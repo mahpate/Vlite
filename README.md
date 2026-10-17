@@ -5,14 +5,14 @@ storage engine: it is not a SQLite wrapper. The embedded core supports one
 fixed-dimension vector space per database, opaque payloads, durable single-record
 mutations, and exact nearest-neighbor search.
 
-REST, gRPC, ANN indexes, distributed operation, batch transactions, compaction,
+REST, gRPC, ANN indexes, distributed operation, batch transactions,
 encryption, metadata filtering, and read-only/multi-reader handles are deferred.
 This is a correctness-first MVP, not a production-hardened storage engine.
 
 ## Build and use
 
-Requires Rust 1.89 or newer. The runtime library has no external dependencies;
-tests use `tempfile`.
+Requires Rust 1.89 or newer. Maintenance uses `tempfile` for private staging and
+no-clobber publication; the vector storage format remains VLite's own engine.
 
 ```powershell
 cargo test --all-targets
@@ -135,10 +135,84 @@ hits; `k` above the live count returns every record. Query validation still appl
 when `k=0` or the database is empty. Normalize vectors yourself if your application
 needs normalized-vector semantics; no cosine or embedding-generation API exists.
 
+## Storage maintenance
+
+`vlite-maintain` provides offline inspection, backup, restore-to-new-path and
+copy-out compaction. Stop every database owner before running it; every operation
+holds the source's exclusive OS lock and returns `Locked` rather than waiting.
+The source is opened read-only. Inspection validates the entire file; it is not
+a quick header-only check.
+
+```text
+cargo run --bin vlite-maintain -- inspect vectors.vlite
+cargo run --bin vlite-maintain -- backup vectors.vlite backup.vlite
+cargo run --bin vlite-maintain -- restore backup.vlite restored.vlite
+cargo run --bin vlite-maintain -- compact vectors.vlite compact.vlite
+```
+
+Library equivalents are `vlite::maintenance::{inspect, backup, restore, compact}`.
+Inspection returns dimensions, live records, validated log-frame count, file
+bytes, valid-prefix bytes and incomplete-tail bytes. The CLI prints these as
+`key=value` fields. Corruption returns an error; an incomplete suffix is reported
+by the library and makes CLI inspection exit nonzero. No inspection repairs or
+changes data.
+
+Backup and restore produce byte-identical, fully validated v1 files. Restore
+**never overwrites an existing database**. Both reject corruption and incomplete
+tails. Compaction writes only current live records, removes tombstones and old
+values, and resets the output log sequence to start at one. It preserves IDs,
+dimensions, payloads and vector component bits, including negative zero. Exact
+search behavior is unchanged. An empty live set produces a 32-byte file that can
+accept new writes. Inspection's commit count is a file-local frame count, not an
+unchangeable lifetime mutation counter.
+
+Output is first written to a private temporary file in the destination directory,
+fully validated and synced, then published using no-clobber semantics. Existing
+files, directories, and aliases to the source are never replaced. A normal error
+before publication removes staging data; abrupt process termination can leave
+an orphan temporary file. No automatic cleanup scans or repair run at startup.
+Only the final destination name denotes a successfully published output.
+
+Unix additionally syncs the destination directory after publication. If this
+fails, `PublicationIndeterminate` identifies the final path: a complete file
+already exists, but directory-entry durability is uncertain. Inspect it before
+retrying rather than deleting or overwriting it. Windows output contents are
+synced before publication, but directory-entry persistence across physical power
+loss is not guaranteed. Filesystems must support the staging helper's
+no-clobber publication; unsupported operations fail explicitly. The usual
+hardware, sync, and cooperative-lock limitations below still apply.
+
+Compaction is intentionally **copy-out, not in-place**. To reclaim space safely:
+stop all owners; compact to a new path; inspect it and verify application data;
+change your application's configured database path; retain the original until
+you have verified the new database and backups. Delete the old file only when you
+explicitly decide it is no longer needed. Do not rename over an open database.
+Compaction temporarily needs space for both files and RAM for the live record
+map; it does not immediately shrink the source.
+
+The Docker runtime contains both executables. After creating the smoke fixture,
+maintenance can be tested across containers using the same volume:
+
+```text
+docker compose run --build --rm vlite
+docker compose run --rm --entrypoint vlite-maintain vlite inspect /data/smoke.vlite
+docker compose run --rm --entrypoint vlite-maintain vlite backup /data/smoke.vlite /data/backup.vlite
+docker compose run --rm --entrypoint vlite-maintain vlite restore /data/backup.vlite /data/restored.vlite
+docker compose run --rm --entrypoint vlite-maintain vlite compact /data/restored.vlite /data/compact.vlite
+docker compose run --rm vlite verify /data/compact.vlite
+```
+
+Rerunning copy commands with the same destinations fails intentionally. Use new
+names or a separate Compose project for a fresh run; do not delete real backups
+merely to rerun examples. Staged outputs use restrictive `tempfile` permissions
+(owner-only on Unix); share backups only through explicitly managed OS access.
+Backups are not encrypted and inherit the same sensitive payloads as the source.
+
 ## One file and ownership
 
 Each database is exactly one self-contained file. This version creates **no WAL,
-journal, index, or lock sidecars**. The append log itself is the canonical store;
+journal, index, or lock sidecars**. Maintenance briefly creates a private staging
+file in the destination directory before publication. The append log is the canonical store;
 the complete live-vector map is rebuilt in RAM on every open. Future versions
 may introduce explicitly documented transient sidecars, but none are required
 to move a closed version-1 database.
@@ -252,7 +326,8 @@ The immutable header is never updated after creation.
 ## Capacity and platform status
 
 Space grows with **all historical mutations**, not just live records; deletes do
-not reclaim disk space. Open time is linear in log size, memory is proportional
+not reclaim disk space until you switch to a compacted copy and retire the old
+file. Open time is linear in log size, memory is proportional
 to live vectors/payloads, and search costs O(n*d + n*log(n)) time plus O(n) result
 memory. There is no total file or RAM quota and allocation exhaustion is not a
 recoverable database error. Plan capacity accordingly.
@@ -263,6 +338,9 @@ tested with Rust 1.99.1 and the declared Rust 1.89.0 minimum. The Linux amd64
 Docker image is tested using Docker Engine in Ubuntu 24.04 WSL, including
 non-root volume persistence across separate containers and the full test suite.
 Native macOS, Docker on macOS, and Linux arm64 have not been tested. Container
-testing does not verify physical power-loss durability. No on-disk compatibility
+testing does not verify physical power-loss durability. The GitHub Actions
+workflow adds Windows, Linux and macOS test jobs on minimum and stable Rust,
+plus lint and Linux Docker end-to-end checks; a configured job is not a claim
+that it has passed until its run completes. No on-disk compatibility
 with SQLite, redb, or Qdrant is claimed; their storage/ownership/index-separation
 designs are conceptual references only.

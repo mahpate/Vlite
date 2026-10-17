@@ -3,13 +3,14 @@
 //! See the project README for the durability and explicit tail-repair contract.
 
 mod format;
+pub mod maintenance;
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, Seek, SeekFrom, Write};
 use std::ops::{Deref, DerefMut};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub const MAX_DIMENSIONS: usize = 65_536;
 pub const MAX_PAYLOAD_BYTES: usize = 1_048_576;
@@ -20,14 +21,27 @@ pub enum Error {
     Io(io::Error),
     Locked,
     InvalidDimensions(usize),
-    DimensionMismatch { expected: usize, actual: usize },
+    DimensionMismatch {
+        expected: usize,
+        actual: usize,
+    },
     NonFiniteVector,
     PayloadTooLarge(usize),
     UnsupportedVersion(u32),
-    Corrupt { offset: u64, reason: &'static str },
-    IncompleteTail { offset: u64, bytes: u64 },
+    Corrupt {
+        offset: u64,
+        reason: &'static str,
+    },
+    IncompleteTail {
+        offset: u64,
+        bytes: u64,
+    },
     CommitIndeterminate(io::Error),
     RepairIndeterminate(io::Error),
+    PublicationIndeterminate {
+        destination: PathBuf,
+        source: io::Error,
+    },
     Poisoned,
     SequenceExhausted,
 }
@@ -67,6 +81,15 @@ impl fmt::Display for Error {
                 f,
                 "tail repair outcome is indeterminate: {error}; inspect the file before retrying"
             ),
+            Self::PublicationIndeterminate {
+                destination,
+                source,
+            } => write!(
+                f,
+                "output published at {}, but directory sync failed: {source}; \
+                 inspect that path before retrying",
+                destination.display()
+            ),
             Self::Poisoned => write!(f, "handle poisoned by failed commit; close and reopen"),
             Self::SequenceExhausted => write!(f, "commit sequence exhausted"),
         }
@@ -79,6 +102,7 @@ impl std::error::Error for Error {
             Self::Io(error)
             | Self::CommitIndeterminate(error)
             | Self::RepairIndeterminate(error) => Some(error),
+            Self::PublicationIndeterminate { source, .. } => Some(source),
             _ => None,
         }
     }

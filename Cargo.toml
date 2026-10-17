@@ -6,6 +6,4 @@ rust-version = "1.89"
 description = "A small embedded single-file vector database"
 
 [dependencies]
-
-[dev-dependencies]
 tempfile = "3"

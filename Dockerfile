@@ -6,7 +6,7 @@ COPY src ./src
 COPY tests ./tests
 COPY examples ./examples
 RUN cargo test --locked --all-targets \
-    && cargo build --locked --release --bin vlite-smoke
+    && cargo build --locked --release --bins
 
 FROM build AS test
 CMD ["cargo", "test", "--locked", "--all-targets"]
@@ -17,6 +17,7 @@ RUN groupadd --gid 10001 vlite \
     && mkdir /data \
     && chown vlite:vlite /data
 COPY --from=build /app/target/release/vlite-smoke /usr/local/bin/vlite-smoke
+COPY --from=build /app/target/release/vlite-maintain /usr/local/bin/vlite-maintain
 USER 10001:10001
 WORKDIR /data
 ENTRYPOINT ["/usr/local/bin/vlite-smoke"]
