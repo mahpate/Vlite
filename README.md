@@ -5,7 +5,9 @@ storage engine: it is not a SQLite wrapper. The embedded core supports one
 fixed-dimension vector space per database, opaque payloads, durable single-record
 and atomic batch mutations, and exact nearest-neighbor search.
 
-An optional REST service exposes the same engine. gRPC, ANN indexes, distributed operation, interactive transactions,
+An optional REST service exposes the same engine. Optional in-memory HNSW search
+supports approximate retrieval without changing the database file.
+gRPC, persistent ANN indexes, distributed operation, interactive transactions,
 encryption, metadata filtering, and read-only/multi-reader handles are deferred.
 This is a correctness-first MVP, not a production-hardened storage engine.
 
@@ -199,7 +201,7 @@ Invoke-RestMethod "$base/v1/vectors/20" -Method Delete
 - `GET /v1/vectors/{id}`: ID, vector and base64 payload; 404 when missing.
 - `DELETE /v1/vectors/{id}`: `{"deleted":true|false}`; missing is a no-op.
 - `POST /v1/batches`: `{"operations":[...]}`; one atomic commit, 204 on success.
-- `POST /v1/search`: `{"vector":[...],"k":N}`; `{"hits":[{"id":"...","distance":0.0}]}`.
+- `POST /v1/search`: `{"vector":[...],"k":N,"mode":"exact"}`; `{"hits":[{"id":"...","distance":0.0}]}`.
 
 IDs are **canonical decimal strings**, including `"0"` and
 `"18446744073709551615"`, not JSON numbers; this avoids JavaScript integer
@@ -208,6 +210,12 @@ Payloads use canonical padded standard base64; omitted payload means empty
 bytes, including replacement writes. Requests reject unknown fields. Vectors
 are finite f32 values with the database's exact dimensions. Search preserves
 the embedded squared-L2 ordering and tie rules, with k between 0 and 10,000.
+`mode` defaults to `exact`. Explicit `"mode":"approximate"` enables the
+rebuildable HNSW index; optional `ef_search` defaults to `max(100,min(k,records))`
+and must be 1..100,000 and at least `min(k,records)`. It is rejected in exact
+mode. REST construction uses m=16, ef_construction=100, seed=42 (not
+per-request configurable). Approximate recall and a full k results are not
+guaranteed. Rebuilds are serialized with all other database operations.
 
 Transport limits are **8 MiB of JSON per request**, **16 in-flight requests**,
 and **16 queued/running database workers**. These are additional to the core's
@@ -306,6 +314,56 @@ Old VLite binaries reject a v2 header as unsupported; no backward-reading claim
 is made. `Database::format_version()` and maintenance inspection expose the
 version.
 
+## Optional HNSW search
+
+`Database::search` stays exact. `search_approximate` explicitly opts into a
+deterministic hierarchical navigable small-world graph with bounded
+per-layer degree, greedy upper-layer descent and beam search at the base.
+It uses the same f64 squared-L2 calculation and sorts discovered candidates
+by distance then numeric ID. It may miss nearest neighbors or return fewer
+than `min(k,records)` hits if the reachable candidate set is smaller.
+There is no universal recall guarantee or automatic fallback to exact search.
+
+```rust
+use vlite::{Database, HnswConfig};
+
+fn main() -> vlite::Result<()> {
+    let mut db = Database::open("vectors.vlite")?;
+    let config = HnswConfig::default(); // m=16, ef_construction=100, seed=42
+    db.build_hnsw(config)?; // optional: otherwise the first query builds it
+    let hits = db.search_approximate(&[0.9, 0.1, 0.0], 5, 100, config)?;
+    println!("{hits:?}");
+    db.close()
+}
+```
+
+Construction parameters are `m` (2..64), `ef_construction` (m..4096), and a u64
+seed. Search `ef_search` must be 1..100,000 and at least `min(k,live records)`.
+Larger parameters usually trade more build time/memory or query work for recall,
+not guaranteed monotonic quality on every dataset. Query validation applies to
+empty databases and k=0 too; k=0 does not build the index.
+
+The graph references the current live records by ID; vector/payload data is not
+duplicated in the index. Every successful nonempty commit **invalidates the
+entire graph**, including updates, deletes and atomic batches. Invalid mutations,
+empty batches and missing single deletes do not invalidate it. A failed commit
+poisons the owner and prevents both exact and approximate searches. The next
+approximate query rebuilds synchronously from all committed live records before
+serving results. Reopen also starts without an index. Changing construction
+parameters rebuilds it; the previous configuration is not cached separately.
+Explicit `build_hnsw` always rebuilds, even with unchanged configuration.
+
+This conservative first implementation is suitable for **read-mostly** workloads.
+It does not incrementally update, persist or background-build the graph; the
+first approximate query after a write can be much slower than exact search and
+blocks other operations. Rebuilding is not free and small datasets may search
+faster with the exact scan. Index creation/search allocate RAM without a
+recoverable OOM guarantee. The ef bound is not a total visited-node/RAM quota.
+No index or sidecar is written; v1/v2 files and maintenance operations remain
+unchanged. Fixed-workload tests require recall@10 >=0.95 on 1,000 seeded
+16-dimensional vectors and verify deterministic replay, returned distances,
+ordering and mutation consistency; this is not a promise for arbitrary data.
+
 ## Reproducible benchmark
 
 `vlite-bench` generates deterministic fixed-point vectors using SplitMix64,
@@ -338,6 +396,41 @@ an ANN performance claim. Distances and tied IDs must also match the oracle.
 `process_peak_rss_bytes` is explicitly `null`: vector-data counts are not
 process-memory measurements. Use an external process-memory profiler when
 comparing actual memory consumption.
+
+To compare HNSW against the same independently checked exact results:
+
+```text
+cargo run --release --bin vlite-bench -- --ann 16 100 100 1000 32 100 100 10 42
+docker compose run --build --rm --entrypoint vlite-bench vlite --ann 16 100 100 1000 32 100 100 10 42
+```
+
+The optional prefix is `--ann m ef_construction ef_search`; construction seed
+is fixed at 42 and reported separately from the dataset seed. The remaining six
+positional arguments and existing exact-only output remain compatible. The
+`hnsw` JSON object adds construction/search parameters, index-build milliseconds,
+warm approximate query p50/p95 and measured ID-set recall@k against exact top-k
+(ties follow numeric ID). Missing candidates reduce recall. Each returned
+candidate's distance, ID uniqueness and ordering are checked separately.
+The build runs after the exact baseline; approximate query timing excludes
+build, warmup and correctness comparisons. No benchmark forces a recall target
+or reports guessed speedups.
+
+To attach **actual whole-process peak resident memory**, run the standard-library
+Python wrapper with the release executable path:
+
+```powershell
+python tests\measure_benchmark.py target\release\vlite-bench.exe --ann 16 100 100 1000 32 100 100 10 42
+```
+
+On Linux/macOS use `python3 tests/measure_benchmark.py
+target/release/vlite-bench --ann 16 100 100 1000 32 100 100 10 42`.
+The wrapper replaces the null RSS field with the child's measured peak:
+Windows `GetProcessMemoryInfo.PeakWorkingSetSize`, Linux/macOS `getrusage`
+maximum RSS (converted to bytes). It reports source and scope. This includes
+the source dataset, database, exact ground truth, graph, and both query paths;
+it is **not marginal index memory**, and OS definitions differ. Run a fresh
+wrapper per workload. No Python/runtime profiler is added to the production
+container. Native CI exercises the wrapper on all three OSes.
 
 Ingestion timing includes operation construction, encoding, writes, sync and
 live-map updates, but excludes dataset generation, header creation and reopen.
@@ -582,6 +675,10 @@ file. Open time is linear in log size, memory is proportional
 to live vectors/payloads, and search costs O(n*d + n*log(n)) time plus O(n) result
 memory. There is no total file or RAM quota and allocation exhaustion is not a
 recoverable database error. Plan capacity accordingly.
+The optional HNSW graph adds O(n*m) adjacency storage plus construction/search
+scratch allocations; vectors remain in the authoritative live map. Its
+rebuild and candidate-search costs depend on configuration and data distribution,
+not a fixed latency bound.
 
 The source uses portable Rust I/O, standard OS locks, and explicit binary
 encoding, targeting Windows, Linux, and macOS. Windows x86_64 (MSVC) has been

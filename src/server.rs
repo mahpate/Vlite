@@ -178,7 +178,9 @@ impl From<Error> for ApiError {
             | Error::InvalidDimensions(_)
             | Error::NonFiniteVector
             | Error::PayloadTooLarge(_)
-            | Error::BatchTooLarge => Self::new(
+            | Error::BatchTooLarge
+            | Error::InvalidHnswConfig
+            | Error::InvalidEfSearch => Self::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "invalid_input",
                 error.to_string(),
@@ -384,11 +386,34 @@ async fn batch(
         .await
 }
 
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(try_from = "String")]
+enum SearchMode {
+    #[default]
+    Exact,
+    Approximate,
+}
+
+impl TryFrom<String> for SearchMode {
+    type Error = &'static str;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        match value.as_str() {
+            "exact" => Ok(Self::Exact),
+            "approximate" => Ok(Self::Approximate),
+            _ => Err("mode must be exact or approximate"),
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Search {
     vector: Vec<f32>,
     k: usize,
+    #[serde(default)]
+    mode: SearchMode,
+    ef_search: Option<usize>,
 }
 
 async fn search(
@@ -403,13 +428,27 @@ async fn search(
             format!("k must be at most {MAX_SEARCH_K}"),
         ));
     }
+    if matches!(input.mode, SearchMode::Exact) && input.ef_search.is_some() {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_input",
+            "ef_search is only valid in approximate mode",
+        ));
+    }
     service
         .run(move |db| {
-            let hits = db
-                .search(&input.vector, input.k)?
-                .into_iter()
-                .map(|hit| json!({"id": hit.id.to_string(), "distance": hit.distance}))
-                .collect::<Vec<_>>();
+            let hits = match input.mode {
+                SearchMode::Exact => db.search(&input.vector, input.k)?,
+                SearchMode::Approximate => db.search_approximate(
+                    &input.vector,
+                    input.k,
+                    input.ef_search.unwrap_or(100.max(input.k.min(db.len()))),
+                    crate::HnswConfig::default(),
+                )?,
+            }
+            .into_iter()
+            .map(|hit| json!({"id": hit.id.to_string(), "distance": hit.distance}))
+            .collect::<Vec<_>>();
             Ok(Json(json!({"hits": hits})))
         })
         .await

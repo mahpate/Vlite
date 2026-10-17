@@ -3,11 +3,13 @@ use std::hint::black_box;
 use std::io;
 use std::process::ExitCode;
 use std::time::Instant;
-use vlite::{Database, MAX_BATCH_BYTES, MAX_BATCH_OPERATIONS, MAX_DIMENSIONS, Mutation};
+use vlite::{
+    Database, HnswConfig, MAX_BATCH_BYTES, MAX_BATCH_OPERATIONS, MAX_DIMENSIONS, MAX_EF_SEARCH,
+    Mutation,
+};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
-const USAGE: &str =
-    "usage: vlite-bench [records=1000 dimensions=32 queries=100 batch_size=100 k=10 seed=42]";
+const USAGE: &str = "usage: vlite-bench [--ann <m> <ef_construction> <ef_search>] [records=1000 dimensions=32 queries=100 batch_size=100 k=10 seed=42]";
 const MAX_DATA_BYTES: usize = 256 * 1024 * 1024;
 const MAX_DISTANCE_COMPONENTS: u64 = 500_000_000;
 
@@ -18,11 +20,37 @@ struct Config {
     batch_size: usize,
     k: usize,
     seed: u64,
+    ann: Option<(HnswConfig, usize)>,
 }
 
 impl Config {
     fn parse() -> Result<Self> {
-        let args: Vec<_> = std::env::args().skip(1).collect();
+        let mut args: Vec<_> = std::env::args().skip(1).collect();
+        let ann = if args.first().is_some_and(|arg| arg == "--ann") {
+            if args.len() < 4 {
+                return Err(USAGE.into());
+            }
+            let m = args[1].parse::<usize>()?;
+            let ef_construction = args[2].parse::<usize>()?;
+            let ef_search = args[3].parse::<usize>()?;
+            if !(2..=64).contains(&m)
+                || !(m..=4096).contains(&ef_construction)
+                || !(1..=MAX_EF_SEARCH).contains(&ef_search)
+            {
+                return Err("invalid HNSW parameters".into());
+            }
+            args.drain(..4);
+            Some((
+                HnswConfig {
+                    m,
+                    ef_construction,
+                    seed: 42,
+                },
+                ef_search,
+            ))
+        } else {
+            None
+        };
         if args.len() > 6 {
             return Err(USAGE.into());
         }
@@ -34,6 +62,9 @@ impl Config {
                 .map_err(|_| format!("invalid integer {arg:?}; {USAGE}"))?;
         }
         let [records, dimensions, queries, batch_size, k, seed] = values;
+        if ann.is_some_and(|(_, ef)| (ef as u64) < k) {
+            return Err("ef_search must be at least k".into());
+        }
         let bounded = records > 0
             && records <= 1_000_000
             && dimensions > 0
@@ -66,6 +97,7 @@ impl Config {
             batch_size: usize::try_from(batch_size)?,
             k: usize::try_from(k)?,
             seed,
+            ann,
         })
     }
 }
@@ -133,7 +165,7 @@ fn run() -> Result<()> {
     db.close()?;
     let file_bytes = std::fs::metadata(&path)?.len();
     let start = Instant::now();
-    let db = Database::open(&path)?;
+    let mut db = Database::open(&path)?;
     let reopen_ms = start.elapsed().as_secs_f64() * 1000.0;
     if db.len() != config.records {
         return Err("reopened database has an incorrect record count".into());
@@ -141,6 +173,7 @@ fn run() -> Result<()> {
     black_box(db.search(&queries[0], config.k)?);
     let mut times_ms = Vec::with_capacity(config.queries);
     let mut matched = 0usize;
+    let mut truth = Vec::new();
     for query in &queries {
         let start = Instant::now();
         let actual = black_box(db.search(black_box(query), config.k)?);
@@ -170,7 +203,67 @@ fn run() -> Result<()> {
         if actual.len() != config.k {
             return Err("exact search returned incorrect result count".into());
         }
+        if config.ann.is_some() {
+            truth.push(actual);
+        }
     }
+    let ann_json = if let Some((index_config, ef_search)) = config.ann {
+        let start = Instant::now();
+        db.build_hnsw(index_config)?;
+        let build_ms = start.elapsed().as_secs_f64() * 1000.0;
+        black_box(db.search_approximate(&queries[0], config.k, ef_search, index_config)?);
+        let mut approximate_times = Vec::new();
+        let mut recalled = 0;
+        for (query, exact) in queries.iter().zip(&truth) {
+            let start = Instant::now();
+            let hits = black_box(db.search_approximate(
+                black_box(query),
+                config.k,
+                ef_search,
+                index_config,
+            )?);
+            approximate_times.push(start.elapsed().as_secs_f64() * 1000.0);
+            let mut ids = std::collections::BTreeSet::new();
+            for hit in &hits {
+                if !ids.insert(hit.id) || hit.id >= config.records as u64 {
+                    return Err("approximate search returned duplicate or invalid IDs".into());
+                }
+                let expected = dataset[hit.id as usize]
+                    .iter()
+                    .zip(query)
+                    .fold(0.0, |sum, (&a, &b)| {
+                        sum + (f64::from(a) - f64::from(b)).powi(2)
+                    });
+                if hit.distance != expected {
+                    return Err("approximate candidate distance is incorrect".into());
+                }
+                recalled += usize::from(exact.iter().any(|truth| truth.id == hit.id));
+            }
+            if hits.windows(2).any(|pair| {
+                pair[0]
+                    .distance
+                    .total_cmp(&pair[1].distance)
+                    .then(pair[0].id.cmp(&pair[1].id))
+                    .is_gt()
+            }) {
+                return Err("approximate results are not sorted".into());
+            }
+        }
+        approximate_times.sort_by(f64::total_cmp);
+        format!(
+            ",\"hnsw\":{{\"m\":{},\"ef_construction\":{},\"ef_search\":{},\"seed\":{},\"index_build_ms\":{:.6},\"query_p50_ms\":{:.6},\"query_p95_ms\":{:.6},\"recall_at_k\":{:.6}}}",
+            index_config.m,
+            index_config.ef_construction,
+            ef_search,
+            index_config.seed,
+            build_ms,
+            percentile(&approximate_times, 50),
+            percentile(&approximate_times, 95),
+            recalled as f64 / (config.queries * config.k) as f64
+        )
+    } else {
+        String::new()
+    };
     db.close()?;
     directory.close()?;
     times_ms.sort_by(f64::total_cmp);
@@ -181,7 +274,7 @@ fn run() -> Result<()> {
             "\"dataset_checksum\":\"{:016x}\",\"ingest_seconds\":{:.9},\"ingest_vectors_per_second\":{:.3},",
             "\"reopen_ms\":{:.6},\"query_p50_ms\":{:.6},\"query_p95_ms\":{:.6},",
             "\"file_bytes\":{},\"vector_data_bytes\":{},\"query_data_bytes\":{},\"process_peak_rss_bytes\":null,",
-            "\"recall_at_k\":{:.6}}}"
+            "\"recall_at_k\":{:.6}{}}}"
         ),
         env!("CARGO_PKG_VERSION"),
         format_version,
@@ -207,7 +300,8 @@ fn run() -> Result<()> {
         file_bytes,
         config.records * config.dimensions * 4,
         config.queries * config.dimensions * 4,
-        matched as f64 / (config.queries * config.k) as f64
+        matched as f64 / (config.queries * config.k) as f64,
+        ann_json
     );
     Ok(())
 }

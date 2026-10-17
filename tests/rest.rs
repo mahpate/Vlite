@@ -399,9 +399,90 @@ async fn parallel_mutations_are_serialized_without_lost_writes() {
             .0
         }));
     }
+
     for task in tasks {
         assert_eq!(task.await.unwrap(), 204);
     }
     service.close().await.unwrap();
     assert_eq!(Database::open(path).unwrap().len(), 8);
+}
+
+#[tokio::test]
+async fn approximate_mode_is_explicit_and_rebuilds_after_mutation() {
+    let directory = tempfile::tempdir().unwrap();
+    let service = Service::new(Database::create(directory.path().join("ann.vlite"), 2).unwrap());
+    let app = router(service.clone());
+    for (id, vector) in [
+        ("0", json!([0, 0])),
+        ("1", json!([1, 1])),
+        ("2", json!([2, 2])),
+    ] {
+        assert_eq!(
+            request(
+                &app,
+                "PUT",
+                &format!("/v1/vectors/{id}"),
+                json!({"vector":vector})
+            )
+            .await
+            .0,
+            204
+        );
+    }
+    let approximate = json!({"vector":[0,0],"k":2,"mode":"approximate","ef_search":10});
+    assert_eq!(
+        request(&app, "POST", "/v1/search", approximate.clone())
+            .await
+            .1,
+        request(&app, "POST", "/v1/search", json!({"vector":[0,0],"k":2}))
+            .await
+            .1
+    );
+    assert_eq!(
+        request(&app, "DELETE", "/v1/vectors/0", Value::Null)
+            .await
+            .0,
+        200
+    );
+    assert_eq!(
+        request(&app, "POST", "/v1/search", approximate.clone())
+            .await
+            .1["hits"][0]["id"],
+        "1"
+    );
+    assert_eq!(
+        request(&app, "PUT", "/v1/vectors/1", json!({"vector":[9,9]}))
+            .await
+            .0,
+        204
+    );
+    assert_eq!(
+        request(&app, "POST", "/v1/search", approximate.clone())
+            .await
+            .1["hits"][0]["id"],
+        "2"
+    );
+    for input in [
+        json!({"vector":[0,0],"k":2,"ef_search":10}),
+        json!({"vector":[0,0],"k":2,"mode":"approximate","ef_search":1}),
+        json!({"vector":[0,0],"k":2,"mode":"approximate","ef_search":100001}),
+        json!({"vector":[0,0],"k":2,"mode":"auto"}),
+        json!({"vector":[0,0],"k":2,"mode":null}),
+        json!({"vector":[0,0],"k":2,"mode":"approximate","m":4}),
+    ] {
+        let (status, error) = request(&app, "POST", "/v1/search", input).await;
+        assert_eq!(status, 422, "{error}");
+    }
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/v1/search",
+            json!({"vector":[0,0],"k":2,"mode":"approximate"})
+        )
+        .await
+        .0,
+        200
+    );
+    service.close().await.unwrap();
 }

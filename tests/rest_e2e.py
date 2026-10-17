@@ -94,6 +94,8 @@ def run():
         {"id": "1", "distance": 0.0},
         {"id": "18446744073709551615", "distance": 2.0},
     ]
+    approximate = {"vector": [0, 1, 0], "k": 2, "mode": "approximate", "ef_search": 100}
+    assert request(port, "POST", "/v1/search", approximate)["hits"][0]["id"] == "1"
     assert request(port, "GET", "/openapi.json")["openapi"] == "3.1.0"
     stopped_cleanly()
     mismatch = compose(
@@ -106,9 +108,11 @@ def run():
     ready(port)
     assert request(port, "GET", "/v1/vectors/18446744073709551615")["payload_base64"] == "AP8="
     assert request(port, "GET", "/v1/database")["records"] == 2
+    assert request(port, "POST", "/v1/search", approximate)["hits"][0]["id"] == "1"
     request(port, "GET", "/v1/vectors/2", expected=404)
     assert request(port, "DELETE", "/v1/vectors/1")["deleted"] is True
     assert request(port, "DELETE", "/v1/vectors/1")["deleted"] is False
+    assert request(port, "POST", "/v1/search", approximate)["hits"][0]["id"] == "18446744073709551615"
     stopped_cleanly()
     compose("start", "api")
     port = published_port()

@@ -81,9 +81,9 @@
     },
     "/v1/search": {
       "post": {
-        "summary": "Exact squared-L2 search; distance then ascending numeric ID",
-        "description": "k=0 returns no hits but still validates the query. k above the live count returns all records, up to the API k limit. Distances accumulate in f64. Payloads are fetched separately.",
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "required": ["vector", "k"], "properties": {"vector": {"$ref": "#/components/schemas/Vector"}, "k": {"type": "integer", "minimum": 0, "maximum": 10000}}}}}},
+        "summary": "Exact (default) or explicitly approximate squared-L2 search",
+        "description": "Both modes return candidates ordered by distance then ascending numeric ID. k=0 still validates the query. Exact mode returns min(k, live count). Approximate mode uses a lazily rebuilt in-memory HNSW index (m=16, ef_construction=100, seed=42), returns at most k candidates, and does not guarantee recall or a full result count. The first approximate query after successful mutation/reopen includes a blocking rebuild from committed records. ef_search defaults to max(100,min(k,live count)), must be 1..100000 and at least min(k,live count); it is rejected in exact mode. Distances accumulate in f64 and are exact for returned candidates. Payloads are fetched separately.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "required": ["vector", "k"], "properties": {"vector": {"$ref": "#/components/schemas/Vector"}, "k": {"type": "integer", "minimum": 0, "maximum": 10000}, "mode": {"type": "string", "enum": ["exact", "approximate"], "default": "exact"}, "ef_search": {"type": "integer", "minimum": 1, "maximum": 100000}}}}}},
         "responses": {
           "200": {"description": "Nearest hits", "content": {"application/json": {"schema": {"type": "object", "required": ["hits"], "properties": {"hits": {"type": "array", "items": {"type": "object", "required": ["id", "distance"], "properties": {"id": {"$ref": "#/components/schemas/Id"}, "distance": {"type": "number", "minimum": 0}}}}}}}}},
           "400": {"$ref": "#/components/responses/BadRequest"},

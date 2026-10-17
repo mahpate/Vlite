@@ -65,6 +65,10 @@ fn benchmark_rejects_invalid_or_unbounded_workloads_before_creating_files() {
         vec!["1000000", "65536"],
         vec!["32", "4", "5", "4097"],
         vec!["32", "4", "5", "8", "3", "42", "extra"],
+        vec!["--ann", "1", "100", "10"],
+        vec!["--ann", "16", "15", "10"],
+        vec!["--ann", "16", "100", "0"],
+        vec!["--ann", "16", "100", "2", "32", "4", "5", "8", "3", "42"],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_vlite-bench"))
             .args(args)
@@ -73,6 +77,30 @@ fn benchmark_rejects_invalid_or_unbounded_workloads_before_creating_files() {
             .unwrap();
         assert!(!output.status.success(), "{output:?}");
         assert!(String::from_utf8(output.stderr).unwrap().contains("FAIL:"));
+    }
+
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn approximate_benchmark_emits_measured_recall_and_build_cost() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_vlite-bench"))
+        .args(["--ann", "8", "32", "32", "64", "8", "10", "16", "5", "42"])
+        .env("VLITE_BENCH_DIR", directory.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8(output.stdout).unwrap();
+    for field in [
+        "\"hnsw\":{",
+        "\"m\":8",
+        "\"ef_construction\":32",
+        "\"ef_search\":32",
+        "\"index_build_ms\":",
+        "\"recall_at_k\":1.000000",
+    ] {
+        assert!(text.contains(field), "{text}");
     }
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
 }

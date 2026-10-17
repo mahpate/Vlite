@@ -3,6 +3,8 @@
 //! See the project README for the durability and explicit tail-repair contract.
 
 mod format;
+mod hnsw;
+pub use hnsw::{HnswConfig, MAX_EF_SEARCH};
 pub mod maintenance;
 #[cfg(feature = "server")]
 pub mod server;
@@ -34,6 +36,8 @@ pub enum Error {
     PayloadTooLarge(usize),
     BatchTooLarge,
     BatchRequiresUpgrade,
+    InvalidHnswConfig,
+    InvalidEfSearch,
     UnsupportedVersion(u32),
     Corrupt {
         offset: u64,
@@ -78,6 +82,14 @@ impl fmt::Display for Error {
             Self::BatchRequiresUpgrade => write!(
                 f,
                 "atomic batches require format v2; compact the closed v1 database to a new path to upgrade"
+            ),
+            Self::InvalidHnswConfig => write!(
+                f,
+                "HNSW m must be 2..=64 and ef_construction must be m..=4096"
+            ),
+            Self::InvalidEfSearch => write!(
+                f,
+                "ef_search must be 1..={MAX_EF_SEARCH} and at least min(k, live records)"
             ),
             Self::UnsupportedVersion(version) => write!(f, "unsupported format version {version}"),
             Self::Corrupt { offset, reason } => {
@@ -171,6 +183,7 @@ pub struct Database {
     sequence: u64,
     end: u64,
     poisoned: bool,
+    index: Option<hnsw::Index>,
 }
 
 struct LockedFile(File);
@@ -241,6 +254,7 @@ impl Database {
             sequence: 0,
             end: format::HEADER_SIZE,
             poisoned: false,
+            index: None,
         })
     }
 
@@ -264,6 +278,7 @@ impl Database {
             sequence: loaded.sequence,
             end: loaded.end,
             poisoned: false,
+            index: None,
         })
     }
 
@@ -448,7 +463,53 @@ impl Database {
         }
         self.sequence = sequence;
         self.end += frame.len() as u64;
+        self.index = None;
         Ok(())
+    }
+
+    /// Builds/replaces the optional in-memory HNSW index from committed live records.
+    ///
+    /// Successful mutations invalidate it. Nothing is written to the database file.
+    pub fn build_hnsw(&mut self, config: HnswConfig) -> Result<()> {
+        self.ensure_healthy()?;
+        config.validate()?;
+        self.index = Some(hnsw::Index::build(&self.records, config));
+        Ok(())
+    }
+
+    /// Approximate squared-L2 search; exact search remains the default.
+    ///
+    /// Lazily rebuilds after a mutation, reopen, or construction-parameter change.
+    /// The first query includes the full rebuild cost. Returned distances are exact
+    /// for the visited candidates; nearest-neighbor recall is not guaranteed.
+    pub fn search_approximate(
+        &mut self,
+        query: &[f32],
+        k: usize,
+        ef_search: usize,
+        config: HnswConfig,
+    ) -> Result<Vec<SearchHit>> {
+        self.ensure_healthy()?;
+        self.validate_vector(query)?;
+        config.validate()?;
+        if !(1..=MAX_EF_SEARCH).contains(&ef_search) || ef_search < k.min(self.records.len()) {
+            return Err(Error::InvalidEfSearch);
+        }
+        if k == 0 || self.records.is_empty() {
+            return Ok(Vec::new());
+        }
+        if self
+            .index
+            .as_ref()
+            .is_none_or(|index| index.config != config)
+        {
+            self.build_hnsw(config)?;
+        }
+        Ok(self
+            .index
+            .as_ref()
+            .expect("built index")
+            .search(query, k, ef_search, &self.records))
     }
 
     /// Exact squared-L2 nearest neighbors, ordered by distance then ascending ID.
@@ -577,6 +638,7 @@ mod tests {
         let path = directory.path().join("poison.vlite");
         let mut db = Database::create(&path, 1).unwrap();
         db.put(1, &[1.0], b"original").unwrap();
+        db.build_hnsw(HnswConfig::default()).unwrap();
         // A read-only descriptor deterministically fails the next disk write.
         db.file = LockedFile(File::open(&path).unwrap());
         assert!(matches!(
@@ -587,6 +649,14 @@ mod tests {
         assert_eq!(db.records.get(&1).unwrap().payload, b"original");
         assert!(matches!(db.get(1), Err(Error::Poisoned)));
         assert!(matches!(db.search(&[1.0], 1), Err(Error::Poisoned)));
+        assert!(matches!(
+            db.search_approximate(&[1.0], 1, 10, HnswConfig::default()),
+            Err(Error::Poisoned)
+        ));
+        assert!(matches!(
+            db.build_hnsw(HnswConfig::default()),
+            Err(Error::Poisoned)
+        ));
         assert!(matches!(db.put(2, &[1.0], b""), Err(Error::Poisoned)));
         assert!(matches!(db.delete(1), Err(Error::Poisoned)));
         assert!(matches!(db.close(), Err(Error::Poisoned)));
