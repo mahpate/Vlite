@@ -10,6 +10,7 @@ use tempfile::NamedTempFile;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Inspection {
+    pub format_version: u32,
     pub dimensions: usize,
     pub live_records: usize,
     /// Validated log frames, not a lifetime mutation counter after compaction.
@@ -31,6 +32,7 @@ fn source(path: &Path) -> Result<LockedFile> {
 
 fn inspection(loaded: &format::Loaded) -> Inspection {
     Inspection {
+        format_version: loaded.version,
         dimensions: loaded.dimensions,
         live_records: loaded.records.len(),
         commits: loaded.sequence,
@@ -89,7 +91,7 @@ pub fn restore(backup_path: impl AsRef<Path>, destination: impl AsRef<Path>) -> 
     backup(backup_path, destination)
 }
 
-/// Writes only live records to a new standalone version-1 file.
+/// Writes only live records to a new standalone current-version file (v2).
 ///
 /// The original database remains untouched. IDs, component bits, dimensions and
 /// payloads are preserved; tombstones and old values are removed. Log sequences

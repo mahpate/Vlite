@@ -7,7 +7,8 @@ restore BACKUP DESTINATION | compact SOURCE DESTINATION";
 
 fn print_report(report: &Inspection) {
     println!(
-        "dimensions={} live_records={} commits={} file_bytes={} valid_bytes={} incomplete_tail_bytes={}",
+        "format_version={} dimensions={} live_records={} commits={} file_bytes={} valid_bytes={} incomplete_tail_bytes={}",
+        report.format_version,
         report.dimensions,
         report.live_records,
         report.commits,
