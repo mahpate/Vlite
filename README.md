@@ -5,7 +5,7 @@ storage engine: it is not a SQLite wrapper. The embedded core supports one
 fixed-dimension vector space per database, opaque payloads, durable single-record
 and atomic batch mutations, and exact nearest-neighbor search.
 
-REST, gRPC, ANN indexes, distributed operation, interactive transactions,
+An optional REST service exposes the same engine. gRPC, ANN indexes, distributed operation, interactive transactions,
 encryption, metadata filtering, and read-only/multi-reader handles are deferred.
 This is a correctness-first MVP, not a production-hardened storage engine.
 
@@ -15,8 +15,8 @@ Requires Rust 1.89 or newer. Maintenance uses `tempfile` for private staging and
 no-clobber publication; the vector storage format remains VLite's own engine.
 
 ```powershell
-cargo test --all-targets
-cargo clippy --all-targets -- -D warnings
+cargo test --all-targets --all-features
+cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --check
 cargo run --example basic -- demo.vlite
 ```
@@ -54,7 +54,8 @@ Requires Docker Engine with **Linux containers** and Docker Compose v2 or newer.
 These commands work from the project root on Linux, macOS with a Linux Docker
 VM, or Windows with Docker Desktop/WSL. Docker runs Linux code on all these
 hosts; it does not replace testing the native Windows or macOS filesystem APIs.
-No network API, published ports, or long-running server are included.
+The default smoke job has no network API. The opt-in `api` service below runs
+a persistent HTTP server.
 
 Build and run the persistent smoke test:
 
@@ -134,6 +135,119 @@ live vector, sorts by distance, and breaks ties by ascending ID. `k=0` returns n
 hits; `k` above the live count returns every record. Query validation still applies
 when `k=0` or the database is empty. Normalize vectors yourself if your application
 needs normalized-vector semantics; no cosine or embedding-generation API exists.
+
+## REST service (optional)
+
+The default Cargo library remains embedded-only. Build the transport with the
+`server` feature; it uses Axum/Tokio without changing the storage format:
+
+```powershell
+cargo run --release --features server --bin vlite-server -- vectors.vlite --create-if-missing 3
+```
+
+The server opens one exclusively locked file. `--create-if-missing N` creates
+only if the path is missing and checks that an existing file has dimension N.
+Without that option, missing files fail startup. Corruption, incomplete tails,
+locking conflicts, and dimension mismatches fail startup without repair,
+replacement, or retry. Parent directories must already exist. File creation
+retains the embedded engine's parent-directory sync limitations.
+
+Native listening defaults to `127.0.0.1:8080`. Override with
+`--bind 127.0.0.1:9000` (numeric IP/port; IPv6 uses `[::1]:9000`).
+Non-loopback binding requires explicit `--allow-remote`. **There is no
+authentication, authorization, TLS, or CORS support.** Use only locally or behind
+a trusted, authenticated TLS reverse proxy; do not expose it to the internet.
+
+For persistent Docker deployment, the opt-in service publishes only to the
+host's loopback address and uses its own named volume, separate from smoke data:
+
+```text
+docker compose --profile api up --build -d api
+docker compose logs api
+docker compose stop api
+docker compose start api
+```
+
+Set `VLITE_DIMENSIONS` before initial creation (default 3), and `VLITE_PORT` to
+change the host port (default 8080). Changing dimensions never migrates a file;
+it causes startup to fail. Within the isolated Docker network the container
+listens on `0.0.0.0`, explicitly enabled by `--allow-remote`; other containers on
+that network can reach it without authentication. The runtime is non-root with
+a read-only root, dropped capabilities and no-new-privileges. `docker compose
+down` retains the volume. Stop the service before using offline maintenance;
+never mount the same database into multiple servers.
+
+Windows PowerShell examples (also usable against the Docker service):
+
+```powershell
+$base = 'http://127.0.0.1:8080'
+Invoke-RestMethod "$base/ready"
+Invoke-RestMethod "$base/v1/vectors/10" -Method Put -ContentType 'application/json' -Body '{"vector":[1,0,0],"payload_base64":"ZG9jdW1lbnQgQQ=="}'
+Invoke-RestMethod "$base/v1/vectors/10"
+Invoke-RestMethod "$base/v1/search" -Method Post -ContentType 'application/json' -Body '{"vector":[0.9,0.1,0],"k":5}'
+Invoke-RestMethod "$base/v1/batches" -Method Post -ContentType 'application/json' -Body '{"operations":[{"op":"put","id":"20","vector":[0,1,0]},{"op":"delete","id":"10"}]}'
+Invoke-RestMethod "$base/v1/vectors/20" -Method Delete
+```
+
+`GET /openapi.json` serves the checked-in OpenAPI 3.1 contract from
+`src/openapi.json`. Routes are:
+
+- `GET /health`: process liveness, independent of database health.
+- `GET /ready`: 200 when the owner can read, 503 if busy/closed/poisoned.
+- `GET /v1/database`: dimensions, format version, live record count.
+- `PUT /v1/vectors/{id}`: insert/replace; 204 only after durable commit.
+- `GET /v1/vectors/{id}`: ID, vector and base64 payload; 404 when missing.
+- `DELETE /v1/vectors/{id}`: `{"deleted":true|false}`; missing is a no-op.
+- `POST /v1/batches`: `{"operations":[...]}`; one atomic commit, 204 on success.
+- `POST /v1/search`: `{"vector":[...],"k":N}`; `{"hits":[{"id":"...","distance":0.0}]}`.
+
+IDs are **canonical decimal strings**, including `"0"` and
+`"18446744073709551615"`, not JSON numbers; this avoids JavaScript integer
+precision loss. Path IDs follow the same rule (no plus signs/leading zeros).
+Payloads use canonical padded standard base64; omitted payload means empty
+bytes, including replacement writes. Requests reject unknown fields. Vectors
+are finite f32 values with the database's exact dimensions. Search preserves
+the embedded squared-L2 ordering and tie rules, with k between 0 and 10,000.
+
+Transport limits are **8 MiB of JSON per request**, **16 in-flight requests**,
+and **16 queued/running database workers**. These are additional to the core's
+batch/payload limits: a valid 16 MiB engine batch may be too large for this API.
+Database operations are serialized on blocking workers, not asynchronous I/O
+threads. Slow requests and exact searches can occupy slots; no per-client
+fairness, streaming, rate limiting or execution deadline is promised. Use a
+proxy for connection/header/body timeouts and network-level limits.
+
+Errors use `{"error":{"code":"...","message":"..."}}`: 400 for malformed JSON or
+IDs, 404 for missing records/routes, 405 for unsupported methods, 409 for batches
+requiring v1 upgrade, 413 for body size, 415 for content type, 422 for schema or
+engine validation, 503 for busy/unavailable/poisoned or indeterminate commit,
+and 500 for internal failures (details logged to stderr). HTTP protocol errors
+rejected before routing may be handled directly by the HTTP stack.
+
+**A lost response or client disconnect does not imply a failed write.** Accepted
+blocking work can finish after disconnection. `commit_indeterminate` explicitly
+means the write may already be committed; the owner is poisoned and readiness
+fails. There is no automatic reopen, repair, retry, or idempotency-key support.
+Stop the server, inspect the file and resolve the outcome before retrying.
+Ctrl+C and, on Unix/Docker, SIGTERM stop admission and drain active HTTP requests,
+then wait for database workers and close the owner. Docker allows 30 seconds
+before a forced kill; long requests can exceed that grace period. Acknowledged
+commits retain the core's sync and hardware limitations, not physical power-loss
+guarantees.
+
+The Rust tests cover in-process routing and real TCP subprocess restarts on
+native platforms. With Docker and Python 3 on the host, run the complete
+container lifecycle check:
+
+```text
+python3 tests/rest_e2e.py
+```
+
+It builds and starts an isolated Compose project on a dynamically assigned
+loopback port, tests CRUD/batches/search/validation, gracefully stops and restarts
+the container, and verifies persistence. It removes test containers/networks but
+**retains and prints its database volume name**; it never deletes database data.
+For WSL-only Docker, run this command within WSL from the mounted project root.
 
 ## Atomic batch writes
 
@@ -474,10 +588,11 @@ encoding, targeting Windows, Linux, and macOS. Windows x86_64 (MSVC) has been
 tested with Rust 1.99.1 and the declared Rust 1.89.0 minimum. The Linux amd64
 Docker image is tested using Docker Engine in Ubuntu 24.04 WSL, including
 non-root volume persistence across separate containers and the full test suite.
-The previous maintenance release's full test suite passed in native Windows,
+The batch release's full test suite passed in native Windows,
 Linux and macOS GitHub Actions jobs on minimum and stable Rust, along with lint
-and Linux Docker end-to-end checks. The same CI matrix runs the batch,
-compatibility and benchmark tests for this milestone. Docker on macOS and Linux arm64 images have not been tested.
+and Linux Docker end-to-end checks. The same CI matrix runs the optional REST
+feature and native TCP tests; Docker additionally checks the HTTP container
+lifecycle and SIGTERM shutdown. Docker on macOS and Linux arm64 images have not been tested.
 Container testing does not verify physical power-loss durability. No on-disk compatibility
 with SQLite, redb, or Qdrant is claimed; their storage/ownership/index-separation
 designs are conceptual references only.

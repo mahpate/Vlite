@@ -5,5 +5,30 @@ edition = "2024"
 rust-version = "1.89"
 description = "A small embedded single-file vector database"
 
+[features]
+default = []
+server = ["dep:axum", "dep:base64", "dep:serde", "dep:serde_json", "dep:tokio"]
+
 [dependencies]
+axum = { version = "0.8", optional = true }
+base64 = { version = "0.22", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync"], optional = true }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+
+[[bin]]
+name = "vlite-server"
+required-features = ["server"]
+
+[[test]]
+name = "rest"
+required-features = ["server"]
+
+[[test]]
+name = "server_cli"
+required-features = ["server"]

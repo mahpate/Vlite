@@ -4,6 +4,8 @@
 
 mod format;
 pub mod maintenance;
+#[cfg(feature = "server")]
+pub mod server;
 
 use std::collections::BTreeMap;
 use std::fmt;

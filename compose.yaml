@@ -19,5 +19,26 @@ services:
       context: .
       target: test
 
+  api:
+    profiles:
+      - api
+    image: vlite-smoke:local
+    build:
+      context: .
+      target: runtime
+    entrypoint: ["/usr/local/bin/vlite-server"]
+    command: ["/data/vectors.vlite", "--create-if-missing", "${VLITE_DIMENSIONS:-3}", "--bind", "0.0.0.0:8080", "--allow-remote"]
+    ports:
+      - "127.0.0.1:${VLITE_PORT:-8080}:8080"
+    volumes:
+      - api-data:/data
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+
 volumes:
   vlite-data:
+  api-data:
