@@ -1,0 +1,23 @@
+services:
+  vlite:
+    image: vlite-smoke:local
+    build:
+      context: .
+      target: runtime
+    volumes:
+      - vlite-data:/data
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  tests:
+    profiles:
+      - test
+    build:
+      context: .
+      target: test
+
+volumes:
+  vlite-data:
