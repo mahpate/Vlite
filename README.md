@@ -337,10 +337,9 @@ encoding, targeting Windows, Linux, and macOS. Windows x86_64 (MSVC) has been
 tested with Rust 1.99.1 and the declared Rust 1.89.0 minimum. The Linux amd64
 Docker image is tested using Docker Engine in Ubuntu 24.04 WSL, including
 non-root volume persistence across separate containers and the full test suite.
-Native macOS, Docker on macOS, and Linux arm64 have not been tested. Container
-testing does not verify physical power-loss durability. The GitHub Actions
-workflow adds Windows, Linux and macOS test jobs on minimum and stable Rust,
-plus lint and Linux Docker end-to-end checks; a configured job is not a claim
-that it has passed until its run completes. No on-disk compatibility
+The full 41-test suite also passes in native Windows, Linux and macOS GitHub
+Actions jobs on minimum and stable Rust, along with lint and Linux Docker
+end-to-end checks. Docker on macOS and Linux arm64 images have not been tested.
+Container testing does not verify physical power-loss durability. No on-disk compatibility
 with SQLite, redb, or Qdrant is claimed; their storage/ownership/index-separation
 designs are conceptual references only.
