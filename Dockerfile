@@ -18,6 +18,7 @@ RUN groupadd --gid 10001 vlite \
     && chown vlite:vlite /data
 COPY --from=build /app/target/release/vlite-smoke /usr/local/bin/vlite-smoke
 COPY --from=build /app/target/release/vlite-maintain /usr/local/bin/vlite-maintain
+COPY --from=build /app/target/release/vlite-bench /usr/local/bin/vlite-bench
 USER 10001:10001
 WORKDIR /data
 ENTRYPOINT ["/usr/local/bin/vlite-smoke"]

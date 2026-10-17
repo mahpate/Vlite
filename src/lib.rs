@@ -14,6 +14,9 @@ use std::path::{Path, PathBuf};
 
 pub const MAX_DIMENSIONS: usize = 65_536;
 pub const MAX_PAYLOAD_BYTES: usize = 1_048_576;
+pub const MAX_BATCH_OPERATIONS: usize = 4_096;
+/// Maximum encoded batch body, including per-operation metadata.
+pub const MAX_BATCH_BYTES: usize = 16_777_216;
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]
@@ -27,6 +30,8 @@ pub enum Error {
     },
     NonFiniteVector,
     PayloadTooLarge(usize),
+    BatchTooLarge,
+    BatchRequiresUpgrade,
     UnsupportedVersion(u32),
     Corrupt {
         offset: u64,
@@ -64,6 +69,14 @@ impl fmt::Display for Error {
             Self::PayloadTooLarge(n) => {
                 write!(f, "payload is {n} bytes; maximum is {MAX_PAYLOAD_BYTES}")
             }
+            Self::BatchTooLarge => write!(
+                f,
+                "batch exceeds {MAX_BATCH_OPERATIONS} operations or {MAX_BATCH_BYTES} encoded body bytes"
+            ),
+            Self::BatchRequiresUpgrade => write!(
+                f,
+                "atomic batches require format v2; compact the closed v1 database to a new path to upgrade"
+            ),
             Self::UnsupportedVersion(version) => write!(f, "unsupported format version {version}"),
             Self::Corrupt { offset, reason } => {
                 write!(f, "database corruption at byte {offset}: {reason}")
@@ -120,6 +133,18 @@ pub struct Record {
     pub payload: Vec<u8>,
 }
 
+/// One operation in an atomic batch. Operations execute in slice order.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Mutation {
+    Put {
+        id: u64,
+        vector: Vec<f32>,
+        payload: Vec<u8>,
+    },
+    /// A missing ID is a no-op, but remains part of the batch commit.
+    Delete { id: u64 },
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SearchHit {
     pub id: u64,
@@ -138,6 +163,7 @@ pub struct RepairReport {
 /// Reads use a rebuilt in-memory map. No persistent index or lock sidecar exists.
 pub struct Database {
     file: LockedFile,
+    version: u32,
     dimensions: usize,
     records: BTreeMap<u64, Record>,
     sequence: u64,
@@ -207,6 +233,7 @@ impl Database {
         file.sync_all()?;
         Ok(Self {
             file,
+            version: format::CURRENT_VERSION,
             dimensions,
             records: BTreeMap::new(),
             sequence: 0,
@@ -229,6 +256,7 @@ impl Database {
         }
         Ok(Self {
             file,
+            version: loaded.version,
             dimensions: loaded.dimensions,
             records: loaded.records,
             sequence: loaded.sequence,
@@ -260,6 +288,10 @@ impl Database {
 
     pub fn dimensions(&self) -> usize {
         self.dimensions
+    }
+
+    pub fn format_version(&self) -> u32 {
+        self.version
     }
 
     pub fn len(&self) -> usize {
@@ -323,13 +355,91 @@ impl Database {
         Ok(true)
     }
 
+    /// Validates all operations, appends one atomic frame, then syncs once.
+    ///
+    /// No operation becomes visible until the entire frame is durably committed.
+    /// Duplicate IDs execute in order; an empty batch is a no-op on either format.
+    /// Any write/sync failure is indeterminate for the entire batch and poisons
+    /// this handle. A complete batch may reappear after an unacknowledged failure.
+    pub fn write_batch(&mut self, operations: &[Mutation]) -> Result<()> {
+        self.ensure_healthy()?;
+        if operations.is_empty() {
+            return Ok(());
+        }
+        if self.version < 2 {
+            return Err(Error::BatchRequiresUpgrade);
+        }
+        if operations.len() > MAX_BATCH_OPERATIONS {
+            return Err(Error::BatchTooLarge);
+        }
+        let mut body_bytes = 0usize;
+        for operation in operations {
+            let bytes = match operation {
+                Mutation::Put {
+                    vector, payload, ..
+                } => {
+                    self.validate_vector(vector)?;
+                    if payload.len() > MAX_PAYLOAD_BYTES {
+                        return Err(Error::PayloadTooLarge(payload.len()));
+                    }
+                    16 + vector.len() * 4 + payload.len()
+                }
+                Mutation::Delete { .. } => 16,
+            };
+            body_bytes = body_bytes.checked_add(bytes).ok_or(Error::BatchTooLarge)?;
+            if body_bytes > MAX_BATCH_BYTES {
+                return Err(Error::BatchTooLarge);
+            }
+        }
+        let sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or(Error::SequenceExhausted)?;
+        let frame = format::batch_frame(sequence, operations, body_bytes);
+        self.commit_frame(sequence, &frame)?;
+        for operation in operations {
+            match operation {
+                Mutation::Put {
+                    id,
+                    vector,
+                    payload,
+                } => {
+                    self.records.insert(
+                        *id,
+                        Record {
+                            vector: vector.clone(),
+                            payload: payload.clone(),
+                        },
+                    );
+                }
+                Mutation::Delete { id } => {
+                    self.records.remove(id);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn commit(&mut self, id: u64, record: Option<&Record>) -> Result<()> {
         let sequence = self
             .sequence
             .checked_add(1)
             .ok_or(Error::SequenceExhausted)?;
         let frame = format::frame(sequence, id, record);
-        let result = append_and_sync(&mut self.file.0, self.end, &frame, File::sync_all);
+        self.commit_frame(sequence, &frame)
+    }
+
+    fn commit_frame(&mut self, sequence: u64, frame: &[u8]) -> Result<()> {
+        self.commit_frame_with_sync(sequence, frame, File::sync_all)
+    }
+
+    fn commit_frame_with_sync(
+        &mut self,
+        sequence: u64,
+        frame: &[u8],
+        sync: impl FnOnce(&File) -> io::Result<()>,
+    ) -> Result<()> {
+        let result = append_and_sync(&mut self.file.0, self.end, frame, sync);
         if let Err(error) = result {
             self.poisoned = true;
             return Err(Error::CommitIndeterminate(error));
@@ -499,6 +609,11 @@ mod tests {
             db.put(1, &[1.0], b""),
             Err(Error::SequenceExhausted)
         ));
+        assert!(matches!(
+            db.write_batch(&[Mutation::Delete { id: 1 }]),
+            Err(Error::SequenceExhausted)
+        ));
+        db.write_batch(&[]).unwrap();
         assert!(!db.poisoned);
         assert!(db.get(1).unwrap().is_none());
         assert_eq!(db.file.metadata().unwrap().len(), format::HEADER_SIZE);
@@ -521,5 +636,94 @@ mod tests {
             Database::open(&path).unwrap().close().unwrap();
             drop(duplicate);
         }
+    }
+
+    #[test]
+    fn failed_batch_write_poisoning_preserves_all_in_memory_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("batch-poison.vlite");
+        let mut db = Database::create(&path, 1).unwrap();
+        db.put(1, &[1.0], b"old").unwrap();
+        db.file = LockedFile(File::open(&path).unwrap());
+        assert!(matches!(
+            db.write_batch(&[
+                Mutation::Delete { id: 1 },
+                Mutation::Put {
+                    id: 2,
+                    vector: vec![2.0],
+                    payload: Vec::new()
+                },
+            ]),
+            Err(Error::CommitIndeterminate(_))
+        ));
+        assert_eq!(db.records.len(), 1);
+        assert_eq!(db.records.get(&1).unwrap().payload, b"old");
+        assert!(matches!(db.write_batch(&[]), Err(Error::Poisoned)));
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.len(), 1);
+        assert!(db.get(2).unwrap().is_none());
+    }
+
+    #[test]
+    fn batch_sync_is_once_and_failure_may_leave_a_complete_atomic_commit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("batch-sync.vlite");
+        let mut db = Database::create(&path, 1).unwrap();
+        db.put(1, &[1.0], b"old").unwrap();
+        let operations = [
+            Mutation::Delete { id: 1 },
+            Mutation::Put {
+                id: 2,
+                vector: vec![2.0],
+                payload: Vec::new(),
+            },
+        ];
+        let frame = format::batch_frame(2, &operations, 36);
+        let sync_count = Cell::new(0);
+        let result = db.commit_frame_with_sync(2, &frame, |file| {
+            sync_count.set(sync_count.get() + 1);
+            file.sync_all()?;
+            Err(io::Error::other("injected failure after flush"))
+        });
+        assert!(matches!(result, Err(Error::CommitIndeterminate(_))));
+        assert_eq!(sync_count.get(), 1);
+        assert_eq!(db.sequence, 1);
+        assert!(matches!(db.get(1), Err(Error::Poisoned)));
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.len(), 1);
+        assert!(db.get(1).unwrap().is_none());
+        assert_eq!(db.get(2).unwrap().unwrap().vector, [2.0]);
+    }
+
+    #[test]
+    fn short_batch_writes_never_sync_and_success_syncs_once() {
+        let operations = [Mutation::Delete { id: 1 }, Mutation::Delete { id: 2 }];
+        let frame = format::batch_frame(1, &operations, 32);
+        for cut in 0..frame.len() {
+            let mut writer = FailingWriter {
+                bytes: Cursor::new(Vec::new()),
+                remaining: cut,
+            };
+            let sync_count = Cell::new(0);
+            assert!(
+                append_and_sync(&mut writer, 0, &frame, |_| {
+                    sync_count.set(sync_count.get() + 1);
+                    Ok(())
+                })
+                .is_err()
+            );
+            assert_eq!(sync_count.get(), 0);
+        }
+        let sync_count = Cell::new(0);
+        let mut writer = Cursor::new(Vec::new());
+        append_and_sync(&mut writer, 0, &frame, |_| {
+            sync_count.set(sync_count.get() + 1);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(sync_count.get(), 1);
+        assert_eq!(writer.into_inner(), frame);
     }
 }

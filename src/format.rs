@@ -1,4 +1,7 @@
-use crate::{Error, MAX_DIMENSIONS, MAX_PAYLOAD_BYTES, Record, Result};
+use crate::{
+    Error, MAX_BATCH_BYTES, MAX_BATCH_OPERATIONS, MAX_DIMENSIONS, MAX_PAYLOAD_BYTES, Mutation,
+    Record, Result,
+};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -7,9 +10,10 @@ pub(crate) const HEADER_SIZE: u64 = 32;
 pub(crate) const PREFIX_SIZE: usize = 36;
 pub(crate) const FOOTER_SIZE: usize = 16;
 const MAGIC: &[u8; 8] = b"VLITEDB\0";
-const VERSION: u32 = 1;
+pub(crate) const CURRENT_VERSION: u32 = 2;
 
 pub(crate) struct Loaded {
+    pub version: u32,
     pub dimensions: usize,
     pub records: BTreeMap<u64, Record>,
     pub sequence: u64,
@@ -44,7 +48,7 @@ fn corrupt(offset: u64, reason: &'static str) -> Error {
 pub(crate) fn header(dimensions: usize) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(HEADER_SIZE as usize);
     bytes.extend_from_slice(MAGIC);
-    bytes.extend_from_slice(&VERSION.to_le_bytes());
+    bytes.extend_from_slice(&CURRENT_VERSION.to_le_bytes());
     bytes.extend_from_slice(&(dimensions as u32).to_le_bytes());
     bytes.extend_from_slice(&[0; 12]);
     bytes.extend_from_slice(&crc32(&bytes).to_le_bytes());
@@ -77,6 +81,104 @@ pub(crate) fn frame(sequence: u64, id: u64, record: Option<&Record>) -> Vec<u8> 
     bytes
 }
 
+pub(crate) fn batch_frame(sequence: u64, operations: &[Mutation], body_bytes: usize) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(PREFIX_SIZE + body_bytes + FOOTER_SIZE);
+    bytes.extend_from_slice(b"VREC");
+    bytes.extend_from_slice(&[3, 0, 0, 0]);
+    bytes.extend_from_slice(&sequence.to_le_bytes());
+    bytes.extend_from_slice(&0u64.to_le_bytes());
+    bytes.extend_from_slice(&(operations.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&(body_bytes as u32).to_le_bytes());
+    bytes.extend_from_slice(&crc32(&bytes).to_le_bytes());
+    for operation in operations {
+        match operation {
+            Mutation::Put {
+                id,
+                vector,
+                payload,
+            } => {
+                bytes.extend_from_slice(&[1, 0, 0, 0]);
+                bytes.extend_from_slice(&id.to_le_bytes());
+                bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+                for value in vector {
+                    bytes.extend_from_slice(&value.to_le_bytes());
+                }
+                bytes.extend_from_slice(payload);
+            }
+            Mutation::Delete { id } => {
+                bytes.extend_from_slice(&[2, 0, 0, 0]);
+                bytes.extend_from_slice(&id.to_le_bytes());
+                bytes.extend_from_slice(&0u32.to_le_bytes());
+            }
+        }
+    }
+    let checksum = crc32(&bytes);
+    bytes.extend_from_slice(b"VCMT");
+    bytes.extend_from_slice(&checksum.to_le_bytes());
+    bytes.extend_from_slice(&sequence.to_le_bytes());
+    bytes
+}
+
+fn decode_vector(bytes: &[u8], offset: u64) -> Result<Vec<f32>> {
+    let vector: Vec<_> = bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
+        .collect();
+    if vector.iter().any(|value| !value.is_finite()) {
+        return Err(corrupt(offset, "non-finite stored vector component"));
+    }
+    Ok(vector)
+}
+
+fn decode_batch(
+    body: &[u8],
+    count: usize,
+    dimensions: usize,
+    offset: u64,
+) -> Result<Vec<Mutation>> {
+    let mut operations = Vec::with_capacity(count);
+    let mut position = 0usize;
+    for _ in 0..count {
+        let entry = body
+            .get(position..position + 16)
+            .ok_or_else(|| corrupt(offset, "truncated batch entry header"))?;
+        let operation = entry[0];
+        if !matches!(operation, 1 | 2) || entry[1..4] != [0; 3] {
+            return Err(corrupt(
+                offset,
+                "invalid batch entry operation or reserved bytes",
+            ));
+        }
+        let id = u64_at(entry, 4);
+        let payload_len = u32_at(entry, 12) as usize;
+        if payload_len > MAX_PAYLOAD_BYTES || (operation == 2 && payload_len != 0) {
+            return Err(corrupt(offset, "invalid batch entry payload length"));
+        }
+        position += 16;
+        if operation == 1 {
+            let end = position + dimensions * 4 + payload_len;
+            let data = body
+                .get(position..end)
+                .ok_or_else(|| corrupt(offset, "truncated batch entry body"))?;
+            let vector = decode_vector(&data[..dimensions * 4], offset)?;
+            operations.push(Mutation::Put {
+                id,
+                vector,
+                payload: data[dimensions * 4..].to_vec(),
+            });
+            position = end;
+        } else {
+            operations.push(Mutation::Delete { id });
+        }
+    }
+    if position != body.len() {
+        return Err(corrupt(offset, "extra bytes after batch entries"));
+    }
+    Ok(operations)
+}
+
 pub(crate) fn load(file: &mut File) -> Result<Loaded> {
     file.seek(SeekFrom::Start(0))?;
     let length = file.metadata()?.len();
@@ -92,7 +194,7 @@ pub(crate) fn load(file: &mut File) -> Result<Loaded> {
         return Err(corrupt(0, "database header checksum mismatch"));
     }
     let version = u32_at(&bytes, 8);
-    if version != VERSION {
+    if !matches!(version, 1 | 2) {
         return Err(Error::UnsupportedVersion(version));
     }
     if bytes[16..28] != [0; 12] {
@@ -103,6 +205,7 @@ pub(crate) fn load(file: &mut File) -> Result<Loaded> {
         return Err(corrupt(0, "invalid database dimensions"));
     }
     let mut loaded = Loaded {
+        version,
         dimensions,
         records: BTreeMap::new(),
         sequence: 0,
@@ -131,7 +234,9 @@ pub(crate) fn load(file: &mut File) -> Result<Loaded> {
             return Err(corrupt(offset, "record header checksum mismatch"));
         }
         let operation = prefix[4];
-        if !matches!(operation, 1 | 2) || prefix[5..8] != [0; 3] {
+        if !(matches!(operation, 1 | 2) || (operation == 3 && version >= 2))
+            || prefix[5..8] != [0; 3]
+        {
             return Err(corrupt(
                 offset,
                 "invalid operation or reserved record bytes",
@@ -144,13 +249,27 @@ pub(crate) fn load(file: &mut File) -> Result<Loaded> {
         let id = u64_at(&prefix, 16);
         let count = u32_at(&prefix, 24) as usize;
         let payload_len = u32_at(&prefix, 28) as usize;
-        if (operation == 1 && count != dimensions)
-            || (operation == 2 && (count != 0 || payload_len != 0))
-            || payload_len > MAX_PAYLOAD_BYTES
-        {
-            return Err(corrupt(offset, "invalid vector or payload length"));
-        }
-        let body_len = count * 4 + payload_len;
+        let body_len = if operation == 3 {
+            if id != 0
+                || !(1..=MAX_BATCH_OPERATIONS).contains(&count)
+                || payload_len > MAX_BATCH_BYTES
+                || payload_len < count * 16
+            {
+                return Err(corrupt(
+                    offset,
+                    "invalid batch count, reserved ID or body length",
+                ));
+            }
+            payload_len
+        } else {
+            if (operation == 1 && count != dimensions)
+                || (operation == 2 && (count != 0 || payload_len != 0))
+                || payload_len > MAX_PAYLOAD_BYTES
+            {
+                return Err(corrupt(offset, "invalid vector or payload length"));
+            }
+            count * 4 + payload_len
+        };
         let frame_len = (PREFIX_SIZE + body_len + FOOTER_SIZE) as u64;
         if remaining < frame_len {
             loaded.incomplete_bytes = remaining;
@@ -168,19 +287,27 @@ pub(crate) fn load(file: &mut File) -> Result<Loaded> {
             return Err(corrupt(offset, "commit footer or record checksum mismatch"));
         }
         if operation == 1 {
-            let vector: Vec<f32> = frame[PREFIX_SIZE..PREFIX_SIZE + count * 4]
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|chunk| f32::from_le_bytes(*chunk))
-                .collect();
-            if vector.iter().any(|value| !value.is_finite()) {
-                return Err(corrupt(offset, "non-finite stored vector component"));
-            }
+            let vector = decode_vector(&frame[PREFIX_SIZE..PREFIX_SIZE + count * 4], offset)?;
             let payload = frame[PREFIX_SIZE + count * 4..].to_vec();
             loaded.records.insert(id, Record { vector, payload });
-        } else {
+        } else if operation == 2 {
             loaded.records.remove(&id);
+        } else {
+            let operations = decode_batch(&frame[PREFIX_SIZE..], count, dimensions, offset)?;
+            for operation in operations {
+                match operation {
+                    Mutation::Put {
+                        id,
+                        vector,
+                        payload,
+                    } => {
+                        loaded.records.insert(id, Record { vector, payload });
+                    }
+                    Mutation::Delete { id } => {
+                        loaded.records.remove(&id);
+                    }
+                }
+            }
         }
         loaded.sequence = sequence;
         loaded.end += frame_len;
@@ -202,7 +329,7 @@ mod tests {
     fn header_has_stable_portable_encoding() {
         let bytes = header(3);
         assert_eq!(bytes.len(), 32);
-        assert_eq!(&bytes[..16], b"VLITEDB\0\x01\0\0\0\x03\0\0\0");
+        assert_eq!(&bytes[..16], b"VLITEDB\0\x02\0\0\0\x03\0\0\0");
         assert_eq!(u32_at(&bytes, 28), crc32(&bytes[..28]));
     }
 
@@ -294,5 +421,56 @@ mod tests {
         bytes.extend_from_slice(&frame(1, 1, Some(&record)));
         bytes.extend_from_slice(&frame(3, 2, Some(&record)));
         assert!(matches!(load_bytes(&bytes), Err(Error::Corrupt { .. })));
+    }
+
+    #[test]
+    fn valid_checksums_cannot_hide_malformed_batch_entries() {
+        let operations = [
+            Mutation::Put {
+                id: 1,
+                vector: vec![1.0],
+                payload: vec![42],
+            },
+            Mutation::Delete { id: 2 },
+        ];
+        let original = batch_frame(1, &operations, 37);
+        let cases = [
+            (16, 1u64.to_le_bytes().to_vec()),
+            (24, 0u32.to_le_bytes().to_vec()),
+            (24, 1u32.to_le_bytes().to_vec()),
+            (24, 3u32.to_le_bytes().to_vec()),
+            (24, (MAX_BATCH_OPERATIONS as u32 + 1).to_le_bytes().to_vec()),
+            (28, (MAX_BATCH_BYTES as u32 + 1).to_le_bytes().to_vec()),
+            (PREFIX_SIZE, vec![3]),
+            (PREFIX_SIZE + 1, vec![1]),
+            (PREFIX_SIZE + 12, u32::MAX.to_le_bytes().to_vec()),
+            (PREFIX_SIZE + 16, f32::NAN.to_le_bytes().to_vec()),
+            (PREFIX_SIZE + 16, f32::INFINITY.to_le_bytes().to_vec()),
+            (PREFIX_SIZE + 21 + 12, 1u32.to_le_bytes().to_vec()),
+        ];
+        for (position, replacement) in cases {
+            let mut frame = original.clone();
+            frame[position..position + replacement.len()].copy_from_slice(&replacement);
+            refresh_record_checksums(&mut frame);
+            let mut bytes = header(1);
+            bytes.extend_from_slice(&frame);
+            assert!(
+                matches!(load_bytes(&bytes), Err(Error::Corrupt { .. })),
+                "field at {position}"
+            );
+        }
+        // Keep total body bytes unchanged but declare a larger entry payload.
+        let mut frame = original.clone();
+        frame[PREFIX_SIZE + 12..PREFIX_SIZE + 16].copy_from_slice(&32u32.to_le_bytes());
+        refresh_record_checksums(&mut frame);
+        let mut bytes = header(1);
+        bytes.extend_from_slice(&frame);
+        assert!(matches!(load_bytes(&bytes), Err(Error::Corrupt { .. })));
+
+        let mut legacy = header(1);
+        legacy[8..12].copy_from_slice(&1u32.to_le_bytes());
+        refresh_header_checksum(&mut legacy);
+        legacy.extend_from_slice(&original);
+        assert!(matches!(load_bytes(&legacy), Err(Error::Corrupt { .. })));
     }
 }

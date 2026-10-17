@@ -2,7 +2,7 @@ use std::error::Error;
 use std::io;
 use std::path::Path;
 use std::process::{Command, ExitCode};
-use vlite::Database;
+use vlite::{Database, Mutation};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -15,14 +15,33 @@ fn require(condition: bool, message: &str) -> Result<()> {
 
 fn initialize(path: &Path) -> Result<()> {
     let mut db = Database::create(path, 3)?;
-    db.put(10, &[1.0, 0.0, 0.0], b"original")?;
-    db.put(20, &[0.0, 1.0, 0.0], b"second")?;
-    db.put(30, &[0.0, 0.0, 1.0], b"temporary")?;
-    db.put(10, &[2.0, 0.0, 0.0], b"updated")?;
-    require(db.delete(30)?, "delete failed")?;
+    db.write_batch(&[
+        Mutation::Put {
+            id: 10,
+            vector: vec![1.0, 0.0, 0.0],
+            payload: b"original".to_vec(),
+        },
+        Mutation::Put {
+            id: 20,
+            vector: vec![0.0, 1.0, 0.0],
+            payload: b"second".to_vec(),
+        },
+        Mutation::Put {
+            id: 30,
+            vector: vec![0.0, 0.0, 1.0],
+            payload: b"temporary".to_vec(),
+        },
+        Mutation::Put {
+            id: 10,
+            vector: vec![2.0, 0.0, 0.0],
+            payload: b"updated".to_vec(),
+        },
+        Mutation::Delete { id: 30 },
+    ])?;
+    require(db.get(30)?.is_none(), "batch delete failed")?;
     require(!db.delete(30)?, "missing delete unexpectedly succeeded")?;
     db.close()?;
-    println!("PASS init: committed inserts, update and delete");
+    println!("PASS init: atomically committed inserts, update and delete");
     Ok(())
 }
 
