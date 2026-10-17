@@ -180,12 +180,14 @@ impl From<Error> for ApiError {
             | Error::PayloadTooLarge(_)
             | Error::BatchTooLarge
             | Error::InvalidHnswConfig
-            | Error::InvalidEfSearch => Self::new(
+            | Error::InvalidEfSearch
+            | Error::InvalidMetadata(_)
+            | Error::InvalidFilter(_) => Self::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "invalid_input",
                 error.to_string(),
             ),
-            Error::BatchRequiresUpgrade => {
+            Error::BatchRequiresUpgrade | Error::MetadataRequiresUpgrade => {
                 Self::new(StatusCode::CONFLICT, "upgrade_required", error.to_string())
             }
             Error::CommitIndeterminate(_) => {
@@ -294,7 +296,8 @@ async fn fetch(
             Ok(Json(json!({
                 "id": id.to_string(),
                 "vector": record.vector,
-                "payload_base64": BASE64_STANDARD.encode(&record.payload)
+                "payload_base64": BASE64_STANDARD.encode(&record.payload),
+                "metadata":record.metadata,
             })))
         })
         .await
@@ -306,6 +309,8 @@ struct Put {
     vector: Vec<f32>,
     #[serde(default)]
     payload_base64: String,
+    #[serde(default)]
+    metadata: crate::Metadata,
 }
 
 async fn put(
@@ -318,7 +323,7 @@ async fn put(
     let payload = payload(&input.payload_base64)?;
     service
         .run(move |db| {
-            db.put(id, &input.vector, &payload)?;
+            db.put_with_metadata(id, &input.vector, &payload, &input.metadata)?;
             Ok(StatusCode::NO_CONTENT)
         })
         .await
@@ -342,6 +347,8 @@ enum Operation {
         vector: Vec<f32>,
         #[serde(default)]
         payload_base64: String,
+        #[serde(default)]
+        metadata: crate::Metadata,
     },
     Delete {
         id: String,
@@ -370,11 +377,25 @@ async fn batch(
                 id: text,
                 vector,
                 payload_base64,
-            } => Ok(Mutation::Put {
-                id: id(&text)?,
-                vector,
-                payload: payload(&payload_base64)?,
-            }),
+                metadata,
+            } => {
+                let id = id(&text)?;
+                let payload = payload(&payload_base64)?;
+                if metadata.is_empty() {
+                    Ok(Mutation::Put {
+                        id,
+                        vector,
+                        payload,
+                    })
+                } else {
+                    Ok(Mutation::PutWithMetadata {
+                        id,
+                        vector,
+                        payload,
+                        metadata,
+                    })
+                }
+            }
             Operation::Delete { id: text } => Ok(Mutation::Delete { id: id(&text)? }),
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
@@ -414,6 +435,7 @@ struct Search {
     #[serde(default)]
     mode: SearchMode,
     ef_search: Option<usize>,
+    filter: Option<Vec<crate::Condition>>,
 }
 
 async fn search(
@@ -435,10 +457,21 @@ async fn search(
             "ef_search is only valid in approximate mode",
         ));
     }
+    if matches!(input.mode, SearchMode::Approximate) && input.filter.is_some() {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_input",
+            "filters require mode exact; approximate filtering is not supported",
+        ));
+    }
     service
         .run(move |db| {
             let hits = match input.mode {
-                SearchMode::Exact => db.search(&input.vector, input.k)?,
+                SearchMode::Exact => db.search_filtered(
+                    &input.vector,
+                    input.k,
+                    input.filter.as_deref().unwrap_or(&[]),
+                )?,
                 SearchMode::Approximate => db.search_approximate(
                     &input.vector,
                     input.k,

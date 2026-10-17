@@ -8,7 +8,7 @@ and atomic batch mutations, and exact nearest-neighbor search.
 An optional REST service exposes the same engine. Optional in-memory HNSW search
 supports approximate retrieval without changing the database file.
 gRPC, persistent ANN indexes, distributed operation, interactive transactions,
-encryption, metadata filtering, and read-only/multi-reader handles are deferred.
+encryption, approximate metadata filtering, and read-only/multi-reader handles are deferred.
 This is a correctness-first MVP, not a production-hardened storage engine.
 
 ## Build and use
@@ -198,7 +198,7 @@ Invoke-RestMethod "$base/v1/vectors/20" -Method Delete
 - `GET /ready`: 200 when the owner can read, 503 if busy/closed/poisoned.
 - `GET /v1/database`: dimensions, format version, live record count.
 - `PUT /v1/vectors/{id}`: insert/replace; 204 only after durable commit.
-- `GET /v1/vectors/{id}`: ID, vector and base64 payload; 404 when missing.
+- `GET /v1/vectors/{id}`: ID, vector, base64 payload and typed metadata; 404 when missing.
 - `DELETE /v1/vectors/{id}`: `{"deleted":true|false}`; missing is a no-op.
 - `POST /v1/batches`: `{"operations":[...]}`; one atomic commit, 204 on success.
 - `POST /v1/search`: `{"vector":[...],"k":N,"mode":"exact"}`; `{"hits":[{"id":"...","distance":0.0}]}`.
@@ -227,7 +227,7 @@ proxy for connection/header/body timeouts and network-level limits.
 
 Errors use `{"error":{"code":"...","message":"..."}}`: 400 for malformed JSON or
 IDs, 404 for missing records/routes, 405 for unsupported methods, 409 for batches
-requiring v1 upgrade, 413 for body size, 415 for content type, 422 for schema or
+requiring a file-format upgrade (batch v2+, metadata v3), 413 for body size, 415 for content type, 422 for schema or
 engine validation, 503 for busy/unavailable/poisoned or indeterminate commit,
 and 500 for internal failures (details logged to stderr). HTTP protocol errors
 rejected before routing may be handled directly by the HTTP stack.
@@ -259,7 +259,7 @@ For WSL-only Docker, run this command within WSL from the mounted project root.
 
 ## Atomic batch writes
 
-New databases use format v2. A batch is one bounded checksummed commit frame,
+New databases use format v3. A batch is one bounded checksummed commit frame,
 not a loop over separately acknowledged writes:
 
 ```rust
@@ -308,11 +308,118 @@ process on OOM.
 **Existing v1 databases:** reads and single-record writes remain supported,
 with their original encoding unchanged. Nonempty batches return
 `BatchRequiresUpgrade`; the library never rewrites a v1 header in place. Close
-the v1 database and compact it to a **new** path to explicitly upgrade to v2,
+the v1 database and compact it to a **new** path to explicitly upgrade to current v3,
 then verify and switch paths. Backup/restore preserve the input format exactly.
-Old VLite binaries reject a v2 header as unsupported; no backward-reading claim
-is made. `Database::format_version()` and maintenance inspection expose the
+Older binaries reject newer unsupported headers; v2-only binaries reject v3.
+`Database::format_version()` and maintenance inspection expose the
 version.
+
+## Typed metadata and exact filtered search
+
+Format v3 supports a typed map alongside each vector and opaque payload.
+`Record::metadata` is a `BTreeMap<String, MetadataValue>` containing string,
+signed i64 integer, finite f64 float, or boolean values. No arrays, nested maps,
+nulls, field indexes, or general expression language are included.
+
+```rust
+use vlite::{Condition, Database, Metadata, MetadataValue};
+
+fn main() -> vlite::Result<()> {
+    let mut db = Database::create("metadata.vlite", 3)?;
+    let metadata = Metadata::from([
+        ("category".into(), MetadataValue::String("docs".into())),
+        ("year".into(), MetadataValue::Integer(2026)),
+    ]);
+    db.put_with_metadata(10, &[1.0, 0.0, 0.0], b"document A", &metadata)?;
+    let filter = [
+        Condition::Eq {
+            field: "category".into(),
+            value: MetadataValue::String("docs".into()),
+        },
+        Condition::Range {
+            field: "year".into(),
+            min: Some(MetadataValue::Integer(2025)),
+            max: None,
+        },
+    ];
+    let hits = db.search_filtered(&[0.9, 0.1, 0.0], 5, &filter)?;
+    assert_eq!(hits[0].id, 10);
+    db.close()
+}
+```
+
+`put_with_metadata` replaces the **entire** vector, payload and map.
+Existing `put` and `Mutation::Put` clear any previous metadata, rather than
+merging or retaining it. Use `Mutation::PutWithMetadata` in atomic batches to
+replace all three together. Every operation is validated before any frame is
+written, and duplicate IDs still execute in order. Metadata updates invalidate
+HNSW exactly like other commits. `get` returns the persisted map.
+
+Limits: at most **64 fields**, names **1..256 UTF-8 bytes**, string values at most
+**4,096 UTF-8 bytes**, and **65,536 encoded metadata bytes** per map (including
+field count, names, tags and values). Metadata bytes count toward the existing
+16 MiB batch-body limit, in addition to vector/payload and entry overhead.
+Non-finite floats are rejected. Names/strings are case-sensitive with no Unicode
+normalization. Signed zero float bits survive storage; equality and numeric
+ranges treat -0.0 and +0.0 as equal. Integer and float types never coerce, avoiding
+precision loss at i64 boundaries.
+
+Filters are an AND conjunction of at most **64** conditions. Equality supports
+all four types; ranges accept inclusive min and/or max of one numeric type,
+requiring min <= max. Missing fields and mismatched stored types do not match;
+an empty filter matches all records. Validation applies even to k=0 and empty
+databases. Filtering is a full scan of eligible records **before** top-k
+selection, not post-filtering nearest hits. `search_filtered` is always exact.
+
+For REST, `metadata` is optional on PUT and batch puts (omission means `{}`):
+
+```json
+{
+  "vector": [1, 0, 0],
+  "payload_base64": "",
+  "metadata": {
+    "category": {"type": "string", "value": "docs"},
+    "year": {"type": "integer", "value": "2026"},
+    "score": {"type": "float", "value": 1.5},
+    "active": {"type": "boolean", "value": true}
+  }
+}
+```
+
+Integer values use **canonical decimal i64 strings**, not JSON numbers, so
+JavaScript clients can preserve all 64 bits. Float values use JSON numbers.
+Reads return the same tagged representation. Nested maps/nulls/unknown types
+are rejected. Search accepts `filter`:
+
+```json
+{
+  "vector": [0.9, 0.1, 0],
+  "k": 5,
+  "mode": "exact",
+  "filter": [
+    {"op": "eq", "field": "category", "value": {"type": "string", "value": "docs"}},
+    {"op": "range", "field": "year", "min": {"type": "integer", "value": "2025"}}
+  ]
+}
+```
+
+**Approximate mode with any non-null filter (even `[]`) returns 422.** There is
+no silent exact fallback or misleading HNSW post-filter. Use explicit exact mode
+for filtered queries; unfiltered exact/approximate requests remain compatible.
+
+**Migration:** v1/v2 records open with empty metadata. Existing reads, ordinary
+puts/deletes, and v2 batches remain byte-compatible on those files. Nonempty
+`put_with_metadata` requires v3; `Mutation::PutWithMetadata` always requires v3,
+including an empty map. REST maps empty metadata puts to legacy-compatible
+operations. Unsupported metadata writes return `MetadataRequiresUpgrade` /
+HTTP 409, without changing any bytes. Stop the server/close the owner, then use
+`vlite-maintain compact old.vlite upgraded.vlite` to create a validated v3 copy.
+Verify it before explicitly switching the application path. The source is never
+rewritten. Backup/restore preserve original versions and bytes. Compaction
+preserves typed metadata and writes v3. Older binaries reject the new header
+even when the file contains no metadata. `Record` gained a public metadata
+field and `Mutation` gained a variant: downstream Rust struct literals and
+exhaustive matches must be updated.
 
 ## Optional HNSW search
 
@@ -359,7 +466,7 @@ first approximate query after a write can be much slower than exact search and
 blocks other operations. Rebuilding is not free and small datasets may search
 faster with the exact scan. Index creation/search allocate RAM without a
 recoverable OOM guarantee. The ef bound is not a total visited-node/RAM quota.
-No index or sidecar is written; v1/v2 files and maintenance operations remain
+No index or sidecar is written; v1/v2/v3 files and maintenance operations remain
 unchanged. Fixed-workload tests require recall@10 >=0.95 on 1,000 seeded
 16-dimensional vectors and verify deterministic replay, returned distances,
 ordering and mutation consistency; this is not a promise for arbitrary data.
@@ -470,10 +577,10 @@ bytes, valid-prefix bytes and incomplete-tail bytes. The CLI prints these as
 by the library and makes CLI inspection exit nonzero. No inspection repairs or
 changes data.
 
-Backup and restore produce byte-identical, fully validated v1 or v2 files. Restore
+Backup and restore produce byte-identical, fully validated v1, v2 or v3 files. Restore
 **never overwrites an existing database**. Both reject corruption and incomplete
 tails. Compaction writes only current live records, removes tombstones and old
-values, writes format v2, and resets the output log sequence to start at one. It preserves IDs,
+values, writes format v3, and resets the output log sequence to start at one. It preserves IDs,
 dimensions, payloads and vector component bits, including negative zero. Exact
 search behavior is unchanged. An empty live set produces a 32-byte file that can
 accept new writes. Inspection's commit count is a file-local frame count, not an
@@ -596,7 +703,7 @@ new filename across machine power failure requires platform-specific directory
 durability handling by the caller. Tests simulate interrupted writes and process
 exit, not physical power loss.
 
-## File formats v1 and v2
+## File formats v1, v2 and v3
 
 All integers and IEEE-754 `f32` components use little-endian encoding, never native
 Rust struct layouts. Checksums are IEEE CRC-32 (reflected polynomial `0xEDB88320`,
@@ -607,7 +714,7 @@ The 32-byte database header:
 | Offset | Size | Value |
 |---|---|---|
 | 0 | 8 | `VLITEDB` followed by NUL |
-| 8 | 4 | Format version, 1 or 2; new files use 2 |
+| 8 | 4 | Format version, 1, 2 or 3; new files use 3 |
 | 12 | 4 | Dimensions |
 | 16 | 12 | Reserved, zero |
 | 28 | 4 | CRC-32 of bytes 0 through 27 |
@@ -636,7 +743,7 @@ record bodies. Unknown operations and nonzero reserved fields are rejected.
 Replaying a tombstone removes that ID. Sequence exhaustion rejects the next write.
 The immutable header is never updated after creation.
 
-Version 2 additionally supports operation **3=batch** in the same outer frame
+Versions 2 and 3 additionally support operation **3=batch** in the same outer frame
 layout. Outer ID (offset 16) must be zero, offset 24 is the operation count and
 offset 28 is the **total encoded body byte length**, not payload bytes. The
 header checksum, `VCMT` footer, whole-frame checksum and repeated sequence work
@@ -658,7 +765,25 @@ payload limits; trailing extra bytes are rejected. All entry checks happen
 before applying any operation. Version 1 readers in this release reject batch
 records inside v1 files as corruption rather than interpreting unknown data.
 
-Fixed fixtures `tests/fixtures/v1.hex` and `tests/fixtures/v2.hex` were encoded
+Version 3 additionally supports **4=put with metadata**, both standalone and
+inside a batch. Standalone op4 has ID at prefix offset 16, dimensions at 24, and
+**total extended-body byte length** at 28. For an op4 batch entry, its offset 12
+is the total extended-body length, not plain payload length. An extended body is:
+dimension-count little-endian f32 components, u32 payload-byte length, payload,
+then the typed metadata encoding below. It must contain all bytes exactly.
+Empty-metadata standalone puts may use legacy op1; explicit
+`Mutation::PutWithMetadata` uses op4 even for an empty map.
+
+Metadata starts with u32 field count, followed by fields in strictly ascending
+UTF-8 name-byte order. Each field has a u16 name-byte length, UTF-8 name, u8 tag,
+then value bytes: tag1 string = u32 byte length plus UTF-8, tag2 integer = i64 LE,
+tag3 float = f64 LE, tag4 boolean = one byte 0 or 1. Duplicate/unsorted names,
+invalid UTF-8, non-finite floats, unknown tags, trailing bytes and limit violations
+are corruption even if checksums are valid. Op4 body lengths are bounded before
+allocation. Op4 in a v1/v2 file (including v2 batch entries) is corruption; new
+meanings never silently reuse an old format version.
+
+Fixed fixtures `tests/fixtures/v1.hex`, `v2.hex` and `v3.hex` were encoded
 independently with Python `struct` and `zlib.crc32`, not generated by the Rust
 writer during tests. Tests pin complete legacy/current file bytes, replay and
 single-write compatibility, current batch encoding and explicit copy-out
@@ -672,7 +797,7 @@ must never be silently repurposed under an existing version.
 Space grows with **all historical mutations**, not just live records; deletes do
 not reclaim disk space until you switch to a compacted copy and retire the old
 file. Open time is linear in log size, memory is proportional
-to live vectors/payloads, and search costs O(n*d + n*log(n)) time plus O(n) result
+to live vectors/payloads/metadata, and unfiltered exact search costs O(n*d + n*log(n)) time plus O(n) result
 memory. There is no total file or RAM quota and allocation exhaustion is not a
 recoverable database error. Plan capacity accordingly.
 The optional HNSW graph adds O(n*m) adjacency storage plus construction/search

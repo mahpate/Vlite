@@ -34,7 +34,7 @@
     "/v1/vectors/{id}": {
       "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"$ref": "#/components/schemas/Id"}}],
       "get": {
-        "summary": "Read one vector and opaque payload",
+        "summary": "Read one vector, opaque payload and typed metadata",
         "responses": {
           "200": {"description": "Record", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Record"}}}},
           "400": {"$ref": "#/components/responses/BadRequest"},
@@ -43,11 +43,12 @@
         }
       },
       "put": {
-        "summary": "Durably insert or replace vector and payload",
+        "summary": "Durably replace vector, payload and entire metadata map; omitted metadata clears it",
         "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Put"}}}},
         "responses": {
           "204": {"description": "Durably committed"},
           "400": {"$ref": "#/components/responses/BadRequest"},
+          "409": {"$ref": "#/components/responses/Upgrade"},
           "413": {"$ref": "#/components/responses/TooLarge"},
           "415": {"$ref": "#/components/responses/MediaType"},
           "422": {"$ref": "#/components/responses/InvalidInput"},
@@ -71,7 +72,7 @@
         "responses": {
           "204": {"description": "Entire batch durably committed, or empty no-op"},
           "400": {"$ref": "#/components/responses/BadRequest"},
-          "409": {"description": "Nonempty batch on v1; stop service and compact to a new v2 path", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "409": {"$ref": "#/components/responses/Upgrade"},
           "413": {"$ref": "#/components/responses/TooLarge"},
           "415": {"$ref": "#/components/responses/MediaType"},
           "422": {"$ref": "#/components/responses/InvalidInput"},
@@ -82,8 +83,8 @@
     "/v1/search": {
       "post": {
         "summary": "Exact (default) or explicitly approximate squared-L2 search",
-        "description": "Both modes return candidates ordered by distance then ascending numeric ID. k=0 still validates the query. Exact mode returns min(k, live count). Approximate mode uses a lazily rebuilt in-memory HNSW index (m=16, ef_construction=100, seed=42), returns at most k candidates, and does not guarantee recall or a full result count. The first approximate query after successful mutation/reopen includes a blocking rebuild from committed records. ef_search defaults to max(100,min(k,live count)), must be 1..100000 and at least min(k,live count); it is rejected in exact mode. Distances accumulate in f64 and are exact for returned candidates. Payloads are fetched separately.",
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "required": ["vector", "k"], "properties": {"vector": {"$ref": "#/components/schemas/Vector"}, "k": {"type": "integer", "minimum": 0, "maximum": 10000}, "mode": {"type": "string", "enum": ["exact", "approximate"], "default": "exact"}, "ef_search": {"type": "integer", "minimum": 1, "maximum": 100000}}}}}},
+        "description": "Both modes return candidates ordered by distance then ascending numeric ID. k=0 still validates query/filter. Exact mode filters eligible records first and returns min(k, eligible count). Optional filter is an AND array of at most 64 strict-type equality or inclusive numeric-range conditions; absent fields and mismatched types do not match. Empty filter matches all. Approximate mode rejects any non-null filter including []; no implicit fallback or post-filter. It uses a lazily rebuilt in-memory HNSW index (m=16, ef_construction=100, seed=42), returns at most k candidates, and does not guarantee recall or a full result count. The first approximate query after successful mutation/reopen includes a blocking rebuild from committed records. ef_search defaults to max(100,min(k,live count)), must be 1..100000 and at least min(k,live count); it is rejected in exact mode. Distances accumulate in f64 and are exact for returned candidates. Payloads and metadata are fetched separately.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "required": ["vector", "k"], "properties": {"vector": {"$ref": "#/components/schemas/Vector"}, "k": {"type": "integer", "minimum": 0, "maximum": 10000}, "mode": {"type": "string", "enum": ["exact", "approximate"], "default": "exact"}, "ef_search": {"type": "integer", "minimum": 1, "maximum": 100000}, "filter": {"type": ["array", "null"], "maxItems": 64, "items": {"$ref": "#/components/schemas/Condition"}}}}}}},
         "responses": {
           "200": {"description": "Nearest hits", "content": {"application/json": {"schema": {"type": "object", "required": ["hits"], "properties": {"hits": {"type": "array", "items": {"type": "object", "required": ["id", "distance"], "properties": {"id": {"$ref": "#/components/schemas/Id"}, "distance": {"type": "number", "minimum": 0}}}}}}}}},
           "400": {"$ref": "#/components/responses/BadRequest"},
@@ -102,13 +103,25 @@
     "schemas": {
       "Id": {"type": "string", "pattern": "^(0|[1-9][0-9]*)$", "maxLength": 20, "description": "Canonical decimal u64, maximum 18446744073709551615; never a JSON number"},
       "Vector": {"type": "array", "minItems": 1, "maxItems": 65536, "items": {"type": "number", "format": "float"}, "description": "Finite f32 components, exactly the database's dimension count"},
-      "Put": {"type": "object", "additionalProperties": false, "required": ["vector"], "properties": {"vector": {"$ref": "#/components/schemas/Vector"}, "payload_base64": {"type": "string", "contentEncoding": "base64", "default": "", "description": "Canonical padded standard base64, decoded length <=1048576 bytes"}}},
-      "Record": {"type": "object", "required": ["id", "vector", "payload_base64"], "properties": {"id": {"$ref": "#/components/schemas/Id"}, "vector": {"$ref": "#/components/schemas/Vector"}, "payload_base64": {"type": "string", "contentEncoding": "base64"}}},
-      "BatchPut": {"type": "object", "additionalProperties": false, "required": ["op", "id", "vector"], "properties": {"op": {"const": "put"}, "id": {"$ref": "#/components/schemas/Id"}, "vector": {"$ref": "#/components/schemas/Vector"}, "payload_base64": {"type": "string", "contentEncoding": "base64", "default": ""}}},
+      "Put": {"type": "object", "additionalProperties": false, "required": ["vector"], "properties": {"vector": {"$ref": "#/components/schemas/Vector"}, "payload_base64": {"type": "string", "contentEncoding": "base64", "default": "", "description": "Canonical padded standard base64, decoded length <=1048576 bytes"}, "metadata": {"$ref": "#/components/schemas/Metadata"}}},
+      "Record": {"type": "object", "required": ["id", "vector", "payload_base64", "metadata"], "properties": {"id": {"$ref": "#/components/schemas/Id"}, "vector": {"$ref": "#/components/schemas/Vector"}, "payload_base64": {"type": "string", "contentEncoding": "base64"}, "metadata": {"$ref": "#/components/schemas/Metadata"}}},
+      "BatchPut": {"type": "object", "additionalProperties": false, "required": ["op", "id", "vector"], "properties": {"op": {"const": "put"}, "id": {"$ref": "#/components/schemas/Id"}, "vector": {"$ref": "#/components/schemas/Vector"}, "payload_base64": {"type": "string", "contentEncoding": "base64", "default": ""}, "metadata": {"$ref": "#/components/schemas/Metadata"}}},
+      "Metadata": {"type": "object", "maxProperties": 64, "default": {}, "description": "Full replacement map; keys 1..256 UTF-8 bytes, string values <=4096 UTF-8 bytes, encoded map <=65536 bytes. Nonempty metadata requires file format v3. No nulls, nesting or arrays.", "additionalProperties": {"$ref": "#/components/schemas/MetadataValue"}},
+      "MetadataValue": {"oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["type", "value"], "properties": {"type": {"const": "string"}, "value": {"type": "string"}}},
+        {"type": "object", "additionalProperties": false, "required": ["type", "value"], "properties": {"type": {"const": "integer"}, "value": {"type": "string", "pattern": "^(0|-?[1-9][0-9]*)$", "description": "Canonical decimal signed i64 string, range -9223372036854775808..9223372036854775807"}}},
+        {"type": "object", "additionalProperties": false, "required": ["type", "value"], "properties": {"type": {"const": "float"}, "value": {"type": "number", "format": "double", "description": "Finite f64"}}},
+        {"type": "object", "additionalProperties": false, "required": ["type", "value"], "properties": {"type": {"const": "boolean"}, "value": {"type": "boolean"}}}
+      ]},
+      "Condition": {"oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["op", "field", "value"], "properties": {"op": {"const": "eq"}, "field": {"type": "string", "description": "1..256 UTF-8 bytes, case-sensitive"}, "value": {"$ref": "#/components/schemas/MetadataValue"}}},
+        {"type": "object", "additionalProperties": false, "required": ["op", "field"], "description": "At least one non-null min/max. Both bounds must be the same numeric type and min <= max; inclusive. String/boolean bounds are rejected.", "properties": {"op": {"const": "range"}, "field": {"type": "string"}, "min": {"anyOf": [{"$ref": "#/components/schemas/MetadataValue"}, {"type": "null"}]}, "max": {"anyOf": [{"$ref": "#/components/schemas/MetadataValue"}, {"type": "null"}]}}}
+      ]},
       "BatchDelete": {"type": "object", "additionalProperties": false, "required": ["op", "id"], "properties": {"op": {"const": "delete"}, "id": {"$ref": "#/components/schemas/Id"}}},
       "Error": {"type": "object", "required": ["error"], "properties": {"error": {"type": "object", "required": ["code", "message"], "properties": {"code": {"type": "string"}, "message": {"type": "string"}}}}}
     },
     "responses": {
+      "Upgrade": {"description": "Nonempty batch requires v2+, nonempty metadata requires v3. Stop server and compact to a new current-version path; source is never upgraded in place.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "BadRequest": {"description": "Malformed JSON or invalid ID", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "NotFound": {"description": "Unknown route or record", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "TooLarge": {"description": "JSON body exceeds 8 MiB", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},

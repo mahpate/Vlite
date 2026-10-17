@@ -17,7 +17,7 @@ fn benchmark_emits_verified_metrics_and_removes_temporary_database() {
     assert!(text.trim_end().ends_with('}'));
     for field in [
         "\"records\":32",
-        "\"format_version\":2",
+        "\"format_version\":3",
         "\"dimensions\":4",
         "\"queries\":5",
         "\"batch_size\":8",

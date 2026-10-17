@@ -4,7 +4,12 @@
 
 mod format;
 mod hnsw;
+mod metadata;
 pub use hnsw::{HnswConfig, MAX_EF_SEARCH};
+pub use metadata::{
+    Condition, MAX_FILTER_CONDITIONS, MAX_METADATA_BYTES, MAX_METADATA_FIELDS, Metadata,
+    MetadataValue,
+};
 pub mod maintenance;
 #[cfg(feature = "server")]
 pub mod server;
@@ -38,6 +43,9 @@ pub enum Error {
     BatchRequiresUpgrade,
     InvalidHnswConfig,
     InvalidEfSearch,
+    InvalidMetadata(&'static str),
+    InvalidFilter(&'static str),
+    MetadataRequiresUpgrade,
     UnsupportedVersion(u32),
     Corrupt {
         offset: u64,
@@ -90,6 +98,12 @@ impl fmt::Display for Error {
             Self::InvalidEfSearch => write!(
                 f,
                 "ef_search must be 1..={MAX_EF_SEARCH} and at least min(k, live records)"
+            ),
+            Self::InvalidMetadata(reason) => write!(f, "invalid metadata: {reason}"),
+            Self::InvalidFilter(reason) => write!(f, "invalid filter: {reason}"),
+            Self::MetadataRequiresUpgrade => write!(
+                f,
+                "metadata requires format v3; compact the closed database to a new path"
             ),
             Self::UnsupportedVersion(version) => write!(f, "unsupported format version {version}"),
             Self::Corrupt { offset, reason } => {
@@ -145,11 +159,18 @@ impl From<io::Error> for Error {
 pub struct Record {
     pub vector: Vec<f32>,
     pub payload: Vec<u8>,
+    pub metadata: Metadata,
 }
 
 /// One operation in an atomic batch. Operations execute in slice order.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Mutation {
+    PutWithMetadata {
+        id: u64,
+        vector: Vec<f32>,
+        payload: Vec<u8>,
+        metadata: Metadata,
+    },
     Put {
         id: u64,
         vector: Vec<f32>,
@@ -345,16 +366,32 @@ impl Database {
         Ok(self.records.get(&id))
     }
 
-    /// Durably inserts or replaces one record, including its opaque payload.
+    /// Durably replaces one record's vector and opaque payload, clearing any metadata.
     pub fn put(&mut self, id: u64, vector: &[f32], payload: &[u8]) -> Result<()> {
+        self.put_with_metadata(id, vector, payload, &Metadata::new())
+    }
+
+    /// Replaces the entire vector, payload and metadata map. Nonempty metadata requires v3.
+    pub fn put_with_metadata(
+        &mut self,
+        id: u64,
+        vector: &[f32],
+        payload: &[u8],
+        metadata: &Metadata,
+    ) -> Result<()> {
         self.ensure_healthy()?;
         self.validate_vector(vector)?;
         if payload.len() > MAX_PAYLOAD_BYTES {
             return Err(Error::PayloadTooLarge(payload.len()));
         }
+        metadata::validate(metadata)?;
+        if !metadata.is_empty() && self.version < 3 {
+            return Err(Error::MetadataRequiresUpgrade);
+        }
         let record = Record {
             vector: vector.to_vec(),
             payload: payload.to_vec(),
+            metadata: metadata.clone(),
         };
         self.commit(id, Some(&record))?;
         self.records.insert(id, record);
@@ -392,6 +429,22 @@ impl Database {
         let mut body_bytes = 0usize;
         for operation in operations {
             let bytes = match operation {
+                Mutation::PutWithMetadata {
+                    vector,
+                    payload,
+                    metadata,
+                    ..
+                } => {
+                    self.validate_vector(vector)?;
+                    if payload.len() > MAX_PAYLOAD_BYTES {
+                        return Err(Error::PayloadTooLarge(payload.len()));
+                    }
+                    let metadata_bytes = metadata::validate(metadata)?;
+                    if self.version < 3 {
+                        return Err(Error::MetadataRequiresUpgrade);
+                    }
+                    16 + vector.len() * 4 + 4 + payload.len() + metadata_bytes
+                }
                 Mutation::Put {
                     vector, payload, ..
                 } => {
@@ -426,6 +479,22 @@ impl Database {
                         Record {
                             vector: vector.clone(),
                             payload: payload.clone(),
+                            metadata: Metadata::new(),
+                        },
+                    );
+                }
+                Mutation::PutWithMetadata {
+                    id,
+                    vector,
+                    payload,
+                    metadata,
+                } => {
+                    self.records.insert(
+                        *id,
+                        Record {
+                            vector: vector.clone(),
+                            payload: payload.clone(),
+                            metadata: metadata.clone(),
                         },
                     );
                 }
@@ -517,14 +586,26 @@ impl Database {
     /// k=0 returns an empty result; k above the live count returns all records.
     /// Query vectors are validated even when k=0 or the database is empty.
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<SearchHit>> {
+        self.search_filtered(query, k, &[])
+    }
+
+    /// Exact top-k over records satisfying every condition; no HNSW post-filtering.
+    pub fn search_filtered(
+        &self,
+        query: &[f32],
+        k: usize,
+        conditions: &[Condition],
+    ) -> Result<Vec<SearchHit>> {
         self.ensure_healthy()?;
         self.validate_vector(query)?;
+        metadata::validate_filter(conditions)?;
         if k == 0 {
             return Ok(Vec::new());
         }
         let mut hits: Vec<SearchHit> = self
             .records
             .iter()
+            .filter(|(_, record)| metadata::matches(&record.metadata, conditions))
             .map(|(&id, record)| SearchHit {
                 id,
                 distance: record
@@ -607,6 +688,7 @@ mod tests {
         let record = Record {
             vector: vec![1.0],
             payload: b"data".to_vec(),
+            metadata: Metadata::new(),
         };
         let frame = format::frame(1, 42, Some(&record));
         for cut in 0..frame.len() {

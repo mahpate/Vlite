@@ -76,10 +76,13 @@ def run():
     port = published_port()
     ready(port)
     assert request(port, "GET", "/v1/database") == {
-        "dimensions": 3, "format_version": 2, "records": 0
+        "dimensions": 3, "format_version": 3, "records": 0
     }
     request(port, "PUT", "/v1/vectors/18446744073709551615",
-            {"vector": [1, 0, 0], "payload_base64": "AP8="}, expected=204)
+            {"vector": [1, 0, 0], "payload_base64": "AP8=", "metadata": {
+                "category": {"type": "string", "value": "docs"},
+                "count": {"type": "integer", "value": "9223372036854775807"}
+            }}, expected=204)
     request(port, "POST", "/v1/batches", {"operations": [
         {"op": "put", "id": "1", "vector": [0, 1, 0]},
         {"op": "put", "id": "2", "vector": [0, 0, 1]},
@@ -96,6 +99,11 @@ def run():
     ]
     approximate = {"vector": [0, 1, 0], "k": 2, "mode": "approximate", "ef_search": 100}
     assert request(port, "POST", "/v1/search", approximate)["hits"][0]["id"] == "1"
+    filtered = {"vector": [0, 1, 0], "k": 1, "filter": [
+        {"op": "eq", "field": "category", "value": {"type": "string", "value": "docs"}}
+    ]}
+    assert request(port, "POST", "/v1/search", filtered)["hits"][0]["id"] == "18446744073709551615"
+    request(port, "POST", "/v1/search", dict(filtered, mode="approximate"), expected=422)
     assert request(port, "GET", "/openapi.json")["openapi"] == "3.1.0"
     stopped_cleanly()
     mismatch = compose(
@@ -107,6 +115,8 @@ def run():
     port = published_port()
     ready(port)
     assert request(port, "GET", "/v1/vectors/18446744073709551615")["payload_base64"] == "AP8="
+    assert request(port, "GET", "/v1/vectors/18446744073709551615")["metadata"]["count"]["value"] == "9223372036854775807"
+    assert request(port, "POST", "/v1/search", filtered)["hits"][0]["id"] == "18446744073709551615"
     assert request(port, "GET", "/v1/database")["records"] == 2
     assert request(port, "POST", "/v1/search", approximate)["hits"][0]["id"] == "1"
     request(port, "GET", "/v1/vectors/2", expected=404)
@@ -120,7 +130,7 @@ def run():
     assert request(port, "GET", "/v1/database")["records"] == 1
     request(port, "GET", "/v1/vectors/1", expected=404)
     stopped_cleanly()
-    print("PASS REST: CRUD, atomic rejection, exact search, contract, restart persistence, SIGTERM")
+    print("PASS REST: CRUD, typed metadata, exact filters, atomic rejection, ANN filter rejection, contract, restart persistence, SIGTERM")
 
 
 if __name__ == "__main__":

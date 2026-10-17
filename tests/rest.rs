@@ -107,7 +107,7 @@ async fn crud_search_batch_and_reopen_preserve_binary_payloads_and_full_u64_ids(
     );
     assert_eq!(
         request(&app, "GET", "/v1/database", Value::Null).await.1,
-        json!({"dimensions":2,"format_version":2,"records":2})
+        json!({"dimensions":2,"format_version":3,"records":2})
     );
     service.close().await.unwrap();
     assert_eq!(request(&app, "GET", "/health", Value::Null).await.0, 200);
@@ -377,6 +377,172 @@ async fn payload_limits_and_canonical_base64_are_enforced() {
         db.get(1).unwrap().unwrap().payload,
         vec![255; vlite::MAX_PAYLOAD_BYTES]
     );
+}
+
+#[tokio::test]
+async fn typed_metadata_filters_and_atomic_rejection_are_exposed_over_rest() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("metadata.vlite");
+    let service = Service::new(Database::create(&path, 1).unwrap());
+    let app = router(service.clone());
+    let metadata = json!({
+        "category":{"type":"string","value":"docs"},
+        "count":{"type":"integer","value":"9223372036854775807"},
+        "score":{"type":"float","value":1.5},
+        "active":{"type":"boolean","value":true}
+    });
+    assert_eq!(
+        request(
+            &app,
+            "PUT",
+            "/v1/vectors/7",
+            json!({"vector":[7],"metadata":metadata})
+        )
+        .await
+        .0,
+        204
+    );
+    assert_eq!(
+        request(&app, "PUT", "/v1/vectors/0", json!({"vector":[0]}))
+            .await
+            .0,
+        204
+    );
+    assert_eq!(
+        request(&app, "GET", "/v1/vectors/7", Value::Null).await.1["metadata"],
+        metadata
+    );
+    let filter = json!([
+        {"op":"eq","field":"category","value":{"type":"string","value":"docs"}},
+        {"op":"range","field":"count","min":{"type":"integer","value":"9223372036854775807"}}
+    ]);
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/v1/search",
+            json!({"vector":[0],"k":1,"filter":filter})
+        )
+        .await
+        .1["hits"][0]["id"],
+        "7"
+    );
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/v1/search",
+            json!({"vector":[0],"k":1,"mode":"approximate","filter":filter})
+        )
+        .await
+        .0,
+        422
+    );
+    for metadata in [
+        json!({"x":{"type":"integer","value":9007199254740993u64}}),
+        json!({"x":{"type":"integer","value":"01"}}),
+        json!({"x":{"type":"integer","value":"9223372036854775808"}}),
+        json!({"x":{"type":"string","value":["a"]}}),
+        json!({"x":{"type":"unknown","value":true}}),
+        json!({"x":{"type":"boolean","value":true,"typo":1}}),
+        json!({"":{"type":"boolean","value":true}}),
+    ] {
+        let (status, error) = request(
+            &app,
+            "POST",
+            "/v1/batches",
+            json!({"operations":[
+                {"op":"delete","id":"7"},
+                {"op":"put","id":"8","vector":[8],"metadata":metadata}
+            ]}),
+        )
+        .await;
+        assert!(status.is_client_error(), "{error}");
+        assert_eq!(
+            request(&app, "GET", "/v1/vectors/7", Value::Null).await.0,
+            200
+        );
+    }
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/v1/batches",
+            json!({"operations":[
+                {"op":"put","id":"8","vector":[8],"metadata":metadata},
+                {"op":"delete","id":"7"}
+            ]})
+        )
+        .await
+        .0,
+        204
+    );
+    service.close().await.unwrap();
+    let service = Service::new(Database::open(&path).unwrap());
+    let app = router(service.clone());
+    assert_eq!(
+        request(&app, "GET", "/v1/vectors/8", Value::Null).await.1["metadata"],
+        metadata
+    );
+    assert_eq!(
+        request(&app, "PUT", "/v1/vectors/8", json!({"vector":[8]}))
+            .await
+            .0,
+        204
+    );
+    assert_eq!(
+        request(&app, "GET", "/v1/vectors/8", Value::Null).await.1["metadata"],
+        json!({})
+    );
+    service.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn metadata_requires_explicit_upgrade_over_rest_without_changing_legacy_files() {
+    let directory = tempfile::tempdir().unwrap();
+    for (version, hex) in [
+        (1, include_str!("fixtures/v1.hex")),
+        (2, include_str!("fixtures/v2.hex")),
+    ] {
+        let path = directory.path().join(format!("v{version}.vlite"));
+        let hex = hex.split_whitespace().collect::<String>();
+        let bytes = hex
+            .as_bytes()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect::<Vec<_>>();
+        std::fs::write(&path, &bytes).unwrap();
+        let service = Service::new(Database::open(&path).unwrap());
+        let app = router(service.clone());
+        let metadata = json!({"category":{"type":"string","value":"docs"}});
+        for (route, input) in [
+            ("/v1/vectors/9", json!({"vector":[1,2],"metadata":metadata})),
+            (
+                "/v1/batches",
+                json!({"operations":[
+                    {"op":"delete","id":"9"},
+                    {"op":"put","id":"7","vector":[1,2],"metadata":metadata}
+                ]}),
+            ),
+        ] {
+            let method = if route == "/v1/batches" {
+                "POST"
+            } else {
+                "PUT"
+            };
+            let (status, error) = request(&app, method, route, input).await;
+            assert_eq!(status, 409);
+            assert_eq!(error["error"]["code"], "upgrade_required");
+            assert_eq!(
+                request(&app, "GET", "/v1/vectors/9", Value::Null).await.1["metadata"],
+                json!({})
+            );
+        }
+        service.close().await.unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
 }
 
 #[tokio::test]

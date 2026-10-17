@@ -91,7 +91,7 @@ pub fn restore(backup_path: impl AsRef<Path>, destination: impl AsRef<Path>) -> 
     backup(backup_path, destination)
 }
 
-/// Writes only live records to a new standalone current-version file (v2).
+/// Writes only live records to a new standalone current-version file (v3).
 ///
 /// The original database remains untouched. IDs, component bits, dimensions and
 /// payloads are preserved; tombstones and old values are removed. Log sequences
@@ -179,6 +179,7 @@ mod tests {
         let record = crate::Record {
             vector: vec![1.0],
             payload: b"payload".to_vec(),
+            metadata: crate::Metadata::new(),
         };
         let frame = format::frame(1, 1, Some(&record));
         for cut in 1..frame.len() {

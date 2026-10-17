@@ -292,6 +292,7 @@ mod tests {
                     Record {
                         vector: vec![(id % 17) as f32, (id / 17) as f32],
                         payload: vec![],
+                        metadata: crate::Metadata::new(),
                     },
                 )
             })

@@ -26,7 +26,7 @@ fn batch_is_one_commit_applied_in_order_and_survives_maintenance() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("batch.vlite");
     let mut db = Database::create(&path, 2).unwrap();
-    assert_eq!(db.format_version(), 2);
+    assert_eq!(db.format_version(), 3);
     db.put(3, &[9.0, 9.0], b"old").unwrap();
     db.write_batch(&operations()).unwrap();
     assert_eq!(db.len(), 2);
@@ -109,6 +109,7 @@ fn exact_operation_and_encoded_byte_limits_are_enforced() {
                 vector, payload, ..
             } => 16 + vector.len() * 4 + payload.len(),
             Mutation::Delete { .. } => 16,
+            Mutation::PutWithMetadata { .. } => panic!("this fixture has no metadata"),
         })
         .sum();
     assert_eq!(encoded, MAX_BATCH_BYTES);

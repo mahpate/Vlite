@@ -22,6 +22,7 @@ fn fixed_legacy_and_current_files_replay_and_keep_their_format_on_single_writes(
     for (version, fixture) in [
         (1, include_str!("fixtures/v1.hex")),
         (2, include_str!("fixtures/v2.hex")),
+        (3, include_str!("fixtures/v3.hex")),
     ] {
         let path = directory.path().join(format!("v{version}.vlite"));
         let bytes = decode_hex(fixture);
@@ -71,10 +72,12 @@ fn fixed_legacy_and_current_files_replay_and_keep_their_format_on_single_writes(
 }
 
 #[test]
-fn current_writer_matches_independently_encoded_golden_bytes() {
+fn v2_writer_matches_independently_encoded_golden_bytes() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("v2.vlite");
-    let mut db = Database::create(&path, 2).unwrap();
+    let fixture = decode_hex(include_str!("fixtures/v2.hex"));
+    fs::write(&path, &fixture[..32]).unwrap();
+    let mut db = Database::open(&path).unwrap();
     db.write_batch(&[
         Mutation::Put {
             id: 7,
@@ -120,7 +123,7 @@ fn copy_out_compaction_explicitly_upgrades_legacy_files_without_changing_the_sou
     fs::write(&source, &bytes).unwrap();
     let report = maintenance::compact(&source, &output).unwrap();
     assert_eq!(report.source.format_version, 1);
-    assert_eq!(report.output.format_version, 2);
+    assert_eq!(report.output.format_version, 3);
     assert_eq!(fs::read(source).unwrap(), bytes);
     let mut db = Database::open(&output).unwrap();
     db.write_batch(&[Mutation::Delete { id: 9 }]).unwrap();
