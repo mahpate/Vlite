@@ -221,6 +221,45 @@ fn mixed_buffered_writes_have_exact_candidate_distances_and_measured_recall() {
 }
 
 #[test]
+fn buffers_work_with_empty_graphs_delete_reinsert_and_configuration_changes() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut db = Database::create(directory.path().join("empty-graph.vlite"), 1).unwrap();
+    let config = HnswConfig::default();
+    db.build_hnsw(config).unwrap();
+    db.put(u64::MAX, &[2.0], b"").unwrap();
+    assert_eq!(
+        db.search_approximate(&[2.0], 1, 1, config).unwrap(),
+        db.search(&[2.0], 1).unwrap()
+    );
+    db.delete(u64::MAX).unwrap();
+    assert!(
+        db.search_approximate(&[2.0], 1, 1, config)
+            .unwrap()
+            .is_empty()
+    );
+    db.put(u64::MAX, &[-2.0], b"").unwrap();
+    assert_eq!(
+        db.search_approximate(&[-2.0], 1, 1, config).unwrap()[0].distance,
+        0.0
+    );
+    db.build_hnsw(config).unwrap();
+    db.delete(u64::MAX).unwrap();
+    db.put(0, &[-2.0], b"").unwrap();
+    assert_eq!(
+        db.search_approximate(&[-2.0], 1, 1, config).unwrap()[0].id,
+        0
+    );
+    let other = HnswConfig {
+        seed: config.seed + 1,
+        ..config
+    };
+    assert_eq!(
+        db.search_approximate(&[-2.0], 10, 10, other).unwrap(),
+        db.search(&[-2.0], 10).unwrap()
+    );
+}
+
+#[test]
 fn configuration_query_validation_extremes_and_ties() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("validation.vlite");
@@ -243,6 +282,7 @@ fn configuration_query_validation_extremes_and_ties() {
             Err(Error::InvalidHnswConfig)
         ));
     }
+
     assert!(matches!(
         db.search_approximate(&[f32::NAN], 0, 10, default),
         Err(Error::NonFiniteVector)

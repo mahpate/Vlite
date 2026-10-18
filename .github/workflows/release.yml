@@ -43,7 +43,9 @@ jobs:
                   bundle.write(pathlib.Path("target/release") / (name + suffix), name + suffix)
               for name in ["README.md", "Cargo.toml", "Cargo.lock", "src/openapi.json",
                            "compose.yaml", "compose.tls.yaml", "deploy/Caddyfile", "Dockerfile",
-                           "docs/REFERENCE.md", "benchmarks/README.md", "benchmarks/RESULTS.md"]:
+                           "docs/REFERENCE.md", "benchmarks/README.md", "benchmarks/RESULTS.md",
+                           "benchmarks/compare_rest.py"] + [
+                               str(path) for path in sorted(pathlib.Path("benchmarks/results").glob("*.json"))]:
                   bundle.write(name)
           (output / (archive.name + ".sha256")).write_text(
               hashlib.sha256(archive.read_bytes()).hexdigest() + "  " + archive.name + "\n", encoding="ascii")

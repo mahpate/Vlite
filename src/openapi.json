@@ -124,7 +124,7 @@
       "BearerAuth": {"type": "http", "scheme": "bearer", "description": "One random 32..256-character base64url token supplied from environment or secret file. Full read/write/metrics access. Never put it in a URL."}
     },
     "schemas": {
-      "Metrics": {"type": "object", "required": ["requests_total", "request_failures_total", "unauthorized_total", "request_duration_seconds_total", "commit_failures_total", "hnsw_rebuilds_total", "hnsw_rebuild_and_search_seconds_total", "database_healthy", "database_bytes", "live_records"], "properties": {
+      "Metrics": {"type": "object", "required": ["requests_total", "request_failures_total", "unauthorized_total", "request_duration_seconds_total", "commit_failures_total", "hnsw_rebuilds_total", "hnsw_buffered_ids", "hnsw_buffer_vector_bytes", "hnsw_rebuild_and_search_seconds_total", "database_healthy", "database_bytes", "live_records"], "properties": {
         "requests_total": {"type": "integer", "minimum": 0},
         "request_failures_total": {"type": "integer", "minimum": 0},
         "unauthorized_total": {"type": "integer", "minimum": 0},

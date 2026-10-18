@@ -93,6 +93,7 @@ fn distance(a: &[f32], b: &[f32]) -> f64 {
 }
 
 impl Index {
+    #[cfg(any(feature = "server", test))]
     pub fn buffer_usage(&self) -> (usize, usize) {
         (self.buffered.len(), self.buffered_bytes)
     }

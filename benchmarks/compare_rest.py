@@ -285,7 +285,8 @@ def main():
         "platform": platform.platform(), "cpu": cpu,
         "python": platform.python_version(),
         "docker": json.loads(docker("info", "--format", "{{json .}}")),
-        "config": vars(config), "dataset_and_queries_sha256": checksum, "runs": [],
+        "config": dict(vars(config), output=os.path.basename(config.output)),
+        "dataset_and_queries_sha256": checksum, "runs": [],
     }
     # Publish no host paths, registry credentials, environment, or Docker daemon labels.
     report["docker"] = {key: report["docker"].get(key)
