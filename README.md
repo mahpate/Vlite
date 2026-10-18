@@ -133,7 +133,8 @@ Vectors contain finite `f32` values; NaN and infinities are rejected. Payloads a
 uninterpreted bytes limited to 1,048,576 bytes per record, including empty payloads.
 
 Search uses **squared Euclidean distance**, accumulating in `f64`. It scans every
-live vector, sorts by distance, and breaks ties by ascending ID. `k=0` returns no
+live vector, retains the best k in a bounded max-heap, then orders those hits by
+distance with ties broken by ascending ID. `k=0` returns no
 hits; `k` above the live count returns every record. Query validation still applies
 when `k=0` or the database is empty. Normalize vectors yourself if your application
 needs normalized-vector semantics; no cosine or embedding-generation API exists.
@@ -608,6 +609,32 @@ query is checked against an independent brute-force calculation on the original
 generated vectors **outside** the measured query time. Incorrect results make
 the benchmark fail rather than print successful metrics.
 
+Prefix `--filter-every N` to benchmark exact metadata filtering, selecting IDs
+divisible by positive N (approximately 1/N of the dataset). It writes boolean
+metadata for every vector, filters before ranking, and verifies eligible hits
+against the full-sort oracle. Output adds `filter_every`, `eligible_records`,
+and `returned_per_query`; k can exceed the eligible count. This flag cannot
+be combined with `--ann`. Examples varying selectivity and k:
+
+```text
+cargo run --release --bin vlite-bench -- --filter-every 10 10000 32 100 100 10 42
+cargo run --release --bin vlite-bench -- --filter-every 100 10000 32 100 100 1000 42
+```
+
+Exact search retains at most `min(k, live count)` candidates. Allocation-bound
+tests measure requested query allocation bytes independently of dataset setup;
+whole-process peak memory still includes the live database, benchmark dataset,
+and full-sort oracle. This is not a bounded-memory storage engine, nor a promise
+that heap selection is faster when k approaches the eligible count.
+
+One Windows x86_64 release-mode comparison (32 dimensions, 100 queries, seed42,
+sequential runs on the same host) measured p50 1.8302 ms for the previous
+full-sort binary versus 0.7373 ms for the bounded heap at 10,000 records/k10.
+At 1,000 records/k1,000 the heap was slower: 0.1339 ms versus 0.1143 ms.
+All results matched the independent oracle. These are workload-specific
+observations, not speed guarantees; repeat on your hardware and include
+filtered workloads and large k when evaluating the trade-off.
+
 ```text
 cargo run --release --bin vlite-bench -- 1000 32 100 100 10 42
 docker compose run --build --rm --entrypoint vlite-bench vlite 1000 32 100 100 10 42
@@ -925,8 +952,11 @@ must never be silently repurposed under an existing version.
 Space grows with **all historical mutations**, not just live records; deletes do
 not reclaim disk space until you switch to a compacted copy and retire the old
 file. Open time is linear in log size, memory is proportional
-to live vectors/payloads/metadata, and unfiltered exact search costs O(n*d + n*log(n)) time plus O(n) result
-memory. There is no total file or RAM quota and allocation exhaustion is not a
+to live vectors/payloads/metadata. Exact search scans n metadata maps, computes
+distances for e eligible records, and uses O(e*d + e*log(1+L) + L*log(1+L))
+distance/selection time plus metadata evaluation, where L=min(k,n).
+Candidate/result memory is O(L), not O(e); the retained results alone are sorted.
+There is no total file or RAM quota and allocation exhaustion is not a
 recoverable database error. Plan capacity accordingly.
 The optional HNSW graph adds O(n*m) adjacency storage plus construction/search
 scratch allocations; vectors remain in the authoritative live map. Its

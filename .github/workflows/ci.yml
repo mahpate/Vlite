@@ -24,6 +24,8 @@ jobs:
       - run: cargo check --locked --no-default-features --lib
       - run: cargo test --locked --all-targets --all-features
       - run: cargo build --locked --release --bin vlite-bench
+      - name: Verify filtered exact top-k benchmark
+        run: cargo run --locked --release --bin vlite-bench -- --filter-every 10 1024 8 10 64 10 42
       - name: Measure exact/HNSW benchmark and process peak memory
         run: python tests/measure_benchmark.py target/release/vlite-bench${{ runner.os == 'Windows' && '.exe' || '' }} --ann 16 100 100 256 8 10 64 5 42
 

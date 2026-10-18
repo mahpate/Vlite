@@ -4,12 +4,12 @@ use std::io;
 use std::process::ExitCode;
 use std::time::Instant;
 use vlite::{
-    Database, HnswConfig, MAX_BATCH_BYTES, MAX_BATCH_OPERATIONS, MAX_DIMENSIONS, MAX_EF_SEARCH,
-    Mutation,
+    Condition, Database, HnswConfig, MAX_BATCH_BYTES, MAX_BATCH_OPERATIONS, MAX_DIMENSIONS,
+    MAX_EF_SEARCH, Metadata, MetadataValue, Mutation,
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
-const USAGE: &str = "usage: vlite-bench [--ann <m> <ef_construction> <ef_search>] [records=1000 dimensions=32 queries=100 batch_size=100 k=10 seed=42]";
+const USAGE: &str = "usage: vlite-bench [--filter-every <N>] [--ann <m> <ef_construction> <ef_search>] [records=1000 dimensions=32 queries=100 batch_size=100 k=10 seed=42]; filtering and ANN are mutually exclusive";
 const MAX_DATA_BYTES: usize = 256 * 1024 * 1024;
 const MAX_DISTANCE_COMPONENTS: u64 = 500_000_000;
 
@@ -21,11 +21,22 @@ struct Config {
     k: usize,
     seed: u64,
     ann: Option<(HnswConfig, usize)>,
+    filter_every: Option<usize>,
 }
 
 impl Config {
     fn parse() -> Result<Self> {
         let mut args: Vec<_> = std::env::args().skip(1).collect();
+        let filter_every = if args.first().is_some_and(|arg| arg == "--filter-every") {
+            let every = args.get(1).ok_or(USAGE)?.parse::<usize>()?;
+            if every == 0 {
+                return Err("filter interval must be positive".into());
+            }
+            args.drain(..2);
+            Some(every)
+        } else {
+            None
+        };
         let ann = if args.first().is_some_and(|arg| arg == "--ann") {
             if args.len() < 4 {
                 return Err(USAGE.into());
@@ -51,6 +62,9 @@ impl Config {
         } else {
             None
         };
+        if filter_every.is_some() && ann.is_some() {
+            return Err("filtered approximate search is not supported".into());
+        }
         if args.len() > 6 {
             return Err(USAGE.into());
         }
@@ -86,7 +100,9 @@ impl Config {
             .and_then(|v| v.checked_mul(queries));
         if bytes.is_none_or(|n| n > MAX_DATA_BYTES as u64)
             || components.is_none_or(|n| n > MAX_DISTANCE_COMPONENTS)
-            || batch_size.min(records) * (16 + dimensions * 4) > MAX_BATCH_BYTES as u64
+            || batch_size.min(records)
+                * (16 + dimensions * 4 + if filter_every.is_some() { 28 } else { 0 })
+                > MAX_BATCH_BYTES as u64
         {
             return Err("workload exceeds 256 MiB of vector data, 500 million distance components, or batch byte limit".into());
         }
@@ -98,6 +114,7 @@ impl Config {
             k: usize::try_from(k)?,
             seed,
             ann,
+            filter_every,
         })
     }
 }
@@ -153,10 +170,25 @@ fn run() -> Result<()> {
         let operations: Vec<_> = chunk
             .iter()
             .enumerate()
-            .map(|(index, vector)| Mutation::Put {
-                id: (batch_index * config.batch_size + index) as u64,
-                vector: vector.clone(),
-                payload: Vec::new(),
+            .map(|(index, vector)| {
+                let id = batch_index * config.batch_size + index;
+                if let Some(every) = config.filter_every {
+                    Mutation::PutWithMetadata {
+                        id: id as u64,
+                        vector: vector.clone(),
+                        payload: Vec::new(),
+                        metadata: Metadata::from([(
+                            "selected".into(),
+                            MetadataValue::Boolean(id % every == 0),
+                        )]),
+                    }
+                } else {
+                    Mutation::Put {
+                        id: id as u64,
+                        vector: vector.clone(),
+                        payload: Vec::new(),
+                    }
+                }
             })
             .collect();
         db.write_batch(&operations)?;
@@ -170,18 +202,31 @@ fn run() -> Result<()> {
     if db.len() != config.records {
         return Err("reopened database has an incorrect record count".into());
     }
-    black_box(db.search(&queries[0], config.k)?);
+    let filter = config
+        .filter_every
+        .map(|_| Condition::Eq {
+            field: "selected".into(),
+            value: MetadataValue::Boolean(true),
+        })
+        .into_iter()
+        .collect::<Vec<_>>();
+    let eligible_records = config
+        .filter_every
+        .map_or(config.records, |every| (config.records - 1) / every + 1);
+    let result_count = config.k.min(eligible_records);
+    black_box(db.search_filtered(&queries[0], config.k, &filter)?);
     let mut times_ms = Vec::with_capacity(config.queries);
     let mut matched = 0usize;
     let mut truth = Vec::new();
     for query in &queries {
         let start = Instant::now();
-        let actual = black_box(db.search(black_box(query), config.k)?);
+        let actual = black_box(db.search_filtered(black_box(query), config.k, &filter)?);
         times_ms.push(start.elapsed().as_secs_f64() * 1000.0);
         // The oracle works directly from the generated input, outside timing.
         let mut expected: Vec<_> = dataset
             .iter()
             .enumerate()
+            .filter(|(id, _)| config.filter_every.is_none_or(|every| id % every == 0))
             .map(|(id, vector)| {
                 let mut distance = 0.0f64;
                 for index in 0..config.dimensions {
@@ -191,7 +236,7 @@ fn run() -> Result<()> {
             })
             .collect();
         expected.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
-        for (hit, &(id, distance)) in actual.iter().zip(&expected[..config.k]) {
+        for (hit, &(id, distance)) in actual.iter().zip(&expected[..result_count]) {
             if hit.id != id || hit.distance != distance {
                 return Err(io::Error::other(
                     "exact search disagrees with independent ground truth",
@@ -200,7 +245,7 @@ fn run() -> Result<()> {
             }
             matched += 1;
         }
-        if actual.len() != config.k {
+        if actual.len() != result_count {
             return Err("exact search returned incorrect result count".into());
         }
         if config.ann.is_some() {
@@ -264,6 +309,9 @@ fn run() -> Result<()> {
     } else {
         String::new()
     };
+    let filter_json = config.filter_every.map_or(String::new(), |every| format!(
+        ",\"filter_every\":{every},\"eligible_records\":{eligible_records},\"returned_per_query\":{result_count}"
+    ));
     db.close()?;
     directory.close()?;
     times_ms.sort_by(f64::total_cmp);
@@ -274,7 +322,7 @@ fn run() -> Result<()> {
             "\"dataset_checksum\":\"{:016x}\",\"ingest_seconds\":{:.9},\"ingest_vectors_per_second\":{:.3},",
             "\"reopen_ms\":{:.6},\"query_p50_ms\":{:.6},\"query_p95_ms\":{:.6},",
             "\"file_bytes\":{},\"vector_data_bytes\":{},\"query_data_bytes\":{},\"process_peak_rss_bytes\":null,",
-            "\"recall_at_k\":{:.6}{}}}"
+            "\"recall_at_k\":{:.6}{}{}}}"
         ),
         env!("CARGO_PKG_VERSION"),
         format_version,
@@ -300,8 +348,9 @@ fn run() -> Result<()> {
         file_bytes,
         config.records * config.dimensions * 4,
         config.queries * config.dimensions * 4,
-        matched as f64 / (config.queries * config.k) as f64,
-        ann_json
+        matched as f64 / (config.queries * result_count) as f64,
+        ann_json,
+        filter_json
     );
     Ok(())
 }

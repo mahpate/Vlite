@@ -14,7 +14,7 @@ pub mod maintenance;
 #[cfg(feature = "server")]
 pub mod server;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BinaryHeap};
 use std::fmt;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, Seek, SeekFrom, Write};
@@ -185,6 +185,31 @@ pub struct SearchHit {
     pub id: u64,
     /// Squared Euclidean distance, accumulated in f64. Smaller is nearer.
     pub distance: f64,
+}
+
+struct RankedHit(SearchHit);
+
+impl PartialEq for RankedHit {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+
+impl Eq for RankedHit {}
+
+impl PartialOrd for RankedHit {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RankedHit {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0
+            .distance
+            .total_cmp(&other.0.distance)
+            .then_with(|| self.0.id.cmp(&other.0.id))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -590,6 +615,7 @@ impl Database {
     }
 
     /// Exact top-k over records satisfying every condition; no HNSW post-filtering.
+    /// Retains at most min(k, live count) candidates, not one hit per matching record.
     pub fn search_filtered(
         &self,
         query: &[f32],
@@ -602,11 +628,16 @@ impl Database {
         if k == 0 {
             return Ok(Vec::new());
         }
-        let mut hits: Vec<SearchHit> = self
-            .records
-            .iter()
-            .filter(|(_, record)| metadata::matches(&record.metadata, conditions))
-            .map(|(&id, record)| SearchHit {
+        let limit = k.min(self.records.len());
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut hits = BinaryHeap::with_capacity(limit);
+        for (&id, record) in &self.records {
+            if !metadata::matches(&record.metadata, conditions) {
+                continue;
+            }
+            let hit = RankedHit(SearchHit {
                 id,
                 distance: record
                     .vector
@@ -617,15 +648,20 @@ impl Database {
                         difference * difference
                     })
                     .sum(),
-            })
-            .collect();
-        hits.sort_by(|a, b| {
-            a.distance
-                .total_cmp(&b.distance)
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        hits.truncate(k);
-        Ok(hits)
+            });
+            if hits.len() < limit {
+                hits.push(hit);
+            } else if let Some(mut worst) = hits.peek_mut()
+                && hit < *worst
+            {
+                *worst = hit;
+            }
+        }
+        Ok(hits
+            .into_sorted_vec()
+            .into_iter()
+            .map(|hit| hit.0)
+            .collect())
     }
 
     /// Consumes the handle and releases its OS lock. Commits are already synced.

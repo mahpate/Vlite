@@ -69,6 +69,9 @@ fn benchmark_rejects_invalid_or_unbounded_workloads_before_creating_files() {
         vec!["--ann", "16", "15", "10"],
         vec!["--ann", "16", "100", "0"],
         vec!["--ann", "16", "100", "2", "32", "4", "5", "8", "3", "42"],
+        vec!["--filter-every"],
+        vec!["--filter-every", "0"],
+        vec!["--filter-every", "2", "--ann", "16", "100", "100"],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_vlite-bench"))
             .args(args)
@@ -80,6 +83,38 @@ fn benchmark_rejects_invalid_or_unbounded_workloads_before_creating_files() {
     }
 
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn filtered_benchmark_checks_ground_truth_and_reports_eligible_counts() {
+    let directory = tempfile::tempdir().unwrap();
+    for (every, eligible, returned) in [(1, 32, 10), (4, 8, 8), (100, 1, 1)] {
+        let output = Command::new(env!("CARGO_BIN_EXE_vlite-bench"))
+            .args([
+                "--filter-every",
+                &every.to_string(),
+                "32",
+                "4",
+                "5",
+                "8",
+                "10",
+                "42",
+            ])
+            .env("VLITE_BENCH_DIR", directory.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let text = String::from_utf8(output.stdout).unwrap();
+        for field in [
+            format!("\"filter_every\":{every}"),
+            format!("\"eligible_records\":{eligible}"),
+            format!("\"returned_per_query\":{returned}"),
+            "\"recall_at_k\":1.000000".into(),
+        ] {
+            assert!(text.contains(&field), "{text}");
+        }
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
 }
 
 #[test]
