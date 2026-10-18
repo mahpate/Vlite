@@ -29,8 +29,9 @@ It is not a SQLite wrapper and does not require an external database.
   no-clobber copy-out compaction.
 
 VLite is licensed under the GNU General Public License v3.0 only; see
-[LICENSE](LICENSE). There is no gRPC, cosine/inner-product metric, distributed replication,
-multi-reader handle, encryption at rest, or approximate metadata filtering.
+[LICENSE](LICENSE). There is no gRPC, cosine/inner-product metric, distributed
+replication, multi-reader handle, encryption at rest, or approximate metadata
+filtering.
 See the [technical reference](docs/REFERENCE.md) for contracts and limits.
 
 ## Quick start: embedded Rust
