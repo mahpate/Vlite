@@ -1,0 +1,22 @@
+# Requires a public DNS name pointing to this host and inbound TCP 80/443.
+services:
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      VLITE_DOMAIN: ${VLITE_DOMAIN:?Set VLITE_DOMAIN to your DNS hostname}
+    ports:
+      - "${VLITE_TLS_BIND:-0.0.0.0}:${VLITE_TLS_HTTP_PORT:-80}:80"
+      - "${VLITE_TLS_BIND:-0.0.0.0}:${VLITE_TLS_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - api
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  caddy-data:
+  caddy-config:

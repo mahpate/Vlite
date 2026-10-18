@@ -1,6 +1,12 @@
 //! Optional HTTP transport over one exclusively owned embedded database.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Instant,
+};
 
 use axum::{
     Json, Router,
@@ -16,6 +22,7 @@ use axum::{
 use base64::{Engine, prelude::BASE64_STANDARD};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use subtle::ConstantTimeEq;
 use tokio::sync::Semaphore;
 
 use crate::{Database, Error, MAX_BATCH_OPERATIONS, MAX_PAYLOAD_BYTES, Mutation};
@@ -24,12 +31,50 @@ pub const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SEARCH_K: usize = 10_000;
 const MAX_IN_FLIGHT: usize = 16;
 
+#[derive(Default)]
+struct Metrics {
+    requests: AtomicU64,
+    failures: AtomicU64,
+    unauthorized: AtomicU64,
+    duration_ns: AtomicU64,
+    commit_failures: AtomicU64,
+    rebuilds: AtomicU64,
+    rebuild_search_ns: AtomicU64,
+}
+
+/// Validated high-entropy bearer token. Intentionally does not implement Debug.
+#[derive(Clone)]
+pub struct BearerToken([u8; 256]);
+
+impl BearerToken {
+    pub fn new(value: &str) -> Result<Self, &'static str> {
+        if !(32..=256).contains(&value.len())
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Err("token must be 32..256 base64url characters; generate a random secret");
+        }
+        let mut bytes = [0; 256];
+        bytes[..value.len()].copy_from_slice(value.as_bytes());
+        Ok(Self(bytes))
+    }
+
+    fn accepts(&self, value: &str) -> bool {
+        let Ok(candidate) = Self::new(value) else {
+            return false;
+        };
+        bool::from(self.0.ct_eq(&candidate.0))
+    }
+}
+
 /// Cloneable service state. Database work runs off the asynchronous I/O threads.
 #[derive(Clone)]
 pub struct Service {
     database: Arc<Mutex<Option<Database>>>,
     requests: Arc<Semaphore>,
     workers: Arc<Semaphore>,
+    metrics: Arc<Metrics>,
 }
 
 impl Service {
@@ -38,6 +83,7 @@ impl Service {
             database: Arc::new(Mutex::new(Some(database))),
             requests: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
             workers: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
+            metrics: Arc::new(Metrics::default()),
         }
     }
 
@@ -53,12 +99,20 @@ impl Service {
             )
         })?;
         let database = self.database.clone();
+        let metrics = self.metrics.clone();
         tokio::task::spawn_blocking(move || {
             // The permit stays with the worker even if the HTTP client disconnects.
             let _permit = permit;
             let mut owner = database.lock().map_err(internal)?;
             let db = owner.as_mut().ok_or_else(unavailable)?;
-            operation(db)
+            let result = operation(db);
+            if result
+                .as_ref()
+                .is_err_and(|error| error.code == "commit_indeterminate")
+            {
+                metrics.commit_failures.fetch_add(1, Ordering::Relaxed);
+            }
+            result
         })
         .await
         .map_err(internal)?
@@ -81,10 +135,23 @@ impl Service {
     }
 }
 
+/// Unauthenticated router for explicitly local development or in-process use.
+/// Network callers should use `authenticated_router`.
 pub fn router(service: Service) -> Router {
+    configured_router(service, None)
+}
+
+/// Protects every route except process-only `/health` using one bearer token.
+pub fn authenticated_router(service: Service, token: BearerToken) -> Router {
+    configured_router(service, Some(token))
+}
+
+fn configured_router(service: Service, token: Option<BearerToken>) -> Router {
+    let observation = (service.clone(), token);
     Router::new()
         .route("/health", get(|| async { Json(json!({"status": "ok"})) }))
         .route("/ready", get(ready))
+        .route("/metrics", get(metrics))
         .route("/v1/database", get(info))
         .route("/v1/vectors/{id}", get(fetch).put(put).delete(delete))
         .route("/v1/batches", post(batch))
@@ -108,7 +175,104 @@ pub fn router(service: Service) -> Router {
         })
         .layer(DefaultBodyLimit::max(MAX_JSON_BYTES))
         .layer(middleware::from_fn_with_state(service.clone(), admission))
+        .layer(middleware::from_fn_with_state(observation, observe))
         .with_state(service)
+}
+
+async fn observe(
+    State((service, token)): State<(Service, Option<BearerToken>)>,
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let started = Instant::now();
+    let number = service.metrics.requests.fetch_add(1, Ordering::Relaxed) + 1;
+    let request_id = format!("{}-{number}", std::process::id());
+    let route = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map_or("unmatched", |path| path.as_str())
+        .to_owned();
+    let method = match request.method().as_str() {
+        "GET" => "GET",
+        "POST" => "POST",
+        "PUT" => "PUT",
+        "DELETE" => "DELETE",
+        _ => "other",
+    };
+    let authorized = request.uri().path() == "/health"
+        || token.as_ref().is_none_or(|token| {
+            let mut values = request.headers().get_all(header::AUTHORIZATION).iter();
+            let first = values.next();
+            values.next().is_none()
+                && first
+                    .and_then(|h| h.to_str().ok())
+                    .and_then(|h| h.split_once(' '))
+                    .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
+                    .map(|(_, value)| value)
+                    .is_some_and(|value| token.accepts(value))
+        });
+    let mut response = if authorized {
+        next.run(request).await
+    } else {
+        service.metrics.unauthorized.fetch_add(1, Ordering::Relaxed);
+        let mut response = ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "valid bearer token required",
+        )
+        .into_response();
+        response.headers_mut().insert(
+            header::WWW_AUTHENTICATE,
+            axum::http::HeaderValue::from_static("Bearer"),
+        );
+        response
+    };
+    response.headers_mut().insert(
+        "x-request-id",
+        request_id.parse().expect("generated ASCII ID"),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    let elapsed = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+    service
+        .metrics
+        .duration_ns
+        .fetch_add(elapsed, Ordering::Relaxed);
+    if response.status().is_client_error() || response.status().is_server_error() {
+        service.metrics.failures.fetch_add(1, Ordering::Relaxed);
+    }
+    eprintln!(
+        "{}",
+        json!({"event":"request", "request_id":request_id, "method":method,
+        "route":route, "status":response.status().as_u16(), "duration_ns":elapsed})
+    );
+    response
+}
+
+async fn metrics(State(service): State<Service>) -> Result<Json<Value>, ApiError> {
+    let metrics = service.metrics.clone();
+    service.run(move |db| {
+        let healthy = !db.poisoned;
+        let database_bytes = if healthy {
+            Some(db.file.0.metadata().map_err(crate::Error::from)?.len())
+        } else {
+            None
+        };
+        Ok(Json(json!({
+            "requests_total":metrics.requests.load(Ordering::Relaxed),
+            "request_failures_total":metrics.failures.load(Ordering::Relaxed),
+            "unauthorized_total":metrics.unauthorized.load(Ordering::Relaxed),
+            "request_duration_seconds_total":metrics.duration_ns.load(Ordering::Relaxed) as f64 / 1e9,
+            "commit_failures_total":metrics.commit_failures.load(Ordering::Relaxed),
+            "hnsw_rebuilds_total":metrics.rebuilds.load(Ordering::Relaxed),
+            "hnsw_rebuild_and_search_seconds_total":metrics.rebuild_search_ns.load(Ordering::Relaxed) as f64 / 1e9,
+            "database_healthy":healthy,
+            "database_bytes":database_bytes,
+            "live_records":healthy.then(|| db.len())
+        })))
+    }).await
 }
 
 async fn admission(
@@ -154,8 +318,8 @@ impl IntoResponse for ApiError {
     }
 }
 
-fn internal(error: impl std::fmt::Display) -> ApiError {
-    eprintln!("REST internal error: {error}");
+fn internal(_error: impl std::fmt::Display) -> ApiError {
+    eprintln!("{}", json!({"event":"internal_error"}));
     ApiError::new(
         StatusCode::INTERNAL_SERVER_ERROR,
         "internal_error",
@@ -191,7 +355,7 @@ impl From<Error> for ApiError {
                 Self::new(StatusCode::CONFLICT, "upgrade_required", error.to_string())
             }
             Error::CommitIndeterminate(_) => {
-                eprintln!("REST commit error: {error}");
+                eprintln!("{}", json!({"event":"commit_indeterminate"}));
                 Self::new(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "commit_indeterminate",
@@ -464,8 +628,11 @@ async fn search(
             "filters require mode exact; approximate filtering is not supported",
         ));
     }
+    let metrics = service.metrics.clone();
     service
         .run(move |db| {
+            let rebuilding = matches!(input.mode, SearchMode::Approximate) && db.index.is_none();
+            let started = Instant::now();
             let hits = match input.mode {
                 SearchMode::Exact => db.search_filtered(
                     &input.vector,
@@ -478,10 +645,18 @@ async fn search(
                     input.ef_search.unwrap_or(100.max(input.k.min(db.len()))),
                     crate::HnswConfig::default(),
                 )?,
+            };
+            if rebuilding && db.index.is_some() {
+                metrics.rebuilds.fetch_add(1, Ordering::Relaxed);
+                metrics.rebuild_search_ns.fetch_add(
+                    started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                    Ordering::Relaxed,
+                );
             }
-            .into_iter()
-            .map(|hit| json!({"id": hit.id.to_string(), "distance": hit.distance}))
-            .collect::<Vec<_>>();
+            let hits = hits
+                .into_iter()
+                .map(|hit| json!({"id": hit.id.to_string(), "distance": hit.distance}))
+                .collect::<Vec<_>>();
             Ok(Json(json!({"hits": hits})))
         })
         .await
@@ -593,5 +768,29 @@ mod tests {
         )));
         assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(error.code, "commit_indeterminate");
+    }
+
+    #[tokio::test]
+    async fn commit_failure_metrics_count_worker_failures() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("failure.vlite");
+        let mut db = Database::create(&path, 1).unwrap();
+        db.file = crate::LockedFile(std::fs::File::open(&path).unwrap());
+        let service = Service::new(db);
+        let error = service
+            .run(|db| {
+                db.put(1, &[1.0], b"")?;
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "commit_indeterminate");
+        assert_eq!(service.metrics.commit_failures.load(Ordering::Relaxed), 1);
+        let snapshot = metrics(State(service.clone())).await.unwrap().0;
+        assert_eq!(snapshot["commit_failures_total"], 1);
+        assert_eq!(snapshot["database_healthy"], false);
+        assert!(snapshot["database_bytes"].is_null());
+        assert!(snapshot["live_records"].is_null());
+        assert!(service.close().await.is_err());
     }
 }

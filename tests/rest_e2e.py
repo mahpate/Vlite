@@ -6,10 +6,13 @@ import os
 import subprocess
 import time
 import uuid
+import secrets
+import tempfile
 
 
 PROJECT = "vlite-rest-" + uuid.uuid4().hex[:10]
-ENV = dict(os.environ, VLITE_PORT="0", VLITE_DIMENSIONS="3")
+ENV = dict(os.environ, VLITE_PORT="0", VLITE_DIMENSIONS="3", VLITE_DATABASE_PATH="/data/vectors.vlite")
+TOKEN = secrets.token_urlsafe(32)
 
 
 def compose(*args, check=True):
@@ -24,16 +27,20 @@ def compose(*args, check=True):
     )
 
 
-def request(port, method, path, body=None, expected=200):
+def request(port, method, path, body=None, expected=200, token=TOKEN):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
     try:
+        headers = {"Content-Type": "application/json"}
+        if token is not None:
+            headers["Authorization"] = "Bearer " + token
         connection.request(
             method,
             path,
             body=None if body is None else json.dumps(body),
-            headers={"Content-Type": "application/json"},
+            headers=headers,
         )
         response = connection.getresponse()
+        assert response.getheader("x-request-id"), "missing request ID"
         content = response.read()
         assert response.status == expected, (response.status, content)
         return json.loads(content) if content else None
@@ -72,9 +79,13 @@ def published_port():
 
 
 def run():
-    compose("up", "--build", "--detach", "api")
+    compose("up", "--no-build" if os.environ.get("VLITE_E2E_NO_BUILD") else "--build", "--detach", "api")
     port = published_port()
     ready(port)
+    request(port, "GET", "/health", token=None)
+    request(port, "GET", "/v1/database", expected=401, token=None)
+    request(port, "PUT", "/v1/vectors/4", {"vector": [1, 0, 0]}, expected=401, token="x" * 43)
+    request(port, "GET", "/metrics", expected=401, token=None)
     assert request(port, "GET", "/v1/database") == {
         "dimensions": 3, "format_version": 3, "records": 0
     }
@@ -105,6 +116,10 @@ def run():
     assert request(port, "POST", "/v1/search", filtered)["hits"][0]["id"] == "18446744073709551615"
     request(port, "POST", "/v1/search", dict(filtered, mode="approximate"), expected=422)
     assert request(port, "GET", "/openapi.json")["openapi"] == "3.1.0"
+    metrics = request(port, "GET", "/metrics")
+    assert metrics["unauthorized_total"] == 3, metrics
+    assert metrics["hnsw_rebuilds_total"] == 1, metrics
+    assert metrics["database_bytes"] > 32, metrics
     stopped_cleanly()
     mismatch = compose(
         "run", "--rm", "--no-deps", "api", "/data/vectors.vlite",
@@ -130,10 +145,38 @@ def run():
     assert request(port, "GET", "/v1/database")["records"] == 1
     request(port, "GET", "/v1/vectors/1", expected=404)
     stopped_cleanly()
-    print("PASS REST: CRUD, typed metadata, exact filters, atomic rejection, ANN filter rejection, contract, restart persistence, SIGTERM")
+    for operation, source, destination in [
+        ("backup", "/data/vectors.vlite", "/data/backup.vlite"),
+        ("restore", "/data/backup.vlite", "/data/restored.vlite"),
+        ("compact", "/data/restored.vlite", "/data/compact.vlite"),
+    ]:
+        compose("run", "--rm", "--no-deps", "--entrypoint", "vlite-maintain",
+                "api", operation, source, destination)
+    report = compose("run", "--rm", "--no-deps", "--entrypoint", "vlite-maintain",
+                     "api", "inspect", "/data/compact.vlite")
+    assert "live_records=1" in report.stdout, report.stdout
+    ENV["VLITE_DATABASE_PATH"] = "/data/restored.vlite"
+    compose("up", "--no-build", "--force-recreate", "--detach", "api")
+    port = published_port()
+    ready(port)
+    restored = request(port, "GET", "/v1/vectors/18446744073709551615")
+    assert restored["payload_base64"] == "AP8=" and restored["metadata"]["count"]["value"] == "9223372036854775807"
+    assert request(port, "POST", "/v1/search", filtered)["hits"][0]["id"] == restored["id"]
+    request(port, "GET", "/v1/vectors/1", expected=404)
+    stopped_cleanly()
+    logs = compose("logs", "--no-color", "api").stdout
+    assert TOKEN not in logs and "AP8=" not in logs and "9223372036854775807" not in logs
+    assert '"event":"request"' in logs and '"request_id":' in logs, logs
+    print("PASS REST: authentication, metrics, redacted logs, CRUD, metadata, filters, backup/restore, restart persistence, SIGTERM")
 
 
 if __name__ == "__main__":
+    secret_directory = tempfile.TemporaryDirectory(prefix="vlite-test-token-")
+    token_path = os.path.join(secret_directory.name, "token")
+    with open(token_path, "w", encoding="ascii") as secret_file:
+        secret_file.write(TOKEN)
+    os.chmod(token_path, 0o644)  # Readable by the non-root container; directory remains private.
+    ENV["VLITE_TOKEN_FILE"] = token_path
     try:
         run()
     except subprocess.CalledProcessError as error:
@@ -142,6 +185,7 @@ if __name__ == "__main__":
         raise
     finally:
         logs = compose("logs", "--no-color", "api", check=False)
-        print(logs.stdout)
+        print(logs.stdout.replace(TOKEN, "[REDACTED]"))
         compose("down")
+        secret_directory.cleanup()
         print(f"Retained Docker data volume: {PROJECT}_api-data")

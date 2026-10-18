@@ -15,12 +15,24 @@ struct Server {
 
 impl Server {
     fn start(path: &Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_vlite-server"))
+        Self::start_with_source(path, false)
+    }
+
+    fn start_with_source(path: &Path, file: bool) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_vlite-server"));
+        command
             .arg(path)
             .args(["--create-if-missing", "2", "--bind", "127.0.0.1:0"])
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
+            .env_remove("VLITE_AUTH_TOKEN")
+            .env_remove("VLITE_AUTH_TOKEN_FILE");
+        if file {
+            let token = path.with_extension("token");
+            std::fs::write(&token, format!("{TOKEN}\r\n")).unwrap();
+            command.arg("--token-file").arg(token);
+        } else {
+            command.env("VLITE_AUTH_TOKEN", TOKEN);
+        }
+        let mut child = command.stdout(Stdio::piped()).spawn().unwrap();
         let stdout = child.stdout.take().unwrap();
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
@@ -53,7 +65,7 @@ impl Server {
             .set_write_timeout(Some(Duration::from_secs(10)))
             .unwrap();
         write!(stream,
-            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",body.len()
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",body.len()
         ).unwrap();
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
@@ -70,6 +82,8 @@ impl Server {
     }
 }
 
+const TOKEN: &str = "test_secret_0123456789_ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
 impl Drop for Server {
     fn drop(&mut self) {
         if self.child.try_wait().unwrap().is_none() {
@@ -82,11 +96,42 @@ impl Drop for Server {
 fn fails(path: &Path, args: &[&str]) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_vlite-server"))
         .arg(path)
+        .arg("--insecure-local")
+        .env_remove("VLITE_AUTH_TOKEN")
+        .env_remove("VLITE_AUTH_TOKEN_FILE")
         .args(args)
         .output()
         .unwrap();
     assert!(!output.status.success(), "{output:?}");
     String::from_utf8(output.stderr).unwrap()
+}
+
+#[test]
+fn authentication_configuration_fails_closed_before_creating_a_database() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("no-create.vlite");
+    let secret = directory.path().join("token");
+    std::fs::write(&secret, "short").unwrap();
+    let run = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_vlite-server"))
+            .arg(&path)
+            .args(["--create-if-missing", "2", "--bind", "127.0.0.1:0"])
+            .args(args)
+            .env_remove("VLITE_AUTH_TOKEN")
+            .env_remove("VLITE_AUTH_TOKEN_FILE")
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(!path.exists());
+        String::from_utf8(output.stderr).unwrap()
+    };
+    assert!(run(&[]).contains("select exactly one"));
+    assert!(run(&["--token-file", secret.to_str().unwrap()]).contains("base64url"));
+    assert!(
+        run(&["--insecure-local", "--token-file", secret.to_str().unwrap()])
+            .contains("select exactly one")
+    );
+    assert!(fails(&path, &["--allow-remote", "--bind", "0.0.0.0:0"]).contains("loopback"));
 }
 
 #[test]
@@ -112,7 +157,7 @@ fn real_http_acknowledged_data_survives_process_termination_and_restart() {
     assert!(fails(&path, &["--bind", "127.0.0.1:0"]).contains("already locked"));
     drop(server);
     let bytes = std::fs::read(&path).unwrap();
-    let server = Server::start(&path);
+    let server = Server::start_with_source(&path, true);
     let (status, record) = server.request("GET", "/v1/vectors/18446744073709551615", Value::Null);
     assert_eq!(status, 200);
     assert_eq!(record["payload_base64"], "AP8=");
@@ -131,7 +176,7 @@ fn real_http_acknowledged_data_survives_process_termination_and_restart() {
 fn startup_never_overwrites_repairs_or_silently_changes_dimensions() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("startup.vlite");
-    assert!(fails(&path, &["--bind", "127.0.0.1:0"]).contains("FAIL:"));
+    assert!(fails(&path, &["--bind", "127.0.0.1:0"]).contains("startup_or_shutdown_failure"));
     assert!(!path.exists());
     assert!(fails(&path, &["--create-if-missing", "0"]).contains("dimensions"));
     assert!(
@@ -169,7 +214,7 @@ fn startup_never_overwrites_repairs_or_silently_changes_dimensions() {
             &path,
             &["--create-if-missing", "2", "--bind", "127.0.0.1:0"]
         )
-        .contains("FAIL:")
+        .contains("startup_or_shutdown_failure")
     );
     assert_eq!(std::fs::read(path).unwrap(), b"corrupt; never replace");
 }

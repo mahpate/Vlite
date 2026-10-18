@@ -1,6 +1,6 @@
 services:
   vlite:
-    image: vlite-smoke:local
+    image: ${VLITE_IMAGE:-vlite-smoke:local}
     build:
       context: .
       target: runtime
@@ -22,12 +22,16 @@ services:
   api:
     profiles:
       - api
-    image: vlite-smoke:local
+    image: ${VLITE_IMAGE:-vlite-smoke:local}
     build:
       context: .
       target: runtime
     entrypoint: ["/usr/local/bin/vlite-server"]
-    command: ["/data/vectors.vlite", "--create-if-missing", "${VLITE_DIMENSIONS:-3}", "--bind", "0.0.0.0:8080", "--allow-remote"]
+    command: ["${VLITE_DATABASE_PATH:-/data/vectors.vlite}", "--create-if-missing", "${VLITE_DIMENSIONS:-3}", "--bind", "0.0.0.0:8080", "--allow-remote"]
+    environment:
+      VLITE_AUTH_TOKEN_FILE: /run/secrets/api_token
+    secrets:
+      - api_token
     ports:
       - "127.0.0.1:${VLITE_PORT:-8080}:8080"
     volumes:
@@ -42,3 +46,7 @@ services:
 volumes:
   vlite-data:
   api-data:
+
+secrets:
+  api_token:
+    file: ${VLITE_TOKEN_FILE:-.secrets/api-token}

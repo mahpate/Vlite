@@ -144,8 +144,22 @@ The default Cargo library remains embedded-only. Build the transport with the
 `server` feature; it uses Axum/Tokio without changing the storage format:
 
 ```powershell
+$env:VLITE_AUTH_TOKEN = python -c "import secrets; print(secrets.token_urlsafe(32))"
 cargo run --release --features server --bin vlite-server -- vectors.vlite --create-if-missing 3
 ```
+
+Generate the token once and store it in a secret manager for real deployments;
+the example creates a new token in the current shell. Do not print it, put it
+in a URL, check it into Git, or pass it as a command-line argument.
+The binary requires **exactly one** authentication mode before opening/creating
+the database: `VLITE_AUTH_TOKEN`, `--token-file PATH` /
+`VLITE_AUTH_TOKEN_FILE`, or explicit **`--insecure-local`**. Conflicting sources
+fail startup. Tokens must be 32..256 base64url characters; use at least 32 random
+bytes. Files may end in one LF or CRLF, but arbitrary whitespace is not trimmed.
+Restrict file/directory permissions to the service account (and Docker's
+non-root UID 10001 where applicable). Empty, malformed, unreadable or missing
+secrets fail closed. Tokens are read once; rotate by replacing the secret and
+restarting the server, updating clients accordingly.
 
 The server opens one exclusively locked file. `--create-if-missing N` creates
 only if the path is missing and checks that an existing file has dimension N.
@@ -156,25 +170,41 @@ retains the embedded engine's parent-directory sync limitations.
 
 Native listening defaults to `127.0.0.1:8080`. Override with
 `--bind 127.0.0.1:9000` (numeric IP/port; IPv6 uses `[::1]:9000`).
-Non-loopback binding requires explicit `--allow-remote`. **There is no
-authentication, authorization, TLS, or CORS support.** Use only locally or behind
-a trusted, authenticated TLS reverse proxy; do not expose it to the internet.
+Non-loopback binding requires explicit `--allow-remote` **and authentication**.
+`--insecure-local` never allows a non-loopback bind, even with `--allow-remote`.
+All routes except `/health` require `Authorization: Bearer TOKEN`; missing,
+wrong or duplicate authorization headers return 401 with `WWW-Authenticate:
+Bearer`. One token grants full read/write/metrics access; there are no roles,
+per-client quotas, browser/CORS support, or built-in TLS. Use HTTPS through a
+trusted proxy for any non-loopback traffic. The embedding library's `router`
+function is explicitly unauthenticated for local/in-process use;
+`authenticated_router` with a validated `BearerToken` is the network-safe option.
 
 For persistent Docker deployment, the opt-in service publishes only to the
 host's loopback address and uses its own named volume, separate from smoke data:
 
 ```text
+python -c "import pathlib,secrets; p=pathlib.Path('.secrets'); p.mkdir(mode=0o700,exist_ok=True); (p/'api-token').write_text(secrets.token_urlsafe(32), encoding='ascii')"
 docker compose --profile api up --build -d api
 docker compose logs api
 docker compose stop api
 docker compose start api
 ```
 
+Compose mounts `.secrets/api-token` read-only at `/run/secrets/api_token`, not
+as an image layer or environment value. `.secrets` is Git-ignored and excluded
+from the Docker build context. Override `VLITE_TOKEN_FILE` to point at an
+existing secret file. Ensure UID 10001 can read the file; keep its parent
+directory private. Compose bind-mounted secrets do not automatically enforce
+the desired host permissions. Do not use the example test tokens in production.
+
 Set `VLITE_DIMENSIONS` before initial creation (default 3), and `VLITE_PORT` to
-change the host port (default 8080). Changing dimensions never migrates a file;
+change the host port (default 8080). `VLITE_DATABASE_PATH` selects the path inside
+the data volume (default `/data/vectors.vlite`), including a validated restored
+or migrated copy. Changing dimensions never migrates a file;
 it causes startup to fail. Within the isolated Docker network the container
 listens on `0.0.0.0`, explicitly enabled by `--allow-remote`; other containers on
-that network can reach it without authentication. The runtime is non-root with
+that network still require the bearer token. The runtime is non-root with
 a read-only root, dropped capabilities and no-new-privileges. `docker compose
 down` retains the volume. Stop the service before using offline maintenance;
 never mount the same database into multiple servers.
@@ -183,12 +213,14 @@ Windows PowerShell examples (also usable against the Docker service):
 
 ```powershell
 $base = 'http://127.0.0.1:8080'
-Invoke-RestMethod "$base/ready"
-Invoke-RestMethod "$base/v1/vectors/10" -Method Put -ContentType 'application/json' -Body '{"vector":[1,0,0],"payload_base64":"ZG9jdW1lbnQgQQ=="}'
-Invoke-RestMethod "$base/v1/vectors/10"
-Invoke-RestMethod "$base/v1/search" -Method Post -ContentType 'application/json' -Body '{"vector":[0.9,0.1,0],"k":5}'
-Invoke-RestMethod "$base/v1/batches" -Method Post -ContentType 'application/json' -Body '{"operations":[{"op":"put","id":"20","vector":[0,1,0]},{"op":"delete","id":"10"}]}'
-Invoke-RestMethod "$base/v1/vectors/20" -Method Delete
+$auth = @{ Authorization = "Bearer $env:VLITE_AUTH_TOKEN" }
+# For Docker instead: $auth = @{ Authorization = "Bearer $((Get-Content .secrets\api-token -Raw).TrimEnd())" }
+Invoke-RestMethod "$base/ready" -Headers $auth
+Invoke-RestMethod "$base/v1/vectors/10" -Headers $auth -Method Put -ContentType 'application/json' -Body '{"vector":[1,0,0],"payload_base64":"ZG9jdW1lbnQgQQ=="}'
+Invoke-RestMethod "$base/v1/vectors/10" -Headers $auth
+Invoke-RestMethod "$base/v1/search" -Headers $auth -Method Post -ContentType 'application/json' -Body '{"vector":[0.9,0.1,0],"k":5}'
+Invoke-RestMethod "$base/v1/batches" -Headers $auth -Method Post -ContentType 'application/json' -Body '{"operations":[{"op":"put","id":"20","vector":[0,1,0]},{"op":"delete","id":"10"}]}'
+Invoke-RestMethod "$base/v1/vectors/20" -Headers $auth -Method Delete
 ```
 
 `GET /openapi.json` serves the checked-in OpenAPI 3.1 contract from
@@ -196,6 +228,7 @@ Invoke-RestMethod "$base/v1/vectors/20" -Method Delete
 
 - `GET /health`: process liveness, independent of database health.
 - `GET /ready`: 200 when the owner can read, 503 if busy/closed/poisoned.
+- `GET /metrics`: authenticated JSON operational snapshot (not Prometheus text).
 - `GET /v1/database`: dimensions, format version, live record count.
 - `PUT /v1/vectors/{id}`: insert/replace; 204 only after durable commit.
 - `GET /v1/vectors/{id}`: ID, vector, base64 payload and typed metadata; 404 when missing.
@@ -225,7 +258,7 @@ threads. Slow requests and exact searches can occupy slots; no per-client
 fairness, streaming, rate limiting or execution deadline is promised. Use a
 proxy for connection/header/body timeouts and network-level limits.
 
-Errors use `{"error":{"code":"...","message":"..."}}`: 400 for malformed JSON or
+Errors use `{"error":{"code":"...","message":"..."}}`: 401 for authentication, 400 for malformed JSON or
 IDs, 404 for missing records/routes, 405 for unsupported methods, 409 for batches
 requiring a file-format upgrade (batch v2+, metadata v3), 413 for body size, 415 for content type, 422 for schema or
 engine validation, 503 for busy/unavailable/poisoned or indeterminate commit,
@@ -256,6 +289,101 @@ loopback port, tests CRUD/batches/search/validation, gracefully stops and restar
 the container, and verifies persistence. It removes test containers/networks but
 **retains and prints its database volume name**; it never deletes database data.
 For WSL-only Docker, run this command within WSL from the mounted project root.
+
+## HTTPS, observability and releases
+
+`compose.tls.yaml` adds a Caddy HTTPS reverse proxy with automatic certificate
+renewal. Set `VLITE_DOMAIN` to a real DNS hostname pointing to the Docker host,
+allow inbound TCP 80/443, provision the secret above, then run:
+
+```text
+docker compose -f compose.yaml -f compose.tls.yaml --profile api up --build -d api caddy
+```
+
+Use `https://YOUR_DOMAIN` with the same authorization header. Caddy forwards
+the token over the private Docker network; do not attach untrusted containers
+to it. HTTPS does not encrypt database files, backups, or container-network
+traffic. Caddy's certificate/config volumes must persist. The API's direct host
+port remains loopback-only; never publish plain HTTP publicly. Restrict ingress,
+apply host/proxy connection limits, monitor certificate renewal, and pin the
+Caddy image to a reviewed digest in production. The example sets HSTS, so use a
+dedicated hostname that will remain HTTPS-only. No access logs containing
+authorization headers or bodies are enabled. `/health` is intentionally public
+and reveals no database details; readiness, metrics and OpenAPI are protected.
+
+Each completed routed request emits one JSON line on stderr with `event`,
+server-generated `request_id`, method, route **template**, status and duration.
+The response returns `X-Request-ID`; client IDs are not trusted. Headers, raw
+paths/query strings, IDs, payloads, vectors, metadata and tokens are not logged.
+Startup prints the listening address on stdout; startup/shutdown failures and
+internal/indeterminate-commit events use JSON stderr. Request IDs are unique
+within a process/router lifetime, not globally across container restarts.
+
+`/metrics` returns process-local cumulative counters for requests, failed
+responses (4xx/5xx), unauthorized requests, indeterminate commits, and HNSW
+rebuilds; request duration and rebuild-triggering-search duration totals use
+seconds. The latter **includes the triggering query**, not isolated graph build
+time. `database_bytes` and `live_records` are gauges. Counters reset on restart.
+Request timing ends when response headers/body are produced, not after streaming
+to the client; canceled middleware requests may not produce a completion log.
+The current metrics request is counted but not yet timed. Snapshots are
+non-transactional; database gauges serialize behind other work and return 503
+when busy or closed. A poisoned owner still exposes failure counters with
+`database_healthy: false` and null database gauges, never stale live data.
+Metrics share the full-access token: give access
+only to trusted monitoring and never expose an unauthenticated scrape endpoint.
+There are no histogram/percentile claims; aggregate durations are totals.
+
+`tests/rest_e2e.py` checks authentication failures without mutation, metrics,
+log redaction, exact/ANN behavior, persistent restarts and copy-out
+backup/restore/compaction. `tests/tls_e2e.py` additionally exercises the actual
+Caddy proxy with a generated local CA, verifying the certificate chain and
+hostname (never disabling certificate checks), authentication and HTTPS CRUD.
+Both preserve database volumes and remove only their temporary secret files.
+The local-CA test does not prove public DNS/ACME renewal works on your host.
+
+The **VLite release** workflow supports manual validation without publication.
+An explicitly pushed `vX.Y.Z` tag matching `Cargo.toml` triggers tested native
+ZIP bundles/checksums and a versioned `ghcr.io/mahpate/vlite:vX.Y.Z` image for
+Linux amd64/arm64, then a GitHub release with the immutable image digest.
+Native artifact names identify the actual Rust host target; they do not promise
+every OS/architecture combination. ARM containers run the Dockerfile tests
+under QEMU during publication. This is not equivalent to physical ARM testing.
+Registry credentials are the workflow's scoped `GITHUB_TOKEN`; private packages
+require a read-packages login on deployment hosts. There is no floating `latest`
+tag, automatic production rollout, or implied open-source license.
+
+For deployment, select a published version/digest and skip local builds:
+
+```text
+VLITE_IMAGE=ghcr.io/mahpate/vlite@sha256:YOUR_RELEASE_DIGEST docker compose --profile api up --no-build -d api
+```
+
+Set `VLITE_IMAGE` using your shell's environment syntax on Windows. The image
+keeps `vlite-smoke` as its default entrypoint; Compose explicitly selects
+`vlite-server`. The release gate tests that exact locally built runtime image
+without rebuilding it. Multi-platform publication also rebuilds/tests both
+target architectures before the manifest is published. A further gate pulls the
+published digest and repeats authenticated REST/HTTPS acceptance without
+rebuilding before creating the GitHub release. Release archives include
+native tools, OpenAPI and deployment examples; verify the adjacent SHA-256 file
+before running downloaded binaries. Publication requires a maintainer to push
+a version tag; adding the workflow alone does not create a release.
+
+**Upgrade/rollback runbook:** stop the owner and confirm the volume is not in
+use; run the old `vlite-maintain inspect` and `backup` to a **new** backup path,
+copy the validated backup off-host, and retain the previous image digest and
+token configuration. If a format migration is needed, compact to a **new** file,
+inspect it, and explicitly switch the server's database path after validation.
+Never modify a header or overwrite the only database/backup. Start the new
+digest, check authenticated readiness, record count and representative reads/
+searches, and keep the original file until acceptance. To roll back, stop the
+new owner, restore the pre-upgrade backup to another **new** path and start the
+old digest against it. An old binary may not read a newer format. Writes made
+after the backup are not automatically rolled back or merged: stop writers and
+resolve that data-loss decision explicitly before restoring. Never delete data
+volumes with `down -v` as an upgrade step. Transport/auth changes here do not
+alter the v3 file format.
 
 ## Atomic batch writes
 

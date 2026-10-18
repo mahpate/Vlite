@@ -1,0 +1,15 @@
+{$VLITE_DOMAIN} {
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+	}
+	request_body {
+		max_size 8MB
+	}
+	reverse_proxy api:8080 {
+		transport http {
+			dial_timeout 5s
+			response_header_timeout 120s
+		}
+	}
+}

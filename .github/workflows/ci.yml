@@ -57,3 +57,5 @@ jobs:
           docker compose run --rm --entrypoint vlite-bench vlite --ann 16 100 100 256 8 10 64 5 42
       - name: Verify REST over HTTP and persistent container restart
         run: python3 tests/rest_e2e.py
+      - name: Verify authenticated HTTPS reverse proxy
+        run: python3 tests/tls_e2e.py

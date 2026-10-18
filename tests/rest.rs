@@ -43,6 +43,89 @@ async fn raw(
 }
 
 #[tokio::test]
+async fn authentication_metrics_and_request_ids_are_enforced_without_mutations() {
+    use vlite::server::{BearerToken, authenticated_router};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("auth.vlite");
+    let service = Service::new(Database::create(&path, 1).unwrap());
+    let token = "test_secret_0123456789_ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let app = authenticated_router(service.clone(), BearerToken::new(token).unwrap());
+    for value in ["", "Basic abc", "Bearer wrong", &format!("Bearer {token}x")] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/v1/vectors/1")
+                    .header("authorization", value)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"vector":[1]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 401);
+        assert_eq!(response.headers()["www-authenticate"], "Bearer");
+        assert!(response.headers().contains_key("x-request-id"));
+    }
+    assert_eq!(raw(&app, "GET", "/health", "", false).await.0, 200);
+    assert_eq!(raw(&app, "GET", "/openapi.json", "", false).await.0, 401);
+    let duplicate = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/database")
+                .header("authorization", format!("Bearer {token}"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(duplicate.status(), 401);
+    let mut ids = std::collections::BTreeSet::new();
+    for uri in ["/ready", "/metrics"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("x-request-id", "untrusted-client-id")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let id = response.headers()["x-request-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_ne!(id, "untrusted-client-id");
+        assert!(ids.insert(id));
+        if uri == "/metrics" {
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["unauthorized_total"], 6);
+            assert_eq!(value["live_records"], 0);
+            assert_eq!(value["database_bytes"], 32);
+            assert_eq!(value["commit_failures_total"], 0);
+        }
+    }
+    service.close().await.unwrap();
+    assert_eq!(std::fs::metadata(path).unwrap().len(), 32);
+    for value in [
+        "short",
+        &"x".repeat(257),
+        &format!("{} ", "x".repeat(32)),
+        &"é".repeat(32),
+    ] {
+        assert!(BearerToken::new(value).is_err());
+    }
+}
+
+#[tokio::test]
 async fn crud_search_batch_and_reopen_preserve_binary_payloads_and_full_u64_ids() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("api.vlite");
