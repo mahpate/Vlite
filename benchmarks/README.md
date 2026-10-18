@@ -74,6 +74,9 @@ all latency samples, recall, version information, retained volumes and errors
 - HNSW construction m=16, ef-construction=100, search ef=100; no quantization.
   These matching parameter names do **not** imply identical implementations.
   Qdrant ANN indexing must finish before timing (indexed vector count checked);
+  ANN sets `full_scan_threshold=0` to prevent this small workload from silently
+  using Qdrant's default scan-preferred planner. Exact mode retains its default
+  threshold and explicitly requests exact search.
   VLite builds synchronously on the initial query. Index wait/first-query
   latency is reported separately from steady-state warm queries.
 - Ten warmups (or the query count if smaller); persistent HTTP connections;

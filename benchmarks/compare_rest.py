@@ -134,7 +134,8 @@ def benchmark(engine, trial, config, data, queries, truth):
         if engine == "qdrant":
             client.request("PUT", "/collections/bench", {
                 "vectors": {"size": config.dimensions, "distance": "Euclid", "on_disk": False},
-                "hnsw_config": {"m": 16, "ef_construct": 100, "max_indexing_threads": config.cpus},
+                "hnsw_config": {"m": 16, "ef_construct": 100, "max_indexing_threads": config.cpus,
+                                "full_scan_threshold": 0 if config.mode == "ann" else 10000},
                 "optimizers_config": {"indexing_threshold": 1 if config.mode == "ann" else 0},
                 "on_disk_payload": False,
             })
