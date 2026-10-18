@@ -28,7 +28,8 @@ It is not a SQLite wrapper and does not require an external database.
 - **Maintenance:** offline inspection, byte-preserving backup/restore, and
   no-clobber copy-out compaction.
 
-There is no gRPC, cosine/inner-product metric, distributed replication,
+VLite is licensed under the GNU General Public License v3.0 only; see
+[LICENSE](LICENSE). There is no gRPC, cosine/inner-product metric, distributed replication,
 multi-reader handle, encryption at rest, or approximate metadata filtering.
 See the [technical reference](docs/REFERENCE.md) for contracts and limits.
 
@@ -189,4 +190,5 @@ including [zvec](https://github.com/alibaba/zvec)'s staged-index/optimization
 model. Its storage format and Rust engine are independent implementations;
 no zvec code is copied and no file-format compatibility is claimed.
 Any future source reuse requires review of upstream licensing and notices.
-This repository does not currently grant a license for redistribution.
+This repository is licensed under the GNU General Public License v3.0 only.
+See [LICENSE](../LICENSE) for the license terms.
