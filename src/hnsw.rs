@@ -36,6 +36,8 @@ impl HnswConfig {
 
 /// Maximum search candidate width, not a total memory or execution-time bound.
 pub const MAX_EF_SEARCH: usize = 100_000;
+pub const MAX_HNSW_BUFFER_IDS: usize = 256;
+pub const MAX_HNSW_BUFFER_VECTOR_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug)]
 struct Candidate {
@@ -71,6 +73,13 @@ pub(crate) struct Index {
     pub config: HnswConfig,
     nodes: Vec<Node>,
     entry: Option<usize>,
+    buffered: BTreeMap<u64, Buffered>,
+    buffered_bytes: usize,
+}
+
+struct Buffered {
+    original: Option<Vec<f32>>,
+    current_bytes: usize,
 }
 
 fn distance(a: &[f32], b: &[f32]) -> f64 {
@@ -84,11 +93,17 @@ fn distance(a: &[f32], b: &[f32]) -> f64 {
 }
 
 impl Index {
+    pub fn buffer_usage(&self) -> (usize, usize) {
+        (self.buffered.len(), self.buffered_bytes)
+    }
+
     pub fn build(records: &BTreeMap<u64, Record>, config: HnswConfig) -> Self {
         let mut index = Self {
             config,
             nodes: Vec::with_capacity(records.len()),
             entry: None,
+            buffered: BTreeMap::new(),
+            buffered_bytes: 0,
         };
         for &id in records.keys() {
             index.insert(id, records);
@@ -96,8 +111,41 @@ impl Index {
         index
     }
 
-    fn vector<'a>(&self, node: usize, records: &'a BTreeMap<u64, Record>) -> &'a [f32] {
-        &records[&self.nodes[node].id].vector
+    /// Called only after sync, before authoritative records are replaced.
+    pub fn track(&mut self, id: u64, previous: Option<&Record>, current_bytes: usize) -> bool {
+        let prior = self.buffered.get(&id);
+        let original_bytes = prior.map_or_else(
+            || previous.map_or(0, |record| record.vector.len() * 4),
+            |entry| entry.original.as_ref().map_or(0, |vector| vector.len() * 4),
+        );
+        let removed = prior.map_or(0, |entry| original_bytes + entry.current_bytes);
+        let bytes = self.buffered_bytes - removed + original_bytes + current_bytes;
+        if (prior.is_none() && self.buffered.len() == MAX_HNSW_BUFFER_IDS)
+            || bytes > MAX_HNSW_BUFFER_VECTOR_BYTES
+        {
+            return false;
+        }
+        self.buffered
+            .entry(id)
+            .and_modify(|entry| entry.current_bytes = current_bytes)
+            .or_insert_with(|| Buffered {
+                original: previous.map(|record| record.vector.clone()),
+                current_bytes,
+            });
+        self.buffered_bytes = bytes;
+        true
+    }
+
+    fn vector<'a>(&'a self, node: usize, records: &'a BTreeMap<u64, Record>) -> &'a [f32] {
+        let id = self.nodes[node].id;
+        if let Some(entry) = self.buffered.get(&id) {
+            entry
+                .original
+                .as_deref()
+                .expect("graph IDs have original vectors")
+        } else {
+            &records[&id].vector
+        }
     }
 
     fn candidate(&self, node: usize, query: &[f32], records: &BTreeMap<u64, Record>) -> Candidate {
@@ -261,27 +309,70 @@ impl Index {
         ef: usize,
         records: &BTreeMap<u64, Record>,
     ) -> Vec<SearchHit> {
-        let Some(entry) = self.entry else {
-            return Vec::new();
-        };
-        let mut best = self.candidate(entry, query, records);
-        for layer in (1..self.nodes[entry].links.len()).rev() {
-            best = self.greedy(query, best, layer, records);
+        let mut hits = Vec::new();
+        if let Some(entry) = self.entry {
+            let mut best = self.candidate(entry, query, records);
+            for layer in (1..self.nodes[entry].links.len()).rev() {
+                best = self.greedy(query, best, layer, records);
+            }
+            hits.extend(
+                self.layer(query, best, 0, ef + self.buffered.len(), records)
+                    .into_iter()
+                    .filter(|candidate| !self.buffered.contains_key(&self.nodes[candidate.node].id))
+                    .take(k)
+                    .map(|candidate| SearchHit {
+                        id: self.nodes[candidate.node].id,
+                        distance: candidate.distance,
+                    }),
+            );
         }
-        self.layer(query, best, 0, ef, records)
-            .into_iter()
-            .take(k)
-            .map(|candidate| SearchHit {
-                id: self.nodes[candidate.node].id,
-                distance: candidate.distance,
+        hits.extend(self.buffered.keys().filter_map(|&id| {
+            records.get(&id).map(|record| SearchHit {
+                id,
+                distance: distance(&record.vector, query),
             })
-            .collect()
+        }));
+        hits.sort_by(|a, b| {
+            a.distance
+                .total_cmp(&b.distance)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        hits.truncate(k);
+        hits
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn buffer_preserves_original_vectors_and_enforces_exact_limits() {
+        let record = Record {
+            vector: vec![0.0; crate::MAX_DIMENSIONS],
+            payload: vec![],
+            metadata: crate::Metadata::new(),
+        };
+        let records = BTreeMap::from([(0, record.clone())]);
+        let mut index = Index::build(&records, HnswConfig::default());
+        let vector_bytes = crate::MAX_DIMENSIONS * 4;
+        for id in 0..16 {
+            assert!(index.track(id, Some(&record), vector_bytes));
+        }
+        assert_eq!(index.buffer_usage(), (16, MAX_HNSW_BUFFER_VECTOR_BYTES));
+        assert!(index.track(0, Some(&record), 0));
+        assert_eq!(index.vector(0, &BTreeMap::new()), record.vector);
+        assert!(index.track(0, Some(&record), vector_bytes));
+        assert!(!index.track(16, Some(&record), vector_bytes));
+        assert_eq!(index.buffer_usage(), (16, MAX_HNSW_BUFFER_VECTOR_BYTES));
+        let mut index = Index::build(&BTreeMap::new(), HnswConfig::default());
+        for id in 0..MAX_HNSW_BUFFER_IDS {
+            assert!(index.track(id as u64, None, 4));
+            assert!(index.track(id as u64, Some(&record), 0));
+        }
+        assert_eq!(index.buffer_usage(), (MAX_HNSW_BUFFER_IDS, 0));
+        assert!(!index.track(u64::MAX, None, 0));
+    }
 
     #[test]
     fn graph_links_have_bounded_degree_valid_layers_and_no_self_or_duplicate_edges() {

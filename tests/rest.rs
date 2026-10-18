@@ -657,7 +657,7 @@ async fn parallel_mutations_are_serialized_without_lost_writes() {
 }
 
 #[tokio::test]
-async fn approximate_mode_is_explicit_and_rebuilds_after_mutation() {
+async fn approximate_mode_is_explicit_and_merges_mutations() {
     let directory = tempfile::tempdir().unwrap();
     let service = Service::new(Database::create(directory.path().join("ann.vlite"), 2).unwrap());
     let app = router(service.clone());

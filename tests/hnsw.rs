@@ -77,7 +77,7 @@ fn recall_distances_ordering_and_deterministic_rebuild_are_measured_against_exac
 }
 
 #[test]
-fn mutations_invalidate_index_without_stale_ids_vectors_or_partial_batches() {
+fn mutations_buffer_without_stale_ids_vectors_or_partial_batches() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("mutations.vlite");
     let mut db = Database::create(&path, 2).unwrap();
@@ -141,6 +141,82 @@ fn mutations_invalidate_index_without_stale_ids_vectors_or_partial_batches() {
         db.search_approximate(&[0.0, 0.0], 1, 10, config)
             .unwrap()
             .is_empty()
+    );
+}
+
+#[test]
+fn mixed_buffered_writes_have_exact_candidate_distances_and_measured_recall() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("mixed.vlite");
+    let mut db = Database::create(&path, 16).unwrap();
+    let data = vectors(1200, 16);
+    db.write_batch(
+        &(0..1000)
+            .map(|id| Mutation::Put {
+                id: id as u64,
+                vector: data[id].clone(),
+                payload: vec![],
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let config = HnswConfig::default();
+    db.build_hnsw(config).unwrap();
+    let mut changes = (0..50)
+        .map(|id| Mutation::Delete { id })
+        .collect::<Vec<_>>();
+    changes.extend((50..100).map(|id| Mutation::Put {
+        id: id as u64,
+        vector: data[id + 1000].clone(),
+        payload: vec![],
+    }));
+    changes.extend((1000..1100).map(|id| Mutation::Put {
+        id: id as u64,
+        vector: data[id].clone(),
+        payload: vec![],
+    }));
+    db.write_batch(&changes).unwrap();
+    let mut recalled = 0;
+    for query in &data[1100..] {
+        let exact = db.search(query, 10).unwrap();
+        let hits = db.search_approximate(query, 10, 100, config).unwrap();
+        assert_eq!(hits.len(), 10);
+        let mut seen = std::collections::BTreeSet::new();
+        for hit in &hits {
+            assert!(seen.insert(hit.id));
+            assert!(hit.id >= 50);
+            let record = db.get(hit.id).unwrap().unwrap();
+            let distance = record
+                .vector
+                .iter()
+                .zip(query)
+                .map(|(&a, &b)| {
+                    let diff = f64::from(a) - f64::from(b);
+                    diff * diff
+                })
+                .sum::<f64>();
+            assert_eq!(hit.distance, distance);
+            recalled += usize::from(exact.iter().any(|reference| reference.id == hit.id));
+        }
+        assert!(hits.windows(2).all(|pair| {
+            pair[0]
+                .distance
+                .total_cmp(&pair[1].distance)
+                .then(pair[0].id.cmp(&pair[1].id))
+                .is_le()
+        }));
+    }
+    assert!(recalled >= 950, "mixed recall {recalled}/1000 < 0.95");
+    // Every buffered live vector is evaluated exactly, even with the narrowest legal search.
+    assert_eq!(
+        db.search_approximate(&data[1001], 1, 1, config).unwrap()[0].id,
+        1001
+    );
+    db.close().unwrap();
+    let mut db = Database::open(path).unwrap();
+    assert_eq!(
+        db.search_approximate(&data[1001], 1, 100, config).unwrap()[0].id,
+        1001
     );
 }
 

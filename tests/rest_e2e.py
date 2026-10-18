@@ -138,6 +138,9 @@ def run():
     assert request(port, "DELETE", "/v1/vectors/1")["deleted"] is True
     assert request(port, "DELETE", "/v1/vectors/1")["deleted"] is False
     assert request(port, "POST", "/v1/search", approximate)["hits"][0]["id"] == "18446744073709551615"
+    metrics = request(port, "GET", "/metrics")
+    assert metrics["hnsw_rebuilds_total"] == 1, metrics
+    assert metrics["hnsw_buffered_ids"] == 1, metrics
     stopped_cleanly()
     compose("start", "api")
     port = published_port()

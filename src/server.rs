@@ -260,6 +260,7 @@ async fn metrics(State(service): State<Service>) -> Result<Json<Value>, ApiError
         } else {
             None
         };
+        let (buffered_ids, buffer_bytes) = db.index.as_ref().map_or((0,0), |index| index.buffer_usage());
         Ok(Json(json!({
             "requests_total":metrics.requests.load(Ordering::Relaxed),
             "request_failures_total":metrics.failures.load(Ordering::Relaxed),
@@ -267,6 +268,8 @@ async fn metrics(State(service): State<Service>) -> Result<Json<Value>, ApiError
             "request_duration_seconds_total":metrics.duration_ns.load(Ordering::Relaxed) as f64 / 1e9,
             "commit_failures_total":metrics.commit_failures.load(Ordering::Relaxed),
             "hnsw_rebuilds_total":metrics.rebuilds.load(Ordering::Relaxed),
+            "hnsw_buffered_ids":buffered_ids,
+            "hnsw_buffer_vector_bytes":buffer_bytes,
             "hnsw_rebuild_and_search_seconds_total":metrics.rebuild_search_ns.load(Ordering::Relaxed) as f64 / 1e9,
             "database_healthy":healthy,
             "database_bytes":database_bytes,

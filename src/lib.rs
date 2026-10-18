@@ -5,7 +5,7 @@
 mod format;
 mod hnsw;
 mod metadata;
-pub use hnsw::{HnswConfig, MAX_EF_SEARCH};
+pub use hnsw::{HnswConfig, MAX_EF_SEARCH, MAX_HNSW_BUFFER_IDS, MAX_HNSW_BUFFER_VECTOR_BYTES};
 pub use metadata::{
     Condition, MAX_FILTER_CONDITIONS, MAX_METADATA_BYTES, MAX_METADATA_FIELDS, Metadata,
     MetadataValue,
@@ -419,6 +419,7 @@ impl Database {
             metadata: metadata.clone(),
         };
         self.commit(id, Some(&record))?;
+        self.track_index_mutation(id, vector.len() * 4);
         self.records.insert(id, record);
         Ok(())
     }
@@ -430,6 +431,7 @@ impl Database {
             return Ok(false);
         }
         self.commit(id, None)?;
+        self.track_index_mutation(id, 0);
         self.records.remove(&id);
         Ok(true)
     }
@@ -493,6 +495,13 @@ impl Database {
         let frame = format::batch_frame(sequence, operations, body_bytes);
         self.commit_frame(sequence, &frame)?;
         for operation in operations {
+            let (id, bytes) = match operation {
+                Mutation::Put { id, vector, .. } | Mutation::PutWithMetadata { id, vector, .. } => {
+                    (*id, vector.len() * 4)
+                }
+                Mutation::Delete { id } => (*id, 0),
+            };
+            self.track_index_mutation(id, bytes);
             match operation {
                 Mutation::Put {
                     id,
@@ -557,13 +566,20 @@ impl Database {
         }
         self.sequence = sequence;
         self.end += frame.len() as u64;
-        self.index = None;
         Ok(())
+    }
+
+    fn track_index_mutation(&mut self, id: u64, current_bytes: usize) {
+        if let Some(index) = &mut self.index
+            && !index.track(id, self.records.get(&id), current_bytes)
+        {
+            self.index = None;
+        }
     }
 
     /// Builds/replaces the optional in-memory HNSW index from committed live records.
     ///
-    /// Successful mutations invalidate it. Nothing is written to the database file.
+    /// Clears the mutation buffer. Nothing is written to the database file.
     pub fn build_hnsw(&mut self, config: HnswConfig) -> Result<()> {
         self.ensure_healthy()?;
         config.validate()?;
@@ -573,7 +589,7 @@ impl Database {
 
     /// Approximate squared-L2 search; exact search remains the default.
     ///
-    /// Lazily rebuilds after a mutation, reopen, or construction-parameter change.
+    /// Lazily rebuilds after buffer overflow, reopen, or construction-parameter change.
     /// The first query includes the full rebuild cost. Returned distances are exact
     /// for the visited candidates; nearest-neighbor recall is not guaranteed.
     pub fn search_approximate(
@@ -689,6 +705,47 @@ fn append_and_sync<W: Write + Seek>(
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn committed_mutations_keep_graph_until_buffer_overflow_and_failed_inputs_do_not_change_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut db = Database::create(directory.path().join("buffer.vlite"), 1).unwrap();
+        db.put(0, &[0.0], b"").unwrap();
+        db.build_hnsw(HnswConfig::default()).unwrap();
+        for id in 0..MAX_HNSW_BUFFER_IDS as u64 {
+            db.put(id, &[id as f32], b"").unwrap();
+            assert_eq!(db.index.as_ref().unwrap().buffer_usage().0, id as usize + 1);
+        }
+        let before = db.index.as_ref().unwrap().buffer_usage();
+        assert!(db.put(999, &[], b"").is_err());
+        db.write_batch(&[]).unwrap();
+        assert!(!db.delete(999).unwrap());
+        assert_eq!(db.index.as_ref().unwrap().buffer_usage(), before);
+        db.put(0, &[-1.0], b"").unwrap();
+        assert_eq!(db.index.as_ref().unwrap().buffer_usage(), before);
+        db.put(1000, &[-2.0], b"").unwrap();
+        assert!(db.index.is_none());
+        assert_eq!(
+            db.search_approximate(&[-2.0], 1, 100, HnswConfig::default())
+                .unwrap()[0]
+                .id,
+            1000
+        );
+        assert_eq!(db.index.as_ref().unwrap().buffer_usage(), (0, 0));
+        db.delete(1000).unwrap();
+        db.build_hnsw(HnswConfig::default()).unwrap();
+        assert_eq!(db.index.as_ref().unwrap().buffer_usage(), (0, 0));
+        db.file = LockedFile(File::open(directory.path().join("buffer.vlite")).unwrap());
+        assert!(matches!(
+            db.put(999, &[0.0], b""),
+            Err(Error::CommitIndeterminate(_))
+        ));
+        assert_eq!(db.index.as_ref().unwrap().buffer_usage(), (0, 0));
+        assert!(matches!(
+            db.search_approximate(&[0.0], 1, 100, HnswConfig::default()),
+            Err(Error::Poisoned)
+        ));
+    }
     use std::io::Cursor;
 
     struct FailingWriter {
