@@ -44,7 +44,8 @@ jobs:
               for name in ["README.md", "Cargo.toml", "Cargo.lock", "src/openapi.json",
                            "compose.yaml", "compose.tls.yaml", "deploy/Caddyfile", "Dockerfile",
                            "docs/REFERENCE.md", "benchmarks/README.md", "benchmarks/RESULTS.md",
-                           "benchmarks/compare_rest.py"] + [
+                           "benchmarks/compare_rest.py", "benchmarks/native_campaign.py",
+                           "tests/measure_benchmark.py"] + [
                                str(path) for path in sorted(pathlib.Path("benchmarks/results").glob("*.json"))]:
                   bundle.write(name)
           (output / (archive.name + ".sha256")).write_text(
@@ -75,6 +76,15 @@ jobs:
           VLITE_IMAGE: vlite-release:test
           VLITE_E2E_NO_BUILD: "1"
         run: python3 tests/tls_e2e.py
+      - name: Install dashboard browser test dependencies
+        run: |
+          python3 -m pip install -r tests/requirements-dashboard.txt
+          python3 -m playwright install --with-deps chromium
+      - name: Test dashboard with the same runtime image
+        env:
+          VLITE_IMAGE: vlite-release:test
+          VLITE_E2E_NO_BUILD: "1"
+        run: python3 tests/dashboard_e2e.py
 
   image-publish:
     if: startsWith(github.ref, 'refs/tags/v')

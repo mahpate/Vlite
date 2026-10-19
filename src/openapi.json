@@ -3,11 +3,20 @@
   "info": {
     "title": "VLite REST API",
     "version": "0.1.0",
-    "description": "Experimental API for one exclusively owned database. Bearer authentication is required by the server binary except explicit loopback-only development mode. All routes except /health require the same full-access token. Terminate TLS at a trusted reverse proxy; the binary serves plain HTTP. No roles, CORS, automatic repair or retries. Responses include server-generated X-Request-ID and Cache-Control: no-store. IDs are canonical decimal strings, payloads are padded standard base64. Requests are limited to 8 MiB of JSON and 16 in-flight requests/workers. Successful writes are synced. A disconnect or commit_indeterminate error does not prove a write failed; never blindly retry mutations. Database creation has the embedded engine's parent-directory durability limitations. All protected operations may return 401 with the Error schema and WWW-Authenticate: Bearer."
+    "description": "Experimental API for one exclusively owned database. Bearer authentication is required by the server binary except explicit loopback-only development mode. Data, metrics and OpenAPI routes require the same full-access token. /health and the three static dashboard assets are public. The dashboard contains no credentials or database data; API access requires the token entered into browser memory. Terminate TLS at a trusted reverse proxy; the binary serves plain HTTP. No roles, CORS, automatic repair or retries. Responses include server-generated X-Request-ID and Cache-Control: no-store. IDs are canonical decimal strings, payloads are padded standard base64. Requests are limited to 8 MiB of JSON and 16 in-flight requests/workers. Successful writes are synced. A disconnect or commit_indeterminate error does not prove a write failed; never blindly retry mutations. Database creation has the embedded engine's parent-directory durability limitations. All protected operations may return 401 with the Error schema and WWW-Authenticate: Bearer."
   },
   "security": [{"BearerAuth": []}],
   "servers": [{"url": "http://127.0.0.1:8080"}],
   "paths": {
+    "/dashboard": {
+      "get": {"security": [], "summary": "Public static testing dashboard; all database requests require bearer authentication", "responses": {"200": {"description": "Bundled HTML with same-origin script/style assets, restrictive CSP and no-store", "content": {"text/html": {"schema": {"type": "string"}}}}}}
+    },
+    "/dashboard/app.js": {
+      "get": {"security": [], "summary": "Public static dashboard JavaScript; no credentials", "responses": {"200": {"description": "Bundled script", "content": {"text/javascript": {"schema": {"type": "string"}}}}}}
+    },
+    "/dashboard/style.css": {
+      "get": {"security": [], "summary": "Public static dashboard stylesheet", "responses": {"200": {"description": "Bundled stylesheet", "content": {"text/css": {"schema": {"type": "string"}}}}}}
+    },
     "/health": {
       "get": {
         "security": [],
@@ -18,7 +27,7 @@
     "/metrics": {
       "get": {
         "summary": "Authenticated process-local JSON metrics snapshot",
-        "description": "Counters reset at restart; request duration totals cover completed middleware responses and exclude streaming body transfer. HNSW timing includes the query that triggered a rebuild, not isolated build time. Metrics reads queue behind database work and fail 503 if busy or closed. Poisoned owners still expose failure counters with database_healthy=false and null database gauges. Live records and file bytes are gauges; other numeric values are cumulative. The current metrics request is counted but not yet timed.",
+        "description": "Counters reset at restart; request duration totals cover completed middleware responses and exclude streaming body transfer. HNSW rebuild counters include explicit builds and lazy builds. HNSW timing includes explicit build duration or build plus the triggering query, not isolated build time for lazy queries. Metrics reads queue behind database work and fail 503 if busy or closed. Poisoned owners still expose failure counters with database_healthy=false and null database gauges. Live records, file bytes and buffer usage are gauges; other numeric values are cumulative. The current metrics request is counted but not yet timed.",
         "responses": {
           "200": {"description": "Metrics snapshot", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Metrics"}}}},
           "401": {"$ref": "#/components/responses/Unauthorized"},
@@ -42,6 +51,26 @@
         "responses": {
           "401": {"$ref": "#/components/responses/Unauthorized"},
           "200": {"description": "Database information", "content": {"application/json": {"schema": {"type": "object", "required": ["dimensions", "format_version", "records"], "properties": {"dimensions": {"type": "integer"}, "format_version": {"type": "integer"}, "records": {"type": "integer"}}}}}},
+          "503": {"$ref": "#/components/responses/Unavailable"}
+        }
+      }
+    },
+    "/v1/vectors": {
+      "get": {
+        "summary": "Bounded live-page listing of vector IDs and typed metadata only",
+        "description": "Ascending numeric u64 order. after is an exclusive ID bound, not an opaque snapshot token and need not exist. Omitting after starts at the beginning, including ID 0. Concurrent writes between requests can change membership/metadata; inserts at or below the cursor will not appear in subsequent pages. No stable snapshot or total count is promised. A page is capped at limit records and 1 MiB serialized JSON, whichever occurs first; it can contain fewer than limit even when more data exists. Use next_after until null. Vectors and payloads are deliberately omitted. Empty/end pages have items=[] and next_after=null. Listing does not build an index or modify storage.",
+        "parameters": [
+          {"name": "after", "in": "query", "schema": {"$ref": "#/components/schemas/Id"}},
+          {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 25}}
+        ],
+        "responses": {
+          "200": {"description": "Bounded page", "content": {"application/json": {"schema": {"type": "object", "required": ["items", "next_after"], "properties": {
+            "items": {"type": "array", "maxItems": 100, "items": {"type": "object", "required": ["id", "metadata"], "properties": {"id": {"$ref": "#/components/schemas/Id"}, "metadata": {"$ref": "#/components/schemas/Metadata"}}}},
+            "next_after": {"oneOf": [{"$ref": "#/components/schemas/Id"}, {"type": "null"}]}
+          }}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "422": {"$ref": "#/components/responses/InvalidInput"},
           "503": {"$ref": "#/components/responses/Unavailable"}
         }
       }
@@ -99,13 +128,45 @@
         }
       }
     },
+    "/v1/index/hnsw": {
+      "get": {
+        "summary": "Read readiness and mutation-buffer usage without building",
+        "description": "Point-in-time status for the REST default HNSW configuration, not a readiness reservation or latency guarantee. ready=true may include buffered writes; false means a nonempty ready-only query needs maintenance. Reopen/overflow lose readiness. Uses the serialized worker and can queue behind builds. Poisoned/closed owners return 503. Does not build or increment rebuild counters.",
+        "responses": {
+          "200": {"description": "Index status", "content": {"application/json": {"schema": {"type": "object", "required": ["ready", "buffered_ids", "buffer_vector_bytes", "max_buffer_ids", "max_buffer_vector_bytes", "config"], "properties": {
+            "ready": {"type": "boolean"},
+            "buffered_ids": {"type": "integer", "minimum": 0, "maximum": 256},
+            "buffer_vector_bytes": {"type": "integer", "minimum": 0, "maximum": 8388608},
+            "max_buffer_ids": {"const": 256}, "max_buffer_vector_bytes": {"const": 8388608},
+            "config": {"type": "object", "required": ["m", "ef_construction", "seed"], "properties": {"m": {"const": 16}, "ef_construction": {"const": 100}, "seed": {"const": 42}}}
+          }}}}},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "503": {"$ref": "#/components/responses/Unavailable"}
+        }
+      },
+      "post": {
+        "summary": "Explicitly rebuild the in-memory HNSW index",
+        "description": "Requires an empty JSON object. Synchronously builds m=16, ef_construction=100, seed=42 from current committed records and clears the mutation buffer. No database bytes change. Uses the same serialized worker and authentication as other operations; queries and writes can queue behind this build. Schedule during maintenance, not concurrently with latency-sensitive traffic. A disconnected client does not cancel an admitted build. Nothing is persisted; reopen still requires another build. No automatic background rebuild or latency bound is implied.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "maxProperties": 0}}}},
+        "responses": {
+          "204": {"description": "Index built from committed live records"},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "413": {"$ref": "#/components/responses/TooLarge"},
+          "415": {"$ref": "#/components/responses/MediaType"},
+          "422": {"$ref": "#/components/responses/InvalidInput"},
+          "503": {"$ref": "#/components/responses/Unavailable"}
+        }
+      }
+    },
     "/v1/search": {
       "post": {
-        "summary": "Exact (default) or explicitly approximate squared-L2 search",
+        "summary": "Exact (default), lazy approximate or ready-only approximate squared-L2 search",
         "description": "Both modes return candidates ordered by distance then ascending numeric ID. k=0 still validates query/filter. Exact mode filters eligible records first and returns min(k, eligible count). Optional filter is an AND array of at most 64 strict-type equality or inclusive numeric-range conditions; absent fields and mismatched types do not match. Empty filter matches all. Approximate mode rejects any non-null filter including []; no implicit fallback or post-filter. It uses in-memory HNSW (m=16, ef_construction=100, seed=42) plus an exact mutation buffer capped at 256 distinct IDs and 8 MiB of original/current vector bytes. Updated/deleted graph IDs are excluded from results, and live buffered records are scanned exactly. Overflow drops the graph; the next nonempty approximate query after overflow/reopen rebuilds synchronously. Returned count/recall are not guaranteed. ef_search defaults to max(100,min(k,live count)), must be 1..100000 and at least min(k,live count); it is rejected in exact mode. Internal width may include up to 256 extra buffered IDs. Distances accumulate in f64 and are exact for returned candidates. Payloads and metadata are fetched separately.",
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "required": ["vector", "k"], "properties": {"vector": {"$ref": "#/components/schemas/Vector"}, "k": {"type": "integer", "minimum": 0, "maximum": 10000}, "mode": {"type": "string", "enum": ["exact", "approximate"], "default": "exact"}, "ef_search": {"type": "integer", "minimum": 1, "maximum": 100000}, "filter": {"type": ["array", "null"], "maxItems": 64, "items": {"$ref": "#/components/schemas/Condition"}}}}}}},
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "required": ["vector", "k"], "properties": {"vector": {"$ref": "#/components/schemas/Vector"}, "k": {"type": "integer", "minimum": 0, "maximum": 10000}, "mode": {"type": "string", "enum": ["exact", "approximate", "approximate_ready"], "default": "exact", "description": "approximate_ready never builds on this query: missing index returns 409 index_not_ready. POST /v1/index/hnsw separately to build. Empty/k=0 queries validate but need no index. All approximate-mode filter, ef and recall rules apply; no exact fallback. Does not avoid time queued behind other work."}, "ef_search": {"type": "integer", "minimum": 1, "maximum": 100000}, "filter": {"type": ["array", "null"], "maxItems": 64, "items": {"$ref": "#/components/schemas/Condition"}}}}}}},
         "responses": {
           "200": {"description": "Nearest hits", "content": {"application/json": {"schema": {"type": "object", "required": ["hits"], "properties": {"hits": {"type": "array", "items": {"type": "object", "required": ["id", "distance"], "properties": {"id": {"$ref": "#/components/schemas/Id"}, "distance": {"type": "number", "minimum": 0}}}}}}}}},
+          "409": {"description": "index_not_ready in approximate_ready mode; explicitly build the index or choose another mode", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "400": {"$ref": "#/components/responses/BadRequest"},
           "413": {"$ref": "#/components/responses/TooLarge"},
           "401": {"$ref": "#/components/responses/Unauthorized"},

@@ -24,11 +24,14 @@ jobs:
       - run: cargo check --locked --no-default-features --lib
       - run: cargo test --locked --all-targets --all-features
       - run: python tests/benchmark_comparison.py
+      - run: python tests/native_campaign.py
       - run: cargo build --locked --release --bin vlite-bench
       - name: Verify filtered exact top-k benchmark
         run: cargo run --locked --release --bin vlite-bench -- --filter-every 10 1024 8 10 64 10 42
       - name: Measure exact/HNSW benchmark and process peak memory
         run: python tests/measure_benchmark.py target/release/vlite-bench${{ runner.os == 'Windows' && '.exe' || '' }} --ann 16 100 100 256 8 10 64 5 42
+      - name: Verify mixed-update campaign and measured peak memory
+        run: python benchmarks/native_campaign.py --binary target/release/vlite-bench${{ runner.os == 'Windows' && '.exe' || '' }} --records 300 --dimensions 8 --queries 10 --trials 1 --ef 32 --mixed-writes 32 --output native-campaign.json
 
   lint:
     runs-on: ubuntu-latest
@@ -62,3 +65,9 @@ jobs:
         run: python3 tests/rest_e2e.py
       - name: Verify authenticated HTTPS reverse proxy
         run: python3 tests/tls_e2e.py
+      - name: Install dashboard browser test dependencies
+        run: |
+          python3 -m pip install -r tests/requirements-dashboard.txt
+          python3 -m playwright install --with-deps chromium
+      - name: Verify dashboard with Chromium against Docker
+        run: python3 tests/dashboard_e2e.py

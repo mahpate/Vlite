@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VLite dashboard</title>
+  <link rel="stylesheet" href="/dashboard/style.css">
+  <script src="/dashboard/app.js" defer></script>
+</head>
+<body>
+<header><h1>VLite <span>testing dashboard</span></h1><p>Experimental single-file vector database. Same-origin REST testing; not a production monitoring system.</p></header>
+<main>
+  <section>
+    <h2>Connection</h2>
+    <form id="connection">
+      <label>Bearer token <input id="token" type="password" autocomplete="off" spellcheck="false"></label>
+      <p>Token stays in this page's memory only. Reloading this page or Disconnect clears it. Use HTTPS beyond loopback.</p>
+      <button type="submit">Connect / refresh</button><button id="disconnect" type="button">Disconnect</button>
+    </form>
+    <p id="status" role="status" aria-live="polite">Disconnected</p>
+    <pre id="overview" aria-label="Database overview"></pre>
+  </section>
+  <section>
+    <h2>Browse vectors</h2>
+    <p>Live pages in numeric ID order, not a snapshot. Each page contains IDs and typed metadata only; select an ID to load its vector and payload.</p>
+    <form id="browse-form">
+      <label>Page size <input id="page-size" type="number" min="1" max="100" value="25" required></label>
+      <button type="submit">First page / refresh</button><button id="next-page" type="button" disabled>Next page</button>
+    </form>
+    <p id="browse-status" role="status"></p>
+    <table id="vectors"><caption>Committed live records</caption><thead><tr><th>ID (select to inspect)</th><th>Typed metadata</th></tr></thead><tbody></tbody></table>
+  </section>
+  <section>
+    <h2>Vector CRUD</h2>
+    <p>Enter an ID or select it from Browse vectors. Put replaces vector, payload and all metadata.</p>
+    <form id="vector-form">
+      <label>ID (decimal u64) <input id="id" value="1" required inputmode="numeric" spellcheck="false"></label>
+      <label>Vector (JSON array) <textarea id="record-vector" rows="3">[1, 0, 0]</textarea></label>
+      <label>Payload (standard base64) <textarea id="payload" rows="2"></textarea></label>
+      <label>Typed metadata (JSON object) <textarea id="metadata" rows="4">{}</textarea></label>
+      <button type="submit">Put / replace</button><button id="get-vector" type="button">Get</button><button id="delete-vector" type="button">Delete</button>
+    </form>
+    <pre id="record" aria-label="Record result"></pre>
+  </section>
+  <section>
+    <h2>Search playground</h2>
+    <form id="search-form">
+      <label>Query vector (JSON array) <textarea id="query" rows="3">[1, 0, 0]</textarea></label>
+      <label>k <input id="k" type="number" value="10" min="0" max="10000" required></label>
+      <label>Mode <select id="mode"><option value="exact">Exact</option><option value="approximate">Approximate (may build synchronously)</option><option value="approximate_ready">Approximate ready-only (409 if unavailable)</option></select></label>
+      <label>Search ef (ANN only) <input id="ef" type="number" value="100" min="1" max="100000" disabled></label>
+      <label>Exact filter (JSON AND array) <textarea id="filter" rows="4">[]</textarea></label>
+      <p>Example: [{"op":"eq","field":"category","value":{"type":"string","value":"docs"}}]. Filters are exact-only; no silent post-filtering.</p>
+      <button type="submit">Search</button>
+    </form>
+    <table id="hits"><caption>Search results (squared L2 distance)</caption><thead><tr><th>ID</th><th>Distance</th></tr></thead><tbody></tbody></table>
+  </section>
+  <section>
+    <h2>Index maintenance</h2>
+    <p id="index-status" role="status">Index readiness not checked</p>
+    <button id="refresh-index" type="button">Refresh index status</button>
+    <p>Builds default HNSW from committed records. Blocks the single owner; schedule outside latency-sensitive traffic. Reopen/overflow loses readiness.</p>
+    <button id="build-index" type="button">Build HNSW</button>
+    <p id="build-result" role="status"></p>
+  </section>
+  <section class="wide">
+    <h2>Request inspector</h2>
+    <p>Latest request only. Authorization is never displayed. Latency includes browser/network/response parsing, not isolated engine time. No automatic retries.</p>
+    <pre id="inspector" aria-label="Request inspector"></pre>
+  </section>
+</main>
+<dialog id="confirmation">
+  <form method="dialog">
+    <h2>Confirm operation</h2><p id="confirmation-text"></p>
+    <button value="cancel">Cancel</button><button value="confirm">Confirm</button>
+  </form>
+</dialog>
+<footer><a href="/openapi.json">OpenAPI (requires bearer header)</a> &middot; Tokens and database contents are not stored in browser storage.</footer>
+</body>
+</html>

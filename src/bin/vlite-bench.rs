@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::hint::black_box;
-use std::io;
+use std::io::{self, Read};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 use vlite::{
@@ -9,7 +10,7 @@ use vlite::{
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
-const USAGE: &str = "usage: vlite-bench [--filter-every <N>] [--ann <m> <ef_construction> <ef_search>] [records=1000 dimensions=32 queries=100 batch_size=100 k=10 seed=42]; filtering and ANN are mutually exclusive";
+const USAGE: &str = "usage: vlite-bench [--vectors <file> --query-vectors <file>] [--mixed-writes <updates per query>] [--filter-every <N>] [--ann <m> <ef_construction> <ef_search>] [records=1000 dimensions=32 queries=100 batch_size=100 k=10 seed=42]; mixed writes require ANN; filtering and ANN are mutually exclusive";
 const MAX_DATA_BYTES: usize = 256 * 1024 * 1024;
 const MAX_DISTANCE_COMPONENTS: u64 = 500_000_000;
 
@@ -22,11 +23,47 @@ struct Config {
     seed: u64,
     ann: Option<(HnswConfig, usize)>,
     filter_every: Option<usize>,
+    input: Option<(PathBuf, PathBuf)>,
+    mixed_writes: usize,
 }
 
 impl Config {
     fn parse() -> Result<Self> {
         let mut args: Vec<_> = std::env::args().skip(1).collect();
+        let mut input_vectors = None;
+        let mut input_queries = None;
+        let mut mixed_writes = None;
+        while args.first().is_some_and(|arg| {
+            matches!(
+                arg.as_str(),
+                "--vectors" | "--query-vectors" | "--mixed-writes"
+            )
+        }) {
+            let flag = args[0].clone();
+            let value = args.get(1).ok_or(USAGE)?.clone();
+            match flag.as_str() {
+                "--vectors" if input_vectors.is_none() => {
+                    input_vectors = Some(PathBuf::from(value))
+                }
+                "--query-vectors" if input_queries.is_none() => {
+                    input_queries = Some(PathBuf::from(value));
+                }
+                "--mixed-writes" if mixed_writes.is_none() => {
+                    let count = value.parse::<usize>()?;
+                    if !(1..=256).contains(&count) {
+                        return Err("mixed writes must be between 1 and 256".into());
+                    }
+                    mixed_writes = Some(count);
+                }
+                _ => return Err("duplicate benchmark option".into()),
+            }
+            args.drain(..2);
+        }
+        let input = match (input_vectors, input_queries) {
+            (Some(vectors), Some(queries)) => Some((vectors, queries)),
+            (None, None) => None,
+            _ => return Err("both --vectors and --query-vectors are required".into()),
+        };
         let filter_every = if args.first().is_some_and(|arg| arg == "--filter-every") {
             let every = args.get(1).ok_or(USAGE)?.parse::<usize>()?;
             if every == 0 {
@@ -65,6 +102,9 @@ impl Config {
         if filter_every.is_some() && ann.is_some() {
             return Err("filtered approximate search is not supported".into());
         }
+        if mixed_writes.is_some() && ann.is_none() {
+            return Err("mixed writes require --ann".into());
+        }
         if args.len() > 6 {
             return Err(USAGE.into());
         }
@@ -92,10 +132,16 @@ impl Config {
         if !bounded {
             return Err(format!("invalid workload bounds; {USAGE}").into());
         }
+        let mixed_writes = mixed_writes.unwrap_or(0);
+        if queries * mixed_writes as u64 > 65_536
+            || mixed_writes as u64 * (16 + dimensions * 4) > MAX_BATCH_BYTES as u64
+        {
+            return Err("mixed workload exceeds 65536 updates or batch byte limit".into());
+        }
         let bytes = (records + queries)
             .checked_mul(dimensions)
             .and_then(|v| v.checked_mul(4));
-        let components = records
+        let components = (records + mixed_writes as u64)
             .checked_mul(dimensions)
             .and_then(|v| v.checked_mul(queries));
         if bytes.is_none_or(|n| n > MAX_DATA_BYTES as u64)
@@ -115,8 +161,71 @@ impl Config {
             seed,
             ann,
             filter_every,
+            input,
+            mixed_writes,
         })
     }
+}
+
+fn load_vectors(path: &PathBuf, count: usize, dimensions: usize) -> Result<Vec<Vec<f32>>> {
+    // Bound text input as well as decoded vectors before reading untrusted files.
+    let limit = (count * dimensions * 32 + count).min(64 * 1024 * 1024) as u64;
+    let mut text = String::new();
+    std::fs::File::open(path)?
+        .take(limit + 1)
+        .read_to_string(&mut text)?;
+    if text.len() as u64 > limit {
+        return Err("vector text input exceeds byte limit".into());
+    }
+    let mut result = Vec::with_capacity(count);
+    for line in text.lines() {
+        if result.len() == count {
+            return Err("vector text has too many rows".into());
+        }
+        let vector = line
+            .split_whitespace()
+            .take(dimensions + 1)
+            .map(str::parse::<f32>)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if vector.len() != dimensions || vector.iter().any(|value| !value.is_finite()) {
+            return Err(
+                "vector text requires exactly the configured finite components per row".into(),
+            );
+        }
+        result.push(vector);
+    }
+    if result.len() != count {
+        return Err("vector text row count differs from configured count".into());
+    }
+    Ok(result)
+}
+
+fn checksum(vectors: &[Vec<f32>]) -> u64 {
+    vectors
+        .iter()
+        .flatten()
+        .fold(0xcbf2_9ce4_8422_2325, |hash, value| {
+            value.to_bits().to_le_bytes().iter().fold(hash, |h, &byte| {
+                (h ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3)
+            })
+        })
+}
+
+fn ground_truth(dataset: &[Vec<f32>], query: &[f32]) -> Vec<(u64, f64)> {
+    let mut expected: Vec<_> = dataset
+        .iter()
+        .enumerate()
+        .map(|(id, vector)| {
+            let distance: f64 = vector
+                .iter()
+                .zip(query)
+                .map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2))
+                .sum();
+            (id as u64, distance)
+        })
+        .collect();
+    expected.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+    expected
 }
 
 // SplitMix64 with fixed-point components: reproducible across OSes and CPUs.
@@ -148,16 +257,19 @@ fn run() -> Result<()> {
     }
     let config = Config::parse()?;
     let mut state = config.seed;
-    let dataset = vectors(config.records, config.dimensions, &mut state);
-    let queries = vectors(config.queries, config.dimensions, &mut state);
-    let checksum = dataset
-        .iter()
-        .flatten()
-        .fold(0xcbf2_9ce4_8422_2325u64, |hash, value| {
-            value.to_bits().to_le_bytes().iter().fold(hash, |h, &byte| {
-                (h ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3)
-            })
-        });
+    let (mut dataset, queries) = if let Some((data, queries)) = &config.input {
+        (
+            load_vectors(data, config.records, config.dimensions)?,
+            load_vectors(queries, config.queries, config.dimensions)?,
+        )
+    } else {
+        (
+            vectors(config.records, config.dimensions, &mut state),
+            vectors(config.queries, config.dimensions, &mut state),
+        )
+    };
+    let dataset_checksum = checksum(&dataset);
+    let query_checksum = checksum(&queries);
     let parent = std::env::var_os("VLITE_BENCH_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or(std::env::current_dir()?);
@@ -223,19 +335,14 @@ fn run() -> Result<()> {
         let actual = black_box(db.search_filtered(black_box(query), config.k, &filter)?);
         times_ms.push(start.elapsed().as_secs_f64() * 1000.0);
         // The oracle works directly from the generated input, outside timing.
-        let mut expected: Vec<_> = dataset
-            .iter()
-            .enumerate()
-            .filter(|(id, _)| config.filter_every.is_none_or(|every| id % every == 0))
-            .map(|(id, vector)| {
-                let mut distance = 0.0f64;
-                for index in 0..config.dimensions {
-                    distance += (f64::from(vector[index]) - f64::from(query[index])).powi(2);
-                }
-                (id as u64, distance)
+        let expected: Vec<_> = ground_truth(&dataset, query)
+            .into_iter()
+            .filter(|(id, _)| {
+                config
+                    .filter_every
+                    .is_none_or(|every| (*id as usize).is_multiple_of(every))
             })
             .collect();
-        expected.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
         for (hit, &(id, distance)) in actual.iter().zip(&expected[..result_count]) {
             if hit.id != id || hit.distance != distance {
                 return Err(io::Error::other(
@@ -258,8 +365,29 @@ fn run() -> Result<()> {
         let build_ms = start.elapsed().as_secs_f64() * 1000.0;
         black_box(db.search_approximate(&queries[0], config.k, ef_search, index_config)?);
         let mut approximate_times = Vec::new();
+        let mut write_times = Vec::new();
         let mut recalled = 0;
-        for (query, exact) in queries.iter().zip(&truth) {
+        for (query_index, query) in queries.iter().enumerate() {
+            if config.mixed_writes > 0 {
+                let updates = vectors(config.mixed_writes, config.dimensions, &mut state);
+                let operations: Vec<_> = updates
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, vector)| Mutation::Put {
+                        id: ((query_index * config.mixed_writes + index) % config.records) as u64,
+                        vector,
+                        payload: Vec::new(),
+                    })
+                    .collect();
+                let start = Instant::now();
+                db.write_batch(&operations)?;
+                write_times.push(start.elapsed().as_secs_f64() * 1000.0);
+                for operation in operations {
+                    if let Mutation::Put { id, vector, .. } = operation {
+                        dataset[id as usize] = vector;
+                    }
+                }
+            }
             let start = Instant::now();
             let hits = black_box(db.search_approximate(
                 black_box(query),
@@ -268,6 +396,27 @@ fn run() -> Result<()> {
                 index_config,
             )?);
             approximate_times.push(start.elapsed().as_secs_f64() * 1000.0);
+            let expected = if config.mixed_writes > 0 {
+                let expected = ground_truth(&dataset, query);
+                let exact = db.search(query, config.k)?;
+                if exact.len() != config.k
+                    || exact
+                        .iter()
+                        .zip(&expected)
+                        .any(|(hit, &(id, distance))| hit.id != id || hit.distance != distance)
+                {
+                    return Err(
+                        "post-write exact search disagrees with current-state oracle".into(),
+                    );
+                }
+                expected
+            } else {
+                truth[query_index]
+                    .iter()
+                    .map(|hit| (hit.id, hit.distance))
+                    .collect()
+            };
+            let cutoff = expected[config.k - 1].1;
             let mut ids = std::collections::BTreeSet::new();
             for hit in &hits {
                 if !ids.insert(hit.id) || hit.id >= config.records as u64 {
@@ -282,7 +431,7 @@ fn run() -> Result<()> {
                 if hit.distance != expected {
                     return Err("approximate candidate distance is incorrect".into());
                 }
-                recalled += usize::from(exact.iter().any(|truth| truth.id == hit.id));
+                recalled += usize::from(hit.distance <= cutoff);
             }
             if hits.windows(2).any(|pair| {
                 pair[0]
@@ -294,9 +443,11 @@ fn run() -> Result<()> {
                 return Err("approximate results are not sorted".into());
             }
         }
+        let samples = format!("{approximate_times:?}");
+        let writes = format!("{write_times:?}");
         approximate_times.sort_by(f64::total_cmp);
         format!(
-            ",\"hnsw\":{{\"m\":{},\"ef_construction\":{},\"ef_search\":{},\"seed\":{},\"index_build_ms\":{:.6},\"query_p50_ms\":{:.6},\"query_p95_ms\":{:.6},\"recall_at_k\":{:.6}}}",
+            ",\"hnsw\":{{\"m\":{},\"ef_construction\":{},\"ef_search\":{},\"seed\":{},\"index_build_ms\":{:.6},\"query_p50_ms\":{:.6},\"query_p95_ms\":{:.6},\"query_p99_ms\":{:.6},\"recall_at_k\":{:.6},\"mixed_writes_per_query\":{},\"query_samples_ms\":{},\"write_batch_samples_ms\":{}}}",
             index_config.m,
             index_config.ef_construction,
             ef_search,
@@ -304,7 +455,11 @@ fn run() -> Result<()> {
             build_ms,
             percentile(&approximate_times, 50),
             percentile(&approximate_times, 95),
-            recalled as f64 / (config.queries * config.k) as f64
+            percentile(&approximate_times, 99),
+            recalled as f64 / (config.queries * config.k) as f64,
+            config.mixed_writes,
+            samples,
+            writes,
         )
     } else {
         String::new()
@@ -313,14 +468,16 @@ fn run() -> Result<()> {
         ",\"filter_every\":{every},\"eligible_records\":{eligible_records},\"returned_per_query\":{result_count}"
     ));
     db.close()?;
+    let final_file_bytes = std::fs::metadata(&path)?.len();
     directory.close()?;
+    let samples = format!("{times_ms:?}");
     times_ms.sort_by(f64::total_cmp);
     println!(
         concat!(
             "{{\"schema_version\":1,\"engine_version\":\"{}\",\"format_version\":{},\"os\":\"{}\",\"arch\":\"{}\",\"profile\":\"{}\",",
             "\"records\":{},\"dimensions\":{},\"queries\":{},\"batch_size\":{},\"k\":{},\"seed\":{},",
-            "\"dataset_checksum\":\"{:016x}\",\"ingest_seconds\":{:.9},\"ingest_vectors_per_second\":{:.3},",
-            "\"reopen_ms\":{:.6},\"query_p50_ms\":{:.6},\"query_p95_ms\":{:.6},",
+            "\"dataset_checksum\":\"{:016x}\",\"query_checksum\":\"{:016x}\",\"input\":\"{}\",\"ingest_seconds\":{:.9},\"ingest_vectors_per_second\":{:.3},",
+            "\"reopen_ms\":{:.6},\"query_p50_ms\":{:.6},\"query_p95_ms\":{:.6},\"query_p99_ms\":{:.6},\"query_samples_ms\":{},\"final_file_bytes\":{},",
             "\"file_bytes\":{},\"vector_data_bytes\":{},\"query_data_bytes\":{},\"process_peak_rss_bytes\":null,",
             "\"recall_at_k\":{:.6}{}{}}}"
         ),
@@ -339,12 +496,21 @@ fn run() -> Result<()> {
         config.batch_size,
         config.k,
         config.seed,
-        checksum,
+        dataset_checksum,
+        query_checksum,
+        if config.input.is_some() {
+            "external-f32-text"
+        } else {
+            "synthetic-splitmix64"
+        },
         ingest_seconds,
         config.records as f64 / ingest_seconds.max(f64::MIN_POSITIVE),
         reopen_ms,
         percentile(&times_ms, 50),
         percentile(&times_ms, 95),
+        percentile(&times_ms, 99),
+        samples,
+        final_file_bytes,
         file_bytes,
         config.records * config.dimensions * 4,
         config.queries * config.dimensions * 4,

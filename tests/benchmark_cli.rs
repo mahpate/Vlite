@@ -72,6 +72,12 @@ fn benchmark_rejects_invalid_or_unbounded_workloads_before_creating_files() {
         vec!["--filter-every"],
         vec!["--filter-every", "0"],
         vec!["--filter-every", "2", "--ann", "16", "100", "100"],
+        vec!["--mixed-writes", "0", "--ann", "16", "100", "100"],
+        vec!["--mixed-writes", "257", "--ann", "16", "100", "100"],
+        vec!["--mixed-writes", "1"],
+        vec!["--mixed-writes", "1", "--mixed-writes", "1"],
+        vec!["--vectors", "missing"],
+        vec!["--query-vectors", "missing"],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_vlite-bench"))
             .args(args)
@@ -82,6 +88,89 @@ fn benchmark_rejects_invalid_or_unbounded_workloads_before_creating_files() {
         assert!(String::from_utf8(output.stderr).unwrap().contains("FAIL:"));
     }
 
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn external_vectors_are_validated_and_used_without_publishing_paths() {
+    let directory = tempfile::tempdir().unwrap();
+    let data = directory.path().join("private-data.txt");
+    let queries = directory.path().join("private-queries.txt");
+    std::fs::write(&queries, "1 0\n0 1\n").unwrap();
+    let oversized = "0".repeat(300);
+    for (content, success) in [
+        ("1 0\n0 1\n-1 0\n", true),
+        ("1 0\n0 1\n", false),
+        ("1 0\n0 1\n-1 0\n0 0\n", false),
+        ("1\n0 1\n-1 0\n", false),
+        ("1 0 2\n0 1\n-1 0\n", false),
+        ("NaN 0\n0 1\n-1 0\n", false),
+        ("inf 0\n0 1\n-1 0\n", false),
+        ("garbage\n0 1\n-1 0\n", false),
+        (oversized.as_str(), false),
+    ] {
+        std::fs::write(&data, content).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_vlite-bench"))
+            .args(["--vectors"])
+            .arg(&data)
+            .arg("--query-vectors")
+            .arg(&queries)
+            .args(["3", "2", "2", "3", "2", "42"])
+            .env("VLITE_BENCH_DIR", directory.path())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.success(), success, "{output:?}");
+        if success {
+            let text = String::from_utf8(output.stdout).unwrap();
+            assert!(text.contains("\"input\":\"external-f32-text\""));
+            assert!(text.contains("\"recall_at_k\":1.000000"));
+            assert!(!text.contains("private-"));
+        }
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
+    }
+}
+
+#[cfg(feature = "server")]
+#[test]
+fn mixed_workload_reports_samples_growth_and_current_state_recall() {
+    let directory = tempfile::tempdir().unwrap();
+    // Cross the 256-ID threshold, then cycle IDs to exercise updates and rebuilds.
+    let output = Command::new(env!("CARGO_BIN_EXE_vlite-bench"))
+        .args([
+            "--mixed-writes",
+            "32",
+            "--ann",
+            "8",
+            "32",
+            "300",
+            "300",
+            "4",
+            "12",
+            "100",
+            "5",
+            "42",
+        ])
+        .env("VLITE_BENCH_DIR", directory.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["hnsw"]["mixed_writes_per_query"], 32);
+    assert_eq!(value["hnsw"]["recall_at_k"], 1.0);
+    assert!(value["final_file_bytes"].as_u64().unwrap() > value["file_bytes"].as_u64().unwrap());
+    for (object, field) in [
+        (&value, "query_samples_ms"),
+        (&value["hnsw"], "query_samples_ms"),
+        (&value["hnsw"], "write_batch_samples_ms"),
+    ] {
+        let samples = object[field].as_array().unwrap();
+        assert_eq!(samples.len(), 12);
+        assert!(
+            samples
+                .iter()
+                .all(|v| v.as_f64().unwrap().is_finite() && v.as_f64().unwrap() >= 0.0)
+        );
+    }
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
 }
 

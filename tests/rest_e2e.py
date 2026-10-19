@@ -109,6 +109,10 @@ def run():
         {"id": "18446744073709551615", "distance": 2.0},
     ]
     approximate = {"vector": [0, 1, 0], "k": 2, "mode": "approximate", "ef_search": 100}
+    no_build = dict(approximate, mode="approximate_ready")
+    assert request(port, "POST", "/v1/search", no_build, expected=409)["error"]["code"] == "index_not_ready"
+    request(port, "POST", "/v1/index/hnsw", {}, expected=204)
+    assert request(port, "POST", "/v1/search", no_build)["hits"][0]["id"] == "1"
     assert request(port, "POST", "/v1/search", approximate)["hits"][0]["id"] == "1"
     filtered = {"vector": [0, 1, 0], "k": 1, "filter": [
         {"op": "eq", "field": "category", "value": {"type": "string", "value": "docs"}}
@@ -133,6 +137,7 @@ def run():
     assert request(port, "GET", "/v1/vectors/18446744073709551615")["metadata"]["count"]["value"] == "9223372036854775807"
     assert request(port, "POST", "/v1/search", filtered)["hits"][0]["id"] == "18446744073709551615"
     assert request(port, "GET", "/v1/database")["records"] == 2
+    assert request(port, "POST", "/v1/search", no_build, expected=409)["error"]["code"] == "index_not_ready"
     assert request(port, "POST", "/v1/search", approximate)["hits"][0]["id"] == "1"
     request(port, "GET", "/v1/vectors/2", expected=404)
     assert request(port, "DELETE", "/v1/vectors/1")["deleted"] is True
@@ -170,7 +175,7 @@ def run():
     logs = compose("logs", "--no-color", "api").stdout
     assert TOKEN not in logs and "AP8=" not in logs and "9223372036854775807" not in logs
     assert '"event":"request"' in logs and '"request_id":' in logs, logs
-    print("PASS REST: authentication, metrics, redacted logs, CRUD, metadata, filters, backup/restore, restart persistence, SIGTERM")
+    print("PASS REST: authentication, metrics, explicit ANN build/ready queries, redacted logs, CRUD, metadata, filters, backup/restore, restart persistence, SIGTERM")
 
 
 if __name__ == "__main__":

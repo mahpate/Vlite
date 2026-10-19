@@ -11,8 +11,8 @@ use std::{
 use axum::{
     Json, Router,
     extract::{
-        DefaultBodyLimit, Path, State,
-        rejection::{JsonRejection, PathRejection},
+        DefaultBodyLimit, Path, Query, State,
+        rejection::{JsonRejection, PathRejection, QueryRejection},
     },
     http::{StatusCode, header},
     middleware::{self, Next},
@@ -141,7 +141,7 @@ pub fn router(service: Service) -> Router {
     configured_router(service, None)
 }
 
-/// Protects every route except process-only `/health` using one bearer token.
+/// Protects data routes with one bearer token; health and static dashboard assets are public.
 pub fn authenticated_router(service: Service, token: BearerToken) -> Router {
     configured_router(service, Some(token))
 }
@@ -150,12 +150,41 @@ fn configured_router(service: Service, token: Option<BearerToken>) -> Router {
     let observation = (service.clone(), token);
     Router::new()
         .route("/health", get(|| async { Json(json!({"status": "ok"})) }))
+        .route(
+            "/dashboard",
+            get(|| async {
+                dashboard_asset(
+                    "text/html; charset=utf-8",
+                    include_str!("dashboard/index.html"),
+                )
+            }),
+        )
+        .route(
+            "/dashboard/app.js",
+            get(|| async {
+                dashboard_asset(
+                    "text/javascript; charset=utf-8",
+                    include_str!("dashboard/app.js"),
+                )
+            }),
+        )
+        .route(
+            "/dashboard/style.css",
+            get(|| async {
+                dashboard_asset(
+                    "text/css; charset=utf-8",
+                    include_str!("dashboard/style.css"),
+                )
+            }),
+        )
         .route("/ready", get(ready))
         .route("/metrics", get(metrics))
         .route("/v1/database", get(info))
+        .route("/v1/vectors", get(list_vectors))
         .route("/v1/vectors/{id}", get(fetch).put(put).delete(delete))
         .route("/v1/batches", post(batch))
         .route("/v1/search", post(search))
+        .route("/v1/index/hnsw", get(index_status).post(build_index))
         .route(
             "/openapi.json",
             get(|| async {
@@ -179,6 +208,21 @@ fn configured_router(service: Service, token: Option<BearerToken>) -> Router {
         .with_state(service)
 }
 
+fn dashboard_asset(content_type: &'static str, content: &'static str) -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (
+                header::CONTENT_SECURITY_POLICY,
+                "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+            ),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::REFERRER_POLICY, "no-referrer"),
+        ],
+        content,
+    )
+}
+
 async fn observe(
     State((service, token)): State<(Service, Option<BearerToken>)>,
     request: axum::extract::Request,
@@ -199,18 +243,20 @@ async fn observe(
         "DELETE" => "DELETE",
         _ => "other",
     };
-    let authorized = request.uri().path() == "/health"
-        || token.as_ref().is_none_or(|token| {
-            let mut values = request.headers().get_all(header::AUTHORIZATION).iter();
-            let first = values.next();
-            values.next().is_none()
-                && first
-                    .and_then(|h| h.to_str().ok())
-                    .and_then(|h| h.split_once(' '))
-                    .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
-                    .map(|(_, value)| value)
-                    .is_some_and(|value| token.accepts(value))
-        });
+    let authorized = matches!(
+        request.uri().path(),
+        "/health" | "/dashboard" | "/dashboard/app.js" | "/dashboard/style.css"
+    ) || token.as_ref().is_none_or(|token| {
+        let mut values = request.headers().get_all(header::AUTHORIZATION).iter();
+        let first = values.next();
+        values.next().is_none()
+            && first
+                .and_then(|h| h.to_str().ok())
+                .and_then(|h| h.split_once(' '))
+                .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
+                .map(|(_, value)| value)
+                .is_some_and(|value| token.accepts(value))
+    });
     let mut response = if authorized {
         next.run(request).await
     } else {
@@ -341,6 +387,11 @@ fn unavailable() -> ApiError {
 impl From<Error> for ApiError {
     fn from(error: Error) -> Self {
         match error {
+            Error::IndexNotReady => Self::new(
+                StatusCode::CONFLICT,
+                "index_not_ready",
+                "HNSW index is not ready; POST /v1/index/hnsw during maintenance, or explicitly choose exact/lazy approximate search",
+            ),
             Error::DimensionMismatch { .. }
             | Error::InvalidDimensions(_)
             | Error::NonFiniteVector
@@ -405,6 +456,80 @@ fn path(input: Result<Path<String>, PathRejection>) -> Result<u64, ApiError> {
     let Path(text) = input
         .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, "invalid_id", error.body_text()))?;
     id(&text)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListVectors {
+    after: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn list_vectors(
+    State(service): State<Service>,
+    query: Result<Query<ListVectors>, QueryRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let Query(query) = query.map_err(|error| {
+        ApiError::new(StatusCode::BAD_REQUEST, "invalid_query", error.body_text())
+    })?;
+    let after = query.after.as_deref().map(id).transpose()?;
+    let limit = query.limit.unwrap_or(25);
+    if !(1..=100).contains(&limit) {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_input",
+            "limit must be 1..100",
+        ));
+    }
+    service
+        .run(move |db| {
+            db.ensure_healthy()?;
+            use std::ops::Bound::{Excluded, Unbounded};
+            let mut records = db
+                .records
+                .range((after.map_or(Unbounded, Excluded), Unbounded))
+                .peekable();
+            let mut items = Vec::with_capacity(limit);
+            // Reserve envelope space; even maximally escaped single-record metadata fits.
+            let mut bytes = 1024usize;
+            let mut last = None;
+            while let Some(&(&record_id, record)) = records.peek() {
+                if items.len() == limit {
+                    break;
+                }
+                let item = json!({"id":record_id.to_string(), "metadata":record.metadata});
+                let size = serde_json::to_vec(&item).map_err(internal)?.len() + 1;
+                if bytes + size > 1_048_576 {
+                    break;
+                }
+                bytes += size;
+                items.push(item);
+                last = Some(record_id);
+                records.next();
+            }
+            let next_after = if records.peek().is_some() {
+                last.map(|id| id.to_string())
+            } else {
+                None
+            };
+            Ok(Json(json!({"items":items, "next_after":next_after})))
+        })
+        .await
+}
+
+async fn index_status(State(service): State<Service>) -> Result<Json<Value>, ApiError> {
+    service.run(|db| {
+        db.ensure_healthy()?;
+        let config = crate::HnswConfig::default();
+        let ready = db.index.as_ref().is_some_and(|index| index.config == config);
+        let (buffered_ids, buffer_vector_bytes) = db.index.as_ref().map_or((0, 0), |index| index.buffer_usage());
+        Ok(Json(json!({
+            "ready":ready, "buffered_ids":buffered_ids, "buffer_vector_bytes":buffer_vector_bytes,
+            "max_buffer_ids":crate::MAX_HNSW_BUFFER_IDS,
+            "max_buffer_vector_bytes":crate::MAX_HNSW_BUFFER_VECTOR_BYTES,
+            "config":{"m":config.m, "ef_construction":config.ef_construction, "seed":config.seed},
+        })))
+    }).await
 }
 
 fn payload(text: &str) -> Result<Vec<u8>, ApiError> {
@@ -580,6 +705,7 @@ enum SearchMode {
     #[default]
     Exact,
     Approximate,
+    ApproximateReady,
 }
 
 impl TryFrom<String> for SearchMode {
@@ -589,7 +715,8 @@ impl TryFrom<String> for SearchMode {
         match value.as_str() {
             "exact" => Ok(Self::Exact),
             "approximate" => Ok(Self::Approximate),
-            _ => Err("mode must be exact or approximate"),
+            "approximate_ready" => Ok(Self::ApproximateReady),
+            _ => Err("mode must be exact, approximate or approximate_ready"),
         }
     }
 }
@@ -624,7 +751,7 @@ async fn search(
             "ef_search is only valid in approximate mode",
         ));
     }
-    if matches!(input.mode, SearchMode::Approximate) && input.filter.is_some() {
+    if !matches!(input.mode, SearchMode::Exact) && input.filter.is_some() {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_input",
@@ -648,6 +775,12 @@ async fn search(
                     input.ef_search.unwrap_or(100.max(input.k.min(db.len()))),
                     crate::HnswConfig::default(),
                 )?,
+                SearchMode::ApproximateReady => db.search_approximate_ready(
+                    &input.vector,
+                    input.k,
+                    input.ef_search.unwrap_or(100.max(input.k.min(db.len()))),
+                    crate::HnswConfig::default(),
+                )?,
             };
             if rebuilding && db.index.is_some() {
                 metrics.rebuilds.fetch_add(1, Ordering::Relaxed);
@@ -661,6 +794,35 @@ async fn search(
                 .map(|hit| json!({"id": hit.id.to_string(), "distance": hit.distance}))
                 .collect::<Vec<_>>();
             Ok(Json(json!({"hits": hits})))
+        })
+        .await
+}
+
+async fn build_index(
+    State(service): State<Service>,
+    input: Result<Json<Value>, JsonRejection>,
+) -> Result<StatusCode, ApiError> {
+    if !body(input)?
+        .as_object()
+        .is_some_and(|object| object.is_empty())
+    {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_input",
+            "index build requires an empty JSON object",
+        ));
+    }
+    let metrics = service.metrics.clone();
+    service
+        .run(move |db| {
+            let started = Instant::now();
+            db.build_hnsw(crate::HnswConfig::default())?;
+            metrics.rebuilds.fetch_add(1, Ordering::Relaxed);
+            metrics.rebuild_search_ns.fetch_add(
+                started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                Ordering::Relaxed,
+            );
+            Ok(StatusCode::NO_CONTENT)
         })
         .await
 }

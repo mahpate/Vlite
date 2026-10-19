@@ -1,15 +1,16 @@
 # VLite
 
-**An experimental single-file vector database for Rust applications.**
+**A single-file vector database for Rust applications.**
 
 VLite combines a custom append-only storage engine, durable atomic batches,
 typed metadata, exact similarity search, and optional in-memory HNSW search.
 Embed the Rust library directly or run the authenticated REST service in Docker.
-It is not a SQLite wrapper and does not require an external database.
+It uses its own storage format and does not require an external database.
 
-> **Status:** experimental. Correctness and recovery are prioritized over scale.
-> The live dataset resides in memory; the log is replayed on open. VLite is not
-> a distributed database or a substitute for a production-readiness assessment.
+> **Operating model:** the live dataset resides in memory, and the log is
+> replayed on open. One database owner serializes access to each file.
+> Size deployments for the full dataset and validate recovery and workload
+> requirements before production use.
 
 ## Capabilities
 
@@ -95,9 +96,35 @@ Invoke-RestMethod "$base/v1/search" -Headers $auth -Method Post -ContentType 'ap
 ```
 
 Use the same token value on the host where requests are sent; do not put tokens
-in URLs or commit them. `/health` is public; other routes require bearer
+in URLs or commit them. `/health` and the static dashboard assets are public;
+data, metrics and OpenAPI routes require bearer
 authentication. Native server usage supports token files/environment or an
 explicit loopback-only `--insecure-local` development mode.
+
+## Browser dashboard
+
+After starting the Docker API above, open **http://localhost:8080/dashboard**
+and paste the existing `.secrets/api-token` value into the connection field.
+No separate frontend container, Node service or network-hosted assets are needed.
+The native REST binary includes the same dashboard.
+
+The dashboard provides database information and metrics, paginated ID/metadata
+browsing, click-to-inspect vector CRUD, payload/typed metadata editing, exact filters, all three search modes,
+explicit HNSW builds, and a request/response inspector with browser-observed
+latency. Put/delete/build operations require confirmation. It is a testing/admin
+interface, not an embedding generator or production monitor.
+Put replaces the entire record; no undo or automatic retries are provided.
+
+Browse pages are capped at 100 records and 1 MiB JSON and omit vectors/payloads.
+They are live views, not stable snapshots. HNSW readiness and buffer usage are
+visible without attempting a search; refresh status after writes or builds.
+
+Tokens stay only in page memory (not browser storage, cookies or URLs); reload
+or Disconnect clears them. Requests use the same-origin bearer-protected API.
+The public page contains no database contents or credentials. Use the HTTPS
+overlay beyond loopback and treat the token as full read/write/admin access.
+The inspector displays record data, so do not share screenshots containing
+private vectors or payloads. Explicit builds still block the single owner.
 
 The binary serves plain HTTP. Use the supplied
 [HTTPS deployment](docs/REFERENCE.md#https-observability-and-releases) before
@@ -119,24 +146,33 @@ reopen, or changed index configuration causes a synchronous rebuild on the next
 nonempty ANN query. It is approximate: recall and a full k results are not
 guaranteed. Filters currently require exact mode.
 
+For latency-sensitive callers, `Database::search_approximate_ready` (REST
+`"mode":"approximate_ready"`) never builds an index during the query. Missing
+or invalidated indexes return `IndexNotReady` / HTTP 409 `index_not_ready`;
+there is no silent exact fallback. Schedule `build_hnsw` or authenticated
+`POST /v1/index/hnsw` with `{}` separately. Builds still block the single owner,
+so this separates maintenance from queries rather than providing a latency SLA.
+
 See [metadata and filters](docs/REFERENCE.md#typed-metadata-and-exact-filtered-search)
 and [HNSW behavior](docs/REFERENCE.md#optional-hnsw-search).
 
-## Performance and comparisons
+## Performance
 
 Performance numbers are workload-specific, not product rankings.
 
-- [Benchmark methodology and cross-database instructions](benchmarks/README.md)
+- [Benchmark methodology and reproducible runs](benchmarks/README.md)
 - [Published measurements and raw results](benchmarks/RESULTS.md)
 - [Native benchmark reference](docs/REFERENCE.md#reproducible-benchmark)
 
 The native benchmark verifies every exact query against an independent oracle.
-The cross-database harness compares **REST with REST**, using identical seeded
-vectors, filters, k, resource limits, warmups, and recall checks. Embedded
-zvec/FAISS comparisons belong in a separate in-process track; mixing their
-latency with network calls would be misleading. Real embeddings, concurrency,
-larger dimensions and datasets, recall targets, storage, and memory need their
-own measurements before making deployment decisions.
+It accepts external vector/query files and can measure durable mixed updates,
+ANN rebuild pauses, raw latency samples, measured file growth and whole-process
+peak memory through the native campaign runner.
+Measure embedded calls and REST requests separately; mixing in-process latency
+with network calls would be misleading. Use identical inputs, resource limits,
+warmups and correctness checks when comparing runs. Real embeddings,
+concurrency, larger dimensions and datasets, recall targets, storage, and memory
+need their own measurements before making deployment decisions.
 
 ## Data safety and maintenance
 
@@ -173,20 +209,54 @@ python3 tests/rest_e2e.py
 python3 tests/tls_e2e.py
 ```
 
+Browser acceptance tests additionally need Playwright on the Docker execution
+host (WSL when Docker lives there). Use a virtual environment, then:
+
+```text
+python3 -m pip install -r tests/requirements-dashboard.txt
+python3 -m playwright install --with-deps chromium
+python3 tests/dashboard_e2e.py
+```
+
+This creates an isolated Docker database/container, exercises the UI with real
+Chromium, removes the test container and retains its explicitly named data
+volume. The runtime image itself needs neither Python nor a browser.
+
 CI covers Windows, Linux, and macOS on Rust minimum/stable, plus Linux Docker
 REST persistence and verified HTTPS. Docker on a Windows/macOS host still
 executes Linux code; it does not replace native filesystem testing. ARM release
 publication is configured but not yet exercised.
 
-The tag-triggered release workflow builds native archives/checksums and
-multi-architecture container images, with acceptance gates. No published
-release or GHCR image is implied by the presence of that workflow.
+## Stable release criteria
 
-## Design references
+The current package version is **0.1.0**. A stable release requires a verified
+compatibility and operational baseline, not just a version or wording change:
 
-VLite learns from separation of authoritative storage and rebuildable indexes,
-including [zvec](https://github.com/alibaba/zvec)'s staged-index/optimization
-model. Its storage format and Rust engine are independent implementations;
-no zvec code is copied and no file-format compatibility is claimed.
-Any future source reuse requires review of upstream licensing and notices.
+1. **Freeze the supported contracts:** document the Rust API, REST/OpenAPI
+   behavior, file-format compatibility, migration rules and support matrix.
+   Define which changes require a major version increment.
+2. **Pass release gates on the exact candidate:** run native minimum/stable Rust
+   checks on Windows, Linux and macOS, plus Docker REST, HTTPS and browser
+   acceptance. Verify each advertised image architecture before supporting it.
+3. **Exercise recovery and upgrades:** verify acknowledged writes across
+   restarts, interrupted-write and corruption handling, backup/restore,
+   migration and rollback using retained compatibility fixtures.
+4. **Set measured deployment limits:** run representative datasets and sustained
+   mixed workloads; record latency tails, recall, memory, startup/replay time
+   and file growth. Include index-buffer overflow and explicit rebuilds.
+5. **Resolve distribution and security readiness:** select a license, review
+   dependencies and authentication/deployment configuration, and document
+   supported versions and vulnerability reporting.
+6. **Publish an immutable release:** update `Cargo.toml` and `Cargo.lock`
+   together, record release notes and known limits, then tag the approved
+   commit as `v<package-version>`. Use `v1.0.0` once the stable contracts above
+   are satisfied; pin deployed images by digest.
+
+The existing tag-triggered workflow builds native archives/checksums and
+multi-architecture container images, with acceptance gates. A manual workflow
+run can validate a candidate without publishing it. No published release or
+registry image is implied by the presence of that workflow.
+
+## License
+
 This repository does not currently grant a license for redistribution.

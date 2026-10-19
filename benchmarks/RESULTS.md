@@ -5,6 +5,72 @@ See [methodology and reproduction](README.md) before interpreting the numbers.
 
 No zvec, Milvus, Weaviate, FAISS or other unmeasured engine results are inferred.
 
+## Native 384-dimensional mixed-update profiling, October 18, 2026 UTC
+
+This separate **VLite-only synthetic diagnostic** uses direct embedded calls,
+not REST. It must not be ranked against the HTTP measurements below.
+[Raw campaign and all child samples](results/native-384-mixed.json).
+
+Windows 11 x86_64, Intel Xeon Platinum 8370C at 2.80 GHz, release binary,
+1,024 vectors x 384 dimensions, 30 queries, k=10, seed 42, m=16, construction
+ef=100, three fresh-database trials per configuration. Shared host, no CPU
+pinning or imposed process resource limits. Higher dimension is not proof of
+real-embedding representativeness: these remain seeded uniform vectors.
+
+All latencies are milliseconds. Values are medians of trial-level percentiles;
+recall is the minimum of the three trial means. The target is 0.99 in **every**
+trial. Mixed rows commit 16 replacement vectors before each ANN query and
+include the buffer-overflow rebuild in ANN timing.
+
+| Updates/query | Search ef | ANN p50 | ANN p95 | ANN p99 | Minimum recall@10 | Target met |
+|---|---|---|---|---|---|---|
+| 0 | 32 | 0.3949 | 0.4791 | 0.5286 | 0.846667 | No |
+| 0 | 100 | 0.6403 | 0.7173 | 0.8515 | 0.996667 | Yes |
+| 16 | 32 | 0.9103 | 1.1620 | 1753.4897 | 0.993333 | Yes |
+| 16 | 100 | 0.9392 | 1.0910 | 1721.8457 | 1.000000 | Yes |
+
+**Finding:** low-ef static ANN looks faster but misses the recall target.
+Static exact-scan p50 was approximately 0.51 ms, so static ANN at ef=100 did
+not beat exact scanning at this size. Mixed-workload recall is higher partly
+because buffered vectors are scanned exactly; this is not evidence that
+updates improve the graph. Exact timings in each child precede mutations and
+are not timed post-write baselines.
+
+Every mixed trial's slowest query was query 17: the 17th batch crosses the
+256-distinct-ID buffer limit and triggers a synchronous full rebuild. Initial
+build medians were 1.71-1.75 seconds, consistent with the observed pause.
+There are only 30 queries per trial, so nearest-rank p99 is the maximum sample,
+not a statistically stable production p99. Do not hide this pause behind p50,
+or claim the mutation buffer eliminates rebuild costs.
+
+Median OS-measured whole-child peak RSS was 8,863,744-8,912,896 bytes for static
+runs and 9,621,504-9,662,464 bytes for mixed runs. These are total high-water
+marks including input generation, database, oracle and graph, **not marginal
+index/buffer RAM**. The logical database file grew from 1,589,852 to 2,336,372
+bytes after 480 replacements in 30 durable batches: 746,520 bytes of log growth.
+Static runs had no log growth. Filesystem allocation/compaction were not measured.
+Each write batch and query sample is retained separately in the raw report.
+
+Reproduction from this checkout:
+
+```powershell
+cargo build --locked --release --bin vlite-bench
+python benchmarks\native_campaign.py --binary target\release\vlite-bench.exe --records 1024 --dimensions 384 --queries 30 --trials 3 --ef 32 100 --mixed-writes 16 --recall-target 0.99 --output native-384.json
+```
+
+The run's base commit is `61180befc1903491d6b3e0fe8b410bf6d2125f93`
+with `source_dirty=true` for the new benchmark implementation. Exact benchmark/
+engine/runner source-byte hashes and the binary SHA-256 are in the report.
+Binary SHA-256:
+`20f5babe764f9b2368aaf49125ce678aafe5298a75953983a9e17b12158e63f3`.
+The report is copied without modifying measured samples.
+
+This establishes a rebuild-tail bottleneck, not a CPU-stack attribution to
+distance computation or allocations. No real-embedding, concurrent, Linux
+native, zvec, or larger-scale performance result is implied. The
+[benchmark guide](README.md#native-profiling-real-vectors-and-mixed-updates)
+documents external input support and measurement boundaries.
+
 ## VLite vs Qdrant: authenticated REST, October 18, 2026 UTC
 
 **Scope:** synthetic development-host comparison, not a production capacity

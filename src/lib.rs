@@ -43,6 +43,7 @@ pub enum Error {
     BatchRequiresUpgrade,
     InvalidHnswConfig,
     InvalidEfSearch,
+    IndexNotReady,
     InvalidMetadata(&'static str),
     InvalidFilter(&'static str),
     MetadataRequiresUpgrade,
@@ -98,6 +99,10 @@ impl fmt::Display for Error {
             Self::InvalidEfSearch => write!(
                 f,
                 "ef_search must be 1..={MAX_EF_SEARCH} and at least min(k, live records)"
+            ),
+            Self::IndexNotReady => write!(
+                f,
+                "HNSW index is not ready for this configuration; call build_hnsw explicitly"
             ),
             Self::InvalidMetadata(reason) => write!(f, "invalid metadata: {reason}"),
             Self::InvalidFilter(reason) => write!(f, "invalid filter: {reason}"),
@@ -599,12 +604,7 @@ impl Database {
         ef_search: usize,
         config: HnswConfig,
     ) -> Result<Vec<SearchHit>> {
-        self.ensure_healthy()?;
-        self.validate_vector(query)?;
-        config.validate()?;
-        if !(1..=MAX_EF_SEARCH).contains(&ef_search) || ef_search < k.min(self.records.len()) {
-            return Err(Error::InvalidEfSearch);
-        }
+        self.validate_hnsw_query(query, k, ef_search, config)?;
         if k == 0 || self.records.is_empty() {
             return Ok(Vec::new());
         }
@@ -620,6 +620,47 @@ impl Database {
             .as_ref()
             .expect("built index")
             .search(query, k, ef_search, &self.records))
+    }
+
+    /// Searches an existing matching HNSW index without building one.
+    ///
+    /// Returns `IndexNotReady` after reopen, buffer overflow, or a configuration
+    /// mismatch. Call `build_hnsw` separately during a maintenance window.
+    /// Buffered updates remain visible. Empty/k=0 queries validate inputs but
+    /// need no index. This avoids rebuild work, not traversal or queue latency.
+    pub fn search_approximate_ready(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef_search: usize,
+        config: HnswConfig,
+    ) -> Result<Vec<SearchHit>> {
+        self.validate_hnsw_query(query, k, ef_search, config)?;
+        if k == 0 || self.records.is_empty() {
+            return Ok(Vec::new());
+        }
+        let index = self
+            .index
+            .as_ref()
+            .filter(|index| index.config == config)
+            .ok_or(Error::IndexNotReady)?;
+        Ok(index.search(query, k, ef_search, &self.records))
+    }
+
+    fn validate_hnsw_query(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef_search: usize,
+        config: HnswConfig,
+    ) -> Result<()> {
+        self.ensure_healthy()?;
+        self.validate_vector(query)?;
+        config.validate()?;
+        if !(1..=MAX_EF_SEARCH).contains(&ef_search) || ef_search < k.min(self.records.len()) {
+            return Err(Error::InvalidEfSearch);
+        }
+        Ok(())
     }
 
     /// Exact squared-L2 nearest neighbors, ordered by distance then ascending ID.
@@ -743,6 +784,10 @@ mod tests {
         assert_eq!(db.index.as_ref().unwrap().buffer_usage(), (0, 0));
         assert!(matches!(
             db.search_approximate(&[0.0], 1, 100, HnswConfig::default()),
+            Err(Error::Poisoned)
+        ));
+        assert!(matches!(
+            db.search_approximate_ready(&[0.0], 1, 100, HnswConfig::default()),
             Err(Error::Poisoned)
         ));
     }

@@ -176,13 +176,51 @@ Native listening defaults to `127.0.0.1:8080`. Override with
 `--bind 127.0.0.1:9000` (numeric IP/port; IPv6 uses `[::1]:9000`).
 Non-loopback binding requires explicit `--allow-remote` **and authentication**.
 `--insecure-local` never allows a non-loopback bind, even with `--allow-remote`.
-All routes except `/health` require `Authorization: Bearer TOKEN`; missing,
+Data, metrics and OpenAPI routes require `Authorization: Bearer TOKEN`; missing,
 wrong or duplicate authorization headers return 401 with `WWW-Authenticate:
 Bearer`. One token grants full read/write/metrics access; there are no roles,
-per-client quotas, browser/CORS support, or built-in TLS. Use HTTPS through a
+per-client quotas, cross-origin/CORS support, or built-in TLS. Use HTTPS through a
 trusted proxy for any non-loopback traffic. The embedding library's `router`
 function is explicitly unauthenticated for local/in-process use;
 `authenticated_router` with a validated `BearerToken` is the network-safe option.
+
+The browser dashboard is bundled into the REST binary at `/dashboard`; its HTML,
+`/dashboard/app.js` and `/dashboard/style.css` are public static assets with no
+credentials or database contents. All data requests still authenticate using
+the existing token entered into the page. The dashboard keeps that token in a
+closure in page memory, clears the entry field after connecting, and never
+writes browser storage/cookies or puts credentials in URLs/inspector output.
+Reload/Disconnect clears it. Browser extensions/password managers and host
+security remain outside this guarantee; never use an untrusted browser.
+
+The UI supports known-ID CRUD, base64 payloads, typed metadata, exact filters,
+exact/lazy-ANN/ready-only search, HNSW maintenance, overview metrics and a latest
+request inspector. Put/delete/build require a confirmation dialog. Client
+validation supplements, not replaces, authoritative server validation.
+Untrusted record contents are rendered with text nodes, not HTML. Assets are
+same-origin with a restrictive CSP, no third-party CDN or frontend runtime.
+Browse pages use `GET /v1/vectors?limit=25&after=123`, with ascending numeric IDs,
+typed metadata only and a strict 1..100 page-size range. `after` is an exclusive
+canonical u64 bound; omit it for the first page (including ID 0). Responses
+contain `items` and `next_after` (string cursor or null). Follow `next_after`,
+not page length: a 1 MiB serialized JSON cap may shorten a page. Vectors and
+payloads are omitted until click-to-inspect loads the existing record endpoint.
+No snapshot isolation spans requests: inserts at/below the cursor can be missed,
+and records deleted or updated between requests reflect current live state.
+Refreshing the first page starts a new traversal. No offset scan, total-count
+promise, listing filter, export or backup semantics are implied.
+
+`GET /v1/index/hnsw` returns a point-in-time `ready` boolean for the default
+REST configuration, buffer counts/bytes, capacity limits and configuration.
+It does not build, mutate storage or increment rebuild counters. Poisoned or
+closed owners fail with 503. The dashboard refreshes this on connect/build,
+marks it stale after its own writes and offers manual refresh. External writes
+can invalidate readiness immediately afterward; it is not a reservation.
+Inspector latency includes browser/network/parsing, not isolated engine CPU.
+Results may contain private data; screenshots/inspection should be handled
+accordingly. Builds use the same serialized worker and can block other requests.
+Failures are shown without automatic retry; a lost mutation response may be
+indeterminate. The dashboard does not provide roles, undo, backups or recovery.
 
 For persistent Docker deployment, the opt-in service publishes only to the
 host's loopback address and uses its own named volume, separate from smoke data:
@@ -558,6 +596,42 @@ exhaustive matches must be updated.
 
 ## Optional HNSW search
 
+### Explicit maintenance and no-rebuild queries
+
+Use `Database::search_approximate_ready(&query, k, ef_search, config)` when the
+caller must not initiate graph construction. It takes a shared reference and
+returns `Error::IndexNotReady` if a nonempty query needs an absent or differently
+configured index. It never silently falls back to exact search or changes an
+existing graph. Input validation, mutation-buffer visibility, exact candidate
+distances and approximate recall rules are identical to lazy search.
+Empty-database and k=0 queries still validate but need no graph.
+
+Call `build_hnsw(config)` explicitly in a maintenance window. The REST equivalent
+uses the fixed default construction parameters:
+
+```powershell
+Invoke-RestMethod "$base/v1/index/hnsw" -Headers $auth -Method Post -ContentType 'application/json' -Body '{}'
+Invoke-RestMethod "$base/v1/search" -Headers $auth -Method Post -ContentType 'application/json' -Body '{"vector":[0.9,0.1,0],"k":5,"mode":"approximate_ready","ef_search":100}'
+```
+
+The build route accepts **only an empty JSON object**, requires the same token,
+and returns 204 when complete. Missing indexes produce HTTP 409 with code
+`index_not_ready` in ready mode; choose maintenance or an explicitly different
+search mode rather than blindly retrying. Writes can invalidate an index again
+after a successful build. Reopen always loses the graph. Exact search remains
+available without graph construction. No storage format or database bytes change.
+
+Both explicit builds and successful lazy rebuilds increment
+`hnsw_rebuilds_total`. `hnsw_rebuild_and_search_seconds_total` accumulates explicit
+build duration plus lazy build-and-triggering-query duration; it is not uniformly
+isolated build time. Ready queries and readiness errors do not increment these
+counters. Explicit builds use the existing serialized worker: requests may queue
+behind maintenance and admitted builds finish even if the client disconnects.
+This prevents query-triggered builds, **not queue latency, allocation cost or
+background work**. There is still no background builder or latency guarantee.
+
+### Existing lazy mode
+
 `Database::search` stays exact. `search_approximate` explicitly opts into a
 deterministic hierarchical navigable small-world graph with bounded
 per-layer degree, greedy upper-layer descent and beam search at the base.
@@ -634,6 +708,14 @@ query is checked against an independent brute-force calculation on the original
 generated vectors **outside** the measured query time. Incorrect results make
 the benchmark fail rather than print successful metrics.
 
+Optional `--vectors <file> --query-vectors <file>` loads bounded finite f32
+text rows instead of generating inputs. `--mixed-writes N --ann ...` commits
+N existing-ID replacements before every approximate query, verifies against
+the current dataset and retains rebuild pauses in query samples. Place these
+flags before the filtering/ANN flags. See the
+[native campaign guide](../benchmarks/README.md#native-profiling-real-vectors-and-mixed-updates)
+for format, bounds, repeated trials, recall targets and measured memory scope.
+
 Prefix `--filter-every N` to benchmark exact metadata filtering, selecting IDs
 divisible by positive N (approximately 1/N of the dataset). It writes boolean
 metadata for every vector, filters before ranking, and verifies eligible hits
@@ -676,8 +758,9 @@ can leave temporary benchmark data; cleanup is then an explicit user decision.
 
 Output is one JSON object with schema version 1, engine/file-format versions, OS/architecture,
 debug/release profile, all inputs, hexadecimal dataset checksum, ingestion seconds and
-vectors/second, reopen milliseconds, nearest-rank query p50/p95 milliseconds,
-database bytes, source/query vector-data byte counts and recall@k. With the
+vectors/second, reopen milliseconds, nearest-rank query p50/p95/p99 milliseconds,
+raw query samples, initial/final logical database bytes, decoded dataset/query
+checksums, source/query vector-data byte counts and recall@k. With the
 current exact engine, recall@k must be 1.0; this is a correctness check, **not**
 an ANN performance claim. Distances and tied IDs must also match the oracle.
 `process_peak_rss_bytes` is explicitly `null`: vector-data counts are not

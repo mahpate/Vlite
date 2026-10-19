@@ -122,6 +122,69 @@ all supporting services and total resource allocation, not just the query node.
 Do not borrow marketing numbers from upstream benchmark pages for our table.
 No external engine numbers are published here until its adapter has actually run.
 
+## Native profiling, real vectors and mixed updates
+
+Build `cargo build --locked --release --bin vlite-bench`, then run from a source
+checkout (the campaign records Git provenance):
+
+```powershell
+python benchmarks\native_campaign.py --binary target\release\vlite-bench.exe --records 1024 --dimensions 384 --queries 30 --trials 3 --ef 32 100 --mixed-writes 16 --recall-target 0.99 --output native-384.json
+```
+
+On Linux/macOS use `python3` and `target/release/vlite-bench`. Each independent
+release child creates and removes its own database. Static and mixed modes
+alternate order between trials; ef values run in the listed order. The report
+preserves every child's raw samples, source hashes/dirty state, binary SHA-256,
+host information, and per-trial summary. Output files are never overwritten.
+Failed children produce `status=failed`, not a successful partial campaign.
+CPU/memory are **not** container-limited or pinned in this native track.
+
+Each child measures ingestion, reopen, initial exact query latency, explicit
+HNSW build time, and ANN query latency. Mixed mode commits a batch of N
+replacement vectors before **each** ANN query, cycling existing IDs; vectors
+come from the seeded generator, not the queries. Write latency includes durable
+batch sync and is recorded separately. ANN latency includes any synchronous
+rebuild triggered by buffer overflow. Independent ground truth and an exact
+engine query check the current post-write dataset outside ANN timing.
+This is sequential update/query interleaving, **not concurrent readers/writers**,
+and does not benchmark deletion, insertion, or the REST server.
+
+ANN recall is tie-aware at the exact kth distance. The declared recall target
+is satisfied only if every trial's mean recall meets it. Different workloads
+cannot be ranked together even if both satisfy the target: buffered exact
+scanning can raise mixed-workload recall. No setting is selected by latency
+alone. With only 30 queries, nearest-rank p99 is the maximum sample; this exposes
+rebuild pauses but is not a stable production tail estimate.
+
+`process_peak_rss_bytes` is an OS-measured **whole child** high-water mark,
+including generation, dataset, database, exact oracle, graph, mutation buffer
+and all phases. It is not incremental graph RAM or query-only memory.
+`file_bytes` and `final_file_bytes` are measured logical database lengths,
+not allocated filesystem blocks or total storage cost. Raw write/query samples
+allow phase-level diagnosis; these are **not CPU stack profiles** of traversal,
+distance functions or allocation. Use a platform CPU profiler before making
+low-level optimization claims.
+
+For licensed/public or user-owned embeddings, export two UTF-8 text files:
+one vector per line, whitespace-separated finite f32 components, no header,
+IDs or blank lines. Dataset/query row counts and dimensions must exactly match
+the positional arguments. Inputs are bounded to 64 MiB per text file (and at
+most 32 bytes per expected component plus row separators); existing decoded
+vector/oracle bounds still apply. Input is validated before database creation.
+Keep original input-file SHA-256, model/version, normalization, license and
+train/query split with your experiment; VLite reports decoded dataset/query
+FNV-1a checksums for continuity, not cryptographic provenance.
+
+```powershell
+target\release\vlite-bench.exe --vectors documents.txt --query-vectors queries.txt --ann 16 100 100 1000 384 100 100 10 42
+```
+
+External-input flags and `--mixed-writes` precede `--filter-every`/`--ann`.
+Do not publish private embeddings. The included campaign uses synthetic data;
+support for loading real vectors does **not** mean a real-embedding campaign
+has been executed. Large datasets require a separately validated faster oracle;
+the bounded native tool is not a million-vector production load generator.
+
 ## Publishing results
 
 Commit raw complete JSON under `benchmarks/results/` and summarize in
