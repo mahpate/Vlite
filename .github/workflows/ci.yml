@@ -74,6 +74,22 @@ jobs:
       - run: npm --prefix clients/javascript ci --ignore-scripts
       - run: npm --prefix clients/javascript test
       - run: npm --prefix clients/javascript run typecheck
+      - run: npm --prefix bindings/node ci --ignore-scripts
+      - run: npm --prefix bindings/node run build
+      - run: npm --prefix bindings/node test
+      - run: npm --prefix bindings/node run typecheck
+      - run: node bindings/node/pack.mjs node-packages
+      - name: Verify offline installed Node package
+        shell: python
+        run: |
+          import pathlib, subprocess
+          packages = list(pathlib.Path("node-packages").glob("*.tgz"))
+          assert len(packages) == 1
+          subprocess.run(["node", "tests/node_package.mjs", str(packages[0])], check=True)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: embedded-node-${{ runner.os }}-${{ runner.arch }}
+          path: node-packages/*
       - run: cargo build --locked --features server --bin vlite-server
       - run: python tests/clients_e2e.py target/debug/vlite-server${{ runner.os == 'Windows' && '.exe' || '' }}
 
@@ -91,6 +107,13 @@ jobs:
         with:
           name: embedded-wheel-manylinux-x86_64
           path: manylinux-wheels/*.whl
+
+  node-linux-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Verify embedded Node package in clean offline runtime
+        run: docker build --file bindings/node/Dockerfile --target artifacts --output type=local,dest=node-linux-packages .
 
   lint:
     runs-on: ubuntu-latest

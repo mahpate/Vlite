@@ -1,10 +1,12 @@
 # VLite
 
-**A single-file vector database for Rust applications.**
+**A single-file vector database for your applications, embedded or self-hosted.**
 
 VLite combines a custom append-only storage engine, durable atomic batches,
 typed metadata, exact similarity search, and optional in-memory HNSW search.
-Embed the Rust library directly or run the authenticated REST service in Docker.
+Use it in-process through native language bindings, embed the Rust library
+directly, or connect to the authenticated REST service from any HTTP-capable
+language.
 It uses its own storage format and does not require an external database.
 
 > **Operating model:** the live dataset resides in memory, and the log is
@@ -34,6 +36,71 @@ VLite is licensed under the MIT License; see
 replication, multi-reader handle, encryption at rest, or approximate metadata
 filtering.
 See the [technical reference](docs/REFERENCE.md) for contracts and limits.
+
+## Choose how to use VLite
+
+- **Python, embedded:** install a matching `vlite-embedded` platform wheel and
+  open a `.vlite` file directly. No Rust, Docker or server is needed at runtime.
+- **Node.js/TypeScript, embedded:** install a matching `@vlite/embedded` native
+  tarball and call the engine asynchronously through a worker-backed addon.
+  No HTTP service or Rust toolchain is needed at runtime.
+- **Rust, embedded:** use the core crate directly in your application.
+- **C/C++ and other native consumers:** use the versioned C ABI/shared library.
+  Other languages can build bindings through their FFI; a dedicated SDK is
+  not automatically provided for every language.
+- **Python and TypeScript/JavaScript, REST:** use the first-party clients to
+  connect to a self-hosted VLite service.
+- **Other languages, REST:** call the documented HTTP/JSON API or generate a
+  client from [OpenAPI](src/openapi.json). First-party C#, Java and Go SDKs
+  are not currently included.
+
+The engine's implementation language does not restrict the language of a
+consuming application. Embedded packages must match their host's OS,
+architecture and native runtime; REST clients only need network access to the
+service. Embedded access still permits one owner per database file. Use the
+service when multiple applications need to share one database.
+
+Packages are currently installed from this checkout or built artifacts, not
+public package registries. See the [embedded deployment guide](bindings/README.md)
+and [REST client guide](clients/README.md) for installation and examples.
+
+## Quick start: embedded Python
+
+Install a matching platform wheel from the build artifacts with
+`python -m pip install <wheel-path>`, then:
+
+```python
+from vlite_embedded import NativeLibrary
+
+native = NativeLibrary()
+with native.create("documents.vlite", dimensions=3) as db:
+    db.put("10", [1, 0, 0])
+    print(db.search([0.9, 0.1, 0], 5))
+```
+
+Use `native.open("documents.vlite")` to reopen; creation never overwrites.
+See [Python installation and native platform support](bindings/README.md).
+
+## Quick start: embedded Node.js / TypeScript
+
+Install a matching native tarball using `npm install <tarball-path>`, then:
+
+```javascript
+import { NativeLibrary } from "@vlite/embedded";
+
+const native = new NativeLibrary();
+try {
+  const db = await native.create("documents.vlite", 3);
+  await db.put("10", [1, 0, 0]);
+  console.log(await db.search([0.9, 0.1, 0], 5));
+} finally {
+  await native.close(); // Drains accepted work and closes owned databases.
+}
+```
+
+These calls run native work in a dedicated worker thread. Node.js 22.9+ and
+a matching native package are required; this is not a browser/edge SDK.
+See [Node installation, TypeScript types and lifetime rules](bindings/node/README.md).
 
 ## Quick start: embedded Rust
 
@@ -106,8 +173,9 @@ explicit loopback-only `--insecure-local` development mode.
 ## Embedded deployment across languages
 
 Deploy VLite inside your application without a server using the native shared
-library and versioned C ABI. Python has an embedded ctypes binding; C/C++ uses
-the supplied header. Other languages can build bindings against the same ABI.
+library and versioned C ABI. Python has an embedded ctypes binding,
+Node.js/TypeScript has an asynchronous native addon, and C/C++ uses the supplied
+header. Other languages can build bindings against the same ABI.
 Build once for the target OS/architecture; Rust is not required at runtime.
 The database retains its single-owner file-locking and durability contracts.
 
@@ -118,6 +186,9 @@ builds and isolated installation checks are wired into CI/release workflows;
 packages have not yet been published to a registry.
 A dedicated audited manylinux wheel targets Linux x86_64/glibc 2.28+;
 host-native wheels remain available for Windows and macOS.
+The [embedded Node package](bindings/node/README.md) bundles its addon and
+native library in host-specific, checksummed tarballs. Its Linux build is
+host-specific, not covered by the Python wheel's manylinux certification.
 The embedded binding supports atomic writes and bounded multi-record reads;
 see [measured Python binding/batch performance](benchmarks/RESULTS.md#python-embedded-binding-and-batching-october-19-2026-utc).
 

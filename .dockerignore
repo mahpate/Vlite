@@ -18,3 +18,9 @@ bindings/python/*.egg-info/
 bindings/python/**/__pycache__/
 !bindings/build_wheel.py
 !bindings/manylinux.Dockerfile
+!bindings/node/
+!bindings/node/**
+bindings/node/node_modules/
+bindings/node/build/
+bindings/node/prebuilds/
+bindings/node/*.tgz

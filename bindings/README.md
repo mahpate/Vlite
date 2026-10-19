@@ -2,11 +2,12 @@
 
 VLite can run inside your application's process instead of as a REST service.
 The Rust engine is compiled to a native shared library with a C-compatible
-interface. Python uses the included ctypes binding; C/C++ can use the header
-directly. Other languages can bind the same three exported functions using
-P/Invoke, cgo, JNI/FFM, or their native FFI tooling. Those language-specific
-bindings are not implemented yet. The JavaScript package under `clients/`
-is still a REST client, not a native Node.js addon.
+interface. Python uses the included ctypes binding; Node.js/TypeScript uses a
+worker-backed N-API addon; C/C++ can use the header directly. Other languages
+can bind the same three exported functions using P/Invoke, cgo, JNI/FFM or
+their native FFI tooling. Dedicated C#, Go and Java bindings are not included.
+Use [the embedded Node package](node/README.md) for server-free JavaScript;
+the separate package under `clients/javascript` remains a REST client.
 
 ## Build once, deploy without Rust
 

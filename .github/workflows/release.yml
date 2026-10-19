@@ -21,6 +21,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -33,6 +36,18 @@ jobs:
       - run: python tests/embedded_e2e.py target/release/${{ runner.os == 'Windows' && 'vlite_ffi.dll' || runner.os == 'macOS' && 'libvlite_ffi.dylib' || 'libvlite_ffi.so' }}
       - run: python bindings/build_wheel.py --output embedded-wheels
       - run: python tests/embedded_wheel.py embedded-wheels
+      - run: npm --prefix bindings/node ci --ignore-scripts
+      - run: npm --prefix bindings/node run build
+      - run: npm --prefix bindings/node test
+      - run: npm --prefix bindings/node run typecheck
+      - run: node bindings/node/pack.mjs node-packages
+      - name: Verify offline installed Node package
+        shell: python
+        run: |
+          import pathlib, subprocess
+          packages = list(pathlib.Path("node-packages").glob("*.tgz"))
+          assert len(packages) == 1
+          subprocess.run(["node", "tests/node_package.mjs", str(packages[0])], check=True)
       - name: Package binaries, contract and documentation
         shell: python
         run: |
@@ -77,6 +92,9 @@ jobs:
               shutil.copy2(wheel, target)
               (output / (wheel.name + ".sha256")).write_text(
                   hashlib.sha256(target.read_bytes()).hexdigest() + "  " + wheel.name + "\n", encoding="ascii")
+          for package in pathlib.Path("node-packages").iterdir():
+              import shutil
+              shutil.copy2(package, output / package.name)
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ runner.os }}-${{ runner.arch }}

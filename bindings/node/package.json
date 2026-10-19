@@ -1,0 +1,18 @@
+{
+  "name": "@vlite/embedded",
+  "version": "0.1.0",
+  "description": "Worker-backed embedded VLite for Node.js",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "engines": { "node": ">=22.9" },
+  "exports": { ".": { "types": "./index.d.ts", "import": "./index.js" } },
+  "files": ["index.js", "index.d.ts", "worker.js", "prebuilds", "LICENSE", "README.md"],
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test test.mjs",
+    "typecheck": "tsc --noEmit --strict --module nodenext --target es2022 example.ts",
+    "install": "node -e \"\""
+  },
+  "devDependencies": { "node-gyp": "12.4.0", "typescript": "5.9.3" }
+}

@@ -8,3 +8,9 @@ clients/python/build/
 clients/python/dist/
 bindings/python/build/
 bindings/python/dist/
+bindings/node/node_modules/
+bindings/node/build/
+bindings/node/prebuilds/
+bindings/node/*.tgz
+/node-packages/
+/node-linux-packages/

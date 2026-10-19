@@ -3,7 +3,7 @@ name = "vlite"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
-description = "A small embedded single-file vector database"
+description = "A single-file vector database with embedded bindings and an optional REST service"
 license = "MIT"
 
 [workspace]
