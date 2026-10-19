@@ -325,6 +325,18 @@ This creates an isolated Docker database/container, exercises the UI with real
 Chromium, removes the test container and retains its explicitly named data
 volume. The runtime image itself needs neither Python nor a browser.
 
+The bounded reliability campaign runs with `cargo test --locked --test reliability`.
+Four fixed seeds compare mixed CRUD/atomic batches and exact search with an
+independent state model across reopen, backup and compaction. Subprocess tests
+forcibly terminate an owner after acknowledged writes and around a subsequent
+unacknowledged batch, checking acknowledged-data retention, batch atomicity,
+lock release and continued writes. Incomplete tails require an explicit
+backed-up repair in the test; normal open must not modify the file.
+The crash fixture is marked ignored because its parent invokes it explicitly.
+Kill timing does not guarantee every write boundary is hit; these process-crash
+checks complement byte-prefix recovery and sync-failure tests, not hardware
+power-loss certification.
+
 CI covers Windows, Linux, and macOS on Rust minimum/stable, plus Linux Docker
 REST persistence and verified HTTPS. Docker on a Windows/macOS host still
 executes Linux code; it does not replace native filesystem testing. ARM release
