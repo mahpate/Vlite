@@ -76,6 +76,22 @@ on your deployment baseline. macOS builds align the Rust deployment target with
 the Python build configuration. Cross-compilation is not supported by this
 builder; build and run installation checks on each target host.
 
+For **Linux x86_64 with glibc 2.28 or newer**, use the dedicated manylinux build
+instead of a host-specific wheel:
+
+```text
+docker build --file bindings/manylinux.Dockerfile --target artifacts --output type=local,dest=manylinux-wheels .
+```
+
+This builds with Rust 1.89 in the PyPA manylinux_2_28 image, runs `auditwheel
+repair` for that policy, inspects the result and tests isolated installation.
+CI and release gates also test the repaired wheel in a separate Debian Python
+3.11 container without network access. Only repaired wheels receive the
+`manylinux_2_28_x86_64` tag; ordinary host builds remain `linux_*`.
+This does not support musl/Alpine, glibc older than 2.28, or ARM64.
+Images use maintained upstream tags; record resolved digests for a particular
+release build rather than assuming byte-for-byte reproducibility.
+
 For advanced deployment, `NativeLibrary(absolute_path)` loads a separately
 supplied compatible library. Missing bundled libraries produce an explicit
 installation error rather than searching arbitrary directories or downloading

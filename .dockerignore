@@ -10,3 +10,11 @@
 !bindings/
 !bindings/c/
 !bindings/c/**
+!bindings/python/
+!bindings/python/**
+bindings/python/build/
+bindings/python/dist/
+bindings/python/*.egg-info/
+bindings/python/**/__pycache__/
+!bindings/build_wheel.py
+!bindings/manylinux.Dockerfile

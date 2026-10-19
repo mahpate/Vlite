@@ -12,6 +12,7 @@ import zipfile
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
+    parser.add_argument("--platform-tag", help="Require an audited platform tag in filename and WHEEL metadata")
     args = parser.parse_args()
     wheels = list(args.directory.glob("vlite_embedded-*.whl"))
     if len(wheels) != 1:
@@ -26,6 +27,9 @@ def main():
         metadata = bundle.read(next(path for path in names if path.endswith(".dist-info/WHEEL"))).decode()
         assert "Root-Is-Purelib: false" in metadata
         assert "Tag: py3-none-" in metadata and "Tag: py3-none-any" not in metadata
+        if args.platform_tag:
+            assert wheel.name.endswith("-" + args.platform_tag + ".whl")
+            assert f"Tag: py3-none-{args.platform_tag}\n" in metadata
     with tempfile.TemporaryDirectory(prefix="vlite-wheel-test-") as directory:
         directory = Path(directory)
         venv.EnvBuilder(with_pip=True).create(directory / "venv")

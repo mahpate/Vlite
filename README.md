@@ -116,6 +116,8 @@ Platform-specific Python wheels bundle the native library: install a matching
 wheel and use `NativeLibrary()` without supplying a DLL path. Native wheel
 builds and isolated installation checks are wired into CI/release workflows;
 packages have not yet been published to a registry.
+A dedicated audited manylinux wheel targets Linux x86_64/glibc 2.28+;
+host-native wheels remain available for Windows and macOS.
 The embedded binding supports atomic writes and bounded multi-record reads;
 see [measured Python binding/batch performance](benchmarks/RESULTS.md#python-embedded-binding-and-batching-october-19-2026-utc).
 

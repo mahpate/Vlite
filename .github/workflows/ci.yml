@@ -77,6 +77,21 @@ jobs:
       - run: cargo build --locked --features server --bin vlite-server
       - run: python tests/clients_e2e.py target/debug/vlite-server${{ runner.os == 'Windows' && '.exe' || '' }}
 
+  manylinux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build and audit glibc 2.28 x86_64 wheel
+        run: docker build --file bindings/manylinux.Dockerfile --target artifacts --output type=local,dest=manylinux-wheels .
+      - name: Verify installation in a separate Linux runtime
+        run: |
+          docker pull python:3.11-slim-bookworm
+          docker run --rm --network none --mount type=bind,source=${{ github.workspace }},target=/repo,readonly --workdir /repo python:3.11-slim-bookworm python tests/embedded_wheel.py manylinux-wheels --platform-tag manylinux_2_28_x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: embedded-wheel-manylinux-x86_64
+          path: manylinux-wheels/*.whl
+
   lint:
     runs-on: ubuntu-latest
     steps:
