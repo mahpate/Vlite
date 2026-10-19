@@ -48,6 +48,9 @@ and its normal native OS runtime, not Rust or a server. CI retains these wheels
 as artifacts and the release workflow includes them with checksums; no PyPI
 upload or published release is implied.
 
+For installation without a checkout or Rust toolchain, use the
+[versioned release packages and installation guide](../docs/INSTALL.md).
+
 ```python
 from vlite_embedded import NativeLibrary, EmbeddedError
 

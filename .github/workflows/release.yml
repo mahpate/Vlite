@@ -13,7 +13,68 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  identity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate candidate identity before building
+        shell: python
+        run: |
+          import json, os, pathlib, tomllib
+          version = tomllib.loads(pathlib.Path("Cargo.toml").read_text())["package"]["version"]
+          for name in ["clients/python/pyproject.toml", "bindings/python/pyproject.toml"]:
+              assert tomllib.loads(pathlib.Path(name).read_text())["project"]["version"] == version
+          for name in ["clients/javascript/package.json", "bindings/node/package.json"]:
+              assert json.loads(pathlib.Path(name).read_text())["version"] == version
+          if os.environ["GITHUB_REF"].startswith("refs/tags/"):
+              assert os.environ["GITHUB_REF_NAME"] == "v" + version, "tag must match all package versions"
+      - run: python tests/release_assets.py
+
+  clients:
+    needs: identity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+      - run: python -m unittest discover -s clients/python -p test_client.py
+      - run: python -m pip wheel --no-deps --wheel-dir dist ./clients/python
+      - name: Verify installed REST Python wheel
+        shell: python
+        run: |
+          import pathlib, subprocess, sys
+          wheels = list(pathlib.Path("dist").glob("vlite_client-*.whl"))
+          assert len(wheels) == 1
+          subprocess.run([sys.executable, "tests/client_wheel.py", str(wheels[0])], check=True)
+      - run: npm --prefix clients/javascript ci --ignore-scripts
+      - run: npm --prefix clients/javascript test
+      - run: npm --prefix clients/javascript run typecheck
+      - run: npm pack ./clients/javascript --ignore-scripts --pack-destination dist
+      - name: Checksum client packages
+        shell: python
+        run: |
+          import hashlib, pathlib
+          for path in pathlib.Path("dist").iterdir():
+              path.with_name(path.name + ".sha256").write_text(
+                  hashlib.sha256(path.read_bytes()).hexdigest() + "  " + path.name + "\n", encoding="ascii")
+      - name: Verify installed REST Node package
+        shell: python
+        run: |
+          import pathlib, subprocess
+          packages = list(pathlib.Path("dist").glob("*.tgz"))
+          assert len(packages) == 1
+          subprocess.run(["node", "tests/node_package.mjs", str(packages[0]), "--rest"], check=True)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-rest-clients
+          path: dist/*
+
   native:
+    needs: identity
     strategy:
       fail-fast: false
       matrix:
@@ -66,7 +127,7 @@ jobs:
                   bundle.write(pathlib.Path("target/release") / (name + suffix), name + suffix)
               for name in ["README.md", "LICENSE", "Cargo.toml", "Cargo.lock", "src/openapi.json",
                            "compose.yaml", "compose.tls.yaml", "deploy/Caddyfile", "Dockerfile",
-                           "docs/REFERENCE.md", "benchmarks/README.md", "benchmarks/RESULTS.md",
+                           "docs/REFERENCE.md", "docs/INSTALL.md", "benchmarks/README.md", "benchmarks/RESULTS.md",
                            "benchmarks/compare_rest.py", "benchmarks/native_campaign.py", "benchmarks/embedded.py",
                            "tests/measure_benchmark.py",
                            "clients/README.md", "clients/python/README.md",
@@ -101,6 +162,7 @@ jobs:
           path: dist/*
 
   manylinux:
+    needs: identity
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -123,6 +185,7 @@ jobs:
           path: manylinux-wheels/*
 
   image-test:
+    needs: identity
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -155,7 +218,7 @@ jobs:
 
   image-publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [native, image-test, manylinux]
+    needs: [native, image-test, manylinux, clients]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -224,16 +287,25 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v5
         with:
           pattern: native-*
           path: dist
           merge-multiple: true
+      - name: Verify all payload checksums and record source identity
+        shell: python
+        run: |
+          import os, pathlib, subprocess, sys, tomllib
+          version = tomllib.loads(pathlib.Path("Cargo.toml").read_text())["package"]["version"]
+          subprocess.run([sys.executable, "bindings/release_assets.py", "dist",
+                          "--version", version, "--commit", os.environ["GITHUB_SHA"]], check=True)
       - name: Publish release with digest-pinned image and native checksums
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE: ${{ needs.image-publish.outputs.name }}
           DIGEST: ${{ needs.image-publish.outputs.digest }}
         run: |
-          printf '%s\n\n%s\n' "Container: $IMAGE@$DIGEST" "Back up before upgrading. See the README migration and rollback procedure. No authentication bypass is enabled in this image." > release-notes.txt
-          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --title "VLite $GITHUB_REF_NAME" --notes-file release-notes.txt
+          printf '%s\n\n%s\n\n%s\n' "Container: $IMAGE@$DIGEST" "Download the matching SDK below. Installation and platform limits: https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/docs/INSTALL.md" "Verify SHA256SUMS before installing. Back up before upgrading; see the README migration and rollback procedure. Packages are not published to PyPI/npm. Checksums are integrity checks, not signatures." > release-notes.txt
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "VLite $GITHUB_REF_NAME" --notes-file release-notes.txt
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false

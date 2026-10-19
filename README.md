@@ -60,8 +60,9 @@ architecture and native runtime; REST clients only need network access to the
 service. Embedded access still permits one owner per database file. Use the
 service when multiple applications need to share one database.
 
-Packages are currently installed from this checkout or built artifacts, not
-public package registries. See the [embedded deployment guide](bindings/README.md)
+Use [versioned release assets and installation instructions](docs/INSTALL.md)
+for installation without cloning. Packages are not published to public package
+registries. See the [embedded deployment guide](bindings/README.md)
 and [REST client guide](clients/README.md) for installation and examples.
 
 ## Quick start: embedded Python

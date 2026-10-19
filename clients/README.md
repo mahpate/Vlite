@@ -4,8 +4,9 @@ First-party clients for Python 3.11+ and TypeScript/JavaScript (Node.js 22+).
 They call the existing REST service; they are not embedded database bindings.
 For server-free access, use the separate [Python/native bindings](../bindings/README.md)
 or [embedded Node.js/TypeScript addon](../bindings/node/README.md).
-Both use the MIT License. Packages are available from this checkout, not yet
-published to PyPI or npm.
+Both use the MIT License. Install the wheel or tarball from
+[GitHub release assets](../docs/INSTALL.md), or build from this checkout.
+Packages are not published to PyPI or npm.
 
 ## Python
 

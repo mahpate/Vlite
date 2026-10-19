@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 
 const tarball = resolve(process.argv[2]);
+const rest = process.argv[3] === "--rest";
 const checksum = readFileSync(tarball + ".sha256", "utf8").split(" ")[0];
 assert.equal(createHash("sha256").update(readFileSync(tarball)).digest("hex"), checksum);
 const directory = mkdtempSync(join(tmpdir(), "vlite-node-install-"));
@@ -18,15 +19,34 @@ try {
     { cwd: directory, encoding: "utf8", timeout: 120000 });
   if (install.error) throw install.error;
   assert.equal(install.status, 0, install.stderr);
-  const metadata = JSON.parse(readFileSync(join(directory, "node_modules", "@vlite", "embedded", "package.json")));
-  assert.deepEqual(metadata.os, [process.platform]);
-  assert.deepEqual(metadata.cpu, [process.arch]);
+  const packageName = rest ? "client" : "embedded";
+  const metadata = JSON.parse(readFileSync(join(directory, "node_modules", "@vlite", packageName, "package.json")));
+  if (!rest) {
+    assert.deepEqual(metadata.os, [process.platform]);
+    assert.deepEqual(metadata.cpu, [process.arch]);
+  }
   assert.equal(metadata.dependencies, undefined);
-  assert.equal(metadata.devDependencies, undefined);
-  const installed = join(directory, "node_modules", "@vlite", "embedded");
-  for (const name of ["LICENSE", "index.d.ts", "worker.js"]) assert.ok(existsSync(join(installed, name)), name);
-  assert.deepEqual(readdirSync(join(installed, "prebuilds")), [`${process.platform}-${process.arch}`]);
-  const code = `
+  if (!rest) assert.equal(metadata.devDependencies, undefined);
+  const installed = join(directory, "node_modules", "@vlite", packageName);
+  for (const name of ["LICENSE", "index.d.ts", "index.js"]) assert.ok(existsSync(join(installed, name)), name);
+  if (!rest) assert.deepEqual(readdirSync(join(installed, "prebuilds")), [`${process.platform}-${process.arch}`]);
+  const code = rest ? `
+import assert from "node:assert/strict";
+import { Client, VLiteError } from "@vlite/client";
+let called = false;
+globalThis.fetch = async (url, options) => {
+  assert.equal(url, "http://127.0.0.1:8080/v1/vectors/18446744073709551615");
+  assert.equal(options.method, "GET");
+  called = true;
+  return new Response(JSON.stringify({id:"18446744073709551615",vector:[1,0],payload_base64:"",metadata:{}}),
+    {headers:{"Content-Type":"application/json"}});
+};
+const record = await new Client("http://127.0.0.1:8080", "a".repeat(32)).get("18446744073709551615");
+assert.equal(record.id,"18446744073709551615");
+assert.ok(called);
+assert.equal(typeof VLiteError,"function");
+console.log("PASS offline installed REST Node package");
+` : `
 import assert from "node:assert/strict";
 import { NativeLibrary } from "@vlite/embedded";
 const native = new NativeLibrary();

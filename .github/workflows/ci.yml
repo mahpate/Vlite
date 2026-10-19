@@ -30,6 +30,7 @@ jobs:
       - run: python tests/native_campaign.py
       - run: python tests/embedded_benchmark.py
       - run: python tests/release_candidate.py
+      - run: python tests/release_assets.py
       - run: cargo build --locked --release --bin vlite-bench
       - name: Verify filtered exact top-k benchmark
         run: cargo run --locked --release --bin vlite-bench -- --filter-every 10 1024 8 10 64 10 42
