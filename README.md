@@ -103,6 +103,33 @@ data, metrics and OpenAPI routes require bearer
 authentication. Native server usage supports token files/environment or an
 explicit loopback-only `--insecure-local` development mode.
 
+## Embedded deployment across languages
+
+Deploy VLite inside your application without a server using the native shared
+library and versioned C ABI. Python has an embedded ctypes binding; C/C++ uses
+the supplied header. Other languages can build bindings against the same ABI.
+Build once for the target OS/architecture; Rust is not required at runtime.
+The database retains its single-owner file-locking and durability contracts.
+
+See [embedded installation, Python examples and the C ABI](bindings/README.md).
+Platform-specific Python wheels bundle the native library: install a matching
+wheel and use `NativeLibrary()` without supplying a DLL path. Native wheel
+builds and isolated installation checks are wired into CI/release workflows;
+packages have not yet been published to a registry.
+The embedded binding supports atomic writes and bounded multi-record reads;
+see [measured Python binding/batch performance](benchmarks/RESULTS.md#python-embedded-binding-and-batching-october-19-2026-utc).
+
+## Python and TypeScript/JavaScript REST clients
+
+First-party REST clients support vector CRUD, atomic batches, typed metadata,
+all search modes, cursor browsing, index maintenance and metrics. Python 3.11+
+uses the standard library; the Node.js 22+ ESM client includes TypeScript types
+and has no runtime dependencies. Both preserve full-width IDs as strings,
+expose structured errors and never automatically retry writes.
+
+See [client installation, examples and error handling](clients/README.md).
+Packages are currently installed from this checkout, not published registries.
+
 ## Browser dashboard
 
 After starting the Docker API above, open **http://localhost:8080/dashboard**

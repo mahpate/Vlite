@@ -9,9 +9,9 @@ pub const MAX_METADATA_BYTES: usize = 65_536;
 pub const MAX_FILTER_CONDITIONS: usize = 64;
 
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "server", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "json", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(
-    feature = "server",
+    feature = "json",
     serde(
         tag = "type",
         content = "value",
@@ -21,12 +21,12 @@ pub const MAX_FILTER_CONDITIONS: usize = 64;
 )]
 pub enum MetadataValue {
     String(String),
-    Integer(#[cfg_attr(feature = "server", serde(with = "integer_json"))] i64),
+    Integer(#[cfg_attr(feature = "json", serde(with = "integer_json"))] i64),
     Float(f64),
     Boolean(bool),
 }
 
-#[cfg(feature = "server")]
+#[cfg(feature = "json")]
 mod integer_json {
     use serde::{Deserialize, Deserializer, Serializer, de::Error};
     pub fn serialize<S: Serializer>(value: &i64, serializer: S) -> Result<S::Ok, S::Error> {
@@ -45,9 +45,9 @@ mod integer_json {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "server", derive(serde::Deserialize))]
+#[cfg_attr(feature = "json", derive(serde::Deserialize))]
 #[cfg_attr(
-    feature = "server",
+    feature = "json",
     serde(tag = "op", rename_all = "lowercase", deny_unknown_fields)
 )]
 pub enum Condition {

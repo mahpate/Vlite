@@ -1,0 +1,13 @@
+{
+  "name": "@vlite/client",
+  "version": "0.1.0",
+  "description": "Dependency-free VLite REST client for TypeScript and JavaScript",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=22" },
+  "exports": { ".": { "types": "./index.d.ts", "import": "./index.js" } },
+  "files": ["index.js", "index.d.ts", "LICENSE"],
+  "scripts": { "test": "node --test test.mjs", "typecheck": "tsc --noEmit --strict --module nodenext --target es2022 example.ts" },
+  "devDependencies": { "typescript": "5.9.3" },
+  "private": true
+}

@@ -6,9 +6,14 @@ rust-version = "1.89"
 description = "A small embedded single-file vector database"
 license = "MIT"
 
+[workspace]
+members = ["bindings/c"]
+resolver = "3"
+
 [features]
 default = []
-server = ["dep:axum", "dep:base64", "dep:serde", "dep:serde_json", "dep:tokio", "dep:subtle"]
+json = ["dep:serde", "dep:serde_json"]
+server = ["json", "dep:axum", "dep:base64", "dep:tokio", "dep:subtle"]
 
 [dependencies]
 axum = { version = "0.8", optional = true }

@@ -7,3 +7,6 @@
 !tests/**
 !examples/
 !examples/**
+!bindings/
+!bindings/c/
+!bindings/c/**

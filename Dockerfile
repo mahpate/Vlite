@@ -5,11 +5,13 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY tests ./tests
 COPY examples ./examples
-RUN cargo test --locked --all-targets --all-features \
-    && cargo build --locked --release --bins --all-features
+COPY bindings/c ./bindings/c
+RUN cargo test --locked --workspace --all-targets --all-features \
+    && cargo build --locked --release --bins --all-features \
+    && cargo build --locked --release -p vlite-ffi
 
 FROM build AS test
-CMD ["cargo", "test", "--locked", "--all-targets", "--all-features"]
+CMD ["cargo", "test", "--locked", "--workspace", "--all-targets", "--all-features"]
 
 FROM debian:bookworm-slim AS runtime
 RUN groupadd --gid 10001 vlite \

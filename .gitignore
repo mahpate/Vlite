@@ -1,3 +1,10 @@
 /target/
 *.vlite
 .secrets/
+**/__pycache__/
+**/*.egg-info/
+clients/javascript/node_modules/
+clients/python/build/
+clients/python/dist/
+bindings/python/build/
+bindings/python/dist/

@@ -25,31 +25,58 @@ jobs:
         with:
           components: clippy, rustfmt
       - run: cargo fmt --check
-      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
-      - run: cargo test --locked --all-targets --all-features
+      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --workspace --all-targets --all-features
       - run: cargo check --locked --no-default-features --lib
       - run: cargo build --locked --release --bins --all-features
+      - run: cargo build --locked --release -p vlite-ffi
+      - run: python tests/embedded_e2e.py target/release/${{ runner.os == 'Windows' && 'vlite_ffi.dll' || runner.os == 'macOS' && 'libvlite_ffi.dylib' || 'libvlite_ffi.so' }}
+      - run: python bindings/build_wheel.py --output embedded-wheels
+      - run: python tests/embedded_wheel.py embedded-wheels
       - name: Package binaries, contract and documentation
         shell: python
         run: |
-          import hashlib, os, pathlib, subprocess, zipfile
+          import hashlib, os, pathlib, subprocess, sys, zipfile
           host = subprocess.check_output(["rustc", "-vV"], text=True).split("host: ")[1].splitlines()[0]
           output = pathlib.Path("dist")
           output.mkdir()
           archive = output / f"vlite-{host}.zip"
           suffix = ".exe" if os.name == "nt" else ""
           with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
+              library = "vlite_ffi.dll" if os.name == "nt" else "libvlite_ffi.dylib" if sys.platform == "darwin" else "libvlite_ffi.so"
+              bundle.write(pathlib.Path("target/release") / library, library)
+              if os.name == "nt":
+                  bundle.write("target/release/vlite_ffi.dll.lib", "vlite_ffi.dll.lib")
               for name in ["vlite-server", "vlite-maintain", "vlite-bench", "vlite-smoke"]:
                   bundle.write(pathlib.Path("target/release") / (name + suffix), name + suffix)
               for name in ["README.md", "LICENSE", "Cargo.toml", "Cargo.lock", "src/openapi.json",
                            "compose.yaml", "compose.tls.yaml", "deploy/Caddyfile", "Dockerfile",
                            "docs/REFERENCE.md", "benchmarks/README.md", "benchmarks/RESULTS.md",
-                           "benchmarks/compare_rest.py", "benchmarks/native_campaign.py",
-                           "tests/measure_benchmark.py"] + [
+                           "benchmarks/compare_rest.py", "benchmarks/native_campaign.py", "benchmarks/embedded.py",
+                           "tests/measure_benchmark.py",
+                           "clients/README.md", "clients/python/README.md",
+                           "clients/python/pyproject.toml", "clients/python/LICENSE",
+                           "clients/python/vlite_client/__init__.py",
+                           "clients/python/vlite_client/py.typed",
+                           "clients/javascript/README.md", "clients/javascript/LICENSE",
+                           "clients/javascript/package.json", "clients/javascript/package-lock.json",
+                           "clients/javascript/index.js", "clients/javascript/index.d.ts",
+                           "clients/javascript/example.ts",
+                           "bindings/README.md", "bindings/c/vlite.h", "bindings/c/example.c",
+                           "bindings/python/README.md", "bindings/python/LICENSE",
+                           "bindings/python/pyproject.toml", "bindings/python/setup.py",
+                           "bindings/python/vlite_embedded/__init__.py",
+                           "bindings/python/vlite_embedded/py.typed"] + [
                                str(path) for path in sorted(pathlib.Path("benchmarks/results").glob("*.json"))]:
                   bundle.write(name)
           (output / (archive.name + ".sha256")).write_text(
               hashlib.sha256(archive.read_bytes()).hexdigest() + "  " + archive.name + "\n", encoding="ascii")
+          for wheel in pathlib.Path("embedded-wheels").glob("*.whl"):
+              import shutil
+              target = output / wheel.name
+              shutil.copy2(wheel, target)
+              (output / (wheel.name + ".sha256")).write_text(
+                  hashlib.sha256(target.read_bytes()).hexdigest() + "  " + wheel.name + "\n", encoding="ascii")
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ runner.os }}-${{ runner.arch }}

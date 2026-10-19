@@ -22,9 +22,14 @@ jobs:
         with:
           toolchain: ${{ matrix.toolchain }}
       - run: cargo check --locked --no-default-features --lib
-      - run: cargo test --locked --all-targets --all-features
+      - run: cargo test --locked --workspace --all-targets --all-features
+      - run: cargo build --locked -p vlite-ffi
+      - run: python tests/embedded_e2e.py target/debug/${{ runner.os == 'Windows' && 'vlite_ffi.dll' || runner.os == 'macOS' && 'libvlite_ffi.dylib' || 'libvlite_ffi.so' }}
+      - run: python benchmarks/embedded.py --library target/debug/${{ runner.os == 'Windows' && 'vlite_ffi.dll' || runner.os == 'macOS' && 'libvlite_ffi.dylib' || 'libvlite_ffi.so' }} --records 12 --dimensions 3 --trials 1 --read-passes 2 --output embedded-smoke.json
       - run: python tests/benchmark_comparison.py
       - run: python tests/native_campaign.py
+      - run: python tests/embedded_benchmark.py
+      - run: python tests/release_candidate.py
       - run: cargo build --locked --release --bin vlite-bench
       - name: Verify filtered exact top-k benchmark
         run: cargo run --locked --release --bin vlite-bench -- --filter-every 10 1024 8 10 64 10 42
@@ -32,6 +37,45 @@ jobs:
         run: python tests/measure_benchmark.py target/release/vlite-bench${{ runner.os == 'Windows' && '.exe' || '' }} --ann 16 100 100 256 8 10 64 5 42
       - name: Verify mixed-update campaign and measured peak memory
         run: python benchmarks/native_campaign.py --binary target/release/vlite-bench${{ runner.os == 'Windows' && '.exe' || '' }} --records 300 --dimensions 8 --queries 10 --trials 1 --ef 32 --mixed-writes 32 --output native-campaign.json
+
+  clients:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+      - uses: dtolnay/rust-toolchain@stable
+      - run: python -m unittest discover -s clients/python -p test_client.py
+      - run: python -m pip wheel --no-deps --wheel-dir client-dist ./clients/python
+      - run: python bindings/build_wheel.py --output embedded-wheels
+      - run: python tests/embedded_wheel.py embedded-wheels
+      - name: Assemble verified local candidate
+        shell: python
+        run: |
+          import pathlib, subprocess, sys
+          wheels = list(pathlib.Path("embedded-wheels").glob("*.whl"))
+          assert len(wheels) == 1
+          subprocess.run([sys.executable, "bindings/release_candidate.py", "--wheel",
+                          str(wheels[0]), "--output", "embedded-wheels/candidate.zip"], check=True)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: embedded-wheel-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            embedded-wheels/*.whl
+            embedded-wheels/candidate.zip
+      - run: npm --prefix clients/javascript ci --ignore-scripts
+      - run: npm --prefix clients/javascript test
+      - run: npm --prefix clients/javascript run typecheck
+      - run: cargo build --locked --features server --bin vlite-server
+      - run: python tests/clients_e2e.py target/debug/vlite-server${{ runner.os == 'Windows' && '.exe' || '' }}
 
   lint:
     runs-on: ubuntu-latest
@@ -41,7 +85,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: cargo fmt --check
-      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
   docker:
     runs-on: ubuntu-latest

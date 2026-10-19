@@ -5,6 +5,44 @@ See [methodology and reproduction](README.md) before interpreting the numbers.
 
 No zvec, Milvus, Weaviate, FAISS or other unmeasured engine results are inferred.
 
+## Python embedded binding and batching, October 19, 2026 UTC
+
+[Raw timings and binary/source hashes](results/embedded-python-windows.json).
+This is a **binding-level microbenchmark**, not REST or Rust-only engine
+throughput: Windows 11 x86_64, Python 3.15.0, release DLL, shared host with
+16 logical CPUs, 128 synthetic vectors x 32 dimensions, seed 42, three
+fresh-database trials, batches of 32 and ten warm read passes per trial.
+
+| Operation | Median records/second |
+|---|---:|
+| Individual durable puts | 286.32 |
+| Atomic batch puts (32 records/commit) | 7,560.28 |
+| Individual cached gets | 41,618.57 |
+| Bounded `get_many` (32 IDs/call) | 66,455.53 |
+
+Each timed write trial covers all 128 records; each timed read pass reads all
+128. Throughput is 128 divided by the median elapsed duration, not a sustained
+service rate. Write figures have three samples each; read figures have 30.
+Operation order alternates; input generation, correctness comparisons,
+creation/open/close and read warmups are excluded. Raw samples include host
+variation; no CPU pinning or resource isolation was imposed.
+
+**Interpretation:** batch writes amortize sync over 32 operations, changing the
+acknowledgment/atomicity granularity; this is not faster per-record durability.
+`get_many` reduces foreign-function calls and returns ordered records/nulls
+with strict count/response bounds. These small cached-read results do not
+establish benefits for large payloads, concurrent clients or cold storage.
+All returned contents and exact search were checked independently. No claim is
+made about search throughput, tail latency, physical power-loss durability or
+other databases.
+
+Reproduce using the matching platform library:
+
+```text
+cargo build --locked --release -p vlite-ffi
+python benchmarks/embedded.py --library target/release/vlite_ffi.dll --output embedded-results.json
+```
+
 ## Native 384-dimensional mixed-update profiling, October 18, 2026 UTC
 
 This separate **VLite-only synthetic diagnostic** uses direct embedded calls,

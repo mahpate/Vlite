@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "scope": "Python ctypes JSON ABI, single process/thread; cached reads; synchronous durable writes",
+  "limits": [
+    "batch_put amortizes sync across each atomic batch; it is not per-record acknowledgment",
+    "get_many reduces calls, but JSON encoding/copying can outweigh that benefit",
+    "No cross-product, concurrent-load, cold-read or power-loss claims",
+    "Timing excludes correctness comparisons, creation/open/close and warmups"
+  ],
+  "environment": {
+    "platform": "Windows-11-10.0.26300-SP0",
+    "machine": "AMD64",
+    "python": "3.15.0",
+    "cpu_count": 16
+  },
+  "library_sha256": "c84e08ef018526b9d720465a06f1095a9fbf843fc6e68a7407075fb76305cdf6",
+  "source_sha256": {
+    "Cargo.toml": "d808fa5858f43529b36faa01384adcfb3ca04bd668d1eac59ff9cb57471ae08d",
+    "Cargo.lock": "efc439a689f55e78b911e38bdd3a27b737e38a58f1efe2a768f892815e28b558",
+    "src/lib.rs": "e0ff50ee7946568ef2cb3c17d4fe479168998f195f9de19225ca7979e112f7d5",
+    "src/format.rs": "0b76a28b030b02ece26f09eb41c06888de14282453681ef07dadbadfaba2158f",
+    "src/hnsw.rs": "064918f795431d07761312dddd66d6ee545b21fdd2a6c0cf079cde7a294d770f",
+    "src/metadata.rs": "ab584ad98a2b3f96fae518253018d7db871c9da38ba3e9b7a40a7b2345b62a77",
+    "bindings/c/Cargo.toml": "6df40b46584a83eaeeef74e1c2590511065159ccd8e14df7714d492cb8ae6c64",
+    "bindings/c/src/lib.rs": "b15c4cee93e9da80f7e7844eec2a4dfa048c72f40533ce343e9c633701a8fc45",
+    "bindings/python/vlite_embedded/__init__.py": "7fb2dba9c09bc235ce7b6ddd056c4e15ed53df06208e71eaef7d00b5139ebf9d",
+    "benchmarks/embedded.py": "9db4bbbef8ea2f11f5f13901d7a3984c1e58caa5be0eac478919cb3e9717d04c"
+  },
+  "workload": {
+    "records": 128,
+    "dimensions": 32,
+    "batch_size": 32,
+    "trials": 3,
+    "read_passes": 10,
+    "seed": 42
+  },
+  "verified": true,
+  "measurements": {
+    "put": {
+      "elapsed_ns": [
+        452992600,
+        443381100,
+        447051900
+      ],
+      "median_records_per_second": 286.32022366977975
+    },
+    "batch_put": {
+      "elapsed_ns": [
+        24580900,
+        16370800,
+        16930600
+      ],
+      "median_records_per_second": 7560.2754775377125
+    },
+    "get": {
+      "elapsed_ns": [
+        2887900,
+        3133600,
+        4250600,
+        2569300,
+        2719100,
+        5220800,
+        3575400,
+        4790400,
+        4602100,
+        4885700,
+        3308200,
+        4251300,
+        4354900,
+        2642400,
+        2694600,
+        2650600,
+        4416200,
+        3093800,
+        3057300,
+        3206600,
+        2864400,
+        2680200,
+        2636900,
+        2828500,
+        2697100,
+        4992100,
+        2805600,
+        3811300,
+        2620400,
+        2541300
+      ],
+      "median_records_per_second": 41618.57228788347
+    },
+    "get_many": {
+      "elapsed_ns": [
+        2007300,
+        1826700,
+        1715700,
+        1913000,
+        1793600,
+        3265300,
+        1783800,
+        2741900,
+        3177500,
+        3476800,
+        2903500,
+        2623100,
+        3050300,
+        3062600,
+        1834400,
+        1719500,
+        1828100,
+        1682600,
+        1840900,
+        1927400,
+        2775600,
+        1924000,
+        2275500,
+        1924800,
+        2320200,
+        1910400,
+        2958200,
+        3065300,
+        1733200,
+        1642300
+      ],
+      "median_records_per_second": 66455.53190384715
+    }
+  }
+}
