@@ -8,7 +8,9 @@ package-registry name belongs to this project.
 ## Verify before installing
 
 Download `SHA256SUMS`, `release-manifest.json`, and the desired assets from the
-same release. The manifest records their sizes, hashes and source commit.
+same release. The manifest records their sizes, hashes and default source
+commit. An asset's own `source_commit` records its provenance when a corrective
+packaging build differs from the original tagged source.
 On Linux, check downloaded files with:
 
 ```sh
@@ -43,12 +45,13 @@ unless its build baseline matches your runtime. macOS wheels include the
 architecture and minimum OS version in their names; use a matching wheel.
 There is no universal, musl/Alpine or general ARM support claim.
 
-The initial v0.1.0 macOS Python wheel was withdrawn after final inspection
-found that an ARM64 library had been labelled `universal2`. Do not install that
-wheel from a cached download. Use a source build on macOS until a corrected
-versioned wheel is released; the macOS Node package and native archive are
-unaffected. Subsequent builds verify the actual Mach-O architecture against
-the wheel tag.
+The initial v0.1.0 `universal2` macOS Python wheel was withdrawn after final
+inspection found it contained only ARM64 code. Do not install cached copies.
+Use the corrected `macosx_11_0_arm64` wheel on Apple Silicon; Intel macOS
+requires a source build. The release manifest records the corrective wheel's
+packaging source commit. The macOS Node package and native archive are
+unaffected. Builds now verify the actual Mach-O architecture against the
+wheel tag.
 
 ```python
 from vlite_embedded import NativeLibrary

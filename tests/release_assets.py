@@ -27,6 +27,20 @@ class ReleaseAssets(unittest.TestCase):
             with self.assertRaises(ValueError):
                 assets.assemble(directory, "0.1.0", "a" * 40)
 
+    def test_corrective_asset_provenance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            payload = directory / "corrected.whl"
+            payload.write_bytes(b"wheel")
+            digest = hashlib.sha256(b"wheel").hexdigest()
+            payload.with_name(payload.name + ".sha256").write_text(f"{digest}  {payload.name}\n", encoding="ascii")
+            for overrides in [{"missing.whl": "b" * 40}, {payload.name: "short"}]:
+                with self.assertRaises(ValueError):
+                    assets.assemble(directory, "0.1.0", "a" * 40, overrides)
+            result = assets.assemble(directory, "0.1.0", "a" * 40, {payload.name: "b" * 40})
+            self.assertEqual(result["source_commit"], "a" * 40)
+            self.assertEqual(result["assets"][0]["source_commit"], "b" * 40)
+
     def test_reject_missing_or_altered_checksum(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)

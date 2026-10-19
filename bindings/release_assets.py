@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 
 
-def assemble(directory: Path, version: str, commit: str):
+def assemble(directory: Path, version: str, commit: str, asset_commits=None):
     if not re.fullmatch(r"\d+\.\d+\.\d+", version):
         raise ValueError("Expected a numeric release version")
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
@@ -15,6 +15,10 @@ def assemble(directory: Path, version: str, commit: str):
     payloads = [path for path in files if path.name.endswith((".zip", ".whl", ".tgz"))]
     if not payloads:
         raise ValueError("No release payloads")
+    asset_commits = asset_commits or {}
+    if any(name not in {path.name for path in payloads} or not re.fullmatch(r"[0-9a-f]{40}", sha)
+           for name, sha in asset_commits.items()):
+        raise ValueError("Asset source overrides must name a payload and a full source commit")
     expected = {path.name for path in payloads} | {path.name + ".sha256" for path in payloads}
     if {path.name for path in files} != expected or any(not path.is_file() for path in files):
         raise ValueError("Unexpected release files or missing sidecar checksums")
@@ -23,7 +27,10 @@ def assemble(directory: Path, version: str, commit: str):
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         if (directory / (path.name + ".sha256")).read_text(encoding="ascii") != f"{digest}  {path.name}\n":
             raise ValueError(f"Checksum mismatch: {path.name}")
-        assets.append({"name": path.name, "bytes": path.stat().st_size, "sha256": digest})
+        asset = {"name": path.name, "bytes": path.stat().st_size, "sha256": digest}
+        if path.name in asset_commits:
+            asset["source_commit"] = asset_commits[path.name]
+        assets.append(asset)
     manifest = {"version": version, "source_commit": commit, "assets": assets}
     with (directory / "release-manifest.json").open("x", encoding="utf-8", newline="\n") as output:
         json.dump(manifest, output, indent=2)
@@ -40,5 +47,13 @@ if __name__ == "__main__":
     parser.add_argument("directory", type=Path)
     parser.add_argument("--version", required=True)
     parser.add_argument("--commit", required=True)
+    parser.add_argument("--asset-source", action="append", default=[], metavar="FILENAME=COMMIT",
+                        help="Record exact provenance of a replacement built from a corrective commit")
     args = parser.parse_args()
-    assemble(args.directory, args.version, args.commit)
+    overrides = {}
+    for value in args.asset_source:
+        name, separator, sha = value.partition("=")
+        if not separator or name in overrides:
+            parser.error("Expected a unique FILENAME=COMMIT override")
+        overrides[name] = sha
+    assemble(args.directory, args.version, args.commit, overrides)
