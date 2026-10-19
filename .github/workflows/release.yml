@@ -29,6 +29,7 @@ jobs:
           if os.environ["GITHUB_REF"].startswith("refs/tags/"):
               assert os.environ["GITHUB_REF_NAME"] == "v" + version, "tag must match all package versions"
       - run: python tests/release_assets.py
+      - run: python tests/wheel_platform.py
 
   clients:
     needs: identity

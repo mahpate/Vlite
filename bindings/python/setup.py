@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 
 from setuptools import Distribution, setup
@@ -34,6 +35,15 @@ class NativeWheel(bdist_wheel):
 
     def get_tag(self):
         _, _, platform = super().get_tag()
+        if sys.platform == "darwin":
+            architectures = subprocess.check_output(
+                ["lipo", "-archs", os.environ["VLITE_NATIVE_LIBRARY"]], text=True).split()
+            if architectures not in (["arm64"], ["x86_64"]):
+                raise RuntimeError("Expected one host-native macOS architecture")
+            parts = platform.split("_")
+            if len(parts) < 4 or parts[0] != "macosx":
+                raise RuntimeError(f"Unexpected macOS platform tag: {platform}")
+            platform = "_".join(parts[:3]) + "_" + architectures[0]
         # ctypes uses the C ABI, not CPython's extension ABI.
         return "py3", "none", platform
 

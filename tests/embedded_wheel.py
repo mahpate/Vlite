@@ -5,8 +5,18 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import struct
 import venv
 import zipfile
+
+
+def verify_macos_architecture(binary, filename, metadata):
+    assert binary[:4] == bytes.fromhex("cffaedfe"), "Expected a thin 64-bit Mach-O library"
+    cpu = struct.unpack_from("<I", binary, 4)[0]
+    architecture = {0x0100000C: "arm64", 0x01000007: "x86_64"}.get(cpu)
+    assert architecture is not None, "Unsupported Mach-O architecture"
+    assert filename.endswith("_" + architecture + ".whl"), "Wheel architecture differs from native library"
+    assert f"_{architecture}\n" in metadata and "universal2" not in metadata
 
 
 def main():
@@ -27,6 +37,9 @@ def main():
         metadata = bundle.read(next(path for path in names if path.endswith(".dist-info/WHEEL"))).decode()
         assert "Root-Is-Purelib: false" in metadata
         assert "Tag: py3-none-" in metadata and "Tag: py3-none-any" not in metadata
+        if sys.platform == "darwin":
+            # A universal Python interpreter does not make a thin Rust library universal.
+            verify_macos_architecture(bundle.read("vlite_embedded/" + name), wheel.name, metadata)
         if args.platform_tag:
             assert wheel.name.endswith("-" + args.platform_tag + ".whl")
             assert f"Tag: py3-none-{args.platform_tag}\n" in metadata
