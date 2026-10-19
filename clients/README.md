@@ -77,6 +77,14 @@ Node.js is the tested runtime; browser clients are not a separate supported SDK.
 
 ## Supported operations and wire contracts
 
+Exact search accepts `metric: "squared_l2" | "cosine" | "inner_product"` in the
+request (Python uses a dictionary). Omission preserves squared L2.
+Cosine distance is 1 minus similarity; zero queries are rejected and zero-norm
+records excluded. Inner-product distances are negative dot products.
+Results always sort by increasing distance then numeric ID.
+Both approximate modes reject non-L2 metrics. This requires a v0.1.1 server;
+there is no automatic downgrade or retry against older servers.
+
 Python uses `list_vectors`, `index_status`, `build_index`; JavaScript uses
 `listVectors`, `indexStatus`, `buildIndex`. Both expose `health`, `ready`,
 `database`, `metrics`, `get`, `put`, `delete`, `batch` and `search`.

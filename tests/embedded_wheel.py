@@ -58,6 +58,8 @@ with tempfile.TemporaryDirectory() as directory:
     with native.create(path, 2) as db:
         db.put('18446744073709551615', [1,0], payload_base64='AP8=')
         assert db.search([1,0],1)[0]['id']=='18446744073709551615'
+        assert db.search([1,0],1,metric="cosine")[0]['distance']==0
+        assert db.search([1,0],1,metric="inner_product")[0]['distance']==-1
         assert db.get_many(['0','18446744073709551615'])[0] is None
         db.build_index()
         assert db.search_approximate_ready([1,0],1)[0]['distance']==0

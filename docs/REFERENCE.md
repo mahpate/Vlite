@@ -139,8 +139,37 @@ Search uses **squared Euclidean distance**, accumulating in `f64`. It scans ever
 live vector, retains the best k in a bounded max-heap, then orders those hits by
 distance with ties broken by ascending ID. `k=0` returns no
 hits; `k` above the live count returns every record. Query validation still applies
-when `k=0` or the database is empty. Normalize vectors yourself if your application
-needs normalized-vector semantics; no cosine or embedding-generation API exists.
+when `k=0` or the database is empty. Existing `search` and `search_filtered`
+retain squared-L2 defaults; explicit metrics are described below. No
+embedding-generation API is included.
+
+### Exact distance metrics (v0.1.1)
+
+`DistanceMetric::{SquaredL2, Cosine, InnerProduct}` is selected per query using
+`Database::search_with_metric(query, k, metric)` or
+`search_filtered_with_metric(query, k, conditions, metric)`.
+REST and ABI search requests accept `"metric":"squared_l2"`, `"cosine"` or
+`"inner_product"`; omission retains squared L2.
+
+All results use the existing `distance` field and sort ascending, then ascending
+numeric ID on ties. Cosine distance is `1 - clamp(dot/(norm(a)*norm(b)), -1, 1)`
+in [0,2]. Inner-product distance is negative dot product and may be negative;
+do not treat it as a nonnegative Euclidean distance. Accumulation is f64 over
+finite f32 components, without quantization, stored-vector normalization or a
+file-format change. Inner-product zero is canonical positive zero.
+
+Cosine rejects a zero-norm query with `ZeroNormQuery` (REST 422 `invalid_input`,
+ABI `invalid_input`), even for k=0 or an empty database. Zero-norm stored records
+are excluded, including after metadata filtering, so the result count can be
+less than min(k, live/filtered count). Nonzero subnormals remain valid. Dimension,
+nonfinite-vector and filter validation still applies before returning results.
+
+HNSW remains squared-L2 only. Both REST approximate modes reject non-L2 metrics
+with 422; native approximate APIs do not expose a metric parameter. There is no
+implicit fallback, index reuse under a different metric or approximate filtering.
+The default L2 cutoff optimization is not used for cosine/inner product.
+Older native binaries/servers do not understand explicit new metric fields;
+deploy the v0.1.1 SDK and native library/service together for metric queries.
 
 ## REST service (optional)
 
@@ -284,7 +313,7 @@ precision loss. Path IDs follow the same rule (no plus signs/leading zeros).
 Payloads use canonical padded standard base64; omitted payload means empty
 bytes, including replacement writes. Requests reject unknown fields. Vectors
 are finite f32 values with the database's exact dimensions. Search preserves
-the embedded squared-L2 ordering and tie rules, with k between 0 and 10,000.
+the embedded metric ordering and tie rules, with k between 0 and 10,000.
 `mode` defaults to `exact`. Explicit `"mode":"approximate"` enables the
 rebuildable HNSW index; optional `ef_search` defaults to `max(100,min(k,records))`
 and must be 1..100,000 and at least `min(k,records)`. It is rejected in exact

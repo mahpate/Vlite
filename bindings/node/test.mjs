@@ -27,6 +27,10 @@ test("embedded persistence, errors, ordering, binary data and shutdown", { timeo
       id: "18446744073709551615", vector: [1, 0, 0], payload_base64: "AP8=", metadata,
     });
     await assert.rejects(db.searchApproximateReady([1, 0, 0], 1), code("index_not_ready"));
+    assert.equal((await db.search([1, 0, 0], 1, { metric: "cosine" }))[0].distance, 0);
+    assert.equal((await db.search([1, 0, 0], 1, { metric: "inner_product" }))[0].distance, -1);
+    await assert.rejects(db.search([0, 0, 0], 0, { metric: "cosine" }), code("invalid_input"));
+    await assert.rejects(db.search([1, 0, 0], 1, { metric: "invalid" }), code("invalid_input"));
     await assert.rejects(db.put("1", [NaN, 0, 0]), TypeError);
     await assert.rejects(db.get("01"), code("invalid_input"));
     await assert.rejects(db.get("0"), code("not_found"));

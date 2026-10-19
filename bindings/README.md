@@ -192,7 +192,12 @@ follow the [existing JSON shapes](../src/openapi.json). Extra fields are errors.
 `get_many` preserves duplicates, uses null for missing IDs and fails the whole
 read with `response_too_large` if the response would exceed 8 MiB. It never
 truncates results or silently skips IDs. Python exposes it as `db.get_many(ids)`.
-Search is exact squared L2; approximate-ready search requires an explicit build
+Search is exact with optional `metric` (`squared_l2`, `cosine`, `inner_product`);
+the default remains squared L2. Python uses `db.search(vector, k, metric="cosine")`.
+Cosine rejects zero queries and excludes zero-norm records; inner product
+returns negative dot product. Lower distance is better for every metric.
+See [metric contracts](../docs/REFERENCE.md#exact-distance-metrics-v011).
+Approximate-ready search remains L2-only and requires an explicit build
 after reopen/overflow and never silently builds or falls back. Listing, REST
 metrics and lazy ANN are not currently exposed by the native binding.
 

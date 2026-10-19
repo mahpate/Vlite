@@ -55,6 +55,8 @@ try {
   await db.put("18446744073709551615", [1,0], {payload: Buffer.from([0,255])});
   assert.equal((await db.get("18446744073709551615")).payload_base64,"AP8=");
   assert.equal((await db.search([1,0],1))[0].distance,0);
+  assert.equal((await db.search([1,0],1,{metric:"cosine"}))[0].distance,0);
+  assert.equal((await db.search([1,0],1,{metric:"inner_product"}))[0].distance,-1);
   await db.close();
   const next = await native.open("installed.vlite");
   assert.equal((await next.info()).records,1);

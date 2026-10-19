@@ -553,7 +553,7 @@ checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
 
 [[package]]
 name = "vlite"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "base64",
@@ -568,7 +568,7 @@ dependencies = [
 
 [[package]]
 name = "vlite-ffi"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "serde",

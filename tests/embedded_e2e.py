@@ -42,6 +42,10 @@ def main():
         db.put("18446744073709551615", [1, 0, 0], payload_base64="AP8=", metadata=metadata)
         assert db.get("18446744073709551615")["metadata"] == metadata
         assert db.get("18446744073709551615")["payload_base64"] == "AP8="
+        assert db.search([1, 0, 0], 1, metric="cosine")[0]["distance"] == 0
+        assert db.search([1, 0, 0], 1, metric="inner_product")[0]["distance"] == -1
+        fails("invalid_input", lambda: db.search([0, 0, 0], 0, metric="cosine"))
+        fails("invalid_input", lambda: db.search([1, 0, 0], 1, metric="unsupported"))
         assert db.get_many(["18446744073709551615", "0", "18446744073709551615"]) == [
             db.get("18446744073709551615"), None, db.get("18446744073709551615")]
         assert db.get_many([]) == []

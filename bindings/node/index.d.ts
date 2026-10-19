@@ -13,6 +13,7 @@ export type BatchOperation =
   | { op: "put"; id: string; vector: number[]; payload_base64?: string; metadata?: Metadata }
   | { op: "delete"; id: string };
 export interface Hit { id: string; distance: number }
+export type DistanceMetric = "squared_l2" | "cosine" | "inner_product";
 export class EmbeddedError extends Error {
   code: string;
   constructor(code: string, message: string);
@@ -33,7 +34,7 @@ export class Database {
   put(id: string, vector: number[], options?: { payload?: Uint8Array; metadata?: Metadata }): Promise<void>;
   delete(id: string): Promise<boolean>;
   batch(operations: BatchOperation[]): Promise<void>;
-  search(vector: number[], k: number, options?: { filter?: Condition[] }): Promise<Hit[]>;
+  search(vector: number[], k: number, options?: { filter?: Condition[]; metric?: DistanceMetric }): Promise<Hit[]>;
   buildIndex(): Promise<void>;
   searchApproximateReady(vector: number[], k: number, options?: { efSearch?: number }): Promise<Hit[]>;
 }

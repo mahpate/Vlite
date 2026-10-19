@@ -15,6 +15,48 @@ async fn request(app: &Router, method: &str, path: &str, body: Value) -> (Status
     raw(app, method, path, &body.to_string(), true).await
 }
 
+#[tokio::test]
+async fn exact_metrics_and_unsupported_ann_combinations_are_explicit() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut db = Database::create(directory.path().join("metrics.vlite"), 2).unwrap();
+    db.put(1, &[1.0, 0.0], b"").unwrap();
+    db.put(2, &[4.0, 3.0], b"").unwrap();
+    let app = router(Service::new(db));
+    for (metric, id) in [("cosine", "1"), ("inner_product", "2"), ("squared_l2", "1")] {
+        let (status, result) = request(
+            &app,
+            "POST",
+            "/v1/search",
+            json!({"vector":[1,0],"k":2,"metric":metric}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(result["hits"][0]["id"], id);
+    }
+    for (body, code) in [
+        (
+            json!({"vector":[0,0],"k":0,"metric":"cosine"}),
+            "invalid_input",
+        ),
+        (
+            json!({"vector":[1,0],"k":1,"metric":"unknown"}),
+            "invalid_json",
+        ),
+        (
+            json!({"vector":[1,0],"k":1,"metric":"cosine","mode":"approximate"}),
+            "invalid_input",
+        ),
+        (
+            json!({"vector":[1,0],"k":1,"metric":"inner_product","mode":"approximate_ready"}),
+            "invalid_input",
+        ),
+    ] {
+        let (status, result) = request(&app, "POST", "/v1/search", body).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(result["error"]["code"], code);
+    }
+}
+
 async fn raw(
     app: &Router,
     method: &str,

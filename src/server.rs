@@ -395,6 +395,7 @@ impl From<Error> for ApiError {
             Error::DimensionMismatch { .. }
             | Error::InvalidDimensions(_)
             | Error::NonFiniteVector
+            | Error::ZeroNormQuery
             | Error::PayloadTooLarge(_)
             | Error::BatchTooLarge
             | Error::InvalidHnswConfig
@@ -728,6 +729,8 @@ struct Search {
     k: usize,
     #[serde(default)]
     mode: SearchMode,
+    #[serde(default)]
+    metric: crate::DistanceMetric,
     ef_search: Option<usize>,
     filter: Option<Vec<crate::Condition>>,
 }
@@ -758,16 +761,25 @@ async fn search(
             "filters require mode exact; approximate filtering is not supported",
         ));
     }
+    if !matches!(input.mode, SearchMode::Exact) && input.metric != crate::DistanceMetric::SquaredL2
+    {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_input",
+            "approximate search supports only squared_l2",
+        ));
+    }
     let metrics = service.metrics.clone();
     service
         .run(move |db| {
             let rebuilding = matches!(input.mode, SearchMode::Approximate) && db.index.is_none();
             let started = Instant::now();
             let hits = match input.mode {
-                SearchMode::Exact => db.search_filtered(
+                SearchMode::Exact => db.search_filtered_with_metric(
                     &input.vector,
                     input.k,
                     input.filter.as_deref().unwrap_or(&[]),
+                    input.metric,
                 )?,
                 SearchMode::Approximate => db.search_approximate(
                     &input.vector,

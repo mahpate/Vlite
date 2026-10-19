@@ -56,6 +56,8 @@ enum Request {
         k: usize,
         #[serde(default)]
         filter: Vec<vlite::Condition>,
+        #[serde(default)]
+        metric: vlite::DistanceMetric,
     },
     BuildIndex {},
     SearchApproximateReady {
@@ -250,8 +252,15 @@ fn execute(handle: u64, request: Request) -> Result<Value> {
             db.write_batch(&operations).map_err(failure)?;
             Ok(Value::Null)
         }
-        Request::Search { vector, k, filter } => {
-            let hits = db.search_filtered(&vector, k, &filter).map_err(failure)?;
+        Request::Search {
+            vector,
+            k,
+            filter,
+            metric,
+        } => {
+            let hits = db
+                .search_filtered_with_metric(&vector, k, &filter, metric)
+                .map_err(failure)?;
             Ok(
                 json!({"hits":hits.into_iter().map(|h| json!({"id":h.id.to_string(),"distance":h.distance})).collect::<Vec<_>>()}),
             )

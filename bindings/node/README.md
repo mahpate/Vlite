@@ -75,6 +75,11 @@ existing JSON `payload_base64` shape, not Buffers. Full-width IDs and i64
 metadata remain strings. `getMany` retains order/duplicates and returns null
 for missing IDs, with 100-ID/8-MiB bounds. Put replaces all record components.
 Exact search accepts typed filters; ANN is ready-only with explicit builds.
+Exact search also accepts `{ metric: "cosine" }` or
+`{ metric: "inner_product" }`, defaulting to `"squared_l2"`.
+Cosine returns 1 minus similarity, rejects zero queries and excludes zero-norm
+records. Inner product returns negative dot product. Lower is always better.
+ANN remains L2-only. Use the matching v0.1.1 native library for metric requests.
 See [ABI contracts and limitations](../README.md).
 
 ## Lifetime and failure behavior

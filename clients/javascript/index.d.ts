@@ -15,6 +15,7 @@ export interface Search {
   vector: number[];
   k: number;
   mode?: "exact" | "approximate" | "approximate_ready";
+  metric?: "squared_l2" | "cosine" | "inner_product";
   ef_search?: number;
   filter?: Condition[] | null;
 }

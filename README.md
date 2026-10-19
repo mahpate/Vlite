@@ -20,7 +20,7 @@ It uses its own storage format and does not require an external database.
   commits, exclusive locking, and explicit interrupted-write recovery.
 - **Atomic mutations:** vector/payload/metadata replacement and deletion,
   individually or in batches of up to 4,096 operations.
-- **Exact search:** squared Euclidean distance with f64 accumulation,
+- **Exact search:** squared Euclidean, cosine and negative inner-product distance with f64 accumulation,
   deterministic distance/ID ordering, and bounded top-k candidate memory.
 - **Metadata filters:** strict typed equality and inclusive numeric ranges,
   applied before exact top-k selection.
@@ -32,7 +32,7 @@ It uses its own storage format and does not require an external database.
   no-clobber copy-out compaction.
 
 VLite is licensed under the MIT License; see
-[LICENSE](LICENSE). There is no gRPC, cosine/inner-product metric, distributed
+[LICENSE](LICENSE). There is no gRPC, non-L2 ANN, distributed
 replication, multi-reader handle, encryption at rest, or approximate metadata
 filtering.
 See the [technical reference](docs/REFERENCE.md) for contracts and limits.
@@ -259,6 +259,20 @@ so this separates maintenance from queries rather than providing a latency SLA.
 See [metadata and filters](docs/REFERENCE.md#typed-metadata-and-exact-filtered-search)
 and [HNSW behavior](docs/REFERENCE.md#optional-hnsw-search).
 
+## Exact-search metrics
+
+Existing calls remain squared-L2. Rust callers can use
+`db.search_with_metric(&query, k, vlite::DistanceMetric::Cosine)`.
+Python embedded uses `db.search(query, k, metric="cosine")`; Node embedded uses
+`await db.search(query, k, { metric: "cosine" })`. REST accepts the same metric
+names in `/v1/search`: `squared_l2`, `cosine`, `inner_product`.
+The dashboard offers these metrics in exact mode.
+
+Distances always sort lowest first: cosine returns 1 minus similarity, while
+inner product returns negative dot product. Cosine rejects zero queries and
+excludes zero-norm records. ANN remains L2-only and rejects non-L2 requests;
+there is no silent fallback. See [metric contracts](docs/REFERENCE.md#exact-distance-metrics-v011).
+
 ## Performance
 
 Performance numbers are workload-specific, not product rankings.
@@ -360,7 +374,7 @@ publication is configured but not yet exercised.
 
 ## Stable release criteria
 
-The current package version is **0.1.0**. A stable release requires a verified
+The current package version is **0.1.1**. A stable release requires a verified
 compatibility and operational baseline, not just a version or wording change:
 
 1. **Freeze the supported contracts:** document the Rust API, REST/OpenAPI

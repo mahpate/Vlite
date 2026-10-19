@@ -29,6 +29,8 @@ def python_test(base, token):
               "metadata": {"n": {"type": "integer", "value": "-9223372036854775808"}}}
     client.put("18446744073709551615", record)
     assert client.get("18446744073709551615") == dict(id="18446744073709551615", **record)
+    assert client.search({"vector": [1, 0, 0], "k": 1, "metric": "cosine"})[0]["distance"] == 0
+    assert client.search({"vector": [1, 0, 0], "k": 1, "metric": "inner_product"})[0]["distance"] == -1
     client.batch([{"op": "put", "id": "2", "vector": [0, 1, 0]}, {"op": "delete", "id": "0"}])
     first = client.list_vectors(limit=1)
     assert first["items"][0]["id"] == "2" and first["next_after"] == "2"

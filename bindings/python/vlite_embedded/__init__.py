@@ -106,8 +106,9 @@ class Database:
     def batch(self, operations: list[dict]) -> None:
         self._execute("batch", operations=operations)
 
-    def search(self, vector: list[float], k: int, *, filter: list[dict] | None = None) -> list[dict]:
-        return self._execute("search", vector=vector, k=k, filter=[] if filter is None else filter)["hits"]
+    def search(self, vector: list[float], k: int, *, filter: list[dict] | None = None, metric: str = "squared_l2") -> list[dict]:
+        options = {} if metric == "squared_l2" else {"metric": metric}
+        return self._execute("search", vector=vector, k=k, filter=[] if filter is None else filter, **options)["hits"]
 
     def build_index(self) -> None:
         self._execute("build_index")

@@ -119,7 +119,10 @@ export class Database {
   }
   async delete(id) { return (await this.#call("delete", { id })).deleted; }
   async batch(operations) { await this.#call("batch", { operations }); }
-  async search(vector, k, { filter = [] } = {}) { return (await this.#call("search", { vector, k, filter })).hits; }
+  async search(vector, k, { filter = [], metric = "squared_l2" } = {}) {
+    const options = metric === "squared_l2" ? {} : { metric };
+    return (await this.#call("search", { vector, k, filter, ...options })).hits;
+  }
   async buildIndex() { await this.#call("build_index"); }
   async searchApproximateReady(vector, k, { efSearch = 100 } = {}) {
     return (await this.#call("search_approximate_ready", { vector, k, ef_search: efSearch })).hits;

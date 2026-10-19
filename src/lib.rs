@@ -38,6 +38,7 @@ pub enum Error {
         actual: usize,
     },
     NonFiniteVector,
+    ZeroNormQuery,
     PayloadTooLarge(usize),
     BatchTooLarge,
     BatchRequiresUpgrade,
@@ -81,6 +82,7 @@ impl fmt::Display for Error {
                 )
             }
             Self::NonFiniteVector => write!(f, "vector components must be finite"),
+            Self::ZeroNormQuery => write!(f, "cosine search requires a nonzero query vector"),
             Self::PayloadTooLarge(n) => {
                 write!(f, "payload is {n} bytes; maximum is {MAX_PAYLOAD_BYTES}")
             }
@@ -188,8 +190,19 @@ pub enum Mutation {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SearchHit {
     pub id: u64,
-    /// Squared Euclidean distance, accumulated in f64. Smaller is nearer.
+    /// Metric distance accumulated in f64. Smaller is nearer.
     pub distance: f64,
+}
+
+/// Exact search metric. Storage and HNSW retain their existing L2 contracts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "json", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(rename_all = "snake_case"))]
+pub enum DistanceMetric {
+    #[default]
+    SquaredL2,
+    Cosine,
+    InnerProduct,
 }
 
 struct RankedHit(SearchHit);
@@ -679,9 +692,40 @@ impl Database {
         k: usize,
         conditions: &[Condition],
     ) -> Result<Vec<SearchHit>> {
+        self.search_filtered_with_metric(query, k, conditions, DistanceMetric::SquaredL2)
+    }
+
+    /// Exact search with explicit metric; lower distance is better for every metric.
+    pub fn search_with_metric(
+        &self,
+        query: &[f32],
+        k: usize,
+        metric: DistanceMetric,
+    ) -> Result<Vec<SearchHit>> {
+        self.search_filtered_with_metric(query, k, &[], metric)
+    }
+
+    /// Cosine rejects zero queries even for k=0, and excludes zero-norm records.
+    /// Inner product returns negative dot product; cosine returns 1 - similarity.
+    pub fn search_filtered_with_metric(
+        &self,
+        query: &[f32],
+        k: usize,
+        conditions: &[Condition],
+        metric: DistanceMetric,
+    ) -> Result<Vec<SearchHit>> {
         self.ensure_healthy()?;
         self.validate_vector(query)?;
         metadata::validate_filter(conditions)?;
+        let query_norm = if metric == DistanceMetric::Cosine {
+            let squared: f64 = query.iter().map(|&value| f64::from(value).powi(2)).sum();
+            if squared == 0.0 {
+                return Err(Error::ZeroNormQuery);
+            }
+            squared.sqrt()
+        } else {
+            0.0
+        };
         if k == 0 {
             return Ok(Vec::new());
         }
@@ -694,7 +738,27 @@ impl Database {
             if !metadata::matches(&record.metadata, conditions) {
                 continue;
             }
-            let distance = if query.len() <= 32 {
+            let distance = if metric != DistanceMetric::SquaredL2 {
+                let dot: f64 = record
+                    .vector
+                    .iter()
+                    .zip(query)
+                    .map(|(&a, &b)| f64::from(a) * f64::from(b))
+                    .sum();
+                if metric == DistanceMetric::InnerProduct {
+                    if dot == 0.0 { 0.0 } else { -dot }
+                } else {
+                    let norm: f64 = record
+                        .vector
+                        .iter()
+                        .map(|&value| f64::from(value).powi(2))
+                        .sum();
+                    if norm == 0.0 {
+                        continue;
+                    }
+                    1.0 - (dot / (norm.sqrt() * query_norm)).clamp(-1.0, 1.0)
+                }
+            } else if query.len() <= 32 {
                 record
                     .vector
                     .iter()

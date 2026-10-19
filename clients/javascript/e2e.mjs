@@ -13,6 +13,10 @@ const record = { vector: [1, 0, 0], payload_base64: "AP8=",
   metadata: { n: { type: "integer", value: "-9223372036854775808" } } };
 assert.equal(await client.put("18446744073709551615", record), undefined);
 assert.deepEqual(await client.get("18446744073709551615"), { id: "18446744073709551615", ...record });
+assert.equal((await client.search({ vector: [1, 0, 0], k: 1, metric: "cosine" }))[0].distance, 0);
+assert.equal((await client.search({ vector: [1, 0, 0], k: 1, metric: "inner_product" }))[0].distance, -1);
+await assert.rejects(client.search({ vector: [1, 0, 0], k: 1, metric: "cosine", mode: "approximate_ready" }),
+  (e) => e instanceof VLiteError && e.status === 422 && e.code === "invalid_input");
 await client.batch([{ op: "put", id: "2", vector: [0, 1, 0] }, { op: "delete", id: "0" }]);
 const first = await client.listVectors({ limit: 1 });
 assert.deepEqual(first.items.map((item) => item.id), ["2"]);

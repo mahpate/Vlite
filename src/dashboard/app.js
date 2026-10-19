@@ -115,6 +115,7 @@
     const exact = $("mode").value === "exact";
     $("ef").disabled = exact;
     $("filter").disabled = !exact;
+    $("metric").disabled = !exact;
   }
   $("mode").addEventListener("change", modeChanged);
   async function refreshIndex() {
@@ -210,6 +211,7 @@
       const body = { vector: vector("query"), k: Number($("k").value), mode };
       if (!Number.isInteger(body.k) || body.k < 0 || body.k > 10000) throw new Error("k must be 0..10000");
       if (mode === "exact") {
+        body.metric = $("metric").value;
         body.filter = parse("filter");
         if (!Array.isArray(body.filter)) throw new Error("Filter must be a JSON array");
       } else {
@@ -217,6 +219,7 @@
         if (!Number.isInteger(body.ef_search) || body.ef_search < 1 || body.ef_search > 100000) throw new Error("ef must be 1..100000");
       }
       const result = await api("POST", "/v1/search", body);
+      $("hits").querySelector("caption").textContent = `Search results (${body.metric ?? "squared_l2"}; lower distance is better)`;
       for (const hit of result.hits) {
         const row = document.createElement("tr");
         for (const value of [hit.id, hit.distance]) {
