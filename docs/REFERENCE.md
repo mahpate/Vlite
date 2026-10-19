@@ -396,7 +396,8 @@ every OS/architecture combination. ARM containers run the Dockerfile tests
 under QEMU during publication. This is not equivalent to physical ARM testing.
 Registry credentials are the workflow's scoped `GITHUB_TOKEN`; private packages
 require a read-packages login on deployment hosts. There is no floating `latest`
-tag, automatic production rollout, or implied open-source license.
+tag, or automatic production rollout. The repository is licensed under the
+MIT License; see [LICENSE](../LICENSE).
 
 For deployment, select a published version/digest and skip local builds:
 

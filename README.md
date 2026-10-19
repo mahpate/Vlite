@@ -29,8 +29,10 @@ It uses its own storage format and does not require an external database.
 - **Maintenance:** offline inspection, byte-preserving backup/restore, and
   no-clobber copy-out compaction.
 
-There is no gRPC, cosine/inner-product metric, distributed replication,
-multi-reader handle, encryption at rest, or approximate metadata filtering.
+VLite is licensed under the MIT License; see
+[LICENSE](LICENSE). There is no gRPC, cosine/inner-product metric, distributed
+replication, multi-reader handle, encryption at rest, or approximate metadata
+filtering.
 See the [technical reference](docs/REFERENCE.md) for contracts and limits.
 
 ## Quick start: embedded Rust
@@ -244,7 +246,7 @@ compatibility and operational baseline, not just a version or wording change:
 4. **Set measured deployment limits:** run representative datasets and sustained
    mixed workloads; record latency tails, recall, memory, startup/replay time
    and file growth. Include index-buffer overflow and explicit rebuilds.
-5. **Resolve distribution and security readiness:** select a license, review
+5. **Resolve distribution and security readiness:** verify license compliance, review
    dependencies and authentication/deployment configuration, and document
    supported versions and vulnerability reporting.
 6. **Publish an immutable release:** update `Cargo.toml` and `Cargo.lock`
@@ -259,4 +261,6 @@ registry image is implied by the presence of that workflow.
 
 ## License
 
-This repository does not currently grant a license for redistribution.
+VLite is licensed under the [MIT License](LICENSE). You may use, modify,
+redistribute and include it in commercial products, provided you retain the
+copyright and license notice. Contributions are welcome under the same license.
