@@ -147,6 +147,42 @@ fn bounded_top_k_matches_full_sort_for_ties_filters_extremes_and_reopen() {
 }
 
 #[test]
+fn exact_cutoff_preserves_chunk_boundaries_late_components_and_ties() {
+    for dimensions in [31, 32, 33, 63, 64, 65, 129] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut db = Database::create(directory.path().join("cutoff.vlite"), dimensions).unwrap();
+        let operations = (0..257)
+            .chain([u64::MAX])
+            .map(|id| {
+                let mut vector = vec![0.0; dimensions];
+                match id % 5 {
+                    0 => vector[0] = 1.0,
+                    1 => vector[dimensions - 1] = 1.0,
+                    2 => vector[dimensions - 1] = f32::MAX,
+                    3 => vector[0] = -f32::MAX,
+                    _ => vector.fill(0.125),
+                }
+                Mutation::Put {
+                    id,
+                    vector,
+                    payload: vec![],
+                }
+            })
+            .collect::<Vec<_>>();
+        db.write_batch(&operations).unwrap();
+        for query in [vec![0.0; dimensions], vec![0.25; dimensions]] {
+            for k in [1, 7, 32, 257, usize::MAX] {
+                assert_eq!(
+                    db.search(&query, k).unwrap(),
+                    oracle(&db, &query, k, |_| true),
+                    "dimensions={dimensions}, k={k}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn query_allocations_scale_with_k_not_matching_record_count() {
     let directory = tempfile::tempdir().unwrap();
     let mut db = Database::create(directory.path().join("memory.vlite"), 1).unwrap();

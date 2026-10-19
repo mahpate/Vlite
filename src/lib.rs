@@ -689,14 +689,13 @@ impl Database {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let mut hits = BinaryHeap::with_capacity(limit);
-        for (&id, record) in &self.records {
+        let mut hits: BinaryHeap<RankedHit> = BinaryHeap::with_capacity(limit);
+        'records: for (&id, record) in &self.records {
             if !metadata::matches(&record.metadata, conditions) {
                 continue;
             }
-            let hit = RankedHit(SearchHit {
-                id,
-                distance: record
+            let distance = if query.len() <= 32 {
+                record
                     .vector
                     .iter()
                     .zip(query)
@@ -704,8 +703,27 @@ impl Database {
                         let difference = f64::from(a) - f64::from(b);
                         difference * difference
                     })
-                    .sum(),
-            });
+                    .sum()
+            } else {
+                let cutoff = if hits.len() == limit {
+                    hits.peek().expect("nonempty bounded heap").0.distance
+                } else {
+                    f64::INFINITY
+                };
+                let mut distance = 0.0;
+                for (values, query) in record.vector.chunks(32).zip(query.chunks(32)) {
+                    for (&a, &b) in values.iter().zip(query) {
+                        let difference = f64::from(a) - f64::from(b);
+                        distance += difference * difference;
+                    }
+                    // Nonnegative terms cannot bring a rejected candidate below the cutoff.
+                    if distance > cutoff {
+                        continue 'records;
+                    }
+                }
+                distance
+            };
+            let hit = RankedHit(SearchHit { id, distance });
             if hits.len() < limit {
                 hits.push(hit);
             } else if let Some(mut worst) = hits.peek_mut()

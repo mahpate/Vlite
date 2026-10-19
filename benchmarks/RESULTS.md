@@ -5,6 +5,40 @@ See [methodology and reproduction](README.md) before interpreting the numbers.
 
 No zvec, Milvus, Weaviate, FAISS or other unmeasured engine results are inferred.
 
+## Exact-search distance cutoff, October 19, 2026 UTC
+
+[Raw per-query samples and binary/source hashes](results/exact-cutoff-windows.json)
+compare baseline commit `6645183` with the cutoff implementation. Both are native
+Windows x86_64 release binaries on the same shared host. Each workload has
+3 alternating-order trials, 3,000 records, 100 queries, k=10 and seed 42.
+The existing native benchmark checks every query against its full-sort oracle;
+all runs returned recall 1.0 and matching input checksums.
+
+| Synthetic workload | Baseline median trial p50 (ms) | Cutoff median trial p50 (ms) |
+|---|---:|---:|
+| Uniform, 8 dimensions | 0.0452 | 0.0473 |
+| Uniform, 128 dimensions | 0.4847 | 0.4746 |
+| Uniform, 768 dimensions | 3.2106 | 3.0716 |
+| Ordered separable, 128 dimensions | 0.4814 | 0.1584 |
+
+The separable fixture intentionally favors pruning: its first 20 records have
+every component `(id % 10) * 0.01`, the remaining records have every component
+`10 + (id % 10)`, and all queries are zero vectors. Earlier IDs establish a
+small cutoff before distant records are scanned. This is not a representative
+embedding dataset. Uniform cases use the benchmark's existing SplitMix64
+generator. The small-dimensional result was slower in this run; do not claim
+a universal improvement or extrapolate these timings to REST, other CPUs or
+real embeddings. No CPU pinning or resource isolation was imposed.
+
+Reproduce uniform cases with each release binary using
+`vlite-bench 3000 <dimensions> 100 100 10 42`. For the separable case, write one
+whitespace-separated vector per line using the recipe above and run
+`vlite-bench --vectors <vectors-file> --query-vectors <queries-file> 3000 128 100 100 10 42`.
+Keep the baseline and candidate binaries separate and alternate trial order.
+The unchanged short-vector path remains a full distance calculation; larger
+vectors check a nonnegative partial sum after each 32 components. Returned
+distances still accumulate all components in the original f64 order.
+
 ## Python embedded binding and batching, October 19, 2026 UTC
 
 [Raw timings and binary/source hashes](results/embedded-python-windows.json).

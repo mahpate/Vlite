@@ -267,6 +267,13 @@ Performance numbers are workload-specific, not product rankings.
 - [Published measurements and raw results](benchmarks/RESULTS.md)
 - [Native benchmark reference](docs/REFERENCE.md#reproducible-benchmark)
 
+Exact search can reject a candidate early when its partial squared-L2 distance
+already exceeds the current top-k cutoff. Vectors above 32 dimensions check
+the cutoff in 32-component blocks; short vectors retain the full-distance path.
+This preserves exact distances and deterministic ties, but benefits depend on
+the data and scan order. See the published cutoff comparison for gains and
+regressions on the measured synthetic workloads.
+
 The native benchmark verifies every exact query against an independent oracle.
 It accepts external vector/query files and can measure durable mixed updates,
 ANN rebuild pauses, raw latency samples, measured file growth and whole-process
