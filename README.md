@@ -344,6 +344,15 @@ Kill timing does not guarantee every write boundary is hit; these process-crash
 checks complement byte-prefix recovery and sync-failure tests, not hardware
 power-loss certification.
 
+`cargo test --locked --test ann_reliability` runs three seeded mixed ANN
+histories with vector/payload/metadata replacement, deletion and rejected atomic
+batches. An independent committed-state model checks candidate IDs, current
+distances, ordering and fixed-workload recall. It covers the exact 256-ID buffer
+boundary, overflow, explicit rebuilds, configuration mismatch, reopen and
+empty-to-populated transitions. Ready-only queries must not build an index;
+rebuilds must not change database bytes. The 95% recall threshold applies only
+to this small fixed dataset with ef-search=1000, not arbitrary workloads.
+
 CI covers Windows, Linux, and macOS on Rust minimum/stable, plus Linux Docker
 REST persistence and verified HTTPS. Docker on a Windows/macOS host still
 executes Linux code; it does not replace native filesystem testing. ARM release
