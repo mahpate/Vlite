@@ -5,6 +5,59 @@ See [methodology and reproduction](README.md) before interpreting the numbers.
 
 No zvec, Milvus, Weaviate, FAISS or other unmeasured engine results are inferred.
 
+## Exact metrics and cosine ANN, October 20, 2026 UTC
+
+[Final cached-norm campaign](results/metric-cosine-cached-windows.json) contains
+54 native Windows x64 release children: three trials, 1,500 seeded synthetic
+records, 128/384 dimensions, 30 queries and k=10. Each child checks exact results
+and current ANN candidate scores against an independent full-sort oracle.
+The 10%-eligible filter uses strict integer metadata. Values below are medians
+of trial p50s; recall is the lowest trial mean, not a universal guarantee.
+
+| Metric / mode | 128D p50 (ms) | 384D p50 (ms) |
+|---|---:|---:|
+| Exact squared L2 | 0.2350 | 0.7023 |
+| Exact cosine | 0.4366 | 1.4585 |
+| Exact inner product | 0.2349 | 0.7218 |
+| Filtered squared L2 (10% eligible) | 0.0532 | 0.1151 |
+| Filtered cosine (10% eligible) | 0.0786 | 0.2168 |
+| Filtered inner product (10% eligible) | 0.0788 | 0.1074 |
+| Cosine ANN ef=32 | 0.1790 | 0.4340 |
+| Cosine ANN ef=100 | 0.3615 | 0.7901 |
+| Cosine ANN ef=100, 16 replacements/query | 0.6899 | 1.3542 |
+
+Static cosine recall at ef=32 was 0.830000/0.716667 (128D/384D);
+ef=100 reached 0.993333/0.963333. Mixed ef=100 reached 1.000000/0.993333.
+Do not choose ef=32 merely because it is faster, or infer that mixed writes
+improve the graph: buffered records are scanned exactly. Mixed timings include
+a synchronous rebuild when query 17 exceeds the 256-ID buffer.
+Static ef=100 build time was 989.5571/2520.4525 ms; query p95 was
+0.5682/0.8993 ms. Whole-child median peak RSS was 7,159,808/10,338,304 bytes,
+including input vectors, database, oracle, graph and all phases; this is
+**not incremental index memory**. Exact cosine whole-child RSS was
+6,529,024/9,801,728 bytes. Filtered cases additionally store metadata and should
+not be interpreted as query-memory comparisons.
+
+The [initial development campaign](results/metric-cosine-windows.json) computed
+norms repeatedly during traversal. Caching original graph-node norms and
+computing each query norm once reduced static ef=100 observed p50 from
+0.7136/1.8957 ms to 0.3615/0.7901 ms. The recorded dataset/query checksums and
+per-trial recall match before/after caching. These were **sequential exploratory
+campaigns**, not alternating old/new binaries under controlled load. Exact
+cosine latency also drifted upward, and some filtered runs were slower.
+No broad speedup or unchanged-resource claim follows. The uncached development
+source was not a release; both reports identify dirty source hashes and binary
+SHA-256 rather than pretending to measure their base commit's released code.
+
+Reproduce the final source with the command in
+[the metric campaign guide](README.md#exact-metrics-and-cosine-ann).
+These fixed-point vectors are not trained embeddings, the host was shared and
+not pinned, and 30 queries are insufficient for a stable production tail.
+No real-embedding, non-Windows performance or general recall result is claimed.
+Exact search can still be preferable for small datasets, selective filters or
+strict recall requirements. Cosine ANN is currently unreleased source; the
+published v0.1.1 packages do not contain it.
+
 ## Exact-search distance cutoff, October 19, 2026 UTC
 
 [Raw per-query samples and binary/source hashes](results/exact-cutoff-windows.json)

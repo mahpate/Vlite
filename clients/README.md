@@ -82,8 +82,15 @@ request (Python uses a dictionary). Omission preserves squared L2.
 Cosine distance is 1 minus similarity; zero queries are rejected and zero-norm
 records excluded. Inner-product distances are negative dot products.
 Results always sort by increasing distance then numeric ID.
-Both approximate modes reject non-L2 metrics. This requires a v0.1.1 server;
-there is no automatic downgrade or retry against older servers.
+Exact metrics require a v0.1.1 server. Current source additionally supports
+cosine ANN (unreleased); published v0.1.1 servers have L2 ANN only.
+Build it with `client.build_index(metric="cosine")` (Python) or
+`await client.buildIndex({ metric: "cosine" })` (JavaScript), then search with
+`metric: "cosine"` and `mode: "approximate_ready"`. Index status includes
+`metric` (null when absent; older servers omit the field). Only one graph is
+retained. A metric mismatch returns 409 in ready-only mode, or synchronously
+rebuilds in lazy mode. Inner-product ANN returns 422. Filters remain exact-only.
+There is no automatic downgrade or retry against older servers.
 
 Python uses `list_vectors`, `index_status`, `build_index`; JavaScript uses
 `listVectors`, `indexStatus`, `buildIndex`. Both expose `health`, `ready`,

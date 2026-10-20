@@ -182,8 +182,8 @@ library's lifetime, and must not be shared across processes or library copies.
 | `delete` | id | `{"deleted":true}` or false |
 | `batch` | operations: put/delete objects with `op` | null |
 | `search` | vector, k, optional filter array | `{"hits":[{"id":"...","distance":0.0}]}` |
-| `build_index` | none | null |
-| `search_approximate_ready` | vector, k, ef_search | same hits envelope |
+| `build_index` | optional metric (squared_l2/cosine) | null |
+| `search_approximate_ready` | vector, k, ef_search, optional metric (squared_l2/cosine) | same hits envelope |
 
 Example creation: `{"op":"create","path":"documents.vlite","dimensions":3}`.
 IDs are canonical decimal-u64 strings, and integer metadata values are
@@ -197,8 +197,14 @@ the default remains squared L2. Python uses `db.search(vector, k, metric="cosine
 Cosine rejects zero queries and excludes zero-norm records; inner product
 returns negative dot product. Lower distance is better for every metric.
 See [metric contracts](../docs/REFERENCE.md#exact-distance-metrics-v011).
-Approximate-ready search remains L2-only and requires an explicit build
-after reopen/overflow and never silently builds or falls back. Listing, REST
+Approximate-ready search supports squared L2 (default) and cosine and requires
+an explicit matching-metric build after reopen/overflow or metric change.
+Python uses `db.build_index(metric="cosine")` and
+`db.search_approximate_ready(query, k, metric="cosine")`.
+Inner product is exact-only. Cosine ANN is unreleased: rebuild the native
+library and wrapper from current source; v0.1.1 packages have L2 ANN only.
+Omitting the default metric keeps old native requests compatible.
+Ready-only never silently builds or falls back. Listing, REST
 metrics and lazy ANN are not currently exposed by the native binding.
 
 ## Ownership, errors and durability

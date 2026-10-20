@@ -49,7 +49,7 @@
       <label>k <input id="k" type="number" value="10" min="0" max="10000" required></label>
       <label>Mode <select id="mode"><option value="exact">Exact</option><option value="approximate">Approximate (may build synchronously)</option><option value="approximate_ready">Approximate ready-only (409 if unavailable)</option></select></label>
       <label>Search ef (ANN only) <input id="ef" type="number" value="100" min="1" max="100000" disabled></label>
-      <label>Metric (exact only) <select id="metric"><option value="squared_l2">Squared L2</option><option value="cosine">Cosine distance</option><option value="inner_product">Negative inner product</option></select></label>
+      <label>Metric (search and index build) <select id="metric"><option value="squared_l2">Squared L2</option><option value="cosine">Cosine distance</option><option value="inner_product">Negative inner product (exact only)</option></select></label>
       <label>Exact filter (JSON AND array) <textarea id="filter" rows="4">[]</textarea></label>
       <p>Example: [{"op":"eq","field":"category","value":{"type":"string","value":"docs"}}]. Filters are exact-only; no silent post-filtering.</p>
       <button type="submit">Search</button>

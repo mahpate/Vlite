@@ -63,6 +63,8 @@ with tempfile.TemporaryDirectory() as directory:
         assert db.get_many(['0','18446744073709551615'])[0] is None
         db.build_index()
         assert db.search_approximate_ready([1,0],1)[0]['distance']==0
+        db.build_index(metric="cosine")
+        assert db.search_approximate_ready([1,0],1,metric="cosine")[0]['distance']==0
     with native.open(path) as db:
         assert db.get('18446744073709551615')['payload_base64']=='AP8='
 print('PASS installed native wheel: automatic library loading, CRUD, search and reopen')

@@ -123,8 +123,11 @@ export class Database {
     const options = metric === "squared_l2" ? {} : { metric };
     return (await this.#call("search", { vector, k, filter, ...options })).hits;
   }
-  async buildIndex() { await this.#call("build_index"); }
-  async searchApproximateReady(vector, k, { efSearch = 100 } = {}) {
-    return (await this.#call("search_approximate_ready", { vector, k, ef_search: efSearch })).hits;
+  async buildIndex({ metric = "squared_l2" } = {}) {
+    await this.#call("build_index", metric === "squared_l2" ? {} : { metric });
+  }
+  async searchApproximateReady(vector, k, { efSearch = 100, metric = "squared_l2" } = {}) {
+    return (await this.#call("search_approximate_ready", { vector, k, ef_search: efSearch,
+      ...(metric === "squared_l2" ? {} : { metric }) })).hits;
   }
 }

@@ -69,6 +69,12 @@ def main():
         assert hits == [{"id": "18446744073709551615", "distance": 0}]
         db.build_index()
         assert db.search_approximate_ready([1, 0, 0], 1)[0]["distance"] == 0
+        fails("index_not_ready", lambda: db.search_approximate_ready([1,0,0],1,metric="cosine"))
+        db.build_index(metric="cosine")
+        assert db.search_approximate_ready([1,0,0],1,metric="cosine")[0]["distance"] == 0
+        fails("index_not_ready", lambda: db.search_approximate_ready([1,0,0],1))
+        fails("invalid_input", lambda: db.build_index(metric="inner_product"))
+        fails("invalid_input", lambda: db.search_approximate_ready([0,0,0],0,metric="cosine"))
         with ThreadPoolExecutor(max_workers=4) as pool:
             assert all(pool.map(lambda _: db.info()["records"] == 2, range(32)))
         handle = db._handle

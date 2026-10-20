@@ -5,12 +5,12 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 use vlite::{
-    Condition, Database, HnswConfig, MAX_BATCH_BYTES, MAX_BATCH_OPERATIONS, MAX_DIMENSIONS,
-    MAX_EF_SEARCH, Metadata, MetadataValue, Mutation,
+    Condition, Database, DistanceMetric, HnswConfig, MAX_BATCH_BYTES, MAX_BATCH_OPERATIONS,
+    MAX_DIMENSIONS, MAX_EF_SEARCH, Metadata, MetadataValue, Mutation,
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
-const USAGE: &str = "usage: vlite-bench [--vectors <file> --query-vectors <file>] [--mixed-writes <updates per query>] [--filter-every <N>] [--ann <m> <ef_construction> <ef_search>] [records=1000 dimensions=32 queries=100 batch_size=100 k=10 seed=42]; mixed writes require ANN; filtering and ANN are mutually exclusive";
+const USAGE: &str = "usage: vlite-bench [--metric squared_l2|cosine|inner_product] [--vectors <file> --query-vectors <file>] [--mixed-writes <updates per query>] [--filter-every <N>] [--ann <m> <ef_construction> <ef_search>] [records=1000 dimensions=32 queries=100 batch_size=100 k=10 seed=42]; mixed writes require ANN; filtering and ANN are mutually exclusive; inner product is exact-only";
 const MAX_DATA_BYTES: usize = 256 * 1024 * 1024;
 const MAX_DISTANCE_COMPONENTS: u64 = 500_000_000;
 
@@ -25,6 +25,7 @@ struct Config {
     filter_every: Option<usize>,
     input: Option<(PathBuf, PathBuf)>,
     mixed_writes: usize,
+    metric: DistanceMetric,
 }
 
 impl Config {
@@ -33,15 +34,26 @@ impl Config {
         let mut input_vectors = None;
         let mut input_queries = None;
         let mut mixed_writes = None;
+        let mut metric = None;
         while args.first().is_some_and(|arg| {
             matches!(
                 arg.as_str(),
-                "--vectors" | "--query-vectors" | "--mixed-writes"
+                "--vectors" | "--query-vectors" | "--mixed-writes" | "--metric"
             )
         }) {
             let flag = args[0].clone();
             let value = args.get(1).ok_or(USAGE)?.clone();
             match flag.as_str() {
+                "--metric" if metric.is_none() => {
+                    metric = Some(match value.as_str() {
+                        "squared_l2" => DistanceMetric::SquaredL2,
+                        "cosine" => DistanceMetric::Cosine,
+                        "inner_product" => DistanceMetric::InnerProduct,
+                        _ => {
+                            return Err("metric must be squared_l2, cosine or inner_product".into());
+                        }
+                    });
+                }
                 "--vectors" if input_vectors.is_none() => {
                     input_vectors = Some(PathBuf::from(value))
                 }
@@ -101,6 +113,10 @@ impl Config {
         };
         if filter_every.is_some() && ann.is_some() {
             return Err("filtered approximate search is not supported".into());
+        }
+        let metric = metric.unwrap_or_default();
+        if ann.is_some() && metric == DistanceMetric::InnerProduct {
+            return Err("inner_product is exact-only".into());
         }
         if mixed_writes.is_some() && ann.is_none() {
             return Err("mixed writes require --ann".into());
@@ -163,6 +179,7 @@ impl Config {
             filter_every,
             input,
             mixed_writes,
+            metric,
         })
     }
 }
@@ -211,18 +228,41 @@ fn checksum(vectors: &[Vec<f32>]) -> u64 {
         })
 }
 
-fn ground_truth(dataset: &[Vec<f32>], query: &[f32]) -> Vec<(u64, f64)> {
-    let mut expected: Vec<_> = dataset
-        .iter()
-        .enumerate()
-        .map(|(id, vector)| {
-            let distance: f64 = vector
+fn oracle_distance(vector: &[f32], query: &[f32], metric: DistanceMetric) -> Option<f64> {
+    match metric {
+        DistanceMetric::SquaredL2 => Some(
+            vector
                 .iter()
                 .zip(query)
                 .map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2))
+                .sum(),
+        ),
+        DistanceMetric::InnerProduct => {
+            let dot: f64 = vector
+                .iter()
+                .zip(query)
+                .map(|(&a, &b)| f64::from(a) * f64::from(b))
                 .sum();
-            (id as u64, distance)
-        })
+            Some(if dot == 0.0 { 0.0 } else { -dot })
+        }
+        DistanceMetric::Cosine => {
+            let a: f64 = vector.iter().map(|&v| f64::from(v).powi(2)).sum();
+            let b: f64 = query.iter().map(|&v| f64::from(v).powi(2)).sum();
+            let dot: f64 = vector
+                .iter()
+                .zip(query)
+                .map(|(&a, &b)| f64::from(a) * f64::from(b))
+                .sum();
+            (a > 0.0 && b > 0.0).then(|| 1.0 - (dot / (a.sqrt() * b.sqrt())).clamp(-1.0, 1.0))
+        }
+    }
+}
+
+fn ground_truth(dataset: &[Vec<f32>], query: &[f32], metric: DistanceMetric) -> Vec<(u64, f64)> {
+    let mut expected: Vec<_> = dataset
+        .iter()
+        .enumerate()
+        .filter_map(|(id, vector)| oracle_distance(vector, query, metric).map(|d| (id as u64, d)))
         .collect();
     expected.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
     expected
@@ -322,20 +362,32 @@ fn run() -> Result<()> {
         })
         .into_iter()
         .collect::<Vec<_>>();
-    let eligible_records = config
-        .filter_every
-        .map_or(config.records, |every| (config.records - 1) / every + 1);
+    let eligible_records = dataset
+        .iter()
+        .enumerate()
+        .filter(|(id, vector)| {
+            config
+                .filter_every
+                .is_none_or(|every| id.is_multiple_of(every))
+                && (config.metric != DistanceMetric::Cosine || vector.iter().any(|&v| v != 0.0))
+        })
+        .count();
     let result_count = config.k.min(eligible_records);
-    black_box(db.search_filtered(&queries[0], config.k, &filter)?);
+    black_box(db.search_filtered_with_metric(&queries[0], config.k, &filter, config.metric)?);
     let mut times_ms = Vec::with_capacity(config.queries);
     let mut matched = 0usize;
     let mut truth = Vec::new();
     for query in &queries {
         let start = Instant::now();
-        let actual = black_box(db.search_filtered(black_box(query), config.k, &filter)?);
+        let actual = black_box(db.search_filtered_with_metric(
+            black_box(query),
+            config.k,
+            &filter,
+            config.metric,
+        )?);
         times_ms.push(start.elapsed().as_secs_f64() * 1000.0);
         // The oracle works directly from the generated input, outside timing.
-        let expected: Vec<_> = ground_truth(&dataset, query)
+        let expected: Vec<_> = ground_truth(&dataset, query, config.metric)
             .into_iter()
             .filter(|(id, _)| {
                 config
@@ -343,6 +395,7 @@ fn run() -> Result<()> {
                     .is_none_or(|every| (*id as usize).is_multiple_of(every))
             })
             .collect();
+        let result_count = config.k.min(expected.len());
         for (hit, &(id, distance)) in actual.iter().zip(&expected[..result_count]) {
             if hit.id != id || hit.distance != distance {
                 return Err(io::Error::other(
@@ -361,12 +414,19 @@ fn run() -> Result<()> {
     }
     let ann_json = if let Some((index_config, ef_search)) = config.ann {
         let start = Instant::now();
-        db.build_hnsw(index_config)?;
+        db.build_hnsw_with_metric(index_config, config.metric)?;
         let build_ms = start.elapsed().as_secs_f64() * 1000.0;
-        black_box(db.search_approximate(&queries[0], config.k, ef_search, index_config)?);
+        black_box(db.search_approximate_with_metric(
+            &queries[0],
+            config.k,
+            ef_search,
+            index_config,
+            config.metric,
+        )?);
         let mut approximate_times = Vec::new();
         let mut write_times = Vec::new();
         let mut recalled = 0;
+        let mut recall_total = 0;
         for (query_index, query) in queries.iter().enumerate() {
             if config.mixed_writes > 0 {
                 let updates = vectors(config.mixed_writes, config.dimensions, &mut state);
@@ -389,17 +449,18 @@ fn run() -> Result<()> {
                 }
             }
             let start = Instant::now();
-            let hits = black_box(db.search_approximate(
+            let hits = black_box(db.search_approximate_with_metric(
                 black_box(query),
                 config.k,
                 ef_search,
                 index_config,
+                config.metric,
             )?);
             approximate_times.push(start.elapsed().as_secs_f64() * 1000.0);
             let expected = if config.mixed_writes > 0 {
-                let expected = ground_truth(&dataset, query);
-                let exact = db.search(query, config.k)?;
-                if exact.len() != config.k
+                let expected = ground_truth(&dataset, query, config.metric);
+                let exact = db.search_with_metric(query, config.k, config.metric)?;
+                if exact.len() != config.k.min(expected.len())
                     || exact
                         .iter()
                         .zip(&expected)
@@ -416,22 +477,22 @@ fn run() -> Result<()> {
                     .map(|hit| (hit.id, hit.distance))
                     .collect()
             };
-            let cutoff = expected[config.k - 1].1;
             let mut ids = std::collections::BTreeSet::new();
+            recall_total += config.k.min(expected.len());
+            let cutoff = expected
+                .iter()
+                .take(config.k)
+                .next_back()
+                .map(|&(_, distance)| distance);
             for hit in &hits {
                 if !ids.insert(hit.id) || hit.id >= config.records as u64 {
                     return Err("approximate search returned duplicate or invalid IDs".into());
                 }
-                let expected = dataset[hit.id as usize]
-                    .iter()
-                    .zip(query)
-                    .fold(0.0, |sum, (&a, &b)| {
-                        sum + (f64::from(a) - f64::from(b)).powi(2)
-                    });
-                if hit.distance != expected {
+                let distance = oracle_distance(&dataset[hit.id as usize], query, config.metric);
+                if Some(hit.distance) != distance {
                     return Err("approximate candidate distance is incorrect".into());
                 }
-                recalled += usize::from(hit.distance <= cutoff);
+                recalled += usize::from(cutoff.is_some_and(|distance| hit.distance <= distance));
             }
             if hits.windows(2).any(|pair| {
                 pair[0]
@@ -456,7 +517,11 @@ fn run() -> Result<()> {
             percentile(&approximate_times, 50),
             percentile(&approximate_times, 95),
             percentile(&approximate_times, 99),
-            recalled as f64 / (config.queries * config.k) as f64,
+            if recall_total == 0 {
+                1.0
+            } else {
+                recalled as f64 / recall_total as f64
+            },
             config.mixed_writes,
             samples,
             writes,
@@ -464,9 +529,9 @@ fn run() -> Result<()> {
     } else {
         String::new()
     };
-    let filter_json = config.filter_every.map_or(String::new(), |every| format!(
-        ",\"filter_every\":{every},\"eligible_records\":{eligible_records},\"returned_per_query\":{result_count}"
-    ));
+    let filter_json = config.filter_every.map_or(String::new(), |every| {
+        format!(        ",\"filter_every\":{every},\"eligible_records\":{eligible_records},\"returned_per_query\":{result_count}")
+    });
     db.close()?;
     let final_file_bytes = std::fs::metadata(&path)?.len();
     directory.close()?;
@@ -475,7 +540,7 @@ fn run() -> Result<()> {
     println!(
         concat!(
             "{{\"schema_version\":1,\"engine_version\":\"{}\",\"format_version\":{},\"os\":\"{}\",\"arch\":\"{}\",\"profile\":\"{}\",",
-            "\"records\":{},\"dimensions\":{},\"queries\":{},\"batch_size\":{},\"k\":{},\"seed\":{},",
+            "\"records\":{},\"dimensions\":{},\"queries\":{},\"batch_size\":{},\"k\":{},\"seed\":{},\"metric\":\"{}\",",
             "\"dataset_checksum\":\"{:016x}\",\"query_checksum\":\"{:016x}\",\"input\":\"{}\",\"ingest_seconds\":{:.9},\"ingest_vectors_per_second\":{:.3},",
             "\"reopen_ms\":{:.6},\"query_p50_ms\":{:.6},\"query_p95_ms\":{:.6},\"query_p99_ms\":{:.6},\"query_samples_ms\":{},\"final_file_bytes\":{},",
             "\"file_bytes\":{},\"vector_data_bytes\":{},\"query_data_bytes\":{},\"process_peak_rss_bytes\":null,",
@@ -496,6 +561,11 @@ fn run() -> Result<()> {
         config.batch_size,
         config.k,
         config.seed,
+        match config.metric {
+            DistanceMetric::SquaredL2 => "squared_l2",
+            DistanceMetric::Cosine => "cosine",
+            DistanceMetric::InnerProduct => "inner_product",
+        },
         dataset_checksum,
         query_checksum,
         if config.input.is_some() {
@@ -514,7 +584,11 @@ fn run() -> Result<()> {
         file_bytes,
         config.records * config.dimensions * 4,
         config.queries * config.dimensions * 4,
-        matched as f64 / (config.queries * result_count) as f64,
+        if result_count == 0 {
+            1.0
+        } else {
+            matched as f64 / (config.queries * result_count) as f64
+        },
         ann_json,
         filter_json
     );

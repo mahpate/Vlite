@@ -15,7 +15,7 @@ assert.equal(await client.put("18446744073709551615", record), undefined);
 assert.deepEqual(await client.get("18446744073709551615"), { id: "18446744073709551615", ...record });
 assert.equal((await client.search({ vector: [1, 0, 0], k: 1, metric: "cosine" }))[0].distance, 0);
 assert.equal((await client.search({ vector: [1, 0, 0], k: 1, metric: "inner_product" }))[0].distance, -1);
-await assert.rejects(client.search({ vector: [1, 0, 0], k: 1, metric: "cosine", mode: "approximate_ready" }),
+await assert.rejects(client.search({ vector: [1, 0, 0], k: 1, metric: "inner_product", mode: "approximate_ready" }),
   (e) => e instanceof VLiteError && e.status === 422 && e.code === "invalid_input");
 await client.batch([{ op: "put", id: "2", vector: [0, 1, 0] }, { op: "delete", id: "0" }]);
 const first = await client.listVectors({ limit: 1 });
@@ -32,6 +32,11 @@ assert.equal((await client.indexStatus()).ready, true);
 for (const mode of ["approximate", "approximate_ready"]) {
   assert.equal((await client.search({ vector: [1, 0, 0], k: 1, mode }))[0].distance, 0);
 }
+await client.buildIndex({ metric: "cosine" });
+assert.equal((await client.indexStatus()).metric, "cosine");
+assert.equal((await client.search({ vector: [1, 0, 0], k: 1, metric: "cosine", mode: "approximate_ready" }))[0].distance, 0);
+await assert.rejects(client.search({ vector: [1, 0, 0], k: 1, mode: "approximate_ready" }),
+  (e) => e instanceof VLiteError && e.code === "index_not_ready");
 assert.equal((await client.metrics()).database_healthy, true);
 await assert.rejects(new Client(process.env.VLITE_URL, "b".repeat(32)).database(),
   (e) => e instanceof VLiteError && e.status === 401 && Boolean(e.requestId));

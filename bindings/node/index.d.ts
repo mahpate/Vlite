@@ -35,6 +35,6 @@ export class Database {
   delete(id: string): Promise<boolean>;
   batch(operations: BatchOperation[]): Promise<void>;
   search(vector: number[], k: number, options?: { filter?: Condition[]; metric?: DistanceMetric }): Promise<Hit[]>;
-  buildIndex(): Promise<void>;
-  searchApproximateReady(vector: number[], k: number, options?: { efSearch?: number }): Promise<Hit[]>;
+  buildIndex(options?: { metric?: "squared_l2" | "cosine" }): Promise<void>;
+  searchApproximateReady(vector: number[], k: number, options?: { efSearch?: number; metric?: "squared_l2" | "cosine" }): Promise<Hit[]>;
 }

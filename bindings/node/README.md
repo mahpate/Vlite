@@ -79,7 +79,12 @@ Exact search also accepts `{ metric: "cosine" }` or
 `{ metric: "inner_product" }`, defaulting to `"squared_l2"`.
 Cosine returns 1 minus similarity, rejects zero queries and excludes zero-norm
 records. Inner product returns negative dot product. Lower is always better.
-ANN remains L2-only. Use the matching v0.1.1 native library for metric requests.
+ANN supports L2 (default) and cosine with an explicit matching build:
+`await db.buildIndex({ metric: "cosine" })` then
+`await db.searchApproximateReady(query, k, { metric: "cosine" })`.
+One graph is retained; a different metric returns `index_not_ready`.
+Inner-product ANN is rejected. Cosine ANN requires rebuilding the wrapper
+and native library from current source (unreleased); v0.1.1 has L2 ANN only.
 See [ABI contracts and limitations](../README.md).
 
 ## Lifetime and failure behavior

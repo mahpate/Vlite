@@ -73,6 +73,7 @@ class Range(TypedDict):
 class Search(TypedDict):
     vector: list[float]
     k: int
+    metric: NotRequired[Literal["squared_l2", "cosine", "inner_product"]]
     mode: NotRequired[Literal["exact", "approximate", "approximate_ready"]]
     ef_search: NotRequired[int]
     filter: NotRequired[list[Equal | Range] | None]
@@ -106,6 +107,7 @@ class IndexConfig(TypedDict):
 
 
 class IndexStatus(TypedDict):
+    metric: NotRequired[Literal["squared_l2", "cosine"] | None]
     ready: bool
     buffered_ids: int
     buffer_vector_bytes: int
@@ -212,5 +214,5 @@ class Client:
     def index_status(self) -> IndexStatus:
         return self._request("GET", "/v1/index/hnsw")
 
-    def build_index(self) -> None:
-        self._request("POST", "/v1/index/hnsw", {})
+    def build_index(self, *, metric: Literal["squared_l2", "cosine"] = "squared_l2") -> None:
+        self._request("POST", "/v1/index/hnsw", {} if metric == "squared_l2" else {"metric": metric})

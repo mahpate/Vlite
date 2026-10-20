@@ -396,6 +396,7 @@ impl From<Error> for ApiError {
             | Error::InvalidDimensions(_)
             | Error::NonFiniteVector
             | Error::ZeroNormQuery
+            | Error::UnsupportedAnnMetric
             | Error::PayloadTooLarge(_)
             | Error::BatchTooLarge
             | Error::InvalidHnswConfig
@@ -526,6 +527,7 @@ async fn index_status(State(service): State<Service>) -> Result<Json<Value>, Api
         let (buffered_ids, buffer_vector_bytes) = db.index.as_ref().map_or((0, 0), |index| index.buffer_usage());
         Ok(Json(json!({
             "ready":ready, "buffered_ids":buffered_ids, "buffer_vector_bytes":buffer_vector_bytes,
+            "metric":db.index.as_ref().map(|index| index.metric),
             "max_buffer_ids":crate::MAX_HNSW_BUFFER_IDS,
             "max_buffer_vector_bytes":crate::MAX_HNSW_BUFFER_VECTOR_BYTES,
             "config":{"m":config.m, "ef_construction":config.ef_construction, "seed":config.seed},
@@ -761,18 +763,24 @@ async fn search(
             "filters require mode exact; approximate filtering is not supported",
         ));
     }
-    if !matches!(input.mode, SearchMode::Exact) && input.metric != crate::DistanceMetric::SquaredL2
+    if !matches!(input.mode, SearchMode::Exact)
+        && input.metric == crate::DistanceMetric::InnerProduct
     {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_input",
-            "approximate search supports only squared_l2",
+            "approximate search supports squared_l2 and cosine, not inner_product",
         ));
     }
     let metrics = service.metrics.clone();
     service
         .run(move |db| {
-            let rebuilding = matches!(input.mode, SearchMode::Approximate) && db.index.is_none();
+            let rebuilding = matches!(input.mode, SearchMode::Approximate)
+                && input.k > 0
+                && !db.is_empty()
+                && db.index.as_ref().is_none_or(|index| {
+                    index.metric != input.metric || index.config != crate::HnswConfig::default()
+                });
             let started = Instant::now();
             let hits = match input.mode {
                 SearchMode::Exact => db.search_filtered_with_metric(
@@ -781,17 +789,19 @@ async fn search(
                     input.filter.as_deref().unwrap_or(&[]),
                     input.metric,
                 )?,
-                SearchMode::Approximate => db.search_approximate(
+                SearchMode::Approximate => db.search_approximate_with_metric(
                     &input.vector,
                     input.k,
                     input.ef_search.unwrap_or(100.max(input.k.min(db.len()))),
                     crate::HnswConfig::default(),
+                    input.metric,
                 )?,
-                SearchMode::ApproximateReady => db.search_approximate_ready(
+                SearchMode::ApproximateReady => db.search_approximate_ready_with_metric(
                     &input.vector,
                     input.k,
                     input.ef_search.unwrap_or(100.max(input.k.min(db.len()))),
                     crate::HnswConfig::default(),
+                    input.metric,
                 )?,
             };
             if rebuilding && db.index.is_some() {
@@ -810,25 +820,37 @@ async fn search(
         .await
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuildIndex {
+    #[serde(default)]
+    metric: crate::DistanceMetric,
+}
+
 async fn build_index(
     State(service): State<Service>,
     input: Result<Json<Value>, JsonRejection>,
 ) -> Result<StatusCode, ApiError> {
-    if !body(input)?
-        .as_object()
-        .is_some_and(|object| object.is_empty())
-    {
+    let input = body(input)?;
+    if !input.is_object() {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_input",
-            "index build requires an empty JSON object",
+            "index build requires a JSON object",
         ));
     }
+    let input: BuildIndex = serde_json::from_value(input).map_err(|error| {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_input",
+            error.to_string(),
+        )
+    })?;
     let metrics = service.metrics.clone();
     service
         .run(move |db| {
             let started = Instant::now();
-            db.build_hnsw(crate::HnswConfig::default())?;
+            db.build_hnsw_with_metric(crate::HnswConfig::default(), input.metric)?;
             metrics.rebuilds.fetch_add(1, Ordering::Relaxed);
             metrics.rebuild_search_ns.fetch_add(
                 started.elapsed().as_nanos().min(u64::MAX as u128) as u64,

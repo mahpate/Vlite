@@ -28,6 +28,68 @@ pub const MAX_BATCH_OPERATIONS: usize = 4_096;
 pub const MAX_BATCH_BYTES: usize = 16_777_216;
 pub type Result<T> = std::result::Result<T, Error>;
 
+fn vector_norm(vector: &[f32]) -> f64 {
+    vector
+        .iter()
+        .map(|&value| f64::from(value).powi(2))
+        .sum::<f64>()
+        .sqrt()
+}
+
+fn validate_ann_metric(metric: DistanceMetric) -> Result<()> {
+    if metric == DistanceMetric::InnerProduct {
+        Err(Error::UnsupportedAnnMetric)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_metric_query(query: &[f32], metric: DistanceMetric) -> Result<f64> {
+    let norm = if metric == DistanceMetric::Cosine {
+        vector_norm(query)
+    } else {
+        0.0
+    };
+    if metric == DistanceMetric::Cosine && norm == 0.0 {
+        Err(Error::ZeroNormQuery)
+    } else {
+        Ok(norm)
+    }
+}
+
+fn metric_distance(
+    a: &[f32],
+    b: &[f32],
+    metric: DistanceMetric,
+    a_norm: f64,
+    b_norm: f64,
+) -> Option<f64> {
+    if metric == DistanceMetric::SquaredL2 {
+        return Some(
+            a.iter()
+                .zip(b)
+                .map(|(&a, &b)| {
+                    let difference = f64::from(a) - f64::from(b);
+                    difference * difference
+                })
+                .sum(),
+        );
+    }
+    let dot: f64 = a
+        .iter()
+        .zip(b)
+        .map(|(&a, &b)| f64::from(a) * f64::from(b))
+        .sum();
+    if metric == DistanceMetric::InnerProduct {
+        return Some(if dot == 0.0 { 0.0 } else { -dot });
+    }
+    if a_norm == 0.0 || b_norm == 0.0 {
+        None
+    } else {
+        Some(1.0 - (dot / (a_norm * b_norm)).clamp(-1.0, 1.0))
+    }
+}
+
 #[derive(Debug)]
 pub enum Error {
     Io(io::Error),
@@ -43,6 +105,7 @@ pub enum Error {
     BatchTooLarge,
     BatchRequiresUpgrade,
     InvalidHnswConfig,
+    UnsupportedAnnMetric,
     InvalidEfSearch,
     IndexNotReady,
     InvalidMetadata(&'static str),
@@ -98,6 +161,9 @@ impl fmt::Display for Error {
                 f,
                 "HNSW m must be 2..=64 and ef_construction must be m..=4096"
             ),
+            Self::UnsupportedAnnMetric => {
+                write!(f, "HNSW supports squared_l2 and cosine, not inner_product")
+            }
             Self::InvalidEfSearch => write!(
                 f,
                 "ef_search must be 1..={MAX_EF_SEARCH} and at least min(k, live records)"
@@ -599,9 +665,20 @@ impl Database {
     ///
     /// Clears the mutation buffer. Nothing is written to the database file.
     pub fn build_hnsw(&mut self, config: HnswConfig) -> Result<()> {
+        self.build_hnsw_with_metric(config, DistanceMetric::SquaredL2)
+    }
+
+    /// Replaces the one in-memory index with a squared-L2 or cosine index.
+    /// Cosine excludes zero-norm records. Inner product is not supported.
+    pub fn build_hnsw_with_metric(
+        &mut self,
+        config: HnswConfig,
+        metric: DistanceMetric,
+    ) -> Result<()> {
         self.ensure_healthy()?;
         config.validate()?;
-        self.index = Some(hnsw::Index::build(&self.records, config));
+        validate_ann_metric(metric)?;
+        self.index = Some(hnsw::Index::build(&self.records, config, metric));
         Ok(())
     }
 
@@ -617,16 +694,28 @@ impl Database {
         ef_search: usize,
         config: HnswConfig,
     ) -> Result<Vec<SearchHit>> {
-        self.validate_hnsw_query(query, k, ef_search, config)?;
+        self.search_approximate_with_metric(query, k, ef_search, config, DistanceMetric::SquaredL2)
+    }
+
+    /// Approximate search that lazily rebuilds on metric or configuration mismatch.
+    pub fn search_approximate_with_metric(
+        &mut self,
+        query: &[f32],
+        k: usize,
+        ef_search: usize,
+        config: HnswConfig,
+        metric: DistanceMetric,
+    ) -> Result<Vec<SearchHit>> {
+        self.validate_hnsw_query(query, k, ef_search, config, metric)?;
         if k == 0 || self.records.is_empty() {
             return Ok(Vec::new());
         }
         if self
             .index
             .as_ref()
-            .is_none_or(|index| index.config != config)
+            .is_none_or(|index| index.config != config || index.metric != metric)
         {
-            self.build_hnsw(config)?;
+            self.build_hnsw_with_metric(config, metric)?;
         }
         Ok(self
             .index
@@ -648,14 +737,32 @@ impl Database {
         ef_search: usize,
         config: HnswConfig,
     ) -> Result<Vec<SearchHit>> {
-        self.validate_hnsw_query(query, k, ef_search, config)?;
+        self.search_approximate_ready_with_metric(
+            query,
+            k,
+            ef_search,
+            config,
+            DistanceMetric::SquaredL2,
+        )
+    }
+
+    /// Ready-only search; a metric mismatch returns `IndexNotReady`, never rebuilds.
+    pub fn search_approximate_ready_with_metric(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef_search: usize,
+        config: HnswConfig,
+        metric: DistanceMetric,
+    ) -> Result<Vec<SearchHit>> {
+        self.validate_hnsw_query(query, k, ef_search, config, metric)?;
         if k == 0 || self.records.is_empty() {
             return Ok(Vec::new());
         }
         let index = self
             .index
             .as_ref()
-            .filter(|index| index.config == config)
+            .filter(|index| index.config == config && index.metric == metric)
             .ok_or(Error::IndexNotReady)?;
         Ok(index.search(query, k, ef_search, &self.records))
     }
@@ -666,10 +773,13 @@ impl Database {
         k: usize,
         ef_search: usize,
         config: HnswConfig,
+        metric: DistanceMetric,
     ) -> Result<()> {
         self.ensure_healthy()?;
         self.validate_vector(query)?;
         config.validate()?;
+        validate_ann_metric(metric)?;
+        validate_metric_query(query, metric)?;
         if !(1..=MAX_EF_SEARCH).contains(&ef_search) || ef_search < k.min(self.records.len()) {
             return Err(Error::InvalidEfSearch);
         }
@@ -717,15 +827,7 @@ impl Database {
         self.ensure_healthy()?;
         self.validate_vector(query)?;
         metadata::validate_filter(conditions)?;
-        let query_norm = if metric == DistanceMetric::Cosine {
-            let squared: f64 = query.iter().map(|&value| f64::from(value).powi(2)).sum();
-            if squared == 0.0 {
-                return Err(Error::ZeroNormQuery);
-            }
-            squared.sqrt()
-        } else {
-            0.0
-        };
+        let query_norm = validate_metric_query(query, metric)?;
         if k == 0 {
             return Ok(Vec::new());
         }
@@ -739,25 +841,17 @@ impl Database {
                 continue;
             }
             let distance = if metric != DistanceMetric::SquaredL2 {
-                let dot: f64 = record
-                    .vector
-                    .iter()
-                    .zip(query)
-                    .map(|(&a, &b)| f64::from(a) * f64::from(b))
-                    .sum();
-                if metric == DistanceMetric::InnerProduct {
-                    if dot == 0.0 { 0.0 } else { -dot }
+                let norm = if metric == DistanceMetric::Cosine {
+                    vector_norm(&record.vector)
                 } else {
-                    let norm: f64 = record
-                        .vector
-                        .iter()
-                        .map(|&value| f64::from(value).powi(2))
-                        .sum();
-                    if norm == 0.0 {
-                        continue;
-                    }
-                    1.0 - (dot / (norm.sqrt() * query_norm)).clamp(-1.0, 1.0)
-                }
+                    0.0
+                };
+                let Some(distance) =
+                    metric_distance(&record.vector, query, metric, norm, query_norm)
+                else {
+                    continue;
+                };
+                distance
             } else if query.len() <= 32 {
                 record
                     .vector

@@ -78,6 +78,9 @@ fn benchmark_rejects_invalid_or_unbounded_workloads_before_creating_files() {
         vec!["--mixed-writes", "1", "--mixed-writes", "1"],
         vec!["--vectors", "missing"],
         vec!["--query-vectors", "missing"],
+        vec!["--metric", "invalid"],
+        vec!["--metric", "cosine", "--metric", "cosine"],
+        vec!["--metric", "inner_product", "--ann", "16", "100", "100"],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_vlite-bench"))
             .args(args)
@@ -226,5 +229,31 @@ fn approximate_benchmark_emits_measured_recall_and_build_cost() {
     ] {
         assert!(text.contains(field), "{text}");
     }
+
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn metric_benchmarks_verify_exact_filtered_and_mixed_cosine_scores() {
+    for metric in ["squared_l2", "cosine", "inner_product"] {
+        for mode in [
+            vec![],
+            vec!["--filter-every", "4"],
+            vec!["--mixed-writes", "16", "--ann", "8", "32", "100"],
+        ] {
+            if metric == "inner_product" && mode.contains(&"--ann") {
+                continue;
+            }
+            let result = Command::new(env!("CARGO_BIN_EXE_vlite-bench"))
+                .args(["--metric", metric])
+                .args(mode)
+                .args(["64", "8", "20", "16", "5", "42"])
+                .output()
+                .unwrap();
+            assert!(result.status.success(), "{result:?}");
+            let text = String::from_utf8(result.stdout).unwrap();
+            assert!(text.contains(&format!("\"metric\":\"{metric}\"")));
+            assert!(text.contains("\"recall_at_k\":1.000000"));
+        }
+    }
 }

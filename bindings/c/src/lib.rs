@@ -59,11 +59,16 @@ enum Request {
         #[serde(default)]
         metric: vlite::DistanceMetric,
     },
-    BuildIndex {},
+    BuildIndex {
+        #[serde(default)]
+        metric: vlite::DistanceMetric,
+    },
     SearchApproximateReady {
         vector: Vec<f32>,
         k: usize,
         ef_search: usize,
+        #[serde(default)]
+        metric: vlite::DistanceMetric,
     },
 }
 
@@ -265,17 +270,25 @@ fn execute(handle: u64, request: Request) -> Result<Value> {
                 json!({"hits":hits.into_iter().map(|h| json!({"id":h.id.to_string(),"distance":h.distance})).collect::<Vec<_>>()}),
             )
         }
-        Request::BuildIndex {} => {
-            db.build_hnsw(HnswConfig::default()).map_err(failure)?;
+        Request::BuildIndex { metric } => {
+            db.build_hnsw_with_metric(HnswConfig::default(), metric)
+                .map_err(failure)?;
             Ok(Value::Null)
         }
         Request::SearchApproximateReady {
             vector,
             k,
             ef_search,
+            metric,
         } => {
             let hits = db
-                .search_approximate_ready(&vector, k, ef_search, HnswConfig::default())
+                .search_approximate_ready_with_metric(
+                    &vector,
+                    k,
+                    ef_search,
+                    HnswConfig::default(),
+                    metric,
+                )
                 .map_err(failure)?;
             Ok(
                 json!({"hits":hits.into_iter().map(|h| json!({"id":h.id.to_string(),"distance":h.distance})).collect::<Vec<_>>()}),

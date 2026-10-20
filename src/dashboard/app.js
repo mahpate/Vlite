@@ -115,12 +115,14 @@
     const exact = $("mode").value === "exact";
     $("ef").disabled = exact;
     $("filter").disabled = !exact;
-    $("metric").disabled = !exact;
+    const innerProduct = $("metric").querySelector('option[value="inner_product"]');
+    innerProduct.disabled = !exact;
+    if (!exact && $("metric").value === "inner_product") $("metric").value = "squared_l2";
   }
   $("mode").addEventListener("change", modeChanged);
   async function refreshIndex() {
     const result = await api("GET", "/v1/index/hnsw");
-    $("index-status").textContent = `${result.ready ? "Ready" : "Not ready: explicit build required for ready-only search"}; buffer ${result.buffered_ids}/${result.max_buffer_ids} IDs, ${result.buffer_vector_bytes}/${result.max_buffer_vector_bytes} vector bytes (snapshot)`;
+    $("index-status").textContent = `${result.ready ? "Ready" : "Not ready: explicit build required for ready-only search"}; metric ${result.metric ?? "none"}; buffer ${result.buffered_ids}/${result.max_buffer_ids} IDs, ${result.buffer_vector_bytes}/${result.max_buffer_vector_bytes} vector bytes (snapshot)`;
   }
   async function loadRecord(path) {
     $("record").textContent = "";
@@ -208,10 +210,9 @@
       const table = $("hits").querySelector("tbody");
       table.replaceChildren();
       const mode = $("mode").value;
-      const body = { vector: vector("query"), k: Number($("k").value), mode };
+      const body = { vector: vector("query"), k: Number($("k").value), mode, metric: $("metric").value };
       if (!Number.isInteger(body.k) || body.k < 0 || body.k > 10000) throw new Error("k must be 0..10000");
       if (mode === "exact") {
-        body.metric = $("metric").value;
         body.filter = parse("filter");
         if (!Array.isArray(body.filter)) throw new Error("Filter must be a JSON array");
       } else {
@@ -236,7 +237,8 @@
     $("build-result").textContent = "Building; no automatic retry";
     const started = performance.now();
     try {
-      await api("POST", "/v1/index/hnsw", {});
+      if ($("metric").value === "inner_product") throw new Error("HNSW supports squared L2 and cosine, not inner product");
+      await api("POST", "/v1/index/hnsw", { metric: $("metric").value });
       $("build-result").textContent = `Build completed in ${(performance.now() - started).toFixed(1)} ms (browser-observed)`;
       await refreshIndex();
     } catch (error) {

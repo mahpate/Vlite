@@ -43,6 +43,14 @@ def python_test(base, token):
     assert client.index_status()["ready"]
     for mode in ["approximate", "approximate_ready"]:
         assert client.search({"vector": [1, 0, 0], "k": 1, "mode": mode})[0]["distance"] == 0
+    client.build_index(metric="cosine")
+    assert client.index_status()["metric"] == "cosine"
+    assert client.search({"vector": [1,0,0], "k": 1, "mode": "approximate_ready", "metric": "cosine"})[0]["distance"] == 0
+    try:
+        client.search({"vector": [1,0,0], "k": 1, "mode": "approximate_ready"})
+        raise AssertionError("Expected metric mismatch")
+    except VLiteError as error:
+        assert error.code == "index_not_ready"
     assert client.metrics()["database_healthy"]
     for action, status in [
         (lambda: Client(base, "b" * 32).database(), 401),

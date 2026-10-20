@@ -7,6 +7,8 @@ export async function example(baseUrl: string, token: string): Promise<void> {
   await client.put("10", { vector: [1, 0, 0], metadata });
   console.log(await client.search({ vector: [1, 0, 0], k: 5 }));
   console.log(await client.search({ vector: [1, 0, 0], k: 5, metric: "cosine" }));
+  await client.buildIndex({ metric: "cosine" });
+  console.log(await client.search({ vector: [1, 0, 0], k: 5, metric: "cosine", mode: "approximate_ready" }));
   console.log(await client.listVectors({ limit: 25 }));
   try {
     console.log(await client.get("10"));

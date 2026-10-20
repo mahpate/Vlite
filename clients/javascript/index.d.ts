@@ -23,6 +23,7 @@ export interface Hit { id: string; distance: number }
 export interface Page { items: { id: string; metadata: Metadata }[]; next_after: string | null }
 export interface DatabaseInfo { dimensions: number; format_version: number; records: number }
 export interface IndexStatus {
+  metric?: "squared_l2" | "cosine" | null;
   ready: boolean; buffered_ids: number; buffer_vector_bytes: number;
   max_buffer_ids: number; max_buffer_vector_bytes: number;
   config: { m: number; ef_construction: number; seed: number };
@@ -45,5 +46,5 @@ export class Client {
   batch(operations: BatchOperation[]): Promise<void>;
   search(request: Search): Promise<Hit[]>;
   indexStatus(): Promise<IndexStatus>;
-  buildIndex(): Promise<void>;
+  buildIndex(options?: { metric?: "squared_l2" | "cosine" }): Promise<void>;
 }

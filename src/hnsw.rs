@@ -5,7 +5,7 @@ use std::{
     collections::{BTreeMap, BinaryHeap, HashSet},
 };
 
-use crate::{Error, Record, Result, SearchHit};
+use crate::{DistanceMetric, Error, Record, Result, SearchHit, metric_distance, vector_norm};
 
 /// Index construction parameters. A changed configuration requires a rebuild.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,11 +66,13 @@ impl Ord for Candidate {
 
 struct Node {
     id: u64,
+    norm: f64,
     links: Vec<Vec<usize>>,
 }
 
 pub(crate) struct Index {
     pub config: HnswConfig,
+    pub metric: DistanceMetric,
     nodes: Vec<Node>,
     entry: Option<usize>,
     buffered: BTreeMap<u64, Buffered>,
@@ -82,31 +84,33 @@ struct Buffered {
     current_bytes: usize,
 }
 
-fn distance(a: &[f32], b: &[f32]) -> f64 {
-    a.iter()
-        .zip(b)
-        .map(|(&a, &b)| {
-            let difference = f64::from(a) - f64::from(b);
-            difference * difference
-        })
-        .sum()
-}
-
 impl Index {
+    fn distance(&self, a: &[f32], b: &[f32], a_norm: f64, b_norm: f64) -> f64 {
+        metric_distance(a, b, self.metric, a_norm, b_norm)
+            .expect("cosine graph contains only nonzero vectors")
+    }
     #[cfg(any(feature = "server", test))]
     pub fn buffer_usage(&self) -> (usize, usize) {
         (self.buffered.len(), self.buffered_bytes)
     }
 
-    pub fn build(records: &BTreeMap<u64, Record>, config: HnswConfig) -> Self {
+    pub fn build(
+        records: &BTreeMap<u64, Record>,
+        config: HnswConfig,
+        metric: DistanceMetric,
+    ) -> Self {
         let mut index = Self {
             config,
+            metric,
             nodes: Vec::with_capacity(records.len()),
             entry: None,
             buffered: BTreeMap::new(),
             buffered_bytes: 0,
         };
         for &id in records.keys() {
+            if metric == DistanceMetric::Cosine && vector_norm(&records[&id].vector) == 0.0 {
+                continue;
+            }
             index.insert(id, records);
         }
         index
@@ -149,9 +153,20 @@ impl Index {
         }
     }
 
-    fn candidate(&self, node: usize, query: &[f32], records: &BTreeMap<u64, Record>) -> Candidate {
+    fn candidate(
+        &self,
+        node: usize,
+        query: &[f32],
+        query_norm: f64,
+        records: &BTreeMap<u64, Record>,
+    ) -> Candidate {
         Candidate {
-            distance: distance(query, self.vector(node, records)),
+            distance: self.distance(
+                self.vector(node, records),
+                query,
+                self.nodes[node].norm,
+                query_norm,
+            ),
             node,
         }
     }
@@ -159,6 +174,7 @@ impl Index {
     fn greedy(
         &self,
         query: &[f32],
+        query_norm: f64,
         mut best: Candidate,
         layer: usize,
         records: &BTreeMap<u64, Record>,
@@ -166,7 +182,7 @@ impl Index {
         loop {
             let previous = best;
             for &neighbor in &self.nodes[previous.node].links[layer] {
-                let candidate = self.candidate(neighbor, query, records);
+                let candidate = self.candidate(neighbor, query, query_norm, records);
                 if candidate < best {
                     best = candidate;
                 }
@@ -180,6 +196,7 @@ impl Index {
     fn layer(
         &self,
         query: &[f32],
+        query_norm: f64,
         entry: Candidate,
         layer: usize,
         ef: usize,
@@ -196,7 +213,7 @@ impl Index {
                 if !visited.insert(node) {
                     continue;
                 }
-                let candidate = self.candidate(node, query, records);
+                let candidate = self.candidate(node, query, query_norm, records);
                 if nearest.len() < ef || candidate < *nearest.peek().expect("nonempty nearest") {
                     candidates.push(Reverse(candidate));
                     nearest.push(candidate);
@@ -221,9 +238,11 @@ impl Index {
         for candidate in candidates {
             // Preserve directionally diverse links rather than only a dense local cluster.
             if selected.iter().all(|&node| {
-                distance(
+                self.distance(
                     self.vector(candidate.node, records),
                     self.vector(node, records),
+                    self.nodes[candidate.node].norm,
+                    self.nodes[node].norm,
                 ) >= candidate.distance
             }) {
                 selected.push(candidate.node);
@@ -264,6 +283,11 @@ impl Index {
         let new = self.nodes.len();
         self.nodes.push(Node {
             id,
+            norm: if self.metric == DistanceMetric::Cosine {
+                vector_norm(&records[&id].vector)
+            } else {
+                0.0
+            },
             links: vec![Vec::new(); level + 1],
         });
         let Some(entry) = self.entry else {
@@ -272,12 +296,20 @@ impl Index {
         };
         let top = self.nodes[entry].links.len() - 1;
         let query = &records[&id].vector;
-        let mut best = self.candidate(entry, query, records);
+        let query_norm = self.nodes[new].norm;
+        let mut best = self.candidate(entry, query, query_norm, records);
         for layer in ((level + 1)..=top).rev() {
-            best = self.greedy(query, best, layer, records);
+            best = self.greedy(query, query_norm, best, layer, records);
         }
         for layer in (0..=level.min(top)).rev() {
-            let candidates = self.layer(query, best, layer, self.config.ef_construction, records);
+            let candidates = self.layer(
+                query,
+                query_norm,
+                best,
+                layer,
+                self.config.ef_construction,
+                records,
+            );
             let neighbors = self.select(&candidates, self.config.m, records);
             self.nodes[new].links[layer] = neighbors.clone();
             let limit = if layer == 0 {
@@ -290,7 +322,14 @@ impl Index {
                 if self.nodes[neighbor].links[layer].len() > limit {
                     let mut candidates = self.nodes[neighbor].links[layer]
                         .iter()
-                        .map(|&node| self.candidate(node, self.vector(neighbor, records), records))
+                        .map(|&node| {
+                            self.candidate(
+                                node,
+                                self.vector(neighbor, records),
+                                self.nodes[neighbor].norm,
+                                records,
+                            )
+                        })
                         .collect::<Vec<_>>();
                     candidates.sort_unstable();
                     self.nodes[neighbor].links[layer] = self.select(&candidates, limit, records);
@@ -311,26 +350,48 @@ impl Index {
         records: &BTreeMap<u64, Record>,
     ) -> Vec<SearchHit> {
         let mut hits = Vec::new();
+        let query_norm = if self.metric == DistanceMetric::Cosine {
+            vector_norm(query)
+        } else {
+            0.0
+        };
         if let Some(entry) = self.entry {
-            let mut best = self.candidate(entry, query, records);
+            let mut best = self.candidate(entry, query, query_norm, records);
             for layer in (1..self.nodes[entry].links.len()).rev() {
-                best = self.greedy(query, best, layer, records);
+                best = self.greedy(query, query_norm, best, layer, records);
             }
             hits.extend(
-                self.layer(query, best, 0, ef + self.buffered.len(), records)
-                    .into_iter()
-                    .filter(|candidate| !self.buffered.contains_key(&self.nodes[candidate.node].id))
-                    .take(k)
-                    .map(|candidate| SearchHit {
-                        id: self.nodes[candidate.node].id,
-                        distance: candidate.distance,
-                    }),
+                self.layer(
+                    query,
+                    query_norm,
+                    best,
+                    0,
+                    ef + self.buffered.len(),
+                    records,
+                )
+                .into_iter()
+                .filter(|candidate| !self.buffered.contains_key(&self.nodes[candidate.node].id))
+                .take(k)
+                .map(|candidate| SearchHit {
+                    id: self.nodes[candidate.node].id,
+                    distance: candidate.distance,
+                }),
             );
         }
         hits.extend(self.buffered.keys().filter_map(|&id| {
-            records.get(&id).map(|record| SearchHit {
-                id,
-                distance: distance(&record.vector, query),
+            records.get(&id).and_then(|record| {
+                metric_distance(
+                    &record.vector,
+                    query,
+                    self.metric,
+                    if self.metric == DistanceMetric::Cosine {
+                        vector_norm(&record.vector)
+                    } else {
+                        0.0
+                    },
+                    query_norm,
+                )
+                .map(|distance| SearchHit { id, distance })
             })
         }));
         hits.sort_by(|a, b| {
@@ -355,7 +416,7 @@ mod tests {
             metadata: crate::Metadata::new(),
         };
         let records = BTreeMap::from([(0, record.clone())]);
-        let mut index = Index::build(&records, HnswConfig::default());
+        let mut index = Index::build(&records, HnswConfig::default(), DistanceMetric::SquaredL2);
         let vector_bytes = crate::MAX_DIMENSIONS * 4;
         for id in 0..16 {
             assert!(index.track(id, Some(&record), vector_bytes));
@@ -366,7 +427,11 @@ mod tests {
         assert!(index.track(0, Some(&record), vector_bytes));
         assert!(!index.track(16, Some(&record), vector_bytes));
         assert_eq!(index.buffer_usage(), (16, MAX_HNSW_BUFFER_VECTOR_BYTES));
-        let mut index = Index::build(&BTreeMap::new(), HnswConfig::default());
+        let mut index = Index::build(
+            &BTreeMap::new(),
+            HnswConfig::default(),
+            DistanceMetric::SquaredL2,
+        );
         for id in 0..MAX_HNSW_BUFFER_IDS {
             assert!(index.track(id as u64, None, 4));
             assert!(index.track(id as u64, Some(&record), 0));
@@ -395,7 +460,7 @@ mod tests {
                 ef_construction: 100,
                 seed: 42,
             };
-            let index = Index::build(&records, config);
+            let index = Index::build(&records, config, DistanceMetric::SquaredL2);
             for (position, node) in index.nodes.iter().enumerate() {
                 for (layer, links) in node.links.iter().enumerate() {
                     assert!(links.len() <= if layer == 0 { 2 * m } else { m });

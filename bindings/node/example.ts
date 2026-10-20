@@ -11,6 +11,8 @@ export async function example(path: string): Promise<void> {
       });
       console.log(await db.search([1, 0, 0], 5));
       console.log(await db.search([1, 0, 0], 5, { metric: "cosine" }));
+      await db.buildIndex({ metric: "cosine" });
+      console.log(await db.searchApproximateReady([1, 0, 0], 5, { metric: "cosine" }));
       console.log(await db.getMany(["0", "18446744073709551615"]));
     } finally {
       await db.close();

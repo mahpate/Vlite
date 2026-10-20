@@ -187,6 +187,36 @@ the bounded native tool is not a million-vector production load generator.
 
 ## Publishing results
 
+### Exact metrics and cosine ANN
+
+Current-source `vlite-bench` accepts `--metric squared_l2|cosine|inner_product`
+before `--filter-every`/`--ann`. Omission preserves L2. Cosine ANN uses the same
+explicit metric for construction, traversal, buffered updates and its independent
+exact oracle. Inner-product ANN is rejected. Zero-norm dataset records are
+excluded for cosine; zero queries fail explicitly. Empty eligible sets report
+exact recall 1 by convention (there are no expected neighbors).
+
+```powershell
+cargo build --locked --release --bin vlite-bench
+python benchmarks\metric_campaign.py --binary target\release\vlite-bench.exe --output metric-results.json
+```
+
+The bounded campaign runs three independent trials on 1,500 seeded records at
+128 and 384 dimensions, 30 queries, k=10. It compares all three exact metrics,
+10%-eligible metadata filters, and cosine ANN at ef=32/100 plus 16 mixed writes
+per query at ef=100. Trial order reverses to reduce fixed-order bias; each child
+has independent OS peak-RSS measurement. These are synthetic fixed-point
+vectors, **not trained embeddings**. External inputs remain available through
+`--vectors`/`--query-vectors` on the child CLI; record data/model provenance
+before interpreting results on real embeddings.
+
+Reports preserve every argument/raw sample, source and binary hashes, dirty
+state and host details. Medians summarize per-trial percentiles, not pooled
+samples. Memory covers the whole benchmark process, not incremental index RAM.
+No host isolation, broad recall guarantee or production tail-latency estimate
+is implied. Mixed-query times include any synchronous overflow rebuild.
+See [results](RESULTS.md) before choosing an index; exact can win on small data.
+
 Commit raw complete JSON under `benchmarks/results/` and summarize in
 `RESULTS.md`: exact command, source/image provenance, machine/resources,
 sample counts, repeats, p50/p95/p99, recall, indexing cost and caveats.

@@ -32,7 +32,7 @@ It uses its own storage format and does not require an external database.
   no-clobber copy-out compaction.
 
 VLite is licensed under the MIT License; see
-[LICENSE](LICENSE). There is no gRPC, non-L2 ANN, distributed
+[LICENSE](LICENSE). There is no gRPC, inner-product ANN, distributed
 replication, multi-reader handle, encryption at rest, or approximate metadata
 filtering.
 See the [technical reference](docs/REFERENCE.md) for contracts and limits.
@@ -266,12 +266,25 @@ Existing calls remain squared-L2. Rust callers can use
 Python embedded uses `db.search(query, k, metric="cosine")`; Node embedded uses
 `await db.search(query, k, { metric: "cosine" })`. REST accepts the same metric
 names in `/v1/search`: `squared_l2`, `cosine`, `inner_product`.
-The dashboard offers these metrics in exact mode.
+The dashboard offers all three in exact mode and L2/cosine in ANN modes.
 
 Distances always sort lowest first: cosine returns 1 minus similarity, while
 inner product returns negative dot product. Cosine rejects zero queries and
-excludes zero-norm records. ANN remains L2-only and rejects non-L2 requests;
-there is no silent fallback. See [metric contracts](docs/REFERENCE.md#exact-distance-metrics-v011).
+excludes zero-norm records. There is no silent metric fallback.
+See [metric contracts](docs/REFERENCE.md#exact-distance-metrics-v011).
+
+**Cosine ANN (unreleased, build from current source):** Rust adds
+`build_hnsw_with_metric`, `search_approximate_with_metric` and
+`search_approximate_ready_with_metric`, with `DistanceMetric::Cosine`.
+Python uses `db.build_index(metric="cosine")` followed by
+`db.search_approximate_ready(query, k, metric="cosine")`; Node uses
+`await db.buildIndex({ metric: "cosine" })` and
+`await db.searchApproximateReady(query, k, { metric: "cosine" })`.
+REST builds accept `{"metric":"cosine"}` and searches use the same metric.
+Only one graph is retained: ready-only queries reject a mismatched metric;
+lazy queries rebuild synchronously. Inner-product ANN remains unsupported.
+The published v0.1.1 packages still support L2 ANN only; rebuild the engine
+and SDK together for cosine ANN. No database format change is required.
 
 ## Performance
 

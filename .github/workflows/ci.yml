@@ -39,6 +39,8 @@ jobs:
         run: python tests/measure_benchmark.py target/release/vlite-bench${{ runner.os == 'Windows' && '.exe' || '' }} --ann 16 100 100 256 8 10 64 5 42
       - name: Verify mixed-update campaign and measured peak memory
         run: python benchmarks/native_campaign.py --binary target/release/vlite-bench${{ runner.os == 'Windows' && '.exe' || '' }} --records 300 --dimensions 8 --queries 10 --trials 1 --ef 32 --mixed-writes 32 --output native-campaign.json
+      - name: Verify exact-metric and cosine ANN campaign
+        run: python benchmarks/metric_campaign.py --binary target/release/vlite-bench${{ runner.os == 'Windows' && '.exe' || '' }} --records 32 --dimensions 8 --queries 2 --trials 1 --output metric-campaign.json
 
   clients:
     strategy:

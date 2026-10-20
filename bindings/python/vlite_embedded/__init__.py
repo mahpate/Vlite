@@ -110,8 +110,9 @@ class Database:
         options = {} if metric == "squared_l2" else {"metric": metric}
         return self._execute("search", vector=vector, k=k, filter=[] if filter is None else filter, **options)["hits"]
 
-    def build_index(self) -> None:
-        self._execute("build_index")
+    def build_index(self, *, metric: str = "squared_l2") -> None:
+        self._execute("build_index", **({} if metric == "squared_l2" else {"metric": metric}))
 
-    def search_approximate_ready(self, vector: list[float], k: int, *, ef_search: int = 100) -> list[dict]:
-        return self._execute("search_approximate_ready", vector=vector, k=k, ef_search=ef_search)["hits"]
+    def search_approximate_ready(self, vector: list[float], k: int, *, ef_search: int = 100, metric: str = "squared_l2") -> list[dict]:
+        return self._execute("search_approximate_ready", vector=vector, k=k, ef_search=ef_search,
+                             **({} if metric == "squared_l2" else {"metric": metric}))["hits"]

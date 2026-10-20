@@ -164,8 +164,9 @@ are excluded, including after metadata filtering, so the result count can be
 less than min(k, live/filtered count). Nonzero subnormals remain valid. Dimension,
 nonfinite-vector and filter validation still applies before returning results.
 
-HNSW remains squared-L2 only. Both REST approximate modes reject non-L2 metrics
-with 422; native approximate APIs do not expose a metric parameter. There is no
+HNSW in published v0.1.1 remains squared-L2 only. Current source also supports
+cosine ANN as described below; inner-product ANN remains rejected.
+REST rejects inner-product ANN with 422. There is no
 implicit fallback, index reuse under a different metric or approximate filtering.
 The default L2 cutoff optimization is not used for cosine/inner product.
 Older native binaries/servers do not understand explicit new metric fields;
@@ -626,6 +627,41 @@ exhaustive matches must be updated.
 
 ## Optional HNSW search
 
+### Metric identity (unreleased cosine ANN)
+
+The legacy `build_hnsw`, `search_approximate` and `search_approximate_ready`
+methods remain squared-L2 APIs, with unchanged `HnswConfig` fields. Current
+source adds corresponding `_with_metric` methods taking a final
+`DistanceMetric` argument (`build_hnsw_with_metric(config, metric)`).
+Only `SquaredL2` and `Cosine` are supported; `InnerProduct` returns
+`UnsupportedAnnMetric` even for an empty database or k=0.
+Build both the engine and SDK from current source for cosine ANN; published
+v0.1.1 binaries and packages do not include this addition.
+
+Exactly one graph is retained per owner. Its identity includes construction
+parameters and metric. Lazy queries synchronously replace a missing/mismatched
+graph; ready-only queries return `IndexNotReady` without replacing anything.
+Empty-database/k=0 queries validate vectors, metric and ef first but need no
+graph. Reopen loses all indexes. `ef_search` uses the existing live-record
+count bound, including zero-norm records, rather than scanning eligibility
+before validation.
+
+Cosine traverses and prunes using `1 - clamp(dot / (norm_a * norm_b), -1, 1)`,
+with f64 dot products/norms. It does not rewrite or normalize stored f32 vectors.
+Graph-node norms are cached at build time and stay paired with original graph
+vectors during buffered updates; query norms are calculated once per traversal.
+Current buffered vectors are scored independently and merged by distance/ID.
+Zero queries are rejected even for k=0; zero-norm records are excluded from
+graph construction and buffer results. Zero-to-nonzero and nonzero-to-zero
+replacements obey the same visibility and overflow rules as L2 updates.
+No disk format, ownership or durability contract changes.
+
+REST accepts `{"metric":"cosine"}` at both the build route and `/v1/search`.
+Status reports the active `metric` (null without a graph) alongside `ready`;
+both readiness and metric must match the intended query. This is a snapshot,
+not a reservation. The dashboard shows the active metric and builds for the
+selected metric. Inner product is only selectable for exact search.
+
 ### Explicit maintenance and no-rebuild queries
 
 Use `Database::search_approximate_ready(&query, k, ef_search, config)` when the
@@ -644,9 +680,9 @@ Invoke-RestMethod "$base/v1/index/hnsw" -Headers $auth -Method Post -ContentType
 Invoke-RestMethod "$base/v1/search" -Headers $auth -Method Post -ContentType 'application/json' -Body '{"vector":[0.9,0.1,0],"k":5,"mode":"approximate_ready","ef_search":100}'
 ```
 
-The build route accepts **only an empty JSON object**, requires the same token,
+The build route accepts `{}` for L2 or `{"metric":"cosine"}`, requires the same token,
 and returns 204 when complete. Missing indexes produce HTTP 409 with code
-`index_not_ready` in ready mode; choose maintenance or an explicitly different
+`index_not_ready` in ready mode, as do metric mismatches; choose maintenance or an explicitly different
 search mode rather than blindly retrying. Writes can invalidate an index again
 after a successful build. Reopen always loses the graph. Exact search remains
 available without graph construction. No storage format or database bytes change.
@@ -665,7 +701,7 @@ background work**. There is still no background builder or latency guarantee.
 `Database::search` stays exact. `search_approximate` explicitly opts into a
 deterministic hierarchical navigable small-world graph with bounded
 per-layer degree, greedy upper-layer descent and beam search at the base.
-It uses the same f64 squared-L2 calculation and sorts discovered candidates
+It uses the selected f64 distance calculation and sorts discovered candidates
 by distance then numeric ID. It may miss nearest neighbors or return fewer
 than `min(k,records)` hits if the reachable candidate set is smaller.
 There is no universal recall guarantee or automatic fallback to exact search.

@@ -79,5 +79,7 @@ export class Client {
   }
   async search(request) { return (await this.#request("POST", "/v1/search", request)).hits; }
   indexStatus() { return this.#request("GET", "/v1/index/hnsw"); }
-  async buildIndex() { await this.#request("POST", "/v1/index/hnsw", {}); }
+  async buildIndex({ metric = "squared_l2" } = {}) {
+    await this.#request("POST", "/v1/index/hnsw", metric === "squared_l2" ? {} : { metric });
+  }
 }

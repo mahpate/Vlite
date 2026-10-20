@@ -43,7 +43,7 @@ async fn exact_metrics_and_unsupported_ann_combinations_are_explicit() {
             "invalid_json",
         ),
         (
-            json!({"vector":[1,0],"k":1,"metric":"cosine","mode":"approximate"}),
+            json!({"vector":[1,0],"k":1,"metric":"inner_product","mode":"approximate"}),
             "invalid_input",
         ),
         (
@@ -55,6 +55,86 @@ async fn exact_metrics_and_unsupported_ann_combinations_are_explicit() {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(result["error"]["code"], code);
     }
+    let (_, status) = request(&app, "GET", "/v1/index/hnsw", Value::Null).await;
+    assert_eq!(status["metric"], Value::Null);
+    assert_eq!(
+        request(&app, "POST", "/v1/index/hnsw", json!({"metric":"cosine"}))
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    let (_, status) = request(&app, "GET", "/v1/index/hnsw", Value::Null).await;
+    assert_eq!(status["metric"], "cosine");
+    assert_eq!(status["ready"], true);
+    let (code, hits) = request(
+        &app,
+        "POST",
+        "/v1/search",
+        json!({"vector":[1,0],"k":2,"metric":"cosine","mode":"approximate_ready"}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(hits["hits"][0], json!({"id":"1","distance":0.0}));
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/v1/search",
+            json!({"vector":[1,0],"k":1,"mode":"approximate_ready"})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/v1/index/hnsw",
+            json!({"metric":"inner_product"})
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let (_, status) = request(&app, "GET", "/v1/index/hnsw", Value::Null).await;
+    assert_eq!(
+        status["metric"], "cosine",
+        "rejected build must preserve index"
+    );
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/v1/search",
+            json!({"vector":[1,0],"k":0,"mode":"approximate"})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, status) = request(&app, "GET", "/v1/index/hnsw", Value::Null).await;
+    assert_eq!(
+        status["metric"], "cosine",
+        "k=0 must not replace mismatched index"
+    );
+    let (_, metrics) = request(&app, "GET", "/metrics", Value::Null).await;
+    assert_eq!(metrics["hnsw_rebuilds_total"], 1);
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/v1/search",
+            json!({"vector":[1,0],"k":1,"mode":"approximate"})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, status) = request(&app, "GET", "/v1/index/hnsw", Value::Null).await;
+    assert_eq!(status["metric"], "squared_l2");
+    let (_, metrics) = request(&app, "GET", "/metrics", Value::Null).await;
+    assert_eq!(metrics["hnsw_rebuilds_total"], 2);
 }
 
 async fn raw(

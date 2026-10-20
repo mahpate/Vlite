@@ -49,6 +49,12 @@ test("embedded persistence, errors, ordering, binary data and shutdown", { timeo
     ] }), [{ id: "18446744073709551615", distance: 0 }]);
     await db.buildIndex();
     assert.equal((await db.searchApproximateReady([1, 0, 0], 1))[0].distance, 0);
+    await assert.rejects(db.searchApproximateReady([1, 0, 0], 1, { metric: "cosine" }), code("index_not_ready"));
+    await db.buildIndex({ metric: "cosine" });
+    assert.equal((await db.searchApproximateReady([1, 0, 0], 1, { metric: "cosine" }))[0].distance, 0);
+    await assert.rejects(db.searchApproximateReady([1, 0, 0], 1), code("index_not_ready"));
+    await assert.rejects(db.buildIndex({ metric: "inner_product" }), code("invalid_input"));
+    await assert.rejects(db.searchApproximateReady([0, 0, 0], 0, { metric: "cosine" }), code("invalid_input"));
     assert.equal(await db.delete("2"), true);
     assert.equal(await db.delete("2"), false);
     const write = db.put("2", [0, 1, 0]);

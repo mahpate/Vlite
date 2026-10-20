@@ -57,6 +57,8 @@ try {
   assert.equal((await db.search([1,0],1))[0].distance,0);
   assert.equal((await db.search([1,0],1,{metric:"cosine"}))[0].distance,0);
   assert.equal((await db.search([1,0],1,{metric:"inner_product"}))[0].distance,-1);
+  await db.buildIndex({metric:"cosine"});
+  assert.equal((await db.searchApproximateReady([1,0],1,{metric:"cosine"}))[0].distance,0);
   await db.close();
   const next = await native.open("installed.vlite");
   assert.equal((await next.info()).records,1);
