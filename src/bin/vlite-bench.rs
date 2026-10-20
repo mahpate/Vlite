@@ -5,12 +5,13 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 use vlite::{
-    Condition, Database, DistanceMetric, HnswConfig, MAX_BATCH_BYTES, MAX_BATCH_OPERATIONS,
-    MAX_DIMENSIONS, MAX_EF_SEARCH, Metadata, MetadataValue, Mutation,
+    Condition, Database, DistanceMetric, HnswConfig, HnswRebuildLimits, HnswRebuildStatus,
+    MAX_BATCH_BYTES, MAX_BATCH_OPERATIONS, MAX_DIMENSIONS, MAX_EF_SEARCH, Metadata, MetadataValue,
+    Mutation,
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
-const USAGE: &str = "usage: vlite-bench [--metric squared_l2|cosine|inner_product] [--vectors <file> --query-vectors <file>] [--update-vectors <file>] [--mixed-writes <updates per query>] [--mixed-deletes <deletes per query>] [--filter-every <N>] [--ann <m> <ef_construction> <ef_search>] [records=1000 dimensions=32 queries=100 batch_size=100 k=10 seed=42]; mutations require ANN; filtering and ANN are mutually exclusive; inner product is exact-only";
+const USAGE: &str = "usage: vlite-bench [--metric squared_l2|cosine|inner_product] [--vectors <file> --query-vectors <file>] [--update-vectors <file>] [--mixed-writes <updates per query>] [--mixed-deletes <deletes per query>] [--rebuild-mode lazy|background] [--query-interval-ms <0..1000>] [--filter-every <N>] [--ann <m> <ef_construction> <ef_search>] [records=1000 dimensions=32 queries=100 batch_size=100 k=10 seed=42]; background mode requires mixed ANN and reports ready-only rejections without fallback; filtering and ANN are mutually exclusive; inner product is exact-only";
 const MAX_DATA_BYTES: usize = 256 * 1024 * 1024;
 const MAX_DISTANCE_COMPONENTS: u64 = 500_000_000;
 
@@ -28,6 +29,8 @@ struct Config {
     mixed_deletes: usize,
     update_vectors: Option<PathBuf>,
     metric: DistanceMetric,
+    background_rebuild: bool,
+    query_interval_ms: u64,
 }
 
 impl Config {
@@ -39,6 +42,8 @@ impl Config {
         let mut mixed_deletes = None;
         let mut update_vectors = None;
         let mut metric = None;
+        let mut rebuild_mode = None;
+        let mut query_interval_ms = None;
         while args.first().is_some_and(|arg| {
             matches!(
                 arg.as_str(),
@@ -48,11 +53,27 @@ impl Config {
                     | "--mixed-deletes"
                     | "--update-vectors"
                     | "--metric"
+                    | "--rebuild-mode"
+                    | "--query-interval-ms"
             )
         }) {
             let flag = args[0].clone();
             let value = args.get(1).ok_or(USAGE)?.clone();
             match flag.as_str() {
+                "--rebuild-mode" if rebuild_mode.is_none() => {
+                    rebuild_mode = Some(match value.as_str() {
+                        "background" => true,
+                        "lazy" => false,
+                        _ => return Err("rebuild mode must be lazy or background".into()),
+                    });
+                }
+                "--query-interval-ms" if query_interval_ms.is_none() => {
+                    let interval = value.parse::<u64>()?;
+                    if interval > 1000 {
+                        return Err("background interval must be 0..=1000 milliseconds".into());
+                    }
+                    query_interval_ms = Some(interval);
+                }
                 "--metric" if metric.is_none() => {
                     metric = Some(match value.as_str() {
                         "squared_l2" => DistanceMetric::SquaredL2,
@@ -146,6 +167,12 @@ impl Config {
         if input.is_some() && mixed_writes.is_some() && update_vectors.is_none() {
             return Err("external mixed writes require --update-vectors; synthetic replacements are not implicit".into());
         }
+        let background_rebuild = rebuild_mode.unwrap_or(false);
+        if background_rebuild
+            && (ann.is_none() || (mixed_writes.is_none() && mixed_deletes.is_none()))
+        {
+            return Err("background benchmark requires --ann and mixed mutations".into());
+        }
         if args.len() > 6 {
             return Err(USAGE.into());
         }
@@ -172,6 +199,11 @@ impl Config {
             && k <= records;
         if !bounded {
             return Err(format!("invalid workload bounds; {USAGE}").into());
+        }
+        if (background_rebuild || query_interval_ms.is_some())
+            && (queries > 200 || records > 100_000 || records * dimensions * 4 > 128 * 1024 * 1024)
+        {
+            return Err("background workload exceeds 200 queries, 100000 records or 128 MiB snapshot vector bytes".into());
         }
         let mixed_writes = mixed_writes.unwrap_or(0);
         let mixed_deletes = mixed_deletes.unwrap_or(0);
@@ -220,6 +252,8 @@ impl Config {
             mixed_deletes,
             update_vectors,
             metric,
+            background_rebuild,
+            query_interval_ms: query_interval_ms.unwrap_or(0),
         })
     }
 }
@@ -483,7 +517,47 @@ fn run() -> Result<()> {
         let mut rebuild_queries = Vec::new();
         let mut recall_samples = Vec::new();
         let mut live_samples = Vec::new();
+        let mut not_ready_queries = Vec::new();
+        let mut publication_queries = Vec::new();
+        let mut overflow_queries = Vec::new();
+        let mut start_queries = Vec::new();
+        let mut maintenance_times = Vec::new();
+        let mut request_times = Vec::new();
+        let mut served_times = Vec::new();
+        let mut served_recall_total = 0;
         for (query_index, query) in queries.iter().enumerate() {
+            std::thread::sleep(std::time::Duration::from_millis(config.query_interval_ms));
+            let request_start = Instant::now();
+            if config.background_rebuild {
+                let start = Instant::now();
+                let status = db.poll_hnsw_rebuild()?;
+                match status {
+                    HnswRebuildStatus::Published => publication_queries.push(query_index + 1),
+                    HnswRebuildStatus::CatchUpOverflow => overflow_queries.push(query_index + 1),
+                    HnswRebuildStatus::Idle
+                    | HnswRebuildStatus::Running
+                    | HnswRebuildStatus::Cancelling => {}
+                    status => {
+                        return Err(
+                            format!("unexpected background benchmark state: {status:?}").into()
+                        );
+                    }
+                }
+                if matches!(
+                    status,
+                    HnswRebuildStatus::Idle
+                        | HnswRebuildStatus::Published
+                        | HnswRebuildStatus::CatchUpOverflow
+                ) {
+                    db.start_hnsw_rebuild(
+                        index_config,
+                        config.metric,
+                        HnswRebuildLimits::default(),
+                    )?;
+                    start_queries.push(query_index + 1);
+                }
+                maintenance_times.push(start.elapsed().as_secs_f64() * 1000.0);
+            }
             if config.mixed_writes + config.mixed_deletes > 0 {
                 let replacements = if let Some(updates) = &updates {
                     updates
@@ -531,19 +605,25 @@ fn run() -> Result<()> {
                 ) {
                     Ok(hits) => hits,
                     Err(vlite::Error::IndexNotReady) => {
-                        rebuild_queries.push(query_index + 1);
-                        db.search_approximate_with_metric(
-                            query,
-                            config.k,
-                            ef_search,
-                            index_config,
-                            config.metric,
-                        )?
+                        if config.background_rebuild {
+                            not_ready_queries.push(query_index + 1);
+                            Vec::new()
+                        } else {
+                            rebuild_queries.push(query_index + 1);
+                            db.search_approximate_with_metric(
+                                query,
+                                config.k,
+                                ef_search,
+                                index_config,
+                                config.metric,
+                            )?
+                        }
                     }
                     Err(error) => return Err(error.into()),
                 },
             );
             approximate_times.push(start.elapsed().as_secs_f64() * 1000.0);
+            request_times.push(request_start.elapsed().as_secs_f64() * 1000.0);
             let expected = if config.mixed_writes + config.mixed_deletes > 0 {
                 let expected: Vec<_> = ground_truth(&dataset, query, config.metric)
                     .into_iter()
@@ -569,6 +649,10 @@ fn run() -> Result<()> {
             };
             let mut ids = std::collections::BTreeSet::new();
             let expected_count = config.k.min(expected.len());
+            if not_ready_queries.last() != Some(&(query_index + 1)) {
+                served_times.push(*approximate_times.last().expect("timed query"));
+                served_recall_total += expected_count;
+            }
             recall_total += expected_count;
             let before_recalled = recalled;
             live_samples.push(db.len());
@@ -608,9 +692,35 @@ fn run() -> Result<()> {
         }
         let samples = format!("{approximate_times:?}");
         let writes = format!("{write_times:?}");
+        let background_json = if config.background_rebuild {
+            let interval = config.query_interval_ms;
+            let served = served_times.len();
+            served_times.sort_by(f64::total_cmp);
+            let served_p50 = if served == 0 {
+                "null".into()
+            } else {
+                percentile(&served_times, 50).to_string()
+            };
+            let served_p99 = if served == 0 {
+                "null".into()
+            } else {
+                percentile(&served_times, 99).to_string()
+            };
+            format!(
+                ",\"background\":{{\"interval_ms\":{interval},\"start_query_numbers\":{start_queries:?},\"published_query_numbers\":{publication_queries:?},\"catchup_overflow_query_numbers\":{overflow_queries:?},\"not_ready_query_numbers\":{not_ready_queries:?},\"served_queries\":{served},\"attempted_queries\":{},\"served_recall_at_k\":{},\"served_query_p50_ms\":{served_p50},\"served_query_p99_ms\":{served_p99},\"maintenance_samples_ms\":{maintenance_times:?},\"request_samples_ms\":{request_times:?}}}",
+                config.queries,
+                if served_recall_total == 0 {
+                    "null".into()
+                } else {
+                    (recalled as f64 / served_recall_total as f64).to_string()
+                },
+            )
+        } else {
+            String::new()
+        };
         approximate_times.sort_by(f64::total_cmp);
         format!(
-            ",\"hnsw\":{{\"m\":{},\"ef_construction\":{},\"ef_search\":{},\"seed\":{},\"index_build_ms\":{:.6},\"query_p50_ms\":{:.6},\"query_p95_ms\":{:.6},\"query_p99_ms\":{:.6},\"recall_at_k\":{:.6},\"mixed_writes_per_query\":{},\"mixed_deletes_per_query\":{},\"query_samples_ms\":{},\"write_batch_samples_ms\":{},\"rebuild_query_numbers\":{:?},\"recall_samples\":{:?},\"live_records_samples\":{:?}}}",
+            ",\"hnsw\":{{\"m\":{},\"ef_construction\":{},\"ef_search\":{},\"seed\":{},\"index_build_ms\":{:.6},\"query_p50_ms\":{:.6},\"query_p95_ms\":{:.6},\"query_p99_ms\":{:.6},\"recall_at_k\":{:.6},\"mixed_writes_per_query\":{},\"mixed_deletes_per_query\":{},\"query_samples_ms\":{},\"write_batch_samples_ms\":{},\"rebuild_query_numbers\":{:?},\"recall_samples\":{:?},\"live_records_samples\":{:?},\"query_interval_ms\":{},\"request_samples_ms\":{:?}{}}}",
             index_config.m,
             index_config.ef_construction,
             ef_search,
@@ -631,6 +741,9 @@ fn run() -> Result<()> {
             rebuild_queries,
             recall_samples,
             live_samples,
+            config.query_interval_ms,
+            request_times,
+            background_json,
         )
     } else {
         String::new()

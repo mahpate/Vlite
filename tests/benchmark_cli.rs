@@ -76,6 +76,18 @@ fn benchmark_rejects_invalid_or_unbounded_workloads_before_creating_files() {
         vec!["--mixed-writes", "257", "--ann", "16", "100", "100"],
         vec!["--mixed-writes", "1"],
         vec!["--mixed-deletes", "1"],
+        vec!["--rebuild-mode", "background"],
+        vec!["--rebuild-mode", "invalid"],
+        vec![
+            "--query-interval-ms",
+            "1001",
+            "--mixed-writes",
+            "1",
+            "--ann",
+            "16",
+            "100",
+            "100",
+        ],
         vec!["--mixed-deletes", "0", "--ann", "16", "100", "100"],
         vec!["--mixed-deletes", "257", "--ann", "16", "100", "100"],
         vec![
@@ -417,4 +429,61 @@ fn mixed_deletes_report_overflow_rebuilds_and_empty_live_sets() {
         serde_json::json!([9])
     );
     assert_eq!(overflow["hnsw"]["recall_at_k"], 1.0);
+}
+
+#[cfg(feature = "server")]
+#[test]
+fn background_benchmark_reports_availability_without_synchronous_fallback() {
+    let output = Command::new(env!("CARGO_BIN_EXE_vlite-bench"))
+        .args([
+            "--metric",
+            "cosine",
+            "--mixed-writes",
+            "24",
+            "--mixed-deletes",
+            "8",
+            "--rebuild-mode",
+            "background",
+            "--query-interval-ms",
+            "0",
+            "--ann",
+            "8",
+            "32",
+            "300",
+            "300",
+            "4",
+            "20",
+            "100",
+            "5",
+            "42",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let ann = &value["hnsw"];
+    let background = &ann["background"];
+    assert_eq!(ann["rebuild_query_numbers"], serde_json::json!([]));
+    assert_eq!(ann["query_samples_ms"].as_array().unwrap().len(), 20);
+    assert_eq!(background["attempted_queries"], 20);
+    assert_eq!(
+        background["request_samples_ms"].as_array().unwrap().len(),
+        20
+    );
+    assert_eq!(
+        background["maintenance_samples_ms"]
+            .as_array()
+            .unwrap()
+            .len(),
+        20
+    );
+    assert_eq!(
+        background["served_queries"].as_u64().unwrap()
+            + background["not_ready_query_numbers"]
+                .as_array()
+                .unwrap()
+                .len() as u64,
+        20
+    );
+    assert!(background["served_recall_at_k"].as_f64().unwrap() >= 0.99);
 }

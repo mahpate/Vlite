@@ -5,11 +5,13 @@
 mod format;
 mod hnsw;
 mod metadata;
+mod rebuild;
 pub use hnsw::{HnswConfig, MAX_EF_SEARCH, MAX_HNSW_BUFFER_IDS, MAX_HNSW_BUFFER_VECTOR_BYTES};
 pub use metadata::{
     Condition, MAX_FILTER_CONDITIONS, MAX_METADATA_BYTES, MAX_METADATA_FIELDS, Metadata,
     MetadataValue,
 };
+pub use rebuild::{HnswRebuildLimits, HnswRebuildStatus};
 pub mod maintenance;
 #[cfg(feature = "server")]
 pub mod server;
@@ -108,6 +110,10 @@ pub enum Error {
     UnsupportedAnnMetric,
     InvalidEfSearch,
     IndexNotReady,
+    InvalidHnswRebuildLimits,
+    HnswRebuildTooLarge,
+    HnswRebuildBusy,
+    HnswRebuildFailed,
     InvalidMetadata(&'static str),
     InvalidFilter(&'static str),
     MetadataRequiresUpgrade,
@@ -171,6 +177,22 @@ impl fmt::Display for Error {
             Self::IndexNotReady => write!(
                 f,
                 "HNSW index is not ready for this configuration; call build_hnsw explicitly"
+            ),
+            Self::InvalidHnswRebuildLimits => write!(
+                f,
+                "background rebuild limits require 1..=1000000 records and 1..=268435456 snapshot vector bytes"
+            ),
+            Self::HnswRebuildTooLarge => write!(
+                f,
+                "background HNSW snapshot exceeds configured record or vector-byte limit"
+            ),
+            Self::HnswRebuildBusy => write!(
+                f,
+                "a background HNSW rebuild is pending; poll it to completion before starting another"
+            ),
+            Self::HnswRebuildFailed => write!(
+                f,
+                "background HNSW worker failed; current index is unchanged"
             ),
             Self::InvalidMetadata(reason) => write!(f, "invalid metadata: {reason}"),
             Self::InvalidFilter(reason) => write!(f, "invalid filter: {reason}"),
@@ -314,6 +336,7 @@ pub struct Database {
     end: u64,
     poisoned: bool,
     index: Option<hnsw::Index>,
+    rebuild: Option<rebuild::Job>,
 }
 
 struct LockedFile(File);
@@ -385,6 +408,7 @@ impl Database {
             end: format::HEADER_SIZE,
             poisoned: false,
             index: None,
+            rebuild: None,
         })
     }
 
@@ -409,6 +433,7 @@ impl Database {
             end: loaded.end,
             poisoned: false,
             index: None,
+            rebuild: None,
         })
     }
 
@@ -654,6 +679,9 @@ impl Database {
     }
 
     fn track_index_mutation(&mut self, id: u64, current_bytes: usize) {
+        if let Some(job) = &mut self.rebuild {
+            job.track(id, self.records.get(&id), current_bytes);
+        }
         if let Some(index) = &mut self.index
             && !index.track(id, self.records.get(&id), current_bytes)
         {
@@ -678,8 +706,65 @@ impl Database {
         self.ensure_healthy()?;
         config.validate()?;
         validate_ann_metric(metric)?;
+        if let Some(job) = &mut self.rebuild {
+            job.stop(HnswRebuildStatus::Superseded);
+        }
         self.index = Some(hnsw::Index::build(&self.records, config, metric));
         Ok(())
+    }
+
+    /// Copies a bounded committed-vector snapshot, then builds on one owned thread.
+    ///
+    /// Snapshot copying is synchronous; graph construction is not. The current
+    /// graph is retained until normal mutation-buffer overflow. No automatic
+    /// fallback, retry, polling or publication occurs in search/write methods.
+    /// Use ready-only queries and poll explicitly to avoid synchronous builds.
+    pub fn start_hnsw_rebuild(
+        &mut self,
+        config: HnswConfig,
+        metric: DistanceMetric,
+        limits: HnswRebuildLimits,
+    ) -> Result<()> {
+        self.ensure_healthy()?;
+        config.validate()?;
+        validate_ann_metric(metric)?;
+        limits.validate(self.records.len(), self.dimensions)?;
+        if self.rebuild.is_some() {
+            return Err(Error::HnswRebuildBusy);
+        }
+        self.rebuild = Some(rebuild::Job::start(&self.records, config, metric)?);
+        Ok(())
+    }
+
+    /// Nonblocking poll. A completed worker is joined and atomically published
+    /// with bounded committed-mutation catch-up, or explicitly discarded.
+    /// Catch-up has the same 256-ID / 8-MiB vector limits as the active graph.
+    /// Overflow never rejects durable writes or publishes stale snapshot data.
+    pub fn poll_hnsw_rebuild(&mut self) -> Result<HnswRebuildStatus> {
+        self.ensure_healthy()?;
+        let Some(job) = &self.rebuild else {
+            return Ok(HnswRebuildStatus::Idle);
+        };
+        if !job.finished() {
+            return Ok(job.status());
+        }
+        let (status, index) = self.rebuild.take().expect("pending job").finish()?;
+        if let Some(index) = index {
+            self.index = Some(index);
+        }
+        Ok(status)
+    }
+
+    /// Requests cooperative cancellation. Poll until Cancelled (or another
+    /// already-selected terminal reason). Returns false if no job is pending.
+    /// Cancellation never waits or replaces the active graph.
+    pub fn cancel_hnsw_rebuild(&mut self) -> bool {
+        if let Some(job) = &mut self.rebuild {
+            job.stop(HnswRebuildStatus::Cancelled);
+            true
+        } else {
+            false
+        }
     }
 
     /// Approximate squared-L2 search; exact search remains the default.
@@ -900,8 +985,12 @@ impl Database {
     /// Consumes the handle and releases its OS lock. Commits are already synced.
     ///
     /// Dropping the handle is also safe: there is no buffered uncommitted state.
-    pub fn close(self) -> Result<()> {
+    pub fn close(mut self) -> Result<()> {
         self.ensure_healthy()?;
+        if let Some(mut job) = self.rebuild.take() {
+            job.stop(HnswRebuildStatus::Cancelled);
+            job.finish()?;
+        }
         self.file.unlock()?;
         Ok(())
     }

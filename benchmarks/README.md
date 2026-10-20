@@ -264,6 +264,51 @@ non-rebuild median is diagnostic only. Reports must finish with `status=complete
 This is a small 100D word-embedding benchmark on a shared host, not a modern
 sentence-embedding, million-vector, crash-durability or production SLA result.
 
+## Background rebuild latency and availability
+
+Build the current source, then reuse the pinned GloVe subset above:
+
+```powershell
+python benchmarks\background_campaign.py --binary target\release\vlite-bench.exe --dataset C:\benchdata\glove-subset --output background-results.json
+```
+
+The paired campaign runs lazy synchronous and background ready-only modes
+at zero and 250-ms inter-request sleeps, three trials each (12 fresh children).
+Modes run sequentially, reversing order on alternate trials. Inputs, mutations,
+metric, m=16/ef-construction=100/ef-search=100 and k=10 match. Both modes build
+their initial graph synchronously before measured mutation/query requests.
+Sleep is **before each request**, not a fixed arrival-rate generator.
+Sleep and independent oracle work are excluded from request timing, but both
+let workers progress between requests; no production-throughput claim follows.
+
+Background policy: poll once before each mutation/query; on Idle, Published
+or CatchUpOverflow immediately start another bounded snapshot build. No other
+thread reads/writes the database, and there is at most one worker. A missing
+matching index yields a recorded ready-only rejection, **not** exact or lazy
+fallback. Terminal overflow and publication query numbers remain in the raw
+report; the final in-flight job is cancelled/joined during close.
+
+Always pair latency with availability. The report separates served query
+latency/recall from attempted queries, records every `IndexNotReady`, and counts
+rejected attempts as zero recall in the aggregate delivered-recall number.
+An empty eligible set still uses the native recall-1 convention.
+The all-attempt native `query_p50_ms` may include quick rejections; it is
+**not a successful-query latency statistic**. Summary served p50/p99 explicitly
+exclude rejections. Means/percentiles remain per trial, not pooled across trials.
+No-served-query summaries are null, not successful-looking defaults.
+
+`request_samples_ms` includes poll/publication, snapshot cloning when starting,
+mutation generation, durable batch sync, owner live-map updates and the ready/lazy
+query. Those owner costs must not be hidden behind a query-only improvement.
+`maintenance_samples_ms` isolates poll/start overhead. Worker construction
+overlaps requests and uses CPU; whole-child peak RSS includes old graph,
+snapshot, replacement, catch-up originals, database and all benchmark phases.
+Record/vector limits are **not** total RSS limits. Worker cancellation/close
+are not request latency. This experiment tests an explicitly selected Rust
+API/policy, not automatic background behavior in REST or embedded wrappers.
+Use [the lifecycle contract](../docs/REFERENCE.md#background-hnsw-rebuilds-rust)
+for failure, overload, shutdown and current-source compatibility details.
+
 ## Publishing results
 
 ### Exact metrics and cosine ANN

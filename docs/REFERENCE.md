@@ -765,6 +765,91 @@ The mixed-write workload separately requires recall@10 >=0.95 after 50 deletes,
 50 updates and 100 inserts, checks exact returned distances and ID uniqueness,
 and verifies immediate buffer visibility and reopen recovery.
 
+## Background HNSW rebuilds (Rust)
+
+Current-source addition after v0.1.2. The Rust owner has an **opt-in** lifecycle:
+`start_hnsw_rebuild(config, metric, limits)`, `poll_hnsw_rebuild()` and
+`cancel_hnsw_rebuild()`. No REST route, C ABI request, Python/Node wrapper,
+dashboard toggle, persisted index or automatic scheduler is added. Existing
+synchronous build/lazy search/ready-only search behavior remains unchanged.
+See the runnable [`background_hnsw` example](../examples/background_hnsw.rs):
+
+```powershell
+cargo run --locked --example background_hnsw
+```
+
+`start_hnsw_rebuild` validates health, HNSW configuration, L2/cosine metric and
+limits before creating the worker. It copies **only vectors and IDs** from the
+committed live map (no payloads/metadata). Copying is synchronous on the owner;
+graph construction runs on one named owned thread, without the file or database
+lock. Caller operations on `Database` remain serialized; this does not add
+concurrent reads/writes to the handle. Exactly one job may be pending, including
+a finished-but-unpolled or cancelling job. A second start returns
+`HnswRebuildBusy`. Thread creation failure returns `Io` and leaves the current
+index intact.
+
+`HnswRebuildLimits` defaults to **100,000 snapshot records / 128 MiB snapshot
+vector bytes**. Caller limits must be positive, at most 1,000,000 records /
+256 MiB vector bytes; exceeding the configured budget returns
+`HnswRebuildTooLarge` before cloning. These bound vector bytes and graph
+cardinality, **not total RSS or recoverable allocation failure**: BTreeMap/node
+overhead, graph links, construction scratch, current records, existing graph
+and mutation-original copies additionally consume memory. Old and replacement
+graphs coexist. Construction degree/ef retain their existing limits.
+
+After a durable commit, before replacing authoritative records, the owner
+tracks each changed ID against its first snapshot-era vector. Repeated mutations
+retain the original and final current byte count, not an unbounded event log.
+The catch-up buffer uses the existing HNSW **256-distinct-ID / 8-MiB
+original-plus-current-vector-byte** limits. It handles deletes, inserts,
+delete/reinsert in the same batch, metadata puts and cosine zero transitions.
+If either limit overflows, the job is cancelled and eventually reports
+`CatchUpOverflow`; writes stay committed and **no stale graph is published**.
+The old graph independently obeys its original buffer limits and may also become
+unavailable. There is no implicit fallback to exact or synchronous construction.
+
+Call `poll_hnsw_rebuild` on the owner between requests. It returns `Running` or
+`Cancelling` without waiting for construction. Once the worker has terminated,
+poll joins it, transfers the bounded catch-up buffer and replaces the current
+index in a single serialized owner operation. The buffer's original vectors
+remain paired with snapshot graph norms. Queries subsequently score current
+live vectors; deleted IDs cannot reappear. The worker never changes owner state
+directly. Publication and freeing the old graph take owner-thread work and are
+not a hard real-time bound.
+
+| Poll outcome | Meaning |
+|---|---|
+| `Idle` | No pending job. |
+| `Running` / `Cancelling` | Worker still owns resources; poll again later. |
+| `Published` | New graph and catch-up buffer are active. |
+| `Cancelled` | Caller cancellation discarded the replacement. |
+| `Superseded` | An explicit synchronous/lazy build selected another graph; worker cannot overwrite it. |
+| `CatchUpOverflow` | Bounded mutation catch-up was exceeded; snapshot discarded. Retry explicitly with a new snapshot or throttle mutations. |
+| `Err(HnswRebuildFailed)` | Worker panicked/failed; active index is unchanged and storage remains usable. |
+
+Terminal polls consume the job; the next poll is `Idle`. A `Published` index
+may already have buffered mutations and need replacement soon. It is not a
+guarantee of future readiness or ANN recall. Invalid operations do not enter
+catch-up. A poisoned database rejects start/poll/search and never publishes
+a snapshot, retaining the existing indeterminate-commit safety contract.
+
+Use `search_approximate_ready_with_metric` for a latency-sensitive caller:
+it returns `IndexNotReady` when the old graph has overflowed and no replacement
+has been published. **Do not** call lazy search as a hidden retry: it still
+builds synchronously, and supersedes any pending replacement. The application
+must choose whether to reject, retry later or explicitly request exact search.
+Schedule/poll frequently enough and control write rate to meet availability
+requirements; arbitrary sustained mutation rates cannot be promised here.
+
+Cancellation is cooperative, checked between node insertions and before
+returning the completed graph. It is not an immediate thread kill.
+`cancel_hnsw_rebuild` returns false for no job, otherwise requests cancellation;
+it does not replace the active graph. A previously selected overflow/superseded
+reason is preserved. `close()` cancels and joins a pending worker before
+unlocking and reports worker failure; `Drop` also cancels/joins, but cannot
+report errors. Shutdown may wait for an in-progress insertion. Reopen recovers
+committed data, not worker/index state. No sidecar or storage-format change.
+
 ## Reproducible benchmark
 
 `vlite-bench` generates deterministic fixed-point vectors using SplitMix64,
@@ -790,6 +875,19 @@ flags before the filtering/ANN flags. See the
 [native campaign guide](../benchmarks/README.md#native-profiling-real-vectors-and-mixed-updates)
 and [licensed real-data campaign](../benchmarks/README.md#real-glove-embeddings-and-mixed-deletions)
 for format, bounds, repeated trials, recall targets and measured memory scope.
+
+For background lifecycle measurements, prefix `--rebuild-mode background` and
+optionally `--query-interval-ms 250` (0..1000). The native runner starts with a
+synchronous graph in both modes, polls before each mixed mutation/query, starts
+a new worker after every terminal/idle poll, and uses ready-only queries.
+Rejections are recorded, never turned into fast successful queries or hidden
+fallbacks. `--rebuild-mode lazy` preserves the default synchronous path.
+Pacing is also supported for lazy runs; it sleeps before each request, not at
+a fixed external arrival rate. Paced/background workloads are bounded to
+200 queries, 100,000 records and 128 MiB snapshot vector bytes.
+The [paired campaign guide](../benchmarks/README.md#background-rebuild-latency-and-availability)
+describes publication/overflow counts, served versus delivered recall, and
+request timing that includes snapshot/publication/commit work.
 
 Prefix `--filter-every N` to benchmark exact metadata filtering, selecting IDs
 divisible by positive N (approximately 1/N of the dataset). It writes boolean

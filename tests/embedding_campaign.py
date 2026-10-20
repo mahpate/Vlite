@@ -144,6 +144,67 @@ class EmbeddingCampaignTests(unittest.TestCase):
         self.assertEqual(len(checksums), 1)
         self.assertEqual(len(update_checksums), 1)
 
+    @unittest.skipUnless(BINARY, "pass --binary to exercise background pipeline")
+    def test_background_campaign_preserves_availability_and_no_overwrite_contract(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            fixture(directory)
+            output = directory / "background.json"
+            command = [sys.executable, str(ROOT / "benchmarks" / "background_campaign.py"),
+                       "--binary", BINARY, "--dataset", str(directory), "--output", str(output),
+                       "--trials", "1", "--interval-ms", "0", "--writes", "4", "--deletes", "2"]
+            for flags in [["--interval-ms", "-1"], ["--interval-ms", "0", "0"], ["--trials", "0"]]:
+                self.assertNotEqual(subprocess.run(command + flags, capture_output=True).returncode, 0)
+                self.assertFalse(output.exists())
+            result = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(output.read_text())
+            self.assertEqual(report["status"], "complete")
+            self.assertEqual(len(report["runs"]), 2)
+            self.assertEqual(len(report["summary"]), 2)
+            self.assertNotIn(str(directory), output.read_text())
+            background, = [r["measurement"]["hnsw"] for r in report["runs"] if r["mode"] == "background"]
+            self.assertEqual(background["rebuild_query_numbers"], [])
+            state = background["background"]
+            self.assertEqual(state["served_queries"] + len(state["not_ready_query_numbers"]), 2)
+            original = output.read_bytes()
+            self.assertNotEqual(subprocess.run(command, capture_output=True).returncode, 0)
+            self.assertEqual(output.read_bytes(), original)
+
+    def test_published_background_report_does_not_hide_rejected_requests(self):
+        report = json.loads((ROOT / "benchmarks" / "results" / "glove-100-background-windows.json").read_text())
+        self.assertEqual(report["status"], "complete")
+        self.assertEqual(len(report["runs"]), 12)
+        # The runner imports its shared provenance helper from the benchmark folder.
+        sys.path.insert(0, str(ROOT / "benchmarks"))
+        try:
+            spec = importlib.util.spec_from_file_location("background_campaign", ROOT / "benchmarks" / "background_campaign.py")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        finally:
+            sys.path.pop(0)
+        self.assertEqual(report["summary"], module.summarize(report["runs"]))
+        for run in report["runs"]:
+            measurement = run["measurement"]
+            ann = measurement["hnsw"]
+            self.assertEqual(measurement["recall_at_k"], 1)
+            self.assertEqual(measurement["final_live_records"], 2600)
+            self.assertEqual(len(ann["request_samples_ms"]), 100)
+            if run["mode"] == "background":
+                state = ann["background"]
+                rejected = state["not_ready_query_numbers"]
+                self.assertEqual(ann["rebuild_query_numbers"], [])
+                self.assertEqual(state["served_queries"] + len(rejected), 100)
+                for query in rejected:
+                    self.assertEqual(ann["recall_samples"][query - 1], 0)
+                self.assertAlmostEqual(ann["recall_at_k"], sum(ann["recall_samples"]) / 100, places=6)
+                self.assertEqual(state["served_recall_at_k"], 1)
+                self.assertTrue(all(1 <= q <= 100 for q in state["published_query_numbers"]))
+                self.assertEqual(len(state["maintenance_samples_ms"]), 100)
+            else:
+                self.assertNotIn("background", ann)
+                self.assertEqual(ann["recall_at_k"], 1)
+
     @unittest.skipUnless(BINARY, "pass --binary to exercise native pipeline")
     def test_offline_release_campaign_reports_real_input_mutations_and_no_local_paths(self):
         with tempfile.TemporaryDirectory() as name:

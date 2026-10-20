@@ -5,6 +5,66 @@ See [methodology and reproduction](README.md) before interpreting the numbers.
 
 No zvec, Milvus, Weaviate, FAISS or other unmeasured engine results are inferred.
 
+## Background rebuilds: latency versus availability, October 20, 2026 UTC
+
+[Paired raw report](results/glove-100-background-windows.json) measures the new
+opt-in Rust lifecycle against synchronous lazy rebuilding on the **same
+current-source binary**. It reuses the licensed 3,000-row GloVe 100D subset,
+100 queries, 16 real replacements plus four deletes before every query,
+cosine k=10/ef=100/m=16/ef-construction=100. Three trials per mode/pacing setting,
+12 fresh children; order reverses on alternate trials. Both modes build the
+initial graph synchronously outside measured requests.
+
+Availability is the minimum fraction of attempted queries served in any trial.
+Recall in the table is over **served queries only**; rejected requests have
+zero delivered recall and must not be counted as successful fast queries.
+Latency values are medians of trial percentiles, not pooled percentiles.
+Request timing includes owner-thread polling/publication, snapshot cloning,
+mutation generation, durable commit/live-state update and the query. Pacing,
+exact-oracle validation and final cancellation/close are excluded.
+
+| Mode / pre-request sleep | Availability | Served recall@10 | Served query p99 (ms) | Request p99 (ms) | Whole-child peak RSS (bytes) |
+|---|---:|---:|---:|---:|---:|
+| Synchronous / none | 100% | 1.000 | 1961.8581 | 1963.4961 | 11,546,624 |
+| Background ready-only / none | 12% | 1.000 | 1.3406 | 2.3714 | 13,201,408 |
+| Synchronous / 250 ms | 100% | 1.000 | 1920.5720 | 1922.0922 | 11,542,528 |
+| Background ready-only / 250 ms | 57% | 1.000 | 2.2519 | 4.6165 | 14,209,024 |
+
+Without pacing, the worker could not catch up: all three trials served 12/100
+requests, published no replacement, and reported seven catch-up overflows.
+With 250-ms sleeps, trials served **57, 58, 57** requests and each published
+12 replacement graphs without catch-up overflow. Buffered mutations aged
+the published graphs: their remaining capacity was consumed before the next
+replacement completed, so 42--43 ready-only requests still returned
+`IndexNotReady`. Aggregate delivered recall (counting rejects as zero) was
+0.12 unpaced / at least 0.57 paced, **not 1.0**.
+
+All background trials performed **zero synchronous query-triggered rebuilds**.
+The largest background request was 5.2689 ms unpaced / 10.6932 ms paced;
+maximum observed owner maintenance (poll/start) was 1.6333 ms.
+Synchronous mode served every request but rebuilt seven times per trial,
+with maximum request latency 2021.2781 ms unpaced / 1991.1180 ms paced.
+These are observed maxima on this small shared-host workload, not upper bounds.
+Background construction consumes CPU and additional RAM; the snapshot and two
+graphs can coexist. RSS is a whole-child high-water mark, not marginal index RAM.
+
+**Conclusion:** the new API removes graph construction from ready-only requests,
+with explicit cancellation, bounded catch-up and no stale publication, but
+**does not solve continuous ANN availability at this mutation rate**.
+Choose it only when fast explicit rejection/retry or application-controlled
+maintenance is acceptable. Use exact search when recall/availability matter
+more than approximate-index throughput; retain synchronous mode if waiting is
+preferred to rejecting. Do not market this as an unconditional latency or
+availability improvement, or increase buffers silently to hide overload.
+Sleeping before requests is not a fixed arrival-rate load test, and oracle
+work also gives workers time to progress.
+
+The lifecycle is current-source **Rust-only**, after v0.1.2. REST and C/Python/Node
+interfaces remain synchronous/ready-only as before. No cross-platform performance,
+production SLA or crash-durability claim follows from this Windows x64 campaign.
+See [reproduction and timing definitions](README.md#background-rebuild-latency-and-availability)
+and [lifecycle limits/errors](../docs/REFERENCE.md#background-hnsw-rebuilds-rust).
+
 ## Real GloVe cosine retrieval and mixed deletes, October 20, 2026 UTC
 
 [Raw campaign and dataset provenance](results/glove-100-windows.json) records

@@ -3,6 +3,7 @@
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, BinaryHeap, HashSet},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use crate::{DistanceMetric, Error, Record, Result, SearchHit, metric_distance, vector_norm};
@@ -99,6 +100,16 @@ impl Index {
         config: HnswConfig,
         metric: DistanceMetric,
     ) -> Self {
+        Self::build_cancellable(records, config, metric, &AtomicBool::new(false))
+            .expect("synchronous build is never cancelled")
+    }
+
+    pub fn build_cancellable(
+        records: &BTreeMap<u64, Record>,
+        config: HnswConfig,
+        metric: DistanceMetric,
+        cancel: &AtomicBool,
+    ) -> Option<Self> {
         let mut index = Self {
             config,
             metric,
@@ -108,12 +119,24 @@ impl Index {
             buffered_bytes: 0,
         };
         for &id in records.keys() {
+            if cancel.load(Ordering::Relaxed) {
+                return None;
+            }
             if metric == DistanceMetric::Cosine && vector_norm(&records[&id].vector) == 0.0 {
                 continue;
             }
             index.insert(id, records);
         }
-        index
+        if cancel.load(Ordering::Relaxed) {
+            None
+        } else {
+            Some(index)
+        }
+    }
+
+    pub fn adopt_buffer(&mut self, changes: Self) {
+        self.buffered = changes.buffered;
+        self.buffered_bytes = changes.buffered_bytes;
     }
 
     /// Called only after sync, before authoritative records are replaced.

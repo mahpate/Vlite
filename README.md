@@ -290,6 +290,16 @@ and SDK together for cosine ANN. No database format change is required.
 
 Performance numbers are workload-specific, not product rankings.
 
+Current-source Rust callers can opt into
+[bounded background HNSW rebuilds](docs/REFERENCE.md#background-hnsw-rebuilds-rust):
+copy a committed-vector snapshot, build on one worker, then explicitly poll to
+publish with mutation catch-up. Ready-only queries never rebuild or fall back.
+Catch-up overflow is explicit; sustained writes may make ANN temporarily
+unavailable. Snapshot copying/publication still use the owner thread, so this
+is not a hard latency guarantee. Synchronous APIs remain unchanged.
+The background lifecycle is Rust-only for now, not a REST/C/Python/Node API
+and not part of the existing v0.1.2 binaries.
+
 - [Benchmark methodology and reproducible runs](benchmarks/README.md)
 - [Published measurements and raw results](benchmarks/RESULTS.md)
 - [Native benchmark reference](docs/REFERENCE.md#reproducible-benchmark)
