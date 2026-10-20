@@ -765,6 +765,75 @@ The mixed-write workload separately requires recall@10 >=0.95 after 50 deletes,
 50 updates and 100 inserts, checks exact returned distances and ID uniqueness,
 and verifies immediate buffer visibility and reopen recovery.
 
+## Proactive HNSW maintenance (Rust)
+
+Current-source Rust callers can opt into an explicit owner-thread tick:
+`maintain_hnsw(config, metric, policy)`. `HnswMaintenancePolicy` defaults to
+starting a replacement at **128 buffered distinct IDs or 4 MiB of buffered
+original-plus-current vector bytes**. Either threshold triggers; configure
+positive thresholds up to the existing 256-ID / 8-MiB limits. The policy also
+contains `HnswRebuildLimits` (same defaults/budgets as manual starts below).
+Invalid thresholds return `InvalidHnswMaintenancePolicy`; invalid snapshot
+limits return `InvalidHnswRebuildLimits`. No buffer limit is enlarged.
+
+```rust
+use vlite::{Database, DistanceMetric, HnswConfig, HnswMaintenancePolicy};
+
+fn tick(db: &mut Database) -> vlite::Result<()> {
+    let report = db.maintain_hnsw(
+        HnswConfig::default(), DistanceMetric::Cosine,
+        HnswMaintenancePolicy::default(),
+    )?;
+    // The caller decides admission/throttling using ready, pressure and outcome.
+    println!("{report:?}");
+    Ok(())
+}
+```
+
+Call before mutation/query batches, not from a timer that concurrently touches
+the owner. A tick polls at most one matching job and may publish its result.
+If no job remains, it starts a snapshot when the matching graph is absent or
+either active high-water threshold is reached. The result contains the poll
+`outcome`, `started`, and latest `status`. A published graph can already be
+at high water and cause a new job in the same tick. Overflow remains visible
+in `outcome` even if the tick starts a fresh retry. A terminal `Cancelled` or
+`Superseded` suppresses restarting for that tick; a subsequent explicit tick
+can start again. A pending job for another config/metric returns
+`HnswRebuildBusy` without polling, publishing, cancelling or replacing it.
+The method can return an error after publication if starting the next snapshot
+exceeds its budget or thread creation fails; completed publication is not undone.
+
+`hnsw_maintenance_status(config, metric, policy)` validates inputs and observes
+without starting, polling, joining or publishing. `ready` means a matching graph
+exists, not that a worker has finished. This differs from empty-database search,
+which can return empty results without a graph. `active_buffer` contains
+buffered and remaining IDs/vector bytes. Each pending worker exposes identity,
+snapshot/processed record counts, `worker_finished`, selected terminal reason,
+and its own bounded catch-up capacity. The counters include source records
+skipped for cosine zero norms. They measure processed records, **not time,
+percent of CPU work or an ETA**. Counter and thread-finished reads are separate
+observations; an empty snapshot has zero records. Finished does not imply
+success or publication; poll/tick reports cancellation or worker failure.
+
+| Pressure | Meaning (first matching condition wins) |
+|---|---|
+| `CatchUpOverflow` | Pending worker has overflowed and is being discarded. |
+| `Unavailable` | No active matching graph; ready-only search may reject. |
+| `CapacityExhausted` | Active or pending catch-up buffer has zero remaining IDs or vector bytes. The active graph may still be ready at the exact limit. |
+| `RebuildRecommended` | Active graph reaches either configured high-water threshold. |
+| `Healthy` | None of the above; not a future-readiness promise. |
+
+Capacity is **not a number of writes left**: repeated IDs, vector sizes, deletes
+and first-mutation originals affect accounting. A large batch can cross the
+remaining capacity in a single commit. Thresholds are early triggers, not
+reservations, predictive deadlines or automatic admission control. A running
+replacement can catch up too slowly; publishing can retain a large catch-up
+buffer. Inspect `ready`, pressure and terminal outcome together. The application
+must choose to throttle mutations, reject ANN requests, or explicitly use exact
+search. Durable writes remain accepted regardless of index overload. There is
+no hidden scheduler, automatic fallback or transport-facing policy; existing
+Rust synchronous APIs and REST/C/Python/Node behavior are unchanged.
+
 ## Background HNSW rebuilds (Rust)
 
 Current-source addition after v0.1.2. The Rust owner has an **opt-in** lifecycle:
@@ -888,6 +957,12 @@ a fixed external arrival rate. Paced/background workloads are bounded to
 The [paired campaign guide](../benchmarks/README.md#background-rebuild-latency-and-availability)
 describes publication/overflow counts, served versus delivered recall, and
 request timing that includes snapshot/publication/commit work.
+`--rebuild-mode maintenance` uses `maintain_hnsw` with default high-water
+thresholds instead of eagerly starting after every terminal/idle poll. Its
+`background.policy.capacity_samples` expose post-write/pre-query readiness,
+pressure, active/catch-up capacity and processed-record progress. Full-request
+timing also includes this diagnostic sampling/formatting; no synchronous
+fallback is allowed.
 
 Prefix `--filter-every N` to benchmark exact metadata filtering, selecting IDs
 divisible by positive N (approximately 1/N of the dataset). It writes boolean

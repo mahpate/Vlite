@@ -5,6 +5,74 @@ See [methodology and reproduction](README.md) before interpreting the numbers.
 
 No zvec, Milvus, Weaviate, FAISS or other unmeasured engine results are inferred.
 
+## Proactive maintenance under write pressure, October 20, 2026 UTC
+
+[Raw paired report and per-request capacity/progress](results/glove-100-maintenance-windows.json)
+measures default high-water maintenance against lazy synchronous rebuilding on
+the same new Windows x64 release binary: 18 fresh children, three trials per
+mode at zero/250/1000-ms pre-request sleeps. It uses the pinned 3,000 x 100D
+GloVe subset, 100 held-out queries, cosine k=10/ef=100/m=16/construction ef=100,
+and 16 real replacements plus four deletes committed before every query.
+The independent oracle checks the current live state; every trial ends with
+2,600 live records. Initial graph construction is outside request timing.
+Trial order reverses; inputs/mutations match across modes.
+
+Maintenance polls before each batch and starts only when the active graph is
+missing or reaches **128 distinct IDs / 4 MiB**. In every trial the first start
+is query 8, following the seventh batch's 140 buffered IDs. Existing 256-ID /
+8-MiB buffer limits are unchanged. Status samples show active/catch-up used
+and remaining capacity, processed records, completion and explicit pressure.
+
+Availability is the minimum fraction of attempts served in any trial; recall
+is over served queries. Request p99 is the median of trial-level p99s and
+includes owner maintenance/snapshot, mutation generation, durable sync/live-map
+update, status sampling/formatting and query. It excludes sleep, exact-oracle
+work and final cancellation/close. Low latency with rejections is not success.
+
+| Mode / pre-request sleep | Availability | Served recall@10 | Served query p99 (ms) | Request p99 (ms) | Whole-child peak RSS (bytes) |
+|---|---:|---:|---:|---:|---:|
+| Lazy synchronous / none | 100% | 1.000 | 1850.8098 | 1851.9367 | 11,747,328 |
+| Proactive ready-only / none | 12% | 1.000 | 1.1245 | 2.5249 | 13,168,640 |
+| Lazy synchronous / 250 ms | 100% | 1.000 | 1853.5803 | 1855.4179 | 11,726,848 |
+| Proactive ready-only / 250 ms | 64% | 1.000 | 2.1079 | 3.8940 | 14,790,656 |
+| Lazy synchronous / 1000 ms | 100% | 1.000 | 1844.2702 | 1845.7794 | 11,689,984 |
+| Proactive ready-only / 1000 ms | 100% | 1.000 | 1.6584 | 3.6978 | 14,680,064 |
+
+**Finding:** at 1000-ms pacing, proactive maintenance served all 100 attempts
+in every trial with 13 publications, no catch-up overflow and no synchronous
+query-triggered rebuild. The largest request was **9.5430 ms**, not an upper
+bound. This demonstrates a bounded workload where early replacement preserves
+readiness without construction pauses, not continuous availability at arbitrary
+write rates.
+
+At 250 ms, trials served **66/68/64** requests, published 12 replacements each
+and had no catch-up overflow, yet the older active graphs still expired before
+replacement publication. Minimum delivered recall including rejections was
+**0.64**, not 1.0. The maximum request was 6.5376 ms. Without pacing, each trial
+served only 12 requests, published no replacement, and reported seven catch-up
+overflows; delivered recall was 0.12, maximum request 3.6462 ms. Raw pressure
+explicitly records `Unavailable` and `CatchUpOverflow`. Every maintenance trial
+performed zero synchronous query-triggered rebuilds. Lazy mode always served
+all requests, with seven synchronous rebuilds per trial and maximum requests
+1964.6980/1888.7533/1882.1695 ms (zero/250/1000-ms sleeps).
+
+The prior eager-background report below is historical, **not** a controlled
+same-binary comparison against this policy; do not infer a causal availability
+improvement by subtracting those results. Here pacing varies write pressure,
+not an external arrival rate: oracle work and CPU scheduling also let workers
+progress. Small sample counts, shared unpinned Windows host and whole-child RSS
+limit generalization. RSS is a median of measured trial high-water marks,
+including inputs, oracle, current/old/replacement graphs and all phases, not
+incremental index memory.
+
+The API remains opt-in/current-source Rust-only, after v0.1.2; no transport,
+release, storage-format or durability change. Applications still need admission
+control or an explicitly chosen exact/synchronous path when rebuilds cannot keep
+up. [Reproduce the policy campaign](README.md#proactive-maintenance-experiment)
+and read [capacity/pressure semantics](../docs/REFERENCE.md#proactive-hnsw-maintenance-rust).
+No production SLA, general embedding recall, non-Windows performance or
+physical power-loss claim follows.
+
 ## Background rebuilds: latency versus availability, October 20, 2026 UTC
 
 [Paired raw report](results/glove-100-background-windows.json) measures the new

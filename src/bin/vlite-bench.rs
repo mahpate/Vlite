@@ -5,13 +5,13 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 use vlite::{
-    Condition, Database, DistanceMetric, HnswConfig, HnswRebuildLimits, HnswRebuildStatus,
-    MAX_BATCH_BYTES, MAX_BATCH_OPERATIONS, MAX_DIMENSIONS, MAX_EF_SEARCH, Metadata, MetadataValue,
-    Mutation,
+    Condition, Database, DistanceMetric, HnswConfig, HnswMaintenancePolicy, HnswRebuildLimits,
+    HnswRebuildStatus, MAX_BATCH_BYTES, MAX_BATCH_OPERATIONS, MAX_DIMENSIONS, MAX_EF_SEARCH,
+    Metadata, MetadataValue, Mutation,
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
-const USAGE: &str = "usage: vlite-bench [--metric squared_l2|cosine|inner_product] [--vectors <file> --query-vectors <file>] [--update-vectors <file>] [--mixed-writes <updates per query>] [--mixed-deletes <deletes per query>] [--rebuild-mode lazy|background] [--query-interval-ms <0..1000>] [--filter-every <N>] [--ann <m> <ef_construction> <ef_search>] [records=1000 dimensions=32 queries=100 batch_size=100 k=10 seed=42]; background mode requires mixed ANN and reports ready-only rejections without fallback; filtering and ANN are mutually exclusive; inner product is exact-only";
+const USAGE: &str = "usage: vlite-bench [--metric squared_l2|cosine|inner_product] [--vectors <file> --query-vectors <file>] [--update-vectors <file>] [--mixed-writes <updates per query>] [--mixed-deletes <deletes per query>] [--rebuild-mode lazy|background|maintenance] [--query-interval-ms <0..1000>] [--filter-every <N>] [--ann <m> <ef_construction> <ef_search>] [records=1000 dimensions=32 queries=100 batch_size=100 k=10 seed=42]; background/maintenance require mixed ANN and report ready-only rejections without fallback; filtering and ANN are mutually exclusive; inner product is exact-only";
 const MAX_DATA_BYTES: usize = 256 * 1024 * 1024;
 const MAX_DISTANCE_COMPONENTS: u64 = 500_000_000;
 
@@ -30,6 +30,7 @@ struct Config {
     update_vectors: Option<PathBuf>,
     metric: DistanceMetric,
     background_rebuild: bool,
+    maintenance: bool,
     query_interval_ms: u64,
 }
 
@@ -62,9 +63,12 @@ impl Config {
             match flag.as_str() {
                 "--rebuild-mode" if rebuild_mode.is_none() => {
                     rebuild_mode = Some(match value.as_str() {
-                        "background" => true,
-                        "lazy" => false,
-                        _ => return Err("rebuild mode must be lazy or background".into()),
+                        "background" | "lazy" | "maintenance" => value,
+                        _ => {
+                            return Err(
+                                "rebuild mode must be lazy, background or maintenance".into()
+                            );
+                        }
                     });
                 }
                 "--query-interval-ms" if query_interval_ms.is_none() => {
@@ -167,7 +171,8 @@ impl Config {
         if input.is_some() && mixed_writes.is_some() && update_vectors.is_none() {
             return Err("external mixed writes require --update-vectors; synthetic replacements are not implicit".into());
         }
-        let background_rebuild = rebuild_mode.unwrap_or(false);
+        let maintenance = rebuild_mode.as_deref() == Some("maintenance");
+        let background_rebuild = maintenance || rebuild_mode.as_deref() == Some("background");
         if background_rebuild
             && (ann.is_none() || (mixed_writes.is_none() && mixed_deletes.is_none()))
         {
@@ -253,6 +258,7 @@ impl Config {
             update_vectors,
             metric,
             background_rebuild,
+            maintenance,
             query_interval_ms: query_interval_ms.unwrap_or(0),
         })
     }
@@ -525,12 +531,23 @@ fn run() -> Result<()> {
         let mut request_times = Vec::new();
         let mut served_times = Vec::new();
         let mut served_recall_total = 0;
+        let mut capacity_samples = Vec::new();
+        let policy = HnswMaintenancePolicy::default();
         for (query_index, query) in queries.iter().enumerate() {
             std::thread::sleep(std::time::Duration::from_millis(config.query_interval_ms));
             let request_start = Instant::now();
             if config.background_rebuild {
                 let start = Instant::now();
-                let status = db.poll_hnsw_rebuild()?;
+                let report = if config.maintenance {
+                    Some(db.maintain_hnsw(index_config, config.metric, policy)?)
+                } else {
+                    None
+                };
+                let status = if let Some(report) = report {
+                    report.outcome
+                } else {
+                    db.poll_hnsw_rebuild()?
+                };
                 match status {
                     HnswRebuildStatus::Published => publication_queries.push(query_index + 1),
                     HnswRebuildStatus::CatchUpOverflow => overflow_queries.push(query_index + 1),
@@ -543,12 +560,16 @@ fn run() -> Result<()> {
                         );
                     }
                 }
-                if matches!(
-                    status,
-                    HnswRebuildStatus::Idle
-                        | HnswRebuildStatus::Published
-                        | HnswRebuildStatus::CatchUpOverflow
-                ) {
+                if report.is_some_and(|value| value.started) {
+                    start_queries.push(query_index + 1);
+                } else if !config.maintenance
+                    && matches!(
+                        status,
+                        HnswRebuildStatus::Idle
+                            | HnswRebuildStatus::Published
+                            | HnswRebuildStatus::CatchUpOverflow
+                    )
+                {
                     db.start_hnsw_rebuild(
                         index_config,
                         config.metric,
@@ -593,6 +614,21 @@ fn run() -> Result<()> {
                         _ => unreachable!(),
                     }
                 }
+            }
+            if config.maintenance {
+                let status = db.hnsw_maintenance_status(index_config, config.metric, policy)?;
+                let active = status.active_buffer.map_or("null".into(), |buffer| format!(
+                    "{{\"buffered_ids\":{},\"remaining_ids\":{},\"buffer_vector_bytes\":{},\"remaining_vector_bytes\":{}}}",
+                    buffer.buffered_ids, buffer.remaining_ids, buffer.buffer_vector_bytes, buffer.remaining_vector_bytes));
+                let job = status.rebuild.map_or("null".into(), |job| format!(
+                    "{{\"processed_records\":{},\"snapshot_records\":{},\"finished\":{},\"terminal_reason\":{},\"catchup_buffered_ids\":{},\"catchup_remaining_ids\":{},\"catchup_vector_bytes\":{},\"catchup_remaining_vector_bytes\":{}}}",
+                    job.processed_records, job.snapshot_records, job.worker_finished,
+                    job.terminal_reason.map_or("null".into(), |reason| format!("\"{reason:?}\"")),
+                    job.catchup_buffer.map_or("null".into(), |buffer| buffer.buffered_ids.to_string()),
+                    job.catchup_buffer.map_or("null".into(), |buffer| buffer.remaining_ids.to_string()),
+                    job.catchup_buffer.map_or("null".into(), |buffer| buffer.buffer_vector_bytes.to_string()),
+                    job.catchup_buffer.map_or("null".into(), |buffer| buffer.remaining_vector_bytes.to_string())));
+                capacity_samples.push(format!("{{\"ready\":{},\"pressure\":\"{:?}\",\"active_buffer\":{active},\"rebuild\":{job}}}", status.ready, status.pressure));
             }
             let start = Instant::now();
             let hits = black_box(
@@ -706,8 +742,18 @@ fn run() -> Result<()> {
             } else {
                 percentile(&served_times, 99).to_string()
             };
+            let policy_json = if config.maintenance {
+                format!(
+                    ",\"policy\":{{\"rebuild_at_buffered_ids\":{},\"rebuild_at_buffer_vector_bytes\":{},\"capacity_samples\":[{}]}}",
+                    policy.rebuild_at_buffered_ids,
+                    policy.rebuild_at_buffer_vector_bytes,
+                    capacity_samples.join(",")
+                )
+            } else {
+                String::new()
+            };
             format!(
-                ",\"background\":{{\"interval_ms\":{interval},\"start_query_numbers\":{start_queries:?},\"published_query_numbers\":{publication_queries:?},\"catchup_overflow_query_numbers\":{overflow_queries:?},\"not_ready_query_numbers\":{not_ready_queries:?},\"served_queries\":{served},\"attempted_queries\":{},\"served_recall_at_k\":{},\"served_query_p50_ms\":{served_p50},\"served_query_p99_ms\":{served_p99},\"maintenance_samples_ms\":{maintenance_times:?},\"request_samples_ms\":{request_times:?}}}",
+                ",\"background\":{{\"interval_ms\":{interval},\"start_query_numbers\":{start_queries:?},\"published_query_numbers\":{publication_queries:?},\"catchup_overflow_query_numbers\":{overflow_queries:?},\"not_ready_query_numbers\":{not_ready_queries:?},\"served_queries\":{served},\"attempted_queries\":{},\"served_recall_at_k\":{},\"served_query_p50_ms\":{served_p50},\"served_query_p99_ms\":{served_p99},\"maintenance_samples_ms\":{maintenance_times:?},\"request_samples_ms\":{request_times:?}{policy_json}}}",
                 config.queries,
                 if served_recall_total == 0 {
                     "null".into()

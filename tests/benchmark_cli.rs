@@ -77,6 +77,7 @@ fn benchmark_rejects_invalid_or_unbounded_workloads_before_creating_files() {
         vec!["--mixed-writes", "1"],
         vec!["--mixed-deletes", "1"],
         vec!["--rebuild-mode", "background"],
+        vec!["--rebuild-mode", "maintenance"],
         vec!["--rebuild-mode", "invalid"],
         vec![
             "--query-interval-ms",
@@ -486,4 +487,52 @@ fn background_benchmark_reports_availability_without_synchronous_fallback() {
         20
     );
     assert!(background["served_recall_at_k"].as_f64().unwrap() >= 0.99);
+}
+
+#[cfg(feature = "server")]
+#[test]
+fn maintenance_benchmark_starts_before_exhaustion_and_reports_capacity() {
+    let output = Command::new(env!("CARGO_BIN_EXE_vlite-bench"))
+        .args([
+            "--metric",
+            "cosine",
+            "--mixed-writes",
+            "16",
+            "--mixed-deletes",
+            "4",
+            "--rebuild-mode",
+            "maintenance",
+            "--ann",
+            "8",
+            "32",
+            "300",
+            "300",
+            "4",
+            "20",
+            "100",
+            "5",
+            "42",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let ann = &value["hnsw"];
+    let background = &ann["background"];
+    assert_eq!(ann["rebuild_query_numbers"], serde_json::json!([]));
+    assert_eq!(background["start_query_numbers"][0], 8);
+    let samples = background["policy"]["capacity_samples"].as_array().unwrap();
+    assert_eq!(samples.len(), 20);
+    assert_eq!(samples[0]["active_buffer"]["remaining_ids"], 236);
+    assert_eq!(samples[6]["pressure"], "RebuildRecommended");
+    assert!(samples[6]["rebuild"].is_null());
+    assert!(samples[7]["rebuild"].is_object());
+    assert_eq!(
+        background["served_queries"].as_u64().unwrap()
+            + background["not_ready_query_numbers"]
+                .as_array()
+                .unwrap()
+                .len() as u64,
+        20
+    );
 }

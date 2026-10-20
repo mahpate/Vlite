@@ -3,7 +3,7 @@
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, BinaryHeap, HashSet},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use crate::{DistanceMetric, Error, Record, Result, SearchHit, metric_distance, vector_norm};
@@ -90,7 +90,6 @@ impl Index {
         metric_distance(a, b, self.metric, a_norm, b_norm)
             .expect("cosine graph contains only nonzero vectors")
     }
-    #[cfg(any(feature = "server", test))]
     pub fn buffer_usage(&self) -> (usize, usize) {
         (self.buffered.len(), self.buffered_bytes)
     }
@@ -110,6 +109,16 @@ impl Index {
         metric: DistanceMetric,
         cancel: &AtomicBool,
     ) -> Option<Self> {
+        Self::build_with_progress(records, config, metric, cancel, &AtomicUsize::new(0))
+    }
+
+    pub fn build_with_progress(
+        records: &BTreeMap<u64, Record>,
+        config: HnswConfig,
+        metric: DistanceMetric,
+        cancel: &AtomicBool,
+        processed: &AtomicUsize,
+    ) -> Option<Self> {
         let mut index = Self {
             config,
             metric,
@@ -123,9 +132,11 @@ impl Index {
                 return None;
             }
             if metric == DistanceMetric::Cosine && vector_norm(&records[&id].vector) == 0.0 {
+                processed.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
             index.insert(id, records);
+            processed.fetch_add(1, Ordering::Relaxed);
         }
         if cancel.load(Ordering::Relaxed) {
             None

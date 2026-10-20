@@ -309,6 +309,37 @@ API/policy, not automatic background behavior in REST or embedded wrappers.
 Use [the lifecycle contract](../docs/REFERENCE.md#background-hnsw-rebuilds-rust)
 for failure, overload, shutdown and current-source compatibility details.
 
+### Proactive maintenance experiment
+
+The same runner accepts `--modes lazy background maintenance` (default remains
+`lazy background`) and up to three distinct `--interval-ms` values in 0..1000.
+For the archived paired high-water experiment:
+
+```powershell
+python benchmarks\background_campaign.py --binary target\release\vlite-bench.exe --dataset C:\benchdata\glove-subset --output maintenance-results.json --modes lazy maintenance --interval-ms 0 250 1000 --trials 3
+```
+
+This is 18 sequential fresh children: three trials of both modes at three
+pacing intervals. The initial synchronous graph, pinned 3,000 x 100D GloVe
+inputs, 100 held-out queries and 16 replacements / 4 deletes before every query
+are unchanged. At ef=100, maintenance calls the explicit tick before each batch,
+starting only when the active graph is absent or reaches 128 IDs / 4 MiB.
+It does not eagerly rebuild a healthy graph. This differs from the original
+`background` policy, which starts immediately after every terminal/idle poll.
+The native flag is `--rebuild-mode maintenance`; budgets and high-water marks
+use Rust defaults rather than additional benchmark tuning parameters.
+
+`background.policy.capacity_samples` records post-write/pre-query graph
+readiness, pressure, active used/remaining ID and vector-byte capacity, worker
+snapshot/processed records, completion/terminal reason and catch-up capacity.
+The snapshot is diagnostic, not a prediction of writes remaining or time to
+completion. Sampling/formatting is included in full-request latency. Every
+attempt, rejection, publication and catch-up overflow is retained; overload
+must not be presented as a low-latency successful query. All current results
+remain VLite-only Windows measurements, not portable performance claims.
+Pacing creates different write pressure, **not a controlled external write
+arrival rate**: oracle time, CPU contention and request work also affect it.
+
 ## Publishing results
 
 ### Exact metrics and cosine ANN

@@ -61,10 +61,12 @@ def main():
     parser.add_argument("--interval-ms", type=int, nargs="+", default=[0, 250])
     parser.add_argument("--writes", type=int, default=16)
     parser.add_argument("--deletes", type=int, default=4)
+    parser.add_argument("--modes", nargs="+", choices=["lazy", "background", "maintenance"], default=["lazy", "background"])
     args = parser.parse_args()
-    if not (1 <= args.trials <= 3 and 1 <= len(args.interval_ms) <= 2
+    if not (1 <= args.trials <= 3 and 1 <= len(args.interval_ms) <= 3
             and len(set(args.interval_ms)) == len(args.interval_ms)
             and all(0 <= n <= 1000 for n in args.interval_ms)
+            and len(set(args.modes)) == len(args.modes)
             and 1 <= args.writes and 1 <= args.deletes and args.writes + args.deletes <= 256):
         parser.error("invalid bounded campaign configuration")
     manifest, counts = inputs(args.dataset)
@@ -83,8 +85,8 @@ def main():
         "source_hashes": {name: digest(ROOT / name) for name in names}, "binary_sha256": digest(binary),
         "dataset": manifest,
         "config": {"trials": args.trials, "interval_ms": args.interval_ms, "writes": args.writes,
-                   "deletes": args.deletes, "ef_search": 100, "m": 16, "ef_construction": 100, "k": 10},
-        "policy": "Initial synchronous build in both modes. Background mode polls once before each mutation/query and immediately starts a replacement after each terminal/idle result. At most one worker, ready-only queries, no fallback. Sleep before each attempted request; not a fixed arrival rate. Request timing includes poll/publication/snapshot, mutation generation and durable commit, and query; excludes pacing and oracle. Final active job is cancelled/joined by close.",
+                   "deletes": args.deletes, "ef_search": 100, "m": 16, "ef_construction": 100, "k": 10, "modes": args.modes},
+        "policy": "Initial synchronous graph in every mode. Background polls/restarts eagerly before each mutation/query. Maintenance polls before each mutation/query and starts only at 128 buffered IDs / 4 MiB or missing matching graph. At most one worker, ready-only queries in both non-lazy modes, no fallback. Sleep before each attempted request; not a fixed arrival rate. Request timing includes poll/publication/snapshot, mutation generation and durable commit, status sampling, and query; excludes pacing and oracle. Final active job is cancelled/joined by close.",
         "limitations": "Shared unpinned native host. Availability must accompany served-query latency. Rejection is not a successful fast query. Snapshot vector bytes/record count bounded, not total RSS; overlapping snapshot/graphs and mutation originals increase peak memory. No REST/SDK/background API benchmark.",
         "runs": [],
     }
@@ -92,7 +94,7 @@ def main():
     base = ["--metric", "cosine", "--vectors", files[0], "--query-vectors", files[1],
             "--update-vectors", files[2], "--mixed-writes", str(args.writes), "--mixed-deletes", str(args.deletes)]
     positional = [str(counts["vectors.txt"]), str(manifest["dimensions"]), str(counts["queries.txt"]), "100", "10", "42"]
-    scenarios = [(mode, interval) for interval in args.interval_ms for mode in ["lazy", "background"]]
+    scenarios = [(mode, interval) for interval in args.interval_ms for mode in args.modes]
     with args.output.open("x", encoding="utf-8") as stream:
         try:
             for trial in range(args.trials):
@@ -104,7 +106,7 @@ def main():
                     value = json.loads(result.stdout)
                     if value["profile"] != "release" or value["recall_at_k"] != 1:
                         raise ValueError("requires release binary and exact oracle agreement")
-                    if mode == "background" and value["hnsw"]["rebuild_query_numbers"]:
+                    if mode != "lazy" and value["hnsw"]["rebuild_query_numbers"]:
                         raise ValueError("background benchmark silently rebuilt synchronously")
                     report["runs"].append({
                         "trial": trial + 1, "mode": mode, "interval_ms": interval,

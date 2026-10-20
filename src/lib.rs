@@ -11,7 +11,10 @@ pub use metadata::{
     Condition, MAX_FILTER_CONDITIONS, MAX_METADATA_BYTES, MAX_METADATA_FIELDS, Metadata,
     MetadataValue,
 };
-pub use rebuild::{HnswRebuildLimits, HnswRebuildStatus};
+pub use rebuild::{
+    HnswBufferCapacity, HnswMaintenancePolicy, HnswMaintenanceReport, HnswMaintenanceStatus,
+    HnswPressure, HnswRebuildLimits, HnswRebuildProgress, HnswRebuildStatus,
+};
 pub mod maintenance;
 #[cfg(feature = "server")]
 pub mod server;
@@ -114,6 +117,7 @@ pub enum Error {
     HnswRebuildTooLarge,
     HnswRebuildBusy,
     HnswRebuildFailed,
+    InvalidHnswMaintenancePolicy,
     InvalidMetadata(&'static str),
     InvalidFilter(&'static str),
     MetadataRequiresUpgrade,
@@ -193,6 +197,10 @@ impl fmt::Display for Error {
             Self::HnswRebuildFailed => write!(
                 f,
                 "background HNSW worker failed; current index is unchanged"
+            ),
+            Self::InvalidHnswMaintenancePolicy => write!(
+                f,
+                "HNSW maintenance high-water thresholds must be 1..=256 IDs and 1..=8388608 vector bytes"
             ),
             Self::InvalidMetadata(reason) => write!(f, "invalid metadata: {reason}"),
             Self::InvalidFilter(reason) => write!(f, "invalid filter: {reason}"),
@@ -765,6 +773,91 @@ impl Database {
         } else {
             false
         }
+    }
+
+    /// Observe matching-index capacity and worker progress without polling,
+    /// publishing, starting, cancelling, or changing any state.
+    pub fn hnsw_maintenance_status(
+        &self,
+        config: HnswConfig,
+        metric: DistanceMetric,
+        policy: HnswMaintenancePolicy,
+    ) -> Result<HnswMaintenanceStatus> {
+        self.ensure_healthy()?;
+        config.validate()?;
+        validate_ann_metric(metric)?;
+        policy.validate()?;
+        let active_buffer = self
+            .index
+            .as_ref()
+            .filter(|index| index.config == config && index.metric == metric)
+            .map(HnswBufferCapacity::of);
+        let rebuild = self.rebuild.as_ref().map(rebuild::Job::progress);
+        let pressure = if rebuild
+            .is_some_and(|job| job.terminal_reason == Some(HnswRebuildStatus::CatchUpOverflow))
+        {
+            HnswPressure::CatchUpOverflow
+        } else if active_buffer.is_none() {
+            HnswPressure::Unavailable
+        } else if active_buffer.is_some_and(HnswBufferCapacity::exhausted)
+            || rebuild
+                .and_then(|job| job.catchup_buffer)
+                .is_some_and(HnswBufferCapacity::exhausted)
+        {
+            HnswPressure::CapacityExhausted
+        } else if active_buffer.is_some_and(|buffer| buffer.high(policy)) {
+            HnswPressure::RebuildRecommended
+        } else {
+            HnswPressure::Healthy
+        };
+        Ok(HnswMaintenanceStatus {
+            ready: active_buffer.is_some(),
+            pressure,
+            active_buffer,
+            rebuild,
+        })
+    }
+
+    /// Explicit maintenance tick: reap/publish one matching job, then start a
+    /// replacement if the matching index is missing or either high-water mark
+    /// is reached. Never waits for construction or silently falls back.
+    ///
+    /// Catch-up overflow is reported in `outcome` even if a fresh retry starts.
+    /// Cancellation/supersession suppress restarting for that tick. Call before
+    /// mutation/query batches and inspect status; arbitrary write rates cannot
+    /// be guaranteed to maintain readiness.
+    pub fn maintain_hnsw(
+        &mut self,
+        config: HnswConfig,
+        metric: DistanceMetric,
+        policy: HnswMaintenancePolicy,
+    ) -> Result<HnswMaintenanceReport> {
+        let before = self.hnsw_maintenance_status(config, metric, policy)?;
+        if before
+            .rebuild
+            .is_some_and(|job| job.config != config || job.metric != metric)
+        {
+            return Err(Error::HnswRebuildBusy);
+        }
+        let outcome = self.poll_hnsw_rebuild()?;
+        let status = self.hnsw_maintenance_status(config, metric, policy)?;
+        let start = status.rebuild.is_none()
+            && !matches!(
+                outcome,
+                HnswRebuildStatus::Cancelled | HnswRebuildStatus::Superseded
+            )
+            && (!status.ready
+                || status
+                    .active_buffer
+                    .is_some_and(|buffer| buffer.high(policy)));
+        if start {
+            self.start_hnsw_rebuild(config, metric, policy.limits)?;
+        }
+        Ok(HnswMaintenanceReport {
+            outcome,
+            started: start,
+            status: self.hnsw_maintenance_status(config, metric, policy)?,
+        })
     }
 
     /// Approximate squared-L2 search; exact search remains the default.

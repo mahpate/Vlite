@@ -297,6 +297,10 @@ publish with mutation catch-up. Ready-only queries never rebuild or fall back.
 Catch-up overflow is explicit; sustained writes may make ANN temporarily
 unavailable. Snapshot copying/publication still use the owner thread, so this
 is not a hard latency guarantee. Synchronous APIs remain unchanged.
+The caller-driven `maintain_hnsw` tick can start earlier at configurable
+high-water marks (default 128 distinct IDs / 4 MiB), with read-only capacity,
+processed-record progress and explicit pressure status. It does not run inside
+writes or queries and cannot guarantee readiness when mutations outpace rebuilds.
 The background lifecycle is Rust-only for now, not a REST/C/Python/Node API
 and not part of the existing v0.1.2 binaries.
 

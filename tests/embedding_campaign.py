@@ -152,21 +152,31 @@ class EmbeddingCampaignTests(unittest.TestCase):
             output = directory / "background.json"
             command = [sys.executable, str(ROOT / "benchmarks" / "background_campaign.py"),
                        "--binary", BINARY, "--dataset", str(directory), "--output", str(output),
-                       "--trials", "1", "--interval-ms", "0", "--writes", "4", "--deletes", "2"]
-            for flags in [["--interval-ms", "-1"], ["--interval-ms", "0", "0"], ["--trials", "0"]]:
+                       "--trials", "1", "--interval-ms", "0", "--writes", "4", "--deletes", "2",
+                       "--modes", "lazy", "background", "maintenance"]
+            for flags in [["--interval-ms", "-1"], ["--interval-ms", "1001"],
+                          ["--interval-ms", "0", "0"], ["--interval-ms", "0", "1", "2", "3"],
+                          ["--modes", "maintenance", "maintenance"], ["--trials", "0"]]:
                 self.assertNotEqual(subprocess.run(command + flags, capture_output=True).returncode, 0)
                 self.assertFalse(output.exists())
             result = subprocess.run(command, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             report = json.loads(output.read_text())
             self.assertEqual(report["status"], "complete")
-            self.assertEqual(len(report["runs"]), 2)
-            self.assertEqual(len(report["summary"]), 2)
+            self.assertEqual(len(report["runs"]), 3)
+            self.assertEqual(len(report["summary"]), 3)
             self.assertNotIn(str(directory), output.read_text())
             background, = [r["measurement"]["hnsw"] for r in report["runs"] if r["mode"] == "background"]
             self.assertEqual(background["rebuild_query_numbers"], [])
             state = background["background"]
             self.assertEqual(state["served_queries"] + len(state["not_ready_query_numbers"]), 2)
+            maintenance, = [r["measurement"]["hnsw"] for r in report["runs"] if r["mode"] == "maintenance"]
+            self.assertEqual(maintenance["rebuild_query_numbers"], [])
+            state = maintenance["background"]
+            self.assertEqual(state["start_query_numbers"], [])
+            self.assertEqual(state["policy"]["rebuild_at_buffered_ids"], 128)
+            self.assertEqual(len(state["policy"]["capacity_samples"]), 2)
+            self.assertEqual(state["policy"]["capacity_samples"][1]["active_buffer"]["buffered_ids"], 12)
             original = output.read_bytes()
             self.assertNotEqual(subprocess.run(command, capture_output=True).returncode, 0)
             self.assertEqual(output.read_bytes(), original)
@@ -204,6 +214,57 @@ class EmbeddingCampaignTests(unittest.TestCase):
             else:
                 self.assertNotIn("background", ann)
                 self.assertEqual(ann["recall_at_k"], 1)
+
+    def test_published_maintenance_report_preserves_capacity_and_overload(self):
+        report = json.loads((ROOT / "benchmarks" / "results" / "glove-100-maintenance-windows.json").read_text())
+        self.assertEqual(report["status"], "complete")
+        self.assertEqual(len(report["runs"]), 18)
+        sys.path.insert(0, str(ROOT / "benchmarks"))
+        try:
+            spec = importlib.util.spec_from_file_location("background_campaign", ROOT / "benchmarks" / "background_campaign.py")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        finally:
+            sys.path.pop(0)
+        self.assertEqual(report["summary"], module.summarize(report["runs"]))
+        for run in report["runs"]:
+            measurement = run["measurement"]
+            ann = measurement["hnsw"]
+            self.assertEqual(measurement["recall_at_k"], 1)
+            self.assertEqual(measurement["final_live_records"], 2600)
+            self.assertEqual(len(ann["request_samples_ms"]), 100)
+            self.assertAlmostEqual(ann["recall_at_k"], sum(ann["recall_samples"]) / 100, places=6)
+            if run["mode"] == "lazy":
+                self.assertNotIn("background", ann)
+                self.assertEqual(ann["recall_at_k"], 1)
+                continue
+            self.assertEqual(run["mode"], "maintenance")
+            self.assertEqual(ann["rebuild_query_numbers"], [])
+            state = ann["background"]
+            self.assertEqual(state["start_query_numbers"][0], 8)
+            rejected = state["not_ready_query_numbers"]
+            self.assertEqual(state["served_queries"] + len(rejected), 100)
+            self.assertAlmostEqual(state["served_recall_at_k"],
+                                   sum(ann["recall_samples"]) / state["served_queries"], places=6)
+            policy = state["policy"]
+            self.assertEqual(policy["rebuild_at_buffered_ids"], 128)
+            self.assertEqual(policy["rebuild_at_buffer_vector_bytes"], 4 * 1024 * 1024)
+            self.assertEqual(len(policy["capacity_samples"]), 100)
+            for number, sample in enumerate(policy["capacity_samples"], 1):
+                self.assertEqual(sample["ready"], number not in rejected)
+                active = sample["active_buffer"]
+                if active is not None:
+                    self.assertEqual(active["remaining_ids"] + active["buffered_ids"], 256)
+                    self.assertEqual(active["remaining_vector_bytes"] + active["buffer_vector_bytes"], 8 * 1024 * 1024)
+                job = sample["rebuild"]
+                if job is not None:
+                    self.assertLessEqual(job["processed_records"], job["snapshot_records"])
+                    if job["catchup_remaining_ids"] is not None:
+                        self.assertEqual(job["catchup_remaining_ids"] + job["catchup_buffered_ids"], 256)
+                        self.assertEqual(job["catchup_remaining_vector_bytes"] + job["catchup_vector_bytes"], 8 * 1024 * 1024)
+                if number in rejected:
+                    self.assertIn(sample["pressure"], ["Unavailable", "CatchUpOverflow"])
+                    self.assertEqual(ann["recall_samples"][number - 1], 0)
 
     @unittest.skipUnless(BINARY, "pass --binary to exercise native pipeline")
     def test_offline_release_campaign_reports_real_input_mutations_and_no_local_paths(self):

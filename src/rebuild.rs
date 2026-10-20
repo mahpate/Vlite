@@ -3,12 +3,109 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle},
 };
 
-use crate::{DistanceMetric, Error, HnswConfig, Record, Result, hnsw::Index};
+use crate::{
+    DistanceMetric, Error, HnswConfig, MAX_HNSW_BUFFER_IDS, MAX_HNSW_BUFFER_VECTOR_BYTES, Record,
+    Result, hnsw::Index,
+};
+
+/// Explicit caller-driven high-water policy. No timers or hidden retries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HnswMaintenancePolicy {
+    pub rebuild_at_buffered_ids: usize,
+    pub rebuild_at_buffer_vector_bytes: usize,
+    pub limits: HnswRebuildLimits,
+}
+
+impl Default for HnswMaintenancePolicy {
+    fn default() -> Self {
+        Self {
+            rebuild_at_buffered_ids: MAX_HNSW_BUFFER_IDS / 2,
+            rebuild_at_buffer_vector_bytes: MAX_HNSW_BUFFER_VECTOR_BYTES / 2,
+            limits: HnswRebuildLimits::default(),
+        }
+    }
+}
+
+impl HnswMaintenancePolicy {
+    pub(crate) fn validate(self) -> Result<()> {
+        if !(1..=MAX_HNSW_BUFFER_IDS).contains(&self.rebuild_at_buffered_ids)
+            || !(1..=MAX_HNSW_BUFFER_VECTOR_BYTES).contains(&self.rebuild_at_buffer_vector_bytes)
+        {
+            return Err(Error::InvalidHnswMaintenancePolicy);
+        }
+        self.limits.validate(0, 1)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HnswBufferCapacity {
+    pub buffered_ids: usize,
+    pub buffer_vector_bytes: usize,
+    pub remaining_ids: usize,
+    pub remaining_vector_bytes: usize,
+}
+
+impl HnswBufferCapacity {
+    pub(crate) fn of(index: &Index) -> Self {
+        let (buffered_ids, buffer_vector_bytes) = index.buffer_usage();
+        Self {
+            buffered_ids,
+            buffer_vector_bytes,
+            remaining_ids: MAX_HNSW_BUFFER_IDS - buffered_ids,
+            remaining_vector_bytes: MAX_HNSW_BUFFER_VECTOR_BYTES - buffer_vector_bytes,
+        }
+    }
+
+    pub(crate) fn exhausted(self) -> bool {
+        self.remaining_ids == 0 || self.remaining_vector_bytes == 0
+    }
+
+    pub(crate) fn high(self, policy: HnswMaintenancePolicy) -> bool {
+        self.buffered_ids >= policy.rebuild_at_buffered_ids
+            || self.buffer_vector_bytes >= policy.rebuild_at_buffer_vector_bytes
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HnswPressure {
+    Healthy,
+    RebuildRecommended,
+    CapacityExhausted,
+    Unavailable,
+    CatchUpOverflow,
+}
+
+/// Processed records, not percent CPU time or an estimated completion deadline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HnswRebuildProgress {
+    pub config: HnswConfig,
+    pub metric: DistanceMetric,
+    pub snapshot_records: usize,
+    pub processed_records: usize,
+    pub worker_finished: bool,
+    pub terminal_reason: Option<HnswRebuildStatus>,
+    pub catchup_buffer: Option<HnswBufferCapacity>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HnswMaintenanceStatus {
+    pub ready: bool,
+    pub pressure: HnswPressure,
+    pub active_buffer: Option<HnswBufferCapacity>,
+    pub rebuild: Option<HnswRebuildProgress>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HnswMaintenanceReport {
+    pub outcome: HnswRebuildStatus,
+    pub started: bool,
+    pub status: HnswMaintenanceStatus,
+}
 
 /// Bounds snapshot vectors and graph cardinality, not allocator/total process RSS.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +157,10 @@ pub(crate) struct Job {
     cancel: Arc<AtomicBool>,
     terminal: Option<HnswRebuildStatus>,
     changes: Option<Index>,
+    config: HnswConfig,
+    metric: DistanceMetric,
+    snapshot_records: usize,
+    processed: Arc<AtomicUsize>,
 }
 
 impl Job {
@@ -84,15 +185,35 @@ impl Job {
             .collect();
         let cancel = Arc::new(AtomicBool::new(false));
         let stop = Arc::clone(&cancel);
+        let processed = Arc::new(AtomicUsize::new(0));
+        let progress = Arc::clone(&processed);
         let worker = thread::Builder::new()
             .name("vlite-hnsw-rebuild".into())
-            .spawn(move || Index::build_cancellable(&snapshot, config, metric, &stop))?;
+            .spawn(move || {
+                Index::build_with_progress(&snapshot, config, metric, &stop, &progress)
+            })?;
         Ok(Self {
             worker: Some(worker),
             cancel,
             terminal: None,
             changes: Some(Index::build(&BTreeMap::new(), config, metric)),
+            config,
+            metric,
+            snapshot_records: records.len(),
+            processed,
         })
+    }
+
+    pub fn progress(&self) -> HnswRebuildProgress {
+        HnswRebuildProgress {
+            config: self.config,
+            metric: self.metric,
+            snapshot_records: self.snapshot_records,
+            processed_records: self.processed.load(Ordering::Relaxed),
+            worker_finished: self.finished(),
+            terminal_reason: self.terminal,
+            catchup_buffer: self.changes.as_ref().map(HnswBufferCapacity::of),
+        }
     }
 
     pub fn stop(&mut self, reason: HnswRebuildStatus) {
@@ -170,6 +291,10 @@ mod tests {
                 HnswConfig::default(),
                 DistanceMetric::SquaredL2,
             )),
+            config: HnswConfig::default(),
+            metric: DistanceMetric::SquaredL2,
+            snapshot_records: 0,
+            processed: Arc::new(AtomicUsize::new(0)),
         }
     }
 
