@@ -132,6 +132,7 @@ jobs:
                            "compose.yaml", "compose.tls.yaml", "deploy/Caddyfile", "Dockerfile",
                            "docs/REFERENCE.md", "docs/INSTALL.md", "benchmarks/README.md", "benchmarks/RESULTS.md",
                            "benchmarks/compare_rest.py", "benchmarks/native_campaign.py", "benchmarks/metric_campaign.py", "benchmarks/embedded.py",
+                           "benchmarks/embedding_campaign.py", "benchmarks/prepare_glove.py", "benchmarks/requirements-embeddings.txt",
                            "tests/measure_benchmark.py",
                            "clients/README.md", "clients/python/README.md",
                            "clients/python/pyproject.toml", "clients/python/LICENSE",

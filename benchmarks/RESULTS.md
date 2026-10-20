@@ -5,6 +5,68 @@ See [methodology and reproduction](README.md) before interpreting the numbers.
 
 No zvec, Milvus, Weaviate, FAISS or other unmeasured engine results are inferred.
 
+## Real GloVe cosine retrieval and mixed deletes, October 20, 2026 UTC
+
+[Raw campaign and dataset provenance](results/glove-100-windows.json) records
+24 native Windows x64 release children: three trials on 3,000 real 100D
+GloVe Twitter word vectors, 100 held-out upstream test rows, k=10.
+[Preparation, license, exact subset ranges and reproduction](README.md#real-glove-embeddings-and-mixed-deletions)
+are documented; vectors are not included. Every exact result and post-mutation
+ANN candidate score is checked against an independent current-state oracle.
+The upstream full-dataset neighbor labels are not used.
+
+Values are medians of trial percentiles; recall is the minimum trial mean.
+Identical inputs/graph seed mean the trials repeat timing, not independent
+randomized recall experiments. Static and mixed modes are different workloads.
+
+| Mode | p50 (ms) | p95 (ms) | p99 (ms) | Minimum trial recall@10 |
+|---|---:|---:|---:|---:|
+| Exact cosine | 0.7419 | 1.2637 | 1.7236 | 1.000 |
+| Filtered exact cosine, 10% eligible | 0.1358 | 0.2331 | 0.5277 | 1.000 |
+| Static cosine ANN, ef=32 | 0.1814 | 0.2966 | 0.3412 | 0.916 |
+| Static cosine ANN, ef=100 | 0.4625 | 0.5835 | 0.6531 | 0.995 |
+| Static cosine ANN, ef=300 | 0.8000 | 1.0541 | 1.2217 | 1.000 |
+| Mixed cosine ANN, ef=32 | 0.8808 | 2052.9031 | 2215.3210 | 0.992 |
+| Mixed cosine ANN, ef=100 | 0.9480 | 1922.6594 | 2241.4217 | 1.000 |
+| Mixed cosine ANN, ef=300 | 1.1723 | 1878.5783 | 2089.2876 | 1.000 |
+
+Each mixed query follows 16 real replacements and four deletes in one durable
+batch. Every trial rebuilds on queries **13, 26, 39, 52, 65, 78, 91** after the
+256-distinct-ID buffer limit is crossed. The write and triggering query are
+timed separately; query latency includes the complete synchronous rebuild.
+At ef=100, non-rebuild query median was 0.9432 ms, but the maximum observed
+query was **2776.3046 ms**. Do not hide that pause behind a steady-state number.
+Each child finishes with 2,600 live records and 677,200 additional logical
+database bytes; deletion does not reclaim the append log.
+
+Static ef=100 initial index build median was 2366.3051 ms. Whole-child median
+peak RSS was 10,309,632 bytes for exact, 10,133,504 bytes for static ef=100,
+and 11,370,496 bytes for mixed ef=100. This includes all input vectors,
+database, full-sort oracle, index and mutation history; differences are
+**not measurements of marginal index memory**. The mixed report's initial
+exact timing is pre-mutation; no timed mixed exact baseline was collected.
+
+**Recommendations for this measured subset:** use exact search for strict
+recall, selective filters, or when avoiding HNSW rebuild pauses matters.
+Static ef=100 is the lowest tested setting meeting the declared 99% mean-recall
+target in every trial; it is a candidate for read-heavy workloads, not a new
+default or universal guarantee. Its worst individual query recall was 0.9;
+ef=32 fell to 0.3 on a static query despite its faster median.
+Ef=300 reached full measured static recall but was slower than exact at p50.
+The mixed ef=32 mean exceeding 99% does not establish equivalent graph quality:
+buffered vectors are scanned exactly and the live dataset changes.
+Current buffered ANN is **not a bounded-tail recommendation for sustained
+distinct-ID mutations**; schedule explicit rebuilds outside latency-sensitive
+traffic, use ready-only queries to reject missing indexes, or stay with exact
+search. Ready-only mode does not eliminate build cost or make writes concurrent.
+
+This is a small prefix subset of upstream shuffled splits, not the full
+million-vector dataset, modern sentence embeddings, or a production workload.
+The Windows host was shared/unpinned; 100 queries and three timing repetitions
+do not establish a production tail SLA. No Linux/macOS performance claim or
+crash-durability claim follows. The report identifies its precommit dirty-source
+hashes and binary SHA-256, not a released v0.1.2 benchmark binary.
+
 ## Exact metrics and cosine ANN, October 20, 2026 UTC
 
 [Final cached-norm campaign](results/metric-cosine-cached-windows.json) contains

@@ -33,6 +33,8 @@ jobs:
       - run: python tests/release_assets.py
       - run: python tests/wheel_platform.py
       - run: cargo build --locked --release --bin vlite-bench
+      - name: Verify offline embedding campaign and mutation provenance
+        run: python tests/embedding_campaign.py --binary target/release/vlite-bench${{ runner.os == 'Windows' && '.exe' || '' }}
       - name: Verify filtered exact top-k benchmark
         run: cargo run --locked --release --bin vlite-bench -- --filter-every 10 1024 8 10 64 10 42
       - name: Measure exact/HNSW benchmark and process peak memory

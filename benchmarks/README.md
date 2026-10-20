@@ -180,10 +180,89 @@ target\release\vlite-bench.exe --vectors documents.txt --query-vectors queries.t
 ```
 
 External-input flags and `--mixed-writes` precede `--filter-every`/`--ann`.
-Do not publish private embeddings. The included campaign uses synthetic data;
-support for loading real vectors does **not** mean a real-embedding campaign
-has been executed. Large datasets require a separately validated faster oracle;
+Do not publish private embeddings. `native_campaign.py` and `metric_campaign.py`
+use synthetic data; the separate real-data campaign below records its source.
+Large datasets require a separately validated faster oracle;
 the bounded native tool is not a million-vector production load generator.
+
+## Real GloVe embeddings and mixed deletions
+
+This harness and its new CLI flags are current-source additions after v0.1.2.
+Build the benchmark from this checkout; the existing v0.1.2 release binary
+does not contain them. No engine/SDK API or storage format changes are required.
+
+`prepare_glove.py` extracts a bounded subset of
+[ANN-Benchmarks GloVe 100D](https://ann-benchmarks.com/glove-100-angular.hdf5).
+The upstream [conversion](https://github.com/erikbern/ann-benchmarks/blob/main/ann_benchmarks/datasets.py)
+loads Stanford's GloVe Twitter 27B word vectors and splits train/test with
+`random_state=1`. Stanford's [primary distribution page](https://nlp.stanford.edu/projects/glove/)
+explicitly licenses **pretrained vector data** under
+[PDDL v1.0](https://opendatacommons.org/licenses/pddl/1-0/);
+the separate Apache license applies to its code. Cite Pennington, Socher and
+Manning, *GloVe: Global Vectors for Word Representation*, EMNLP 2014.
+No source embeddings or HDF5 files are committed here.
+
+Download and prepare outside the checkout. Extraction alone needs optional
+`h5py`/`numpy`; the campaign itself uses only Python's standard library:
+
+```powershell
+python -m venv C:\benchdata\embedding-env
+C:\benchdata\embedding-env\Scripts\python.exe -m pip install -r benchmarks\requirements-embeddings.txt
+curl.exe --fail --location --output C:\benchdata\glove-100-angular.hdf5 https://ann-benchmarks.com/glove-100-angular.hdf5
+C:\benchdata\embedding-env\Scripts\python.exe benchmarks\prepare_glove.py --source C:\benchdata\glove-100-angular.hdf5 --output C:\benchdata\glove-subset
+cargo build --locked --release --bin vlite-bench
+python benchmarks\embedding_campaign.py --binary target\release\vlite-bench.exe --dataset C:\benchdata\glove-subset --output glove-results.json
+```
+
+Create `C:\benchdata` first. On Linux/macOS use an equivalent external directory,
+`python3`, the virtualenv's `bin/python` and `target/release/vlite-bench`.
+The verified HDF5 SHA-256 is
+`544af1d5e84e112cd4749571dcfd8ca109818a572f850af75a3a09e093a953c4`;
+preparation refuses a different source rather than silently trusting a mutable URL.
+Output directory/report must not exist; failures are explicit and partial exports
+must not be used as complete datasets. Review new upstream data before changing
+the pin. The extraction manifest includes source and exact text/decoded-f32
+SHA-256s, shapes, source row ranges, library versions, license and model provenance.
+Casting to f32 is explicit; 9-digit text is checked for bit-exact f32 round trips.
+No normalization, zero-vector filtering, or query augmentation is performed.
+
+Defaults: 3,000 base rows from upstream `train[0:3000]`, 100 queries from
+`test[0:100]`, and 1,600 replacements from disjoint `train[3000:4600]`.
+These are prefixes of upstream's shuffled splits, not a newly randomized sample;
+source-row separation does not guarantee distinct word meanings or vector values.
+Ground truth is recomputed for this **subset**, never borrowed from upstream's
+full-million neighbor labels.
+
+The campaign executes exact, 10%-eligible filtered exact, and cosine ANN
+ef=32/100/300 in static and mixed modes, three trials each (24 fresh children).
+Trial order reverses on alternate trials; graph seed and inputs remain fixed.
+Construction uses m=16/ef=100. Every mixed query follows one durable batch of
+16 real replacements and 4 deletes. IDs advance by 20 modulo the initial
+record count: replacements occupy the first 16 slots, deletes the next 4.
+Later cycles may reinsert deleted IDs; the published defaults stop before a
+complete cycle and finish with 2,600 live records. These are sequential mutations,
+not concurrent readers/writers. Mixed timings cannot be ranked as static timings.
+
+The native CLI adds `--update-vectors <file>` and `--mixed-deletes <N>` before
+`--ann`; update text has exactly `queries * mixed-writes` rows. External mixed
+writes **require** that file, so real-data runs cannot silently replace vectors
+with synthetic values. Synthetic runs retain their previous generator.
+At most 256 total mutations/query, no more than the base record count, and
+65,536 mutations/run are allowed; existing memory/oracle limits also apply.
+Live counts, per-query recall, update checksums and one-based rebuild query
+numbers accompany raw latency/write samples. A ready-only query is timed;
+on `IndexNotReady` the same timer includes the lazy synchronous rebuild.
+There is no untimed traversal probe. Deleted IDs must not appear, and exact
+search plus an independent live-state full-sort oracle are checked after each
+mutation batch, including empty eligible sets (recall 1 by convention).
+
+The report records source/binary hashes and dirty state, full dataset manifest,
+raw measurements, whole-child peak RSS and per-trial summaries. A 99% target
+means **every trial's mean recall**, not 99% for every query. Per-query values
+remain visible. Rebuild tails are not excluded from p95/p99; the separate
+non-rebuild median is diagnostic only. Reports must finish with `status=complete`.
+This is a small 100D word-embedding benchmark on a shared host, not a modern
+sentence-embedding, million-vector, crash-durability or production SLA result.
 
 ## Publishing results
 

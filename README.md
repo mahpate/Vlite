@@ -302,12 +302,14 @@ the data and scan order. See the published cutoff comparison for gains and
 regressions on the measured synthetic workloads.
 
 The native benchmark verifies every exact query against an independent oracle.
-It accepts external vector/query files and can measure durable mixed updates,
+It accepts external vector/query/update files and can measure durable mixed updates/deletes,
 ANN rebuild pauses, raw latency samples, measured file growth and whole-process
 peak memory through the native campaign runner.
+The [real GloVe campaign](benchmarks/README.md#real-glove-embeddings-and-mixed-deletions)
+records licensed-data provenance and current-state recall after every mutation.
 Measure embedded calls and REST requests separately; mixing in-process latency
 with network calls would be misleading. Use identical inputs, resource limits,
-warmups and correctness checks when comparing runs. Real embeddings,
+warmups and correctness checks when comparing runs. Your own embeddings,
 concurrency, larger dimensions and datasets, recall targets, storage, and memory
 need their own measurements before making deployment decisions.
 

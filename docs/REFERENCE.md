@@ -777,9 +777,18 @@ the benchmark fail rather than print successful metrics.
 Optional `--vectors <file> --query-vectors <file>` loads bounded finite f32
 text rows instead of generating inputs. `--mixed-writes N --ann ...` commits
 N existing-ID replacements before every approximate query, verifies against
-the current dataset and retains rebuild pauses in query samples. Place these
+the current dataset and retains rebuild pauses in query samples.
+`--mixed-deletes N` adds deletes, advancing IDs modulo the initial record count;
+the independent oracle excludes deleted IDs and tracks later reinsertion.
+External mixed writes require `--update-vectors <file>` with exactly
+`queries * mixed-writes` rows (synthetic replacements are not implicit).
+Per-query live counts/recall, one-based rebuild query numbers, final live count
+and decoded update checksums are reported alongside raw latency samples.
+These flags are current-source additions after v0.1.2, not new SDK/engine APIs.
+Place these
 flags before the filtering/ANN flags. See the
 [native campaign guide](../benchmarks/README.md#native-profiling-real-vectors-and-mixed-updates)
+and [licensed real-data campaign](../benchmarks/README.md#real-glove-embeddings-and-mixed-deletions)
 for format, bounds, repeated trials, recall targets and measured memory scope.
 
 Prefix `--filter-every N` to benchmark exact metadata filtering, selecting IDs

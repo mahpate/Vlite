@@ -10,7 +10,7 @@ use vlite::{
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
-const USAGE: &str = "usage: vlite-bench [--metric squared_l2|cosine|inner_product] [--vectors <file> --query-vectors <file>] [--mixed-writes <updates per query>] [--filter-every <N>] [--ann <m> <ef_construction> <ef_search>] [records=1000 dimensions=32 queries=100 batch_size=100 k=10 seed=42]; mixed writes require ANN; filtering and ANN are mutually exclusive; inner product is exact-only";
+const USAGE: &str = "usage: vlite-bench [--metric squared_l2|cosine|inner_product] [--vectors <file> --query-vectors <file>] [--update-vectors <file>] [--mixed-writes <updates per query>] [--mixed-deletes <deletes per query>] [--filter-every <N>] [--ann <m> <ef_construction> <ef_search>] [records=1000 dimensions=32 queries=100 batch_size=100 k=10 seed=42]; mutations require ANN; filtering and ANN are mutually exclusive; inner product is exact-only";
 const MAX_DATA_BYTES: usize = 256 * 1024 * 1024;
 const MAX_DISTANCE_COMPONENTS: u64 = 500_000_000;
 
@@ -25,6 +25,8 @@ struct Config {
     filter_every: Option<usize>,
     input: Option<(PathBuf, PathBuf)>,
     mixed_writes: usize,
+    mixed_deletes: usize,
+    update_vectors: Option<PathBuf>,
     metric: DistanceMetric,
 }
 
@@ -34,11 +36,18 @@ impl Config {
         let mut input_vectors = None;
         let mut input_queries = None;
         let mut mixed_writes = None;
+        let mut mixed_deletes = None;
+        let mut update_vectors = None;
         let mut metric = None;
         while args.first().is_some_and(|arg| {
             matches!(
                 arg.as_str(),
-                "--vectors" | "--query-vectors" | "--mixed-writes" | "--metric"
+                "--vectors"
+                    | "--query-vectors"
+                    | "--mixed-writes"
+                    | "--mixed-deletes"
+                    | "--update-vectors"
+                    | "--metric"
             )
         }) {
             let flag = args[0].clone();
@@ -59,6 +68,16 @@ impl Config {
                 }
                 "--query-vectors" if input_queries.is_none() => {
                     input_queries = Some(PathBuf::from(value));
+                }
+                "--update-vectors" if update_vectors.is_none() => {
+                    update_vectors = Some(PathBuf::from(value));
+                }
+                "--mixed-deletes" if mixed_deletes.is_none() => {
+                    let count = value.parse::<usize>()?;
+                    if !(1..=256).contains(&count) {
+                        return Err("mixed deletes must be between 1 and 256".into());
+                    }
+                    mixed_deletes = Some(count);
                 }
                 "--mixed-writes" if mixed_writes.is_none() => {
                     let count = value.parse::<usize>()?;
@@ -118,8 +137,14 @@ impl Config {
         if ann.is_some() && metric == DistanceMetric::InnerProduct {
             return Err("inner_product is exact-only".into());
         }
-        if mixed_writes.is_some() && ann.is_none() {
-            return Err("mixed writes require --ann".into());
+        if (mixed_writes.is_some() || mixed_deletes.is_some()) && ann.is_none() {
+            return Err("mixed mutations require --ann".into());
+        }
+        if update_vectors.is_some() && (mixed_writes.is_none() || input.is_none()) {
+            return Err("--update-vectors requires external input and --mixed-writes".into());
+        }
+        if input.is_some() && mixed_writes.is_some() && update_vectors.is_none() {
+            return Err("external mixed writes require --update-vectors; synthetic replacements are not implicit".into());
         }
         if args.len() > 6 {
             return Err(USAGE.into());
@@ -149,14 +174,27 @@ impl Config {
             return Err(format!("invalid workload bounds; {USAGE}").into());
         }
         let mixed_writes = mixed_writes.unwrap_or(0);
-        if queries * mixed_writes as u64 > 65_536
-            || mixed_writes as u64 * (16 + dimensions * 4) > MAX_BATCH_BYTES as u64
+        let mixed_deletes = mixed_deletes.unwrap_or(0);
+        let mutations = mixed_writes + mixed_deletes;
+        if mutations > 256
+            || (mutations > 0 && mutations as u64 > records)
+            || queries * mutations as u64 > 65_536
+            || mixed_writes as u64 * (16 + dimensions * 4) + mixed_deletes as u64 * 16
+                > MAX_BATCH_BYTES as u64
         {
-            return Err("mixed workload exceeds 65536 updates or batch byte limit".into());
+            return Err(
+                "mixed workload exceeds mutation count, record count, or batch byte limit".into(),
+            );
         }
-        let bytes = (records + queries)
-            .checked_mul(dimensions)
-            .and_then(|v| v.checked_mul(4));
+        let bytes = (records
+            + queries
+            + if update_vectors.is_some() {
+                queries * mixed_writes as u64
+            } else {
+                0
+            })
+        .checked_mul(dimensions)
+        .and_then(|v| v.checked_mul(4));
         let components = (records + mixed_writes as u64)
             .checked_mul(dimensions)
             .and_then(|v| v.checked_mul(queries));
@@ -179,6 +217,8 @@ impl Config {
             filter_every,
             input,
             mixed_writes,
+            mixed_deletes,
+            update_vectors,
             metric,
         })
     }
@@ -310,6 +350,19 @@ fn run() -> Result<()> {
     };
     let dataset_checksum = checksum(&dataset);
     let query_checksum = checksum(&queries);
+    let updates = config
+        .update_vectors
+        .as_ref()
+        .map(|path| {
+            load_vectors(
+                path,
+                config.queries * config.mixed_writes,
+                config.dimensions,
+            )
+        })
+        .transpose()?;
+    let update_checksum = updates.as_ref().map(|vectors| checksum(vectors));
+    let mut live = vec![true; config.records];
     let parent = std::env::var_os("VLITE_BENCH_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or(std::env::current_dir()?);
@@ -427,38 +480,75 @@ fn run() -> Result<()> {
         let mut write_times = Vec::new();
         let mut recalled = 0;
         let mut recall_total = 0;
+        let mut rebuild_queries = Vec::new();
+        let mut recall_samples = Vec::new();
+        let mut live_samples = Vec::new();
         for (query_index, query) in queries.iter().enumerate() {
-            if config.mixed_writes > 0 {
-                let updates = vectors(config.mixed_writes, config.dimensions, &mut state);
-                let operations: Vec<_> = updates
+            if config.mixed_writes + config.mixed_deletes > 0 {
+                let replacements = if let Some(updates) = &updates {
+                    updates
+                        [query_index * config.mixed_writes..(query_index + 1) * config.mixed_writes]
+                        .to_vec()
+                } else {
+                    vectors(config.mixed_writes, config.dimensions, &mut state)
+                };
+                let width = config.mixed_writes + config.mixed_deletes;
+                let mut operations: Vec<_> = replacements
                     .into_iter()
                     .enumerate()
                     .map(|(index, vector)| Mutation::Put {
-                        id: ((query_index * config.mixed_writes + index) % config.records) as u64,
+                        id: ((query_index * width + index) % config.records) as u64,
                         vector,
                         payload: Vec::new(),
                     })
                     .collect();
+                operations.extend((0..config.mixed_deletes).map(|index| Mutation::Delete {
+                    id: ((query_index * width + config.mixed_writes + index) % config.records)
+                        as u64,
+                }));
                 let start = Instant::now();
                 db.write_batch(&operations)?;
                 write_times.push(start.elapsed().as_secs_f64() * 1000.0);
                 for operation in operations {
-                    if let Mutation::Put { id, vector, .. } = operation {
-                        dataset[id as usize] = vector;
+                    match operation {
+                        Mutation::Put { id, vector, .. } => {
+                            dataset[id as usize] = vector;
+                            live[id as usize] = true;
+                        }
+                        Mutation::Delete { id } => live[id as usize] = false,
+                        _ => unreachable!(),
                     }
                 }
             }
             let start = Instant::now();
-            let hits = black_box(db.search_approximate_with_metric(
-                black_box(query),
-                config.k,
-                ef_search,
-                index_config,
-                config.metric,
-            )?);
+            let hits = black_box(
+                match db.search_approximate_ready_with_metric(
+                    black_box(query),
+                    config.k,
+                    ef_search,
+                    index_config,
+                    config.metric,
+                ) {
+                    Ok(hits) => hits,
+                    Err(vlite::Error::IndexNotReady) => {
+                        rebuild_queries.push(query_index + 1);
+                        db.search_approximate_with_metric(
+                            query,
+                            config.k,
+                            ef_search,
+                            index_config,
+                            config.metric,
+                        )?
+                    }
+                    Err(error) => return Err(error.into()),
+                },
+            );
             approximate_times.push(start.elapsed().as_secs_f64() * 1000.0);
-            let expected = if config.mixed_writes > 0 {
-                let expected = ground_truth(&dataset, query, config.metric);
+            let expected = if config.mixed_writes + config.mixed_deletes > 0 {
+                let expected: Vec<_> = ground_truth(&dataset, query, config.metric)
+                    .into_iter()
+                    .filter(|&(id, _)| live[id as usize])
+                    .collect();
                 let exact = db.search_with_metric(query, config.k, config.metric)?;
                 if exact.len() != config.k.min(expected.len())
                     || exact
@@ -478,14 +568,21 @@ fn run() -> Result<()> {
                     .collect()
             };
             let mut ids = std::collections::BTreeSet::new();
-            recall_total += config.k.min(expected.len());
+            let expected_count = config.k.min(expected.len());
+            recall_total += expected_count;
+            let before_recalled = recalled;
+            live_samples.push(db.len());
             let cutoff = expected
                 .iter()
                 .take(config.k)
                 .next_back()
                 .map(|&(_, distance)| distance);
+            if hits.len() > expected_count {
+                return Err("approximate search returned too many candidates".into());
+            }
             for hit in &hits {
-                if !ids.insert(hit.id) || hit.id >= config.records as u64 {
+                if !ids.insert(hit.id) || hit.id >= config.records as u64 || !live[hit.id as usize]
+                {
                     return Err("approximate search returned duplicate or invalid IDs".into());
                 }
                 let distance = oracle_distance(&dataset[hit.id as usize], query, config.metric);
@@ -494,6 +591,11 @@ fn run() -> Result<()> {
                 }
                 recalled += usize::from(cutoff.is_some_and(|distance| hit.distance <= distance));
             }
+            recall_samples.push(if expected_count == 0 {
+                1.0
+            } else {
+                (recalled - before_recalled) as f64 / expected_count as f64
+            });
             if hits.windows(2).any(|pair| {
                 pair[0]
                     .distance
@@ -508,7 +610,7 @@ fn run() -> Result<()> {
         let writes = format!("{write_times:?}");
         approximate_times.sort_by(f64::total_cmp);
         format!(
-            ",\"hnsw\":{{\"m\":{},\"ef_construction\":{},\"ef_search\":{},\"seed\":{},\"index_build_ms\":{:.6},\"query_p50_ms\":{:.6},\"query_p95_ms\":{:.6},\"query_p99_ms\":{:.6},\"recall_at_k\":{:.6},\"mixed_writes_per_query\":{},\"query_samples_ms\":{},\"write_batch_samples_ms\":{}}}",
+            ",\"hnsw\":{{\"m\":{},\"ef_construction\":{},\"ef_search\":{},\"seed\":{},\"index_build_ms\":{:.6},\"query_p50_ms\":{:.6},\"query_p95_ms\":{:.6},\"query_p99_ms\":{:.6},\"recall_at_k\":{:.6},\"mixed_writes_per_query\":{},\"mixed_deletes_per_query\":{},\"query_samples_ms\":{},\"write_batch_samples_ms\":{},\"rebuild_query_numbers\":{:?},\"recall_samples\":{:?},\"live_records_samples\":{:?}}}",
             index_config.m,
             index_config.ef_construction,
             ef_search,
@@ -523,8 +625,12 @@ fn run() -> Result<()> {
                 recalled as f64 / recall_total as f64
             },
             config.mixed_writes,
+            config.mixed_deletes,
             samples,
             writes,
+            rebuild_queries,
+            recall_samples,
+            live_samples,
         )
     } else {
         String::new()
@@ -536,6 +642,9 @@ fn run() -> Result<()> {
     let final_file_bytes = std::fs::metadata(&path)?.len();
     directory.close()?;
     let samples = format!("{times_ms:?}");
+    let update_json = update_checksum.map_or(String::new(), |value| {
+        format!(",\"update_checksum\":\"{value:016x}\"")
+    });
     times_ms.sort_by(f64::total_cmp);
     println!(
         concat!(
@@ -544,7 +653,7 @@ fn run() -> Result<()> {
             "\"dataset_checksum\":\"{:016x}\",\"query_checksum\":\"{:016x}\",\"input\":\"{}\",\"ingest_seconds\":{:.9},\"ingest_vectors_per_second\":{:.3},",
             "\"reopen_ms\":{:.6},\"query_p50_ms\":{:.6},\"query_p95_ms\":{:.6},\"query_p99_ms\":{:.6},\"query_samples_ms\":{},\"final_file_bytes\":{},",
             "\"file_bytes\":{},\"vector_data_bytes\":{},\"query_data_bytes\":{},\"process_peak_rss_bytes\":null,",
-            "\"recall_at_k\":{:.6}{}{}}}"
+            "\"recall_at_k\":{:.6}{}{}{}{}}}"
         ),
         env!("CARGO_PKG_VERSION"),
         format_version,
@@ -590,7 +699,12 @@ fn run() -> Result<()> {
             matched as f64 / (config.queries * result_count) as f64
         },
         ann_json,
-        filter_json
+        filter_json,
+        update_json,
+        format_args!(
+            ",\"final_live_records\":{}",
+            live.iter().filter(|&&value| value).count()
+        )
     );
     Ok(())
 }

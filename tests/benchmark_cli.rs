@@ -75,8 +75,44 @@ fn benchmark_rejects_invalid_or_unbounded_workloads_before_creating_files() {
         vec!["--mixed-writes", "0", "--ann", "16", "100", "100"],
         vec!["--mixed-writes", "257", "--ann", "16", "100", "100"],
         vec!["--mixed-writes", "1"],
+        vec!["--mixed-deletes", "1"],
+        vec!["--mixed-deletes", "0", "--ann", "16", "100", "100"],
+        vec!["--mixed-deletes", "257", "--ann", "16", "100", "100"],
+        vec![
+            "--mixed-writes",
+            "256",
+            "--mixed-deletes",
+            "1",
+            "--ann",
+            "16",
+            "100",
+            "100",
+        ],
+        vec!["--mixed-deletes", "33", "--ann", "16", "100", "100", "32"],
+        vec![
+            "--update-vectors",
+            "missing",
+            "--mixed-writes",
+            "1",
+            "--ann",
+            "16",
+            "100",
+            "100",
+        ],
         vec!["--mixed-writes", "1", "--mixed-writes", "1"],
         vec!["--vectors", "missing"],
+        vec![
+            "--vectors",
+            "missing",
+            "--query-vectors",
+            "missing",
+            "--mixed-writes",
+            "1",
+            "--ann",
+            "16",
+            "100",
+            "100",
+        ],
         vec!["--query-vectors", "missing"],
         vec!["--metric", "invalid"],
         vec!["--metric", "cosine", "--metric", "cosine"],
@@ -256,4 +292,129 @@ fn metric_benchmarks_verify_exact_filtered_and_mixed_cosine_scores() {
             assert!(text.contains("\"recall_at_k\":1.000000"));
         }
     }
+}
+#[cfg(feature = "server")]
+#[test]
+fn external_updates_delete_and_reinsert_use_current_live_oracle() {
+    let directory = tempfile::tempdir().unwrap();
+    let data = directory.path().join("private-base.txt");
+    let queries = directory.path().join("private-query.txt");
+    let updates = directory.path().join("private-updates.txt");
+    std::fs::write(&data, "1 0\n0 1\n-1 0\n0 -1\n").unwrap();
+    std::fs::write(&queries, "1 0\n1 0\n1 0\n1 0\n").unwrap();
+    std::fs::write(&updates, "0 1\n0 -1\n-1 0\n1 0\n0 1\n0 -1\n-1 0\n1 0\n").unwrap();
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_vlite-bench"))
+            .args(["--metric", "cosine", "--vectors"])
+            .arg(&data)
+            .arg("--query-vectors")
+            .arg(&queries)
+            .arg("--update-vectors")
+            .arg(&updates)
+            .args([
+                "--mixed-writes",
+                "2",
+                "--mixed-deletes",
+                "1",
+                "--ann",
+                "2",
+                "4",
+                "10",
+                "4",
+                "2",
+                "4",
+                "4",
+                "4",
+                "42",
+            ])
+            .env("VLITE_BENCH_DIR", directory.path())
+            .output()
+            .unwrap()
+    };
+    let first = run();
+    assert!(first.status.success(), "{first:?}");
+    let value: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(
+        value["hnsw"]["live_records_samples"],
+        serde_json::json!([3, 2, 2, 2])
+    );
+    assert_eq!(
+        value["hnsw"]["recall_samples"],
+        serde_json::json!([1.0, 1.0, 1.0, 1.0])
+    );
+    assert_eq!(value["final_live_records"], 2);
+    assert!(value["update_checksum"].is_string());
+    assert!(
+        !String::from_utf8(first.stdout)
+            .unwrap()
+            .contains("private-")
+    );
+    std::fs::write(&updates, "1 0\n1 0\n1 0\n1 0\n1 0\n1 0\n1 0\n1 0\n").unwrap();
+    let second = run();
+    assert!(second.status.success(), "{second:?}");
+    let changed: serde_json::Value = serde_json::from_slice(&second.stdout).unwrap();
+    assert_ne!(value["update_checksum"], changed["update_checksum"]);
+    for content in [
+        "1 0\n",
+        "1 0\n1 0\n1 0\n1 0\n1 0\n1 0\n1 0\n1 0\n1 0\n",
+        "NaN 0\n1 0\n1 0\n1 0\n",
+        "1\n1 0\n1 0\n1 0\n",
+    ] {
+        std::fs::write(&updates, content).unwrap();
+        assert!(!run().status.success());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 3);
+    }
+}
+
+#[cfg(feature = "server")]
+#[test]
+fn mixed_deletes_report_overflow_rebuilds_and_empty_live_sets() {
+    let run = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_vlite-bench"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let empty = run(&[
+        "--mixed-deletes",
+        "4",
+        "--ann",
+        "2",
+        "4",
+        "10",
+        "4",
+        "2",
+        "2",
+        "4",
+        "4",
+        "42",
+    ]);
+    assert_eq!(
+        empty["hnsw"]["live_records_samples"],
+        serde_json::json!([0, 0])
+    );
+    assert_eq!(empty["hnsw"]["recall_at_k"], 1.0);
+    let overflow = run(&[
+        "--mixed-writes",
+        "24",
+        "--mixed-deletes",
+        "8",
+        "--ann",
+        "8",
+        "32",
+        "300",
+        "300",
+        "4",
+        "12",
+        "100",
+        "5",
+        "42",
+    ]);
+    assert_eq!(
+        overflow["hnsw"]["rebuild_query_numbers"],
+        serde_json::json!([9])
+    );
+    assert_eq!(overflow["hnsw"]["recall_at_k"], 1.0);
 }
