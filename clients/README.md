@@ -82,8 +82,8 @@ request (Python uses a dictionary). Omission preserves squared L2.
 Cosine distance is 1 minus similarity; zero queries are rejected and zero-norm
 records excluded. Inner-product distances are negative dot products.
 Results always sort by increasing distance then numeric ID.
-Exact metrics require a v0.1.1 server. Current source additionally supports
-cosine ANN (unreleased); published v0.1.1 servers have L2 ANN only.
+Exact metrics require a v0.1.1+ server. Cosine ANN requires v0.1.2+;
+v0.1.1 servers have L2 ANN only.
 Build it with `client.build_index(metric="cosine")` (Python) or
 `await client.buildIndex({ metric: "cosine" })` (JavaScript), then search with
 `metric: "cosine"` and `mode: "approximate_ready"`. Index status includes

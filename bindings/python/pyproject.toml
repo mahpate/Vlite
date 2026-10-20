@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vlite-embedded"
-version = "0.1.1"
+version = "0.1.2"
 requires-python = ">=3.11"
 description = "In-process Python binding for the VLite native database library"
 readme = "README.md"

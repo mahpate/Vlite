@@ -55,8 +55,8 @@ These fixed-point vectors are not trained embeddings, the host was shared and
 not pinned, and 30 queries are insufficient for a stable production tail.
 No real-embedding, non-Windows performance or general recall result is claimed.
 Exact search can still be preferable for small datasets, selective filters or
-strict recall requirements. Cosine ANN is currently unreleased source; the
-published v0.1.1 packages do not contain it.
+strict recall requirements. Cosine ANN is available in v0.1.2+;
+the v0.1.1 packages do not contain it.
 
 ## Exact-search distance cutoff, October 19, 2026 UTC
 

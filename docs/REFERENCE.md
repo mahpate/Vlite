@@ -164,7 +164,7 @@ are excluded, including after metadata filtering, so the result count can be
 less than min(k, live/filtered count). Nonzero subnormals remain valid. Dimension,
 nonfinite-vector and filter validation still applies before returning results.
 
-HNSW in published v0.1.1 remains squared-L2 only. Current source also supports
+HNSW in v0.1.1 remains squared-L2 only. Version v0.1.2+ also supports
 cosine ANN as described below; inner-product ANN remains rejected.
 REST rejects inner-product ANN with 422. There is no
 implicit fallback, index reuse under a different metric or approximate filtering.
@@ -627,7 +627,7 @@ exhaustive matches must be updated.
 
 ## Optional HNSW search
 
-### Metric identity (unreleased cosine ANN)
+### Metric identity (cosine ANN, v0.1.2+)
 
 The legacy `build_hnsw`, `search_approximate` and `search_approximate_ready`
 methods remain squared-L2 APIs, with unchanged `HnswConfig` fields. Current
@@ -635,7 +635,7 @@ source adds corresponding `_with_metric` methods taking a final
 `DistanceMetric` argument (`build_hnsw_with_metric(config, metric)`).
 Only `SquaredL2` and `Cosine` are supported; `InnerProduct` returns
 `UnsupportedAnnMetric` even for an empty database or k=0.
-Build both the engine and SDK from current source for cosine ANN; published
+Use a v0.1.2+ engine and SDK together for cosine ANN;
 v0.1.1 binaries and packages do not include this addition.
 
 Exactly one graph is retained per owner. Its identity includes construction

@@ -22,6 +22,8 @@ jobs:
         run: |
           import json, os, pathlib, tomllib
           version = tomllib.loads(pathlib.Path("Cargo.toml").read_text())["package"]["version"]
+          assert tomllib.loads(pathlib.Path("bindings/c/Cargo.toml").read_text())["package"]["version"] == version
+          assert json.loads(pathlib.Path("src/openapi.json").read_text())["info"]["version"] == version
           for name in ["clients/python/pyproject.toml", "bindings/python/pyproject.toml"]:
               assert tomllib.loads(pathlib.Path(name).read_text())["project"]["version"] == version
           for name in ["clients/javascript/package.json", "bindings/node/package.json"]:
@@ -129,7 +131,7 @@ jobs:
               for name in ["README.md", "LICENSE", "Cargo.toml", "Cargo.lock", "src/openapi.json",
                            "compose.yaml", "compose.tls.yaml", "deploy/Caddyfile", "Dockerfile",
                            "docs/REFERENCE.md", "docs/INSTALL.md", "benchmarks/README.md", "benchmarks/RESULTS.md",
-                           "benchmarks/compare_rest.py", "benchmarks/native_campaign.py", "benchmarks/embedded.py",
+                           "benchmarks/compare_rest.py", "benchmarks/native_campaign.py", "benchmarks/metric_campaign.py", "benchmarks/embedded.py",
                            "tests/measure_benchmark.py",
                            "clients/README.md", "clients/python/README.md",
                            "clients/python/pyproject.toml", "clients/python/LICENSE",

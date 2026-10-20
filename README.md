@@ -273,7 +273,7 @@ inner product returns negative dot product. Cosine rejects zero queries and
 excludes zero-norm records. There is no silent metric fallback.
 See [metric contracts](docs/REFERENCE.md#exact-distance-metrics-v011).
 
-**Cosine ANN (unreleased, build from current source):** Rust adds
+**Cosine ANN (v0.1.2+):** Rust adds
 `build_hnsw_with_metric`, `search_approximate_with_metric` and
 `search_approximate_ready_with_metric`, with `DistanceMetric::Cosine`.
 Python uses `db.build_index(metric="cosine")` followed by
@@ -283,7 +283,7 @@ Python uses `db.build_index(metric="cosine")` followed by
 REST builds accept `{"metric":"cosine"}` and searches use the same metric.
 Only one graph is retained: ready-only queries reject a mismatched metric;
 lazy queries rebuild synchronously. Inner-product ANN remains unsupported.
-The published v0.1.1 packages still support L2 ANN only; rebuild the engine
+The v0.1.1 packages support L2 ANN only; use a v0.1.2+ engine
 and SDK together for cosine ANN. No database format change is required.
 
 ## Performance
@@ -387,7 +387,7 @@ publication is configured but not yet exercised.
 
 ## Stable release criteria
 
-The current package version is **0.1.1**. A stable release requires a verified
+The current package version is **0.1.2**. A stable release requires a verified
 compatibility and operational baseline, not just a version or wording change:
 
 1. **Freeze the supported contracts:** document the Rust API, REST/OpenAPI

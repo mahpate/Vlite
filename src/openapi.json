@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "VLite REST API",
-    "version": "0.1.1",
+    "version": "0.1.2",
     "description": "Experimental API for one exclusively owned database. Bearer authentication is required by the server binary except explicit loopback-only development mode. Data, metrics and OpenAPI routes require the same full-access token. /health and the three static dashboard assets are public. The dashboard contains no credentials or database data; API access requires the token entered into browser memory. Terminate TLS at a trusted reverse proxy; the binary serves plain HTTP. No roles, CORS, automatic repair or retries. Responses include server-generated X-Request-ID and Cache-Control: no-store. IDs are canonical decimal strings, payloads are padded standard base64. Requests are limited to 8 MiB of JSON and 16 in-flight requests/workers. Successful writes are synced. A disconnect or commit_indeterminate error does not prove a write failed; never blindly retry mutations. Database creation has the embedded engine's parent-directory durability limitations. All protected operations may return 401 with the Error schema and WWW-Authenticate: Bearer."
   },
   "security": [{"BearerAuth": []}],
