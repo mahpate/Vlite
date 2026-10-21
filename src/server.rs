@@ -14,7 +14,7 @@ use axum::{
         DefaultBodyLimit, Path, Query, State,
         rejection::{JsonRejection, PathRejection, QueryRejection},
     },
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -78,17 +78,34 @@ pub struct Service {
     workers: Arc<Semaphore>,
     metrics: Arc<Metrics>,
     admin: Arc<admin::AdminState>,
+    /// Random per-service-instance ETag component; old tags fail closed after reopen.
+    etag_nonce: Arc<str>,
 }
 
 impl Service {
+    /// Panics if operating-system randomness is unavailable; see `try_new`.
     pub fn new(database: Database) -> Self {
-        Self {
+        Self::try_new(database).expect("operating-system randomness for ETag nonce")
+    }
+
+    /// Fails explicitly, never falling back, when OS randomness is unavailable.
+    pub fn try_new(database: Database) -> std::io::Result<Self> {
+        let mut nonce = [0u8; 16];
+        getrandom::fill(&mut nonce).map_err(|error| {
+            std::io::Error::other(format!("operating-system randomness unavailable: {error}"))
+        })?;
+        Ok(Self {
             database: Arc::new(Mutex::new(Some(database))),
             requests: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
             workers: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
             metrics: Arc::new(Metrics::default()),
             admin: Arc::new(admin::AdminState::default()),
-        }
+            etag_nonce: nonce
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+                .into(),
+        })
     }
 
     async fn run<T: Send + 'static>(
@@ -650,22 +667,80 @@ async fn info(State(service): State<Service>) -> Result<Json<Value>, ApiError> {
         .await
 }
 
+/// Strong opaque tag: service nonce, database-wide commit sequence and record ID.
+/// Any commit invalidates every tag; reopening the service invalidates all tags.
+fn etag(nonce: &str, db: &Database, id: u64) -> String {
+    format!("\"{nonce}-{}-{id}\"", db.sequence)
+}
+
+/// Accepts absent If-Match or exactly one strong entity tag; nothing else.
+fn if_match(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
+    let mut values = headers.get_all(header::IF_MATCH).iter();
+    let Some(first) = values.next() else {
+        return Ok(None);
+    };
+    let invalid = || {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_if_match",
+            "If-Match must be exactly one strong entity tag from GET; weak, wildcard and multiple validators are unsupported",
+        )
+    };
+    if values.next().is_some() {
+        return Err(invalid());
+    }
+    let text = first.to_str().map_err(|_| invalid())?;
+    let inner = text
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .ok_or_else(invalid)?;
+    if !inner
+        .bytes()
+        .all(|b| b == 0x21 || (0x23..=0x7e).contains(&b))
+    {
+        return Err(invalid());
+    }
+    Ok(Some(text.to_owned()))
+}
+
+/// Must run inside `Service::run`, under the same owner lock as the write.
+fn check_precondition(
+    db: &Database,
+    nonce: &str,
+    id: u64,
+    expected: Option<&str>,
+) -> Result<(), ApiError> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    if db.get(id)?.is_none() || etag(nonce, db, id) != expected {
+        return Err(ApiError::new(
+            StatusCode::PRECONDITION_FAILED,
+            "precondition_failed",
+            "record changed, was removed, or the tag is from another service instance; GET it again",
+        ));
+    }
+    Ok(())
+}
+
 async fn fetch(
     State(service): State<Service>,
     input: Result<Path<String>, PathRejection>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<impl IntoResponse, ApiError> {
     let id = path(input)?;
+    let nonce = service.etag_nonce.clone();
     service
         .run(move |db| {
             let record = db.get(id)?.ok_or_else(|| {
                 ApiError::new(StatusCode::NOT_FOUND, "not_found", "vector not found")
             })?;
-            Ok(Json(json!({
+            let body = Json(json!({
                 "id": id.to_string(),
                 "vector": record.vector,
                 "payload_base64": BASE64_STANDARD.encode(&record.payload),
                 "metadata":record.metadata,
-            })))
+            }));
+            Ok(([(header::ETAG, etag(&nonce, db, id))], body))
         })
         .await
 }
@@ -683,13 +758,17 @@ struct Put {
 async fn put(
     State(service): State<Service>,
     path_input: Result<Path<String>, PathRejection>,
+    headers: HeaderMap,
     input: Result<Json<Put>, JsonRejection>,
 ) -> Result<StatusCode, ApiError> {
     let id = path(path_input)?;
+    let expected = if_match(&headers)?;
     let input = body(input)?;
     let payload = payload(&input.payload_base64)?;
+    let nonce = service.etag_nonce.clone();
     service
         .run(move |db| {
+            check_precondition(db, &nonce, id, expected.as_deref())?;
             db.put_with_metadata(id, &input.vector, &payload, &input.metadata)?;
             Ok(StatusCode::NO_CONTENT)
         })
@@ -699,10 +778,16 @@ async fn put(
 async fn delete(
     State(service): State<Service>,
     input: Result<Path<String>, PathRejection>,
+    headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let id = path(input)?;
+    let expected = if_match(&headers)?;
+    let nonce = service.etag_nonce.clone();
     service
-        .run(move |db| Ok(Json(json!({"deleted": db.delete(id)?}))))
+        .run(move |db| {
+            check_precondition(db, &nonce, id, expected.as_deref())?;
+            Ok(Json(json!({"deleted": db.delete(id)?})))
+        })
         .await
 }
 
@@ -1053,6 +1138,51 @@ mod tests {
         )));
         assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(error.code, "commit_indeterminate");
+    }
+
+    #[tokio::test]
+    async fn matching_conditional_write_reports_indeterminate_commit_then_fails_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("conditional-failure.vlite");
+        let mut db = Database::create(&path, 1).unwrap();
+        db.put(1, &[1.0], b"").unwrap();
+        db.file = crate::LockedFile(std::fs::File::open(&path).unwrap());
+        let service = Service::new(db);
+        let app = router(service.clone());
+        let send = |method: &str, tag: Option<&str>| {
+            let mut builder = Request::builder()
+                .method(method)
+                .uri("/v1/vectors/1")
+                .header(header::CONTENT_TYPE, "application/json");
+            if let Some(tag) = tag {
+                builder = builder.header(header::IF_MATCH, tag);
+            }
+            app.clone().oneshot(
+                builder
+                    .body(Body::from(json!({"vector":[2]}).to_string()))
+                    .unwrap(),
+            )
+        };
+        let response = send("GET", None).await.unwrap();
+        let tag = response.headers()[header::ETAG]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let response = send("PUT", Some(&tag)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["code"], "commit_indeterminate");
+        assert_eq!(service.metrics.commit_failures.load(Ordering::Relaxed), 1);
+        for method in ["PUT", "DELETE"] {
+            let response = send(method, Some(&tag)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
+        assert_eq!(service.metrics.commit_failures.load(Ordering::Relaxed), 1);
+        assert!(service.close().await.is_err());
     }
 
     #[tokio::test]

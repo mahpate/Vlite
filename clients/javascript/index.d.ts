@@ -6,6 +6,10 @@ export type MetadataValue =
 export type Metadata = Record<string, MetadataValue>;
 export interface Put { vector: number[]; payload_base64?: string; metadata?: Metadata }
 export interface VectorRecord extends Put { id: string; payload_base64: string; metadata: Metadata }
+/** Record plus its opaque strong ETag (including quotes). The tag is invalidated by any committed database write or service restart. */
+export interface VersionedRecord { record: VectorRecord; etag: string }
+/** Omit ifMatch for an unconditional write. If present it must be an exact strong tag from getVersioned; the client then checks /v1/capabilities before writing. */
+export interface WriteOptions { ifMatch?: string }
 export type BatchOperation = ({ op: "put"; id: string } & Put) | { op: "delete"; id: string };
 export type NumericValue = Extract<MetadataValue, { type: "integer" | "float" }>;
 export type Condition =
@@ -33,6 +37,8 @@ export class VLiteError extends Error {
   constructor(status: number, code: string, message: string, requestId: string | null);
 }
 export class TransportError extends Error {}
+/** Conditional write refused because GET /v1/capabilities did not report api_version 1 with features.conditional_writes === true. Nothing was sent. */
+export class UnsupportedError extends Error {}
 export class Client {
   constructor(baseUrl: string, token: string, options?: { timeoutMs?: number });
   health(): Promise<{ status: "ok" }>;
@@ -40,8 +46,9 @@ export class Client {
   database(): Promise<DatabaseInfo>;
   metrics(): Promise<Record<string, number | boolean | null>>;
   get(id: string): Promise<VectorRecord>;
-  put(id: string, record: Put): Promise<void>;
-  delete(id: string): Promise<boolean>;
+  getVersioned(id: string): Promise<VersionedRecord>;
+  put(id: string, record: Put, options?: WriteOptions): Promise<void>;
+  delete(id: string, options?: WriteOptions): Promise<boolean>;
   listVectors(options?: { limit?: number; after?: string }): Promise<Page>;
   batch(operations: BatchOperation[]): Promise<void>;
   search(request: Search): Promise<Hit[]>;

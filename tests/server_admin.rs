@@ -64,6 +64,9 @@ async fn roles_enforce_every_mutation_and_lazy_ann_without_hiding_reads() {
     assert_eq!(code, StatusCode::OK);
     assert_eq!(caps["role"], "read_only");
     assert_eq!(caps["features"]["backup_restore"], false);
+    assert_eq!(caps["features"]["conditional_writes"], true);
+    let (_, caps) = call(&app, ADMIN, "GET", "/v1/capabilities", Value::Null).await;
+    assert_eq!(caps["features"]["conditional_writes"], true);
     assert_eq!(
         call(&app, ADMIN, "GET", "/v1/capabilities", Value::Null)
             .await

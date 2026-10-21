@@ -94,7 +94,8 @@ There is no automatic downgrade or retry against older servers.
 
 Python uses `list_vectors`, `index_status`, `build_index`; JavaScript uses
 `listVectors`, `indexStatus`, `buildIndex`. Both expose `health`, `ready`,
-`database`, `metrics`, `get`, `put`, `delete`, `batch` and `search`.
+`database`, `metrics`, `get`, `put`, `delete`, `batch` and `search`, plus
+`get_versioned` (Python) / `getVersioned` (JavaScript) for conditional writes.
 `delete` returns a boolean; `search` returns the hit array. Mutations returning
 HTTP 204 complete without a result. See [OpenAPI](../src/openapi.json) for
 limits, metadata/filter shapes and server error codes.
@@ -115,6 +116,67 @@ limits, metadata/filter shapes and server error codes.
   loopback. Tokens are private client state, never included in request URLs.
   Server-side validation remains authoritative; types do not replace validation.
 - No automatic retries, redirects, index builds, repair, or fallback search.
+
+## Conditional writes (optimistic concurrency)
+
+Requires a server whose authenticated `GET /v1/capabilities` reports
+`api_version: 1` and `features.conditional_writes: true`. Signatures:
+
+```text
+Python:     get_versioned(id) -> {"record": Record, "etag": str}
+            put(id, record, *, if_match: str | None = None) -> None
+            delete(id, *, if_match: str | None = None) -> bool
+JavaScript: getVersioned(id): Promise<{ record: VectorRecord; etag: string }>
+            put(id, record, options?: { ifMatch?: string }): Promise<void>
+            delete(id, options?: { ifMatch?: string }): Promise<boolean>
+```
+
+```python
+current = client.get_versioned("10")
+try:
+    client.put("10", {"vector": [0, 1, 0]}, if_match=current["etag"])
+except VLiteError as error:
+    if error.status != 412:
+        raise
+    # Changed since the read: refetch, re-decide, and write again only if still intended.
+```
+
+```javascript
+const { record, etag } = await client.getVersioned("10");
+await client.delete("10", { ifMatch: etag }); // VLiteError 412 if stale
+```
+
+- The `etag` is the HTTP `ETag` of the record GET: an opaque, quoted, strong
+  tag. Pass it back unchanged; do not parse, construct or persist it.
+- Tags are **database-wide and service-lifetime**, not per-record revisions:
+  any committed write to *any* record (including batches) or a service restart
+  invalidates every outstanding tag, so 412 does not prove this record changed.
+- A stale tag, or a record deleted since the read, fails with `VLiteError`
+  status 412 and code `precondition_failed`; nothing is written.
+  Neither client retries; refetch with `get_versioned`/`getVersioned` and decide.
+- Without `if_match`/`ifMatch`, `put` and `delete` are unconditional and behave
+  exactly as before. Python `if_match=None` means unconditional. In JavaScript,
+  the options object may contain only `ifMatch`; an explicitly present but
+  `undefined`/`null`/malformed `ifMatch` is rejected, never downgraded.
+- Older servers ignore `If-Match`, which would silently turn a conditional
+  write into an unconditional one. So before **every** conditional `put` or
+  `delete`, the client makes a fresh `GET /v1/capabilities` (a positive answer
+  is never cached, because the server may restart as a different version). If
+  the route is missing (404), the response is not an object, `api_version` is
+  not exactly `1`, or `features.conditional_writes` is not exactly `true`, the
+  client raises `UnsupportedError` and sends no mutation. Other capability
+  failures propagate unchanged with no mutation sent: `VLiteError` (for example
+  401) or `TransportError` (invalid response). Unconditional writes skip this
+  check. This is a compatible-deployment guard, **not** protection against a
+  mixed-version, load-balanced endpoint whose backend can change between the
+  capability check and the write. Point each client at one server origin.
+- Clients reject, before sending, any tag that is not exactly one strong tag
+  of visible ASCII (`W/` weak tags, `*`, lists, whitespace and control
+  characters). Python raises `ValueError`; JavaScript rejects with `TypeError`.
+- `get_versioned`/`getVersioned` raise `TransportError` when the response lacks
+  exactly one valid strong `ETag` (for example, an older server). Batch
+  operations are not conditional. Transport errors on a conditional write leave
+  the outcome uncertain, as described below.
 
 ## Errors and uncertain writes
 

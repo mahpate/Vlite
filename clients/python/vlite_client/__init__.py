@@ -47,6 +47,11 @@ class Record(TypedDict):
     metadata: Metadata
 
 
+class VersionedRecord(TypedDict):
+    record: Record
+    etag: str
+
+
 class Summary(TypedDict):
     id: str
     metadata: Metadata
@@ -128,6 +133,10 @@ class TransportError(Exception):
     """Network/timeout/invalid response. A mutation may already be committed."""
 
 
+class UnsupportedError(Exception):
+    """The server does not advertise conditional writes; nothing was mutated."""
+
+
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -136,6 +145,17 @@ class _NoRedirect(HTTPRedirectHandler):
 def _id(value: str) -> str:
     if not isinstance(value, str) or not re.fullmatch(r"0|[1-9][0-9]{0,19}", value) or int(value) > 18446744073709551615:
         raise ValueError("ID must be a canonical decimal u64 string")
+    return value
+
+
+# One strong RFC 9110 entity tag of visible ASCII: no W/ prefix, wildcard,
+# whitespace, control characters, inner quotes or comma-separated lists.
+_ETAG = re.compile(r'"[\x21\x23-\x7e]*"')
+
+
+def _etag(value: str) -> str:
+    if not isinstance(value, str) or not _ETAG.fullmatch(value):
+        raise ValueError("if_match must be one exact strong entity tag returned by get_versioned")
     return value
 
 
@@ -152,16 +172,24 @@ class Client:
         # Do not send the bearer token through implicitly configured environment proxies.
         self._opener = build_opener(ProxyHandler({}), _NoRedirect())
 
-    def _request(self, method: str, path: str, body=None):
+    def _request(self, method: str, path: str, body=None, *, if_match: str | None = None, etag: bool = False):
         data = None if body is None else json.dumps(body, allow_nan=False).encode("utf-8")
         headers = {"Authorization": "Bearer " + self._token, "Accept": "application/json"}
         if data is not None:
             headers["Content-Type"] = "application/json"
+        if if_match is not None:
+            headers["If-Match"] = if_match
         request = Request(self._base + path, data=data, headers=headers, method=method)
         try:
             with self._opener.open(request, timeout=self._timeout) as response:
                 raw = response.read()
-                return json.loads(raw) if raw else None
+                value = json.loads(raw) if raw else None
+                if not etag:
+                    return value
+                tags = response.headers.get_all("ETag") or []
+                if len(tags) != 1 or not _ETAG.fullmatch(tags[0]):
+                    raise ValueError("response must carry exactly one strong ETag")
+                return value, tags[0]
         except HTTPError as error:
             with error:
                 raw = error.read()
@@ -189,11 +217,48 @@ class Client:
     def get(self, id: str) -> Record:
         return self._request("GET", "/v1/vectors/" + _id(id))
 
-    def put(self, id: str, record: Put) -> None:
-        self._request("PUT", "/v1/vectors/" + _id(id), record)
+    def _require_conditional_writes(self) -> None:
+        # Older servers ignore If-Match; a fresh check per write avoids silently
+        # downgrading to an unconditional mutation (never cached across restarts).
+        try:
+            caps = self._request("GET", "/v1/capabilities")
+        except VLiteError as error:
+            if error.status != 404:
+                raise
+            caps = None
+        features = caps.get("features") if isinstance(caps, dict) else None
+        if not (isinstance(caps, dict) and type(caps.get("api_version")) is int and caps["api_version"] == 1
+                and isinstance(features, dict) and features.get("conditional_writes") is True):
+            raise UnsupportedError("Server does not advertise conditional_writes (API version 1); no write was sent")
 
-    def delete(self, id: str) -> bool:
-        return self._request("DELETE", "/v1/vectors/" + _id(id))["deleted"]
+    def _conditional(self, if_match: str | None) -> str | None:
+        if if_match is None:
+            return None
+        _etag(if_match)
+        self._require_conditional_writes()
+        return if_match
+
+    def get_versioned(self, id: str) -> VersionedRecord:
+        """Return {"record": ..., "etag": ...}; the opaque tag is valid only until any
+        committed database write or service restart. A missing/invalid ETag
+        (for example, an older server) raises TransportError."""
+        record, tag = self._request("GET", "/v1/vectors/" + _id(id), etag=True)
+        return {"record": record, "etag": tag}
+
+    def put(self, id: str, record: Put, *, if_match: str | None = None) -> None:
+        """Replace a record. With if_match, send it unchanged as If-Match; a stale
+        tag raises VLiteError 412 precondition_failed and nothing is retried. A
+        conditional write first checks /v1/capabilities and raises UnsupportedError
+        on servers that do not advertise conditional_writes."""
+        path = "/v1/vectors/" + _id(id)
+        self._request("PUT", path, record, if_match=self._conditional(if_match))
+
+    def delete(self, id: str, *, if_match: str | None = None) -> bool:
+        """Delete a record. With if_match, a stale tag or missing record raises
+        VLiteError 412 precondition_failed and nothing is retried. Conditional deletes
+        check capabilities first, like put."""
+        path = "/v1/vectors/" + _id(id)
+        return self._request("DELETE", path, if_match=self._conditional(if_match))["deleted"]
 
     def list_vectors(self, *, limit: int = 25, after: str | None = None) -> Page:
         if type(limit) is not int or not 1 <= limit <= 100:

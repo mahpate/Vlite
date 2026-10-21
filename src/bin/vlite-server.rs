@@ -157,7 +157,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let listener = TcpListener::bind(config.bind).await?;
     let address = listener.local_addr()?;
-    let service = Service::new(open(&config)?);
+    let service = Service::try_new(open(&config)?)?;
     let (signal_tx, signal_rx) = tokio::sync::oneshot::channel();
     let shutdown = async move {
         #[cfg(unix)]

@@ -252,6 +252,10 @@ exact/ANN comparison, sampled metadata/quality analysis and PCA, a REST
 playground, read-only scenario replay, health snapshots and safe payload previews.
 Appearance preferences are stored only when explicitly enabled; database data
 and tokens are never persisted by the console.
+The browser also supports selectable metadata columns, current-page sorting,
+inline record previews, a typed visual metadata draft editor, and downloadable
+named query files for explicit replay. Sorting is not database-wide; neither
+applying a metadata draft nor loading a query sends a write.
 
 Browse pages are capped at 100 records and 1 MiB JSON and omit vectors/payloads.
 They are live views, not stable snapshots. HNSW readiness and buffer usage are

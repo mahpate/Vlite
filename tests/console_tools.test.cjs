@@ -4,7 +4,16 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 global.window = {};
 vm.runInThisContext(fs.readFileSync("src/dashboard/console-tools.js", "utf8"));
-const { id, vector, metadata, record, csvParse, csvExport, distances, analyze, pca } = window.VLiteTools.utils;
+const { id, vector, metadata, record, savedQuery, csvParse, csvExport, distances, analyze, pca } = window.VLiteTools.utils;
+const query = { version: 1, name: "nearest", query: { vector: [1, 0], k: 10, mode: "exact", metric: "cosine", ef_search: 100,
+  config: { m: 16, ef_construction: 100, seed: "18446744073709551615" },
+  filter: [{ op: "range", field: "__proto__", min: { type: "integer", value: "-9223372036854775808" }, max: { type: "integer", value: "9223372036854775807" } }] } };
+assert.deepEqual(savedQuery(query, 2), query);
+assert.throws(() => savedQuery({ ...query, token: "secret" }, 2));
+assert.throws(() => savedQuery(query, 3));
+assert.throws(() => savedQuery({ ...query, query: { ...query.query, headers: {} } }, 2));
+assert.throws(() => savedQuery({ ...query, query: { ...query.query, filter: [{ op: "range", field: "a", min: { type: "float", value: 2 }, max: { type: "float", value: 1 } }] } }, 2));
+assert.throws(() => savedQuery({ ...query, query: { ...query.query, config: { ...query.query.config, seed: "01" } } }, 2));
 assert.equal(id("18446744073709551615"), "18446744073709551615");
 for (const value of ["01", "-1", "18446744073709551616", 1]) assert.throws(() => id(value));
 assert.throws(() => vector([1, 2], 3));

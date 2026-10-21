@@ -30,6 +30,29 @@ def ready(page, base):
     raise RuntimeError("Dashboard API did not become ready within 30 seconds") from last_error
 
 
+def exercise_layout(page, url):
+    page.goto(url)
+    expect(page.locator("details")).to_have_count(0)
+    for selector in ["#overview", "#filter-field", "#hnsw-m", "#maintenance-policy"]:
+        expect(page.locator(selector)).to_be_visible()
+    for width in [1280, 768, 390]:
+        page.set_viewport_size({"width": width, "height": 844})
+        page.evaluate("window.scrollTo(0, 0)")
+        sidebar = page.locator(".sidebar")
+        initial = sidebar.bounding_box()
+        page.get_by_role("navigation").get_by_role("link", name="Operations", exact=True).click()
+        expect(page).to_have_url(url + "#operations")
+        assert page.evaluate("window.scrollY") > 0
+        current = sidebar.bounding_box()
+        assert abs(current["y"] - initial["y"]) <= 1, (width, initial, current)
+        assert current["x"] == 0
+        assert page.locator("#operations").bounding_box()["x"] >= current["width"]
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        page.get_by_role("navigation").get_by_role("link", name="Overview", exact=True).click()
+        expect(page).to_have_url(url + "#database")
+    page.set_viewport_size({"width": 1280, "height": 844})
+
+
 def exercise(page, base, token):
     errors = []
     assets = {}
@@ -269,18 +292,60 @@ def exercise_console_tools(page, base, token):
         assert event.value.suggested_filename.startswith("vlite-page.")
     page.locator("#vectors").get_by_role("button", name="101", exact=True).click()
     expect(page.locator("#id")).to_have_value("101")
+    expect(page.locator("#browse-preview")).to_contain_text('"vector_first_32"')
+    page.locator("#browse-columns").select_option(["category"])
+    expect(page.locator("#vectors thead th")).to_have_count(3)
+    page.locator("#browse-direction").select_option("descending")
+    expect(page.locator("#vectors tbody tr").first.locator("button")).to_have_text("18446744073709551615")
+    page.locator("#browse-sort").select_option("category")
+    expect(page.locator("#vectors tbody tr").first.locator("button")).to_have_text("101")
+    page.get_by_role("button", name="Load JSON into fields", exact=True).click()
+    field = page.locator("#metadata-fields .metadata-row").first
+    field.get_by_label("Metadata field type", exact=True).select_option("integer")
+    field.get_by_label("Metadata field value", exact=True).fill("9223372036854775807")
+    page.get_by_role("button", name="Apply fields to JSON draft", exact=True).click()
+    assert json.loads(page.locator("#metadata").input_value())["category"]["value"] == "9223372036854775807"
+    page.get_by_role("button", name="Add metadata field", exact=True).click()
+    last = page.locator("#metadata-fields .metadata-row").last
+    last.get_by_label("Metadata field name", exact=True).fill("category")
+    page.get_by_role("button", name="Apply fields to JSON draft", exact=True).click()
+    expect(page.locator("#status")).to_contain_text("Duplicate metadata field")
+    last.get_by_role("button", name="Remove field", exact=True).click()
+    page.get_by_role("button", name="Get", exact=True).click()
+    expect(page.locator("#status")).to_contain_text("HTTP 200")
+    assert json.loads(page.locator("#metadata").input_value())["category"]["value"] == "demo"
     expect(page.locator("#payload-preview")).to_contain_text("empty payload")
     page.get_by_role("button", name="Inspect 32 components", exact=True).click()
     expect(page.locator("#vector-slice-result")).to_contain_text('"end_exclusive": 3')
     page.get_by_role("button", name="Find similar to saved ID", exact=True).click()
     expect(page.locator("#search-summary")).to_contain_text("neighbors returned")
-    page.get_by_text("Build an exact metadata filter", exact=True).click()
+    expect(page.get_by_role("heading", name="Build an exact metadata filter", exact=True)).to_be_visible()
     page.locator("#filter-field").fill("category")
     page.locator("#filter-value").fill("demo")
     page.get_by_role("button", name="Add AND condition", exact=True).click()
     assert json.loads(page.locator("#filter").input_value())[0]["value"]["value"] == "demo"
     page.get_by_role("button", name="Search", exact=True).click()
     expect(page.locator("#hits tbody tr")).to_have_count(1)
+    page.locator("#query-name").fill("demo-filter")
+    with page.expect_download() as query_event:
+        page.get_by_role("button", name="Download query", exact=True).click()
+    with open(query_event.value.path(), encoding="utf-8") as stream:
+        saved = json.load(stream)
+    assert saved["name"] == "demo-filter" and token not in json.dumps(saved)
+    page.locator("#query-file").set_input_files({"name": "query.json", "mimeType": "application/json", "buffer": json.dumps(saved).encode()})
+    page.locator("#query").fill("[0,0,1]")
+    page.get_by_role("button", name="Load query into form", exact=True).click()
+    expect(page.locator("#query-workspace-status")).to_contain_text("form only")
+    expect(page.locator("#query")).to_have_value("[1,0,0]")
+    page.get_by_role("button", name="Search", exact=True).click()
+    expect(page.locator("#hits tbody tr")).to_have_count(1)
+    page.locator("#query-file").set_input_files({
+        "name": "unsafe-query.json", "mimeType": "application/json",
+        "buffer": json.dumps({**saved, "token": "not-allowed"}).encode(),
+    })
+    page.get_by_role("button", name="Load query into form", exact=True).click()
+    expect(page.locator("#status")).to_contain_text("without extra fields")
+    expect(page.locator("#query")).to_have_value("[1,0,0]")
     page.get_by_role("button", name="Clear filter", exact=True).click()
     page.locator("#compare-id").fill("102")
     page.get_by_role("button", name="Compare with editor ID", exact=True).click()
@@ -369,7 +434,7 @@ def exercise_operations(page, base, token, read_token):
     page.get_by_role("button", name="Read sanitized audit trail", exact=True).click()
     expect(page.locator("#audit-result")).to_contain_text('"capacity": 256')
     expect(page.locator("#audit-result")).not_to_contain_text(token)
-    page.get_by_text("HNSW configuration and background maintenance", exact=True).click()
+    expect(page.get_by_role("heading", name="HNSW configuration and background maintenance", exact=True)).to_be_visible()
     page.get_by_role("button", name="Read maintenance policy", exact=True).click()
     expect(page.locator("#maintenance-result")).to_contain_text('"pressure"')
     page.locator("#hnsw-m").fill("8")
@@ -481,9 +546,11 @@ def main():
                     page.set_default_timeout(15000)
                     base = "http://127.0.0.1:" + port
                     ready(page, base)
+                    exercise_layout(page, base + "/dashboard")
                     exercise(page, base, token)
                     ui_base = "http://127.0.0.1:" + ui_port
                     ready(page, ui_base + "/api")
+                    exercise_layout(page, ui_base + "/")
                     exercise_separate_app(page, ui_base, token)
                     docker("restart", name)
                     # Docker may reassign an ephemeral host port across restart.

@@ -26,7 +26,7 @@ already admitted before token rotation/revocation may complete.
 `GET /v1/capabilities`:
 
 ```json
-{"version":"0.1.2","api_version":1,"role":"admin","features":{"read_only":true,"tokens_reload":true,"audit":true,"background_rebuild":true,"maintenance":true,"backup_restore":true},"routes":["/v1/capabilities"]}
+{"version":"0.1.2","api_version":1,"role":"admin","features":{"read_only":true,"tokens_reload":true,"audit":true,"background_rebuild":true,"maintenance":true,"backup_restore":true,"conditional_writes":true},"routes":["/v1/capabilities"]}
 ```
 
 `role` is `"admin"` or `"read_only"`; `routes` includes the complete supported

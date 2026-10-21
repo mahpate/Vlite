@@ -338,7 +338,8 @@ Invoke-RestMethod "$base/v1/vectors/20" -Headers $auth -Method Delete
 - `GET /metrics`: authenticated JSON operational snapshot (not Prometheus text).
 - `GET /v1/database`: dimensions, format version, live record count.
 - `PUT /v1/vectors/{id}`: insert/replace; 204 only after durable commit.
-- `GET /v1/vectors/{id}`: ID, vector, base64 payload and typed metadata; 404 when missing.
+- `GET /v1/vectors/{id}`: ID, vector, base64 payload and typed metadata plus an
+  `ETag` header; 404 when missing.
 - `DELETE /v1/vectors/{id}`: `{"deleted":true|false}`; missing is a no-op.
 - `POST /v1/batches`: `{"operations":[...]}`; one atomic commit, 204 on success.
 - `POST /v1/search`: `{"vector":[...],"k":N,"mode":"exact"}`; `{"hits":[{"id":"...","distance":0.0}]}`.
@@ -396,6 +397,42 @@ loopback port, tests CRUD/batches/search/validation, gracefully stops and restar
 the container, and verifies persistence. It removes test containers/networks but
 **retains and prints its database volume name**; it never deletes database data.
 For WSL-only Docker, run this command within WSL from the mounted project root.
+
+### Conditional updates and deletes (optimistic concurrency)
+
+`PUT` and `DELETE` on `/v1/vectors/{id}` accept an optional `If-Match` header
+holding exactly one strong tag copied unchanged from a record `GET`'s `ETag`.
+The service compares that tag and applies the write while holding the database
+owner lock, so for a tag at most one competing write succeeds.
+
+| Request | Result |
+| --- | --- |
+| No `If-Match` | Unchanged: PUT 204, DELETE `{"deleted":...}` |
+| Tag matches current record | Normal success response; one durable commit |
+| Tag stale, from another service instance, or record missing | 412 `precondition_failed`; nothing written; PUT never creates |
+| `*`, `W/"..."`, comma list, repeated header, unquoted/invalid bytes | 400 `invalid_if_match`; nothing written |
+
+Tags are opaque; do not parse them. They are **not persistent per-record
+revisions**. They are invalidated conservatively:
+
+- **Any** committed write invalidates every tag: writes to other IDs and
+  nonempty batches included. Deleting a missing ID and empty batches do not commit.
+- Each service start/reopen uses a fresh OS-random nonce, so tags from before a
+  restart, compaction or restore selection return 412 even if the file's commit
+  sequence repeats. Delete then identical recreate is two commits and also
+  returns 412. If OS randomness is unavailable, the server fails to start.
+
+After 412, `GET` again, re-apply the change and decide whether to resend.
+The service never retries; do not retry automatically. Authentication and
+read-only checks run first (401/403). A `commit_indeterminate` 503 keeps its
+meaning: the write may have committed; inspect rather than retry.
+Successful conditional writes do not return a new tag; GET to obtain one.
+`POST /v1/batches` has no conditional form.
+
+Older servers ignore `If-Match` and would write unconditionally. Servers that
+enforce it report `"conditional_writes":true` under `features` in
+`GET /v1/capabilities` (both roles). Check that flag immediately before any
+conditional write and do not send the write if it is absent or false.
 
 ## HTTPS, observability and releases
 

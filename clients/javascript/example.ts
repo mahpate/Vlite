@@ -10,6 +10,14 @@ export async function example(baseUrl: string, token: string): Promise<void> {
   await client.buildIndex({ metric: "cosine" });
   console.log(await client.search({ vector: [1, 0, 0], k: 5, metric: "cosine", mode: "approximate_ready" }));
   console.log(await client.listVectors({ limit: 25 }));
+  // Optimistic concurrency: a 412 means the database changed (or the service
+  // restarted) since the read. Refetch and decide; the client never retries.
+  const { record, etag } = await client.getVersioned("10");
+  try {
+    await client.put("10", { vector: [0, 1, 0], payload_base64: record.payload_base64, metadata: record.metadata }, { ifMatch: etag });
+  } catch (error) {
+    if (!(error instanceof VLiteError && error.status === 412)) throw error;
+  }
   try {
     console.log(await client.get("10"));
   } catch (error) {
@@ -24,5 +32,9 @@ function typeChecks(client: Client): void {
   client.get(18446744073709551615);
   // @ts-expect-error Integer metadata must preserve i64 precision as a string.
   client.put("1", { vector: [1], metadata: { n: { type: "integer", value: 1 } } });
+  // @ts-expect-error Conditional options accept only ifMatch.
+  client.delete("1", { ifmatch: '"x"' });
+  // @ts-expect-error Entity tags are strings.
+  client.put("1", { vector: [1] }, { ifMatch: 1 });
 }
 void typeChecks;

@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 import queue
+import re
 import secrets
 import subprocess
 import sys
@@ -68,7 +69,86 @@ def python_test(base, token):
         raise AssertionError("Expected not found")
     except VLiteError as error:
         assert error.status == 404
+    conditional_test(client)
     print("PASS Python live REST client")
+
+
+def expect_412(action):
+    try:
+        action()
+    except VLiteError as error:
+        assert error.status == 412 and error.code == "precondition_failed" and error.request_id, error
+        return
+    raise AssertionError("Expected 412 precondition_failed")
+
+
+def conditional_test(client):
+    """Separate records; leaves the record count as it found it."""
+    before = client.database()["records"]
+    wide, other, gone = "18446744073709551614", "100", "101"
+    client.put(wide, {"vector": [1, 0, 0]})
+    first = client.get_versioned(wide)
+    assert first["record"] == client.get(wide) == {"id": wide, "vector": [1, 0, 0],
+                                                   "payload_base64": "", "metadata": {}}
+    assert re.fullmatch(r'"[\x21\x23-\x7e]+"', first["etag"]), "strong opaque tag"
+    assert client.get_versioned(wide)["etag"] == first["etag"], "stable without writes"
+
+    client.put(wide, {"vector": [0, 1, 0]}, if_match=first["etag"])
+    assert client.get(wide)["vector"] == [0, 1, 0]
+    expect_412(lambda: client.put(wide, {"vector": [0, 0, 1]}, if_match=first["etag"]))
+    expect_412(lambda: client.delete(wide, if_match=first["etag"]))
+    assert client.get(wide)["vector"] == [0, 1, 0]
+
+    current = client.get_versioned(wide)["etag"]
+    client.put(other, {"vector": [1, 1, 0]})  # unrelated write invalidates every tag
+    expect_412(lambda: client.delete(wide, if_match=current))
+    current = client.get_versioned(wide)["etag"]
+    client.batch([{"op": "put", "id": gone, "vector": [1, 0, 1]}])
+    expect_412(lambda: client.put(wide, {"vector": [0, 0, 1]}, if_match=current))
+    assert client.get(wide)["vector"] == [0, 1, 0]
+
+    stale = client.get_versioned(gone)["etag"]
+    assert client.delete(gone)
+    expect_412(lambda: client.put(gone, {"vector": [1, 0, 0]}, if_match=stale))
+    try:
+        client.get(gone)
+        raise AssertionError("conditional put must not recreate a deleted record")
+    except VLiteError as error:
+        assert error.status == 404
+
+    def race(calls):
+        barrier, results = threading.Barrier(len(calls)), [None] * len(calls)
+
+        def run(index):
+            barrier.wait()
+            try:
+                results[index] = ("ok", calls[index]())
+            except VLiteError as error:
+                results[index] = ("err", error.status, error.code)
+        threads = [threading.Thread(target=run, args=(i,)) for i in range(len(calls))]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(30)
+        assert all(r is not None for r in results), results
+        winners = [i for i, r in enumerate(results) if r[0] == "ok"]
+        assert len(winners) == 1, results
+        assert all(r == ("err", 412, "precondition_failed") for i, r in enumerate(results) if i != winners[0]), results
+        return winners[0], results[winners[0]][1]
+
+    writers = 8
+    tag = client.get_versioned(wide)["etag"]
+    winner, _ = race([lambda i=i: client.put(wide, {"vector": [i + 2, 0, 0]}, if_match=tag) for i in range(writers)])
+    assert client.get(wide)["vector"] == [winner + 2, 0, 0]
+    tag = client.get_versioned(wide)["etag"]
+    _, deleted = race([lambda: client.delete(wide, if_match=tag) for _ in range(writers)])
+    assert deleted is True
+    expect_412(lambda: client.delete(wide, if_match=tag))
+
+    tag = client.get_versioned(other)["etag"]
+    assert client.delete(other, if_match=tag) is True
+    assert client.database()["records"] == before
+    print("PASS Python live conditional writes")
 
 
 def main():

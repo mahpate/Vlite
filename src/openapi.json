@@ -9,7 +9,7 @@
   "servers": [{"url": "http://127.0.0.1:8080"}],
   "paths": {
     "/v1/capabilities": {
-      "get": {"summary":"Authenticated version, role and compatibility diagnostics","responses":{"200":{"description":"Capability flags reflect server configuration","content":{"application/json":{"schema":{"type":"object","required":["version","api_version","role","features","routes"],"properties":{"version":{"type":"string"},"api_version":{"const":1},"role":{"enum":["admin","read_only"]},"features":{"type":"object","properties":{"read_only":{"type":"boolean"},"tokens_reload":{"type":"boolean"},"audit":{"type":"boolean"},"background_rebuild":{"type":"boolean"},"maintenance":{"type":"boolean"},"backup_restore":{"type":"boolean"}}},"routes":{"type":"array","items":{"type":"string"}}}}}}}}}
+      "get": {"summary":"Authenticated version, role and compatibility diagnostics","responses":{"200":{"description":"Capability flags reflect server configuration","content":{"application/json":{"schema":{"type":"object","required":["version","api_version","role","features","routes"],"properties":{"version":{"type":"string"},"api_version":{"const":1},"role":{"enum":["admin","read_only"]},"features":{"type":"object","properties":{"read_only":{"type":"boolean"},"tokens_reload":{"type":"boolean"},"audit":{"type":"boolean"},"background_rebuild":{"type":"boolean"},"maintenance":{"type":"boolean"},"backup_restore":{"type":"boolean"},"conditional_writes":{"type":"boolean","description":"true when PUT/DELETE /v1/vectors/{id} enforce If-Match. Absent or false: servers may ignore If-Match, so clients must not send conditional writes."}}},"routes":{"type":"array","items":{"type":"string"}}}}}}}}}
     },
     "/v1/admin/tokens": {
       "get":{"summary":"Admin only: nonsecret credential configuration","responses":{"200":{"description":"No token values or paths","content":{"application/json":{"schema":{"$ref":"#/components/schemas/TokenStatus"}}}}}}
@@ -126,7 +126,7 @@
         "summary": "Read one vector, opaque payload and typed metadata",
         "responses": {
           "401": {"$ref": "#/components/responses/Unauthorized"},
-          "200": {"description": "Record", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Record"}}}},
+          "200": {"description": "Record", "headers": {"ETag": {"$ref": "#/components/headers/ETag"}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Record"}}}},
           "400": {"$ref": "#/components/responses/BadRequest"},
           "404": {"$ref": "#/components/responses/NotFound"},
           "503": {"$ref": "#/components/responses/Unavailable"}
@@ -134,12 +134,15 @@
       },
       "put": {
         "summary": "Durably replace vector, payload and entire metadata map; omitted metadata clears it",
+        "description": "With If-Match, replaces only an existing record whose current tag matches; a missing record returns 412 and is never created.",
+        "parameters": [{"$ref": "#/components/parameters/IfMatch"}],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Put"}}}},
         "responses": {
           "204": {"description": "Durably committed"},
           "401": {"$ref": "#/components/responses/Unauthorized"},
           "400": {"$ref": "#/components/responses/BadRequest"},
           "409": {"$ref": "#/components/responses/Upgrade"},
+          "412": {"$ref": "#/components/responses/PreconditionFailed"},
           "413": {"$ref": "#/components/responses/TooLarge"},
           "415": {"$ref": "#/components/responses/MediaType"},
           "422": {"$ref": "#/components/responses/InvalidInput"},
@@ -148,10 +151,13 @@
       },
       "delete": {
         "summary": "Durably delete; missing ID is a successful no-op",
+        "description": "With If-Match, deletes only when the current tag matches; a missing record returns 412 rather than deleted=false.",
+        "parameters": [{"$ref": "#/components/parameters/IfMatch"}],
         "responses": {
           "401": {"$ref": "#/components/responses/Unauthorized"},
           "200": {"description": "Deletion result", "content": {"application/json": {"schema": {"type": "object", "required": ["deleted"], "properties": {"deleted": {"type": "boolean"}}}}}},
           "400": {"$ref": "#/components/responses/BadRequest"},
+          "412": {"$ref": "#/components/responses/PreconditionFailed"},
           "503": {"$ref": "#/components/responses/Unavailable"}
         }
       }
@@ -279,12 +285,19 @@
     "responses": {
       "Unauthorized": {"description": "Missing, invalid or duplicate bearer authorization header", "headers": {"WWW-Authenticate": {"schema": {"type": "string", "const": "Bearer"}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "Upgrade": {"description": "Nonempty batch requires v2+, nonempty metadata requires v3. Stop server and compact to a new current-version path; source is never upgraded in place.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
-      "BadRequest": {"description": "Malformed JSON or invalid ID", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+      "BadRequest": {"description": "Malformed JSON, invalid ID, or invalid_if_match", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "NotFound": {"description": "Unknown route or record", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "TooLarge": {"description": "JSON body exceeds 8 MiB", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "MediaType": {"description": "Expected application/json", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "InvalidInput": {"description": "Schema or database validation rejected input; no write", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
-      "Unavailable": {"description": "Busy, closed, poisoned, or indeterminate commit. commit_indeterminate can mean the write succeeded. Do not blindly retry mutations.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+      "Unavailable": {"description": "Busy, closed, poisoned, or indeterminate commit. commit_indeterminate can mean the write succeeded. Do not blindly retry mutations.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+      "PreconditionFailed": {"description": "precondition_failed: If-Match does not equal the current tag, the record is missing, or the tag came from another service instance. Nothing was written. GET again, re-apply the change and decide whether to resend; never retry automatically.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+    },
+    "parameters": {
+      "IfMatch": {"name": "If-Match", "in": "header", "required": false, "description": "Optional. Exactly one strong entity tag copied byte-for-byte from the ETag of GET /v1/vectors/{id}. Checked and written under the database owner lock. Weak (W/), wildcard (*), comma lists and repeated headers return 400 invalid_if_match. Omit for unconditional behavior.", "schema": {"type": "string", "pattern": "^\"[\\x21\\x23-\\x7e]*\"$"}}
+    },
+    "headers": {
+      "ETag": {"description": "Strong opaque tag for the record as of the current database commit and service instance. Not a persistent record revision: ANY committed write (including other IDs and batches) and any service restart/reopen invalidates every tag. Do not parse.", "schema": {"type": "string"}}
     }
   }
 }

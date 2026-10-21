@@ -40,6 +40,38 @@
     if (payloadBytes > 1048576) throw new Error("Payload exceeds 1 MiB");
     return { id: value.id, vector: value.vector, metadata: value.metadata ?? {}, payload_base64: payload };
   }
+  function savedQuery(value, dimensions) {
+    if (!object(value) || Object.keys(value).sort().join(",") !== "name,query,version" || value.version !== 1 ||
+        typeof value.name !== "string" || !value.name.trim() || value.name.length > 100) throw new Error("Expected a version 1 named query file without extra fields");
+    const q = value.query;
+    if (!object(q) || Object.keys(q).sort().join(",") !== "config,ef_search,filter,k,metric,mode,vector") throw new Error("Unknown or missing query fields; credentials are not accepted");
+    vector(q.vector, dimensions);
+    if (!Number.isInteger(q.k) || q.k < 0 || q.k > 10000 || !Number.isInteger(q.ef_search) || q.ef_search < 1 || q.ef_search > 100000 ||
+        !["exact", "approximate", "approximate_ready"].includes(q.mode) || !["squared_l2", "cosine", "inner_product"].includes(q.metric) ||
+        (q.mode !== "exact" && q.metric === "inner_product")) throw new Error("Invalid query search settings");
+    if (!object(q.config) || Object.keys(q.config).sort().join(",") !== "ef_construction,m,seed" ||
+        !Number.isInteger(q.config.m) || q.config.m < 2 || q.config.m > 64 ||
+        !Number.isInteger(q.config.ef_construction) || q.config.ef_construction < q.config.m || q.config.ef_construction > 4096) throw new Error("Invalid query HNSW configuration");
+    id(q.config.seed);
+    if (!Array.isArray(q.filter) || q.filter.length > 64) throw new Error("Expected up to 64 query filter conditions");
+    for (const condition of q.filter) {
+      if (!object(condition) || typeof condition.field !== "string") throw new Error("Invalid query filter condition");
+      if (condition.op === "eq" && Object.keys(condition).sort().join(",") === "field,op,value") {
+        metadata(Object.fromEntries([[condition.field, condition.value]]));
+      } else if (condition.op === "range" && Object.keys(condition).every((key) => ["op", "field", "min", "max"].includes(key))) {
+        const bounds = [condition.min, condition.max].filter((bound) => bound !== null && bound !== undefined);
+        if (!bounds.length) throw new Error("Range filters require at least one bound");
+        for (const bound of bounds) {
+          metadata(Object.fromEntries([[condition.field, bound]]));
+          if (!["integer", "float"].includes(bound.type)) throw new Error("Range filters require numeric values");
+        }
+        if (bounds.length === 2 && (bounds[0].type !== bounds[1].type ||
+            (bounds[0].type === "integer" ? BigInt(bounds[0].value) > BigInt(bounds[1].value) : bounds[0].value > bounds[1].value))) throw new Error("Range bounds must have matching types and minimum <= maximum");
+      } else throw new Error("Invalid query filter condition");
+    }
+    if (new TextEncoder().encode(JSON.stringify(value)).length > 4 * 1024 * 1024) throw new Error("Query exceeds 4 MiB");
+    return value;
+  }
   function csvParse(source) {
     if (source.startsWith("\uFEFF")) source = source.slice(1);
     const rows = [];
@@ -140,6 +172,63 @@
     const on = (name, action) => $(name).addEventListener("click", () => ctx.run(action));
     const get = (name) => JSON.parse($(name).value);
     const fetchRecord = (value) => ctx.api("GET", `/v1/vectors/${id(value)}`);
+    function metadataRow(name = "", entry = { type: "string", value: "" }) {
+      if ($("metadata-fields").children.length >= 64) throw new Error("At most 64 metadata fields");
+      const row = document.createElement("div"); row.className = "metadata-row";
+      const field = document.createElement("input"); field.value = name;
+      field.setAttribute("aria-label", "Metadata field name");
+      const type = document.createElement("select"); type.setAttribute("aria-label", "Metadata field type");
+      for (const value of ["string", "integer", "float", "boolean"]) type.append(new Option(value, value));
+      type.value = entry.type;
+      const value = document.createElement("input"); value.value = String(entry.value);
+      value.setAttribute("aria-label", "Metadata field value");
+      const remove = document.createElement("button"); remove.type = "button"; remove.textContent = "Remove field";
+      remove.className = "secondary"; remove.addEventListener("click", () => row.remove());
+      row.append(field, type, value, remove); $("metadata-fields").append(row);
+    }
+    on("metadata-load", async () => {
+      const values = metadata(get("metadata"));
+      $("metadata-fields").replaceChildren();
+      for (const [name, entry] of Object.entries(values)) metadataRow(name, entry);
+      ctx.status("Metadata draft loaded into visual fields; no database write");
+    });
+    on("metadata-add", async () => metadataRow());
+    on("metadata-apply", async () => {
+      const entries = [];
+      for (const row of $("metadata-fields").children) {
+        const [field, type, input] = row.children;
+        let value = input.value;
+        if (type.value === "float") {
+          if (!value.trim()) throw new Error("Float fields require a number");
+          value = Number(value);
+        } else if (type.value === "boolean") {
+          if (!["true", "false"].includes(value)) throw new Error("Boolean fields require true or false");
+          value = value === "true";
+        }
+        if (entries.some(([name]) => name === field.value)) throw new Error("Duplicate metadata field names");
+        entries.push([field.value, { type: type.value, value }]);
+      }
+      $("metadata").value = JSON.stringify(metadata(Object.fromEntries(entries)), null, 2);
+      ctx.status("Visual fields applied to JSON draft only; use Put / replace to save");
+    });
+    on("query-save", async () => {
+      const value = savedQuery({ version: 1, name: $("query-name").value, query: {
+        vector: get("query"), k: Number($("k").value), mode: $("mode").value,
+        metric: $("metric").value, ef_search: Number($("ef").value), filter: get("filter"), config: ctx.indexConfig(),
+      } }, ctx.dimensions());
+      download("vlite-query.json", value);
+      text("query-workspace-status", `Downloaded "${value.name}". Query data may be private; no credential included.`);
+    });
+    on("query-load", async () => {
+      const value = savedQuery(JSON.parse(await readFile($("query-file").files[0])), ctx.dimensions());
+      const q = value.query;
+      $("query-name").value = value.name; $("query").value = JSON.stringify(q.vector);
+      $("mode").value = q.mode; $("mode").dispatchEvent(new Event("change"));
+      $("metric").value = q.metric; $("k").value = q.k; $("ef").value = q.ef_search;
+      $("filter").value = JSON.stringify(q.filter, null, 2);
+      $("hnsw-m").value = q.config.m; $("hnsw-ef").value = q.config.ef_construction; $("hnsw-seed").value = q.config.seed;
+      text("query-workspace-status", `Loaded "${value.name}" into the form only. Select Search to replay; approximate mode may build an index.`);
+    });
     async function records(ids) {
       const result = [];
       let bytes = 0;
@@ -452,6 +541,9 @@
     } catch (error) { ctx.status(`Appearance preferences could not be loaded: ${error.message}`, true); }
     return {
       clear() {
+        $("metadata-fields").replaceChildren();
+        $("query-name").value = "my-query"; $("query-file").value = "";
+        text("query-workspace-status", "");
         preview = []; sample = []; $("auto-health").checked = false; $("projection").replaceChildren();
         for (const name of ["import-result", "sample-analysis", "record-comparison", "search-comparison", "scenario-result", "health-result", "code-examples", "payload-preview", "vector-slice-result", "vector-summary", "compatibility", "rebuild-result", "maintenance-result", "token-result", "audit-result", "backup-result"]) text(name, "");
         for (const name of ["batch-ids", "request-body", "scenario", "filter-value", "import-file", "scenario-file"]) $(name).value = "";
@@ -464,6 +556,8 @@
         $("request-body").value = "{}";
       },
       loaded(item) {
+        $("metadata-fields").replaceChildren();
+        for (const [name, entry] of Object.entries(item.metadata)) metadataRow(name, entry);
         text("vector-summary", `${item.vector.length} components. Inspect a 32-component slice below; full vector remains editable.`);
         try {
           const bytes = Uint8Array.from(atob(item.payload_base64), (char) => char.charCodeAt(0));
@@ -473,5 +567,5 @@
       },
     };
   }
-  window.VLiteTools = { init, utils: { id, vector, metadata, record, csvParse, csvExport, distances, analyze, pca } };
+  window.VLiteTools = { init, utils: { id, vector, metadata, record, savedQuery, csvParse, csvExport, distances, analyze, pca } };
 })();

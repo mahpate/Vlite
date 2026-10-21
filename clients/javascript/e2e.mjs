@@ -46,4 +46,55 @@ assert.equal((await client.database()).records, 2);
 assert.equal(await client.delete("2"), true);
 assert.equal(await client.delete("2"), false);
 await assert.rejects(client.get("2"), (e) => e instanceof VLiteError && e.status === 404);
+
+// Conditional writes on separate records; the record count is restored afterward.
+const is412 = (e) => e instanceof VLiteError && e.status === 412 && e.code === "precondition_failed" && Boolean(e.requestId);
+const before = (await client.database()).records;
+const wide = "18446744073709551614", other = "100", gone = "101";
+await client.put(wide, { vector: [1, 0, 0] });
+const initial = await client.getVersioned(wide);
+assert.deepEqual(initial.record, { id: wide, vector: [1, 0, 0], payload_base64: "", metadata: {} });
+assert.deepEqual(initial.record, await client.get(wide));
+assert.match(initial.etag, /^"[\x21\x23-\x7e]+"$/);
+assert.equal((await client.getVersioned(wide)).etag, initial.etag);
+
+assert.equal(await client.put(wide, { vector: [0, 1, 0] }, { ifMatch: initial.etag }), undefined);
+assert.deepEqual((await client.get(wide)).vector, [0, 1, 0]);
+await assert.rejects(client.put(wide, { vector: [0, 0, 1] }, { ifMatch: initial.etag }), is412);
+await assert.rejects(client.delete(wide, { ifMatch: initial.etag }), is412);
+assert.deepEqual((await client.get(wide)).vector, [0, 1, 0]);
+
+let current = (await client.getVersioned(wide)).etag;
+await client.put(other, { vector: [1, 1, 0] }); // unrelated write invalidates every tag
+await assert.rejects(client.delete(wide, { ifMatch: current }), is412);
+current = (await client.getVersioned(wide)).etag;
+await client.batch([{ op: "put", id: gone, vector: [1, 0, 1] }]);
+await assert.rejects(client.put(wide, { vector: [0, 0, 1] }, { ifMatch: current }), is412);
+assert.deepEqual((await client.get(wide)).vector, [0, 1, 0]);
+
+const stale = (await client.getVersioned(gone)).etag;
+assert.equal(await client.delete(gone), true);
+await assert.rejects(client.put(gone, { vector: [1, 0, 0] }, { ifMatch: stale }), is412);
+await assert.rejects(client.get(gone), (e) => e instanceof VLiteError && e.status === 404);
+
+async function race(calls) {
+  const results = await Promise.allSettled(calls.map((call) => call()));
+  const winners = results.flatMap((r, i) => (r.status === "fulfilled" ? [i] : []));
+  assert.equal(winners.length, 1, JSON.stringify(results));
+  for (const r of results) if (r.status === "rejected") assert.ok(is412(r.reason), String(r.reason));
+  return { index: winners[0], value: results[winners[0]].value };
+}
+const writers = 8;
+let tag = (await client.getVersioned(wide)).etag;
+const put = await race(Array.from({ length: writers }, (_, i) => () => client.put(wide, { vector: [i + 2, 0, 0] }, { ifMatch: tag })));
+assert.deepEqual((await client.get(wide)).vector, [put.index + 2, 0, 0]);
+tag = (await client.getVersioned(wide)).etag;
+const del = await race(Array.from({ length: writers }, () => () => client.delete(wide, { ifMatch: tag })));
+assert.equal(del.value, true);
+await assert.rejects(client.delete(wide, { ifMatch: tag }), is412);
+
+tag = (await client.getVersioned(other)).etag;
+assert.equal(await client.delete(other, { ifMatch: tag }), true);
+assert.equal((await client.database()).records, before);
+console.log("PASS JavaScript live conditional writes");
 console.log("PASS JavaScript live REST client");

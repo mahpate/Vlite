@@ -5,6 +5,25 @@ function id(value) {
   return value;
 }
 
+// One strong RFC 9110 entity tag of visible ASCII: no W/ prefix, wildcard,
+// whitespace, control characters, inner quotes or comma-separated lists.
+const ETAG = /^"[\x21\x23-\x7e]*"$/;
+
+function writeOptions(options) {
+  if (options === undefined) return undefined;
+  if (typeof options !== "object" || options === null || Array.isArray(options)
+    || Object.keys(options).some((key) => key !== "ifMatch")) {
+    throw new TypeError("options must be an object with only ifMatch");
+  }
+  // A present-but-unusable ifMatch is rejected rather than downgraded to an unconditional write.
+  if (!Object.hasOwn(options, "ifMatch")) return undefined;
+  const tag = options.ifMatch;
+  if (typeof tag !== "string" || !ETAG.test(tag)) {
+    throw new TypeError("ifMatch must be one exact strong entity tag returned by getVersioned");
+  }
+  return tag;
+}
+
 export class VLiteError extends Error {
   constructor(status, code, message, requestId) {
     super(`HTTP ${status}: ${code}: ${message}`);
@@ -19,6 +38,13 @@ export class TransportError extends Error {
   constructor() {
     super("Request failed or response was invalid; mutation outcome may be unknown; no retry performed");
     this.name = "TransportError";
+  }
+}
+
+export class UnsupportedError extends Error {
+  constructor() {
+    super("Server does not advertise conditional_writes (API version 1); no write was sent");
+    this.name = "UnsupportedError";
   }
 }
 
@@ -37,7 +63,7 @@ export class Client {
     this.#token = token;
     this.#timeout = timeoutMs;
   }
-  async #request(method, path, body) {
+  async #request(method, path, body, { ifMatch, etag = false } = {}) {
     // Reject nonfinite numbers rather than JSON.stringify silently converting them to null.
     const encoded = body === undefined ? undefined : JSON.stringify(body, (_, value) => {
       if (typeof value === "number" && !Number.isFinite(value)) throw new TypeError("Numbers must be finite");
@@ -49,7 +75,8 @@ export class Client {
         method, body: encoded, redirect: "error", credentials: "omit", cache: "no-store",
         signal: AbortSignal.timeout(this.#timeout),
         headers: { Authorization: `Bearer ${this.#token}`, Accept: "application/json",
-          ...(encoded === undefined ? {} : { "Content-Type": "application/json" }) },
+          ...(encoded === undefined ? {} : { "Content-Type": "application/json" }),
+          ...(ifMatch === undefined ? {} : { "If-Match": ifMatch }) },
       });
       const raw = await response.text();
       try { value = raw ? JSON.parse(raw) : null; }
@@ -60,15 +87,38 @@ export class Client {
       throw new VLiteError(response.status, detail?.code ?? "http_error",
         detail?.message ?? "Server returned a nonstandard error response", response.headers.get("x-request-id"));
     }
-    return value;
+    if (!etag) return value;
+    // Multiple ETag fields are combined with ", " by fetch and therefore fail validation.
+    const tag = response.headers.get("etag");
+    if (tag === null || !ETAG.test(tag)) throw new TransportError();
+    return { record: value, etag: tag };
   }
   health() { return this.#request("GET", "/health"); }
   ready() { return this.#request("GET", "/ready"); }
   database() { return this.#request("GET", "/v1/database"); }
   metrics() { return this.#request("GET", "/metrics"); }
   get(recordId) { return this.#request("GET", `/v1/vectors/${id(recordId)}`); }
-  async put(recordId, record) { await this.#request("PUT", `/v1/vectors/${id(recordId)}`, record); }
-  async delete(recordId) { return (await this.#request("DELETE", `/v1/vectors/${id(recordId)}`)).deleted; }
+  // Older servers ignore If-Match; a fresh check per write avoids silently
+  // downgrading to an unconditional mutation (never cached across restarts).
+  async #conditional(options) {
+    const tag = writeOptions(options);
+    if (tag === undefined) return undefined;
+    let caps;
+    try { caps = await this.#request("GET", "/v1/capabilities"); }
+    catch (error) { if (!(error instanceof VLiteError && error.status === 404)) throw error; }
+    if (typeof caps !== "object" || caps === null || Array.isArray(caps) || caps.api_version !== 1
+      || caps.features?.conditional_writes !== true) throw new UnsupportedError();
+    return tag;
+  }
+  getVersioned(recordId) { return this.#request("GET", `/v1/vectors/${id(recordId)}`, undefined, { etag: true }); }
+  async put(recordId, record, options) {
+    const path = `/v1/vectors/${id(recordId)}`;
+    await this.#request("PUT", path, record, { ifMatch: await this.#conditional(options) });
+  }
+  async delete(recordId, options) {
+    const path = `/v1/vectors/${id(recordId)}`;
+    return (await this.#request("DELETE", path, undefined, { ifMatch: await this.#conditional(options) })).deleted;
+  }
   listVectors({ limit = 25, after } = {}) {
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new TypeError("limit must be 1..100");
     return this.#request("GET", `/v1/vectors?limit=${limit}${after === undefined ? "" : `&after=${id(after)}`}`);

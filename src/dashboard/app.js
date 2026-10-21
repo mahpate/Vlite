@@ -12,6 +12,7 @@
   let activeRequest = null;
   let tools = null;
   let lastSearch = null;
+  let browseItems = [];
   function connectionState() {
     $("connection-badge").textContent = connected ? "Connected" : "Disconnected";
     $("connection-badge").dataset.connected = String(connected);
@@ -29,8 +30,12 @@
     for (const id of ["payload-preview", "vector-slice-result", "vector-summary"]) $(id).textContent = "";
   }
   function clearBrowse() {
+    browseItems = [];
     nextAfter = null;
     $("vectors").querySelector("tbody").replaceChildren();
+    $("browse-preview").textContent = "";
+    $("browse-columns").replaceChildren();
+    $("browse-sort").replaceChildren(new Option("ID", ""));
     $("browse-status").textContent = "";
     $("next-page").disabled = true;
   }
@@ -201,6 +206,8 @@
     $("payload").value = result.payload_base64;
     $("metadata").value = JSON.stringify(result.metadata, null, 2);
     tools?.loaded(result);
+    show("browse-preview", { id: result.id, dimensions: result.vector.length, vector_first_32: result.vector.slice(0, 32), metadata: result.metadata });
+    $("browse-preview").textContent += `\nPayload preview:\n${$("payload-preview").textContent.slice(0, 4096)}`;
   }
   async function inspectRecord(path) {
     await loadRecord(path);
@@ -215,22 +222,58 @@
     const result = await api("GET", `/v1/vectors?limit=${requestedSize}${after === null ? "" : `&after=${after}`}`);
     pageSize = requestedSize;
     nextAfter = result.next_after;
+    browseItems = result.items;
+    const fields = [...new Set(browseItems.flatMap((item) => Object.keys(item.metadata)))].sort();
+    for (const field of fields) {
+      $("browse-columns").append(new Option(field, field));
+      $("browse-sort").append(new Option(field, field));
+    }
+    renderBrowse();
+    $("browse-status").textContent = `${result.items.length} records; ${nextAfter === null ? "end of current list" : "more records available"}. Live view: concurrent changes may affect subsequent pages.`;
+  }
+  function renderBrowse() {
     const table = $("vectors").querySelector("tbody");
-    for (const item of result.items) {
+    table.replaceChildren();
+    const columns = [...$("browse-columns").selectedOptions].map((option) => option.value);
+    const header = $("vectors").querySelector("thead tr");
+    header.replaceChildren();
+    for (const title of ["ID (select to inspect)", "Typed metadata", ...columns]) {
+      const cell = document.createElement("th"); cell.textContent = title; header.append(cell);
+    }
+    const field = $("browse-sort").value;
+    const direction = $("browse-direction").value === "descending" ? -1 : 1;
+    const ordered = [...browseItems].sort((a, b) => {
+      if (!field) return direction * (BigInt(a.id) < BigInt(b.id) ? -1 : BigInt(a.id) > BigInt(b.id) ? 1 : 0);
+      const left = a.metadata[field], right = b.metadata[field];
+      if (!left || !right) return left ? -1 : right ? 1 : 0;
+      const x = left.type === "integer" ? BigInt(left.value) : left.value;
+      const y = right.type === "integer" ? BigInt(right.value) : right.value;
+      const numeric = ["integer", "float"];
+      const comparison = left.type === right.type || (numeric.includes(left.type) && numeric.includes(right.type))
+        ? x < y ? -1 : x > y ? 1 : 0 : left.type.localeCompare(right.type);
+      return direction * comparison;
+    });
+    for (const item of ordered) {
       const row = document.createElement("tr");
       const idCell = document.createElement("td");
       const button = document.createElement("button");
       button.type = "button";
       button.textContent = item.id;
-      button.addEventListener("click", () => run(() => inspectRecord(`/v1/vectors/${item.id}`)));
+      button.addEventListener("click", () => run(() => loadRecord(`/v1/vectors/${item.id}`)));
       idCell.append(button);
       const metadata = document.createElement("td");
       metadata.textContent = JSON.stringify(item.metadata);
       row.append(idCell, metadata);
+      for (const field of columns) {
+        const cell = document.createElement("td");
+        const value = item.metadata[field];
+        cell.textContent = value ? `${value.value} (${value.type})` : "(missing)";
+        row.append(cell);
+      }
       table.append(row);
     }
-    $("browse-status").textContent = `${result.items.length} records; ${nextAfter === null ? "end of current list" : "more records available"}. Live view: concurrent changes may affect subsequent pages.`;
   }
+  for (const name of ["browse-columns", "browse-sort", "browse-direction"]) $(name).addEventListener("change", renderBrowse);
   $("browse-form").addEventListener("submit", (event) => {
     event.preventDefault();
     run(() => browse(null));

@@ -52,7 +52,7 @@
     </div>
     <p id="snapshot-note">Connect to view a database snapshot. Refresh after external writes.</p>
     <pre id="compatibility" aria-label="Server compatibility"></pre>
-    <details><summary>Database details and metrics (JSON)</summary><pre id="overview" aria-label="Database overview"></pre></details>
+    <div class="tool-group"><h3>Database details and metrics (JSON)</h3><pre id="overview" aria-label="Database overview"></pre></div>
   </section>
   <section id="browse">
     <span class="eyebrow">02 / EXPLORE</span><h2>Browse vectors</h2>
@@ -62,7 +62,13 @@
       <button type="submit">First page / refresh</button><button id="next-page" type="button" disabled>Next page</button>
     </form>
     <p id="browse-status" role="status">Connect, then refresh to load records.</p>
+    <label>Additional metadata columns (select multiple)<select id="browse-columns" multiple size="4" aria-describedby="browse-sort-note"></select></label>
+    <label>Sort loaded page<select id="browse-sort"><option value="">ID</option></select></label>
+    <label>Direction<select id="browse-direction"><option value="ascending">Ascending</option><option value="descending">Descending</option></select></label>
+    <p id="browse-sort-note">Sorting applies only to the loaded page, not the whole database. Missing fields sort last. Select a record to preview it below and load the editor.</p>
     <div class="table-scroll"><table id="vectors"><caption>Committed live records</caption><thead><tr><th>ID (select to inspect)</th><th>Typed metadata</th></tr></thead><tbody></tbody></table></div>
+    <h3>Selected record preview</h3><pre id="browse-preview" aria-live="polite"></pre>
+    <a href="#editor">Edit the selected record</a>
     <label>Select IDs from this page (comma-separated, decimal strings)<input id="batch-ids" placeholder="1,2,3"></label>
     <label>Batch metadata replacement (typed JSON object)<textarea id="batch-metadata" rows="2">{}</textarea></label>
     <button id="batch-replace" data-write type="button">Replace selected metadata</button>
@@ -79,6 +85,14 @@
       <label>Vector (JSON array) <textarea id="record-vector" rows="3">[1, 0, 0]</textarea></label>
       <label>Payload (standard base64) <textarea id="payload" rows="2"></textarea></label>
       <label>Typed metadata (JSON object) <textarea id="metadata" rows="4">{}</textarea></label>
+      <div class="tool-group">
+        <h3>Visual metadata editor</h3>
+        <p>Load the JSON draft into typed fields, edit them, then apply back to JSON. Applying changes the draft only; Put / replace still requires confirmation. Loading replaces unsaved visual fields.</p>
+        <button id="metadata-load" type="button" class="secondary">Load JSON into fields</button>
+        <div id="metadata-fields"></div>
+        <button id="metadata-add" type="button" class="secondary">Add metadata field</button>
+        <button id="metadata-apply" type="button" class="secondary">Apply fields to JSON draft</button>
+      </div>
       <button type="submit">Put / replace</button><button id="get-vector" class="secondary" type="button">Get</button><button id="delete-vector" class="danger" type="button">Delete</button>
     </form>
     <pre id="record" aria-label="Record result"></pre>
@@ -106,17 +120,26 @@
     </div><div class="search-results"><h3>Nearest neighbors</h3><p id="search-summary" role="status">Run a search to compare vectors. Lower distance is better.</p>
     <div class="table-scroll"><table id="hits"><caption>Search results (lower distance is better)</caption><thead><tr><th>ID</th><th>Distance</th></tr></thead><tbody></tbody></table></div>
     </div></div>
-    <details><summary>Build an exact metadata filter</summary>
+    <div class="tool-group"><h3>Build an exact metadata filter</h3>
       <label>Field<input id="filter-field" value="category"></label>
       <label>Operator<select id="filter-op"><option value="eq">Equals</option><option value="min">At least (numeric)</option><option value="max">At most (numeric)</option></select></label>
       <label>Type<select id="filter-type"><option value="string">String</option><option value="integer">Integer</option><option value="float">Float</option><option value="boolean">Boolean</option></select></label>
       <label>Value<input id="filter-value" value="demo"></label>
       <button id="filter-add" type="button">Add AND condition</button><button id="filter-clear" class="secondary" type="button">Clear filter</button>
-    </details>
+    </div>
     <p>Squared L2 is sum of squared component differences; cosine is 1 minus cosine similarity; inner product is the negative dot product. Lower is better. These are distances, not confidence percentages.</p>
     <button id="compare-search" type="button">Compare exact / ready ANN</button>
     <pre id="search-comparison"></pre>
     <button id="export-hits" type="button" class="secondary">Export results JSON</button>
+    <div class="tool-group">
+      <h3>Saved query workspace</h3>
+      <p>Download a named query including its vector, filter and index settings. Files may contain private data, but never include the connected token. Loading only fills the form; Search replays it explicitly.</p>
+      <label>Query name<input id="query-name" value="my-query" maxlength="100"></label>
+      <button id="query-save" type="button" class="secondary">Download query</button>
+      <label>Load saved query<input id="query-file" type="file" accept=".json,application/json"></label>
+      <button id="query-load" type="button" class="secondary">Load query into form</button>
+      <p id="query-workspace-status" role="status"></p>
+    </div>
   </section>
   <section id="index" class="wide">
     <span class="eyebrow">05 / PERFORMANCE</span><h2>Index maintenance</h2>
@@ -125,7 +148,7 @@
     <p>Builds default HNSW from committed records. Blocks the single owner; schedule outside latency-sensitive traffic. Reopen/overflow loses readiness.</p>
     <button id="build-index" type="button">Build HNSW</button>
     <p id="build-result" role="status"></p>
-    <details><summary>HNSW configuration and background maintenance</summary>
+    <div class="tool-group"><h3>HNSW configuration and background maintenance</h3>
       <p>m trades graph connectivity for memory; ef_construction trades build effort for quality. Use the same configuration for building and ready-only search. A seed makes builds reproducible for fixed data. Snapshot limits do not cap total process memory.</p>
       <label>m (2..64)<input id="hnsw-m" type="number" min="2" max="64" value="16"></label>
       <label>ef_construction (m..4096)<input id="hnsw-ef" type="number" min="2" max="4096" value="100"></label>
@@ -143,7 +166,7 @@
       <button id="tick-maintenance" data-write type="button">Run maintenance tick</button>
       <p>Policy is process-local and resets on restart. No automatic scheduler: a tick explicitly polls/publishes or starts a matching job. Observe does not publish. Cancellation is cooperative.</p>
       <pre id="maintenance-result"></pre>
-    </details>
+    </div>
   </section>
   <section id="data-tools" class="wide">
     <span class="eyebrow">DATA WORKFLOWS</span><h2>Import, export and guided demo</h2>

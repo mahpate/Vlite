@@ -4,6 +4,9 @@ The console is a single-database development tool, not a collections manager,
 embedding generator or production observability system. Open the standalone
 Compose UI (default `http://localhost:8081`), enter a bearer token and connect.
 The embedded console remains available at the API's `/dashboard` route.
+All tools appear on one continuous page, without expandable panels. The left
+navigation stays visible while scrolling, including as a compact rail on small
+screens, and jumps directly to each tool.
 
 ## Testing workflows
 
@@ -45,6 +48,25 @@ The embedded console remains available at the API's `/dashboard` route.
 
 ## Record exploration
 
+The record browser offers selectable typed metadata columns and ascending or
+descending sorting of the **current loaded page only**, never a database-wide
+sort. IDs and integer metadata retain full-width precision. Missing fields sort
+last; mixed nonnumeric types group by type. Selecting a row loads a bounded
+inline vector/payload preview and the editor without leaving the browse area.
+
+The visual metadata editor supports string, integer, float and boolean fields.
+Loading a record replaces its visual draft. After editing raw JSON, use
+**Load JSON into fields** before making visual edits. **Apply fields to JSON
+draft** validates names, duplicate fields, typed values and size limits, but does
+not write to the database. **Put / replace** remains a separate confirmed write.
+
+Named query files preserve the vector, exact filter, metric, search mode, k,
+search ef and HNSW configuration. **Download query** exports a bounded versioned
+JSON file; **Load query into form** validates the entire file before replacing
+the form, with no request sent. Use **Search** to replay it. Files contain query
+data that may be private, never authentication credentials; no query history is
+persisted in browser storage. Loading a different-dimensional query is rejected.
+
 “Find similar to saved ID” fetches the committed vector and runs an exact,
 unfiltered search. Selecting a browse/search/sample ID loads the editor.
 Record comparison shows both complete records and squared L2, cosine and negative
@@ -75,7 +97,8 @@ theme/density to local storage; no token, vector, payload or scenario is stored.
 Unchecking removes that preference.
 
 Sidebar anchors and the skip link support keyboard navigation. Operations and
-errors use live status announcements; record inspection moves focus to the editor.
+errors use live status announcements; search/sample inspection moves focus to
+the editor, while browse selections retain their place and show an inline preview.
 Light/dark themes, compact/comfortable density and responsive tables are available.
 
 **Stop waiting** aborts the browser fetch, not necessarily server work. Ordinary
