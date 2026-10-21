@@ -4,15 +4,21 @@ Commands in this reference run from the repository root. For installation,
 project status and common workflows, start with the [README](../README.md).
 
 VLite is an experimental embedded vector database written in Rust. It owns its
-storage engine: it is not a SQLite wrapper. The embedded core supports one
-fixed-dimension vector space per database, opaque payloads, durable single-record
+storage engine: it is not a SQLite wrapper. Legacy files expose one
+fixed-dimension vector space. Opt-in v4 files support named collections with
+independent dimensions. Both support opaque payloads, durable single-record
 and atomic batch mutations, and exact nearest-neighbor search.
 
 An optional REST service exposes the same engine. Optional in-memory HNSW search
 supports approximate retrieval without changing the database file.
 gRPC, persistent ANN indexes, distributed operation, interactive transactions,
-encryption, metadata indexes, and read-only/multi-reader handles are deferred.
+encryption and read-only/multi-reader handles are deferred.
 This is a correctness-first MVP, not a production-hardened storage engine.
+
+See [collections and advanced retrieval](CAPABILITIES.md) for opt-in v4,
+per-record revisions, metadata indexes and query planning, hybrid search,
+quantized ANN, quality diagnostics and resumable ingestion. Later sections
+describe legacy/default workflows unless explicitly marked otherwise.
 
 ## Build and use
 
@@ -262,7 +268,8 @@ and index snapshots until refreshed. The example helper fills a nonzero unit
 vector matching the connected database dimensions (up to 4096) plus demo
 metadata, without issuing a write. Copying an editor vector into the search
 query is also local-only. Browse and search result IDs load the full record into
-the editor. The console does not implement collections or embedding generation.
+the editor. The collection picker isolates v4 namespaces; embedding generation
+is not included.
 Untrusted record contents are rendered with text nodes, not HTML. Assets are
 same-origin with a restrictive CSP, no third-party CDN or frontend runtime.
 Browse pages use `GET /v1/vectors?limit=25&after=123`, with ascending numeric IDs,
@@ -410,24 +417,29 @@ owner lock, so for a tag at most one competing write succeeds.
 | --- | --- |
 | No `If-Match` | Unchanged: PUT 204, DELETE `{"deleted":...}` |
 | Tag matches current record | Normal success response; one durable commit |
-| Tag stale, from another service instance, or record missing | 412 `precondition_failed`; nothing written; PUT never creates |
+| Tag stale, from another file/record identity, or record missing | 412 `precondition_failed`; nothing written; PUT never creates |
 | `*`, `W/"..."`, comma list, repeated header, unquoted/invalid bytes | 400 `invalid_if_match`; nothing written |
 
-Tags are opaque; do not parse them. They are **not persistent per-record
-revisions**. They are invalidated conservatively:
+Tags are opaque; do not parse them. Servers advertising
+`features.per_record_etags` bind each tag to file identity, collection ID, record
+ID, that record's last-put revision and a full SHA-256 content digest.
+Unrelated commits no longer invalidate a tag. Two records in the same batch
+can share a revision number but never share the complete identity-bound tag.
+Deleting and recreating the same ID advances its revision.
 
-- **Any** committed write invalidates every tag: writes to other IDs and
-  nonempty batches included. Deleting a missing ID and empty batches do not commit.
-- Each service start/reopen uses a fresh OS-random nonce, so tags from before a
-  restart, compaction or restore selection return 412 even if the file's commit
-  sequence repeats. Delete then identical recreate is two commits and also
-  returns 412. If OS randomness is unavailable, the server fails to start.
+V4 tags survive service restart. Legacy files use a fresh OS-random service
+nonce, so their tags fail after restart. Copy-out maintenance assigns a new v4
+lineage; reacquire tags after compaction, upgrade or restore. Divergent raw
+copies with different content cannot match solely because their sequences
+coincide. OS-randomness failure prevents startup rather than weakening identity.
+Older conditional-write servers without the per-record capability retain
+their globally invalidated, process-local tag behavior.
 
 After 412, `GET` again, re-apply the change and decide whether to resend.
 The service never retries; do not retry automatically. Authentication and
 read-only checks run first (401/403). A `commit_indeterminate` 503 keeps its
 meaning: the write may have committed; inspect rather than retry.
-Successful conditional writes do not return a new tag; GET to obtain one.
+Successful PUT returns the new ETag header; GET can also obtain the current tag.
 `POST /v1/batches` has no conditional form.
 
 Older servers ignore `If-Match` and would write unconditionally. Servers that
@@ -863,8 +875,9 @@ and there is no hidden exact fallback: use exact mode when completeness matters.
 REST capability `features.filtered_ann` is `true` on servers that accept
 filters in approximate modes; older servers reject them with 422.
 
-There is no background graph build or persistent graph sidecar. A first
-approximate query after reopen/overflow blocks other operations while rebuilding.
+There is no persistent graph sidecar. A first lazy approximate query after
+reopen/overflow blocks other operations while rebuilding; explicit background
+rebuilds and opt-in server maintenance can prepare a ready index instead.
 The buffer avoids rebuilding after each small write but is not unlimited
 incremental HNSW maintenance. Rebuilding is not free and small datasets may search
 faster with the exact scan. Index creation/search allocate RAM without a
@@ -943,16 +956,18 @@ replacement can catch up too slowly; publishing can retain a large catch-up
 buffer. Inspect `ready`, pressure and terminal outcome together. The application
 must choose to throttle mutations, reject ANN requests, or explicitly use exact
 search. Durable writes remain accepted regardless of index overload. There is
-no hidden scheduler, automatic fallback or transport-facing policy; existing
-Rust synchronous APIs and REST/C/Python/Node behavior are unchanged.
+no hidden scheduler or automatic fallback in this Rust tick API. The server's
+separately configured automatic maintenance is disabled by default; existing
+synchronous and ready-only searches retain their behavior.
 
 ## Background HNSW rebuilds (Rust)
 
 Current-source addition after v0.1.2. The Rust owner has an **opt-in** lifecycle:
 `start_hnsw_rebuild(config, metric, limits)`, `poll_hnsw_rebuild()` and
-`cancel_hnsw_rebuild()`. No REST route, C ABI request, Python/Node wrapper,
-dashboard toggle, persisted index or automatic scheduler is added. Existing
-synchronous build/lazy search/ready-only search behavior remains unchanged.
+`cancel_hnsw_rebuild()`. REST, C ABI, Python/Node wrappers and console controls
+also expose the lifecycle. Optional server scheduling is disabled by default;
+indexes remain derived and memory-only. Existing synchronous build, lazy
+search and ready-only search behavior remains unchanged.
 See the runnable [`background_hnsw` example](../examples/background_hnsw.rs):
 
 ```powershell
@@ -1194,6 +1209,8 @@ cargo run --bin vlite-maintain -- compact vectors.vlite compact.vlite
 ```
 
 Library equivalents are `vlite::maintenance::{inspect, backup, restore, compact}`.
+Additional `upgrade`, `verify` and `drill` operations support opt-in v4 workflows;
+see [collections and advanced retrieval](CAPABILITIES.md).
 Inspection returns format version, dimensions, live records, validated commit-frame count, file
 bytes, valid-prefix bytes and incomplete-tail bytes. The CLI prints these as
 `key=value` fields. Corruption returns an error; an incomplete suffix is reported
@@ -1208,6 +1225,12 @@ dimensions, payloads and vector component bits, including negative zero. Exact
 search behavior is unchanged. An empty live set produces a 32-byte file that can
 accept new writes. Inspection's commit count is a file-local frame count, not an
 unchangeable lifetime mutation counter; a batch counts as one commit frame.
+
+The preceding format-v3 compaction and byte-identical restore descriptions
+apply to legacy/default files. For a v4 source, compaction retains v4,
+collections and settings, and restore/compaction assign a new file identity.
+Revision numbers are file-local, so callers must reacquire conditional tokens
+after copy-out maintenance.
 
 Output is first written to a private temporary file in the destination directory,
 fully validated and synced, then published using no-clobber semantics. Existing
@@ -1325,6 +1348,37 @@ contents but does **not** portably sync its parent directory: persistence of a
 new filename across machine power failure requires platform-specific directory
 durability handling by the caller. Tests simulate interrupted writes and process
 exit, not physical power loss.
+
+## Opt-in file format v4
+
+Format v4 is explicitly selected, never the implicit result of opening an older
+file. Older binaries refuse it. Legacy v1-v3 parsing/writing remains unchanged.
+
+The 32-byte header keeps the magic, little-endian version/dimensions and CRC-32.
+V4 bytes 16..24 contain a nonzero random file lineage, bytes 24..26 contain the
+collection allocation floor and bytes 26..28 remain zero. Create records rebuild
+the high-water mark; IDs are never reused. Copy-out maintenance preserves the
+floor and assigns a new lineage.
+
+The existing 36-byte frame prefix and 16-byte commit footer remain checksummed.
+V4 record/batch frames use prefix bytes 5..7 for a little-endian collection ID,
+with byte 7 reserved zero. Operations 5/6/7 create, drop and update collection
+settings. Each live collection has independent dimensions and ID namespace.
+Settings declarations persist, but derived metadata/text/HNSW indexes do not.
+
+V4 atomic batches can end with an import checkpoint entry (op 8). Ordinary
+checkpoints have a 52-byte body containing chunk number, per-chunk row counts,
+flags and a full 32-byte SHA-256 identity. Open-job snapshots used by compaction
+have a 60-byte body adding high count bits; cumulative counts are preserved
+without truncation. A marker's length must match its flags. Invalid histories,
+collection reuse, counter overflow and malformed fields fail as corruption;
+valid checksums do not bypass semantic validation.
+
+`tests/format_v4.rs` includes independent encodings, valid-checksum malformed
+records, allocation-floor and full-width checkpoint tests. The fixed v4 fixture
+joins the older fixtures below; do not regenerate fixtures to conceal a format
+incompatibility. Pre-release development v4 files from before these invariants
+were finalized are not a supported migration source.
 
 ## File formats v1, v2 and v3
 

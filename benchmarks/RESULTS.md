@@ -5,6 +5,38 @@ See [methodology and reproduction](README.md) before interpreting the numbers.
 
 No zvec, Milvus, Weaviate, FAISS or other unmeasured engine results are inferred.
 
+## Indexed and quantized retrieval, October 21, 2026
+
+[Raw Windows x64 release run](results/search-capabilities-synthetic-windows.json)
+compares two metrics and two quantization modes in one bounded child. The
+workload is 2,000 clustered 32-dimensional synthetic vectors and 30 perturbed
+queries, k=10, m=12, construction/search ef=100, rerank multiplier 4.
+An independent full-sort oracle verifies exact baseline IDs and scores;
+returned ANN distances are independently checked outside timing.
+
+| Metric | Quantization | Recall@10 | Query p50 / p95 (ms) | Exact p50 (ms) |
+|---|---|---:|---:|---:|
+| squared L2 | none | 1.0 | 0.0695 / 0.0825 | 0.0829 |
+| squared L2 | scalar u8 | 1.0 | 0.0688 / 0.0813 | 0.0829 |
+| cosine | none | 1.0 | 0.0707 / 0.0856 | 0.1558 |
+| cosine | scalar u8 | 1.0 | 0.0720 / 0.0821 | 0.1558 |
+
+Each recall denominator is 300. Quantized graphs add 64,000 code bytes and
+512 codebook bytes; **256,000 bytes of original f32 vectors remain resident**
+in every mode. Graph links occupy roughly 322 KB. These are component counts,
+not process RSS; this implementation does not demonstrate total-RAM savings.
+There is no material latency advantage from quantization in this run.
+
+A separate 1%-selective metadata equality query scanned **20 indexed
+candidates instead of 2,000 records**, with identical exact top-k. This is a
+work-count reduction, not a measured end-to-end latency guarantee.
+
+The raw report includes every sample, build timings, component bytes, platform
+and source/binary hashes. One synthetic shared-host run, warm caches, fixed
+exact-before-ANN order and small sample count do not establish production
+quality or tails. This workload and implementation differ from the older
+selectivity campaign below; do not infer a controlled before/after speedup.
+
 ## Filter-aware ANN selectivity, October 21, 2026 UTC
 
 [Raw native Windows x64 release campaign](results/filtered-ann-synthetic-windows.json)

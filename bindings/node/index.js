@@ -67,8 +67,9 @@ export class NativeLibrary {
       catch { this.#pending.delete(id); reject(new EmbeddedError("worker_failed", "Cannot admit operation; worker unavailable")); }
     });
   }
-  async create(path, dimensions) {
-    const result = await this._request("0", { op: "create", path, dimensions });
+  async create(path, dimensions, { format } = {}) {
+    // Format 3 remains the default; pass { format: 4 } for named collections and imports.
+    const result = await this._request("0", { op: "create", path, dimensions, ...(format === undefined ? {} : { format }) });
     return new Database(this, result.handle);
   }
   async open(path) {
@@ -111,23 +112,79 @@ export class Database {
     return this.#closing;
   }
   info() { return this.#call("info"); }
-  get(id) { return this.#call("get", { id }); }
-  async getMany(ids) { return (await this.#call("get_many", { ids })).records; }
-  async put(id, vector, { payload = new Uint8Array(), metadata = {} } = {}) {
+  get(id, { collection } = {}) { return this.#call("get", { id, ...scope(collection) }); }
+  async getMany(ids, { collection } = {}) { return (await this.#call("get_many", { ids, ...scope(collection) })).records; }
+  async put(id, vector, { payload = new Uint8Array(), metadata = {}, collection, expectedRevision } = {}) {
     if (!(payload instanceof Uint8Array)) throw new TypeError("payload must be Uint8Array or Buffer");
-    await this.#call("put", { id, vector, payload_base64: Buffer.from(payload).toString("base64"), metadata });
+    const result = await this.#call("put", { id, vector, payload_base64: Buffer.from(payload).toString("base64"), metadata,
+      ...scope(collection), ...optional("expected_revision", expectedRevision) });
+    // Only conditional writes report the committed revision; unconditional puts keep resolving to undefined.
+    return expectedRevision === undefined ? undefined : result.revision;
   }
-  async delete(id) { return (await this.#call("delete", { id })).deleted; }
-  async batch(operations) { await this.#call("batch", { operations }); }
-  async search(vector, k, { filter = [], metric = "squared_l2" } = {}) {
-    const options = metric === "squared_l2" ? {} : { metric };
-    return (await this.#call("search", { vector, k, filter, ...options })).hits;
+  async delete(id, { collection, expectedRevision } = {}) {
+    return (await this.#call("delete", { id, ...scope(collection), ...optional("expected_revision", expectedRevision) })).deleted;
   }
-  async buildIndex({ metric = "squared_l2" } = {}) {
-    await this.#call("build_index", metric === "squared_l2" ? {} : { metric });
+  async batch(operations, { collection } = {}) { await this.#call("batch", { operations, ...scope(collection) }); }
+  async revision(id, { collection } = {}) { return (await this.#call("revision", { id, ...scope(collection) })).revision; }
+  async search(vector, k, { filter = [], metric, collection, explain = false } = {}) {
+    const result = await this.#call("search", { vector, k, filter, ...optional("metric", metric), ...scope(collection),
+      ...(explain ? { explain } : {}) });
+    return explain ? result : result.hits;
   }
-  async searchApproximateReady(vector, k, { efSearch = 100, metric = "squared_l2" } = {}) {
-    return (await this.#call("search_approximate_ready", { vector, k, ef_search: efSearch,
-      ...(metric === "squared_l2" ? {} : { metric }) })).hits;
+  searchAuto(vector, k, { filter = [], metric, collection, efSearch, quantization, rerankMultiplier, explain = false } = {}) {
+    return this.#call("search", { mode: "auto", vector, k, filter, explain, ...optional("metric", metric), ...scope(collection),
+      ...annFields({ efSearch, quantization, rerankMultiplier }) });
   }
+  searchHybrid(text, k, { vector, filter = [], metric, collection, fusion, vectorLeg, efSearch, quantization,
+    rerankMultiplier, explain = false } = {}) {
+    return this.#call("search", { mode: "hybrid", text, k, filter, explain, ...optional("vector", vector),
+      ...optional("metric", metric), ...scope(collection), ...optional("fusion", snake(fusion)),
+      ...optional("vector_leg", vectorLeg), ...annFields({ efSearch, quantization, rerankMultiplier }) });
+  }
+  async buildIndex({ metric, collection, quantization, rerankMultiplier } = {}) {
+    await this.#call("build_index", { ...optional("metric", metric), ...scope(collection),
+      ...annFields({ quantization, rerankMultiplier }) });
+  }
+  async searchApproximateReady(vector, k, { efSearch = 100, metric, collection, quantization, rerankMultiplier } = {}) {
+    return (await this.#call("search_approximate_ready", { vector, k, ef_search: efSearch, ...optional("metric", metric),
+      ...scope(collection), ...annFields({ quantization, rerankMultiplier }) })).hits;
+  }
+  async listCollections() { return (await this.#call("list_collections")).collections; }
+  createCollection(name, dimensions, settings) {
+    return this.#call("create_collection", { name, dimensions, ...optional("settings", snake(settings)) });
+  }
+  async dropCollection(name) { await this.#call("drop_collection", { name }); }
+  setCollectionSettings(name, settings) { return this.#call("set_collection_settings", { name, settings: snake(settings) }); }
+  async nextImportJobId() { return (await this.#call("next_import_job_id")).job; }
+  importChunk(job, chunk, operations, { collection, policy } = {}) {
+    return this.#call("import_chunk", { job, chunk, operations, ...scope(collection), ...optional("policy", policy) });
+  }
+  importStatus(job) { return this.#call("import_status", { job }); }
+  importFinish(job, { collection } = {}) { return this.#call("import_finish", { job, ...scope(collection) }); }
+  importAbort(job, { collection } = {}) { return this.#call("import_abort", { job, ...scope(collection) }); }
+  annQuality({ collection, metric, quantization, rerankMultiplier, samples, k, efSearch, seed, maxDistanceEvaluations } = {}) {
+    return this.#call("ann_quality", { ...scope(collection), ...optional("metric", metric),
+      ...annFields({ efSearch, quantization, rerankMultiplier }), ...optional("samples", samples), ...optional("k", k),
+      ...optional("seed", seed), ...optional("max_distance_evaluations", maxDistanceEvaluations) });
+  }
+  annMemory({ collection, metric, quantization, rerankMultiplier } = {}) {
+    return this.#call("ann_memory", { ...scope(collection), ...optional("metric", metric),
+      ...annFields({ quantization, rerankMultiplier }) });
+  }
+}
+
+// Omitted options are not sent, so the native side applies the collection's declared defaults.
+function optional(name, value) { return value === undefined ? {} : { [name]: value }; }
+function scope(collection) { return optional("collection", collection); }
+function annFields({ efSearch, quantization, rerankMultiplier }) {
+  return { ...optional("ef_search", efSearch), ...optional("quantization", quantization),
+    ...optional("rerank_multiplier", rerankMultiplier) };
+}
+// Converts camelCase option keys to the native snake_case names. Unknown keys are kept so the
+// native layer rejects them explicitly instead of the wrapper silently dropping them.
+function snake(value) {
+  if (Array.isArray(value)) return value.map(snake);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) =>
+    [key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`), snake(item)]));
 }

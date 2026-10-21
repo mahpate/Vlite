@@ -1,6 +1,7 @@
 //! Optional HTTP transport over one exclusively owned embedded database.
 
 use std::{
+    collections::{BTreeMap, VecDeque},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -9,29 +10,39 @@ use std::{
 };
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{
-        DefaultBodyLimit, Path, Query, State,
+        DefaultBodyLimit, MatchedPath, Path, Query, State,
         rejection::{JsonRejection, PathRejection, QueryRejection},
     },
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, Method, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use base64::{Engine, prelude::BASE64_STANDARD};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::sync::Semaphore;
 
-use crate::{Database, Error, MAX_BATCH_OPERATIONS, MAX_PAYLOAD_BYTES, Mutation};
+use crate::{
+    AnnOptions, CollectionRef, Database, DistanceMetric, Error, Expected, HnswConfig,
+    MAX_BATCH_OPERATIONS, MAX_PAYLOAD_BYTES, Mutation, Quantization, Record, SearchStats,
+};
 mod admin;
+mod audit;
+mod collections;
+mod credentials;
+mod observability;
+mod ops;
 pub use admin::{ServerOptions, configured_admin_router, read_token_file, selected_database};
 
 pub const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SEARCH_K: usize = 10_000;
 const MAX_IN_FLIGHT: usize = 16;
+const SLOW_QUERY_CAPACITY: usize = 256;
 
 #[derive(Default)]
 struct Metrics {
@@ -42,6 +53,45 @@ struct Metrics {
     commit_failures: AtomicU64,
     rebuilds: AtomicU64,
     rebuild_search_ns: AtomicU64,
+    /// Nanoseconds of the last synchronous HNSW build plus one; 0 = none yet.
+    last_rebuild_ns: AtomicU64,
+    background_started: AtomicU64,
+    background_published: AtomicU64,
+    by_strategy: Mutex<BTreeMap<&'static str, u64>>,
+    graph_nodes_visited: AtomicU64,
+    distance_evaluations: AtomicU64,
+    quantized_distance_evaluations: AtomicU64,
+    reranked: AtomicU64,
+    slow_queries: AtomicU64,
+    slow: Mutex<VecDeque<Value>>,
+    slow_threshold_ns: AtomicU64,
+    import_chunks: AtomicU64,
+    import_rows_skipped: AtomicU64,
+    credential_denials: AtomicU64,
+    audit_failures: AtomicU64,
+    /// f64 bits of the last sampled recall plus a presence flag.
+    ann_quality_last_recall: Mutex<Option<f64>>,
+}
+
+impl Metrics {
+    fn search(&self, strategy: &'static str, stats: &SearchStats) {
+        if let Ok(mut counts) = self.by_strategy.lock() {
+            *counts.entry(strategy).or_default() += 1;
+        }
+        self.graph_nodes_visited
+            .fetch_add(stats.graph_nodes_visited, Ordering::Relaxed);
+        self.distance_evaluations
+            .fetch_add(stats.distance_evaluations, Ordering::Relaxed);
+        self.quantized_distance_evaluations
+            .fetch_add(stats.quantized_distance_evaluations, Ordering::Relaxed);
+        self.reranked
+            .fetch_add(stats.reranked_candidates, Ordering::Relaxed);
+    }
+
+    fn built(&self, started: Instant) {
+        let ns = started.elapsed().as_nanos().min(u64::MAX as u128 - 1) as u64;
+        self.last_rebuild_ns.store(ns + 1, Ordering::Relaxed);
+    }
 }
 
 /// Validated high-entropy bearer token. Intentionally does not implement Debug.
@@ -78,8 +128,13 @@ pub struct Service {
     workers: Arc<Semaphore>,
     metrics: Arc<Metrics>,
     admin: Arc<admin::AdminState>,
-    /// Random per-service-instance ETag component; old tags fail closed after reopen.
-    etag_nonce: Arc<str>,
+    /// ETag identity: the v4 lineage (stable across restarts of the same
+    /// file family) or a random per-service nonce for v1–v3 files.
+    etag_ident: Arc<str>,
+    format_version: u32,
+    lineage: Option<u64>,
+    ops: Arc<ops::Ops>,
+    imports: Arc<Mutex<collections::Reservations>>,
 }
 
 impl Service {
@@ -94,17 +149,33 @@ impl Service {
         getrandom::fill(&mut nonce).map_err(|error| {
             std::io::Error::other(format!("operating-system randomness unavailable: {error}"))
         })?;
+        let format_version = database.format_version();
+        let lineage = database.lineage();
+        let etag_ident: Arc<str> = match lineage {
+            Some(lineage) => format!("{lineage:016x}").into(),
+            None => hex(&nonce).into(),
+        };
+        let database = Arc::new(Mutex::new(Some(database)));
+        let workers = Arc::new(Semaphore::new(MAX_IN_FLIGHT));
+        let metrics = Arc::new(Metrics::default());
+        metrics
+            .slow_threshold_ns
+            .store(500_000_000, Ordering::Relaxed);
         Ok(Self {
-            database: Arc::new(Mutex::new(Some(database))),
+            ops: Arc::new(ops::Ops::new(
+                Arc::downgrade(&database),
+                workers.clone(),
+                metrics.clone(),
+            )),
+            database,
             requests: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
-            workers: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
-            metrics: Arc::new(Metrics::default()),
+            workers,
+            metrics,
             admin: Arc::new(admin::AdminState::default()),
-            etag_nonce: nonce
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
-                .into(),
+            etag_ident,
+            format_version,
+            lineage,
+            imports: Arc::new(Mutex::new(collections::Reservations::default())),
         })
     }
 
@@ -139,10 +210,13 @@ impl Service {
         .map_err(internal)?
     }
 
-    /// Call after HTTP graceful shutdown; waits for any disconnected writer too.
+    /// Call after HTTP graceful shutdown. Stops and joins the maintenance and
+    /// backup scheduler, waits for any disconnected writer, then closes.
     pub async fn close(&self) -> crate::Result<()> {
         let database = self.database.clone();
+        let ops = self.ops.clone();
         tokio::task::spawn_blocking(move || {
+            ops.shutdown();
             let mut owner = database
                 .lock()
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -154,6 +228,14 @@ impl Service {
         .await
         .map_err(|error| std::io::Error::other(error.to_string()))?
     }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    bytes.iter().fold(String::new(), |mut text, byte| {
+        let _ = write!(text, "{byte:02x}");
+        text
+    })
 }
 
 /// Unauthenticated router for explicitly local development or in-process use.
@@ -178,9 +260,53 @@ fn configured_router(mut service: Service, token: Option<BearerToken>) -> Router
     configured_routes(service)
 }
 
+fn data_routes() -> Router<Service> {
+    Router::new()
+        .route("/v1/database", get(info))
+        .route("/v1/vectors", get(list_vectors))
+        .route(
+            "/v1/vectors/{id}",
+            get(fetch).put(put_vector).delete(delete),
+        )
+        .route("/v1/batches", post(batch))
+        .route("/v1/search", post(search))
+        .route("/v1/index/hnsw", get(index_status).post(build_index))
+        .route("/v1/index/hnsw/quality", post(quality))
+        .route(
+            "/v1/collections/{collection}/vectors",
+            get(collection_list_vectors),
+        )
+        .route(
+            "/v1/collections/{collection}/vectors/{id}",
+            get(collection_fetch)
+                .put(collection_put)
+                .delete(collection_delete),
+        )
+        .route(
+            "/v1/collections/{collection}/batches",
+            post(collection_batch),
+        )
+        .route(
+            "/v1/collections/{collection}/search",
+            post(collection_search),
+        )
+        .route(
+            "/v1/collections/{collection}/index/hnsw",
+            get(collection_index_status).post(collection_build_index),
+        )
+        .route(
+            "/v1/collections/{collection}/index/hnsw/quality",
+            post(collection_quality),
+        )
+}
+
 fn configured_routes(service: Service) -> Router {
     let observation = service.clone();
     admin::routes()
+        .merge(collections::routes())
+        .merge(ops::routes())
+        .merge(credentials::routes())
+        .merge(data_routes())
         .merge(
             Router::new()
                 .route("/health", get(|| async { Json(json!({"status": "ok"})) }))
@@ -221,13 +347,11 @@ fn configured_routes(service: Service) -> Router {
                     }),
                 )
                 .route("/ready", get(ready))
-                .route("/metrics", get(metrics))
-                .route("/v1/database", get(info))
-                .route("/v1/vectors", get(list_vectors))
-                .route("/v1/vectors/{id}", get(fetch).put(put).delete(delete))
-                .route("/v1/batches", post(batch))
-                .route("/v1/search", post(search))
-                .route("/v1/index/hnsw", get(index_status).post(build_index))
+                .route("/metrics", get(observability::metrics_route))
+                .route(
+                    "/v1/admin/diagnostics/slow-queries",
+                    get(observability::slow_queries),
+                )
                 .route(
                     "/openapi.json",
                     get(|| async {
@@ -269,6 +393,178 @@ fn dashboard_asset(content_type: &'static str, content: &'static str) -> impl In
     )
 }
 
+/// Request ID made available to handlers (slow-query log).
+#[derive(Clone)]
+struct RequestId(String);
+
+/// Error code attached to error responses so observation can count denials.
+#[derive(Clone, Copy)]
+struct ErrorCode(&'static str);
+
+fn bearer(headers: &HeaderMap) -> Option<&str> {
+    let mut values = headers.get_all(header::AUTHORIZATION).iter();
+    let first = values.next();
+    if values.next().is_some() {
+        return None;
+    }
+    first
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.split_once(' '))
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
+        .map(|(_, value)| value)
+}
+
+fn authenticate(service: &Service, headers: &HeaderMap) -> Result<Option<admin::Role>, ApiError> {
+    let value = bearer(headers);
+    {
+        let auth = service.admin.auth.lock().map_err(internal)?;
+        if auth.admin.is_none()
+            || value.is_some_and(|v| auth.admin.as_ref().is_some_and(|t| t.accepts(v)))
+        {
+            return Ok(Some(admin::Role::Admin));
+        }
+        if value.is_some_and(|v| auth.read_only.as_ref().is_some_and(|t| t.accepts(v))) {
+            return Ok(Some(admin::Role::ReadOnly));
+        }
+    }
+    match (value, &service.admin.credentials) {
+        (Some(value), Some(store)) if value.starts_with(credentials::TOKEN_PREFIX) => store
+            .authenticate(value, admin::now_ms() as u64)
+            .map(|grant| Some(admin::Role::Scoped(grant))),
+        _ => Ok(None),
+    }
+}
+
+/// Where a scoped credential's collection binding is enforced.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    /// The handler checks the collection ID and lineage under the database lock.
+    Collection,
+    /// Requires a `*` grant (database-wide data or operations).
+    All,
+    /// The handler filters its output to granted collections.
+    Filtered,
+}
+
+enum Need {
+    Any,
+    Admin,
+    Op(credentials::Op, Reach),
+}
+
+/// Scoped-credential policy keyed on the matched route template. Anything not
+/// listed is admin-only (deny-unmapped).
+fn permission(method: &Method, route: &str) -> Need {
+    use credentials::Op;
+    let index = route.starts_with("/v1/index/hnsw")
+        || route.starts_with("/v1/collections/{collection}/index/hnsw");
+    match (method.as_str(), route) {
+        ("GET" | "HEAD", "/v1/capabilities" | "/ready" | "/openapi.json") => Need::Any,
+        ("GET" | "HEAD", "/metrics" | "/v1/admin/diagnostics/slow-queries") => {
+            Need::Op(Op::Diagnostics, Reach::Filtered)
+        }
+        ("GET" | "HEAD", "/v1/collections") => Need::Op(Op::Read, Reach::Filtered),
+        ("POST", "/v1/collections") => Need::Op(Op::Collections, Reach::All),
+        ("DELETE", "/v1/collections/{collection}")
+        | ("PUT", "/v1/collections/{collection}/settings") => {
+            Need::Op(Op::Collections, Reach::Collection)
+        }
+        (
+            "GET" | "HEAD",
+            "/v1/database"
+            | "/v1/vectors"
+            | "/v1/vectors/{id}"
+            | "/v1/collections/{collection}"
+            | "/v1/collections/{collection}/vectors"
+            | "/v1/collections/{collection}/vectors/{id}"
+            | "/v1/imports/{job}",
+        ) => Need::Op(Op::Read, Reach::Collection),
+        ("PUT" | "DELETE", "/v1/vectors/{id}" | "/v1/collections/{collection}/vectors/{id}")
+        | ("POST", "/v1/batches" | "/v1/collections/{collection}/batches") => {
+            Need::Op(Op::Write, Reach::Collection)
+        }
+        ("POST", "/v1/search" | "/v1/collections/{collection}/search") => {
+            Need::Op(Op::Search, Reach::Collection)
+        }
+        (
+            "POST",
+            "/v1/collections/{collection}/imports"
+            | "/v1/imports/{job}/finish"
+            | "/v1/imports/{job}/abort",
+        )
+        | ("PUT", "/v1/imports/{job}/chunks/{chunk}") => Need::Op(Op::Import, Reach::Collection),
+        ("GET" | "HEAD", _) if index => Need::Op(Op::Read, Reach::Collection),
+        ("POST", _) if index => Need::Op(Op::Index, Reach::Collection),
+        ("GET" | "HEAD", "/v1/admin/backups" | "/v1/admin/backups/schedule")
+        | (
+            "POST",
+            "/v1/admin/backups"
+            | "/v1/admin/backups/{name}/verify"
+            | "/v1/admin/backups/{name}/drill",
+        ) => Need::Op(Op::Backup, Reach::All),
+        ("GET" | "HEAD", "/v1/admin/maintenance/auto") => Need::Op(Op::Index, Reach::All),
+        _ => Need::Admin,
+    }
+}
+
+fn forbidden_scope() -> ApiError {
+    ApiError::new(
+        StatusCode::FORBIDDEN,
+        "forbidden_scope",
+        "credential scope does not permit this operation or collection",
+    )
+}
+
+fn authorize(
+    service: &Service,
+    role: &admin::Role,
+    method: &Method,
+    route: &str,
+    path: &str,
+) -> Result<(), ApiError> {
+    match role {
+        admin::Role::Admin => Ok(()),
+        admin::Role::ReadOnly => {
+            let read = method == Method::GET || method == Method::HEAD;
+            let search = method == Method::POST
+                && (path == "/v1/search" || route == "/v1/collections/{collection}/search");
+            if path.starts_with("/v1/admin/") || !(read || search) {
+                Err(ApiError::new(
+                    StatusCode::FORBIDDEN,
+                    "read_only",
+                    "admin access required",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        admin::Role::Scoped(grant) => {
+            if service.lineage != Some(grant.lineage) {
+                return Err(forbidden_scope());
+            }
+            match permission(method, route) {
+                Need::Any => Ok(()),
+                Need::Admin => Err(forbidden_scope()),
+                Need::Op(op, reach) => {
+                    // Legacy routes address `default` (ID 0); their handlers
+                    // may not resolve a collection, so bind it here as well.
+                    let legacy = reach == Reach::Collection
+                        && !route.contains("{collection}")
+                        && !route.starts_with("/v1/imports");
+                    if !grant.allows(op)
+                        || (reach == Reach::All && !grant.all)
+                        || (legacy && !grant.covers(service.lineage, 0, "default"))
+                    {
+                        Err(forbidden_scope())
+                    } else {
+                        Ok(())
+                    }
+                }
+            }
+        }
+    }
+}
+
 async fn observe(
     State(service): State<Service>,
     mut request: axum::extract::Request,
@@ -279,7 +575,7 @@ async fn observe(
     let request_id = format!("{}-{number}", std::process::id());
     let route = request
         .extensions()
-        .get::<axum::extract::MatchedPath>()
+        .get::<MatchedPath>()
         .map_or("unmatched", |path| path.as_str())
         .to_owned();
     let method = match request.method().as_str() {
@@ -297,58 +593,71 @@ async fn observe(
             | "/dashboard/style.css"
             | "/dashboard/console-tools.js"
     );
-    let authentication = (|| -> Result<Option<admin::Role>, ApiError> {
-        let auth = service.admin.auth.lock().map_err(internal)?;
-        let mut values = request.headers().get_all(header::AUTHORIZATION).iter();
-        let first = values.next();
-        let value = if values.next().is_none() {
-            first
-                .and_then(|h| h.to_str().ok())
-                .and_then(|h| h.split_once(' '))
-                .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
-                .map(|(_, value)| value)
-        } else {
-            None
-        };
-        if auth.admin.is_none()
-            || value.is_some_and(|v| auth.admin.as_ref().is_some_and(|t| t.accepts(v)))
-        {
-            Ok(Some(admin::Role::Admin))
-        } else if value.is_some_and(|v| auth.read_only.as_ref().is_some_and(|t| t.accepts(v))) {
-            Ok(Some(admin::Role::ReadOnly))
-        } else {
-            Ok(None)
-        }
-    })();
-    let role = authentication.as_ref().ok().copied().flatten();
-    let forbidden = role == Some(admin::Role::ReadOnly)
-        && (request.uri().path().starts_with("/v1/admin/")
-            || (!matches!(method, "GET")
-                && request.method() != axum::http::Method::HEAD
-                && request.uri().path() != "/v1/search"));
-    let mut response = if let Some(error) = authentication.err().filter(|_| !public) {
-        error.into_response()
-    } else if !public && forbidden {
-        ApiError::new(StatusCode::FORBIDDEN, "read_only", "admin access required").into_response()
-    } else if public || role.is_some() {
-        if let Some(role) = role {
+    let authentication = authenticate(&service, request.headers());
+    let role = authentication.as_ref().ok().cloned().flatten();
+    request
+        .extensions_mut()
+        .insert(RequestId(request_id.clone()));
+    let mut response = if public {
+        if let Some(role) = role.clone() {
             request.extensions_mut().insert(role);
         }
         next.run(request).await
     } else {
+        match &authentication {
+            Err(error) => error.clone().into_response(),
+            Ok(None) => ApiError::new(
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "valid bearer token required",
+            )
+            .into_response(),
+            Ok(Some(role)) => {
+                match authorize(
+                    &service,
+                    role,
+                    request.method(),
+                    &route,
+                    request.uri().path(),
+                ) {
+                    Err(error) => error.into_response(),
+                    Ok(()) => {
+                        request.extensions_mut().insert(role.clone());
+                        next.run(request).await
+                    }
+                }
+            }
+        }
+    };
+    if response.status() == StatusCode::UNAUTHORIZED {
         service.metrics.unauthorized.fetch_add(1, Ordering::Relaxed);
-        let mut response = ApiError::new(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "valid bearer token required",
-        )
-        .into_response();
         response.headers_mut().insert(
             header::WWW_AUTHENTICATE,
             axum::http::HeaderValue::from_static("Bearer"),
         );
-        response
-    };
+    }
+    let code = response.extensions().get::<ErrorCode>().map(|code| code.0);
+    if let (Some(admin::Role::Scoped(grant)), Some("forbidden_scope")) = (&role, code) {
+        service
+            .metrics
+            .credential_denials
+            .fetch_add(1, Ordering::Relaxed);
+        if let Some(log) = &service.admin.audit_log
+            && log.should_record_denial(&grant.id, &route)
+            && log
+                .append(
+                    json!({"event":"credential_denied","credential_id":grant.id,
+                    "method":method,"route":route,"request_id":request_id}),
+                    false,
+                )
+                .is_err()
+        {
+            service
+                .metrics
+                .audit_failures
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
     response.headers_mut().insert(
         "x-request-id",
         request_id.parse().expect("generated ASCII ID"),
@@ -365,44 +674,23 @@ async fn observe(
     if response.status().is_client_error() || response.status().is_server_error() {
         service.metrics.failures.fetch_add(1, Ordering::Relaxed);
     }
+    let credential = match &role {
+        Some(admin::Role::Scoped(grant)) => Some(grant.id.clone()),
+        _ => None,
+    };
     eprintln!(
         "{}",
         json!({"event":"request", "request_id":request_id, "method":method,
-        "route":route, "status":response.status().as_u16(), "duration_ns":elapsed})
+        "route":route, "status":response.status().as_u16(), "duration_ns":elapsed,
+        "credential_id":credential})
     );
     service.admin.record(
         json!({"request_id":request_id,"method":method,"route":route,
-        "status":response.status().as_u16(),"role":role.map(admin::Role::name),
+        "status":response.status().as_u16(),"role":role.as_ref().map(admin::Role::name),
+        "credential_id":credential,
         "duration_ns":elapsed,"timestamp_unix_ms":admin::now_ms()}),
     );
     response
-}
-
-async fn metrics(State(service): State<Service>) -> Result<Json<Value>, ApiError> {
-    let metrics = service.metrics.clone();
-    service.run(move |db| {
-        let healthy = !db.poisoned;
-        let database_bytes = if healthy {
-            Some(db.file.0.metadata().map_err(crate::Error::from)?.len())
-        } else {
-            None
-        };
-        let (buffered_ids, buffer_bytes) = db.index.as_ref().map_or((0,0), |index| index.buffer_usage());
-        Ok(Json(json!({
-            "requests_total":metrics.requests.load(Ordering::Relaxed),
-            "request_failures_total":metrics.failures.load(Ordering::Relaxed),
-            "unauthorized_total":metrics.unauthorized.load(Ordering::Relaxed),
-            "request_duration_seconds_total":metrics.duration_ns.load(Ordering::Relaxed) as f64 / 1e9,
-            "commit_failures_total":metrics.commit_failures.load(Ordering::Relaxed),
-            "hnsw_rebuilds_total":metrics.rebuilds.load(Ordering::Relaxed),
-            "hnsw_buffered_ids":buffered_ids,
-            "hnsw_buffer_vector_bytes":buffer_bytes,
-            "hnsw_rebuild_and_search_seconds_total":metrics.rebuild_search_ns.load(Ordering::Relaxed) as f64 / 1e9,
-            "database_healthy":healthy,
-            "database_bytes":database_bytes,
-            "live_records":healthy.then(|| db.len())
-        })))
-    }).await
 }
 
 async fn admission(
@@ -421,7 +709,7 @@ async fn admission(
     next.run(request).await
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ApiError {
     status: StatusCode,
     code: &'static str,
@@ -440,11 +728,13 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (
+        let mut response = (
             self.status,
             Json(json!({"error": {"code": self.code, "message": self.message}})),
         )
-            .into_response()
+            .into_response();
+        response.extensions_mut().insert(ErrorCode(self.code));
+        response
     }
 }
 
@@ -463,6 +753,10 @@ fn unavailable() -> ApiError {
         "unavailable",
         "database unavailable",
     )
+}
+
+fn unprocessable(message: impl Into<String>) -> ApiError {
+    ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_input", message)
 }
 
 impl From<Error> for ApiError {
@@ -499,6 +793,53 @@ impl From<Error> for ApiError {
             Error::BatchRequiresUpgrade | Error::MetadataRequiresUpgrade => {
                 Self::new(StatusCode::CONFLICT, "upgrade_required", error.to_string())
             }
+            Error::CollectionNotFound => Self::new(
+                StatusCode::NOT_FOUND,
+                "collection_not_found",
+                error.to_string(),
+            ),
+            Error::ImportNotFound => {
+                Self::new(StatusCode::NOT_FOUND, "import_not_found", error.to_string())
+            }
+            Error::CollectionExists => {
+                Self::new(StatusCode::CONFLICT, "collection_exists", error.to_string())
+            }
+            Error::TooManyCollections => {
+                Self::new(StatusCode::CONFLICT, "collection_limit", error.to_string())
+            }
+            Error::CollectionNotEmpty => Self::new(
+                StatusCode::CONFLICT,
+                "collection_not_empty",
+                error.to_string(),
+            ),
+            Error::DefaultCollectionImmutable => Self::new(
+                StatusCode::CONFLICT,
+                "default_collection_immutable",
+                error.to_string(),
+            ),
+            Error::CollectionsRequireUpgrade | Error::ImportsRequireUpgrade => Self::new(
+                StatusCode::CONFLICT,
+                "requires_format_v4",
+                error.to_string(),
+            ),
+            Error::ImportConflict(_) => {
+                Self::new(StatusCode::CONFLICT, "import_conflict", error.to_string())
+            }
+            Error::TooManyImports => {
+                Self::new(StatusCode::CONFLICT, "import_limit", error.to_string())
+            }
+            Error::RevisionMismatch { .. } => Self::new(
+                StatusCode::PRECONDITION_FAILED,
+                "precondition_failed",
+                error.to_string(),
+            ),
+            Error::InvalidCollectionName
+            | Error::InvalidCollectionSettings(_)
+            | Error::InvalidQuery(_) => Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_input",
+                error.to_string(),
+            ),
             Error::CommitIndeterminate(_) => {
                 eprintln!("{}", json!({"event":"commit_indeterminate"}));
                 Self::new(
@@ -549,6 +890,102 @@ fn path(input: Result<Path<String>, PathRejection>) -> Result<u64, ApiError> {
     id(&text)
 }
 
+/// Parses an optional JSON object body: empty means `T::default()`.
+fn optional<T: serde::de::DeserializeOwned + Default>(bytes: &[u8]) -> Result<T, ApiError> {
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(T::default());
+    }
+    let value: Value = serde_json::from_slice(bytes).map_err(|error| {
+        ApiError::new(StatusCode::BAD_REQUEST, "invalid_json", error.to_string())
+    })?;
+    if !value.is_object() {
+        return Err(unprocessable("request body must be a JSON object"));
+    }
+    serde_json::from_value(value).map_err(|error| unprocessable(error.to_string()))
+}
+
+/// Which collection a data route addresses. Legacy routes always address
+/// `default` with legacy hard defaults; named routes use collection settings.
+#[derive(Clone)]
+enum Target {
+    Legacy,
+    Named(String),
+}
+
+impl Target {
+    fn name(&self) -> &str {
+        match self {
+            Self::Legacy => "default",
+            Self::Named(name) => name,
+        }
+    }
+
+    fn legacy(&self) -> bool {
+        matches!(self, Self::Legacy)
+    }
+}
+
+fn collection_path(input: Result<Path<String>, PathRejection>) -> Result<Target, ApiError> {
+    let Path(name) = input.map_err(|error| {
+        ApiError::new(StatusCode::BAD_REQUEST, "invalid_path", error.body_text())
+    })?;
+    Ok(Target::Named(name))
+}
+
+fn record_path(
+    input: Result<Path<(String, String)>, PathRejection>,
+) -> Result<(Target, u64), ApiError> {
+    let Path((name, text)) = input.map_err(|error| {
+        ApiError::new(StatusCode::BAD_REQUEST, "invalid_path", error.body_text())
+    })?;
+    Ok((Target::Named(name), id(&text)?))
+}
+
+/// Resolves a target under the database lock and enforces scoped bindings:
+/// collection ID and database lineage must both match the grant. The name
+/// is checked first so out-of-scope callers cannot probe existence.
+fn open(db: &Database, role: &admin::Role, target: &Target) -> Result<u16, ApiError> {
+    db.ensure_healthy()?;
+    let name = target.name();
+    if let admin::Role::Scoped(grant) = role
+        && !grant.names(name)
+    {
+        return Err(forbidden_scope());
+    }
+    let collection = db.resolve(name)?;
+    if let admin::Role::Scoped(grant) = role
+        && !grant.covers(db.lineage(), collection, name)
+    {
+        return Err(forbidden_scope());
+    }
+    Ok(collection)
+}
+
+/// Identity defaults: hard legacy defaults, or the collection's settings.
+fn identity(
+    db: &Database,
+    collection: u16,
+    target: &Target,
+) -> (DistanceMetric, HnswConfig, AnnOptions) {
+    if target.legacy() {
+        (
+            DistanceMetric::default(),
+            HnswConfig::default(),
+            AnnOptions::default(),
+        )
+    } else {
+        let settings = &db.state(collection).settings;
+        (
+            settings.metric,
+            settings.hnsw,
+            AnnOptions {
+                quantization: settings.quantization,
+                rerank_multiplier: settings.rerank_multiplier,
+            },
+        )
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ListVectors {
@@ -558,6 +995,25 @@ struct ListVectors {
 
 async fn list_vectors(
     State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
+    query: Result<Query<ListVectors>, QueryRejection>,
+) -> Result<Json<Value>, ApiError> {
+    list_in(service, role, Target::Legacy, query).await
+}
+
+async fn collection_list_vectors(
+    State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
+    target: Result<Path<String>, PathRejection>,
+    query: Result<Query<ListVectors>, QueryRejection>,
+) -> Result<Json<Value>, ApiError> {
+    list_in(service, role, collection_path(target)?, query).await
+}
+
+async fn list_in(
+    service: Service,
+    role: admin::Role,
+    target: Target,
     query: Result<Query<ListVectors>, QueryRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let Query(query) = query.map_err(|error| {
@@ -566,17 +1022,14 @@ async fn list_vectors(
     let after = query.after.as_deref().map(id).transpose()?;
     let limit = query.limit.unwrap_or(25);
     if !(1..=100).contains(&limit) {
-        return Err(ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "invalid_input",
-            "limit must be 1..100",
-        ));
+        return Err(unprocessable("limit must be 1..100"));
     }
     service
         .run(move |db| {
-            db.ensure_healthy()?;
+            let collection = open(db, &role, &target)?;
             use std::ops::Bound::{Excluded, Unbounded};
             let mut records = db
+                .state(collection)
                 .records
                 .range((after.map_or(Unbounded, Excluded), Unbounded))
                 .peekable();
@@ -608,41 +1061,28 @@ async fn list_vectors(
         .await
 }
 
-async fn index_status(State(service): State<Service>) -> Result<Json<Value>, ApiError> {
-    service.run(|db| {
-        db.ensure_healthy()?;
-        let config = db.index.as_ref().map_or_else(crate::HnswConfig::default, |i| i.config);
-        let ready = db.index.as_ref().is_some_and(|index| index.config == config);
-        let (buffered_ids, buffer_vector_bytes) = db.index.as_ref().map_or((0, 0), |index| index.buffer_usage());
-        Ok(Json(json!({
-            "ready":ready, "buffered_ids":buffered_ids, "buffer_vector_bytes":buffer_vector_bytes,
-            "metric":db.index.as_ref().map(|index| index.metric),
-            "max_buffer_ids":crate::MAX_HNSW_BUFFER_IDS,
-            "max_buffer_vector_bytes":crate::MAX_HNSW_BUFFER_VECTOR_BYTES,
-            "config":{"m":config.m, "ef_construction":config.ef_construction, "seed":config.seed},
-        })))
-    }).await
-}
-
 fn payload(text: &str) -> Result<Vec<u8>, ApiError> {
     if text.len() > MAX_PAYLOAD_BYTES.div_ceil(3) * 4 {
-        return Err(ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "invalid_input",
-            format!("payload exceeds {MAX_PAYLOAD_BYTES} decoded bytes"),
-        ));
+        return Err(unprocessable(format!(
+            "payload exceeds {MAX_PAYLOAD_BYTES} decoded bytes"
+        )));
     }
-    let bytes = BASE64_STANDARD.decode(text).map_err(|_| {
+    let bytes = decode_payload(text)?;
+    if bytes.len() > MAX_PAYLOAD_BYTES {
+        return Err(Error::PayloadTooLarge(bytes.len()).into());
+    }
+    Ok(bytes)
+}
+
+/// Decodes without the size check so imports can report oversized rows.
+fn decode_payload(text: &str) -> Result<Vec<u8>, ApiError> {
+    BASE64_STANDARD.decode(text).map_err(|_| {
         ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_payload",
             "payload_base64 must be canonical padded standard base64",
         )
-    })?;
-    if bytes.len() > MAX_PAYLOAD_BYTES {
-        return Err(Error::PayloadTooLarge(bytes.len()).into());
-    }
-    Ok(bytes)
+    })
 }
 
 async fn ready(State(service): State<Service>) -> Result<Json<Value>, ApiError> {
@@ -654,10 +1094,13 @@ async fn ready(State(service): State<Service>) -> Result<Json<Value>, ApiError> 
         .await
 }
 
-async fn info(State(service): State<Service>) -> Result<Json<Value>, ApiError> {
+async fn info(
+    State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
+) -> Result<Json<Value>, ApiError> {
     service
-        .run(|db| {
-            db.get(0)?;
+        .run(move |db| {
+            open(db, &role, &Target::Legacy)?;
             Ok(Json(json!({
                 "dimensions": db.dimensions(),
                 "format_version": db.format_version(),
@@ -667,10 +1110,35 @@ async fn info(State(service): State<Service>) -> Result<Json<Value>, ApiError> {
         .await
 }
 
-/// Strong opaque tag: service nonce, database-wide commit sequence and record ID.
-/// Any commit invalidates every tag; reopening the service invalidates all tags.
-fn etag(nonce: &str, db: &Database, id: u64) -> String {
-    format!("\"{nonce}-{}-{id}\"", db.sequence)
+/// Strong per-record tag: `r2-<ident>-<collection>-<id>-<revision>-<sha256>`.
+/// The ident is the v4 lineage (stable across restarts) or a per-process
+/// nonce (v1–v3). The SHA-256 covers the full record content, so raw file
+/// clones that diverge fail closed. Unrelated writes never invalidate it.
+fn etag(ident: &str, collection: u16, id: u64, revision: u64, record: &Record) -> String {
+    let digest = Sha256::digest(crate::format::extended_body(
+        &record.vector,
+        &record.payload,
+        &record.metadata,
+    ));
+    format!(
+        "\"r2-{ident}-{collection}-{id}-{revision}-{}\"",
+        hex(&digest)
+    )
+}
+
+fn current_etag(
+    db: &Database,
+    ident: &str,
+    collection: u16,
+    id: u64,
+) -> Result<Option<(String, u64)>, ApiError> {
+    match (db.get_in(collection, id)?, db.revision_in(collection, id)?) {
+        (Some(record), Some(revision)) => Ok(Some((
+            etag(ident, collection, id, revision, record),
+            revision,
+        ))),
+        _ => Ok(None),
+    }
 }
 
 /// Accepts absent If-Match or exactly one strong entity tag; nothing else.
@@ -703,44 +1171,71 @@ fn if_match(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
     Ok(Some(text.to_owned()))
 }
 
-/// Must run inside `Service::run`, under the same owner lock as the write.
-fn check_precondition(
+/// Must run under the same owner lock as the write; the returned revision
+/// makes the write itself a compare-and-set.
+fn precondition(
     db: &Database,
-    nonce: &str,
+    ident: &str,
+    collection: u16,
     id: u64,
     expected: Option<&str>,
-) -> Result<(), ApiError> {
+) -> Result<Expected, ApiError> {
     let Some(expected) = expected else {
-        return Ok(());
+        return Ok(Expected::Any);
     };
-    if db.get(id)?.is_none() || etag(nonce, db, id) != expected {
-        return Err(ApiError::new(
+    match current_etag(db, ident, collection, id)? {
+        Some((tag, revision)) if tag == expected => Ok(Expected::Revision(revision)),
+        _ => Err(ApiError::new(
             StatusCode::PRECONDITION_FAILED,
             "precondition_failed",
-            "record changed, was removed, or the tag is from another service instance; GET it again",
-        ));
+            "record changed, was removed, or the tag is from another database or service instance; GET it again",
+        )),
     }
-    Ok(())
 }
 
 async fn fetch(
     State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
     input: Result<Path<String>, PathRejection>,
-) -> Result<impl IntoResponse, ApiError> {
-    let id = path(input)?;
-    let nonce = service.etag_nonce.clone();
+) -> Result<Response, ApiError> {
+    fetch_in(service, role, Target::Legacy, path(input)?).await
+}
+
+async fn collection_fetch(
+    State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
+    input: Result<Path<(String, String)>, PathRejection>,
+) -> Result<Response, ApiError> {
+    let (target, id) = record_path(input)?;
+    fetch_in(service, role, target, id).await
+}
+
+async fn fetch_in(
+    service: Service,
+    role: admin::Role,
+    target: Target,
+    id: u64,
+) -> Result<Response, ApiError> {
+    let ident = service.etag_ident.clone();
     service
         .run(move |db| {
-            let record = db.get(id)?.ok_or_else(|| {
-                ApiError::new(StatusCode::NOT_FOUND, "not_found", "vector not found")
-            })?;
+            let collection = open(db, &role, &target)?;
+            let not_found =
+                || ApiError::new(StatusCode::NOT_FOUND, "not_found", "vector not found");
+            let record = db.get_in(collection, id)?.ok_or_else(not_found)?;
+            let revision = db.revision_in(collection, id)?.ok_or_else(not_found)?;
             let body = Json(json!({
                 "id": id.to_string(),
                 "vector": record.vector,
                 "payload_base64": BASE64_STANDARD.encode(&record.payload),
-                "metadata":record.metadata,
+                "metadata": record.metadata,
+                "revision": revision.to_string(),
             }));
-            Ok(([(header::ETAG, etag(&nonce, db, id))], body))
+            Ok((
+                [(header::ETAG, etag(&ident, collection, id, revision, record))],
+                body,
+            )
+                .into_response())
         })
         .await
 }
@@ -755,38 +1250,105 @@ struct Put {
     metadata: crate::Metadata,
 }
 
-async fn put(
+async fn put_vector(
     State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
     path_input: Result<Path<String>, PathRejection>,
     headers: HeaderMap,
     input: Result<Json<Put>, JsonRejection>,
-) -> Result<StatusCode, ApiError> {
-    let id = path(path_input)?;
+) -> Result<Response, ApiError> {
+    put_in(
+        service,
+        role,
+        Target::Legacy,
+        path(path_input)?,
+        headers,
+        input,
+    )
+    .await
+}
+
+async fn collection_put(
+    State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
+    path_input: Result<Path<(String, String)>, PathRejection>,
+    headers: HeaderMap,
+    input: Result<Json<Put>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let (target, id) = record_path(path_input)?;
+    put_in(service, role, target, id, headers, input).await
+}
+
+async fn put_in(
+    service: Service,
+    role: admin::Role,
+    target: Target,
+    id: u64,
+    headers: HeaderMap,
+    input: Result<Json<Put>, JsonRejection>,
+) -> Result<Response, ApiError> {
     let expected = if_match(&headers)?;
     let input = body(input)?;
     let payload = payload(&input.payload_base64)?;
-    let nonce = service.etag_nonce.clone();
+    let ident = service.etag_ident.clone();
     service
         .run(move |db| {
-            check_precondition(db, &nonce, id, expected.as_deref())?;
-            db.put_with_metadata(id, &input.vector, &payload, &input.metadata)?;
-            Ok(StatusCode::NO_CONTENT)
+            let collection = open(db, &role, &target)?;
+            let expected = precondition(db, &ident, collection, id, expected.as_deref())?;
+            db.put_in(
+                collection,
+                id,
+                &input.vector,
+                &payload,
+                &input.metadata,
+                expected,
+            )?;
+            let mut response = StatusCode::NO_CONTENT.into_response();
+            if let Some((tag, _)) = current_etag(db, &ident, collection, id)? {
+                response
+                    .headers_mut()
+                    .insert(header::ETAG, tag.parse().map_err(internal)?);
+            }
+            Ok(response)
         })
         .await
 }
 
 async fn delete(
     State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
     input: Result<Path<String>, PathRejection>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    let id = path(input)?;
+    delete_in(service, role, Target::Legacy, path(input)?, headers).await
+}
+
+async fn collection_delete(
+    State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
+    input: Result<Path<(String, String)>, PathRejection>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let (target, id) = record_path(input)?;
+    delete_in(service, role, target, id, headers).await
+}
+
+async fn delete_in(
+    service: Service,
+    role: admin::Role,
+    target: Target,
+    id: u64,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
     let expected = if_match(&headers)?;
-    let nonce = service.etag_nonce.clone();
+    let ident = service.etag_ident.clone();
     service
         .run(move |db| {
-            check_precondition(db, &nonce, id, expected.as_deref())?;
-            Ok(Json(json!({"deleted": db.delete(id)?})))
+            let collection = open(db, &role, &target)?;
+            let expected = precondition(db, &ident, collection, id, expected.as_deref())?;
+            Ok(Json(
+                json!({"deleted": db.delete_in(collection, id, expected)?}),
+            ))
         })
         .await
 }
@@ -807,22 +1369,13 @@ enum Operation {
     },
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Batch {
-    operations: Vec<Operation>,
-}
-
-async fn batch(
-    State(service): State<Service>,
-    input: Result<Json<Batch>, JsonRejection>,
-) -> Result<StatusCode, ApiError> {
-    let input = body(input)?;
-    if input.operations.len() > MAX_BATCH_OPERATIONS {
+/// Converts wire operations. `checked` applies the payload size limit up
+/// front (batches); imports leave it to per-row validation.
+fn mutations(operations: Vec<Operation>, checked: bool) -> Result<Vec<Mutation>, ApiError> {
+    if operations.len() > MAX_BATCH_OPERATIONS {
         return Err(Error::BatchTooLarge.into());
     }
-    let operations = input
-        .operations
+    operations
         .into_iter()
         .map(|operation| match operation {
             Operation::Put {
@@ -832,7 +1385,11 @@ async fn batch(
                 metadata,
             } => {
                 let id = id(&text)?;
-                let payload = payload(&payload_base64)?;
+                let payload = if checked {
+                    payload(&payload_base64)?
+                } else {
+                    decode_payload(&payload_base64)?
+                };
                 if metadata.is_empty() {
                     Ok(Mutation::Put {
                         id,
@@ -850,174 +1407,582 @@ async fn batch(
             }
             Operation::Delete { id: text } => Ok(Mutation::Delete { id: id(&text)? }),
         })
-        .collect::<Result<Vec<_>, ApiError>>()?;
+        .collect()
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Batch {
+    operations: Vec<Operation>,
+}
+
+async fn batch(
+    State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
+    input: Result<Json<Batch>, JsonRejection>,
+) -> Result<StatusCode, ApiError> {
+    batch_in(service, role, Target::Legacy, input).await
+}
+
+async fn collection_batch(
+    State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
+    target: Result<Path<String>, PathRejection>,
+    input: Result<Json<Batch>, JsonRejection>,
+) -> Result<StatusCode, ApiError> {
+    batch_in(service, role, collection_path(target)?, input).await
+}
+
+async fn batch_in(
+    service: Service,
+    role: admin::Role,
+    target: Target,
+    input: Result<Json<Batch>, JsonRejection>,
+) -> Result<StatusCode, ApiError> {
+    let operations = mutations(body(input)?.operations, true)?;
     service
         .run(move |db| {
-            db.write_batch(&operations)?;
+            let collection = open(db, &role, &target)?;
+            db.write_batch_in(collection, &operations)?;
             Ok(StatusCode::NO_CONTENT)
         })
         .await
 }
 
-#[derive(Clone, Copy, Default, Deserialize)]
+/// Parsed from a string so `null`/unknown names are 422 data errors, as before.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "String")]
 enum SearchMode {
     #[default]
     Exact,
     Approximate,
     ApproximateReady,
+    Auto,
+    Hybrid,
 }
 
 impl TryFrom<String> for SearchMode {
     type Error = &'static str;
 
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        match value.as_str() {
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        Ok(match text.as_str() {
+            "exact" => Self::Exact,
+            "approximate" => Self::Approximate,
+            "approximate_ready" => Self::ApproximateReady,
+            "auto" => Self::Auto,
+            "hybrid" => Self::Hybrid,
+            _ => return Err("mode must be exact, approximate, approximate_ready, auto or hybrid"),
+        })
+    }
+}
+
+impl SearchMode {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::Approximate => "approximate",
+            Self::ApproximateReady => "approximate_ready",
+            Self::Auto => "auto",
+            Self::Hybrid => "hybrid",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
+enum VectorLegName {
+    Exact,
+    ApproximateReady,
+}
+
+impl TryFrom<String> for VectorLegName {
+    type Error = &'static str;
+
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        match text.as_str() {
             "exact" => Ok(Self::Exact),
-            "approximate" => Ok(Self::Approximate),
             "approximate_ready" => Ok(Self::ApproximateReady),
-            _ => Err("mode must be exact, approximate or approximate_ready"),
+            _ => Err("vector_leg must be exact or approximate_ready"),
         }
     }
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Search {
-    vector: Vec<f32>,
-    k: usize,
-    #[serde(default)]
-    mode: SearchMode,
-    #[serde(default)]
-    metric: crate::DistanceMetric,
-    #[serde(default)]
-    config: admin::IndexConfig,
-    ef_search: Option<usize>,
-    filter: Option<Vec<crate::Condition>>,
-}
-
-async fn search(
-    State(service): State<Service>,
-    axum::Extension(role): axum::Extension<admin::Role>,
-    input: Result<Json<Search>, JsonRejection>,
-) -> Result<Json<Value>, ApiError> {
-    let input = body(input)?;
-    if role == admin::Role::ReadOnly && matches!(input.mode, SearchMode::Approximate) {
-        return Err(ApiError::new(
-            StatusCode::FORBIDDEN,
-            "read_only",
-            "read-only searches must use exact or approximate_ready; lazy builds require admin access",
-        ));
-    }
-    if input.k > MAX_SEARCH_K {
-        return Err(ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "invalid_input",
-            format!("k must be at most {MAX_SEARCH_K}"),
-        ));
-    }
-    if matches!(input.mode, SearchMode::Exact) && input.ef_search.is_some() {
-        return Err(ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "invalid_input",
-            "ef_search is only valid in approximate mode",
-        ));
-    }
-    if !matches!(input.mode, SearchMode::Exact)
-        && input.metric == crate::DistanceMetric::InnerProduct
-    {
-        return Err(ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "invalid_input",
-            "approximate search supports squared_l2 and cosine, not inner_product",
-        ));
-    }
-    let metrics = service.metrics.clone();
-    service
-        .run(move |db| {
-            let config = input.config.validated()?;
-            let rebuilding = matches!(input.mode, SearchMode::Approximate)
-                && input.k > 0
-                && !db.is_empty()
-                && db
-                    .index
-                    .as_ref()
-                    .is_none_or(|index| index.metric != input.metric || index.config != config);
-            let started = Instant::now();
-            let hits = match input.mode {
-                SearchMode::Exact => db.search_filtered_with_metric(
-                    &input.vector,
-                    input.k,
-                    input.filter.as_deref().unwrap_or(&[]),
-                    input.metric,
-                )?,
-                SearchMode::Approximate => db.search_approximate_filtered_with_metric(
-                    &input.vector,
-                    input.k,
-                    input.ef_search.unwrap_or(100.max(input.k.min(db.len()))),
-                    config,
-                    input.filter.as_deref().unwrap_or(&[]),
-                    input.metric,
-                )?,
-                SearchMode::ApproximateReady => db.search_approximate_ready_filtered_with_metric(
-                    &input.vector,
-                    input.k,
-                    input.ef_search.unwrap_or(100.max(input.k.min(db.len()))),
-                    config,
-                    input.filter.as_deref().unwrap_or(&[]),
-                    input.metric,
-                )?,
-            };
-            if rebuilding && db.index.is_some() {
-                metrics.rebuilds.fetch_add(1, Ordering::Relaxed);
-                metrics.rebuild_search_ns.fetch_add(
-                    started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-                    Ordering::Relaxed,
-                );
-            }
-            let hits = hits
-                .into_iter()
-                .map(|hit| json!({"id": hit.id.to_string(), "distance": hit.distance}))
-                .collect::<Vec<_>>();
-            Ok(Json(json!({"hits": hits})))
-        })
-        .await
+struct Fusion {
+    candidates: Option<usize>,
+    rrf_k: Option<u32>,
+    vector_weight: Option<f64>,
+    text_weight: Option<f64>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct BuildIndex {
+struct Search {
+    vector: Option<Vec<f32>>,
+    k: usize,
     #[serde(default)]
-    metric: crate::DistanceMetric,
+    mode: SearchMode,
+    metric: Option<DistanceMetric>,
+    config: Option<admin::IndexConfig>,
+    ef_search: Option<usize>,
+    filter: Option<Vec<crate::Condition>>,
+    quantization: Option<collections::QuantizationName>,
+    rerank_multiplier: Option<u8>,
+    text: Option<String>,
+    fusion: Option<Fusion>,
+    vector_leg: Option<VectorLegName>,
     #[serde(default)]
-    config: admin::IndexConfig,
+    explain: bool,
+}
+
+impl Search {
+    /// Request-shape rules that do not depend on database state.
+    fn validate(&self, role: &admin::Role) -> Result<(), ApiError> {
+        let hybrid = self.mode == SearchMode::Hybrid;
+        if self.mode == SearchMode::Approximate {
+            match role {
+                admin::Role::ReadOnly => {
+                    return Err(ApiError::new(
+                        StatusCode::FORBIDDEN,
+                        "read_only",
+                        "read-only searches must use exact, auto, hybrid or approximate_ready; lazy builds require admin access",
+                    ));
+                }
+                admin::Role::Scoped(grant) if !grant.allows(credentials::Op::SearchBuild) => {
+                    return Err(forbidden_scope());
+                }
+                _ => {}
+            }
+        }
+        if self.k > MAX_SEARCH_K {
+            return Err(unprocessable(format!("k must be at most {MAX_SEARCH_K}")));
+        }
+        if !hybrid && (self.text.is_some() || self.fusion.is_some() || self.vector_leg.is_some()) {
+            return Err(unprocessable(
+                "text, fusion and vector_leg are only valid in hybrid mode",
+            ));
+        }
+        if !hybrid && self.vector.is_none() {
+            return Err(unprocessable("vector is required"));
+        }
+        let exact_vector = match self.mode {
+            SearchMode::Exact => true,
+            SearchMode::Hybrid => self.vector_leg != Some(VectorLegName::ApproximateReady),
+            _ => false,
+        };
+        if exact_vector && self.ef_search.is_some() {
+            return Err(unprocessable(
+                "ef_search is only valid with an approximate vector strategy",
+            ));
+        }
+        if exact_vector && (self.quantization.is_some() || self.rerank_multiplier.is_some()) {
+            return Err(unprocessable(
+                "quantization and rerank_multiplier are only valid with an index",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn stats_json(stats: &SearchStats) -> Value {
+    json!({
+        "records_scanned": stats.records_scanned,
+        "distance_evaluations": stats.distance_evaluations,
+        "quantized_distance_evaluations": stats.quantized_distance_evaluations,
+        "graph_nodes_visited": stats.graph_nodes_visited,
+        "buffered_records_merged": stats.buffered_records_merged,
+        "reranked_candidates": stats.reranked_candidates,
+        "index_candidates": stats.index_candidates,
+    })
+}
+
+fn plan_json(plan: &crate::QueryPlan) -> Value {
+    json!({
+        "strategy": plan.strategy.name(),
+        "estimated_candidates": plan.estimated_candidates,
+        "live_records": plan.live_records,
+        "index_field": plan.index_field,
+        "reason": plan.reason,
+    })
+}
+
+async fn search(
+    State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
+    Extension(request): Extension<RequestId>,
+    input: Result<Json<Search>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    search_in(service, role, request, Target::Legacy, input).await
+}
+
+async fn collection_search(
+    State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
+    Extension(request): Extension<RequestId>,
+    target: Result<Path<String>, PathRejection>,
+    input: Result<Json<Search>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    search_in(service, role, request, collection_path(target)?, input).await
+}
+
+struct Executed {
+    hits: Vec<Value>,
+    stats: SearchStats,
+    plan: Option<crate::QueryPlan>,
+    ef_search: Option<usize>,
+}
+
+fn execute(
+    db: &mut Database,
+    collection: u16,
+    target: &Target,
+    input: &Search,
+    metrics: &Metrics,
+) -> Result<Executed, ApiError> {
+    let (metric, config, options) = identity(db, collection, target);
+    let metric = input.metric.unwrap_or(metric);
+    let config = match input.config {
+        Some(config) => config.validated()?,
+        None => config,
+    };
+    let options = AnnOptions {
+        quantization: input
+            .quantization
+            .map_or(options.quantization, |name| name.0),
+        rerank_multiplier: input.rerank_multiplier.unwrap_or(options.rerank_multiplier),
+    };
+    if matches!(
+        input.mode,
+        SearchMode::Approximate | SearchMode::ApproximateReady
+    ) && metric == DistanceMetric::InnerProduct
+    {
+        return Err(unprocessable(
+            "approximate search supports squared_l2 and cosine, not inner_product",
+        ));
+    }
+    let live = db.state(collection).records.len();
+    let filter = input.filter.as_deref().unwrap_or(&[]);
+    let vector = input.vector.as_deref().unwrap_or(&[]);
+    let default_ef = 100.max(input.k.min(live));
+    let mut stats = SearchStats::default();
+    let distances = |hits: Vec<crate::SearchHit>| {
+        hits.into_iter()
+            .map(|hit| json!({"id": hit.id.to_string(), "distance": hit.distance}))
+            .collect::<Vec<_>>()
+    };
+    Ok(match input.mode {
+        SearchMode::Exact => Executed {
+            hits: distances(db.search_in(collection, vector, input.k, filter, metric, &mut stats)?),
+            stats,
+            plan: None,
+            ef_search: None,
+        },
+        SearchMode::Approximate | SearchMode::ApproximateReady => {
+            let ef = input.ef_search.unwrap_or(default_ef);
+            if input.mode == SearchMode::Approximate {
+                db.validate_hnsw_query(collection, vector, input.k, ef, config, filter, metric)?;
+                let stale =
+                    input.k > 0
+                        && live > 0
+                        && db.state(collection).index.as_ref().is_none_or(|index| {
+                            !index.ready_for(config, metric, options.quantization)
+                        });
+                if stale {
+                    let started = Instant::now();
+                    db.build_hnsw_with_options_in(collection, config, metric, options)?;
+                    metrics.rebuilds.fetch_add(1, Ordering::Relaxed);
+                    metrics.built(started);
+                    metrics.rebuild_search_ns.fetch_add(
+                        started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                        Ordering::Relaxed,
+                    );
+                }
+            }
+            Executed {
+                hits: distances(db.search_ready_with_options_in(
+                    collection, vector, input.k, ef, config, options, filter, metric, &mut stats,
+                )?),
+                stats,
+                plan: None,
+                ef_search: Some(ef),
+            }
+        }
+        SearchMode::Auto => {
+            let ef = input.ef_search.unwrap_or(default_ef);
+            let planned = CollectionRef {
+                db: &*db,
+                id: collection,
+            }
+            .search_auto(vector, input.k, filter, metric, config, options, ef)?;
+            Executed {
+                hits: distances(planned.hits),
+                stats: planned.stats,
+                plan: Some(planned.plan),
+                ef_search: Some(ef),
+            }
+        }
+        SearchMode::Hybrid => {
+            let fusion = input.fusion.as_ref();
+            let defaults = crate::hybrid::FusionOptions::default();
+            let fusion = crate::hybrid::FusionOptions {
+                candidates: fusion.and_then(|f| f.candidates),
+                rrf_k: fusion.and_then(|f| f.rrf_k).unwrap_or(defaults.rrf_k),
+                vector_weight: fusion
+                    .and_then(|f| f.vector_weight)
+                    .unwrap_or(defaults.vector_weight),
+                text_weight: fusion
+                    .and_then(|f| f.text_weight)
+                    .unwrap_or(defaults.text_weight),
+            };
+            let candidates = fusion.candidates.unwrap_or(input.k.max(50));
+            let (vector_leg, ef_search) = match input.vector_leg {
+                Some(VectorLegName::ApproximateReady) => {
+                    let ef = input.ef_search.unwrap_or(100.max(candidates.min(live)));
+                    (
+                        crate::hybrid::VectorLeg::ApproximateReady {
+                            config,
+                            ef_search: ef,
+                            options,
+                        },
+                        Some(ef),
+                    )
+                }
+                _ => (crate::hybrid::VectorLeg::Exact, None),
+            };
+            let query = crate::hybrid::HybridQuery {
+                vector: input.vector.clone(),
+                text: input.text.clone().unwrap_or_default(),
+                k: input.k,
+                conditions: filter.to_vec(),
+                metric,
+                vector_leg,
+                fusion,
+            };
+            let (hits, stats) = CollectionRef {
+                db: &*db,
+                id: collection,
+            }
+            .search_hybrid(&query)?;
+            Executed {
+                hits: hits
+                    .into_iter()
+                    .map(|hit| {
+                        json!({"id": hit.id.to_string(), "score": hit.score,
+                        "distance": hit.distance, "bm25": hit.bm25,
+                        "vector_rank": hit.vector_rank, "text_rank": hit.text_rank})
+                    })
+                    .collect(),
+                stats,
+                plan: None,
+                ef_search,
+            }
+        }
+    })
+}
+
+async fn search_in(
+    service: Service,
+    role: admin::Role,
+    request: RequestId,
+    target: Target,
+    input: Result<Json<Search>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let input = body(input)?;
+    input.validate(&role)?;
+    let metrics = service.metrics.clone();
+    let started = Instant::now();
+    let route = if target.legacy() {
+        "/v1/search"
+    } else {
+        "/v1/collections/{collection}/search"
+    };
+    let (input, collection, executed) = service
+        .run(move |db| {
+            let collection = open(db, &role, &target)?;
+            let executed = execute(db, collection, &target, &input, &metrics)?;
+            let binding = (target.name().to_owned(), collection, db.lineage());
+            Ok((input, binding, executed))
+        })
+        .await?;
+    let (collection, collection_id, lineage) = collection;
+    let strategy = executed
+        .plan
+        .as_ref()
+        .map_or(input.mode.name(), |plan| plan.strategy.name());
+    service.metrics.search(strategy, &executed.stats);
+    let elapsed = started.elapsed();
+    let threshold = service.metrics.slow_threshold_ns.load(Ordering::Relaxed);
+    if elapsed.as_nanos() >= threshold as u128 {
+        service.metrics.slow_queries.fetch_add(1, Ordering::Relaxed);
+        // Field names only: never vectors, text or filter values.
+        let filter_fields = input
+            .filter
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(|condition| match condition {
+                crate::Condition::Eq { field, .. } | crate::Condition::Range { field, .. } => {
+                    field.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        observability::record_slow(
+            &service.metrics,
+            json!({"request_id": request.0, "unix_ms": admin::now_ms() as u64,
+            "route": route, "collection": collection, "collection_id": collection_id,
+            "lineage": lineage.map(|lineage| format!("{lineage:016x}")),
+            "mode": input.mode.name(),
+            "plan_strategy": executed.plan.as_ref().map(|plan| plan.strategy.name()),
+            "k": input.k, "ef_search": executed.ef_search, "filter_fields": filter_fields,
+            "duration_ms": elapsed.as_secs_f64() * 1e3,
+            "stats": stats_json(&executed.stats), "result_count": executed.hits.len()}),
+        );
+    }
+    let mut response = json!({"hits": executed.hits});
+    if input.explain {
+        response["stats"] = stats_json(&executed.stats);
+        response["plan"] = executed.plan.as_ref().map_or(Value::Null, plan_json);
+    }
+    Ok(Json(response))
+}
+
+fn quantization_name(quantization: Quantization) -> &'static str {
+    collections::quantization_name(quantization)
+}
+
+/// Index state of one collection. `ready` means an index exists;
+/// `settings_ready` means it matches the default identity for this route.
+fn index_json(db: &Database, collection: u16, target: &Target) -> Value {
+    let (metric, config, options) = identity(db, collection, target);
+    let state = db.state(collection);
+    let index = state.index.as_ref();
+    let shown = index.map_or(config, |index| index.config);
+    let (buffered_ids, buffer_vector_bytes) = index.map_or((0, 0), |index| index.buffer_usage());
+    let resident = state.records.len() as u64 * state.dimensions as u64 * 4;
+    json!({
+        "ready": index.is_some(),
+        "settings_ready": index.is_some_and(|index| index.ready_for(config, metric, options.quantization)),
+        "config": {"m": shown.m, "ef_construction": shown.ef_construction, "seed": shown.seed.to_string()},
+        "metric": index.map(|index| index.metric),
+        "quantization": quantization_name(index.map_or(options.quantization, |index| index.options.quantization)),
+        "rerank_multiplier": index.map_or(options.rerank_multiplier, |index| index.options.rerank_multiplier),
+        "buffered_ids": buffered_ids,
+        "buffer_vector_bytes": buffer_vector_bytes,
+        "graph_nodes": index.map_or(0, |index| index.graph_nodes()),
+        "stale_nodes": index.map_or(0, |index| index.stale_nodes()),
+        "memory": index.map(|index| {
+            let memory = index.memory();
+            json!({"graph_nodes": memory.graph_nodes, "graph_link_bytes": memory.link_bytes,
+                "code_bytes": memory.code_bytes, "codebook_bytes": memory.codebook_bytes,
+                "buffer_vector_bytes": memory.buffer_vector_bytes,
+                "resident_vector_bytes": resident})
+        }),
+        "max_buffer_ids": crate::MAX_HNSW_BUFFER_IDS,
+        "max_buffer_vector_bytes": crate::MAX_HNSW_BUFFER_VECTOR_BYTES,
+    })
+}
+
+async fn index_status(
+    State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
+) -> Result<Json<Value>, ApiError> {
+    index_status_in(service, role, Target::Legacy).await
+}
+
+async fn collection_index_status(
+    State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
+    target: Result<Path<String>, PathRejection>,
+) -> Result<Json<Value>, ApiError> {
+    index_status_in(service, role, collection_path(target)?).await
+}
+
+async fn index_status_in(
+    service: Service,
+    role: admin::Role,
+    target: Target,
+) -> Result<Json<Value>, ApiError> {
+    service
+        .run(move |db| {
+            let collection = open(db, &role, &target)?;
+            Ok(Json(index_json(db, collection, &target)))
+        })
+        .await
+}
+
+/// Optional index identity overrides; omitted fields use the route defaults.
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IdentityInput {
+    metric: Option<DistanceMetric>,
+    config: Option<admin::IndexConfig>,
+    quantization: Option<collections::QuantizationName>,
+    rerank_multiplier: Option<u8>,
+}
+
+impl IdentityInput {
+    fn resolve(
+        &self,
+        db: &Database,
+        collection: u16,
+        target: &Target,
+    ) -> Result<(DistanceMetric, HnswConfig, AnnOptions), ApiError> {
+        let (metric, config, options) = identity(db, collection, target);
+        Ok((
+            self.metric.unwrap_or(metric),
+            match self.config {
+                Some(config) => config.validated()?,
+                None => config,
+            },
+            AnnOptions {
+                quantization: self
+                    .quantization
+                    .map_or(options.quantization, |name| name.0),
+                rerank_multiplier: self.rerank_multiplier.unwrap_or(options.rerank_multiplier),
+            },
+        ))
+    }
 }
 
 async fn build_index(
     State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
+    input: Result<Json<Value>, JsonRejection>,
+) -> Result<StatusCode, ApiError> {
+    build_index_in(service, role, Target::Legacy, input).await
+}
+
+async fn collection_build_index(
+    State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
+    target: Result<Path<String>, PathRejection>,
+    input: Result<Json<Value>, JsonRejection>,
+) -> Result<StatusCode, ApiError> {
+    build_index_in(service, role, collection_path(target)?, input).await
+}
+
+async fn build_index_in(
+    service: Service,
+    role: admin::Role,
+    target: Target,
     input: Result<Json<Value>, JsonRejection>,
 ) -> Result<StatusCode, ApiError> {
     let input = body(input)?;
     if !input.is_object() {
-        return Err(ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "invalid_input",
-            "index build requires a JSON object",
-        ));
+        return Err(unprocessable("index build requires a JSON object"));
     }
-    let input: BuildIndex = serde_json::from_value(input).map_err(|error| {
-        ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "invalid_input",
-            error.to_string(),
-        )
-    })?;
+    let input: IdentityInput =
+        serde_json::from_value(input).map_err(|error| unprocessable(error.to_string()))?;
     let metrics = service.metrics.clone();
     service
         .run(move |db| {
+            let collection = open(db, &role, &target)?;
+            let (metric, config, options) = input.resolve(db, collection, &target)?;
             let started = Instant::now();
-            db.build_hnsw_with_metric(input.config.validated()?, input.metric)?;
+            db.build_hnsw_with_options_in(collection, config, metric, options)?;
             metrics.rebuilds.fetch_add(1, Ordering::Relaxed);
+            metrics.built(started);
             metrics.rebuild_search_ns.fetch_add(
                 started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
                 Ordering::Relaxed,
@@ -1026,6 +1991,107 @@ async fn build_index(
         })
         .await
 }
+
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Quality {
+    samples: usize,
+    k: usize,
+    ef_search: usize,
+    #[serde(deserialize_with = "admin::seed")]
+    seed: u64,
+    max_distance_evaluations: u64,
+    metric: Option<DistanceMetric>,
+    config: Option<admin::IndexConfig>,
+    quantization: Option<collections::QuantizationName>,
+    rerank_multiplier: Option<u8>,
+}
+
+impl Default for Quality {
+    fn default() -> Self {
+        let sample = crate::quality::QualitySampleOptions::default();
+        Self {
+            samples: sample.samples,
+            k: sample.k,
+            ef_search: sample.ef_search,
+            seed: sample.seed,
+            max_distance_evaluations: sample.max_distance_evaluations,
+            metric: None,
+            config: None,
+            quantization: None,
+            rerank_multiplier: None,
+        }
+    }
+}
+
+async fn quality(
+    State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
+    input: axum::body::Bytes,
+) -> Result<Json<Value>, ApiError> {
+    quality_in(service, role, Target::Legacy, &input).await
+}
+
+async fn collection_quality(
+    State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
+    target: Result<Path<String>, PathRejection>,
+    input: axum::body::Bytes,
+) -> Result<Json<Value>, ApiError> {
+    quality_in(service, role, collection_path(target)?, &input).await
+}
+
+async fn quality_in(
+    service: Service,
+    role: admin::Role,
+    target: Target,
+    input: &[u8],
+) -> Result<Json<Value>, ApiError> {
+    let input: Quality = optional(input)?;
+    let metrics = service.metrics.clone();
+    service
+        .run(move |db| {
+            let collection = open(db, &role, &target)?;
+            let identity = IdentityInput {
+                metric: input.metric,
+                config: input.config,
+                quantization: input.quantization,
+                rerank_multiplier: input.rerank_multiplier,
+            };
+            let (metric, config, options) = identity.resolve(db, collection, &target)?;
+            let report = CollectionRef {
+                db: &*db,
+                id: collection,
+            }
+            .ann_quality(
+                config,
+                metric,
+                options,
+                crate::quality::QualitySampleOptions {
+                    samples: input.samples,
+                    k: input.k,
+                    ef_search: input.ef_search,
+                    seed: input.seed,
+                    max_distance_evaluations: input.max_distance_evaluations,
+                },
+            )?;
+            if let Some(recall) = report.recall_at_k
+                && let Ok(mut last) = metrics.ann_quality_last_recall.lock()
+            {
+                *last = Some(recall);
+            }
+            Ok(Json(json!({
+                "recall_at_k": report.recall_at_k,
+                "samples_used": report.samples_used,
+                "distance_evaluations": report.distance_evaluations,
+                "skipped_reason": report.skipped_reason,
+            })))
+        })
+        .await
+}
+
+#[cfg(test)]
+use observability::metrics;
 
 #[cfg(test)]
 mod tests {

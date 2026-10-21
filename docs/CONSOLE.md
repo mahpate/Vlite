@@ -91,7 +91,8 @@ has a keyboard-accessible inspection button.
 
 Squared L2 sums squared component differences. Cosine distance is one minus
 normalized similarity. Inner product returns negative dot product. Lower is
-better in all cases; none is a universal confidence percentage.
+better for every distance; none is a universal confidence percentage. Hybrid
+search instead returns a fused **score** where higher is better (see below).
 
 ## Safety, accessibility and preferences
 
@@ -121,3 +122,127 @@ diagnostics show the connected server's version and advertised capabilities.
 See [server administration](CONSOLE-ADMIN.md) for credential roles, reload,
 audit, maintenance and backup/restore behavior, and
 [Docker operations](DOCKER-OPERATIONS.md) for versioned deployment and rollback.
+
+## Collections and newer server features
+
+Every newer surface is enabled only when `GET /v1/capabilities` advertises its
+feature flag (and the credential's role or scope allows the operation). Older
+servers keep the original console; unavailable controls stay disabled and the
+Administration note lists which features are and are not available. Nothing is
+inferred from a version number.
+
+| Surface | Flag(s) | Routes used |
+|---|---|---|
+| Collection picker, list, create/drop empty, settings | `collections` (picker, list also work on format v3 with only `default`) | `GET/POST /v1/collections`, `GET/DELETE /v1/collections/{c}`, `PUT /v1/collections/{c}/settings` |
+| Record revisions / If-Match | `per_record_etags` | `ETag` header + `revision` on GET; `If-Match` on PUT/DELETE |
+| Auto search, Explain, Hybrid | `search_auto`, `search_explain`, `search_hybrid` | `POST .../search` (`mode`, `explain`, `text`, `fusion`, `vector_leg`) |
+| Quantization / rerank | `quantization` | search, build, rebuild and quality bodies |
+| Index memory and recall estimate | format v4/v3 collection routes + `index` permission | `GET .../index/hnsw` (`memory`), `POST .../index/hnsw/quality` |
+| Resumable import | `imports` | `POST /v1/collections/{c}/imports`, `PUT /v1/imports/{job}/chunks/{n}`, `GET /v1/imports/{job}`, `POST .../finish`, `POST .../abort` |
+| Automatic maintenance | `auto_maintenance` | `GET/PUT /v1/admin/maintenance/auto`, `POST .../auto/tick` |
+| Backup schedule, verify, drill | `backup_schedule`, `backup_verify_drill` | `GET/PUT /v1/admin/backups/schedule`, `POST /v1/admin/backups/{name}/verify`, `.../drill` |
+| Slow queries, Prometheus text | `slow_query_log`, `prometheus_metrics` | `GET /v1/admin/diagnostics/slow-queries`, `GET /metrics?format=prometheus` |
+| Scoped credentials, persistent audit | `scoped_credentials`, `persistent_audit` | `GET/POST /v1/admin/credentials`, `POST .../{id}/rotate`, `.../revoke`, `GET /v1/admin/audit/persistent` |
+
+**Active collection.** The sidebar picker selects one collection for every
+browse, editor, search, saved-query, import, index, compare and scenario action.
+`default` keeps the legacy `/v1/...` routes; any other collection uses
+`/v1/collections/{name}/...` and the server never falls back to `default`.
+Settings-sensitive actions (search, index status/build/rebuild, maintenance
+read/tick, quality, memory, compare, health) use `/v1/collections/{name}/...`
+for every collection, including `default`, whenever the server reports
+`format_version`, because the legacy routes apply historical defaults
+(squared L2, core HNSW, no quantization) and ignore stored settings. The
+console also sends metric/config (and quantization/rerank for ANN modes)
+explicitly, pre-filled from the selected collection. Older servers keep the
+legacy routes. The maintenance policy save (`PUT /v1/index/hnsw/maintenance`)
+exists only on the legacy route: it is enabled only with `default` selected,
+its thresholds are global, and named collections always use their own stored
+settings as index identity.
+Switching collections first lists exactly what would be discarded (unsaved
+editor changes, loaded record and revision, search results and query, import
+previews, prepared import files, metadata drafts, batch IDs) and asks for
+confirmation; Cancel keeps the current collection. After confirmation the
+console re-reads the target collection, clears all collection-bound state and
+pre-fills metric/HNSW/quantization from its settings, and the record/query
+example vectors for its dimensions; a vector whose length does not match the
+selected collection is rejected before sending. If a ready index was built
+with an explicit identity that differs from the stored settings, the form
+follows the ready index (so ready-only and auto searches use it) and the index
+status says so. A result that arrives
+after a switch is discarded, and every write re-checks that the collection did
+not change between confirmation and send. Confirmations always name the
+collection and route.
+
+**Create, drop and settings.** Create makes an *empty* collection with fixed
+dimensions and optional partial settings. Drop only succeeds for an empty
+non-default collection. Settings saves are partial merges; on a format v3 file
+`default` settings are memory-only (`persisted: false` is shown). A v3 database
+is never upgraded by the console: collection creation returns
+`requires_format_v4`, and the console explains that upgrading is an explicit,
+offline operator step (back up first; no automatic migration).
+
+**Search modes.** Exact, approximate and ready-only approximate return
+distances (lower is better). **Auto** lets the server planner choose exact
+scan, exact over indexed candidates or ready (filtered) ANN; it never builds an
+index. **Explain** shows the plan (auto only) and work counters. **Hybrid**
+fuses BM25 over the collection's declared `text_fields` with the vector leg by
+weighted reciprocal rank fusion. Its table shows score (higher is better),
+distance, BM25 and both ranks; `--` marks a leg that did not return the record.
+Read-only and scoped credentials may use every mode except lazily built
+`approximate` (which needs admin or the `search_build` operation).
+
+**Revisions.** When the server returns an ETag, **Only if unchanged** (on by
+default) sends `If-Match` with the tag of the exact record last loaded from the
+same collection. A 412 means nothing was written; Get the record again and
+reapply the edit.
+
+**Index memory and quality.** Memory shows only the component byte counts the
+server reports plus their sum; it is not process memory. Recall@k is a bounded,
+sampled estimate (1..32 samples, k 1..100, distance-evaluation budget) against a
+ready index; it may be skipped for budget or an empty collection.
+
+**Resumable import.** Validate/split parses JSON, NDJSON or CSV locally and
+splits it deterministically into chunks (1..4096 rows). Start reserves a job
+and sends chunks in order; each chunk commits atomically. A rejected chunk
+(`reject_chunk` policy) writes nothing and shows the invalid-row report;
+`skip_invalid` commits valid rows and reports the skipped ones. Unknown
+outcomes (network failure, timeout) stop the import: there are no blind
+retries. **Resume** reads the durable checkpoint, replays the last committed
+chunk with the same file and chunk size (it must report `already_committed`),
+then continues. Stop pauses after the current chunk. Finish closes the job;
+Abort stops it. In every case previously committed chunks are retained; the
+confirmations say so. A job reserved without a committed chunk is not durable.
+
+**Schedulers.** Automatic maintenance and scheduled backups are off by default.
+Saves are partial merges, memory-only (restart restores the environment
+configuration) and always confirmed. **Run tick now** (`POST
+/v1/admin/maintenance/auto/tick`) and **Run schedule now** (`POST
+/v1/admin/backups/schedule/run`) run exactly one confirmed cycle (admin only). Read the backup schedule first: the
+confirmation describes the merged result and calls out retention deletion
+explicitly when retention is enabled. Verify checks a backup manifest; a drill
+restores a temporary copy in the admin directory, queries it and deletes it.
+
+**Diagnostics.** The slow-query log shows request metadata, plan and counters
+only (no vectors, text or filter values) and is process-local. Prometheus text
+is shown truncated to 64 KiB. Scoped credentials need the `diagnostics`
+operation.
+
+**Scoped credentials.** Admins create credentials for named collections (or
+`*`) with selected operations and a mandatory expiry (1..365 days). The new or
+rotated secret is shown once, masked, in memory only: **Copy secret** writes it
+to the clipboard (HTTPS or localhost), **Clear secret** removes it, and
+disconnect clears it. Secrets are never written to the request inspector,
+status text, history, saved queries, scenarios, local/session storage or the
+URL; create/rotate responses are withheld from the inspector and the REST
+playground refuses credential creation/rotation. Authorization headers and any
+`token`-like field are redacted from inspector output. Grants are bound to the
+collection identity and database lineage, so a dropped/recreated collection or
+restored database makes the credential fail closed (403 `forbidden_scope`).
+A 503 `credentials_commit_indeterminate` means the change IS in effect but
+may not survive a crash and no secret was returned: the console says so, re-reads
+the list and leaves revoking or re-issuing to the admin.
+
+Page exports and batch metadata replacement use only the writable record fields
+(`id`, `vector`, `metadata`, `payload_base64`); the server-owned `revision`
+is dropped, so exports remain importable.

@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import secrets
 import subprocess
 import tempfile
@@ -238,7 +239,8 @@ def exercise_separate_app(page, base, token, expected_index="Ready;"):
     expect(page.locator("#record")).to_contain_text('"payload_base64": "AP8="')
     expect(page.locator("#id")).to_have_value("2")
     assert any(url.endswith("/api/v1/database") for url in api_requests), api_requests
-    assert any(url.endswith("/api/v1/search") for url in api_requests), api_requests
+    # Newer servers route default-collection search through /v1/collections/default so its stored settings apply.
+    assert any(url.endswith(("/api/v1/search", "/api/v1/collections/default/search")) for url in api_requests), api_requests
     assert page.evaluate("localStorage.length + sessionStorage.length") == 0
     page.get_by_role("button", name="Disconnect", exact=True).click()
     expect(page.locator("#overview")).to_have_text("")
@@ -526,11 +528,664 @@ def exercise_operations(page, base, token, read_token):
     assert page.request.get(base + "/api/v1/database", headers=headers).status == 200
 
 
+VLK_TOKEN = re.compile(r"vlk_[A-Za-z0-9]+_[A-Za-z0-9_-]{20,}")
+
+
+def exercise_epic015_real(page, base, token):
+    """EPIC-015 surfaces against the real API (no mocks); gated on what the server advertises."""
+    headers = {"Authorization": "Bearer " + token}
+    caps = page.request.get(base + "/api/v1/capabilities", headers=headers).json()
+    features = caps.get("features", {})
+    page.goto(base + "/")
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.locator("#token").fill(token)
+    page.get_by_role("button", name="Connect / refresh").click()
+    expect(page.locator("#status")).to_have_text("Connected; overview refreshed")
+    if not features.get("collections"):
+        # Format v3 file: no invented surfaces; creation stays disabled and nothing is upgraded.
+        expect(page.locator("#collection-create")).to_be_disabled()
+        expect(page.locator("#job-start")).to_be_disabled()
+        print(f"NOTE real EPIC-015: format_version={caps.get('format_version')}; collection/import surfaces correctly gated off")
+        assert not errors, errors
+        return
+    before = page.request.get(base + "/api/v1/database", headers=headers).json()
+    # Create an empty collection with explicit settings.
+    page.locator("#new-collection-name").fill("e2e_docs")
+    page.locator("#new-collection-dimensions").fill("2")
+    page.locator("#new-collection-settings").fill('{"metric":"cosine","text_fields":["title"]}')
+    page.locator("#collection-create").click()
+    confirm(page, "Create empty collection e2e_docs with 2 dimensions")
+    expect(page.locator("#collections-table tbody")).to_contain_text("e2e_docs")
+    # Switch (pending work forces the confirmation); fields follow the new dimensions.
+    page.locator("#filter").fill('[{"op":"eq","field":"category","value":{"type":"string","value":"x"}}]')
+    page.locator("#collection").select_option("e2e_docs")
+    confirm(page, "Switch from collection default to e2e_docs")
+    expect(page.locator("#collection-badge")).to_have_text("Collection: e2e_docs")
+    expect(page.locator("#query")).to_have_value("[1,0]")
+    expect(page.locator("#metric")).to_have_value("cosine")
+    # Record write goes to the selected collection only; revision/ETag shown on Get.
+    page.locator("#id").fill("1")
+    page.locator("#record-vector").fill("[1,0]")
+    page.locator("#metadata").fill('{"title":{"type":"string","value":"vector database primer"}}')
+    page.get_by_role("button", name="Put / replace").click()
+    confirm(page, "collection e2e_docs")
+    expect(page.locator("#status")).to_contain_text("HTTP 204")
+    page.get_by_role("button", name="Get", exact=True).click()
+    expect(page.locator("#record-revision")).to_contain_text("revision")
+    assert page.request.get(base + "/api/v1/collections/e2e_docs/vectors/1", headers=headers).status == 200
+    # Import job: 3 valid rows in 2 chunks, then finish (committed chunks retained).
+    rows = "\n".join(json.dumps({"id": str(10 + index), "vector": [1, index + 1], "metadata": {"title": {"type": "string", "value": f"doc {index}"}}}) for index in range(3))
+    page.locator("#job-file").set_input_files(files=[{"name": "rows.ndjson", "mimeType": "application/x-ndjson", "buffer": rows.encode()}])
+    page.locator("#job-chunk-size").fill("2")
+    page.locator("#job-prepare").click()
+    expect(page.locator("#job-result")).to_contain_text("2")
+    page.locator("#job-start").click()
+    confirm(page, "into collection e2e_docs")
+    expect(page.locator("#job-progress")).to_have_attribute("value", "2")
+    page.locator("#job-finish").click()
+    confirm(page, "stay")
+    expect(page.locator("#job-result")).to_contain_text("finished")
+    info = page.request.get(base + "/api/v1/collections/e2e_docs", headers=headers).json()
+    assert info["live_records"] == 4, info
+    # Search modes on the collection route: hybrid (score, higher is better) and auto with explain.
+    if features.get("search_hybrid"):
+        page.locator("#filter").fill("[]")
+        page.locator("#mode").select_option("hybrid")
+        page.locator("#search-text").fill("vector database")
+        page.get_by_role("button", name="Search", exact=True).click()
+        expect(page.locator("#hits caption")).to_contain_text("hybrid score, higher is better")
+        expect(page.locator("#hits tbody tr").first).to_contain_text("1")
+    page.locator("#mode").select_option("auto")
+    page.locator("#explain").check()
+    page.get_by_role("button", name="Search", exact=True).click()
+    expect(page.locator("#search-plan")).to_contain_text("exact_scan")
+    expect(page.locator("#hits caption")).to_contain_text("lower distance is better")
+    # Maintenance read uses the selected collection's route; the legacy (global) save is disabled here.
+    page.get_by_role("button", name="Read maintenance policy", exact=True).click()
+    expect(page.locator("#maintenance-result")).to_contain_text("e2e_docs")
+    expect(page.locator("#save-maintenance")).to_be_disabled()
+    # Scoped credential: one-time masked secret; never in page text, inputs, storage, URL or inspector.
+    if features.get("scoped_credentials"):
+        expect(page.locator("#cred-collections")).to_have_value("e2e_docs")
+        page.locator("#cred-name").fill("e2e-reader")
+        page.locator("#cred-create").click()
+        confirm(page, "collections [e2e_docs]")
+        expect(page.locator("#cred-secret")).to_contain_text("Shown once")
+        assert not VLK_TOKEN.search(visible_state(page)), "one-time secret leaked into page state"
+        listed = page.request.get(base + "/api/v1/admin/credentials", headers=headers).json()
+        created = next(item for item in listed["items"] if item["name"] == "e2e-reader")
+        page.locator("#cred-clear").click()
+        expect(page.locator("#cred-secret")).to_have_text("No new secret.")
+        page.get_by_role("button", name="Revoke " + created["id"]).click()
+        confirm(page, "Revoke credential " + created["id"])
+        expect(page.locator("#cred-table tbody")).to_contain_text("revoked")
+        assert not VLK_TOKEN.search(visible_state(page))
+    # Schedulers are off by default; diagnostics are bounded.
+    if features.get("backup_schedule"):
+        page.locator("#backup-schedule-read").click()
+        expect(page.locator("#backup-schedule")).to_have_value(re.compile(r'"enabled": false'))
+    if features.get("auto_maintenance"):
+        page.locator("#auto-maintenance-read").click()
+        expect(page.locator("#auto-maintenance")).to_have_value(re.compile(r'"enabled": false'))
+    if features.get("backup_verify_drill"):
+        # Fresh v4 server: create one consistent backup, then verify it.
+        page.locator("#create-backup").click()
+        page.get_by_role("button", name="Confirm", exact=True).click()
+        expect(page.locator("#backup-result")).to_contain_text('"manifest"')
+        page.locator("#list-backups").click()
+        expect(page.locator("#backup-name option")).not_to_have_count(0)
+        page.locator("#backup-verify").click()
+        expect(page.locator("#backup-result")).to_contain_text('"verified": true')
+    if features.get("slow_query_log"):
+        page.locator("#slow-queries").click()
+        expect(page.locator("#slow-summary")).to_contain_text("threshold")
+    if features.get("prometheus_metrics"):
+        page.locator("#prometheus").click()
+        expect(page.locator("#prometheus-result")).to_contain_text("vlite_")
+    # The default collection was never written by the e2e_docs work.
+    after = page.request.get(base + "/api/v1/database", headers=headers).json()
+    assert after.get("records") == before.get("records"), (before, after)
+    page.get_by_role("button", name="Disconnect", exact=True).click()
+    assert not VLK_TOKEN.search(visible_state(page))
+    assert not errors, errors
+    print(f"PASS EPIC-015 real API: format_version={caps.get('format_version')}; collection create/switch/isolated write, import job, hybrid/auto, collection-route maintenance, one-time credential create/revoke, schedulers, verify, diagnostics")
+
+
+# ---------------------------------------------------------------------------
+# EPIC-015 console surfaces against a route-mocked API that follows the Wave 2
+# server contract. Runs without Docker (``python tests/dashboard_e2e.py --mocked``)
+# and is also part of the full Docker run. Static assets are the real files under
+# src/dashboard, served with a strict no-inline CSP.
+# ---------------------------------------------------------------------------
+MOCK_ORIGIN = "http://vlite.test"
+DASHBOARD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "dashboard")
+CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
+ALL_FEATURES = ["background_rebuild", "maintenance", "backup_restore", "audit", "filtered_ann", "collections", "imports", "per_record_etags",
+                "search_auto", "search_hybrid", "search_explain", "quantization", "auto_maintenance", "backup_schedule", "backup_verify_drill",
+                "slow_query_log", "prometheus_metrics", "scoped_credentials", "persistent_audit"]
+SECRET_TAIL = "Q" * 43
+
+
+def settings(metric="squared_l2", text_fields=()):
+    return {"metric": metric, "hnsw": {"m": 16, "ef_construction": 200, "seed": "0"}, "quantization": "none", "rerank_multiplier": 4,
+            "planner": {"exact_max_candidates": 4096, "exact_max_selectivity_ppm": 20000}, "metadata_indexes": [], "text_fields": list(text_fields)}
+
+
+class FakeApi:
+    """Minimal in-memory Wave 2 API: records every request so tests can assert routing and headers."""
+
+    def __init__(self, role="admin", features=ALL_FEATURES, format_version=4, scope=None):
+        self.caps = {"api_version": 1, "role": role, "features": {name: True for name in features}}
+        if format_version is not None:
+            self.caps["format_version"] = format_version
+        if scope:
+            self.caps["scope"] = scope
+        self.collections = {"default": {"id": 0, "name": "default", "dimensions": 3, "live_records": 1, "settings": settings(), "settings_persisted": True},
+                            "docs": {"id": 1, "name": "docs", "dimensions": 2, "live_records": 1, "settings": settings("cosine", ["title"]), "settings_persisted": True}}
+        if scope and "*" not in scope["collections"]:
+            self.collections = {name: value for name, value in self.collections.items() if name in scope["collections"]}
+        self.records = {("default", "1"): {"vector": [1, 0, 0], "revision": 1}, ("docs", "5"): {"vector": [1, 0], "revision": 1}}
+        self.log = []
+        self.jobs = {}
+        self.reject_chunk_once = {2}
+        self.credentials = []
+        self.issued = []
+        self.schedule = {"enabled": False, "interval_secs": 86400, "retention_enabled": False, "retain_last": 7, "retain_days": 0, "drill_every": 1, "drill_max_bytes": 4294967296}
+        self.auto = {"enabled": False, "interval_ms": 60000, "stale_ratio": 0.2, "rebuild_on_low_recall": False, "min_recall": 0.9, "quality_samples": 8, "limits": {}}
+
+    def etag(self, collection, record_id):
+        return f'"r2-{"a" * 16}-{self.collections[collection]["id"]}-{record_id}-{self.records[(collection, record_id)]["revision"]}-{"b" * 64}"'
+
+    def handle(self, route):
+        request = route.request
+        url = request.url[len(MOCK_ORIGIN):]
+        path, _, query = url.partition("?")
+        if path == "/dashboard" or path.startswith("/dashboard/"):
+            name = "index.html" if path in ("/dashboard", "/dashboard/") else path[len("/dashboard/"):]
+            kind = {"html": "text/html", "js": "text/javascript", "css": "text/css"}[name.rsplit(".", 1)[1]]
+            with open(os.path.join(DASHBOARD_DIR, name), "rb") as stream:
+                return route.fulfill(status=200, body=stream.read(), headers={"content-type": kind + "; charset=utf-8", "content-security-policy": CSP})
+        body = json.loads(request.post_data) if request.post_data else None
+        self.log.append({"method": request.method, "path": path, "query": query, "body": body, "headers": request.headers})
+        status, value, headers = self.api(request.method, path, query, body, request.headers)
+        headers = {"cache-control": "no-store", "x-request-id": str(len(self.log)), **headers}
+        if status == 204:
+            return route.fulfill(status=204, headers=headers)
+        if isinstance(value, str):
+            return route.fulfill(status=status, body=value, headers={**headers, "content-type": "text/plain; version=0.0.4"})
+        return route.fulfill(status=status, body=json.dumps(value), headers={**headers, "content-type": "application/json"})
+
+    @staticmethod
+    def error(status, code):
+        return status, {"error": {"code": code, "message": code.replace("_", " ")}}, {}
+
+    def collection_route(self, path):
+        parts = path.split("/")
+        if path.startswith("/v1/collections/") and len(parts) >= 4:
+            return parts[3], "/" + "/".join(parts[4:]) if len(parts) > 4 else ""
+        return "default", path[3:]
+
+    def api(self, method, path, query, body, headers):
+        if not headers.get("authorization", "").startswith("Bearer "):
+            return self.error(401, "unauthorized")
+        if path == "/v1/capabilities":
+            return 200, self.caps, {}
+        if path == "/v1/collections" and method == "GET":
+            return 200, {"items": list(self.collections.values()), "format_version": self.caps.get("format_version")}, {}
+        if path == "/v1/database":
+            return 200, {"dimensions": 3, "records": 1}, {}
+        if path == "/metrics":
+            return (200, "vlite_records 2\n", {}) if query == "format=prometheus" else (200, {"database_bytes": 4096}, {})
+        if path == "/v1/admin/credentials" and method == "GET":
+            return 200, {"items": self.credentials, "capacity": 256}, {}
+        if path == "/v1/admin/credentials" and method == "POST":
+            if getattr(self, "indeterminate", False):  # change applied, durability unconfirmed, no token returned
+                self.issue(body, None)
+                return self.error(503, "credentials_commit_indeterminate")
+            return self.issue(body, None)
+        if path.startswith("/v1/admin/credentials/") and path.endswith("/rotate"):
+            previous = next(item for item in self.credentials if item["id"] == path.split("/")[4])
+            return self.issue({**previous, "name": previous["name"]}, previous)
+        if path == "/v1/admin/backups/schedule":
+            if method == "PUT":
+                self.schedule.update(body)
+            return 200, {"config": self.schedule, "state": {"runs": 0, "failures": 0, "skipped_busy": 0, "last_success_unix_ms": None, "last_failure_unix_ms": None,
+                                                           "last_error": None, "last_backup": None, "drills": 0, "drill_failures": 0, "last_drill_unix_ms": None,
+                                                           "retention_deleted": 0, "retained": 0}}, {}
+        if path == "/v1/admin/maintenance/auto":
+            if method == "PUT":
+                self.auto.update({key: value for key, value in body.items() if key != "interval_secs"})
+                if "interval_secs" in body:
+                    self.auto["interval_ms"] = body["interval_secs"] * 1000
+            return 200, {"config": self.auto, "state": {"ticks": 0, "skipped_busy": 0, "rebuilds_started": 0, "errors": 0, "last_tick_unix_ms": None,
+                                                       "last_collection": None, "last_action": None, "last_error": None}}, {}
+        if path == "/v1/admin/diagnostics/slow-queries":
+            return 200, {"threshold_ms": 250, "capacity": 256, "items": [{"request_id": "9", "unix_ms": 1700000000000, "route": "/v1/collections/{c}/search",
+                         "collection": "docs", "mode": "auto", "plan_strategy": "exact_scan", "k": 10, "ef_search": None, "filter_fields": ["year"],
+                         "duration_ms": 412, "stats": {}, "result_count": 10}]}, {}
+        if path == "/v1/admin/maintenance/auto/tick" and method == "POST":
+            return 200, {"outcome": "idle", "collection": None, "action": None}, {}
+        if path == "/v1/admin/backups/schedule/run" and method == "POST":
+            return 200, {"outcome": "completed", "backup": "vlite-backup-1.vlite"}, {}
+        if path == "/v1/index/hnsw/maintenance" and method == "PUT":
+            return 200, {"policy": body}, {}
+        if path.startswith("/v1/imports/"):
+            return self.imports(method, path.split("/")[3:], body)
+        collection, rest = self.collection_route(path)
+        if collection not in self.collections:
+            return self.error(404, "collection_not_found")
+        info = self.collections[collection]
+        if rest == "" and method == "GET":
+            return 200, {**info, "text_index": {"declared_fields": info["settings"]["text_fields"], "available": True, "documents": 1, "terms": 3, "postings": 3}}, {}
+        if rest == "/index/hnsw" and method == "GET":
+            built = getattr(self, "ready_index", {}).get(collection)
+            if built:  # a published index whose explicit identity differs from the stored settings
+                return 200, {"ready": True, "config": built["config"], "metric": built["metric"], "quantization": "none", "rerank_multiplier": 4,
+                             "buffered_ids": 0, "buffer_vector_bytes": 0, "graph_nodes": 1, "stale_nodes": 0, "memory": None,
+                             "max_buffer_ids": 256, "max_buffer_vector_bytes": 1048576, "settings_ready": False}, {}
+            return 200, {"ready": False, "config": info["settings"]["hnsw"], "metric": None, "quantization": "none", "rerank_multiplier": 4, "buffered_ids": 0,
+                         "buffer_vector_bytes": 0, "graph_nodes": 0, "stale_nodes": 0, "memory": None, "max_buffer_ids": 256,
+                         "max_buffer_vector_bytes": 1048576, "settings_ready": True}, {}
+        if rest == "/index/hnsw/maintenance" and method == "GET":
+            policy = {"config": info["settings"]["hnsw"], "metric": info["settings"]["metric"], "rebuild_at_buffered_ids": 128}
+            result = {"policy": policy, "status": {"pressure": False}}
+            if path.startswith("/v1/collections/"):
+                result["identity"] = {"collection": collection, "metric": info["settings"]["metric"], "quantization": info["settings"]["quantization"]}
+            return 200, result, {}
+        if rest == "/index/hnsw/maintenance/tick" and method == "POST":
+            return 200, {"outcome": "idle", "started": False, "status": {"pressure": False}}, {}
+        if rest.startswith("/vectors/"):
+            record_id = rest.split("/")[2]
+            key = (collection, record_id)
+            if method == "GET":
+                if key not in self.records:
+                    return self.error(404, "not_found")
+                record = self.records[key]
+                return 200, {"id": record_id, "vector": record["vector"], "payload_base64": "", "metadata": {}, "revision": str(record["revision"])}, {"etag": self.etag(collection, record_id)}
+            if method == "PUT":
+                if "if-match" in headers and (key not in self.records or headers["if-match"] != self.etag(collection, record_id)):
+                    return self.error(412, "precondition_failed")
+                revision = self.records.get(key, {"revision": 0})["revision"] + 1
+                self.records[key] = {"vector": body["vector"], "revision": revision}
+                return 204, None, {"etag": self.etag(collection, record_id)}
+        if rest == "/search" and method == "POST":
+            if body["mode"] == "hybrid":
+                hits = [{"id": "5", "score": 0.032, "distance": 0.0, "bm25": 1.7, "vector_rank": 1, "text_rank": 1},
+                        {"id": "9", "score": 0.016, "distance": None, "bm25": 0.4, "vector_rank": None, "text_rank": 2}]
+            else:
+                hits = [{"id": "5", "distance": 0.0}]
+            result = {"hits": hits}
+            if body.get("explain"):
+                result["stats"] = {"records_scanned": 1, "distance_evaluations": 1, "quantized_distance_evaluations": 0, "graph_nodes_visited": 0,
+                                   "buffered_records_merged": 0, "reranked_candidates": 0, "index_candidates": 0}
+                result["plan"] = {"strategy": "exact_scan", "estimated_candidates": 1, "live_records": 1, "index_field": None, "reason": "small collection"} if body["mode"] == "auto" else None
+            return 200, result, {}
+        if rest == "/imports" and method == "POST":
+            job = str(len(self.jobs) + 7)
+            self.jobs[job] = {"job": job, "collection": collection, "collection_dropped": False, "state": "open", "last_chunk": 0,
+                              "rows_committed": 0, "rows_skipped": 0, "last_digest": None, "durable": False}
+            return 201, self.jobs[job], {}
+        return self.error(404, "mock_route_not_found")
+
+    def issue(self, body, previous):
+        number = len(self.issued) + 1
+        credential = {"id": f"cred{number:08d}", "name": body["name"], "collections": body["collections"], "operations": body["operations"],
+                      "lineage": "a" * 16, "created_unix_ms": 1, "expires_unix_ms": body["expires_unix_ms"], "revoked_unix_ms": None,
+                      "rotated_from": previous["id"] if previous else None, "state": "active"}
+        token = f"vlk_{credential['id']}_{SECRET_TAIL[:-1]}{number}"
+        self.issued.append(token)
+        self.credentials.append(credential)
+        result = {"credential": credential, "token": token}
+        if previous:
+            result["previous"] = previous
+        return 201, result, {}
+
+    def imports(self, method, parts, body):
+        job = self.jobs.get(parts[0])
+        if job is None:
+            return self.error(404, "import_not_found")
+        if len(parts) == 1:
+            return 200, job, {}
+        if parts[1] in ("finish", "abort"):
+            job["state"] = "finished" if parts[1] == "finish" else "aborted"
+            return 200, job, {}
+        chunk = int(parts[2])
+        report = {"job": job["job"], "chunk": chunk, "rows_skipped": 0, "invalid_rows": 0, "invalid": [], "revision": "3", "status": job}
+        if chunk <= job["last_chunk"]:
+            return 200, {**report, "outcome": "already_committed", "rows_committed": 0}, {}
+        if chunk != job["last_chunk"] + 1:
+            return self.error(409, "import_conflict")
+        if chunk in self.reject_chunk_once:
+            self.reject_chunk_once.discard(chunk)
+            return 422, {**report, "error": {"code": "import_rows_invalid", "message": "invalid rows"}, "outcome": "rejected", "rows_committed": 0,
+                         "invalid_rows": 1, "invalid": [{"row": 0, "code": "invalid_input", "message": "bad vector"}]}, {}
+        job.update(last_chunk=chunk, rows_committed=job["rows_committed"] + len(body["operations"]), durable=True, last_digest="c" * 64)
+        return 200, {**report, "outcome": "committed", "rows_committed": len(body["operations"])}, {}
+
+
+def mocked_page(browser, fake):
+    context = browser.new_context(viewport={"width": 1280, "height": 900})
+    context.route(MOCK_ORIGIN + "/**", fake.handle)
+    page = context.new_page()
+    page.set_default_timeout(10000)
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.on("console", lambda message: errors.append(message.text) if message.type == "error" and "Failed to load resource" not in message.text else None)
+    page.goto(MOCK_ORIGIN + "/dashboard")
+    page.locator("#token").fill("admin-" + "t" * 32)
+    page.get_by_role("button", name="Connect / refresh").click()
+    expect(page.locator("#status")).to_have_text("Connected; overview refreshed")
+    return context, page, errors
+
+
+def confirm(page, expected, accept=True):
+    expect(page.locator("#confirmation")).to_be_visible()
+    expect(page.locator("#confirmation-text")).to_contain_text(expected)
+    page.locator("#confirmation").get_by_role("button", name="Confirm" if accept else "Cancel").click()
+    expect(page.locator("#confirmation")).to_be_hidden()
+
+
+def option_disabled(page, value):
+    # Playwright's is_disabled() does not report <option disabled>; read the DOM property.
+    return page.locator(f'#mode option[value="{value}"]').evaluate("option => option.disabled")
+
+
+def visible_state(page):
+    """Everything a user, a screenshot or an extension could read from the page and browser storage."""
+    return page.evaluate("""() => JSON.stringify({
+        text: document.body.innerText,
+        values: [...document.querySelectorAll("input, textarea, select")].map((element) => element.value),
+        local: Object.entries(localStorage), session: Object.entries(sessionStorage), title: document.title, url: location.href })""")
+
+
+def exercise_collections_mocked(browser):
+    fake = FakeApi()
+    context, page, errors = mocked_page(browser, fake)
+    expect(page.locator("#collection")).to_be_enabled()
+    expect(page.locator("#collection option")).to_have_count(2)
+    expect(page.locator("#collection-badge")).to_have_text("Collection: default")
+    expect(page.locator("#collections-table tbody tr")).to_have_count(2)
+    expect(page.locator("#collections-format")).to_contain_text("4")
+    # Pending work (loaded record) requires confirmation; Cancel keeps the original collection.
+    page.locator("#id").fill("1")
+    page.get_by_role("button", name="Get", exact=True).click()
+    expect(page.locator("#record-revision")).to_contain_text("revision 1")
+    page.locator("#collection").select_option("docs")
+    confirm(page, "loaded record 1", accept=False)
+    expect(page.locator("#collection-badge")).to_have_text("Collection: default")
+    expect(page.locator("#collection")).to_have_value("default")
+    page.locator("#collection").select_option("docs")
+    confirm(page, "Switch from collection default to docs")
+    expect(page.locator("#collection-badge")).to_have_text("Collection: docs")
+    expect(page.locator("#status")).to_contain_text("Collection docs selected")
+    expect(page.locator("#record")).to_have_text("")
+    expect(page.locator("#index-status")).to_contain_text("collection docs")
+    # Dimension change (3 -> 2): example fields follow the selected collection and stale-sized vectors are never sent.
+    expect(page.locator("#record-vector")).to_have_value("[1,0]")
+    expect(page.locator("#query")).to_have_value("[1,0]")
+    sent = len(fake.log)
+    page.locator("#query").fill("[1, 0, 0]")
+    page.get_by_role("button", name="Search", exact=True).click()
+    expect(page.locator("#status")).to_contain_text("has 3 dimensions but collection docs uses 2")
+    page.locator("#record-vector").fill("[1, 0, 0]")
+    page.locator("#id").fill("9")
+    page.get_by_role("button", name="Put / replace").click()
+    expect(page.locator("#status")).to_contain_text("has 3 dimensions but collection docs uses 2")
+    assert len(fake.log) == sent, fake.log[sent:]
+    page.locator("#query").fill("[1,0]")
+    # Record routes go only to the selected collection; If-Match carries the loaded tag.
+    page.locator("#id").fill("5")
+    page.get_by_role("button", name="Get", exact=True).click()
+    expect(page.locator("#record-revision")).to_contain_text("Loaded from collection docs, revision 1")
+    assert fake.log[-1]["path"] == "/v1/collections/docs/vectors/5", fake.log[-1]
+    loaded_tag = fake.etag("docs", "5")
+    fake.records[("docs", "5")]["revision"] += 1  # concurrent external write
+    page.get_by_role("button", name="Put / replace").click()
+    confirm(page, "record 5 in collection docs")
+    expect(page.locator("#record-revision")).to_contain_text("Conflict")
+    put = fake.log[-1]
+    assert put["method"] == "PUT" and put["path"] == "/v1/collections/docs/vectors/5" and put["headers"]["if-match"] == loaded_tag, put
+    assert fake.records[("docs", "5")]["revision"] == 2  # nothing written
+    assert not any(entry["method"] in ("PUT", "POST", "DELETE") and entry["path"].startswith("/v1/vectors") for entry in fake.log)
+    # Hybrid search: score columns, explicit direction and collection route.
+    page.locator("#mode").select_option("hybrid")
+    expect(page.locator("#mode-help")).to_contain_text("HIGHER is better")
+    page.locator("#query").fill("[1, 0]")
+    page.locator("#search-text").fill("vector database")
+    page.locator("#explain").check()
+    page.get_by_role("button", name="Search", exact=True).click()
+    expect(page.locator("#hits caption")).to_contain_text("hybrid score, higher is better")
+    expect(page.locator("#hits thead th")).to_have_text(["ID", "Score (higher is better)", "Distance (lower is better)", "bm25", "vector_rank", "text_rank"])
+    expect(page.locator("#hits tbody tr").nth(1)).to_contain_text("--")
+    search = fake.log[-1]
+    assert search["path"] == "/v1/collections/docs/search", search
+    assert search["body"]["mode"] == "hybrid" and search["body"]["text"] == "vector database" and search["body"]["explain"] is True, search
+    assert "quantization" not in search["body"] and "ef_search" not in search["body"], search
+    page.locator("#mode").select_option("auto")
+    page.get_by_role("button", name="Search", exact=True).click()
+    expect(page.locator("#search-plan")).to_contain_text("exact_scan")
+    expect(page.locator("#hits caption")).to_contain_text("lower distance is better")
+    # Resumable import: a rejected chunk stops the job; resume replays the last committed chunk
+    # (already_committed) and continues from the durable checkpoint. No blind retries.
+    rows = "\n".join(json.dumps({"id": str(100 + index), "vector": [1, index]}) for index in range(5))
+    page.locator("#job-file").set_input_files(files=[{"name": "rows.ndjson", "mimeType": "application/x-ndjson", "buffer": rows.encode()}])
+    page.locator("#job-chunk-size").fill("2")
+    page.locator("#job-prepare").click()
+    expect(page.locator("#job-result")).to_contain_text("3")
+    page.locator("#job-start").click()
+    confirm(page, "into collection docs")
+    expect(page.locator("#job-invalid")).to_contain_text("bad vector")
+    expect(page.locator("#job-result")).to_contain_text("remain committed")
+    assert [entry["path"] for entry in fake.log if entry["path"].startswith("/v1/imports/")] == ["/v1/imports/7/chunks/1", "/v1/imports/7/chunks/2"]
+    assert fake.log[-3]["path"] == "/v1/collections/docs/imports" and fake.log[-3]["body"] is None
+    page.locator("#job-resume").click()
+    confirm(page, "Resume job 7 into collection docs")
+    expect(page.locator("#job-progress")).to_have_attribute("value", "3")
+    chunks = [entry["path"].rsplit("/", 1)[1] for entry in fake.log if "/chunks/" in entry["path"]]
+    assert chunks == ["1", "2", "1", "2", "3"], chunks
+    page.locator("#job-finish").click()
+    confirm(page, "3 committed chunk(s) (5 rows) stay")
+    expect(page.locator("#job-result")).to_contain_text("finished")
+    assert fake.jobs["7"]["rows_committed"] == 5
+    # Scoped credential: one-time secret is masked, never in the inspector, storage or URL.
+    page.locator("#cred-name").fill("ci-reader")
+    page.locator("#cred-create").click()
+    confirm(page, "collections [docs]")
+    expect(page.locator("#cred-secret")).to_contain_text("Shown once")
+    expect(page.locator("#cred-table tbody tr")).to_have_count(1)
+    expect(page.locator("#cred-table tbody")).to_contain_text("active")
+    created = next(entry for entry in fake.log if entry["path"] == "/v1/admin/credentials" and entry["method"] == "POST")
+    assert created["body"]["collections"] == ["docs"] and created["body"]["operations"] == ["read", "search"] and created["body"]["name"] == "ci-reader", created
+    expect(page.locator("#cred-copy")).to_be_enabled()
+    page.get_by_role("button", name="Rotate cred00000001").click()
+    confirm(page, "cred00000001")
+    expect(page.locator("#cred-secret")).to_contain_text("cred00000002")
+    state = visible_state(page)
+    for token in fake.issued:
+        assert token not in state and SECRET_TAIL[:20] not in state, "one-time secret leaked into page text, inputs, storage or URL"
+    expect(page.locator("#inspector")).to_contain_text("/v1/admin/credentials")  # the follow-up list (no secrets) replaced it
+    page.locator("#cred-clear").click()
+    expect(page.locator("#cred-secret")).to_have_text("No new secret.")
+    expect(page.locator("#cred-copy")).to_be_disabled()
+    # Switching back (2 -> 3 dims) refills untouched example fields for the new dimensions.
+    page.locator("#query").fill("[1,0]")
+    page.locator("#filter").fill('[{"field":"category","op":"eq","value":{"type":"string","value":"x"}}]')
+    page.locator("#collection").select_option("default")
+    confirm(page, "Switch from collection docs to default")
+    expect(page.locator("#collection-badge")).to_have_text("Collection: default")
+    expect(page.locator("#record-vector")).to_have_value("[1,0,0]")
+    expect(page.locator("#query")).to_have_value("[1,0,0]")
+    # Disconnect clears collection-bound state.
+    page.get_by_role("button", name="Disconnect", exact=True).click()
+    expect(page.locator("#collection-badge")).to_have_text("Collection: default")
+    assert page.evaluate("Object.keys(localStorage).filter((key) => key !== 'vlite-appearance').length") == 0
+    assert not errors, errors
+    context.close()
+
+
+def exercise_scoped_mocked(browser):
+    scope = {"credential_id": "cred00000009", "collections": ["docs"], "operations": ["read", "search"], "expires_unix_ms": 4102444800000}
+    fake = FakeApi(role="scoped", scope=scope)
+    context, page, errors = mocked_page(browser, fake)
+    expect(page.locator("#collection-badge")).to_have_text("Collection: docs")
+    assert not any(entry["path"] in ("/v1/database", "/metrics") for entry in fake.log), "scoped principal must not read global counters"
+    for selector in ["#delete-vector", "#collection-create", "#collection-drop", "#cred-create", "#job-start", "#build-index", "#quality-run", "#backup-schedule-save", "#prometheus"]:
+        expect(page.locator(selector)).to_be_disabled()
+    assert option_disabled(page, "approximate")
+    assert not option_disabled(page, "auto")
+    expect(page.locator("#admin-note")).to_contain_text("operations read, search")
+    page.locator("#query").fill("[1, 0]")
+    page.get_by_role("button", name="Search", exact=True).click()
+    expect(page.locator("#hits tbody tr")).to_have_count(1)
+    assert fake.log[-1]["path"] == "/v1/collections/docs/search"
+    assert not any(entry["method"] != "GET" and entry["path"] != "/v1/collections/docs/search" for entry in fake.log), fake.log
+    assert not errors, errors
+    context.close()
+
+
+def exercise_legacy_mocked(browser):
+    fake = FakeApi(features=["background_rebuild", "maintenance", "filtered_ann"], format_version=None)
+    context, page, errors = mocked_page(browser, fake)
+    expect(page.locator("#collection")).to_be_disabled()
+    for selector in ["#collections-refresh", "#collection-create", "#job-start", "#cred-create", "#slow-queries", "#backup-verify", "#auto-maintenance-save"]:
+        expect(page.locator(selector)).to_be_disabled()
+    for mode in ["auto", "hybrid"]:
+        assert option_disabled(page, mode), mode
+    expect(page.locator("#explain")).to_be_disabled()
+    expect(page.locator("#collections-format")).to_contain_text("predates collections")
+    page.get_by_role("button", name="Search", exact=True).click()
+    expect(page.locator("#hits tbody tr")).to_have_count(1)
+    assert fake.log[-1]["path"] == "/v1/search", fake.log[-1]
+    assert not any(entry["path"].startswith("/v1/collections") for entry in fake.log), fake.log
+    assert not errors, errors
+    context.close()
+
+
+def exercise_settings_routes_mocked(browser):
+    """Settings-sensitive calls use the selected collection's route; nothing silently targets default."""
+    fake = FakeApi()
+    context, page, errors = mocked_page(browser, fake)
+    # Default on a newer server: collection route so default's stored settings apply (legacy routes use hard defaults).
+    assert any(entry["path"] == "/v1/collections/default/index/hnsw" for entry in fake.log), fake.log
+    page.get_by_role("button", name="Search", exact=True).click()
+    expect(page.locator("#hits tbody tr")).to_have_count(1)
+    assert fake.log[-1]["path"] == "/v1/collections/default/search", fake.log[-1]
+    assert fake.log[-1]["body"]["metric"] == "squared_l2" and fake.log[-1]["body"]["config"]["ef_construction"] == 200, fake.log[-1]
+    page.locator("#read-maintenance").click()
+    expect(page.locator("#maintenance-result")).to_contain_text('"collection": "default"')
+    assert fake.log[-1]["path"] == "/v1/collections/default/index/hnsw/maintenance", fake.log[-1]
+    expect(page.locator("#maintenance-scope")).to_contain_text("legacy route")
+    page.locator("#save-maintenance").click()
+    confirm(page, "Thresholds apply to every collection")
+    expect(page.locator("#status")).to_contain_text("PUT /v1/index/hnsw/maintenance: HTTP 200")
+    # Named collection: read/tick on its own route; the legacy-only policy save is disabled and explained.
+    page.locator("#collection").select_option("docs")
+    confirm(page, "Switch from collection default to docs")
+    expect(page.locator("#collection-badge")).to_have_text("Collection: docs")
+    switched = len(fake.log)
+    expect(page.locator("#metric")).to_have_value("cosine")
+    expect(page.locator("#save-maintenance")).to_be_disabled()
+    expect(page.locator("#maintenance-scope")).to_contain_text("Collection docs")
+    page.locator("#read-maintenance").click()
+    expect(page.locator("#maintenance-result")).to_contain_text('"collection": "docs"')
+    expect(page.locator("#maintenance-policy")).to_have_value(re.compile(r'"metric": "cosine"'))
+    page.locator("#tick-maintenance").click()
+    confirm(page, "collection docs")
+    expect(page.locator("#status")).to_contain_text("POST /v1/collections/docs/index/hnsw/maintenance/tick: HTTP 200")
+    page.locator("#query").fill("[1, 0]")
+    page.get_by_role("button", name="Search", exact=True).click()
+    expect(page.locator("#hits tbody tr")).to_have_count(1)
+    after = [entry["path"] for entry in fake.log[switched - 1:]]
+    assert "/v1/collections/docs/index/hnsw/maintenance" in after and "/v1/collections/docs/search" in after, after
+    assert not any(path.startswith(("/v1/index", "/v1/search", "/v1/vectors", "/v1/batches", "/v1/collections/default/")) for path in after), after
+    assert fake.log[-1]["body"]["metric"] == "cosine", fake.log[-1]
+    # A ready index built with an explicit identity (m=8, ef=40) that differs from stored settings: on switch the form
+    # follows the ready index (so ready-only/auto searches hit it) and says so.
+    fake.ready_index = {"default": {"config": {"m": 8, "ef_construction": 40, "seed": "0"}, "metric": "squared_l2"}}
+    page.locator("#collection").select_option("default")
+    confirm(page, "Switch from collection docs to default")
+    expect(page.locator("#index-status")).to_contain_text("differs from the stored settings")
+    expect(page.locator("#hnsw-m")).to_have_value("8")
+    expect(page.locator("#hnsw-ef")).to_have_value("40")
+    expect(page.locator("#metric")).to_have_value("squared_l2")
+    page.get_by_role("button", name="Search", exact=True).click()
+    expect(page.locator("#hits tbody tr")).to_have_count(1)
+    assert fake.log[-1]["path"] == "/v1/collections/default/search" and fake.log[-1]["body"]["config"]["m"] == 8, fake.log[-1]
+    assert not errors, errors
+    context.close()
+
+def exercise_operations_mocked(browser):
+    fake = FakeApi()
+    context, page, errors = mocked_page(browser, fake)
+    # Schedulers are off by default; saves are partial merges with an explicit confirmation.
+    page.locator("#backup-schedule-read").click()
+    expect(page.locator("#backup-schedule")).to_have_value(json.dumps(fake.schedule, indent=2).replace(": False", ": false").replace(": True", ": true"))
+    page.locator("#backup-schedule").fill('{"retention_enabled": true, "retain_last": 3}')
+    page.locator("#backup-schedule-save").click()
+    confirm(page, "RETENTION ON", accept=False)
+    assert fake.schedule["retention_enabled"] is False
+    page.locator("#backup-schedule-save").click()
+    confirm(page, "beyond the newest 3")
+    expect(page.locator("#status")).to_contain_text("PUT /v1/admin/backups/schedule: HTTP 200")
+    assert fake.log[-1]["method"] == "PUT" and fake.log[-1]["body"] == {"retention_enabled": True, "retain_last": 3}, fake.log[-1]
+    page.locator("#auto-maintenance-read").click()
+    expect(page.locator("#auto-maintenance")).to_have_value(re.compile(r'"interval_secs": 60'))
+    page.locator("#auto-maintenance").fill('{"enabled": true, "interval_secs": 30}')
+    page.locator("#auto-maintenance-save").click()
+    confirm(page, "ENABLE automatic maintenance")
+    expect(page.locator("#status")).to_contain_text("PUT /v1/admin/maintenance/auto: HTTP 200")
+    assert fake.auto["enabled"] is True and fake.auto["interval_ms"] == 30000
+    page.locator("#auto-maintenance").fill('{"interval_secs": 5}')
+    page.locator("#auto-maintenance-save").click()
+    expect(page.locator("#status")).to_contain_text("interval_secs")
+    expect(page.locator("#confirmation")).to_be_hidden()
+    page.locator("#auto-maintenance-tick").click()
+    confirm(page, "exactly one bounded")
+    expect(page.locator("#status")).to_contain_text("POST /v1/admin/maintenance/auto/tick: HTTP 200")
+    page.locator("#backup-schedule-run").click()
+    confirm(page, "Run one scheduled backup cycle now", accept=False)
+    assert fake.log[-1]["path"] != "/v1/admin/backups/schedule/run"
+    page.locator("#backup-schedule-run").click()
+    confirm(page, "retention deletes only when enabled")
+    expect(page.locator("#backup-schedule-result")).to_contain_text("vlite-backup-1.vlite")
+    # Diagnostics: bounded slow-query table (no vectors/text) and Prometheus text.
+    page.locator("#slow-queries").click()
+    expect(page.locator("#slow-summary")).to_contain_text("threshold 250 ms")
+    expect(page.locator("#slow-table tbody tr")).to_have_count(1)
+    expect(page.locator("#slow-table tbody")).to_contain_text("exact_scan")
+    page.locator("#prometheus").click()
+    expect(page.locator("#prometheus-result")).to_contain_text("vlite_records 2")
+    # Indeterminate credential commit: reported as IN EFFECT (never "no change"), list re-read, no secret shown.
+    fake.indeterminate = True
+    page.locator("#cred-name").fill("ci-indeterminate")
+    page.locator("#cred-create").click()
+    confirm(page, "Create a credential")
+    expect(page.locator("#cred-result")).to_contain_text("IS in effect")
+    expect(page.locator("#cred-table tbody")).to_contain_text("ci-indeterminate")
+    expect(page.locator("#cred-secret")).to_have_text("No new secret.")
+    expect(page.locator("#error-help")).to_contain_text("Do not assume nothing changed")
+    assert not any(token in visible_state(page) for token in fake.issued)
+    # New sections keep the existing narrow layout constraint.
+    page.set_viewport_size({"width": 390, "height": 844})
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    assert not errors, errors
+    context.close()
+
+def exercise_epic015_mocked(browser):
+    exercise_collections_mocked(browser)
+    exercise_scoped_mocked(browser)
+    exercise_legacy_mocked(browser)
+    exercise_settings_routes_mocked(browser)
+    exercise_operations_mocked(browser)
+    print("PASS EPIC-015 mocked console: collection switch confirm/cancel isolation, If-Match 412, hybrid/auto rendering, resumable import resume/replay, one-time masked credentials, scoped and legacy gating, scheduler merges/confirmations and run-now, selected-collection maintenance/search routing, diagnostics")
+
 def main():
     name = "vlite-dashboard-" + uuid.uuid4().hex[:10]
     volume = name + "-data"
     network = name + "-network"
     ui_name = name + "-ui"
+    v4_name, v4_ui, v4_network = name + "-v4", name + "-v4-ui", name + "-v4-network"
     image = os.environ.get("VLITE_IMAGE", "vlite-dashboard:test")
     ui_image = os.environ.get("VLITE_DASHBOARD_IMAGE", "vlite-dashboard-ui:test")
     token = secrets.token_urlsafe(32)
@@ -600,14 +1255,44 @@ def main():
                     exercise_separate_app(page, ui_base, token, "Not ready")
                     exercise_console_tools(page, ui_base, token)
                     exercise_operations(page, ui_base, token, read_token)
+                    exercise_epic015_real(page, ui_base, token)
+                    # Format v4 stack: the same console against a real v4 API (collections, imports, credentials).
+                    v4_admin = os.path.join(directory, "admin-v4")
+                    os.mkdir(v4_admin)
+                    os.chmod(v4_admin, 0o777)
+                    docker("network", "create", v4_network)
+                    docker("run", "-d", "--name", v4_name, "--network", v4_network, "--network-alias", "api",
+                           "--mount", f"type=bind,source={secret},target=/run/token,readonly",
+                           "--mount", "type=tmpfs,target=/data,tmpfs-mode=1777",
+                           "--mount", f"type=bind,source={v4_admin},target=/admin",
+                           "-e", "VLITE_ADMIN_DIR=/admin", "--entrypoint", "vlite-server", image,
+                           "/data/v4.vlite", "--create-if-missing", "3", "--create-format", "4",
+                           "--bind", "0.0.0.0:8080", "--allow-remote", "--token-file", "/run/token")
+                    docker("run", "-d", "--name", v4_ui, "--network", v4_network, "-p", "127.0.0.1::8080", ui_image)
+                    v4_base = "http://127.0.0.1:" + docker("port", v4_ui, "8080/tcp").rsplit(":", 1)[1]
+                    ready(page, v4_base + "/api")
+                    v4_caps = page.request.get(v4_base + "/api/v1/capabilities", headers={"Authorization": "Bearer " + token}).json()
+                    assert v4_caps.get("format_version") == 4 and v4_caps["features"].get("collections"), v4_caps
+                    exercise_epic015_real(page, v4_base, token)
+                    exercise_epic015_mocked(browser)
                     print("PASS Chromium dashboards: embedded REST UI and separately containerized REST-proxy UI; auth, CRUD, pagination, search, index readiness, confirmation, token lifecycle and API restart persistence")
                 finally:
                     browser.close()
     finally:
-        subprocess.run(["docker", "rm", "-f", ui_name, name], check=False, capture_output=True, timeout=60)
+        subprocess.run(["docker", "rm", "-f", ui_name, name, v4_ui, v4_name], check=False, capture_output=True, timeout=60)
         subprocess.run(["docker", "network", "rm", network], check=False, capture_output=True, timeout=60)
+        subprocess.run(["docker", "network", "rm", v4_network], check=False, capture_output=True, timeout=60)
         print("Retained Docker data volume:", volume)
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    if "--mocked" in sys.argv:
+        with sync_playwright() as playwright:
+            mocked_browser = playwright.chromium.launch()
+            try:
+                exercise_epic015_mocked(mocked_browser)
+            finally:
+                mocked_browser.close()
+    else:
+        main()

@@ -2,29 +2,52 @@
 //!
 //! See the project README for the durability and explicit tail-repair contract.
 
+mod collection;
 mod format;
 mod hnsw;
+pub mod hybrid;
+pub mod import;
 mod metadata;
+pub mod metadata_index;
+pub mod planner;
+pub mod quality;
+pub mod quantize;
 mod rebuild;
+mod stats;
+pub mod text_index;
+pub use collection::{
+    CollectionInfo, CollectionMut, CollectionRef, CollectionSettings, CollectionSpec,
+    SettingsPersistence,
+};
 pub use hnsw::{HnswConfig, MAX_EF_SEARCH, MAX_HNSW_BUFFER_IDS, MAX_HNSW_BUFFER_VECTOR_BYTES};
+pub use import::{
+    ImportChunkOutcome, ImportChunkReport, ImportJobId, ImportState, ImportStatus, InvalidRow,
+    InvalidRowPolicy, MAX_REPORTED_INVALID_ROWS,
+};
 pub use metadata::{
     Condition, MAX_FILTER_CONDITIONS, MAX_METADATA_BYTES, MAX_METADATA_FIELDS, Metadata,
     MetadataValue,
 };
+pub use metadata_index::{MetadataIndexKind, MetadataIndexSpec};
+pub use planner::{PlannedSearch, PlannerPolicy};
+pub use quantize::{AnnOptions, Quantization};
 pub use rebuild::{
     HnswBufferCapacity, HnswMaintenancePolicy, HnswMaintenanceReport, HnswMaintenanceStatus,
     HnswPressure, HnswRebuildLimits, HnswRebuildProgress, HnswRebuildStatus,
 };
+pub use stats::{PlanStrategy, QueryPlan, SearchStats};
 pub mod maintenance;
 #[cfg(feature = "server")]
 pub mod server;
 
-use std::collections::{BTreeMap, BinaryHeap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fmt;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, Seek, SeekFrom, Write};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
+
+use collection::Collection;
 
 pub const MAX_DIMENSIONS: usize = 65_536;
 pub const MAX_PAYLOAD_BYTES: usize = 1_048_576;
@@ -96,6 +119,7 @@ fn metric_distance(
 }
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     Io(io::Error),
     Locked,
@@ -138,6 +162,27 @@ pub enum Error {
     },
     Poisoned,
     SequenceExhausted,
+    /// Named collections need format v4; upgrade a closed copy offline.
+    CollectionsRequireUpgrade,
+    CollectionNotFound,
+    CollectionExists,
+    InvalidCollectionName,
+    /// Live-collection limit (64 including `default`) reached, or the
+    /// lineage's never-reused collection ID space (1..=65535) is exhausted.
+    TooManyCollections,
+    /// Drop refused: live records or open import jobs.
+    CollectionNotEmpty,
+    DefaultCollectionImmutable,
+    InvalidCollectionSettings(&'static str),
+    /// A compare-and-set precondition failed; nothing was written.
+    RevisionMismatch {
+        current: Option<u64>,
+    },
+    ImportsRequireUpgrade,
+    ImportConflict(&'static str),
+    ImportNotFound,
+    TooManyImports,
+    InvalidQuery(&'static str),
 }
 
 impl fmt::Display for Error {
@@ -236,6 +281,46 @@ impl fmt::Display for Error {
             ),
             Self::Poisoned => write!(f, "handle poisoned by failed commit; close and reopen"),
             Self::SequenceExhausted => write!(f, "commit sequence exhausted"),
+            Self::CollectionsRequireUpgrade => write!(
+                f,
+                "named collections require format v4; upgrade a closed copy to a new path"
+            ),
+            Self::CollectionNotFound => write!(f, "collection not found"),
+            Self::CollectionExists => write!(f, "collection already exists"),
+            Self::InvalidCollectionName => {
+                write!(f, "collection names must match ^[a-z][a-z0-9_-]{{0,62}}$")
+            }
+            Self::TooManyCollections => write!(
+                f,
+                "at most 64 live collections, including default, and at most 65535 collection IDs per lineage"
+            ),
+            Self::CollectionNotEmpty => write!(
+                f,
+                "collection has live records or open import jobs; empty it first"
+            ),
+            Self::DefaultCollectionImmutable => {
+                write!(f, "the default collection cannot be created or dropped")
+            }
+            Self::InvalidCollectionSettings(reason) => {
+                write!(f, "invalid collection settings: {reason}")
+            }
+            Self::RevisionMismatch {
+                current: Some(revision),
+            } => write!(
+                f,
+                "revision precondition failed; current revision is {revision}"
+            ),
+            Self::RevisionMismatch { current: None } => {
+                write!(f, "revision precondition failed; record does not exist")
+            }
+            Self::ImportsRequireUpgrade => write!(
+                f,
+                "import jobs require format v4; upgrade a closed copy to a new path"
+            ),
+            Self::ImportConflict(reason) => write!(f, "import conflict: {reason}"),
+            Self::ImportNotFound => write!(f, "import job not found"),
+            Self::TooManyImports => write!(f, "at most 64 import jobs may be open"),
+            Self::InvalidQuery(reason) => write!(f, "invalid query: {reason}"),
         }
     }
 }
@@ -332,19 +417,61 @@ pub struct RepairReport {
     pub retained_commits: u64,
 }
 
+/// On-disk format selected by `Database::create_with_format`.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormatVersion {
+    /// The default for `Database::create`; readable by older VLite releases.
+    V3,
+    /// Adds lineage, named collections, persisted settings and import
+    /// checkpoints. Not readable by releases that predate it.
+    V4,
+}
+
+/// Compare-and-set precondition on a record's current revision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Expected {
+    /// No precondition.
+    Any,
+    /// The ID must not currently exist.
+    Absent,
+    /// The record must exist with exactly this revision.
+    Revision(u64),
+}
+
+impl Expected {
+    fn check(self, current: Option<u64>) -> Result<()> {
+        let matches = match self {
+            Self::Any => true,
+            Self::Absent => current.is_none(),
+            Self::Revision(revision) => current == Some(revision),
+        };
+        if matches {
+            Ok(())
+        } else {
+            Err(Error::RevisionMismatch { current })
+        }
+    }
+}
+
 /// One exclusive database owner. All operations are serialized by the caller.
 ///
 /// Reads use a rebuilt in-memory map. No persistent index or lock sidecar exists.
 pub struct Database {
     file: LockedFile,
     version: u32,
-    dimensions: usize,
-    records: BTreeMap<u64, Record>,
+    lineage: Option<u64>,
     sequence: u64,
     end: u64,
     poisoned: bool,
-    index: Option<hnsw::Index>,
-    rebuild: Option<rebuild::Job>,
+    /// Live collections by ID; ID 0 (`default`) is always present.
+    collections: BTreeMap<u16, Collection>,
+    /// At most one background rebuild per database, owned by one collection.
+    rebuild: Option<(u16, rebuild::Job)>,
+    imports: import::Registry,
+    /// Highest collection ID ever assigned in this lineage history; new
+    /// collections get the next ID, so IDs are never reused.
+    collection_high: u16,
 }
 
 struct LockedFile(File);
@@ -392,31 +519,75 @@ fn validate_dimensions(dimensions: usize) -> Result<()> {
     Ok(())
 }
 
+fn validate_vector(dimensions: usize, vector: &[f32]) -> Result<()> {
+    if vector.len() != dimensions {
+        return Err(Error::DimensionMismatch {
+            expected: dimensions,
+            actual: vector.len(),
+        });
+    }
+    if vector.iter().any(|value| !value.is_finite()) {
+        return Err(Error::NonFiniteVector);
+    }
+    Ok(())
+}
+
+fn validate_settings(settings: &CollectionSettings) -> Result<()> {
+    settings
+        .validate()
+        .map_err(Error::InvalidCollectionSettings)
+}
+
 impl Database {
-    /// Creates a new database without overwriting any existing path.
+    /// Creates a new format-v3 database without overwriting any existing path.
     ///
     /// The file contents are synced before returning. The caller is responsible
     /// for platform-specific parent-directory durability after creation.
     pub fn create(path: impl AsRef<Path>, dimensions: usize) -> Result<Self> {
+        Self::create_with_format(path, dimensions, FormatVersion::V3)
+    }
+
+    /// Creates a new database in an explicit format. `dimensions` applies to
+    /// the `default` collection. V4 draws a random nonzero lineage from the OS.
+    pub fn create_with_format(
+        path: impl AsRef<Path>,
+        dimensions: usize,
+        format: FormatVersion,
+    ) -> Result<Self> {
         validate_dimensions(dimensions)?;
+        let (version, lineage, header) = match format {
+            FormatVersion::V3 => (format::CURRENT_VERSION, None, format::header(dimensions)),
+            FormatVersion::V4 => {
+                let lineage = format::new_lineage()?;
+                (
+                    format::V4,
+                    Some(lineage),
+                    format::header_v4(dimensions, lineage, 0),
+                )
+            }
+        };
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
             .open(path)?;
         let mut file = lock(file)?;
-        file.write_all(&format::header(dimensions))?;
+        file.write_all(&header)?;
         file.sync_all()?;
         Ok(Self {
             file,
-            version: format::CURRENT_VERSION,
-            dimensions,
-            records: BTreeMap::new(),
+            version,
+            lineage,
             sequence: 0,
             end: format::HEADER_SIZE,
             poisoned: false,
-            index: None,
+            collections: BTreeMap::from([(
+                0,
+                Collection::empty("default".into(), dimensions, CollectionSettings::default()),
+            )]),
             rebuild: None,
+            imports: import::Registry::default(),
+            collection_high: 0,
         })
     }
 
@@ -432,16 +603,22 @@ impl Database {
                 bytes: loaded.incomplete_bytes,
             });
         }
+        let imports = import::Registry::from_markers(&loaded.imports);
         Ok(Self {
             file,
             version: loaded.version,
-            dimensions: loaded.dimensions,
-            records: loaded.records,
+            lineage: loaded.lineage,
             sequence: loaded.sequence,
             end: loaded.end,
             poisoned: false,
-            index: None,
+            collections: loaded
+                .collections
+                .into_iter()
+                .map(|(id, collection)| (id, Collection::from_loaded(collection)))
+                .collect(),
             rebuild: None,
+            imports,
+            collection_high: loaded.collection_high,
         })
     }
 
@@ -466,20 +643,43 @@ impl Database {
         Ok(report)
     }
 
+    /// Dimensions of the `default` collection.
     pub fn dimensions(&self) -> usize {
-        self.dimensions
+        self.default_state().dimensions
     }
 
     pub fn format_version(&self) -> u32 {
         self.version
     }
 
+    /// Random nonzero file-family identity of a v4 database; None for v1–v3.
+    /// Compaction, upgrade and restore assign a new lineage.
+    pub fn lineage(&self) -> Option<u64> {
+        self.lineage
+    }
+
+    /// Live records in the `default` collection.
     pub fn len(&self) -> usize {
-        self.records.len()
+        self.default_state().records.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.records.is_empty()
+        self.default_state().records.is_empty()
+    }
+
+    pub(crate) fn default_state(&self) -> &Collection {
+        self.state(0)
+    }
+
+    /// Collection handles guarantee that their ID is live.
+    fn state(&self, collection: u16) -> &Collection {
+        &self.collections[&collection]
+    }
+
+    fn state_mut(&mut self, collection: u16) -> &mut Collection {
+        self.collections
+            .get_mut(&collection)
+            .expect("collection handles reference live collections")
     }
 
     fn ensure_healthy(&self) -> Result<()> {
@@ -489,23 +689,33 @@ impl Database {
         Ok(())
     }
 
-    fn validate_vector(&self, vector: &[f32]) -> Result<()> {
-        if vector.len() != self.dimensions {
-            return Err(Error::DimensionMismatch {
-                expected: self.dimensions,
-                actual: vector.len(),
-            });
-        }
-        if vector.iter().any(|value| !value.is_finite()) {
-            return Err(Error::NonFiniteVector);
-        }
-        Ok(())
+    fn next_sequence(&self) -> Result<u64> {
+        self.sequence.checked_add(1).ok_or(Error::SequenceExhausted)
     }
 
     /// Returns a record, or None when its ID does not exist.
     pub fn get(&self, id: u64) -> Result<Option<&Record>> {
+        self.get_in(0, id)
+    }
+
+    fn get_in(&self, collection: u16, id: u64) -> Result<Option<&Record>> {
         self.ensure_healthy()?;
-        Ok(self.records.get(&id))
+        Ok(self.state(collection).records.get(&id))
+    }
+
+    /// Current revision of a live record, or None when it does not exist.
+    ///
+    /// A revision is the commit sequence that last put the record. It is
+    /// derived from the log on open, so it survives reopen on every format,
+    /// is strictly increasing per ID, and is never reused by a later put.
+    /// It changes when a file is compacted, upgraded or restored.
+    pub fn revision(&self, id: u64) -> Result<Option<u64>> {
+        self.revision_in(0, id)
+    }
+
+    fn revision_in(&self, collection: u16, id: u64) -> Result<Option<u64>> {
+        self.ensure_healthy()?;
+        Ok(self.state(collection).revisions.get(&id).copied())
     }
 
     /// Durably replaces one record's vector and opaque payload, clearing any metadata.
@@ -521,8 +731,36 @@ impl Database {
         payload: &[u8],
         metadata: &Metadata,
     ) -> Result<()> {
+        self.put_in(0, id, vector, payload, metadata, Expected::Any)
+            .map(|_| ())
+    }
+
+    /// Conditional put. Input validation happens first; a failed precondition
+    /// then returns `RevisionMismatch { current }` without writing. On success
+    /// returns the record's new revision, acknowledged only after sync.
+    pub fn put_with_metadata_if(
+        &mut self,
+        id: u64,
+        vector: &[f32],
+        payload: &[u8],
+        metadata: &Metadata,
+        expected: Expected,
+    ) -> Result<u64> {
+        self.put_in(0, id, vector, payload, metadata, expected)
+    }
+
+    fn put_in(
+        &mut self,
+        collection: u16,
+        id: u64,
+        vector: &[f32],
+        payload: &[u8],
+        metadata: &Metadata,
+        expected: Expected,
+    ) -> Result<u64> {
         self.ensure_healthy()?;
-        self.validate_vector(vector)?;
+        let state = self.state(collection);
+        validate_vector(state.dimensions, vector)?;
         if payload.len() > MAX_PAYLOAD_BYTES {
             return Err(Error::PayloadTooLarge(payload.len()));
         }
@@ -530,26 +768,41 @@ impl Database {
         if !metadata.is_empty() && self.version < 3 {
             return Err(Error::MetadataRequiresUpgrade);
         }
+        expected.check(state.revisions.get(&id).copied())?;
         let record = Record {
             vector: vector.to_vec(),
             payload: payload.to_vec(),
             metadata: metadata.clone(),
         };
-        self.commit(id, Some(&record))?;
-        self.track_index_mutation(id, vector.len() * 4);
-        self.records.insert(id, record);
-        Ok(())
+        let sequence = self.next_sequence()?;
+        let frame = format::record_frame(sequence, collection, id, Some(&record));
+        self.commit_frame(sequence, &frame)?;
+        self.apply(collection, id, Some(record), sequence);
+        Ok(sequence)
     }
 
     /// Durably deletes one record. Missing IDs return false without a commit.
     pub fn delete(&mut self, id: u64) -> Result<bool> {
+        self.delete_in(0, id, Expected::Any)
+    }
+
+    /// Conditional delete. A failed precondition returns `RevisionMismatch`
+    /// without writing; `Expected::Absent` on a missing ID returns false.
+    pub fn delete_if(&mut self, id: u64, expected: Expected) -> Result<bool> {
+        self.delete_in(0, id, expected)
+    }
+
+    fn delete_in(&mut self, collection: u16, id: u64, expected: Expected) -> Result<bool> {
         self.ensure_healthy()?;
-        if !self.records.contains_key(&id) {
+        let current = self.state(collection).revisions.get(&id).copied();
+        expected.check(current)?;
+        if current.is_none() {
             return Ok(false);
         }
-        self.commit(id, None)?;
-        self.track_index_mutation(id, 0);
-        self.records.remove(&id);
+        let sequence = self.next_sequence()?;
+        let frame = format::record_frame(sequence, collection, id, None);
+        self.commit_frame(sequence, &frame)?;
+        self.apply(collection, id, None, sequence);
         Ok(true)
     }
 
@@ -560,6 +813,10 @@ impl Database {
     /// Any write/sync failure is indeterminate for the entire batch and poisons
     /// this handle. A complete batch may reappear after an unacknowledged failure.
     pub fn write_batch(&mut self, operations: &[Mutation]) -> Result<()> {
+        self.write_batch_in(0, operations)
+    }
+
+    fn write_batch_in(&mut self, collection: u16, operations: &[Mutation]) -> Result<()> {
         self.ensure_healthy()?;
         if operations.is_empty() {
             return Ok(());
@@ -567,9 +824,24 @@ impl Database {
         if self.version < 2 {
             return Err(Error::BatchRequiresUpgrade);
         }
+        let body_bytes = self.validate_batch(collection, operations)?;
+        let sequence = self.next_sequence()?;
+        let frame = if collection == 0 {
+            format::batch_frame(sequence, operations, body_bytes)
+        } else {
+            format::batch_frame_v4(sequence, collection, operations, None)
+        };
+        self.commit_frame(sequence, &frame)?;
+        self.apply_batch(collection, operations, sequence);
+        Ok(())
+    }
+
+    /// Returns the encoded batch body length.
+    fn validate_batch(&self, collection: u16, operations: &[Mutation]) -> Result<usize> {
         if operations.len() > MAX_BATCH_OPERATIONS {
             return Err(Error::BatchTooLarge);
         }
+        let dimensions = self.state(collection).dimensions;
         let mut body_bytes = 0usize;
         for operation in operations {
             let bytes = match operation {
@@ -579,7 +851,7 @@ impl Database {
                     metadata,
                     ..
                 } => {
-                    self.validate_vector(vector)?;
+                    validate_vector(dimensions, vector)?;
                     if payload.len() > MAX_PAYLOAD_BYTES {
                         return Err(Error::PayloadTooLarge(payload.len()));
                     }
@@ -592,7 +864,7 @@ impl Database {
                 Mutation::Put {
                     vector, payload, ..
                 } => {
-                    self.validate_vector(vector)?;
+                    validate_vector(dimensions, vector)?;
                     if payload.len() > MAX_PAYLOAD_BYTES {
                         return Err(Error::PayloadTooLarge(payload.len()));
                     }
@@ -605,65 +877,64 @@ impl Database {
                 return Err(Error::BatchTooLarge);
             }
         }
-        let sequence = self
-            .sequence
-            .checked_add(1)
-            .ok_or(Error::SequenceExhausted)?;
-        let frame = format::batch_frame(sequence, operations, body_bytes);
-        self.commit_frame(sequence, &frame)?;
+        Ok(body_bytes)
+    }
+
+    fn apply_batch(&mut self, collection: u16, operations: &[Mutation], sequence: u64) {
         for operation in operations {
-            let (id, bytes) = match operation {
-                Mutation::Put { id, vector, .. } | Mutation::PutWithMetadata { id, vector, .. } => {
-                    (*id, vector.len() * 4)
-                }
-                Mutation::Delete { id } => (*id, 0),
-            };
-            self.track_index_mutation(id, bytes);
-            match operation {
+            let (id, record) = match operation {
                 Mutation::Put {
                     id,
                     vector,
                     payload,
-                } => {
-                    self.records.insert(
-                        *id,
-                        Record {
-                            vector: vector.clone(),
-                            payload: payload.clone(),
-                            metadata: Metadata::new(),
-                        },
-                    );
-                }
+                } => (
+                    *id,
+                    Some(Record {
+                        vector: vector.clone(),
+                        payload: payload.clone(),
+                        metadata: Metadata::new(),
+                    }),
+                ),
                 Mutation::PutWithMetadata {
                     id,
                     vector,
                     payload,
                     metadata,
-                } => {
-                    self.records.insert(
-                        *id,
-                        Record {
-                            vector: vector.clone(),
-                            payload: payload.clone(),
-                            metadata: metadata.clone(),
-                        },
-                    );
-                }
-                Mutation::Delete { id } => {
-                    self.records.remove(id);
-                }
-            }
+                } => (
+                    *id,
+                    Some(Record {
+                        vector: vector.clone(),
+                        payload: payload.clone(),
+                        metadata: metadata.clone(),
+                    }),
+                ),
+                Mutation::Delete { id } => (*id, None),
+            };
+            self.apply(collection, id, record, sequence);
         }
-        Ok(())
     }
 
-    fn commit(&mut self, id: u64, record: Option<&Record>) -> Result<()> {
-        let sequence = self
-            .sequence
-            .checked_add(1)
-            .ok_or(Error::SequenceExhausted)?;
-        let frame = format::frame(sequence, id, record);
-        self.commit_frame(sequence, &frame)
+    /// Atomically commits a chunk of rows plus its import checkpoint marker in
+    /// one v4 batch frame, syncs once, then applies both. Callers (EPIC-008)
+    /// validate rows, job state and contiguity first; the loader re-validates.
+    pub(crate) fn commit_import_frame(
+        &mut self,
+        collection: u16,
+        operations: &[Mutation],
+        marker: &format::ImportMarker,
+    ) -> Result<u64> {
+        self.ensure_healthy()?;
+        if self.version < format::V4 {
+            return Err(Error::ImportsRequireUpgrade);
+        }
+        self.validate_batch(collection, operations)?;
+        let sequence = self.next_sequence()?;
+        let frame = format::batch_frame_v4(sequence, collection, operations, Some(marker));
+        self.commit_frame(sequence, &frame)?;
+        self.apply_batch(collection, operations, sequence);
+        let name = &self.collections[&collection].name;
+        self.imports.apply(collection, name, marker);
+        Ok(sequence)
     }
 
     fn commit_frame(&mut self, sequence: u64, frame: &[u8]) -> Result<()> {
@@ -686,16 +957,186 @@ impl Database {
         Ok(())
     }
 
-    fn track_index_mutation(&mut self, id: u64, current_bytes: usize) {
-        if let Some(job) = &mut self.rebuild {
-            job.track(id, self.records.get(&id), current_bytes);
-        }
-        if let Some(index) = &mut self.index
-            && !index.track(id, self.records.get(&id), current_bytes)
+    /// Single post-commit hook: rebuild catch-up, ANN buffer, derived indexes,
+    /// revisions and records, in that order (PAT-002).
+    fn apply(&mut self, collection: u16, id: u64, record: Option<Record>, sequence: u64) {
+        let vector_bytes = record.as_ref().map_or(0, |record| record.vector.len() * 4);
+        let state = self
+            .collections
+            .get_mut(&collection)
+            .expect("committed collection is live");
+        if let Some((owner, job)) = &mut self.rebuild
+            && *owner == collection
         {
-            self.index = None;
+            job.track(id, state.records.get(&id), vector_bytes);
+        }
+        state.apply_committed(id, record, sequence, vector_bytes);
+    }
+
+    // ---------------------------------------------------------------- collections
+
+    fn resolve(&self, name: &str) -> Result<u16> {
+        self.ensure_healthy()?;
+        if name != "default" && !format::valid_collection_name(name) {
+            return Err(Error::InvalidCollectionName);
+        }
+        self.collections
+            .iter()
+            .find(|(_, collection)| collection.name == name)
+            .map(|(&id, _)| id)
+            .ok_or(Error::CollectionNotFound)
+    }
+
+    fn info(&self, id: u16) -> CollectionInfo {
+        let state = self.state(id);
+        CollectionInfo {
+            id,
+            name: state.name.clone(),
+            dimensions: state.dimensions,
+            live_records: state.records.len(),
+            settings: state.settings.clone(),
+            settings_persisted: state.settings_persisted,
         }
     }
+
+    /// Read-only handle to a collection. `default` is always available.
+    pub fn collection(&self, name: &str) -> Result<CollectionRef<'_>> {
+        let id = self.resolve(name)?;
+        Ok(CollectionRef { db: self, id })
+    }
+
+    /// Mutable handle to a collection. `default` is always available.
+    pub fn collection_mut(&mut self, name: &str) -> Result<CollectionMut<'_>> {
+        let id = self.resolve(name)?;
+        Ok(CollectionMut { db: self, id })
+    }
+
+    /// Live collections in ID order, including `default`.
+    pub fn collections(&self) -> Result<Vec<CollectionInfo>> {
+        self.ensure_healthy()?;
+        Ok(self.collections.keys().map(|&id| self.info(id)).collect())
+    }
+
+    /// Durably creates a named collection (v4 only). Names match
+    /// `^[a-z][a-z0-9_-]{0,62}$`; `default` is reserved. At most 64 live
+    /// collections including `default`. IDs are assigned monotonically and are
+    /// never reused within a lineage history, including across `compact`,
+    /// `upgrade` and `restore`. Once ID 65,535 has been assigned, every later
+    /// create returns `TooManyCollections` without writing.
+    pub fn create_collection(
+        &mut self,
+        name: &str,
+        spec: CollectionSpec,
+    ) -> Result<CollectionInfo> {
+        self.ensure_healthy()?;
+        if self.version < format::V4 {
+            return Err(Error::CollectionsRequireUpgrade);
+        }
+        if !format::valid_collection_name(name) {
+            return Err(Error::InvalidCollectionName);
+        }
+        if name == "default" {
+            return Err(Error::DefaultCollectionImmutable);
+        }
+        validate_dimensions(spec.dimensions)?;
+        validate_settings(&spec.settings)?;
+        if self.collections.values().any(|c| c.name == name) {
+            return Err(Error::CollectionExists);
+        }
+        if self.collections.len() >= format::MAX_COLLECTIONS {
+            return Err(Error::TooManyCollections);
+        }
+        // IDs are never reused within a lineage history (they back ETags,
+        // scoped credentials and import identity), so exhausting the u16 ID
+        // space is permanent for this lineage.
+        let id = self
+            .collection_high
+            .checked_add(1)
+            .ok_or(Error::TooManyCollections)?;
+        let sequence = self.next_sequence()?;
+        let frame =
+            format::collection_create_frame(sequence, id, name, spec.dimensions, &spec.settings);
+        self.commit_frame(sequence, &frame)?;
+        self.collection_high = id;
+        let mut collection = Collection::empty(name.into(), spec.dimensions, spec.settings);
+        collection.settings_persisted = true;
+        self.collections.insert(id, collection);
+        Ok(self.info(id))
+    }
+
+    /// Durably drops an empty named collection (v4 only). A collection with
+    /// live records or open import jobs returns `CollectionNotEmpty`.
+    pub fn drop_collection(&mut self, name: &str) -> Result<()> {
+        self.ensure_healthy()?;
+        if self.version < format::V4 {
+            return Err(Error::CollectionsRequireUpgrade);
+        }
+        if name == "default" {
+            return Err(Error::DefaultCollectionImmutable);
+        }
+        let id = self.resolve(name)?;
+        if !self.state(id).records.is_empty() || self.imports.has_open_in(id) {
+            return Err(Error::CollectionNotEmpty);
+        }
+        let sequence = self.next_sequence()?;
+        self.commit_frame(sequence, &format::collection_drop_frame(sequence, id))?;
+        if self.rebuild.as_ref().is_some_and(|(owner, _)| *owner == id) {
+            let (_, mut job) = self.rebuild.take().expect("owned job");
+            job.stop(HnswRebuildStatus::Cancelled);
+            // The collection is gone; a worker panic has nothing left to report to.
+            let _ = job.finish();
+        }
+        self.collections.remove(&id);
+        self.imports.collection_dropped(id);
+        Ok(())
+    }
+
+    /// Validates and replaces a collection's settings, then rebuilds its
+    /// derived indexes. v4 commits a synced settings frame (`Persisted`);
+    /// on v1–v3 only `default` exists and the change is `MemoryOnly`.
+    pub fn set_collection_settings(
+        &mut self,
+        name: &str,
+        settings: CollectionSettings,
+    ) -> Result<SettingsPersistence> {
+        let id = self.resolve(name)?;
+        validate_settings(&settings)?;
+        let persistence = if self.version >= format::V4 {
+            let sequence = self.next_sequence()?;
+            self.commit_frame(sequence, &format::settings_frame(sequence, id, &settings))?;
+            SettingsPersistence::Persisted
+        } else {
+            SettingsPersistence::MemoryOnly
+        };
+        let state = self.state_mut(id);
+        state.settings = settings;
+        state.settings_persisted = persistence == SettingsPersistence::Persisted;
+        state.rebuild_derived();
+        Ok(persistence)
+    }
+
+    /// Durable status of one import job (v4 only).
+    pub fn import_status(&self, job: u64) -> Result<ImportStatus> {
+        self.ensure_healthy()?;
+        if self.version < format::V4 {
+            return Err(Error::ImportsRequireUpgrade);
+        }
+        let state = self.imports.get(job).ok_or(Error::ImportNotFound)?;
+        // The name is the one recorded when the job started; a recreated
+        // collection may carry the same name under a new ID.
+        Ok(ImportStatus {
+            job,
+            collection: self.imports.collection_name(job).to_owned(),
+            collection_dropped: state.collection_dropped,
+            state: state.state,
+            last_chunk: state.last_chunk,
+            rows_committed: state.rows_committed,
+            rows_skipped: state.rows_skipped,
+            last_digest: state.last_digest,
+        })
+    }
+
+    // ---------------------------------------------------------------- HNSW
 
     /// Builds/replaces the optional in-memory HNSW index from committed live records.
     ///
@@ -711,13 +1152,36 @@ impl Database {
         config: HnswConfig,
         metric: DistanceMetric,
     ) -> Result<()> {
+        self.build_hnsw_in(0, config, metric)
+    }
+
+    fn build_hnsw_in(
+        &mut self,
+        collection: u16,
+        config: HnswConfig,
+        metric: DistanceMetric,
+    ) -> Result<()> {
+        self.build_hnsw_with_options_in(collection, config, metric, AnnOptions::default())
+    }
+
+    fn build_hnsw_with_options_in(
+        &mut self,
+        collection: u16,
+        config: HnswConfig,
+        metric: DistanceMetric,
+        options: AnnOptions,
+    ) -> Result<()> {
         self.ensure_healthy()?;
         config.validate()?;
         validate_ann_metric(metric)?;
-        if let Some(job) = &mut self.rebuild {
+        options.validate()?;
+        if let Some((owner, job)) = &mut self.rebuild
+            && *owner == collection
+        {
             job.stop(HnswRebuildStatus::Superseded);
         }
-        self.index = Some(hnsw::Index::build(&self.records, config, metric));
+        let state = self.state_mut(collection);
+        state.index = Some(hnsw::Index::build(&state.records, config, metric, options));
         Ok(())
     }
 
@@ -727,20 +1191,51 @@ impl Database {
     /// graph is retained until normal mutation-buffer overflow. No automatic
     /// fallback, retry, polling or publication occurs in search/write methods.
     /// Use ready-only queries and poll explicitly to avoid synchronous builds.
+    /// One job exists per database across all collections.
     pub fn start_hnsw_rebuild(
         &mut self,
         config: HnswConfig,
         metric: DistanceMetric,
         limits: HnswRebuildLimits,
     ) -> Result<()> {
+        self.start_rebuild_in(0, config, metric, limits)
+    }
+
+    fn start_rebuild_in(
+        &mut self,
+        collection: u16,
+        config: HnswConfig,
+        metric: DistanceMetric,
+        limits: HnswRebuildLimits,
+    ) -> Result<()> {
+        self.start_rebuild_with_options_in(
+            collection,
+            config,
+            metric,
+            AnnOptions::default(),
+            limits,
+        )
+    }
+
+    fn start_rebuild_with_options_in(
+        &mut self,
+        collection: u16,
+        config: HnswConfig,
+        metric: DistanceMetric,
+        options: AnnOptions,
+        limits: HnswRebuildLimits,
+    ) -> Result<()> {
         self.ensure_healthy()?;
         config.validate()?;
         validate_ann_metric(metric)?;
-        limits.validate(self.records.len(), self.dimensions)?;
+        options.validate()?;
+        let state = self.state(collection);
+        limits.validate_for(state.records.len(), state.dimensions, options)?;
         if self.rebuild.is_some() {
             return Err(Error::HnswRebuildBusy);
         }
-        self.rebuild = Some(rebuild::Job::start(&self.records, config, metric)?);
+        let job = rebuild::Job::start(&state.records, config, metric, options)?;
+        self.rebuild = Some((collection, job));
         Ok(())
     }
 
@@ -749,16 +1244,23 @@ impl Database {
     /// Catch-up has the same 256-ID / 8-MiB vector limits as the active graph.
     /// Overflow never rejects durable writes or publishes stale snapshot data.
     pub fn poll_hnsw_rebuild(&mut self) -> Result<HnswRebuildStatus> {
+        self.poll_rebuild_in(0)
+    }
+
+    fn poll_rebuild_in(&mut self, collection: u16) -> Result<HnswRebuildStatus> {
         self.ensure_healthy()?;
-        let Some(job) = &self.rebuild else {
-            return Ok(HnswRebuildStatus::Idle);
-        };
-        if !job.finished() {
-            return Ok(job.status());
+        match &self.rebuild {
+            Some((owner, job)) if *owner == collection => {
+                if !job.finished() {
+                    return Ok(job.status());
+                }
+            }
+            _ => return Ok(HnswRebuildStatus::Idle),
         }
-        let (status, index) = self.rebuild.take().expect("pending job").finish()?;
+        let (_, job) = self.rebuild.take().expect("pending job");
+        let (status, index) = job.finish()?;
         if let Some(index) = index {
-            self.index = Some(index);
+            self.state_mut(collection).index = Some(index);
         }
         Ok(status)
     }
@@ -767,7 +1269,13 @@ impl Database {
     /// already-selected terminal reason). Returns false if no job is pending.
     /// Cancellation never waits or replaces the active graph.
     pub fn cancel_hnsw_rebuild(&mut self) -> bool {
-        if let Some(job) = &mut self.rebuild {
+        self.cancel_rebuild_in(0)
+    }
+
+    fn cancel_rebuild_in(&mut self, collection: u16) -> bool {
+        if let Some((owner, job)) = &mut self.rebuild
+            && *owner == collection
+        {
             job.stop(HnswRebuildStatus::Cancelled);
             true
         } else {
@@ -783,16 +1291,49 @@ impl Database {
         metric: DistanceMetric,
         policy: HnswMaintenancePolicy,
     ) -> Result<HnswMaintenanceStatus> {
+        self.maintenance_status_in(0, config, metric, policy)
+    }
+
+    fn maintenance_status_in(
+        &self,
+        collection: u16,
+        config: HnswConfig,
+        metric: DistanceMetric,
+        policy: HnswMaintenancePolicy,
+    ) -> Result<HnswMaintenanceStatus> {
+        self.maintenance_status_with_options_in(
+            collection,
+            config,
+            metric,
+            AnnOptions::default(),
+            policy,
+        )
+    }
+
+    fn maintenance_status_with_options_in(
+        &self,
+        collection: u16,
+        config: HnswConfig,
+        metric: DistanceMetric,
+        options: AnnOptions,
+        policy: HnswMaintenancePolicy,
+    ) -> Result<HnswMaintenanceStatus> {
         self.ensure_healthy()?;
         config.validate()?;
         validate_ann_metric(metric)?;
+        options.validate()?;
         policy.validate()?;
         let active_buffer = self
+            .state(collection)
             .index
             .as_ref()
-            .filter(|index| index.config == config && index.metric == metric)
+            .filter(|index| index.ready_for(config, metric, options.quantization))
             .map(HnswBufferCapacity::of);
-        let rebuild = self.rebuild.as_ref().map(rebuild::Job::progress);
+        let rebuild = self
+            .rebuild
+            .as_ref()
+            .filter(|(owner, _)| *owner == collection)
+            .map(|(_, job)| job.progress());
         let pressure = if rebuild
             .is_some_and(|job| job.terminal_reason == Some(HnswRebuildStatus::CatchUpOverflow))
         {
@@ -832,15 +1373,41 @@ impl Database {
         metric: DistanceMetric,
         policy: HnswMaintenancePolicy,
     ) -> Result<HnswMaintenanceReport> {
-        let before = self.hnsw_maintenance_status(config, metric, policy)?;
-        if before
+        self.maintain_in(0, config, metric, policy)
+    }
+
+    fn maintain_in(
+        &mut self,
+        collection: u16,
+        config: HnswConfig,
+        metric: DistanceMetric,
+        policy: HnswMaintenancePolicy,
+    ) -> Result<HnswMaintenanceReport> {
+        self.maintain_with_options_in(collection, config, metric, AnnOptions::default(), policy)
+    }
+
+    fn maintain_with_options_in(
+        &mut self,
+        collection: u16,
+        config: HnswConfig,
+        metric: DistanceMetric,
+        options: AnnOptions,
+        policy: HnswMaintenancePolicy,
+    ) -> Result<HnswMaintenanceReport> {
+        let status_of = |db: &Self| {
+            db.maintenance_status_with_options_in(collection, config, metric, options, policy)
+        };
+        let before = status_of(self)?;
+        if self.rebuild.as_ref().is_some_and(|(owner, job)| {
+            *owner != collection || job.options().quantization != options.quantization
+        }) || before
             .rebuild
             .is_some_and(|job| job.config != config || job.metric != metric)
         {
             return Err(Error::HnswRebuildBusy);
         }
-        let outcome = self.poll_hnsw_rebuild()?;
-        let status = self.hnsw_maintenance_status(config, metric, policy)?;
+        let outcome = self.poll_rebuild_in(collection)?;
+        let status = status_of(self)?;
         let start = status.rebuild.is_none()
             && !matches!(
                 outcome,
@@ -851,12 +1418,12 @@ impl Database {
                     .active_buffer
                     .is_some_and(|buffer| buffer.high(policy)));
         if start {
-            self.start_hnsw_rebuild(config, metric, policy.limits)?;
+            self.start_rebuild_with_options_in(collection, config, metric, options, policy.limits)?;
         }
         Ok(HnswMaintenanceReport {
             outcome,
             started: start,
-            status: self.hnsw_maintenance_status(config, metric, policy)?,
+            status: status_of(self)?,
         })
     }
 
@@ -910,23 +1477,40 @@ impl Database {
         conditions: &[Condition],
         metric: DistanceMetric,
     ) -> Result<Vec<SearchHit>> {
-        self.validate_hnsw_query(query, k, ef_search, config, conditions, metric)?;
-        if k == 0 || self.records.is_empty() {
+        self.search_approximate_in(0, query, k, ef_search, config, conditions, metric)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn search_approximate_in(
+        &mut self,
+        collection: u16,
+        query: &[f32],
+        k: usize,
+        ef_search: usize,
+        config: HnswConfig,
+        conditions: &[Condition],
+        metric: DistanceMetric,
+    ) -> Result<Vec<SearchHit>> {
+        self.validate_hnsw_query(collection, query, k, ef_search, config, conditions, metric)?;
+        let state = self.state(collection);
+        if k == 0 || state.records.is_empty() {
             return Ok(Vec::new());
         }
-        if self
+        if state
             .index
             .as_ref()
-            .is_none_or(|index| index.config != config || index.metric != metric)
+            .is_none_or(|index| !index.ready_for(config, metric, Quantization::None))
         {
-            self.build_hnsw_with_metric(config, metric)?;
+            self.build_hnsw_in(collection, config, metric)?;
         }
-        Ok(self.index.as_ref().expect("built index").search_filtered(
+        let state = self.state(collection);
+        Ok(state.index.as_ref().expect("built index").search_filtered(
             query,
             k,
             ef_search,
-            &self.records,
+            &state.records,
             conditions,
+            &mut SearchStats::default(),
         ))
     }
 
@@ -976,20 +1560,85 @@ impl Database {
         conditions: &[Condition],
         metric: DistanceMetric,
     ) -> Result<Vec<SearchHit>> {
-        self.validate_hnsw_query(query, k, ef_search, config, conditions, metric)?;
-        if k == 0 || self.records.is_empty() {
-            return Ok(Vec::new());
-        }
-        let index = self
-            .index
-            .as_ref()
-            .filter(|index| index.config == config && index.metric == metric)
-            .ok_or(Error::IndexNotReady)?;
-        Ok(index.search_filtered(query, k, ef_search, &self.records, conditions))
+        self.search_ready_in(
+            0,
+            query,
+            k,
+            ef_search,
+            config,
+            conditions,
+            metric,
+            &mut SearchStats::default(),
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn search_ready_in(
+        &self,
+        collection: u16,
+        query: &[f32],
+        k: usize,
+        ef_search: usize,
+        config: HnswConfig,
+        conditions: &[Condition],
+        metric: DistanceMetric,
+        stats: &mut SearchStats,
+    ) -> Result<Vec<SearchHit>> {
+        self.search_ready_with_options_in(
+            collection,
+            query,
+            k,
+            ef_search,
+            config,
+            AnnOptions::default(),
+            conditions,
+            metric,
+            stats,
+        )
+    }
+
+    /// Ready-only search of the index identified by `(config, metric,
+    /// options.quantization)`; the index's own rerank multiplier is replaced
+    /// by `options.rerank_multiplier` for this query only.
+    #[allow(clippy::too_many_arguments)]
+    fn search_ready_with_options_in(
+        &self,
+        collection: u16,
+        query: &[f32],
+        k: usize,
+        ef_search: usize,
+        config: HnswConfig,
+        options: AnnOptions,
+        conditions: &[Condition],
+        metric: DistanceMetric,
+        stats: &mut SearchStats,
+    ) -> Result<Vec<SearchHit>> {
+        self.validate_hnsw_query(collection, query, k, ef_search, config, conditions, metric)?;
+        options.validate()?;
+        let state = self.state(collection);
+        if k == 0 || state.records.is_empty() {
+            return Ok(Vec::new());
+        }
+        let index = state
+            .index
+            .as_ref()
+            .filter(|index| index.ready_for(config, metric, options.quantization))
+            .ok_or(Error::IndexNotReady)?;
+        Ok(index.search_filtered_with(
+            query,
+            k,
+            ef_search,
+            options,
+            &state.records,
+            conditions,
+            stats,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn validate_hnsw_query(
         &self,
+        collection: u16,
         query: &[f32],
         k: usize,
         ef_search: usize,
@@ -998,16 +1647,19 @@ impl Database {
         metric: DistanceMetric,
     ) -> Result<()> {
         self.ensure_healthy()?;
-        self.validate_vector(query)?;
+        let state = self.state(collection);
+        validate_vector(state.dimensions, query)?;
         metadata::validate_filter(conditions)?;
         config.validate()?;
         validate_ann_metric(metric)?;
         validate_metric_query(query, metric)?;
-        if !(1..=MAX_EF_SEARCH).contains(&ef_search) || ef_search < k.min(self.records.len()) {
+        if !(1..=MAX_EF_SEARCH).contains(&ef_search) || ef_search < k.min(state.records.len()) {
             return Err(Error::InvalidEfSearch);
         }
         Ok(())
     }
+
+    // ---------------------------------------------------------------- exact search
 
     /// Exact squared-L2 nearest neighbors, ordered by distance then ascending ID.
     ///
@@ -1047,77 +1699,41 @@ impl Database {
         conditions: &[Condition],
         metric: DistanceMetric,
     ) -> Result<Vec<SearchHit>> {
+        self.search_in(0, query, k, conditions, metric, &mut SearchStats::default())
+    }
+
+    fn search_in(
+        &self,
+        collection: u16,
+        query: &[f32],
+        k: usize,
+        conditions: &[Condition],
+        metric: DistanceMetric,
+        stats: &mut SearchStats,
+    ) -> Result<Vec<SearchHit>> {
         self.ensure_healthy()?;
-        self.validate_vector(query)?;
+        let state = self.state(collection);
+        validate_vector(state.dimensions, query)?;
         metadata::validate_filter(conditions)?;
         let query_norm = validate_metric_query(query, metric)?;
-        if k == 0 {
-            return Ok(Vec::new());
+        // Declared metadata indexes narrow the scan to a re-verified superset;
+        // exact ordering makes the result identical to a full scan.
+        let lookup = state
+            .metadata_indexes
+            .lookup(conditions, state.records.len() / 2);
+        let candidates = lookup.and_then(|lookup| lookup.ids);
+        if let Some(ids) = &candidates {
+            stats.index_candidates = stats.index_candidates.saturating_add(ids.len() as u64);
         }
-        let limit = k.min(self.records.len());
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let mut hits: BinaryHeap<RankedHit> = BinaryHeap::with_capacity(limit);
-        'records: for (&id, record) in &self.records {
-            if !metadata::matches(&record.metadata, conditions) {
-                continue;
-            }
-            let distance = if metric != DistanceMetric::SquaredL2 {
-                let norm = if metric == DistanceMetric::Cosine {
-                    vector_norm(&record.vector)
-                } else {
-                    0.0
-                };
-                let Some(distance) =
-                    metric_distance(&record.vector, query, metric, norm, query_norm)
-                else {
-                    continue;
-                };
-                distance
-            } else if query.len() <= 32 {
-                record
-                    .vector
-                    .iter()
-                    .zip(query)
-                    .map(|(&a, &b)| {
-                        let difference = f64::from(a) - f64::from(b);
-                        difference * difference
-                    })
-                    .sum()
-            } else {
-                let cutoff = if hits.len() == limit {
-                    hits.peek().expect("nonempty bounded heap").0.distance
-                } else {
-                    f64::INFINITY
-                };
-                let mut distance = 0.0;
-                for (values, query) in record.vector.chunks(32).zip(query.chunks(32)) {
-                    for (&a, &b) in values.iter().zip(query) {
-                        let difference = f64::from(a) - f64::from(b);
-                        distance += difference * difference;
-                    }
-                    // Nonnegative terms cannot bring a rejected candidate below the cutoff.
-                    if distance > cutoff {
-                        continue 'records;
-                    }
-                }
-                distance
-            };
-            let hit = RankedHit(SearchHit { id, distance });
-            if hits.len() < limit {
-                hits.push(hit);
-            } else if let Some(mut worst) = hits.peek_mut()
-                && hit < *worst
-            {
-                *worst = hit;
-            }
-        }
-        Ok(hits
-            .into_sorted_vec()
-            .into_iter()
-            .map(|hit| hit.0)
-            .collect())
+        Ok(state.exact_search_candidates(
+            query,
+            query_norm,
+            k,
+            conditions,
+            metric,
+            candidates.as_ref(),
+            stats,
+        ))
     }
 
     /// Consumes the handle and releases its OS lock. Commits are already synced.
@@ -1125,13 +1741,102 @@ impl Database {
     /// Dropping the handle is also safe: there is no buffered uncommitted state.
     pub fn close(mut self) -> Result<()> {
         self.ensure_healthy()?;
-        if let Some(mut job) = self.rebuild.take() {
+        if let Some((_, mut job)) = self.rebuild.take() {
             job.stop(HnswRebuildStatus::Cancelled);
             job.finish()?;
         }
         self.file.unlock()?;
         Ok(())
     }
+}
+
+/// Exact bounded top-k scan; ordering is distance then ascending ID.
+///
+/// With `candidates`, only those IDs (if live) are scored; results are
+/// identical to a full scan restricted to that set. Inputs are prevalidated.
+#[allow(clippy::too_many_arguments)]
+fn exact_search(
+    records: &BTreeMap<u64, Record>,
+    query: &[f32],
+    query_norm: f64,
+    k: usize,
+    conditions: &[Condition],
+    metric: DistanceMetric,
+    candidates: Option<&BTreeSet<u64>>,
+    stats: &mut SearchStats,
+) -> Vec<SearchHit> {
+    let limit = k.min(
+        candidates
+            .map_or(records.len(), BTreeSet::len)
+            .min(records.len()),
+    );
+    if limit == 0 {
+        return Vec::new();
+    }
+    let scan: Box<dyn Iterator<Item = (&u64, &Record)>> = match candidates {
+        None => Box::new(records.iter()),
+        Some(ids) => Box::new(ids.iter().filter_map(|id| records.get_key_value(id))),
+    };
+    let mut hits: BinaryHeap<RankedHit> = BinaryHeap::with_capacity(limit);
+    'records: for (&id, record) in scan {
+        stats.records_scanned += 1;
+        if !metadata::matches(&record.metadata, conditions) {
+            continue;
+        }
+        stats.distance_evaluations += 1;
+        let distance = if metric != DistanceMetric::SquaredL2 {
+            let norm = if metric == DistanceMetric::Cosine {
+                vector_norm(&record.vector)
+            } else {
+                0.0
+            };
+            let Some(distance) = metric_distance(&record.vector, query, metric, norm, query_norm)
+            else {
+                continue;
+            };
+            distance
+        } else if query.len() <= 32 {
+            record
+                .vector
+                .iter()
+                .zip(query)
+                .map(|(&a, &b)| {
+                    let difference = f64::from(a) - f64::from(b);
+                    difference * difference
+                })
+                .sum()
+        } else {
+            let cutoff = if hits.len() == limit {
+                hits.peek().expect("nonempty bounded heap").0.distance
+            } else {
+                f64::INFINITY
+            };
+            let mut distance = 0.0;
+            for (values, query) in record.vector.chunks(32).zip(query.chunks(32)) {
+                for (&a, &b) in values.iter().zip(query) {
+                    let difference = f64::from(a) - f64::from(b);
+                    distance += difference * difference;
+                }
+                // Nonnegative terms cannot bring a rejected candidate below the cutoff.
+                if distance > cutoff {
+                    continue 'records;
+                }
+            }
+            distance
+        };
+        let hit = RankedHit(SearchHit { id, distance });
+        if hits.len() < limit {
+            hits.push(hit);
+        } else if let Some(mut worst) = hits.peek_mut()
+            && hit < *worst
+        {
+            *worst = hit;
+        }
+    }
+    hits.into_sorted_vec()
+        .into_iter()
+        .map(|hit| hit.0)
+        .collect()
 }
 
 fn append_and_sync<W: Write + Seek>(
@@ -1158,33 +1863,51 @@ mod tests {
         db.build_hnsw(HnswConfig::default()).unwrap();
         for id in 0..MAX_HNSW_BUFFER_IDS as u64 {
             db.put(id, &[id as f32], b"").unwrap();
-            assert_eq!(db.index.as_ref().unwrap().buffer_usage().0, id as usize + 1);
+            assert_eq!(
+                db.default_state().index.as_ref().unwrap().buffer_usage().0,
+                id as usize + 1
+            );
         }
-        let before = db.index.as_ref().unwrap().buffer_usage();
+        let before = db.default_state().index.as_ref().unwrap().buffer_usage();
         assert!(db.put(999, &[], b"").is_err());
         db.write_batch(&[]).unwrap();
         assert!(!db.delete(999).unwrap());
-        assert_eq!(db.index.as_ref().unwrap().buffer_usage(), before);
+        assert_eq!(
+            db.default_state().index.as_ref().unwrap().buffer_usage(),
+            before
+        );
         db.put(0, &[-1.0], b"").unwrap();
-        assert_eq!(db.index.as_ref().unwrap().buffer_usage(), before);
+        assert_eq!(
+            db.default_state().index.as_ref().unwrap().buffer_usage(),
+            before
+        );
         db.put(1000, &[-2.0], b"").unwrap();
-        assert!(db.index.is_none());
+        assert!(db.default_state().index.is_none());
         assert_eq!(
             db.search_approximate(&[-2.0], 1, 100, HnswConfig::default())
                 .unwrap()[0]
                 .id,
             1000
         );
-        assert_eq!(db.index.as_ref().unwrap().buffer_usage(), (0, 0));
+        assert_eq!(
+            db.default_state().index.as_ref().unwrap().buffer_usage(),
+            (0, 0)
+        );
         db.delete(1000).unwrap();
         db.build_hnsw(HnswConfig::default()).unwrap();
-        assert_eq!(db.index.as_ref().unwrap().buffer_usage(), (0, 0));
+        assert_eq!(
+            db.default_state().index.as_ref().unwrap().buffer_usage(),
+            (0, 0)
+        );
         db.file = LockedFile(File::open(directory.path().join("buffer.vlite")).unwrap());
         assert!(matches!(
             db.put(999, &[0.0], b""),
             Err(Error::CommitIndeterminate(_))
         ));
-        assert_eq!(db.index.as_ref().unwrap().buffer_usage(), (0, 0));
+        assert_eq!(
+            db.default_state().index.as_ref().unwrap().buffer_usage(),
+            (0, 0)
+        );
         assert!(matches!(
             db.search_approximate(&[0.0], 1, 100, HnswConfig::default()),
             Err(Error::Poisoned)
@@ -1269,7 +1992,10 @@ mod tests {
             Err(Error::CommitIndeterminate(_))
         ));
         assert_eq!(db.sequence, 1);
-        assert_eq!(db.records.get(&1).unwrap().payload, b"original");
+        assert_eq!(
+            db.default_state().records.get(&1).unwrap().payload,
+            b"original"
+        );
         assert!(matches!(db.get(1), Err(Error::Poisoned)));
         assert!(matches!(db.search(&[1.0], 1), Err(Error::Poisoned)));
         assert!(matches!(
@@ -1351,8 +2077,8 @@ mod tests {
             ]),
             Err(Error::CommitIndeterminate(_))
         ));
-        assert_eq!(db.records.len(), 1);
-        assert_eq!(db.records.get(&1).unwrap().payload, b"old");
+        assert_eq!(db.default_state().records.len(), 1);
+        assert_eq!(db.default_state().records.get(&1).unwrap().payload, b"old");
         assert!(matches!(db.write_batch(&[]), Err(Error::Poisoned)));
         drop(db);
         let db = Database::open(&path).unwrap();
@@ -1420,5 +2146,274 @@ mod tests {
         .unwrap();
         assert_eq!(sync_count.get(), 1);
         assert_eq!(writer.into_inner(), frame);
+    }
+}
+
+#[cfg(test)]
+mod v4_tests {
+    use super::*;
+    use crate::format::{ImportMarker, MARKER_ABORTED, MARKER_FINISHED};
+    use std::fs;
+
+    fn decode_hex(text: &str) -> Vec<u8> {
+        let digits: Vec<u8> = text.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+        digits
+            .chunks(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect()
+    }
+
+    fn chunk(job: u64, chunk: u64, rows: &[Mutation], skipped: u32) -> ImportMarker {
+        ImportMarker {
+            job,
+            chunk,
+            rows_committed: rows.len() as u64,
+            rows_skipped: u64::from(skipped),
+            flags: 0,
+            digest: import::chunk_digest(rows, InvalidRowPolicy::RejectChunk),
+        }
+    }
+
+    fn close_marker(job: u64, chunk: u64, flags: u32) -> ImportMarker {
+        ImportMarker {
+            job,
+            chunk,
+            rows_committed: 0,
+            rows_skipped: 0,
+            flags,
+            digest: [0; 32],
+        }
+    }
+
+    fn put(id: u64, vector: &[f32], payload: &[u8]) -> Mutation {
+        Mutation::Put {
+            id,
+            vector: vector.to_vec(),
+            payload: payload.to_vec(),
+        }
+    }
+
+    #[test]
+    fn v4_writer_matches_independently_encoded_golden_bytes() {
+        let expected = decode_hex(include_str!("../tests/fixtures/v4.hex"));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("v4.vlite");
+        fs::write(&path, &expected[..32]).unwrap();
+        let mut db = Database::open(&path).unwrap();
+        assert_eq!(db.lineage(), Some(0x0123_4567_89ab_cdef));
+        let info = db
+            .create_collection(
+                "docs",
+                CollectionSpec {
+                    dimensions: 3,
+                    settings: CollectionSettings::default(),
+                },
+            )
+            .unwrap();
+        assert_eq!(info.id, 1);
+        let settings = CollectionSettings {
+            text_fields: vec!["title".into()],
+            ..CollectionSettings::default()
+        };
+        assert_eq!(
+            db.set_collection_settings("default", settings).unwrap(),
+            SettingsPersistence::Persisted
+        );
+        db.put(9, &[0.0, 2.0], b"b").unwrap();
+        assert_eq!(
+            db.collection_mut("docs")
+                .unwrap()
+                .put(5, &[1.0, 2.0, 3.0], b"x")
+                .unwrap(),
+            4
+        );
+        let rows = [put(6, &[4.0, 5.0, 6.0], b"y")];
+        assert_eq!(db.imports.next_job_id(), Some(1));
+        db.commit_import_frame(1, &rows, &chunk(1, 1, &rows, 0))
+            .unwrap();
+        db.close().unwrap();
+        assert_eq!(fs::read(&path).unwrap(), expected);
+
+        let db = Database::open(&path).unwrap();
+        let status = db.import_status(1).unwrap();
+        assert_eq!(status.collection, "docs");
+        assert_eq!(status.state, ImportState::Open);
+        assert_eq!((status.last_chunk, status.rows_committed), (1, 1));
+        assert_eq!(status.last_digest, chunk(1, 1, &rows, 0).digest);
+        assert_eq!(db.collection("docs").unwrap().revision(6).unwrap(), Some(5));
+        assert_eq!(db.imports.next_job_id(), Some(2));
+    }
+
+    #[test]
+    fn chunk_digest_is_full_sha256_of_canonical_entries_and_policy() {
+        let rows = [put(6, &[4.0, 5.0, 6.0], b"y")];
+        let digest = import::chunk_digest(&rows, InvalidRowPolicy::RejectChunk);
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "59bb806719e92c3ca406492e13ea608f12455d914fb71a23f3298b293875b1c8"
+        );
+        assert_ne!(
+            import::chunk_digest(&rows, InvalidRowPolicy::SkipInvalid),
+            digest
+        );
+    }
+
+    fn v4_with_docs(path: &Path) -> Database {
+        let mut db = Database::create_with_format(path, 2, FormatVersion::V4).unwrap();
+        db.create_collection(
+            "docs",
+            CollectionSpec {
+                dimensions: 2,
+                settings: CollectionSettings::default(),
+            },
+        )
+        .unwrap();
+        db
+    }
+
+    #[test]
+    fn import_hook_requires_v4_and_open_jobs_block_drop_until_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut v3 = Database::create(directory.path().join("v3.vlite"), 2).unwrap();
+        let rows = [put(1, &[1.0, 1.0], b"")];
+        assert!(matches!(
+            v3.commit_import_frame(0, &rows, &chunk(1, 1, &rows, 0)),
+            Err(Error::ImportsRequireUpgrade)
+        ));
+        assert!(matches!(
+            v3.import_status(1),
+            Err(Error::ImportsRequireUpgrade)
+        ));
+
+        let path = directory.path().join("v4.vlite");
+        let mut db = v4_with_docs(&path);
+        db.commit_import_frame(1, &rows, &chunk(7, 1, &rows, 2))
+            .unwrap();
+        db.collection_mut("docs").unwrap().delete(1).unwrap();
+        assert!(matches!(
+            db.drop_collection("docs"),
+            Err(Error::CollectionNotEmpty)
+        ));
+        db.commit_import_frame(1, &[], &close_marker(7, 1, MARKER_FINISHED))
+            .unwrap();
+        let status = db.import_status(7).unwrap();
+        assert_eq!(status.state, ImportState::Finished);
+        assert_eq!((status.rows_committed, status.rows_skipped), (1, 2));
+        db.drop_collection("docs").unwrap();
+        assert!(matches!(db.import_status(8), Err(Error::ImportNotFound)));
+        db.close().unwrap();
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.import_status(7).unwrap().state, ImportState::Finished);
+        assert_eq!(db.collections().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn invalid_marker_sequences_written_by_a_buggy_caller_fail_closed_on_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let rows = [put(1, &[1.0, 1.0], b"")];
+        let cases: Vec<(&str, Vec<ImportMarker>)> = vec![
+            ("gap", vec![chunk(1, 2, &rows, 0)]),
+            (
+                "rows",
+                vec![ImportMarker {
+                    rows_committed: 2,
+                    ..chunk(1, 1, &rows, 0)
+                }],
+            ),
+            (
+                "after-close",
+                vec![
+                    chunk(1, 1, &rows, 0),
+                    close_marker(1, 1, MARKER_ABORTED),
+                    chunk(1, 2, &rows, 0),
+                ],
+            ),
+            (
+                "both-flags",
+                vec![close_marker(1, 0, MARKER_ABORTED | MARKER_FINISHED)],
+            ),
+            ("close-chunk", vec![close_marker(1, 3, MARKER_FINISHED)]),
+        ];
+        for (name, markers) in cases {
+            let path = directory.path().join(format!("{name}.vlite"));
+            let mut db = v4_with_docs(&path);
+            for marker in &markers {
+                let data: &[Mutation] = if marker.flags == 0 { &rows } else { &[] };
+                db.commit_import_frame(1, data, marker).unwrap();
+            }
+            drop(db);
+            assert!(
+                matches!(Database::open(&path), Err(Error::Corrupt { .. })),
+                "{name} accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn v4_compaction_carries_open_jobs_as_snapshots_and_drops_closed_jobs() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.vlite");
+        let mut db = v4_with_docs(&source);
+        let first = [put(1, &[1.0, 1.0], b"a")];
+        let second = [put(2, &[2.0, 2.0], b"b"), put(3, &[3.0, 3.0], b"c")];
+        db.commit_import_frame(1, &first, &chunk(3, 1, &first, 1))
+            .unwrap();
+        db.commit_import_frame(1, &second, &chunk(3, 2, &second, 0))
+            .unwrap();
+        db.commit_import_frame(1, &first, &chunk(4, 1, &first, 0))
+            .unwrap();
+        db.commit_import_frame(1, &[], &close_marker(4, 1, MARKER_ABORTED))
+            .unwrap();
+        let lineage = db.lineage();
+        db.close().unwrap();
+        let output = directory.path().join("output.vlite");
+        let report = maintenance::compact(&source, &output).unwrap();
+        assert_eq!(report.output.format_version, 4);
+        let detail = maintenance::inspect_detail(&output).unwrap();
+        assert_eq!((detail.collections, detail.open_imports), (2, 1));
+        assert_ne!(detail.lineage, lineage);
+        let mut db = Database::open(&output).unwrap();
+        let status = db.import_status(3).unwrap();
+        assert_eq!(
+            (
+                status.state,
+                status.last_chunk,
+                status.rows_committed,
+                status.rows_skipped
+            ),
+            (ImportState::Open, 2, 3, 1)
+        );
+        assert_eq!(status.last_digest, chunk(3, 2, &second, 0).digest);
+        assert!(matches!(db.import_status(4), Err(Error::ImportNotFound)));
+        let third = [put(4, &[4.0, 4.0], b"d")];
+        db.commit_import_frame(1, &third, &chunk(3, 3, &third, 0))
+            .unwrap();
+        db.close().unwrap();
+        let db = Database::open(&output).unwrap();
+        assert_eq!(db.import_status(3).unwrap().rows_committed, 4);
+        assert_eq!(db.collection("docs").unwrap().len(), 4);
+    }
+
+    #[test]
+    fn candidate_restricted_exact_search_matches_full_scan_on_the_subset() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut db = Database::create(directory.path().join("c.vlite"), 1).unwrap();
+        for id in 0..20u64 {
+            db.put(id, &[id as f32], b"").unwrap();
+        }
+        let subset: BTreeSet<u64> = [3, 7, 11, 99].into();
+        let mut stats = SearchStats::default();
+        let hits = db.default_state().exact_search_candidates(
+            &[10.0],
+            0.0,
+            2,
+            &[],
+            DistanceMetric::SquaredL2,
+            Some(&subset),
+            &mut stats,
+        );
+        assert_eq!(hits.iter().map(|hit| hit.id).collect::<Vec<_>>(), [11, 7]);
+        assert_eq!((stats.records_scanned, stats.distance_evaluations), (3, 3));
     }
 }

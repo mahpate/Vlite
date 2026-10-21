@@ -87,6 +87,45 @@ Inner-product ANN is rejected. Cosine ANN requires a v0.1.2+ wrapper
 and native library; v0.1.1 has L2 ANN only.
 See [ABI contracts and limitations](../README.md).
 
+## Format 4: collections, revisions, planned search and imports
+
+`native.create(path, dims)` still creates format 3. Pass `{ format: 4 }` for
+named collections, collection settings and resumable imports; on format 3 those
+calls reject with `requires_format_v4`.
+
+```js
+const db = await native.create("docs.vlite", 2, { format: 4 });
+await db.createCollection("docs", 2, { textFields: ["title"], metadataIndexes: [{ field: "tag", kind: "eq" }] });
+const revision = await db.put("1", [1, 0], { collection: "docs", expectedRevision: "absent" });
+await db.put("1", [0, 1], { collection: "docs", expectedRevision: revision }); // precondition_failed if changed
+const { hits, plan } = await db.searchAuto([1, 0], 5, { collection: "docs", explain: true });
+const hybrid = await db.searchHybrid("apple", 5, { collection: "docs", vector: [1, 0] });
+const job = await db.nextImportJobId();
+await db.importChunk(job, "1", [{ op: "put", id: "2", vector: [0, 1] }], { collection: "docs" });
+await db.importFinish(job, { collection: "docs" });
+```
+
+- Most methods accept `{ collection }`; omitting it addresses `default`.
+- Records include a `revision` string. `put` resolves to the new revision only
+  when `expectedRevision` (`"absent"` or a revision string) is given; otherwise it
+  still resolves to `undefined`. `delete` accepts `expectedRevision` as well.
+- `search(..., { explain: true })` returns `{ hits, stats }`. `searchAuto` returns
+  `{ hits }` plus `plan` and `stats` with `explain`. `searchHybrid(text, k, ...)`
+  fuses BM25 over the collection's `textFields` with an optional vector leg.
+- `buildIndex`, `searchApproximateReady`, `searchAuto`, `annQuality` and
+  `annMemory` accept `quantization` (`"none"`/`"scalar_u8"`) and
+  `rerankMultiplier`. Omitted metric, quantization and rerank multiplier come from
+  the collection's settings; `default` keeps squared L2 without quantization.
+- `listCollections`, `createCollection`, `dropCollection` and
+  `setCollectionSettings` (full replacement) manage collections. Setting keys are
+  camelCase in JavaScript and are returned in the native snake_case shape.
+- `importChunk(job, chunk, rows, { policy: "skip_invalid" })`, `importStatus`,
+  `importFinish` and `importAbort` give exactly-once chunks that survive reopen.
+  Job and chunk numbers are decimal strings.
+
+Automatic maintenance, scheduled backups, metrics and slow-query logs, and
+credentials and audit logs are server-only; this package has no API for them.
+
 ## Lifetime and failure behavior
 
 Each `NativeLibrary` owns one worker. Always await `native.close()` in `finally`,

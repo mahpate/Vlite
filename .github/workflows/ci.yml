@@ -32,6 +32,12 @@ jobs:
       - run: python tests/release_candidate.py
       - run: python tests/release_assets.py
       - run: python tests/wheel_platform.py
+      - name: Verify advanced retrieval report contracts
+        run: python tests/search_capabilities_campaign.py
+      - name: Verify bundled OpenAPI references and route parameters
+        run: python tests/openapi_contract.py
+      - name: Verify v4 collection, revision and import example
+        run: cargo run --locked --example collections -- collections-example.vlite
       - run: cargo build --locked --release --bin vlite-bench
       - name: Verify offline embedding campaign and mutation provenance
         run: python tests/embedding_campaign.py --binary target/release/vlite-bench${{ runner.os == 'Windows' && '.exe' || '' }}
@@ -43,6 +49,17 @@ jobs:
         run: python benchmarks/native_campaign.py --binary target/release/vlite-bench${{ runner.os == 'Windows' && '.exe' || '' }} --records 300 --dimensions 8 --queries 10 --trials 1 --ef 32 --mixed-writes 32 --output native-campaign.json
       - name: Verify exact-metric and cosine ANN campaign
         run: python benchmarks/metric_campaign.py --binary target/release/vlite-bench${{ runner.os == 'Windows' && '.exe' || '' }} --records 32 --dimensions 8 --queries 2 --trials 1 --output metric-campaign.json
+      - name: Build advanced retrieval measurement example
+        if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'
+        run: cargo build --locked --release --example search_capabilities_bench
+      - name: Measure indexed and quantized retrieval with independent oracle
+        if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'
+        run: python benchmarks/search_capabilities_campaign.py --binary target/release/examples/search_capabilities_bench --output search-capabilities.json
+      - uses: actions/upload-artifact@v4
+        if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'
+        with:
+          name: search-capabilities-measurements
+          path: search-capabilities.json
 
   clients:
     strategy:

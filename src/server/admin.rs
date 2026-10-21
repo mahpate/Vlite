@@ -3,21 +3,24 @@ use super::*;
 use axum::Extension;
 use std::{
     collections::VecDeque,
-    io::{Read, Seek, SeekFrom, Write},
+    io::{Read, Write},
     path::{Path as FilePath, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone)]
 pub(super) enum Role {
     Admin,
     ReadOnly,
+    /// Scoped `vlk_` credential; holds no secret.
+    Scoped(Arc<super::credentials::Grant>),
 }
 impl Role {
-    pub(super) fn name(self) -> &'static str {
+    pub(super) fn name(&self) -> &'static str {
         match self {
             Self::Admin => "admin",
             Self::ReadOnly => "read_only",
+            Self::Scoped(_) => "scoped",
         }
     }
 }
@@ -36,7 +39,11 @@ pub(super) struct AdminState {
     pub auth: Mutex<Auth>,
     audit: Mutex<VecDeque<Value>>,
     maintenance: Mutex<Maintenance>,
-    directory: Option<PathBuf>,
+    pub directory: Option<PathBuf>,
+    /// Scoped credential store; requires an admin token and admin directory.
+    pub credentials: Option<Arc<super::credentials::Store>>,
+    /// Persistent JSON-lines audit log in the admin directory.
+    pub audit_log: Option<Arc<super::audit::Log>>,
 }
 impl AdminState {
     pub fn record(&self, event: Value) {
@@ -63,6 +70,21 @@ pub struct ServerOptions {
     pub admin_token_file: Option<PathBuf>,
     pub read_only_token_file: Option<PathBuf>,
     pub admin_directory: Option<PathBuf>,
+    /// Enables automatic maintenance at startup with this interval (10s..1h).
+    pub auto_maintenance_interval: Option<Duration>,
+    /// Enables scheduled backups at startup (5min..7d); needs the admin directory.
+    pub backup_interval: Option<Duration>,
+    /// Deletes old generated backups after scheduled runs (off by default).
+    pub backup_retention_enabled: bool,
+    pub backup_retain_last: Option<usize>,
+    pub backup_retain_days: Option<u64>,
+    /// Restore drill every N scheduled backups (0 = never; default 1).
+    pub backup_drill_every: Option<u64>,
+    pub backup_drill_max_bytes: Option<u64>,
+    /// Slow-query log threshold (default 500 ms).
+    pub slow_query_threshold: Option<Duration>,
+    /// Active database path, protected from retention.
+    pub database_path: Option<PathBuf>,
 }
 
 impl ServerOptions {
@@ -84,6 +106,51 @@ impl ServerOptions {
                 "admin and read-only tokens must differ",
             ));
         }
+        if self
+            .auto_maintenance_interval
+            .is_some_and(|d| !(10..=3600).contains(&d.as_secs()))
+        {
+            return Err(std::io::Error::other(
+                "auto maintenance interval must be 10..3600 seconds",
+            ));
+        }
+        if let Some(interval) = self.backup_interval {
+            if !(300..=604_800).contains(&interval.as_secs()) {
+                return Err(std::io::Error::other(
+                    "backup interval must be 300..604800 seconds",
+                ));
+            }
+            if self.admin_directory.is_none() {
+                return Err(std::io::Error::other(
+                    "scheduled backups require an admin directory",
+                ));
+            }
+        }
+        if self.backup_retention_enabled && self.admin_directory.is_none() {
+            return Err(std::io::Error::other(
+                "backup retention requires an admin directory",
+            ));
+        }
+        if self
+            .backup_retain_last
+            .is_some_and(|n| !(1..=100).contains(&n))
+        {
+            return Err(std::io::Error::other("backup retain-last must be 1..100"));
+        }
+        if self.backup_retain_days.is_some_and(|d| d > 3650) {
+            return Err(std::io::Error::other("backup retain-days must be 0..3650"));
+        }
+        if self.backup_drill_every.is_some_and(|n| n > 100) {
+            return Err(std::io::Error::other("backup drill-every must be 0..100"));
+        }
+        if self
+            .slow_query_threshold
+            .is_some_and(|d| d.is_zero() || d.as_secs() > 3600)
+        {
+            return Err(std::io::Error::other(
+                "slow query threshold must be 1ms..3600s",
+            ));
+        }
         Ok(())
     }
 }
@@ -100,6 +167,41 @@ pub fn configured_admin_router(
             std::fs::canonicalize(p)
         })
         .transpose()?;
+    // The audit log and credential store live in the private admin directory.
+    // Scoped credentials additionally require an admin token: without one
+    // every caller is already admin and scoping would be meaningless.
+    let audit_log = directory
+        .as_deref()
+        .map(super::audit::Log::open)
+        .transpose()?
+        .map(Arc::new);
+    let credentials = match (&directory, &options.admin_token) {
+        (Some(directory), Some(_)) => Some(Arc::new(super::credentials::Store::load(directory)?)),
+        _ => None,
+    };
+    if let Some(threshold) = options.slow_query_threshold {
+        service.metrics.slow_threshold_ns.store(
+            threshold.as_nanos().min(u64::MAX as u128) as u64,
+            Ordering::Relaxed,
+        );
+    }
+    service
+        .ops
+        .configure(
+            directory.clone(),
+            options.database_path.clone(),
+            audit_log.clone(),
+            &super::ops::Schedule {
+                auto_interval: options.auto_maintenance_interval,
+                backup_interval: options.backup_interval,
+                retention_enabled: options.backup_retention_enabled,
+                retain_last: options.backup_retain_last,
+                retain_days: options.backup_retain_days,
+                drill_every: options.backup_drill_every,
+                drill_max_bytes: options.backup_drill_max_bytes,
+            },
+        )
+        .map_err(|error| std::io::Error::other(error.message))?;
     service.admin = Arc::new(AdminState {
         auth: Mutex::new(Auth {
             admin: options.admin_token,
@@ -109,6 +211,8 @@ pub fn configured_admin_router(
             generation: 1,
         }),
         directory,
+        credentials,
+        audit_log,
         ..AdminState::default()
     });
     Ok(super::configured_routes(service))
@@ -161,6 +265,26 @@ pub(super) fn routes() -> Router<Service> {
             get(maintenance_get).put(maintenance_put),
         )
         .route("/v1/index/hnsw/maintenance/tick", post(maintenance_tick))
+        .route(
+            "/v1/collections/{collection}/index/hnsw/rebuild",
+            get(collection_rebuild_status).post(collection_rebuild_start),
+        )
+        .route(
+            "/v1/collections/{collection}/index/hnsw/rebuild/poll",
+            post(collection_rebuild_poll),
+        )
+        .route(
+            "/v1/collections/{collection}/index/hnsw/rebuild/cancel",
+            post(collection_rebuild_cancel),
+        )
+        .route(
+            "/v1/collections/{collection}/index/hnsw/maintenance",
+            get(collection_rebuild_status),
+        )
+        .route(
+            "/v1/collections/{collection}/index/hnsw/maintenance/tick",
+            post(collection_maintenance_tick),
+        )
         .route("/v1/admin/backups", get(backups).post(backup))
         .route("/v1/admin/restores", post(restore))
         .route("/v1/admin/restores/select", post(select_restore))
@@ -171,17 +295,42 @@ async fn capabilities(
     Extension(role): Extension<Role>,
 ) -> Result<Json<Value>, ApiError> {
     let auth = s.admin.auth.lock().map_err(internal)?;
-    Ok(Json(
-        json!({"version":env!("CARGO_PKG_VERSION"),"api_version":1,"role":role.name(),
+    let v4 = s.format_version >= 4;
+    let backups = s.admin.directory.is_some();
+    let scoped = s.admin.credentials.is_some();
+    let audit_log = s.admin.audit_log.is_some();
+    let mut value = json!({"version":env!("CARGO_PKG_VERSION"),"api_version":1,"role":role.name(),
+        "format_version":s.format_version,
         "features":{"read_only":true,"tokens_reload":auth.admin_file.is_some() || auth.read_only_file.is_some(),
-        "audit":true,"background_rebuild":true,"maintenance":true,"backup_restore":s.admin.directory.is_some(),
-        "conditional_writes":true,"filtered_ann":true},
+        "audit":true,"background_rebuild":true,"maintenance":true,"backup_restore":backups,
+        "conditional_writes":true,"filtered_ann":true,
+        "collections":v4,"revisions":true,"per_record_etags":true,
+        "auto_search":true,"search_auto":true,"hybrid_search":v4,"search_hybrid":v4,"search_explain":true,
+        "imports":v4,"quantization":true,"ann_quality":true,"auto_maintenance":true,
+        "backup_schedule":backups,"backup_verify":backups,"backup_verify_drill":backups,
+        "slow_queries":true,"slow_query_log":true,"prometheus":true,"prometheus_metrics":true,
+        "scoped_credentials":scoped,"persistent_audit":audit_log},
         "routes":["/health","/ready","/metrics","/openapi.json","/dashboard","/dashboard/app.js","/dashboard/style.css","/dashboard/console-tools.js",
         "/v1/capabilities","/v1/database","/v1/vectors","/v1/vectors/{id}","/v1/batches","/v1/search",
-        "/v1/index/hnsw","/v1/index/hnsw/rebuild","/v1/index/hnsw/rebuild/poll","/v1/index/hnsw/rebuild/cancel",
+        "/v1/index/hnsw","/v1/index/hnsw/quality","/v1/index/hnsw/rebuild","/v1/index/hnsw/rebuild/poll","/v1/index/hnsw/rebuild/cancel",
         "/v1/index/hnsw/maintenance","/v1/index/hnsw/maintenance/tick","/v1/admin/tokens","/v1/admin/tokens/reload",
-        "/v1/admin/tokens/revoke-read-only","/v1/admin/audit","/v1/admin/backups","/v1/admin/restores","/v1/admin/restores/select"]}),
-    ))
+        "/v1/admin/tokens/revoke-read-only","/v1/admin/audit","/v1/admin/backups","/v1/admin/restores","/v1/admin/restores/select",
+        "/v1/collections","/v1/collections/{collection}","/v1/collections/{collection}/settings",
+        "/v1/collections/{collection}/vectors","/v1/collections/{collection}/vectors/{id}",
+        "/v1/collections/{collection}/batches","/v1/collections/{collection}/search",
+        "/v1/collections/{collection}/index/hnsw","/v1/collections/{collection}/index/hnsw/quality",
+        "/v1/collections/{collection}/index/hnsw/rebuild","/v1/collections/{collection}/index/hnsw/rebuild/poll",
+        "/v1/collections/{collection}/index/hnsw/rebuild/cancel","/v1/collections/{collection}/index/hnsw/maintenance",
+        "/v1/collections/{collection}/index/hnsw/maintenance/tick","/v1/collections/{collection}/imports",
+        "/v1/imports/{job}","/v1/imports/{job}/chunks/{chunk}","/v1/imports/{job}/finish","/v1/imports/{job}/abort",
+        "/v1/admin/maintenance/auto","/v1/admin/maintenance/auto/tick","/v1/admin/backups/schedule",
+        "/v1/admin/backups/schedule/run","/v1/admin/backups/{name}/verify","/v1/admin/backups/{name}/drill",
+        "/v1/admin/diagnostics/slow-queries","/v1/admin/credentials","/v1/admin/credentials/{id}/rotate",
+        "/v1/admin/credentials/{id}/revoke","/v1/admin/audit/persistent"]});
+    if let Role::Scoped(grant) = &role {
+        value["scope"] = grant.json();
+    }
+    Ok(Json(value))
 }
 fn token_status(a: &Auth) -> Value {
     json!({"generation":a.generation,"admin_file_configured":a.admin_file.is_some(),
@@ -254,7 +403,7 @@ pub(super) struct IndexConfig {
     #[serde(deserialize_with = "seed")]
     seed: u64,
 }
-fn seed<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+pub(super) fn seed<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum Seed {
@@ -293,7 +442,7 @@ impl IndexConfig {
 }
 #[derive(Clone, Copy, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct Limits {
+pub(super) struct Limits {
     max_records: usize,
     max_snapshot_vector_bytes: usize,
 }
@@ -307,13 +456,13 @@ impl Default for Limits {
     }
 }
 impl Limits {
-    fn core(self) -> crate::HnswRebuildLimits {
+    pub(super) fn core(self) -> crate::HnswRebuildLimits {
         crate::HnswRebuildLimits {
             max_records: self.max_records,
             max_snapshot_vector_bytes: self.max_snapshot_vector_bytes,
         }
     }
-    fn json(self) -> Value {
+    pub(super) fn json(self) -> Value {
         json!({"max_records":self.max_records,"max_snapshot_vector_bytes":self.max_snapshot_vector_bytes})
     }
 }
@@ -351,7 +500,7 @@ impl Maintenance {
         "rebuild_at_buffered_ids":self.rebuild_at_buffered_ids,"rebuild_at_buffer_vector_bytes":self.rebuild_at_buffer_vector_bytes})
     }
 }
-fn outcome(s: crate::HnswRebuildStatus) -> &'static str {
+pub(super) fn outcome(s: crate::HnswRebuildStatus) -> &'static str {
     use crate::HnswRebuildStatus::*;
     match s {
         Idle => "idle",
@@ -397,8 +546,15 @@ async fn maintenance_put(
 }
 async fn maintenance_tick(State(s): State<Service>) -> Result<Json<Value>, ApiError> {
     let p = current(&s)?;
+    let metrics = s.metrics.clone();
     s.run(move |db| {
         let r = db.maintain_hnsw(p.config.validated()?, p.metric, p.policy())?;
+        if r.started {
+            metrics.background_started.fetch_add(1, Ordering::Relaxed);
+        }
+        if r.outcome == crate::HnswRebuildStatus::Published {
+            metrics.background_published.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(Json(
             json!({"outcome":outcome(r.outcome),"started":r.started,"status":status(r.status)}),
         ))
@@ -420,15 +576,24 @@ async fn rebuild_start(
     input: Result<Json<Start>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let p = body(input)?;
+    let metrics = s.metrics.clone();
     s.run(move |db| {
         db.start_hnsw_rebuild(p.config.validated()?, p.metric, p.limits.core())?;
+        metrics.background_started.fetch_add(1, Ordering::Relaxed);
         Ok((StatusCode::ACCEPTED, Json(json!({"outcome":"running"}))))
     })
     .await
 }
 async fn rebuild_poll(State(s): State<Service>) -> Result<Json<Value>, ApiError> {
-    s.run(|db| Ok(Json(json!({"outcome":outcome(db.poll_hnsw_rebuild()?)}))))
-        .await
+    let metrics = s.metrics.clone();
+    s.run(move |db| {
+        let status = db.poll_hnsw_rebuild()?;
+        if status == crate::HnswRebuildStatus::Published {
+            metrics.background_published.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(Json(json!({"outcome":outcome(status)})))
+    })
+    .await
 }
 async fn rebuild_cancel(State(s): State<Service>) -> Result<Json<Value>, ApiError> {
     s.run(|db| {
@@ -438,7 +603,133 @@ async fn rebuild_cancel(State(s): State<Service>) -> Result<Json<Value>, ApiErro
     .await
 }
 
-fn generated(name: &str, prefix: &str) -> bool {
+/// Collection rebuild body: identity overrides (defaults: collection settings)
+/// plus snapshot limits.
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct CollectionStart {
+    metric: Option<crate::DistanceMetric>,
+    config: Option<IndexConfig>,
+    quantization: Option<super::collections::QuantizationName>,
+    rerank_multiplier: Option<u8>,
+    limits: Limits,
+}
+
+fn identity_json(
+    metric: crate::DistanceMetric,
+    config: crate::HnswConfig,
+    options: crate::AnnOptions,
+) -> Value {
+    json!({"metric":metric,
+        "config":{"m":config.m,"ef_construction":config.ef_construction,"seed":config.seed.to_string()},
+        "quantization":super::quantization_name(options.quantization),
+        "rerank_multiplier":options.rerank_multiplier})
+}
+
+async fn collection_rebuild_status(
+    State(s): State<Service>,
+    Extension(role): Extension<Role>,
+    target: Result<Path<String>, PathRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let target = super::collection_path(target)?;
+    let p = current(&s)?;
+    s.run(move |db| {
+        let id = super::open(db, &role, &target)?;
+        let (metric, config, options) = super::identity(db, id, &target);
+        let report =
+            db.maintenance_status_with_options_in(id, config, metric, options, p.policy())?;
+        Ok(Json(
+            json!({"identity":identity_json(metric, config, options),
+            "policy":{"limits":p.limits.json(),"rebuild_at_buffered_ids":p.rebuild_at_buffered_ids,
+                "rebuild_at_buffer_vector_bytes":p.rebuild_at_buffer_vector_bytes},
+            "status":status(report)}),
+        ))
+    })
+    .await
+}
+
+async fn collection_rebuild_start(
+    State(s): State<Service>,
+    Extension(role): Extension<Role>,
+    target: Result<Path<String>, PathRejection>,
+    input: axum::body::Bytes,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let target = super::collection_path(target)?;
+    let input: CollectionStart = super::optional(&input)?;
+    let metrics = s.metrics.clone();
+    s.run(move |db| {
+        let id = super::open(db, &role, &target)?;
+        let identity = super::IdentityInput {
+            metric: input.metric,
+            config: input.config,
+            quantization: input.quantization,
+            rerank_multiplier: input.rerank_multiplier,
+        };
+        let (metric, config, options) = identity.resolve(db, id, &target)?;
+        db.start_rebuild_with_options_in(id, config, metric, options, input.limits.core())?;
+        metrics.background_started.fetch_add(1, Ordering::Relaxed);
+        Ok((StatusCode::ACCEPTED, Json(json!({"outcome":"running"}))))
+    })
+    .await
+}
+
+async fn collection_rebuild_poll(
+    State(s): State<Service>,
+    Extension(role): Extension<Role>,
+    target: Result<Path<String>, PathRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let target = super::collection_path(target)?;
+    let metrics = s.metrics.clone();
+    s.run(move |db| {
+        let id = super::open(db, &role, &target)?;
+        let status = db.poll_rebuild_in(id)?;
+        if status == crate::HnswRebuildStatus::Published {
+            metrics.background_published.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(Json(json!({"outcome":outcome(status)})))
+    })
+    .await
+}
+
+async fn collection_rebuild_cancel(
+    State(s): State<Service>,
+    Extension(role): Extension<Role>,
+    target: Result<Path<String>, PathRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let target = super::collection_path(target)?;
+    s.run(move |db| {
+        let id = super::open(db, &role, &target)?;
+        Ok(Json(json!({"cancelled":db.cancel_rebuild_in(id)})))
+    })
+    .await
+}
+
+async fn collection_maintenance_tick(
+    State(s): State<Service>,
+    Extension(role): Extension<Role>,
+    target: Result<Path<String>, PathRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let target = super::collection_path(target)?;
+    let p = current(&s)?;
+    let metrics = s.metrics.clone();
+    s.run(move |db| {
+        let id = super::open(db, &role, &target)?;
+        let (metric, config, options) = super::identity(db, id, &target);
+        let r = db.maintain_with_options_in(id, config, metric, options, p.policy())?;
+        if r.started {
+            metrics.background_started.fetch_add(1, Ordering::Relaxed);
+        }
+        if r.outcome == crate::HnswRebuildStatus::Published {
+            metrics.background_published.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(Json(
+            json!({"outcome":outcome(r.outcome),"started":r.started,"status":status(r.status)}),
+        ))
+    })
+    .await
+}
+
+pub(super) fn generated(name: &str, prefix: &str) -> bool {
     name.starts_with(prefix)
         && name.ends_with(".vlite")
         && name.len() <= 96
@@ -456,7 +747,7 @@ fn directory(s: &Service) -> Result<PathBuf, ApiError> {
         )
     })
 }
-fn safe_file(dir: &FilePath, name: &str, prefix: &str) -> Result<PathBuf, ApiError> {
+pub(super) fn safe_file(dir: &FilePath, name: &str, prefix: &str) -> Result<PathBuf, ApiError> {
     if !generated(name, prefix) {
         return Err(invalid("invalid generated snapshot name"));
     }
@@ -472,7 +763,7 @@ fn inspection(i: crate::maintenance::Inspection) -> Value {
         "file_bytes":i.file_bytes,"valid_bytes":i.valid_bytes,"incomplete_tail_bytes":i.incomplete_tail_bytes})
 }
 static NAMES: AtomicU64 = AtomicU64::new(0);
-fn name(prefix: &str) -> String {
+pub(super) fn name(prefix: &str) -> String {
     format!(
         "{prefix}{}-{}-{}.vlite",
         now_ms(),
@@ -488,7 +779,7 @@ async fn backups(State(s): State<Service>) -> Result<Json<Value>, ApiError> {
     };
     s.run(move |_| {
         let mut items = Vec::new();
-        for entry in std::fs::read_dir(dir).map_err(internal)? {
+        for entry in std::fs::read_dir(&dir).map_err(internal)? {
             let entry = entry.map_err(internal)?;
             let name = entry.file_name().to_string_lossy().into_owned();
             let kind = if generated(&name, "backup-") {
@@ -501,8 +792,13 @@ async fn backups(State(s): State<Service>) -> Result<Json<Value>, ApiError> {
             if !entry.file_type().map_err(internal)?.is_file() {
                 continue;
             }
+            let manifest = if kind == "backup" {
+                super::ops::read_manifest(&dir, &name)
+            } else {
+                None
+            };
             items.push(
-                json!({"name":name,"kind":kind,"bytes":entry.metadata().map_err(internal)?.len()}),
+                json!({"name":name,"kind":kind,"bytes":entry.metadata().map_err(internal)?.len(),"manifest":manifest}),
             );
             if items.len() == 1000 {
                 break;
@@ -516,32 +812,15 @@ async fn backups(State(s): State<Service>) -> Result<Json<Value>, ApiError> {
 }
 async fn backup(State(s): State<Service>) -> Result<(StatusCode, Json<Value>), ApiError> {
     let dir = directory(&s)?;
+    let ops = s.ops.clone();
     s.run(move |db| {
-        db.ensure_healthy()?;
-        let name = name("backup-");
-        let mut staged = tempfile::NamedTempFile::new_in(&dir).map_err(internal)?;
-        let position = db.file.0.stream_position().map_err(internal)?;
-        let copied = (|| -> std::io::Result<()> {
-            db.file.0.seek(SeekFrom::Start(0))?;
-            std::io::copy(&mut db.file.0, staged.as_file_mut())?;
-            staged.as_file().sync_all()
-        })();
-        db.file
-            .0
-            .seek(SeekFrom::Start(position))
-            .map_err(internal)?;
-        copied.map_err(internal)?;
-        let report = crate::maintenance::inspect(staged.path())?;
-        if report.incomplete_tail_bytes != 0 {
-            return Err(invalid("database snapshot has an incomplete tail"));
-        }
-        staged
-            .persist_noclobber(dir.join(&name))
-            .map_err(internal)?;
-        sync_directory(&dir)?;
+        let (name, staged) = super::ops::snapshot(db, &dir)?;
+        let manifest = super::ops::publish(&dir, staged, &name)?;
+        let report = crate::maintenance::inspect(dir.join(&name))?;
+        ops.audit(json!({"event":"backup_created","name":name,"bytes":manifest["bytes"]}));
         Ok((
             StatusCode::CREATED,
-            Json(json!({"name":name,"inspection":inspection(report),"restart_required":true})),
+            Json(json!({"name":name,"inspection":inspection(report),"manifest":manifest,"restart_required":true})),
         ))
     })
     .await
@@ -573,7 +852,7 @@ async fn restore(
 struct Select {
     name: String,
 }
-fn sync_directory(dir: &FilePath) -> Result<(), ApiError> {
+pub(super) fn sync_directory(dir: &FilePath) -> Result<(), ApiError> {
     #[cfg(unix)]
     std::fs::File::open(dir)
         .and_then(|d| d.sync_all())

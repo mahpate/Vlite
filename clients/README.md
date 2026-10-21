@@ -97,7 +97,8 @@ Python uses `list_vectors`, `index_status`, `build_index`; JavaScript uses
 `database`, `metrics`, `get`, `put`, `delete`, `batch` and `search`, plus
 `get_versioned` (Python) / `getVersioned` (JavaScript) for conditional writes.
 `delete` returns a boolean; `search` returns the hit array. Mutations returning
-HTTP 204 complete without a result. See [OpenAPI](../src/openapi.json) for
+HTTP 204 complete without a result. Collections, new search modes, imports and
+administration are described below. See [OpenAPI](../src/openapi.json) for
 limits, metadata/filter shapes and server error codes.
 
 - IDs are **canonical decimal strings**, including `18446744073709551615`.
@@ -190,9 +191,16 @@ await client.delete("10", { ifMatch: etag }); // VLiteError 412 if stale
 
 - The `etag` is the HTTP `ETag` of the record GET: an opaque, quoted, strong
   tag. Pass it back unchanged; do not parse, construct or persist it.
-- Tags are **database-wide and service-lifetime**, not per-record revisions:
-  any committed write to *any* record (including batches) or a service restart
-  invalidates every outstanding tag, so 412 does not prove this record changed.
+- Tag scope depends on the server. When `GET /v1/capabilities` reports
+  `features.per_record_etags: true`, tags are **per record**: they change only
+  when that record is written or deleted (including through a batch or import),
+  and unrelated writes do not invalidate them. On format v4 files they survive a
+  service restart; on v1-v3 files a restart invalidates every tag. GET responses
+  also carry `revision` (a decimal string), which is informational only: pass
+  the `etag`, not the revision, to conditional writes. Older servers use
+  **database-wide, service-lifetime** tags: any committed write to *any* record
+  or a restart invalidates every outstanding tag, so 412 does not prove this
+  record changed.
 - A stale tag, or a record deleted since the read, fails with `VLiteError`
   status 412 and code `precondition_failed`; nothing is written.
   Neither client retries; refetch with `get_versioned`/`getVersioned` and decide.
@@ -219,6 +227,186 @@ await client.delete("10", { ifMatch: etag }); // VLiteError 412 if stale
   exactly one valid strong `ETag` (for example, an older server). Batch
   operations are not conditional. Transport errors on a conditional write leave
   the outcome uncertain, as described below.
+
+## Collections (format v4)
+
+Servers whose capabilities report `features.collections: true` (format v4
+databases) host named collections. Each collection has its own dimensions, ID
+space and settings. Names match `^[a-z][a-z0-9_-]{0,62}$`; the clients reject any
+other name before sending. Legacy `/v1/vectors`, `/v1/batches`, `/v1/search` and
+`/v1/index/hnsw` calls on `Client` continue to act on the `default` collection
+with their historical defaults (squared L2, default HNSW config, no quantization).
+
+```python
+client.create_collection("docs", 768, {"metric": "cosine", "text_fields": ["title"],
+                                       "metadata_indexes": [{"field": "category", "kind": "eq"}]})
+docs = client.collection("docs")   # same record/search/index methods as Client
+docs.put("1", {"vector": [0.0] * 768})
+client.set_collection_settings("docs", {"quantization": "scalar_u8"})  # {"collection", "persisted"}
+```
+
+```javascript
+const docs = client.collection("docs");
+await docs.batch([{ op: "delete", id: "1" }]);
+console.log((await client.listCollections()).items, await docs.info());
+```
+
+| Python | JavaScript | HTTP |
+|---|---|---|
+| `list_collections()` | `listCollections()` | `GET /v1/collections` |
+| `create_collection(name, dims, settings=None)` | `createCollection(name, dims, settings?)` | `POST /v1/collections` |
+| `get_collection(name)` / `coll.info()` | `getCollection(name)` / `coll.info()` | `GET /v1/collections/{c}` |
+| `drop_collection(name)` -> bool | `dropCollection(name)` | `DELETE /v1/collections/{c}` |
+| `set_collection_settings(name, partial)` | `setCollectionSettings(name, partial)` | `PUT /v1/collections/{c}/settings` |
+| `coll.get/get_versioned/put/delete/list_vectors/batch` | `coll.get/getVersioned/put/delete/listVectors/batch` | `/v1/collections/{c}/vectors[/{id}]`, `/batches` |
+| `coll.search(req)` / `coll.search_detailed(req)` | `coll.search(req)` / `coll.searchDetailed(req)` | `POST /v1/collections/{c}/search` |
+| `coll.index_status()` / `coll.build_index(...)` | `coll.indexStatus()` / `coll.buildIndex({...})` | `GET`/`POST /v1/collections/{c}/index/hnsw` |
+| `rebuild_status/start_rebuild/poll_rebuild/cancel_rebuild` | `rebuildStatus/startRebuild/pollRebuild/cancelRebuild` | `.../index/hnsw/rebuild`, `/rebuild/poll`, `/rebuild/cancel` |
+| `coll.ann_quality(options=None)` | `coll.annQuality(options?)` | `POST /v1/collections/{c}/index/hnsw/quality` |
+| `coll.maintenance_status()` / `coll.maintenance_tick()` | `coll.maintenanceStatus()` / `coll.maintenanceTick()` | `GET .../index/hnsw/maintenance`, `POST .../maintenance/tick` |
+
+- Omitted `metric`, `config`, `quantization` and `rerank_multiplier` on
+  collection routes use **that collection's** settings. An unknown collection
+  is 404 `collection_not_found`; nothing falls back to `default`.
+- Settings updates are partial: omitted fields keep their values. On a v1-v3
+  file, creating collections and imports return 409 `requires_format_v4`;
+  `default` settings changes apply in memory only (`persisted: false`).
+- Dropping requires an empty collection (409 `collection_not_empty`); `default`
+  cannot be dropped (409 `default_collection_immutable`).
+- Collection index status is a superset of the legacy shape: `ready`, `config`,
+  `metric`, `quantization`, `rerank_multiplier`, `graph_nodes`, `stale_nodes`,
+  buffer counters, `settings_ready` and `memory` (graph, quantized code,
+  codebook, buffer and resident vector bytes; null without a graph).
+  `ann_quality`/`annQuality` measures recall@k against exact search on
+  the **ready** index only (409 `index_not_ready` otherwise; it never builds) and
+  may return `recall_at_k: null` with `skipped_reason` `"budget"` or `"empty"`.
+
+## Search modes, explain and quantization
+
+In addition to `exact`, `approximate` and `approximate_ready`, servers reporting
+the matching capability flags accept:
+
+- `mode: "auto"` (`features.search_auto`): the server's planner chooses an exact
+  scan, an indexed exact plan, filtered ANN or ANN, using the collection's
+  planner policy and metadata indexes. It never builds an index.
+- `mode: "hybrid"` (`features.search_hybrid`): reciprocal-rank fusion of a
+  vector leg (`vector_leg: "exact" | "approximate_ready"`) and a BM25 text leg
+  over the collection's `text_fields`. `vector` is optional only in this mode;
+  `text` and `fusion: {rrf_k, vector_weight, text_weight, candidates}` apply only
+  here. Hybrid hits are `{id, score, distance, bm25, vector_rank, text_rank}`
+  (nullable per leg) sorted by score descending then ID; every other mode sorts
+  by distance ascending then ID.
+- `explain: true` (`features.search_explain`): `search_detailed` /
+  `searchDetailed` return the whole response including `stats` (records scanned,
+  distance evaluations, quantized evaluations, graph nodes visited, buffered
+  records merged, reranked candidates, index candidates) and `plan` (non-null for
+  `auto` only). `search` still returns only the hit array.
+- `quantization: "none" | "scalar_u8"` and `rerank_multiplier` (1-16)
+  (`features.quantization`) select a scalar-quantized index identity, reranked
+  with exact distances. Build or rebuild it explicitly
+  (`build_index(quantization="scalar_u8", rerank_multiplier=4)` /
+  `buildIndex({ quantization: "scalar_u8", rerankMultiplier: 4 })`); a missing
+  or different identity in ready-only mode is 409, never a silent exact search.
+
+Read-only and scoped `search` credentials may use `exact`, `approximate_ready`,
+`auto` and `hybrid`; lazy `approximate` (which may build) needs the admin token
+or the scoped `search_build` operation; otherwise it is 403 (`read_only` or
+`forbidden_scope`). Errors are
+propagated once; the clients never retry or downgrade a search to exact mode.
+
+## Resumable imports (format v4)
+
+| Python | JavaScript | HTTP |
+|---|---|---|
+| `begin_import(collection)` | `beginImport(collection)` | `POST /v1/collections/{c}/imports` (no body) |
+| `import_chunk(job, chunk, ops, *, policy=None)` | `importChunk(job, chunk, ops, { policy })` | `PUT /v1/imports/{job}/chunks/{n}` |
+| `import_status(job)` | `importStatus(job)` | `GET /v1/imports/{job}` |
+| `finish_import(job)` / `abort_import(job)` | `finishImport(job)` / `abortImport(job)` | `POST /v1/imports/{job}/finish`, `/abort` |
+| `import_ndjson(path, collection, *, chunk_size=1024, policy="reject_chunk", job=None)` | `importNdjson(path, collection, { chunkSize, policy, job })` (Node only) | all of the above |
+
+Jobs and chunk numbers are decimal strings; chunks start at `"1"` and must be
+contiguous. Each chunk (up to 4096 batch operations) commits atomically with
+its checkpoint. Outcomes are explicit:
+
+- `committed`: the chunk was written.
+- `already_committed`: an identical resubmission of the last committed chunk;
+  nothing was written. Use it to confirm a chunk whose response was lost.
+- **Rejected**: with `policy: "reject_chunk"` (default) any invalid row raises
+  `ImportRejectedError` (a `VLiteError`, HTTP 422 `import_rows_invalid`) whose
+  `report` lists `invalid: [{row, code, message}]` with `outcome: "rejected"`;
+  nothing was written and the job did not advance. `"skip_invalid"` commits the
+  valid rows and reports the skipped ones.
+- 409 `import_conflict` (for example a different payload for a committed chunk,
+  a gap, a dropped collection, a superseded reservation, or a first chunk sent
+  while an earlier reservation on a live collection has not committed; that
+  message names the earlier job and nothing is written), 409 `import_limit`
+  and 404 `import_not_found` are `VLiteError`s. Finishing a job with no chunk is
+  409; aborting an unused reservation drops it.
+
+`import_ndjson`/`importNdjson` reads one batch operation object per line (blank
+lines ignored). The whole file is read and validated **before** a job is
+reserved or resumed: a missing, unreadable, empty or malformed file (a
+`ValueError`/`TypeError` naming the line) sends nothing and leaves no orphaned
+job. Any failure after that rethrows the original error with the job ID
+attached (`error.import_job` in Python, `error.importJob` in JavaScript). The
+job is never aborted automatically, so committed chunks stay resumable or can be
+aborted explicitly.
+With `job`, it resumes: it reads the job status, skips chunks before
+`last_chunk`, resubmits `last_chunk` and requires `already_committed` (proving the
+same file, chunk size and policy), sends the rest, then finishes. A finished job
+returns its status without sending anything. Any other outcome, a transport
+failure or an error stops the import; nothing is retried automatically. A job
+without a durable chunk (`durable: false`) does not survive a restart.
+
+## Administration (admin token)
+
+| Python | JavaScript | HTTP |
+|---|---|---|
+| `capabilities()` | `capabilities()` | `GET /v1/capabilities` |
+| `prometheus_metrics()` -> str | `prometheusMetrics()` | `GET /metrics?format=prometheus` (text/plain) |
+| `auto_maintenance()` / `set_auto_maintenance(policy)` | `autoMaintenance()` / `setAutoMaintenance(policy)` | `GET`/`PUT /v1/admin/maintenance/auto` |
+| `tick_auto_maintenance()` | `tickAutoMaintenance()` | `POST /v1/admin/maintenance/auto/tick` |
+| `backup_schedule()` / `set_backup_schedule(schedule)` | `backupSchedule()` / `setBackupSchedule(schedule)` | `GET`/`PUT /v1/admin/backups/schedule` |
+| `run_backup_schedule()` | `runBackupSchedule()` | `POST /v1/admin/backups/schedule/run` |
+| `list_backups()` / `create_backup()` | `listBackups()` / `createBackup()` | `GET`/`POST /v1/admin/backups` |
+| `verify_backup(name)` / `drill_backup(name)` | `verifyBackup(name)` / `drillBackup(name)` | `POST /v1/admin/backups/{name}/verify`, `/drill` |
+| `slow_queries()` | `slowQueries()` | `GET /v1/admin/diagnostics/slow-queries` |
+| `list_credentials()` | `listCredentials()` | `GET /v1/admin/credentials` |
+| `create_credential(request)` | `createCredential(request)` | `POST /v1/admin/credentials` |
+| `rotate_credential(id, *, grace_seconds=None)` | `rotateCredential(id, { graceSeconds })` | `POST /v1/admin/credentials/{id}/rotate` |
+| `revoke_credential(id)` | `revokeCredential(id)` | `POST /v1/admin/credentials/{id}/revoke` |
+| `persistent_audit(*, limit=100)` | `persistentAudit({ limit })` | `GET /v1/admin/audit/persistent?limit=n` |
+
+- Auto-maintenance and backup-schedule responses are `{config, state}`; PUT
+  merges the given fields (auto-maintenance takes `interval_secs` and reports
+  `interval_ms`). Auto-maintenance policy changes are memory-only. Backup schedule, verify and
+  drill need a server started with an admin directory; a failed verify or drill
+  is 422 `verification_failed` / `drill_failed` (verify also fails when the
+  manifest or its metadata was altered). Backup names are validated as
+  generated snapshot names (no paths) before sending. Without an admin
+  directory, schedule changes return 409 `admin_directory_disabled`.
+- Scoped credentials (`features.scoped_credentials`) are created only with the
+  bootstrap admin token and an admin directory on a v4 file (otherwise 409
+  `credentials_disabled` / `requires_format_v4`): `{name (1-64 chars),
+  collections: ["*"] | [names], operations, expires_unix_ms}` with operations from `read`, `search`, `search_build`,
+  `write`, `import`, `index`, `collections`, `diagnostics`, `backup`, and a
+  mandatory expiry within 365 days. **The `token` from create/rotate is shown
+  once.** Hand it to its consumer; never log, print, persist or include it in
+  error reports. Lists never return secrets; credentials report `state`
+  (`active`, `expired`, `revoked`) and their bound `lineage`. Rotating an
+  inactive credential is 409 `credential_inactive`; 503
+  `credentials_unavailable` / `audit_unavailable` mean nothing was changed.
+  **503 `credentials_commit_indeterminate`** on create, rotate or revoke means
+  the change *is* in effect but may not survive a crash, and no token is
+  returned: re-list credentials and revoke or re-issue as needed; never treat it
+  as "no change".
+  Persistent audit returns `{items, enabled}`.
+- A scoped token is used like any token (`Client(url, token)`); `capabilities()`
+  then reports `role: "scoped"` and its `scope`. Calls outside the scope fail
+  with 403 `forbidden_scope`; expired tokens with 401 `credential_expired`,
+  revoked or unknown ones with 401 `unauthorized`. Scopes are
+  bound to the collection identity and database lineage: a dropped and
+  recreated collection, or a restored different database, fails closed.
 
 ## Errors and uncertain writes
 

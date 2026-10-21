@@ -882,7 +882,8 @@ async fn approximate_mode_is_explicit_and_merges_mutations() {
         json!({"vector":[0,0],"k":2,"ef_search":10}),
         json!({"vector":[0,0],"k":2,"mode":"approximate","ef_search":1}),
         json!({"vector":[0,0],"k":2,"mode":"approximate","ef_search":100001}),
-        json!({"vector":[0,0],"k":2,"mode":"auto"}),
+        // `auto` and `hybrid` are valid Wave2 modes; unknown names stay 422.
+        json!({"vector":[0,0],"k":2,"mode":"fuzzy"}),
         json!({"vector":[0,0],"k":2,"mode":null}),
         json!({"vector":[0,0],"k":2,"mode":"approximate","m":4}),
     ] {

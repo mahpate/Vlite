@@ -18,8 +18,15 @@ await assert.rejects(client.search({ vector: [1, 0, 0], k: 1, mode: "approximate
 (e) => e instanceof VLiteError && e.status === 422 && e.code === "invalid_input");
 const record = { vector: [1, 0, 0], payload_base64: "AP8=",
   metadata: { n: { type: "integer", value: "-9223372036854775808" } } };
+const caps = await client.capabilities();
+const perRecord = caps.features?.per_record_etags === true;
+// Strip the additive per-record revision (newer servers) before comparing records.
+const plain = ({ revision, ...rest }) => {
+  if (revision !== undefined) assert.match(revision, /^(0|[1-9][0-9]{0,19})$/);
+  return rest;
+};
 assert.equal(await client.put("18446744073709551615", record), undefined);
-assert.deepEqual(await client.get("18446744073709551615"), { id: "18446744073709551615", ...record });
+assert.deepEqual(plain(await client.get("18446744073709551615")), { id: "18446744073709551615", ...record });
 assert.equal((await client.search({ vector: [1, 0, 0], k: 1, metric: "cosine" }))[0].distance, 0);
 assert.equal((await client.search({ vector: [1, 0, 0], k: 1, metric: "inner_product" }))[0].distance, -1);
 await assert.rejects(client.search({ vector: [1, 0, 0], k: 1, metric: "inner_product", mode: "approximate_ready" }),
@@ -60,8 +67,9 @@ const before = (await client.database()).records;
 const wide = "18446744073709551614", other = "100", gone = "101";
 await client.put(wide, { vector: [1, 0, 0] });
 const initial = await client.getVersioned(wide);
-assert.deepEqual(initial.record, { id: wide, vector: [1, 0, 0], payload_base64: "", metadata: {} });
+assert.deepEqual(plain(initial.record), { id: wide, vector: [1, 0, 0], payload_base64: "", metadata: {} });
 assert.deepEqual(initial.record, await client.get(wide));
+assert.equal("revision" in initial.record, perRecord);
 assert.match(initial.etag, /^"[\x21\x23-\x7e]+"$/);
 assert.equal((await client.getVersioned(wide)).etag, initial.etag);
 
@@ -72,11 +80,14 @@ await assert.rejects(client.delete(wide, { ifMatch: initial.etag }), is412);
 assert.deepEqual((await client.get(wide)).vector, [0, 1, 0]);
 
 let current = (await client.getVersioned(wide)).etag;
-await client.put(other, { vector: [1, 1, 0] }); // unrelated write invalidates every tag
-await assert.rejects(client.delete(wide, { ifMatch: current }), is412);
+await client.put(other, { vector: [1, 1, 0] });
+// Per-record tags survive unrelated writes and batches; legacy database-wide tags do not.
+if (perRecord) await client.put(wide, { vector: [0, 1, 0] }, { ifMatch: current });
+else await assert.rejects(client.delete(wide, { ifMatch: current }), is412);
 current = (await client.getVersioned(wide)).etag;
 await client.batch([{ op: "put", id: gone, vector: [1, 0, 1] }]);
-await assert.rejects(client.put(wide, { vector: [0, 0, 1] }, { ifMatch: current }), is412);
+if (perRecord) await client.put(wide, { vector: [0, 1, 0] }, { ifMatch: current });
+else await assert.rejects(client.put(wide, { vector: [0, 0, 1] }, { ifMatch: current }), is412);
 assert.deepEqual((await client.get(wide)).vector, [0, 1, 0]);
 
 const stale = (await client.getVersioned(gone)).etag;

@@ -87,6 +87,28 @@ incremental index memory. Synthetic data, shared unpinned host, small query
 counts and single-client warm-cache timing do not establish production tails,
 real-embedding quality or a universal speedup.
 
+### Indexed and quantized search comparison
+
+```powershell
+cargo build --locked --release --example search_capabilities_bench
+python benchmarks\search_capabilities_campaign.py --binary target\release\examples\search_capabilities_bench.exe --output search-capabilities.json
+python tests\search_capabilities_campaign.py
+```
+
+This bounded example compares unquantized and scalar-u8 ANN on 2,000 clustered
+32-dimensional synthetic vectors, both squared L2 and cosine, against exact
+top-k. It verifies exact returned distances outside timed queries and retains
+every query sample, denominator, component byte count and source/binary hash.
+A separate selective metadata query must preserve exact results while scanning
+fewer records after index declaration. No hidden ANN-to-exact fallback is used.
+
+Code/codebook and graph-link counts are component accounting, not OS-measured
+RSS. Original f32 records remain resident: this implementation can add memory
+for quantization, so do not advertise total-memory savings. One shared-host run,
+fixed benchmark order and synthetic clusters do not establish production recall
+or tail latency. The campaign rejects an existing output path and validates its
+result shape before writing a successful report.
+
 ## Reproduce the REST comparison
 
 `compare_rest.py` uses only Python's standard library and Docker. It creates

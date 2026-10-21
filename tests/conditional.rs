@@ -1,5 +1,7 @@
 #![cfg(feature = "server")]
-//! Conditional REST writes: service-lifetime, database-wide strong ETags.
+//! Conditional REST writes: per-record strong ETags bound to the database
+//! identity (v4 lineage or a per-process nonce for v1-v3), collection, record
+//! ID, per-record revision and a full SHA-256 of the record content.
 
 use axum::{
     Router,
@@ -103,9 +105,13 @@ async fn get_returns_strong_opaque_etag_without_changing_body() {
     let id = u64::MAX.to_string();
     let (status, etag, body) = send(&app, "GET", &format!("/v1/vectors/{id}"), &[], None).await;
     assert_eq!(status, StatusCode::OK);
+    // Additive: `revision` is the record's decimal per-record revision.
+    let revision = body["revision"].as_str().expect("decimal revision string");
+    assert!(revision.parse::<u64>().unwrap() > 0);
     assert_eq!(
         body,
-        json!({"id":id,"vector":[u64::MAX as f32],"payload_base64":"cA==","metadata":{}})
+        json!({"id":id,"vector":[u64::MAX as f32],"payload_base64":"cA==","metadata":{},
+            "revision":revision})
     );
     let etag = etag.unwrap();
     assert!(etag.len() > 2 && etag.starts_with('"') && etag.ends_with('"'));
@@ -198,19 +204,30 @@ async fn delete_and_identical_recreate_invalidates_old_tag() {
 }
 
 #[tokio::test]
-async fn batches_and_unrelated_writes_conservatively_invalidate_all_tags() {
+async fn tags_are_per_record_unrelated_writes_and_batches_keep_them_valid() {
     let (_dir, _service, app) = app_with(&[1, 2]);
     let seen = tag(&app, "1").await;
+    // A write to another record does not invalidate record 1's tag.
     assert_eq!(put(&app, "2", None, 5.0).await.0, StatusCode::NO_CONTENT);
-    assert_precondition_failed(put(&app, "1", Some(&seen), 9.0).await);
-
-    let seen = tag(&app, "1").await;
+    assert_eq!(tag(&app, "1").await, seen);
     let (status, _, _) = send(
         &app,
         "POST",
         "/v1/batches",
         &[],
         Some(json!({"operations":[{"op":"put","id":"3","vector":[3]}]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(tag(&app, "1").await, seen);
+
+    // A batch that touches record 1 invalidates it.
+    let (status, _, _) = send(
+        &app,
+        "POST",
+        "/v1/batches",
+        &[],
+        Some(json!({"operations":[{"op":"put","id":"1","vector":[1]}]})),
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
@@ -238,6 +255,69 @@ async fn batches_and_unrelated_writes_conservatively_invalidate_all_tags() {
         StatusCode::NO_CONTENT
     );
     assert_eq!(vector(&app, "1").await, Some(json!(9.0)));
+}
+
+#[tokio::test]
+async fn same_batch_records_get_distinct_independent_tags() {
+    let (_dir, _service, app) = app_with(&[]);
+    let (status, _, _) = send(
+        &app,
+        "POST",
+        "/v1/batches",
+        &[],
+        Some(json!({"operations":[
+            {"op":"put","id":"1","vector":[4]},
+            {"op":"put","id":"2","vector":[4]}]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (one, two) = (tag(&app, "1").await, tag(&app, "2").await);
+    assert_ne!(
+        one, two,
+        "identical content in one batch still differs by ID"
+    );
+    assert_precondition_failed(put(&app, "2", Some(&one), 1.0).await);
+    assert_eq!(
+        put(&app, "1", Some(&one), 1.0).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        put(&app, "2", Some(&two), 2.0).await.0,
+        StatusCode::NO_CONTENT
+    );
+}
+
+#[tokio::test]
+async fn v4_tags_survive_restart_and_divergent_raw_clones_fail_closed() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("v4.vlite");
+    let mut db = Database::create_with_format(&path, 1, vlite::FormatVersion::V4).unwrap();
+    db.put(1, &[1.0], b"").unwrap();
+    let service = Service::new(db);
+    let seen = tag(&router(service.clone()), "1").await;
+    service.close().await.unwrap();
+
+    // Same lineage and content: the tag is stable across restart.
+    let service = Service::new(Database::open(&path).unwrap());
+    let app = router(service.clone());
+    assert_eq!(tag(&app, "1").await, seen);
+    service.close().await.unwrap();
+
+    // A raw byte clone shares the lineage; divergent content at the same
+    // revision must still produce different tags.
+    let clone = directory.path().join("clone.vlite");
+    std::fs::copy(&path, &clone).unwrap();
+    let original = Service::new(Database::open(&path).unwrap());
+    let copy = Service::new(Database::open(&clone).unwrap());
+    let (a, b) = (router(original.clone()), router(copy.clone()));
+    assert_eq!(put(&a, "1", None, 10.0).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(put(&b, "1", None, 20.0).await.0, StatusCode::NO_CONTENT);
+    let (tag_a, tag_b) = (tag(&a, "1").await, tag(&b, "1").await);
+    assert_ne!(tag_a, tag_b);
+    assert_precondition_failed(put(&b, "1", Some(&tag_a), 30.0).await);
+    assert_eq!(vector(&b, "1").await, Some(json!(20.0)));
+    original.close().await.unwrap();
+    copy.close().await.unwrap();
 }
 
 #[tokio::test]

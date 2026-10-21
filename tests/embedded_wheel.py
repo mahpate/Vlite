@@ -67,7 +67,21 @@ with tempfile.TemporaryDirectory() as directory:
         assert db.search_approximate_ready([1,0],1,metric="cosine")[0]['distance']==0
     with native.open(path) as db:
         assert db.get('18446744073709551615')['payload_base64']=='AP8='
-print('PASS installed native wheel: automatic library loading, CRUD, search and reopen')
+    advanced = Path(directory) / 'collections.vlite'
+    with native.create(advanced, 2, format=4) as db:
+        db.create_collection('documents', 2)
+        db.put('1', [1,0], collection='documents')
+        try:
+            db.get('1')
+        except EmbeddedError as error:
+            assert error.code == 'not_found'
+        else:
+            raise AssertionError('collection record leaked into default')
+        assert db.get('1', collection='documents')['revision']
+        assert db.search_auto([1,0], 1, collection='documents')['hits'][0]['id']=='1'
+    with native.open(advanced) as db:
+        assert db.get('1', collection='documents')['vector']==[1,0]
+print('PASS installed native wheel: automatic loading, legacy and v4 collections, CRUD, search and reopen')
 """
         # -I excludes PYTHONPATH and cwd imports. No server or external DLL path.
         subprocess.run([str(python), "-I", "-c", code], cwd=directory, check=True, timeout=60)

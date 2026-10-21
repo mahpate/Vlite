@@ -3,7 +3,8 @@ use std::process::ExitCode;
 use vlite::maintenance::{self, Inspection};
 
 const USAGE: &str = "usage: vlite-maintain inspect SOURCE | backup SOURCE DESTINATION | \
-restore BACKUP DESTINATION | compact SOURCE DESTINATION";
+restore BACKUP DESTINATION | compact SOURCE DESTINATION | upgrade SOURCE DESTINATION | \
+verify PATH | drill BACKUP WORKDIR";
 
 fn print_report(report: &Inspection) {
     println!(
@@ -38,6 +39,27 @@ fn run() -> Result<(), Box<dyn Error>> {
                 report.source.file_bytes, report.source.commits
             );
             print_report(&report.output);
+        }
+        (Some("upgrade"), 3) => {
+            let report = maintenance::upgrade(&args[1], &args[2])?;
+            println!(
+                "source_format_version={} source_bytes={}",
+                report.source.format_version, report.source.file_bytes
+            );
+            print_report(&report.output);
+        }
+        (Some("verify"), 2) => {
+            let report = maintenance::verify(&args[1])?;
+            print_report(&report.inspection);
+            println!("bytes={} crc32={:08x}", report.bytes, report.crc32);
+        }
+        (Some("drill"), 3) => {
+            let report = maintenance::drill(&args[1], &args[2])?;
+            print_report(&report.backup);
+            println!(
+                "drill=passed collections={} probes={}",
+                report.collections, report.probes
+            );
         }
         _ => return Err(USAGE.into()),
     }

@@ -167,11 +167,245 @@
     link.href = url; link.download = name; link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
+  // ---- EPIC-015 helpers: collections, search modes, imports, credentials ----
+  const COLLECTION_NAME = /^[a-z][a-z0-9_-]{0,62}$/;
+  function collectionName(value) {
+    if (typeof value !== "string" || !COLLECTION_NAME.test(value)) throw new Error("Collection names match ^[a-z][a-z0-9_-]{0,62}$");
+    return value;
+  }
+  // `default` keeps the legacy routes so older servers and existing workflows are unchanged.
+  function collectionPath(collection, suffix) {
+    collectionName(collection);
+    if (!suffix.startsWith("/")) throw new Error("Collection route suffix must start with /");
+    return collection === "default" ? `/v1${suffix}` : `/v1/collections/${collection}${suffix}`;
+  }
+  const METRICS = ["squared_l2", "cosine", "inner_product"];
+  const INDEX_KINDS = ["eq", "range", "eq_range"];
+  function settings(value) {
+    if (!object(value)) throw new Error("Settings must be a JSON object");
+    const allowed = ["metric", "hnsw", "quantization", "rerank_multiplier", "planner", "metadata_indexes", "text_fields"];
+    const unknown = Object.keys(value).filter((key) => !allowed.includes(key));
+    if (unknown.length) throw new Error(`Unknown settings fields: ${unknown.join(", ")}`);
+    if (value.metric !== undefined && !METRICS.includes(value.metric)) throw new Error("metric must be squared_l2, cosine or inner_product");
+    if (value.hnsw !== undefined) {
+      const h = value.hnsw;
+      if (!object(h) || Object.keys(h).some((key) => !["m", "ef_construction", "seed"].includes(key)) ||
+          !Number.isInteger(h.m) || h.m < 2 || h.m > 64 || !Number.isInteger(h.ef_construction) || h.ef_construction < h.m || h.ef_construction > 4096) throw new Error("hnsw requires m 2..64 and ef_construction m..4096");
+      id(h.seed);
+    }
+    if (value.quantization !== undefined && !["none", "scalar_u8"].includes(value.quantization)) throw new Error("quantization must be none or scalar_u8");
+    if (value.rerank_multiplier !== undefined && (!Number.isInteger(value.rerank_multiplier) || value.rerank_multiplier < 1 || value.rerank_multiplier > 16)) throw new Error("rerank_multiplier must be 1..16");
+    if (value.planner !== undefined) {
+      const p = value.planner;
+      if (!object(p) || Object.keys(p).some((key) => !["exact_max_candidates", "exact_max_selectivity_ppm"].includes(key)) ||
+          (p.exact_max_candidates !== undefined && (!Number.isInteger(p.exact_max_candidates) || p.exact_max_candidates < 1 || p.exact_max_candidates > 1000000)) ||
+          (p.exact_max_selectivity_ppm !== undefined && (!Number.isInteger(p.exact_max_selectivity_ppm) || p.exact_max_selectivity_ppm < 0 || p.exact_max_selectivity_ppm > 1000000))) throw new Error("planner requires exact_max_candidates 1..1000000 and exact_max_selectivity_ppm 0..1000000");
+    }
+    const field = (name) => typeof name === "string" && name.length > 0 && new TextEncoder().encode(name).length <= 256;
+    if (value.metadata_indexes !== undefined) {
+      if (!Array.isArray(value.metadata_indexes) || value.metadata_indexes.length > 16) throw new Error("At most 16 metadata indexes");
+      for (const entry of value.metadata_indexes) {
+        if (!object(entry) || Object.keys(entry).sort().join(",") !== "field,kind" || !field(entry.field) || !INDEX_KINDS.includes(entry.kind)) throw new Error("Metadata indexes are {field, kind: eq|range|eq_range}");
+      }
+      if (new Set(value.metadata_indexes.map((entry) => entry.field)).size !== value.metadata_indexes.length) throw new Error("Duplicate metadata index field");
+    }
+    if (value.text_fields !== undefined) {
+      if (!Array.isArray(value.text_fields) || value.text_fields.length > 8 || !value.text_fields.every(field)) throw new Error("At most 8 text fields of 1..256 bytes");
+      if (new Set(value.text_fields).size !== value.text_fields.length) throw new Error("Duplicate text field");
+    }
+    return value;
+  }
+  // Higher-is-better scores must never be presented as distances.
+  function scoreDirection(mode, metric) {
+    if (mode === "hybrid") return { column: "score", label: "Hybrid RRF score (higher is better)", better: "higher" };
+    return { column: "distance", label: `${metric ?? "squared_l2"} distance (lower is better)`, better: "lower" };
+  }
+  const SECRET_KEY = /^(?:token|secret|authorization|password|api_key|bearer)$|_token$|_secret$/i;
+  const SECRET_TEXT = /vlk_[a-z2-7]{12}_[A-Za-z0-9_-]{20,}/g;
+  // Deep copy for display/export surfaces: removes credential-looking fields and scoped tokens.
+  function redact(value, depth = 0) {
+    if (depth > 32) return "[redacted: too deep]";
+    if (typeof value === "string") return value.replace(SECRET_TEXT, "[redacted credential]");
+    if (Array.isArray(value)) return value.map((item) => redact(item, depth + 1));
+    if (!object(value)) return value;
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, SECRET_KEY.test(key) && item !== null && typeof item !== "boolean" ? "[redacted]" : redact(item, depth + 1)]));
+  }
+  function maskSecret(token) {
+    if (typeof token !== "string" || !token) return "";
+    const match = /^(vlk_[a-z2-7]{12}_)(.+)$/.exec(token);
+    return match ? `${match[1]}${"\u2022".repeat(12)} (${match[2].length}-character secret hidden)` : `${"\u2022".repeat(12)} (${token.length}-character secret hidden)`;
+  }
+  const OPERATIONS = ["read", "search", "search_build", "write", "import", "index", "collections", "diagnostics", "backup"];
+  function credentialRequest(input, now = Date.now()) {
+    const collections = input.collections.trim() === "*" ? ["*"] : input.collections.split(",").map((value) => value.trim()).filter(Boolean);
+    if (!collections.length || collections.length > 64) throw new Error("Scope 1..64 collections, or * for all");
+    if (!(collections.length === 1 && collections[0] === "*")) collections.forEach(collectionName);
+    if (new Set(collections).size !== collections.length) throw new Error("Duplicate collection scope");
+    const operations = [...new Set(input.operations)];
+    if (!operations.length || operations.some((value) => !OPERATIONS.includes(value))) throw new Error(`Select at least one operation from ${OPERATIONS.join(", ")}`);
+    const days = Number(input.days);
+    if (!Number.isInteger(days) || days < 1 || days > 365) throw new Error("Expiry must be 1..365 days; credentials always expire");
+    const body = { collections, operations, expires_unix_ms: now + days * 86400000 };
+    if (typeof input.name !== "string" || input.name.length < 1 || input.name.length > 64 || !/^[\x20-\x7e]+$/.test(input.name)) throw new Error("Credential name is required: 1..64 printable ASCII characters");
+    body.name = input.name;
+    return body;
+  }
+  function graceSeconds(value) {
+    const seconds = Number(value);
+    if (!Number.isInteger(seconds) || seconds < 0 || seconds > 86400) throw new Error("Grace must be 0..86400 seconds");
+    return seconds;
+  }
+  function boundedInteger(value, min, max, label) {
+    const number = Number(value);
+    if (!Number.isInteger(number) || number < min || number > max) throw new Error(`${label} must be ${min}..${max}`);
+    return number;
+  }
+  // Parses JSON array, NDJSON/JSONL or CSV into put operations. Structure is checked
+  // locally; dimension and value rules are enforced (and reported per row) by the server.
+  function importRows(name, source) {
+    const lower = name.toLowerCase();
+    let rows;
+    if (lower.endsWith(".csv")) rows = csvParse(source);
+    else if (lower.endsWith(".ndjson") || lower.endsWith(".jsonl")) {
+      rows = source.split(/\r?\n/).map((line, index) => {
+        if (!line.trim()) return null;
+        try { return JSON.parse(line); } catch { throw new Error(`Line ${index + 1}: invalid JSON`); }
+      }).filter((row) => row !== null);
+    } else rows = JSON.parse(source);
+    if (!Array.isArray(rows) || !rows.length) throw new Error("Import file contains no records");
+    if (rows.length > 1000000) throw new Error("Browser import is limited to 1,000,000 records");
+    return rows.map((row, index) => {
+      if (!object(row) || Object.keys(row).some((key) => !["id", "vector", "metadata", "payload_base64"].includes(key))) throw new Error(`Row ${index + 1}: unknown fields; records are {id, vector, payload_base64?, metadata?}`);
+      try { id(row.id); } catch (error) { throw new Error(`Row ${index + 1}: ${error.message}`); }
+      if (!Array.isArray(row.vector) || !row.vector.every((v) => typeof v === "number")) throw new Error(`Row ${index + 1}: vector must be a numeric array`);
+      if (row.metadata !== undefined && !object(row.metadata)) throw new Error(`Row ${index + 1}: metadata must be an object`);
+      if (row.payload_base64 !== undefined && typeof row.payload_base64 !== "string") throw new Error(`Row ${index + 1}: payload_base64 must be a string`);
+      return { op: "put", id: row.id, vector: row.vector, ...(row.payload_base64 ? { payload_base64: row.payload_base64 } : {}), ...(row.metadata ? { metadata: row.metadata } : {}) };
+    });
+  }
+  // Deterministic chunking: the same file and size always produce identical chunks,
+  // which the server's exactly-once digest check relies on when resuming.
+  function chunk(rows, size) {
+    boundedInteger(size, 1, 4096, "Chunk size");
+    const chunks = [];
+    for (let start = 0; start < rows.length; start += size) chunks.push(rows.slice(start, start + size));
+    for (const [index, item] of chunks.entries()) {
+      if (new TextEncoder().encode(JSON.stringify(item)).length > 16 * 1024 * 1024) throw new Error(`Chunk ${index + 1} exceeds 16 MiB; use a smaller chunk size`);
+    }
+    return chunks;
+  }
+  // Decide how to continue a job from its durable server status; never guesses.
+  function resumePlan(status, totalChunks) {
+    if (!object(status)) throw new Error("Import status unavailable");
+    const state = status.state, last = Number(status.last_chunk ?? 0);
+    if (!Number.isInteger(last) || last < 0) throw new Error("Import status has an invalid last_chunk");
+    if (state === "finished" || state === "aborted") return { action: "closed", last, message: `Job is ${state}; ${last} chunk(s) committed and retained. Nothing to resend.` };
+    if (state !== "open") throw new Error(`Unknown import state ${state}`);
+    if (last > totalChunks) return { action: "mismatch", last, message: `Server committed ${last} chunks but this file has only ${totalChunks}; select the original file and chunk size.` };
+    return { action: last === totalChunks ? "finish" : "continue", last, verify: last >= 1 ? last : null, next: last + 1,
+      message: last ? `Chunks 1..${last} are durably committed and will not be resent; chunk ${last} is replayed once to prove this is the same file (expects already_committed).` : "No chunks committed yet; starting at chunk 1." };
+  }
+  function savedQueryV2(value, dimensions, collection) {
+    if (!object(value) || value.version !== 2 || Object.keys(value).sort().join(",") !== "collection,name,query,version" ||
+        typeof value.name !== "string" || !value.name.trim() || value.name.length > 100) throw new Error("Expected a version 2 named query file without extra fields");
+    collectionName(value.collection);
+    if (collection !== undefined && value.collection !== collection) throw new Error(`Query belongs to collection "${value.collection}"; select that collection first. Nothing was loaded.`);
+    const q = value.query;
+    const keys = ["config", "ef_search", "explain", "filter", "fusion", "k", "metric", "mode", "quantization", "rerank_multiplier", "text", "vector", "vector_leg"];
+    if (!object(q) || Object.keys(q).some((key) => !keys.includes(key)) || keys.some((key) => !(key in q))) throw new Error("Unknown or missing query fields; credentials are not accepted");
+    if (!["exact", "approximate", "approximate_ready", "auto", "hybrid"].includes(q.mode)) throw new Error("Invalid query mode");
+    if (!["exact", "approximate_ready"].includes(q.vector_leg) || !Number.isInteger(q.rerank_multiplier) || q.rerank_multiplier < 1 || q.rerank_multiplier > 16) throw new Error("Invalid vector_leg or rerank_multiplier");
+    if (typeof q.text !== "string" || new TextEncoder().encode(q.text).length > 1024) throw new Error("Query text must be at most 1024 bytes");
+    if (q.vector === null) {
+      if (q.mode !== "hybrid" || !q.text.trim()) throw new Error("Only hybrid queries with text may omit the vector");
+    } else vector(q.vector, dimensions);
+    if (typeof q.explain !== "boolean" || !["none", "scalar_u8"].includes(q.quantization)) throw new Error("Invalid explain/quantization fields");
+    if (!object(q.fusion) || Object.keys(q.fusion).sort().join(",") !== "candidates,rrf_k,text_weight,vector_weight") throw new Error("Invalid fusion fields");
+    boundedInteger(q.fusion.rrf_k, 1, 10000, "fusion.rrf_k");
+    boundedInteger(q.fusion.candidates, 1, 10000, "fusion.candidates");
+    for (const weight of [q.fusion.vector_weight, q.fusion.text_weight]) if (typeof weight !== "number" || !Number.isFinite(weight) || weight < 0 || weight > 1000) throw new Error("Fusion weights must be 0..1000");
+    savedQuery({ version: 1, name: value.name, query: { vector: q.vector ?? [0], k: q.k, mode: ["auto", "hybrid"].includes(q.mode) ? "exact" : q.mode, metric: q.metric, ef_search: q.ef_search, filter: q.filter, config: q.config } }, q.vector === null ? undefined : dimensions);
+    return value;
+  }
+  function exactKeys(value, allowed, required, label) {
+    if (!object(value) || Object.keys(value).some((key) => !allowed.includes(key)) || required.some((key) => !(key in value))) throw new Error(`${label}: unknown or missing fields (allowed: ${allowed.join(", ")})`);
+  }
+  // Partial (merge) bodies for the memory-only schedulers; bounds mirror the server. Omitted fields keep their current value.
+  function autoMaintenance(value) {
+    const keys = ["enabled", "interval_secs", "stale_ratio", "rebuild_on_low_recall", "min_recall", "quality_samples", "limits"];
+    exactKeys(value, keys, [], "Automatic maintenance");
+    if (!Object.keys(value).length) throw new Error("Automatic maintenance: change at least one field");
+    for (const key of ["enabled", "rebuild_on_low_recall"]) if (key in value && typeof value[key] !== "boolean") throw new Error(`${key} must be a boolean`);
+    if ("interval_secs" in value) boundedInteger(value.interval_secs, 10, 3600, "interval_secs");
+    if ("quality_samples" in value) boundedInteger(value.quality_samples, 1, 32, "quality_samples");
+    if ("stale_ratio" in value && (typeof value.stale_ratio !== "number" || !(value.stale_ratio > 0 && value.stale_ratio <= 1))) throw new Error("stale_ratio must be greater than 0 and at most 1");
+    if ("min_recall" in value && (typeof value.min_recall !== "number" || !(value.min_recall >= 0 && value.min_recall <= 1))) throw new Error("min_recall must be 0..1");
+    if ("limits" in value && !object(value.limits)) throw new Error("limits must be an object");
+    return value;
+  }
+  // GET returns {config:{interval_ms,...}}; PUT takes interval_secs.
+  function autoMaintenanceForm(config) {
+    const form = {};
+    for (const key of ["enabled", "stale_ratio", "rebuild_on_low_recall", "min_recall", "quality_samples"]) if (key in config) form[key] = config[key];
+    if (Number.isFinite(config.interval_ms)) form.interval_secs = Math.round(config.interval_ms / 1000);
+    return form;
+  }
+  function backupSchedule(value) {
+    const keys = ["enabled", "interval_secs", "retain_last", "retain_days", "retention_enabled", "drill_every", "drill_max_bytes"];
+    exactKeys(value, keys, [], "Backup schedule");
+    if (!Object.keys(value).length) throw new Error("Backup schedule: change at least one field");
+    for (const key of ["enabled", "retention_enabled"]) if (key in value && typeof value[key] !== "boolean") throw new Error(`${key} must be a boolean`);
+    for (const [key, min, max] of [["interval_secs", 300, 604800], ["retain_last", 1, 100], ["retain_days", 0, 3650], ["drill_every", 0, 100]]) if (key in value) boundedInteger(value[key], min, max, key);
+    if ("drill_max_bytes" in value && (!Number.isSafeInteger(value.drill_max_bytes) || value.drill_max_bytes < 1)) throw new Error("drill_max_bytes must be a positive integer");
+    return value;
+  }
+  // Index component byte counts. The total is only the sum of these byte components.
+  function memoryRows(index) {
+    if (!index?.memory) return [];
+    const rows = Object.entries(index.memory).filter(([name, bytes]) => name.endsWith("_bytes") && Number.isFinite(bytes));
+    rows.push(["sum of listed components (not process memory)", rows.reduce((sum, [, bytes]) => sum + bytes, 0)]);
+    return rows;
+  }
+  const NAME = "[a-z][a-z0-9_-]{0,62}", ID = "(?:0|[1-9][0-9]*)";
+  const SCOPED = `(?:/collections/${NAME})?`;
+  // REST playground allowlist. Credential creation/rotation is intentionally absent: one-time
+  // secrets are only handled by the Scoped credentials panel, never the general inspector.
+  function requestAllowed(method, path) {
+    const patterns = {
+      GET: [`^/(?:health|ready|metrics|openapi\\.json|v1/database|v1/capabilities|v1/collections)$`, `^/v1/collections/${NAME}$`,
+        `^/v1${SCOPED}/vectors(?:/${ID})?$`, `^/v1${SCOPED}/index/hnsw(?:/rebuild|/maintenance)?$`, `^/v1/imports/${ID}$`,
+        "^/v1/admin/(?:maintenance/auto|backups/schedule|diagnostics/slow-queries|credentials)$"],
+      PUT: [`^/v1${SCOPED}/vectors/${ID}$`],
+      DELETE: [`^/v1${SCOPED}/vectors/${ID}$`],
+      POST: [`^/v1${SCOPED}/(?:search|batches|index/hnsw)$`],
+    }[method] || [];
+    return patterns.some((pattern) => new RegExp(pattern).test(path));
+  }
+  const isSearch = (path) => new RegExp(`^/v1${SCOPED}/search$`).test(path);
   function init(ctx) {
-    let preview = [], sample = [], refreshing = false;
-    const on = (name, action) => $(name).addEventListener("click", () => ctx.run(action));
+    let preview = [], previewCollection = null, sample = [], refreshing = false;
+    // Resumable import state: prepared file chunks and the job being driven (never persisted).
+    let prepared = null; // { collection, file, size, chunks, rows }
+    let job = null; // { id, collection }
+    let stopRequested = false;
+    // One-time credential secret: closure memory only; never logged, inspected or stored.
+    let secret = null;
+    const on = (name, action) => {
+      const element = $(name);
+      if (!element) throw new Error(`console markup is missing control #${name}`);
+      element.addEventListener("click", () => ctx.run(action));
+    };
     const get = (name) => JSON.parse($(name).value);
-    const fetchRecord = (value) => ctx.api("GET", `/v1/vectors/${id(value)}`);
+    // Record fields only: newer servers add server-owned fields (e.g. `revision`) that are not writable and would make
+    // exports non-importable and read-then-rewrite batches fail validation.
+    const fetchRecord = async (value) => {
+      const { id: recordId, vector: values, metadata: fields, payload_base64: payload } = await ctx.api("GET", ctx.path(`/vectors/${id(value)}`));
+      return { id: recordId, vector: values, metadata: fields ?? {}, payload_base64: payload ?? "" };
+    };
+    // Index-changing and index-measuring routes: collection routes on extended servers (so the
+    // collection's quantization/settings apply), legacy routes otherwise.
+    // Settings-sensitive routes: the selected collection's own route on newer servers (never a silent legacy/default fallback).
+    const indexPath = (suffix) => ctx.settingsPath(suffix);
     function metadataRow(name = "", entry = { type: "string", value: "" }) {
       if ($("metadata-fields").children.length >= 64) throw new Error("At most 64 metadata fields");
       const row = document.createElement("div"); row.className = "metadata-row";
@@ -212,22 +446,37 @@
       ctx.status("Visual fields applied to JSON draft only; use Put / replace to save");
     });
     on("query-save", async () => {
-      const value = savedQuery({ version: 1, name: $("query-name").value, query: {
-        vector: get("query"), k: Number($("k").value), mode: $("mode").value,
-        metric: $("metric").value, ef_search: Number($("ef").value), filter: get("filter"), config: ctx.indexConfig(),
-      } }, ctx.dimensions());
+      const base = { k: Number($("k").value), mode: $("mode").value, metric: $("metric").value, ef_search: Number($("ef").value), filter: get("filter"), config: ctx.indexConfig() };
+      let value;
+      if (ctx.extended()) {
+        const query = $("query").value.trim();
+        value = savedQueryV2({ version: 2, name: $("query-name").value, collection: ctx.collection(), query: { ...base,
+          vector: query ? get("query") : null, text: $("search-text").value, explain: $("explain").checked,
+          quantization: $("quantization").value, rerank_multiplier: Number($("rerank-multiplier").value), vector_leg: $("vector-leg").value,
+          fusion: { rrf_k: Number($("rrf-k").value), vector_weight: Number($("vector-weight").value), text_weight: Number($("text-weight").value), candidates: Number($("fusion-candidates").value) },
+        } }, ctx.dimensions());
+      } else value = savedQuery({ version: 1, name: $("query-name").value, query: { vector: get("query"), ...base } }, ctx.dimensions());
       download("vlite-query.json", value);
-      text("query-workspace-status", `Downloaded "${value.name}". Query data may be private; no credential included.`);
+      text("query-workspace-status", `Downloaded "${value.name}"${value.collection ? ` for collection ${value.collection}` : ""}. Query data may be private; no credential included.`);
     });
     on("query-load", async () => {
-      const value = savedQuery(JSON.parse(await readFile($("query-file").files[0])), ctx.dimensions());
+      const source = JSON.parse(await readFile($("query-file").files[0]));
+      // Version 2 files are bound to a collection and are refused for any other collection.
+      const value = object(source) && source.version === 2 ? savedQueryV2(source, ctx.dimensions(), ctx.collection()) : savedQuery(source, ctx.dimensions());
       const q = value.query;
-      $("query-name").value = value.name; $("query").value = JSON.stringify(q.vector);
-      $("mode").value = q.mode; $("mode").dispatchEvent(new Event("change"));
+      if (["auto", "hybrid"].includes(q.mode) && $("mode").querySelector(`option[value="${q.mode}"]`).disabled) throw new Error(`This server does not advertise ${q.mode} search; nothing was loaded`);
+      $("query-name").value = value.name; $("query").value = q.vector === null ? "" : JSON.stringify(q.vector);
+      $("mode").value = q.mode;
       $("metric").value = q.metric; $("k").value = q.k; $("ef").value = q.ef_search;
       $("filter").value = JSON.stringify(q.filter, null, 2);
       $("hnsw-m").value = q.config.m; $("hnsw-ef").value = q.config.ef_construction; $("hnsw-seed").value = q.config.seed;
-      text("query-workspace-status", `Loaded "${value.name}" into the form only. Select Search to replay; approximate mode may build an index.`);
+      if (value.version === 2) {
+        $("search-text").value = q.text; $("explain").checked = q.explain && ctx.feature("search_explain");
+        $("quantization").value = q.quantization; $("rerank-multiplier").value = q.rerank_multiplier; $("vector-leg").value = q.vector_leg;
+        $("rrf-k").value = q.fusion.rrf_k; $("vector-weight").value = q.fusion.vector_weight; $("text-weight").value = q.fusion.text_weight; $("fusion-candidates").value = q.fusion.candidates;
+      }
+      $("mode").dispatchEvent(new Event("change"));
+      text("query-workspace-status", `Loaded "${value.name}" into the form only${value.collection ? ` (collection ${value.collection})` : ""}. Select Search to replay; approximate mode may build an index.`);
     });
     async function records(ids) {
       const result = [];
@@ -250,12 +499,13 @@
       if (ids.length > 100 || new Set(ids).size !== ids.length || ids.some((v) => !pageIds().includes(v))) throw new Error("Select up to 100 unique IDs from the currently loaded page");
       return ids;
     }
-    async function commit(items) {
+    async function commit(items, owner = ctx.collection()) {
       for (let start = 0; start < items.length; start += 20) {
-        text("import-result", `${start}/${items.length} operations acknowledged; sending next atomic batch. Do not retry an unknown outcome.`);
-        await ctx.api("POST", "/v1/batches", { operations: items.slice(start, start + 20) });
+        if (owner !== ctx.collection()) throw new Error(`Collection changed; stopped after ${start}/${items.length} operations (those remain committed in ${owner})`);
+        text("import-result", `${start}/${items.length} operations acknowledged in collection ${owner}; sending next atomic batch. Do not retry an unknown outcome.`);
+        await ctx.api("POST", collectionPath(owner, "/batches"), { operations: items.slice(start, start + 20) });
       }
-      text("import-result", `${items.length}/${items.length} operations committed. Refresh the browse page.`);
+      text("import-result", `${items.length}/${items.length} operations committed to collection ${owner}. Refresh the browse page.`);
     }
     function validatePreview(items) {
       if (ctx.dimensions() === null) throw new Error("Connect before validating records");
@@ -271,7 +521,8 @@
       const size = ctx.dimensions();
       if (!size || size > 4096) throw new Error("Connect to a database with 1..4096 dimensions for the demo");
       preview = validatePreview([1, 2, 3].map((n) => ({ id: String(n), vector: Array.from({ length: size }, (_, j) => j === 0 ? n / 3 : j === 1 ? 1 - n / 3 : 0), metadata: { category: { type: "string", value: "demo" } } })));
-      text("import-result", { instructions: "Preview only. Commit replaces IDs 1,2,3 after confirmation; then browse and Find similar to saved ID.", records: preview });
+      previewCollection = ctx.collection();
+      text("import-result", { instructions: "Preview only. Commit replaces IDs 1,2,3 after confirmation; then browse and Find similar to saved ID.", collection: previewCollection, records: preview });
     });
     on("import-preview", async () => {
       preview = [];
@@ -279,34 +530,42 @@
       const file = $("import-file").files[0];
       const source = await readFile(file);
       preview = validatePreview(file.name.toLowerCase().endsWith(".csv") ? csvParse(source) : JSON.parse(source));
-      text("import-result", { validated_records: preview.length, preview });
+      previewCollection = ctx.collection();
+      text("import-result", { validated_records: preview.length, collection: previewCollection, preview });
     });
     on("import-commit", async () => {
       if (!preview.length) throw new Error("Validate or prepare a preview first");
-      const items = preview;
-      if (!await ctx.confirm(`Commit ${items.length} records in batches of 20? Existing IDs will be replaced. Earlier batches remain committed if a later batch fails.`)) return;
+      if (previewCollection !== ctx.collection()) throw new Error("The preview was validated for another collection; validate it again");
+      const items = preview, owner = previewCollection;
+      if (!await ctx.confirm(`Commit ${items.length} records to collection ${owner} in batches of 20? Existing IDs will be replaced. Earlier batches remain committed if a later batch fails.`)) return;
       preview = [];
-      await commit(items.map((item) => ({ op: "put", ...item })));
+      await commit(items.map((item) => ({ op: "put", ...item })), owner);
     });
     for (const format of ["json", "csv"]) on(`export-page-${format}`, async () => {
       const items = await records(pageIds());
       download(`vlite-page.${format}`, format === "csv" ? csvExport(items) : items, format === "csv" ? "text/csv" : "application/json");
     });
     on("export-hits", async () => {
-      const hits = [...$("hits").querySelectorAll("tbody tr")].map((row) => ({ id: row.cells[0].textContent, distance: Number(row.cells[1].textContent) }));
+      const fields = [...$("hits").querySelectorAll("thead th")].map((cell) => cell.dataset.field || cell.textContent.toLowerCase());
+      const hits = [...$("hits").querySelectorAll("tbody tr")].map((row) => Object.fromEntries(fields.map((field, index) => {
+        const value = row.cells[index].textContent;
+        return [field, field === "id" ? value : value === "--" ? null : Number(value)];
+      })));
       if (!hits.length) throw new Error("Run a search first");
-      download("vlite-search.json", { metric: $("hits").caption.textContent, hits });
+      download("vlite-search.json", { collection: ctx.lastSearch()?.collection ?? ctx.collection(), metric: $("hits").caption.textContent, hits });
     });
     on("batch-delete", async () => {
-      const ids = selectedIds();
-      if (!await ctx.confirm(`Delete ${ids.length} selected records? This cannot be undone. Batches of 20 are atomic; the whole selection is not.`)) return;
-      await commit(ids.map((value) => ({ op: "delete", id: value })));
+      const ids = selectedIds(), owner = ctx.collection();
+      if (!await ctx.confirm(`Delete ${ids.length} selected records from collection ${owner}? This cannot be undone. Batches of 20 are atomic; the whole selection is not.`)) return;
+      text("import-result", `Deleting ${ids.length} selected records from collection ${owner}; nothing acknowledged yet`);
+      await commit(ids.map((value) => ({ op: "delete", id: value })), owner);
     });
     on("batch-replace", async () => {
-      const ids = selectedIds(), replacement = metadata(get("batch-metadata"));
-      if (!await ctx.confirm(`Replace entire metadata maps on ${ids.length} records? Records are read then rewritten, not compare-and-swap; use a dedicated test database without concurrent writers.`)) return;
+      const ids = selectedIds(), replacement = metadata(get("batch-metadata")), owner = ctx.collection();
+      if (!await ctx.confirm(`Replace entire metadata maps on ${ids.length} records in collection ${owner}? Records are read then rewritten, not compare-and-swap; use a dedicated test database without concurrent writers.`)) return;
+      text("import-result", `Reading ${ids.length} selected records from collection ${owner}; nothing written yet`);
       const items = await records(ids);
-      await commit(items.map((item) => ({ op: "put", ...record({ ...item, metadata: replacement }, ctx.dimensions()) })));
+      await commit(items.map((item) => ({ op: "put", ...record({ ...item, metadata: replacement }, ctx.dimensions()) })), owner);
     });
     on("filter-add", async () => {
       const field = $("filter-field").value, type = $("filter-type").value, source = $("filter-value").value, op = $("filter-op").value;
@@ -334,9 +593,9 @@
       text("search-comparison", "Running exact then ready-only ANN; the two reads are not a snapshot");
       const body = { vector: vector(get("query"), ctx.dimensions()), k: Number($("k").value), metric: $("metric").value, config: ctx.indexConfig(), filter };
       const started = performance.now();
-      const exact = await ctx.api("POST", "/v1/search", { ...body, mode: "exact" });
+      const exact = await ctx.api("POST", indexPath("/search"), { ...body, mode: "exact" });
       const exactMs = performance.now() - started, annStart = performance.now();
-      const ann = await ctx.api("POST", "/v1/search", { ...body, mode: "approximate_ready", ef_search: Number($("ef").value) });
+      const ann = await ctx.api("POST", indexPath("/search"), { ...body, mode: "approximate_ready", ef_search: Number($("ef").value), ...ctx.annOptions() });
       const common = exact.hits.filter((hit) => ann.hits.some((other) => other.id === hit.id)).length;
       text("search-comparison", { exact_ms: exactMs, ann_ms: performance.now() - annStart, common_ids: common, exact_count: exact.hits.length, ann_count: ann.hits.length, overlap_fraction: exact.hits.length ? common / exact.hits.length : null, note: "Same filter on both queries, live reads not a snapshot. Browser timing; overlap with exact top-k on this query, not a general recall benchmark. ANN can underfill; no exact fallback. Null overlap means no exact matches.", exact, ann });
     });
@@ -352,7 +611,7 @@
     });
     on("analyze-sample", async () => {
       sample = []; $("projection").replaceChildren();
-      const page = await ctx.api("GET", "/v1/vectors?limit=32");
+      const page = await ctx.api("GET", ctx.path("/vectors?limit=32"));
       sample = await records(page.items.map((item) => item.id));
       text("sample-analysis", analyze(sample));
       if (sample.length < 2 || sample[0].vector.length > 256) {
@@ -366,9 +625,9 @@
         const circle = document.createElementNS(svg.namespaceURI, "circle");
         circle.setAttribute("cx", String(point.x / maxX * 100)); circle.setAttribute("cy", String(-point.y / maxY * 100)); circle.setAttribute("r", "4"); circle.setAttribute("fill", "#7365db");
         circle.setAttribute("role", "button"); circle.setAttribute("tabindex", "0"); circle.setAttribute("aria-label", `Inspect record ${point.id}`);
-        circle.addEventListener("click", () => ctx.run(() => ctx.inspect(`/v1/vectors/${point.id}`)));
+        circle.addEventListener("click", () => ctx.run(() => ctx.inspect(ctx.path(`/vectors/${point.id}`))));
         circle.addEventListener("keydown", (event) => {
-          if (event.key === "Enter" || event.key === " ") { event.preventDefault(); ctx.run(() => ctx.inspect(`/v1/vectors/${point.id}`)); }
+          if (event.key === "Enter" || event.key === " ") { event.preventDefault(); ctx.run(() => ctx.inspect(ctx.path(`/vectors/${point.id}`))); }
         });
         const title = document.createElementNS(svg.namespaceURI, "title"); title.textContent = `Record ${point.id}`; circle.append(title); svg.append(circle);
       });
@@ -376,20 +635,17 @@
       const caption = document.createElement("p"); caption.textContent = "PCA sample IDs (keyboard-accessible inspection):"; $("projection").append(caption);
       points.forEach((point) => {
         const button = document.createElement("button"); button.type = "button"; button.textContent = point.id;
-        button.addEventListener("click", () => ctx.run(() => ctx.inspect(`/v1/vectors/${point.id}`))); $("projection").append(button);
+        button.addEventListener("click", () => ctx.run(() => ctx.inspect(ctx.path(`/vectors/${point.id}`)))); $("projection").append(button);
       });
     });
     function requestSpec() {
       const method = $("request-method").value, path = $("request-path").value;
-      const allowed = method === "GET" ? /^\/(?:health|ready|metrics|openapi\.json|v1\/database|v1\/capabilities|v1\/index\/hnsw|v1\/vectors(?:\/(?:0|[1-9][0-9]*))?)$/
-        : method === "PUT" || method === "DELETE" ? /^\/v1\/vectors\/(?:0|[1-9][0-9]*)$/
-          : /^\/v1\/(?:search|batches|index\/hnsw)$/;
-      if (!allowed.test(path)) throw new Error("Playground path/method is not a supported route; no external origins, queries or credentials allowed");
+      if (!requestAllowed(method, path)) throw new Error("Playground path/method is not a supported route; no external origins, queries or credentials allowed");
       return { method, path, ...(method === "GET" || method === "DELETE" ? {} : { body: get("request-body") }) };
     }
     on("send-request", async () => {
       const spec = requestSpec();
-      if (spec.method !== "GET" && spec.path !== "/v1/search" && !await ctx.confirm(`Send ${spec.method} ${spec.path}? This can durably change data; no automatic retry.`)) return;
+      if (spec.method !== "GET" && !isSearch(spec.path) && !await ctx.confirm(`Send ${spec.method} ${spec.path}? This can durably change data; no automatic retry.`)) return;
       await ctx.api(spec.method, spec.path, spec.body);
     });
     on("request-examples", async () => {
@@ -403,10 +659,10 @@
       for (const step of value.steps) {
         if (!object(step) || Object.keys(step).some((key) => !["path", "body", "expected_ids"].includes(key)) || !Array.isArray(step.expected_ids)) throw new Error("Invalid scenario step; credentials/headers are not allowed");
         step.expected_ids.forEach(id);
-        if (step.path === "/v1/search") {
+        if (isSearch(step.path)) {
           if (!object(step.body) || Object.keys(step.body).some((key) => !["vector", "k", "mode", "metric", "filter", "ef_search"].includes(key))) throw new Error("Invalid scenario search body");
           vector(step.body.vector, ctx.dimensions());
-        } else if (!/^\/v1\/vectors\/(?:0|[1-9][0-9]*)$/.test(step.path) || step.body !== undefined) throw new Error("Only record GET and search steps are allowed");
+        } else if (!new RegExp(`^/v1${SCOPED}/vectors/${ID}$`).test(step.path) || step.body !== undefined) throw new Error("Only record GET and search steps are allowed");
       }
       return value;
     }
@@ -418,15 +674,16 @@
       const value = scenario(), results = [];
       text("scenario-result", "Running read-only scenario");
       for (const step of value.steps) {
-        const result = await ctx.api(step.path === "/v1/search" ? "POST" : "GET", step.path, step.body);
-        const actual = step.path === "/v1/search" ? result.hits.map((hit) => hit.id) : [result.id];
+        const result = await ctx.api(isSearch(step.path) ? "POST" : "GET", step.path, step.body);
+        const actual = isSearch(step.path) ? result.hits.map((hit) => hit.id) : [result.id];
         results.push({ path: step.path, expected: step.expected_ids, actual, passed: JSON.stringify(actual) === JSON.stringify(step.expected_ids) });
         text("scenario-result", { name: value.name, results });
       }
     });
     async function health() {
-      const metrics = await ctx.api("GET", "/metrics");
-      const index = await ctx.api("GET", "/v1/index/hnsw");
+      const caps = ctx.capabilities();
+      const metrics = caps?.role !== "scoped" || ctx.can("diagnostics") ? await ctx.api("GET", "/metrics") : "Unavailable: scoped credential lacks the diagnostics operation";
+      const index = await ctx.api("GET", indexPath("/index/hnsw"));
       text("health-result", { observed_at: new Date().toISOString(), metrics, index, queue_note: "Request admission is bounded; this is a snapshot, not live telemetry" });
     }
     on("refresh-health", health);
@@ -435,38 +692,57 @@
       if (!caps || caps.role !== "admin") throw new Error("HTTP 403: admin credential required");
       if (feature && !caps.features?.[feature]) throw new Error(`Server feature ${feature} is not enabled; inspect compatibility/configuration`);
     }
-    on("status-rebuild", async () => text("rebuild-result", await ctx.api("GET", "/v1/index/hnsw/rebuild")));
+    // Admin, or a scoped credential holding `operation` for the active collection.
+    function permit(feature, operation) {
+      if (!ctx.can(operation)) throw new Error(`HTTP 403: this credential lacks the ${operation} operation for collection ${ctx.collection()}`);
+      if (feature && !ctx.feature(feature)) throw new Error(`Server feature ${feature} is not enabled; inspect compatibility/configuration`);
+    }
+    on("status-rebuild", async () => text("rebuild-result", await ctx.api("GET", indexPath("/index/hnsw/rebuild"))));
     on("start-rebuild", async () => {
-      admin("background_rebuild");
-      if (!await ctx.confirm("Start a bounded background rebuild? Snapshot capture briefly owns the database; worker memory is additional to the active graph.")) return;
-      text("rebuild-result", await ctx.api("POST", "/v1/index/hnsw/rebuild", { config: ctx.indexConfig(), metric: $("metric").value, limits: {
+      permit("background_rebuild", "index");
+      if (!await ctx.confirm(`Start a bounded background rebuild for collection ${ctx.collection()}? Snapshot capture briefly owns the database; worker memory is additional to the active graph.`)) return;
+      text("rebuild-result", await ctx.api("POST", indexPath("/index/hnsw/rebuild"), { config: ctx.indexConfig(), metric: $("metric").value, ...ctx.annOptions(), limits: {
         max_records: Number($("hnsw-max-records").value), max_snapshot_vector_bytes: Number($("hnsw-max-bytes").value),
       } }));
     });
     on("poll-rebuild", async () => {
-      admin("background_rebuild");
-      text("rebuild-result", await ctx.api("POST", "/v1/index/hnsw/rebuild/poll", {}));
+      permit("background_rebuild", "index");
+      text("rebuild-result", await ctx.api("POST", indexPath("/index/hnsw/rebuild/poll"), {}));
     });
     on("cancel-rebuild", async () => {
-      admin("background_rebuild");
+      permit("background_rebuild", "index");
       if (!await ctx.confirm("Request cooperative cancellation? The current active graph is preserved; poll to reap the worker.")) return;
-      text("rebuild-result", await ctx.api("POST", "/v1/index/hnsw/rebuild/cancel", {}));
+      text("rebuild-result", await ctx.api("POST", indexPath("/index/hnsw/rebuild/cancel"), {}));
     });
+    // The policy PUT exists only on the legacy (default) route; on newer servers its thresholds are global and
+    // each collection route takes its index identity from that collection's settings.
+    function maintenanceScope() {
+      const named = ctx.collection() !== "default";
+      text("maintenance-scope", !ctx.extended()
+        ? "Maintenance policy applies to the single (default) database."
+        : named
+          ? `Collection ${ctx.collection()}: read and tick use this collection's route; its metric/HNSW/quantization identity comes from its stored settings (edit them under Collections). The policy can only be replaced from the default collection.`
+          : "Collection default: read and tick use the default collection route (its stored settings). Replacing the policy uses the legacy route: its thresholds apply to every collection; its config/metric apply only to legacy /v1/index routes.");
+    }
     on("read-maintenance", async () => {
-      const result = await ctx.api("GET", "/v1/index/hnsw/maintenance");
+      const owner = ctx.collection();
+      const result = await ctx.api("GET", indexPath("/index/hnsw/maintenance"));
+      if (owner !== ctx.collection()) throw new Error("Collection changed while reading; result discarded");
       $("maintenance-policy").value = JSON.stringify(result.policy, null, 2);
-      text("maintenance-result", result);
+      text("maintenance-result", { collection: owner, ...result });
     });
     on("save-maintenance", async () => {
       admin("maintenance");
+      if (ctx.collection() !== "default") throw new Error(`The maintenance policy can only be replaced while the default collection is selected; collection ${ctx.collection()} uses its stored settings`);
       const policy = get("maintenance-policy");
-      if (!await ctx.confirm("Replace the entire process-local maintenance policy? Omitted fields use defaults, not current values. No timer is started.")) return;
+      if (!await ctx.confirm(`Replace the entire process-local maintenance policy via the legacy route (default collection)? Omitted fields use defaults, not current values. No timer is started.${ctx.extended() ? " Thresholds apply to every collection; config/metric apply only to legacy /v1/index routes, while collection routes use each collection's stored settings." : ""}`)) return;
+      if (ctx.collection() !== "default") throw new Error("Collection changed before the write; nothing sent");
       text("maintenance-result", await ctx.api("PUT", "/v1/index/hnsw/maintenance", policy));
     });
     on("tick-maintenance", async () => {
-      admin("maintenance");
-      if (!await ctx.confirm("Run one maintenance tick? It may publish a finished graph or start a background rebuild.")) return;
-      text("maintenance-result", await ctx.api("POST", "/v1/index/hnsw/maintenance/tick", {}));
+      permit("maintenance", "index");
+      if (!await ctx.confirm(`Run one maintenance tick for collection ${ctx.collection()}? It may publish a finished graph or start a background rebuild.`)) return;
+      text("maintenance-result", await ctx.api("POST", indexPath("/index/hnsw/maintenance/tick"), {}));
     });
     on("token-status", async () => {
       admin(); text("token-result", await ctx.api("GET", "/v1/admin/tokens"));
@@ -517,6 +793,341 @@
       if (!await ctx.confirm(`Select ${name} for the NEXT API restart? Live data will not change now. The persistent selection overrides the positional database until changed offline or another restored copy is selected.`)) return;
       text("backup-result", await ctx.api("POST", "/v1/admin/restores/select", { name }));
     });
+    // ---- EPIC-015 surfaces ----
+    const table = (name, rows) => {
+      const body = $(name).querySelector("tbody");
+      body.replaceChildren();
+      for (const cells of rows) {
+        const row = document.createElement("tr");
+        for (const value of cells) {
+          const cell = document.createElement("td");
+          if (value instanceof Node) cell.append(value); else cell.textContent = value === null || value === undefined ? "--" : String(value);
+          row.append(cell);
+        }
+        body.append(row);
+      }
+    };
+    const when = (ms) => ms === null || ms === undefined ? "--" : new Date(ms).toISOString();
+    function requireExtended() {
+      if (!ctx.extended()) throw new Error("This server predates collections, settings and index diagnostics; upgrade the server");
+    }
+    function formatNote(version) {
+      text("collections-format", version >= 4
+        ? `Database format v${version}: named collections and resumable imports are available.`
+        : `Database format v${version}: only the default collection exists. Named collections and resumable imports need format v4. Upgrade is offline and non-destructive: stop the server, run "vlite-maintain upgrade SOURCE DEST" to write a NEW v4 file (the source is never modified), then start the server on DEST. The console never upgrades automatically.`);
+    }
+    function renderCollections(items) {
+      table("collections-table", items.map((item) => [item.name, item.dimensions, item.live_records, item.settings?.metric, item.settings?.quantization,
+        item.settings_persisted === false ? "memory only (lost on restart)" : "persisted"]));
+    }
+    on("collections-refresh", async () => {
+      requireExtended();
+      const listed = await ctx.refreshCollections();
+      formatNote(listed.format_version);
+      renderCollections(listed.items);
+    });
+    on("collection-create", async () => {
+      requireExtended();
+      if (!ctx.feature("collections")) throw new Error("HTTP 409: requires_format_v4; collections need a format v4 database file");
+      const name = collectionName($("new-collection-name").value.trim());
+      const dimensions = boundedInteger($("new-collection-dimensions").value, 1, 65536, "Dimensions");
+      const initial = settings(get("new-collection-settings"));
+      const body = { name, dimensions, ...(Object.keys(initial).length ? { settings: initial } : {}) };
+      if (!await ctx.confirm(`Create empty collection ${name} with ${dimensions} dimensions${body.settings ? " and the given settings" : " and default settings"}? The active collection does not change.`)) return;
+      const created = await ctx.api("POST", "/v1/collections", body, { data: false });
+      const listed = await ctx.refreshCollections();
+      renderCollections(listed.items);
+      text("collection-result", { created });
+      $("new-collection-name").value = "";
+    });
+    on("collection-drop", async () => {
+      requireExtended();
+      const name = collectionName($("drop-collection-name").value.trim());
+      if (name === "default") throw new Error("The default collection cannot be dropped");
+      if (!ctx.collections().some((item) => item.name === name)) throw new Error("No such collection in the current list; refresh it");
+      if (!await ctx.confirm(`Drop collection ${name}? The server only drops EMPTY collections (delete its records first). Credentials scoped to it stop working, even if a collection with the same name is created later.${name === ctx.collection() ? " It is the active collection; the console will switch away." : ""}`)) return;
+      const result = await ctx.api("DELETE", `/v1/collections/${name}`, undefined, { data: false });
+      const listed = await ctx.refreshCollections();
+      renderCollections(listed.items);
+      text("collection-result", { dropped: name, result });
+      $("drop-collection-name").value = "";
+    });
+    on("settings-load", async () => {
+      requireExtended();
+      const info = await ctx.api("GET", `/v1/collections/${ctx.collection()}`);
+      $("collection-settings").value = JSON.stringify(info.settings, null, 2);
+      text("collection-result", { collection: info.name, settings_persisted: info.settings_persisted, text_index: info.text_index ?? null });
+    });
+    on("settings-save", async () => {
+      requireExtended();
+      const owner = ctx.collection();
+      const change = settings(get("collection-settings"));
+      if (!Object.keys(change).length) throw new Error("No settings to change");
+      if (!await ctx.confirm(`Apply settings to collection ${owner}? Omitted fields keep their current values. Changing metric, HNSW or quantization makes an existing index stale until rebuilt; text fields and metadata indexes are rebuilt by the server.`)) return;
+      const result = await ctx.api("PUT", `/v1/collections/${owner}/settings`, change, { data: false });
+      text("collection-result", { collection: result.collection, persisted: result.persisted,
+        note: result.persisted ? "Settings are durable." : "Applied in memory only (format v3 default collection); they reset when the server restarts." });
+      $("collection-settings").value = JSON.stringify(result.collection.settings, null, 2);
+      ctx.applySettings(result.collection);
+    });
+    // Index memory and quality.
+    on("index-memory", async () => {
+      requireExtended();
+      const result = await ctx.api("GET", indexPath("/index/hnsw"));
+      const rows = memoryRows(result);
+      table("index-memory-table", rows.length ? [
+        ["graph nodes", result.graph_nodes], ["stale nodes", result.stale_nodes], ["quantization", result.quantization],
+        ...rows,
+      ] : [["no index built", "--"]]);
+    });
+    on("quality-run", async () => {
+      requireExtended();
+      permit(null, "index");
+      const body = {
+        metric: $("metric").value, config: ctx.indexConfig(), ...ctx.annOptions(),
+        samples: boundedInteger($("quality-samples").value, 1, 32, "Samples"), k: boundedInteger($("quality-k").value, 1, 100, "k"),
+        ef_search: boundedInteger($("ef").value, 1, 100000, "ef"), seed: id($("hnsw-seed").value),
+        max_distance_evaluations: boundedInteger($("quality-budget").value, 1, 1000000000, "Budget"),
+      };
+      text("quality-result", "Measuring; read-only, may take a while");
+      const result = await ctx.api("POST", indexPath("/index/hnsw/quality"), body, { data: false });
+      text("quality-result", { collection: ctx.collection(), ...result,
+        summary: result.recall_at_k === null ? `Not measured: ${result.skipped_reason === "budget" ? "distance evaluation budget too small" : "no live records to sample"}` : `recall@${body.k} = ${result.recall_at_k} over ${result.samples_used} sampled queries (estimate, not a guarantee)` });
+    });
+    // Resumable import.
+    function jobText(value) { text("job-result", value); }
+    function progress(done, total) { $("job-progress").max = Math.max(1, total); $("job-progress").value = done; }
+    on("job-prepare", async () => {
+      prepared = null;
+      const file = $("job-file").files[0];
+      if (!file) throw new Error("Choose an import file first");
+      const size = boundedInteger($("job-chunk-size").value, 1, 4096, "Rows per chunk");
+      const rows = importRows(file.name, await readFile(file));
+      const dims = ctx.dimensions();
+      const wrong = rows.findIndex((row) => row.vector.length !== dims);
+      if (wrong >= 0) throw new Error(`Row ${wrong + 1}: ${rows[wrong].vector.length} dimensions; collection ${ctx.collection()} has ${dims}`);
+      prepared = { collection: ctx.collection(), file: file.name, size, chunks: chunk(rows, size), rows: rows.length };
+      progress(0, prepared.chunks.length);
+      jobText({ collection: prepared.collection, file: prepared.file, rows: prepared.rows, chunks: prepared.chunks.length, rows_per_chunk: size, note: "Validated locally; nothing sent. Keep this file and chunk size to resume later." });
+    });
+    function ensurePrepared() {
+      if (!prepared) throw new Error("Validate / split the import file first (the same file and chunk size used for the job)");
+      if (prepared.collection !== ctx.collection()) throw new Error("The file was prepared for another collection; prepare it again");
+    }
+    async function sendChunks(from) {
+      const total = prepared.chunks.length, policy = $("job-policy").value, invalid = [];
+      stopRequested = false;
+      for (let n = from; n <= total; n += 1) {
+        if (stopRequested) { jobText({ job: job.id, collection: job.collection, stopped_before_chunk: n, note: "Stopped. Committed chunks are retained; Resume continues from the durable checkpoint." }); return; }
+        if (job.collection !== ctx.collection()) throw new Error("Collection changed; import paused (committed chunks are retained)");
+        let report;
+        try {
+          report = await ctx.api("PUT", `/v1/imports/${job.id}/chunks/${n}`, { operations: prepared.chunks[n - 1], policy });
+        } catch (error) {
+          if (error.code === "import_rows_invalid" && error.body) {
+            text("job-invalid", { chunk: n, invalid: error.body.invalid });
+            jobText({ job: job.id, rejected_chunk: n, note: `Chunk ${n} was rejected and nothing from it was written. Chunks 1..${n - 1} remain committed. Fix the rows (or choose skip_invalid) and Resume with the same chunk size.` });
+          } else jobText({ job: job.id, chunk: n, note: `Outcome of chunk ${n} is unknown or failed (${error.message}). Nothing is retried automatically; use Resume, which reads the durable checkpoint first.` });
+          throw error;
+        }
+        if (report.invalid?.length) invalid.push(...report.invalid.slice(0, 100 - invalid.length).map((row) => ({ chunk: n, ...row })));
+        progress(n, total);
+        jobText({ job: job.id, collection: job.collection, checkpoint_chunk: n, of: total, outcome: report.outcome, rows_committed: report.rows_committed, rows_skipped: report.rows_skipped });
+        if (invalid.length) text("job-invalid", { first_100_skipped_rows: invalid });
+      }
+      jobText({ job: job.id, collection: job.collection, all_chunks_sent: total, note: "All chunks are committed. Finish the job to close it." });
+    }
+    on("job-start", async () => {
+      ensurePrepared();
+      if (!ctx.feature("imports")) throw new Error("This server/database does not support resumable imports (format v4 required)");
+      const owner = prepared.collection;
+      if (!await ctx.confirm(`Import ${prepared.rows} records from ${prepared.file} into collection ${owner} as ${prepared.chunks.length} chunk(s) of up to ${prepared.size}? Existing IDs are replaced. Each chunk commits atomically; committed chunks are kept if the import stops or is aborted.`)) return;
+      const created = await ctx.api("POST", `/v1/collections/${owner}/imports`);
+      job = { id: created.job, collection: created.collection };
+      $("job-id").value = created.job;
+      text("job-invalid", "");
+      await sendChunks(1);
+    });
+    async function readJob() {
+      const value = $("job-id").value.trim();
+      id(value);
+      return ctx.api("GET", `/v1/imports/${value}`);
+    }
+    on("job-status", async () => {
+      const status = await readJob();
+      jobText({ ...status, note: status.collection_dropped ? "The target collection was dropped." : status.durable ? "Durable checkpoint." : "Not yet durable: a job with no committed chunk does not survive a restart." });
+    });
+    on("job-resume", async () => {
+      ensurePrepared();
+      const status = await readJob();
+      if (status.collection !== ctx.collection() || status.collection !== prepared.collection) throw new Error(`Job ${status.job} belongs to collection ${status.collection}; select it and prepare the same file`);
+      if (status.collection_dropped) throw new Error("The job's collection was dropped; it cannot be resumed");
+      const plan = resumePlan(status, prepared.chunks.length);
+      if (plan.action === "closed" || plan.action === "mismatch") { jobText({ ...status, note: plan.message }); return; }
+      if (!await ctx.confirm(`Resume job ${status.job} into collection ${status.collection}? ${plan.message}`)) return;
+      job = { id: status.job, collection: status.collection };
+      progress(plan.last, prepared.chunks.length);
+      if (plan.verify) {
+        const check = await ctx.api("PUT", `/v1/imports/${job.id}/chunks/${plan.verify}`, { operations: prepared.chunks[plan.verify - 1], policy: $("job-policy").value });
+        if (check.outcome !== "already_committed") throw new Error(`Chunk ${plan.verify} replay reported ${check.outcome}; stopping. Inspect the job status before continuing.`);
+      }
+      await sendChunks(plan.next);
+    });
+    $("job-stop").addEventListener("click", () => { stopRequested = true; ctx.status("Stop requested; the chunk in flight completes, then the import pauses"); });
+    for (const [name, verb] of [["job-finish", "finish"], ["job-abort", "abort"]]) on(name, async () => {
+      const status = await readJob();
+      if (status.collection !== ctx.collection()) throw new Error(`Job ${status.job} belongs to collection ${status.collection}; select it first`);
+      if (!await ctx.confirm(verb === "finish"
+        ? `Finish job ${status.job} in collection ${status.collection}? ${status.last_chunk} committed chunk(s) (${status.rows_committed} rows) stay; no further chunks are accepted.`
+        : `Abort job ${status.job} in collection ${status.collection}? The ${status.last_chunk} chunk(s) (${status.rows_committed} rows) ALREADY COMMITTED ARE RETAINED, not rolled back. No further chunks are accepted.`)) return;
+      const result = await ctx.api("POST", `/v1/imports/${status.job}/${verb}`, {});
+      if (job?.id === status.job) job = null;
+      jobText(result);
+    });
+    // Schedulers.
+    on("auto-maintenance-read", async () => {
+      admin("auto_maintenance");
+      const result = await ctx.api("GET", "/v1/admin/maintenance/auto");
+      $("auto-maintenance").value = JSON.stringify(autoMaintenanceForm(result.config || {}), null, 2);
+      text("auto-maintenance-result", result);
+    });
+    on("auto-maintenance-save", async () => {
+      admin("auto_maintenance");
+      const policy = autoMaintenance(get("auto-maintenance"));
+      const changes = Object.entries(policy).map(([key, value]) => `${key}=${JSON.stringify(value)}`).join(", ");
+      if (!await ctx.confirm(`${policy.enabled === true ? "ENABLE automatic maintenance for all collections: it may start background rebuilds (at most one at a time). " : policy.enabled === false ? "Disable automatic maintenance. " : ""}Merge ${changes} into the automatic maintenance policy (omitted fields keep their current values)? Memory-only: restart restores the environment configuration.`)) return;
+      text("auto-maintenance-result", await ctx.api("PUT", "/v1/admin/maintenance/auto", policy, { data: false }));
+    });
+    on("auto-maintenance-tick", async () => {
+      admin("auto_maintenance");
+      if (!await ctx.confirm("Run exactly one bounded automatic-maintenance tick now? It may act on one collection (round-robin) and may start one background rebuild. It runs even if the timer is disabled.")) return;
+      text("auto-maintenance-result", await ctx.api("POST", "/v1/admin/maintenance/auto/tick", undefined, { data: false }));
+    });
+    on("backup-schedule-run", async () => {
+      admin("backup_schedule");
+      if (!await ctx.confirm("Run one scheduled backup cycle now? It writes a backup to the admin directory (disk and I/O) and, per the current schedule, may run a restore drill and apply retention (retention deletes only when enabled).")) return;
+      text("backup-schedule-result", await ctx.api("POST", "/v1/admin/backups/schedule/run", undefined, { data: false }));
+    });
+    let scheduleConfig = null, credentialDefault = null;
+    on("backup-schedule-read", async () => {
+      admin("backup_schedule");
+      const result = await ctx.api("GET", "/v1/admin/backups/schedule");
+      scheduleConfig = result.config;
+      $("backup-schedule").value = JSON.stringify(result.config, null, 2);
+      text("backup-schedule-result", result);
+    });
+    on("backup-schedule-save", async () => {
+      admin("backup_schedule");
+      const changes = backupSchedule(get("backup-schedule"));
+      if (!scheduleConfig) throw new Error("Read the current schedule first so the confirmation can describe the merged result");
+      const schedule = { ...scheduleConfig, ...changes };
+      const parts = [schedule.enabled ? `Back up every ${schedule.interval_secs} s` : "Scheduled backups OFF",
+        schedule.retention_enabled ? `RETENTION ON: generated backups beyond the newest ${schedule.retain_last}${schedule.retain_days ? ` and older than ${schedule.retain_days} days` : ""} will be DELETED (the newest backup, newest verified backup, next-startup target, active database and non-generated files are never deleted)` : "retention off (nothing is deleted)",
+        schedule.drill_every ? `restore drill every ${schedule.drill_every} backup(s)` : "no drills"];
+      if (!await ctx.confirm(`Update the backup schedule? Result: ${parts.join("; ")}. Memory-only: restart restores the environment configuration.`)) return;
+      const result = await ctx.api("PUT", "/v1/admin/backups/schedule", changes, { data: false });
+      if (result?.config) scheduleConfig = result.config;
+      text("backup-schedule-result", result);
+    });
+    for (const [name, verb] of [["backup-verify", "verify"], ["backup-drill", "drill"]]) on(name, async () => {
+      admin("backup_verify_drill");
+      const backup = $("backup-name").value;
+      if (!backup) throw new Error("List snapshots and select a generated backup first");
+      if (verb === "drill" && !await ctx.confirm(`Run a restore drill for ${backup}? It writes a temporary scratch copy in the admin directory (disk and I/O), validates and queries it, then deletes it. The active database is not touched.`)) return;
+      try {
+        text("backup-result", await ctx.api("POST", `/v1/admin/backups/${backup}/${verb}`, {}, { data: false }));
+      } catch (error) {
+        if (error.body) text("backup-result", { backup, result: `${verb} failed`, response: redact(error.body) });
+        throw error;
+      }
+    });
+    // Diagnostics.
+    on("slow-queries", async () => {
+      const result = await ctx.api("GET", "/v1/admin/diagnostics/slow-queries");
+      text("slow-summary", `${result.items.length} of at most ${result.capacity} retained; threshold ${result.threshold_ms} ms. Process-local; resets on restart.`);
+      table("slow-table", result.items.map((item) => [when(item.unix_ms), item.route, item.collection, item.mode, item.plan_strategy, item.k, item.duration_ms, item.result_count]));
+    });
+    on("prometheus", async () => {
+      const body = await ctx.api("GET", "/metrics?format=prometheus", undefined, { text: true });
+      text("prometheus-result", body.length > 65536 ? `${body.slice(0, 65536)}\n... (${body.length - 65536} more characters not shown)` : body);
+    });
+    // Scoped credentials: the token is held only in `secret` and rendered masked.
+    function showSecret(value, credential) {
+      secret = value;
+      text("cred-secret", value ? `New secret for ${credential.id}${credential.name ? ` (${credential.name})` : ""}: ${maskSecret(value)}. Shown once: copy it now; it cannot be retrieved again.` : "No new secret.");
+    }
+    function credentialRows(items) {
+      table("cred-table", items.map((item) => {
+        const actions = document.createElement("span");
+        const state = item.state ?? item.status;
+        if (state === "active") {
+          for (const [label, verb, className] of [["Rotate", "rotate", "secondary"], ["Revoke", "revoke", "danger"]]) {
+            const button = document.createElement("button");
+            button.type = "button"; button.className = className; button.textContent = `${label} ${item.id}`;
+            button.dataset.admin = ""; button.dataset.feature = "scoped_credentials";
+            button.addEventListener("click", () => ctx.run(() => credentialAction(item, verb)));
+            actions.append(button);
+          }
+        }
+        return [item.id, item.name, item.collections.join(", "), item.operations.join(", "), state, when(item.expires_unix_ms), actions];
+      }));
+    }
+    async function listCredentials() {
+      const result = await ctx.api("GET", "/v1/admin/credentials", undefined, { data: false });
+      credentialRows(result.items);
+      text("cred-result", `${result.items.length} of ${result.capacity} credential slots used. Secrets and hashes are never returned.`);
+    }
+    // 503 credentials_commit_indeterminate: the change IS in effect (no token returned) but may not survive a crash.
+    // Never present it as "no change": say so, then re-list so the admin can revoke or re-issue.
+    async function credentialMutation(action, label) {
+      try {
+        return await action();
+      } catch (error) {
+        if (error.code === "credentials_commit_indeterminate") {
+          try { await listCredentials(); } catch { /* the original error is reported below */ }
+          text("cred-result", `${label}: the change IS in effect but its durability is not confirmed and no secret was returned. Review the list below, then revoke or re-issue as needed.`);
+        }
+        throw error;
+      }
+    }
+    async function credentialAction(item, verb) {
+      admin("scoped_credentials");
+      if (verb === "rotate") {
+        const grace = graceSeconds($("cred-grace").value);
+        if (!await ctx.confirm(`Rotate credential ${item.id}? A new secret with the same scope is shown once. The old secret ${grace ? `keeps working for ${grace} seconds, then stops` : "stops working immediately"}.`)) return;
+        const result = await credentialMutation(() => ctx.api("POST", `/v1/admin/credentials/${item.id}/rotate`, { grace_seconds: grace }, { sensitive: true, data: false }), `Rotate ${item.id}`);
+        showSecret(result.token, result.credential);
+      } else {
+        if (!await ctx.confirm(`Revoke credential ${item.id}${item.name ? ` (${item.name})` : ""}? Requests using it are refused from now on. This cannot be undone.`)) return;
+        await credentialMutation(() => ctx.api("POST", `/v1/admin/credentials/${item.id}/revoke`, {}, { data: false }), `Revoke ${item.id}`);
+      }
+      await listCredentials();
+    }
+    on("cred-create", async () => {
+      admin("scoped_credentials");
+      const body = credentialRequest({ name: $("cred-name").value.trim(), collections: $("cred-collections").value,
+        operations: [...document.querySelectorAll('input[name="cred-op"]:checked')].map((input) => input.value), days: $("cred-days").value });
+      if (!await ctx.confirm(`Create a credential for collections [${body.collections.join(", ")}] with operations [${body.operations.join(", ")}], expiring ${when(body.expires_unix_ms)}? The secret is shown once.`)) return;
+      showSecret(null);
+      const result = await credentialMutation(() => ctx.api("POST", "/v1/admin/credentials", body, { sensitive: true, data: false }), "Create");
+      showSecret(result.token, result.credential);
+      $("cred-name").value = "";
+      await listCredentials();
+    });
+    on("cred-list", async () => { admin("scoped_credentials"); await listCredentials(); });
+    on("cred-copy", async () => {
+      if (!secret) throw new Error("No secret to copy");
+      if (!navigator.clipboard) throw new Error("Clipboard unavailable (requires HTTPS or localhost); the secret cannot be displayed in full");
+      await navigator.clipboard.writeText(secret);
+      ctx.status("Secret copied to the clipboard. Store it in a secret manager, then Clear.");
+    });
+    on("cred-clear", async () => { showSecret(null); ctx.status("Secret cleared from this page"); });
+    on("persistent-audit", async () => {
+      admin("persistent_audit");
+      const limit = boundedInteger($("audit-limit").value, 1, 1000, "Entries");
+      const result = await ctx.api("GET", `/v1/admin/audit/persistent?limit=${limit}`);
+      text("persistent-audit-result", redact(result));
+    });
     const timer = setInterval(() => {
       if (!$("auto-health").checked || document.hidden || ctx.busy() || !ctx.connected() || refreshing) return;
       refreshing = true;
@@ -544,15 +1155,28 @@
         $("metadata-fields").replaceChildren();
         $("query-name").value = "my-query"; $("query-file").value = "";
         text("query-workspace-status", "");
-        preview = []; sample = []; $("auto-health").checked = false; $("projection").replaceChildren();
-        for (const name of ["import-result", "sample-analysis", "record-comparison", "search-comparison", "scenario-result", "health-result", "code-examples", "payload-preview", "vector-slice-result", "vector-summary", "compatibility", "rebuild-result", "maintenance-result", "token-result", "audit-result", "backup-result"]) text(name, "");
-        for (const name of ["batch-ids", "request-body", "scenario", "filter-value", "import-file", "scenario-file"]) $(name).value = "";
-        $("batch-metadata").value = "{}";
+        preview = []; previewCollection = null; sample = []; $("auto-health").checked = false; $("projection").replaceChildren();
+        prepared = null; job = null; stopRequested = true; showSecret(null); scheduleConfig = null;
+        for (const name of ["import-result", "sample-analysis", "record-comparison", "search-comparison", "scenario-result", "health-result", "code-examples", "payload-preview", "vector-slice-result", "vector-summary", "compatibility", "rebuild-result", "maintenance-result", "maintenance-scope", "token-result", "audit-result", "backup-result",
+          "collection-result", "quality-result", "job-result", "job-invalid", "auto-maintenance-result", "backup-schedule-result", "slow-summary", "prometheus-result", "cred-result", "persistent-audit-result"]) text(name, "");
+        for (const name of ["batch-ids", "request-body", "scenario", "filter-value", "import-file", "scenario-file", "job-file", "job-id", "new-collection-name", "drop-collection-name", "cred-name"]) $(name).value = "";
+        $("batch-metadata").value = "{}"; $("collection-settings").value = "{}"; $("new-collection-settings").value = "{}";
+        for (const name of ["collections-table", "index-memory-table", "slow-table", "cred-table"]) $(name).querySelector("tbody").replaceChildren();
+        progress(0, 1);
+        text("collections-format", "Connect to discover collection support.");
         $("backup-name").replaceChildren(); $("restore-name").replaceChildren();
       },
       connected(caps) {
-        text("admin-note", `Role: ${caps.role}; API v${caps.api_version}. Backup/restore ${caps.features?.backup_restore ? "enabled" : "disabled: configure VLITE_ADMIN_DIR"}. Token-file reload ${caps.features?.tokens_reload ? "available" : "unavailable: use configured files or restart"}.`);
-        $("scenario").value = JSON.stringify({ name: "get-record", steps: [{ path: "/v1/vectors/1", expected_ids: ["1"] }] }, null, 2);
+        const f = caps.features || {};
+        const flags = ["collections", "imports", "per_record_etags", "search_auto", "search_hybrid", "search_explain", "quantization", "auto_maintenance", "backup_schedule", "backup_verify_drill", "slow_query_log", "prometheus_metrics", "scoped_credentials", "persistent_audit"];
+        const available = flags.filter((flag) => f[flag] === true), missing = flags.filter((flag) => f[flag] !== true);
+        text("admin-note", `Role: ${caps.role}${caps.scope ? ` (collections ${caps.scope.collections.join(", ")}; operations ${caps.scope.operations.join(", ")}; expires ${when(caps.scope.expires_unix_ms)})` : ""}; API v${caps.api_version}${caps.format_version !== undefined ? `; database format v${caps.format_version}` : ""}. Backup/restore ${f.backup_restore ? "enabled" : "disabled: configure VLITE_ADMIN_DIR"}. Token-file reload ${f.tokens_reload ? "available" : "unavailable: use configured files or restart"}. Available: ${available.join(", ") || "none of the newer features"}. Not available on this server/configuration: ${missing.join(", ") || "none"}.`);
+        if (caps.format_version !== undefined) formatNote(caps.format_version);
+        else text("collections-format", "This server predates collections; only the default database is available.");
+        if (ctx.extended()) renderCollections(ctx.collections());
+        maintenanceScope();
+        $("cred-collections").value = credentialDefault = ctx.collection();
+        $("scenario").value = JSON.stringify({ name: "get-record", steps: [{ path: ctx.path("/vectors/1"), expected_ids: ["1"] }] }, null, 2);
         $("request-body").value = "{}";
       },
       loaded(item) {
@@ -565,7 +1189,46 @@
           try { text("payload-preview", JSON.parse(decoded)); } catch { text("payload-preview", decoded || "(empty payload)"); }
         } catch { text("payload-preview", "Binary payload: use the base64 field. No UTF-8 preview available."); }
       },
+      // Collection-bound pending work that a collection switch would discard.
+      dirty() {
+        const lost = [];
+        if (preview.length) lost.push(`validated import preview (${preview.length} records)`);
+        if (prepared) lost.push(`prepared resumable import file ${prepared.file} (${prepared.chunks.length} chunks)`);
+        if (job) lost.push(`progress view of import job ${job.id} (the job stays open on the server)`);
+        if ($("batch-ids").value.trim()) lost.push("batch ID selection");
+        if ($("metadata-fields").children.length) lost.push("visual metadata fields");
+        return lost;
+      },
+      collectionChanged(info) {
+        preview = []; previewCollection = null; sample = []; prepared = null; stopRequested = true;
+        // Follow the selection only while the scope field still holds the untouched default.
+        if (info?.name && $("cred-collections").value === credentialDefault) $("cred-collections").value = credentialDefault = info.name;
+        const previousJob = job; job = null;
+        $("projection").replaceChildren(); $("metadata-fields").replaceChildren();
+        for (const name of ["import-result", "sample-analysis", "record-comparison", "search-comparison", "scenario-result", "payload-preview", "vector-slice-result", "vector-summary", "rebuild-result", "maintenance-result", "quality-result", "job-invalid"]) text(name, "");
+        for (const name of ["batch-ids", "import-file", "job-file"]) $(name).value = "";
+        maintenanceScope();
+        $("index-memory-table").querySelector("tbody").replaceChildren();
+        $("collection-settings").value = info?.settings ? JSON.stringify(info.settings, null, 2) : "{}";
+        progress(0, 1);
+        text("job-result", previousJob ? `Import job ${previousJob.id} (collection ${previousJob.collection}) remains open on the server; select that collection and Resume to continue.` : "");
+        $("scenario").value = JSON.stringify({ name: "get-record", steps: [{ path: ctx.path("/vectors/1"), expected_ids: ["1"] }] }, null, 2);
+      },
+      // Runs after every operation (buttons are re-enabled first): state-dependent disabling.
+      gate() {
+        if (!ctx.connected()) return;
+        document.querySelectorAll("[data-extended]").forEach((element) => { if (!ctx.extended()) element.disabled = true; });
+        $("cred-copy").disabled = $("cred-clear").disabled = secret === null;
+        $("job-stop").disabled = true;
+        if (ctx.collection() !== "default") $("save-maintenance").disabled = true;
+        const caps = ctx.capabilities();
+        if (caps?.role === "scoped" && !ctx.can("diagnostics")) { $("prometheus").disabled = true; $("refresh-health").disabled = true; }
+      },
     };
   }
-  window.VLiteTools = { init, utils: { id, vector, metadata, record, savedQuery, csvParse, csvExport, distances, analyze, pca } };
+  window.VLiteTools = { init, utils: {
+    id, vector, metadata, record, savedQuery, csvParse, csvExport, distances, analyze, pca,
+    collectionName, collectionPath, settings, scoreDirection, redact, maskSecret, OPERATIONS, credentialRequest, graceSeconds,
+    boundedInteger, importRows, chunk, resumePlan, savedQueryV2, autoMaintenance, autoMaintenanceForm, backupSchedule, memoryRows, requestAllowed, isSearch,
+  } };
 })();

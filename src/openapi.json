@@ -8,8 +8,129 @@
   "security": [{"BearerAuth": []}],
   "servers": [{"url": "http://127.0.0.1:8080"}],
   "paths": {
+    "/v1/collections":{
+      "get":{"summary":"List visible collections","responses":{"200":{"description":"Collection list scoped to the caller","content":{"application/json":{"schema":{"type":"object","properties":{"items":{"type":"array","items":{"$ref":"#/components/schemas/CollectionInfo"}},"format_version":{"type":"integer"}}}}}}}},
+      "post":{"summary":"Create an opt-in v4 collection","requestBody":{"required":true,"content":{"application/json":{"schema":{"type":"object","additionalProperties":false,"required":["name","dimensions"],"properties":{"name":{"type":"string","pattern":"^[a-z][a-z0-9_-]{0,62}$"},"dimensions":{"type":"integer","minimum":1,"maximum":65536},"settings":{"$ref":"#/components/schemas/CollectionSettings"}}}}}},"responses":{"201":{"description":"Created collection","content":{"application/json":{"schema":{"$ref":"#/components/schemas/CollectionInfo"}}}},"409":{"description":"Conflict or explicit v4 upgrade required"}}}
+    },
+    "/v1/collections/{c}":{
+      "parameters":[{"name":"c","in":"path","required":true,"schema":{"type":"string"}}],
+      "get":{"summary":"Inspect collection settings and text-index state","responses":{"200":{"description":"Collection details","content":{"application/json":{"schema":{"$ref":"#/components/schemas/CollectionInfo"}}}},"404":{"description":"Collection not found"}}},
+      "delete":{"summary":"Drop an empty named collection without open import jobs","description":"default cannot be dropped. IDs are not recycled within the file lineage.","responses":{"200":{"description":"Dropped"},"409":{"description":"Collection is nonempty, has open imports, or is reserved"}}}
+    },
+    "/v1/collections/{c}/settings":{
+      "parameters":[{"name":"c","in":"path","required":true,"schema":{"type":"string"}}],
+      "put":{"summary":"Update declared per-collection settings","requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/CollectionSettings"}}}},"responses":{"200":{"description":"Updated settings and explicit persistence result; legacy settings are memory-only"}}}
+    },
+    "/v1/collections/{c}/vectors":{
+      "parameters":[{"name":"c","in":"path","required":true,"schema":{"type":"string"}}],
+      "get":{"summary":"List a bounded collection-scoped live page","parameters":[{"name":"after","in":"query","schema":{"$ref":"#/components/schemas/Id"}},{"name":"limit","in":"query","schema":{"type":"integer","minimum":1,"maximum":100}}],"responses":{"200":{"description":"items of id/metadata and next_after, matching legacy pagination semantics"}}}
+    },
+    "/v1/collections/{c}/vectors/{id}":{
+      "parameters":[{"name":"c","in":"path","required":true,"schema":{"type":"string"}},{"name":"id","in":"path","required":true,"schema":{"$ref":"#/components/schemas/Id"}}],
+      "get":{"summary":"Get a collection-scoped record and strong ETag","responses":{"200":{"description":"Record","headers":{"ETag":{"$ref":"#/components/headers/ETag"}},"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Record"}}}},"404":{"description":"Record not found"}}},
+      "put":{"summary":"Put a collection-scoped record","parameters":[{"name":"If-Match","in":"header","schema":{"type":"string"}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Put"}}}},"responses":{"204":{"description":"Synced mutation with ETag response header"},"412":{"description":"Record ETag no longer matches"}}},
+      "delete":{"summary":"Delete a collection-scoped record","parameters":[{"name":"If-Match","in":"header","schema":{"type":"string"}}],"responses":{"200":{"description":"Deletion result"},"412":{"description":"Record ETag no longer matches"}}}
+    },
+    "/v1/collections/{c}/batches":{
+      "parameters":[{"name":"c","in":"path","required":true,"schema":{"type":"string"}}],
+      "post":{"summary":"Commit an atomic single-collection batch","requestBody":{"required":true,"content":{"application/json":{"schema":{"type":"object","required":["operations"],"properties":{"operations":{"type":"array","maxItems":4096,"items":{"oneOf":[{"$ref":"#/components/schemas/BatchPut"},{"$ref":"#/components/schemas/BatchDelete"}]}}}}}}},"responses":{"200":{"description":"Synced atomic batch"}}}
+    },
+    "/v1/collections/{c}/search":{
+      "parameters":[{"name":"c","in":"path","required":true,"schema":{"type":"string"}}],
+      "post":{"summary":"Search a collection using its default settings","requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/SearchRequest"}}}},"responses":{"200":{"description":"Hits; hybrid scores sort descending, other distances ascending. explain adds stats and optional auto plan."},"409":{"description":"Requested ready-only index is unavailable"}}}
+    },
+    "/v1/collections/{c}/index/hnsw":{
+      "parameters":[{"name":"c","in":"path","required":true,"schema":{"type":"string"}}],
+      "get":{"summary":"Observe collection index identity, readiness and component memory","responses":{"200":{"description":"Readiness, stale/buffer counts and optional component memory (not RSS)"}}},
+      "post":{"summary":"Explicitly build a collection index","requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/RebuildRequest"}}}},"responses":{"204":{"description":"Built; blocks the single owner"}}}
+    },
+    "/v1/collections/{c}/index/hnsw/rebuild":{
+      "parameters":[{"name":"c","in":"path","required":true,"schema":{"type":"string"}}],
+      "get":{"summary":"Observe the collection background job without publication","responses":{"200":{"description":"Job state"}}},
+      "post":{"summary":"Start a bounded collection background rebuild","requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/RebuildRequest"}}}},"responses":{"202":{"description":"Started"},"409":{"description":"Database already has a pending job"}}}
+    },
+    "/v1/collections/{c}/index/hnsw/rebuild/poll":{
+      "parameters":[{"name":"c","in":"path","required":true,"schema":{"type":"string"}}],
+      "post":{"summary":"Poll and publish this collection's completed rebuild","responses":{"200":{"description":"Outcome"},"409":{"description":"Pending job belongs to another collection"}}}
+    },
+    "/v1/collections/{c}/index/hnsw/rebuild/cancel":{
+      "parameters":[{"name":"c","in":"path","required":true,"schema":{"type":"string"}}],
+      "post":{"summary":"Cooperatively cancel this collection's rebuild","responses":{"200":{"description":"Cancellation result"},"409":{"description":"Pending job belongs to another collection"}}}
+    },
+    "/v1/collections/{c}/index/hnsw/maintenance":{
+      "parameters":[{"name":"c","in":"path","required":true,"schema":{"type":"string"}}],
+      "get":{"summary":"Observe collection maintenance pressure","responses":{"200":{"description":"Readiness and pressure; no publication"}}}
+    },
+    "/v1/collections/{c}/index/hnsw/maintenance/tick":{
+      "parameters":[{"name":"c","in":"path","required":true,"schema":{"type":"string"}}],
+      "post":{"summary":"Run one bounded collection maintenance step","requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/RebuildRequest"}}}},"responses":{"200":{"description":"Explicit tick result"}}}
+    },
+    "/v1/collections/{c}/index/hnsw/quality":{
+      "parameters":[{"name":"c","in":"path","required":true,"schema":{"type":"string"}}],
+      "post":{"summary":"Sample a ready collection ANN index against exact search","description":"Never builds. Returns recall or explicit empty/budget skip reason.","requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/QualityOptions"}}}},"responses":{"200":{"description":"Sampled quality"},"409":{"description":"Index not ready"}}}
+    },
+    "/v1/collections/{c}/imports":{
+      "parameters":[{"name":"c","in":"path","required":true,"schema":{"type":"string"}}],
+      "post":{"summary":"Reserve a resumable import job for a collection","description":"Reservation is not durable until its first chunk commits.","responses":{"201":{"description":"Reserved job status","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ImportStatus"}}}},"409":{"description":"v4 upgrade required"}}}
+    },
+    "/v1/imports/{job}":{
+      "parameters":[{"name":"job","in":"path","required":true,"schema":{"$ref":"#/components/schemas/Id"}}],
+      "get":{"summary":"Inspect import checkpoint and original collection identity","responses":{"200":{"description":"Import status","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ImportStatus"}}}}}}
+    },
+    "/v1/imports/{job}/chunks/{n}":{
+      "parameters":[{"name":"job","in":"path","required":true,"schema":{"$ref":"#/components/schemas/Id"}},{"name":"n","in":"path","required":true,"schema":{"$ref":"#/components/schemas/Id"}}],
+      "put":{"summary":"Commit or explicitly replay an import chunk","description":"Accepted rows and full-SHA256 checkpoint commit atomically. Same last chunk and identity returns already_committed; gaps and differing identities conflict. No automatic retry.","requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/ImportChunk"}}}},"responses":{"200":{"description":"Chunk committed or already committed"},"409":{"description":"Import conflict"},"422":{"description":"Rejected rows with bounded report; no write and no job progress"}}}
+    },
+    "/v1/imports/{job}/finish":{
+      "parameters":[{"name":"job","in":"path","required":true,"schema":{"$ref":"#/components/schemas/Id"}}],
+      "post":{"summary":"Durably finish an existing import","responses":{"200":{"description":"Finished status"},"409":{"description":"Unused reservation or conflicting state"}}}
+    },
+    "/v1/imports/{job}/abort":{
+      "parameters":[{"name":"job","in":"path","required":true,"schema":{"$ref":"#/components/schemas/Id"}}],
+      "post":{"summary":"Abort an import without rolling back committed chunks","responses":{"200":{"description":"Aborted status"},"409":{"description":"Conflicting state"}}}
+    },
+    "/v1/admin/maintenance/auto":{
+      "get":{"summary":"Observe automatic maintenance policy and state","responses":{"200":{"description":"config and state, including skipped busy ticks and errors"}}},
+      "put":{"summary":"Merge process-local automatic maintenance policy","description":"Disabled by default. At most one bounded collection action per tick; no synchronous rebuild fallback. Runtime changes reset on restart.","requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/AutoMaintenancePolicy"}}}},"responses":{"200":{"description":"Merged config and observed state"}}}
+    },
+    "/v1/admin/maintenance/auto/tick":{
+      "post":{"summary":"Run one bounded automatic-maintenance tick now","responses":{"200":{"description":"Tick state; busy skips and failures are explicit"}}}
+    },
+    "/v1/admin/backups/schedule":{
+      "get":{"summary":"Observe backup schedule configuration and state","responses":{"200":{"description":"config and state; no implicit backup"}}},
+      "put":{"summary":"Merge process-local backup schedule","description":"Scheduling and retention deletion are disabled by default. Retention protects newest generated and verified backups, restores, active/selected files and symlinks.","requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/BackupSchedulePolicy"}}}},"responses":{"200":{"description":"Merged config and observed state"}}}
+    },
+    "/v1/admin/backups/schedule/run":{
+      "post":{"summary":"Run one backup, verification and configured drill/retention cycle now","responses":{"200":{"description":"Cycle outcome"},"409":{"description":"Backup administration unavailable"}}}
+    },
+    "/v1/admin/backups/{name}/verify":{
+      "parameters":[{"name":"name","in":"path","required":true,"schema":{"type":"string","maxLength":96}}],
+      "post":{"summary":"Verify a generated backup against its manifest","responses":{"200":{"description":"name, verified:true and manifest"},"422":{"description":"verification_failed; no active-file replacement"}}}
+    },
+    "/v1/admin/backups/{name}/drill":{
+      "parameters":[{"name":"name","in":"path","required":true,"schema":{"type":"string","maxLength":96}}],
+      "post":{"summary":"Restore and probe a private scratch copy, never the active owner","responses":{"200":{"description":"Drill outcome, collections, probes and updated manifest"},"422":{"description":"drill_failed"}}}
+    },
+    "/v1/admin/diagnostics/slow-queries":{
+      "get":{"summary":"Read bounded sanitized slow-query diagnostics","description":"No vectors, text, metadata values or filter values. Requires diagnostics permission; scoped views cannot reveal other collections.","responses":{"200":{"description":"threshold_ms, capacity and items"}}}
+    },
+    "/v1/admin/credentials":{
+      "get":{"summary":"Admin only: list nonsecret scoped credential metadata","responses":{"200":{"description":"items and capacity; no secret hashes or tokens"},"409":{"description":"Credential administration disabled"}}},
+      "post":{"summary":"Admin only: issue an expiring collection/operation-scoped credential","description":"Requires private admin directory, bootstrap admin authentication and a v4 database. Returns secret once; never log it. Grants bind file lineage and collection identity.","requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/CredentialCreate"}}}},"responses":{"201":{"description":"credential metadata and one-time token"},"409":{"description":"Disabled or explicit v4 upgrade required"}}}
+    },
+    "/v1/admin/credentials/{id}/rotate":{
+      "parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"string"}}],
+      "post":{"summary":"Admin only: rotate credential with bounded old-token grace","requestBody":{"content":{"application/json":{"schema":{"type":"object","additionalProperties":false,"properties":{"grace_seconds":{"type":"integer","minimum":0,"maximum":86400,"default":3600}}}}}},"responses":{"201":{"description":"New credential, one-time token and previous metadata"}}}
+    },
+    "/v1/admin/credentials/{id}/revoke":{
+      "parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"string"}}],
+      "post":{"summary":"Admin only: persist credential revocation","responses":{"200":{"description":"Revoked credential metadata"}}}
+    },
+    "/v1/admin/audit/persistent":{
+      "get":{"summary":"Admin only: read sanitized durable audit records","parameters":[{"name":"limit","in":"query","schema":{"type":"integer","minimum":1,"maximum":1000,"default":100}}],"responses":{"200":{"description":"items and enabled flag; no token values"}}}
+    },
     "/v1/capabilities": {
-      "get": {"summary":"Authenticated version, role and compatibility diagnostics","responses":{"200":{"description":"Capability flags reflect server configuration","content":{"application/json":{"schema":{"type":"object","required":["version","api_version","role","features","routes"],"properties":{"version":{"type":"string"},"api_version":{"const":1},"role":{"enum":["admin","read_only"]},"features":{"type":"object","properties":{"read_only":{"type":"boolean"},"tokens_reload":{"type":"boolean"},"audit":{"type":"boolean"},"background_rebuild":{"type":"boolean"},"maintenance":{"type":"boolean"},"backup_restore":{"type":"boolean"},"conditional_writes":{"type":"boolean","description":"true when PUT/DELETE /v1/vectors/{id} enforce If-Match. Absent or false: servers may ignore If-Match, so clients must not send conditional writes."},"filtered_ann":{"type":"boolean","description":"true when approximate and approximate_ready search accept filter. Absent or false: send nonempty filters only in exact mode."}}},"routes":{"type":"array","items":{"type":"string"}}}}}}}}}
+      "get": {"summary":"Authenticated version, role and compatibility diagnostics","responses":{"200":{"description":"Capability flags reflect file format and server configuration. Inspect before using optional features.","content":{"application/json":{"schema":{"type":"object","required":["version","api_version","role","features","routes","format_version"],"properties":{"version":{"type":"string"},"api_version":{"const":1},"format_version":{"type":"integer"},"role":{"enum":["admin","read_only","scoped"]},"scope":{"type":"object","properties":{"credential_id":{"type":"string"},"collections":{"type":"array","items":{"type":"string"}},"operations":{"type":"array","items":{"type":"string"}},"expires_unix_ms":{"type":"integer"}}},"features":{"type":"object","additionalProperties":{"type":"boolean"},"description":"Includes collections, per_record_etags, search_auto, search_hybrid, search_explain, imports, quantization, ann_quality, auto_maintenance, backup_schedule, backup_verify_drill, slow_query_log, prometheus_metrics, scoped_credentials, persistent_audit and legacy flags. Collections, imports and hybrid require v4; backup and persistent audit require an admin directory. Check conditional_writes before sending If-Match to an older server."},"routes":{"type":"array","items":{"type":"string"}}}}}}}}}
     },
     "/v1/admin/tokens": {
       "get":{"summary":"Admin only: nonsecret credential configuration","responses":{"200":{"description":"No token values or paths","content":{"application/json":{"schema":{"$ref":"#/components/schemas/TokenStatus"}}}}}}
@@ -71,10 +192,11 @@
     },
     "/metrics": {
       "get": {
-        "summary": "Authenticated process-local JSON metrics snapshot",
+        "summary": "Authenticated JSON or Prometheus metrics snapshot",
+        "parameters": [{"name":"format","in":"query","schema":{"enum":["json","prometheus"],"default":"json"}}],
         "description": "Counters reset at restart; request duration totals cover completed middleware responses and exclude streaming body transfer. HNSW rebuild counters include explicit builds and lazy builds. HNSW timing includes explicit build duration or build plus the triggering query, not isolated build time for lazy queries. Metrics reads queue behind database work and fail 503 if busy or closed. Poisoned owners still expose failure counters with database_healthy=false and null database gauges. Live records, file bytes and buffer usage are gauges; other numeric values are cumulative. The current metrics request is counted but not yet timed.",
         "responses": {
-          "200": {"description": "Metrics snapshot", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Metrics"}}}},
+          "200": {"description": "Metrics snapshot; scoped diagnostics return only authorized collections, not global counters", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Metrics"}}, "text/plain": {"schema":{"type":"string"},"example":"# TYPE vlite_requests_total counter\nvlite_requests_total 1\n"}}},
           "401": {"$ref": "#/components/responses/Unauthorized"},
           "503": {"$ref": "#/components/responses/Unavailable"}
         }
@@ -213,11 +335,26 @@
     },
     "/v1/search": {
       "post": {
-        "summary": "Exact multi-metric search or squared-L2/cosine approximate search",
-        "description": "All modes order by distance then numeric ID. Exact mode filters first; optional filter is an AND array of at most 64 strict-type conditions. Cosine rejects zero-norm queries even for k=0 and excludes zero-norm records. Approximate modes support squared_l2/cosine only. filter is accepted in every mode and validated (422) before readiness, k=0, empty-database or lazy-build handling; null/[] mean unfiltered. Filtered ANN applies the filter during graph traversal (nonmatching nodes remain bridges; only current records with current matching metadata are returned; buffered updates are scored from current records), not to an unfiltered top-k. ef_search bounds retained eligible candidates, not nodes visited: selective or no-match filters may visit every reachable node. Up to k eligible hits; no exact fallback. Optional config selects HNSW parameters (defaults 16/100/42). Graph buffer is capped at 256 IDs and 8 MiB vector bytes; overflow discards the graph. Lazy approximate synchronously rebuilds missing/config-mismatched graphs and is admin-only (read-only returns 403). approximate_ready never builds: a missing/config/metric mismatch returns 409; empty/k=0 queries validate but need no graph. No fallback; ANN recall/count not guaranteed. ef_search defaults to max(100,min(k,live count)), must be at least min(k,live count), and is rejected in exact mode. Internal width may include 256 extra buffered IDs. Distances accumulate in f64 and are exact for returned candidates; payloads/metadata are fetched separately.",
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type":"object","additionalProperties":false,"required":["vector","k"],"properties":{"vector":{"$ref":"#/components/schemas/Vector"},"k":{"type":"integer","minimum":0,"maximum":10000},"metric":{"enum":["squared_l2","cosine","inner_product"],"default":"squared_l2"},"mode":{"enum":["exact","approximate","approximate_ready"],"default":"exact"},"config":{"$ref":"#/components/schemas/IndexConfig"},"ef_search":{"type":"integer","minimum":1,"maximum":100000},"filter":{"type":["array","null"],"maxItems":64,"items":{"$ref":"#/components/schemas/Condition"}}}}}}},
+        "summary": "Search the default collection with legacy parameter defaults",
+        "description": "Supports exact, approximate, approximate_ready, auto and hybrid modes. Distance modes order ascending then numeric ID; hybrid ranks RRF scores descending. Auto never builds and may choose an indexed exact scan, full exact scan or ready ANN. Hybrid requires v4 and declared text fields for its nonzero text leg. Exact supports squared_l2, cosine and inner_product; ANN supports squared_l2/cosine. Strict-type AND filters are validated before readiness or empty-query handling. Nonmatching ANN nodes remain traversal bridges; ef_search bounds retained eligible candidates, not visited nodes or time. ANN has no hidden exact fallback. Scalar-u8 traversal reranks with current f32 vectors and does not promise total RAM savings. Lazy approximate may build synchronously: read-only credentials cannot build, and scoped credentials additionally need search_build. approximate_ready returns 409 on missing or mismatched index identity. Use collection routes to inherit persisted settings instead of this alias's hard defaults. explain adds work counters and an auto plan. See docs/CAPABILITIES.md for bounds and score semantics.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref":"#/components/schemas/SearchRequest"}}}},
         "responses": {
-          "200": {"description": "Nearest hits, ordered by increasing metric distance then numeric ID. Inner-product distances may be negative.", "content": {"application/json": {"schema": {"type": "object", "required": ["hits"], "properties": {"hits": {"type": "array", "items": {"type": "object", "required": ["id", "distance"], "properties": {"id": {"$ref": "#/components/schemas/Id"}, "distance": {"type": "number"}}}}}}}}},
+          "200": {
+            "description": "Hits ordered by distance ascending or hybrid score descending, then numeric ID. explain includes stats and optional plan.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["hits"],
+                  "properties": {
+                    "hits": {"type":"array","items":{"type":"object","required":["id"],"properties":{"id":{"$ref":"#/components/schemas/Id"},"distance":{"type":"number"},"score":{"type":"number"}}}},
+                    "stats": {"$ref":"#/components/schemas/SearchStats"},
+                    "plan": {"oneOf":[{"$ref":"#/components/schemas/QueryPlan"},{"type":"null"}]}
+                  }
+                }
+              }
+            }
+          },
           "409": {"description": "index_not_ready in approximate_ready mode; explicitly build the index or choose another mode", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "400": {"$ref": "#/components/responses/BadRequest"},
           "413": {"$ref": "#/components/responses/TooLarge"},
@@ -234,14 +371,55 @@
   },
   "components": {
     "securitySchemes": {
-      "BearerAuth": {"type": "http", "scheme": "bearer", "description": "Random 32..256-character base64url credential. Admin: VLITE_AUTH_TOKEN or configured file. Optional distinct read-only: VLITE_READ_ONLY_TOKEN or configured file. Never put credentials in URLs or request bodies. See /v1/capabilities for effective role."}
+      "BearerAuth": {"type": "http", "scheme": "bearer", "description": "Admin: VLITE_AUTH_TOKEN or configured file. Optional distinct read-only: VLITE_READ_ONLY_TOKEN or configured file. Scoped tokens use the vlk_ prefix and are returned once by credential creation/rotation. Never put credentials in URLs. See /v1/capabilities for effective role and scope."}
     },
     "schemas": {
-      "SearchRequest":{"type":"object","additionalProperties":false,"required":["vector","k"],"properties":{"vector":{"$ref":"#/components/schemas/Vector"},"k":{"type":"integer","minimum":0,"maximum":10000},"metric":{"enum":["squared_l2","cosine","inner_product"],"default":"squared_l2"},"mode":{"enum":["exact","approximate","approximate_ready"],"default":"exact"},"config":{"$ref":"#/components/schemas/IndexConfig"},"ef_search":{"type":"integer","minimum":1,"maximum":100000},"filter":{"type":["array","null"],"maxItems":64,"items":{"$ref":"#/components/schemas/Condition"}}}},
+      "SearchRequest":{
+        "type":"object","additionalProperties":false,"required":["k"],
+        "description":"vector is required except in hybrid mode. Hybrid k is at most 1000 and ranks by score descending; other modes rank by distance ascending. Auto never builds an index; explicit approximate may build. Collection routes default to collection settings. explain adds stats, and an auto plan.",
+        "properties":{
+          "vector":{"$ref":"#/components/schemas/Vector"},
+          "k":{"type":"integer","minimum":0,"maximum":10000},
+          "metric":{"enum":["squared_l2","cosine","inner_product"]},
+          "mode":{"enum":["exact","approximate","approximate_ready","auto","hybrid"],"default":"exact"},
+          "config":{"$ref":"#/components/schemas/IndexConfig"},
+          "ef_search":{"type":"integer","minimum":1,"maximum":100000},
+          "filter":{"type":["array","null"],"maxItems":64,"items":{"$ref":"#/components/schemas/Condition"}},
+          "quantization":{"$ref":"#/components/schemas/Quantization"},
+          "rerank_multiplier":{"type":"integer","minimum":1,"maximum":16},
+          "explain":{"type":"boolean","default":false},
+          "text":{"type":"string","maxLength":1024,"description":"Hybrid only; at most 1024 UTF-8 bytes and 32 unique tokens."},
+          "vector_leg":{"enum":["exact","approximate_ready"],"default":"exact"},
+          "fusion":{"$ref":"#/components/schemas/Fusion"}
+        },
+        "allOf":[{"if":{"properties":{"mode":{"const":"hybrid"}},"required":["mode"]},"then":{"properties":{"k":{"maximum":1000}}},"else":{"required":["vector"]}}]
+      },
+      "Quantization":{"enum":["none","scalar_u8"],"description":"Index readiness identity includes quantization. Scalar-u8 traversal reranks candidates using current f32 vectors. No total-process-memory reduction is promised."},
+      "Fusion":{"type":"object","additionalProperties":false,"properties":{"rrf_k":{"type":"integer","minimum":1,"maximum":1000,"default":60},"vector_weight":{"type":"number","minimum":0,"maximum":10,"default":1},"text_weight":{"type":"number","minimum":0,"maximum":10,"default":1},"candidates":{"type":"integer","minimum":0,"maximum":1000,"description":"At least k; default max(k,50). Weights cannot both be zero."}}},
+      "SearchStats":{"type":"object","properties":{"records_scanned":{"type":"integer","minimum":0},"distance_evaluations":{"type":"integer","minimum":0},"quantized_distance_evaluations":{"type":"integer","minimum":0},"graph_nodes_visited":{"type":"integer","minimum":0},"buffered_records_merged":{"type":"integer","minimum":0},"reranked_candidates":{"type":"integer","minimum":0},"index_candidates":{"type":"integer","minimum":0}}},
+      "QueryPlan":{"type":"object","properties":{"strategy":{"enum":["exact_scan","exact_indexed","filtered_ann","ann"]},"estimated_candidates":{"type":["integer","null"],"minimum":0},"live_records":{"type":"integer","minimum":0},"index_field":{"type":["string","null"]},"reason":{"type":"string"}}},
+      "CollectionSettings":{
+        "type":"object","additionalProperties":false,"description":"REST updates merge supplied fields with current settings; v4 persists settings, legacy default collections report memory-only settings.",
+        "properties":{
+          "metric":{"enum":["squared_l2","cosine","inner_product"]},"hnsw":{"$ref":"#/components/schemas/IndexConfig"},
+          "quantization":{"$ref":"#/components/schemas/Quantization"},"rerank_multiplier":{"type":"integer","minimum":1,"maximum":16},
+          "planner":{"type":"object","additionalProperties":false,"properties":{"exact_max_candidates":{"type":"integer","minimum":1,"maximum":1000000},"exact_max_selectivity_ppm":{"type":"integer","minimum":0,"maximum":1000000}}},
+          "metadata_indexes":{"type":"array","maxItems":16,"items":{"type":"object","additionalProperties":false,"required":["field","kind"],"properties":{"field":{"type":"string","minLength":1,"maxLength":256},"kind":{"enum":["eq","range","eq_range"]}}}},
+          "text_fields":{"type":"array","maxItems":8,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":256}}
+        }
+      },
+      "CollectionInfo":{"type":"object","required":["id","name","dimensions","live_records","settings","settings_persisted"],"properties":{"id":{"type":"integer","minimum":0,"maximum":65535},"name":{"type":"string","pattern":"^[a-z][a-z0-9_-]{0,62}$"},"dimensions":{"type":"integer","minimum":1,"maximum":65536},"live_records":{"type":"integer","minimum":0},"settings":{"$ref":"#/components/schemas/CollectionSettings"},"settings_persisted":{"type":"boolean"}}},
+      "AnnMemory":{"type":"object","description":"Component accounting only, excludes allocator and process overhead. Original f32 records remain resident.","properties":{"graph_nodes":{"type":"integer","minimum":0},"graph_link_bytes":{"type":"integer","minimum":0},"code_bytes":{"type":"integer","minimum":0},"codebook_bytes":{"type":"integer","minimum":0},"buffer_vector_bytes":{"type":"integer","minimum":0},"resident_vector_bytes":{"type":"integer","minimum":0}}},
+      "QualityOptions":{"type":"object","additionalProperties":false,"properties":{"config":{"$ref":"#/components/schemas/IndexConfig"},"metric":{"enum":["squared_l2","cosine"]},"quantization":{"$ref":"#/components/schemas/Quantization"},"rerank_multiplier":{"type":"integer","minimum":1,"maximum":16},"samples":{"type":"integer","minimum":1,"maximum":32},"k":{"type":"integer","minimum":1,"maximum":100},"ef_search":{"type":"integer","minimum":1,"maximum":100000},"seed":{"$ref":"#/components/schemas/Id"},"max_distance_evaluations":{"type":"integer","minimum":1}}},
+      "ImportStatus":{"type":"object","properties":{"job":{"$ref":"#/components/schemas/Id"},"collection":{"type":"string"},"collection_dropped":{"type":"boolean"},"state":{"enum":["open","finished","aborted"]},"last_chunk":{"oneOf":[{"$ref":"#/components/schemas/Id"},{"type":"integer","minimum":0}]},"rows_committed":{"type":"integer","minimum":0},"rows_skipped":{"type":"integer","minimum":0},"last_digest":{"type":["string","null"]},"durable":{"type":"boolean","description":"False before the first chunk; an unused reservation does not survive restart."}}},
+      "ImportChunk":{"type":"object","additionalProperties":false,"required":["operations"],"properties":{"operations":{"type":"array","maxItems":4096,"items":{"oneOf":[{"$ref":"#/components/schemas/BatchPut"},{"$ref":"#/components/schemas/BatchDelete"}]}},"policy":{"enum":["reject_chunk","skip_invalid"],"default":"reject_chunk"}}},
+      "CredentialCreate":{"type":"object","additionalProperties":false,"required":["name","collections","operations","expires_unix_ms"],"properties":{"name":{"type":"string","minLength":1,"maxLength":64},"collections":{"type":"array","minItems":1,"items":{"type":"string"},"description":"Explicit collection names or [\"*\"]. Grants bind collection identity, not a replacement with the same name."},"operations":{"type":"array","minItems":1,"uniqueItems":true,"items":{"enum":["read","search","search_build","write","import","index","collections","diagnostics","backup"]}},"expires_unix_ms":{"type":"integer","description":"Mandatory future expiry, at most 365 days from creation."}}},
+      "AutoMaintenancePolicy":{"type":"object","additionalProperties":false,"properties":{"enabled":{"type":"boolean","default":false},"interval_secs":{"type":"integer","minimum":10,"maximum":3600,"default":60},"stale_ratio":{"type":"number","exclusiveMinimum":0,"maximum":1,"default":0.2},"rebuild_on_low_recall":{"type":"boolean","default":false},"min_recall":{"type":"number","minimum":0,"maximum":1,"default":0.9},"quality_samples":{"type":"integer","minimum":1,"maximum":32,"default":8},"limits":{"$ref":"#/components/schemas/RebuildLimits"}}},
+      "BackupSchedulePolicy":{"type":"object","additionalProperties":false,"properties":{"enabled":{"type":"boolean","default":false},"interval_secs":{"type":"integer","minimum":300,"maximum":604800,"default":86400},"retention_enabled":{"type":"boolean","default":false},"retain_last":{"type":"integer","minimum":1,"maximum":100,"default":7},"retain_days":{"type":"integer","minimum":0,"maximum":3650,"default":0},"drill_every":{"type":"integer","minimum":0,"default":1},"drill_max_bytes":{"type":"integer","minimum":1,"default":4294967296}}},
       "TokenStatus":{"type":"object","properties":{"generation":{"type":"integer"},"admin_file_configured":{"type":"boolean"},"read_only_configured":{"type":"boolean"},"read_only_file_configured":{"type":"boolean"}}},
       "IndexConfig":{"type":"object","additionalProperties":false,"properties":{"m":{"type":"integer","minimum":2,"maximum":64,"default":16},"ef_construction":{"type":"integer","minimum":2,"maximum":4096,"default":100,"description":"Must be >= m"},"seed":{"oneOf":[{"type":"integer","minimum":0,"maximum":18446744073709551615},{"type":"string","pattern":"^(0|[1-9][0-9]*)$"}],"default":42,"description":"Administrative responses use decimal string for JS precision"}}},
       "RebuildLimits":{"type":"object","additionalProperties":false,"properties":{"max_records":{"type":"integer","minimum":1,"maximum":1000000,"default":100000},"max_snapshot_vector_bytes":{"type":"integer","minimum":1,"maximum":268435456,"default":134217728}}},
-      "RebuildRequest":{"type":"object","additionalProperties":false,"properties":{"config":{"$ref":"#/components/schemas/IndexConfig"},"metric":{"enum":["squared_l2","cosine"],"default":"squared_l2"},"limits":{"$ref":"#/components/schemas/RebuildLimits"}}},
+      "RebuildRequest":{"type":"object","additionalProperties":false,"properties":{"config":{"$ref":"#/components/schemas/IndexConfig"},"metric":{"enum":["squared_l2","cosine"],"default":"squared_l2"},"quantization":{"$ref":"#/components/schemas/Quantization"},"rerank_multiplier":{"type":"integer","minimum":1,"maximum":16},"limits":{"$ref":"#/components/schemas/RebuildLimits"}}},
       "RebuildOutcome":{"enum":["idle","running","cancelling","published","cancelled","superseded","catch_up_overflow"]},
       "BufferCapacity":{"type":"object","properties":{"buffered_ids":{"type":"integer"},"buffer_vector_bytes":{"type":"integer"},"remaining_ids":{"type":"integer"},"remaining_vector_bytes":{"type":"integer"}}},
       "MaintenancePolicy":{"type":"object","additionalProperties":false,"properties":{"config":{"$ref":"#/components/schemas/IndexConfig"},"metric":{"enum":["squared_l2","cosine"],"default":"squared_l2"},"limits":{"$ref":"#/components/schemas/RebuildLimits"},"rebuild_at_buffered_ids":{"type":"integer","minimum":1,"maximum":256,"default":128},"rebuild_at_buffer_vector_bytes":{"type":"integer","minimum":1,"maximum":8388608,"default":4194304}}},
@@ -266,7 +444,7 @@
       "Id": {"type": "string", "pattern": "^(0|[1-9][0-9]*)$", "maxLength": 20, "description": "Canonical decimal u64, maximum 18446744073709551615; never a JSON number"},
       "Vector": {"type": "array", "minItems": 1, "maxItems": 65536, "items": {"type": "number", "format": "float"}, "description": "Finite f32 components, exactly the database's dimension count"},
       "Put": {"type": "object", "additionalProperties": false, "required": ["vector"], "properties": {"vector": {"$ref": "#/components/schemas/Vector"}, "payload_base64": {"type": "string", "contentEncoding": "base64", "default": "", "description": "Canonical padded standard base64, decoded length <=1048576 bytes"}, "metadata": {"$ref": "#/components/schemas/Metadata"}}},
-      "Record": {"type": "object", "required": ["id", "vector", "payload_base64", "metadata"], "properties": {"id": {"$ref": "#/components/schemas/Id"}, "vector": {"$ref": "#/components/schemas/Vector"}, "payload_base64": {"type": "string", "contentEncoding": "base64"}, "metadata": {"$ref": "#/components/schemas/Metadata"}}},
+      "Record": {"type": "object", "required": ["id", "vector", "payload_base64", "metadata"], "properties": {"id": {"$ref": "#/components/schemas/Id"}, "revision":{"$ref":"#/components/schemas/Id"}, "vector": {"$ref": "#/components/schemas/Vector"}, "payload_base64": {"type": "string", "contentEncoding": "base64"}, "metadata": {"$ref": "#/components/schemas/Metadata"}}},
       "BatchPut": {"type": "object", "additionalProperties": false, "required": ["op", "id", "vector"], "properties": {"op": {"const": "put"}, "id": {"$ref": "#/components/schemas/Id"}, "vector": {"$ref": "#/components/schemas/Vector"}, "payload_base64": {"type": "string", "contentEncoding": "base64", "default": ""}, "metadata": {"$ref": "#/components/schemas/Metadata"}}},
       "Metadata": {"type": "object", "maxProperties": 64, "default": {}, "description": "Full replacement map; keys 1..256 UTF-8 bytes, string values <=4096 UTF-8 bytes, encoded map <=65536 bytes. Nonempty metadata requires file format v3. No nulls, nesting or arrays.", "additionalProperties": {"$ref": "#/components/schemas/MetadataValue"}},
       "MetadataValue": {"oneOf": [
@@ -291,13 +469,13 @@
       "MediaType": {"description": "Expected application/json", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "InvalidInput": {"description": "Schema or database validation rejected input; no write", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
       "Unavailable": {"description": "Busy, closed, poisoned, or indeterminate commit. commit_indeterminate can mean the write succeeded. Do not blindly retry mutations.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
-      "PreconditionFailed": {"description": "precondition_failed: If-Match does not equal the current tag, the record is missing, or the tag came from another service instance. Nothing was written. GET again, re-apply the change and decide whether to resend; never retry automatically.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+      "PreconditionFailed": {"description": "precondition_failed: If-Match does not equal the current record identity/content/revision, or the record is missing. V4 tags survive service restart; legacy tags do not. Nothing was written. GET again, re-apply the change and decide whether to resend; never retry automatically.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
     },
     "parameters": {
       "IfMatch": {"name": "If-Match", "in": "header", "required": false, "description": "Optional. Exactly one strong entity tag copied byte-for-byte from the ETag of GET /v1/vectors/{id}. Checked and written under the database owner lock. Weak (W/), wildcard (*), comma lists and repeated headers return 400 invalid_if_match. Omit for unconditional behavior.", "schema": {"type": "string", "pattern": "^\"[\\x21\\x23-\\x7e]*\"$"}}
     },
     "headers": {
-      "ETag": {"description": "Strong opaque tag for the record as of the current database commit and service instance. Not a persistent record revision: ANY committed write (including other IDs and batches) and any service restart/reopen invalidates every tag. Do not parse.", "schema": {"type": "string"}}
+      "ETag": {"description": "Strong opaque per-record tag bound to file identity, collection ID, record ID, last-put revision and full SHA-256 content digest. Unrelated writes do not invalidate it. V4 tags survive restart; legacy-file tags include a process nonce and do not. Copy-out maintenance changes identity. Do not parse.", "schema": {"type": "string"}}
     }
   }
 }

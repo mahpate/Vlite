@@ -32,3 +32,26 @@ function checkTypes(db: Awaited<ReturnType<NativeLibrary["open"]>>) {
   db.put("1", [1], { metadata: { n: { type: "integer", value: 1 } } });
 }
 void checkTypes;
+
+export async function collections(native: NativeLibrary, path: string): Promise<void> {
+  const db = await native.create(path, 2, { format: 4 });
+  try {
+    await db.createCollection("docs", 2, { textFields: ["title"], metadataIndexes: [{ field: "tag", kind: "eq" }] });
+    const revision: string = await db.put("1", [1, 0], { collection: "docs", expectedRevision: "absent" });
+    const unconditional: void = await db.put("2", [0, 1], { collection: "docs" });
+    void unconditional;
+    await db.put("1", [0, 1], { collection: "docs", expectedRevision: revision });
+    const explained = await db.search([1, 0], 1, { collection: "docs", explain: true });
+    console.log(explained.stats.records_scanned);
+    const planned = await db.searchAuto([1, 0], 1, { collection: "docs", explain: true });
+    console.log(planned.plan?.strategy);
+    console.log((await db.searchHybrid("apple", 2, { collection: "docs", vector: [1, 0] })).hits[0]?.bm25);
+    const job = await db.nextImportJobId();
+    const report = await db.importChunk(job, "1", [{ op: "put", id: "3", vector: [1, 1] }], { collection: "docs" });
+    console.log(report.outcome, (await db.importFinish(job, { collection: "docs" })).state);
+    // @ts-expect-error import jobs and chunks are decimal strings.
+    await db.importStatus(1);
+  } finally {
+    await db.close();
+  }
+}

@@ -1,13 +1,17 @@
 //! Rebuildable, deterministic HNSW graph. No index bytes are persisted.
 
 use std::{
+    borrow::Cow,
+    cell::Cell,
     cmp::Reverse,
     collections::{BTreeMap, BinaryHeap, HashSet},
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use crate::{
-    Condition, DistanceMetric, Error, Record, Result, SearchHit, metadata, metric_distance,
+    AnnOptions, Condition, DistanceMetric, Error, Record, Result, SearchHit, SearchStats, metadata,
+    metric_distance,
+    quantize::{Quantization, ScalarU8},
     vector_norm,
 };
 
@@ -77,10 +81,63 @@ struct Node {
 pub(crate) struct Index {
     pub config: HnswConfig,
     pub metric: DistanceMetric,
+    /// Readiness identity (quantization) and rerank width.
+    pub options: AnnOptions,
     nodes: Vec<Node>,
     entry: Option<usize>,
     buffered: BTreeMap<u64, Buffered>,
     buffered_bytes: usize,
+    /// ScalarU8 only: codec and node-major codes (`dimensions` bytes per node).
+    quantizer: Option<ScalarU8>,
+    codes: Vec<u8>,
+}
+
+/// Node IDs and u8 codes copied from committed records for one quantized
+/// build. Holds no f32 vectors, payloads or metadata.
+pub(crate) struct QuantizedSnapshot {
+    quantizer: ScalarU8,
+    ids: Vec<u64>,
+    codes: Vec<u8>,
+    /// Cosine zero-norm records excluded from the graph.
+    skipped: usize,
+}
+
+impl QuantizedSnapshot {
+    /// Trains bounds on, and encodes, every graph-eligible record.
+    pub fn encode(records: &BTreeMap<u64, Record>, metric: DistanceMetric) -> Self {
+        let eligible = || {
+            records.iter().filter(move |(_, record)| {
+                metric != DistanceMetric::Cosine || vector_norm(&record.vector) != 0.0
+            })
+        };
+        let dimensions = records.values().next().map_or(0, |r| r.vector.len());
+        let quantizer = ScalarU8::train(
+            dimensions,
+            eligible().map(|(_, record)| record.vector.as_slice()),
+        );
+        let mut ids = Vec::new();
+        let mut codes = Vec::new();
+        for (&id, record) in eligible() {
+            ids.push(id);
+            quantizer.encode_into(&record.vector, &mut codes);
+        }
+        Self {
+            quantizer,
+            skipped: records.len() - ids.len(),
+            ids,
+            codes,
+        }
+    }
+}
+
+/// Component sizes of one index; see `AnnMemoryReport`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct IndexMemory {
+    pub graph_nodes: usize,
+    pub link_bytes: usize,
+    pub code_bytes: usize,
+    pub codebook_bytes: usize,
+    pub buffer_vector_bytes: usize,
 }
 
 struct Buffered {
@@ -97,12 +154,97 @@ impl Index {
         (self.buffered.len(), self.buffered_bytes)
     }
 
+    pub fn memory(&self) -> IndexMemory {
+        IndexMemory {
+            graph_nodes: self.nodes.len(),
+            link_bytes: self
+                .nodes
+                .iter()
+                .flat_map(|node| &node.links)
+                .map(|links| links.len() * size_of::<usize>())
+                .sum(),
+            code_bytes: self.codes.len(),
+            codebook_bytes: self.quantizer.as_ref().map_or(0, ScalarU8::codebook_bytes),
+            buffer_vector_bytes: self.buffered_bytes,
+        }
+    }
+
+    /// Graph nodes whose record was deleted or replaced after construction.
+    /// Such IDs stay buffered until the index is rebuilt.
+    pub fn stale_nodes(&self) -> usize {
+        self.buffered
+            .keys()
+            .filter(|&&id| self.nodes.binary_search_by_key(&id, |node| node.id).is_ok())
+            .count()
+    }
+
+    pub fn graph_nodes(&self) -> usize {
+        self.nodes.len()
+    }
+
+    fn quantized(&self) -> bool {
+        self.options.quantization == Quantization::ScalarU8
+    }
+
+    fn codes_of(&self, node: usize) -> &[u8] {
+        let dimensions = self
+            .quantizer
+            .as_ref()
+            .expect("quantized index")
+            .dimensions();
+        &self.codes[node * dimensions..(node + 1) * dimensions]
+    }
+
+    /// Traversal distance from an f32 query to one graph node.
+    fn node_distance(
+        &self,
+        node: usize,
+        query: &[f32],
+        query_norm: f64,
+        records: &BTreeMap<u64, Record>,
+    ) -> f64 {
+        match &self.quantizer {
+            Some(quantizer) => quantizer.distance(
+                self.metric,
+                query,
+                query_norm,
+                self.codes_of(node),
+                self.nodes[node].norm,
+            ),
+            None => self.distance(
+                self.vector(node, records),
+                query,
+                self.nodes[node].norm,
+                query_norm,
+            ),
+        }
+    }
+
+    /// A node's traversal vector as a query: f32 or dequantized codes.
+    fn node_query<'a>(&'a self, node: usize, records: &'a BTreeMap<u64, Record>) -> Cow<'a, [f32]> {
+        match &self.quantizer {
+            Some(quantizer) => Cow::Owned(quantizer.decode(self.codes_of(node))),
+            None => Cow::Borrowed(self.vector(node, records)),
+        }
+    }
+
+    /// Readiness identity: `(config, metric, quantization)`.
+    pub fn ready_for(
+        &self,
+        config: HnswConfig,
+        metric: DistanceMetric,
+        quantization: Quantization,
+    ) -> bool {
+        self.config == config && self.metric == metric && self.options.quantization == quantization
+    }
+
     pub fn build(
         records: &BTreeMap<u64, Record>,
         config: HnswConfig,
         metric: DistanceMetric,
+        options: AnnOptions,
     ) -> Self {
-        Self::build_cancellable(records, config, metric, &AtomicBool::new(false))
+        Self::build_cancellable(records, config, metric, options, &AtomicBool::new(false))
             .expect("synchronous build is never cancelled")
     }
 
@@ -110,26 +252,32 @@ impl Index {
         records: &BTreeMap<u64, Record>,
         config: HnswConfig,
         metric: DistanceMetric,
+        options: AnnOptions,
         cancel: &AtomicBool,
     ) -> Option<Self> {
-        Self::build_with_progress(records, config, metric, cancel, &AtomicUsize::new(0))
+        Self::build_with_progress(
+            records,
+            config,
+            metric,
+            options,
+            cancel,
+            &AtomicUsize::new(0),
+        )
     }
 
     pub fn build_with_progress(
         records: &BTreeMap<u64, Record>,
         config: HnswConfig,
         metric: DistanceMetric,
+        options: AnnOptions,
         cancel: &AtomicBool,
         processed: &AtomicUsize,
     ) -> Option<Self> {
-        let mut index = Self {
-            config,
-            metric,
-            nodes: Vec::with_capacity(records.len()),
-            entry: None,
-            buffered: BTreeMap::new(),
-            buffered_bytes: 0,
-        };
+        if options.quantization == Quantization::ScalarU8 {
+            let snapshot = QuantizedSnapshot::encode(records, metric);
+            return Self::build_quantized(snapshot, config, metric, options, cancel, processed);
+        }
+        let mut index = Self::empty(config, metric, options, records.len());
         for &id in records.keys() {
             if cancel.load(Ordering::Relaxed) {
                 return None;
@@ -148,16 +296,74 @@ impl Index {
         }
     }
 
+    /// Builds a ScalarU8 graph from codes only; construction distances use
+    /// dequantized vectors.
+    pub fn build_quantized(
+        snapshot: QuantizedSnapshot,
+        config: HnswConfig,
+        metric: DistanceMetric,
+        options: AnnOptions,
+        cancel: &AtomicBool,
+        processed: &AtomicUsize,
+    ) -> Option<Self> {
+        debug_assert_eq!(options.quantization, Quantization::ScalarU8);
+        processed.fetch_add(snapshot.skipped, Ordering::Relaxed);
+        let mut index = Self::empty(config, metric, options, snapshot.ids.len());
+        index.codes = snapshot.codes;
+        index.quantizer = Some(snapshot.quantizer);
+        let no_records = BTreeMap::new();
+        for id in snapshot.ids {
+            if cancel.load(Ordering::Relaxed) {
+                return None;
+            }
+            index.insert(id, &no_records);
+            processed.fetch_add(1, Ordering::Relaxed);
+        }
+        if cancel.load(Ordering::Relaxed) {
+            None
+        } else {
+            Some(index)
+        }
+    }
+
+    fn empty(
+        config: HnswConfig,
+        metric: DistanceMetric,
+        options: AnnOptions,
+        capacity: usize,
+    ) -> Self {
+        Self {
+            config,
+            metric,
+            options,
+            nodes: Vec::with_capacity(capacity),
+            entry: None,
+            buffered: BTreeMap::new(),
+            buffered_bytes: 0,
+            quantizer: None,
+            codes: Vec::new(),
+        }
+    }
+
     pub fn adopt_buffer(&mut self, changes: Self) {
         self.buffered = changes.buffered;
         self.buffered_bytes = changes.buffered_bytes;
     }
 
     /// Called only after sync, before authoritative records are replaced.
+    ///
+    /// Unquantized graphs keep a copy of each changed graph vector because
+    /// traversal reads vectors from current records. Quantized graphs score
+    /// their own codes, so they keep no f32 copy and count only current bytes.
     pub fn track(&mut self, id: u64, previous: Option<&Record>, current_bytes: usize) -> bool {
+        let keep_original = !self.quantized();
         let prior = self.buffered.get(&id);
         let original_bytes = prior.map_or_else(
-            || previous.map_or(0, |record| record.vector.len() * 4),
+            || {
+                previous
+                    .filter(|_| keep_original)
+                    .map_or(0, |record| record.vector.len() * 4)
+            },
             |entry| entry.original.as_ref().map_or(0, |vector| vector.len() * 4),
         );
         let removed = prior.map_or(0, |entry| original_bytes + entry.current_bytes);
@@ -171,7 +377,9 @@ impl Index {
             .entry(id)
             .and_modify(|entry| entry.current_bytes = current_bytes)
             .or_insert_with(|| Buffered {
-                original: previous.map(|record| record.vector.clone()),
+                original: previous
+                    .filter(|_| keep_original)
+                    .map(|record| record.vector.clone()),
                 current_bytes,
             });
         self.buffered_bytes = bytes;
@@ -196,14 +404,11 @@ impl Index {
         query: &[f32],
         query_norm: f64,
         records: &BTreeMap<u64, Record>,
+        visits: &Cell<u64>,
     ) -> Candidate {
+        visits.set(visits.get() + 1);
         Candidate {
-            distance: self.distance(
-                self.vector(node, records),
-                query,
-                self.nodes[node].norm,
-                query_norm,
-            ),
+            distance: self.node_distance(node, query, query_norm, records),
             node,
         }
     }
@@ -215,11 +420,12 @@ impl Index {
         mut best: Candidate,
         layer: usize,
         records: &BTreeMap<u64, Record>,
+        visits: &Cell<u64>,
     ) -> Candidate {
         loop {
             let previous = best;
             for &neighbor in &self.nodes[previous.node].links[layer] {
-                let candidate = self.candidate(neighbor, query, query_norm, records);
+                let candidate = self.candidate(neighbor, query, query_norm, records, visits);
                 if candidate < best {
                     best = candidate;
                 }
@@ -230,6 +436,7 @@ impl Index {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn layer(
         &self,
         query: &[f32],
@@ -238,6 +445,7 @@ impl Index {
         layer: usize,
         ef: usize,
         records: &BTreeMap<u64, Record>,
+        visits: &Cell<u64>,
     ) -> Vec<Candidate> {
         let mut visited = HashSet::from([entry.node]);
         let mut candidates = BinaryHeap::from([Reverse(entry)]);
@@ -250,7 +458,7 @@ impl Index {
                 if !visited.insert(node) {
                     continue;
                 }
-                let candidate = self.candidate(node, query, query_norm, records);
+                let candidate = self.candidate(node, query, query_norm, records, visits);
                 if nearest.len() < ef || candidate < *nearest.peek().expect("nonempty nearest") {
                     candidates.push(Reverse(candidate));
                     nearest.push(candidate);
@@ -273,14 +481,12 @@ impl Index {
     ) -> Vec<usize> {
         let mut selected = Vec::with_capacity(limit);
         for candidate in candidates {
+            let candidate_query = self.node_query(candidate.node, records);
+            let candidate_norm = self.nodes[candidate.node].norm;
             // Preserve directionally diverse links rather than only a dense local cluster.
             if selected.iter().all(|&node| {
-                self.distance(
-                    self.vector(candidate.node, records),
-                    self.vector(node, records),
-                    self.nodes[candidate.node].norm,
-                    self.nodes[node].norm,
-                ) >= candidate.distance
+                self.node_distance(node, &candidate_query, candidate_norm, records)
+                    >= candidate.distance
             }) {
                 selected.push(candidate.node);
                 if selected.len() == limit {
@@ -318,13 +524,24 @@ impl Index {
     fn insert(&mut self, id: u64, records: &BTreeMap<u64, Record>) {
         let level = self.level(id);
         let new = self.nodes.len();
+        let cosine = self.metric == DistanceMetric::Cosine;
+        let (query, norm) = match &self.quantizer {
+            Some(quantizer) => {
+                let codes = self.codes_of(new);
+                let norm = if cosine { quantizer.norm(codes) } else { 0.0 };
+                (Cow::Owned(quantizer.decode(codes)), norm)
+            }
+            None => {
+                let vector = records[&id].vector.as_slice();
+                (
+                    Cow::Borrowed(vector),
+                    if cosine { vector_norm(vector) } else { 0.0 },
+                )
+            }
+        };
         self.nodes.push(Node {
             id,
-            norm: if self.metric == DistanceMetric::Cosine {
-                vector_norm(&records[&id].vector)
-            } else {
-                0.0
-            },
+            norm,
             links: vec![Vec::new(); level + 1],
         });
         let Some(entry) = self.entry else {
@@ -332,11 +549,12 @@ impl Index {
             return;
         };
         let top = self.nodes[entry].links.len() - 1;
-        let query = &records[&id].vector;
+        let query = &*query;
         let query_norm = self.nodes[new].norm;
-        let mut best = self.candidate(entry, query, query_norm, records);
+        let visits = Cell::new(0);
+        let mut best = self.candidate(entry, query, query_norm, records, &visits);
         for layer in ((level + 1)..=top).rev() {
-            best = self.greedy(query, query_norm, best, layer, records);
+            best = self.greedy(query, query_norm, best, layer, records, &visits);
         }
         for layer in (0..=level.min(top)).rev() {
             let candidates = self.layer(
@@ -346,6 +564,7 @@ impl Index {
                 layer,
                 self.config.ef_construction,
                 records,
+                &visits,
             );
             let neighbors = self.select(&candidates, self.config.m, records);
             self.nodes[new].links[layer] = neighbors.clone();
@@ -357,17 +576,20 @@ impl Index {
             for neighbor in neighbors {
                 self.nodes[neighbor].links[layer].push(new);
                 if self.nodes[neighbor].links[layer].len() > limit {
+                    let neighbor_query = self.node_query(neighbor, records);
                     let mut candidates = self.nodes[neighbor].links[layer]
                         .iter()
                         .map(|&node| {
                             self.candidate(
                                 node,
-                                self.vector(neighbor, records),
+                                &neighbor_query,
                                 self.nodes[neighbor].norm,
                                 records,
+                                &visits,
                             )
                         })
                         .collect::<Vec<_>>();
+                    drop(neighbor_query);
                     candidates.sort_unstable();
                     self.nodes[neighbor].links[layer] = self.select(&candidates, limit, records);
                 }
@@ -386,6 +608,7 @@ impl Index {
     /// stops once `ef` eligible results are held and the nearest unexpanded
     /// candidate is worse than the worst of them, so selective or empty-match
     /// filters may visit every reachable node.
+    #[allow(clippy::too_many_arguments)]
     fn filtered_layer(
         &self,
         query: &[f32],
@@ -394,6 +617,7 @@ impl Index {
         ef: usize,
         records: &BTreeMap<u64, Record>,
         conditions: &[Condition],
+        visits: &Cell<u64>,
     ) -> Vec<Candidate> {
         let eligible = |node: usize| {
             let id = self.nodes[node].id;
@@ -402,7 +626,7 @@ impl Index {
         };
         let mut visited = HashSet::from([entry.node]);
         let mut candidates = BinaryHeap::from([Reverse(entry)]);
-        let mut results = BinaryHeap::with_capacity(ef + 1);
+        let mut results = BinaryHeap::with_capacity(ef.min(self.nodes.len()).saturating_add(1));
         if eligible(entry.node) {
             results.push(entry);
         }
@@ -414,7 +638,7 @@ impl Index {
                 if !visited.insert(node) {
                     continue;
                 }
-                let candidate = self.candidate(node, query, query_norm, records);
+                let candidate = self.candidate(node, query, query_norm, records, visits);
                 if results.len() < ef || candidate < *results.peek().expect("nonempty results") {
                     candidates.push(Reverse(candidate));
                     if eligible(node) {
@@ -441,25 +665,107 @@ impl Index {
         ef: usize,
         records: &BTreeMap<u64, Record>,
         conditions: &[Condition],
+        stats: &mut SearchStats,
     ) -> Vec<SearchHit> {
+        self.search_filtered_with(query, k, ef, self.options, records, conditions, stats)
+    }
+
+    /// `search_filtered` with a per-query rerank multiplier from `rerank`
+    /// (its quantization is ignored; readiness is checked by the caller).
+    #[allow(clippy::too_many_arguments)]
+    pub fn search_filtered_with(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef: usize,
+        rerank: AnnOptions,
+        records: &BTreeMap<u64, Record>,
+        conditions: &[Condition],
+        stats: &mut SearchStats,
+    ) -> Vec<SearchHit> {
+        let width = rerank.rerank_width(k, ef);
         if conditions.is_empty() {
-            return self.search(query, k, ef, records);
+            return self.search_with_width(query, k, ef, width, records, stats);
         }
         let query_norm = self.query_norm(query);
         let mut hits = Vec::new();
+        let visits = Cell::new(0);
         if let Some(entry) = self.entry {
-            let best = self.descend(query, query_norm, entry, records);
-            hits.extend(
-                self.filtered_layer(query, query_norm, best, ef.max(k), records, conditions)
-                    .into_iter()
-                    .take(k)
-                    .map(|candidate| SearchHit {
-                        id: self.nodes[candidate.node].id,
-                        distance: candidate.distance,
-                    }),
+            let best = self.descend(query, query_norm, entry, records, &visits);
+            // Results hold distinct graph nodes, so retention beyond the node
+            // count changes nothing; capping it keeps huge `k` from sizing
+            // the heap (`ef + 1` below) off an unbounded caller value.
+            let retain = ef.max(k).min(self.nodes.len());
+            let eligible = self.filtered_layer(
+                query, query_norm, best, retain, records, conditions, &visits,
             );
+            hits = self.finish_graph_hits(eligible, query, query_norm, k, width, records, stats);
         }
-        self.merge_buffered(hits, query, query_norm, k, records, conditions)
+        self.count_visits(stats, &visits);
+        self.merge_buffered(hits, query, query_norm, k, records, conditions, stats)
+    }
+
+    /// Converts traversal-ordered eligible candidates into graph hits.
+    ///
+    /// Unquantized distances are already exact. ScalarU8 candidates are
+    /// re-scored exactly from current records (unbuffered graph nodes are
+    /// unchanged since construction) over the rerank `width`, then cut to k.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_graph_hits(
+        &self,
+        eligible: Vec<Candidate>,
+        query: &[f32],
+        query_norm: f64,
+        k: usize,
+        width: usize,
+        records: &BTreeMap<u64, Record>,
+        stats: &mut SearchStats,
+    ) -> Vec<SearchHit> {
+        if self.quantizer.is_none() {
+            return eligible
+                .into_iter()
+                .take(k)
+                .map(|candidate| SearchHit {
+                    id: self.nodes[candidate.node].id,
+                    distance: candidate.distance,
+                })
+                .collect();
+        }
+        let mut hits: Vec<SearchHit> = eligible
+            .into_iter()
+            .take(width)
+            .filter_map(|candidate| {
+                let id = self.nodes[candidate.node].id;
+                let vector = &records[&id].vector;
+                let norm = if self.metric == DistanceMetric::Cosine {
+                    vector_norm(vector)
+                } else {
+                    0.0
+                };
+                stats.reranked_candidates = stats.reranked_candidates.saturating_add(1);
+                stats.distance_evaluations = stats.distance_evaluations.saturating_add(1);
+                metric_distance(vector, query, self.metric, norm, query_norm)
+                    .map(|distance| SearchHit { id, distance })
+            })
+            .collect();
+        hits.sort_by(|a, b| {
+            a.distance
+                .total_cmp(&b.distance)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        hits.truncate(k);
+        hits
+    }
+
+    fn count_visits(&self, stats: &mut SearchStats, visits: &Cell<u64>) {
+        stats.graph_nodes_visited = stats.graph_nodes_visited.saturating_add(visits.get());
+        if self.quantizer.is_some() {
+            stats.quantized_distance_evaluations = stats
+                .quantized_distance_evaluations
+                .saturating_add(visits.get());
+        } else {
+            stats.distance_evaluations = stats.distance_evaluations.saturating_add(visits.get());
+        }
     }
 
     fn query_norm(&self, query: &[f32]) -> f64 {
@@ -476,14 +782,16 @@ impl Index {
         query_norm: f64,
         entry: usize,
         records: &BTreeMap<u64, Record>,
+        visits: &Cell<u64>,
     ) -> Candidate {
-        let mut best = self.candidate(entry, query, query_norm, records);
+        let mut best = self.candidate(entry, query, query_norm, records, visits);
         for layer in (1..self.nodes[entry].links.len()).rev() {
-            best = self.greedy(query, query_norm, best, layer, records);
+            best = self.greedy(query, query_norm, best, layer, records, visits);
         }
         best
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn merge_buffered(
         &self,
         mut hits: Vec<SearchHit>,
@@ -492,7 +800,9 @@ impl Index {
         k: usize,
         records: &BTreeMap<u64, Record>,
         conditions: &[Condition],
+        stats: &mut SearchStats,
     ) -> Vec<SearchHit> {
+        let before = hits.len();
         hits.extend(self.buffered.keys().filter_map(|&id| {
             records
                 .get(&id)
@@ -512,6 +822,9 @@ impl Index {
                     .map(|distance| SearchHit { id, distance })
                 })
         }));
+        let merged = (hits.len() - before) as u64;
+        stats.buffered_records_merged = stats.buffered_records_merged.saturating_add(merged);
+        stats.distance_evaluations = stats.distance_evaluations.saturating_add(merged);
         hits.sort_by(|a, b| {
             a.distance
                 .total_cmp(&b.distance)
@@ -521,36 +834,37 @@ impl Index {
         hits
     }
 
-    pub fn search(
+    fn search_with_width(
         &self,
         query: &[f32],
         k: usize,
         ef: usize,
+        width: usize,
         records: &BTreeMap<u64, Record>,
+        stats: &mut SearchStats,
     ) -> Vec<SearchHit> {
         let query_norm = self.query_norm(query);
         let mut hits = Vec::new();
+        let visits = Cell::new(0);
         if let Some(entry) = self.entry {
-            let best = self.descend(query, query_norm, entry, records);
-            hits.extend(
-                self.layer(
+            let best = self.descend(query, query_norm, entry, records, &visits);
+            let eligible = self
+                .layer(
                     query,
                     query_norm,
                     best,
                     0,
                     ef + self.buffered.len(),
                     records,
+                    &visits,
                 )
                 .into_iter()
                 .filter(|candidate| !self.buffered.contains_key(&self.nodes[candidate.node].id))
-                .take(k)
-                .map(|candidate| SearchHit {
-                    id: self.nodes[candidate.node].id,
-                    distance: candidate.distance,
-                }),
-            );
+                .collect();
+            hits = self.finish_graph_hits(eligible, query, query_norm, k, width, records, stats);
         }
-        self.merge_buffered(hits, query, query_norm, k, records, &[])
+        self.count_visits(stats, &visits);
+        self.merge_buffered(hits, query, query_norm, k, records, &[], stats)
     }
 }
 
@@ -566,7 +880,12 @@ mod tests {
             metadata: crate::Metadata::new(),
         };
         let records = BTreeMap::from([(0, record.clone())]);
-        let mut index = Index::build(&records, HnswConfig::default(), DistanceMetric::SquaredL2);
+        let mut index = Index::build(
+            &records,
+            HnswConfig::default(),
+            DistanceMetric::SquaredL2,
+            AnnOptions::default(),
+        );
         let vector_bytes = crate::MAX_DIMENSIONS * 4;
         for id in 0..16 {
             assert!(index.track(id, Some(&record), vector_bytes));
@@ -581,6 +900,7 @@ mod tests {
             &BTreeMap::new(),
             HnswConfig::default(),
             DistanceMetric::SquaredL2,
+            AnnOptions::default(),
         );
         for id in 0..MAX_HNSW_BUFFER_IDS {
             assert!(index.track(id as u64, None, 4));
@@ -610,7 +930,12 @@ mod tests {
                 ef_construction: 100,
                 seed: 42,
             };
-            let index = Index::build(&records, config, DistanceMetric::SquaredL2);
+            let index = Index::build(
+                &records,
+                config,
+                DistanceMetric::SquaredL2,
+                AnnOptions::default(),
+            );
             for (position, node) in index.nodes.iter().enumerate() {
                 for (layer, links) in node.links.iter().enumerate() {
                     assert!(links.len() <= if layer == 0 { 2 * m } else { m });

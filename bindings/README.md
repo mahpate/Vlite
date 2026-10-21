@@ -172,18 +172,29 @@ library's lifetime, and must not be shared across processes or library copies.
 
 | Request `op` | Additional fields | Successful `result` |
 |---|---|---|
-| `create` | `path`: UTF-8 string, `dimensions`: integer | `{"handle":"..."}` |
+| `create` | `path`: UTF-8 string, `dimensions`: integer, optional `format` (3 default, or 4) | `{"handle":"..."}` |
 | `open` | `path`: UTF-8 string | `{"handle":"..."}` |
 | `close` | none | null; handle consumed |
 | `info` | none | dimensions, format_version, records |
-| `put` | id, vector, optional payload_base64/metadata | null |
-| `get` | id | id, vector, payload_base64, metadata |
-| `get_many` | ids: up to 100 canonical ID strings | `{"records":[record,null,...]}` in request order |
-| `delete` | id | `{"deleted":true}` or false |
-| `batch` | operations: put/delete objects with `op` | null |
-| `search` | vector, k, optional filter array | `{"hits":[{"id":"...","distance":0.0}]}` |
-| `build_index` | optional metric (squared_l2/cosine) | null |
-| `search_approximate_ready` | vector, k, ef_search, optional metric (squared_l2/cosine) | same hits envelope |
+| `put` | id, vector, optional payload_base64/metadata/collection/expected_revision | null; `{"revision":"..."}` when expected_revision is given |
+| `get` | id, optional collection | id, vector, payload_base64, metadata, revision |
+| `get_many` | ids: up to 100 canonical ID strings, optional collection | `{"records":[record,null,...]}` in request order |
+| `delete` | id, optional collection/expected_revision | `{"deleted":true}` or false |
+| `batch` | operations: put/delete objects with `op`, optional collection | null |
+| `revision` | id, optional collection | `{"revision":"..."}` or `{"revision":null}` |
+| `search` | vector, k, optional filter/metric/collection/mode/explain and mode-specific fields below | `{"hits":[{"id":"...","distance":0.0}]}` |
+| `build_index` | optional metric (squared_l2/cosine), collection, quantization, rerank_multiplier | null |
+| `search_approximate_ready` | vector, k, ef_search, optional metric (squared_l2/cosine), collection, quantization, rerank_multiplier | same hits envelope |
+| `list_collections` | none | `{"collections":[collection,...]}` |
+| `create_collection` | name, dimensions, optional settings | collection |
+| `drop_collection` | name | null |
+| `set_collection_settings` | name, settings (full replacement) | `{"persisted":true}` or false |
+| `next_import_job_id` | none | `{"job":"..."}` |
+| `import_chunk` | job, chunk, operations, optional collection, policy (`reject_chunk` default or `skip_invalid`) | chunk report |
+| `import_status` | job | import status |
+| `import_finish` / `import_abort` | job, optional collection | import status |
+| `ann_quality` | optional collection, metric, quantization, rerank_multiplier, samples, k, ef_search, seed, max_distance_evaluations | recall_at_k, samples_used, distance_evaluations, skipped_reason |
+| `ann_memory` | optional collection, metric, quantization, rerank_multiplier | graph_nodes and byte counts |
 
 Example creation: `{"op":"create","path":"documents.vlite","dimensions":3}`.
 IDs are canonical decimal-u64 strings, and integer metadata values are
@@ -204,8 +215,64 @@ Python uses `db.build_index(metric="cosine")` and
 Inner product is exact-only. Cosine ANN requires a v0.1.2+ native
 library and wrapper; v0.1.1 packages have L2 ANN only.
 Omitting the default metric keeps old native requests compatible.
-Ready-only never silently builds or falls back. Listing, REST
-metrics and lazy ANN are not currently exposed by the native binding.
+Ready-only never silently builds or falls back. REST metrics and lazy ANN are
+not exposed by the native binding.
+
+### Additive v1 operations: collections, revisions, planning, imports
+
+These fields and operations are additive to ABI v1 (`vlite_abi_version()` stays
+1). Requests without them behave exactly as before; the only change to existing
+results is the extra `revision` string on records from `get`/`get_many`.
+
+- **Format.** `create` makes a format-3 file unless `"format":4` is given. Named
+  collections, settings changes and imports require format 4 and fail on format 3
+  with `requires_format_v4`. Existing files are never upgraded by the binding.
+- **Collections.** Omitting `collection` addresses `default`. A collection
+  result is `{id,name,dimensions,live_records,settings,settings_persisted}`.
+  Settings are `{metric, hnsw:{m,ef_construction,seed}, quantization
+  (none/scalar_u8), rerank_multiplier, planner:{exact_max_candidates,
+  exact_max_selectivity_ppm}, metadata_indexes:[{field,kind:eq/range/eq_range}],
+  text_fields}`. Input settings may omit any field (engine default) but unknown
+  fields are errors; `set_collection_settings` replaces the whole settings
+  object. Codes: `collection_not_found`, `collection_exists`, `collection_limit`,
+  `collection_not_empty`, `default_collection_immutable`.
+- **Defaults.** When a search, build or quality request omits `metric`,
+  `quantization` or `rerank_multiplier`, the collection's declared setting is
+  used, and the HNSW configuration always comes from the collection's settings.
+  The `default` collection's settings are the historical defaults (squared L2,
+  no quantization, HNSW defaults), so legacy requests are unchanged.
+- **Revisions.** `expected_revision` is `"absent"` (the ID must not exist) or a
+  canonical decimal revision string (the record must have exactly that revision).
+  A mismatch fails with `precondition_failed` and writes nothing.
+- **Search modes.** `mode` is `exact` (default), `auto` or `hybrid`; `explain`
+  adds `stats` (and `plan` for `auto`); without it the result is `{"hits":[...]}`.
+  `exact` rejects ANN/text fields. `auto` accepts `ef_search` (default 100),
+  `quantization`, `rerank_multiplier` and returns a plan
+  `{strategy: exact_scan|exact_indexed|filtered_ann|ann, estimated_candidates,
+  live_records, index_field, reason}`; it never builds an index. `hybrid`
+  requires `text` (BM25 over the collection's `text_fields`), an optional
+  `vector`, `fusion:{candidates,rrf_k,vector_weight,text_weight}` and
+  `vector_leg` `exact` (default) or `approximate_ready`; its hits are
+  `{id,score,distance,bm25,vector_rank,text_rank}`.
+- **Imports.** Get a job with `next_import_job_id`, then send chunks numbered
+  consecutively from `"1"`. Results report `outcome`
+  (`committed`, `already_committed`, `rejected`), row counts, up to 100
+  `invalid` rows `{row,code,message}` and the commit `revision`. Resending the
+  most recent committed chunk with the same content is `already_committed`;
+  different content, a different collection or a skipped number fails with
+  `import_conflict`. A rejected chunk writes nothing and may be resent. Status is
+  `{job,collection,collection_dropped,state:open|finished|aborted,last_chunk,
+  rows_committed,rows_skipped,last_digest}` and survives reopen. Abort stops a
+  job but never rolls back committed chunks.
+- **Quality and memory.** `ann_quality` samples recall against exact search
+  within `max_distance_evaluations`; `skipped_reason` explains a skipped
+  measurement. `ann_memory` reports index memory in bytes and requires a ready
+  index for that metric and quantization.
+
+IDs, revisions, job and chunk numbers, seeds and digests are strings; counts
+are JSON numbers. Automatic index maintenance, scheduled backups and restore
+drills, metrics and slow-query logs, and scoped credentials with audit logs are
+**server-only** features: the embedded binding provides no operations for them.
 
 ## Ownership, errors and durability
 
@@ -217,7 +284,10 @@ shared-file access.
 
 Engine error codes include `locked`, `not_found`, `corrupt`, `incomplete_tail`,
 `format_error`, `invalid_input`, `io_error`, `index_not_ready`, `poisoned`,
-`sequence_exhausted` and `commit_indeterminate`. Python raises `EmbeddedError`
+`sequence_exhausted` and `commit_indeterminate`; format-4 operations add
+`requires_format_v4`, `precondition_failed`, `import_not_found`,
+`import_conflict`, `import_limit` and the collection codes above. Python raises
+`EmbeddedError`
 with `code`. Failed opens do not mutate/repair data. Success retains the engine's
 sync-before-acknowledgment contract and its filesystem/hardware limitations.
 There are no retries. An indeterminate commit may have succeeded; close/reopen

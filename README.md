@@ -243,8 +243,8 @@ dimensions, file bytes and index readiness. **Fill example** prepares a
 dimension-matched vector and typed metadata without saving; choose an ID and
 use **Put / replace** to commit it. **Use editor vector as query** makes a
 self-match search easy. Select a browse or search result ID to inspect the
-record in the editor. Mutation confirmations remain required. This is one
-database per server, not a collections manager.
+record in the editor. Mutation confirmations remain required. Each server owns
+one database file; opt-in v4 files support named collections in that file.
 
 The expanded [testing console guide](docs/CONSOLE.md) covers guided demo data,
 bounded JSON/CSV import and export, batch editing, a visual filter builder,
@@ -388,8 +388,13 @@ cargo run --locked --bin vlite-maintain -- compact vectors.vlite compact.vlite
 ```
 
 Stop the database owner before maintenance. Output paths must be new; existing
-files are never overwritten. Current files use format v3; legacy v1/v2 files
+files are never overwritten. Default creation uses format v3; legacy v1/v2 files
 remain readable, but metadata writes require explicit copy-out migration.
+Opt-in format v4 adds named collections and durable import checkpoints. Upgrade
+only to a new path, retain the original, and explicitly switch owners after
+verification; older binaries cannot open v4. See
+[collections and advanced retrieval](docs/CAPABILITIES.md) for record revisions,
+metadata indexes/planning, hybrid search, quantized ANN and ingestion contracts.
 See [maintenance](docs/REFERENCE.md#storage-maintenance),
 [durability details](docs/REFERENCE.md), and the
 [upgrade/rollback runbook](docs/REFERENCE.md#https-observability-and-releases).

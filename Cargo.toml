@@ -13,14 +13,15 @@ resolver = "3"
 [features]
 default = []
 json = ["dep:serde", "dep:serde_json"]
-server = ["json", "dep:axum", "dep:base64", "dep:tokio", "dep:subtle", "dep:getrandom"]
+server = ["json", "dep:axum", "dep:base64", "dep:tokio", "dep:subtle"]
 
 [dependencies]
 axum = { version = "0.8", optional = true }
 base64 = { version = "0.22", optional = true }
-getrandom = { version = "0.4", optional = true }
+getrandom = "0.4"
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
+sha2 = "0.10"
 tempfile = "3"
 subtle = { version = "2.6", optional = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync"], optional = true }

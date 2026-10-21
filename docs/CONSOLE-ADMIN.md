@@ -3,7 +3,8 @@
 The bundled console talks to this same-origin experimental REST API. All routes
 below require bearer authentication (except static console files). Existing
 `VLITE_AUTH_TOKEN` / `VLITE_AUTH_TOKEN_FILE` and `--token-file` remain admin
-credentials. No secret value is returned or logged.
+credentials. Existing bootstrap secrets are never returned. Scoped credential
+creation and rotation return a new secret exactly once; never log that response.
 
 ## Configuration and roles
 
@@ -16,10 +17,12 @@ credentials. No secret value is returned or logged.
 - `--insecure-local` remains loopback-only; all callers have admin access in that
   explicit development mode.
 
-Read-only credentials permit authenticated GET/HEAD and POST `/v1/search` with
-`mode: "exact"` or `"approximate_ready"`. Lazy `"approximate"` can build a graph
-and is therefore forbidden with HTTP 403. All `/v1/admin/` routes and other
-mutating methods require admin access. These rules are enforced by the server,
+Read-only credentials permit authenticated GET/HEAD outside admin routes and
+non-building searches, including exact, approximate_ready, auto and hybrid
+where supported. Lazy approximate can build a graph and is therefore forbidden
+with HTTP 403. Scoped credentials additionally restrict collections and
+operations; lazy search requires both search and search_build. All `/v1/admin/`
+routes require the bootstrap admin credential. These rules are enforced by the server,
 not by console controls. Authentication failure returns 401. Existing requests
 already admitted before token rotation/revocation may complete.
 
@@ -29,14 +32,20 @@ already admitted before token rotation/revocation may complete.
 {"version":"0.1.2","api_version":1,"role":"admin","features":{"read_only":true,"tokens_reload":true,"audit":true,"background_rebuild":true,"maintenance":true,"backup_restore":true,"conditional_writes":true,"filtered_ann":true},"routes":["/v1/capabilities"]}
 ```
 
-`role` is `"admin"` or `"read_only"`; `routes` includes the complete supported
+The example above shows legacy flags only. Current responses additionally report
+`format_version` and the advanced capability flags described in
+[CAPABILITIES.md](CAPABILITIES.md). `role` is `"admin"`, `"read_only"` or
+`"scoped"`; scoped responses include effective collections, operations and expiry.
+`routes` includes the complete supported
 data/admin route templates. Feature booleans reflect configuration where relevant.
 Clients should check API version and features rather than infer support from the
 package version. Existing data endpoints are unchanged, except search and index
 build now additionally accept optional `config`. `filtered_ann: true` means
 `filter` is accepted in `approximate` and `approximate_ready` search (filter-aware
 traversal, up to k eligible hits, no exact fallback); without it, send nonempty
-filters only in exact mode.
+filters only in exact mode. Collections and hybrid/import workflows require
+explicit v4 creation or an offline copy-out upgrade; enabling the console does
+not migrate any file.
 
 ## Token lifecycle and audit (admin only)
 

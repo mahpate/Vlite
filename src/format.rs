@@ -1,8 +1,13 @@
 use crate::{
-    Error, MAX_BATCH_BYTES, MAX_BATCH_OPERATIONS, MAX_DIMENSIONS, MAX_PAYLOAD_BYTES, Mutation,
-    Record, Result,
+    CollectionSettings, DistanceMetric, Error, HnswConfig, MAX_BATCH_BYTES, MAX_BATCH_OPERATIONS,
+    MAX_DIMENSIONS, MAX_PAYLOAD_BYTES, Mutation, Record, Result,
+    metadata_index::{MAX_METADATA_INDEXES, MetadataIndexKind, MetadataIndexSpec},
+    planner::PlannerPolicy,
+    quantize::Quantization,
+    text_index::MAX_TEXT_FIELDS,
 };
-use std::collections::BTreeMap;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
@@ -10,12 +15,36 @@ pub(crate) const HEADER_SIZE: u64 = 32;
 pub(crate) const PREFIX_SIZE: usize = 36;
 pub(crate) const FOOTER_SIZE: usize = 16;
 const MAGIC: &[u8; 8] = b"VLITEDB\0";
+/// Version written by `Database::create` and by compaction of v1–v3 sources.
 pub(crate) const CURRENT_VERSION: u32 = 3;
+/// Opt-in format with lineage, collections and import checkpoints.
+pub(crate) const V4: u32 = 4;
+
+/// Maximum encoded settings blob (op 5 tail and op 7 body).
+pub(crate) const MAX_SETTINGS_BLOB: usize = 16_384;
+/// Maximum live collections, including the default collection.
+pub(crate) const MAX_COLLECTIONS: usize = 64;
+/// Exact body length of a batch entry op 8 chunk or close checkpoint.
+pub(crate) const IMPORT_MARKER_LEN: usize = 52;
+/// Exact body length of a batch entry op 8 snapshot checkpoint: the 52-byte
+/// layout (row counts hold the low 32 bits) followed by the high 32 bits of
+/// `rows_committed` and `rows_skipped`, so cumulative u64 counts survive
+/// compaction exactly.
+pub(crate) const IMPORT_SNAPSHOT_LEN: usize = 60;
+const IMPORT_SNAPSHOT_ENTRY: usize = 16 + IMPORT_SNAPSHOT_LEN;
+pub(crate) const MARKER_FINISHED: u32 = 1;
+pub(crate) const MARKER_ABORTED: u32 = 2;
+/// Deviation from the PRD layout: compaction/upgrade carry an open job forward
+/// with a marker-only snapshot whose chunk need not start at 1. Snapshot
+/// markers (and only they) use the 60-byte layout.
+pub(crate) const MARKER_SNAPSHOT: u32 = 4;
+const MAX_COLLECTION_NAME: usize = 63;
+const MAX_CREATE_BODY: usize = 1 + MAX_COLLECTION_NAME + 4 + MAX_SETTINGS_BLOB;
 
 pub(crate) const MAX_EXTENDED_BODY: usize =
     MAX_DIMENSIONS * 4 + 4 + MAX_PAYLOAD_BYTES + crate::MAX_METADATA_BYTES;
 
-fn extended_body(vector: &[f32], payload: &[u8], metadata: &crate::Metadata) -> Vec<u8> {
+pub(crate) fn extended_body(vector: &[f32], payload: &[u8], metadata: &crate::Metadata) -> Vec<u8> {
     let mut body = Vec::new();
     for value in vector {
         body.extend_from_slice(&value.to_le_bytes());
@@ -24,6 +53,18 @@ fn extended_body(vector: &[f32], payload: &[u8], metadata: &crate::Metadata) -> 
     body.extend_from_slice(payload);
     body.extend_from_slice(&crate::metadata::encode(metadata));
     body
+}
+
+/// Body bytes the record occupies in a single-record frame (used for
+/// reclaimable-space estimates; excludes the 52-byte prefix+footer).
+pub(crate) fn record_body_len(record: &Record) -> u64 {
+    let vector = record.vector.len() as u64 * 4;
+    if record.metadata.is_empty() {
+        vector + record.payload.len() as u64
+    } else {
+        let metadata = crate::metadata::validate(&record.metadata).unwrap_or(0) as u64;
+        vector + 4 + record.payload.len() as u64 + metadata
+    }
 }
 
 fn decode_extended(body: &[u8], dimensions: usize, offset: u64) -> Result<Record> {
@@ -53,18 +94,169 @@ fn decode_extended(body: &[u8], dimensions: usize, offset: u64) -> Result<Record
     })
 }
 
+/// One v4 import checkpoint (batch entry op 8). Chunk and close markers use
+/// the 52-byte body and carry per-chunk counts (at most 4,096, so they fit
+/// the u32 fields); snapshot markers use the 60-byte body and carry the full
+/// cumulative u64 counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ImportMarker {
+    pub job: u64,
+    pub chunk: u64,
+    pub rows_committed: u64,
+    pub rows_skipped: u64,
+    pub flags: u32,
+    pub digest: [u8; 32],
+}
+
+impl ImportMarker {
+    fn is_snapshot(&self) -> bool {
+        self.flags & MARKER_SNAPSHOT != 0
+    }
+
+    /// Body length of this marker's layout.
+    fn len(&self) -> usize {
+        if self.is_snapshot() {
+            IMPORT_SNAPSHOT_LEN
+        } else {
+            IMPORT_MARKER_LEN
+        }
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        let split = |count: u64| (count as u32, (count >> 32) as u32);
+        let (committed_low, committed_high) = split(self.rows_committed);
+        let (skipped_low, skipped_high) = split(self.rows_skipped);
+        // Never truncate silently: only snapshots may carry high bits.
+        assert!(
+            self.is_snapshot() || (committed_high == 0 && skipped_high == 0),
+            "chunk/close import marker counts exceed u32"
+        );
+        let mut bytes = Vec::with_capacity(self.len());
+        bytes.extend_from_slice(&self.chunk.to_le_bytes());
+        bytes.extend_from_slice(&committed_low.to_le_bytes());
+        bytes.extend_from_slice(&skipped_low.to_le_bytes());
+        bytes.extend_from_slice(&self.flags.to_le_bytes());
+        bytes.extend_from_slice(&self.digest);
+        if self.is_snapshot() {
+            bytes.extend_from_slice(&committed_high.to_le_bytes());
+            bytes.extend_from_slice(&skipped_high.to_le_bytes());
+        }
+        bytes
+    }
+
+    /// Decodes a 52- or 60-byte body; `decode_batch` checks that the length
+    /// matches the snapshot flag.
+    fn decode(job: u64, body: &[u8]) -> Self {
+        let high = |offset: usize| {
+            body.get(offset..offset + 4)
+                .map_or(0, |bytes| u64::from(u32_at(bytes, 0)) << 32)
+        };
+        Self {
+            job,
+            chunk: u64_at(body, 0),
+            rows_committed: u64::from(u32_at(body, 8)) | high(52),
+            rows_skipped: u64::from(u32_at(body, 12)) | high(56),
+            flags: u32_at(body, 16),
+            digest: body[20..52].try_into().unwrap(),
+        }
+    }
+}
+
+/// Import-relevant log event in log order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LoadedImportMarker {
+    /// A checkpoint with the collection (ID and name at that point in the
+    /// log) of its batch frame.
+    Marker {
+        collection: u16,
+        name: String,
+        marker: ImportMarker,
+    },
+    /// A collection drop. Its ID is never reused, but jobs bound to the
+    /// dropped collection keep only their history.
+    CollectionDropped(u16),
+}
+
+pub(crate) struct LoadedCollection {
+    pub name: String,
+    pub dimensions: usize,
+    pub settings: CollectionSettings,
+    /// True once a create (op 5) or settings (op 7) frame stored the settings.
+    pub settings_persisted: bool,
+    pub records: BTreeMap<u64, Record>,
+    /// Sequence of the frame that last put each live record.
+    pub revisions: BTreeMap<u64, u64>,
+    pub live_body_bytes: u64,
+}
+
+impl LoadedCollection {
+    pub(crate) fn new(name: String, dimensions: usize, settings: CollectionSettings) -> Self {
+        Self {
+            name,
+            dimensions,
+            settings,
+            settings_persisted: false,
+            records: BTreeMap::new(),
+            revisions: BTreeMap::new(),
+            live_body_bytes: 0,
+        }
+    }
+
+    fn put(&mut self, id: u64, record: Record, sequence: u64) {
+        self.live_body_bytes += record_body_len(&record);
+        if let Some(previous) = self.records.insert(id, record) {
+            self.live_body_bytes -= record_body_len(&previous);
+        }
+        self.revisions.insert(id, sequence);
+    }
+
+    fn delete(&mut self, id: u64) {
+        if let Some(previous) = self.records.remove(&id) {
+            self.live_body_bytes -= record_body_len(&previous);
+        }
+        self.revisions.remove(&id);
+    }
+}
+
 pub(crate) struct Loaded {
     pub version: u32,
+    /// Default-collection (ID 0) dimensions from the header.
     pub dimensions: usize,
-    pub records: BTreeMap<u64, Record>,
+    /// Nonzero v4 header lineage; None for v1–v3.
+    pub lineage: Option<u64>,
+    /// Header collection-ID floor (v4 bytes 24..26; 0 for v1–v3).
+    pub collection_floor: u16,
+    /// Highest collection ID ever assigned in this lineage history: the
+    /// maximum of `collection_floor` and every create (op 5) in the log.
+    /// Collection IDs are never reused, so the next one is this plus one.
+    pub collection_high: u16,
+    /// Live collections by ID; ID 0 (`default`) is always present.
+    pub collections: BTreeMap<u16, LoadedCollection>,
+    /// Import markers and collection drops in log order.
+    pub imports: Vec<LoadedImportMarker>,
     pub sequence: u64,
     pub end: u64,
     pub incomplete_bytes: u64,
 }
 
-// IEEE CRC-32, reflected polynomial. Checksums detect accidents, not tampering.
-pub(crate) fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = !0u32;
+impl Loaded {
+    /// Live records across all collections.
+    pub(crate) fn live_records(&self) -> usize {
+        self.collections
+            .values()
+            .map(|collection| collection.records.len())
+            .sum()
+    }
+
+    /// Records of the default collection.
+    pub(crate) fn default_records(&self) -> &BTreeMap<u64, Record> {
+        &self.collections[&0].records
+    }
+}
+
+/// Streaming IEEE CRC-32: `crc32_update(crc32_update(0, a), b) == crc32(a ++ b)`.
+pub(crate) fn crc32_update(previous: u32, bytes: &[u8]) -> u32 {
+    let mut crc = !previous;
     for &byte in bytes {
         crc ^= u32::from(byte);
         for _ in 0..8 {
@@ -72,6 +264,15 @@ pub(crate) fn crc32(bytes: &[u8]) -> u32 {
         }
     }
     !crc
+}
+
+// IEEE CRC-32, reflected polynomial. Checksums detect accidents, not tampering.
+pub(crate) fn crc32(bytes: &[u8]) -> u32 {
+    crc32_update(0, bytes)
+}
+
+fn u16_at(bytes: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap())
 }
 
 fn u32_at(bytes: &[u8], offset: usize) -> u32 {
@@ -86,51 +287,77 @@ fn corrupt(offset: u64, reason: &'static str) -> Error {
     Error::Corrupt { offset, reason }
 }
 
+/// Returns a random nonzero lineage from operating-system randomness.
+pub(crate) fn new_lineage() -> Result<u64> {
+    loop {
+        let mut bytes = [0u8; 8];
+        getrandom::fill(&mut bytes).map_err(|error| {
+            Error::Io(std::io::Error::other(format!(
+                "operating-system randomness unavailable: {error}"
+            )))
+        })?;
+        let lineage = u64::from_le_bytes(bytes);
+        if lineage != 0 {
+            return Ok(lineage);
+        }
+    }
+}
+
+/// `^[a-z][a-z0-9_-]{0,62}$`.
+pub(crate) fn valid_collection_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    (1..=MAX_COLLECTION_NAME).contains(&bytes.len())
+        && bytes[0].is_ascii_lowercase()
+        && bytes[1..]
+            .iter()
+            .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
 pub(crate) fn header(dimensions: usize) -> Vec<u8> {
+    header_with(CURRENT_VERSION, dimensions, 0, 0)
+}
+
+/// v4 header; `lineage` MUST be nonzero. `collection_floor` (bytes 24..26) is
+/// the highest collection ID ever assigned by the history this file was
+/// rewritten from (0 for a new file); IDs at or below it are never assigned
+/// again (see `load`).
+pub(crate) fn header_v4(dimensions: usize, lineage: u64, collection_floor: u16) -> Vec<u8> {
+    header_with(V4, dimensions, lineage, collection_floor)
+}
+
+fn header_with(version: u32, dimensions: usize, lineage: u64, collection_floor: u16) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(HEADER_SIZE as usize);
     bytes.extend_from_slice(MAGIC);
-    bytes.extend_from_slice(&CURRENT_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&version.to_le_bytes());
     bytes.extend_from_slice(&(dimensions as u32).to_le_bytes());
-    bytes.extend_from_slice(&[0; 12]);
+    bytes.extend_from_slice(&lineage.to_le_bytes());
+    bytes.extend_from_slice(&collection_floor.to_le_bytes());
+    bytes.extend_from_slice(&[0; 2]);
     bytes.extend_from_slice(&crc32(&bytes).to_le_bytes());
     bytes
 }
 
-pub(crate) fn frame(sequence: u64, id: u64, record: Option<&Record>) -> Vec<u8> {
-    let extended = record
-        .filter(|record| !record.metadata.is_empty())
-        .map(|record| extended_body(&record.vector, &record.payload, &record.metadata));
-    let mut bytes = Vec::new();
+/// Wraps a body with prefix and footer. `collection` occupies bytes 5..7.
+fn wrap(
+    operation: u8,
+    collection: u16,
+    sequence: u64,
+    id: u64,
+    count: u32,
+    payload_len: u32,
+    body: &[u8],
+) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(PREFIX_SIZE + body.len() + FOOTER_SIZE);
     bytes.extend_from_slice(b"VREC");
-    bytes.push(if extended.is_some() {
-        4
-    } else if record.is_some() {
-        1
-    } else {
-        2
-    });
-    bytes.extend_from_slice(&[0; 3]);
+    bytes.push(operation);
+    bytes.extend_from_slice(&collection.to_le_bytes());
+    bytes.push(0);
     bytes.extend_from_slice(&sequence.to_le_bytes());
     bytes.extend_from_slice(&id.to_le_bytes());
-    let (dimensions, payload_len) = record
-        .map(|r| {
-            (
-                r.vector.len() as u32,
-                extended.as_ref().map_or(r.payload.len(), Vec::len) as u32,
-            )
-        })
-        .unwrap_or((0, 0));
-    bytes.extend_from_slice(&dimensions.to_le_bytes());
+    bytes.extend_from_slice(&count.to_le_bytes());
     bytes.extend_from_slice(&payload_len.to_le_bytes());
     bytes.extend_from_slice(&crc32(&bytes).to_le_bytes());
-    if let Some(body) = extended {
-        bytes.extend_from_slice(&body);
-    } else if let Some(record) = record {
-        for value in &record.vector {
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
-        bytes.extend_from_slice(&record.payload);
-    }
+    bytes.extend_from_slice(body);
     let checksum = crc32(&bytes);
     bytes.extend_from_slice(b"VCMT");
     bytes.extend_from_slice(&checksum.to_le_bytes());
@@ -138,15 +365,54 @@ pub(crate) fn frame(sequence: u64, id: u64, record: Option<&Record>) -> Vec<u8> 
     bytes
 }
 
-pub(crate) fn batch_frame(sequence: u64, operations: &[Mutation], body_bytes: usize) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(PREFIX_SIZE + body_bytes + FOOTER_SIZE);
-    bytes.extend_from_slice(b"VREC");
-    bytes.extend_from_slice(&[3, 0, 0, 0]);
-    bytes.extend_from_slice(&sequence.to_le_bytes());
-    bytes.extend_from_slice(&0u64.to_le_bytes());
-    bytes.extend_from_slice(&(operations.len() as u32).to_le_bytes());
-    bytes.extend_from_slice(&(body_bytes as u32).to_le_bytes());
-    bytes.extend_from_slice(&crc32(&bytes).to_le_bytes());
+/// Single put/delete frame for the default collection (byte-identical to v1–v3).
+pub(crate) fn frame(sequence: u64, id: u64, record: Option<&Record>) -> Vec<u8> {
+    record_frame(sequence, 0, id, record)
+}
+
+/// Single put (op 1/4) or delete (op 2) frame tagged with a collection ID.
+/// Collection 0 produces exactly the legacy encoding.
+pub(crate) fn record_frame(
+    sequence: u64,
+    collection: u16,
+    id: u64,
+    record: Option<&Record>,
+) -> Vec<u8> {
+    match record {
+        None => wrap(2, collection, sequence, id, 0, 0, &[]),
+        Some(record) if !record.metadata.is_empty() => {
+            let body = extended_body(&record.vector, &record.payload, &record.metadata);
+            wrap(
+                4,
+                collection,
+                sequence,
+                id,
+                record.vector.len() as u32,
+                body.len() as u32,
+                &body,
+            )
+        }
+        Some(record) => {
+            let mut body = Vec::with_capacity(record.vector.len() * 4 + record.payload.len());
+            for value in &record.vector {
+                body.extend_from_slice(&value.to_le_bytes());
+            }
+            body.extend_from_slice(&record.payload);
+            wrap(
+                1,
+                collection,
+                sequence,
+                id,
+                record.vector.len() as u32,
+                record.payload.len() as u32,
+                &body,
+            )
+        }
+    }
+}
+
+/// Canonical batch-entry encoding shared by batch frames and import digests.
+pub(crate) fn encode_batch_entries(operations: &[Mutation], bytes: &mut Vec<u8>) {
     for operation in operations {
         match operation {
             Mutation::PutWithMetadata {
@@ -181,11 +447,195 @@ pub(crate) fn batch_frame(sequence: u64, operations: &[Mutation], body_bytes: us
             }
         }
     }
-    let checksum = crc32(&bytes);
-    bytes.extend_from_slice(b"VCMT");
-    bytes.extend_from_slice(&checksum.to_le_bytes());
-    bytes.extend_from_slice(&sequence.to_le_bytes());
+}
+
+pub(crate) fn batch_frame(sequence: u64, operations: &[Mutation], body_bytes: usize) -> Vec<u8> {
+    let mut body = Vec::with_capacity(body_bytes);
+    encode_batch_entries(operations, &mut body);
+    debug_assert_eq!(body.len(), body_bytes);
+    wrap(
+        3,
+        0,
+        sequence,
+        0,
+        operations.len() as u32,
+        body.len() as u32,
+        &body,
+    )
+}
+
+/// v4 batch frame for one collection, optionally ending with an import marker.
+pub(crate) fn batch_frame_v4(
+    sequence: u64,
+    collection: u16,
+    operations: &[Mutation],
+    marker: Option<&ImportMarker>,
+) -> Vec<u8> {
+    let mut body = Vec::new();
+    encode_batch_entries(operations, &mut body);
+    if let Some(marker) = marker {
+        body.extend_from_slice(&[8, 0, 0, 0]);
+        body.extend_from_slice(&marker.job.to_le_bytes());
+        body.extend_from_slice(&(marker.len() as u32).to_le_bytes());
+        body.extend_from_slice(&marker.encode());
+    }
+    let count = operations.len() + usize::from(marker.is_some());
+    wrap(
+        3,
+        collection,
+        sequence,
+        0,
+        count as u32,
+        body.len() as u32,
+        &body,
+    )
+}
+
+/// Full SHA-256 over the canonical batch-entry encoding of `operations`
+/// followed by one policy byte (REQ-009 exactly-once chunk identity).
+pub(crate) fn import_digest(operations: &[Mutation], policy: u8) -> [u8; 32] {
+    let mut bytes = Vec::new();
+    encode_batch_entries(operations, &mut bytes);
+    bytes.push(policy);
+    Sha256::digest(&bytes).into()
+}
+
+pub(crate) fn collection_create_frame(
+    sequence: u64,
+    id: u16,
+    name: &str,
+    dimensions: usize,
+    settings: &CollectionSettings,
+) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.push(name.len() as u8);
+    body.extend_from_slice(name.as_bytes());
+    body.extend_from_slice(&(dimensions as u32).to_le_bytes());
+    body.extend_from_slice(&encode_settings(settings));
+    wrap(5, 0, sequence, u64::from(id), 0, body.len() as u32, &body)
+}
+
+pub(crate) fn collection_drop_frame(sequence: u64, id: u16) -> Vec<u8> {
+    wrap(6, 0, sequence, u64::from(id), 0, 0, &[])
+}
+
+pub(crate) fn settings_frame(sequence: u64, id: u16, settings: &CollectionSettings) -> Vec<u8> {
+    let body = encode_settings(settings);
+    wrap(7, 0, sequence, u64::from(id), 0, body.len() as u32, &body)
+}
+
+fn metric_code(metric: DistanceMetric) -> u8 {
+    match metric {
+        DistanceMetric::SquaredL2 => 0,
+        DistanceMetric::Cosine => 1,
+        DistanceMetric::InnerProduct => 2,
+    }
+}
+
+/// Settings blob v1. Callers MUST validate settings first.
+pub(crate) fn encode_settings(settings: &CollectionSettings) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.push(metric_code(settings.metric));
+    bytes.extend_from_slice(&(settings.hnsw.m as u16).to_le_bytes());
+    bytes.extend_from_slice(&(settings.hnsw.ef_construction as u16).to_le_bytes());
+    bytes.extend_from_slice(&settings.hnsw.seed.to_le_bytes());
+    bytes.push(settings.quantization.code());
+    bytes.push(settings.rerank_multiplier);
+    bytes.extend_from_slice(&settings.planner.exact_max_candidates.to_le_bytes());
+    bytes.extend_from_slice(&settings.planner.exact_max_selectivity_ppm.to_le_bytes());
+    bytes.push(settings.metadata_indexes.len() as u8);
+    for spec in &settings.metadata_indexes {
+        bytes.push(spec.kind.code());
+        bytes.extend_from_slice(&(spec.field.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(spec.field.as_bytes());
+    }
+    bytes.push(settings.text_fields.len() as u8);
+    for field in &settings.text_fields {
+        bytes.extend_from_slice(&(field.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(field.as_bytes());
+    }
     bytes
+}
+
+/// Decodes and validates settings blob v1; errors are static reasons.
+pub(crate) fn decode_settings(
+    bytes: &[u8],
+) -> std::result::Result<CollectionSettings, &'static str> {
+    const TRUNCATED: &str = "truncated collection settings";
+    fn take<'a>(bytes: &mut &'a [u8], n: usize) -> std::result::Result<&'a [u8], &'static str> {
+        let value = bytes.get(..n).ok_or(TRUNCATED)?;
+        *bytes = &bytes[n..];
+        Ok(value)
+    }
+    fn field(bytes: &mut &[u8]) -> std::result::Result<String, &'static str> {
+        let length = u16_at(take(bytes, 2)?, 0) as usize;
+        let text = std::str::from_utf8(take(bytes, length)?)
+            .map_err(|_| "settings field names must be UTF-8")?;
+        Ok(text.to_owned())
+    }
+    if bytes.len() > MAX_SETTINGS_BLOB {
+        return Err("collection settings exceed 16384 bytes");
+    }
+    let mut rest = bytes;
+    if u16_at(take(&mut rest, 2)?, 0) != 1 {
+        return Err("unsupported collection settings version");
+    }
+    let metric = match take(&mut rest, 1)?[0] {
+        0 => DistanceMetric::SquaredL2,
+        1 => DistanceMetric::Cosine,
+        2 => DistanceMetric::InnerProduct,
+        _ => return Err("invalid collection settings metric"),
+    };
+    let fixed = take(&mut rest, 2 + 2 + 8)?;
+    let hnsw = HnswConfig {
+        m: usize::from(u16_at(fixed, 0)),
+        ef_construction: usize::from(u16_at(fixed, 2)),
+        seed: u64_at(fixed, 4),
+    };
+    let quantization = Quantization::from_code(take(&mut rest, 1)?[0])
+        .ok_or("invalid collection settings quantization")?;
+    let rerank_multiplier = take(&mut rest, 1)?[0];
+    let planner_bytes = take(&mut rest, 8)?;
+    let planner = PlannerPolicy {
+        exact_max_candidates: u32_at(planner_bytes, 0),
+        exact_max_selectivity_ppm: u32_at(planner_bytes, 4),
+    };
+    let index_count = usize::from(take(&mut rest, 1)?[0]);
+    if index_count > MAX_METADATA_INDEXES {
+        return Err("collection settings declare more than 16 metadata indexes");
+    }
+    let mut metadata_indexes = Vec::with_capacity(index_count);
+    for _ in 0..index_count {
+        let kind = MetadataIndexKind::from_code(take(&mut rest, 1)?[0])
+            .ok_or("invalid metadata index kind")?;
+        metadata_indexes.push(MetadataIndexSpec {
+            field: field(&mut rest)?,
+            kind,
+        });
+    }
+    let text_count = usize::from(take(&mut rest, 1)?[0]);
+    if text_count > MAX_TEXT_FIELDS {
+        return Err("collection settings declare more than 8 text fields");
+    }
+    let mut text_fields = Vec::with_capacity(text_count);
+    for _ in 0..text_count {
+        text_fields.push(field(&mut rest)?);
+    }
+    if !rest.is_empty() {
+        return Err("trailing collection settings bytes");
+    }
+    let settings = CollectionSettings {
+        metric,
+        hnsw,
+        quantization,
+        rerank_multiplier,
+        planner,
+        metadata_indexes,
+        text_fields,
+    };
+    settings.validate()?;
+    Ok(settings)
 }
 
 fn decode_vector(bytes: &[u8], offset: u64) -> Result<Vec<f32>> {
@@ -207,15 +657,18 @@ fn decode_batch(
     dimensions: usize,
     offset: u64,
     version: u32,
-) -> Result<Vec<Mutation>> {
+) -> Result<(Vec<Mutation>, Option<ImportMarker>)> {
     let mut operations = Vec::with_capacity(count);
+    let mut marker = None;
     let mut position = 0usize;
-    for _ in 0..count {
+    for index in 0..count {
         let entry = body
             .get(position..position + 16)
             .ok_or_else(|| corrupt(offset, "truncated batch entry header"))?;
         let operation = entry[0];
-        if !(matches!(operation, 1 | 2) || (operation == 4 && version >= 3))
+        if !(matches!(operation, 1 | 2)
+            || (operation == 4 && version >= 3)
+            || (operation == 8 && version >= V4))
             || entry[1..4] != [0; 3]
         {
             return Err(corrupt(
@@ -225,14 +678,39 @@ fn decode_batch(
         }
         let id = u64_at(entry, 4);
         let payload_len = u32_at(entry, 12) as usize;
-        if (operation != 4 && payload_len > MAX_PAYLOAD_BYTES)
+        if operation == 8 {
+            if index + 1 != count {
+                return Err(corrupt(
+                    offset,
+                    "import marker must be the last batch entry",
+                ));
+            }
+            if id == 0 || !matches!(payload_len, IMPORT_MARKER_LEN | IMPORT_SNAPSHOT_LEN) {
+                return Err(corrupt(offset, "invalid import marker job or length"));
+            }
+        }
+        if (matches!(operation, 1 | 2) && payload_len > MAX_PAYLOAD_BYTES)
             || (operation == 4 && payload_len > MAX_EXTENDED_BODY)
             || (operation == 2 && payload_len != 0)
         {
             return Err(corrupt(offset, "invalid batch entry payload length"));
         }
         position += 16;
-        if operation == 4 {
+        if operation == 8 {
+            let end = position + payload_len;
+            let data = body
+                .get(position..end)
+                .ok_or_else(|| corrupt(offset, "truncated import marker"))?;
+            let decoded = ImportMarker::decode(id, data);
+            if decoded.len() != payload_len {
+                return Err(corrupt(
+                    offset,
+                    "import marker length does not match its snapshot flag",
+                ));
+            }
+            marker = Some(decoded);
+            position = end;
+        } else if operation == 4 {
             let end = position + payload_len;
             let record = decode_extended(
                 body.get(position..end)
@@ -266,7 +744,119 @@ fn decode_batch(
     if position != body.len() {
         return Err(corrupt(offset, "extra bytes after batch entries"));
     }
-    Ok(operations)
+    // v4 prefixes admit one extra entry/76 bytes for a marker; data alone must
+    // still respect the ordinary batch limits.
+    let data_bytes = body.len() - marker.map_or(0, |marker| 16 + marker.len());
+    if operations.len() > MAX_BATCH_OPERATIONS || data_bytes > MAX_BATCH_BYTES {
+        return Err(corrupt(
+            offset,
+            "batch data exceeds operation or byte limits",
+        ));
+    }
+    Ok((operations, marker))
+}
+
+#[derive(Clone, Copy)]
+struct JobReplay {
+    collection: u16,
+    last_chunk: u64,
+    closed: bool,
+    rows_committed: u64,
+    rows_skipped: u64,
+}
+
+/// Validates one marker against per-job log state (contiguity and closure).
+fn replay_marker(
+    jobs: &mut HashMap<u64, JobReplay>,
+    collection: u16,
+    marker: &ImportMarker,
+    data_entries: usize,
+    offset: u64,
+) -> Result<()> {
+    if marker.flags & !(MARKER_FINISHED | MARKER_ABORTED | MARKER_SNAPSHOT) != 0
+        || marker.flags & (MARKER_FINISHED | MARKER_ABORTED) == (MARKER_FINISHED | MARKER_ABORTED)
+    {
+        return Err(corrupt(offset, "invalid import marker flags"));
+    }
+    let previous = jobs.get(&marker.job).copied();
+    if let Some(previous) = previous {
+        if previous.closed {
+            return Err(corrupt(offset, "import marker after job closed"));
+        }
+        if previous.collection != collection {
+            return Err(corrupt(offset, "import job collection mismatch"));
+        }
+    }
+    let last = previous.map_or(0, |job| job.last_chunk);
+    let closing = marker.flags & (MARKER_FINISHED | MARKER_ABORTED) != 0;
+    if marker.flags & MARKER_SNAPSHOT != 0 {
+        if previous.is_some() || closing || marker.chunk == 0 || data_entries != 0 {
+            return Err(corrupt(offset, "invalid import snapshot marker"));
+        }
+    } else if closing {
+        if marker.chunk != last
+            || data_entries != 0
+            || marker.rows_committed != 0
+            || marker.rows_skipped != 0
+            || marker.digest != [0; 32]
+        {
+            return Err(corrupt(offset, "invalid import finish or abort marker"));
+        }
+    } else if Some(marker.chunk) != last.checked_add(1) {
+        return Err(corrupt(offset, "non-contiguous import chunk number"));
+    } else if marker.rows_committed != data_entries as u64
+        || marker.rows_committed + marker.rows_skipped > MAX_BATCH_OPERATIONS as u64
+    {
+        return Err(corrupt(
+            offset,
+            "import marker row counts do not match chunk",
+        ));
+    }
+    // Cumulative counts are exact u64 values; overflow is corruption, never
+    // a silent clamp. (Close markers carry zero counts.)
+    let previous_committed = previous.map_or(0, |job| job.rows_committed);
+    let previous_skipped = previous.map_or(0, |job| job.rows_skipped);
+    let (Some(rows_committed), Some(rows_skipped)) = (
+        previous_committed.checked_add(marker.rows_committed),
+        previous_skipped.checked_add(marker.rows_skipped),
+    ) else {
+        return Err(corrupt(offset, "import row counts overflow"));
+    };
+    jobs.insert(
+        marker.job,
+        JobReplay {
+            collection,
+            last_chunk: marker.chunk,
+            closed: closing,
+            rows_committed,
+            rows_skipped,
+        },
+    );
+    Ok(())
+}
+
+fn decode_create(body: &[u8], offset: u64) -> Result<(String, usize, CollectionSettings)> {
+    let name_len = usize::from(
+        *body
+            .first()
+            .ok_or_else(|| corrupt(offset, "truncated collection create"))?,
+    );
+    let name = body
+        .get(1..1 + name_len)
+        .and_then(|name| std::str::from_utf8(name).ok())
+        .filter(|name| valid_collection_name(name) && *name != "default")
+        .ok_or_else(|| corrupt(offset, "invalid collection name"))?
+        .to_owned();
+    let dims = body
+        .get(1 + name_len..5 + name_len)
+        .ok_or_else(|| corrupt(offset, "truncated collection create"))?;
+    let dimensions = u32_at(dims, 0) as usize;
+    if !(1..=MAX_DIMENSIONS).contains(&dimensions) {
+        return Err(corrupt(offset, "invalid collection dimensions"));
+    }
+    let settings =
+        decode_settings(&body[5 + name_len..]).map_err(|reason| corrupt(offset, reason))?;
+    Ok((name, dimensions, settings))
 }
 
 pub(crate) fn load(file: &mut File) -> Result<Loaded> {
@@ -284,12 +874,24 @@ pub(crate) fn load(file: &mut File) -> Result<Loaded> {
         return Err(corrupt(0, "database header checksum mismatch"));
     }
     let version = u32_at(&bytes, 8);
-    if !matches!(version, 1..=3) {
+    if !matches!(version, 1..=V4) {
         return Err(Error::UnsupportedVersion(version));
     }
-    if bytes[16..28] != [0; 12] {
-        return Err(corrupt(0, "nonzero reserved database header bytes"));
-    }
+    let (lineage, collection_floor) = if version == V4 {
+        if bytes[26..28] != [0; 2] {
+            return Err(corrupt(0, "nonzero reserved database header bytes"));
+        }
+        let lineage = u64_at(&bytes, 16);
+        if lineage == 0 {
+            return Err(corrupt(0, "zero database lineage"));
+        }
+        (Some(lineage), u16_at(&bytes, 24))
+    } else {
+        if bytes[16..28] != [0; 12] {
+            return Err(corrupt(0, "nonzero reserved database header bytes"));
+        }
+        (None, 0)
+    };
     let dimensions = u32_at(&bytes, 12) as usize;
     if !(1..=MAX_DIMENSIONS).contains(&dimensions) {
         return Err(corrupt(0, "invalid database dimensions"));
@@ -297,11 +899,23 @@ pub(crate) fn load(file: &mut File) -> Result<Loaded> {
     let mut loaded = Loaded {
         version,
         dimensions,
-        records: BTreeMap::new(),
+        lineage,
+        collection_floor,
+        collection_high: collection_floor,
+        collections: BTreeMap::from([(
+            0,
+            LoadedCollection::new("default".into(), dimensions, CollectionSettings::default()),
+        )]),
+        imports: Vec::new(),
         sequence: 0,
         end: HEADER_SIZE,
         incomplete_bytes: 0,
     };
+    let mut jobs: HashMap<u64, JobReplay> = HashMap::new();
+    // Highest collection ID created by an op 5 in this log so far, and how
+    // many create frames were seen.
+    let mut created_high = 0u16;
+    let mut creates_seen = 0u64;
     while loaded.end < length {
         let offset = loaded.end;
         let remaining = length - offset;
@@ -324,16 +938,25 @@ pub(crate) fn load(file: &mut File) -> Result<Loaded> {
             return Err(corrupt(offset, "record header checksum mismatch"));
         }
         let operation = prefix[4];
-        if !(matches!(operation, 1 | 2)
-            || (operation == 3 && version >= 2)
-            || (operation == 4 && version >= 3))
-            || prefix[5..8] != [0; 3]
-        {
+        let allowed = match operation {
+            1 | 2 => true,
+            3 => version >= 2,
+            4 => version >= 3,
+            5..=7 => version >= V4,
+            _ => false,
+        };
+        let reserved_clear = if version >= V4 && operation <= 4 {
+            prefix[7] == 0
+        } else {
+            prefix[5..8] == [0; 3]
+        };
+        if !allowed || !reserved_clear {
             return Err(corrupt(
                 offset,
                 "invalid operation or reserved record bytes",
             ));
         }
+        let collection_id = u16_at(&prefix, 5);
         let sequence = u64_at(&prefix, 8);
         if loaded.sequence.checked_add(1) != Some(sequence) {
             return Err(corrupt(offset, "non-contiguous commit sequence"));
@@ -341,10 +964,27 @@ pub(crate) fn load(file: &mut File) -> Result<Loaded> {
         let id = u64_at(&prefix, 16);
         let count = u32_at(&prefix, 24) as usize;
         let payload_len = u32_at(&prefix, 28) as usize;
+        let target_dimensions = if operation <= 4 {
+            loaded
+                .collections
+                .get(&collection_id)
+                .ok_or_else(|| corrupt(offset, "record references unknown collection"))?
+                .dimensions
+        } else {
+            0
+        };
         let body_len = if operation == 3 {
+            let (max_count, max_bytes) = if version >= V4 {
+                (
+                    MAX_BATCH_OPERATIONS + 1,
+                    MAX_BATCH_BYTES + IMPORT_SNAPSHOT_ENTRY,
+                )
+            } else {
+                (MAX_BATCH_OPERATIONS, MAX_BATCH_BYTES)
+            };
             if id != 0
-                || !(1..=MAX_BATCH_OPERATIONS).contains(&count)
-                || payload_len > MAX_BATCH_BYTES
+                || !(1..=max_count).contains(&count)
+                || payload_len > max_bytes
                 || payload_len < count * 16
             {
                 return Err(corrupt(
@@ -354,15 +994,27 @@ pub(crate) fn load(file: &mut File) -> Result<Loaded> {
             }
             payload_len
         } else if operation == 4 {
-            if count != dimensions
+            if count != target_dimensions
                 || payload_len > MAX_EXTENDED_BODY
-                || payload_len < dimensions * 4 + 8
+                || payload_len < target_dimensions * 4 + 8
             {
                 return Err(corrupt(offset, "invalid extended record length"));
             }
             payload_len
+        } else if operation >= 5 {
+            let valid = count == 0
+                && id <= u64::from(u16::MAX)
+                && match operation {
+                    5 => id != 0 && (6..=MAX_CREATE_BODY).contains(&payload_len),
+                    6 => id != 0 && payload_len == 0,
+                    _ => payload_len <= MAX_SETTINGS_BLOB,
+                };
+            if !valid {
+                return Err(corrupt(offset, "invalid collection frame fields"));
+            }
+            payload_len
         } else {
-            if (operation == 1 && count != dimensions)
+            if (operation == 1 && count != target_dimensions)
                 || (operation == 2 && (count != 0 || payload_len != 0))
                 || payload_len > MAX_PAYLOAD_BYTES
             {
@@ -386,68 +1038,138 @@ pub(crate) fn load(file: &mut File) -> Result<Loaded> {
         {
             return Err(corrupt(offset, "commit footer or record checksum mismatch"));
         }
-        if operation == 1 {
-            let vector = decode_vector(&frame[PREFIX_SIZE..PREFIX_SIZE + count * 4], offset)?;
-            let payload = frame[PREFIX_SIZE + count * 4..].to_vec();
-            loaded.records.insert(
-                id,
-                Record {
+        let body = &frame[PREFIX_SIZE..];
+        match operation {
+            1 => {
+                let vector = decode_vector(&body[..count * 4], offset)?;
+                let record = Record {
                     vector,
-                    payload,
+                    payload: body[count * 4..].to_vec(),
                     metadata: crate::Metadata::new(),
-                },
-            );
-        } else if operation == 4 {
-            loaded.records.insert(
-                id,
-                decode_extended(&frame[PREFIX_SIZE..], dimensions, offset)?,
-            );
-        } else if operation == 2 {
-            loaded.records.remove(&id);
-        } else {
-            let operations =
-                decode_batch(&frame[PREFIX_SIZE..], count, dimensions, offset, version)?;
-            for operation in operations {
-                match operation {
-                    Mutation::Put {
-                        id,
-                        vector,
-                        payload,
-                    } => {
-                        loaded.records.insert(
+                };
+                collection_mut(&mut loaded, collection_id).put(id, record, sequence);
+            }
+            4 => {
+                let record = decode_extended(body, target_dimensions, offset)?;
+                collection_mut(&mut loaded, collection_id).put(id, record, sequence);
+            }
+            2 => collection_mut(&mut loaded, collection_id).delete(id),
+            3 => {
+                let (operations, marker) =
+                    decode_batch(body, count, target_dimensions, offset, version)?;
+                if let Some(marker) = &marker {
+                    replay_marker(&mut jobs, collection_id, marker, operations.len(), offset)?;
+                }
+                let collection = collection_mut(&mut loaded, collection_id);
+                for operation in operations {
+                    match operation {
+                        Mutation::Put {
+                            id,
+                            vector,
+                            payload,
+                        } => collection.put(
                             id,
                             Record {
                                 vector,
                                 payload,
                                 metadata: crate::Metadata::new(),
                             },
-                        );
-                    }
-                    Mutation::PutWithMetadata {
-                        id,
-                        vector,
-                        payload,
-                        metadata,
-                    } => {
-                        loaded.records.insert(
+                            sequence,
+                        ),
+                        Mutation::PutWithMetadata {
+                            id,
+                            vector,
+                            payload,
+                            metadata,
+                        } => collection.put(
                             id,
                             Record {
                                 vector,
                                 payload,
                                 metadata,
                             },
-                        );
-                    }
-                    Mutation::Delete { id } => {
-                        loaded.records.remove(&id);
+                            sequence,
+                        ),
+                        Mutation::Delete { id } => collection.delete(id),
                     }
                 }
+                if let Some(marker) = marker {
+                    loaded.imports.push(LoadedImportMarker::Marker {
+                        collection: collection_id,
+                        name: loaded.collections[&collection_id].name.clone(),
+                        marker,
+                    });
+                }
+            }
+            5 => {
+                let collection = id as u16;
+                let (name, dimensions, settings) = decode_create(body, offset)?;
+                // Collection IDs are never reused within a lineage history:
+                // creates are strictly increasing, and an ID at or below the
+                // header floor is only valid in the leading run of create
+                // frames that compaction/upgrade write to restate live
+                // collections (every frame so far is such a create).
+                let restating = creates_seen == loaded.sequence;
+                if collection <= created_high
+                    || (collection <= loaded.collection_floor && !restating)
+                {
+                    return Err(corrupt(offset, "collection ID reused"));
+                }
+                if loaded.collections.contains_key(&collection) {
+                    return Err(corrupt(offset, "collection ID already in use"));
+                }
+                if loaded.collections.values().any(|c| c.name == name) {
+                    return Err(corrupt(offset, "duplicate collection name"));
+                }
+                if loaded.collections.len() >= MAX_COLLECTIONS {
+                    return Err(corrupt(offset, "too many live collections"));
+                }
+                let mut created = LoadedCollection::new(name, dimensions, settings);
+                created.settings_persisted = true;
+                loaded.collections.insert(collection, created);
+                created_high = collection;
+                creates_seen += 1;
+                loaded.collection_high = loaded.collection_high.max(collection);
+            }
+            6 => {
+                let collection = id as u16;
+                let existing = loaded
+                    .collections
+                    .get(&collection)
+                    .ok_or_else(|| corrupt(offset, "drop of unknown collection"))?;
+                if !existing.records.is_empty()
+                    || jobs
+                        .values()
+                        .any(|job| job.collection == collection && !job.closed)
+                {
+                    return Err(corrupt(offset, "drop of non-empty collection"));
+                }
+                loaded.collections.remove(&collection);
+                loaded
+                    .imports
+                    .push(LoadedImportMarker::CollectionDropped(collection));
+            }
+            _ => {
+                let settings = decode_settings(body).map_err(|reason| corrupt(offset, reason))?;
+                let collection = loaded
+                    .collections
+                    .get_mut(&(id as u16))
+                    .ok_or_else(|| corrupt(offset, "settings for unknown collection"))?;
+                collection.settings = settings;
+                collection.settings_persisted = true;
             }
         }
         loaded.sequence = sequence;
         loaded.end += frame_len;
     }
     Ok(loaded)
+}
+
+fn collection_mut(loaded: &mut Loaded, id: u16) -> &mut LoadedCollection {
+    loaded
+        .collections
+        .get_mut(&id)
+        .expect("collection existence checked before decoding")
 }
 
 #[cfg(test)]

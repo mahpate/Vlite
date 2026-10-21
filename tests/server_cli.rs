@@ -218,3 +218,74 @@ fn startup_never_overwrites_repairs_or_silently_changes_dimensions() {
     );
     assert_eq!(std::fs::read(path).unwrap(), b"corrupt; never replace");
 }
+
+#[test]
+fn create_format_selects_v4_and_invalid_operational_options_fail_before_creation() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("v4.vlite");
+    assert!(
+        fails(&path, &["--create-format", "5", "--create-if-missing", "2"])
+            .contains("create-format")
+    );
+    assert!(fails(&path, &["--create-format", "4"]).contains("--create-if-missing"));
+    let output = Command::new(env!("CARGO_BIN_EXE_vlite-server"))
+        .arg(&path)
+        .args([
+            "--insecure-local",
+            "--create-if-missing",
+            "2",
+            "--bind",
+            "127.0.0.1:0",
+        ])
+        .env_remove("VLITE_AUTH_TOKEN")
+        .env_remove("VLITE_AUTH_TOKEN_FILE")
+        .env("VLITE_BACKUP_INTERVAL_SECS", "3600")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("admin directory"),
+        "{output:?}"
+    );
+    assert!(!path.exists());
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_vlite-server"));
+    command
+        .arg(&path)
+        .args([
+            "--create-if-missing",
+            "2",
+            "--create-format",
+            "4",
+            "--bind",
+            "127.0.0.1:0",
+        ])
+        .env_remove("VLITE_AUTH_TOKEN_FILE")
+        .env("VLITE_AUTH_TOKEN", TOKEN);
+    let mut child = command.stdout(Stdio::piped()).spawn().unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let server = Server {
+        child,
+        address: line
+            .trim()
+            .strip_prefix("LISTENING http://")
+            .unwrap()
+            .to_owned(),
+    };
+    let (status, created) = server.request(
+        "POST",
+        "/v1/collections",
+        json!({"name":"docs","dimensions":3}),
+    );
+    assert_eq!(status, 201, "{created}");
+    assert_eq!(
+        server.request("GET", "/v1/capabilities", Value::Null).1["format_version"],
+        4
+    );
+    drop(server);
+    let db = vlite::Database::open(&path).unwrap();
+    assert_eq!(db.format_version(), 4);
+}

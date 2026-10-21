@@ -53,3 +53,101 @@ assert.ok(Math.abs(axes[0].y) < 1e-6);
 assert.throws(() => pca([items[0]]));
 assert.throws(() => pca([{ id: "1", vector: Array(257).fill(1) }, { id: "2", vector: Array(257).fill(2) }]));
 console.log("PASS console helpers: u64/i64, dimensions, typed metadata, CSV round-trip/quoting, distances, sample quality and PCA bounds");
+// ---- EPIC-015 helpers ----
+const u = window.VLiteTools.utils;
+// Collection routing: default keeps legacy routes; names are validated before any path is built.
+assert.equal(u.collectionPath("default", "/vectors/1"), "/v1/vectors/1");
+assert.equal(u.collectionPath("docs_v2", "/search"), "/v1/collections/docs_v2/search");
+for (const bad of ["", "Docs", "1docs", "a/b", "a".repeat(64), "../x", "a?b"]) assert.throws(() => u.collectionPath(bad, "/search"));
+assert.throws(() => u.collectionPath("docs", "search"));
+// Settings bounds (partial objects; unknown fields refused).
+assert.deepEqual(u.settings({}), {});
+u.settings({ metric: "cosine", hnsw: { m: 16, ef_construction: 100, seed: "42" }, quantization: "scalar_u8", rerank_multiplier: 16,
+  planner: { exact_max_candidates: 1000, exact_max_selectivity_ppm: 0 }, metadata_indexes: [{ field: "year", kind: "range" }], text_fields: ["title"] });
+for (const bad of [{ token: "x" }, { metric: "l1" }, { rerank_multiplier: 17 }, { quantization: "pq" }, { hnsw: { m: 1, ef_construction: 1, seed: "1" } },
+  { metadata_indexes: [{ field: "a", kind: "eq" }, { field: "a", kind: "range" }] }, { text_fields: Array(9).fill("t").map((v, i) => v + i) }]) assert.throws(() => u.settings(bad));
+// Score direction is explicit per mode.
+assert.equal(u.scoreDirection("hybrid", "cosine").better, "higher");
+for (const mode of ["exact", "approximate", "approximate_ready", "auto"]) assert.equal(u.scoreDirection(mode, "cosine").better, "lower");
+// Redaction: credential fields and scoped tokens never reach display/export surfaces.
+const tokenValue = "vlk_abcdefghijk2_" + "S".repeat(43);
+const redacted = u.redact({ token: tokenValue, credential: { id: "abcdefghijk2", name: "ci" }, nested: [{ Authorization: "Bearer x", refresh_token: "y" }], message: `bad ${tokenValue} here`, enabled: true });
+assert.equal(redacted.token, "[redacted]");
+assert.equal(redacted.nested[0].Authorization, "[redacted]");
+assert.equal(redacted.nested[0].refresh_token, "[redacted]");
+assert.equal(redacted.credential.id, "abcdefghijk2");
+assert.ok(!JSON.stringify(redacted).includes("S".repeat(20)));
+assert.equal(u.redact(`HTTP 401: ${tokenValue}`), "HTTP 401: [redacted credential]");
+const masked = u.maskSecret(tokenValue);
+assert.ok(masked.startsWith("vlk_abcdefghijk2_") && !masked.includes("SSSS") && masked.includes("43-character"));
+assert.ok(!u.maskSecret("plain-secret-value").includes("plain"));
+// Credential requests: bounded expiry, known operations, validated scope, `name` not `label`.
+const now = 1700000000000;
+assert.deepEqual(u.credentialRequest({ collections: "docs, default", operations: ["read", "search", "read"], days: "30", name: "ci" }, now),
+  { collections: ["docs", "default"], operations: ["read", "search"], expires_unix_ms: now + 30 * 86400000, name: "ci" });
+assert.deepEqual(u.credentialRequest({ collections: "*", operations: ["backup"], days: 1, name: "ops" }, now).collections, ["*"]);
+for (const bad of [{ days: 0 }, { days: 366 }, { operations: [] }, { operations: ["admin"] }, { collections: "" }, { collections: "Bad" }, { collections: "a,a" }, { name: "x".repeat(65) }, { name: "" }])
+  assert.throws(() => u.credentialRequest({ collections: "docs", operations: ["read"], days: 30, name: "ci", ...bad }, now));
+assert.equal(u.graceSeconds("86400"), 86400);
+assert.throws(() => u.graceSeconds(-1));
+// Import parsing and deterministic chunking.
+const rows = u.importRows("rows.ndjson", '{"id":"1","vector":[1,0]}\n\n{"id":"2","vector":[0,1],"metadata":{"a":{"type":"string","value":"x"}}}\n');
+assert.deepEqual(rows, [{ op: "put", id: "1", vector: [1, 0] }, { op: "put", id: "2", vector: [0, 1], metadata: { a: { type: "string", value: "x" } } }]);
+assert.equal(u.importRows("rows.json", '[{"id":"3","vector":[1]}]')[0].id, "3");
+assert.equal(u.importRows("rows.csv", 'id,vector\n4,"[1,2]"')[0].id, "4");
+assert.throws(() => u.importRows("rows.json", '[{"id":"1","vector":[1],"token":"x"}]'));
+assert.throws(() => u.importRows("rows.jsonl", '{"id":"01","vector":[1]}'));
+assert.throws(() => u.importRows("rows.json", "[]"));
+const many = Array.from({ length: 10 }, (_, i) => ({ op: "put", id: String(i), vector: [i] }));
+const chunks = u.chunk(many, 4);
+assert.deepEqual(chunks.map((c) => c.length), [4, 4, 2]);
+assert.deepEqual(JSON.stringify(u.chunk(many, 4)), JSON.stringify(chunks));
+assert.throws(() => u.chunk(many, 0));
+assert.throws(() => u.chunk(many, 4097));
+// Resume decisions come only from durable server status.
+assert.equal(u.resumePlan({ state: "open", last_chunk: 0 }, 3).next, 1);
+assert.equal(u.resumePlan({ state: "open", last_chunk: 0 }, 3).verify, null);
+const middle = u.resumePlan({ state: "open", last_chunk: "2" }, 3);
+assert.deepEqual([middle.action, middle.verify, middle.next], ["continue", 2, 3]);
+assert.equal(u.resumePlan({ state: "open", last_chunk: 3 }, 3).action, "finish");
+assert.equal(u.resumePlan({ state: "open", last_chunk: 4 }, 3).action, "mismatch");
+assert.equal(u.resumePlan({ state: "aborted", last_chunk: 2 }, 3).action, "closed");
+assert.match(u.resumePlan({ state: "aborted", last_chunk: 2 }, 3).message, /retained/);
+assert.throws(() => u.resumePlan({ state: "weird", last_chunk: 0 }, 3));
+assert.throws(() => u.resumePlan(null, 3));
+// Saved query v2 is collection-bound and refuses credentials or another collection.
+const v2 = { version: 2, name: "hybrid", collection: "docs", query: { vector: null, text: "vector database", k: 5, mode: "hybrid", metric: "cosine", ef_search: 64,
+  filter: [], config: { m: 16, ef_construction: 100, seed: "42" }, explain: true, quantization: "none", rerank_multiplier: 4, vector_leg: "exact",
+  fusion: { rrf_k: 60, vector_weight: 1, text_weight: 0.5, candidates: 100 } } };
+assert.deepEqual(u.savedQueryV2(v2, 2, "docs"), v2);
+assert.throws(() => u.savedQueryV2(v2, 2, "default"), /belongs to collection/);
+assert.throws(() => u.savedQueryV2({ ...v2, token: "x" }, 2, "docs"));
+assert.throws(() => u.savedQueryV2({ ...v2, query: { ...v2.query, text: "" } }, 2, "docs"));
+assert.throws(() => u.savedQueryV2({ ...v2, query: { ...v2.query, mode: "exact" } }, 2, "docs"));
+assert.throws(() => u.savedQueryV2({ ...v2, query: { ...v2.query, fusion: { ...v2.query.fusion, rrf_k: 0 } } }, 2, "docs"));
+u.savedQueryV2({ ...v2, query: { ...v2.query, vector: [1, 0], mode: "auto" } }, 2, "docs");
+assert.throws(() => u.savedQueryV2({ ...v2, query: { ...v2.query, vector: [1, 0, 0], mode: "auto" } }, 2, "docs"));
+// Scheduler bodies: partial merges with server bounds; GET interval_ms maps to PUT interval_secs.
+assert.deepEqual(u.autoMaintenance({ enabled: false }), { enabled: false });
+u.autoMaintenance({ enabled: true, interval_secs: 60, stale_ratio: 0.2, rebuild_on_low_recall: false, min_recall: 0.9, quality_samples: 8, limits: {} });
+for (const bad of [{}, { interval_secs: 9 }, { interval_secs: 3601 }, { stale_ratio: 0 }, { stale_ratio: 1.5 }, { enabled: "yes" }, { quality_samples: 33 }, { extra: 1 }, { limits: [] }])
+  assert.throws(() => u.autoMaintenance(bad));
+assert.deepEqual(u.autoMaintenanceForm({ enabled: false, interval_ms: 60000, stale_ratio: 0.2, rebuild_on_low_recall: false, min_recall: 0.9, quality_samples: 8, limits: { x: 1 } }),
+  { enabled: false, stale_ratio: 0.2, rebuild_on_low_recall: false, min_recall: 0.9, quality_samples: 8, interval_secs: 60 });
+u.backupSchedule({ enabled: false, interval_secs: 86400, retain_last: 7, retain_days: 0, retention_enabled: false, drill_every: 1, drill_max_bytes: 4294967296 });
+u.backupSchedule({ retention_enabled: true });
+for (const bad of [{}, { interval_secs: 299 }, { retain_last: 0 }, { retain_days: 3651 }, { drill_every: 101 }, { drill_max_bytes: 0 }, { retention_enabled: 1 }, { token: "x" }])
+  assert.throws(() => u.backupSchedule(bad));
+// Memory display: only *_bytes components plus their sum (graph_nodes is a count), never presented as process memory.
+const memory = u.memoryRows({ memory: { graph_nodes: 9, graph_link_bytes: 100, code_bytes: 20, codebook_bytes: 8, buffer_vector_bytes: 0, resident_vector_bytes: 400 } });
+assert.equal(memory.length, 6);
+assert.deepEqual(memory.at(-1), ["sum of listed components (not process memory)", 528]);
+assert.deepEqual(u.memoryRows({ memory: null }), []);
+// Playground allowlist: collection routes allowed; credential minting and foreign paths are not.
+assert.ok(u.requestAllowed("GET", "/v1/collections/docs/vectors/5"));
+assert.ok(u.requestAllowed("POST", "/v1/collections/docs/search"));
+assert.ok(u.requestAllowed("GET", "/v1/admin/credentials"));
+for (const [method, path] of [["POST", "/v1/admin/credentials"], ["POST", "/v1/admin/credentials/abc/rotate"], ["GET", "//evil.example/v1/database"],
+  ["GET", "/v1/collections/Docs"], ["DELETE", "/v1/collections/docs"], ["GET", "/v1/vectors?limit=1"], ["PUT", "/v1/collections/docs/settings"]]) assert.ok(!u.requestAllowed(method, path), `${method} ${path}`);
+assert.ok(u.isSearch("/v1/search") && u.isSearch("/v1/collections/a/search") && !u.isSearch("/v1/collections/a/searchx"));
+console.log("PASS EPIC-015 console helpers: collection routing, settings bounds, score direction, secret redaction/masking, credential requests, import parsing/chunking/resume, saved query v2, scheduler bodies, memory rows, playground allowlist");

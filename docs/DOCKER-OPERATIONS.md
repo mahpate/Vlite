@@ -61,6 +61,23 @@ permissions. The API token is mounted from `.secrets/api-token` as a Docker
 secret. No read-only token is required by default. An optional
 `VLITE_READ_ONLY_TOKEN` can be passed from the host environment.
 
+### Advanced capabilities and format upgrades
+
+New collection, hybrid and resumable-import features require opt-in format v4.
+The default server creation format remains v3. Deploying a newer image does not
+upgrade an existing volume. Use the offline copy-out upgrade procedure in
+[CAPABILITIES.md](CAPABILITIES.md), verify the new copy, and explicitly select it
+only during an operator-controlled maintenance window. Never overwrite the
+active file or remove the original recovery copy.
+
+Automatic index maintenance and scheduled backups are disabled by default.
+Admin runtime configuration is process-local and must be reapplied after
+restart; backup manifests, scoped credentials and durable audit live in the
+private admin volume. Retention deletion has a separate opt-in switch. Protect
+both volumes and keep an independent backup: the admin volume is not an off-host
+disaster-recovery copy. Scoped credentials must be reissued after selecting a
+compacted, upgraded or restored file because its lineage changes.
+
 To use a separate read-only token file, create an untracked Compose override
 such as `compose.read-only-token.yaml` and keep the token file private:
 

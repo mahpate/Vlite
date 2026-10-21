@@ -9,8 +9,9 @@ use std::{
 };
 
 use crate::{
-    DistanceMetric, Error, HnswConfig, MAX_HNSW_BUFFER_IDS, MAX_HNSW_BUFFER_VECTOR_BYTES, Record,
-    Result, hnsw::Index,
+    AnnOptions, DistanceMetric, Error, HnswConfig, MAX_HNSW_BUFFER_IDS,
+    MAX_HNSW_BUFFER_VECTOR_BYTES, Quantization, Record, Result,
+    hnsw::{Index, QuantizedSnapshot},
 };
 
 /// Explicit caller-driven high-water policy. No timers or hidden retries.
@@ -124,15 +125,32 @@ impl Default for HnswRebuildLimits {
 }
 
 impl HnswRebuildLimits {
+    /// f32 snapshot: `records × dimensions × 4` bytes count against the limit.
     pub(crate) fn validate(self, records: usize, dimensions: usize) -> Result<()> {
+        self.validate_snapshot(records, dimensions.checked_mul(4))
+    }
+
+    /// Snapshot for `options`: f32 vectors (4 bytes per component) or, for
+    /// ScalarU8, u8 codes (1 byte per component) count against the limit.
+    pub(crate) fn validate_for(
+        self,
+        records: usize,
+        dimensions: usize,
+        options: AnnOptions,
+    ) -> Result<()> {
+        match options.quantization {
+            Quantization::None => self.validate(records, dimensions),
+            Quantization::ScalarU8 => self.validate_snapshot(records, Some(dimensions)),
+        }
+    }
+
+    fn validate_snapshot(self, records: usize, record_bytes: Option<usize>) -> Result<()> {
         if !(1..=1_000_000).contains(&self.max_records)
             || !(1..=256 * 1024 * 1024).contains(&self.max_snapshot_vector_bytes)
         {
             return Err(Error::InvalidHnswRebuildLimits);
         }
-        let bytes = records
-            .checked_mul(dimensions)
-            .and_then(|n| n.checked_mul(4));
+        let bytes = record_bytes.and_then(|n| records.checked_mul(n));
         if records > self.max_records || bytes.is_none_or(|n| n > self.max_snapshot_vector_bytes) {
             return Err(Error::HnswRebuildTooLarge);
         }
@@ -159,49 +177,74 @@ pub(crate) struct Job {
     changes: Option<Index>,
     config: HnswConfig,
     metric: DistanceMetric,
+    options: AnnOptions,
     snapshot_records: usize,
     processed: Arc<AtomicUsize>,
 }
 
 impl Job {
+    /// Copies a snapshot synchronously, then builds on one owned thread.
+    ///
+    /// Unquantized snapshots copy f32 vectors; ScalarU8 snapshots are trained
+    /// and encoded here and hold only IDs and u8 codes. Neither copies
+    /// payloads or metadata.
     pub fn start(
         records: &BTreeMap<u64, Record>,
         config: HnswConfig,
         metric: DistanceMetric,
+        options: AnnOptions,
     ) -> Result<Self> {
-        // Do not copy opaque payloads or metadata into the worker.
-        let snapshot = records
-            .iter()
-            .map(|(&id, record)| {
-                (
-                    id,
-                    Record {
-                        vector: record.vector.clone(),
-                        payload: Vec::new(),
-                        metadata: BTreeMap::new(),
-                    },
-                )
-            })
-            .collect();
+        enum Snapshot {
+            Vectors(BTreeMap<u64, Record>),
+            Codes(QuantizedSnapshot),
+        }
+        let snapshot = match options.quantization {
+            Quantization::ScalarU8 => Snapshot::Codes(QuantizedSnapshot::encode(records, metric)),
+            Quantization::None => Snapshot::Vectors(
+                records
+                    .iter()
+                    .map(|(&id, record)| {
+                        (
+                            id,
+                            Record {
+                                vector: record.vector.clone(),
+                                payload: Vec::new(),
+                                metadata: BTreeMap::new(),
+                            },
+                        )
+                    })
+                    .collect(),
+            ),
+        };
         let cancel = Arc::new(AtomicBool::new(false));
         let stop = Arc::clone(&cancel);
         let processed = Arc::new(AtomicUsize::new(0));
         let progress = Arc::clone(&processed);
         let worker = thread::Builder::new()
             .name("vlite-hnsw-rebuild".into())
-            .spawn(move || {
-                Index::build_with_progress(&snapshot, config, metric, &stop, &progress)
+            .spawn(move || match snapshot {
+                Snapshot::Vectors(records) => {
+                    Index::build_with_progress(&records, config, metric, options, &stop, &progress)
+                }
+                Snapshot::Codes(codes) => {
+                    Index::build_quantized(codes, config, metric, options, &stop, &progress)
+                }
             })?;
         Ok(Self {
             worker: Some(worker),
             cancel,
             terminal: None,
-            changes: Some(Index::build(&BTreeMap::new(), config, metric)),
+            changes: Some(Index::build(&BTreeMap::new(), config, metric, options)),
             config,
             metric,
+            options,
             snapshot_records: records.len(),
             processed,
         })
+    }
+
+    pub fn options(&self) -> AnnOptions {
+        self.options
     }
 
     pub fn progress(&self) -> HnswRebuildProgress {
@@ -290,9 +333,11 @@ mod tests {
                 &BTreeMap::new(),
                 HnswConfig::default(),
                 DistanceMetric::SquaredL2,
+                AnnOptions::default(),
             )),
             config: HnswConfig::default(),
             metric: DistanceMetric::SquaredL2,
+            options: AnnOptions::default(),
             snapshot_records: 0,
             processed: Arc::new(AtomicUsize::new(0)),
         }
@@ -304,9 +349,9 @@ mod tests {
         let mut db = Database::create(directory.path().join("data.vlite"), 2).unwrap();
         db.put(1, &[1.0, 2.0], b"").unwrap();
         db.build_hnsw(HnswConfig::default()).unwrap();
-        db.rebuild = Some(failed_job());
+        db.rebuild = Some((0, failed_job()));
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !db.rebuild.as_ref().unwrap().finished() {
+        while !db.rebuild.as_ref().unwrap().1.finished() {
             assert!(Instant::now() < deadline);
             thread::yield_now();
         }
@@ -322,7 +367,7 @@ mod tests {
             1
         );
         db.put(2, &[2.0, 3.0], b"still writable").unwrap();
-        db.rebuild = Some(failed_job());
+        db.rebuild = Some((0, failed_job()));
         assert!(matches!(db.close(), Err(Error::HnswRebuildFailed)));
     }
 
@@ -332,6 +377,7 @@ mod tests {
             &BTreeMap::new(),
             HnswConfig::default(),
             DistanceMetric::SquaredL2,
+            AnnOptions::default(),
         )
         .unwrap();
         let record = Record {
@@ -361,6 +407,7 @@ mod tests {
                 &BTreeMap::new(),
                 HnswConfig::default(),
                 DistanceMetric::Cosine,
+                AnnOptions::default(),
                 &AtomicBool::new(true)
             )
             .is_none()
@@ -416,7 +463,7 @@ mod tests {
             ),
             Err(Error::Poisoned)
         ));
-        assert!(db.index.is_none());
+        assert!(db.default_state().index.is_none());
         assert!(matches!(db.close(), Err(Error::Poisoned)));
     }
 }

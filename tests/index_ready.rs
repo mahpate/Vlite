@@ -179,8 +179,20 @@ mod rest {
             .1;
         assert!(contract["paths"]["/v1/index/hnsw"]["post"]["responses"]["204"].is_object());
         assert!(contract["paths"]["/v1/search"]["post"]["responses"]["409"].is_object());
-        assert!(contract["paths"]["/v1/search"]["post"]["requestBody"]["content"]["application/json"]["schema"]["properties"]["mode"]["enum"]
-            .as_array().unwrap().contains(&json!("approximate_ready")));
+        let mut schema = &contract["paths"]["/v1/search"]["post"]["requestBody"]["content"]["application/json"]
+            ["schema"];
+        if let Some(name) = schema["$ref"]
+            .as_str()
+            .and_then(|r| r.strip_prefix("#/components/schemas/"))
+        {
+            schema = &contract["components"]["schemas"][name];
+        }
+        assert!(
+            schema["properties"]["mode"]["enum"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("approximate_ready"))
+        );
         for body in [json!({"m":8}), Value::Null, json!([])] {
             assert_eq!(
                 request(&app, "POST", "/v1/index/hnsw", body, true).await.0,

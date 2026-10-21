@@ -11,7 +11,9 @@
 extern "C" {
 #endif
 
-/* ABI major version 1. JSON fields have their own documented v1 contract. */
+/* ABI major version 1. JSON fields have their own documented v1 contract;
+   format-4 collections, revisions, planned/hybrid search, ANN quality and
+   resumable imports are additive v1 operations (see bindings/README.md). */
 VLITE_API uint32_t vlite_abi_version(void);
 /* Input is borrowed for the call; output must be freed with this library.
    handle=0 for create/open. Handles belong to this loaded library/process.
