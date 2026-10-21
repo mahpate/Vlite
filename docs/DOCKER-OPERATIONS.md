@@ -1,0 +1,172 @@
+# VLite Docker operations
+
+VLite publishes versioned Linux `amd64` and `arm64` images to GitHub Container
+Registry through the release workflow when a matching version tag is released:
+
+| Image | Purpose |
+| --- | --- |
+| `ghcr.io/mahpate/vlite-api:<version>` | REST API server |
+| `ghcr.io/mahpate/vlite-dashboard:<version>` | Standalone browser UI and same-origin API proxy |
+| `ghcr.io/mahpate/vlite:<version>` | Smoke, maintenance, and benchmark tools; retains the `vlite-smoke` entrypoint |
+
+Use the same version for the API and dashboard. The multi-platform image
+manifests select the host architecture automatically. Releases also publish
+digest references in their notes; pinning those digests gives an immutable
+deployment.
+
+## First deployment
+
+Run Docker Engine with Linux containers and Docker Compose v2. These commands
+are suitable for Docker running inside WSL; run them from the repository in
+the same WSL distribution that owns the Docker engine. The default published
+ports are loopback-only: API `127.0.0.1:18084` and UI `127.0.0.1:8081`.
+
+Create the API bearer-token file once. Do not check `.secrets` into source
+control:
+
+```sh
+mkdir -p .secrets
+chmod 700 .secrets
+umask 077
+python3 -c 'import secrets; print(secrets.token_urlsafe(32))' > .secrets/api-token
+chmod 644 .secrets/api-token
+```
+
+The directory remains private; the file must be readable by container UID
+`10001` through its read-only secret mount. Do not use an existing token file
+with this creation command: it replaces the credential.
+
+Select a published release and start both services. Replace the example
+version with a release that exists in GHCR:
+
+```sh
+export VLITE_API_IMAGE=ghcr.io/mahpate/vlite-api:vX.Y.Z
+export VLITE_DASHBOARD_IMAGE=ghcr.io/mahpate/vlite-dashboard:vX.Y.Z
+docker compose --profile dashboard up -d --no-build api dashboard
+docker compose ps
+```
+
+Open <http://localhost:8081>, enter the API token, and connect. The UI sends
+requests to its own `/api/` origin; Nginx forwards them to the API container
+over the private Compose network. The API is not exposed beyond loopback by
+default. Set `VLITE_PORT` or `VLITE_DASHBOARD_PORT` to change the host-side
+port while retaining the loopback bind.
+
+The `api` service persists its database in the Compose-managed `api-data`
+volume and its administrative snapshots/state in the separate
+`api-admin-data` volume mounted at `/admin`. `VLITE_ADMIN_DIR=/admin` is
+configured in Compose. The image prepares `/admin` as UID/GID `10001`, which
+also initializes the named volume with the service user's writable
+permissions. The API token is mounted from `.secrets/api-token` as a Docker
+secret. No read-only token is required by default. An optional
+`VLITE_READ_ONLY_TOKEN` can be passed from the host environment.
+
+To use a separate read-only token file, create an untracked Compose override
+such as `compose.read-only-token.yaml` and keep the token file private:
+
+```yaml
+services:
+  api:
+    environment:
+      VLITE_READ_ONLY_TOKEN_FILE: /run/secrets/read_only_token
+    volumes:
+      - type: bind
+        source: ./.secrets/read-only-token
+        target: /run/secrets/read_only_token
+        read_only: true
+        bind:
+          create_host_path: false
+```
+
+Start with both Compose files, for example:
+
+```sh
+docker compose -f compose.yaml -f compose.read-only-token.yaml \
+  --profile dashboard up -d --no-build api dashboard
+```
+
+Treat credentials as secrets and do not place them in committed Compose files.
+
+For a source checkout instead of published images, omit both image variables
+and use `docker compose --profile dashboard up --build -d api dashboard`.
+
+## Stop and restart
+
+Stop without removing containers or data:
+
+```sh
+docker compose stop api dashboard
+docker compose start api dashboard
+```
+
+Or remove the containers and network while retaining named volumes:
+
+```sh
+docker compose down
+```
+
+Do **not** add `-v` to `docker compose down` unless permanent deletion of the
+database and administrative backup directory is intended. The same Compose
+project name and both named volumes are required when bringing the deployment
+back up.
+
+The dashboard waits for the API health check before starting. Both services
+use an `unless-stopped` restart policy. The API health check requests its
+public `/health` endpoint without installing extra tools in the runtime image.
+The dashboard health check uses the Nginx image's BusyBox `wget`. Its `/tmp`
+is a small tmpfs so Nginx can run with a read-only root filesystem. Nginx
+re-resolves the API service name periodically, which lets the proxy recover
+after Compose replaces the API container with a new address.
+
+## Upgrade
+
+1. Back up the database and any required administrative files before changing
+   versions. Use the administrative backup feature when enabled, and copy
+   important backup files outside the Docker volume as a separate recovery
+   measure.
+2. Set both image variables to the **same** new release tag (or digest refs
+   from that release's notes).
+3. Pull and recreate only the two services:
+
+   ```sh
+   docker compose pull api dashboard
+   docker compose --profile dashboard up -d --no-build api dashboard
+   docker compose ps
+   docker compose logs --tail=100 api dashboard
+   ```
+
+Compose reuses `api-data` and `api-admin-data`; do not remove or rename either
+volume during an upgrade. Check the release notes and data-format
+compatibility before upgrading. A newer server may write a format that an
+older server cannot read, so retaining an old image alone is not a sufficient
+rollback plan.
+
+## Rollback
+
+1. Stop writes to the API and preserve a copy of the current volume/backups
+   before changing images.
+2. Restore both `VLITE_API_IMAGE` and `VLITE_DASHBOARD_IMAGE` to the prior
+   compatible version (or its pinned digests).
+3. Recreate the services without removing volumes:
+
+   ```sh
+   docker compose pull api dashboard
+   docker compose --profile dashboard up -d --no-build api dashboard
+   ```
+
+If the newer server changed the on-disk format, do not point the older image
+at that modified database. Restore a pre-upgrade backup to a separate,
+validated copy first, then select that copy using the documented
+administrative restore procedure. The restore workflow creates and validates
+a copy; selecting it takes effect on the next startup rather than replacing a
+live database. See [the administrative API reference](CONSOLE-ADMIN.md) for
+backup and restore details.
+
+## Release and image verification
+
+The release workflow builds and tests the runtime, API, and dashboard targets
+for `linux/amd64` and `linux/arm64`. It loads the standalone dashboard image
+for the browser E2E run, publishes version tags only from matching `vX.Y.Z`
+Git tags, checks the published multi-platform manifests, and runs REST, HTTPS,
+and browser verification against the published digests. Workflow
+dispatches from non-tag refs do not publish images.

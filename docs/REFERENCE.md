@@ -219,7 +219,9 @@ The browser dashboard is bundled into the REST binary at `/dashboard`; its HTML,
 credentials or database contents. All data requests still authenticate using
 the existing token entered into the page. The dashboard keeps that token in a
 closure in page memory, clears the entry field after connecting, and never
-writes browser storage/cookies or puts credentials in URLs/inspector output.
+writes tokens or database contents to browser storage/cookies or puts credentials
+in URLs/inspector output. Theme/density alone can be saved by explicitly enabling
+the appearance preference.
 Reload/Disconnect clears it. Browser extensions/password managers and host
 security remain outside this guarantee; never use an untrusted browser.
 
@@ -237,7 +239,7 @@ security boundary for its bearer token: treat the token as full database access.
 ```text
 docker compose --profile dashboard up --build -d dashboard
 # UI:  http://localhost:8081
-# API: http://localhost:8080
+# API: http://localhost:18084
 docker compose --profile dashboard stop dashboard api
 ```
 
@@ -253,6 +255,13 @@ The UI supports known-ID CRUD, base64 payloads, typed metadata, exact filters,
 exact/lazy-ANN/ready-only search, HNSW maintenance, overview metrics and a latest
 request inspector. Put/delete/build require a confirmation dialog. Client
 validation supplements, not replaces, authoritative server validation.
+Sidebar anchors navigate the console without losing form state. Overview cards
+are snapshots, not live counters; writes through the UI invalidate count/size
+and index snapshots until refreshed. The example helper fills a nonzero unit
+vector matching the connected database dimensions (up to 4096) plus demo
+metadata, without issuing a write. Copying an editor vector into the search
+query is also local-only. Browse and search result IDs load the full record into
+the editor. The console does not implement collections or embedding generation.
 Untrusted record contents are rendered with text nodes, not HTML. Assets are
 same-origin with a restrictive CSP, no third-party CDN or frontend runtime.
 Browse pages use `GET /v1/vectors?limit=25&after=123`, with ascending numeric IDs,

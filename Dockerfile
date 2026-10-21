@@ -17,7 +17,9 @@ FROM debian:bookworm-slim AS runtime
 RUN groupadd --gid 10001 vlite \
     && useradd --uid 10001 --gid vlite --no-create-home --shell /usr/sbin/nologin vlite \
     && mkdir /data \
-    && chown vlite:vlite /data
+    && mkdir /admin \
+    && chown vlite:vlite /data /admin \
+    && chmod 700 /admin
 COPY --from=build /app/target/release/vlite-smoke /usr/local/bin/vlite-smoke
 COPY --from=build /app/target/release/vlite-maintain /usr/local/bin/vlite-maintain
 COPY --from=build /app/target/release/vlite-bench /usr/local/bin/vlite-bench
@@ -27,6 +29,10 @@ WORKDIR /data
 ENTRYPOINT ["/usr/local/bin/vlite-smoke"]
 CMD ["run", "/data/smoke.vlite"]
 
+FROM runtime AS api
+ENTRYPOINT ["/usr/local/bin/vlite-server"]
+CMD ["/data/vectors.vlite", "--create-if-missing", "3", "--bind", "0.0.0.0:8080", "--allow-remote"]
+
 FROM nginxinc/nginx-unprivileged:1.30.6-alpine AS dashboard
 COPY deploy/dashboard.conf /etc/nginx/conf.d/default.conf
 COPY src/dashboard/ /usr/share/nginx/html/
@@ -35,5 +41,8 @@ RUN sed -i \
     -e 's|name="vlite-api-base" content=""|name="vlite-api-base" content="/api"|' \
     -e 's|href="/dashboard/style.css"|href="/style.css"|' \
     -e 's|src="/dashboard/app.js"|src="/app.js"|' \
+    -e 's|src="/dashboard/console-tools.js"|src="/console-tools.js"|' \
     /usr/share/nginx/html/index.html
 USER 101
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1

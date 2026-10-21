@@ -152,14 +152,14 @@ docker compose --profile api up --build -d api
 Keep the secret directory private and allow the container's UID 10001 to read
 the token file. The file is Git-ignored and excluded from image builds.
 `VLITE_TOKEN_FILE` selects an existing secret; `VLITE_DIMENSIONS` defaults to 3.
-The API is published only at **127.0.0.1:8080**. The named data volume survives
+The API is published only at **127.0.0.1:18084**. The named data volume survives
 container removal and `docker compose down`.
 
 PowerShell client example (run from the checkout containing the secret):
 
 ```powershell
 $auth = @{ Authorization = "Bearer $((Get-Content .secrets\api-token -Raw).TrimEnd())" }
-$base = 'http://127.0.0.1:8080'
+$base = 'http://127.0.0.1:18084'
 Invoke-RestMethod "$base/ready" -Headers $auth
 Invoke-RestMethod "$base/v1/vectors/10" -Headers $auth -Method Put -ContentType 'application/json' -Body '{"vector":[1,0,0]}'
 Invoke-RestMethod "$base/v1/search" -Headers $auth -Method Post -ContentType 'application/json' -Body '{"vector":[0.9,0.1,0],"k":5}'
@@ -206,7 +206,7 @@ Packages are currently installed from this checkout, not published registries.
 
 ## Browser dashboard
 
-After starting the Docker API above, open **http://localhost:8080/dashboard**
+After starting the Docker API above, open **http://localhost:18084/dashboard**
 and paste the existing `.secrets/api-token` value into the connection field.
 This built-in option requires no separate frontend container. The native REST
 binary includes the same dashboard.
@@ -221,7 +221,7 @@ docker compose --profile dashboard up --build -d dashboard
 Open **http://localhost:8081** and paste the same token. The static UI container
 proxies `/api/*` to the authenticated API service; it does not embed credentials,
 add browser CORS permission, or use a separate database. The REST API remains
-available at **http://localhost:8080**. Override `VLITE_DASHBOARD_PORT` or
+available at **http://localhost:18084**. Override `VLITE_DASHBOARD_PORT` or
 `VLITE_PORT` if those loopback ports are already in use. Stop both services with
 `docker compose --profile dashboard stop dashboard api`.
 
@@ -236,6 +236,22 @@ explicit HNSW builds, and a request/response inspector with browser-observed
 latency. Put/delete/build operations require confirmation. It is a testing/admin
 interface, not an embedding generator or production monitor.
 Put replaces the entire record; no undo or automatic retries are provided.
+
+The console has sidebar shortcuts for overview, browsing, editing, search,
+index maintenance and REST inspection. Snapshot cards show vector count,
+dimensions, file bytes and index readiness. **Fill example** prepares a
+dimension-matched vector and typed metadata without saving; choose an ID and
+use **Put / replace** to commit it. **Use editor vector as query** makes a
+self-match search easy. Select a browse or search result ID to inspect the
+record in the editor. Mutation confirmations remain required. This is one
+database per server, not a collections manager.
+
+The expanded [testing console guide](docs/CONSOLE.md) covers guided demo data,
+bounded JSON/CSV import and export, batch editing, a visual filter builder,
+exact/ANN comparison, sampled metadata/quality analysis and PCA, a REST
+playground, read-only scenario replay, health snapshots and safe payload previews.
+Appearance preferences are stored only when explicitly enabled; database data
+and tokens are never persisted by the console.
 
 Browse pages are capped at 100 records and 1 MiB JSON and omit vectors/payloads.
 They are live views, not stable snapshots. HNSW readiness and buffer usage are

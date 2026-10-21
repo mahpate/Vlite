@@ -44,6 +44,7 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: "22"
+      - run: node tests/console_tools.test.cjs
       - run: python -m unittest discover -s clients/python -p test_client.py
       - run: python -m pip wheel --no-deps --wheel-dir dist ./clients/python
       - name: Verify installed REST Python wheel
@@ -129,8 +130,10 @@ jobs:
               for name in ["vlite-server", "vlite-maintain", "vlite-bench", "vlite-smoke"]:
                   bundle.write(pathlib.Path("target/release") / (name + suffix), name + suffix)
               for name in ["README.md", "LICENSE", "Cargo.toml", "Cargo.lock", "src/openapi.json",
-                           "compose.yaml", "compose.tls.yaml", "deploy/Caddyfile", "Dockerfile",
-                           "docs/REFERENCE.md", "docs/INSTALL.md", "benchmarks/README.md", "benchmarks/RESULTS.md",
+                           "compose.yaml", "compose.tls.yaml", "deploy/Caddyfile", "deploy/dashboard.conf", "Dockerfile",
+                           "docs/REFERENCE.md", "docs/INSTALL.md", "docs/CONSOLE.md",
+                           "docs/CONSOLE-ADMIN.md", "docs/DOCKER-OPERATIONS.md",
+                           "benchmarks/README.md", "benchmarks/RESULTS.md",
                            "benchmarks/compare_rest.py", "benchmarks/native_campaign.py", "benchmarks/metric_campaign.py", "benchmarks/embedded.py",
                            "benchmarks/embedding_campaign.py", "benchmarks/prepare_glove.py", "benchmarks/requirements-embeddings.txt",
                            "benchmarks/background_campaign.py", "examples/background_hnsw.rs",
@@ -201,23 +204,38 @@ jobs:
           target: runtime
           load: true
           tags: vlite-release:test
-      - name: Test the exact runtime image without rebuilding
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: api
+          load: true
+          tags: vlite-release:api-test
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: dashboard
+          load: true
+          tags: vlite-release:dashboard-test
+      - name: Verify the legacy runtime entrypoint
+        run: docker run --rm --network none --read-only --tmpfs /data:rw,noexec,nosuid,size=64m,uid=10001,gid=10001 vlite-release:test
+      - name: Test the exact API image without rebuilding
         env:
-          VLITE_IMAGE: vlite-release:test
+          VLITE_API_IMAGE: vlite-release:api-test
           VLITE_E2E_NO_BUILD: "1"
         run: python3 tests/rest_e2e.py
-      - name: Test HTTPS with the same runtime image
+      - name: Test HTTPS with the same API image
         env:
-          VLITE_IMAGE: vlite-release:test
+          VLITE_API_IMAGE: vlite-release:api-test
           VLITE_E2E_NO_BUILD: "1"
         run: python3 tests/tls_e2e.py
       - name: Install dashboard browser test dependencies
         run: |
           python3 -m pip install -r tests/requirements-dashboard.txt
           python3 -m playwright install --with-deps chromium
-      - name: Test dashboard with the same runtime image
+      - name: Test browser UI with the exact standalone dashboard image
         env:
-          VLITE_IMAGE: vlite-release:test
+          VLITE_IMAGE: vlite-release:api-test
+          VLITE_DASHBOARD_IMAGE: vlite-release:dashboard-test
           VLITE_E2E_NO_BUILD: "1"
         run: python3 tests/dashboard_e2e.py
 
@@ -229,8 +247,12 @@ jobs:
       contents: read
       packages: write
     outputs:
-      digest: ${{ steps.image.outputs.digest }}
-      name: ${{ steps.name.outputs.image }}
+      runtime_digest: ${{ steps.runtime.outputs.digest }}
+      api_digest: ${{ steps.api.outputs.digest }}
+      dashboard_digest: ${{ steps.dashboard.outputs.digest }}
+      runtime_name: ${{ steps.name.outputs.runtime_image }}
+      api_name: ${{ steps.name.outputs.api_image }}
+      dashboard_name: ${{ steps.name.outputs.dashboard_image }}
     steps:
       - uses: actions/checkout@v5
       - name: Validate version and derive lowercase registry name
@@ -241,7 +263,10 @@ jobs:
           version = tomllib.load(open("Cargo.toml", "rb"))["package"]["version"]
           assert os.environ["GITHUB_REF_NAME"] == "v" + version, "tag must match Cargo.toml version"
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write("image=ghcr.io/" + os.environ["GITHUB_REPOSITORY"].lower() + "\n")
+              image = "ghcr.io/" + os.environ["GITHUB_REPOSITORY"].lower()
+              output.write("runtime_image=" + image + "\n")
+              output.write("api_image=" + image + "-api\n")
+              output.write("dashboard_image=" + image + "-dashboard\n")
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
@@ -250,17 +275,47 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/build-push-action@v6
-        id: image
+        id: runtime
         with:
           context: .
           target: runtime
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.name.outputs.image }}:${{ github.ref_name }}
+          tags: ${{ steps.name.outputs.runtime_image }}:${{ github.ref_name }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ github.ref_name }}
+          provenance: mode=max
+          sbom: true
+      - uses: docker/build-push-action@v6
+        id: api
+        with:
+          context: .
+          target: api
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.name.outputs.api_image }}:${{ github.ref_name }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.description=VLite REST API server
+          provenance: mode=max
+          sbom: true
+      - uses: docker/build-push-action@v6
+        id: dashboard
+        with:
+          context: .
+          target: dashboard
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.name.outputs.dashboard_image }}:${{ github.ref_name }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.description=VLite REST dashboard
           provenance: mode=max
           sbom: true
 
@@ -272,19 +327,47 @@ jobs:
       packages: read
     steps:
       - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Confirm published images contain both supported platforms
+        env:
+          VLITE_RUNTIME_IMAGE: ${{ needs.image-publish.outputs.runtime_name }}@${{ needs.image-publish.outputs.runtime_digest }}
+          VLITE_API_IMAGE: ${{ needs.image-publish.outputs.api_name }}@${{ needs.image-publish.outputs.api_digest }}
+          VLITE_DASHBOARD_IMAGE: ${{ needs.image-publish.outputs.dashboard_name }}@${{ needs.image-publish.outputs.dashboard_digest }}
+        run: |
+          set -euo pipefail
+          for image in "$VLITE_RUNTIME_IMAGE" "$VLITE_API_IMAGE" "$VLITE_DASHBOARD_IMAGE"; do
+            platforms="$(docker buildx imagetools inspect "$image")"
+            grep -q 'linux/amd64' <<<"$platforms"
+            grep -q 'linux/arm64' <<<"$platforms"
+          done
       - name: Pull and verify the published digest without rebuilding
         env:
-          VLITE_IMAGE: ${{ needs.image-publish.outputs.name }}@${{ needs.image-publish.outputs.digest }}
+          VLITE_API_IMAGE: ${{ needs.image-publish.outputs.api_name }}@${{ needs.image-publish.outputs.api_digest }}
+          VLITE_DASHBOARD_IMAGE: ${{ needs.image-publish.outputs.dashboard_name }}@${{ needs.image-publish.outputs.dashboard_digest }}
+          VLITE_IMAGE: ${{ needs.image-publish.outputs.runtime_name }}@${{ needs.image-publish.outputs.runtime_digest }}
           VLITE_E2E_NO_BUILD: "1"
         run: |
+          docker pull "$VLITE_API_IMAGE"
+          docker pull "$VLITE_DASHBOARD_IMAGE"
           docker pull "$VLITE_IMAGE"
+          docker run --rm --network none --read-only --tmpfs /data:rw,noexec,nosuid,size=64m,uid=10001,gid=10001 "$VLITE_IMAGE"
           python3 tests/rest_e2e.py
           python3 tests/tls_e2e.py
+      - name: Install dashboard browser test dependencies
+        run: |
+          python3 -m pip install -r tests/requirements-dashboard.txt
+          python3 -m playwright install --with-deps chromium
+      - name: Verify browser UI against the published API and dashboard digests
+        env:
+          VLITE_IMAGE: ${{ needs.image-publish.outputs.api_name }}@${{ needs.image-publish.outputs.api_digest }}
+          VLITE_DASHBOARD_IMAGE: ${{ needs.image-publish.outputs.dashboard_name }}@${{ needs.image-publish.outputs.dashboard_digest }}
+          VLITE_E2E_NO_BUILD: "1"
+        run: python3 tests/dashboard_e2e.py
 
   release:
     needs: [image-publish, image-verify]
@@ -308,9 +391,13 @@ jobs:
       - name: Publish release with digest-pinned image and native checksums
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          IMAGE: ${{ needs.image-publish.outputs.name }}
-          DIGEST: ${{ needs.image-publish.outputs.digest }}
+          RUNTIME_IMAGE: ${{ needs.image-publish.outputs.runtime_name }}
+          RUNTIME_DIGEST: ${{ needs.image-publish.outputs.runtime_digest }}
+          API_IMAGE: ${{ needs.image-publish.outputs.api_name }}
+          API_DIGEST: ${{ needs.image-publish.outputs.api_digest }}
+          DASHBOARD_IMAGE: ${{ needs.image-publish.outputs.dashboard_name }}
+          DASHBOARD_DIGEST: ${{ needs.image-publish.outputs.dashboard_digest }}
         run: |
-          printf '%s\n\n%s\n\n%s\n' "Container: $IMAGE@$DIGEST" "Download the matching SDK below. Installation and platform limits: https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/docs/INSTALL.md" "Verify SHA256SUMS before installing. Back up before upgrading; see the README migration and rollback procedure. Packages are not published to PyPI/npm. Checksums are integrity checks, not signatures." > release-notes.txt
+          printf '%s\n\n%s\n%s\n%s\n\n%s\n\n%s\n' "Container images (linux/amd64 and linux/arm64):" "- REST API: $API_IMAGE@$API_DIGEST" "- Dashboard: $DASHBOARD_IMAGE@$DASHBOARD_DIGEST" "- Smoke/maintenance tools (legacy entrypoint): $RUNTIME_IMAGE@$RUNTIME_DIGEST" "Download the matching SDK below. Installation and platform limits: https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/docs/INSTALL.md" "Verify SHA256SUMS before installing. Back up before upgrading; see the Docker upgrade and rollback procedure in docs/DOCKER-OPERATIONS.md. Packages are not published to PyPI/npm. Checksums are integrity checks, not signatures." > release-notes.txt
           gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "VLite $GITHUB_REF_NAME" --notes-file release-notes.txt
           gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false

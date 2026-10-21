@@ -1,18 +1,25 @@
-use std::{error::Error, io::Read, net::SocketAddr, path::PathBuf};
+use std::{error::Error, net::SocketAddr, path::PathBuf};
 
 use tokio::net::TcpListener;
 use vlite::{
     Database,
-    server::{BearerToken, Service},
+    server::{
+        BearerToken, ServerOptions, Service, configured_admin_router, read_token_file,
+        selected_database,
+    },
 };
 
-const USAGE: &str = "usage: vlite-server <database-path> [--create-if-missing <dimensions>] [--bind <ip:port>] [--allow-remote] [--token-file <path> | --insecure-local]; token may also come from VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE";
+const USAGE: &str = "usage: vlite-server <database-path> [--create-if-missing <dimensions>] [--bind <ip:port>] [--allow-remote] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups: VLITE_ADMIN_DIR";
 
 struct Config {
     path: PathBuf,
     dimensions: Option<usize>,
     bind: SocketAddr,
     token: Option<BearerToken>,
+    token_file: Option<PathBuf>,
+    read_only_token: Option<BearerToken>,
+    read_only_file: Option<PathBuf>,
+    admin_directory: Option<PathBuf>,
 }
 
 fn config() -> Result<Config, Box<dyn Error>> {
@@ -67,37 +74,67 @@ fn config() -> Result<Config, Box<dyn Error>> {
     }
     let token = if insecure_local {
         None
+    } else if let Some(ref path) = token_file {
+        read_token_file(std::path::Path::new(path), false)?
     } else {
-        let text = if let Some(path) = token_file {
-            let mut text = String::new();
-            std::fs::File::open(path)?
-                .take(259)
-                .read_to_string(&mut text)?;
-            text.strip_suffix("\r\n")
-                .or_else(|| text.strip_suffix('\n'))
-                .unwrap_or(&text)
-                .to_owned()
-        } else {
-            token_env
-                .expect("validated token source")
-                .into_string()
-                .map_err(|_| "token must be valid ASCII")?
-        };
+        let text = token_env
+            .expect("validated token source")
+            .into_string()
+            .map_err(|_| "token must be valid ASCII")?;
         Some(BearerToken::new(&text)?)
     };
+    let read_only_file = std::env::var_os("VLITE_READ_ONLY_TOKEN_FILE").map(PathBuf::from);
+    let read_only_env = std::env::var_os("VLITE_READ_ONLY_TOKEN");
+    if read_only_file.is_some() && read_only_env.is_some() {
+        return Err("select one read-only token source".into());
+    }
+    let read_only_token = if let Some(file) = &read_only_file {
+        read_token_file(file, true)?
+    } else {
+        read_only_env
+            .map(|value| {
+                let text = value
+                    .into_string()
+                    .map_err(|_| "read-only token must be ASCII")?;
+                BearerToken::new(&text)
+            })
+            .transpose()?
+    };
+    if insecure_local && (read_only_token.is_some() || read_only_file.is_some()) {
+        return Err("read-only credentials require admin bearer authentication".into());
+    }
+    ServerOptions {
+        admin_token: token.clone(),
+        read_only_token: read_only_token.clone(),
+        ..ServerOptions::default()
+    }
+    .validate()?;
     Ok(Config {
         path: path.into(),
         dimensions,
         bind,
         token,
+        token_file: token_file.map(PathBuf::from),
+        read_only_token,
+        read_only_file,
+        admin_directory: std::env::var_os("VLITE_ADMIN_DIR").map(PathBuf::from),
     })
 }
 
 fn open(config: &Config) -> vlite::Result<Database> {
-    let db = match Database::open(&config.path) {
+    let selected = config
+        .admin_directory
+        .as_deref()
+        .map(selected_database)
+        .transpose()?
+        .flatten();
+    let path = selected.as_deref().unwrap_or(&config.path);
+    let db = match Database::open(path) {
         Ok(db) => db,
         Err(vlite::Error::Io(error))
-            if error.kind() == std::io::ErrorKind::NotFound && config.dimensions.is_some() =>
+            if error.kind() == std::io::ErrorKind::NotFound
+                && config.dimensions.is_some()
+                && selected.is_none() =>
         {
             Database::create(&config.path, config.dimensions.expect("guarded dimensions"))?
         }
@@ -132,11 +169,17 @@ async fn run() -> Result<(), Box<dyn Error>> {
         let result = tokio::signal::ctrl_c().await;
         let _ = signal_tx.send(result);
     };
+    let router = configured_admin_router(
+        service.clone(),
+        ServerOptions {
+            admin_token: config.token,
+            read_only_token: config.read_only_token,
+            admin_token_file: config.token_file,
+            read_only_token_file: config.read_only_file,
+            admin_directory: config.admin_directory,
+        },
+    )?;
     println!("LISTENING http://{address}");
-    let router = match config.token {
-        Some(token) => vlite::server::authenticated_router(service.clone(), token),
-        None => vlite::server::router(service.clone()),
-    };
     let serving = axum::serve(listener, router)
         .with_graceful_shutdown(shutdown)
         .await;

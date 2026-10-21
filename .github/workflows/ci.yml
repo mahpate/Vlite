@@ -58,6 +58,9 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: "22"
+      - name: Verify dashboard console helpers
+        if: matrix.os == 'ubuntu-latest'
+        run: node tests/console_tools.test.cjs
       - uses: dtolnay/rust-toolchain@stable
       - run: python -m unittest discover -s clients/python -p test_client.py
       - run: python -m pip wheel --no-deps --wheel-dir client-dist ./clients/python

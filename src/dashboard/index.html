@@ -6,45 +6,93 @@
   <meta name="vlite-api-base" content="">
   <title>VLite dashboard</title>
   <link rel="stylesheet" href="/dashboard/style.css">
+  <script src="/dashboard/console-tools.js" defer></script>
   <script src="/dashboard/app.js" defer></script>
 </head>
 <body>
-<header><h1>VLite <span>testing dashboard</span></h1><p>Experimental single-file vector database. Same-origin REST testing; not a production monitoring system.</p></header>
+<aside class="sidebar">
+  <a class="brand" href="#database">V<span>Lite</span><small>DATABASE CONSOLE</small></a>
+  <nav aria-label="Dashboard navigation">
+    <a href="#database">Overview</a>
+    <a href="#browse">Browse vectors</a>
+    <a href="#editor">Vector editor</a>
+    <a href="#search">Search playground</a>
+    <a href="#index">Index maintenance</a>
+    <a href="#requests">Request inspector</a>
+    <a href="#data-tools">Import / export</a>
+    <a href="#explore">Explore / compare</a>
+    <a href="#operations">Operations</a>
+  </nav>
+  <div class="sidebar-note"><strong>One file. Your vectors.</strong><p>One database per server. Collections and embedding generation are not supported.</p></div>
+</aside>
+<div class="workspace">
+<header class="topbar"><div><span class="eyebrow">LOCAL WORKSPACE / DATABASE</span><h1>Database explorer</h1><p>Browse records, test similarity search, and inspect every REST request.</p></div><span id="connection-badge" class="badge">Disconnected</span></header>
+<a class="skip-link" href="#database">Skip to database controls</a>
+<div class="preferences">
+  <label>Theme <select id="theme"><option value="light">Light</option><option value="dark">Dark</option></select></label>
+  <label>Density <select id="density"><option value="comfortable">Comfortable</option><option value="compact">Compact</option></select></label>
+  <label><input id="remember-preferences" type="checkbox"> Remember appearance only</label>
+  <button id="cancel-request" type="button" class="secondary" disabled>Stop waiting</button>
+</div>
+<p id="status" class="status-bar" role="status" aria-live="polite">Disconnected</p>
+<p id="error-help" role="status"></p>
 <main>
-  <section>
-    <h2>Connection</h2>
+  <section id="database" class="wide">
+    <div class="section-heading"><div><span class="eyebrow">01 / GET STARTED</span><h2>Connection</h2></div><span class="badge">Single-file database</span></div>
     <form id="connection">
       <label>Bearer token <input id="token" type="password" autocomplete="off" spellcheck="false"></label>
       <p>Token stays in this page's memory only. Reloading this page or Disconnect clears it. Use HTTPS beyond loopback.</p>
       <button type="submit">Connect / refresh</button><button id="disconnect" type="button">Disconnect</button>
     </form>
-    <p id="status" role="status" aria-live="polite">Disconnected</p>
-    <pre id="overview" aria-label="Database overview"></pre>
+    <div class="stat-grid" aria-label="Database snapshot">
+      <div><span>Committed vectors</span><strong id="stat-records">--</strong></div>
+      <div><span>Dimensions</span><strong id="stat-dimensions">--</strong></div>
+      <div><span>Database size (bytes)</span><strong id="stat-bytes">--</strong></div>
+      <div><span>HNSW index</span><strong id="stat-index">Not checked</strong></div>
+    </div>
+    <p id="snapshot-note">Connect to view a database snapshot. Refresh after external writes.</p>
+    <pre id="compatibility" aria-label="Server compatibility"></pre>
+    <details><summary>Database details and metrics (JSON)</summary><pre id="overview" aria-label="Database overview"></pre></details>
   </section>
-  <section>
-    <h2>Browse vectors</h2>
+  <section id="browse">
+    <span class="eyebrow">02 / EXPLORE</span><h2>Browse vectors</h2>
     <p>Live pages in numeric ID order, not a snapshot. Each page contains IDs and typed metadata only; select an ID to load its vector and payload.</p>
     <form id="browse-form">
       <label>Page size <input id="page-size" type="number" min="1" max="100" value="25" required></label>
       <button type="submit">First page / refresh</button><button id="next-page" type="button" disabled>Next page</button>
     </form>
-    <p id="browse-status" role="status"></p>
-    <table id="vectors"><caption>Committed live records</caption><thead><tr><th>ID (select to inspect)</th><th>Typed metadata</th></tr></thead><tbody></tbody></table>
+    <p id="browse-status" role="status">Connect, then refresh to load records.</p>
+    <div class="table-scroll"><table id="vectors"><caption>Committed live records</caption><thead><tr><th>ID (select to inspect)</th><th>Typed metadata</th></tr></thead><tbody></tbody></table></div>
+    <label>Select IDs from this page (comma-separated, decimal strings)<input id="batch-ids" placeholder="1,2,3"></label>
+    <label>Batch metadata replacement (typed JSON object)<textarea id="batch-metadata" rows="2">{}</textarea></label>
+    <button id="batch-replace" data-write type="button">Replace selected metadata</button>
+    <button id="batch-delete" data-write type="button" class="danger">Delete selected</button>
   </section>
-  <section>
-    <h2>Vector CRUD</h2>
+  <section id="editor">
+    <span class="eyebrow">03 / EDIT</span><h2>Vector editor</h2>
     <p>Enter an ID or select it from Browse vectors. Put replaces vector, payload and all metadata.</p>
+    <button id="example-record" class="secondary" type="button">Fill example</button>
+    <button id="find-similar" class="secondary" type="button">Find similar to saved ID</button>
+    <p>Fills a dimension-matched vector and sample metadata without writing. Choose an ID, then Put / replace to save.</p>
     <form id="vector-form">
       <label>ID (decimal u64) <input id="id" value="1" required inputmode="numeric" spellcheck="false"></label>
       <label>Vector (JSON array) <textarea id="record-vector" rows="3">[1, 0, 0]</textarea></label>
       <label>Payload (standard base64) <textarea id="payload" rows="2"></textarea></label>
       <label>Typed metadata (JSON object) <textarea id="metadata" rows="4">{}</textarea></label>
-      <button type="submit">Put / replace</button><button id="get-vector" type="button">Get</button><button id="delete-vector" type="button">Delete</button>
+      <button type="submit">Put / replace</button><button id="get-vector" class="secondary" type="button">Get</button><button id="delete-vector" class="danger" type="button">Delete</button>
     </form>
     <pre id="record" aria-label="Record result"></pre>
+    <p id="vector-summary"></p>
+    <label>Vector slice start<input id="vector-slice-start" type="number" min="0" value="0"></label>
+    <button id="vector-slice" type="button" class="secondary">Inspect 32 components</button>
+    <pre id="vector-slice-result"></pre>
+    <h3>Safe payload preview</h3><p>UTF-8 / JSON text only. HTML is never rendered.</p><pre id="payload-preview"></pre>
   </section>
-  <section>
-    <h2>Search playground</h2>
+  <section id="search" class="wide">
+    <span class="eyebrow">04 / TEST SIMILARITY</span><h2>Search playground</h2>
+    <p>Use a saved vector as a query or enter your own. Select a result ID to inspect its full record.</p>
+    <button id="use-record-query" class="secondary" type="button">Use editor vector as query</button>
+    <div class="search-layout"><div>
     <form id="search-form">
       <label>Query vector (JSON array) <textarea id="query" rows="3">[1, 0, 0]</textarea></label>
       <label>k <input id="k" type="number" value="10" min="0" max="10000" required></label>
@@ -55,20 +103,116 @@
       <p>Example: [{"op":"eq","field":"category","value":{"type":"string","value":"docs"}}]. Filters are exact-only; no silent post-filtering.</p>
       <button type="submit">Search</button>
     </form>
-    <table id="hits"><caption>Search results (lower distance is better)</caption><thead><tr><th>ID</th><th>Distance</th></tr></thead><tbody></tbody></table>
+    </div><div class="search-results"><h3>Nearest neighbors</h3><p id="search-summary" role="status">Run a search to compare vectors. Lower distance is better.</p>
+    <div class="table-scroll"><table id="hits"><caption>Search results (lower distance is better)</caption><thead><tr><th>ID</th><th>Distance</th></tr></thead><tbody></tbody></table></div>
+    </div></div>
+    <details><summary>Build an exact metadata filter</summary>
+      <label>Field<input id="filter-field" value="category"></label>
+      <label>Operator<select id="filter-op"><option value="eq">Equals</option><option value="min">At least (numeric)</option><option value="max">At most (numeric)</option></select></label>
+      <label>Type<select id="filter-type"><option value="string">String</option><option value="integer">Integer</option><option value="float">Float</option><option value="boolean">Boolean</option></select></label>
+      <label>Value<input id="filter-value" value="demo"></label>
+      <button id="filter-add" type="button">Add AND condition</button><button id="filter-clear" class="secondary" type="button">Clear filter</button>
+    </details>
+    <p>Squared L2 is sum of squared component differences; cosine is 1 minus cosine similarity; inner product is the negative dot product. Lower is better. These are distances, not confidence percentages.</p>
+    <button id="compare-search" type="button">Compare exact / ready ANN</button>
+    <pre id="search-comparison"></pre>
+    <button id="export-hits" type="button" class="secondary">Export results JSON</button>
   </section>
-  <section>
-    <h2>Index maintenance</h2>
+  <section id="index" class="wide">
+    <span class="eyebrow">05 / PERFORMANCE</span><h2>Index maintenance</h2>
     <p id="index-status" role="status">Index readiness not checked</p>
     <button id="refresh-index" type="button">Refresh index status</button>
     <p>Builds default HNSW from committed records. Blocks the single owner; schedule outside latency-sensitive traffic. Reopen/overflow loses readiness.</p>
     <button id="build-index" type="button">Build HNSW</button>
     <p id="build-result" role="status"></p>
+    <details><summary>HNSW configuration and background maintenance</summary>
+      <p>m trades graph connectivity for memory; ef_construction trades build effort for quality. Use the same configuration for building and ready-only search. A seed makes builds reproducible for fixed data. Snapshot limits do not cap total process memory.</p>
+      <label>m (2..64)<input id="hnsw-m" type="number" min="2" max="64" value="16"></label>
+      <label>ef_construction (m..4096)<input id="hnsw-ef" type="number" min="2" max="4096" value="100"></label>
+      <label>Seed (decimal u64)<input id="hnsw-seed" value="42"></label>
+      <label>Maximum snapshot records<input id="hnsw-max-records" type="number" min="1" max="1000000" value="100000"></label>
+      <label>Maximum snapshot vector bytes<input id="hnsw-max-bytes" type="number" min="1" max="268435456" value="134217728"></label>
+      <button id="start-rebuild" data-write type="button">Start background rebuild</button>
+      <button id="status-rebuild" type="button" class="secondary">Observe rebuild status</button>
+      <button id="poll-rebuild" data-write type="button">Poll / publish rebuild</button>
+      <button id="cancel-rebuild" data-write type="button" class="danger">Cancel background rebuild</button>
+      <pre id="rebuild-result"></pre>
+      <label>Maintenance policy JSON<textarea id="maintenance-policy" rows="7">{"config":{"m":16,"ef_construction":100,"seed":"42"},"metric":"squared_l2","limits":{"max_records":100000,"max_snapshot_vector_bytes":134217728},"rebuild_at_buffered_ids":128,"rebuild_at_buffer_vector_bytes":4194304}</textarea></label>
+      <button id="read-maintenance" type="button" class="secondary">Read maintenance policy</button>
+      <button id="save-maintenance" data-write type="button">Replace maintenance policy</button>
+      <button id="tick-maintenance" data-write type="button">Run maintenance tick</button>
+      <p>Policy is process-local and resets on restart. No automatic scheduler: a tick explicitly polls/publishes or starts a matching job. Observe does not publish. Cancellation is cooperative.</p>
+      <pre id="maintenance-result"></pre>
+    </details>
   </section>
-  <section class="wide">
-    <h2>Request inspector</h2>
+  <section id="data-tools" class="wide">
+    <span class="eyebrow">DATA WORKFLOWS</span><h2>Import, export and guided demo</h2>
+    <p>Imports are limited to 100 records / 4 MiB, committed in atomic batches of 20. An entire import is not atomic. Existing IDs are replaced only after confirmation. No automatic retries.</p>
+    <ol><li>Connect to a test database.</li><li>Preview a demo or import file.</li><li>Confirm the writes, browse the records, then search.</li></ol>
+    <button id="demo-preview" type="button">Prepare 3 demo vectors</button>
+    <label>JSON array or CSV file<input id="import-file" type="file" accept=".json,.csv,application/json,text/csv"></label>
+    <p>Each record: id (string), vector (JSON array), optional payload_base64 and metadata (typed object). CSV headers: id,vector,payload_base64,metadata; quote JSON cells.</p>
+    <button id="import-preview" type="button">Validate / preview import</button><button id="import-commit" data-write type="button">Commit previewed records</button>
+    <pre id="import-result" role="status"></pre>
+    <button id="export-page-json" type="button" class="secondary">Export current page JSON</button>
+    <button id="export-page-csv" type="button" class="secondary">Export current page CSV</button>
+    <p>Page exports include full records (up to 100), fetched individually; not a point-in-time database backup. Use Operations for consistent backups.</p>
+  </section>
+  <section id="explore" class="wide">
+    <span class="eyebrow">BOUNDED EXPLORATION</span><h2>Record comparison and data quality</h2>
+    <label>Other saved ID<input id="compare-id" value="2"></label>
+    <button id="compare-records" type="button">Compare with editor ID</button>
+    <pre id="record-comparison"></pre>
+    <button id="analyze-sample" type="button">Analyze first 32 records</button>
+    <p>Non-snapshot sample only; not a whole-database audit. Includes field types/value counts, zero and duplicate vectors. PCA is limited to 256 dimensions, is approximate and does not preserve all neighbor distances.</p>
+    <pre id="sample-analysis"></pre>
+    <div id="projection" role="group" aria-label="PCA sample projection"></div>
+  </section>
+  <section id="requests" class="wide">
+    <span class="eyebrow">06 / DEBUG</span><h2>Request inspector</h2>
     <p>Latest request only. Authorization is never displayed. Latency includes browser/network/response parsing, not isolated engine time. No automatic retries.</p>
     <pre id="inspector" aria-label="Request inspector"></pre>
+    <h3>REST playground</h3>
+    <label>Method<select id="request-method"><option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option></select></label>
+    <label>Supported API path<input id="request-path" value="/v1/database"></label>
+    <label>JSON request body<textarea id="request-body" rows="4">{}</textarea></label>
+    <button id="send-request" type="button">Send request</button>
+    <button id="request-examples" type="button" class="secondary">Generate redacted examples</button>
+    <pre id="code-examples"></pre>
+    <h3>Reproducible read-only scenarios</h3>
+    <p>Definitions never contain credentials. Run only against a dedicated test database. Supported steps: get a record (expected ID), or search (expected hit IDs in order).</p>
+    <label>Scenario JSON<textarea id="scenario" rows="5">{"name":"self-match","steps":[{"path":"/v1/search","body":{"vector":[1,0,0],"k":1,"mode":"exact","metric":"squared_l2"},"expected_ids":["1"]}]}</textarea></label>
+    <button id="run-scenario" type="button">Run scenario</button>
+    <button id="save-scenario" type="button" class="secondary">Download scenario</button>
+    <label>Load scenario file<input id="scenario-file" type="file" accept=".json,application/json"></label>
+    <pre id="scenario-result"></pre>
+  </section>
+  <section id="operations" class="wide">
+    <span class="eyebrow">SERVER OPERATIONS</span><h2>Health and administration</h2>
+    <button id="refresh-health" type="button">Refresh health snapshot</button>
+    <label><input id="auto-health" type="checkbox"> Refresh every 10 seconds while this page is visible</label>
+    <pre id="health-result"></pre>
+    <div id="admin-controls">
+      <p id="admin-note">Connect to discover server administration features. These operations require an admin credential.</p>
+      <h3>Credentials and audit</h3>
+      <button id="token-status" data-admin type="button" class="secondary">Inspect credential sources</button>
+      <button id="token-reload" data-admin data-write type="button">Reload configured token files</button>
+      <button id="token-revoke" data-admin data-write type="button" class="danger">Revoke read-only credential</button>
+      <p>Change configured secret files offline first. Reload validates both before swapping. Admin token rotation requires reconnecting with the new token. Environment tokens require restart. Revocation is in-memory; empty its configured file to persist it.</p>
+      <pre id="token-result"></pre>
+      <button id="read-audit" data-admin type="button" class="secondary">Read sanitized audit trail</button>
+      <p>Last 256 process-local requests only; not a durable compliance log. No credentials or record contents.</p>
+      <pre id="audit-result"></pre>
+      <h3>Backup and staged restore</h3>
+      <button id="list-backups" data-admin type="button" class="secondary">List snapshots</button>
+      <button id="create-backup" data-admin data-write type="button">Create consistent backup</button>
+      <label>Backup to restore<select id="backup-name"></select></label>
+      <button id="stage-restore" data-admin data-write type="button">Validate / stage restored copy</button>
+      <label>Restored copy for next startup<select id="restore-name"></select></label>
+      <button id="select-restore" data-admin data-write type="button" class="danger">Select restored copy for restart</button>
+      <p>Copies can block the owner and consume disk. Restore never replaces the live file. Selection takes effect only after an operator restarts the API with the same admin directory. Original data remains untouched; the selection persists. Do not remove the selected copy.</p>
+      <pre id="backup-result"></pre>
+    </div>
   </section>
 </main>
 <dialog id="confirmation">
@@ -77,6 +221,7 @@
     <button value="cancel">Cancel</button><button value="confirm">Confirm</button>
   </form>
 </dialog>
-<footer><a href="/openapi.json">OpenAPI (requires bearer header)</a> &middot; Tokens and database contents are not stored in browser storage.</footer>
+<footer>Experimental VLite console &middot; Tokens and database contents are not stored in browser storage. No undo or automatic retries.</footer>
+</div>
 </body>
 </html>

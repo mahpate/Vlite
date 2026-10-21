@@ -26,6 +26,8 @@ use subtle::ConstantTimeEq;
 use tokio::sync::Semaphore;
 
 use crate::{Database, Error, MAX_BATCH_OPERATIONS, MAX_PAYLOAD_BYTES, Mutation};
+mod admin;
+pub use admin::{ServerOptions, configured_admin_router, read_token_file, selected_database};
 
 pub const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SEARCH_K: usize = 10_000;
@@ -75,6 +77,7 @@ pub struct Service {
     requests: Arc<Semaphore>,
     workers: Arc<Semaphore>,
     metrics: Arc<Metrics>,
+    admin: Arc<admin::AdminState>,
 }
 
 impl Service {
@@ -84,6 +87,7 @@ impl Service {
             requests: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
             workers: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
             metrics: Arc::new(Metrics::default()),
+            admin: Arc::new(admin::AdminState::default()),
         }
     }
 
@@ -146,62 +150,87 @@ pub fn authenticated_router(service: Service, token: BearerToken) -> Router {
     configured_router(service, Some(token))
 }
 
-fn configured_router(service: Service, token: Option<BearerToken>) -> Router {
-    let observation = (service.clone(), token);
-    Router::new()
-        .route("/health", get(|| async { Json(json!({"status": "ok"})) }))
-        .route(
-            "/dashboard",
-            get(|| async {
-                dashboard_asset(
-                    "text/html; charset=utf-8",
-                    include_str!("dashboard/index.html"),
+fn configured_router(mut service: Service, token: Option<BearerToken>) -> Router {
+    service.admin = Arc::new(admin::AdminState::default());
+    service
+        .admin
+        .auth
+        .lock()
+        .expect("new authentication state")
+        .admin = token;
+    configured_routes(service)
+}
+
+fn configured_routes(service: Service) -> Router {
+    let observation = service.clone();
+    admin::routes()
+        .merge(
+            Router::new()
+                .route("/health", get(|| async { Json(json!({"status": "ok"})) }))
+                .route(
+                    "/dashboard",
+                    get(|| async {
+                        dashboard_asset(
+                            "text/html; charset=utf-8",
+                            include_str!("dashboard/index.html"),
+                        )
+                    }),
                 )
-            }),
-        )
-        .route(
-            "/dashboard/app.js",
-            get(|| async {
-                dashboard_asset(
-                    "text/javascript; charset=utf-8",
-                    include_str!("dashboard/app.js"),
+                .route(
+                    "/dashboard/app.js",
+                    get(|| async {
+                        dashboard_asset(
+                            "text/javascript; charset=utf-8",
+                            include_str!("dashboard/app.js"),
+                        )
+                    }),
                 )
-            }),
-        )
-        .route(
-            "/dashboard/style.css",
-            get(|| async {
-                dashboard_asset(
-                    "text/css; charset=utf-8",
-                    include_str!("dashboard/style.css"),
+                .route(
+                    "/dashboard/console-tools.js",
+                    get(|| async {
+                        dashboard_asset(
+                            "text/javascript; charset=utf-8",
+                            include_str!("dashboard/console-tools.js"),
+                        )
+                    }),
                 )
-            }),
-        )
-        .route("/ready", get(ready))
-        .route("/metrics", get(metrics))
-        .route("/v1/database", get(info))
-        .route("/v1/vectors", get(list_vectors))
-        .route("/v1/vectors/{id}", get(fetch).put(put).delete(delete))
-        .route("/v1/batches", post(batch))
-        .route("/v1/search", post(search))
-        .route("/v1/index/hnsw", get(index_status).post(build_index))
-        .route(
-            "/openapi.json",
-            get(|| async {
-                (
-                    [(header::CONTENT_TYPE, "application/json")],
-                    include_str!("openapi.json"),
+                .route(
+                    "/dashboard/style.css",
+                    get(|| async {
+                        dashboard_asset(
+                            "text/css; charset=utf-8",
+                            include_str!("dashboard/style.css"),
+                        )
+                    }),
                 )
-            }),
+                .route("/ready", get(ready))
+                .route("/metrics", get(metrics))
+                .route("/v1/database", get(info))
+                .route("/v1/vectors", get(list_vectors))
+                .route("/v1/vectors/{id}", get(fetch).put(put).delete(delete))
+                .route("/v1/batches", post(batch))
+                .route("/v1/search", post(search))
+                .route("/v1/index/hnsw", get(index_status).post(build_index))
+                .route(
+                    "/openapi.json",
+                    get(|| async {
+                        (
+                            [(header::CONTENT_TYPE, "application/json")],
+                            include_str!("openapi.json"),
+                        )
+                    }),
+                )
+                .fallback(|| async {
+                    ApiError::new(StatusCode::NOT_FOUND, "not_found", "route not found")
+                })
+                .method_not_allowed_fallback(|| async {
+                    ApiError::new(
+                        StatusCode::METHOD_NOT_ALLOWED,
+                        "method_not_allowed",
+                        "method not allowed",
+                    )
+                }),
         )
-        .fallback(|| async { ApiError::new(StatusCode::NOT_FOUND, "not_found", "route not found") })
-        .method_not_allowed_fallback(|| async {
-            ApiError::new(
-                StatusCode::METHOD_NOT_ALLOWED,
-                "method_not_allowed",
-                "method not allowed",
-            )
-        })
         .layer(DefaultBodyLimit::max(MAX_JSON_BYTES))
         .layer(middleware::from_fn_with_state(service.clone(), admission))
         .layer(middleware::from_fn_with_state(observation, observe))
@@ -224,8 +253,8 @@ fn dashboard_asset(content_type: &'static str, content: &'static str) -> impl In
 }
 
 async fn observe(
-    State((service, token)): State<(Service, Option<BearerToken>)>,
-    request: axum::extract::Request,
+    State(service): State<Service>,
+    mut request: axum::extract::Request,
     next: Next,
 ) -> Response {
     let started = Instant::now();
@@ -243,21 +272,51 @@ async fn observe(
         "DELETE" => "DELETE",
         _ => "other",
     };
-    let authorized = matches!(
+    let public = matches!(
         request.uri().path(),
-        "/health" | "/dashboard" | "/dashboard/app.js" | "/dashboard/style.css"
-    ) || token.as_ref().is_none_or(|token| {
+        "/health"
+            | "/dashboard"
+            | "/dashboard/app.js"
+            | "/dashboard/style.css"
+            | "/dashboard/console-tools.js"
+    );
+    let authentication = (|| -> Result<Option<admin::Role>, ApiError> {
+        let auth = service.admin.auth.lock().map_err(internal)?;
         let mut values = request.headers().get_all(header::AUTHORIZATION).iter();
         let first = values.next();
-        values.next().is_none()
-            && first
+        let value = if values.next().is_none() {
+            first
                 .and_then(|h| h.to_str().ok())
                 .and_then(|h| h.split_once(' '))
                 .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
                 .map(|(_, value)| value)
-                .is_some_and(|value| token.accepts(value))
-    });
-    let mut response = if authorized {
+        } else {
+            None
+        };
+        if auth.admin.is_none()
+            || value.is_some_and(|v| auth.admin.as_ref().is_some_and(|t| t.accepts(v)))
+        {
+            Ok(Some(admin::Role::Admin))
+        } else if value.is_some_and(|v| auth.read_only.as_ref().is_some_and(|t| t.accepts(v))) {
+            Ok(Some(admin::Role::ReadOnly))
+        } else {
+            Ok(None)
+        }
+    })();
+    let role = authentication.as_ref().ok().copied().flatten();
+    let forbidden = role == Some(admin::Role::ReadOnly)
+        && (request.uri().path().starts_with("/v1/admin/")
+            || (!matches!(method, "GET")
+                && request.method() != axum::http::Method::HEAD
+                && request.uri().path() != "/v1/search"));
+    let mut response = if let Some(error) = authentication.err().filter(|_| !public) {
+        error.into_response()
+    } else if !public && forbidden {
+        ApiError::new(StatusCode::FORBIDDEN, "read_only", "admin access required").into_response()
+    } else if public || role.is_some() {
+        if let Some(role) = role {
+            request.extensions_mut().insert(role);
+        }
         next.run(request).await
     } else {
         service.metrics.unauthorized.fetch_add(1, Ordering::Relaxed);
@@ -293,6 +352,11 @@ async fn observe(
         "{}",
         json!({"event":"request", "request_id":request_id, "method":method,
         "route":route, "status":response.status().as_u16(), "duration_ns":elapsed})
+    );
+    service.admin.record(
+        json!({"request_id":request_id,"method":method,"route":route,
+        "status":response.status().as_u16(),"role":role.map(admin::Role::name),
+        "duration_ns":elapsed,"timestamp_unix_ms":admin::now_ms()}),
     );
     response
 }
@@ -387,12 +451,20 @@ fn unavailable() -> ApiError {
 impl From<Error> for ApiError {
     fn from(error: Error) -> Self {
         match error {
+            Error::HnswRebuildBusy => Self::new(
+                StatusCode::CONFLICT,
+                "rebuild_busy",
+                "a rebuild is already pending",
+            ),
             Error::IndexNotReady => Self::new(
                 StatusCode::CONFLICT,
                 "index_not_ready",
                 "HNSW index is not ready; POST /v1/index/hnsw during maintenance, or explicitly choose exact/lazy approximate search",
             ),
             Error::DimensionMismatch { .. }
+            | Error::InvalidHnswRebuildLimits
+            | Error::InvalidHnswMaintenancePolicy
+            | Error::HnswRebuildTooLarge
             | Error::InvalidDimensions(_)
             | Error::NonFiniteVector
             | Error::ZeroNormQuery
@@ -522,7 +594,7 @@ async fn list_vectors(
 async fn index_status(State(service): State<Service>) -> Result<Json<Value>, ApiError> {
     service.run(|db| {
         db.ensure_healthy()?;
-        let config = crate::HnswConfig::default();
+        let config = db.index.as_ref().map_or_else(crate::HnswConfig::default, |i| i.config);
         let ready = db.index.as_ref().is_some_and(|index| index.config == config);
         let (buffered_ids, buffer_vector_bytes) = db.index.as_ref().map_or((0, 0), |index| index.buffer_usage());
         Ok(Json(json!({
@@ -733,15 +805,25 @@ struct Search {
     mode: SearchMode,
     #[serde(default)]
     metric: crate::DistanceMetric,
+    #[serde(default)]
+    config: admin::IndexConfig,
     ef_search: Option<usize>,
     filter: Option<Vec<crate::Condition>>,
 }
 
 async fn search(
     State(service): State<Service>,
+    axum::Extension(role): axum::Extension<admin::Role>,
     input: Result<Json<Search>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let input = body(input)?;
+    if role == admin::Role::ReadOnly && matches!(input.mode, SearchMode::Approximate) {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "read_only",
+            "read-only searches must use exact or approximate_ready; lazy builds require admin access",
+        ));
+    }
     if input.k > MAX_SEARCH_K {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -775,12 +857,14 @@ async fn search(
     let metrics = service.metrics.clone();
     service
         .run(move |db| {
+            let config = input.config.validated()?;
             let rebuilding = matches!(input.mode, SearchMode::Approximate)
                 && input.k > 0
                 && !db.is_empty()
-                && db.index.as_ref().is_none_or(|index| {
-                    index.metric != input.metric || index.config != crate::HnswConfig::default()
-                });
+                && db
+                    .index
+                    .as_ref()
+                    .is_none_or(|index| index.metric != input.metric || index.config != config);
             let started = Instant::now();
             let hits = match input.mode {
                 SearchMode::Exact => db.search_filtered_with_metric(
@@ -793,14 +877,14 @@ async fn search(
                     &input.vector,
                     input.k,
                     input.ef_search.unwrap_or(100.max(input.k.min(db.len()))),
-                    crate::HnswConfig::default(),
+                    config,
                     input.metric,
                 )?,
                 SearchMode::ApproximateReady => db.search_approximate_ready_with_metric(
                     &input.vector,
                     input.k,
                     input.ef_search.unwrap_or(100.max(input.k.min(db.len()))),
-                    crate::HnswConfig::default(),
+                    config,
                     input.metric,
                 )?,
             };
@@ -825,6 +909,8 @@ async fn search(
 struct BuildIndex {
     #[serde(default)]
     metric: crate::DistanceMetric,
+    #[serde(default)]
+    config: admin::IndexConfig,
 }
 
 async fn build_index(
@@ -850,7 +936,7 @@ async fn build_index(
     service
         .run(move |db| {
             let started = Instant::now();
-            db.build_hnsw_with_metric(crate::HnswConfig::default(), input.metric)?;
+            db.build_hnsw_with_metric(input.config.validated()?, input.metric)?;
             metrics.rebuilds.fetch_add(1, Ordering::Relaxed);
             metrics.rebuild_search_ns.fetch_add(
                 started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
