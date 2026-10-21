@@ -29,8 +29,13 @@ def ready(page, base):
 
 def exercise(page, base, token):
     errors = []
+    assets = {}
     page.on("pageerror", lambda error: errors.append(str(error)))
+    page.on("response", lambda response: assets.update({response.url: response.status}) if "/dashboard/" in response.url else None)
     page.goto(base + "/dashboard")
+    assert assets.get(base + "/dashboard/app.js") == 200, assets
+    assert assets.get(base + "/dashboard/style.css") == 200, assets
+    assert not errors, errors
     expect(page.get_by_role("heading", name="Connection", exact=True)).to_be_visible()
     expect(page.locator("#status")).to_have_text("Disconnected")
     page.locator("#token").fill("x" * 32)
@@ -163,15 +168,50 @@ def exercise(page, base, token):
     page.set_viewport_size({"width": 390, "height": 844})
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
 
+def exercise_separate_app(page, base, token, expected_index="Ready;"):
+    errors = []
+    api_requests = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.on("request", lambda request: api_requests.append(request.url) if "/api/" in request.url else None)
+    page.goto(base + "/")
+    expect(page.get_by_role("heading", name="Connection", exact=True)).to_be_visible()
+    expect(page.locator("#status")).to_have_text("Disconnected")
+    page.locator("#token").fill("x" * 32)
+    page.get_by_role("button", name="Connect / refresh").click()
+    expect(page.locator("#status")).to_contain_text("HTTP 401")
+    page.locator("#token").fill(token)
+    page.get_by_role("button", name="Connect / refresh").click()
+    expect(page.locator("#status")).to_have_text("Connected; overview refreshed")
+    expect(page.locator("#overview")).to_contain_text('"dimensions": 3')
+    expect(page.locator("#index-status")).to_contain_text(expected_index)
+    page.get_by_role("button", name="First page / refresh", exact=True).click()
+    expect(page.locator("#vectors tbody tr")).to_have_count(2)
+    page.locator("#query").fill("[1,0,0]")
+    page.locator("#k").fill("2")
+    page.get_by_role("button", name="Search", exact=True).click()
+    expect(page.locator("#hits tbody tr")).to_have_count(2)
+    expect(page.locator("#inspector")).to_contain_text('"distance": 0')
+    assert any(url.endswith("/api/v1/database") for url in api_requests), api_requests
+    assert any(url.endswith("/api/v1/search") for url in api_requests), api_requests
+    assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+    page.get_by_role("button", name="Disconnect", exact=True).click()
+    expect(page.locator("#overview")).to_have_text("")
+    assert not errors, errors
+
 
 def main():
     name = "vlite-dashboard-" + uuid.uuid4().hex[:10]
     volume = name + "-data"
+    network = name + "-network"
+    ui_name = name + "-ui"
     image = os.environ.get("VLITE_IMAGE", "vlite-dashboard:test")
+    ui_image = os.environ.get("VLITE_DASHBOARD_IMAGE", "vlite-dashboard-ui:test")
     token = secrets.token_urlsafe(32)
     if not os.environ.get("VLITE_E2E_NO_BUILD"):
         docker("build", "--target", "runtime", "-t", image, ".")
+        docker("build", "--target", "dashboard", "-t", ui_image, ".")
     docker("volume", "create", volume)
+    docker("network", "create", network)
     try:
         # File secret: no token in process arguments or environment.
         with tempfile.TemporaryDirectory(prefix="vlite-ui-secret-") as directory:
@@ -179,12 +219,16 @@ def main():
             with open(secret, "w", encoding="ascii") as stream:
                 stream.write(token)
             os.chmod(secret, 0o644)
-            docker("run", "-d", "--name", name, "--mount", f"type=volume,source={volume},target=/data",
+            docker("run", "-d", "--name", name, "--network", network, "--network-alias", "api",
+                   "--mount", f"type=volume,source={volume},target=/data",
                    "--mount", f"type=bind,source={secret},target=/run/token,readonly",
                    "-p", "127.0.0.1::8080", "--entrypoint", "vlite-server", image,
                    "/data/vectors.vlite", "--create-if-missing", "3",
                    "--bind", "0.0.0.0:8080", "--allow-remote", "--token-file", "/run/token")
+            docker("run", "-d", "--name", ui_name, "--network", network,
+                   "-p", "127.0.0.1::8080", ui_image)
             port = docker("port", name, "8080/tcp").rsplit(":", 1)[1]
+            ui_port = docker("port", ui_name, "8080/tcp").rsplit(":", 1)[1]
             with sync_playwright() as playwright:
                 browser = playwright.chromium.launch()
                 try:
@@ -193,6 +237,9 @@ def main():
                     base = "http://127.0.0.1:" + port
                     ready(page, base)
                     exercise(page, base, token)
+                    ui_base = "http://127.0.0.1:" + ui_port
+                    ready(page, ui_base + "/api")
+                    exercise_separate_app(page, ui_base, token)
                     docker("restart", name)
                     # Docker may reassign an ephemeral host port across restart.
                     port = docker("port", name, "8080/tcp").rsplit(":", 1)[1]
@@ -209,11 +256,14 @@ def main():
                     page.get_by_role("button", name="Disconnect", exact=True).click()
                     # Fresh page has no bearer credential; every API still fails closed.
                     assert page.request.get(base + "/v1/database").status == 401
-                    print("PASS Chromium dashboard: auth, CRUD, bounded numeric pagination, click-to-inspect, readiness, filters, all search modes, build, confirmation, XSS text rendering, token lifecycle, restart persistence and responsive layout")
+                    ready(page, ui_base + "/api")
+                    exercise_separate_app(page, ui_base, token, "Not ready")
+                    print("PASS Chromium dashboards: embedded REST UI and separately containerized REST-proxy UI; auth, CRUD, pagination, search, index readiness, confirmation, token lifecycle and API restart persistence")
                 finally:
                     browser.close()
     finally:
-        subprocess.run(["docker", "rm", "-f", name], check=False, capture_output=True, timeout=60)
+        subprocess.run(["docker", "rm", "-f", ui_name, name], check=False, capture_output=True, timeout=60)
+        subprocess.run(["docker", "network", "rm", network], check=False, capture_output=True, timeout=60)
         print("Retained Docker data volume:", volume)
 
 

@@ -208,8 +208,27 @@ Packages are currently installed from this checkout, not published registries.
 
 After starting the Docker API above, open **http://localhost:8080/dashboard**
 and paste the existing `.secrets/api-token` value into the connection field.
-No separate frontend container, Node service or network-hosted assets are needed.
-The native REST binary includes the same dashboard.
+This built-in option requires no separate frontend container. The native REST
+binary includes the same dashboard.
+
+For a separately containerized frontend that talks to the REST service over
+the Compose network, build and start the API plus dashboard together:
+
+```text
+docker compose --profile dashboard up --build -d dashboard
+```
+
+Open **http://localhost:8081** and paste the same token. The static UI container
+proxies `/api/*` to the authenticated API service; it does not embed credentials,
+add browser CORS permission, or use a separate database. The REST API remains
+available at **http://localhost:8080**. Override `VLITE_DASHBOARD_PORT` or
+`VLITE_PORT` if those loopback ports are already in use. Stop both services with
+`docker compose --profile dashboard stop dashboard api`.
+
+The separate image is built from `Dockerfile` target `dashboard`; Compose builds
+it locally rather than requiring a Node toolchain or an external UI service.
+Both UI and API publish only on loopback by default. Use the documented HTTPS
+deployment before accessing them from other machines.
 
 The dashboard provides database information and metrics, paginated ID/metadata
 browsing, click-to-inspect vector CRUD, payload/typed metadata editing, exact filters, all three search modes,
@@ -371,8 +390,9 @@ python3 -m playwright install --with-deps chromium
 python3 tests/dashboard_e2e.py
 ```
 
-This creates an isolated Docker database/container, exercises the UI with real
-Chromium, removes the test container and retains its explicitly named data
+This creates isolated API and dashboard containers on a private Docker network
+and exercises both the embedded and separate REST-backed UIs with real Chromium.
+It removes the test containers/network and retains its explicitly named data
 volume. The runtime image itself needs neither Python nor a browser.
 
 The bounded reliability campaign runs with `cargo test --locked --test reliability`.

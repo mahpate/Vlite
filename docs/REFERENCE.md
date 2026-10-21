@@ -223,6 +223,32 @@ writes browser storage/cookies or puts credentials in URLs/inspector output.
 Reload/Disconnect clears it. Browser extensions/password managers and host
 security remain outside this guarantee; never use an untrusted browser.
 
+An optional standalone frontend image is available from the Dockerfile's
+`dashboard` target and Compose's `dashboard` profile. It serves the same static
+assets from an unprivileged Nginx container at loopback port 8081 and proxies
+same-origin `/api/*` requests to the Compose `api` service, stripping the prefix.
+This keeps the browser on one origin without adding CORS to the REST API. The
+API service remains separately available on loopback port 8080 and continues to
+require its bearer token. The proxy forwards `Authorization` only to the API;
+the UI keeps it in page memory and it is not part of the URL or Nginx access log.
+Both containers use the same named API data volume. The UI container is not a
+security boundary for its bearer token: treat the token as full database access.
+
+```text
+docker compose --profile dashboard up --build -d dashboard
+# UI:  http://localhost:8081
+# API: http://localhost:8080
+docker compose --profile dashboard stop dashboard api
+```
+
+The UI publishes to loopback only, uses a read-only root filesystem and runs
+without Linux capabilities. Its `/tmp` is an ephemeral 16-MiB tmpfs. Nginx
+allows JSON bodies up to the REST service's 8-MiB request limit and permits
+long-running explicit index builds up to its one-hour proxy timeout. Set
+`VLITE_DASHBOARD_PORT` and `VLITE_PORT` to avoid host port conflicts. The API
+must be started with the dashboard Compose profile so the proxy can reach it;
+the dashboard does not connect directly to arbitrary external API origins.
+
 The UI supports known-ID CRUD, base64 payloads, typed metadata, exact filters,
 exact/lazy-ANN/ready-only search, HNSW maintenance, overview metrics and a latest
 request inspector. Put/delete/build require a confirmation dialog. Client

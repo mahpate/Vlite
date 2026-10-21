@@ -26,3 +26,14 @@ USER 10001:10001
 WORKDIR /data
 ENTRYPOINT ["/usr/local/bin/vlite-smoke"]
 CMD ["run", "/data/smoke.vlite"]
+
+FROM nginxinc/nginx-unprivileged:1.30.6-alpine AS dashboard
+COPY deploy/dashboard.conf /etc/nginx/conf.d/default.conf
+COPY src/dashboard/ /usr/share/nginx/html/
+USER root
+RUN sed -i \
+    -e 's|name="vlite-api-base" content=""|name="vlite-api-base" content="/api"|' \
+    -e 's|href="/dashboard/style.css"|href="/style.css"|' \
+    -e 's|src="/dashboard/app.js"|src="/app.js"|' \
+    /usr/share/nginx/html/index.html
+USER 101

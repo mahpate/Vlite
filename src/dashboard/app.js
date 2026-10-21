@@ -1,6 +1,7 @@
 "use strict";
 (() => {
   const $ = (id) => document.getElementById(id);
+  const apiBase = document.querySelector('meta[name="vlite-api-base"]')?.content || "";
   let token = "";
   let connected = false;
   let busy = false;
@@ -64,7 +65,7 @@
     let response;
     let value;
     try {
-      response = await fetch(path, {
+      response = await fetch(`${apiBase}${path}`, {
         method, cache: "no-store", credentials: "omit", redirect: "error",
         headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
