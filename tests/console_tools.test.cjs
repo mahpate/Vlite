@@ -9,6 +9,8 @@ const query = { version: 1, name: "nearest", query: { vector: [1, 0], k: 10, mod
   config: { m: 16, ef_construction: 100, seed: "18446744073709551615" },
   filter: [{ op: "range", field: "__proto__", min: { type: "integer", value: "-9223372036854775808" }, max: { type: "integer", value: "9223372036854775807" } }] } };
 assert.deepEqual(savedQuery(query, 2), query);
+const filteredAnnQuery = { ...query, query: { ...query.query, mode: "approximate_ready", metric: "squared_l2" } };
+assert.deepEqual(savedQuery(filteredAnnQuery, 2), filteredAnnQuery);
 assert.throws(() => savedQuery({ ...query, token: "secret" }, 2));
 assert.throws(() => savedQuery(query, 3));
 assert.throws(() => savedQuery({ ...query, query: { ...query.query, headers: {} } }, 2));

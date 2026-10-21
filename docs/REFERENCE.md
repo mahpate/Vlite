@@ -11,7 +11,7 @@ and atomic batch mutations, and exact nearest-neighbor search.
 An optional REST service exposes the same engine. Optional in-memory HNSW search
 supports approximate retrieval without changing the database file.
 gRPC, persistent ANN indexes, distributed operation, interactive transactions,
-encryption, approximate metadata filtering, and read-only/multi-reader handles are deferred.
+encryption, metadata indexes, and read-only/multi-reader handles are deferred.
 This is a correctness-first MVP, not a production-hardened storage engine.
 
 ## Build and use
@@ -167,7 +167,8 @@ nonfinite-vector and filter validation still applies before returning results.
 HNSW in v0.1.1 remains squared-L2 only. Version v0.1.2+ also supports
 cosine ANN as described below; inner-product ANN remains rejected.
 REST rejects inner-product ANN with 422. There is no
-implicit fallback, index reuse under a different metric or approximate filtering.
+implicit fallback or index reuse under a different metric. Filter-aware ANN is
+described under "Filtered approximate search" below.
 The default L2 cutoff optimization is not used for cosine/inner product.
 Older native binaries/servers do not understand explicit new metric fields;
 deploy the v0.1.1 SDK and native library/service together for metric queries.
@@ -645,7 +646,8 @@ all four types; ranges accept inclusive min and/or max of one numeric type,
 requiring min <= max. Missing fields and mismatched stored types do not match;
 an empty filter matches all records. Validation applies even to k=0 and empty
 databases. Filtering is a full scan of eligible records **before** top-k
-selection, not post-filtering nearest hits. `search_filtered` is always exact.
+selection, not post-filtering nearest hits. `search_filtered` is always exact;
+approximate filtering is a separate, explicit API described below.
 
 For REST, `metadata` is optional on PUT and batch puts (omission means `{}`):
 
@@ -679,9 +681,11 @@ are rejected. Search accepts `filter`:
 }
 ```
 
-**Approximate mode with any non-null filter (even `[]`) returns 422.** There is
-no silent exact fallback or misleading HNSW post-filter. Use explicit exact mode
-for filtered queries; unfiltered exact/approximate requests remain compatible.
+`filter` is accepted in all three modes (`exact`, `approximate`,
+`approximate_ready`) with identical validation; `null`, omission and `[]` all
+mean unfiltered. Inner product remains exact-only. See "Filtered approximate
+search" for ANN semantics. Malformed filters return 422 `invalid_input` before
+readiness, zero-k, empty-database or lazy-build handling.
 
 **Migration:** v1/v2 records open with empty metadata. Existing reads, ordinary
 puts/deletes, and v2 batches remain byte-compatible on those files. Nonempty
@@ -821,7 +825,43 @@ without an index. Changing construction parameters rebuilds it; explicit
 may be `ef_search + buffered IDs` (at most 256 extra), to compensate for stale
 graph candidates. This is not a recall/full-k guarantee: deleted nodes remain
 traversal bridges, and data distribution still affects discovery. Exact search
-remains the correctness baseline; approximate filtering remains rejected.
+remains the correctness baseline.
+
+### Filtered approximate search
+
+```rust
+db.search_approximate_filtered_with_metric(&query, k, ef_search, config, &conditions, metric)?;
+db.search_approximate_ready_filtered_with_metric(&query, k, ef_search, config, &conditions, metric)?;
+```
+
+Conditions come before the final metric, matching
+`search_filtered_with_metric(query, k, conditions, metric)`. The conditions are
+the same typed AND predicates as exact search and are validated first (after
+the query vector), even for k=0, empty databases, a missing index or a lazy
+build. Only squared L2 and cosine are supported. Empty conditions take the
+unchanged unfiltered path; existing `search_approximate*` methods delegate with
+empty conditions. The lazy method rebuilds exactly like
+`search_approximate_with_metric`; the ready method never builds and returns
+`IndexNotReady` under the same conditions as unfiltered ready search.
+
+Filtering participates in base-layer traversal rather than post-filtering an
+unfiltered top-k. Every reachable graph node may be expanded as a navigation
+bridge, including nonmatching nodes and nodes with buffered updates/deletes
+(which navigate using their pre-update graph vectors). Only unbuffered graph
+nodes whose **current** metadata matches enter the result heap; eligibility is
+never taken from stale state. Buffered current records that match are scored
+separately against the query and merged. Traversal can stop early only once
+`ef_search` eligible results are held and the nearest unexpanded node is
+farther than the worst of them.
+
+`ef_search` is the eligible-candidate retention width, **not** a visit or time
+cap. Selective or no-match filters may visit every reachable node (comparable
+to an exact scan of the graph). Up to k eligible records are returned with
+exact distances, ordered by distance then ID. Recall and filling k are not
+guaranteed (for example, matches unreachable from the entry point are missed),
+and there is no hidden exact fallback: use exact mode when completeness matters.
+REST capability `features.filtered_ann` is `true` on servers that accept
+filters in approximate modes; older servers reject them with 422.
 
 There is no background graph build or persistent graph sidecar. A first
 approximate query after reopen/overflow blocks other operations while rebuilding.

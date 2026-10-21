@@ -76,6 +76,13 @@ class Range(TypedDict):
 
 
 class Search(TypedDict):
+    """One request shape for every mode. Approximate modes support squared_l2 and
+    cosine only. ``filter`` is an AND of typed conditions (None/[] keeps every
+    record), valid in exact mode and, on servers advertising
+    ``features.filtered_ann``, in both approximate modes; those return at most k
+    eligible records and may return fewer. ``ef_search`` (approximate only) then
+    controls eligible-candidate retention, not a visit/time cap."""
+
     vector: list[float]
     k: int
     metric: NotRequired[Literal["squared_l2", "cosine", "inner_product"]]
@@ -274,6 +281,8 @@ class Client:
         self._request("POST", "/v1/batches", {"operations": operations})
 
     def search(self, request: Search) -> list[Hit]:
+        """Send the request unchanged. There is no exact fallback: an older server's
+        422 for an approximate filter, or 409 from approximate_ready, is raised."""
         return self._request("POST", "/v1/search", request)["hits"]
 
     def index_status(self) -> IndexStatus:

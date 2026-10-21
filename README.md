@@ -286,7 +286,11 @@ a mutation buffer rather than forcing a complete rebuild on every write.
 The buffer is capped at **256 distinct IDs / 8 MiB of vector bytes**. Overflow,
 reopen, or changed index configuration causes a synchronous rebuild on the next
 nonempty ANN query. It is approximate: recall and a full k results are not
-guaranteed. Filters currently require exact mode.
+guaranteed. Both ANN modes accept the same typed metadata filters as exact
+search. Filter-aware traversal retains eligible candidates and can cross
+nonmatching graph nodes; it does not filter an unfiltered top-k or fall back to
+an exact scan. Selective filters can be expensive: `ef_search` controls candidate
+retention, not a hard visit/time budget. Cosine excludes zero-norm records.
 
 For latency-sensitive callers, `Database::search_approximate_ready` (REST
 `"mode":"approximate_ready"`) never builds an index during the query. Missing

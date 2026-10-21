@@ -89,7 +89,7 @@ Build it with `client.build_index(metric="cosine")` (Python) or
 `metric: "cosine"` and `mode: "approximate_ready"`. Index status includes
 `metric` (null when absent; older servers omit the field). Only one graph is
 retained. A metric mismatch returns 409 in ready-only mode, or synchronously
-rebuilds in lazy mode. Inner-product ANN returns 422. Filters remain exact-only.
+rebuilds in lazy mode. Inner-product ANN returns 422, with or without a filter.
 There is no automatic downgrade or retry against older servers.
 
 Python uses `list_vectors`, `index_status`, `build_index`; JavaScript uses
@@ -106,8 +106,9 @@ limits, metadata/filter shapes and server error codes.
   explicitly with your language's base64 utilities.
 - Put replaces the entire record; omitted metadata/payload clears them.
   Batch accepts the REST operation objects and commits them atomically.
-- Search accepts `exact`, `approximate` and `approximate_ready`. Filters require
-  exact mode. Ready-only search never builds; explicitly call the build method.
+- Search accepts `exact`, `approximate` and `approximate_ready`, with the same
+  `filter` field in every mode (see [Filtered search](#filtered-search)).
+  Ready-only search never builds; explicitly call the build method.
 - Listing returns IDs/metadata only, capped at 100 records and 1 MiB per page.
   Follow the returned cursor until null, even on short pages. Pages are live,
   not snapshots; index readiness is also only a point-in-time observation.
@@ -116,6 +117,47 @@ limits, metadata/filter shapes and server error codes.
   loopback. Tokens are private client state, never included in request URLs.
   Server-side validation remains authoritative; types do not replace validation.
 - No automatic retries, redirects, index builds, repair, or fallback search.
+
+## Filtered search
+
+`filter` is an AND array of typed conditions on record metadata: `eq` (any
+metadata type, strict type match) and `range` (integer or float bounds, either
+optional). Omitted, `null` or `[]` keeps every record. The request object and
+client signatures are unchanged; the same filter works in every mode:
+
+```python
+flt = [{"op": "eq", "field": "category", "value": {"type": "string", "value": "example"}},
+       {"op": "range", "field": "rank", "min": {"type": "integer", "value": "10"}}]
+exact = client.search({"vector": [1, 0, 0], "k": 5, "filter": flt})
+ann = client.search({"vector": [1, 0, 0], "k": 5, "filter": flt,
+                     "mode": "approximate_ready", "metric": "cosine"})
+```
+
+```javascript
+const filter = [{ op: "eq", field: "category", value: { type: "string", value: "example" } }];
+const hits = await client.search({ vector: [1, 0, 0], k: 5, filter, mode: "approximate" });
+```
+
+- **Exact** mode returns the true top k among matching records.
+- **Approximate** modes (`approximate`, `approximate_ready`) with a filter require
+  a server whose `GET /v1/capabilities` reports `features.filtered_ann: true`, and
+  support `squared_l2` and `cosine` only; inner product stays exact-only. The
+  filter is applied during graph traversal (non-matching records are still
+  traversed but never returned), not to an unfiltered top k afterwards. Every hit
+  matches the filter and reflects current (including buffered) writes and
+  deletes; distances are exact for returned records.
+- Approximate results contain **at most k and possibly fewer** eligible records,
+  and recall is not guaranteed. A selective or non-matching filter may visit
+  most or all of the graph, so it can be slower than an unfiltered query.
+  `ef_search` widens how many eligible candidates are retained; it is not a cap
+  on visited nodes or time. Use exact mode when you need complete results.
+- There is **no hidden exact fallback**. `approximate_ready` still returns 409
+  `index_not_ready` when the graph is missing or built for another metric;
+  malformed filters return 422 before readiness is checked.
+- Older servers reject a non-null filter in either approximate mode with 422
+  `invalid_input`. The clients do not probe capabilities for searches (unlike
+  conditional writes, the rejection is explicit and nothing is mutated); they
+  propagate that `VLiteError` without retrying or downgrading to exact search.
 
 ## Conditional writes (optimistic concurrency)
 

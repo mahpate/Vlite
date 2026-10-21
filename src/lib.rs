@@ -884,7 +884,33 @@ impl Database {
         config: HnswConfig,
         metric: DistanceMetric,
     ) -> Result<Vec<SearchHit>> {
-        self.validate_hnsw_query(query, k, ef_search, config, metric)?;
+        self.search_approximate_filtered_with_metric(query, k, ef_search, config, &[], metric)
+    }
+
+    /// Filter-aware approximate search that lazily rebuilds like
+    /// `search_approximate_with_metric`. Conditions are the same typed AND
+    /// predicates as `search_filtered_with_metric`, validated before any
+    /// zero-k/empty return or index build.
+    ///
+    /// Filtering participates in base-layer traversal: nonmatching and
+    /// buffered graph nodes remain navigation bridges, while only current
+    /// records whose current metadata matches enter the result heap. Buffered
+    /// updates are scored from current records, never from stale graph
+    /// vectors or metadata. `ef_search` bounds eligible candidates retained,
+    /// not nodes visited; selective or empty-match filters may visit every
+    /// reachable node. Returns up to k eligible hits with exact distances,
+    /// ordered by distance then ID. Recall and filling k are not guaranteed,
+    /// and there is no exact fallback. Empty conditions are unfiltered search.
+    pub fn search_approximate_filtered_with_metric(
+        &mut self,
+        query: &[f32],
+        k: usize,
+        ef_search: usize,
+        config: HnswConfig,
+        conditions: &[Condition],
+        metric: DistanceMetric,
+    ) -> Result<Vec<SearchHit>> {
+        self.validate_hnsw_query(query, k, ef_search, config, conditions, metric)?;
         if k == 0 || self.records.is_empty() {
             return Ok(Vec::new());
         }
@@ -895,11 +921,13 @@ impl Database {
         {
             self.build_hnsw_with_metric(config, metric)?;
         }
-        Ok(self
-            .index
-            .as_ref()
-            .expect("built index")
-            .search(query, k, ef_search, &self.records))
+        Ok(self.index.as_ref().expect("built index").search_filtered(
+            query,
+            k,
+            ef_search,
+            &self.records,
+            conditions,
+        ))
     }
 
     /// Searches an existing matching HNSW index without building one.
@@ -933,7 +961,22 @@ impl Database {
         config: HnswConfig,
         metric: DistanceMetric,
     ) -> Result<Vec<SearchHit>> {
-        self.validate_hnsw_query(query, k, ef_search, config, metric)?;
+        self.search_approximate_ready_filtered_with_metric(query, k, ef_search, config, &[], metric)
+    }
+
+    /// Ready-only filter-aware search; never builds. Malformed filters are
+    /// rejected before readiness and zero-k checks. Traversal, buffering and
+    /// result semantics match `search_approximate_filtered_with_metric`.
+    pub fn search_approximate_ready_filtered_with_metric(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef_search: usize,
+        config: HnswConfig,
+        conditions: &[Condition],
+        metric: DistanceMetric,
+    ) -> Result<Vec<SearchHit>> {
+        self.validate_hnsw_query(query, k, ef_search, config, conditions, metric)?;
         if k == 0 || self.records.is_empty() {
             return Ok(Vec::new());
         }
@@ -942,7 +985,7 @@ impl Database {
             .as_ref()
             .filter(|index| index.config == config && index.metric == metric)
             .ok_or(Error::IndexNotReady)?;
-        Ok(index.search(query, k, ef_search, &self.records))
+        Ok(index.search_filtered(query, k, ef_search, &self.records, conditions))
     }
 
     fn validate_hnsw_query(
@@ -951,10 +994,12 @@ impl Database {
         k: usize,
         ef_search: usize,
         config: HnswConfig,
+        conditions: &[Condition],
         metric: DistanceMetric,
     ) -> Result<()> {
         self.ensure_healthy()?;
         self.validate_vector(query)?;
+        metadata::validate_filter(conditions)?;
         config.validate()?;
         validate_ann_metric(metric)?;
         validate_metric_query(query, metric)?;

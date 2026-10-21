@@ -113,14 +113,14 @@
       <label>Mode <select id="mode"><option value="exact">Exact</option><option value="approximate">Approximate (may build synchronously)</option><option value="approximate_ready">Approximate ready-only (409 if unavailable)</option></select></label>
       <label>Search ef (ANN only) <input id="ef" type="number" value="100" min="1" max="100000" disabled></label>
       <label>Metric (search and index build) <select id="metric"><option value="squared_l2">Squared L2</option><option value="cosine">Cosine distance</option><option value="inner_product">Negative inner product (exact only)</option></select></label>
-      <label>Exact filter (JSON AND array) <textarea id="filter" rows="4">[]</textarea></label>
-      <p>Example: [{"op":"eq","field":"category","value":{"type":"string","value":"docs"}}]. Filters are exact-only; no silent post-filtering.</p>
+      <label>Metadata filter (JSON AND array) <textarea id="filter" rows="4">[]</textarea></label>
+      <p>Example: [{"op":"eq","field":"category","value":{"type":"string","value":"docs"}}]. The same conditions work in exact and filter-aware ANN search. ANN can return fewer than k matches and has no exact fallback. Selective filters may traverse many graph nodes; ef is not a visit/time limit.</p>
       <button type="submit">Search</button>
     </form>
     </div><div class="search-results"><h3>Nearest neighbors</h3><p id="search-summary" role="status">Run a search to compare vectors. Lower distance is better.</p>
     <div class="table-scroll"><table id="hits"><caption>Search results (lower distance is better)</caption><thead><tr><th>ID</th><th>Distance</th></tr></thead><tbody></tbody></table></div>
     </div></div>
-    <div class="tool-group"><h3>Build an exact metadata filter</h3>
+    <div class="tool-group"><h3>Build a metadata filter</h3>
       <label>Field<input id="filter-field" value="category"></label>
       <label>Operator<select id="filter-op"><option value="eq">Equals</option><option value="min">At least (numeric)</option><option value="max">At most (numeric)</option></select></label>
       <label>Type<select id="filter-type"><option value="string">String</option><option value="integer">Integer</option><option value="float">Float</option><option value="boolean">Boolean</option></select></label>

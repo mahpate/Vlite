@@ -6,7 +6,10 @@ use std::{
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-use crate::{DistanceMetric, Error, Record, Result, SearchHit, metric_distance, vector_norm};
+use crate::{
+    Condition, DistanceMetric, Error, Record, Result, SearchHit, metadata, metric_distance,
+    vector_norm,
+};
 
 /// Index construction parameters. A changed configuration requires a rebuild.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -376,6 +379,148 @@ impl Index {
         }
     }
 
+    /// Base-layer traversal whose result heap holds only eligible graph nodes.
+    ///
+    /// Every reachable node may be expanded as a bridge; only nodes that are
+    /// unbuffered and whose current metadata matches enter `results`. Traversal
+    /// stops once `ef` eligible results are held and the nearest unexpanded
+    /// candidate is worse than the worst of them, so selective or empty-match
+    /// filters may visit every reachable node.
+    fn filtered_layer(
+        &self,
+        query: &[f32],
+        query_norm: f64,
+        entry: Candidate,
+        ef: usize,
+        records: &BTreeMap<u64, Record>,
+        conditions: &[Condition],
+    ) -> Vec<Candidate> {
+        let eligible = |node: usize| {
+            let id = self.nodes[node].id;
+            !self.buffered.contains_key(&id)
+                && metadata::matches(&records[&id].metadata, conditions)
+        };
+        let mut visited = HashSet::from([entry.node]);
+        let mut candidates = BinaryHeap::from([Reverse(entry)]);
+        let mut results = BinaryHeap::with_capacity(ef + 1);
+        if eligible(entry.node) {
+            results.push(entry);
+        }
+        while let Some(Reverse(current)) = candidates.pop() {
+            if results.len() >= ef && current > *results.peek().expect("nonempty results") {
+                break;
+            }
+            for &node in &self.nodes[current.node].links[0] {
+                if !visited.insert(node) {
+                    continue;
+                }
+                let candidate = self.candidate(node, query, query_norm, records);
+                if results.len() < ef || candidate < *results.peek().expect("nonempty results") {
+                    candidates.push(Reverse(candidate));
+                    if eligible(node) {
+                        results.push(candidate);
+                        if results.len() > ef {
+                            results.pop();
+                        }
+                    }
+                }
+            }
+        }
+        let mut results = results.into_vec();
+        results.sort_unstable();
+        results
+    }
+
+    /// Filtered search; empty conditions take the unfiltered path unchanged.
+    /// Buffered IDs serve only as graph bridges; their current records are
+    /// scored separately when they match.
+    pub fn search_filtered(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef: usize,
+        records: &BTreeMap<u64, Record>,
+        conditions: &[Condition],
+    ) -> Vec<SearchHit> {
+        if conditions.is_empty() {
+            return self.search(query, k, ef, records);
+        }
+        let query_norm = self.query_norm(query);
+        let mut hits = Vec::new();
+        if let Some(entry) = self.entry {
+            let best = self.descend(query, query_norm, entry, records);
+            hits.extend(
+                self.filtered_layer(query, query_norm, best, ef.max(k), records, conditions)
+                    .into_iter()
+                    .take(k)
+                    .map(|candidate| SearchHit {
+                        id: self.nodes[candidate.node].id,
+                        distance: candidate.distance,
+                    }),
+            );
+        }
+        self.merge_buffered(hits, query, query_norm, k, records, conditions)
+    }
+
+    fn query_norm(&self, query: &[f32]) -> f64 {
+        if self.metric == DistanceMetric::Cosine {
+            vector_norm(query)
+        } else {
+            0.0
+        }
+    }
+
+    fn descend(
+        &self,
+        query: &[f32],
+        query_norm: f64,
+        entry: usize,
+        records: &BTreeMap<u64, Record>,
+    ) -> Candidate {
+        let mut best = self.candidate(entry, query, query_norm, records);
+        for layer in (1..self.nodes[entry].links.len()).rev() {
+            best = self.greedy(query, query_norm, best, layer, records);
+        }
+        best
+    }
+
+    fn merge_buffered(
+        &self,
+        mut hits: Vec<SearchHit>,
+        query: &[f32],
+        query_norm: f64,
+        k: usize,
+        records: &BTreeMap<u64, Record>,
+        conditions: &[Condition],
+    ) -> Vec<SearchHit> {
+        hits.extend(self.buffered.keys().filter_map(|&id| {
+            records
+                .get(&id)
+                .filter(|record| metadata::matches(&record.metadata, conditions))
+                .and_then(|record| {
+                    metric_distance(
+                        &record.vector,
+                        query,
+                        self.metric,
+                        if self.metric == DistanceMetric::Cosine {
+                            vector_norm(&record.vector)
+                        } else {
+                            0.0
+                        },
+                        query_norm,
+                    )
+                    .map(|distance| SearchHit { id, distance })
+                })
+        }));
+        hits.sort_by(|a, b| {
+            a.distance
+                .total_cmp(&b.distance)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        hits.truncate(k);
+        hits
+    }
+
     pub fn search(
         &self,
         query: &[f32],
@@ -383,17 +528,10 @@ impl Index {
         ef: usize,
         records: &BTreeMap<u64, Record>,
     ) -> Vec<SearchHit> {
+        let query_norm = self.query_norm(query);
         let mut hits = Vec::new();
-        let query_norm = if self.metric == DistanceMetric::Cosine {
-            vector_norm(query)
-        } else {
-            0.0
-        };
         if let Some(entry) = self.entry {
-            let mut best = self.candidate(entry, query, query_norm, records);
-            for layer in (1..self.nodes[entry].links.len()).rev() {
-                best = self.greedy(query, query_norm, best, layer, records);
-            }
+            let best = self.descend(query, query_norm, entry, records);
             hits.extend(
                 self.layer(
                     query,
@@ -412,29 +550,7 @@ impl Index {
                 }),
             );
         }
-        hits.extend(self.buffered.keys().filter_map(|&id| {
-            records.get(&id).and_then(|record| {
-                metric_distance(
-                    &record.vector,
-                    query,
-                    self.metric,
-                    if self.metric == DistanceMetric::Cosine {
-                        vector_norm(&record.vector)
-                    } else {
-                        0.0
-                    },
-                    query_norm,
-                )
-                .map(|distance| SearchHit { id, distance })
-            })
-        }));
-        hits.sort_by(|a, b| {
-            a.distance
-                .total_cmp(&b.distance)
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        hits.truncate(k);
-        hits
+        self.merge_buffered(hits, query, query_norm, k, records, &[])
     }
 }
 

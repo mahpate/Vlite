@@ -77,6 +77,19 @@ class Handler(BaseHTTPRequestHandler):
 
     do_DELETE = do_GET
 
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+        self.requests.append((self.command, self.path, body))
+        if self.mode == "filter-rejected":
+            self.send_response(422)
+            self.send_header("X-Request-ID", "test-422")
+            self.end_headers()
+            self.wfile.write(b'{"error":{"code":"invalid_input","message":"filters require mode exact"}}')
+        else:
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"hits":[{"id":"7","distance":0.5}]}')
+
 
 class ClientTests(unittest.TestCase):
     @classmethod
@@ -128,6 +141,31 @@ class ClientTests(unittest.TestCase):
         with self.assertRaises(TransportError):
             Client(self.base, TOKEN, timeout=0.05).put("1", {"vector": [1]})
         self.assertEqual(len(Handler.calls), 1)
+
+    def test_filtered_search_forwards_request_unchanged_in_every_mode(self):
+        flt = [{"op": "eq", "field": "tag", "value": {"type": "string", "value": "a"}},
+               {"op": "range", "field": "n", "min": {"type": "integer", "value": "-9223372036854775808"}, "max": None}]
+        requests = [{"vector": [1.0, 0.0], "k": 3, "mode": mode, "metric": metric, "filter": flt,
+                     **({} if mode == "exact" else {"ef_search": 50})}
+                    for mode in ("exact", "approximate", "approximate_ready") for metric in ("squared_l2", "cosine")]
+        for request in requests:
+            self.assertEqual(self.client.search(request), [{"id": "7", "distance": 0.5}])
+        self.assertEqual(Handler.requests, [("POST", "/v1/search", request) for request in requests])
+        Handler.requests = []
+        self.client.search({"vector": [1.0, 0.0], "k": 1, "mode": "approximate"})
+        self.assertEqual(Handler.requests, [("POST", "/v1/search", {"vector": [1.0, 0.0], "k": 1, "mode": "approximate"})])
+
+    def test_old_server_filter_rejection_propagates_without_fallback(self):
+        Handler.mode = "filter-rejected"
+        flt = [{"op": "eq", "field": "tag", "value": {"type": "boolean", "value": True}}]
+        for mode in ("approximate", "approximate_ready"):
+            with self.assertRaises(VLiteError) as result:
+                self.client.search({"vector": [1.0], "k": 1, "mode": mode, "filter": flt})
+            self.assertEqual((result.exception.status, result.exception.code, result.exception.request_id),
+                             (422, "invalid_input", "test-422"))
+        # Exactly one request per call: no retry and no silent exact-mode resend.
+        self.assertEqual([(r[2]["mode"], r[2]["filter"]) for r in Handler.requests],
+                         [("approximate", flt), ("approximate_ready", flt)])
 
     def test_invalid_inputs_never_send(self):
         for value in [1, "", "01", "-1", "18446744073709551616", "1/health"]:

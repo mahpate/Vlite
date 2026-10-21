@@ -127,7 +127,7 @@ def exercise(page, base, token):
     page.locator("#mode").select_option("approximate_ready")
     expect(page.locator("#metric")).to_be_enabled()
     expect(page.locator('#metric option[value="inner_product"]')).to_have_js_property("disabled", True)
-    expect(page.locator("#filter")).to_be_disabled()
+    expect(page.locator("#filter")).to_be_enabled()
     expect(page.locator("#ef")).to_be_enabled()
     page.get_by_role("button", name="Search", exact=True).click()
     expect(page.locator("#status")).to_contain_text("index_not_ready")
@@ -319,7 +319,7 @@ def exercise_console_tools(page, base, token):
     expect(page.locator("#vector-slice-result")).to_contain_text('"end_exclusive": 3')
     page.get_by_role("button", name="Find similar to saved ID", exact=True).click()
     expect(page.locator("#search-summary")).to_contain_text("neighbors returned")
-    expect(page.get_by_role("heading", name="Build an exact metadata filter", exact=True)).to_be_visible()
+    expect(page.get_by_role("heading", name="Build a metadata filter", exact=True)).to_be_visible()
     page.locator("#filter-field").fill("category")
     page.locator("#filter-value").fill("demo")
     page.get_by_role("button", name="Add AND condition", exact=True).click()
@@ -359,6 +359,29 @@ def exercise_console_tools(page, base, token):
     expect(page.locator("#build-result")).to_contain_text("Build completed")
     page.get_by_role("button", name="Compare exact / ready ANN", exact=True).click()
     expect(page.locator("#search-comparison")).to_contain_text('"overlap_fraction": 1')
+    page.locator("#mode").select_option("approximate_ready")
+    page.locator("#filter-field").fill("category")
+    page.locator("#filter-type").select_option("integer")
+    page.locator("#filter-value").fill("42")
+    page.get_by_role("button", name="Add AND condition", exact=True).click()
+    expect(page.locator("#mode")).to_have_value("approximate_ready")
+    page.locator("#k").fill("1")
+    page.get_by_role("button", name="Search", exact=True).click()
+    expect(page.locator("#hits tbody tr")).to_have_count(1)
+    expect(page.locator("#hits tbody button")).to_have_text("102")
+    expect(page.locator("#search-summary")).to_contain_text("no exact fallback")
+    page.get_by_role("button", name="Compare exact / ready ANN", exact=True).click()
+    expect(page.locator("#search-comparison")).to_contain_text('"exact_count": 1')
+    expect(page.locator("#search-comparison")).to_contain_text('"ann_count": 1')
+    page.locator("#filter").fill('[{"op":"eq","field":"category","value":{"type":"integer","value":"999"}}]')
+    page.get_by_role("button", name="Compare exact / ready ANN", exact=True).click()
+    expect(page.locator("#search-comparison")).to_contain_text('"overlap_fraction": null')
+    expect(page.locator("#search-comparison")).to_contain_text('"exact_count": 0')
+    page.get_by_role("button", name="Search", exact=True).click()
+    expect(page.locator("#hits tbody tr")).to_have_count(0)
+    page.get_by_role("button", name="Clear filter", exact=True).click()
+    page.locator("#mode").select_option("exact")
+    page.locator("#k").fill("10")
     page.locator("#scenario").fill(json.dumps({
         "name": "invalid-credential-field",
         "steps": [{"path": "/v1/vectors/101", "expected_ids": ["101"], "headers": {"Authorization": "not-allowed"}}],
@@ -480,6 +503,11 @@ def exercise_operations(page, base, token, read_token):
     expect(page.locator("#hits tbody tr")).to_have_count(2)
     # Direct API access still enforces the role independently of the console.
     headers = {"Authorization": "Bearer " + read_token}
+    page.locator("#mode").select_option("approximate_ready")
+    page.locator("#filter").fill('[{"op":"eq","field":"category","value":{"type":"string","value":"missing"}}]')
+    page.get_by_role("button", name="Search", exact=True).click()
+    expect(page.locator("#hits tbody tr")).to_have_count(0)
+    expect(page.locator("#status")).to_contain_text("HTTP 200")
     assert page.request.put(base + "/api/v1/vectors/500", headers=headers, data={"vector": [1, 0, 0]}).status == 403
     assert page.request.get(base + "/api/v1/admin/audit", headers=headers).status == 403
     assert page.request.post(base + "/api/v1/search", headers=headers, data={"vector": [1, 0, 0], "k": 1, "mode": "approximate"}).status == 403

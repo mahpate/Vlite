@@ -23,12 +23,69 @@ number on a small synthetic workload.
 cargo run --locked --release --bin vlite-bench -- 10000 32 100 100 10 42
 cargo run --locked --release --bin vlite-bench -- --ann 16 100 100 10000 32 100 100 10 42
 cargo run --locked --release --bin vlite-bench -- --filter-every 10 10000 32 100 100 10 42
+cargo run --locked --release --bin vlite-bench -- --metric cosine --filter-every 100 --ann 16 100 100 2000 32 30 100 10 42
+cargo run --locked --release --bin vlite-bench -- --filter-none --ann 16 100 100 2000 32 30 100 10 42
 ```
 
 Measure whole-child peak memory separately using
 `tests/measure_benchmark.py`. That peak includes dataset generation and the
 full-sort oracle, not only query working memory. Never present input-vector
 byte counts as measured process memory.
+
+### Filter-aware ANN campaign
+
+From the repository root, using native Windows Rust/Python:
+
+```powershell
+cargo build --locked --release --bin vlite-bench
+python benchmarks\filtered_ann_campaign.py --binary target\release\vlite-bench.exe --records 2000 --dimensions 32 --queries 30 --trials 3 --ef 100 --recall-target 0.99 --output benchmarks\results\filtered-ann-synthetic-windows.json
+python tests\filtered_ann_campaign.py
+cargo test --locked --features server --test benchmark_cli
+```
+
+The output path must not exist. On other systems use their native executable
+path. The bounded standard-library campaign runs **24 sequential fresh release
+children** by default: both squared L2 and cosine across unfiltered, broad
+(50%, `id % 2 == 0`), restrictive (1%, `id % 100 == 0`) and no-match predicates,
+three trials each. Order reverses on alternating trials. `--filter-none` stores
+`selected=false` on every record and queries `selected=true`, providing an
+explicit no-match predicate without changing `--filter-every`'s existing
+zero-based ID selection. Both options precede `--ann` and are mutually exclusive.
+Other metric/input/mutation options precede filter options, as before.
+
+Each child verifies exact IDs, distances and result counts against a full-sort
+oracle built directly from the same vectors and predicate, outside timing.
+The same filter goes to exact, lazy ANN and ready-only ANN APIs; no exact
+fallback is used. Initial explicit index construction and one warmup per mode
+are outside measured query samples. Static queries use the ready-only ANN path;
+mixed lazy mode can rebuild an unavailable graph synchronously, while background
+and maintenance modes retain their explicit ready-only rejections.
+Mixed writes preserve the synthetic metadata and compare to the current live,
+eligible exact oracle.
+
+Top-level `eligible_records` is the initial eligible dataset count (excluding
+zero-norm vectors for cosine), `returned_per_query` is its capped count, and
+`returned_counts` records actual exact counts per query. `hnsw` records
+`eligible_records_samples`, `returned_counts`, `recall_denominator_samples`
+and summed `recall_denominator` for each current query state. Cosine excludes
+zero-norm stored vectors and rejects zero query vectors. Recall is tie-aware against the kth **eligible** exact
+distance, not global top-k; the denominator is `min(k, eligible exact count)`
+per query. Existing empty-set convention is preserved: recall **1 with explicit
+denominator 0**, a vacuous result, not evidence of retrieval quality. The
+campaign's empty-set recall-target verdict is null. Nonempty target checks use
+measured trial recall; choosing an ef does not establish a recall guarantee.
+
+Filtering participates in candidate retention while nonmatching nodes remain
+traversal bridges. An ef bounds retained eligible candidates, **not visits or
+time**. Restrictive/no-match filters may traverse the entire reachable graph,
+and ANN does not promise to fill k. Compare against exact latency rather than
+assuming filtering makes ANN faster. Reports retain every raw exact/ANN latency
+sample, build cost, returned counts, recall denominators, workload checksums,
+source/binary hashes and OS-measured whole-child peak RSS via
+`tests\measure_benchmark.py`. RSS includes input/oracle/index/all phases, not
+incremental index memory. Synthetic data, shared unpinned host, small query
+counts and single-client warm-cache timing do not establish production tails,
+real-embedding quality or a universal speedup.
 
 ## Reproduce the REST comparison
 

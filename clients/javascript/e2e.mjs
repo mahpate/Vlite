@@ -9,6 +9,13 @@ assert.equal((await client.indexStatus()).ready, false);
 await client.put("0", { vector: [0, 0, 1] });
 await assert.rejects(client.search({ vector: [1, 0, 0], k: 1, mode: "approximate_ready" }),
   (e) => e instanceof VLiteError && e.code === "index_not_ready");
+const FAR = { op: "eq", field: "group", value: { type: "string", value: "far" } };
+// A filter never turns ready-only search into a build or exact fallback; malformed filters fail first.
+await assert.rejects(client.search({ vector: [1, 0, 0], k: 1, mode: "approximate_ready", filter: [FAR] }),
+  (e) => e instanceof VLiteError && e.status === 409 && e.code === "index_not_ready");
+await assert.rejects(client.search({ vector: [1, 0, 0], k: 1, mode: "approximate_ready",
+  filter: [{ op: "range", field: "rank", min: { type: "string", value: "1" } }] }),
+(e) => e instanceof VLiteError && e.status === 422 && e.code === "invalid_input");
 const record = { vector: [1, 0, 0], payload_base64: "AP8=",
   metadata: { n: { type: "integer", value: "-9223372036854775808" } } };
 assert.equal(await client.put("18446744073709551615", record), undefined);
@@ -97,4 +104,69 @@ tag = (await client.getVersioned(other)).etag;
 assert.equal(await client.delete(other, { ifMatch: tag }), true);
 assert.equal((await client.database()).records, before);
 console.log("PASS JavaScript live conditional writes");
+
+// Filtered ANN: every eligible record lies outside the unfiltered top k.
+const RESTRICTIVE = [FAR, { op: "range", field: "rank", min: { type: "integer", value: "2" } }];
+const NO_MATCH = [[{ op: "eq", field: "group", value: { type: "string", value: "none" } }],
+  [FAR, { op: "range", field: "rank", min: { type: "integer", value: "1000" } }],
+  [{ op: "eq", field: "group", value: { type: "integer", value: "1" } }]]; // strict type match
+const tagged = (vector, group, rank) => ({ vector, metadata: {
+  group: { type: "string", value: group }, rank: { type: "integer", value: String(rank) } } });
+// ANN returns only eligible current records (at most k) and, on this tiny graph
+// with ef_search above the live count, the same hits as the exact oracle.
+async function checkFiltered(metric, k, filter, eligible, expected) {
+  const query = { vector: [1, 0, 0], k, metric };
+  const exact = await client.search({ ...query, filter });
+  assert.deepEqual(exact.map((h) => h.id), expected, `${metric} exact`);
+  for (const mode of ["approximate", "approximate_ready"]) {
+    for (const extra of [{}, { ef_search: 100 }]) {
+      const hits = await client.search({ ...query, mode, filter, ...extra });
+      const label = `${metric} ${mode} ${JSON.stringify(hits)}`;
+      assert.ok(hits.length <= k && hits.every((h) => eligible.includes(h.id)), label);
+      for (let i = 1; i < hits.length; i++) {
+        const [a, b] = [hits[i - 1], hits[i]];
+        assert.ok(a.distance < b.distance || (a.distance === b.distance && BigInt(a.id) < BigInt(b.id)), label);
+      }
+      if (extra.ef_search) {
+        assert.deepEqual(hits.map((h) => h.id), expected, label);
+        hits.forEach((h, i) => assert.ok(Math.abs(h.distance - exact[i].distance) <= 1e-9, label));
+      }
+    }
+    const unfiltered = await client.search({ ...query, mode });
+    assert.ok(unfiltered.length === k && !unfiltered.some((h) => eligible.includes(h.id)), "filter must be restrictive");
+  }
+}
+const filteredBefore = (await client.database()).records;
+const near = Array.from({ length: 16 }, (_, n) => String(200 + n));
+const seed = [...near.map((id, n) => ({ op: "put", id, ...tagged([1, 0.05 * n, 0], "near", n) })),
+  ...[["300", [0, 1, 0], 1], ["301", [0, 0, 1], 2], ["302", [0.1, 1, 0], 3], ["303", [-1, 0.2, 0], 4], ["304", [0, 1, 1], 5]]
+    .map(([id, vector, rank]) => ({ op: "put", id, ...tagged(vector, "far", rank) }))];
+for (const metric of ["squared_l2", "cosine"]) {
+  await client.batch(seed);
+  await client.buildIndex({ metric });
+  const built = await client.indexStatus();
+  assert.ok(built.ready && built.metric === metric);
+  // Same order for both metrics (cosine 301/304 tie by ID).
+  await checkFiltered(metric, 3, RESTRICTIVE, ["301", "302", "303", "304"], ["302", "301", "304"]);
+  // k above the eligible count underfills rather than padding with ineligible records.
+  await checkFiltered(metric, 10, RESTRICTIVE, ["301", "302", "303", "304"], ["302", "301", "304", "303"]);
+  for (const filter of NO_MATCH) await checkFiltered(metric, 3, filter, [], []);
+  // Buffered updates/deletes without rebuilding: old graph entries must not leak.
+  await client.put("215", tagged([1, 0.75, 0], "far", 9)); // becomes eligible; still outside unfiltered top 3
+  await client.put("301", tagged([0, 0, 1], "near", 2)); // no longer eligible
+  assert.equal(await client.delete("302"), true);
+  await client.batch([{ op: "put", id: "305", ...tagged([0.5, 1, 0], "far", 2) }, { op: "delete", id: "304" }]);
+  const status = await client.indexStatus();
+  assert.ok(status.ready && status.metric === metric && status.buffered_ids > 0, JSON.stringify(status));
+  await checkFiltered(metric, 3, RESTRICTIVE, ["215", "303", "305"], ["215", "305", "303"]);
+  for (const filter of NO_MATCH) await checkFiltered(metric, 3, filter, [], []);
+  for (const mode of ["approximate", "approximate_ready"]) {
+    await assert.rejects(client.search({ vector: [1, 0, 0], k: 1, mode, metric: "inner_product", filter: RESTRICTIVE }),
+      (e) => e instanceof VLiteError && e.status === 422 && e.code === "invalid_input");
+  }
+  await client.batch([...seed.filter((op) => !["302", "304"].includes(op.id)).map(({ id }) => ({ op: "delete", id })),
+    { op: "delete", id: "305" }]);
+  assert.equal((await client.database()).records, filteredBefore);
+}
+console.log("PASS JavaScript live filtered ANN");
 console.log("PASS JavaScript live REST client");

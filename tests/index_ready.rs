@@ -248,7 +248,7 @@ mod rest {
             "1"
         );
         for body in [
-            json!({"vector":[0.0],"k":1,"mode":"approximate_ready","filter":[]}),
+            json!({"vector":[0.0],"k":1,"mode":"approximate_ready","filter":[{"op":"range","field":"x"}]}),
             json!({"vector":[0.0],"k":1,"mode":"approximate_ready","ef_search":0}),
             json!({"vector":[],"k":0,"mode":"approximate_ready"}),
         ] {

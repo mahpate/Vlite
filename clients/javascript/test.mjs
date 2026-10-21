@@ -164,3 +164,44 @@ test("versioned reads and conditional writes", async () => {
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+test("filtered search sends the request unchanged and propagates rejections without fallback", async () => {
+  const calls = [];
+  let reject = false;
+  const server = createServer(async (req, res) => {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    calls.push({ method: req.method, path: req.url, body: JSON.parse(body) });
+    if (reject) {
+      res.writeHead(422, { "X-Request-ID": "test-422" });
+      res.end(JSON.stringify({ error: { code: "invalid_input", message: "filters require mode exact; approximate filtering is not supported" } }));
+    } else {
+      res.end(JSON.stringify({ hits: [{ id: "7", distance: 0.5 }] }));
+    }
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const client = new Client(`http://127.0.0.1:${server.address().port}`, token);
+  const filter = [
+    { op: "eq", field: "tag", value: { type: "string", value: "a" } },
+    { op: "range", field: "n", min: { type: "integer", value: "-9223372036854775808" }, max: null },
+  ];
+  try {
+    const requests = ["exact", "approximate", "approximate_ready"].flatMap((mode) => ["squared_l2", "cosine"].map(
+      (metric) => ({ vector: [1, 0], k: 3, mode, metric, filter, ...(mode === "exact" ? {} : { ef_search: 50 }) })));
+    for (const request of requests) assert.deepEqual(await client.search(request), [{ id: "7", distance: 0.5 }]);
+    assert.deepEqual(calls.splice(0), requests.map((body) => ({ method: "POST", path: "/v1/search", body })));
+    // Requests without a filter are unchanged by the filtered-ANN contract.
+    await client.search({ vector: [1, 0], k: 1, mode: "approximate" });
+    assert.deepEqual(calls.splice(0)[0].body, { vector: [1, 0], k: 1, mode: "approximate" });
+    // An older server's explicit rejection is surfaced once: no retry, no exact fallback.
+    reject = true;
+    for (const mode of ["approximate", "approximate_ready"]) {
+      await assert.rejects(client.search({ vector: [1, 0], k: 1, mode, filter }), (e) => e instanceof VLiteError
+        && e.status === 422 && e.code === "invalid_input" && e.requestId === "test-422");
+    }
+    assert.deepEqual(calls.splice(0).map((c) => [c.body.mode, c.body.filter]), [["approximate", filter], ["approximate_ready", filter]]);
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});

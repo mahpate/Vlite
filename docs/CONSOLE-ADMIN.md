@@ -26,14 +26,17 @@ already admitted before token rotation/revocation may complete.
 `GET /v1/capabilities`:
 
 ```json
-{"version":"0.1.2","api_version":1,"role":"admin","features":{"read_only":true,"tokens_reload":true,"audit":true,"background_rebuild":true,"maintenance":true,"backup_restore":true,"conditional_writes":true},"routes":["/v1/capabilities"]}
+{"version":"0.1.2","api_version":1,"role":"admin","features":{"read_only":true,"tokens_reload":true,"audit":true,"background_rebuild":true,"maintenance":true,"backup_restore":true,"conditional_writes":true,"filtered_ann":true},"routes":["/v1/capabilities"]}
 ```
 
 `role` is `"admin"` or `"read_only"`; `routes` includes the complete supported
 data/admin route templates. Feature booleans reflect configuration where relevant.
 Clients should check API version and features rather than infer support from the
 package version. Existing data endpoints are unchanged, except search and index
-build now additionally accept optional `config`.
+build now additionally accept optional `config`. `filtered_ann: true` means
+`filter` is accepted in `approximate` and `approximate_ready` search (filter-aware
+traversal, up to k eligible hits, no exact fallback); without it, send nonempty
+filters only in exact mode.
 
 ## Token lifecycle and audit (admin only)
 

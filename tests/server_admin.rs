@@ -65,8 +65,26 @@ async fn roles_enforce_every_mutation_and_lazy_ann_without_hiding_reads() {
     assert_eq!(caps["role"], "read_only");
     assert_eq!(caps["features"]["backup_restore"], false);
     assert_eq!(caps["features"]["conditional_writes"], true);
+    assert_eq!(caps["features"]["filtered_ann"], true);
     let (_, caps) = call(&app, ADMIN, "GET", "/v1/capabilities", Value::Null).await;
     assert_eq!(caps["features"]["conditional_writes"], true);
+    assert_eq!(caps["features"]["filtered_ann"], true);
+    let filter = json!([{"op":"eq","field":"tag","value":{"type":"string","value":"a"}}]);
+    let lazy = json!({"vector":[1.,2.],"k":1,"mode":"approximate","filter":filter});
+    assert_eq!(
+        call(&app, READ, "POST", "/v1/search", lazy).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let ready = json!({"vector":[1.,2.],"k":1,"mode":"approximate_ready","filter":filter});
+    assert_eq!(
+        call(&app, READ, "POST", "/v1/search", ready).await.0,
+        StatusCode::CONFLICT
+    );
+    let invalid = json!({"vector":[1.,2.],"k":0,"mode":"approximate_ready","filter":[{"op":"range","field":"n"}]});
+    assert_eq!(
+        call(&app, READ, "POST", "/v1/search", invalid).await.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
     assert_eq!(
         call(&app, ADMIN, "GET", "/v1/capabilities", Value::Null)
             .await

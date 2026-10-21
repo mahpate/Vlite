@@ -317,7 +317,6 @@
       if (!Array.isArray(conditions)) throw new Error("Current filter must be an array");
       conditions.push(op === "eq" ? { op, field, value: { type, value } } : { op: "range", field, [op]: { type, value } });
       $("filter").value = JSON.stringify(conditions, null, 2);
-      $("mode").value = "exact"; $("mode").dispatchEvent(new Event("change"));
     });
     on("filter-clear", async () => { $("filter").value = "[]"; });
     on("find-similar", async () => {
@@ -330,15 +329,16 @@
     on("compare-search", async () => {
       if ($("metric").value === "inner_product") throw new Error("ANN comparison supports squared L2 and cosine only");
       const filter = get("filter");
-      if (!Array.isArray(filter) || filter.length) throw new Error("Clear filters before unfiltered exact/ANN comparison");
+      if (!Array.isArray(filter)) throw new Error("Filter must be an AND array");
+      if (filter.length && ctx.capabilities()?.features?.filtered_ann !== true) throw new Error("This server does not advertise filtered ANN; use exact search or upgrade the server");
       text("search-comparison", "Running exact then ready-only ANN; the two reads are not a snapshot");
-      const body = { vector: vector(get("query"), ctx.dimensions()), k: Number($("k").value), metric: $("metric").value, config: ctx.indexConfig() };
+      const body = { vector: vector(get("query"), ctx.dimensions()), k: Number($("k").value), metric: $("metric").value, config: ctx.indexConfig(), filter };
       const started = performance.now();
       const exact = await ctx.api("POST", "/v1/search", { ...body, mode: "exact" });
       const exactMs = performance.now() - started, annStart = performance.now();
       const ann = await ctx.api("POST", "/v1/search", { ...body, mode: "approximate_ready", ef_search: Number($("ef").value) });
       const common = exact.hits.filter((hit) => ann.hits.some((other) => other.id === hit.id)).length;
-      text("search-comparison", { exact_ms: exactMs, ann_ms: performance.now() - annStart, common_ids: common, exact_count: exact.hits.length, overlap_fraction: exact.hits.length ? common / exact.hits.length : null, note: "Browser timing; overlap on this query, not a general recall benchmark", exact, ann });
+      text("search-comparison", { exact_ms: exactMs, ann_ms: performance.now() - annStart, common_ids: common, exact_count: exact.hits.length, ann_count: ann.hits.length, overlap_fraction: exact.hits.length ? common / exact.hits.length : null, note: "Same filter on both queries, live reads not a snapshot. Browser timing; overlap with exact top-k on this query, not a general recall benchmark. ANN can underfill; no exact fallback. Null overlap means no exact matches.", exact, ann });
     });
     on("compare-records", async () => {
       const [left, right] = await records([$("id").value, $("compare-id").value]);

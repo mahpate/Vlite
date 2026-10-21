@@ -1,4 +1,4 @@
-import { Client, VLiteError, type Metadata } from "./index.js";
+import { Client, VLiteError, type Condition, type Metadata } from "./index.js";
 
 // Supply the token at runtime; never hard-code real credentials.
 export async function example(baseUrl: string, token: string): Promise<void> {
@@ -9,6 +9,14 @@ export async function example(baseUrl: string, token: string): Promise<void> {
   console.log(await client.search({ vector: [1, 0, 0], k: 5, metric: "cosine" }));
   await client.buildIndex({ metric: "cosine" });
   console.log(await client.search({ vector: [1, 0, 0], k: 5, metric: "cosine", mode: "approximate_ready" }));
+  // The same typed AND filter works in exact and approximate modes. Filtered ANN
+  // returns at most k matching records (possibly fewer); there is no exact fallback.
+  const filter: Condition[] = [
+    { op: "eq", field: "category", value: { type: "string", value: "example" } },
+    { op: "range", field: "rank", min: { type: "integer", value: "10" }, max: null },
+  ];
+  console.log(await client.search({ vector: [1, 0, 0], k: 5, filter }));
+  console.log(await client.search({ vector: [1, 0, 0], k: 5, metric: "cosine", mode: "approximate_ready", filter, ef_search: 200 }));
   console.log(await client.listVectors({ limit: 25 }));
   // Optimistic concurrency: a 412 means the database changed (or the service
   // restarted) since the read. Refetch and decide; the client never retries.
@@ -36,5 +44,9 @@ function typeChecks(client: Client): void {
   client.delete("1", { ifmatch: '"x"' });
   // @ts-expect-error Entity tags are strings.
   client.put("1", { vector: [1] }, { ifMatch: 1 });
+  // @ts-expect-error Range bounds must be numeric metadata values.
+  client.search({ vector: [1], k: 1, mode: "approximate", filter: [{ op: "range", field: "n", min: { type: "string", value: "a" } }] });
+  // @ts-expect-error Filter values are typed metadata, not raw JSON scalars.
+  client.search({ vector: [1], k: 1, mode: "approximate_ready", filter: [{ op: "eq", field: "n", value: 1 }] });
 }
 void typeChecks;

@@ -175,7 +175,7 @@ async fn capabilities(
         json!({"version":env!("CARGO_PKG_VERSION"),"api_version":1,"role":role.name(),
         "features":{"read_only":true,"tokens_reload":auth.admin_file.is_some() || auth.read_only_file.is_some(),
         "audit":true,"background_rebuild":true,"maintenance":true,"backup_restore":s.admin.directory.is_some(),
-        "conditional_writes":true},
+        "conditional_writes":true,"filtered_ann":true},
         "routes":["/health","/ready","/metrics","/openapi.json","/dashboard","/dashboard/app.js","/dashboard/style.css","/dashboard/console-tools.js",
         "/v1/capabilities","/v1/database","/v1/vectors","/v1/vectors/{id}","/v1/batches","/v1/search",
         "/v1/index/hnsw","/v1/index/hnsw/rebuild","/v1/index/hnsw/rebuild/poll","/v1/index/hnsw/rebuild/cancel",

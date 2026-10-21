@@ -28,11 +28,16 @@ screens, and jumps directly to each tool.
   CSV prefixes spreadsheet formula-leading cells with an apostrophe for safety.
 - **Filter builder:** add equality or inclusive numeric lower/upper range
   conditions joined by AND. The generated JSON stays editable. Filters use exact
-  search; no silent ANN post-filtering.
-- **Search comparison:** run an unfiltered exact search followed by matching
-  ready-only ANN. The output includes ID overlap and separate browser-observed
-  times, not engine-only timings or a general recall claim. No index is built
-  implicitly by the comparison.
+  and filter-aware ANN search. The builder preserves the selected mode. ANN
+  retains matching candidates during traversal and uses nonmatching nodes as
+  graph bridges, not a final filter on unfiltered top-k. It can return fewer than
+  k matches; no hidden exact-search fallback is performed. Selective/no-match
+  filters can traverse many or all reachable nodes; ef is not a visit/time cap.
+- **Search comparison:** run exact search followed by matching ready-only ANN
+  with the same filter. The output includes exact/ANN result counts, ID overlap
+  and separate browser-observed times, not engine-only timings or a general
+  recall claim. Overlap is null when exact returns no matches. The reads are
+  not a snapshot. No index is built implicitly by the comparison.
 - **Batch editing:** enter unique IDs from the loaded page for deletion or
   replacement of entire metadata maps. Operations are confirmed and divided
   into batches of 20. Metadata replacement first reads full records, then

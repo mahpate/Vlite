@@ -71,7 +71,7 @@ fn benchmark_rejects_invalid_or_unbounded_workloads_before_creating_files() {
         vec!["--ann", "16", "100", "2", "32", "4", "5", "8", "3", "42"],
         vec!["--filter-every"],
         vec!["--filter-every", "0"],
-        vec!["--filter-every", "2", "--ann", "16", "100", "100"],
+        vec!["--filter-none", "--filter-every", "2"],
         vec!["--mixed-writes", "0", "--ann", "16", "100", "100"],
         vec!["--mixed-writes", "257", "--ann", "16", "100", "100"],
         vec!["--mixed-writes", "1"],
@@ -282,6 +282,88 @@ fn approximate_benchmark_emits_measured_recall_and_build_cost() {
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
 }
 
+#[cfg(feature = "server")]
+#[test]
+fn filtered_ann_reports_eligible_oracle_denominators_for_both_metrics() {
+    let directory = tempfile::tempdir().unwrap();
+    for metric in ["squared_l2", "cosine"] {
+        for (flags, eligible, returned) in [
+            (vec![], 200, 10),
+            (vec!["--filter-every", "2"], 100, 10),
+            (vec!["--filter-every", "100"], 2, 2),
+            (vec!["--filter-none"], 0, 0),
+        ] {
+            let output = Command::new(env!("CARGO_BIN_EXE_vlite-bench"))
+                .args(["--metric", metric])
+                .args(&flags)
+                .args(["--ann", "8", "32", "200", "200", "4", "5", "50", "10", "42"])
+                .env("VLITE_BENCH_DIR", directory.path())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{metric} {flags:?}: {output:?}");
+            let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(value["eligible_records"], eligible);
+            assert_eq!(value["returned_per_query"], returned);
+            let ann = &value["hnsw"];
+            assert_eq!(ann["recall_denominator"], returned * 5);
+            assert_eq!(ann["returned_counts"], serde_json::json!(vec![returned; 5]));
+            assert_eq!(
+                ann["eligible_records_samples"],
+                serde_json::json!(vec![eligible; 5])
+            );
+            assert_eq!(
+                ann["recall_denominator_samples"],
+                serde_json::json!(vec![returned; 5])
+            );
+            // Empty exact sets use vacuous recall 1, explicitly labelled by denominator 0.
+            assert_eq!(ann["recall_at_k"], 1.0);
+            assert_eq!(value["recall_at_k"], 1.0);
+            assert_eq!(ann["rebuild_query_numbers"], serde_json::json!([]));
+        }
+    }
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+}
+
+#[cfg(feature = "server")]
+#[test]
+fn filtered_ann_mixed_updates_preserve_metadata_and_current_eligible_oracle() {
+    for mode in ["lazy", "background", "maintenance"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_vlite-bench"))
+            .args([
+                "--metric",
+                "cosine",
+                "--mixed-writes",
+                "16",
+                "--mixed-deletes",
+                "4",
+                "--rebuild-mode",
+                mode,
+                "--filter-every",
+                "4",
+                "--ann",
+                "8",
+                "32",
+                "100",
+                "64",
+                "4",
+                "5",
+                "16",
+                "10",
+                "42",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{mode}: {output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            value["hnsw"]["eligible_records_samples"],
+            serde_json::json!([15, 14, 13, 12, 12])
+        );
+        assert_eq!(value["hnsw"]["recall_denominator"], 50);
+        assert_eq!(value["hnsw"]["recall_at_k"], 1.0);
+    }
+}
+
 #[test]
 fn metric_benchmarks_verify_exact_filtered_and_mixed_cosine_scores() {
     for metric in ["squared_l2", "cosine", "inner_product"] {
@@ -306,6 +388,67 @@ fn metric_benchmarks_verify_exact_filtered_and_mixed_cosine_scores() {
         }
     }
 }
+
+#[cfg(feature = "server")]
+#[test]
+fn filtered_cosine_benchmark_excludes_zero_norm_records_and_rejects_zero_queries() {
+    let directory = tempfile::tempdir().unwrap();
+    let data = directory.path().join("vectors.txt");
+    let queries = directory.path().join("queries.txt");
+    std::fs::write(&data, "1 0\n0 0\n").unwrap();
+    std::fs::write(&queries, "1 0\n0 1\n").unwrap();
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_vlite-bench"))
+            .args(["--metric", "cosine", "--vectors"])
+            .arg(&data)
+            .arg("--query-vectors")
+            .arg(&queries)
+            .args([
+                "--filter-every",
+                "1",
+                "--ann",
+                "2",
+                "4",
+                "4",
+                "2",
+                "2",
+                "2",
+                "2",
+                "2",
+                "42",
+            ])
+            .env("VLITE_BENCH_DIR", directory.path())
+            .output()
+            .unwrap()
+    };
+    let output = run();
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["eligible_records"], 1);
+    for mode in [&value, &value["hnsw"]] {
+        assert_eq!(mode["recall_at_k"], 1.0);
+        assert_eq!(mode["recall_denominator"], 2);
+        assert_eq!(mode["returned_counts"], serde_json::json!([1, 1]));
+    }
+    assert_eq!(
+        value["hnsw"]["eligible_records_samples"],
+        serde_json::json!([1, 1])
+    );
+    assert_eq!(
+        value["hnsw"]["recall_denominator_samples"],
+        serde_json::json!([1, 1])
+    );
+    std::fs::write(&queries, "1 0\n0 0\n").unwrap();
+    let invalid = run();
+    assert!(!invalid.status.success());
+    assert!(
+        String::from_utf8(invalid.stderr)
+            .unwrap()
+            .contains("nonzero query")
+    );
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
+}
+
 #[cfg(feature = "server")]
 #[test]
 fn external_updates_delete_and_reinsert_use_current_live_oracle() {

@@ -11,7 +11,7 @@ use vlite::{
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
-const USAGE: &str = "usage: vlite-bench [--metric squared_l2|cosine|inner_product] [--vectors <file> --query-vectors <file>] [--update-vectors <file>] [--mixed-writes <updates per query>] [--mixed-deletes <deletes per query>] [--rebuild-mode lazy|background|maintenance] [--query-interval-ms <0..1000>] [--filter-every <N>] [--ann <m> <ef_construction> <ef_search>] [records=1000 dimensions=32 queries=100 batch_size=100 k=10 seed=42]; background/maintenance require mixed ANN and report ready-only rejections without fallback; filtering and ANN are mutually exclusive; inner product is exact-only";
+const USAGE: &str = "usage: vlite-bench [--metric squared_l2|cosine|inner_product] [--vectors <file> --query-vectors <file>] [--update-vectors <file>] [--mixed-writes <updates per query>] [--mixed-deletes <deletes per query>] [--rebuild-mode lazy|background|maintenance] [--query-interval-ms <0..1000>] [--filter-every <N>|--filter-none] [--ann <m> <ef_construction> <ef_search>] [records=1000 dimensions=32 queries=100 batch_size=100 k=10 seed=42]; background/maintenance require mixed ANN and report ready-only rejections without fallback; filtered ANN retains eligible candidates, selective filters may traverse the whole graph; inner product is exact-only";
 const MAX_DATA_BYTES: usize = 256 * 1024 * 1024;
 const MAX_DISTANCE_COMPONENTS: u64 = 500_000_000;
 
@@ -24,6 +24,7 @@ struct Config {
     seed: u64,
     ann: Option<(HnswConfig, usize)>,
     filter_every: Option<usize>,
+    filter_none: bool,
     input: Option<(PathBuf, PathBuf)>,
     mixed_writes: usize,
     mixed_deletes: usize,
@@ -120,16 +121,21 @@ impl Config {
             (None, None) => None,
             _ => return Err("both --vectors and --query-vectors are required".into()),
         };
-        let filter_every = if args.first().is_some_and(|arg| arg == "--filter-every") {
-            let every = args.get(1).ok_or(USAGE)?.parse::<usize>()?;
-            if every == 0 {
-                return Err("filter interval must be positive".into());
-            }
-            args.drain(..2);
-            Some(every)
-        } else {
-            None
-        };
+        let filter_none = args.first().is_some_and(|arg| arg == "--filter-none");
+        if filter_none {
+            args.remove(0);
+        }
+        let filter_every =
+            if !filter_none && args.first().is_some_and(|arg| arg == "--filter-every") {
+                let every = args.get(1).ok_or(USAGE)?.parse::<usize>()?;
+                if every == 0 {
+                    return Err("filter interval must be positive".into());
+                }
+                args.drain(..2);
+                Some(every)
+            } else {
+                None
+            };
         let ann = if args.first().is_some_and(|arg| arg == "--ann") {
             if args.len() < 4 {
                 return Err(USAGE.into());
@@ -155,9 +161,6 @@ impl Config {
         } else {
             None
         };
-        if filter_every.is_some() && ann.is_some() {
-            return Err("filtered approximate search is not supported".into());
-        }
         let metric = metric.unwrap_or_default();
         if ann.is_some() && metric == DistanceMetric::InnerProduct {
             return Err("inner_product is exact-only".into());
@@ -238,7 +241,13 @@ impl Config {
         if bytes.is_none_or(|n| n > MAX_DATA_BYTES as u64)
             || components.is_none_or(|n| n > MAX_DISTANCE_COMPONENTS)
             || batch_size.min(records)
-                * (16 + dimensions * 4 + if filter_every.is_some() { 28 } else { 0 })
+                * (16
+                    + dimensions * 4
+                    + if filter_every.is_some() || filter_none {
+                        28
+                    } else {
+                        0
+                    })
                 > MAX_BATCH_BYTES as u64
         {
             return Err("workload exceeds 256 MiB of vector data, 500 million distance components, or batch byte limit".into());
@@ -252,6 +261,7 @@ impl Config {
             seed,
             ann,
             filter_every,
+            filter_none,
             input,
             mixed_writes,
             mixed_deletes,
@@ -261,6 +271,13 @@ impl Config {
             maintenance,
             query_interval_ms: query_interval_ms.unwrap_or(0),
         })
+    }
+
+    fn selected(&self, id: usize) -> bool {
+        !self.filter_none
+            && self
+                .filter_every
+                .is_none_or(|every| id.is_multiple_of(every))
     }
 }
 
@@ -417,14 +434,14 @@ fn run() -> Result<()> {
             .enumerate()
             .map(|(index, vector)| {
                 let id = batch_index * config.batch_size + index;
-                if let Some(every) = config.filter_every {
+                if config.filter_every.is_some() || config.filter_none {
                     Mutation::PutWithMetadata {
                         id: id as u64,
                         vector: vector.clone(),
                         payload: Vec::new(),
                         metadata: Metadata::from([(
                             "selected".into(),
-                            MetadataValue::Boolean(id % every == 0),
+                            MetadataValue::Boolean(config.selected(id)),
                         )]),
                     }
                 } else {
@@ -447,9 +464,8 @@ fn run() -> Result<()> {
     if db.len() != config.records {
         return Err("reopened database has an incorrect record count".into());
     }
-    let filter = config
-        .filter_every
-        .map(|_| Condition::Eq {
+    let filter = (config.filter_every.is_some() || config.filter_none)
+        .then(|| Condition::Eq {
             field: "selected".into(),
             value: MetadataValue::Boolean(true),
         })
@@ -459,9 +475,7 @@ fn run() -> Result<()> {
         .iter()
         .enumerate()
         .filter(|(id, vector)| {
-            config
-                .filter_every
-                .is_none_or(|every| id.is_multiple_of(every))
+            config.selected(*id)
                 && (config.metric != DistanceMetric::Cosine || vector.iter().any(|&v| v != 0.0))
         })
         .count();
@@ -469,6 +483,8 @@ fn run() -> Result<()> {
     black_box(db.search_filtered_with_metric(&queries[0], config.k, &filter, config.metric)?);
     let mut times_ms = Vec::with_capacity(config.queries);
     let mut matched = 0usize;
+    let mut exact_denominator = 0usize;
+    let mut exact_returned_counts = Vec::new();
     let mut truth = Vec::new();
     for query in &queries {
         let start = Instant::now();
@@ -482,13 +498,11 @@ fn run() -> Result<()> {
         // The oracle works directly from the generated input, outside timing.
         let expected: Vec<_> = ground_truth(&dataset, query, config.metric)
             .into_iter()
-            .filter(|(id, _)| {
-                config
-                    .filter_every
-                    .is_none_or(|every| (*id as usize).is_multiple_of(every))
-            })
+            .filter(|(id, _)| config.selected(*id as usize))
             .collect();
         let result_count = config.k.min(expected.len());
+        exact_denominator += result_count;
+        exact_returned_counts.push(actual.len());
         for (hit, &(id, distance)) in actual.iter().zip(&expected[..result_count]) {
             if hit.id != id || hit.distance != distance {
                 return Err(io::Error::other(
@@ -509,11 +523,12 @@ fn run() -> Result<()> {
         let start = Instant::now();
         db.build_hnsw_with_metric(index_config, config.metric)?;
         let build_ms = start.elapsed().as_secs_f64() * 1000.0;
-        black_box(db.search_approximate_with_metric(
+        black_box(db.search_approximate_filtered_with_metric(
             &queries[0],
             config.k,
             ef_search,
             index_config,
+            &filter,
             config.metric,
         )?);
         let mut approximate_times = Vec::new();
@@ -523,6 +538,9 @@ fn run() -> Result<()> {
         let mut rebuild_queries = Vec::new();
         let mut recall_samples = Vec::new();
         let mut live_samples = Vec::new();
+        let mut eligible_samples = Vec::new();
+        let mut denominator_samples = Vec::new();
+        let mut returned_counts = Vec::new();
         let mut not_ready_queries = Vec::new();
         let mut publication_queries = Vec::new();
         let mut overflow_queries = Vec::new();
@@ -591,10 +609,25 @@ fn run() -> Result<()> {
                 let mut operations: Vec<_> = replacements
                     .into_iter()
                     .enumerate()
-                    .map(|(index, vector)| Mutation::Put {
-                        id: ((query_index * width + index) % config.records) as u64,
-                        vector,
-                        payload: Vec::new(),
+                    .map(|(index, vector)| {
+                        let id = (query_index * width + index) % config.records;
+                        if filter.is_empty() {
+                            Mutation::Put {
+                                id: id as u64,
+                                vector,
+                                payload: Vec::new(),
+                            }
+                        } else {
+                            Mutation::PutWithMetadata {
+                                id: id as u64,
+                                vector,
+                                payload: Vec::new(),
+                                metadata: Metadata::from([(
+                                    "selected".into(),
+                                    MetadataValue::Boolean(config.selected(id)),
+                                )]),
+                            }
+                        }
                     })
                     .collect();
                 operations.extend((0..config.mixed_deletes).map(|index| Mutation::Delete {
@@ -606,12 +639,12 @@ fn run() -> Result<()> {
                 write_times.push(start.elapsed().as_secs_f64() * 1000.0);
                 for operation in operations {
                     match operation {
-                        Mutation::Put { id, vector, .. } => {
+                        Mutation::Put { id, vector, .. }
+                        | Mutation::PutWithMetadata { id, vector, .. } => {
                             dataset[id as usize] = vector;
                             live[id as usize] = true;
                         }
                         Mutation::Delete { id } => live[id as usize] = false,
-                        _ => unreachable!(),
                     }
                 }
             }
@@ -632,11 +665,12 @@ fn run() -> Result<()> {
             }
             let start = Instant::now();
             let hits = black_box(
-                match db.search_approximate_ready_with_metric(
+                match db.search_approximate_ready_filtered_with_metric(
                     black_box(query),
                     config.k,
                     ef_search,
                     index_config,
+                    &filter,
                     config.metric,
                 ) {
                     Ok(hits) => hits,
@@ -646,11 +680,12 @@ fn run() -> Result<()> {
                             Vec::new()
                         } else {
                             rebuild_queries.push(query_index + 1);
-                            db.search_approximate_with_metric(
+                            db.search_approximate_filtered_with_metric(
                                 query,
                                 config.k,
                                 ef_search,
                                 index_config,
+                                &filter,
                                 config.metric,
                             )?
                         }
@@ -663,9 +698,10 @@ fn run() -> Result<()> {
             let expected = if config.mixed_writes + config.mixed_deletes > 0 {
                 let expected: Vec<_> = ground_truth(&dataset, query, config.metric)
                     .into_iter()
-                    .filter(|&(id, _)| live[id as usize])
+                    .filter(|&(id, _)| live[id as usize] && config.selected(id as usize))
                     .collect();
-                let exact = db.search_with_metric(query, config.k, config.metric)?;
+                let exact =
+                    db.search_filtered_with_metric(query, config.k, &filter, config.metric)?;
                 if exact.len() != config.k.min(expected.len())
                     || exact
                         .iter()
@@ -685,6 +721,19 @@ fn run() -> Result<()> {
             };
             let mut ids = std::collections::BTreeSet::new();
             let expected_count = config.k.min(expected.len());
+            eligible_samples.push(
+                dataset
+                    .iter()
+                    .enumerate()
+                    .filter(|(id, vector)| {
+                        live[*id]
+                            && config.selected(*id)
+                            && oracle_distance(vector, query, config.metric).is_some()
+                    })
+                    .count(),
+            );
+            denominator_samples.push(expected_count);
+            returned_counts.push(hits.len());
             if not_ready_queries.last() != Some(&(query_index + 1)) {
                 served_times.push(*approximate_times.last().expect("timed query"));
                 served_recall_total += expected_count;
@@ -701,7 +750,10 @@ fn run() -> Result<()> {
                 return Err("approximate search returned too many candidates".into());
             }
             for hit in &hits {
-                if !ids.insert(hit.id) || hit.id >= config.records as u64 || !live[hit.id as usize]
+                if !ids.insert(hit.id)
+                    || hit.id >= config.records as u64
+                    || !live[hit.id as usize]
+                    || !config.selected(hit.id as usize)
                 {
                     return Err("approximate search returned duplicate or invalid IDs".into());
                 }
@@ -766,7 +818,7 @@ fn run() -> Result<()> {
         };
         approximate_times.sort_by(f64::total_cmp);
         format!(
-            ",\"hnsw\":{{\"m\":{},\"ef_construction\":{},\"ef_search\":{},\"seed\":{},\"index_build_ms\":{:.6},\"query_p50_ms\":{:.6},\"query_p95_ms\":{:.6},\"query_p99_ms\":{:.6},\"recall_at_k\":{:.6},\"mixed_writes_per_query\":{},\"mixed_deletes_per_query\":{},\"query_samples_ms\":{},\"write_batch_samples_ms\":{},\"rebuild_query_numbers\":{:?},\"recall_samples\":{:?},\"live_records_samples\":{:?},\"query_interval_ms\":{},\"request_samples_ms\":{:?}{}}}",
+            ",\"hnsw\":{{\"m\":{},\"ef_construction\":{},\"ef_search\":{},\"seed\":{},\"index_build_ms\":{:.6},\"query_p50_ms\":{:.6},\"query_p95_ms\":{:.6},\"query_p99_ms\":{:.6},\"recall_at_k\":{:.6},\"mixed_writes_per_query\":{},\"mixed_deletes_per_query\":{},\"query_samples_ms\":{},\"write_batch_samples_ms\":{},\"rebuild_query_numbers\":{:?},\"recall_samples\":{:?},\"live_records_samples\":{:?},\"query_interval_ms\":{},\"request_samples_ms\":{:?},\"recall_denominator\":{recall_total},\"recall_denominator_samples\":{denominator_samples:?},\"eligible_records_samples\":{eligible_samples:?},\"returned_counts\":{returned_counts:?}{}}}",
             index_config.m,
             index_config.ef_construction,
             ef_search,
@@ -794,9 +846,13 @@ fn run() -> Result<()> {
     } else {
         String::new()
     };
-    let filter_json = config.filter_every.map_or(String::new(), |every| {
-        format!(        ",\"filter_every\":{every},\"eligible_records\":{eligible_records},\"returned_per_query\":{result_count}")
-    });
+    let filter_json = format!(
+        ",\"filter_every\":{},\"filter_none\":{},\"eligible_records\":{eligible_records},\"returned_per_query\":{result_count},\"returned_counts\":{exact_returned_counts:?},\"recall_denominator\":{exact_denominator},\"zero_denominator_recall\":1",
+        config
+            .filter_every
+            .map_or("null".into(), |every| every.to_string()),
+        config.filter_none
+    );
     db.close()?;
     let final_file_bytes = std::fs::metadata(&path)?.len();
     directory.close()?;
@@ -852,10 +908,10 @@ fn run() -> Result<()> {
         file_bytes,
         config.records * config.dimensions * 4,
         config.queries * config.dimensions * 4,
-        if result_count == 0 {
+        if exact_denominator == 0 {
             1.0
         } else {
-            matched as f64 / (config.queries * result_count) as f64
+            matched as f64 / exact_denominator as f64
         },
         ann_json,
         filter_json,

@@ -640,8 +640,53 @@ async fn typed_metadata_filters_and_atomic_rejection_are_exposed_over_rest() {
             json!({"vector":[0],"k":1,"mode":"approximate","filter":filter})
         )
         .await
-        .0,
-        422
+        .1["hits"],
+        json!([{"id":"7","distance":49.0}])
+    );
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/v1/search",
+            json!({"vector":[0],"k":2,"mode":"approximate_ready","ef_search":2,"filter":filter})
+        )
+        .await
+        .1["hits"],
+        json!([{"id":"7","distance":49.0}])
+    );
+    for (mode, body) in [
+        ("approximate", json!([{"op":"range","field":"count"}])),
+        (
+            "approximate_ready",
+            json!([{"op":"range","field":"count","min":{"type":"string","value":"a"}}]),
+        ),
+        (
+            "approximate_ready",
+            json!([{"op":"range","field":"count","min":{"type":"integer","value":"2"},"max":{"type":"integer","value":"1"}}]),
+        ),
+    ] {
+        for k in [0, 1] {
+            let (status, error) = request(
+                &app,
+                "POST",
+                "/v1/search",
+                json!({"vector":[0],"k":k,"mode":mode,"filter":body}),
+            )
+            .await;
+            assert_eq!(status, 422, "{error}");
+            assert_eq!(error["error"]["code"], "invalid_input");
+        }
+    }
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/v1/search",
+            json!({"vector":[0],"k":1,"mode":"approximate_ready","filter":[{"op":"eq","field":"category","value":{"type":"string","value":"none"}}]})
+        )
+        .await
+        .1["hits"],
+        json!([])
     );
     for metadata in [
         json!({"x":{"type":"integer","value":9007199254740993u64}}),

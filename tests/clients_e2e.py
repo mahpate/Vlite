@@ -26,6 +26,15 @@ def python_test(base, token):
         raise AssertionError("Expected index_not_ready")
     except VLiteError as error:
         assert error.code == "index_not_ready" and error.status == 409
+    # A filter never turns ready-only search into a build or an exact fallback,
+    # and malformed filters are rejected before readiness is considered.
+    for flt, status, code in [([FAR], 409, "index_not_ready"),
+                              ([{"op": "range", "field": "rank", "min": {"type": "string", "value": "1"}}], 422, "invalid_input")]:
+        try:
+            client.search({"vector": [1, 0, 0], "k": 1, "mode": "approximate_ready", "filter": flt})
+            raise AssertionError("Expected filtered ready-only rejection")
+        except VLiteError as error:
+            assert (error.status, error.code) == (status, code), error
     record = {"vector": [1, 0, 0], "payload_base64": "AP8=",
               "metadata": {"n": {"type": "integer", "value": "-9223372036854775808"}}}
     client.put("18446744073709551615", record)
@@ -70,7 +79,81 @@ def python_test(base, token):
     except VLiteError as error:
         assert error.status == 404
     conditional_test(client)
+    filtered_ann_test(client)
     print("PASS Python live REST client")
+
+
+FAR = {"op": "eq", "field": "group", "value": {"type": "string", "value": "far"}}
+# Typed AND: "far" records with integer rank >= 2.
+RESTRICTIVE = [FAR, {"op": "range", "field": "rank", "min": {"type": "integer", "value": "2"}}]
+NO_MATCH = [[{"op": "eq", "field": "group", "value": {"type": "string", "value": "none"}}],
+            [FAR, {"op": "range", "field": "rank", "min": {"type": "integer", "value": "1000"}}],
+            [{"op": "eq", "field": "group", "value": {"type": "integer", "value": "1"}}]]  # strict type match
+
+
+def tagged(vector, group, rank):
+    return {"vector": vector, "metadata": {"group": {"type": "string", "value": group},
+                                           "rank": {"type": "integer", "value": str(rank)}}}
+
+
+def check_filtered(client, metric, k, flt, eligible, expected):
+    """ANN returns only eligible current records (at most k) and, on this tiny
+    graph with ef_search above the live count, the same hits as the exact oracle."""
+    query = {"vector": [1, 0, 0], "k": k, "metric": metric}
+    exact = client.search(dict(query, filter=flt))
+    assert [h["id"] for h in exact] == expected, (metric, exact)
+    for mode in ["approximate", "approximate_ready"]:
+        for extra in [{}, {"ef_search": 100}]:
+            hits = client.search(dict(query, mode=mode, filter=flt, **extra))
+            assert len(hits) <= k and {h["id"] for h in hits} <= eligible, (metric, mode, hits)
+            assert hits == sorted(hits, key=lambda h: (h["distance"], int(h["id"]))), hits
+            if extra:
+                assert [h["id"] for h in hits] == expected, (metric, mode, hits, exact)
+                assert all(abs(a["distance"] - b["distance"]) <= 1e-9 for a, b in zip(hits, exact)), (hits, exact)
+        unfiltered = client.search(dict(query, mode=mode))
+        assert len(unfiltered) == k and not {h["id"] for h in unfiltered} & eligible, "filter must be restrictive"
+
+
+def filtered_ann_test(client):
+    """Filtered ANN in both modes and metrics where every eligible record lies
+    outside the unfiltered top k. Leaves the record count as it found it."""
+    before = client.database()["records"]
+    near = [str(200 + i) for i in range(16)]
+    seed = [dict(op="put", id=i, **tagged([1, 0.05 * n, 0], "near", n)) for n, i in enumerate(near)]
+    seed += [dict(op="put", id=i, **tagged(v, "far", r)) for i, v, r in [
+        ("300", [0, 1, 0], 1), ("301", [0, 0, 1], 2), ("302", [0.1, 1, 0], 3),
+        ("303", [-1, 0.2, 0], 4), ("304", [0, 1, 1], 5)]]
+    for metric in ["squared_l2", "cosine"]:
+        client.batch(seed)
+        client.build_index(metric=metric)
+        assert client.index_status()["ready"] and client.index_status()["metric"] == metric
+        expected = ["302", "301", "304"]  # same order for both metrics (cosine 301/304 tie by ID)
+        check_filtered(client, metric, 3, RESTRICTIVE, {"301", "302", "303", "304"}, expected)
+        # Larger k than eligible count underfills rather than padding with ineligible records.
+        check_filtered(client, metric, 10, RESTRICTIVE, {"301", "302", "303", "304"},
+                       ["302", "301", "304", "303"])
+        for flt in NO_MATCH:
+            check_filtered(client, metric, 3, flt, set(), [])
+        # Buffered updates/deletes without rebuilding: old graph entries must not leak.
+        client.put("215", tagged([1, 0.75, 0], "far", 9))  # becomes eligible; still outside unfiltered top 3
+        client.put("301", tagged([0, 0, 1], "near", 2))  # no longer eligible
+        assert client.delete("302")
+        client.batch([dict(op="put", id="305", **tagged([0.5, 1, 0], "far", 2)), {"op": "delete", "id": "304"}])
+        status = client.index_status()
+        assert status["ready"] and status["metric"] == metric and status["buffered_ids"] > 0, status
+        check_filtered(client, metric, 3, RESTRICTIVE, {"215", "303", "305"}, ["215", "305", "303"])
+        for flt in NO_MATCH:
+            check_filtered(client, metric, 3, flt, set(), [])
+        for mode in ["approximate", "approximate_ready"]:
+            try:
+                client.search({"vector": [1, 0, 0], "k": 1, "mode": mode, "metric": "inner_product", "filter": RESTRICTIVE})
+                raise AssertionError("Expected inner_product ANN rejection")
+            except VLiteError as error:
+                assert error.status == 422 and error.code == "invalid_input", error
+        client.batch([{"op": "delete", "id": op["id"]} for op in seed if op["id"] not in ("302", "304")]
+                     + [{"op": "delete", "id": "305"}])
+        assert client.database()["records"] == before
+    print("PASS Python live filtered ANN")
 
 
 def expect_412(action):

@@ -5,6 +5,58 @@ See [methodology and reproduction](README.md) before interpreting the numbers.
 
 No zvec, Milvus, Weaviate, FAISS or other unmeasured engine results are inferred.
 
+## Filter-aware ANN selectivity, October 21, 2026 UTC
+
+[Raw native Windows x64 release campaign](results/filtered-ann-synthetic-windows.json)
+contains **24 fresh children**, three trials for each of two metrics and four
+predicates. Dataset: 2,000 deterministic SplitMix64 f32 vectors x 32 dimensions,
+30 independent seeded queries, seed 42, k=10, m=16, construction ef=100,
+search ef=100, batches of 100. Exact and ANN use the same predicate, with
+independent full-sort oracle validation outside timing; initial construction
+and one warmup per mode are excluded from query samples. Static timed ANN calls
+are ready-only, with no exact fallback and no query-triggered rebuild.
+
+Times and RSS below are medians of trial-level statistics; recall is the
+minimum trial aggregate recall. All nonempty queries returned 10 records from
+eligible sets of 2,000/1,000/20, with denominator 300 per trial. All no-match
+queries returned zero, denominator zero. The zero-denominator convention is
+**vacuous recall 1**, shown as N/A below, and excluded from recall-target
+claims. Every nonempty trial met the declared 0.99 target.
+
+| Metric / predicate | Eligible records | Recall@10 | Exact p50 (ms) | ANN p50 / p95 (ms) | Whole-child peak RSS (bytes) |
+|---|---:|---:|---:|---:|---:|
+| squared L2 / unfiltered | 2,000 | 0.993333 | 0.0815 | 0.2300 / 0.2734 | 6,647,808 |
+| squared L2 / broad 50% | 1,000 | 1.000000 | 0.0948 | 0.3968 / 0.5963 | 8,253,440 |
+| squared L2 / restrictive 1% | 20 | 1.000000 | 0.0420 | 1.3157 / 1.5810 | 8,290,304 |
+| squared L2 / no matches | 0 | N/A | 0.0381 | 1.3205 / 1.9678 | 8,269,824 |
+| cosine / unfiltered | 2,000 | 1.000000 | 0.1535 | 0.3505 / 0.4266 | 6,623,232 |
+| cosine / broad 50% | 1,000 | 1.000000 | 0.1266 | 0.4170 / 0.9446 | 8,253,440 |
+| cosine / restrictive 1% | 20 | 1.000000 | 0.0701 | 1.9666 / 2.3357 | 8,298,496 |
+| cosine / no matches | 0 | N/A | 0.0534 | 1.9756 / 3.1817 | 8,282,112 |
+
+**Finding:** exact scans were faster than ANN in every scenario at this small
+scale. Restrictive and no-match ANN were slower than broad/unfiltered ANN:
+nonmatching graph nodes remain traversal bridges, and ef bounds eligible
+retention, not visits or time. This is not an ANN speedup claim. Recall 1 on
+restrictive synthetic sets does not guarantee complete results for other graphs,
+filters, ef settings or real embeddings.
+
+Median initial construction ranged from **790.4603 to 970.3650 ms** across
+scenario/metric groups and is reported separately in the raw file. Whole-child
+RSS is measured by `GetProcessMemoryInfo.PeakWorkingSetSize`; it includes
+dataset, database, full-sort oracle, graph and all phases, **not marginal graph
+RAM**. No visit counts, CPU profile, cold latency, concurrency, mutation load or
+real-embedding benchmark is implied. The shared unpinned Windows host and only
+30 queries per trial limit latency comparisons and tail inference. Metadata
+storage differs between unfiltered and filtered children, so their RSS
+difference is not solely traversal overhead.
+
+Reproduce with the **Filter-aware ANN campaign** commands in
+[the benchmark methodology](README.md#filter-aware-ann-campaign), using a new
+output filename. The archived report records source commit/dirty state,
+source hashes, release-binary SHA-256, OS, exact/ANN samples and checksums.
+This measures the current-source milestone after v0.1.2, not a new release.
+
 ## Proactive maintenance under write pressure, October 20, 2026 UTC
 
 [Raw paired report and per-request capacity/progress](results/glove-100-maintenance-windows.json)

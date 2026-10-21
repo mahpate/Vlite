@@ -15,12 +15,23 @@ export type NumericValue = Extract<MetadataValue, { type: "integer" | "float" }>
 export type Condition =
   | { op: "eq"; field: string; value: MetadataValue }
   | { op: "range"; field: string; min?: NumericValue | null; max?: NumericValue | null };
+/**
+ * The same request shape is used by every mode. Approximate modes support
+ * squared_l2/cosine only (inner_product is exact-only).
+ */
 export interface Search {
   vector: number[];
   k: number;
   mode?: "exact" | "approximate" | "approximate_ready";
   metric?: "squared_l2" | "cosine" | "inner_product";
+  /** Approximate modes only. With a filter it controls eligible-candidate retention, not a visit/time cap. */
   ef_search?: number;
+  /**
+   * AND of typed conditions; omitted, null or [] keeps every record. Valid in exact
+   * and, on servers advertising `features.filtered_ann`, in both approximate modes,
+   * which return at most k eligible records and may return fewer (no exact fallback).
+   * Older servers reject approximate filters with 422; the error is propagated, never retried.
+   */
   filter?: Condition[] | null;
 }
 export interface Hit { id: string; distance: number }

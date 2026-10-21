@@ -186,7 +186,6 @@
   function modeChanged() {
     const exact = $("mode").value === "exact";
     $("ef").disabled = exact;
-    $("filter").disabled = !exact;
     const innerProduct = $("metric").querySelector('option[value="inner_product"]');
     innerProduct.disabled = !exact;
     if (!exact && $("metric").value === "inner_product") $("metric").value = "squared_l2";
@@ -365,17 +364,17 @@
       const mode = $("mode").value;
       const body = { vector: vector("query"), k: Number($("k").value), mode, metric: $("metric").value, config: indexConfig() };
       if (!Number.isInteger(body.k) || body.k < 0 || body.k > 10000) throw new Error("k must be 0..10000");
-      if (mode === "exact") {
-        body.filter = parse("filter");
-        if (!Array.isArray(body.filter)) throw new Error("Filter must be a JSON array");
-      } else {
+      body.filter = parse("filter");
+      if (!Array.isArray(body.filter)) throw new Error("Filter must be a JSON array");
+      if (mode !== "exact") {
+        if (body.filter.length && capabilities?.features?.filtered_ann !== true) throw new Error("This server does not advertise filtered ANN; use exact search or upgrade the server");
         body.ef_search = Number($("ef").value);
         if (!Number.isInteger(body.ef_search) || body.ef_search < 1 || body.ef_search > 100000) throw new Error("ef must be 1..100000");
       }
       const started = performance.now();
       const result = await api("POST", "/v1/search", body);
       lastSearch = { body, result };
-      $("search-summary").textContent = `${result.hits.length} neighbors returned in ${(performance.now() - started).toFixed(1)} ms (browser-observed); ${body.mode}, ${body.metric}. Select an ID to inspect.`;
+      $("search-summary").textContent = `${result.hits.length} neighbors returned in ${(performance.now() - started).toFixed(1)} ms (browser-observed); ${body.mode}, ${body.metric}. ${mode !== "exact" && body.filter.length ? "Filter-aware ANN may return fewer than k; no exact fallback. " : ""}Select an ID to inspect.`;
       $("hits").querySelector("caption").textContent = `Search results (${body.metric ?? "squared_l2"}; lower distance is better)`;
       for (const hit of result.hits) {
         const row = document.createElement("tr");

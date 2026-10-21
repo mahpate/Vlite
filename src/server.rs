@@ -923,13 +923,6 @@ async fn search(
             "ef_search is only valid in approximate mode",
         ));
     }
-    if !matches!(input.mode, SearchMode::Exact) && input.filter.is_some() {
-        return Err(ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "invalid_input",
-            "filters require mode exact; approximate filtering is not supported",
-        ));
-    }
     if !matches!(input.mode, SearchMode::Exact)
         && input.metric == crate::DistanceMetric::InnerProduct
     {
@@ -958,18 +951,20 @@ async fn search(
                     input.filter.as_deref().unwrap_or(&[]),
                     input.metric,
                 )?,
-                SearchMode::Approximate => db.search_approximate_with_metric(
+                SearchMode::Approximate => db.search_approximate_filtered_with_metric(
                     &input.vector,
                     input.k,
                     input.ef_search.unwrap_or(100.max(input.k.min(db.len()))),
                     config,
+                    input.filter.as_deref().unwrap_or(&[]),
                     input.metric,
                 )?,
-                SearchMode::ApproximateReady => db.search_approximate_ready_with_metric(
+                SearchMode::ApproximateReady => db.search_approximate_ready_filtered_with_metric(
                     &input.vector,
                     input.k,
                     input.ef_search.unwrap_or(100.max(input.k.min(db.len()))),
                     config,
+                    input.filter.as_deref().unwrap_or(&[]),
                     input.metric,
                 )?,
             };
