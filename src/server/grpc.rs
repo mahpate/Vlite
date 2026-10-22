@@ -33,6 +33,27 @@ pub const ERROR_CODE_TRAILER: &str = "vlite-error-code";
 pub struct GrpcServer {
     routes: tonic::service::Routes,
     health: GrpcHealth,
+    tls: Option<tonic::transport::ServerTlsConfig>,
+}
+
+/// Validated PEM server identity for native gRPC TLS (rustls, TLS 1.2+).
+#[derive(Clone)]
+pub struct GrpcTls(tonic::transport::ServerTlsConfig);
+
+impl GrpcTls {
+    /// Parses a PEM certificate chain (leaf first) and its PEM private key.
+    /// Fails if either is malformed or the key does not match the leaf, so a
+    /// bad identity is reported before a listener serves any request.
+    pub fn from_pem(
+        cert_chain: impl AsRef<[u8]>,
+        key: impl AsRef<[u8]>,
+    ) -> Result<Self, tonic::transport::Error> {
+        let config = tonic::transport::ServerTlsConfig::new()
+            .identity(tonic::transport::Identity::from_pem(cert_chain, key));
+        // Building the rustls acceptor is what validates the identity.
+        tonic::transport::Server::builder().tls_config(config.clone())?;
+        Ok(Self(config))
+    }
 }
 
 /// Health reporter for the gRPC listener. Health calls never require
@@ -76,7 +97,11 @@ pub async fn grpc_router(mut service: Service) -> GrpcServer {
         .max_decoding_message_size(MAX_DECODING_MESSAGE_BYTES)
         .max_encoding_message_size(MAX_ENCODING_MESSAGE_BYTES);
     let routes = tonic::service::Routes::new(health_service).add_service(vlite);
-    GrpcServer { routes, health }
+    GrpcServer {
+        routes,
+        health,
+        tls: None,
+    }
 }
 
 impl GrpcServer {
@@ -84,15 +109,27 @@ impl GrpcServer {
         self.health.clone()
     }
 
-    /// Serves plaintext HTTP/2 until `shutdown` resolves, then drains
-    /// in-flight calls. Each connection is limited to the same 16 in-flight
-    /// requests as the shared admission permits.
+    /// Serves TLS instead of plaintext HTTP/2 (clients use `https://`).
+    #[must_use]
+    pub fn with_tls(mut self, tls: GrpcTls) -> Self {
+        self.tls = Some(tls.0);
+        self
+    }
+
+    /// Serves HTTP/2 (TLS when configured with [`Self::with_tls`]) until
+    /// `shutdown` resolves, then drains in-flight calls. Each connection is
+    /// limited to the same 16 in-flight requests as the shared admission
+    /// permits.
     pub async fn serve_with_shutdown(
         self,
         listener: tokio::net::TcpListener,
         shutdown: impl Future<Output = ()> + Send,
     ) -> Result<(), tonic::transport::Error> {
-        tonic::transport::Server::builder()
+        let mut builder = tonic::transport::Server::builder();
+        if let Some(tls) = self.tls {
+            builder = builder.tls_config(tls)?;
+        }
+        builder
             .concurrency_limit_per_connection(MAX_IN_FLIGHT)
             .add_routes(self.routes)
             .serve_with_incoming_shutdown(
@@ -759,40 +796,16 @@ impl VLite for Adapter {
             false,
             false,
             |service, role, _, request| async move {
-                let policy = match proto::ImportPolicy::try_from(request.policy) {
-                    Ok(proto::ImportPolicy::RejectChunk) => crate::InvalidRowPolicy::RejectChunk,
-                    Ok(proto::ImportPolicy::SkipInvalid) => crate::InvalidRowPolicy::SkipInvalid,
-                    Err(_) => return Err(unprocessable("unknown import policy")),
-                };
-                if request.operations.len() > MAX_BATCH_OPERATIONS {
-                    return Err(Error::BatchTooLarge.into());
-                }
-                let operations = request
-                    .operations
-                    .into_iter()
-                    .map(mutation)
-                    .collect::<Result<Vec<_>, _>>()?;
-                let value = collections::import_chunk_core(
+                apply_chunk(
                     &service,
                     role,
                     request.job,
                     request.chunk,
-                    operations,
-                    policy,
+                    request.operations,
+                    request.policy,
                 )
-                .await?;
-                if value["outcome"] == "rejected" {
-                    let details = serde_json::to_string(&value).map_err(internal)?;
-                    return Err(
-                        ApiError::new(
-                            StatusCode::UNPROCESSABLE_ENTITY,
-                            "import_rows_invalid",
-                            "chunk rejected; nothing was written; correct invalid rows or use skip_invalid",
-                        )
-                        .with_details(details),
-                    );
-                }
-                import_json(value)
+                .await
+                .and_then(import_json)
             },
         )
         .await
@@ -811,6 +824,232 @@ impl VLite for Adapter {
     ) -> Result<Response<proto::ImportJsonResponse>, Status> {
         self.close_import(request, true).await
     }
+
+    type ExportVectorsStream = std::pin::Pin<
+        Box<dyn tokio_stream::Stream<Item = Result<proto::Vector, Status>> + Send + 'static>,
+    >;
+
+    async fn export_vectors(
+        &self,
+        request: Request<proto::ExportVectorsRequest>,
+    ) -> Result<Response<Self::ExportVectorsStream>, Status> {
+        let legacy = request.get_ref().collection.is_empty();
+        let headers = request.metadata().clone().into_headers();
+        // The unary pipeline authenticates, authorizes, validates and records
+        // the call; each page below re-authenticates so revocation applies
+        // mid-stream.
+        let opened = self
+            .call(
+                "grpc:/vlite.v1.VLite/ExportVectors",
+                request,
+                Need::Op(Op::Read, Reach::Collection),
+                true,
+                legacy,
+                |service, role, request_id, request| async move {
+                    let page = match request.page_size {
+                        0 => 256,
+                        size @ 1..=1000 => size as usize,
+                        _ => return Err(unprocessable("page_size must be 0..1000")),
+                    };
+                    let target = target(request.collection);
+                    let check = target.clone();
+                    service
+                        .run(move |db| open(db, &role, &check).map(|_| ()))
+                        .await?;
+                    Ok((request_id, target, request.after, page))
+                },
+            )
+            .await?;
+        let (request_id, target, mut after, page) = opened.into_inner();
+        let service = self.service.clone();
+        let (sender, receiver) = tokio::sync::mpsc::channel(page.min(64));
+        let header_id = request_id.clone();
+        tokio::spawn(async move {
+            const ROUTE: &str = "grpc:/vlite.v1.VLite/ExportVectors";
+            loop {
+                let result = export_page(&service, &headers, &target, after, page).await;
+                let (records, more) = match result {
+                    Ok(page) => page,
+                    Err(error) => {
+                        record_stream_failure(&service, ROUTE, &request_id, &error);
+                        let _ = sender.send(Err(status(error, &request_id))).await;
+                        return;
+                    }
+                };
+                for record in records {
+                    after = Some(record.id);
+                    if sender.send(Ok(record)).await.is_err() {
+                        return;
+                    }
+                    service
+                        .metrics
+                        .grpc_stream_messages
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                if !more {
+                    return;
+                }
+            }
+        });
+        let mut response: Response<Self::ExportVectorsStream> = Response::new(Box::pin(
+            tokio_stream::wrappers::ReceiverStream::new(receiver),
+        ));
+        if let Ok(value) = header_id.parse() {
+            response.metadata_mut().insert("x-request-id", value);
+        }
+        Ok(response)
+    }
+
+    async fn stream_import(
+        &self,
+        request: Request<tonic::Streaming<proto::StreamImportRequest>>,
+    ) -> Result<Response<proto::ImportJsonResponse>, Status> {
+        self.call(
+            "grpc:/vlite.v1.VLite/StreamImport",
+            request,
+            Need::Op(Op::Import, Reach::Collection),
+            false,
+            false,
+            |service, role, _, mut stream| async move {
+                let mut job = None;
+                let mut finished = None;
+                while let Some(message) = stream.message().await.map_err(|error| {
+                    ApiError::new(
+                        StatusCode::BAD_REQUEST,
+                        "stream_error",
+                        format!("import stream failed: {}", error.message()),
+                    )
+                })? {
+                    service
+                        .metrics
+                        .grpc_stream_messages
+                        .fetch_add(1, Ordering::Relaxed);
+                    if finished.is_some() {
+                        return Err(unprocessable("finish must be on the last stream message"));
+                    }
+                    if *job.get_or_insert(message.job) != message.job {
+                        return Err(unprocessable("every stream message must name the same job"));
+                    }
+                    let control_only = message.chunk == 0 && message.operations.is_empty();
+                    if !(control_only && message.finish) {
+                        apply_chunk(
+                            &service,
+                            role.clone(),
+                            message.job,
+                            message.chunk,
+                            message.operations,
+                            message.policy,
+                        )
+                        .await?;
+                    }
+                    if message.finish {
+                        finished = Some(
+                            collections::close_core(&service, role.clone(), message.job, false)
+                                .await?,
+                        );
+                    }
+                }
+                match (finished, job) {
+                    (Some(value), _) => import_json(value),
+                    (None, Some(job)) => {
+                        import_json(collections::status_core(&service, role, job).await?)
+                    }
+                    (None, None) => Err(unprocessable("import stream contained no messages")),
+                }
+            },
+        )
+        .await
+    }
+}
+
+/// Reads one atomic page of records after `after` with a fresh admission
+/// permit and authentication. Returns the page and whether more remain.
+async fn export_page(
+    service: &Service,
+    headers: &axum::http::HeaderMap,
+    target: &Target,
+    after: Option<u64>,
+    page: usize,
+) -> Result<(Vec<proto::Vector>, bool), ApiError> {
+    let _permit = service
+        .requests
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(internal)?;
+    let role = authenticate(service, headers)?.ok_or_else(|| {
+        ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "valid bearer token required",
+        )
+    })?;
+    let target = target.clone();
+    service
+        .run(move |db| {
+            use std::ops::Bound::{Excluded, Unbounded};
+            let collection = open(db, &role, &target)?;
+            let state = db.state(collection);
+            let mut records = state
+                .records
+                .range((after.map_or(Unbounded, Excluded), Unbounded))
+                .peekable();
+            let mut items = Vec::with_capacity(page);
+            while items.len() < page {
+                let Some((&id, record)) = records.next() else {
+                    break;
+                };
+                let revision = db.revision_in(collection, id)?.unwrap_or_default();
+                items.push(proto::Vector {
+                    id,
+                    vector: record.vector.clone(),
+                    payload: record.payload.clone(),
+                    metadata: metadata_out(record.metadata.clone()),
+                    revision,
+                });
+            }
+            Ok((items, records.peek().is_some()))
+        })
+        .await
+}
+
+/// ImportChunk semantics shared by the unary and streaming RPCs.
+async fn apply_chunk(
+    service: &Service,
+    role: admin::Role,
+    job: u64,
+    chunk: u64,
+    operations: Vec<proto::Operation>,
+    policy: i32,
+) -> Result<Value, ApiError> {
+    let policy = match proto::ImportPolicy::try_from(policy) {
+        Ok(proto::ImportPolicy::RejectChunk) => crate::InvalidRowPolicy::RejectChunk,
+        Ok(proto::ImportPolicy::SkipInvalid) => crate::InvalidRowPolicy::SkipInvalid,
+        Err(_) => return Err(unprocessable("unknown import policy")),
+    };
+    if operations.len() > MAX_BATCH_OPERATIONS {
+        return Err(Error::BatchTooLarge.into());
+    }
+    let operations = operations
+        .into_iter()
+        .map(mutation)
+        .collect::<Result<Vec<_>, _>>()?;
+    let value =
+        collections::import_chunk_core(service, role, job, chunk, operations, policy).await?;
+    if value["outcome"] == "rejected" {
+        let details = serde_json::to_string(&value).map_err(internal)?;
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "import_rows_invalid",
+            "chunk rejected; nothing was written; correct invalid rows or use skip_invalid",
+        )
+        .with_details(details));
+    }
+    Ok(value)
+}
+
+mod tokio_stream {
+    pub use tonic::codegen::tokio_stream::*;
 }
 
 impl Adapter {

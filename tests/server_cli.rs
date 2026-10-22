@@ -346,10 +346,15 @@ fn launch(path: &Path, extra: &[&str]) -> Launched {
         .expect("REST address")
         .to_owned();
     let grpc = extra.contains(&"--grpc-bind").then(|| {
-        receiver
+        let line = receiver
             .recv_timeout(Duration::from_secs(30))
-            .expect("gRPC address")
-            .strip_prefix("LISTENING grpc://")
+            .expect("gRPC address");
+        let scheme = if extra.contains(&"--grpc-tls-cert") {
+            "LISTENING grpcs://"
+        } else {
+            "LISTENING grpc://"
+        };
+        line.strip_prefix(scheme)
             .expect("gRPC address line")
             .to_owned()
     });
@@ -450,6 +455,66 @@ fn grpc_bind_combinations_are_validated_before_opening() {
         );
         assert!(insecure.contains("loopback"), "{insecure}");
         assert!(fails(&path, &["--grpc-bind", "not-an-address"]).contains("invalid"));
+        let cert = directory.path().join("cert.pem");
+        let key = directory.path().join("key.pem");
+        std::fs::write(&cert, "not a certificate").unwrap();
+        std::fs::write(&key, "not a key").unwrap();
+        let (cert, key) = (cert.to_str().unwrap(), key.to_str().unwrap());
+        let half = fails(
+            &path,
+            &[
+                create[0],
+                create[1],
+                "--grpc-bind",
+                "127.0.0.1:0",
+                "--grpc-tls-cert",
+                cert,
+            ],
+        );
+        assert!(half.contains("must be given together"), "{half}");
+        let unbound = fails(
+            &path,
+            &[
+                create[0],
+                create[1],
+                "--grpc-tls-cert",
+                cert,
+                "--grpc-tls-key",
+                key,
+            ],
+        );
+        assert!(unbound.contains("requires --grpc-bind"), "{unbound}");
+        let invalid = fails(
+            &path,
+            &[
+                create[0],
+                create[1],
+                "--grpc-bind",
+                "127.0.0.1:0",
+                "--grpc-tls-cert",
+                cert,
+                "--grpc-tls-key",
+                key,
+            ],
+        );
+        assert!(invalid.contains("invalid gRPC TLS identity"), "{invalid}");
+        let unreadable = fails(
+            &path,
+            &[
+                create[0],
+                create[1],
+                "--grpc-bind",
+                "127.0.0.1:0",
+                "--grpc-tls-cert",
+                "missing-cert.pem",
+                "--grpc-tls-key",
+                key,
+            ],
+        );
+        assert!(
+            unreadable.contains("cannot read --grpc-tls-cert"),
+            "{unreadable}"
+        );
         // A port conflict fails before the database is created.
         let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let taken = taken.local_addr().unwrap().to_string();
@@ -604,4 +669,76 @@ fn ann_snapshot_is_opt_in_loads_after_graceful_restart_and_rejects_stale() {
     let mut launched = launch(&other, &[]);
     assert!(launched.stop().success());
     assert!(!vlite::Database::ann_snapshot_path(&other).exists());
+}
+
+#[cfg(feature = "grpc")]
+#[test]
+fn grpc_listener_serves_native_tls_from_pem_files() {
+    use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair};
+    use tonic::transport::{Certificate, Channel, ClientTlsConfig};
+    use tonic_health::pb::{HealthCheckRequest, health_client::HealthClient};
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let ca = CertifiedIssuer::self_signed(ca_params, KeyPair::generate().unwrap()).unwrap();
+    let key = KeyPair::generate().unwrap();
+    let cert = CertificateParams::new(vec!["localhost".to_owned()])
+        .unwrap()
+        .signed_by(&key, &ca)
+        .unwrap();
+    let cert_path = directory.path().join("server.pem");
+    let key_path = directory.path().join("server.key");
+    std::fs::write(&cert_path, cert.pem()).unwrap();
+    std::fs::write(&key_path, key.serialize_pem()).unwrap();
+
+    let path = directory.path().join("tls.vlite");
+    let mut launched = launch(
+        &path,
+        &[
+            "--grpc-bind",
+            "127.0.0.1:0",
+            "--grpc-tls-cert",
+            cert_path.to_str().unwrap(),
+            "--grpc-tls-key",
+            key_path.to_str().unwrap(),
+        ],
+    );
+    let port = launched
+        .grpc
+        .clone()
+        .unwrap()
+        .rsplit(':')
+        .next()
+        .unwrap()
+        .to_owned();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let tls = ClientTlsConfig::new()
+            .ca_certificate(Certificate::from_pem(ca.pem()))
+            .domain_name("localhost");
+        let channel = Channel::from_shared(format!("https://localhost:{port}"))
+            .unwrap()
+            .tls_config(tls)
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let status = HealthClient::new(channel)
+            .check(HealthCheckRequest {
+                service: "vlite.v1.VLite".into(),
+            })
+            .await
+            .unwrap()
+            .into_inner()
+            .status;
+        assert_eq!(status, 1, "SERVING");
+    });
+    // Drop the client runtime so its connection closes during the drain.
+    drop(runtime);
+    let exit = launched.stop();
+    assert!(exit.success(), "{exit:?}: {:?}", launched.rest_of_stderr());
 }

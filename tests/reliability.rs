@@ -285,3 +285,113 @@ fn forced_termination_preserves_acknowledged_commits() {
         );
     }
 }
+
+/// Builds a source large enough that copy-out operations are observable in
+/// flight, with overwritten values so compaction actually rewrites.
+fn maintenance_source(path: &std::path::Path) -> BTreeMap<u64, Record> {
+    let mut db = Database::create(path, 3).unwrap();
+    let mut model = BTreeMap::new();
+    for round in 0..2u8 {
+        let batch: Vec<_> = (0..48u64)
+            .map(|id| Mutation::Put {
+                id,
+                vector: vec![id as f32, f32::from(round), 1.0],
+                payload: vec![round ^ id as u8; 96 * 1024],
+            })
+            .collect();
+        db.write_batch(&batch).unwrap();
+    }
+    for id in 0..48u64 {
+        model.insert(id, db.get(id).unwrap().unwrap().clone());
+    }
+    db.close().unwrap();
+    model
+}
+
+/// Killing `vlite-maintain` at any point never modifies the source and never
+/// publishes a partial destination: it is either absent or complete and equal
+/// to the source's live records. A retry after the kill succeeds.
+#[test]
+fn forced_termination_of_copy_out_maintenance_never_publishes_partial_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.vlite");
+    let model = maintenance_source(&source);
+    let backup = directory.path().join("seed-backup.vlite");
+    maintenance::backup(&source, &backup).unwrap();
+    let source_bytes = fs::read(&source).unwrap();
+    let backup_bytes = fs::read(&backup).unwrap();
+    let check = |path: &std::path::Path| {
+        let db = Database::open(path).unwrap();
+        assert_eq!(db.len(), model.len());
+        for (id, record) in &model {
+            assert_eq!(db.get(*id).unwrap(), Some(record), "record {id}");
+        }
+        db.close().unwrap();
+    };
+    let mut published = 0;
+    let mut absent = 0;
+    for operation in ["backup", "restore", "compact", "upgrade"] {
+        let input = if operation == "restore" {
+            &backup
+        } else {
+            &source
+        };
+        for delay_ms in [0u64, 10, 40, 5000] {
+            let output = directory
+                .path()
+                .join(format!("{operation}-{delay_ms}.vlite"));
+            let mut child = RunningChild(
+                Command::new(env!("CARGO_BIN_EXE_vlite-maintain"))
+                    .arg(operation)
+                    .arg(input)
+                    .arg(&output)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+            std::thread::sleep(Duration::from_millis(delay_ms));
+            let _ = child.0.kill();
+            let _ = child.0.wait();
+            assert_eq!(fs::read(&source).unwrap(), source_bytes, "{operation}");
+            assert_eq!(fs::read(&backup).unwrap(), backup_bytes, "{operation}");
+            if output.exists() {
+                published += 1;
+                check(&output);
+            } else {
+                absent += 1;
+                // The interrupted run left no lock or partial file behind.
+                let status = Command::new(env!("CARGO_BIN_EXE_vlite-maintain"))
+                    .arg(operation)
+                    .arg(input)
+                    .arg(&output)
+                    .stdout(Stdio::null())
+                    .status()
+                    .unwrap();
+                assert!(status.success(), "{operation} retry after kill");
+                check(&output);
+            }
+            // Never overwrites a published destination.
+            let again = Command::new(env!("CARGO_BIN_EXE_vlite-maintain"))
+                .arg(operation)
+                .arg(input)
+                .arg(&output)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap();
+            assert!(!again.success(), "{operation} overwrote its destination");
+        }
+    }
+    // Staging files may be abandoned, but none ever carries a final name.
+    for entry in fs::read_dir(directory.path()).unwrap() {
+        let name = entry.unwrap().file_name().into_string().unwrap();
+        assert!(
+            name.ends_with(".vlite") || name.starts_with(".tmp"),
+            "unexpected file {name}"
+        );
+    }
+    assert_eq!(published + absent, 16);
+    eprintln!("maintenance kill outcomes: {published} published, {absent} absent");
+    check(&source);
+}

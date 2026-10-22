@@ -30,6 +30,15 @@ service VLite {
   rpc ImportChunk(ImportChunkRequest) returns (ImportJsonResponse);
   rpc FinishImport(ImportJobRequest) returns (ImportJsonResponse);
   rpc AbortImport(ImportJobRequest) returns (ImportJsonResponse);
+  // Streams records in ascending id order, one Vector per message. Each
+  // page is read atomically; writes between pages may or may not be seen.
+  // Resume after a broken stream with `after` = last id received.
+  rpc ExportVectors(ExportVectorsRequest) returns (stream Vector);
+  // Applies a client stream of ImportChunk-equivalent messages to one
+  // reserved job, in order, each chunk committed durably as it arrives.
+  // On any error or disconnect the job stays open: resume from
+  // GetImportStatus.last_chunk + 1 (replaying the last chunk is idempotent).
+  rpc StreamImport(stream StreamImportRequest) returns (ImportJsonResponse);
 }
 
 message Collection {
@@ -277,4 +286,24 @@ message ImportChunkRequest {
   uint64 chunk = 2;
   repeated Operation operations = 3;
   ImportPolicy policy = 4;
+}
+
+message ExportVectorsRequest {
+  string collection = 1;
+  // Export ids strictly greater than this value; unset starts at the lowest id.
+  optional uint64 after = 2;
+  // Records read per atomic page, 1..1000; 0 means 256.
+  uint32 page_size = 3;
+}
+
+// Every message names the same job. `chunk` 0 with no operations is allowed
+// only together with `finish`, which must be on the last message and
+// finishes the job after its chunk (if any) commits. The response is the
+// final job status (or the finish result).
+message StreamImportRequest {
+  uint64 job = 1;
+  uint64 chunk = 2;
+  repeated Operation operations = 3;
+  ImportPolicy policy = 4;
+  bool finish = 5;
 }

@@ -52,6 +52,9 @@ struct Metrics {
     failures: AtomicU64,
     unauthorized: AtomicU64,
     duration_ns: AtomicU64,
+    grpc_requests: AtomicU64,
+    grpc_failures: AtomicU64,
+    grpc_stream_messages: AtomicU64,
     commit_failures: AtomicU64,
     rebuilds: AtomicU64,
     rebuild_search_ns: AtomicU64,
@@ -767,8 +770,21 @@ fn record_request(service: &Service, record: &RequestRecord<'_>) {
         .metrics
         .duration_ns
         .fetch_add(elapsed, Ordering::Relaxed);
-    if status.is_client_error() || status.is_server_error() {
+    let failed = status.is_client_error() || status.is_server_error();
+    if failed {
         service.metrics.failures.fetch_add(1, Ordering::Relaxed);
+    }
+    if method == "grpc" {
+        service
+            .metrics
+            .grpc_requests
+            .fetch_add(1, Ordering::Relaxed);
+        if failed {
+            service
+                .metrics
+                .grpc_failures
+                .fetch_add(1, Ordering::Relaxed);
+        }
     }
     let credential = match role {
         Some(admin::Role::Scoped(grant)) => Some(grant.id.clone()),
@@ -785,6 +801,23 @@ fn record_request(service: &Service, record: &RequestRecord<'_>) {
         "status":status.as_u16(),"role":role.map(admin::Role::name),
         "credential_id":credential,
         "duration_ns":elapsed,"timestamp_unix_ms":admin::now_ms()}),
+    );
+}
+
+/// A failure after a streaming RPC was accepted (and already recorded as a
+/// successful call): counts it as a failure and logs it under the same
+/// request ID so the stream's outcome stays observable.
+#[cfg(feature = "grpc")]
+fn record_stream_failure(service: &Service, route: &str, request_id: &str, error: &ApiError) {
+    service.metrics.failures.fetch_add(1, Ordering::Relaxed);
+    service
+        .metrics
+        .grpc_failures
+        .fetch_add(1, Ordering::Relaxed);
+    eprintln!(
+        "{}",
+        json!({"event":"stream_error", "request_id":request_id, "method":"grpc",
+        "route":route, "status":error.status.as_u16(), "code":error.code})
     );
 }
 
@@ -809,6 +842,9 @@ struct ApiError {
     status: StatusCode,
     code: &'static str,
     message: String,
+    /// Structured error body for transports that cannot carry the REST JSON
+    /// body (gRPC trailers).
+    #[cfg_attr(not(feature = "grpc"), allow(dead_code))]
     details: Option<String>,
 }
 
@@ -822,6 +858,7 @@ impl ApiError {
         }
     }
 
+    #[cfg(feature = "grpc")]
     fn with_details(mut self, details: String) -> Self {
         self.details = Some(details);
         self

@@ -15,7 +15,7 @@ use vlite::{
     },
 };
 
-const USAGE: &str = "usage: vlite-server <database-path> [--create-if-missing <dimensions> [--create-format 3|4]] [--bind <ip:port>] [--grpc-bind <ip:port>] [--allow-remote] [--ann-snapshot] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS";
+const USAGE: &str = "usage: vlite-server <database-path> [--create-if-missing <dimensions> [--create-format 3|4]] [--bind <ip:port>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem>]] [--allow-remote] [--ann-snapshot] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS";
 
 struct Config {
     path: PathBuf,
@@ -24,6 +24,9 @@ struct Config {
     bind: SocketAddr,
     /// Optional second listener for the gRPC transport (feature `grpc`).
     grpc_bind: Option<SocketAddr>,
+    /// Native TLS identity for the gRPC listener.
+    #[cfg(feature = "grpc")]
+    grpc_tls: Option<vlite::server::grpc::GrpcTls>,
     /// Load `<active>.ann` after open; save it after both listeners drain.
     ann_snapshot: bool,
     token: Option<BearerToken>,
@@ -109,6 +112,8 @@ fn config() -> Result<Config, Box<dyn Error>> {
     let mut insecure_local = false;
     let mut grpc_bind: Option<SocketAddr> = None;
     let mut ann_snapshot = false;
+    let mut grpc_tls_cert: Option<PathBuf> = None;
+    let mut grpc_tls_key: Option<PathBuf> = None;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--create-if-missing") if dimensions.is_none() => {
@@ -133,6 +138,12 @@ fn config() -> Result<Config, Box<dyn Error>> {
             Some("--grpc-bind") if grpc_bind.is_none() => {
                 grpc_bind = Some(args.next().ok_or(USAGE)?.to_str().ok_or(USAGE)?.parse()?);
             }
+            Some("--grpc-tls-cert") if grpc_tls_cert.is_none() => {
+                grpc_tls_cert = Some(args.next().ok_or(USAGE)?.into());
+            }
+            Some("--grpc-tls-key") if grpc_tls_key.is_none() => {
+                grpc_tls_key = Some(args.next().ok_or(USAGE)?.into());
+            }
             Some("--ann-snapshot") if !ann_snapshot => ann_snapshot = true,
             Some("--allow-remote") if !allow_remote => allow_remote = true,
             Some("--token-file") if token_file.is_none() => {
@@ -148,6 +159,12 @@ fn config() -> Result<Config, Box<dyn Error>> {
     if grpc_bind.is_some() && !cfg!(feature = "grpc") {
         return Err("--grpc-bind requires a build with the grpc feature".into());
     }
+    if grpc_tls_cert.is_some() != grpc_tls_key.is_some() {
+        return Err("--grpc-tls-cert and --grpc-tls-key must be given together".into());
+    }
+    if grpc_tls_cert.is_some() && grpc_bind.is_none() {
+        return Err("--grpc-tls-cert requires --grpc-bind".into());
+    }
     if let Some(grpc) = grpc_bind {
         // Port 0 asks for two distinct ephemeral ports; anything else must differ.
         if grpc == bind && grpc.port() != 0 {
@@ -155,7 +172,7 @@ fn config() -> Result<Config, Box<dyn Error>> {
         }
         if !grpc.ip().is_loopback() && !allow_remote {
             return Err(
-                "non-loopback --grpc-bind requires --allow-remote and bearer authentication; TLS must terminate at a proxy"
+                "non-loopback --grpc-bind requires --allow-remote and bearer authentication; use --grpc-tls-cert/--grpc-tls-key or terminate TLS at a proxy"
                     .into(),
             );
         }
@@ -212,6 +229,25 @@ fn config() -> Result<Config, Box<dyn Error>> {
             })
             .transpose()?
     };
+    #[cfg(feature = "grpc")]
+    let grpc_tls = match (&grpc_tls_cert, &grpc_tls_key) {
+        (Some(cert), Some(key)) => {
+            let read = |path: &PathBuf, what: &str| {
+                std::fs::read(path)
+                    .map_err(|error| format!("cannot read {what} {}: {error}", path.display()))
+            };
+            Some(
+                vlite::server::grpc::GrpcTls::from_pem(
+                    read(cert, "--grpc-tls-cert")?,
+                    read(key, "--grpc-tls-key")?,
+                )
+                .map_err(|error| format!("invalid gRPC TLS identity: {error}"))?,
+            )
+        }
+        _ => None,
+    };
+    #[cfg(not(feature = "grpc"))]
+    let _ = (grpc_tls_cert, grpc_tls_key);
     if insecure_local && (read_only_token.is_some() || read_only_file.is_some()) {
         return Err("read-only credentials require admin bearer authentication".into());
     }
@@ -221,6 +257,8 @@ fn config() -> Result<Config, Box<dyn Error>> {
         format: format.unwrap_or(FormatVersion::V3),
         bind,
         grpc_bind,
+        #[cfg(feature = "grpc")]
+        grpc_tls,
         ann_snapshot,
         token,
         token_file: token_file.map(PathBuf::from),
@@ -401,10 +439,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
     #[cfg(feature = "grpc")]
     let grpc = match grpc_listener {
         // Built after the REST router so it shares its tokens and audit log.
-        Some(listener) => Some((
-            vlite::server::grpc::grpc_router(service.clone()).await,
-            listener,
-        )),
+        Some(listener) => {
+            let server = vlite::server::grpc::grpc_router(service.clone()).await;
+            let server = match config.grpc_tls.clone() {
+                Some(tls) => server.with_tls(tls),
+                None => server,
+            };
+            Some((server, listener))
+        }
         None => None,
     };
     #[cfg(not(feature = "grpc"))]
@@ -420,7 +462,15 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     println!("LISTENING http://{address}");
     if let Some((_, listener)) = &grpc {
-        println!("LISTENING grpc://{}", listener.local_addr()?);
+        #[cfg(feature = "grpc")]
+        let scheme = if config.grpc_tls.is_some() {
+            "grpcs"
+        } else {
+            "grpc"
+        };
+        #[cfg(not(feature = "grpc"))]
+        let scheme = "grpc";
+        println!("LISTENING {scheme}://{}", listener.local_addr()?);
     }
     let rest = {
         let stop_tx = stop_tx.clone();

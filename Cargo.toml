@@ -26,7 +26,7 @@ grpc = [
 
 [dependencies]
 prost = { version = "0.14", optional = true }
-tonic = { version = "0.14", optional = true, default-features = false, features = ["transport", "router", "server", "codegen"] }
+tonic = { version = "0.14", optional = true, default-features = false, features = ["transport", "router", "server", "codegen", "tls-ring"] }
 tonic-health = { version = "0.14", optional = true, default-features = false }
 tonic-prost = { version = "0.14", optional = true }
 axum = { version = "0.8", optional = true }
@@ -45,6 +45,7 @@ tonic-prost-build = { version = "0.14", optional = true }
 
 [dev-dependencies]
 http-body-util = "0.1"
+rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem"] }
 tower = { version = "0.5", features = ["util"] }
 
 [[bin]]

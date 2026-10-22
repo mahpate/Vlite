@@ -768,6 +768,284 @@ async fn hybrid_search_and_resumable_import_match_rest() {
     assert_error(&denied, Code::PermissionDenied, "read_only");
 }
 
+async fn reserve_job(h: &mut Harness, collection: &str) -> u64 {
+    let reserved = h
+        .client
+        .reserve_import(admin(proto::ReserveImportRequest {
+            collection: collection.into(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let reserved: Value = serde_json::from_str(&reserved.json).unwrap();
+    reserved["job"].as_str().unwrap().parse().unwrap()
+}
+
+fn stream_chunk(job: u64, chunk: u64, ids: &[u64], finish: bool) -> proto::StreamImportRequest {
+    proto::StreamImportRequest {
+        job,
+        chunk,
+        operations: ids
+            .iter()
+            .map(|&id| put_op(id, vec![id as f32, 1.0]))
+            .collect(),
+        policy: proto::ImportPolicy::RejectChunk as i32,
+        finish,
+    }
+}
+
+async fn export(
+    h: &mut Harness,
+    token: &str,
+    request: proto::ExportVectorsRequest,
+) -> Result<Vec<proto::Vector>, Status> {
+    let mut stream = h
+        .client
+        .export_vectors(req(Some(token), request))
+        .await?
+        .into_inner();
+    let mut records = Vec::new();
+    while let Some(record) = stream.message().await? {
+        records.push(record);
+    }
+    Ok(records)
+}
+
+#[tokio::test]
+async fn streaming_export_and_resumable_stream_import() {
+    use tonic::codegen::tokio_stream::iter;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = start(v4(&dir.path().join("db.vlite")), None).await;
+    h.client
+        .create_collection(admin(create("docs", None)))
+        .await
+        .unwrap();
+    h.client
+        .write_batch(admin(batch(
+            "docs",
+            (1..=5).map(|id| put_op(id, vec![id as f32, 0.0])).collect(),
+        )))
+        .await
+        .unwrap();
+
+    // Paged export returns every record once, in id order, with REST-equal content.
+    let all = export(
+        &mut h,
+        READER,
+        proto::ExportVectorsRequest {
+            collection: "docs".into(),
+            after: None,
+            page_size: 2,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        all.iter().map(|r| r.id).collect::<Vec<_>>(),
+        [1, 2, 3, 4, 5]
+    );
+    for record in &all {
+        let fetched = h
+            .client
+            .get_vector(admin(get("docs", record.id)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(record, &fetched);
+    }
+    let resumed = export(
+        &mut h,
+        ADMIN,
+        proto::ExportVectorsRequest {
+            collection: "docs".into(),
+            after: Some(3),
+            page_size: 0,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(resumed.iter().map(|r| r.id).collect::<Vec<_>>(), [4, 5]);
+    let invalid = export(
+        &mut h,
+        ADMIN,
+        proto::ExportVectorsRequest {
+            collection: "docs".into(),
+            after: None,
+            page_size: 1001,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_error(&invalid, Code::InvalidArgument, "invalid_input");
+    let missing = export(
+        &mut h,
+        ADMIN,
+        proto::ExportVectorsRequest {
+            collection: "nope".into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(missing.code(), Code::NotFound);
+    let anonymous = h
+        .client
+        .export_vectors(Request::new(proto::ExportVectorsRequest::default()))
+        .await
+        .unwrap_err();
+    assert_eq!(anonymous.code(), Code::Unauthenticated);
+
+    // One stream: two chunks then a control-only finish.
+    let job = reserve_job(&mut h, "docs").await;
+    let done = h
+        .client
+        .stream_import(admin(iter(vec![
+            stream_chunk(job, 1, &[10, 11], false),
+            stream_chunk(job, 2, &[12], false),
+            stream_chunk(job, 0, &[], true),
+        ])))
+        .await
+        .unwrap()
+        .into_inner();
+    let done: Value = serde_json::from_str(&done.json).unwrap();
+    assert_eq!(done["state"], "finished");
+    assert_eq!(done["rows_committed"], 3);
+    for id in [10, 11, 12] {
+        assert_eq!(
+            rest_ok(
+                &h.app,
+                "GET",
+                &format!("/v1/collections/docs/vectors/{id}"),
+                None
+            )
+            .await["vector"],
+            json!([id as f64, 1.0])
+        );
+    }
+
+    // A failing stream keeps committed chunks and leaves the job open to resume.
+    let job = reserve_job(&mut h, "docs").await;
+    let gap = h
+        .client
+        .stream_import(admin(iter(vec![
+            stream_chunk(job, 1, &[20], false),
+            stream_chunk(job, 3, &[22], false),
+        ])))
+        .await
+        .unwrap_err();
+    assert_error(&gap, Code::FailedPrecondition, "import_conflict");
+    let status = h
+        .client
+        .get_import_status(admin(proto::ImportJobRequest { job }))
+        .await
+        .unwrap()
+        .into_inner();
+    let status: Value = serde_json::from_str(&status.json).unwrap();
+    assert_eq!(status["state"], "open");
+    assert_eq!(status["last_chunk"], 1);
+    let resumed = h
+        .client
+        .stream_import(admin(iter(vec![
+            stream_chunk(job, 1, &[20], false),
+            stream_chunk(job, 2, &[21], true),
+        ])))
+        .await
+        .unwrap()
+        .into_inner();
+    let resumed: Value = serde_json::from_str(&resumed.json).unwrap();
+    assert_eq!(resumed["state"], "finished");
+    assert_eq!(resumed["rows_committed"], 2);
+    let ids: Vec<u64> = export(
+        &mut h,
+        ADMIN,
+        proto::ExportVectorsRequest {
+            collection: "docs".into(),
+            after: Some(19),
+            page_size: 1,
+        },
+    )
+    .await
+    .unwrap()
+    .iter()
+    .map(|r| r.id)
+    .collect();
+    assert_eq!(ids, [20, 21]);
+
+    // Without finish the stream reports the still-open job status.
+    let job = reserve_job(&mut h, "docs").await;
+    let open = h
+        .client
+        .stream_import(admin(iter(vec![stream_chunk(job, 1, &[30], false)])))
+        .await
+        .unwrap()
+        .into_inner();
+    let open: Value = serde_json::from_str(&open.json).unwrap();
+    assert_eq!(open["state"], "open");
+    assert_eq!(open["last_chunk"], 1);
+    let mixed = h
+        .client
+        .stream_import(admin(iter(vec![
+            stream_chunk(job, 2, &[31], false),
+            stream_chunk(job + 1, 3, &[32], false),
+        ])))
+        .await
+        .unwrap_err();
+    assert_error(&mixed, Code::InvalidArgument, "invalid_input");
+    let late = h
+        .client
+        .stream_import(admin(iter(vec![
+            stream_chunk(job, 0, &[], true),
+            stream_chunk(job, 3, &[33], false),
+        ])))
+        .await
+        .unwrap_err();
+    assert_error(&late, Code::InvalidArgument, "invalid_input");
+    let empty = h
+        .client
+        .stream_import(admin(iter(Vec::<proto::StreamImportRequest>::new())))
+        .await
+        .unwrap_err();
+    assert_error(&empty, Code::InvalidArgument, "invalid_input");
+    let denied = h
+        .client
+        .stream_import(req(
+            Some(READER),
+            iter(vec![stream_chunk(job, 3, &[], true)]),
+        ))
+        .await
+        .unwrap_err();
+    assert_error(&denied, Code::PermissionDenied, "read_only");
+
+    // Streamed messages and gRPC calls have their own counters.
+    let grpc_before = metric(&h.app, "grpc_requests_total").await;
+    let failures_before = metric(&h.app, "grpc_request_failures_total").await;
+    let messages_before = metric(&h.app, "grpc_stream_messages_total").await;
+    let all_ids = export(
+        &mut h,
+        ADMIN,
+        proto::ExportVectorsRequest {
+            collection: "docs".into(),
+            after: None,
+            page_size: 3,
+        },
+    )
+    .await
+    .unwrap()
+    .len() as u64;
+    assert_eq!(metric(&h.app, "grpc_requests_total").await - grpc_before, 1);
+    assert_eq!(
+        metric(&h.app, "grpc_stream_messages_total").await - messages_before,
+        all_ids
+    );
+    assert_eq!(
+        metric(&h.app, "grpc_request_failures_total").await,
+        failures_before
+    );
+    let rest_before = metric(&h.app, "grpc_requests_total").await;
+    rest_ok(&h.app, "GET", "/v1/collections/docs/vectors/1", None).await;
+    assert_eq!(metric(&h.app, "grpc_requests_total").await, rest_before);
+}
+
 #[tokio::test]
 async fn expected_preconditions_are_atomic_and_scoped_to_the_collection() {
     let dir = tempfile::tempdir().unwrap();
@@ -1155,4 +1433,110 @@ async fn limits_and_validation_commit_nothing() {
     let error = h.client.put_vector(admin(request)).await.unwrap_err();
     assert_eq!(error.code(), Code::InvalidArgument);
     assert_eq!(live().await, 1);
+}
+
+struct TestPki {
+    ca_pem: String,
+    cert_pem: String,
+    key_pem: String,
+}
+
+fn test_pki() -> TestPki {
+    use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair};
+    let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let ca = CertifiedIssuer::self_signed(ca_params, KeyPair::generate().unwrap()).unwrap();
+    let key = KeyPair::generate().unwrap();
+    let cert = CertificateParams::new(vec!["localhost".to_owned()])
+        .unwrap()
+        .signed_by(&key, &ca)
+        .unwrap();
+    TestPki {
+        ca_pem: ca.pem(),
+        cert_pem: cert.pem(),
+        key_pem: key.serialize_pem(),
+    }
+}
+
+#[tokio::test]
+async fn native_tls_serves_authenticated_calls_and_rejects_plaintext() {
+    use tonic::transport::{Certificate, ClientTlsConfig};
+    use vlite::server::grpc::GrpcTls;
+
+    let pki = test_pki();
+    assert!(GrpcTls::from_pem("not a certificate", "not a key").is_err());
+    assert!(GrpcTls::from_pem(&pki.cert_pem, "").is_err());
+    let tls = GrpcTls::from_pem(&pki.cert_pem, &pki.key_pem).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let options = ServerOptions {
+        admin_token: Some(BearerToken::new(ADMIN).unwrap()),
+        ..ServerOptions::default()
+    };
+    let service = Service::new(v4(&dir.path().join("db.vlite")));
+    let _app = configured_admin_router(service.clone(), options).unwrap();
+    let grpc = grpc_router(service).await.with_tls(tls);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(grpc.serve_with_shutdown(listener, async {
+        let _ = rx.await;
+    }));
+
+    let trusted = ClientTlsConfig::new()
+        .ca_certificate(Certificate::from_pem(&pki.ca_pem))
+        .domain_name("localhost");
+    let channel = Channel::from_shared(format!("https://localhost:{port}"))
+        .unwrap()
+        .tls_config(trusted)
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut client = VLiteClient::new(channel);
+    let listed = client
+        .list_collections(admin(proto::ListCollectionsRequest::default()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(listed.format_version, 4);
+    let anonymous = client
+        .list_collections(Request::new(proto::ListCollectionsRequest::default()))
+        .await
+        .unwrap_err();
+    assert_eq!(anonymous.code(), Code::Unauthenticated);
+
+    // A client that does not trust the server's CA cannot complete the handshake.
+    let untrusted = ClientTlsConfig::new()
+        .ca_certificate(Certificate::from_pem(test_pki().ca_pem))
+        .domain_name("localhost");
+    let refused = match Channel::from_shared(format!("https://localhost:{port}"))
+        .unwrap()
+        .tls_config(untrusted)
+        .unwrap()
+        .connect()
+        .await
+    {
+        Err(_) => true,
+        Ok(channel) => VLiteClient::new(channel)
+            .list_collections(admin(proto::ListCollectionsRequest::default()))
+            .await
+            .is_err(),
+    };
+    assert!(refused);
+
+    // Plaintext HTTP/2 to the TLS port never reaches the service.
+    let plaintext = match Channel::from_shared(format!("http://127.0.0.1:{port}"))
+        .unwrap()
+        .connect()
+        .await
+    {
+        Err(_) => true,
+        Ok(channel) => VLiteClient::new(channel)
+            .list_collections(admin(proto::ListCollectionsRequest::default()))
+            .await
+            .is_err(),
+    };
+    assert!(plaintext);
+    drop(tx);
 }

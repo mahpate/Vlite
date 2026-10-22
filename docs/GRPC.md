@@ -9,9 +9,24 @@ cargo build --locked --features grpc --bin vlite-server
 ```
 
 gRPC is disabled unless `--grpc-bind` is explicitly supplied. Bind to loopback
-by default. Remote listeners require `--allow-remote` and a trusted TLS
-terminating proxy; the binary itself serves plaintext. Do not expose bearer
-credentials over an untrusted plaintext network.
+by default. Remote listeners require `--allow-remote` and bearer
+authentication. Do not expose bearer credentials over an untrusted plaintext
+network: either terminate TLS at a trusted proxy or serve native TLS:
+
+```text
+vlite-server data.vlite --token-file admin.token --allow-remote \
+  --grpc-bind 0.0.0.0:50051 \
+  --grpc-tls-cert server-chain.pem --grpc-tls-key server-key.pem
+```
+
+The certificate chain (leaf first) and private key are PEM files. Both flags are
+required together. They are read and validated, including that the key matches
+the leaf, before the database is opened. A TLS listener reports
+`LISTENING grpcs://<address>`, and clients connect with `https://` and must trust
+the issuing CA. Native TLS uses rustls with TLS 1.2 or later; it does not
+request client certificates (mTLS) and does not reload certificates. Restart the
+server to rotate the certificate. REST still serves plaintext, so put REST
+behind a TLS proxy (see `compose.tls.yaml`) when it is remote.
 
 ## Scope
 
@@ -34,7 +49,34 @@ details.
 
 REST remains the operational interface for auto retrieval, index quality and
 maintenance, backup/restore, credentials and diagnostics. There is no
-reflection or streaming data API in this release.
+reflection API.
+
+## Streaming export and import
+
+`ExportVectors` is a server stream of `Vector` messages for one collection, in
+strictly ascending ID order without duplicates. It reads `page_size` records
+(0 means 256; maximum 1000) per page. Each page is an atomic snapshot, but
+writes committed between pages may or may not appear: the stream is not a
+point-in-time snapshot of the whole collection. Pass the last received ID as
+`after` to resume after a disconnect. Credentials and revocation are rechecked
+for every page, so a revoked token ends the stream with an error. Read-only
+tokens may export.
+
+`StreamImport` is a client stream over an already reserved import job. Each
+message names the same `job` and carries one numbered chunk with the same
+durable, atomic, idempotent semantics as `ImportChunk`. Set `finish` only on
+the last message; a control-only finish message (`chunk` 0, no operations) is
+allowed. The response is the finish result or, without `finish`, the current
+job status. If the stream fails, chunks already committed stay committed and
+the job remains open: read `GetImportStatus` and resume from `last_chunk + 1`,
+or replay the last chunk safely.
+
+Both transports share `requests_total` and `request_failures_total`. The admin
+`/metrics` view also reports `grpc_requests_total`,
+`grpc_request_failures_total` and `grpc_stream_messages_total`. A streaming
+call is recorded once when it is accepted. A later mid-stream failure, such as
+revocation during export, also increments both failure counters and writes a
+`stream_error` log line with the original request ID.
 
 IDs and revisions are protobuf `uint64`, vector components are `float`, payloads
 are raw bytes, and typed metadata is represented with protobuf oneofs. Generate
@@ -61,5 +103,6 @@ state before deciding what to do. A disconnected client does not cancel or
 roll back a database commit.
 
 REST and gRPC share the owner and bounded request/worker resources. Unary
-requests are capped at 8 MiB and responses at 16 MiB. A large response is an
+requests and individual stream messages are capped at 8 MiB and responses at
+16 MiB. A large response is an
 explicit transport failure, not a truncated successful result.
