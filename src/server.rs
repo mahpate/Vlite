@@ -809,6 +809,7 @@ struct ApiError {
     status: StatusCode,
     code: &'static str,
     message: String,
+    details: Option<String>,
 }
 
 impl ApiError {
@@ -817,7 +818,13 @@ impl ApiError {
             status,
             code,
             message: message.into(),
+            details: None,
         }
+    }
+
+    fn with_details(mut self, details: String) -> Self {
+        self.details = Some(details);
+        self
     }
 }
 

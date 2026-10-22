@@ -7,6 +7,7 @@ use axum::{
     body::Body,
     http::{Request as HttpRequest, StatusCode, header},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use std::{collections::HashMap, path::Path};
@@ -540,6 +541,231 @@ async fn every_rpc_matches_rest_on_the_same_service() {
     // gRPC calls and failures are recorded in the shared metrics.
     assert!(metric(&h.app, "requests_total").await >= 20);
     assert!(metric(&h.app, "request_failures_total").await >= 4);
+}
+
+#[tokio::test]
+async fn hybrid_search_and_resumable_import_match_rest() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = start(v4(&dir.path().join("db.vlite")), None).await;
+    let created = h
+        .client
+        .create_collection(admin(create("docs", Some(r#"{"text_fields":["title"]}"#))))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(created.name, "docs");
+
+    for (id, vector, title) in [
+        (1, vec![1.0, 0.0], "rust vector database"),
+        (2, vec![0.0, 1.0], "python vector search"),
+    ] {
+        h.client
+            .put_vector(admin(proto::PutVectorRequest {
+                collection: "docs".into(),
+                id,
+                vector,
+                metadata: HashMap::from([("title".into(), string(title))]),
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+    }
+
+    let request = proto::SearchRequest {
+        collection: "docs".into(),
+        vector: vec![0.0, 1.0],
+        vector_enabled: true,
+        text: Some("rust".into()),
+        k: 2,
+        mode: proto::SearchMode::Hybrid as i32,
+        fusion: Some(proto::FusionOptions {
+            candidates: Some(2),
+            rrf_k: Some(60),
+            vector_weight: Some(1.0),
+            text_weight: Some(1.0),
+        }),
+        ..Default::default()
+    };
+    let grpc = h.client.search(admin(request)).await.unwrap().into_inner();
+    assert!(grpc.hits.is_empty());
+    let rest_hybrid = rest_ok(
+        &h.app,
+        "POST",
+        "/v1/collections/docs/search",
+        Some(json!({"vector":[0,1],"text":"rust","k":2,"mode":"hybrid",
+            "fusion":{"candidates":2,"rrf_k":60,"vector_weight":1,"text_weight":1}})),
+    )
+    .await;
+    assert_eq!(
+        grpc.hybrid_hits.len(),
+        rest_hybrid["hits"].as_array().unwrap().len()
+    );
+    for (grpc_hit, rest_hit) in grpc
+        .hybrid_hits
+        .iter()
+        .zip(rest_hybrid["hits"].as_array().unwrap())
+    {
+        assert_eq!(
+            grpc_hit.id,
+            rest_hit["id"].as_str().unwrap().parse::<u64>().unwrap()
+        );
+        assert_eq!(grpc_hit.score, rest_hit["score"].as_f64().unwrap());
+        assert_eq!(grpc_hit.distance, rest_hit["distance"].as_f64());
+        assert_eq!(grpc_hit.bm25, rest_hit["bm25"].as_f64());
+        assert_eq!(
+            grpc_hit.vector_rank.map(u64::from),
+            rest_hit["vector_rank"].as_u64()
+        );
+        assert_eq!(
+            grpc_hit.text_rank.map(u64::from),
+            rest_hit["text_rank"].as_u64()
+        );
+    }
+
+    let text_only = h
+        .client
+        .search(admin(proto::SearchRequest {
+            collection: "docs".into(),
+            text: Some("python".into()),
+            k: 2,
+            mode: proto::SearchMode::Hybrid as i32,
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(text_only.hybrid_hits[0].distance.is_none());
+    assert_eq!(text_only.hybrid_hits[0].id, 2);
+
+    let reserved = h
+        .client
+        .reserve_import(admin(proto::ReserveImportRequest {
+            collection: "docs".into(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let reserved: Value = serde_json::from_str(&reserved.json).unwrap();
+    let job = reserved["job"].as_str().unwrap().parse::<u64>().unwrap();
+    assert_eq!(reserved["state"], "open");
+    assert_eq!(reserved["durable"], false);
+
+    let status = h
+        .client
+        .get_import_status(admin(proto::ImportJobRequest { job }))
+        .await
+        .unwrap()
+        .into_inner();
+    let status: Value = serde_json::from_str(&status.json).unwrap();
+    assert_eq!(status["job"], job.to_string());
+    assert_eq!(status["durable"], false);
+
+    let chunk = proto::ImportChunkRequest {
+        job,
+        chunk: 1,
+        operations: vec![put_op(99, vec![0.5, 0.5])],
+        policy: proto::ImportPolicy::RejectChunk as i32,
+    };
+    let result = h
+        .client
+        .import_chunk(admin(chunk.clone()))
+        .await
+        .unwrap()
+        .into_inner();
+    let result: Value = serde_json::from_str(&result.json).unwrap();
+    assert_eq!(result["outcome"], "committed");
+    assert_eq!(result["rows_committed"], 1);
+    assert_eq!(result["status"]["durable"], true);
+
+    let replay = h
+        .client
+        .import_chunk(admin(chunk))
+        .await
+        .unwrap()
+        .into_inner();
+    let replay: Value = serde_json::from_str(&replay.json).unwrap();
+    assert_eq!(replay["outcome"], "already_committed");
+    assert_eq!(
+        rest_ok(&h.app, "GET", "/v1/collections/docs/vectors/99", None).await["vector"],
+        json!([0.5, 0.5])
+    );
+
+    let finished = h
+        .client
+        .finish_import(admin(proto::ImportJobRequest { job }))
+        .await
+        .unwrap()
+        .into_inner();
+    let finished: Value = serde_json::from_str(&finished.json).unwrap();
+    assert_eq!(finished["state"], "finished");
+    assert_eq!(finished["durable"], true);
+
+    let status = h
+        .client
+        .get_import_status(admin(proto::ImportJobRequest { job }))
+        .await
+        .unwrap()
+        .into_inner();
+    let status: Value = serde_json::from_str(&status.json).unwrap();
+    assert_eq!(status["state"], "finished");
+
+    let rejected_job = h
+        .client
+        .reserve_import(admin(proto::ReserveImportRequest {
+            collection: "docs".into(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let rejected_job: Value = serde_json::from_str(&rejected_job.json).unwrap();
+    let rejected_job = rejected_job["job"]
+        .as_str()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    let invalid = h
+        .client
+        .import_chunk(admin(proto::ImportChunkRequest {
+            job: rejected_job,
+            chunk: 1,
+            operations: vec![put_op(88, vec![1.0])],
+            policy: proto::ImportPolicy::RejectChunk as i32,
+        }))
+        .await
+        .unwrap_err();
+    assert_error(&invalid, Code::InvalidArgument, "import_rows_invalid");
+    let details = invalid
+        .metadata()
+        .get("vlite-error-details-base64")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let details: Value = serde_json::from_slice(&STANDARD.decode(details).unwrap()).unwrap();
+    assert_eq!(details["outcome"], "rejected");
+    assert_eq!(details["invalid_rows"], 1);
+    assert!(details["invalid"].is_array());
+    let aborted = h
+        .client
+        .abort_import(admin(proto::ImportJobRequest { job: rejected_job }))
+        .await
+        .unwrap()
+        .into_inner();
+    let aborted: Value = serde_json::from_str(&aborted.json).unwrap();
+    assert_eq!(aborted["state"], "aborted");
+    assert_eq!(aborted["durable"], false);
+
+    // The added operations participate in the same authorization path.
+    let denied = h
+        .client
+        .reserve_import(req(
+            Some(READER),
+            proto::ReserveImportRequest {
+                collection: "docs".into(),
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_error(&denied, Code::PermissionDenied, "read_only");
 }
 
 #[tokio::test]

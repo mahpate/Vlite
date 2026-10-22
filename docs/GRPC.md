@@ -16,13 +16,25 @@ credentials over an untrusted plaintext network.
 ## Scope
 
 The protobuf service covers listing, inspecting, creating and dropping
-collections; vector get/put/delete; atomic single-collection batches; and exact
-or ready-only ANN search. Ready-only search never builds an index. Use REST's
-explicit index build or maintenance controls before querying it.
+collections; vector get/put/delete; atomic single-collection batches; exact,
+ready-only ANN and hybrid retrieval; and resumable import reservation, chunk,
+status, finish and abort operations. Ready-only vector search never builds an
+index. Hybrid search supports exact or ready-only vector legs, optional text-
+only retrieval, metadata filters and weighted reciprocal-rank fusion.
+Resumable-import RPCs use the same durable chunk identity and replay behavior as
+REST.
 
-REST remains the operational interface for imports, hybrid/auto retrieval,
-index quality and maintenance, backup/restore, credentials and diagnostics.
-There is no reflection or streaming data API in this release.
+Import RPC responses wrap the corresponding REST JSON body in
+`ImportJsonResponse.json`, preserving decimal-string job IDs without narrowing
+64-bit identifiers. A rejected import chunk returns `INVALID_ARGUMENT` with
+`vlite-error-code: import_rows_invalid`; its
+`vlite-error-details-base64` trailer contains base64-encoded UTF-8 JSON in the
+same shape as the REST rejection body, including bounded per-row validation
+details.
+
+REST remains the operational interface for auto retrieval, index quality and
+maintenance, backup/restore, credentials and diagnostics. There is no
+reflection or streaming data API in this release.
 
 IDs and revisions are protobuf `uint64`, vector components are `float`, payloads
 are raw bytes, and typed metadata is represented with protobuf oneofs. Generate

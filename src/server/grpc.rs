@@ -129,6 +129,12 @@ fn status(error: ApiError, request_id: &str) -> Status {
     let mut status = Status::new(status_code(&error), error.message);
     let metadata = status.metadata_mut();
     metadata.insert(ERROR_CODE_TRAILER, Ascii::from_static(error.code));
+    if let Some(details) = error.details {
+        let encoded = BASE64_STANDARD.encode(details);
+        if let Ok(value) = encoded.parse() {
+            metadata.insert("vlite-error-details-base64", value);
+        }
+    }
     if let Ok(value) = request_id.parse() {
         metadata.insert("x-request-id", value);
     }
@@ -294,17 +300,14 @@ fn condition(condition: proto::Condition) -> Result<crate::Condition, ApiError> 
     }
 }
 
-/// Converts a wire request into the REST `Search` input. Only `exact` and
-/// `approximate_ready` are reachable: gRPC never builds an index.
+/// Converts a wire request into the REST `Search` input. Lazy index builds
+/// are not exposed over gRPC.
 fn search_input(request: proto::SearchRequest) -> Result<Search, ApiError> {
     let mode = match proto::SearchMode::try_from(request.mode) {
         Ok(proto::SearchMode::Unspecified | proto::SearchMode::Exact) => SearchMode::Exact,
         Ok(proto::SearchMode::ApproximateReady) => SearchMode::ApproximateReady,
-        Err(_) => {
-            return Err(unprocessable(
-                "mode must be SEARCH_MODE_EXACT or SEARCH_MODE_APPROXIMATE_READY",
-            ));
-        }
+        Ok(proto::SearchMode::Hybrid) => SearchMode::Hybrid,
+        Err(_) => return Err(unprocessable("unknown search mode")),
     };
     let metric = match proto::Metric::try_from(request.metric) {
         Ok(proto::Metric::Unspecified) => None,
@@ -350,8 +353,35 @@ fn search_input(request: proto::SearchRequest) -> Result<Search, ApiError> {
         .into_iter()
         .map(condition)
         .collect::<Result<Vec<_>, _>>()?;
+    let vector_leg = match proto::HybridVectorLeg::try_from(request.vector_leg) {
+        Ok(proto::HybridVectorLeg::Exact) => None,
+        Ok(proto::HybridVectorLeg::ApproximateReady) => Some(VectorLegName::ApproximateReady),
+        Err(_) => return Err(unprocessable("unknown hybrid vector leg")),
+    };
+    let fusion = request
+        .fusion
+        .map(|fusion| -> Result<Fusion, ApiError> {
+            let candidates = fusion
+                .candidates
+                .map(usize::try_from)
+                .transpose()
+                .map_err(|_| unprocessable("fusion candidates exceed platform limits"))?;
+            Ok(Fusion {
+                candidates,
+                rrf_k: fusion.rrf_k,
+                vector_weight: fusion.vector_weight,
+                text_weight: fusion.text_weight,
+            })
+        })
+        .transpose()?;
+    let vector =
+        if mode != SearchMode::Hybrid || request.vector_enabled || !request.vector.is_empty() {
+            Some(request.vector)
+        } else {
+            None
+        };
     Ok(Search {
-        vector: Some(request.vector),
+        vector,
         k: request.k as usize,
         mode,
         metric,
@@ -360,9 +390,9 @@ fn search_input(request: proto::SearchRequest) -> Result<Search, ApiError> {
         filter: (!filter.is_empty()).then_some(filter),
         quantization,
         rerank_multiplier,
-        text: None,
-        fusion: None,
-        vector_leg: None,
+        text: request.text,
+        fusion,
+        vector_leg,
         explain: false,
     })
 }
@@ -401,6 +431,12 @@ fn mutation(operation: proto::Operation) -> Result<Mutation, ApiError> {
         Some(Kind::Delete(delete)) => Ok(Mutation::Delete { id: delete.id }),
         None => Err(unprocessable("operations must set put or delete")),
     }
+}
+
+fn import_json(value: Value) -> Result<proto::ImportJsonResponse, ApiError> {
+    Ok(proto::ImportJsonResponse {
+        json: serde_json::to_string(&value).map_err(internal)?,
+    })
 }
 
 use credentials::Op;
@@ -628,18 +664,174 @@ impl VLite for Adapter {
                 let input = search_input(request)?;
                 let (_, executed) =
                     search_core(&service, role, &request_id, ROUTE, target, input).await?;
-                let Hits::Vector(hits) = executed.hits else {
-                    return Err(internal("vector search returned fused hits"));
-                };
-                Ok(proto::SearchResponse {
-                    hits: hits
-                        .into_iter()
-                        .map(|hit| proto::Hit {
-                            id: hit.id,
-                            distance: hit.distance,
+                match executed.hits {
+                    Hits::Vector(hits) => Ok(proto::SearchResponse {
+                        hits: hits
+                            .into_iter()
+                            .map(|hit| proto::Hit {
+                                id: hit.id,
+                                distance: hit.distance,
+                            })
+                            .collect(),
+                        hybrid_hits: Vec::new(),
+                    }),
+                    Hits::Hybrid(hits) => {
+                        let hybrid_hits = hits
+                            .into_iter()
+                            .map(|hit| {
+                                let id = hit["id"]
+                                    .as_str()
+                                    .and_then(|id| id.parse().ok())
+                                    .ok_or_else(|| internal("hybrid result has invalid id"))?;
+                                let score = hit["score"]
+                                    .as_f64()
+                                    .ok_or_else(|| internal("hybrid result has invalid score"))?;
+                                Ok(proto::HybridHit {
+                                    id,
+                                    score,
+                                    distance: hit["distance"].as_f64(),
+                                    bm25: hit["bm25"].as_f64(),
+                                    vector_rank: hit["vector_rank"]
+                                        .as_u64()
+                                        .and_then(|rank| u32::try_from(rank).ok()),
+                                    text_rank: hit["text_rank"]
+                                        .as_u64()
+                                        .and_then(|rank| u32::try_from(rank).ok()),
+                                })
+                            })
+                            .collect::<Result<Vec<_>, ApiError>>()?;
+                        Ok(proto::SearchResponse {
+                            hits: Vec::new(),
+                            hybrid_hits,
                         })
-                        .collect(),
-                })
+                    }
+                }
+            },
+        )
+        .await
+    }
+
+    async fn reserve_import(
+        &self,
+        request: Request<proto::ReserveImportRequest>,
+    ) -> Result<Response<proto::ImportJsonResponse>, Status> {
+        self.call(
+            "grpc:/vlite.v1.VLite/ReserveImport",
+            request,
+            Need::Op(Op::Import, Reach::Collection),
+            false,
+            false,
+            |service, role, _, request| async move {
+                let value =
+                    collections::reserve_core(&service, role, Target::Named(request.collection))
+                        .await?;
+                import_json(value)
+            },
+        )
+        .await
+    }
+
+    async fn get_import_status(
+        &self,
+        request: Request<proto::ImportJobRequest>,
+    ) -> Result<Response<proto::ImportJsonResponse>, Status> {
+        self.call(
+            "grpc:/vlite.v1.VLite/GetImportStatus",
+            request,
+            Need::Op(Op::Read, Reach::Collection),
+            true,
+            false,
+            |service, role, _, request| async move {
+                import_json(collections::status_core(&service, role, request.job).await?)
+            },
+        )
+        .await
+    }
+
+    async fn import_chunk(
+        &self,
+        request: Request<proto::ImportChunkRequest>,
+    ) -> Result<Response<proto::ImportJsonResponse>, Status> {
+        self.call(
+            "grpc:/vlite.v1.VLite/ImportChunk",
+            request,
+            Need::Op(Op::Import, Reach::Collection),
+            false,
+            false,
+            |service, role, _, request| async move {
+                let policy = match proto::ImportPolicy::try_from(request.policy) {
+                    Ok(proto::ImportPolicy::RejectChunk) => crate::InvalidRowPolicy::RejectChunk,
+                    Ok(proto::ImportPolicy::SkipInvalid) => crate::InvalidRowPolicy::SkipInvalid,
+                    Err(_) => return Err(unprocessable("unknown import policy")),
+                };
+                if request.operations.len() > MAX_BATCH_OPERATIONS {
+                    return Err(Error::BatchTooLarge.into());
+                }
+                let operations = request
+                    .operations
+                    .into_iter()
+                    .map(mutation)
+                    .collect::<Result<Vec<_>, _>>()?;
+                let value = collections::import_chunk_core(
+                    &service,
+                    role,
+                    request.job,
+                    request.chunk,
+                    operations,
+                    policy,
+                )
+                .await?;
+                if value["outcome"] == "rejected" {
+                    let details = serde_json::to_string(&value).map_err(internal)?;
+                    return Err(
+                        ApiError::new(
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            "import_rows_invalid",
+                            "chunk rejected; nothing was written; correct invalid rows or use skip_invalid",
+                        )
+                        .with_details(details),
+                    );
+                }
+                import_json(value)
+            },
+        )
+        .await
+    }
+
+    async fn finish_import(
+        &self,
+        request: Request<proto::ImportJobRequest>,
+    ) -> Result<Response<proto::ImportJsonResponse>, Status> {
+        self.close_import(request, false).await
+    }
+
+    async fn abort_import(
+        &self,
+        request: Request<proto::ImportJobRequest>,
+    ) -> Result<Response<proto::ImportJsonResponse>, Status> {
+        self.close_import(request, true).await
+    }
+}
+
+impl Adapter {
+    async fn close_import(
+        &self,
+        request: Request<proto::ImportJobRequest>,
+        abort: bool,
+    ) -> Result<Response<proto::ImportJsonResponse>, Status> {
+        let route = if abort {
+            "grpc:/vlite.v1.VLite/AbortImport"
+        } else {
+            "grpc:/vlite.v1.VLite/FinishImport"
+        };
+        self.call(
+            route,
+            request,
+            Need::Op(Op::Import, Reach::Collection),
+            false,
+            false,
+            move |service, role, _, request| async move {
+                import_json(collections::close_core(&service, role, request.job, abort).await?)
             },
         )
         .await

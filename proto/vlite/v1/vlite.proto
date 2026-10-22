@@ -25,6 +25,11 @@ service VLite {
   rpc WriteBatch(WriteBatchRequest) returns (WriteBatchResponse);
   // Exact or ready-index ANN search. Never builds an index.
   rpc Search(SearchRequest) returns (SearchResponse);
+  rpc ReserveImport(ReserveImportRequest) returns (ImportJsonResponse);
+  rpc GetImportStatus(ImportJobRequest) returns (ImportJsonResponse);
+  rpc ImportChunk(ImportChunkRequest) returns (ImportJsonResponse);
+  rpc FinishImport(ImportJobRequest) returns (ImportJsonResponse);
+  rpc AbortImport(ImportJobRequest) returns (ImportJsonResponse);
 }
 
 message Collection {
@@ -154,6 +159,8 @@ enum SearchMode {
   // Uses an existing matching index; FAILED_PRECONDITION `index_not_ready`
   // otherwise. Build indexes with REST `POST .../index/hnsw`.
   SEARCH_MODE_APPROXIMATE_READY = 2;
+  // Fuses vector and text results using reciprocal-rank fusion.
+  SEARCH_MODE_HYBRID = 3;
 }
 
 enum Metric {
@@ -206,6 +213,11 @@ message SearchRequest {
   optional uint32 rerank_multiplier = 9;
   // Conjunction of metadata conditions.
   repeated Condition filter = 10;
+  // Hybrid-only text query. Set vector_enabled=false for text-only retrieval.
+  optional string text = 11;
+  bool vector_enabled = 12;
+  FusionOptions fusion = 13;
+  HybridVectorLeg vector_leg = 14;
 }
 
 message Hit {
@@ -213,6 +225,56 @@ message Hit {
   double distance = 2;
 }
 
+enum HybridVectorLeg {
+  HYBRID_VECTOR_LEG_EXACT = 0;
+  HYBRID_VECTOR_LEG_APPROXIMATE_READY = 1;
+}
+
+message FusionOptions {
+  optional uint32 candidates = 1;
+  optional uint32 rrf_k = 2;
+  optional double vector_weight = 3;
+  optional double text_weight = 4;
+}
+
+message HybridHit {
+  uint64 id = 1;
+  double score = 2;
+  optional double distance = 3;
+  optional double bm25 = 4;
+  optional uint32 vector_rank = 5;
+  optional uint32 text_rank = 6;
+}
+
 message SearchResponse {
   repeated Hit hits = 1;
+  repeated HybridHit hybrid_hits = 2;
+}
+
+// Successful import responses contain the same JSON shape as REST, preserving
+// string-encoded job IDs. Rejected chunks return INVALID_ARGUMENT; the
+// `vlite-error-details-base64` trailer contains base64-encoded UTF-8 JSON with
+// the REST chunk response, including bounded per-row validation details.
+message ImportJsonResponse {
+  string json = 1;
+}
+
+message ReserveImportRequest {
+  string collection = 1;
+}
+
+message ImportJobRequest {
+  uint64 job = 1;
+}
+
+enum ImportPolicy {
+  IMPORT_POLICY_REJECT_CHUNK = 0;
+  IMPORT_POLICY_SKIP_INVALID = 1;
+}
+
+message ImportChunkRequest {
+  uint64 job = 1;
+  uint64 chunk = 2;
+  repeated Operation operations = 3;
+  ImportPolicy policy = 4;
 }

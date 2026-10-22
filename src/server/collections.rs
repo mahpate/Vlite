@@ -442,6 +442,17 @@ async fn reserve(
     target: Result<Path<String>, PathRejection>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let target = collection_path(target)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(reserve_core(&service, role, target).await?),
+    ))
+}
+
+pub(super) async fn reserve_core(
+    service: &Service,
+    role: admin::Role,
+    target: Target,
+) -> Result<Value, ApiError> {
     let reservations = service.imports.clone();
     service
         .run(move |db| {
@@ -461,10 +472,7 @@ async fn reserve(
             reserved
                 .jobs
                 .insert(job, (collection, target.name().to_owned()));
-            Ok((
-                StatusCode::CREATED,
-                Json(reserved_json(job, target.name(), "open")),
-            ))
+            Ok(reserved_json(job, target.name(), "open"))
         })
         .await
 }
@@ -544,25 +552,33 @@ async fn status(
     job: Result<Path<String>, PathRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let job = job_path(job)?;
+    Ok(Json(status_core(&service, role, job).await?))
+}
+
+pub(super) async fn status_core(
+    service: &Service,
+    role: admin::Role,
+    job: u64,
+) -> Result<Value, ApiError> {
     let reservations = service.imports.clone();
     service
         .run(move |db| {
             let reserved = reservations.lock().map_err(internal)?;
             match locate(db, &reserved, &role, job) {
-                Ok(Job::Durable(_)) => Ok(Json(status_json(&db.import_status(job)?, true))),
+                Ok(Job::Durable(_)) => Ok(status_json(&db.import_status(job)?, true)),
                 // Dropped durable jobs remain observable (historical name).
                 Err(error) if error.code == "import_conflict" && db.imports.get(job).is_some() => {
-                    Ok(Json(status_json(&db.import_status(job)?, true)))
+                    Ok(status_json(&db.import_status(job)?, true))
                 }
                 Ok(Job::Reserved(_)) => {
                     let (_, name) = &reserved.jobs[&job];
-                    Ok(Json(reserved_json(job, name, "open")))
+                    Ok(reserved_json(job, name, "open"))
                 }
                 Err(error) if error.code == "import_conflict" => {
                     let (_, name) = &reserved.jobs[&job];
                     let mut value = reserved_json(job, name, "open");
                     value["collection_dropped"] = json!(true);
-                    Ok(Json(value))
+                    Ok(value)
                 }
                 Err(error) => Err(error),
             }
@@ -603,6 +619,26 @@ async fn chunk(
         Policy::SkipInvalid => InvalidRowPolicy::SkipInvalid,
     };
     let operations = mutations(input.operations, false)?;
+    let value = import_chunk_core(&service, role, job, number, operations, policy).await?;
+    if value["outcome"] == "rejected" {
+        let mut response = (StatusCode::UNPROCESSABLE_ENTITY, Json(value)).into_response();
+        response
+            .extensions_mut()
+            .insert(ErrorCode("import_rows_invalid"));
+        Ok(response)
+    } else {
+        Ok(Json(value).into_response())
+    }
+}
+
+pub(super) async fn import_chunk_core(
+    service: &Service,
+    role: admin::Role,
+    job: u64,
+    number: u64,
+    operations: Vec<Mutation>,
+    policy: InvalidRowPolicy,
+) -> Result<Value, ApiError> {
     let reservations = service.imports.clone();
     let metrics = service.metrics.clone();
     service
@@ -657,16 +693,11 @@ async fn chunk(
                 ImportChunkOutcome::Committed | ImportChunkOutcome::AlreadyCommitted
             ) {
                 value["status"] = status_json(&db.import_status(job)?, true);
-                Ok(Json(value).into_response())
             } else {
                 value["error"] = json!({"code": "import_rows_invalid",
                     "message": "chunk rejected; nothing was written; fix the rows or use policy skip_invalid"});
-                let mut response = (StatusCode::UNPROCESSABLE_ENTITY, Json(value)).into_response();
-                response
-                    .extensions_mut()
-                    .insert(ErrorCode("import_rows_invalid"));
-                Ok(response)
             }
+            Ok(value)
         })
         .await
 }
@@ -694,6 +725,15 @@ async fn close(
     abort: bool,
 ) -> Result<Json<Value>, ApiError> {
     let job = job_path(job)?;
+    Ok(Json(close_core(&service, role, job, abort).await?))
+}
+
+pub(super) async fn close_core(
+    service: &Service,
+    role: admin::Role,
+    job: u64,
+    abort: bool,
+) -> Result<Value, ApiError> {
     let reservations = service.imports.clone();
     service
         .run(move |db| {
@@ -710,14 +750,14 @@ async fn close(
                     } else {
                         handle.finish_import(job)?
                     };
-                    Ok(Json(status_json(&status, true)))
+                    Ok(status_json(&status, true))
                 }
                 Ok(Job::Reserved(_)) if !abort => Err(conflict(
                     "no chunk has been committed; abort the reservation instead",
                 )),
                 Ok(Job::Reserved(_)) => {
                     let (_, name) = reserved.jobs.remove(&job).expect("located reservation");
-                    Ok(Json(reserved_json(job, &name, "aborted")))
+                    Ok(reserved_json(job, &name, "aborted"))
                 }
                 // A reservation for a dropped collection can only be released.
                 Err(error)
@@ -728,7 +768,7 @@ async fn close(
                     let (_, name) = reserved.jobs.remove(&job).expect("located reservation");
                     let mut value = reserved_json(job, &name, "aborted");
                     value["collection_dropped"] = json!(true);
-                    Ok(Json(value))
+                    Ok(value)
                 }
                 Err(error) => Err(error),
             }
