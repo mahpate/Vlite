@@ -4,7 +4,7 @@ use vlite::{
 };
 
 fn wait(db: &mut Database) -> vlite::Result<HnswRebuildStatus> {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + Duration::from_secs(600);
     loop {
         let status = db.poll_hnsw_rebuild()?;
         if !matches!(

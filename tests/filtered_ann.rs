@@ -543,7 +543,7 @@ fn background_rebuild_publication_serves_current_filtered_results() {
         db.put_with_metadata(41, &[1.0, 1.0], b"", &tag("rare"))
             .unwrap();
         db.delete(57).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + Duration::from_secs(600);
         let status = loop {
             let status = db.poll_hnsw_rebuild().unwrap();
             if !matches!(

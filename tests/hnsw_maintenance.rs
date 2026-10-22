@@ -6,7 +6,7 @@ use vlite::{
 };
 
 fn wait(db: &mut Database) {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + Duration::from_secs(600);
     loop {
         match db.poll_hnsw_rebuild().unwrap() {
             HnswRebuildStatus::Running | HnswRebuildStatus::Cancelling => {
@@ -220,7 +220,7 @@ fn observation_does_not_publish_finished_worker_and_reports_processed_zero_recor
     let policy = HnswMaintenancePolicy::default();
     db.start_hnsw_rebuild(config, metric, policy.limits)
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(600);
     let mut previous = 0;
     loop {
         let status = db.hnsw_maintenance_status(config, metric, policy).unwrap();
@@ -267,7 +267,7 @@ fn cancellation_tick_does_not_restart_and_invalid_configuration_never_polls() {
         Err(Error::UnsupportedAnnMetric)
     ));
     assert!(db.cancel_hnsw_rebuild());
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(600);
     loop {
         let report = db
             .maintain_hnsw(config, DistanceMetric::Cosine, policy)

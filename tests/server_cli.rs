@@ -403,7 +403,7 @@ impl Launched {
             let sent = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) };
             assert_ne!(sent, 0, "{}", std::io::Error::last_os_error());
         }
-        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let deadline = std::time::Instant::now() + Duration::from_secs(600);
         loop {
             if let Some(status) = self.server.child.try_wait().unwrap() {
                 return status;

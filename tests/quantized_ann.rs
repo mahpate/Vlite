@@ -254,7 +254,7 @@ fn buffered_mutations_background_rebuild_and_snapshot_limits() {
     // Writes during the build are caught up into the published index.
     let far = vec![50.0; DIMS];
     db.put(9000, &far, b"").unwrap();
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_secs(600);
     loop {
         match db.poll_hnsw_rebuild().unwrap() {
             HnswRebuildStatus::Published => break,

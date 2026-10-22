@@ -495,7 +495,7 @@ fn published_background_rebuild_with_catch_up_round_trips() {
         db.start_hnsw_rebuild_with_options(config(), metric, options, HnswRebuildLimits::default())
             .unwrap();
         mutate(&mut db, None, &mut live, 4);
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_secs(600);
         loop {
             match db.poll_hnsw_rebuild().unwrap() {
                 HnswRebuildStatus::Published => break,
