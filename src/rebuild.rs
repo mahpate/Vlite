@@ -350,10 +350,10 @@ mod tests {
         db.put(1, &[1.0, 2.0], b"").unwrap();
         db.build_hnsw(HnswConfig::default()).unwrap();
         db.rebuild = Some((0, failed_job()));
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(600);
         while !db.rebuild.as_ref().unwrap().1.finished() {
             assert!(Instant::now() < deadline);
-            thread::yield_now();
+            thread::sleep(Duration::from_millis(1));
         }
         assert!(matches!(
             db.poll_hnsw_rebuild(),

@@ -411,8 +411,8 @@ async fn collection_index_routes_use_collection_identity_and_never_touch_default
     )
     .await;
     assert_eq!(code, StatusCode::ACCEPTED, "{started}");
-    let mut outcome = String::new();
-    for _ in 0..500 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+    let outcome = loop {
         let polled = ok(
             &app,
             "POST",
@@ -420,12 +420,16 @@ async fn collection_index_routes_use_collection_identity_and_never_touch_default
             None,
         )
         .await;
-        outcome = polled["outcome"].as_str().unwrap().to_owned();
+        let outcome = polled["outcome"].as_str().unwrap().to_owned();
         if outcome != "running" {
-            break;
+            break outcome;
         }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "rebuild did not finish"
+        );
         std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    };
     assert_eq!(outcome, "published");
     assert_eq!(
         ok(

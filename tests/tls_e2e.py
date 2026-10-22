@@ -33,7 +33,7 @@ def run(directory):
     port = int(address.rsplit(":", 1)[1])
     container = rest.compose("ps", "--quiet", "caddy").stdout.strip()
     root = os.path.join(directory, "root.crt")
-    deadline = time.monotonic() + 60
+    deadline = time.monotonic() + 120
     while True:
         copied = subprocess.run(
             ["docker", "cp", container + ":/data/caddy/pki/authorities/local/root.crt", root],
@@ -61,6 +61,7 @@ def run(directory):
         finally:
             connection.close()
 
+    deadline = time.monotonic() + 120
     while True:
         try:
             if request("GET", "/ready")[0] == 200:

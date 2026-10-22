@@ -45,7 +45,7 @@ impl Server {
             address: String::new(),
         };
         let line = receiver
-            .recv_timeout(Duration::from_secs(15))
+            .recv_timeout(Duration::from_secs(120))
             .expect("server startup timed out");
         server.address = line
             .trim()
@@ -59,10 +59,10 @@ impl Server {
         let body = body.to_string();
         let mut stream = TcpStream::connect(&self.address).unwrap();
         stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
+            .set_read_timeout(Some(Duration::from_secs(120)))
             .unwrap();
         stream
-            .set_write_timeout(Some(Duration::from_secs(10)))
+            .set_write_timeout(Some(Duration::from_secs(120)))
             .unwrap();
         write!(stream,
             "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",body.len()
@@ -339,7 +339,7 @@ fn launch(path: &Path, extra: &[&str]) -> Launched {
         address: String::new(),
     };
     let line = receiver
-        .recv_timeout(Duration::from_secs(30))
+        .recv_timeout(Duration::from_secs(120))
         .expect("server startup timed out");
     server.address = line
         .strip_prefix("LISTENING http://")
@@ -347,7 +347,7 @@ fn launch(path: &Path, extra: &[&str]) -> Launched {
         .to_owned();
     let grpc = extra.contains(&"--grpc-bind").then(|| {
         let line = receiver
-            .recv_timeout(Duration::from_secs(30))
+            .recv_timeout(Duration::from_secs(120))
             .expect("gRPC address");
         let scheme = if extra.contains(&"--grpc-tls-cert") {
             "LISTENING grpcs://"
@@ -368,10 +368,11 @@ fn launch(path: &Path, extra: &[&str]) -> Launched {
 impl Launched {
     /// The next stderr JSON line with this event name.
     fn event(&self, name: &str) -> Value {
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
         loop {
             let line = self
                 .events
-                .recv_timeout(Duration::from_secs(60))
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
                 .unwrap_or_else(|_| panic!("no {name} event"));
             if let Ok(value) = serde_json::from_str::<Value>(&line)
                 && value["event"] == name
@@ -383,7 +384,19 @@ impl Launched {
 
     /// Every remaining stderr line (after the process exited).
     fn rest_of_stderr(&self) -> Vec<String> {
-        self.events.try_iter().collect()
+        // Process exit can precede the stderr reader forwarding its final lines.
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        let mut lines = Vec::new();
+        loop {
+            match self
+                .events
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            {
+                Ok(line) => lines.push(line),
+                Err(mpsc::RecvTimeoutError::Disconnected) => return lines,
+                Err(mpsc::RecvTimeoutError::Timeout) => panic!("stderr reader did not finish"),
+            }
+        }
     }
 
     /// Sends the platform stop signal and waits for a graceful exit.

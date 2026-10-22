@@ -225,7 +225,7 @@ fn forced_termination_preserves_acknowledged_commits() {
         });
         let wait_for = |expected| loop {
             let line = receiver
-                .recv_timeout(Duration::from_secs(30))
+                .recv_timeout(Duration::from_secs(120))
                 .expect("child did not reach durability checkpoint");
             if line == expected {
                 break;

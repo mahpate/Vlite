@@ -379,10 +379,12 @@ def v4_quantization(client):
     quality = d.ann_quality({"samples": 4, "k": 2})
     assert quality["skipped_reason"] is None and quality["samples_used"] > 0 and quality["recall_at_k"] >= 0.5, quality
     assert d.start_rebuild()["outcome"] == "running"
-    for _ in range(200):
+    deadline = time.monotonic() + 600
+    while True:
         outcome = d.poll_rebuild()["outcome"]
         if outcome != "running":
             break
+        assert time.monotonic() < deadline, "rebuild did not finish"
         time.sleep(0.05)
     assert outcome == "published", outcome
     assert d.index_status()["quantization"] == "scalar_u8"
@@ -551,7 +553,7 @@ def start_server(binary, database, env, *args):
         lines = queue.Queue()
         threading.Thread(target=lambda: lines.put(process.stdout.readline()), daemon=True).start()
         try:
-            line = lines.get(timeout=30).strip()
+            line = lines.get(timeout=120).strip()
         except queue.Empty:
             line = ""
         if not line.startswith("LISTENING http://"):

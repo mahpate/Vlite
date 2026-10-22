@@ -7,8 +7,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const token = "test_" + "a".repeat(32);
-test("HTTP contract, redirects, validation and no retries", async () => {
+test("HTTP contract, redirects, validation and no retries", async (t) => {
   const calls = [];
+  const timeoutController = new AbortController();
   let mode = "ok";
   const server = createServer(async (req, res) => {
     let body = "";
@@ -22,7 +23,8 @@ test("HTTP contract, redirects, validation and no retries", async () => {
     } else if (mode === "bad-json") {
       res.end("not json");
     } else if (mode === "timeout") {
-      // No response; client must abort without retrying.
+      // Abort only after admission, not before a slow runner can send the request.
+      timeoutController.abort(new DOMException("Timed out", "TimeoutError"));
     } else {
       res.end(JSON.stringify({ items: [], next_after: null }));
     }
@@ -50,6 +52,10 @@ test("HTTP contract, redirects, validation and no retries", async () => {
     mode = "bad-json";
     await assert.rejects(client.database(), TransportError);
     mode = "timeout";
+    t.mock.method(AbortSignal, "timeout", (milliseconds) => {
+      assert.equal(milliseconds, 100);
+      return timeoutController.signal;
+    });
     await assert.rejects(new Client(base, token, { timeoutMs: 100 }).put("1", { vector: [1] }), TransportError);
     assert.equal(calls.length, 5);
   } finally {

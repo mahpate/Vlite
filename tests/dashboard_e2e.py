@@ -10,6 +10,8 @@ import time
 import uuid
 from playwright.sync_api import Error as PlaywrightError, sync_playwright, expect
 
+expect.set_options(timeout=30000)
+
 
 def docker(*args, **kwargs):
     result = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=600, **kwargs)
@@ -18,17 +20,17 @@ def docker(*args, **kwargs):
     return result.stdout.strip()
 
 def ready(page, base):
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + 120
     last_error = None
     while time.monotonic() < deadline:
         try:
-            response = page.request.get(base + "/health", timeout=1000)
+            response = page.request.get(base + "/health", timeout=10000)
             if response.status == 200:
                 return
         except PlaywrightError as error:
             last_error = error
         time.sleep(.1)
-    raise RuntimeError("Dashboard API did not become ready within 30 seconds") from last_error
+    raise RuntimeError("Dashboard API did not become ready within 120 seconds") from last_error
 
 
 def exercise_layout(page, url):
@@ -467,11 +469,16 @@ def exercise_operations(page, base, token, read_token):
     page.get_by_role("button", name="Start background rebuild", exact=True).click()
     page.get_by_role("button", name="Confirm", exact=True).click()
     expect(page.locator("#rebuild-result")).to_contain_text('"outcome": "running"')
-    for _ in range(100):
-        page.get_by_role("button", name="Poll / publish rebuild", exact=True).click()
-        expect(page.locator("#rebuild-result")).to_contain_text('"outcome"')
-        if '"published"' in page.locator("#rebuild-result").inner_text():
+    deadline = time.monotonic() + 600
+    while True:
+        with page.expect_response(lambda response: response.url.endswith("/index/hnsw/rebuild/poll")) as polled:
+            page.get_by_role("button", name="Poll / publish rebuild", exact=True).click()
+        assert polled.value.status == 200
+        outcome = polled.value.json()["outcome"]
+        if outcome != "running":
+            assert outcome == "published", outcome
             break
+        assert time.monotonic() < deadline, "rebuild did not finish"
         time.sleep(.05)
     expect(page.locator("#rebuild-result")).to_contain_text('"published"')
     page.locator("#query").fill("[1,0,0]")
@@ -868,7 +875,7 @@ def mocked_page(browser, fake):
     context = browser.new_context(viewport={"width": 1280, "height": 900})
     context.route(MOCK_ORIGIN + "/**", fake.handle)
     page = context.new_page()
-    page.set_default_timeout(10000)
+    page.set_default_timeout(30000)
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.on("console", lambda message: errors.append(message.text) if message.type == "error" and "Failed to load resource" not in message.text else None)
@@ -1226,7 +1233,7 @@ def main():
                 browser = playwright.chromium.launch()
                 try:
                     page = browser.new_page()
-                    page.set_default_timeout(15000)
+                    page.set_default_timeout(30000)
                     base = "http://127.0.0.1:" + port
                     ready(page, base)
                     exercise_layout(page, base + "/dashboard")

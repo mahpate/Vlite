@@ -2,8 +2,7 @@ import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import tempfile
-from threading import Thread
-import time
+from threading import Event, Thread
 import unittest
 
 from vlite_client import Client, ImportRejectedError, TransportError, UnsupportedError, VLiteError
@@ -22,6 +21,8 @@ class Handler(BaseHTTPRequestHandler):
     mode = "ok"
     etags = [TAG]
     caps = CAPS
+    timeout_release = Event()
+    timeout_finished = Event()
 
     def log_message(self, *_):
         pass
@@ -67,7 +68,10 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b'not json')
         elif self.mode == "timeout":
-            time.sleep(0.2)
+            try:
+                self.timeout_release.wait(60)
+            finally:
+                self.timeout_finished.set()
         else:
             self.send_response(200)
             self.end_headers()
@@ -140,9 +144,15 @@ class ClientTests(unittest.TestCase):
 
     def test_mutation_timeout_is_not_retried(self):
         Handler.mode = "timeout"
-        with self.assertRaises(TransportError):
-            Client(self.base, TOKEN, timeout=0.05).put("1", {"vector": [1]})
-        self.assertEqual(len(Handler.calls), 1)
+        Handler.timeout_release.clear()
+        Handler.timeout_finished.clear()
+        try:
+            with self.assertRaises(TransportError):
+                Client(self.base, TOKEN, timeout=5).put("1", {"vector": [1]})
+            self.assertEqual(len(Handler.calls), 1)
+        finally:
+            Handler.timeout_release.set()
+            self.assertTrue(Handler.timeout_finished.wait(60), "timeout handler did not finish")
 
     def test_filtered_search_forwards_request_unchanged_in_every_mode(self):
         flt = [{"op": "eq", "field": "tag", "value": {"type": "string", "value": "a"}},

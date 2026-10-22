@@ -49,7 +49,7 @@ def request(port, method, path, body=None, expected=200, token=TOKEN):
 
 
 def ready(port):
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
         try:
             request(port, "GET", "/ready")

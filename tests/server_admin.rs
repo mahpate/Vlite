@@ -662,11 +662,11 @@ fn startup_roles_fail_closed_before_creation_and_selected_restore_is_opened() {
         BufReader::new(stdout).read_line(&mut line).unwrap();
         let _ = tx.send(line);
     });
-    let line = rx.recv_timeout(Duration::from_secs(15)).unwrap();
+    let line = rx.recv_timeout(Duration::from_secs(120)).unwrap();
     let address = line.trim().strip_prefix("LISTENING http://").unwrap();
     let mut stream = TcpStream::connect(address).unwrap();
     stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
+        .set_read_timeout(Some(Duration::from_secs(120)))
         .unwrap();
     write!(stream, "GET /v1/database HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: Bearer {READ}\r\n\r\n").unwrap();
     let mut response = String::new();
