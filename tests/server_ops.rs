@@ -296,16 +296,19 @@ async fn credentials_expire_revoke_rotate_and_persist_across_restart() {
     let (status, _) = call(&app, Some(READER), "GET", "/v1/admin/credentials", None).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
-    let (_, short) = credential(&app, &["*"], &["read"], now_ms() + 300).await;
     let (keep_id, keep) = credential(&app, &["default"], &["read"], now_ms() + 600_000).await;
     let (revoke_id, revoked) = credential(&app, &["*"], &["read"], now_ms() + 600_000).await;
+    // Created last with a margin: credential hashing is slow on unoptimized CI builds.
+    let short_expiry = now_ms() + 2_000;
+    let (_, short) = credential(&app, &["*"], &["read"], short_expiry).await;
     assert_eq!(
         call(&app, Some(&short), "GET", "/v1/database", None)
             .await
             .0,
         StatusCode::OK
     );
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    let remaining = short_expiry.saturating_sub(now_ms());
+    tokio::time::sleep(Duration::from_millis(remaining + 200)).await;
     let (status, error) = call(&app, Some(&short), "GET", "/v1/database", None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(error["error"]["code"], "credential_expired");
@@ -813,7 +816,7 @@ async fn prometheus_metrics_and_slow_query_log_expose_counters_not_values() {
         "POST",
         "/v1/search",
         Some(
-            json!({"vector":[0.123,0.456],"k":1,"filter":[{"field":"lang","op":"eq",
+            json!({"vector":[0.31415927,0.456],"k":1,"filter":[{"field":"lang","op":"eq",
             "value":{"type":"string","value":"needle-value"}}]}),
         ),
     )
@@ -826,7 +829,8 @@ async fn prometheus_metrics_and_slow_query_log_expose_counters_not_values() {
     assert_eq!(item["mode"], "exact");
     assert_eq!(item["filter_fields"], json!(["lang"]));
     let text = slow.to_string();
-    assert!(!text.contains("needle-value") && !text.contains("0.123"));
+    // A distinctive vector component: short substrings can collide with duration_ms.
+    assert!(!text.contains("needle-value") && !text.contains("31415927"));
     // Read-only cannot read admin diagnostics.
     let (status, _) = call(
         &app,
