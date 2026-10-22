@@ -291,9 +291,8 @@ fn invalid_code(error: &Error) -> &'static str {
     }
 }
 
-/// The same per-row checks `write_batch` applies (format v4 always admits
-/// metadata).
-fn validate_row(dimensions: usize, operation: &Mutation) -> Result<()> {
+/// The same per-row checks `write_batch` applies, including v5-only geo values.
+fn validate_row(dimensions: usize, operation: &Mutation, version: u32) -> Result<()> {
     let (vector, payload, metadata) = match operation {
         Mutation::Put {
             vector, payload, ..
@@ -312,6 +311,9 @@ fn validate_row(dimensions: usize, operation: &Mutation) -> Result<()> {
     }
     if let Some(metadata) = metadata {
         metadata::validate(metadata)?;
+        if metadata::contains_geo(metadata) && version < format::V5 {
+            return Err(Error::ExpiryRequiresUpgrade);
+        }
     }
     Ok(())
 }
@@ -373,6 +375,14 @@ fn encode_invalid_row(operation: &Mutation, bytes: &mut Vec<u8>) {
                 bytes.extend_from_slice(&value.to_le_bytes());
             }
             crate::MetadataValue::Boolean(value) => bytes.extend_from_slice(&[4, u8::from(*value)]),
+            crate::MetadataValue::GeoPoint {
+                latitude,
+                longitude,
+            } => {
+                bytes.push(5);
+                bytes.extend_from_slice(&latitude.to_le_bytes());
+                bytes.extend_from_slice(&longitude.to_le_bytes());
+            }
         }
     }
 }
@@ -462,7 +472,7 @@ impl Database {
         let mut invalid = Vec::new();
         let mut invalid_rows = 0u32;
         for (row, operation) in operations.iter().enumerate() {
-            let result = validate_row(dimensions, operation);
+            let result = validate_row(dimensions, operation, self.version);
             if let Err(error) = &result {
                 invalid_rows += 1;
                 if invalid.len() < MAX_REPORTED_INVALID_ROWS {

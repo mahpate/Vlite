@@ -60,6 +60,35 @@ non-exhaustive. Rust callers matching every prior variant must add a wildcard
 arm; this is a source-compatibility change even though existing file formats
 remain readable. No package release is implied by the working-tree changes.
 
+## Opt-in v5 record features
+
+`Database::create` remains v3 and the collection/import format remains v4.
+Create a new file with `FormatVersion::V5` to persist absolute Unix-millisecond
+record expiries, GeoPoint metadata and metadata-only update frames. Opening an
+existing file never migrates it; formats v1-v4 retain their prior byte and
+read behavior, while older binaries reject a v5 header.
+
+`put_with_expiry(id, vector, payload, metadata, expires_at_ms)` writes a
+versioned full-record frame. A record is expired when its expiry is less than
+or equal to the query clock. `get_at` and `search_at` accept an explicit clock
+for deterministic behavior; ordinary get/search/browse use the system clock.
+`maintenance::compact_at(source, destination, now_ms)` omits expired records
+from the new copy and preserves unexpired expiry timestamps. The source is
+never modified.
+
+`update_metadata(id, &metadata)` commits only the metadata bytes; it does not
+rewrite the vector or payload and preserves expiry. It advances the record
+revision. Expiry and metadata-only operations on older formats return
+`ExpiryRequiresUpgrade`.
+
+The embedded retrieval APIs include `search_grouped` (nearest-first groups with
+a per-group hit cap), `recommend(&RecommendationQuery)` (positive vector mean
+minus negative mean, excluding example IDs), `facets` and `numeric_stats`.
+`MetadataValue::GeoPoint` stores bounded latitude/longitude values.
+`Condition::GeoRadius` applies a Haversine radius filter, and
+`search_geo(&GeoSearchQuery)` can rank by vector or geographic distance. These
+query-time operations require no derived persistent indexes.
+
 ## Record revisions
 
 `revision(id)` returns the sequence of the record's last successful put.
@@ -238,3 +267,11 @@ Persistent administrative audit is exposed separately at
 `/v1/admin/audit/persistent`; the old bounded audit ring remains process-local.
 Permissions still apply to read-only diagnostics. Backend errors and skipped
 maintenance/backup work must be inspected rather than treated as success.
+
+## Embedded vector extensions
+
+Opt-in v5 additionally supports named/multi-vector records, per-model bounded
+embedding history, sparse inverted-index dot-product search, dense/sparse RRF,
+and resumable revision-checked re-embedding with an atomic active-version switch.
+Provider and reranker traits and a parsed read-only query language are additive
+Rust APIs. See [VECTORS.md](VECTORS.md) for APIs, grammar, storage limits and examples.

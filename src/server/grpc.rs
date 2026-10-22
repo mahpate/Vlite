@@ -34,6 +34,7 @@ pub struct GrpcServer {
     routes: tonic::service::Routes,
     health: GrpcHealth,
     tls: Option<tonic::transport::ServerTlsConfig>,
+    reloadable_tls: Option<super::tls::TlsIdentity>,
 }
 
 /// Validated PEM server identity for native gRPC TLS (rustls, TLS 1.2+).
@@ -101,10 +102,18 @@ pub async fn grpc_router(mut service: Service) -> GrpcServer {
         routes,
         health,
         tls: None,
+        reloadable_tls: None,
     }
 }
 
 impl GrpcServer {
+    /// Uses a reloadable native TLS listener, including optional client authentication.
+    #[must_use]
+    pub fn with_reloadable_tls(mut self, tls: super::tls::TlsIdentity) -> Self {
+        self.reloadable_tls = Some(tls);
+        self
+    }
+
     pub fn health(&self) -> GrpcHealth {
         self.health.clone()
     }
@@ -125,6 +134,30 @@ impl GrpcServer {
         listener: tokio::net::TcpListener,
         shutdown: impl Future<Output = ()> + Send,
     ) -> Result<(), tonic::transport::Error> {
+        if let Some(tls) = self.reloadable_tls {
+            let listener = super::tls::TlsListener::new(listener, tls).expect("bound TLS listener");
+            let incoming = tokio_stream::wrappers::ReceiverStream::new({
+                let (tx, rx) = tokio::sync::mpsc::channel(64);
+                tokio::spawn(async move {
+                    let mut listener = listener;
+                    loop {
+                        tokio::select! {
+                            _ = tx.closed() => break,
+                            stream = listener.next() => match stream {
+                                Some(stream) => if tx.send(stream).await.is_err() { break },
+                                None => break,
+                            }
+                        }
+                    }
+                });
+                rx
+            });
+            return tonic::transport::Server::builder()
+                .concurrency_limit_per_connection(MAX_IN_FLIGHT)
+                .add_routes(self.routes)
+                .serve_with_incoming_shutdown(incoming, shutdown)
+                .await;
+        }
         let mut builder = tonic::transport::Server::builder();
         if let Some(tls) = self.tls {
             builder = builder.tls_config(tls)?;
@@ -148,6 +181,7 @@ struct Adapter {
 fn status_code(error: &ApiError) -> tonic::Code {
     use tonic::Code;
     match (error.status.as_u16(), error.code) {
+        (429, _) => Code::ResourceExhausted,
         (401, _) => Code::Unauthenticated,
         (403, _) => Code::PermissionDenied,
         (404, _) => Code::NotFound,
@@ -165,6 +199,9 @@ fn status_code(error: &ApiError) -> tonic::Code {
 fn status(error: ApiError, request_id: &str) -> Status {
     let mut status = Status::new(status_code(&error), error.message);
     let metadata = status.metadata_mut();
+    if error.status == StatusCode::TOO_MANY_REQUESTS {
+        metadata.insert("retry-after", Ascii::from_static("1"));
+    }
     metadata.insert(ERROR_CODE_TRAILER, Ascii::from_static(error.code));
     if let Some(details) = error.details {
         let encoded = BASE64_STANDARD.encode(details);
@@ -201,9 +238,13 @@ impl Adapter {
         let service = self.service.clone();
         let headers = request.metadata().clone().into_headers();
         let message = request.into_inner();
+        #[cfg(feature = "otel")]
+        let trace_collection = request_collection(&message);
         let task = tokio::spawn(async move {
             let started = Instant::now();
             let request_id = next_request_id(&service);
+            #[cfg(feature = "otel")]
+            let trace = super::telemetry::request(&request_id, route, &trace_collection);
             let mut role = None;
             let result = match service.requests.clone().try_acquire_owned() {
                 Err(_) => Err(ApiError::new(
@@ -220,7 +261,9 @@ impl Adapter {
                     )),
                     Ok(Some(caller)) => {
                         role = Some(caller.clone());
-                        match authorize_need(&service, &caller, need, read_only_allowed, legacy) {
+                        match rate_limit(&service, &caller).and_then(|()| {
+                            authorize_need(&service, &caller, need, read_only_allowed, legacy)
+                        }) {
                             Err(error) => Err(error),
                             Ok(()) => {
                                 core(service.clone(), caller, request_id.clone(), message).await
@@ -233,6 +276,8 @@ impl Adapter {
                 Ok(_) => (StatusCode::OK, None),
                 Err(error) => (error.status, Some(error.code)),
             };
+            #[cfg(feature = "otel")]
+            super::telemetry::finish(trace, status_code.as_u16());
             record_request(
                 &service,
                 &RequestRecord {
@@ -277,6 +322,10 @@ fn value_in(value: Option<proto::MetadataValue>) -> Result<crate::MetadataValue,
         Some(Kind::IntegerValue(value)) => Ok(crate::MetadataValue::Integer(value)),
         Some(Kind::FloatValue(value)) => Ok(crate::MetadataValue::Float(value)),
         Some(Kind::BooleanValue(value)) => Ok(crate::MetadataValue::Boolean(value)),
+        Some(Kind::GeoPoint(value)) => Ok(crate::MetadataValue::GeoPoint {
+            latitude: value.latitude,
+            longitude: value.longitude,
+        }),
         None => Err(unprocessable(
             "metadata values must set string_value, integer_value, float_value or boolean_value",
         )),
@@ -291,6 +340,13 @@ fn value_out(value: crate::MetadataValue) -> proto::MetadataValue {
             crate::MetadataValue::Integer(value) => Kind::IntegerValue(value),
             crate::MetadataValue::Float(value) => Kind::FloatValue(value),
             crate::MetadataValue::Boolean(value) => Kind::BooleanValue(value),
+            crate::MetadataValue::GeoPoint {
+                latitude,
+                longitude,
+            } => Kind::GeoPoint(proto::GeoPoint {
+                latitude,
+                longitude,
+            }),
         }),
     }
 }
@@ -327,6 +383,12 @@ fn condition(condition: proto::Condition) -> Result<crate::Condition, ApiError> 
         Some(Kind::Eq(eq)) => Ok(crate::Condition::Eq {
             field: eq.field,
             value: value_in(eq.value)?,
+        }),
+        Some(Kind::GeoRadius(geo)) => Ok(crate::Condition::GeoRadius {
+            field: geo.field,
+            latitude: geo.latitude,
+            longitude: geo.longitude,
+            radius_meters: geo.radius_meters,
         }),
         Some(Kind::Range(range)) => Ok(crate::Condition::Range {
             field: range.field,
@@ -1075,4 +1137,27 @@ impl Adapter {
         )
         .await
     }
+}
+
+#[cfg(feature = "otel")]
+fn request_collection<T: 'static>(request: &T) -> String {
+    let request = request as &dyn std::any::Any;
+    macro_rules! field {
+        ($type:ty, $field:ident) => {
+            if let Some(r) = request.downcast_ref::<$type>() {
+                return r.$field.clone();
+            }
+        };
+    }
+    field!(proto::GetCollectionRequest, name);
+    field!(proto::CreateCollectionRequest, name);
+    field!(proto::DropCollectionRequest, name);
+    field!(proto::GetVectorRequest, collection);
+    field!(proto::PutVectorRequest, collection);
+    field!(proto::DeleteVectorRequest, collection);
+    field!(proto::WriteBatchRequest, collection);
+    field!(proto::SearchRequest, collection);
+    field!(proto::ReserveImportRequest, collection);
+    field!(proto::ExportVectorsRequest, collection);
+    String::new()
 }

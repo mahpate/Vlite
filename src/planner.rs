@@ -117,7 +117,14 @@ impl<'a> CollectionRef<'a> {
         };
         let exact = |stats: &mut SearchStats, candidates: Option<&BTreeSet<u64>>| {
             state.exact_search_candidates(
-                query, query_norm, k, conditions, metric, candidates, stats,
+                query,
+                query_norm,
+                k,
+                conditions,
+                metric,
+                candidates,
+                crate::current_time_ms(),
+                stats,
             )
         };
         let hits = if conditions.is_empty() {

@@ -1,0 +1,114 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "vlite.name" . }}
+  labels:
+    {{- include "vlite.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "vlite.name" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "vlite.labels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "vlite.labels" . | nindent 8 }}
+      annotations:
+        checksum/auth: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: vlite
+          image: {{ printf "%s:%s" .Values.image.repository .Values.image.tag | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/vlite-server"]
+          args:
+            - /data/vectors.vlite
+            - --create-if-missing
+            - {{ .Values.database.dimensions | quote }}
+            - --create-format
+            - {{ .Values.database.format | quote }}
+            - --bind
+            - "0.0.0.0:8080"
+            - --allow-remote
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: VLITE_AUTH_TOKEN_FILE
+              value: /run/secrets/vlite/token
+            - name: VLITE_ADMIN_DIR
+              value: /data/admin
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          startupProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+            failureThreshold: 120
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 3
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: auth
+              mountPath: /run/secrets/vlite
+              readOnly: true
+            {{- if .Values.tls.existingSecret }}
+            - name: tls
+              mountPath: /run/secrets/tls
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: auth
+          secret:
+            secretName: {{ include "vlite.secret" . }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.auth.secretKey | quote }}
+                path: token
+        {{- if .Values.tls.existingSecret }}
+        - name: tls
+          secret:
+            secretName: {{ .Values.tls.existingSecret }}
+            defaultMode: 0440
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          {{- toYaml .Values.persistence.accessModes | nindent 10 }}
+        {{- if ne .Values.persistence.storageClass nil }}
+        storageClassName: {{ .Values.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}

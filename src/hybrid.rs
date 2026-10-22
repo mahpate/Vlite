@@ -189,10 +189,13 @@ impl CollectionRef<'_> {
         }
         let text_hits = if fusion.text_weight > 0.0 && !terms.is_empty() {
             state.text_index.search(&terms, candidates, |id| {
-                state
-                    .records
-                    .get(&id)
-                    .is_some_and(|record| metadata::matches(&record.metadata, &query.conditions))
+                state.records.get(&id).is_some_and(|record| {
+                    !state
+                        .expiries
+                        .get(&id)
+                        .is_some_and(|expiry| *expiry <= crate::current_time_ms())
+                        && metadata::matches(&record.metadata, &query.conditions)
+                })
             })
         } else {
             Vec::new()
@@ -243,4 +246,53 @@ impl Database {
     pub fn search_hybrid(&self, query: &HybridQuery) -> Result<(Vec<HybridHit>, SearchStats)> {
         CollectionRef { db: self, id: 0 }.search_hybrid(query)
     }
+}
+
+/// Weighted reciprocal rank fusion for arbitrary dense/sparse ranked legs.
+/// Distances are retained from the first leg; the second contributes rank only.
+pub fn fuse_ranked(
+    dense: &[crate::SearchHit],
+    sparse: &[crate::SearchHit],
+    k: usize,
+    fusion: FusionOptions,
+) -> Result<Vec<HybridHit>> {
+    validate_weight(fusion.vector_weight)?;
+    validate_weight(fusion.text_weight)?;
+    if k > MAX_HYBRID_K
+        || !(1..=1000).contains(&fusion.rrf_k)
+        || fusion.vector_weight + fusion.text_weight == 0.0
+        || fusion.candidates.is_some_and(|n| n < k || n > MAX_HYBRID_K)
+    {
+        return Err(Error::InvalidQuery("invalid fusion options"));
+    }
+    let mut hits = BTreeMap::new();
+    for (leg, values, weight) in [
+        (0, dense, fusion.vector_weight),
+        (1, sparse, fusion.text_weight),
+    ] {
+        if weight == 0.0 {
+            continue;
+        }
+        for (rank, hit) in values.iter().take(MAX_HYBRID_K).enumerate() {
+            let h = hits.entry(hit.id).or_insert(HybridHit {
+                id: hit.id,
+                score: 0.0,
+                distance: None,
+                bm25: None,
+                vector_rank: None,
+                text_rank: None,
+            });
+            h.score += weight / (f64::from(fusion.rrf_k) + (rank + 1) as f64);
+            if leg == 0 {
+                h.vector_rank = Some((rank + 1) as u32);
+                h.distance = Some(hit.distance);
+            } else {
+                h.text_rank = Some((rank + 1) as u32);
+            }
+        }
+    }
+    let mut hits: Vec<_> = hits.into_values().collect();
+    hits.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.id.cmp(&b.id)));
+    hits.truncate(k);
+    Ok(hits)
 }

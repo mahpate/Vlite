@@ -40,7 +40,7 @@ fn visible(role: &admin::Role, item: &Value) -> bool {
 
 fn global(role: &admin::Role) -> bool {
     match role {
-        admin::Role::Scoped(grant) => grant.all,
+        admin::Role::Scoped(grant) => grant.all && grant.tenant_id.is_none(),
         _ => true,
     }
 }
@@ -130,6 +130,8 @@ async fn snapshot(service: Service, role: admin::Role) -> Result<Value, ApiError
                 "import_rows_skipped_total": load(&metrics.import_rows_skipped),
                 "import_open_jobs": if healthy { db.imports.open_jobs().count() } else { 0 },
                 "credential_denials_total": load(&metrics.credential_denials),
+                "rate_limited_total": load(&metrics.rate_limited),
+                "quota_exceeded_total": load(&metrics.quota_exceeded),
                 "audit_write_failures_total": load(&metrics.audit_failures),
                 "ann_quality_last_recall": metrics.ann_quality_last_recall.lock().ok().and_then(|r| *r),
                 "database_healthy": healthy,

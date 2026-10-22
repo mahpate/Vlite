@@ -19,6 +19,8 @@ const MAGIC: &[u8; 8] = b"VLITEDB\0";
 pub(crate) const CURRENT_VERSION: u32 = 3;
 /// Opt-in format with lineage, collections and import checkpoints.
 pub(crate) const V4: u32 = 4;
+/// Opt-in v5 record expiry and geospatial metadata format.
+pub(crate) const V5: u32 = 5;
 
 /// Maximum encoded settings blob (op 5 tail and op 7 body).
 pub(crate) const MAX_SETTINGS_BLOB: usize = 16_384;
@@ -67,7 +69,7 @@ pub(crate) fn record_body_len(record: &Record) -> u64 {
     }
 }
 
-fn decode_extended(body: &[u8], dimensions: usize, offset: u64) -> Result<Record> {
+fn decode_extended(body: &[u8], dimensions: usize, offset: u64, allow_geo: bool) -> Result<Record> {
     let vector_end = dimensions * 4;
     if body.len() < vector_end + 8 {
         return Err(corrupt(offset, "truncated metadata record"));
@@ -87,6 +89,9 @@ fn decode_extended(body: &[u8], dimensions: usize, offset: u64) -> Result<Record
             .ok_or_else(|| corrupt(offset, "missing metadata"))?,
     )
     .map_err(|_| corrupt(offset, "invalid typed metadata encoding"))?;
+    if !allow_geo && crate::metadata::contains_geo(&metadata) {
+        return Err(corrupt(offset, "geo metadata requires format v5"));
+    }
     Ok(Record {
         vector,
         payload,
@@ -178,12 +183,14 @@ pub(crate) enum LoadedImportMarker {
 }
 
 pub(crate) struct LoadedCollection {
+    pub vectors: crate::vectors::VectorData,
     pub name: String,
     pub dimensions: usize,
     pub settings: CollectionSettings,
     /// True once a create (op 5) or settings (op 7) frame stored the settings.
     pub settings_persisted: bool,
     pub records: BTreeMap<u64, Record>,
+    pub expiries: BTreeMap<u64, u64>,
     /// Sequence of the frame that last put each live record.
     pub revisions: BTreeMap<u64, u64>,
     pub live_body_bytes: u64,
@@ -192,29 +199,57 @@ pub(crate) struct LoadedCollection {
 impl LoadedCollection {
     pub(crate) fn new(name: String, dimensions: usize, settings: CollectionSettings) -> Self {
         Self {
+            vectors: crate::vectors::VectorData::default(),
             name,
             dimensions,
             settings,
             settings_persisted: false,
             records: BTreeMap::new(),
+            expiries: BTreeMap::new(),
             revisions: BTreeMap::new(),
             live_body_bytes: 0,
         }
     }
 
-    fn put(&mut self, id: u64, record: Record, sequence: u64) {
+    fn put(&mut self, id: u64, record: Record, sequence: u64, expires_at_ms: Option<u64>) {
+        self.vectors.records.remove(&id);
         self.live_body_bytes += record_body_len(&record);
         if let Some(previous) = self.records.insert(id, record) {
             self.live_body_bytes -= record_body_len(&previous);
         }
         self.revisions.insert(id, sequence);
+        if let Some(expiry) = expires_at_ms {
+            self.expiries.insert(id, expiry);
+        } else {
+            self.expiries.remove(&id);
+        }
     }
 
     fn delete(&mut self, id: u64) {
+        self.vectors.records.remove(&id);
         if let Some(previous) = self.records.remove(&id) {
             self.live_body_bytes -= record_body_len(&previous);
         }
         self.revisions.remove(&id);
+        self.expiries.remove(&id);
+    }
+
+    fn update_metadata(
+        &mut self,
+        id: u64,
+        metadata: crate::Metadata,
+        sequence: u64,
+        offset: u64,
+    ) -> Result<()> {
+        let Some(record) = self.records.get_mut(&id) else {
+            return Err(corrupt(offset, "metadata update references missing record"));
+        };
+        self.vectors.invalidate_staged(id);
+        self.live_body_bytes -= record_body_len(record);
+        record.metadata = metadata;
+        self.live_body_bytes += record_body_len(record);
+        self.revisions.insert(id, sequence);
+        Ok(())
     }
 }
 
@@ -325,6 +360,10 @@ pub(crate) fn header_v4(dimensions: usize, lineage: u64, collection_floor: u16) 
     header_with(V4, dimensions, lineage, collection_floor)
 }
 
+pub(crate) fn header_v5(dimensions: usize, lineage: u64, collection_floor: u16) -> Vec<u8> {
+    header_with(V5, dimensions, lineage, collection_floor)
+}
+
 fn header_with(version: u32, dimensions: usize, lineage: u64, collection_floor: u16) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(HEADER_SIZE as usize);
     bytes.extend_from_slice(MAGIC);
@@ -409,6 +448,44 @@ pub(crate) fn record_frame(
             )
         }
     }
+}
+
+/// V5 full-record frame with a nullable absolute Unix-millisecond expiry.
+pub(crate) fn record_frame_v5(
+    sequence: u64,
+    collection: u16,
+    id: u64,
+    record: &Record,
+    expiry: Option<u64>,
+) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.push(u8::from(expiry.is_some()));
+    body.extend_from_slice(&expiry.unwrap_or(0).to_le_bytes());
+    body.extend_from_slice(&extended_body(
+        &record.vector,
+        &record.payload,
+        &record.metadata,
+    ));
+    wrap(
+        9,
+        collection,
+        sequence,
+        id,
+        record.vector.len() as u32,
+        body.len() as u32,
+        &body,
+    )
+}
+
+/// V5 metadata-only frame. The record's vector, payload and expiry are retained.
+pub(crate) fn metadata_frame_v5(
+    sequence: u64,
+    collection: u16,
+    id: u64,
+    metadata: &crate::Metadata,
+) -> Vec<u8> {
+    let body = crate::metadata::encode(metadata);
+    wrap(8, collection, sequence, id, 0, body.len() as u32, &body)
 }
 
 /// Canonical batch-entry encoding shared by batch frames and import digests.
@@ -717,6 +794,7 @@ fn decode_batch(
                     .ok_or_else(|| corrupt(offset, "truncated extended batch entry"))?,
                 dimensions,
                 offset,
+                version >= V5,
             )?;
             operations.push(Mutation::PutWithMetadata {
                 id,
@@ -874,10 +952,10 @@ pub(crate) fn load(file: &mut File) -> Result<Loaded> {
         return Err(corrupt(0, "database header checksum mismatch"));
     }
     let version = u32_at(&bytes, 8);
-    if !matches!(version, 1..=V4) {
+    if !matches!(version, 1..=V5) {
         return Err(Error::UnsupportedVersion(version));
     }
-    let (lineage, collection_floor) = if version == V4 {
+    let (lineage, collection_floor) = if version >= V4 {
         if bytes[26..28] != [0; 2] {
             return Err(corrupt(0, "nonzero reserved database header bytes"));
         }
@@ -943,9 +1021,11 @@ pub(crate) fn load(file: &mut File) -> Result<Loaded> {
             3 => version >= 2,
             4 => version >= 3,
             5..=7 => version >= V4,
+            8 => version >= V5,
+            9 | 10 => version >= V5,
             _ => false,
         };
-        let reserved_clear = if version >= V4 && operation <= 4 {
+        let reserved_clear = if version >= V4 && matches!(operation, 1..=4 | 8 | 9 | 10) {
             prefix[7] == 0
         } else {
             prefix[5..8] == [0; 3]
@@ -964,12 +1044,18 @@ pub(crate) fn load(file: &mut File) -> Result<Loaded> {
         let id = u64_at(&prefix, 16);
         let count = u32_at(&prefix, 24) as usize;
         let payload_len = u32_at(&prefix, 28) as usize;
-        let target_dimensions = if operation <= 4 {
+        let target_dimensions = if operation <= 4 || operation == 9 {
             loaded
                 .collections
                 .get(&collection_id)
                 .ok_or_else(|| corrupt(offset, "record references unknown collection"))?
                 .dimensions
+        } else if operation == 8 || operation == 10 {
+            loaded
+                .collections
+                .get(&collection_id)
+                .ok_or_else(|| corrupt(offset, "metadata update references unknown collection"))?;
+            0
         } else {
             0
         };
@@ -1001,7 +1087,7 @@ pub(crate) fn load(file: &mut File) -> Result<Loaded> {
                 return Err(corrupt(offset, "invalid extended record length"));
             }
             payload_len
-        } else if operation >= 5 {
+        } else if (5..=7).contains(&operation) {
             let valid = count == 0
                 && id <= u64::from(u16::MAX)
                 && match operation {
@@ -1011,6 +1097,25 @@ pub(crate) fn load(file: &mut File) -> Result<Loaded> {
                 };
             if !valid {
                 return Err(corrupt(offset, "invalid collection frame fields"));
+            }
+            payload_len
+        } else if operation == 10 {
+            if count != 0 || id != 0 || payload_len > crate::MAX_BATCH_BYTES {
+                return Err(corrupt(offset, "invalid vector extension length"));
+            }
+            payload_len
+        } else if operation == 8 {
+            if count != 0 || !(4..=crate::MAX_METADATA_BYTES).contains(&payload_len) {
+                return Err(corrupt(offset, "invalid metadata-only update length"));
+            }
+            payload_len
+        } else if operation == 9 {
+            if version < V5
+                || count != target_dimensions
+                || payload_len > MAX_EXTENDED_BODY + 9
+                || payload_len < target_dimensions * 4 + 17
+            {
+                return Err(corrupt(offset, "invalid expiring record length"));
             }
             payload_len
         } else {
@@ -1040,6 +1145,22 @@ pub(crate) fn load(file: &mut File) -> Result<Loaded> {
         }
         let body = &frame[PREFIX_SIZE..];
         match operation {
+            10 => {
+                let data = crate::vectors::VectorData::decode(body)
+                    .map_err(|_| corrupt(offset, "invalid vector extension"))?;
+                let target = collection_mut(&mut loaded, collection_id);
+                if data
+                    .records
+                    .keys()
+                    .any(|id| !target.records.contains_key(id))
+                {
+                    return Err(corrupt(
+                        offset,
+                        "vector extension references missing record",
+                    ));
+                }
+                target.vectors = data;
+            }
             1 => {
                 let vector = decode_vector(&body[..count * 4], offset)?;
                 let record = Record {
@@ -1047,11 +1168,26 @@ pub(crate) fn load(file: &mut File) -> Result<Loaded> {
                     payload: body[count * 4..].to_vec(),
                     metadata: crate::Metadata::new(),
                 };
-                collection_mut(&mut loaded, collection_id).put(id, record, sequence);
+                collection_mut(&mut loaded, collection_id).put(id, record, sequence, None);
             }
             4 => {
-                let record = decode_extended(body, target_dimensions, offset)?;
-                collection_mut(&mut loaded, collection_id).put(id, record, sequence);
+                let record = decode_extended(body, target_dimensions, offset, version >= V5)?;
+                collection_mut(&mut loaded, collection_id).put(id, record, sequence, None);
+            }
+            9 => {
+                let expiry_flag = body[0];
+                if expiry_flag > 1 || (expiry_flag == 0 && u64_at(body, 1) != 0) {
+                    return Err(corrupt(offset, "invalid expiry marker"));
+                }
+                let expiry = (expiry_flag == 1).then(|| u64_at(body, 1));
+                let record = decode_extended(&body[9..], target_dimensions, offset, true)?;
+                collection_mut(&mut loaded, collection_id).put(id, record, sequence, expiry);
+            }
+            8 => {
+                let metadata = crate::metadata::decode(body)
+                    .map_err(|_| corrupt(offset, "invalid metadata update"))?;
+                collection_mut(&mut loaded, collection_id)
+                    .update_metadata(id, metadata, sequence, offset)?;
             }
             2 => collection_mut(&mut loaded, collection_id).delete(id),
             3 => {
@@ -1075,6 +1211,7 @@ pub(crate) fn load(file: &mut File) -> Result<Loaded> {
                                 metadata: crate::Metadata::new(),
                             },
                             sequence,
+                            None,
                         ),
                         Mutation::PutWithMetadata {
                             id,
@@ -1089,6 +1226,7 @@ pub(crate) fn load(file: &mut File) -> Result<Loaded> {
                                 metadata,
                             },
                             sequence,
+                            None,
                         ),
                         Mutation::Delete { id } => collection.delete(id),
                     }
@@ -1170,6 +1308,10 @@ fn collection_mut(loaded: &mut Loaded, id: u16) -> &mut LoadedCollection {
         .collections
         .get_mut(&id)
         .expect("collection existence checked before decoding")
+}
+
+pub(crate) fn vector_frame(sequence: u64, collection: u16, body: &[u8]) -> Vec<u8> {
+    wrap(10, collection, sequence, 0, 0, body.len() as u32, body)
 }
 
 #[cfg(test)]

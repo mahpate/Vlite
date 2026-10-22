@@ -42,6 +42,7 @@ pub(super) struct AdminState {
     pub directory: Option<PathBuf>,
     /// Scoped credential store; requires an admin token and admin directory.
     pub credentials: Option<Arc<super::credentials::Store>>,
+    pub tenants: Option<Arc<super::tenants::Store>>,
     /// Persistent JSON-lines audit log in the admin directory.
     pub audit_log: Option<Arc<super::audit::Log>>,
 }
@@ -179,6 +180,10 @@ pub fn configured_admin_router(
         (Some(directory), Some(_)) => Some(Arc::new(super::credentials::Store::load(directory)?)),
         _ => None,
     };
+    let tenants = match (&directory, &options.admin_token) {
+        (Some(directory), Some(_)) => Some(Arc::new(super::tenants::Store::load(directory)?)),
+        _ => None,
+    };
     if let Some(threshold) = options.slow_query_threshold {
         service.metrics.slow_threshold_ns.store(
             threshold.as_nanos().min(u64::MAX as u128) as u64,
@@ -212,6 +217,7 @@ pub fn configured_admin_router(
         }),
         directory,
         credentials,
+        tenants,
         audit_log,
         ..AdminState::default()
     });
@@ -309,8 +315,11 @@ async fn capabilities(
         "imports":v4,"quantization":true,"ann_quality":true,"auto_maintenance":true,
         "backup_schedule":backups,"backup_verify":backups,"backup_verify_drill":backups,
         "slow_queries":true,"slow_query_log":true,"prometheus":true,"prometheus_metrics":true,
-        "scoped_credentials":scoped,"persistent_audit":audit_log},
+        "scoped_credentials":scoped,"persistent_audit":audit_log,
+        "native_tls":true,"tls_reload":!s.tls.lock().map_err(internal)?.is_empty(),
+        "tenants":s.admin.tenants.is_some(),"credential_rate_limits":scoped,"credential_vector_quotas":scoped,"otel":cfg!(feature="otel")},
         "routes":["/health","/ready","/metrics","/openapi.json","/dashboard","/dashboard/app.js","/dashboard/style.css","/dashboard/console-tools.js",
+        "/v1/admin/tls/reload","/v1/admin/tenants","/v1/admin/tenants/{id}",
         "/v1/capabilities","/v1/database","/v1/vectors","/v1/vectors/{id}","/v1/batches","/v1/search",
         "/v1/index/hnsw","/v1/index/hnsw/quality","/v1/index/hnsw/rebuild","/v1/index/hnsw/rebuild/poll","/v1/index/hnsw/rebuild/cancel",
         "/v1/index/hnsw/maintenance","/v1/index/hnsw/maintenance/tick","/v1/admin/tokens","/v1/admin/tokens/reload",

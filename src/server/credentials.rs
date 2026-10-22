@@ -78,6 +78,10 @@ fn op_names(mask: u16) -> Vec<&'static str> {
 /// An authenticated scoped principal. Contains no secret.
 pub(super) struct Grant {
     pub id: String,
+    pub tenant_id: Option<String>,
+    pub requests_per_second: Option<u32>,
+    pub max_vectors: Option<u64>,
+    pub max_vectors_per_collection: Option<u64>,
     pub all: bool,
     pub collections: Vec<(String, u16)>,
     ops: u16,
@@ -86,19 +90,30 @@ pub(super) struct Grant {
 }
 
 impl Grant {
+    pub(super) fn qualify(&self, name: &str) -> String {
+        self.tenant_id
+            .as_ref()
+            .map_or_else(|| name.to_owned(), |id| format!("t{id}__{name}"))
+    }
+    pub(super) fn owns(&self, name: &str) -> bool {
+        self.tenant_id
+            .as_ref()
+            .is_none_or(|id| name.starts_with(&format!("t{id}__")))
+    }
     pub(super) fn allows(&self, op: Op) -> bool {
         self.ops & bit(op) != 0
     }
 
     /// Cheap name pre-check before the collection is resolved.
     pub(super) fn names(&self, name: &str) -> bool {
-        self.all || self.collections.iter().any(|(n, _)| n == name)
+        self.owns(name) && (self.all || self.collections.iter().any(|(n, _)| n == name))
     }
 
     /// Binding check: database lineage plus exact collection ID and name.
     /// A dropped and recreated collection has a new ID and never matches.
     pub(super) fn covers(&self, lineage: Option<u64>, collection: u16, name: &str) -> bool {
         lineage == Some(self.lineage)
+            && self.owns(name)
             && (self.all
                 || self
                     .collections
@@ -109,7 +124,10 @@ impl Grant {
     pub(super) fn json(&self) -> Value {
         json!({"credential_id": self.id,
             "collections": if self.all { vec!["*".to_owned()] } else {
-                self.collections.iter().map(|(n, _)| n.clone()).collect() },
+                self.collections.iter().map(|(n, _)| self.tenant_id.as_ref()
+                    .and_then(|id| n.strip_prefix(&format!("t{id}__"))).unwrap_or(n).to_owned()).collect() },
+            "tenant_id":self.tenant_id,"requests_per_second":self.requests_per_second,
+            "max_vectors":self.max_vectors,"max_vectors_per_collection":self.max_vectors_per_collection,
             "operations": op_names(self.ops), "expires_unix_ms": self.expires})
     }
 }
@@ -136,6 +154,14 @@ struct Entry {
     expires_unix_ms: u64,
     revoked_unix_ms: Option<u64>,
     rotated_from: Option<String>,
+    #[serde(default)]
+    tenant_id: Option<String>,
+    #[serde(default)]
+    requests_per_second: Option<u32>,
+    #[serde(default)]
+    max_vectors: Option<u64>,
+    #[serde(default)]
+    max_vectors_per_collection: Option<u64>,
 }
 
 impl Entry {
@@ -156,7 +182,9 @@ impl Entry {
             "operations": self.operations, "lineage": self.lineage,
             "created_unix_ms": self.created_unix_ms, "expires_unix_ms": self.expires_unix_ms,
             "revoked_unix_ms": self.revoked_unix_ms, "rotated_from": self.rotated_from,
-            "state": self.state(now)})
+            "state": self.state(now), "tenant_id": self.tenant_id,
+            "requests_per_second": self.requests_per_second,
+            "max_vectors": self.max_vectors, "max_vectors_per_collection": self.max_vectors_per_collection})
     }
 
     fn validate(&self) -> Option<()> {
@@ -167,6 +195,13 @@ impl Entry {
         (id_ok
             && hash_ok
             && lineage_ok
+            && self
+                .requests_per_second
+                .is_none_or(|r| r > 0 && r <= 1_000_000)
+            && self
+                .tenant_id
+                .as_ref()
+                .is_none_or(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
             && parse_ops(&self.operations).is_ok()
             && (self.all == self.collections.is_empty())
             && !self.name.is_empty()
@@ -291,6 +326,10 @@ impl Store {
         }
         Ok(Arc::new(Grant {
             id: entry.id.clone(),
+            tenant_id: entry.tenant_id.clone(),
+            requests_per_second: entry.requests_per_second,
+            max_vectors: entry.max_vectors,
+            max_vectors_per_collection: entry.max_vectors_per_collection,
             all: entry.all,
             collections: entry
                 .collections
@@ -434,6 +473,10 @@ struct Create {
     collections: Vec<String>,
     operations: Vec<String>,
     expires_unix_ms: u64,
+    tenant_id: Option<String>,
+    requests_per_second: Option<u32>,
+    max_vectors: Option<u64>,
+    max_vectors_per_collection: Option<u64>,
 }
 
 /// Adds an entry, pruning inactive ones only when at capacity.
@@ -467,6 +510,20 @@ async fn create(
         return Err(unprocessable("name must be 1..64 printable characters"));
     }
     let operations = parse_ops(&input.operations)?;
+    if input
+        .requests_per_second
+        .is_some_and(|r| r == 0 || r > 1_000_000)
+    {
+        return Err(unprocessable("requests_per_second must be 1..1000000"));
+    }
+    if let Some(id) = &input.tenant_id {
+        service
+            .admin
+            .tenants
+            .as_ref()
+            .ok_or_else(forbidden_scope)?
+            .get(id)?;
+    }
     if input.expires_unix_ms <= now || input.expires_unix_ms > now + MAX_LIFETIME_MS {
         return Err(unprocessable(
             "expires_unix_ms must be in the future and at most 365 days ahead",
@@ -478,7 +535,16 @@ async fn create(
             "collections must be [\"*\"] or a nonempty list of names",
         ));
     }
-    let names = input.collections.clone();
+    let names = input
+        .collections
+        .iter()
+        .map(|name| {
+            input
+                .tenant_id
+                .as_ref()
+                .map_or_else(|| name.clone(), |id| format!("t{id}__{name}"))
+        })
+        .collect::<Vec<_>>();
     // Resolve names to IDs and capture the lineage under the database lock.
     let (lineage, scopes) = service
         .run(move |db| {
@@ -514,6 +580,10 @@ async fn create(
         expires_unix_ms: input.expires_unix_ms,
         revoked_unix_ms: None,
         rotated_from: None,
+        tenant_id: input.tenant_id,
+        requests_per_second: input.requests_per_second,
+        max_vectors: input.max_vectors,
+        max_vectors_per_collection: input.max_vectors_per_collection,
     };
     let view = entry.view(now);
     let token = token(&entry, &secret);
@@ -692,6 +762,10 @@ pub(super) mod tests {
             expires_unix_ms: u64::MAX,
             revoked_unix_ms: None,
             rotated_from: None,
+            tenant_id: None,
+            requests_per_second: None,
+            max_vectors: None,
+            max_vectors_per_collection: None,
         }
     }
 

@@ -1,6 +1,7 @@
 # VLite REST clients
 
-First-party clients for Python 3.11+ and TypeScript/JavaScript (Node.js 22+).
+First-party clients for Python 3.11+, TypeScript/JavaScript (Node.js 22+),
+[Go 1.22+](#go) and [.NET 8+](#net).
 They call the existing REST service; they are not embedded database bindings.
 For server-free access, use the separate [Python/native bindings](../bindings/README.md)
 or [embedded Node.js/TypeScript addon](../bindings/node/README.md).
@@ -438,3 +439,191 @@ python tests/clients_e2e.py target/debug/vlite-server
 On Windows, pass `target\debug\vlite-server.exe` to the final command.
 Integration tests start isolated servers on ephemeral loopback ports, create
 temporary databases and tokens, exercise both languages and clean up.
+
+
+## Go
+
+The standard-library-only module is `github.com/mahpate/Vlite/clients/go`:
+
+```sh
+go get github.com/mahpate/Vlite/clients/go
+```
+
+Until a module version is tagged, use a local checkout with
+`go mod edit -replace github.com/mahpate/Vlite/clients/go=/path/to/VLite/clients/go`.
+No registry package publication is required for Git-backed Go modules.
+
+```go
+import (
+    "context"
+    "os"
+    "time"
+    vlite "github.com/mahpate/Vlite/clients/go"
+)
+
+client, err := vlite.New(os.Getenv("VLITE_URL"), os.Getenv("VLITE_AUTH_TOKEN"), 30*time.Second)
+if err != nil { panic(err) }
+defer client.Close()
+ctx := context.Background()
+if err := client.Put(ctx, "10", vlite.Put{Vector: []float32{1, 0, 0}}); err != nil { panic(err) }
+hits, err := client.Search(ctx, vlite.Object{"vector": []float32{1, 0, 0}, "k": 5, "mode": "exact"})
+_ = hits
+_ = err
+```
+
+`Collection(name)` returns scoped `Records` (and an error for invalid names).
+`ListCollections`, `CreateCollection`, `Info`, `Drop`, `SetSettings`, `Get`,
+`Put`, `Delete`, `Batch`, `Search`, `SearchDetailed`, `Browse`, `IndexStatus`,
+`BuildIndex`, `Health`, `Ready` and `Database` mirror REST. Each call accepts a
+`context.Context`. `Browse(ctx, 25, after)` returns `Page.NextAfter`; follow it
+until nil. Search options and collection settings use `Object`, preserving REST
+field names, modes, typed filters and decimal-string integers. Structured record,
+metadata, page and hit types are included. Dynamic JSON numbers use `json.Number`.
+
+Use `errors.As(err, &apiError)` with `*vlite.APIError` to inspect `Status`, `Code`
+and `RequestID`. `*vlite.TransportError` has code `transport_error` and unwraps
+the underlying timeout/cancellation/network/JSON error. A mutation may have
+committed when a transport error occurs: do not blindly retry. Redirects and
+implicit proxies are disabled. Timeout zero selects 30 seconds; negative values
+are rejected. Server-side validation remains authoritative.
+
+```sh
+cd clients/go
+go test ./...
+go vet ./...
+```
+
+## .NET
+
+The `net8.0` library uses only `System.Net.Http` and `System.Text.Json`; there
+are no NuGet runtime or test dependencies. From an application in this checkout:
+
+```sh
+dotnet add reference /path/to/VLite/clients/dotnet/VLite.Client/VLite.Client.csproj
+```
+
+```csharp
+using VLite;
+
+using var client = new Client(Environment.GetEnvironmentVariable("VLITE_URL")!,
+                              Environment.GetEnvironmentVariable("VLITE_AUTH_TOKEN")!);
+await client.PutAsync("10", new PutRequest([1, 0, 0]));
+var hits = await client.SearchAsync(new { vector = new[] { 1, 0, 0 }, k = 5, mode = "exact" });
+var docs = client.Collection("docs"); // Collection must already exist.
+var page = await docs.BrowseAsync(limit: 25);
+```
+
+The methods correspond to Go with an `Async` suffix, except `Collection` and
+`Dispose`. `SearchAsync` returns typed hits; `SearchDetailedAsync` and
+administrative/collection info return `JsonElement`. Pass anonymous objects or
+dictionaries with REST field names for search/settings/batch operations. Use
+`MetadataValue("integer", "9223372036854775807")` for i64 metadata, never a JSON
+number. All asynchronous calls accept a `CancellationToken`. The constructor's
+optional `timeout` defaults to 30 seconds. `VLiteException` exposes `Status`,
+`Code`, `RequestId`; `TransportException.Code` is `transport_error` and warns
+about unknown mutation outcomes. Redirects/proxies are disabled by default;
+custom `HttpMessageHandler` injection is for tests or explicitly controlled
+transports (the caller is responsible for equivalent transport safety).
+
+The package-free test executable uses a fake HTTP handler and exits nonzero on
+failure. Run it rather than `dotnet test` (no test-runner package is needed):
+
+```sh
+dotnet build clients/dotnet/VLite.Client.Tests
+dotnet run --project clients/dotnet/VLite.Client.Tests --no-build
+```
+
+Go and .NET cover the core REST surface above, including exact/ANN and typed
+filters. The broader Python/JS convenience APIs for imports, backups, diagnostics,
+credentials, conditional writes and maintenance are not yet wrapped in these two
+clients. No client silently retries or falls back between search modes.
+
+### Optional live Go/.NET e2e
+
+Both suites run live checks only when `VLITE_URL` is set, using
+`VLITE_AUTH_TOKEN`. Use a **disposable v4, 3-dimensional database**: they create/drop collections, write/delete
+high record IDs and build an ANN index. To own a disposable v4 server automatically:
+
+```sh
+cargo build --locked --features server --bin vlite-server
+python clients/go/live_test.py go
+python clients/go/live_test.py dotnet
+```
+
+The helper waits for `/health`, runs the suite, stops its own child process and
+removes its project-local database directory. It never reuses a user database.
+
+## LangChain and LlamaIndex integrations
+
+Optional extras do not affect the standard-library Python client:
+
+```sh
+python -m pip install './clients/python[langchain]'
+python -m pip install './clients/python[llamaindex]'
+# Or install both:
+python -m pip install './clients/python[integrations]'
+```
+
+Importing `vlite_client.integrations` or either adapter module is dependency-free.
+Requesting an adapter class lazily imports its framework; missing dependencies
+raise an actionable `ImportError` naming the extra.
+
+```python
+from vlite_client import Client
+from vlite_client.integrations import VLiteVectorStore
+
+client = Client(url, token)
+# embeddings implements LangChain's Embeddings protocol.
+store = VLiteVectorStore(client, embeddings, collection="docs", mode="exact")
+ids = store.add_texts(["hello world"], metadatas=[{"category": "greeting"}])
+docs = store.similarity_search("hello", k=3)
+retriever = store.as_retriever()
+store.delete(ids)
+```
+
+`similarity_search_with_score` returns raw VLite **distance** (lower is better).
+The relevance-score hook uses `1/(1+distance)` for squared L2, `1-distance` for
+cosine, or negative distance for inner product; these values are not calibrated
+probabilities and inner-product/cosine relevance may be outside `[0,1]`.
+Use REST condition arrays via `filter=`. `mode="approximate_ready"` never builds
+or silently falls back; build the index explicitly using the underlying client.
+
+```python
+from vlite_client.integrations import VLiteLlamaIndexVectorStore
+from llama_index.core import StorageContext, VectorStoreIndex
+
+vector_store = VLiteLlamaIndexVectorStore(client, collection="docs", metric="cosine")
+storage = StorageContext.from_defaults(vector_store=vector_store)
+# embed_model must be explicitly configured for your environment.
+index = VectorStoreIndex.from_documents(documents, storage_context=storage, embed_model=embed_model)
+```
+
+LlamaIndex supports dense/default queries, AND equality filters and inclusive
+numeric `>=`/`<=` filters. Unsupported OR/operators, doc/node-ID query restrictions
+and non-dense modes raise errors instead of silently losing constraints.
+`delete_nodes` requires explicit node IDs; `delete(ref_doc_id)` browses all pages
+then deletes the matching nodes. Deletion/search plus record fetches are live,
+not snapshot transactions. Concurrent mutation may affect them.
+
+Both adapters support dense distance modes, not VLite hybrid score mode.
+Both adapters store text/full node JSON in base64 payloads and flat scalar
+metadata in typed filter fields. Nested/null/list metadata and out-of-i64 integers
+are rejected. LlamaIndex reserves `_vlite_ref_doc_id` for document deletion.
+Collections must already exist with matching embedding dimensions; v3+ metadata
+and explicit v4 collection creation/upgrades are the caller's responsibility.
+Canonical u64 string IDs pass through; other framework IDs map deterministically
+via 64-bit BLAKE2b. Original IDs are preserved in payloads; hashing has a theoretical
+collision risk (including collisions with numeric IDs), so do not mix adapter and
+unrelated raw records in one collection. Chunked adds/deletes use batches of at
+most 4096; each chunk commits independently, and HTTP byte limits still apply.
+
+Test without framework packages (fakes + explicit missing-dependency checks), or
+install extras to additionally run real-framework smoke tests:
+
+```sh
+python -m unittest discover -s clients/python/vlite_client/integrations -p test_integrations.py -v
+```
+
+When running from a checkout without installing the client, set
+`PYTHONPATH=clients/python`. CI exercises both dependency-free and real-package
+matrices. Tests use deterministic fake embeddings and never call an embedding API.

@@ -116,6 +116,7 @@ enum EqKey {
     Integer(i64),
     Float(u64),
     Boolean(bool),
+    GeoPoint(u64, u64),
 }
 
 impl EqKey {
@@ -125,6 +126,13 @@ impl EqKey {
             MetadataValue::Integer(value) => Self::Integer(*value),
             MetadataValue::Float(value) => Self::Float(OrdF64::new(*value).0.to_bits()),
             MetadataValue::Boolean(value) => Self::Boolean(*value),
+            MetadataValue::GeoPoint {
+                latitude,
+                longitude,
+            } => Self::GeoPoint(
+                OrdF64::new(*latitude).0.to_bits(),
+                OrdF64::new(*longitude).0.to_bits(),
+            ),
         }
     }
 }
@@ -255,6 +263,7 @@ impl FieldIndex {
     /// Upper bound on matches saturating at `cap + 1`; `None` = not indexed.
     fn count(&self, condition: &Condition, cap: usize) -> Option<usize> {
         match condition {
+            Condition::GeoRadius { .. } => None,
             Condition::Eq { value, .. } => self
                 .eq_postings(value)
                 .map(|ids| ids.map_or(0, BTreeSet::len)),
@@ -271,6 +280,7 @@ impl FieldIndex {
 
     fn ids(&self, condition: &Condition) -> Postings {
         match condition {
+            Condition::GeoRadius { .. } => Postings::new(),
             Condition::Eq { value, .. } => self
                 .eq_postings(value)
                 .flatten()
@@ -290,7 +300,9 @@ impl FieldIndex {
 
 fn field_of(condition: &Condition) -> &str {
     match condition {
-        Condition::Eq { field, .. } | Condition::Range { field, .. } => field,
+        Condition::Eq { field, .. }
+        | Condition::Range { field, .. }
+        | Condition::GeoRadius { field, .. } => field,
     }
 }
 

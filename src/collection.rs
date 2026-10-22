@@ -129,6 +129,9 @@ pub enum SettingsPersistence {
 /// datafile; the HNSW index may only be cached in an explicit, revalidated
 /// ANN snapshot sidecar (`Database::save_ann_snapshot`).
 pub(crate) struct Collection {
+    pub vectors: crate::vectors::VectorData,
+    pub sparse_index: crate::vectors::SparseIndex,
+    pub vector_indexes: BTreeMap<(String, String), hnsw::Index>,
     pub name: String,
     pub dimensions: usize,
     pub settings: CollectionSettings,
@@ -136,6 +139,9 @@ pub(crate) struct Collection {
     pub records: BTreeMap<u64, Record>,
     /// Commit sequence that last put each live record (its revision).
     pub revisions: BTreeMap<u64, u64>,
+    /// Persisted absolute Unix-millisecond expiry times. Derived visibility is
+    /// evaluated against the query clock; expired records are removed by compaction.
+    pub expiries: BTreeMap<u64, u64>,
     pub live_body_bytes: u64,
     pub index: Option<hnsw::Index>,
     pub metadata_indexes: MetadataIndexes,
@@ -145,12 +151,16 @@ pub(crate) struct Collection {
 impl Collection {
     pub(crate) fn from_loaded(loaded: format::LoadedCollection) -> Self {
         let mut collection = Self {
+            sparse_index: crate::vectors::SparseIndex::build(&loaded.vectors),
+            vectors: loaded.vectors,
+            vector_indexes: BTreeMap::new(),
             name: loaded.name,
             dimensions: loaded.dimensions,
             settings: loaded.settings,
             settings_persisted: loaded.settings_persisted,
             records: loaded.records,
             revisions: loaded.revisions,
+            expiries: loaded.expiries,
             live_body_bytes: loaded.live_body_bytes,
             index: None,
             metadata_indexes: MetadataIndexes::default(),
@@ -175,16 +185,19 @@ impl Collection {
         conditions: &[Condition],
         metric: DistanceMetric,
         candidates: Option<&BTreeSet<u64>>,
+        now_ms: u64,
         stats: &mut SearchStats,
     ) -> Vec<SearchHit> {
         crate::exact_search(
             &self.records,
+            &self.expiries,
             query,
             query_norm,
             k,
             conditions,
             metric,
             candidates,
+            now_ms,
             stats,
         )
     }
@@ -196,6 +209,21 @@ impl Collection {
             .rebuild(&self.settings.text_fields, &self.records);
     }
 
+    pub(crate) fn apply_metadata_committed(&mut self, id: u64, metadata: Metadata, sequence: u64) {
+        self.vectors.invalidate_staged(id);
+        self.vector_indexes.clear();
+        if let Some(record) = self.records.get_mut(&id) {
+            let previous = record.metadata.clone();
+            self.metadata_indexes
+                .track(id, Some(&previous), Some(&metadata));
+            self.text_index.track(id, Some(&previous), Some(&metadata));
+            self.live_body_bytes -= format::record_body_len(record);
+            record.metadata = metadata;
+            self.live_body_bytes += format::record_body_len(record);
+            self.revisions.insert(id, sequence);
+        }
+    }
+
     /// Applies one durably committed mutation to all in-memory state.
     ///
     /// Derived structures observe the previous record before replacement.
@@ -205,7 +233,11 @@ impl Collection {
         record: Option<Record>,
         sequence: u64,
         vector_bytes: usize,
+        expires_at_ms: Option<u64>,
     ) {
+        self.vectors.records.remove(&id);
+        self.sparse_index.remove(id);
+        self.vector_indexes.clear();
         if let Some(index) = &mut self.index
             && !index.track(id, self.records.get(&id), vector_bytes)
         {
@@ -222,12 +254,18 @@ impl Collection {
                     self.live_body_bytes -= format::record_body_len(&previous);
                 }
                 self.revisions.insert(id, sequence);
+                if let Some(expiry) = expires_at_ms {
+                    self.expiries.insert(id, expiry);
+                } else {
+                    self.expiries.remove(&id);
+                }
             }
             None => {
                 if let Some(previous) = self.records.remove(&id) {
                     self.live_body_bytes -= format::record_body_len(&previous);
                 }
                 self.revisions.remove(&id);
+                self.expiries.remove(&id);
             }
         }
     }
@@ -275,6 +313,15 @@ impl<'a> CollectionRef<'a> {
 
     pub fn get(&self, id: u64) -> Result<Option<&'a Record>> {
         self.db.get_in(self.id, id)
+    }
+
+    pub fn get_at(&self, id: u64, now_ms: u64) -> Result<Option<&'a Record>> {
+        self.db.get_at_in(self.id, id, now_ms)
+    }
+
+    pub fn expires_at(&self, id: u64) -> Result<Option<u64>> {
+        self.db.ensure_healthy()?;
+        Ok(self.state().expiries.get(&id).copied())
     }
 
     /// See `Database::revision`.
@@ -389,6 +436,30 @@ impl CollectionMut<'_> {
         metadata: &Metadata,
     ) -> Result<u64> {
         self.put_with_metadata_if(id, vector, payload, metadata, Expected::Any)
+    }
+
+    pub fn put_with_expiry(
+        &mut self,
+        id: u64,
+        vector: &[f32],
+        payload: &[u8],
+        metadata: &Metadata,
+        expires_at_ms: Option<u64>,
+    ) -> Result<u64> {
+        self.db.put_with_expiry_in(
+            self.id,
+            id,
+            vector,
+            payload,
+            metadata,
+            expires_at_ms,
+            Expected::Any,
+        )
+    }
+
+    pub fn update_metadata(&mut self, id: u64, metadata: &Metadata) -> Result<u64> {
+        self.db
+            .update_metadata_in(self.id, id, metadata, Expected::Any)
     }
 
     /// See `Database::put_with_metadata_if`.

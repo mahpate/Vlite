@@ -24,9 +24,15 @@ required together. They are read and validated, including that the key matches
 the leaf, before the database is opened. A TLS listener reports
 `LISTENING grpcs://<address>`, and clients connect with `https://` and must trust
 the issuing CA. Native TLS uses rustls with TLS 1.2 or later; it does not
-request client certificates (mTLS) and does not reload certificates. Restart the
-server to rotate the certificate. REST still serves plaintext, so put REST
-behind a TLS proxy (see `compose.tls.yaml`) when it is remote.
+request client certificates unless `--grpc-tls-client-ca client-ca.pem` is set.
+That flag requires a certificate signed by the configured client CA on every
+connection; bearer authentication still applies. REST supports native HTTPS
+using `--tls-cert`/`--tls-key`. Bootstrap admins can call
+`POST /v1/admin/tls/reload` to transactionally reload both listeners and client
+CA roots without restarting; invalid files leave all old configurations active.
+Existing TLS sessions are unchanged. See [SECURITY.md](SECURITY.md) for tenant
+namespace isolation, persisted credential rate/vector limits, and optional OTLP
+tracing. Rate/quota errors use `RESOURCE_EXHAUSTED` with `retry-after: 1`.
 
 ## Scope
 

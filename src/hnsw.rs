@@ -620,13 +620,18 @@ impl Index {
         entry: Candidate,
         ef: usize,
         records: &BTreeMap<u64, Record>,
+        expiries: &BTreeMap<u64, u64>,
+        now_ms: u64,
         conditions: &[Condition],
         visits: &Cell<u64>,
     ) -> Vec<Candidate> {
         let eligible = |node: usize| {
             let id = self.nodes[node].id;
             !self.buffered.contains_key(&id)
-                && metadata::matches(&records[&id].metadata, conditions)
+                && !expiries.get(&id).is_some_and(|expiry| *expiry <= now_ms)
+                && records
+                    .get(&id)
+                    .is_some_and(|record| metadata::matches(&record.metadata, conditions))
         };
         let mut visited = HashSet::from([entry.node]);
         let mut candidates = BinaryHeap::from([Reverse(entry)]);
@@ -659,54 +664,35 @@ impl Index {
         results
     }
 
-    /// Filtered search; empty conditions take the unfiltered path unchanged.
-    /// Buffered IDs serve only as graph bridges; their current records are
-    /// scored separately when they match.
-    pub fn search_filtered(
-        &self,
-        query: &[f32],
-        k: usize,
-        ef: usize,
-        records: &BTreeMap<u64, Record>,
-        conditions: &[Condition],
-        stats: &mut SearchStats,
-    ) -> Vec<SearchHit> {
-        self.search_filtered_with(query, k, ef, self.options, records, conditions, stats)
-    }
-
-    /// `search_filtered` with a per-query rerank multiplier from `rerank`
-    /// (its quantization is ignored; readiness is checked by the caller).
     #[allow(clippy::too_many_arguments)]
-    pub fn search_filtered_with(
+    pub(crate) fn search_filtered_with_expiry(
         &self,
         query: &[f32],
         k: usize,
         ef: usize,
         rerank: AnnOptions,
         records: &BTreeMap<u64, Record>,
+        expiries: &BTreeMap<u64, u64>,
+        now_ms: u64,
         conditions: &[Condition],
         stats: &mut SearchStats,
     ) -> Vec<SearchHit> {
         let width = rerank.rerank_width(k, ef);
-        if conditions.is_empty() {
-            return self.search_with_width(query, k, ef, width, records, stats);
-        }
         let query_norm = self.query_norm(query);
         let mut hits = Vec::new();
         let visits = Cell::new(0);
         if let Some(entry) = self.entry {
             let best = self.descend(query, query_norm, entry, records, &visits);
-            // Results hold distinct graph nodes, so retention beyond the node
-            // count changes nothing; capping it keeps huge `k` from sizing
-            // the heap (`ef + 1` below) off an unbounded caller value.
             let retain = ef.max(k).min(self.nodes.len());
             let eligible = self.filtered_layer(
-                query, query_norm, best, retain, records, conditions, &visits,
+                query, query_norm, best, retain, records, expiries, now_ms, conditions, &visits,
             );
             hits = self.finish_graph_hits(eligible, query, query_norm, k, width, records, stats);
         }
         self.count_visits(stats, &visits);
-        self.merge_buffered(hits, query, query_norm, k, records, conditions, stats)
+        self.merge_buffered(
+            hits, query, query_norm, k, records, expiries, now_ms, conditions, stats,
+        )
     }
 
     /// Converts traversal-ordered eligible candidates into graph hits.
@@ -803,6 +789,8 @@ impl Index {
         query_norm: f64,
         k: usize,
         records: &BTreeMap<u64, Record>,
+        expiries: &BTreeMap<u64, u64>,
+        now_ms: u64,
         conditions: &[Condition],
         stats: &mut SearchStats,
     ) -> Vec<SearchHit> {
@@ -810,7 +798,10 @@ impl Index {
         hits.extend(self.buffered.keys().filter_map(|&id| {
             records
                 .get(&id)
-                .filter(|record| metadata::matches(&record.metadata, conditions))
+                .filter(|record| {
+                    !expiries.get(&id).is_some_and(|expiry| *expiry <= now_ms)
+                        && metadata::matches(&record.metadata, conditions)
+                })
                 .and_then(|record| {
                     metric_distance(
                         &record.vector,
@@ -836,39 +827,6 @@ impl Index {
         });
         hits.truncate(k);
         hits
-    }
-
-    fn search_with_width(
-        &self,
-        query: &[f32],
-        k: usize,
-        ef: usize,
-        width: usize,
-        records: &BTreeMap<u64, Record>,
-        stats: &mut SearchStats,
-    ) -> Vec<SearchHit> {
-        let query_norm = self.query_norm(query);
-        let mut hits = Vec::new();
-        let visits = Cell::new(0);
-        if let Some(entry) = self.entry {
-            let best = self.descend(query, query_norm, entry, records, &visits);
-            let eligible = self
-                .layer(
-                    query,
-                    query_norm,
-                    best,
-                    0,
-                    ef + self.buffered.len(),
-                    records,
-                    &visits,
-                )
-                .into_iter()
-                .filter(|candidate| !self.buffered.contains_key(&self.nodes[candidate.node].id))
-                .collect();
-            hits = self.finish_graph_hits(eligible, query, query_norm, k, width, records, stats);
-        }
-        self.count_visits(stats, &visits);
-        self.merge_buffered(hits, query, query_norm, k, records, &[], stats)
     }
 }
 

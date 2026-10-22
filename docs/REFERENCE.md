@@ -6,7 +6,7 @@ project status and common workflows, start with the [README](../README.md).
 VLite is an experimental embedded vector database written in Rust. It owns its
 storage engine: it is not a SQLite wrapper. Legacy files expose one
 fixed-dimension vector space. Opt-in v4 files support named collections with
-independent dimensions. Both support opaque payloads, durable single-record
+independent dimensions; opt-in v5 adds record expiry and GeoPoint metadata. Both support opaque payloads, durable single-record
 and atomic batch mutations, and exact nearest-neighbor search.
 
 Optional REST and gRPC services expose the same engine. Optional in-memory HNSW
@@ -16,12 +16,15 @@ Distributed operation, interactive transactions, encryption and
 read-only/multi-reader handles are deferred.
 This is a correctness-first MVP, not a production-hardened storage engine.
 
-See [collections and advanced retrieval](CAPABILITIES.md) for opt-in v4,
-per-record revisions, metadata indexes and query planning, hybrid search,
+See [collections and advanced retrieval](CAPABILITIES.md) for opt-in v4/v5,
+per-record revisions, expiry and metadata-only updates, metadata indexes and query planning, hybrid search,
 quantized ANN, quality diagnostics and resumable ingestion. Later sections
 describe legacy/default workflows unless explicitly marked otherwise.
 See [gRPC](GRPC.md) and [ANN snapshots](ANN-SNAPSHOTS.md) for their opt-in
 contracts and [0.2.0 upgrade guidance](RELEASE-0.2.0.md) before deployment.
+
+See [embedded vector extensions](VECTORS.md) for v5 named/sparse vectors, model
+version history, resumable re-embedding, provider/reranker traits and parsed queries.
 
 ## Build and use
 

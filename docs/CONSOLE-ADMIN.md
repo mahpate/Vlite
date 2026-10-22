@@ -1,5 +1,8 @@
 # Console administration API
 
+Native HTTPS, gRPC mTLS/certificate reload, tenant isolation, persisted credential
+rate/vector limits and optional OTLP tracing are documented in [SECURITY.md](SECURITY.md).
+
 The bundled console talks to this same-origin experimental REST API. All routes
 below require bearer authentication (except static console files). Existing
 `VLITE_AUTH_TOKEN` / `VLITE_AUTH_TOKEN_FILE` and `--token-file` remain admin

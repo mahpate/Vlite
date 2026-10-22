@@ -1,0 +1,48 @@
+image:
+  repository: vlite-api
+  tag: "local"
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+service:
+  type: ClusterIP
+  port: 8080
+# A single owner per database file: replicas are intentionally not configurable.
+database:
+  dimensions: 3
+  format: 4
+persistence:
+  size: 10Gi
+  storageClass: null
+  accessModes: [ReadWriteOnce]
+auth:
+  # Prefer an existing Secret. Otherwise auth.token must be supplied at installation.
+  existingSecret: ""
+  secretKey: token
+  token: ""
+tls:
+  # Optional mount only. Terminate REST TLS at an ingress/proxy when using this chart.
+  existingSecret: ""
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  fsGroupChangePolicy: OnRootMismatch
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+  seccompProfile:
+    type: RuntimeDefault
+nodeSelector: {}
+tolerations: []
+affinity: {}
+terminationGracePeriodSeconds: 60

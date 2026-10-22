@@ -24,6 +24,7 @@ pub enum MetadataValue {
     Integer(#[cfg_attr(feature = "json", serde(with = "integer_json"))] i64),
     Float(f64),
     Boolean(bool),
+    GeoPoint { latitude: f64, longitude: f64 },
 }
 
 #[cfg(feature = "json")]
@@ -60,6 +61,12 @@ pub enum Condition {
         min: Option<MetadataValue>,
         max: Option<MetadataValue>,
     },
+    GeoRadius {
+        field: String,
+        latitude: f64,
+        longitude: f64,
+        radius_meters: f64,
+    },
 }
 
 fn field_valid(field: &str) -> bool {
@@ -74,8 +81,26 @@ fn validate_value(value: &MetadataValue) -> Result<()> {
         MetadataValue::String(value) if value.len() > 4096 => Err(Error::InvalidMetadata(
             "string values exceed 4096 UTF-8 bytes",
         )),
+        MetadataValue::GeoPoint {
+            latitude,
+            longitude,
+        } if !latitude.is_finite()
+            || !longitude.is_finite()
+            || !(-90.0..=90.0).contains(latitude)
+            || !(-180.0..=180.0).contains(longitude) =>
+        {
+            Err(Error::InvalidMetadata(
+                "geo coordinates must be finite latitude/longitude in range",
+            ))
+        }
         _ => Ok(()),
     }
+}
+
+pub(crate) fn contains_geo(metadata: &Metadata) -> bool {
+    metadata
+        .values()
+        .any(|value| matches!(value, MetadataValue::GeoPoint { .. }))
 }
 
 pub(crate) fn validate(metadata: &Metadata) -> Result<usize> {
@@ -97,6 +122,7 @@ pub(crate) fn validate(metadata: &Metadata) -> Result<usize> {
                 MetadataValue::String(value) => 4 + value.len(),
                 MetadataValue::Integer(_) | MetadataValue::Float(_) => 8,
                 MetadataValue::Boolean(_) => 1,
+                MetadataValue::GeoPoint { .. } => 16,
             };
         if length > MAX_METADATA_BYTES {
             return Err(Error::InvalidMetadata(
@@ -129,6 +155,14 @@ pub(crate) fn encode(metadata: &Metadata) -> Vec<u8> {
             }
             MetadataValue::Boolean(value) => {
                 bytes.extend_from_slice(&[4, u8::from(*value)]);
+            }
+            MetadataValue::GeoPoint {
+                latitude,
+                longitude,
+            } => {
+                bytes.push(5);
+                bytes.extend_from_slice(&latitude.to_le_bytes());
+                bytes.extend_from_slice(&longitude.to_le_bytes());
             }
         }
     }
@@ -185,6 +219,14 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Metadata> {
                 1 => MetadataValue::Boolean(true),
                 _ => return Err(Error::InvalidMetadata("invalid boolean")),
             },
+            5 => {
+                let latitude = f64::from_le_bytes(take(&mut remaining, 8)?.try_into().unwrap());
+                let longitude = f64::from_le_bytes(take(&mut remaining, 8)?.try_into().unwrap());
+                MetadataValue::GeoPoint {
+                    latitude,
+                    longitude,
+                }
+            }
             _ => return Err(Error::InvalidMetadata("unknown metadata type")),
         };
         previous = Some(key.clone());
@@ -236,6 +278,25 @@ pub(crate) fn validate_filter(conditions: &[Condition]) -> Result<()> {
                 }
                 field
             }
+            Condition::GeoRadius {
+                field,
+                latitude,
+                longitude,
+                radius_meters,
+            } => {
+                if !latitude.is_finite()
+                    || !(-90.0..=90.0).contains(latitude)
+                    || !longitude.is_finite()
+                    || !(-180.0..=180.0).contains(longitude)
+                    || !radius_meters.is_finite()
+                    || *radius_meters < 0.0
+                {
+                    return Err(Error::InvalidFilter(
+                        "geo radius requires valid coordinates and nonnegative finite meters",
+                    ));
+                }
+                field
+            }
         };
         if !field_valid(field) {
             return Err(Error::InvalidFilter(
@@ -244,6 +305,16 @@ pub(crate) fn validate_filter(conditions: &[Condition]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+pub(crate) fn geo_distance_meters(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    const EARTH_RADIUS_METERS: f64 = 6_371_008.8;
+    let radians = std::f64::consts::PI / 180.0;
+    let (lat1, lat2) = (lat1 * radians, lat2 * radians);
+    let dlat = lat2 - lat1;
+    let dlon = (lon2 - lon1) * radians;
+    let a = (dlat / 2.0).sin().powi(2) + lat1.cos() * lat2.cos() * (dlon / 2.0).sin().powi(2);
+    2.0 * EARTH_RADIUS_METERS * a.sqrt().atan2((1.0 - a).max(0.0).sqrt())
 }
 
 pub(crate) fn matches(metadata: &Metadata, conditions: &[Condition]) -> bool {
@@ -255,6 +326,22 @@ pub(crate) fn matches(metadata: &Metadata, conditions: &[Condition]) -> bool {
             }) && max.as_ref().is_none_or(|max| {
                 numeric_compare(value, max).is_some_and(|ordering| ordering.is_le())
             })
+        }),
+        Condition::GeoRadius {
+            field,
+            latitude,
+            longitude,
+            radius_meters,
+        } => metadata.get(field).is_some_and(|value| {
+            if let MetadataValue::GeoPoint {
+                latitude: lat,
+                longitude: lon,
+            } = value
+            {
+                geo_distance_meters(*latitude, *longitude, *lat, *lon) <= *radius_meters
+            } else {
+                false
+            }
         }),
     })
 }

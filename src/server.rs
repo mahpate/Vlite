@@ -39,6 +39,10 @@ mod credentials;
 pub mod grpc;
 mod observability;
 mod ops;
+#[cfg(feature = "otel")]
+pub mod telemetry;
+mod tenants;
+pub mod tls;
 pub use admin::{ServerOptions, configured_admin_router, read_token_file, selected_database};
 
 pub const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
@@ -74,6 +78,8 @@ struct Metrics {
     import_rows_skipped: AtomicU64,
     credential_denials: AtomicU64,
     audit_failures: AtomicU64,
+    rate_limited: AtomicU64,
+    quota_exceeded: AtomicU64,
     /// f64 bits of the last sampled recall plus a presence flag.
     ann_quality_last_recall: Mutex<Option<f64>>,
 }
@@ -144,9 +150,27 @@ pub struct Service {
     /// any clone of this service; other transports share it (same tokens,
     /// credential store, audit log and reloads).
     published_admin: Arc<Mutex<Option<Arc<admin::AdminState>>>>,
+    tls: Arc<Mutex<Vec<tls::TlsIdentity>>>,
+    rate_limits: Arc<Mutex<BTreeMap<String, (f64, Instant)>>>,
 }
 
 impl Service {
+    /// Registers a file-backed listener for the admin TLS reload endpoint.
+    pub fn register_tls(&self, identity: tls::TlsIdentity) -> std::io::Result<()> {
+        let mut identities = self
+            .tls
+            .lock()
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        if identities
+            .iter()
+            .any(|existing| existing.same_config(&identity))
+        {
+            return Err(std::io::Error::other("TLS identity is already registered"));
+        }
+        identities.push(identity);
+        Ok(())
+    }
+
     /// Panics if operating-system randomness is unavailable; see `try_new`.
     pub fn new(database: Database) -> Self {
         Self::try_new(database).expect("operating-system randomness for ETag nonce")
@@ -186,6 +210,8 @@ impl Service {
             lineage,
             imports: Arc::new(Mutex::new(collections::Reservations::default())),
             published_admin: Arc::default(),
+            tls: Arc::default(),
+            rate_limits: Arc::default(),
         })
     }
 
@@ -341,6 +367,8 @@ fn configured_routes(service: Service) -> Router {
     }
     let observation = service.clone();
     admin::routes()
+        .merge(tls::routes())
+        .merge(tenants::routes())
         .merge(collections::routes())
         .merge(ops::routes())
         .merge(credentials::routes())
@@ -466,9 +494,18 @@ fn authenticate(service: &Service, headers: &HeaderMap) -> Result<Option<admin::
         }
     }
     match (value, &service.admin.credentials) {
-        (Some(value), Some(store)) if value.starts_with(credentials::TOKEN_PREFIX) => store
-            .authenticate(value, admin::now_ms() as u64)
-            .map(|grant| Some(admin::Role::Scoped(grant))),
+        (Some(value), Some(store)) if value.starts_with(credentials::TOKEN_PREFIX) => {
+            let grant = store.authenticate(value, admin::now_ms() as u64)?;
+            if let Some(id) = &grant.tenant_id {
+                service
+                    .admin
+                    .tenants
+                    .as_ref()
+                    .ok_or_else(forbidden_scope)?
+                    .get(id)?;
+            }
+            Ok(Some(admin::Role::Scoped(grant)))
+        }
         _ => Ok(None),
     }
 }
@@ -605,7 +642,10 @@ fn authorize_need(
                 Need::Op(op, reach) => {
                     let legacy = legacy && reach == Reach::Collection;
                     if !grant.allows(op)
-                        || (reach == Reach::All && !grant.all)
+                        || (reach == Reach::All
+                            && (!grant.all
+                                || (grant.tenant_id.is_some()
+                                    && op != credentials::Op::Collections)))
                         || (legacy && !grant.covers(service.lineage, 0, "default"))
                     {
                         Err(forbidden_scope())
@@ -630,6 +670,29 @@ async fn observe(
         .get::<MatchedPath>()
         .map_or("unmatched", |path| path.as_str())
         .to_owned();
+    #[cfg(feature = "otel")]
+    let trace = telemetry::request(
+        &request_id,
+        &route,
+        request
+            .uri()
+            .path()
+            .strip_prefix("/v1/collections/")
+            .and_then(|p| p.split('/').next())
+            .unwrap_or_else(|| {
+                if route.starts_with("/v1/vectors")
+                    || route.starts_with("/v1/index/")
+                    || matches!(
+                        route.as_str(),
+                        "/v1/search" | "/v1/batches" | "/v1/database"
+                    )
+                {
+                    "default"
+                } else {
+                    ""
+                }
+            }),
+    );
     let method = match request.method().as_str() {
         "GET" => "GET",
         "POST" => "POST",
@@ -665,13 +728,15 @@ async fn observe(
             )
             .into_response(),
             Ok(Some(role)) => {
-                match authorize(
-                    &service,
-                    role,
-                    request.method(),
-                    &route,
-                    request.uri().path(),
-                ) {
+                match rate_limit(&service, role).and_then(|()| {
+                    authorize(
+                        &service,
+                        role,
+                        request.method(),
+                        &route,
+                        request.uri().path(),
+                    )
+                }) {
                     Err(error) => error.into_response(),
                     Ok(()) => {
                         request.extensions_mut().insert(role.clone());
@@ -687,6 +752,8 @@ async fn observe(
             axum::http::HeaderValue::from_static("Bearer"),
         );
     }
+    #[cfg(feature = "otel")]
+    telemetry::finish(trace, response.status().as_u16());
     let code = response.extensions().get::<ErrorCode>().map(|code| code.0);
     record_request(
         &service,
@@ -741,6 +808,15 @@ fn record_request(service: &Service, record: &RequestRecord<'_>) {
         request_id,
         started,
     } = *record;
+    if code == Some("rate_limited") {
+        service.metrics.rate_limited.fetch_add(1, Ordering::Relaxed);
+    }
+    if code == Some("quota_exceeded") {
+        service
+            .metrics
+            .quota_exceeded
+            .fetch_add(1, Ordering::Relaxed);
+    }
     if status == StatusCode::UNAUTHORIZED {
         service.metrics.unauthorized.fetch_add(1, Ordering::Relaxed);
     }
@@ -809,6 +885,15 @@ fn record_request(service: &Service, record: &RequestRecord<'_>) {
 /// request ID so the stream's outcome stays observable.
 #[cfg(feature = "grpc")]
 fn record_stream_failure(service: &Service, route: &str, request_id: &str, error: &ApiError) {
+    if error.code == "quota_exceeded" {
+        service
+            .metrics
+            .quota_exceeded
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    if error.code == "rate_limited" {
+        service.metrics.rate_limited.fetch_add(1, Ordering::Relaxed);
+    }
     service.metrics.failures.fetch_add(1, Ordering::Relaxed);
     service
         .metrics
@@ -872,6 +957,12 @@ impl IntoResponse for ApiError {
             Json(json!({"error": {"code": self.code, "message": self.message}})),
         )
             .into_response();
+        if self.status == StatusCode::TOO_MANY_REQUESTS {
+            response.headers_mut().insert(
+                header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("1"),
+            );
+        }
         response.extensions_mut().insert(ErrorCode(self.code));
         response
     }
@@ -1085,7 +1176,8 @@ fn record_path(
 /// is checked first so out-of-scope callers cannot probe existence.
 fn open(db: &Database, role: &admin::Role, target: &Target) -> Result<u16, ApiError> {
     db.ensure_healthy()?;
-    let name = target.name();
+    let qualified = tenants::qualify(role, target.name());
+    let name = qualified.as_str();
     if let admin::Role::Scoped(grant) = role
         && !grant.names(name)
     {
@@ -1520,9 +1612,11 @@ async fn put_core(
         return Err(Error::PayloadTooLarge(payload.len()).into());
     }
     let ident = service.etag_ident.clone();
+    let quota_service = service.clone();
     service
         .run(move |db| {
             let collection = open(db, &role, &target)?;
+            enforce_quota(&quota_service, db, &role, collection, &[(id, true)])?;
             let expected = guard.resolve(db, &ident, collection, id)?;
             let created = db.revision_in(collection, id)?.is_none();
             db.put_in(collection, id, &vector, &payload, &metadata, expected)?;
@@ -1695,9 +1789,17 @@ async fn batch_core(
             return Err(Error::PayloadTooLarge(payload.len()).into());
         }
     }
+    let quota_service = service.clone();
     service
         .run(move |db| {
             let collection = open(db, &role, &target)?;
+            enforce_quota(
+                &quota_service,
+                db,
+                &role,
+                collection,
+                &quota_mutations(&operations),
+            )?;
             db.write_batch_in(collection, &operations)?;
             Ok(())
         })
@@ -2099,7 +2201,11 @@ async fn search_core(
         .run(move |db| {
             let collection = open(db, &role, &target)?;
             let executed = execute(db, collection, &target, &input, &metrics)?;
-            let binding = (target.name().to_owned(), collection, db.lineage());
+            let binding = (
+                tenants::qualify(&role, target.name()),
+                collection,
+                db.lineage(),
+            );
             Ok((input, binding, executed))
         })
         .await?;
@@ -2120,9 +2226,9 @@ async fn search_core(
             .unwrap_or(&[])
             .iter()
             .map(|condition| match condition {
-                crate::Condition::Eq { field, .. } | crate::Condition::Range { field, .. } => {
-                    field.clone()
-                }
+                crate::Condition::Eq { field, .. }
+                | crate::Condition::Range { field, .. }
+                | crate::Condition::GeoRadius { field, .. } => field.clone(),
             })
             .collect::<Vec<_>>();
         observability::record_slow(
@@ -2385,6 +2491,119 @@ async fn quality_in(
 
 #[cfg(test)]
 use observability::metrics;
+
+/// Shared token bucket; default capacity is one second of requests. Monotonic
+/// time avoids clock changes granting tokens. State is bounded by store capacity.
+fn rate_limit(service: &Service, role: &admin::Role) -> Result<(), ApiError> {
+    let admin::Role::Scoped(grant) = role else {
+        return Ok(());
+    };
+    let Some(rate) = grant.requests_per_second else {
+        return Ok(());
+    };
+    let mut buckets = service.rate_limits.lock().map_err(internal)?;
+    if buckets.len() >= 512 {
+        buckets.retain(|_, (_, at)| at.elapsed().as_secs() < 3600);
+    }
+    if !buckets.contains_key(&grant.id) && buckets.len() >= 512 {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "busy",
+            "rate limiter capacity reached",
+        ));
+    }
+    let (tokens, at) = buckets
+        .entry(grant.id.clone())
+        .or_insert((rate as f64, Instant::now()));
+    *tokens = (*tokens + at.elapsed().as_secs_f64() * rate as f64).min(rate as f64);
+    *at = Instant::now();
+    if *tokens < 1.0 {
+        return Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            "credential request rate exceeded",
+        ));
+    }
+    *tokens -= 1.0;
+    Ok(())
+}
+fn quota_mutations(operations: &[Mutation]) -> Vec<(u64, bool)> {
+    operations
+        .iter()
+        .map(|op| match op {
+            Mutation::Put { id, .. } | Mutation::PutWithMetadata { id, .. } => (*id, true),
+            Mutation::Delete { id } => (*id, false),
+        })
+        .collect()
+}
+/// Evaluate projected live counts under the same owner lock as the commit.
+/// Counts are over all collections visible to a credential (not write history).
+fn enforce_quota(
+    service: &Service,
+    db: &Database,
+    role: &admin::Role,
+    collection: u16,
+    changes: &[(u64, bool)],
+) -> Result<(), ApiError> {
+    let grant = match role {
+        admin::Role::Scoped(grant) => Some(grant),
+        _ => None,
+    };
+    let state = db.state(collection);
+    let tenant_id = state
+        .name
+        .strip_prefix('t')
+        .and_then(|name| name.split_once("__"))
+        .map(|(id, _)| id)
+        .filter(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()));
+    let tenant = match (tenant_id, &service.admin.tenants) {
+        (Some(id), Some(store)) if store.known(id)? => Some(store.get(id)?),
+        _ => None,
+    };
+    if grant.is_none_or(|g| g.max_vectors.is_none() && g.max_vectors_per_collection.is_none())
+        && tenant.as_ref().is_none_or(|t| t.max_vectors.is_none())
+    {
+        return Ok(());
+    }
+    let mut projected = BTreeMap::new();
+    for &(id, present) in changes {
+        projected.insert(id, present);
+    }
+    let mut count = state.records.len() as i128;
+    for (id, present) in projected {
+        count += i128::from(present) - i128::from(state.records.contains_key(&id));
+    }
+    let delta = count - state.records.len() as i128;
+    let credential_count: i128 = db
+        .collections
+        .iter()
+        .filter(|(id, state)| grant.is_some_and(|g| g.covers(db.lineage(), **id, &state.name)))
+        .map(|(_, s)| s.records.len() as i128)
+        .sum();
+    let tenant_count: i128 = db
+        .collections
+        .values()
+        .filter(|s| tenant_id.is_some_and(|id| s.name.starts_with(&format!("t{id}__"))))
+        .map(|s| s.records.len() as i128)
+        .sum();
+    if grant
+        .and_then(|g| g.max_vectors_per_collection)
+        .is_some_and(|max| count > max as i128)
+        || grant
+            .and_then(|g| g.max_vectors)
+            .is_some_and(|max| credential_count + delta > max as i128)
+        || tenant
+            .and_then(|t| t.max_vectors)
+            .is_some_and(|max| tenant_count + delta > max as i128)
+    {
+        return Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "quota_exceeded",
+            "live vector quota exceeded; delete vectors or raise the configured quota",
+        ));
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {

@@ -4,6 +4,7 @@
 
 mod ann_snapshot;
 mod collection;
+pub mod embedding;
 mod format;
 mod hnsw;
 pub mod hybrid;
@@ -13,9 +14,13 @@ pub mod metadata_index;
 pub mod planner;
 pub mod quality;
 pub mod quantize;
+pub mod query_language;
 mod rebuild;
+pub mod records;
+pub mod rerank;
 mod stats;
 pub mod text_index;
+pub mod vectors;
 pub use ann_snapshot::{
     AnnSnapshotLoad, AnnSnapshotRejection, AnnSnapshotReport, MAX_ANN_SNAPSHOT_BYTES,
 };
@@ -39,6 +44,10 @@ pub use rebuild::{
     HnswBufferCapacity, HnswMaintenancePolicy, HnswMaintenanceReport, HnswMaintenanceStatus,
     HnswPressure, HnswRebuildLimits, HnswRebuildProgress, HnswRebuildStatus,
 };
+pub use records::{
+    BrowseHit, BrowsePage, FacetCount, GeoSearchHit, GeoSearchQuery, GeoSort, NumericStats,
+    RecommendationQuery, SearchGroup,
+};
 pub use stats::{PlanStrategy, QueryPlan, SearchStats};
 pub mod maintenance;
 #[cfg(feature = "server")]
@@ -59,6 +68,14 @@ pub const MAX_BATCH_OPERATIONS: usize = 4_096;
 /// Maximum encoded batch body, including per-operation metadata.
 pub const MAX_BATCH_BYTES: usize = 16_777_216;
 pub type Result<T> = std::result::Result<T, Error>;
+
+pub(crate) fn current_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
 
 fn vector_norm(vector: &[f32]) -> f64 {
     vector
@@ -149,6 +166,7 @@ pub enum Error {
     InvalidMetadata(&'static str),
     InvalidFilter(&'static str),
     MetadataRequiresUpgrade,
+    ExpiryRequiresUpgrade,
     UnsupportedVersion(u32),
     Corrupt {
         offset: u64,
@@ -256,6 +274,10 @@ impl fmt::Display for Error {
             Self::MetadataRequiresUpgrade => write!(
                 f,
                 "metadata requires format v3; compact the closed database to a new path"
+            ),
+            Self::ExpiryRequiresUpgrade => write!(
+                f,
+                "record expiry and metadata-only updates require opt-in format v5"
             ),
             Self::UnsupportedVersion(version) => write!(f, "unsupported format version {version}"),
             Self::Corrupt { offset, reason } => {
@@ -430,6 +452,10 @@ pub enum FormatVersion {
     /// Adds lineage, named collections, persisted settings and import
     /// checkpoints. Not readable by releases that predate it.
     V4,
+    /// Adds record expiry, metadata-only updates, geospatial metadata and
+    /// named/sparse vector histories with re-embedding checkpoints.
+    /// Not readable by releases that predate it.
+    V5,
 }
 
 /// Compare-and-set precondition on a record's current revision.
@@ -555,7 +581,7 @@ impl Database {
     }
 
     /// Creates a new database in an explicit format. `dimensions` applies to
-    /// the `default` collection. V4 draws a random nonzero lineage from the OS.
+    /// the `default` collection. V4/V5 draw a random nonzero lineage from the OS.
     pub fn create_with_format(
         path: impl AsRef<Path>,
         dimensions: usize,
@@ -570,6 +596,14 @@ impl Database {
                     format::V4,
                     Some(lineage),
                     format::header_v4(dimensions, lineage, 0),
+                )
+            }
+            FormatVersion::V5 => {
+                let lineage = format::new_lineage()?;
+                (
+                    format::V5,
+                    Some(lineage),
+                    format::header_v5(dimensions, lineage, 0),
                 )
             }
         };
@@ -706,8 +740,22 @@ impl Database {
     }
 
     fn get_in(&self, collection: u16, id: u64) -> Result<Option<&Record>> {
+        self.get_at_in(collection, id, current_time_ms())
+    }
+
+    fn get_at_in(&self, collection: u16, id: u64, now_ms: u64) -> Result<Option<&Record>> {
         self.ensure_healthy()?;
-        Ok(self.state(collection).records.get(&id))
+        let state = self.state(collection);
+        Ok(state.records.get(&id).filter(|_| {
+            !state
+                .expiries
+                .get(&id)
+                .is_some_and(|expiry| *expiry <= now_ms)
+        }))
+    }
+
+    pub fn get_at(&self, id: u64, now_ms: u64) -> Result<Option<&Record>> {
+        self.get_at_in(0, id, now_ms)
     }
 
     /// Current revision of a live record, or None when it does not exist.
@@ -742,6 +790,57 @@ impl Database {
             .map(|_| ())
     }
 
+    /// Durably puts a record with an optional absolute Unix-millisecond expiry. Requires v5.
+    pub fn put_with_expiry(
+        &mut self,
+        id: u64,
+        vector: &[f32],
+        payload: &[u8],
+        metadata: &Metadata,
+        expires_at_ms: Option<u64>,
+    ) -> Result<u64> {
+        self.put_with_expiry_in(
+            0,
+            id,
+            vector,
+            payload,
+            metadata,
+            expires_at_ms,
+            Expected::Any,
+        )
+    }
+
+    /// Expiry of an existing record, or None for missing/non-expiring records.
+    pub fn expires_at(&self, id: u64) -> Result<Option<u64>> {
+        self.ensure_healthy()?;
+        Ok(self.default_state().expiries.get(&id).copied())
+    }
+
+    /// Updates only metadata; vector and payload bytes are not rewritten. Requires v5.
+    pub fn update_metadata(&mut self, id: u64, metadata: &Metadata) -> Result<u64> {
+        self.update_metadata_in(0, id, metadata, Expected::Any)
+    }
+
+    /// Exact search using a caller-supplied Unix-millisecond clock.
+    pub fn search_filtered_with_metric_at(
+        &self,
+        query: &[f32],
+        k: usize,
+        conditions: &[Condition],
+        metric: DistanceMetric,
+        now_ms: u64,
+    ) -> Result<Vec<SearchHit>> {
+        self.search_in_at(
+            0,
+            query,
+            k,
+            conditions,
+            metric,
+            now_ms,
+            &mut SearchStats::default(),
+        )
+    }
+
     /// Conditional put. Input validation happens first; a failed precondition
     /// then returns `RevisionMismatch { current }` without writing. On success
     /// returns the record's new revision, acknowledged only after sync.
@@ -754,6 +853,71 @@ impl Database {
         expected: Expected,
     ) -> Result<u64> {
         self.put_in(0, id, vector, payload, metadata, expected)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn put_with_expiry_in(
+        &mut self,
+        collection: u16,
+        id: u64,
+        vector: &[f32],
+        payload: &[u8],
+        metadata: &Metadata,
+        expiry: Option<u64>,
+        expected: Expected,
+    ) -> Result<u64> {
+        self.ensure_healthy()?;
+        if self.version < format::V5 {
+            return Err(Error::ExpiryRequiresUpgrade);
+        }
+        let state = self.state(collection);
+        validate_vector(state.dimensions, vector)?;
+        if payload.len() > MAX_PAYLOAD_BYTES {
+            return Err(Error::PayloadTooLarge(payload.len()));
+        }
+        metadata::validate(metadata)?;
+        if metadata::contains_geo(metadata) && self.version < format::V5 {
+            return Err(Error::ExpiryRequiresUpgrade);
+        }
+        expected.check(state.revisions.get(&id).copied())?;
+        let record = Record {
+            vector: vector.to_vec(),
+            payload: payload.to_vec(),
+            metadata: metadata.clone(),
+        };
+        let sequence = self.next_sequence()?;
+        let frame = format::record_frame_v5(sequence, collection, id, &record, expiry);
+        self.commit_frame(sequence, &frame)?;
+        self.apply(collection, id, Some(record), sequence, expiry);
+        Ok(sequence)
+    }
+
+    fn update_metadata_in(
+        &mut self,
+        collection: u16,
+        id: u64,
+        metadata: &Metadata,
+        expected: Expected,
+    ) -> Result<u64> {
+        self.ensure_healthy()?;
+        if self.version < format::V5 {
+            return Err(Error::ExpiryRequiresUpgrade);
+        }
+        metadata::validate(metadata)?;
+        if metadata::contains_geo(metadata) && self.version < format::V5 {
+            return Err(Error::ExpiryRequiresUpgrade);
+        }
+        let current = self.state(collection).revisions.get(&id).copied();
+        expected.check(current)?;
+        if current.is_none() {
+            return Err(Error::RevisionMismatch { current: None });
+        }
+        let sequence = self.next_sequence()?;
+        let frame = format::metadata_frame_v5(sequence, collection, id, metadata);
+        self.commit_frame(sequence, &frame)?;
+        self.state_mut(collection)
+            .apply_metadata_committed(id, metadata.clone(), sequence);
+        Ok(sequence)
     }
 
     fn put_in(
@@ -772,6 +936,9 @@ impl Database {
             return Err(Error::PayloadTooLarge(payload.len()));
         }
         metadata::validate(metadata)?;
+        if metadata::contains_geo(metadata) && self.version < format::V5 {
+            return Err(Error::ExpiryRequiresUpgrade);
+        }
         if !metadata.is_empty() && self.version < 3 {
             return Err(Error::MetadataRequiresUpgrade);
         }
@@ -784,7 +951,7 @@ impl Database {
         let sequence = self.next_sequence()?;
         let frame = format::record_frame(sequence, collection, id, Some(&record));
         self.commit_frame(sequence, &frame)?;
-        self.apply(collection, id, Some(record), sequence);
+        self.apply(collection, id, Some(record), sequence, None);
         Ok(sequence)
     }
 
@@ -809,7 +976,7 @@ impl Database {
         let sequence = self.next_sequence()?;
         let frame = format::record_frame(sequence, collection, id, None);
         self.commit_frame(sequence, &frame)?;
-        self.apply(collection, id, None, sequence);
+        self.apply(collection, id, None, sequence, None);
         Ok(true)
     }
 
@@ -863,6 +1030,9 @@ impl Database {
                         return Err(Error::PayloadTooLarge(payload.len()));
                     }
                     let metadata_bytes = metadata::validate(metadata)?;
+                    if metadata::contains_geo(metadata) && self.version < format::V5 {
+                        return Err(Error::ExpiryRequiresUpgrade);
+                    }
                     if self.version < 3 {
                         return Err(Error::MetadataRequiresUpgrade);
                     }
@@ -917,7 +1087,7 @@ impl Database {
                 ),
                 Mutation::Delete { id } => (*id, None),
             };
-            self.apply(collection, id, record, sequence);
+            self.apply(collection, id, record, sequence, None);
         }
     }
 
@@ -966,7 +1136,14 @@ impl Database {
 
     /// Single post-commit hook: rebuild catch-up, ANN buffer, derived indexes,
     /// revisions and records, in that order (PAT-002).
-    fn apply(&mut self, collection: u16, id: u64, record: Option<Record>, sequence: u64) {
+    fn apply(
+        &mut self,
+        collection: u16,
+        id: u64,
+        record: Option<Record>,
+        sequence: u64,
+        expires_at_ms: Option<u64>,
+    ) {
         let vector_bytes = record.as_ref().map_or(0, |record| record.vector.len() * 4);
         let state = self
             .collections
@@ -977,7 +1154,7 @@ impl Database {
         {
             job.track(id, state.records.get(&id), vector_bytes);
         }
-        state.apply_committed(id, record, sequence, vector_bytes);
+        state.apply_committed(id, record, sequence, vector_bytes, expires_at_ms);
     }
 
     // ---------------------------------------------------------------- collections
@@ -1511,14 +1688,21 @@ impl Database {
             self.build_hnsw_in(collection, config, metric)?;
         }
         let state = self.state(collection);
-        Ok(state.index.as_ref().expect("built index").search_filtered(
-            query,
-            k,
-            ef_search,
-            &state.records,
-            conditions,
-            &mut SearchStats::default(),
-        ))
+        Ok(state
+            .index
+            .as_ref()
+            .expect("built index")
+            .search_filtered_with_expiry(
+                query,
+                k,
+                ef_search,
+                AnnOptions::default(),
+                &state.records,
+                &state.expiries,
+                current_time_ms(),
+                conditions,
+                &mut SearchStats::default(),
+            ))
     }
 
     /// Searches an existing matching HNSW index without building one.
@@ -1631,12 +1815,14 @@ impl Database {
             .as_ref()
             .filter(|index| index.ready_for(config, metric, options.quantization))
             .ok_or(Error::IndexNotReady)?;
-        Ok(index.search_filtered_with(
+        Ok(index.search_filtered_with_expiry(
             query,
             k,
             ef_search,
             options,
             &state.records,
+            &state.expiries,
+            current_time_ms(),
             conditions,
             stats,
         ))
@@ -1674,6 +1860,19 @@ impl Database {
     /// Query vectors are validated even when k=0 or the database is empty.
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<SearchHit>> {
         self.search_filtered(query, k, &[])
+    }
+
+    /// Exact search at a caller-supplied Unix-millisecond time.
+    pub fn search_at(&self, query: &[f32], k: usize, now_ms: u64) -> Result<Vec<SearchHit>> {
+        self.search_in_at(
+            0,
+            query,
+            k,
+            &[],
+            DistanceMetric::SquaredL2,
+            now_ms,
+            &mut SearchStats::default(),
+        )
     }
 
     /// Exact top-k over records satisfying every condition; no HNSW post-filtering.
@@ -1718,6 +1917,28 @@ impl Database {
         metric: DistanceMetric,
         stats: &mut SearchStats,
     ) -> Result<Vec<SearchHit>> {
+        self.search_in_at(
+            collection,
+            query,
+            k,
+            conditions,
+            metric,
+            current_time_ms(),
+            stats,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn search_in_at(
+        &self,
+        collection: u16,
+        query: &[f32],
+        k: usize,
+        conditions: &[Condition],
+        metric: DistanceMetric,
+        now_ms: u64,
+        stats: &mut SearchStats,
+    ) -> Result<Vec<SearchHit>> {
         self.ensure_healthy()?;
         let state = self.state(collection);
         validate_vector(state.dimensions, query)?;
@@ -1739,6 +1960,7 @@ impl Database {
             conditions,
             metric,
             candidates.as_ref(),
+            now_ms,
             stats,
         ))
     }
@@ -1804,12 +2026,14 @@ impl Database {
 #[allow(clippy::too_many_arguments)]
 fn exact_search(
     records: &BTreeMap<u64, Record>,
+    expiries: &BTreeMap<u64, u64>,
     query: &[f32],
     query_norm: f64,
     k: usize,
     conditions: &[Condition],
     metric: DistanceMetric,
     candidates: Option<&BTreeSet<u64>>,
+    now_ms: u64,
     stats: &mut SearchStats,
 ) -> Vec<SearchHit> {
     let limit = k.min(
@@ -1827,7 +2051,9 @@ fn exact_search(
     let mut hits: BinaryHeap<RankedHit> = BinaryHeap::with_capacity(limit);
     'records: for (&id, record) in scan {
         stats.records_scanned += 1;
-        if !metadata::matches(&record.metadata, conditions) {
+        if expiries.get(&id).is_some_and(|expires| *expires <= now_ms)
+            || !metadata::matches(&record.metadata, conditions)
+        {
             continue;
         }
         stats.distance_evaluations += 1;
@@ -2489,6 +2715,7 @@ mod v4_tests {
             &[],
             DistanceMetric::SquaredL2,
             Some(&subset),
+            current_time_ms(),
             &mut stats,
         );
         assert_eq!(hits.iter().map(|hit| hit.id).collect::<Vec<_>>(), [11, 7]);

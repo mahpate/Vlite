@@ -1540,3 +1540,90 @@ async fn native_tls_serves_authenticated_calls_and_rejects_plaintext() {
     assert!(plaintext);
     drop(tx);
 }
+
+#[tokio::test]
+async fn tenant_namespace_and_resource_exhausted_are_shared_with_rest() {
+    let directory = tempfile::tempdir_in(".").unwrap();
+    let mut h = start(
+        v4(&directory.path().join("tenant.vlite")),
+        Some(directory.path()),
+    )
+    .await;
+    let tenant = rest_ok(
+        &h.app,
+        "POST",
+        "/v1/admin/tenants",
+        Some(json!({"name":"tenant","max_vectors":0})),
+    )
+    .await;
+    let tenant_id = tenant["tenant"]["id"].as_str().unwrap();
+    let issued = rest_ok(
+        &h.app,
+        "POST",
+        "/v1/admin/credentials",
+        Some(json!({
+            "name":"tenant-grpc","tenant_id":tenant_id,"collections":["*"],
+            "operations":["read","write","collections"],"expires_unix_ms":now_ms()+3600000
+        })),
+    )
+    .await;
+    let token = issued["token"].as_str().unwrap();
+    let created = h
+        .client
+        .create_collection(req(Some(token), create("docs", None)))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(created.name, "docs");
+    let listed = h
+        .client
+        .list_collections(req(Some(token), proto::ListCollectionsRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(listed.items.len(), 1);
+    assert_eq!(listed.items[0].name, "docs");
+    let error = h
+        .client
+        .put_vector(req(Some(token), put("docs", 1, vec![1.0, 0.0])))
+        .await
+        .unwrap_err();
+    assert_error(&error, Code::ResourceExhausted, "quota_exceeded");
+    assert_eq!(error.metadata().get("retry-after").unwrap(), "1");
+    let error = h
+        .client
+        .get_vector(req(
+            Some(token),
+            proto::GetVectorRequest {
+                collection: "default".into(),
+                id: 1,
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::NotFound);
+    let rate = rest_ok(
+        &h.app,
+        "POST",
+        "/v1/admin/credentials",
+        Some(json!({
+            "name":"rate-grpc","collections":["*"],"operations":["read"],
+            "requests_per_second":1,"expires_unix_ms":now_ms()+3600000
+        })),
+    )
+    .await;
+    let token = rate["token"].as_str().unwrap();
+    // One bucket is shared, rather than one bucket for each transport.
+    assert_eq!(
+        rest(&h.app, Some(token), "GET", "/v1/collections", None)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let error = h
+        .client
+        .list_collections(req(Some(token), proto::ListCollectionsRequest {}))
+        .await
+        .unwrap_err();
+    assert_error(&error, Code::ResourceExhausted, "rate_limited");
+}

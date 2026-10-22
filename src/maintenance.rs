@@ -169,7 +169,7 @@ pub fn restore(backup_path: impl AsRef<Path>, destination: impl AsRef<Path>) -> 
     let loaded = format::load(&mut file)?;
     require_complete(&loaded)?;
     let expected = inspection(&loaded);
-    let lineage = if loaded.version == format::V4 {
+    let lineage = if loaded.version >= format::V4 {
         Some(format::new_lineage()?)
     } else {
         None
@@ -182,11 +182,11 @@ pub fn restore(backup_path: impl AsRef<Path>, destination: impl AsRef<Path>) -> 
         }
         if let Some(lineage) = lineage {
             output.seek(SeekFrom::Start(0))?;
-            output.write_all(&format::header_v4(
-                loaded.dimensions,
-                lineage,
-                loaded.collection_floor,
-            ))?;
+            output.write_all(&if loaded.version >= format::V5 {
+                format::header_v5(loaded.dimensions, lineage, loaded.collection_floor)
+            } else {
+                format::header_v4(loaded.dimensions, lineage, loaded.collection_floor)
+            })?;
         }
         Ok(())
     })
@@ -207,14 +207,27 @@ pub fn compact(
     source_path: impl AsRef<Path>,
     destination: impl AsRef<Path>,
 ) -> Result<CompactionReport> {
+    compact_at(source_path, destination, crate::current_time_ms())
+}
+
+/// Compacts at an explicit Unix-millisecond clock; v5 records expired at or before `now_ms` are omitted.
+pub fn compact_at(
+    source_path: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+    now_ms: u64,
+) -> Result<CompactionReport> {
     let mut file = source(source_path.as_ref())?;
     let loaded = format::load(&mut file)?;
     require_complete(&loaded)?;
     let source = inspection(&loaded);
-    let output = if loaded.version == format::V4 {
+    let output = if loaded.version >= format::V4 {
         let lineage = format::new_lineage()?;
         publish(destination.as_ref(), |output| {
-            write_v4(output, &loaded, lineage)
+            if loaded.version >= format::V5 {
+                write_v5(output, &loaded, lineage, now_ms)
+            } else {
+                write_v4(output, &loaded, lineage)
+            }
         })?
     } else {
         publish(destination.as_ref(), |output| {
@@ -230,7 +243,7 @@ pub fn compact(
     Ok(CompactionReport { source, output })
 }
 
-/// Explicit offline upgrade of a closed v1–v3 (or v4) file to a new v4 file.
+/// Explicit offline upgrade of a closed v1–v4 file to v4; v5 sources stay v5.
 ///
 /// IDs, vector bits, payloads and metadata are preserved in the `default`
 /// collection; the output gets a new lineage. The source is never modified and
@@ -245,7 +258,11 @@ pub fn upgrade(
     let source = inspection(&loaded);
     let lineage = format::new_lineage()?;
     let output = publish(destination.as_ref(), |output| {
-        write_v4(output, &loaded, lineage)
+        if loaded.version >= format::V5 {
+            write_v5(output, &loaded, lineage, crate::current_time_ms())
+        } else {
+            write_v4(output, &loaded, lineage)
+        }
     })?;
     Ok(CompactionReport { source, output })
 }
@@ -401,6 +418,72 @@ fn publish(destination: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> R
             source,
         })?;
     Ok(report)
+}
+
+fn write_v5(output: &mut File, loaded: &format::Loaded, lineage: u64, now_ms: u64) -> Result<()> {
+    let mut sequence = 0u64;
+    let mut next = || -> Result<u64> {
+        sequence = sequence.checked_add(1).ok_or(Error::SequenceExhausted)?;
+        Ok(sequence)
+    };
+    output.write_all(&format::header_v5(
+        loaded.dimensions,
+        lineage,
+        loaded.collection_high,
+    ))?;
+    for (&id, collection) in loaded.collections.range(1..) {
+        output.write_all(&format::collection_create_frame(
+            next()?,
+            id,
+            &collection.name,
+            collection.dimensions,
+            &collection.settings,
+        ))?;
+    }
+    let default = &loaded.collections[&0];
+    if default.settings_persisted {
+        output.write_all(&format::settings_frame(next()?, 0, &default.settings))?;
+    }
+    for (&collection_id, collection) in &loaded.collections {
+        for (&id, record) in &collection.records {
+            if collection
+                .expiries
+                .get(&id)
+                .is_some_and(|expiry| *expiry <= now_ms)
+            {
+                continue;
+            }
+            output.write_all(&format::record_frame_v5(
+                next()?,
+                collection_id,
+                id,
+                record,
+                collection.expiries.get(&id).copied(),
+            ))?;
+        }
+    }
+    for (&collection_id, collection) in &loaded.collections {
+        let mut data = collection.vectors.clone();
+        data.records.retain(|id, _| {
+            !collection
+                .expiries
+                .get(id)
+                .is_some_and(|expiry| *expiry <= now_ms)
+        });
+        let bytes = data.encode()?;
+        output.write_all(&format::vector_frame(next()?, collection_id, &bytes))?;
+    }
+    let registry = import::Registry::from_markers(&loaded.imports);
+    for (job, state) in registry.open_jobs() {
+        let marker = import::snapshot_marker(job, state);
+        output.write_all(&format::batch_frame_v4(
+            next()?,
+            state.collection,
+            &[],
+            Some(&marker),
+        ))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

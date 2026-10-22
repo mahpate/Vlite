@@ -15,18 +15,20 @@ use vlite::{
     },
 };
 
-const USAGE: &str = "usage: vlite-server <database-path> [--create-if-missing <dimensions> [--create-format 3|4]] [--bind <ip:port>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem>]] [--allow-remote] [--ann-snapshot] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS";
+const USAGE: &str = "usage: vlite-server <database-path> [--create-if-missing <dimensions> [--create-format 3|4]] [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS";
 
 struct Config {
+    otlp_endpoint: Option<String>,
     path: PathBuf,
     dimensions: Option<usize>,
     format: FormatVersion,
     bind: SocketAddr,
     /// Optional second listener for the gRPC transport (feature `grpc`).
     grpc_bind: Option<SocketAddr>,
-    /// Native TLS identity for the gRPC listener.
+    /// Native TLS identity for the REST listener.
+    rest_tls: Option<vlite::server::tls::TlsIdentity>,
     #[cfg(feature = "grpc")]
-    grpc_tls: Option<vlite::server::grpc::GrpcTls>,
+    grpc_tls: Option<vlite::server::tls::TlsIdentity>,
     /// Load `<active>.ann` after open; save it after both listeners drain.
     ann_snapshot: bool,
     token: Option<BearerToken>,
@@ -103,6 +105,7 @@ fn options(config: &Config, database_path: Option<PathBuf>) -> ServerOptions {
 fn config() -> Result<Config, Box<dyn Error>> {
     let mut args = std::env::args_os().skip(1);
     let path = args.next().ok_or(USAGE)?;
+    let mut otlp_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
     let mut dimensions = None;
     let mut format = None;
     let mut bind: SocketAddr = "127.0.0.1:8080".parse()?;
@@ -112,10 +115,16 @@ fn config() -> Result<Config, Box<dyn Error>> {
     let mut insecure_local = false;
     let mut grpc_bind: Option<SocketAddr> = None;
     let mut ann_snapshot = false;
+    let mut tls_cert: Option<PathBuf> = None;
+    let mut tls_key: Option<PathBuf> = None;
+    let mut grpc_tls_client_ca: Option<PathBuf> = None;
     let mut grpc_tls_cert: Option<PathBuf> = None;
     let mut grpc_tls_key: Option<PathBuf> = None;
     while let Some(arg) = args.next() {
         match arg.to_str() {
+            Some("--otlp-endpoint") => {
+                otlp_endpoint = Some(args.next().ok_or(USAGE)?.to_str().ok_or(USAGE)?.to_owned());
+            }
             Some("--create-if-missing") if dimensions.is_none() => {
                 let value = args.next().ok_or(USAGE)?;
                 let count: usize = value.to_str().ok_or(USAGE)?.parse()?;
@@ -138,6 +147,15 @@ fn config() -> Result<Config, Box<dyn Error>> {
             Some("--grpc-bind") if grpc_bind.is_none() => {
                 grpc_bind = Some(args.next().ok_or(USAGE)?.to_str().ok_or(USAGE)?.parse()?);
             }
+            Some("--tls-cert") if tls_cert.is_none() => {
+                tls_cert = Some(args.next().ok_or(USAGE)?.into());
+            }
+            Some("--tls-key") if tls_key.is_none() => {
+                tls_key = Some(args.next().ok_or(USAGE)?.into());
+            }
+            Some("--grpc-tls-client-ca") if grpc_tls_client_ca.is_none() => {
+                grpc_tls_client_ca = Some(args.next().ok_or(USAGE)?.into());
+            }
             Some("--grpc-tls-cert") if grpc_tls_cert.is_none() => {
                 grpc_tls_cert = Some(args.next().ok_or(USAGE)?.into());
             }
@@ -153,12 +171,30 @@ fn config() -> Result<Config, Box<dyn Error>> {
             _ => return Err(USAGE.into()),
         }
     }
+    if otlp_endpoint.is_some() && !cfg!(feature = "otel") {
+        return Err(
+            "--otlp-endpoint / OTEL_EXPORTER_OTLP_ENDPOINT requires the otel feature".into(),
+        );
+    }
     if format.is_some() && dimensions.is_none() {
         return Err("--create-format requires --create-if-missing".into());
     }
     if grpc_bind.is_some() && !cfg!(feature = "grpc") {
         return Err("--grpc-bind requires a build with the grpc feature".into());
     }
+    if tls_cert.is_some() != tls_key.is_some() {
+        return Err("--tls-cert and --tls-key must be given together".into());
+    }
+    if grpc_tls_client_ca.is_some() && grpc_tls_cert.is_none() {
+        return Err("--grpc-tls-client-ca requires --grpc-tls-cert and --grpc-tls-key".into());
+    }
+    let rest_tls = match (&tls_cert, &tls_key) {
+        (Some(cert), Some(key)) => Some(
+            vlite::server::tls::TlsIdentity::from_files(cert, key, None)
+                .map_err(|error| format!("invalid REST TLS identity: {error}"))?,
+        ),
+        _ => None,
+    };
     if grpc_tls_cert.is_some() != grpc_tls_key.is_some() {
         return Err("--grpc-tls-cert and --grpc-tls-key must be given together".into());
     }
@@ -179,7 +215,7 @@ fn config() -> Result<Config, Box<dyn Error>> {
     }
     if !bind.ip().is_loopback() && !allow_remote {
         return Err(
-            "non-loopback bind requires --allow-remote and bearer authentication; TLS must terminate at a proxy"
+            "non-loopback bind requires --allow-remote and bearer authentication; use --tls-cert/--tls-key or terminate TLS at a proxy"
                 .into(),
         );
     }
@@ -231,32 +267,25 @@ fn config() -> Result<Config, Box<dyn Error>> {
     };
     #[cfg(feature = "grpc")]
     let grpc_tls = match (&grpc_tls_cert, &grpc_tls_key) {
-        (Some(cert), Some(key)) => {
-            let read = |path: &PathBuf, what: &str| {
-                std::fs::read(path)
-                    .map_err(|error| format!("cannot read {what} {}: {error}", path.display()))
-            };
-            Some(
-                vlite::server::grpc::GrpcTls::from_pem(
-                    read(cert, "--grpc-tls-cert")?,
-                    read(key, "--grpc-tls-key")?,
-                )
-                .map_err(|error| format!("invalid gRPC TLS identity: {error}"))?,
-            )
-        }
+        (Some(cert), Some(key)) => Some(
+            vlite::server::tls::TlsIdentity::from_files(cert, key, grpc_tls_client_ca.as_deref())
+                .map_err(|error| format!("invalid gRPC TLS identity (cannot read --grpc-tls-cert/--grpc-tls-key/--grpc-tls-client-ca or invalid PEM): {error}"))?,
+        ),
         _ => None,
     };
     #[cfg(not(feature = "grpc"))]
-    let _ = (grpc_tls_cert, grpc_tls_key);
+    let _ = (grpc_tls_cert, grpc_tls_key, grpc_tls_client_ca);
     if insecure_local && (read_only_token.is_some() || read_only_file.is_some()) {
         return Err("read-only credentials require admin bearer authentication".into());
     }
     let config = Config {
+        otlp_endpoint,
         path: path.into(),
         dimensions,
         format: format.unwrap_or(FormatVersion::V3),
         bind,
         grpc_bind,
+        rest_tls,
         #[cfg(feature = "grpc")]
         grpc_tls,
         ann_snapshot,
@@ -401,6 +430,10 @@ async fn stopped(mut stop: tokio::sync::watch::Receiver<bool>, health: Option<Gr
 
 async fn run() -> Result<(), Box<dyn Error>> {
     let config = config()?;
+    #[cfg(feature = "otel")]
+    let telemetry = vlite::server::telemetry::configure(config.otlp_endpoint.as_deref())?;
+    #[cfg(not(feature = "otel"))]
+    let _ = &config.otlp_endpoint;
     let signals = Signals::new()?;
     // Bind both listeners before opening, so a port conflict never opens
     // (or creates) the database.
@@ -418,6 +451,13 @@ async fn run() -> Result<(), Box<dyn Error>> {
         load_ann_snapshot(&mut database, path);
     }
     let service = Service::try_new(database)?;
+    if let Some(tls) = &config.rest_tls {
+        service.register_tls(tls.clone())?;
+    }
+    #[cfg(feature = "grpc")]
+    if let Some(tls) = &config.grpc_tls {
+        service.register_tls(tls.clone())?;
+    }
     let router = match configured_admin_router(service.clone(), options(&config, Some(active))) {
         Ok(router) => router,
         Err(error) => {
@@ -442,7 +482,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Some(listener) => {
             let server = vlite::server::grpc::grpc_router(service.clone()).await;
             let server = match config.grpc_tls.clone() {
-                Some(tls) => server.with_tls(tls),
+                Some(tls) => server.with_reloadable_tls(tls),
                 None => server,
             };
             Some((server, listener))
@@ -460,7 +500,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
     #[cfg(not(feature = "grpc"))]
     let health: Option<GrpcHealth> = None;
 
-    println!("LISTENING http://{address}");
+    let scheme = if config.rest_tls.is_some() {
+        "https"
+    } else {
+        "http"
+    };
+    println!("LISTENING {scheme}://{address}");
     if let Some((_, listener)) = &grpc {
         #[cfg(feature = "grpc")]
         let scheme = if config.grpc_tls.is_some() {
@@ -476,9 +521,15 @@ async fn run() -> Result<(), Box<dyn Error>> {
         let stop_tx = stop_tx.clone();
         let shutdown = stopped(stop_rx.clone(), health.clone());
         async move {
-            let result = axum::serve(listener, router)
-                .with_graceful_shutdown(shutdown)
-                .await;
+            let result = if let Some(tls) = config.rest_tls {
+                axum::serve(vlite::server::tls::TlsListener::new(listener, tls)?, router)
+                    .with_graceful_shutdown(shutdown)
+                    .await
+            } else {
+                axum::serve(listener, router)
+                    .with_graceful_shutdown(shutdown)
+                    .await
+            };
             // Either listener failing stops the other one.
             let _ = stop_tx.send(true);
             result.map_err(|error| -> Box<dyn Error> { error.into() })
@@ -509,6 +560,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
     rest?;
     grpc?;
     closing?;
+    #[cfg(feature = "otel")]
+    if let Some(provider) = telemetry {
+        provider.shutdown()?;
+    }
     if signal.is_finished() {
         signal.await??;
     } else {

@@ -192,3 +192,76 @@ jobs:
           python3 -m playwright install --with-deps chromium
       - name: Verify dashboard with Chromium against Docker
         run: python3 tests/dashboard_e2e.py
+
+
+  go-client:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.22.x"
+          cache: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Go unit tests and static checks
+        working-directory: clients/go
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test -race ./...
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --locked --features server --bin vlite-server
+      - name: Go opt-in REST e2e against disposable server
+        run: python clients/go/live_test.py go
+
+  dotnet-client:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "8.0.x"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Build .NET client and package-free tests
+        run: dotnet build clients/dotnet/VLite.Client.Tests --configuration Release --nologo
+      - name: Run fake HTTP handler tests
+        run: dotnet run --project clients/dotnet/VLite.Client.Tests --configuration Release --no-build
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --locked --features server --bin vlite-server
+      - name: .NET opt-in REST e2e against disposable server
+        run: python clients/go/live_test.py dotnet
+
+  python-integrations:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        extras: [none, integrations]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install dependency-free client
+        if: matrix.extras == 'none'
+        run: python -m pip install ./clients/python
+      - name: Install real framework extras
+        if: matrix.extras == 'integrations'
+        run: python -m pip install './clients/python[integrations]'
+      - name: Adapter fake tests and optional real-package tests
+        run: python -m unittest discover -s clients/python/vlite_client/integrations -p test_integrations.py -v
+
+  helm-chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.17.3
+      - run: helm lint deploy/helm/vlite --set auth.existingSecret=vlite-auth
+      - run: helm template vectors deploy/helm/vlite --set auth.existingSecret=vlite-auth
+      - name: Validate managed auth Secret and optional TLS mount
+        run: helm template vectors deploy/helm/vlite --set auth.token=abcdefghijklmnopqrstuvwxyz012345 --set tls.existingSecret=vlite-tls

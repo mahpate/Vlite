@@ -201,6 +201,7 @@ impl CollectionRef<'_> {
                 &[],
                 metric,
                 None,
+                crate::current_time_ms(),
                 &mut stats,
             );
             let approximate = self.db.search_ready_with_options_in(

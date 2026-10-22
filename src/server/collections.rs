@@ -209,7 +209,7 @@ pub(super) async fn list_core(
     service
         .run(move |db| {
             let lineage = db.lineage();
-            let items = db
+            let mut items = db
                 .collections()?
                 .into_iter()
                 .filter(|info| match &role {
@@ -217,6 +217,9 @@ pub(super) async fn list_core(
                     _ => true,
                 })
                 .collect::<Vec<_>>();
+            for item in &mut items {
+                item.name = tenants::unqualify(&role, &item.name);
+            }
             Ok((items, db.format_version()))
         })
         .await
@@ -275,11 +278,25 @@ async fn create(
 pub(super) async fn create_core(
     service: &Service,
     role: admin::Role,
-    input: Create,
+    mut input: Create,
 ) -> Result<CollectionInfo, ApiError> {
+    input.name = tenants::qualify(&role, &input.name);
     let actor = principal(&role);
+    let quota_service = service.clone();
+    let tenant_id = match &role {
+        admin::Role::Scoped(g) => g.tenant_id.clone(),
+        _ => None,
+    };
     let info = service
         .run(move |db| {
+            if let Some(id) = &tenant_id {
+                quota_service
+                    .admin
+                    .tenants
+                    .as_ref()
+                    .ok_or_else(forbidden_scope)?
+                    .get(id)?;
+            }
             Ok(db.create_collection(
                 &input.name,
                 CollectionSpec {
@@ -293,6 +310,8 @@ pub(super) async fn create_core(
         service,
         json!({"event":"collection_created","collection":info.name,"collection_id":info.id,"actor":actor}),
     );
+    let mut info = info;
+    info.name = tenants::unqualify(&role, &info.name);
     Ok(info)
 }
 
@@ -319,7 +338,8 @@ pub(super) async fn fetch_core(
     service
         .run(move |db| {
             let collection = open(db, &role, &target)?;
-            let info = db.info(collection);
+            let mut info = db.info(collection);
+            info.name = tenants::unqualify(&role, &info.name);
             let text = CollectionRef {
                 db: &*db,
                 id: collection,
@@ -350,7 +370,7 @@ pub(super) async fn drop_core(
     let (name, id) = service
         .run(move |db| {
             let collection = open(db, &role, &target)?;
-            db.drop_collection(target.name())?;
+            db.drop_collection(&tenants::qualify(&role, target.name()))?;
             Ok((target.name().to_owned(), collection))
         })
         .await?;
@@ -374,7 +394,8 @@ async fn settings(
         .run(move |db| {
             let collection = open(db, &role, &target)?;
             let merged = input.merge(db.state(collection).settings.clone());
-            let persistence = db.set_collection_settings(target.name(), merged)?;
+            let persistence =
+                db.set_collection_settings(&tenants::qualify(&role, target.name()), merged)?;
             Ok((
                 db.info(collection),
                 persistence == SettingsPersistence::Persisted,
@@ -458,7 +479,8 @@ pub(super) async fn reserve_core(
         .run(move |db| {
             open(db, &role, &target)?;
             let next = db.next_import_job_id()?;
-            let collection = db.resolve(target.name())?;
+            let physical_name = tenants::qualify(&role, target.name());
+            let collection = db.resolve(&physical_name)?;
             let mut reserved = reservations.lock().map_err(internal)?;
             if db.imports.open_jobs().count() + reserved.jobs.len() >= MAX_ACTIVE_IMPORTS {
                 return Err(Error::TooManyImports.into());
@@ -469,9 +491,7 @@ pub(super) async fn reserve_core(
                 .next_back()
                 .map_or(Some(next), |&last| last.checked_add(1).map(|n| n.max(next)))
                 .ok_or(Error::ImportConflict("import job IDs are exhausted"))?;
-            reserved
-                .jobs
-                .insert(job, (collection, target.name().to_owned()));
+            reserved.jobs.insert(job, (collection, physical_name));
             Ok(reserved_json(job, target.name(), "open"))
         })
         .await
@@ -640,6 +660,7 @@ pub(super) async fn import_chunk_core(
     policy: InvalidRowPolicy,
 ) -> Result<Value, ApiError> {
     let reservations = service.imports.clone();
+    let quota_service = service.clone();
     let metrics = service.metrics.clone();
     service
         .run(move |db| {
@@ -665,6 +686,11 @@ pub(super) async fn import_chunk_core(
                     collection
                 }
             };
+            // Let the engine verify replay digests without projecting a write
+            // that an idempotent retry will not actually perform.
+            if !db.imports.get(job).is_some_and(|state| number <= state.last_chunk) {
+                enforce_quota(&quota_service, db, &role, collection, &quota_mutations(&operations))?;
+            }
             let report = CollectionMut { db: &mut *db, id: collection }
                 .import_chunk(job, number, &operations, policy)?;
             if db.imports.get(job).is_some() {

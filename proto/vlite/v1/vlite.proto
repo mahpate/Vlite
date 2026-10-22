@@ -77,12 +77,15 @@ message DropCollectionResponse {
   bool deleted = 1;
 }
 
+message GeoPoint { double latitude = 1; double longitude = 2; }
+
 message MetadataValue {
   oneof kind {
     string string_value = 1;
     int64 integer_value = 2;
     double float_value = 3;
     bool boolean_value = 4;
+    GeoPoint geo_point = 5;
   }
 }
 
@@ -204,9 +207,11 @@ message Condition {
     MetadataValue min = 2;
     MetadataValue max = 3;
   }
+  message GeoRadius { string field = 1; double latitude = 2; double longitude = 3; double radius_meters = 4; }
   oneof kind {
     Eq eq = 1;
     Range range = 2;
+    GeoRadius geo_radius = 3;
   }
 }
 

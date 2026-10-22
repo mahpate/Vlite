@@ -16,7 +16,8 @@ It uses its own storage format and does not require an external database.
 ## Capabilities
 
 - **Single-file persistence:** versioned binary records, checksums, synchronous
-  commits, exclusive locking, and explicit interrupted-write recovery.
+  commits, exclusive locking, and explicit interrupted-write recovery. Opt-in v5
+  adds expiring records and compact metadata-only updates.
 - **Atomic mutations:** vector/payload/metadata replacement and deletion,
   individually or in batches of up to 4,096 operations.
 - **Exact search:** squared Euclidean, cosine and negative inner-product distance with f64 accumulation,
@@ -26,8 +27,11 @@ It uses its own storage format and does not require an external database.
 - **Approximate search:** deterministic, rebuildable HNSW with a bounded
   mutation buffer for small mixed read/write workloads, optional scalar-u8
   traversal and opt-in [restart snapshots](docs/ANN-SNAPSHOTS.md).
-- **Advanced retrieval:** opt-in v4 collections, metadata indexes/planning,
-  hybrid BM25/vector search and checkpointed resumable ingestion.
+- **Advanced retrieval:** opt-in v4 collections and v5 record expiry, metadata-only
+  updates, grouped/recommendation search, facets and geo filtering/ranking.
+- **Embedded retrieval extensions:** opt-in v5 [named/sparse vectors, model history,
+  resumable re-embedding](docs/VECTORS.md), pluggable embedding/reranking, and a
+  read-only query language. Optional HTTP embeddings require `http-embedder`.
 - **Deployment:** authenticated REST, OpenAPI, JSON metrics, redacted request
   logs, non-root Docker images, optional [gRPC](docs/GRPC.md), and an optional
   HTTPS reverse proxy.
@@ -39,6 +43,9 @@ VLite is licensed under the MIT License; see
 replication, multi-reader handle, encryption at rest, or approximate metadata
 filtering.
 See the [technical reference](docs/REFERENCE.md) for contracts and limits.
+See [offline command-line tools](docs/TOOLS.md) for the interactive shell,
+CSV/JSONL/pgvector/FAISS and optional Parquet/Arrow imports, HNSW tuning, and
+ANN quality/configuration comparisons.
 
 ## Choose how to use VLite
 
@@ -69,6 +76,9 @@ Use [versioned release assets and installation instructions](docs/INSTALL.md)
 for installation without cloning. Packages are not published to public package
 registries. See the [embedded deployment guide](bindings/README.md)
 and [REST client guide](clients/README.md) for installation and examples.
+Additional clients: [Go](clients/README.md#go), [.NET](clients/README.md#net),
+[LangChain and LlamaIndex adapters](clients/README.md#langchain-and-llamaindex-integrations);
+Kubernetes deployment: [Helm chart](deploy/helm/vlite/README.md).
 
 ## Quick start: embedded Python
 
@@ -141,7 +151,8 @@ fn main() -> vlite::Result<()> {
 
 Use `Database::open` to reopen an existing file. Plain `put` replaces the
 entire record and clears prior metadata. `put_with_metadata` replaces all
-three components. IDs are u64; each database has one fixed vector dimension.
+three components. IDs are u64; each legacy vector space has one fixed dimension. Opt-in v5
+[named vectors](docs/VECTORS.md) add independent per-name dimensions and metrics.
 
 ## Quick start: Docker REST service
 
