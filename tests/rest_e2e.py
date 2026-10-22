@@ -118,7 +118,10 @@ def run():
         {"op": "eq", "field": "category", "value": {"type": "string", "value": "docs"}}
     ]}
     assert request(port, "POST", "/v1/search", filtered)["hits"][0]["id"] == "18446744073709551615"
-    request(port, "POST", "/v1/search", dict(filtered, mode="approximate"), expected=422)
+    for mode in ("approximate", "approximate_ready"):
+        assert request(port, "POST", "/v1/search", dict(filtered, mode=mode))["hits"] == [
+            {"id": "18446744073709551615", "distance": 2.0},
+        ]
     assert request(port, "GET", "/openapi.json")["openapi"] == "3.1.0"
     metrics = request(port, "GET", "/metrics")
     assert metrics["unauthorized_total"] == 3, metrics

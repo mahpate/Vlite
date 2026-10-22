@@ -2,6 +2,7 @@
 //!
 //! See the project README for the durability and explicit tail-repair contract.
 
+mod ann_snapshot;
 mod collection;
 mod format;
 mod hnsw;
@@ -15,6 +16,9 @@ pub mod quantize;
 mod rebuild;
 mod stats;
 pub mod text_index;
+pub use ann_snapshot::{
+    AnnSnapshotLoad, AnnSnapshotRejection, AnnSnapshotReport, MAX_ANN_SNAPSHOT_BYTES,
+};
 pub use collection::{
     CollectionInfo, CollectionMut, CollectionRef, CollectionSettings, CollectionSpec,
     SettingsPersistence,
@@ -456,7 +460,10 @@ impl Expected {
 
 /// One exclusive database owner. All operations are serialized by the caller.
 ///
-/// Reads use a rebuilt in-memory map. No persistent index or lock sidecar exists.
+/// Reads use a rebuilt in-memory map. The datafile is the only source of truth:
+/// in-memory HNSW indexes are derived, and the only optional persisted copy is
+/// an explicitly saved, fully revalidated ANN snapshot sidecar (see
+/// save_ann_snapshot). No lock sidecar exists.
 pub struct Database {
     file: LockedFile,
     version: u32,
@@ -1748,6 +1755,46 @@ impl Database {
         self.file.unlock()?;
         Ok(())
     }
+
+    // ---------------------------------------------------------------- ANN snapshot
+
+    /// Conventional sidecar path for a datafile: `<datafile>.ann`.
+    pub fn ann_snapshot_path(datafile: impl AsRef<Path>) -> PathBuf {
+        ann_snapshot::sidecar_path(datafile.as_ref())
+    }
+
+    /// Atomically writes every in-memory HNSW index (graph, entry, norms,
+    /// mutation buffer, quantizer and codes) with this database's identity and
+    /// per-collection content digests. The datafile is never written.
+    ///
+    /// The snapshot is the active indexes at the current committed state; a
+    /// pending background rebuild is not included. The bytes are staged under
+    /// a random `create_new` name in the destination directory, re-validated
+    /// with the loader, synced and renamed over `path`. An existing `path` is
+    /// replaced only if it is a regular file starting with the sidecar magic,
+    /// so a datafile, symlink or unrelated file is refused with `Io`
+    /// (`InvalidInput`). Any error before the rename leaves `path` untouched;
+    /// `PublicationIndeterminate` (Unix directory sync) means `path` already
+    /// holds the complete new snapshot but its durability is uncertain.
+    /// The sidecar contains vector data; protect it like the datafile.
+    pub fn save_ann_snapshot(&self, path: impl AsRef<Path>) -> Result<AnnSnapshotReport> {
+        self.ensure_healthy()?;
+        ann_snapshot::save(self, path.as_ref())
+    }
+
+    /// Validates a sidecar against the current committed state and, only if
+    /// every section passes, installs its indexes (replacing those
+    /// collections' indexes). Every sidecar problem is an explicit
+    /// `Missing`/`Rejected` outcome that leaves all state unchanged; the file
+    /// is only read. Returns `Err` only for `Poisoned` or `HnswRebuildBusy`
+    /// (a background rebuild is pending).
+    pub fn load_ann_snapshot(&mut self, path: impl AsRef<Path>) -> Result<AnnSnapshotLoad> {
+        self.ensure_healthy()?;
+        if self.rebuild.is_some() {
+            return Err(Error::HnswRebuildBusy);
+        }
+        Ok(ann_snapshot::load(self, path.as_ref()))
+    }
 }
 
 /// Exact bounded top-k scan; ordering is distance then ascending ID.
@@ -2116,6 +2163,37 @@ mod tests {
         assert_eq!(db.len(), 1);
         assert!(db.get(1).unwrap().is_none());
         assert_eq!(db.get(2).unwrap().unwrap().vector, [2.0]);
+    }
+
+    #[test]
+    fn poisoned_database_refuses_ann_snapshot_save_and_load() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("poisoned-ann.vlite");
+        let sidecar = Database::ann_snapshot_path(&path);
+        let mut db = Database::create(&path, 1).unwrap();
+        db.put(1, &[1.0], b"").unwrap();
+        db.build_hnsw(HnswConfig::default()).unwrap();
+        db.save_ann_snapshot(&sidecar).unwrap();
+        let saved = std::fs::read(&sidecar).unwrap();
+        let record = Record {
+            vector: vec![2.0],
+            payload: Vec::new(),
+            metadata: Metadata::new(),
+        };
+        let frame = format::frame(2, 2, Some(&record));
+        let result = db.commit_frame_with_sync(2, &frame, |_| {
+            Err(io::Error::other("injected failure after flush"))
+        });
+        assert!(matches!(result, Err(Error::CommitIndeterminate(_))));
+        assert!(matches!(
+            db.save_ann_snapshot(&sidecar),
+            Err(Error::Poisoned)
+        ));
+        assert!(matches!(
+            db.load_ann_snapshot(&sidecar),
+            Err(Error::Poisoned)
+        ));
+        assert_eq!(std::fs::read(&sidecar).unwrap(), saved);
     }
 
     #[test]

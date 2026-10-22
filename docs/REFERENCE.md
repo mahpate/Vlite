@@ -9,16 +9,19 @@ fixed-dimension vector space. Opt-in v4 files support named collections with
 independent dimensions. Both support opaque payloads, durable single-record
 and atomic batch mutations, and exact nearest-neighbor search.
 
-An optional REST service exposes the same engine. Optional in-memory HNSW search
-supports approximate retrieval without changing the database file.
-gRPC, persistent ANN indexes, distributed operation, interactive transactions,
-encryption and read-only/multi-reader handles are deferred.
+Optional REST and gRPC services expose the same engine. Optional in-memory HNSW
+search supports approximate retrieval without changing the database file;
+an explicit snapshot sidecar can cache derived graph state across restarts.
+Distributed operation, interactive transactions, encryption and
+read-only/multi-reader handles are deferred.
 This is a correctness-first MVP, not a production-hardened storage engine.
 
 See [collections and advanced retrieval](CAPABILITIES.md) for opt-in v4,
 per-record revisions, metadata indexes and query planning, hybrid search,
 quantized ANN, quality diagnostics and resumable ingestion. Later sections
 describe legacy/default workflows unless explicitly marked otherwise.
+See [gRPC](GRPC.md) and [ANN snapshots](ANN-SNAPSHOTS.md) for their opt-in
+contracts and [0.2.0 upgrade guidance](RELEASE-0.2.0.md) before deployment.
 
 ## Build and use
 

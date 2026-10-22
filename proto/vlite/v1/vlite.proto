@@ -1,0 +1,218 @@
+// VLite gRPC API v1. Opt-in transport (`--grpc-bind`, Cargo feature `grpc`)
+// over the same engine, authentication, scopes and limits as REST.
+//
+// Authentication: send `authorization: Bearer <token>` metadata (admin,
+// read-only or scoped `vlk_` credential), exactly as for REST.
+// Errors: the gRPC status message is the REST error message and the
+// `vlite-error-code` trailer carries the stable REST error code.
+// Addressing: an empty `collection` field addresses the legacy `default`
+// collection with legacy defaults (the REST `/v1/...` routes); a non-empty
+// value addresses that named collection (`/v1/collections/{collection}/...`).
+// Limits: requests are capped at 8 MiB and responses at 16 MiB.
+syntax = "proto3";
+
+package vlite.v1;
+
+service VLite {
+  rpc ListCollections(ListCollectionsRequest) returns (ListCollectionsResponse);
+  rpc GetCollection(GetCollectionRequest) returns (Collection);
+  rpc CreateCollection(CreateCollectionRequest) returns (Collection);
+  rpc DropCollection(DropCollectionRequest) returns (DropCollectionResponse);
+  rpc GetVector(GetVectorRequest) returns (Vector);
+  rpc PutVector(PutVectorRequest) returns (PutVectorResponse);
+  rpc DeleteVector(DeleteVectorRequest) returns (DeleteVectorResponse);
+  // Atomic: every operation commits, or none does.
+  rpc WriteBatch(WriteBatchRequest) returns (WriteBatchResponse);
+  // Exact or ready-index ANN search. Never builds an index.
+  rpc Search(SearchRequest) returns (SearchResponse);
+}
+
+message Collection {
+  uint32 id = 1;
+  string name = 2;
+  uint32 dimensions = 3;
+  uint64 live_records = 4;
+  // Effective settings as the same JSON object REST returns in `settings`.
+  string settings_json = 5;
+  bool settings_persisted = 6;
+}
+
+message ListCollectionsRequest {}
+
+message ListCollectionsResponse {
+  repeated Collection items = 1;
+  uint32 format_version = 2;
+}
+
+message GetCollectionRequest {
+  string name = 1;
+}
+
+message CreateCollectionRequest {
+  string name = 1;
+  uint32 dimensions = 2;
+  // Optional partial settings: the same JSON object as REST `settings`.
+  optional string settings_json = 3;
+}
+
+message DropCollectionRequest {
+  string name = 1;
+}
+
+message DropCollectionResponse {
+  bool deleted = 1;
+}
+
+message MetadataValue {
+  oneof kind {
+    string string_value = 1;
+    int64 integer_value = 2;
+    double float_value = 3;
+    bool boolean_value = 4;
+  }
+}
+
+// Compare-and-set precondition, checked atomically with the write (under the
+// same database lock) against the addressed record of the addressed
+// collection. Unset means `any`.
+message Expected {
+  message Any {}
+  message Absent {}
+  oneof kind {
+    Any any = 1;
+    // The ID must not currently exist.
+    Absent absent = 2;
+    // The record must exist with exactly this revision.
+    uint64 revision = 3;
+  }
+}
+
+message GetVectorRequest {
+  string collection = 1;
+  uint64 id = 2;
+}
+
+message Vector {
+  uint64 id = 1;
+  repeated float vector = 2;
+  bytes payload = 3;
+  map<string, MetadataValue> metadata = 4;
+  uint64 revision = 5;
+}
+
+message PutVectorRequest {
+  string collection = 1;
+  uint64 id = 2;
+  repeated float vector = 3;
+  bytes payload = 4;
+  map<string, MetadataValue> metadata = 5;
+  Expected expected = 6;
+}
+
+message PutVectorResponse {
+  uint64 revision = 1;
+  bool created = 2;
+}
+
+message DeleteVectorRequest {
+  string collection = 1;
+  uint64 id = 2;
+  Expected expected = 3;
+}
+
+message DeleteVectorResponse {
+  bool deleted = 1;
+}
+
+message Operation {
+  message Put {
+    uint64 id = 1;
+    repeated float vector = 2;
+    bytes payload = 3;
+    map<string, MetadataValue> metadata = 4;
+  }
+  message Delete {
+    uint64 id = 1;
+  }
+  oneof kind {
+    Put put = 1;
+    Delete delete = 2;
+  }
+}
+
+message WriteBatchRequest {
+  string collection = 1;
+  repeated Operation operations = 2;
+}
+
+message WriteBatchResponse {}
+
+enum SearchMode {
+  // Same as EXACT.
+  SEARCH_MODE_UNSPECIFIED = 0;
+  SEARCH_MODE_EXACT = 1;
+  // Uses an existing matching index; FAILED_PRECONDITION `index_not_ready`
+  // otherwise. Build indexes with REST `POST .../index/hnsw`.
+  SEARCH_MODE_APPROXIMATE_READY = 2;
+}
+
+enum Metric {
+  // The collection default (legacy target: squared_l2).
+  METRIC_UNSPECIFIED = 0;
+  METRIC_SQUARED_L2 = 1;
+  METRIC_COSINE = 2;
+  METRIC_INNER_PRODUCT = 3;
+}
+
+enum Quantization {
+  // The collection default (legacy target: none).
+  QUANTIZATION_UNSPECIFIED = 0;
+  QUANTIZATION_NONE = 1;
+  QUANTIZATION_SCALAR_U8 = 2;
+}
+
+// Index identity override; omitted fields use the default identity.
+message HnswConfig {
+  optional uint32 m = 1;
+  optional uint32 ef_construction = 2;
+  optional uint64 seed = 3;
+}
+
+message Condition {
+  message Eq {
+    string field = 1;
+    MetadataValue value = 2;
+  }
+  message Range {
+    string field = 1;
+    MetadataValue min = 2;
+    MetadataValue max = 3;
+  }
+  oneof kind {
+    Eq eq = 1;
+    Range range = 2;
+  }
+}
+
+message SearchRequest {
+  string collection = 1;
+  repeated float vector = 2;
+  uint32 k = 3;
+  SearchMode mode = 4;
+  Metric metric = 5;
+  HnswConfig config = 6;
+  optional uint32 ef_search = 7;
+  Quantization quantization = 8;
+  optional uint32 rerank_multiplier = 9;
+  // Conjunction of metadata conditions.
+  repeated Condition filter = 10;
+}
+
+message Hit {
+  uint64 id = 1;
+  double distance = 2;
+}
+
+message SearchResponse {
+  repeated Hit hits = 1;
+}

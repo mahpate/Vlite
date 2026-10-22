@@ -5,6 +5,40 @@ See [methodology and reproduction](README.md) before interpreting the numbers.
 
 No zvec, Milvus, Weaviate, FAISS or other unmeasured engine results are inferred.
 
+## Release 0.2.0 real-embedding regression
+
+[Final-source Windows campaign](results/release02-glove-windows.json) measures
+the same pinned 3,000-vector GloVe subset with 100 queries and cosine k=10.
+Static ANN at ef=100 has mean recall 0.995, p50 0.53 ms and p95 0.73 ms;
+ef=300 reaches recall 1.0 with p50 0.92 ms and p95 1.13 ms.
+Exact IDs/distances match the independent oracle in every scenario.
+
+The mutation workload deliberately uses lazy synchronous rebuilding: seven
+rebuilds produce roughly 1.5-second p95 query stalls. These are measured costs,
+not hidden failures or production latency claims. Prefer ready-only search
+with explicit/background maintenance when such pauses are unacceptable.
+The raw report retains all samples, process peak RSS, provenance and caveats.
+One trial on a shared host does not establish production tail latency.
+
+## ANN restart cache, October 21, 2026
+
+[Raw release measurement](results/ann-restart-glove-windows.json) uses the
+licensed, hash-pinned GloVe subset: 3,000 vectors, 100 dimensions, 100 queries,
+cosine, k=10, ef=100, m=16 and construction ef=100 on Windows x64.
+Every returned ID and exact distance bit matches before and after loading,
+and all three fresh rebuild trials return the same results.
+
+Unquantized reopen plus snapshot validation/load took **24.63 ms**, versus
+**2,056.35 ms mean** for reopen plus rebuild across three trials. The snapshot
+was 377,740 bytes. Scalar-u8 took **27.64 ms**, versus **1,919.07 ms mean** to
+reopen/rebuild; its snapshot was 679,452 bytes. Quantized codes add cache bytes;
+this is not a total-RAM savings claim.
+
+These are warm-cache, same-child observations on a shared unpinned host, not
+cold-machine startup or production tails. The full primary log is still replayed
+and cache integrity/content still validated. This small historical word-vector
+subset does not establish quality on modern sentence embeddings.
+
 ## Indexed and quantized retrieval, October 21, 2026
 
 [Raw Windows x64 release run](results/search-capabilities-synthetic-windows.json)

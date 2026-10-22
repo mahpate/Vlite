@@ -1,6 +1,6 @@
 [package]
 name = "vlite"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.89"
 description = "A single-file vector database with embedded bindings and an optional REST service"
@@ -14,8 +14,21 @@ resolver = "3"
 default = []
 json = ["dep:serde", "dep:serde_json"]
 server = ["json", "dep:axum", "dep:base64", "dep:tokio", "dep:subtle"]
+grpc = [
+    "server",
+    "dep:tonic",
+    "dep:tonic-prost",
+    "dep:prost",
+    "dep:tonic-health",
+    "dep:tonic-prost-build",
+    "dep:protox",
+]
 
 [dependencies]
+prost = { version = "0.14", optional = true }
+tonic = { version = "0.14", optional = true, default-features = false, features = ["transport", "router", "server", "codegen"] }
+tonic-health = { version = "0.14", optional = true, default-features = false }
+tonic-prost = { version = "0.14", optional = true }
 axum = { version = "0.8", optional = true }
 base64 = { version = "0.22", optional = true }
 getrandom = "0.4"
@@ -25,6 +38,10 @@ sha2 = "0.10"
 tempfile = "3"
 subtle = { version = "2.6", optional = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync"], optional = true }
+
+[build-dependencies]
+protox = { version = "0.10", optional = true }
+tonic-prost-build = { version = "0.14", optional = true }
 
 [dev-dependencies]
 http-body-util = "0.1"
@@ -41,3 +58,7 @@ required-features = ["server"]
 [[test]]
 name = "server_cli"
 required-features = ["server"]
+
+[[test]]
+name = "grpc"
+required-features = ["grpc"]

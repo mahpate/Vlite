@@ -1,21 +1,31 @@
-use std::{error::Error, net::SocketAddr, path::PathBuf, time::Duration};
+use std::{
+    error::Error,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
 
+use serde_json::json;
 use tokio::net::TcpListener;
 use vlite::{
-    Database, FormatVersion,
+    AnnSnapshotLoad, Database, FormatVersion,
     server::{
         BearerToken, ServerOptions, Service, configured_admin_router, read_token_file,
         selected_database,
     },
 };
 
-const USAGE: &str = "usage: vlite-server <database-path> [--create-if-missing <dimensions> [--create-format 3|4]] [--bind <ip:port>] [--allow-remote] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS";
+const USAGE: &str = "usage: vlite-server <database-path> [--create-if-missing <dimensions> [--create-format 3|4]] [--bind <ip:port>] [--grpc-bind <ip:port>] [--allow-remote] [--ann-snapshot] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS";
 
 struct Config {
     path: PathBuf,
     dimensions: Option<usize>,
     format: FormatVersion,
     bind: SocketAddr,
+    /// Optional second listener for the gRPC transport (feature `grpc`).
+    grpc_bind: Option<SocketAddr>,
+    /// Load `<active>.ann` after open; save it after both listeners drain.
+    ann_snapshot: bool,
     token: Option<BearerToken>,
     token_file: Option<PathBuf>,
     read_only_token: Option<BearerToken>,
@@ -97,6 +107,8 @@ fn config() -> Result<Config, Box<dyn Error>> {
     let mut seen_bind = false;
     let mut token_file = std::env::var_os("VLITE_AUTH_TOKEN_FILE");
     let mut insecure_local = false;
+    let mut grpc_bind: Option<SocketAddr> = None;
+    let mut ann_snapshot = false;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--create-if-missing") if dimensions.is_none() => {
@@ -118,6 +130,10 @@ fn config() -> Result<Config, Box<dyn Error>> {
                 bind = args.next().ok_or(USAGE)?.to_str().ok_or(USAGE)?.parse()?;
                 seen_bind = true;
             }
+            Some("--grpc-bind") if grpc_bind.is_none() => {
+                grpc_bind = Some(args.next().ok_or(USAGE)?.to_str().ok_or(USAGE)?.parse()?);
+            }
+            Some("--ann-snapshot") if !ann_snapshot => ann_snapshot = true,
             Some("--allow-remote") if !allow_remote => allow_remote = true,
             Some("--token-file") if token_file.is_none() => {
                 token_file = Some(args.next().ok_or(USAGE)?);
@@ -128,6 +144,21 @@ fn config() -> Result<Config, Box<dyn Error>> {
     }
     if format.is_some() && dimensions.is_none() {
         return Err("--create-format requires --create-if-missing".into());
+    }
+    if grpc_bind.is_some() && !cfg!(feature = "grpc") {
+        return Err("--grpc-bind requires a build with the grpc feature".into());
+    }
+    if let Some(grpc) = grpc_bind {
+        // Port 0 asks for two distinct ephemeral ports; anything else must differ.
+        if grpc == bind && grpc.port() != 0 {
+            return Err("--grpc-bind must differ from --bind".into());
+        }
+        if !grpc.ip().is_loopback() && !allow_remote {
+            return Err(
+                "non-loopback --grpc-bind requires --allow-remote and bearer authentication; TLS must terminate at a proxy"
+                    .into(),
+            );
+        }
     }
     if !bind.ip().is_loopback() && !allow_remote {
         return Err(
@@ -143,6 +174,11 @@ fn config() -> Result<Config, Box<dyn Error>> {
     {
         return Err(
             "select exactly one of token file, VLITE_AUTH_TOKEN, or --insecure-local".into(),
+        );
+    }
+    if insecure_local && grpc_bind.is_some_and(|grpc| !grpc.ip().is_loopback()) {
+        return Err(
+            "--insecure-local requires a loopback --grpc-bind, even with --allow-remote".into(),
         );
     }
     if insecure_local && !bind.ip().is_loopback() {
@@ -184,6 +220,8 @@ fn config() -> Result<Config, Box<dyn Error>> {
         dimensions,
         format: format.unwrap_or(FormatVersion::V3),
         bind,
+        grpc_bind,
+        ann_snapshot,
         token,
         token_file: token_file.map(PathBuf::from),
         read_only_token,
@@ -230,25 +268,118 @@ fn open(config: &Config) -> vlite::Result<(Database, PathBuf)> {
     Ok((db, path.to_path_buf()))
 }
 
-async fn run() -> Result<(), Box<dyn Error>> {
-    let config = config()?;
+/// Graceful-stop signals, registered before any listener binds: Ctrl-C
+/// everywhere, SIGTERM on Unix (container stop) and Ctrl-Break on Windows
+/// (the console event a supervisor can send to one process group).
+struct Signals {
     #[cfg(unix)]
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    let listener = TcpListener::bind(config.bind).await?;
-    let address = listener.local_addr()?;
-    let (database, active) = open(&config)?;
-    let service = Service::try_new(database)?;
-    let (signal_tx, signal_rx) = tokio::sync::oneshot::channel();
-    let shutdown = async move {
+    terminate: tokio::signal::unix::Signal,
+    #[cfg(windows)]
+    ctrl_break: tokio::signal::windows::CtrlBreak,
+}
+
+impl Signals {
+    fn new() -> std::io::Result<Self> {
+        Ok(Self {
+            #[cfg(unix)]
+            terminate: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?,
+            #[cfg(windows)]
+            ctrl_break: tokio::signal::windows::ctrl_break()?,
+        })
+    }
+
+    async fn recv(mut self) -> std::io::Result<()> {
         #[cfg(unix)]
         let result = tokio::select! {
             result = tokio::signal::ctrl_c() => result,
-            _ = terminate.recv() => Ok(()),
+            _ = self.terminate.recv() => Ok(()),
         };
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        let result = tokio::select! {
+            result = tokio::signal::ctrl_c() => result,
+            _ = self.ctrl_break.recv() => Ok(()),
+        };
+        #[cfg(not(any(unix, windows)))]
         let result = tokio::signal::ctrl_c().await;
-        let _ = signal_tx.send(result);
+        result
+    }
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Loads `<active>.ann`. Every outcome is one stderr JSON line; no outcome
+/// fails startup (the sidecar is a disposable cache).
+fn load_ann_snapshot(database: &mut Database, path: &Path) {
+    let started = Instant::now();
+    let line = match database.load_ann_snapshot(path) {
+        Ok(outcome) => {
+            let (indexes, reason) = match outcome {
+                AnnSnapshotLoad::Loaded { indexes } => (indexes, None),
+                AnnSnapshotLoad::Rejected(rejection) => (0, Some(rejection.to_string())),
+                _ => (0, None),
+            };
+            json!({"event":"ann_snapshot_load","outcome":outcome.code(),"reason":reason,
+                "indexes":indexes,"duration_ms":elapsed_ms(started)})
+        }
+        Err(error) => json!({"event":"ann_snapshot_load","outcome":"error",
+            "reason":error.to_string(),"indexes":0,"duration_ms":elapsed_ms(started)}),
     };
+    eprintln!("{line}");
+}
+
+/// Saves after both listeners drained. A failed save is logged and never
+/// blocks `close` or changes the exit code (the prior sidecar stays intact).
+async fn save_ann_snapshot(service: &Service, path: &Path) {
+    let started = Instant::now();
+    let line = match service.save_ann_snapshot(path).await {
+        Ok(report) => json!({"event":"ann_snapshot_save","outcome":"saved","reason":null,
+            "indexes":report.indexes,"bytes":report.bytes,"duration_ms":elapsed_ms(started)}),
+        Err(error) => json!({"event":"ann_snapshot_save","outcome":"failed",
+            "reason":error.to_string(),"indexes":0,"bytes":0,"duration_ms":elapsed_ms(started)}),
+    };
+    eprintln!("{line}");
+}
+
+#[cfg(feature = "grpc")]
+type GrpcHealth = vlite::server::grpc::GrpcHealth;
+/// Uninhabited: without the feature there is never a gRPC listener.
+#[cfg(not(feature = "grpc"))]
+#[derive(Clone)]
+enum GrpcHealth {}
+
+/// Resolves once the shared stop flag is raised, after reporting gRPC
+/// health `NOT_SERVING`, so health flips before either listener drains.
+async fn stopped(mut stop: tokio::sync::watch::Receiver<bool>, health: Option<GrpcHealth>) {
+    let _ = stop.wait_for(|stop| *stop).await;
+    #[cfg(feature = "grpc")]
+    if let Some(health) = health {
+        health.set_not_serving().await;
+    }
+    #[cfg(not(feature = "grpc"))]
+    let _ = health;
+}
+
+async fn run() -> Result<(), Box<dyn Error>> {
+    let config = config()?;
+    let signals = Signals::new()?;
+    // Bind both listeners before opening, so a port conflict never opens
+    // (or creates) the database.
+    let listener = TcpListener::bind(config.bind).await?;
+    let address = listener.local_addr()?;
+    let grpc_listener = match config.grpc_bind {
+        Some(bind) => Some(TcpListener::bind(bind).await?),
+        None => None,
+    };
+    let (mut database, active) = open(&config)?;
+    let snapshot = config
+        .ann_snapshot
+        .then(|| Database::ann_snapshot_path(&active));
+    if let Some(path) = &snapshot {
+        load_ann_snapshot(&mut database, path);
+    }
+    let service = Service::try_new(database)?;
     let router = match configured_admin_router(service.clone(), options(&config, Some(active))) {
         Ok(router) => router,
         Err(error) => {
@@ -257,17 +388,84 @@ async fn run() -> Result<(), Box<dyn Error>> {
             return Err(error.into());
         }
     };
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let signal = tokio::spawn({
+        let stop_tx = stop_tx.clone();
+        async move {
+            let result = signals.recv().await;
+            let _ = stop_tx.send(true);
+            result
+        }
+    });
+
+    #[cfg(feature = "grpc")]
+    let grpc = match grpc_listener {
+        // Built after the REST router so it shares its tokens and audit log.
+        Some(listener) => Some((
+            vlite::server::grpc::grpc_router(service.clone()).await,
+            listener,
+        )),
+        None => None,
+    };
+    #[cfg(not(feature = "grpc"))]
+    let grpc: Option<((), TcpListener)> = {
+        // `config` rejects --grpc-bind without the feature.
+        debug_assert!(grpc_listener.is_none());
+        None
+    };
+    #[cfg(feature = "grpc")]
+    let health = grpc.as_ref().map(|(server, _)| server.health());
+    #[cfg(not(feature = "grpc"))]
+    let health: Option<GrpcHealth> = None;
+
     println!("LISTENING http://{address}");
-    let serving = axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown)
-        .await;
+    if let Some((_, listener)) = &grpc {
+        println!("LISTENING grpc://{}", listener.local_addr()?);
+    }
+    let rest = {
+        let stop_tx = stop_tx.clone();
+        let shutdown = stopped(stop_rx.clone(), health.clone());
+        async move {
+            let result = axum::serve(listener, router)
+                .with_graceful_shutdown(shutdown)
+                .await;
+            // Either listener failing stops the other one.
+            let _ = stop_tx.send(true);
+            result.map_err(|error| -> Box<dyn Error> { error.into() })
+        }
+    };
+    let grpc = async move {
+        let Some((server, listener)) = grpc else {
+            return Ok(());
+        };
+        #[cfg(feature = "grpc")]
+        let result = server
+            .serve_with_shutdown(listener, stopped(stop_rx, health))
+            .await
+            .map_err(|error| -> Box<dyn Error> { error.into() });
+        #[cfg(not(feature = "grpc"))]
+        let result: Result<(), Box<dyn Error>> = {
+            let _ = (server, listener, stop_rx, health);
+            Ok(())
+        };
+        let _ = stop_tx.send(true);
+        result
+    };
+    let (rest, grpc) = tokio::join!(rest, grpc);
+    if let Some(path) = &snapshot {
+        save_ann_snapshot(&service, path).await;
+    }
     let closing = service.close().await;
-    serving?;
+    rest?;
+    grpc?;
     closing?;
-    signal_rx.await??;
+    if signal.is_finished() {
+        signal.await??;
+    } else {
+        signal.abort();
+    }
     Ok(())
 }
-
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     match run().await {

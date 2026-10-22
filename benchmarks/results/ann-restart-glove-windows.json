@@ -1,0 +1,230 @@
+{
+  "schema": 1,
+  "created_utc": "2026-10-22T00:33:23.658630+00:00",
+  "platform": "Windows-11-10.0.26300-SP0",
+  "dataset": {
+    "schema_version": 1,
+    "dataset": "ANN-Benchmarks glove-100-angular",
+    "source_url": "https://ann-benchmarks.com/glove-100-angular.hdf5",
+    "source_sha256": "544af1d5e84e112cd4749571dcfd8ca109818a572f850af75a3a09e093a953c4",
+    "source_bytes": 485413888,
+    "prepared_utc": "2026-10-20T05:37:19.676466+00:00",
+    "preparation_versions": {
+      "h5py": "3.16.0",
+      "numpy": "2.5.4"
+    },
+    "model": "GloVe Twitter 27B, 100 dimensions (ANN-Benchmarks conversion)",
+    "model_source": "https://nlp.stanford.edu/projects/glove/",
+    "conversion_source": "https://github.com/erikbern/ann-benchmarks/blob/main/ann_benchmarks/datasets.py",
+    "license": "Open Data Commons Public Domain Dedication and License (PDDL) v1.0",
+    "license_url": "https://opendatacommons.org/licenses/pddl/1-0/",
+    "license_declaration_url": "https://nlp.stanford.edu/projects/glove/",
+    "citation": "Jeffrey Pennington, Richard Socher, Christopher D. Manning. GloVe: Global Vectors for Word Representation. EMNLP 2014.",
+    "dimensions": 100,
+    "normalization": "none; source values cast to f32 and exported with 9 significant digits",
+    "split_policy": "prefixes of upstream train/test splits; updates are disjoint train rows after the base subset; not the full ANN-Benchmarks dataset",
+    "upstream_shapes": {
+      "train": [
+        1183514,
+        100
+      ],
+      "test": [
+        10000,
+        100
+      ]
+    },
+    "files": [
+      {
+        "name": "vectors.txt",
+        "split": "train",
+        "start": 0,
+        "stop": 3000,
+        "rows": 3000,
+        "sha256": "4486b794c8085809551d19f7bb5a146e126b4514a5902c461a19a5098f56691c",
+        "decoded_f32_sha256": "d978da3ff23f0bf0d120be3bda41cc06789b51a6fe1ced0bb5f05b50295c6f52"
+      },
+      {
+        "name": "queries.txt",
+        "split": "test",
+        "start": 0,
+        "stop": 100,
+        "rows": 100,
+        "sha256": "c9b50d8c51a0fe58f5b2930f606575ba80b162df4e4ebc467af92b0acd0e987b",
+        "decoded_f32_sha256": "52c5e29ffd501b6fe06af70e7ca02d5a5c2b7d86c3e60280f8f95e8e6522da7a"
+      },
+      {
+        "name": "updates.txt",
+        "split": "train",
+        "start": 3000,
+        "stop": 4600,
+        "rows": 1600,
+        "sha256": "f17d64bdbd0a5b272dae91f46869a1f16cf950d532dc228d94b402c2e6f05ed0",
+        "decoded_f32_sha256": "5f1b1f60c2b8d9053dcea47ed6e9486f8b9248d28c195229d45f07c8c548f8f5"
+      }
+    ],
+    "preparer_sha256": "390b2cd7e9d27cdb1dae5dbf7cccca57b0ba2fa262436e071a7bb1f2c2213bc5"
+  },
+  "rows": [
+    {
+      "benchmark": "ann_restart",
+      "vlite_version": "0.2.0",
+      "profile": "release",
+      "os": "windows",
+      "arch": "x86_64",
+      "source": "files",
+      "provenance": [
+        {
+          "role": "vectors",
+          "path": "<dataset>/vectors.txt",
+          "sha256": "4486b794c8085809551d19f7bb5a146e126b4514a5902c461a19a5098f56691c",
+          "bytes": 3701238
+        },
+        {
+          "role": "queries",
+          "path": "<dataset>/queries.txt",
+          "sha256": "c9b50d8c51a0fe58f5b2930f606575ba80b162df4e4ebc467af92b0acd0e987b",
+          "bytes": 123614
+        },
+        {
+          "role": "manifest",
+          "path": "<dataset>/dataset-manifest.json",
+          "sha256": "591357abd518c5d00107bc0c7b987f6fbcbdc487f94dcb4336942040d64d3805",
+          "bytes": 2392
+        }
+      ],
+      "records": 3000,
+      "queries": 100,
+      "dimensions": 100,
+      "metric": "cosine",
+      "quantization": "none",
+      "k": 10,
+      "ef_search": 100,
+      "m": 16,
+      "ef_construction": 100,
+      "seed": 42,
+      "snapshot_bytes": 377740,
+      "load_outcome": "loaded",
+      "exact_hits_match": true,
+      "mismatched_queries": 0,
+      "rebuild_hits_equal_pre_save": true,
+      "timings_ns": {
+        "input": 25593300,
+        "insert": 13720700,
+        "initial_build": 1825741100,
+        "pre_save_queries": 42490900,
+        "save": 12699000,
+        "close": 1269400,
+        "reopen": 18755100,
+        "load": 5874700,
+        "post_load_queries": 42366900,
+        "restart_with_snapshot": 24629800,
+        "rebuild_trials": [
+          {
+            "reopen": 8829600,
+            "build": 1765385200,
+            "restart_with_rebuild": 1774214800
+          },
+          {
+            "reopen": 8791700,
+            "build": 2335962100,
+            "restart_with_rebuild": 2344753800
+          },
+          {
+            "reopen": 11923100,
+            "build": 2038156400,
+            "restart_with_rebuild": 2050079500
+          }
+        ]
+      }
+    },
+    {
+      "benchmark": "ann_restart",
+      "vlite_version": "0.2.0",
+      "profile": "release",
+      "os": "windows",
+      "arch": "x86_64",
+      "source": "files",
+      "provenance": [
+        {
+          "role": "vectors",
+          "path": "<dataset>/vectors.txt",
+          "sha256": "4486b794c8085809551d19f7bb5a146e126b4514a5902c461a19a5098f56691c",
+          "bytes": 3701238
+        },
+        {
+          "role": "queries",
+          "path": "<dataset>/queries.txt",
+          "sha256": "c9b50d8c51a0fe58f5b2930f606575ba80b162df4e4ebc467af92b0acd0e987b",
+          "bytes": 123614
+        },
+        {
+          "role": "manifest",
+          "path": "<dataset>/dataset-manifest.json",
+          "sha256": "591357abd518c5d00107bc0c7b987f6fbcbdc487f94dcb4336942040d64d3805",
+          "bytes": 2392
+        }
+      ],
+      "records": 3000,
+      "queries": 100,
+      "dimensions": 100,
+      "metric": "cosine",
+      "quantization": "u8",
+      "k": 10,
+      "ef_search": 100,
+      "m": 16,
+      "ef_construction": 100,
+      "seed": 42,
+      "snapshot_bytes": 679452,
+      "load_outcome": "loaded",
+      "exact_hits_match": true,
+      "mismatched_queries": 0,
+      "rebuild_hits_equal_pre_save": true,
+      "timings_ns": {
+        "input": 26535500,
+        "insert": 13376900,
+        "initial_build": 1602890100,
+        "pre_save_queries": 36458500,
+        "save": 17076300,
+        "close": 1547000,
+        "reopen": 19735200,
+        "load": 7908200,
+        "post_load_queries": 34232600,
+        "restart_with_snapshot": 27643400,
+        "rebuild_trials": [
+          {
+            "reopen": 8893000,
+            "build": 2086445700,
+            "restart_with_rebuild": 2095338700
+          },
+          {
+            "reopen": 8849700,
+            "build": 1583197500,
+            "restart_with_rebuild": 1592047200
+          },
+          {
+            "reopen": 8623600,
+            "build": 2061215200,
+            "restart_with_rebuild": 2069838800
+          }
+        ]
+      }
+    }
+  ],
+  "source_sha256": {
+    "src/ann_snapshot.rs": "4a1638cedc204f0bc1c34fee1acf70e9c369d1b445aa49f55af2a11fb71f64e5",
+    "src/hnsw.rs": "1d36ad8c1f927764f07199870c0d1c8d6d0e9fb499ec695ab97cf03563a7da80",
+    "src/quantize.rs": "91c0645a05a47e90268d595854767f87b8b3a3b83797d2f6aeb819add27ca42e",
+    "src/lib.rs": "f37a504e79504d9bb74eed3343f07702d391b1a2e8ca9feca27dab4c95276975",
+    "examples/ann_restart_bench.rs": "478aa399deb1f44815e6e8270a520e5e5438f204232384555410d1944611f7ae",
+    "benchmarks/ann_restart_campaign.py": "ee41280f1c0ef1eea2a6af9f212ecc8d595d3acc730638e9fec3e223ccd33534",
+    "Cargo.toml": "4d69d69c4e3d8a9cdfb270ad1d2d16efddfc33ebd659b0918803546030416411",
+    "Cargo.lock": "9f32d5005344011dd475a5539c73f56f59ee30ffadc082f2ae963839865c0cb7"
+  },
+  "binary_sha256": "5bb5c263c3d3bb3a6a6aeb6bef8eb26da0ef361c6f9a1ae1e4f13b2ce7f92d96",
+  "limitations": [
+    "One bounded GloVe subset, not modern sentence embeddings or full ANN-Benchmarks.",
+    "Shared unpinned host; warm-cache reopen timings, not cold-machine startup.",
+    "Snapshot checksum/content validation remains necessary; primary log still replays.",
+    "Repeated rebuilds in one child; no process RSS or production tail claim."
+  ]
+}

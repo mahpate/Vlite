@@ -35,6 +35,8 @@ mod admin;
 mod audit;
 mod collections;
 mod credentials;
+#[cfg(feature = "grpc")]
+pub mod grpc;
 mod observability;
 mod ops;
 pub use admin::{ServerOptions, configured_admin_router, read_token_file, selected_database};
@@ -135,6 +137,10 @@ pub struct Service {
     lineage: Option<u64>,
     ops: Arc<ops::Ops>,
     imports: Arc<Mutex<collections::Reservations>>,
+    /// Authentication state of the most recently configured REST router on
+    /// any clone of this service; other transports share it (same tokens,
+    /// credential store, audit log and reloads).
+    published_admin: Arc<Mutex<Option<Arc<admin::AdminState>>>>,
 }
 
 impl Service {
@@ -176,6 +182,7 @@ impl Service {
             format_version,
             lineage,
             imports: Arc::new(Mutex::new(collections::Reservations::default())),
+            published_admin: Arc::default(),
         })
     }
 
@@ -224,6 +231,31 @@ impl Service {
                 db.close()?;
             }
             Ok(())
+        })
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))?
+    }
+
+    /// Call after every listener has drained and before `close`. Stops and
+    /// joins the scheduler (so no maintenance or backup races the save),
+    /// waits for any disconnected writer, then saves the active ANN indexes.
+    /// It never writes the datafile; `close` remains required.
+    pub async fn save_ann_snapshot(
+        &self,
+        path: impl Into<std::path::PathBuf>,
+    ) -> crate::Result<crate::AnnSnapshotReport> {
+        let path = path.into();
+        let database = self.database.clone();
+        let ops = self.ops.clone();
+        tokio::task::spawn_blocking(move || {
+            ops.shutdown();
+            let owner = database
+                .lock()
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            owner
+                .as_ref()
+                .ok_or_else(|| std::io::Error::other("database is closed"))?
+                .save_ann_snapshot(&path)
         })
         .await
         .map_err(|error| std::io::Error::other(error.to_string()))?
@@ -301,6 +333,9 @@ fn data_routes() -> Router<Service> {
 }
 
 fn configured_routes(service: Service) -> Router {
+    if let Ok(mut published) = service.published_admin.lock() {
+        *published = Some(service.admin.clone());
+    }
     let observation = service.clone();
     admin::routes()
         .merge(collections::routes())
@@ -515,6 +550,8 @@ fn forbidden_scope() -> ApiError {
     )
 }
 
+/// REST adapter for `authorize_need`: derives the scope requirement, the
+/// read-only rule and the legacy `default` binding from the matched route.
 fn authorize(
     service: &Service,
     role: &admin::Role,
@@ -522,35 +559,48 @@ fn authorize(
     route: &str,
     path: &str,
 ) -> Result<(), ApiError> {
+    let read = method == Method::GET || method == Method::HEAD;
+    let search = method == Method::POST
+        && (path == "/v1/search" || route == "/v1/collections/{collection}/search");
+    let read_only_allowed = !path.starts_with("/v1/admin/") && (read || search);
+    // Legacy routes address `default` (ID 0); their handlers may not resolve
+    // a collection, so the binding is checked here as well.
+    let legacy = !route.contains("{collection}") && !route.starts_with("/v1/imports");
+    authorize_need(
+        service,
+        role,
+        permission(method, route),
+        read_only_allowed,
+        legacy,
+    )
+}
+
+/// Transport-neutral authorization policy shared by REST and gRPC.
+/// `legacy` marks requests that address `default` without naming it.
+fn authorize_need(
+    service: &Service,
+    role: &admin::Role,
+    need: Need,
+    read_only_allowed: bool,
+    legacy: bool,
+) -> Result<(), ApiError> {
     match role {
         admin::Role::Admin => Ok(()),
-        admin::Role::ReadOnly => {
-            let read = method == Method::GET || method == Method::HEAD;
-            let search = method == Method::POST
-                && (path == "/v1/search" || route == "/v1/collections/{collection}/search");
-            if path.starts_with("/v1/admin/") || !(read || search) {
-                Err(ApiError::new(
-                    StatusCode::FORBIDDEN,
-                    "read_only",
-                    "admin access required",
-                ))
-            } else {
-                Ok(())
-            }
-        }
+        admin::Role::ReadOnly if read_only_allowed => Ok(()),
+        admin::Role::ReadOnly => Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "read_only",
+            "admin access required",
+        )),
         admin::Role::Scoped(grant) => {
             if service.lineage != Some(grant.lineage) {
                 return Err(forbidden_scope());
             }
-            match permission(method, route) {
+            match need {
                 Need::Any => Ok(()),
                 Need::Admin => Err(forbidden_scope()),
                 Need::Op(op, reach) => {
-                    // Legacy routes address `default` (ID 0); their handlers
-                    // may not resolve a collection, so bind it here as well.
-                    let legacy = reach == Reach::Collection
-                        && !route.contains("{collection}")
-                        && !route.starts_with("/v1/imports");
+                    let legacy = legacy && reach == Reach::Collection;
                     if !grant.allows(op)
                         || (reach == Reach::All && !grant.all)
                         || (legacy && !grant.covers(service.lineage, 0, "default"))
@@ -571,8 +621,7 @@ async fn observe(
     next: Next,
 ) -> Response {
     let started = Instant::now();
-    let number = service.metrics.requests.fetch_add(1, Ordering::Relaxed) + 1;
-    let request_id = format!("{}-{number}", std::process::id());
+    let request_id = next_request_id(&service);
     let route = request
         .extensions()
         .get::<MatchedPath>()
@@ -630,20 +679,75 @@ async fn observe(
         }
     };
     if response.status() == StatusCode::UNAUTHORIZED {
-        service.metrics.unauthorized.fetch_add(1, Ordering::Relaxed);
         response.headers_mut().insert(
             header::WWW_AUTHENTICATE,
             axum::http::HeaderValue::from_static("Bearer"),
         );
     }
     let code = response.extensions().get::<ErrorCode>().map(|code| code.0);
-    if let (Some(admin::Role::Scoped(grant)), Some("forbidden_scope")) = (&role, code) {
+    record_request(
+        &service,
+        &RequestRecord {
+            route: &route,
+            method,
+            status: response.status(),
+            code,
+            role: role.as_ref(),
+            request_id: &request_id,
+            started,
+        },
+    );
+    response.headers_mut().insert(
+        "x-request-id",
+        request_id.parse().expect("generated ASCII ID"),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+/// Process-unique request ID; also counts the request.
+fn next_request_id(service: &Service) -> String {
+    let number = service.metrics.requests.fetch_add(1, Ordering::Relaxed) + 1;
+    format!("{}-{number}", std::process::id())
+}
+
+/// One completed request from either transport.
+struct RequestRecord<'a> {
+    route: &'a str,
+    method: &'static str,
+    status: StatusCode,
+    code: Option<&'static str>,
+    role: Option<&'a admin::Role>,
+    request_id: &'a str,
+    started: Instant,
+}
+
+/// Transport-neutral observation: metrics, scoped-denial audit, the request
+/// log line and the in-memory admin request record. Never logs secrets,
+/// vectors, payloads or metadata values.
+fn record_request(service: &Service, record: &RequestRecord<'_>) {
+    let RequestRecord {
+        route,
+        method,
+        status,
+        code,
+        role,
+        request_id,
+        started,
+    } = *record;
+    if status == StatusCode::UNAUTHORIZED {
+        service.metrics.unauthorized.fetch_add(1, Ordering::Relaxed);
+    }
+    if let (Some(admin::Role::Scoped(grant)), Some("forbidden_scope")) = (role, code) {
         service
             .metrics
             .credential_denials
             .fetch_add(1, Ordering::Relaxed);
         if let Some(log) = &service.admin.audit_log
-            && log.should_record_denial(&grant.id, &route)
+            && log.should_record_denial(&grant.id, route)
             && log
                 .append(
                     json!({"event":"credential_denied","credential_id":grant.id,
@@ -658,39 +762,30 @@ async fn observe(
                 .fetch_add(1, Ordering::Relaxed);
         }
     }
-    response.headers_mut().insert(
-        "x-request-id",
-        request_id.parse().expect("generated ASCII ID"),
-    );
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static("no-store"),
-    );
     let elapsed = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
     service
         .metrics
         .duration_ns
         .fetch_add(elapsed, Ordering::Relaxed);
-    if response.status().is_client_error() || response.status().is_server_error() {
+    if status.is_client_error() || status.is_server_error() {
         service.metrics.failures.fetch_add(1, Ordering::Relaxed);
     }
-    let credential = match &role {
+    let credential = match role {
         Some(admin::Role::Scoped(grant)) => Some(grant.id.clone()),
         _ => None,
     };
     eprintln!(
         "{}",
         json!({"event":"request", "request_id":request_id, "method":method,
-        "route":route, "status":response.status().as_u16(), "duration_ns":elapsed,
+        "route":route, "status":status.as_u16(), "duration_ns":elapsed,
         "credential_id":credential})
     );
     service.admin.record(
         json!({"request_id":request_id,"method":method,"route":route,
-        "status":response.status().as_u16(),"role":role.as_ref().map(admin::Role::name),
+        "status":status.as_u16(),"role":role.map(admin::Role::name),
         "credential_id":credential,
         "duration_ns":elapsed,"timestamp_unix_ms":admin::now_ms()}),
     );
-    response
 }
 
 async fn admission(
@@ -1216,26 +1311,50 @@ async fn fetch_in(
     target: Target,
     id: u64,
 ) -> Result<Response, ApiError> {
-    let ident = service.etag_ident.clone();
+    let fetched = fetch_core(&service, role, target, id).await?;
+    let body = Json(json!({
+        "id": id.to_string(),
+        "vector": fetched.record.vector,
+        "payload_base64": BASE64_STANDARD.encode(&fetched.record.payload),
+        "metadata": fetched.record.metadata,
+        "revision": fetched.revision.to_string(),
+    }));
+    let tag = etag(
+        &service.etag_ident,
+        fetched.collection,
+        id,
+        fetched.revision,
+        &fetched.record,
+    );
+    Ok(([(header::ETAG, tag)], body).into_response())
+}
+
+/// One record with its revision and resolved collection ID.
+struct Fetched {
+    record: Record,
+    revision: u64,
+    collection: u16,
+}
+
+/// Transport-neutral record read with scope enforcement.
+async fn fetch_core(
+    service: &Service,
+    role: admin::Role,
+    target: Target,
+    id: u64,
+) -> Result<Fetched, ApiError> {
     service
         .run(move |db| {
             let collection = open(db, &role, &target)?;
             let not_found =
                 || ApiError::new(StatusCode::NOT_FOUND, "not_found", "vector not found");
-            let record = db.get_in(collection, id)?.ok_or_else(not_found)?;
+            let record = db.get_in(collection, id)?.ok_or_else(not_found)?.clone();
             let revision = db.revision_in(collection, id)?.ok_or_else(not_found)?;
-            let body = Json(json!({
-                "id": id.to_string(),
-                "vector": record.vector,
-                "payload_base64": BASE64_STANDARD.encode(&record.payload),
-                "metadata": record.metadata,
-                "revision": revision.to_string(),
-            }));
-            Ok((
-                [(header::ETAG, etag(&ident, collection, id, revision, record))],
-                body,
-            )
-                .into_response())
+            Ok(Fetched {
+                record,
+                revision,
+                collection,
+            })
         })
         .await
 }
@@ -1287,29 +1406,89 @@ async fn put_in(
     headers: HeaderMap,
     input: Result<Json<Put>, JsonRejection>,
 ) -> Result<Response, ApiError> {
-    let expected = if_match(&headers)?;
+    let expected = Guard::ETag(if_match(&headers)?);
     let input = body(input)?;
     let payload = payload(&input.payload_base64)?;
+    let written = put_core(
+        &service,
+        role,
+        target,
+        id,
+        expected,
+        input.vector,
+        payload,
+        input.metadata,
+    )
+    .await?;
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response
+        .headers_mut()
+        .insert(header::ETAG, written.etag.parse().map_err(internal)?);
+    Ok(response)
+}
+
+/// Write precondition in transport form, resolved under the owner lock so
+/// the write itself is a compare-and-set.
+enum Guard {
+    /// REST `If-Match`: absent, or one strong tag from this service.
+    ETag(Option<String>),
+    /// Engine precondition on the addressed record's revision (gRPC).
+    #[cfg_attr(not(feature = "grpc"), allow(dead_code))]
+    Expected(Expected),
+}
+
+impl Guard {
+    fn resolve(
+        self,
+        db: &Database,
+        ident: &str,
+        collection: u16,
+        id: u64,
+    ) -> Result<Expected, ApiError> {
+        match self {
+            Self::ETag(tag) => precondition(db, ident, collection, id, tag.as_deref()),
+            Self::Expected(expected) => Ok(expected),
+        }
+    }
+}
+
+struct Written {
+    #[cfg_attr(not(feature = "grpc"), allow(dead_code))]
+    revision: u64,
+    #[cfg_attr(not(feature = "grpc"), allow(dead_code))]
+    created: bool,
+    etag: String,
+}
+
+/// Transport-neutral conditional put with scope enforcement.
+#[allow(clippy::too_many_arguments)]
+async fn put_core(
+    service: &Service,
+    role: admin::Role,
+    target: Target,
+    id: u64,
+    guard: Guard,
+    vector: Vec<f32>,
+    payload: Vec<u8>,
+    metadata: crate::Metadata,
+) -> Result<Written, ApiError> {
+    if payload.len() > MAX_PAYLOAD_BYTES {
+        return Err(Error::PayloadTooLarge(payload.len()).into());
+    }
     let ident = service.etag_ident.clone();
     service
         .run(move |db| {
             let collection = open(db, &role, &target)?;
-            let expected = precondition(db, &ident, collection, id, expected.as_deref())?;
-            db.put_in(
-                collection,
-                id,
-                &input.vector,
-                &payload,
-                &input.metadata,
-                expected,
-            )?;
-            let mut response = StatusCode::NO_CONTENT.into_response();
-            if let Some((tag, _)) = current_etag(db, &ident, collection, id)? {
-                response
-                    .headers_mut()
-                    .insert(header::ETAG, tag.parse().map_err(internal)?);
-            }
-            Ok(response)
+            let expected = guard.resolve(db, &ident, collection, id)?;
+            let created = db.revision_in(collection, id)?.is_none();
+            db.put_in(collection, id, &vector, &payload, &metadata, expected)?;
+            let (etag, revision) = current_etag(db, &ident, collection, id)?
+                .ok_or_else(|| internal("acknowledged put is not readable under the same lock"))?;
+            Ok(Written {
+                revision,
+                created,
+                etag,
+            })
         })
         .await
 }
@@ -1340,15 +1519,25 @@ async fn delete_in(
     id: u64,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    let expected = if_match(&headers)?;
+    let expected = Guard::ETag(if_match(&headers)?);
+    let deleted = delete_core(&service, role, target, id, expected).await?;
+    Ok(Json(json!({"deleted": deleted})))
+}
+
+/// Transport-neutral conditional delete with scope enforcement.
+async fn delete_core(
+    service: &Service,
+    role: admin::Role,
+    target: Target,
+    id: u64,
+    guard: Guard,
+) -> Result<bool, ApiError> {
     let ident = service.etag_ident.clone();
     service
         .run(move |db| {
             let collection = open(db, &role, &target)?;
-            let expected = precondition(db, &ident, collection, id, expected.as_deref())?;
-            Ok(Json(
-                json!({"deleted": db.delete_in(collection, id, expected)?}),
-            ))
+            let expected = guard.resolve(db, &ident, collection, id)?;
+            Ok(db.delete_in(collection, id, expected)?)
         })
         .await
 }
@@ -1440,11 +1629,33 @@ async fn batch_in(
     input: Result<Json<Batch>, JsonRejection>,
 ) -> Result<StatusCode, ApiError> {
     let operations = mutations(body(input)?.operations, true)?;
+    batch_core(&service, role, target, operations).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Transport-neutral atomic batch with scope enforcement: every operation
+/// commits in one frame, or none does.
+async fn batch_core(
+    service: &Service,
+    role: admin::Role,
+    target: Target,
+    operations: Vec<Mutation>,
+) -> Result<(), ApiError> {
+    if operations.len() > MAX_BATCH_OPERATIONS {
+        return Err(Error::BatchTooLarge.into());
+    }
+    for operation in &operations {
+        if let Mutation::Put { payload, .. } | Mutation::PutWithMetadata { payload, .. } = operation
+            && payload.len() > MAX_PAYLOAD_BYTES
+        {
+            return Err(Error::PayloadTooLarge(payload.len()).into());
+        }
+    }
     service
         .run(move |db| {
             let collection = open(db, &role, &target)?;
             db.write_batch_in(collection, &operations)?;
-            Ok(StatusCode::NO_CONTENT)
+            Ok(())
         })
         .await
 }
@@ -1626,8 +1837,33 @@ async fn collection_search(
     search_in(service, role, request, collection_path(target)?, input).await
 }
 
+/// Ranked results: vector hits (exact, approximate, auto) or fused hybrid hits.
+enum Hits {
+    Vector(Vec<crate::SearchHit>),
+    Hybrid(Vec<Value>),
+}
+
+impl Hits {
+    fn len(&self) -> usize {
+        match self {
+            Self::Vector(hits) => hits.len(),
+            Self::Hybrid(hits) => hits.len(),
+        }
+    }
+
+    fn json(self) -> Vec<Value> {
+        match self {
+            Self::Vector(hits) => hits
+                .into_iter()
+                .map(|hit| json!({"id": hit.id.to_string(), "distance": hit.distance}))
+                .collect(),
+            Self::Hybrid(hits) => hits,
+        }
+    }
+}
+
 struct Executed {
-    hits: Vec<Value>,
+    hits: Hits,
     stats: SearchStats,
     plan: Option<crate::QueryPlan>,
     ef_search: Option<usize>,
@@ -1666,11 +1902,7 @@ fn execute(
     let vector = input.vector.as_deref().unwrap_or(&[]);
     let default_ef = 100.max(input.k.min(live));
     let mut stats = SearchStats::default();
-    let distances = |hits: Vec<crate::SearchHit>| {
-        hits.into_iter()
-            .map(|hit| json!({"id": hit.id.to_string(), "distance": hit.distance}))
-            .collect::<Vec<_>>()
-    };
+    let distances = Hits::Vector;
     Ok(match input.mode {
         SearchMode::Exact => Executed {
             hits: distances(db.search_in(collection, vector, input.k, filter, metric, &mut stats)?),
@@ -1765,14 +1997,15 @@ fn execute(
             }
             .search_hybrid(&query)?;
             Executed {
-                hits: hits
-                    .into_iter()
-                    .map(|hit| {
-                        json!({"id": hit.id.to_string(), "score": hit.score,
-                        "distance": hit.distance, "bm25": hit.bm25,
-                        "vector_rank": hit.vector_rank, "text_rank": hit.text_rank})
-                    })
-                    .collect(),
+                hits: Hits::Hybrid(
+                    hits.into_iter()
+                        .map(|hit| {
+                            json!({"id": hit.id.to_string(), "score": hit.score,
+                            "distance": hit.distance, "bm25": hit.bm25,
+                            "vector_rank": hit.vector_rank, "text_rank": hit.text_rank})
+                        })
+                        .collect(),
+                ),
                 stats,
                 plan: None,
                 ef_search,
@@ -1789,14 +2022,35 @@ async fn search_in(
     input: Result<Json<Search>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let input = body(input)?;
-    input.validate(&role)?;
-    let metrics = service.metrics.clone();
-    let started = Instant::now();
     let route = if target.legacy() {
         "/v1/search"
     } else {
         "/v1/collections/{collection}/search"
     };
+    let (input, executed) = search_core(&service, role, &request.0, route, target, input).await?;
+    let stats = input.explain.then(|| stats_json(&executed.stats));
+    let plan = executed.plan.as_ref().map_or(Value::Null, plan_json);
+    let mut response = json!({"hits": executed.hits.json()});
+    if let Some(stats) = stats {
+        response["stats"] = stats;
+        response["plan"] = plan;
+    }
+    Ok(Json(response))
+}
+
+/// Transport-neutral search: request-shape validation, scoped execution,
+/// search metrics and the slow-query log (`route` labels the log entry).
+async fn search_core(
+    service: &Service,
+    role: admin::Role,
+    request_id: &str,
+    route: &str,
+    target: Target,
+    input: Search,
+) -> Result<(Search, Executed), ApiError> {
+    input.validate(&role)?;
+    let metrics = service.metrics.clone();
+    let started = Instant::now();
     let (input, collection, executed) = service
         .run(move |db| {
             let collection = open(db, &role, &target)?;
@@ -1829,7 +2083,7 @@ async fn search_in(
             .collect::<Vec<_>>();
         observability::record_slow(
             &service.metrics,
-            json!({"request_id": request.0, "unix_ms": admin::now_ms() as u64,
+            json!({"request_id": request_id, "unix_ms": admin::now_ms() as u64,
             "route": route, "collection": collection, "collection_id": collection_id,
             "lineage": lineage.map(|lineage| format!("{lineage:016x}")),
             "mode": input.mode.name(),
@@ -1839,12 +2093,7 @@ async fn search_in(
             "stats": stats_json(&executed.stats), "result_count": executed.hits.len()}),
         );
     }
-    let mut response = json!({"hits": executed.hits});
-    if input.explain {
-        response["stats"] = stats_json(&executed.stats);
-        response["plan"] = executed.plan.as_ref().map_or(Value::Null, plan_json);
-    }
-    Ok(Json(response))
+    Ok((input, executed))
 }
 
 fn quantization_name(quantization: Quantization) -> &'static str {

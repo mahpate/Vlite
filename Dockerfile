@@ -2,6 +2,8 @@
 FROM rust:1.89-bookworm AS build
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
+COPY build.rs ./
+COPY proto ./proto
 COPY src ./src
 COPY tests ./tests
 COPY examples ./examples

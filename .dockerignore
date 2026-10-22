@@ -1,6 +1,9 @@
 **
 !Cargo.toml
 !Cargo.lock
+!build.rs
+!proto/
+!proto/**
 !src/
 !src/**
 !deploy/

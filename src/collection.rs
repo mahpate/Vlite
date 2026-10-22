@@ -125,7 +125,9 @@ pub enum SettingsPersistence {
     MemoryOnly,
 }
 
-/// In-memory state of one collection. Derived indexes are never persisted.
+/// In-memory state of one collection. Derived indexes are never written to the
+/// datafile; the HNSW index may only be cached in an explicit, revalidated
+/// ANN snapshot sidecar (`Database::save_ann_snapshot`).
 pub(crate) struct Collection {
     pub name: String,
     pub dimensions: usize,

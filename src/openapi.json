@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "VLite REST API",
-    "version": "0.1.2",
+    "version": "0.2.0",
     "description": "Experimental API for one exclusively owned database. Bearer authentication is required except explicit loopback-only development mode. Optional distinct read-only credentials permit GET/HEAD outside /v1/admin/ and POST /v1/search in exact or approximate_ready mode only; other requests require admin (403 otherwise). /health and static dashboard assets are public. Terminate TLS at a trusted proxy; the binary serves plain HTTP. No CORS, automatic repair or retries. X-Request-ID and Cache-Control: no-store are included. IDs and administrative seeds use decimal strings; payloads use padded standard base64. JSON is limited to 8 MiB and 16 in-flight requests/workers. Successful writes are synced. Disconnects and commit_indeterminate errors do not prove writes failed; never blindly retry. Backups require VLITE_ADMIN_DIR; restore selection takes effect only on restart and never replaces the live owner. Token reload reads only configured files. See docs/CONSOLE-ADMIN.md for semantics, bounds and durability limitations. Protected operations may return 401, 403, 422 or 503 with the Error schema."
   },
   "security": [{"BearerAuth": []}],

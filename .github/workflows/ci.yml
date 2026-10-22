@@ -23,6 +23,15 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
       - run: cargo check --locked --no-default-features --lib
       - run: cargo test --locked --workspace --all-targets --all-features
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Build optional gRPC server
+        run: cargo build --locked --features grpc --bin vlite-server
+      - name: Install protobuf smoke-test dependencies
+        run: python -m pip install -r tests/requirements-grpc.txt
+      - name: Verify generated gRPC client against real server
+        run: python tests/grpc_smoke.py
       - run: cargo build --locked -p vlite-ffi
       - run: python tests/embedded_e2e.py target/debug/${{ runner.os == 'Windows' && 'vlite_ffi.dll' || runner.os == 'macOS' && 'libvlite_ffi.dylib' || 'libvlite_ffi.so' }}
       - run: python benchmarks/embedded.py --library target/debug/${{ runner.os == 'Windows' && 'vlite_ffi.dll' || runner.os == 'macOS' && 'libvlite_ffi.dylib' || 'libvlite_ffi.so' }} --records 12 --dimensions 3 --trials 1 --read-passes 2 --output embedded-smoke.json
@@ -34,6 +43,10 @@ jobs:
       - run: python tests/wheel_platform.py
       - name: Verify advanced retrieval report contracts
         run: python tests/search_capabilities_campaign.py
+      - name: Verify restart measurement contracts
+        run: python tests/ann_restart_campaign.py
+      - name: Verify container code-generation inputs
+        run: python tests/docker_build_inputs.py
       - name: Verify bundled OpenAPI references and route parameters
         run: python tests/openapi_contract.py
       - name: Verify v4 collection, revision and import example

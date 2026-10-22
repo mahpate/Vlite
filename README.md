@@ -5,8 +5,7 @@
 VLite combines a custom append-only storage engine, durable atomic batches,
 typed metadata, exact similarity search, and optional in-memory HNSW search.
 Use it in-process through native language bindings, embed the Rust library
-directly, or connect to the authenticated REST service from any HTTP-capable
-language.
+directly, or connect through authenticated REST or the optional gRPC transport.
 It uses its own storage format and does not require an external database.
 
 > **Operating model:** the live dataset resides in memory, and the log is
@@ -25,14 +24,18 @@ It uses its own storage format and does not require an external database.
 - **Metadata filters:** strict typed equality and inclusive numeric ranges,
   applied before exact top-k selection.
 - **Approximate search:** deterministic, rebuildable HNSW with a bounded
-  mutation buffer for small mixed read/write workloads.
+  mutation buffer for small mixed read/write workloads, optional scalar-u8
+  traversal and opt-in [restart snapshots](docs/ANN-SNAPSHOTS.md).
+- **Advanced retrieval:** opt-in v4 collections, metadata indexes/planning,
+  hybrid BM25/vector search and checkpointed resumable ingestion.
 - **Deployment:** authenticated REST, OpenAPI, JSON metrics, redacted request
-  logs, non-root Docker images, and an optional HTTPS reverse proxy.
+  logs, non-root Docker images, optional [gRPC](docs/GRPC.md), and an optional
+  HTTPS reverse proxy.
 - **Maintenance:** offline inspection, byte-preserving backup/restore, and
   no-clobber copy-out compaction.
 
 VLite is licensed under the MIT License; see
-[LICENSE](LICENSE). There is no gRPC, inner-product ANN, distributed
+[LICENSE](LICENSE). There is no inner-product ANN, distributed
 replication, multi-reader handle, encryption at rest, or approximate metadata
 filtering.
 See the [technical reference](docs/REFERENCE.md) for contracts and limits.
@@ -53,6 +56,8 @@ See the [technical reference](docs/REFERENCE.md) for contracts and limits.
 - **Other languages, REST:** call the documented HTTP/JSON API or generate a
   client from [OpenAPI](src/openapi.json). First-party C#, Java and Go SDKs
   are not currently included.
+- **Other languages, gRPC:** generate a client from the versioned protobuf
+  contract; enable the optional transport explicitly.
 
 The engine's implementation language does not restrict the language of a
 consuming application. Embedded packages must match their host's OS,

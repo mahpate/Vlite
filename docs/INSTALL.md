@@ -24,7 +24,7 @@ On Windows, calculate a file's hash and compare it with its entry in
 `SHA256SUMS`:
 
 ```powershell
-Get-FileHash .\vlite-embedded-0.1.2-win32-x64.tgz -Algorithm SHA256
+Get-FileHash .\vlite-embedded-0.2.0-win32-x64.tgz -Algorithm SHA256
 ```
 
 Checksums detect altered or incomplete downloads; they are not a publisher
@@ -36,7 +36,7 @@ Requires Python 3.11+. Choose a `vlite_embedded-*.whl` matching your OS and
 architecture, then install the downloaded filename:
 
 ```text
-python -m pip install ./vlite_embedded-0.1.2-py3-none-win_amd64.whl
+python -m pip install ./vlite_embedded-0.2.0-py3-none-win_amd64.whl
 ```
 
 That example is for Windows x64. Linux x86_64/glibc 2.28+ should use the
@@ -81,7 +81,7 @@ exact-only. No file format migration is required; back up before any upgrade.
 Requires Node.js 22.9+. Choose a host-matching tarball:
 
 ```text
-npm install ./vlite-embedded-0.1.2-win32-x64.tgz
+npm install ./vlite-embedded-0.2.0-win32-x64.tgz
 ```
 
 Use `linux-x64` or the macOS `darwin-<architecture>` asset instead on those
@@ -112,13 +112,13 @@ authenticated VLite server separately and provide its URL and token.
 Python 3.11+:
 
 ```text
-python -m pip install ./vlite_client-0.1.2-py3-none-any.whl
+python -m pip install ./vlite_client-0.2.0-py3-none-any.whl
 ```
 
 Node.js 22+:
 
 ```text
-npm install ./vlite-client-0.1.2.tgz
+npm install ./vlite-client-0.2.0.tgz
 ```
 
 Import `Client` from `vlite_client` in Python or `@vlite/client` in JavaScript.

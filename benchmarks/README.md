@@ -19,6 +19,23 @@ number on a small synthetic workload.
 
 ## Native VLite benchmark
 
+### Persisted ANN restart measurement
+
+With the licensed, hash-verified GloVe subset prepared by the existing
+`prepare_glove.py` workflow:
+
+```powershell
+cargo build --locked --release --example ann_restart_bench
+python benchmarks\ann_restart_campaign.py --binary target\release\examples\ann_restart_bench.exe --dataset PATH_TO_PREPARED_SUBSET --output ann-restart.json
+python tests\ann_restart_campaign.py
+```
+
+The campaign runs both quantization modes, checks bit-identical results over
+restart and rebuild, preserves raw nanosecond samples and source/input/binary
+hashes, and rejects existing output paths. Reopen/load timings include database
+replay and snapshot validation. They are warm-cache observations rather than
+cold-process startup or a total-memory measurement.
+
 ```text
 cargo run --locked --release --bin vlite-bench -- 10000 32 100 100 10 42
 cargo run --locked --release --bin vlite-bench -- --ann 16 100 100 10000 32 100 100 10 42

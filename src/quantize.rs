@@ -2,9 +2,15 @@
 //!
 //! Quantization only changes how the in-memory HNSW graph scores candidates
 //! during traversal. Stored records stay f32, every returned distance is
-//! recomputed exactly from the current f32 record, and nothing is persisted.
+//! recomputed exactly from the current f32 record. The datafile never stores
+//! codes; only the optional, validated ANN snapshot sidecar may cache them.
 
-use crate::{DistanceMetric, Error, Result};
+use std::io::{self, Read, Write};
+
+use crate::{
+    DistanceMetric, Error, Result,
+    ann_snapshot::{Parse, Source, corrupt},
+};
 
 /// Vector encoding used for HNSW traversal. Stored records always stay f32.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -150,6 +156,37 @@ impl ScalarU8 {
             .map(|value| value * value)
             .sum::<f64>()
             .sqrt()
+    }
+
+    /// ANN snapshot body: `dimensions u32`, then `min` and `scale` as f64 bits.
+    pub(crate) fn write_snapshot(&self, w: &mut impl Write) -> io::Result<()> {
+        let dimensions = u32::try_from(self.dimensions())
+            .map_err(|_| io::Error::other("quantizer dimensions exceed snapshot format"))?;
+        w.write_all(&dimensions.to_le_bytes())?;
+        for value in self.min.iter().chain(&self.scale) {
+            w.write_all(&value.to_bits().to_le_bytes())?;
+        }
+        Ok(())
+    }
+
+    /// Reads a codec written by `write_snapshot`. Its dimension count must be
+    /// `dimensions` or 0 (a quantizer trained on an empty collection); bounds
+    /// must be finite with non-negative scales, as `train` produces.
+    pub(crate) fn read_snapshot<R: Read>(source: &mut Source<R>, dimensions: usize) -> Parse<Self> {
+        let stored = source.u32()? as usize;
+        if stored != 0 && stored != dimensions {
+            return Err(corrupt("quantizer dimensions"));
+        }
+        let min = source.f64s(stored)?;
+        let scale = source.f64s(stored)?;
+        if min.iter().any(|value| !value.is_finite())
+            || scale
+                .iter()
+                .any(|value| !value.is_finite() || value.is_sign_negative())
+        {
+            return Err(corrupt("quantizer bounds"));
+        }
+        Ok(Self { min, scale })
     }
 
     /// Asymmetric distance between an f32 query and one code vector.

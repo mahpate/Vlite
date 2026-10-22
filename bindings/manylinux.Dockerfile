@@ -6,6 +6,8 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup.sh 
     && sh /tmp/rustup.sh -y --profile minimal --default-toolchain 1.89.0 \
     && rm /tmp/rustup.sh
 COPY Cargo.toml Cargo.lock ./
+COPY build.rs ./
+COPY proto ./proto
 COPY src ./src
 COPY bindings/c ./bindings/c
 COPY bindings/python ./bindings/python

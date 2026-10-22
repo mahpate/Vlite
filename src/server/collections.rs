@@ -193,32 +193,72 @@ async fn list(
     State(service): State<Service>,
     Extension(role): Extension<admin::Role>,
 ) -> Result<Json<Value>, ApiError> {
+    let (items, format_version) = list_core(&service, role).await?;
+    let items = items.iter().map(info_json).collect::<Vec<_>>();
+    Ok(Json(
+        json!({"items": items, "format_version": format_version}),
+    ))
+}
+
+/// Transport-neutral listing filtered to the caller's grants; returns the
+/// collections and the datafile format version.
+pub(super) async fn list_core(
+    service: &Service,
+    role: admin::Role,
+) -> Result<(Vec<CollectionInfo>, u32), ApiError> {
     service
         .run(move |db| {
             let lineage = db.lineage();
             let items = db
                 .collections()?
-                .iter()
+                .into_iter()
                 .filter(|info| match &role {
                     admin::Role::Scoped(grant) => grant.covers(lineage, info.id, &info.name),
                     _ => true,
                 })
-                .map(info_json)
                 .collect::<Vec<_>>();
-            Ok(Json(
-                json!({"items": items, "format_version": db.format_version()}),
-            ))
+            Ok((items, db.format_version()))
         })
         .await
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Create {
+pub(super) struct Create {
     name: String,
     dimensions: usize,
     #[serde(default)]
     settings: SettingsInput,
+}
+
+impl Create {
+    /// Builds a request from transport fields; `settings_json` is parsed with
+    /// the same strict REST settings type (a JSON object, unknown fields
+    /// rejected).
+    #[cfg_attr(not(feature = "grpc"), allow(dead_code))]
+    pub(super) fn new(
+        name: String,
+        dimensions: usize,
+        settings_json: Option<&str>,
+    ) -> Result<Self, ApiError> {
+        let settings = match settings_json {
+            None => SettingsInput::default(),
+            Some(text) => {
+                let value: Value = serde_json::from_str(text).map_err(|error| {
+                    ApiError::new(StatusCode::BAD_REQUEST, "invalid_json", error.to_string())
+                })?;
+                if !value.is_object() {
+                    return Err(unprocessable("settings must be a JSON object"));
+                }
+                serde_json::from_value(value).map_err(|error| unprocessable(error.to_string()))?
+            }
+        };
+        Ok(Self {
+            name,
+            dimensions,
+            settings,
+        })
+    }
 }
 
 async fn create(
@@ -227,6 +267,16 @@ async fn create(
     input: Result<Json<Create>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let input = body(input)?;
+    let info = create_core(&service, role, input).await?;
+    Ok((StatusCode::CREATED, Json(info_json(&info))))
+}
+
+/// Transport-neutral collection creation with lifecycle audit.
+pub(super) async fn create_core(
+    service: &Service,
+    role: admin::Role,
+    input: Create,
+) -> Result<CollectionInfo, ApiError> {
     let actor = principal(&role);
     let info = service
         .run(move |db| {
@@ -240,10 +290,10 @@ async fn create(
         })
         .await?;
     audit_event(
-        &service,
+        service,
         json!({"event":"collection_created","collection":info.name,"collection_id":info.id,"actor":actor}),
     );
-    Ok((StatusCode::CREATED, Json(info_json(&info))))
+    Ok(info)
 }
 
 async fn fetch(
@@ -252,6 +302,20 @@ async fn fetch(
     target: Result<Path<String>, PathRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let target = collection_path(target)?;
+    let (info, text) = fetch_core(&service, role, target).await?;
+    let mut value = info_json(&info);
+    value["text_index"] = json!({"declared_fields": text.declared_fields,
+        "available": text.available, "documents": text.documents,
+        "terms": text.terms, "postings": text.postings});
+    Ok(Json(value))
+}
+
+/// Transport-neutral collection description with scope enforcement.
+pub(super) async fn fetch_core(
+    service: &Service,
+    role: admin::Role,
+    target: Target,
+) -> Result<(CollectionInfo, crate::text_index::TextIndexStatus), ApiError> {
     service
         .run(move |db| {
             let collection = open(db, &role, &target)?;
@@ -261,11 +325,7 @@ async fn fetch(
                 id: collection,
             }
             .text_index_status();
-            let mut value = info_json(&info);
-            value["text_index"] = json!({"declared_fields": text.declared_fields,
-                "available": text.available, "documents": text.documents,
-                "terms": text.terms, "postings": text.postings});
-            Ok(Json(value))
+            Ok((info, text))
         })
         .await
 }
@@ -276,6 +336,16 @@ async fn drop(
     target: Result<Path<String>, PathRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let target = collection_path(target)?;
+    drop_core(&service, role, target).await?;
+    Ok(Json(json!({"deleted": true})))
+}
+
+/// Transport-neutral collection drop with scope enforcement and audit.
+pub(super) async fn drop_core(
+    service: &Service,
+    role: admin::Role,
+    target: Target,
+) -> Result<(), ApiError> {
     let actor = principal(&role);
     let (name, id) = service
         .run(move |db| {
@@ -285,10 +355,10 @@ async fn drop(
         })
         .await?;
     audit_event(
-        &service,
+        service,
         json!({"event":"collection_dropped","collection":name,"collection_id":id,"actor":actor}),
     );
-    Ok(Json(json!({"deleted": true})))
+    Ok(())
 }
 
 async fn settings(

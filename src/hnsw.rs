@@ -1,16 +1,20 @@
-//! Rebuildable, deterministic HNSW graph. No index bytes are persisted.
+//! Rebuildable, deterministic HNSW graph. The datafile never stores index
+//! bytes; the optional ANN snapshot sidecar (`ann_snapshot`) may cache a fully
+//! revalidated copy of this in-memory state.
 
 use std::{
     borrow::Cow,
     cell::Cell,
     cmp::Reverse,
     collections::{BTreeMap, BinaryHeap, HashSet},
+    io::{self, Read, Write},
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use crate::{
-    AnnOptions, Condition, DistanceMetric, Error, Record, Result, SearchHit, SearchStats, metadata,
-    metric_distance,
+    AnnOptions, Condition, DistanceMetric, Error, Record, Result, SearchHit, SearchStats,
+    ann_snapshot::{Parse, Source, corrupt},
+    metadata, metric_distance,
     quantize::{Quantization, ScalarU8},
     vector_norm,
 };
@@ -865,6 +869,309 @@ impl Index {
         }
         self.count_visits(stats, &visits);
         self.merge_buffered(hits, query, query_norm, k, records, &[], stats)
+    }
+}
+
+/// Smallest encoded node: `id u64`, `norm u64`, `levels u8`, one `count u16`.
+const MIN_SNAPSHOT_NODE_BYTES: u64 = 19;
+
+fn metric_code(metric: DistanceMetric) -> io::Result<u8> {
+    match metric {
+        DistanceMetric::SquaredL2 => Ok(0),
+        DistanceMetric::Cosine => Ok(1),
+        DistanceMetric::InnerProduct => Err(io::Error::other("inner product has no HNSW index")),
+    }
+}
+
+impl Index {
+    /// Writes one ANN snapshot section body (format v1), from `m` through the
+    /// node-major codes. Identity and digest framing belong to `ann_snapshot`.
+    pub(crate) fn write_snapshot(&self, w: &mut impl Write) -> io::Result<()> {
+        let too_large = || io::Error::other("HNSW index exceeds ANN snapshot format v1 limits");
+        let u32_of = |value: usize| u32::try_from(value).map_err(|_| too_large());
+        w.write_all(&u32_of(self.config.m)?.to_le_bytes())?;
+        w.write_all(&u32_of(self.config.ef_construction)?.to_le_bytes())?;
+        w.write_all(&self.config.seed.to_le_bytes())?;
+        w.write_all(&[
+            metric_code(self.metric)?,
+            self.options.quantization.code(),
+            self.options.rerank_multiplier,
+            0,
+        ])?;
+        // Links are stored as u32 node positions.
+        u32_of(self.nodes.len())?;
+        w.write_all(&(self.nodes.len() as u64).to_le_bytes())?;
+        w.write_all(
+            &self
+                .entry
+                .map_or(u64::MAX, |entry| entry as u64)
+                .to_le_bytes(),
+        )?;
+        for node in &self.nodes {
+            w.write_all(&node.id.to_le_bytes())?;
+            w.write_all(&node.norm.to_bits().to_le_bytes())?;
+            w.write_all(&[u8::try_from(node.links.len()).map_err(|_| too_large())?])?;
+            for links in &node.links {
+                let count = u16::try_from(links.len()).map_err(|_| too_large())?;
+                w.write_all(&count.to_le_bytes())?;
+                for &target in links {
+                    w.write_all(&u32_of(target)?.to_le_bytes())?;
+                }
+            }
+        }
+        w.write_all(&u32_of(self.buffered.len())?.to_le_bytes())?;
+        for (&id, entry) in &self.buffered {
+            w.write_all(&id.to_le_bytes())?;
+            w.write_all(&(entry.current_bytes as u64).to_le_bytes())?;
+            match &entry.original {
+                None => w.write_all(&[0])?,
+                Some(original) => {
+                    w.write_all(&[1])?;
+                    for value in original {
+                        w.write_all(&value.to_bits().to_le_bytes())?;
+                    }
+                }
+            }
+        }
+        match &self.quantizer {
+            None => w.write_all(&[0]),
+            Some(quantizer) => {
+                w.write_all(&[1])?;
+                quantizer.write_snapshot(w)?;
+                w.write_all(&self.codes)
+            }
+        }
+    }
+
+    /// Reads one section body and accepts it only if it is exactly a state
+    /// that `build`/`track`/`adopt_buffer` could have produced for the current
+    /// `records` (see `check_snapshot`). Every count is bounded by current
+    /// in-memory state and by the unread file bytes before allocation.
+    pub(crate) fn read_snapshot<R: Read>(
+        source: &mut Source<R>,
+        records: &BTreeMap<u64, Record>,
+        dimensions: usize,
+    ) -> Parse<Self> {
+        let m = source.u32()? as usize;
+        let ef_construction = source.u32()? as usize;
+        let seed = source.u64()?;
+        let config = HnswConfig {
+            m,
+            ef_construction,
+            seed,
+        };
+        config.validate().map_err(|_| corrupt("hnsw config"))?;
+        let metric = match source.u8()? {
+            0 => DistanceMetric::SquaredL2,
+            1 => DistanceMetric::Cosine,
+            _ => return Err(corrupt("metric")),
+        };
+        let quantization =
+            Quantization::from_code(source.u8()?).ok_or_else(|| corrupt("quantization"))?;
+        let options = AnnOptions {
+            quantization,
+            rerank_multiplier: source.u8()?,
+        };
+        options.validate().map_err(|_| corrupt("ann options"))?;
+        if source.u8()? != 0 {
+            return Err(corrupt("reserved"));
+        }
+        let node_count = source.u64()?;
+        let max_nodes = records.len().saturating_add(MAX_HNSW_BUFFER_IDS) as u64;
+        if node_count > max_nodes
+            || node_count.saturating_mul(MIN_SNAPSHOT_NODE_BYTES) > source.remaining()
+        {
+            return Err(corrupt("node count"));
+        }
+        let node_count = node_count as usize;
+        let entry = source.u64()?;
+        let mut index = Self::empty(config, metric, options, node_count);
+        for _ in 0..node_count {
+            let id = source.u64()?;
+            if index.nodes.last().is_some_and(|last| last.id >= id) {
+                return Err(corrupt("node order"));
+            }
+            let norm = f64::from_bits(source.u64()?);
+            let levels = usize::from(source.u8()?);
+            if levels != index.level(id) + 1 {
+                return Err(corrupt("node level"));
+            }
+            let mut links = Vec::with_capacity(levels);
+            for layer in 0..levels {
+                let count = usize::from(source.u16()?);
+                if count > if layer == 0 { 2 * m } else { m } {
+                    return Err(corrupt("node degree"));
+                }
+                let mut targets = Vec::with_capacity(count);
+                for _ in 0..count {
+                    targets.push(source.u32()? as usize);
+                }
+                links.push(targets);
+            }
+            index.nodes.push(Node { id, norm, links });
+        }
+        index.entry = match entry {
+            u64::MAX => None,
+            entry if entry < node_count as u64 => Some(entry as usize),
+            _ => return Err(corrupt("entry")),
+        };
+        let buffered_count = source.u32()? as usize;
+        if buffered_count > MAX_HNSW_BUFFER_IDS {
+            return Err(corrupt("buffer count"));
+        }
+        let mut original_bytes = 0usize;
+        for _ in 0..buffered_count {
+            let id = source.u64()?;
+            if index
+                .buffered
+                .last_key_value()
+                .is_some_and(|(&last, _)| last >= id)
+            {
+                return Err(corrupt("buffer order"));
+            }
+            let current_bytes = source.u64()?;
+            let expected = records.get(&id).map_or(0, |record| record.vector.len() * 4);
+            if current_bytes != expected as u64 {
+                return Err(corrupt("buffer current bytes"));
+            }
+            let original = match source.u8()? {
+                0 => None,
+                1 if quantization == Quantization::None => {
+                    original_bytes = original_bytes.saturating_add(dimensions * 4);
+                    if original_bytes > MAX_HNSW_BUFFER_VECTOR_BYTES {
+                        return Err(corrupt("buffer bytes"));
+                    }
+                    let vector = source.f32s(dimensions)?;
+                    if vector.iter().any(|value| !value.is_finite()) {
+                        return Err(corrupt("buffer original"));
+                    }
+                    Some(vector)
+                }
+                _ => return Err(corrupt("buffer original")),
+            };
+            index.buffered_bytes = index
+                .buffered_bytes
+                .saturating_add(expected)
+                .saturating_add(original.as_ref().map_or(0, |vector| vector.len() * 4));
+            index.buffered.insert(
+                id,
+                Buffered {
+                    original,
+                    current_bytes: expected,
+                },
+            );
+        }
+        if index.buffered_bytes > MAX_HNSW_BUFFER_VECTOR_BYTES {
+            return Err(corrupt("buffer bytes"));
+        }
+        match source.u8()? {
+            0 => {}
+            1 => {
+                let quantizer = ScalarU8::read_snapshot(source, dimensions)?;
+                let length = node_count
+                    .checked_mul(quantizer.dimensions())
+                    .ok_or_else(|| corrupt("codes"))?;
+                index.codes = source.bytes(length)?;
+                index.quantizer = Some(quantizer);
+            }
+            _ => return Err(corrupt("quantizer flag")),
+        }
+        index.check_snapshot(records, dimensions)?;
+        Ok(index)
+    }
+
+    /// Semantic invariants that make every later search, `track` and
+    /// `stale_nodes` call total (no panics) and that reject any state the
+    /// builder could not have produced for the current records.
+    fn check_snapshot(&self, records: &BTreeMap<u64, Record>, dimensions: usize) -> Parse<()> {
+        let count = self.nodes.len();
+        let top = self.nodes.iter().map(|node| node.links.len()).max();
+        let first_top = top.and_then(|top| self.nodes.iter().position(|n| n.links.len() == top));
+        if self.entry != first_top {
+            return Err(corrupt("entry"));
+        }
+        let mut sorted = Vec::new();
+        for (position, node) in self.nodes.iter().enumerate() {
+            for (layer, links) in node.links.iter().enumerate() {
+                if links.iter().any(|&target| {
+                    target >= count || target == position || self.nodes[target].links.len() <= layer
+                }) {
+                    return Err(corrupt("links"));
+                }
+                sorted.clear();
+                sorted.extend_from_slice(links);
+                sorted.sort_unstable();
+                if sorted.windows(2).any(|pair| pair[0] == pair[1]) {
+                    return Err(corrupt("links"));
+                }
+            }
+        }
+        let cosine = self.metric == DistanceMetric::Cosine;
+        match &self.quantizer {
+            None if self.quantized() => return Err(corrupt("quantizer missing")),
+            Some(_) if !self.quantized() => return Err(corrupt("quantizer unexpected")),
+            Some(quantizer) if quantizer.dimensions() != dimensions && count != 0 => {
+                return Err(corrupt("quantizer dimensions"));
+            }
+            _ => {}
+        }
+        let mut codes = Vec::new();
+        for (position, node) in self.nodes.iter().enumerate() {
+            let buffered = self.buffered.get(&node.id);
+            let live = records.get(&node.id);
+            let norm = match &self.quantizer {
+                None => {
+                    let vector = match (buffered, live) {
+                        (Some(entry), _) => entry.original.as_deref(),
+                        (None, record) => record.map(|record| record.vector.as_slice()),
+                    }
+                    .ok_or_else(|| corrupt("node vector"))?;
+                    let norm = if cosine { vector_norm(vector) } else { 0.0 };
+                    if cosine && norm == 0.0 {
+                        return Err(corrupt("node vector"));
+                    }
+                    norm
+                }
+                Some(quantizer) => {
+                    let stored = self.codes_of(position);
+                    if buffered.is_none() {
+                        let record = live.ok_or_else(|| corrupt("node vector"))?;
+                        if cosine && vector_norm(&record.vector) == 0.0 {
+                            return Err(corrupt("node vector"));
+                        }
+                        codes.clear();
+                        quantizer.encode_into(&record.vector, &mut codes);
+                        if codes != stored {
+                            return Err(corrupt("codes"));
+                        }
+                    }
+                    if cosine { quantizer.norm(stored) } else { 0.0 }
+                }
+            };
+            if node.norm.to_bits() != norm.to_bits() {
+                return Err(corrupt("node norm"));
+            }
+        }
+        let in_graph = |id: u64| self.nodes.binary_search_by_key(&id, |n| n.id).is_ok();
+        for (&id, entry) in &self.buffered {
+            // Only a cosine zero-norm record is tracked with an original but
+            // left out of the graph.
+            if let Some(original) = &entry.original
+                && !in_graph(id)
+                && !(cosine && vector_norm(original) == 0.0)
+            {
+                return Err(corrupt("buffer original"));
+            }
+        }
+        for (&id, record) in records {
+            if !self.buffered.contains_key(&id)
+                && !in_graph(id)
+                && !(cosine && vector_norm(&record.vector) == 0.0)
+            {
+                return Err(corrupt("incomplete graph"));
+            }
+        }
+        Ok(())
     }
 }
 

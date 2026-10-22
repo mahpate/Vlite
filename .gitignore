@@ -1,5 +1,7 @@
 /target/
 *.vlite
+*.vlite.ann
+*.vlite.ann.tmp
 .secrets/
 **/__pycache__/
 **/*.egg-info/
