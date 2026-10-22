@@ -1,3 +1,4 @@
+use crate::crypto::{Cipher, DESCRIPTOR_SIZE, Descriptor, EncryptionKey, SEAL_OVERHEAD};
 use crate::{
     CollectionSettings, DistanceMetric, Error, HnswConfig, MAX_BATCH_BYTES, MAX_BATCH_OPERATIONS,
     MAX_DIMENSIONS, MAX_PAYLOAD_BYTES, Mutation, Record, Result,
@@ -8,10 +9,16 @@ use crate::{
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
-use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
 pub(crate) const HEADER_SIZE: u64 = 32;
+/// Header flag (v5 bytes 26..28): frame bodies are sealed; a 64-byte
+/// encryption descriptor follows the header.
+pub(crate) const FLAG_ENCRYPTED: u16 = 1;
+/// Header flag: every commit is preceded by a time-anchor frame (op 11).
+pub(crate) const FLAG_TIMESTAMPS: u16 = 2;
+pub(crate) const KNOWN_FLAGS: u16 = FLAG_ENCRYPTED | FLAG_TIMESTAMPS;
+pub(crate) const OP_TIME_ANCHOR: u8 = 11;
 pub(crate) const PREFIX_SIZE: usize = 36;
 pub(crate) const FOOTER_SIZE: usize = 16;
 const MAGIC: &[u8; 8] = b"VLITEDB\0";
@@ -69,7 +76,12 @@ pub(crate) fn record_body_len(record: &Record) -> u64 {
     }
 }
 
-fn decode_extended(body: &[u8], dimensions: usize, offset: u64, allow_geo: bool) -> Result<Record> {
+pub(crate) fn decode_extended(
+    body: &[u8],
+    dimensions: usize,
+    offset: u64,
+    allow_geo: bool,
+) -> Result<Record> {
     let vector_end = dimensions * 4;
     if body.len() < vector_end + 8 {
         return Err(corrupt(offset, "truncated metadata record"));
@@ -272,6 +284,12 @@ pub(crate) struct Loaded {
     pub sequence: u64,
     pub end: u64,
     pub incomplete_bytes: u64,
+    pub flags: u16,
+    /// Present for encrypted files.
+    pub cipher: Option<Cipher>,
+    /// Per-commit wall-clock milliseconds `(sequence, timestamp)`, ascending,
+    /// for files created with commit timestamps.
+    pub commit_times: Vec<(u64, u64)>,
 }
 
 impl Loaded {
@@ -360,8 +378,36 @@ pub(crate) fn header_v4(dimensions: usize, lineage: u64, collection_floor: u16) 
     header_with(V4, dimensions, lineage, collection_floor)
 }
 
-pub(crate) fn header_v5(dimensions: usize, lineage: u64, collection_floor: u16) -> Vec<u8> {
-    header_with(V5, dimensions, lineage, collection_floor)
+/// v5 header with feature flags and, for encrypted files, the descriptor.
+pub(crate) fn header_v5_flags(
+    dimensions: usize,
+    lineage: u64,
+    collection_floor: u16,
+    flags: u16,
+    cipher: Option<&Cipher>,
+) -> Vec<u8> {
+    let mut bytes = header_with(V5, dimensions, lineage, collection_floor);
+    bytes[26..28].copy_from_slice(&flags.to_le_bytes());
+    let checksum = crc32(&bytes[..28]);
+    bytes[28..32].copy_from_slice(&checksum.to_le_bytes());
+    if let Some(cipher) = cipher {
+        bytes.extend_from_slice(&cipher.descriptor.encode());
+    }
+    bytes
+}
+
+/// A time-anchor frame: written immediately before the commit frame that has
+/// `next_sequence`; it consumes no sequence number.
+pub(crate) fn time_anchor_frame(next_sequence: u64, timestamp_ms: u64) -> Vec<u8> {
+    wrap(
+        OP_TIME_ANCHOR,
+        0,
+        next_sequence,
+        0,
+        0,
+        8,
+        &timestamp_ms.to_le_bytes(),
+    )
 }
 
 fn header_with(version: u32, dimensions: usize, lineage: u64, collection_floor: u16) -> Vec<u8> {
@@ -715,7 +761,7 @@ pub(crate) fn decode_settings(
     Ok(settings)
 }
 
-fn decode_vector(bytes: &[u8], offset: u64) -> Result<Vec<f32>> {
+pub(crate) fn decode_vector(bytes: &[u8], offset: u64) -> Result<Vec<f32>> {
     let vector: Vec<_> = bytes
         .as_chunks::<4>()
         .0
@@ -728,7 +774,7 @@ fn decode_vector(bytes: &[u8], offset: u64) -> Result<Vec<f32>> {
     Ok(vector)
 }
 
-fn decode_batch(
+pub(crate) fn decode_batch(
     body: &[u8],
     count: usize,
     dimensions: usize,
@@ -913,7 +959,10 @@ fn replay_marker(
     Ok(())
 }
 
-fn decode_create(body: &[u8], offset: u64) -> Result<(String, usize, CollectionSettings)> {
+pub(crate) fn decode_create(
+    body: &[u8],
+    offset: u64,
+) -> Result<(String, usize, CollectionSettings)> {
     let name_len = usize::from(
         *body
             .first()
@@ -937,9 +986,46 @@ fn decode_create(body: &[u8], offset: u64) -> Result<(String, usize, CollectionS
     Ok((name, dimensions, settings))
 }
 
-pub(crate) fn load(file: &mut File) -> Result<Loaded> {
+/// Parsed file header (plus encryption descriptor) of a log.
+pub(crate) struct LogHeader {
+    pub version: u32,
+    pub dimensions: usize,
+    pub lineage: Option<u64>,
+    pub collection_floor: u16,
+    pub flags: u16,
+    pub cipher: Option<Cipher>,
+    /// Offset of the first frame.
+    pub start: u64,
+    /// Exact header (and descriptor) bytes.
+    pub raw: Vec<u8>,
+    pub length: u64,
+}
+
+impl LogHeader {
+    pub(crate) fn seal(&self) -> usize {
+        if self.cipher.is_some() {
+            SEAL_OVERHEAD
+        } else {
+            0
+        }
+    }
+}
+
+pub(crate) fn read_log_header<R: Read + Seek>(
+    file: &mut R,
+    key: Option<&EncryptionKey>,
+) -> Result<LogHeader> {
+    read_log_header_with(file, key, None)
+}
+
+/// Like `read_log_header`, but an already-open cipher may stand in for the key.
+pub(crate) fn read_log_header_with<R: Read + Seek>(
+    file: &mut R,
+    key: Option<&EncryptionKey>,
+    known: Option<&Cipher>,
+) -> Result<LogHeader> {
+    let length = file.seek(SeekFrom::End(0))?;
     file.seek(SeekFrom::Start(0))?;
-    let length = file.metadata()?.len();
     if length < HEADER_SIZE {
         return Err(corrupt(0, "missing or truncated database header"));
     }
@@ -955,8 +1041,14 @@ pub(crate) fn load(file: &mut File) -> Result<Loaded> {
     if !matches!(version, 1..=V5) {
         return Err(Error::UnsupportedVersion(version));
     }
+    let mut flags = 0u16;
     let (lineage, collection_floor) = if version >= V4 {
-        if bytes[26..28] != [0; 2] {
+        if version >= V5 {
+            flags = u16_at(&bytes, 26);
+            if flags & !KNOWN_FLAGS != 0 {
+                return Err(Error::UnsupportedFeature(flags & !KNOWN_FLAGS));
+            }
+        } else if bytes[26..28] != [0; 2] {
             return Err(corrupt(0, "nonzero reserved database header bytes"));
         }
         let lineage = u64_at(&bytes, 16);
@@ -974,6 +1066,138 @@ pub(crate) fn load(file: &mut File) -> Result<Loaded> {
     if !(1..=MAX_DIMENSIONS).contains(&dimensions) {
         return Err(corrupt(0, "invalid database dimensions"));
     }
+    let mut raw = bytes.to_vec();
+    let mut start = HEADER_SIZE;
+    let mut cipher = None;
+    if flags & FLAG_ENCRYPTED != 0 {
+        if length < HEADER_SIZE + DESCRIPTOR_SIZE as u64 {
+            return Err(corrupt(HEADER_SIZE, "truncated encryption descriptor"));
+        }
+        let mut descriptor_bytes = [0u8; DESCRIPTOR_SIZE];
+        file.read_exact(&mut descriptor_bytes)?;
+        let descriptor = Descriptor::decode(&descriptor_bytes)?;
+        cipher = Some(match known {
+            Some(known) if known.descriptor == descriptor => known.clone(),
+            Some(_) => return Err(corrupt(HEADER_SIZE, "encryption descriptor changed")),
+            None => Cipher::open(key.ok_or(Error::EncryptionKeyRequired)?, &descriptor)?,
+        });
+        raw.extend_from_slice(&descriptor_bytes);
+        start += DESCRIPTOR_SIZE as u64;
+    } else if key.is_some() || known.is_some() {
+        return Err(Error::NotEncrypted);
+    }
+    Ok(LogHeader {
+        version,
+        dimensions,
+        lineage,
+        collection_floor,
+        flags,
+        cipher,
+        start,
+        raw,
+        length,
+    })
+}
+
+/// Body length implied by a frame prefix (plaintext), without validating it.
+pub(crate) fn plain_body_len(operation: u8, count: u32, payload_len: u32) -> usize {
+    match operation {
+        1 => count as usize * 4 + payload_len as usize,
+        2 => 0,
+        _ => payload_len as usize,
+    }
+}
+
+/// A structurally verified frame read from a log.
+pub(crate) struct RawFrame {
+    pub operation: u8,
+    pub collection: u16,
+    pub sequence: u64,
+    pub id: u64,
+    pub count: u32,
+    /// Exact on-disk bytes (sealed for encrypted logs).
+    pub disk: Vec<u8>,
+    /// Plaintext `wrap` layout (equals `disk` for unencrypted logs).
+    pub plain: Vec<u8>,
+}
+
+impl RawFrame {
+    pub(crate) fn body(&self) -> &[u8] {
+        &self.plain[PREFIX_SIZE..self.plain.len() - FOOTER_SIZE]
+    }
+}
+
+/// Reads the next frame at `offset`, verifying checksums and authentication.
+/// `None` means a clean end or an incomplete trailing frame. Callers validate
+/// semantics; use `load` for full replay validation.
+pub(crate) fn next_frame<R: Read + Seek>(
+    file: &mut R,
+    header: &LogHeader,
+    offset: u64,
+) -> Result<Option<RawFrame>> {
+    if header.length.saturating_sub(offset) < PREFIX_SIZE as u64 {
+        return Ok(None);
+    }
+    file.seek(SeekFrom::Start(offset))?;
+    let mut prefix = [0; PREFIX_SIZE];
+    file.read_exact(&mut prefix)?;
+    if &prefix[..4] != b"VREC" {
+        return Err(corrupt(offset, "invalid record magic"));
+    }
+    if crc32(&prefix[..32]) != u32_at(&prefix, 32) {
+        return Err(corrupt(offset, "record header checksum mismatch"));
+    }
+    let operation = prefix[4];
+    let count = u32_at(&prefix, 24);
+    let payload_len = u32_at(&prefix, 28);
+    let body_len = plain_body_len(operation, count, payload_len);
+    if body_len > MAX_FRAME_BODY {
+        return Err(corrupt(offset, "implausible frame length"));
+    }
+    let disk_len = PREFIX_SIZE + body_len + header.seal() + FOOTER_SIZE;
+    if header.length - offset < disk_len as u64 {
+        return Ok(None);
+    }
+    let mut disk = prefix.to_vec();
+    disk.resize(disk_len, 0);
+    file.read_exact(&mut disk[PREFIX_SIZE..])?;
+    let sequence = u64_at(&prefix, 8);
+    let plain = verified_frame(&disk, header.cipher.as_ref(), sequence, offset)?;
+    Ok(Some(RawFrame {
+        operation,
+        collection: u16_at(&prefix, 5),
+        sequence,
+        id: u64_at(&prefix, 16),
+        count,
+        disk,
+        plain,
+    }))
+}
+
+const MAX_FRAME_BODY: usize = 1 << 28;
+
+pub(crate) fn load<R: Read + Seek>(file: &mut R) -> Result<Loaded> {
+    load_with(file, None)
+}
+
+pub(crate) fn load_with<R: Read + Seek>(
+    file: &mut R,
+    key: Option<&EncryptionKey>,
+) -> Result<Loaded> {
+    let header = read_log_header(file, key)?;
+    let length = header.length;
+    let LogHeader {
+        version,
+        dimensions,
+        lineage,
+        collection_floor,
+        flags,
+        cipher,
+        start,
+        ..
+    } = header;
+    file.seek(SeekFrom::Start(start))?;
+    let seal = if cipher.is_some() { SEAL_OVERHEAD } else { 0 };
     let mut loaded = Loaded {
         version,
         dimensions,
@@ -986,16 +1210,26 @@ pub(crate) fn load(file: &mut File) -> Result<Loaded> {
         )]),
         imports: Vec::new(),
         sequence: 0,
-        end: HEADER_SIZE,
+        end: start,
         incomplete_bytes: 0,
+        flags,
+        cipher: cipher.clone(),
+        commit_times: Vec::new(),
     };
     let mut jobs: HashMap<u64, JobReplay> = HashMap::new();
     // Highest collection ID created by an op 5 in this log so far, and how
     // many create frames were seen.
     let mut created_high = 0u16;
     let mut creates_seen = 0u64;
-    while loaded.end < length {
-        let offset = loaded.end;
+    // A time anchor read ahead of its commit frame: (timestamp, frame bytes).
+    let mut anchor: Option<(u64, u64)> = None;
+    loop {
+        let anchor_len = anchor.map_or(0, |(_, len)| len);
+        let offset = loaded.end + anchor_len;
+        if offset >= length {
+            loaded.incomplete_bytes = anchor_len;
+            break;
+        }
         let remaining = length - offset;
         if remaining < PREFIX_SIZE as u64 {
             let mut partial = vec![0; remaining as usize];
@@ -1004,7 +1238,7 @@ pub(crate) fn load(file: &mut File) -> Result<Loaded> {
             if partial[..magic_len] != b"VREC"[..magic_len] {
                 return Err(corrupt(offset, "invalid trailing record magic"));
             }
-            loaded.incomplete_bytes = remaining;
+            loaded.incomplete_bytes = remaining + anchor_len;
             break;
         }
         let mut prefix = [0; PREFIX_SIZE];
@@ -1016,6 +1250,32 @@ pub(crate) fn load(file: &mut File) -> Result<Loaded> {
             return Err(corrupt(offset, "record header checksum mismatch"));
         }
         let operation = prefix[4];
+        if operation == OP_TIME_ANCHOR {
+            let valid = flags & FLAG_TIMESTAMPS != 0
+                && anchor.is_none()
+                && prefix[5..8] == [0; 3]
+                && u32_at(&prefix, 24) == 0
+                && u64_at(&prefix, 16) == 0
+                && u32_at(&prefix, 28) == 8
+                && loaded.sequence.checked_add(1) == Some(u64_at(&prefix, 8));
+            if !valid {
+                return Err(corrupt(offset, "invalid time anchor frame"));
+            }
+            let length_on_disk = (PREFIX_SIZE + 8 + seal + FOOTER_SIZE) as u64;
+            if remaining < length_on_disk {
+                loaded.incomplete_bytes = remaining;
+                break;
+            }
+            let mut disk = prefix.to_vec();
+            disk.resize(length_on_disk as usize, 0);
+            file.read_exact(&mut disk[PREFIX_SIZE..])?;
+            let plain = verified_frame(&disk, cipher.as_ref(), u64_at(&prefix, 8), offset)?;
+            anchor = Some((u64_at(&plain, PREFIX_SIZE), length_on_disk));
+            continue;
+        }
+        if flags & FLAG_TIMESTAMPS != 0 && anchor.is_none() {
+            return Err(corrupt(offset, "commit without a time anchor"));
+        }
         let allowed = match operation {
             1 | 2 => true,
             3 => version >= 2,
@@ -1127,23 +1387,16 @@ pub(crate) fn load(file: &mut File) -> Result<Loaded> {
             }
             count * 4 + payload_len
         };
-        let frame_len = (PREFIX_SIZE + body_len + FOOTER_SIZE) as u64;
+        let frame_len = (PREFIX_SIZE + body_len + seal + FOOTER_SIZE) as u64;
         if remaining < frame_len {
-            loaded.incomplete_bytes = remaining;
+            loaded.incomplete_bytes = remaining + anchor_len;
             break;
         }
-        let mut frame = prefix.to_vec();
-        frame.resize(PREFIX_SIZE + body_len, 0);
-        file.read_exact(&mut frame[PREFIX_SIZE..])?;
-        let mut footer = [0; FOOTER_SIZE];
-        file.read_exact(&mut footer)?;
-        if &footer[..4] != b"VCMT"
-            || u64_at(&footer, 8) != sequence
-            || u32_at(&footer, 4) != crc32(&frame)
-        {
-            return Err(corrupt(offset, "commit footer or record checksum mismatch"));
-        }
-        let body = &frame[PREFIX_SIZE..];
+        let mut disk = prefix.to_vec();
+        disk.resize(frame_len as usize, 0);
+        file.read_exact(&mut disk[PREFIX_SIZE..])?;
+        let frame = verified_frame(&disk, cipher.as_ref(), sequence, offset)?;
+        let body = &frame[PREFIX_SIZE..PREFIX_SIZE + body_len];
         match operation {
             10 => {
                 let data = crate::vectors::VectorData::decode(body)
@@ -1298,9 +1551,35 @@ pub(crate) fn load(file: &mut File) -> Result<Loaded> {
             }
         }
         loaded.sequence = sequence;
-        loaded.end += frame_len;
+        loaded.end += anchor_len + frame_len;
+        if let Some((timestamp, _)) = anchor.take() {
+            loaded.commit_times.push((sequence, timestamp));
+        }
     }
     Ok(loaded)
+}
+
+/// Verifies a complete on-disk frame (footer, checksum, and for encrypted files
+/// the authentication tag) and returns it in plaintext `wrap` layout.
+pub(crate) fn verified_frame(
+    disk: &[u8],
+    cipher: Option<&Cipher>,
+    sequence: u64,
+    offset: u64,
+) -> Result<Vec<u8>> {
+    let footer = &disk[disk.len() - FOOTER_SIZE..];
+    if &footer[..4] != b"VCMT"
+        || u64_at(footer, 8) != sequence
+        || u32_at(footer, 4) != crc32(&disk[..disk.len() - FOOTER_SIZE])
+    {
+        return Err(corrupt(offset, "commit footer or record checksum mismatch"));
+    }
+    match cipher {
+        None => Ok(disk.to_vec()),
+        Some(cipher) => cipher
+            .open_frame(disk)
+            .ok_or_else(|| corrupt(offset, "frame authentication failed")),
+    }
 }
 
 fn collection_mut(loaded: &mut Loaded, id: u16) -> &mut LoadedCollection {

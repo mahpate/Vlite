@@ -265,3 +265,20 @@ jobs:
       - run: helm template vectors deploy/helm/vlite --set auth.existingSecret=vlite-auth
       - name: Validate managed auth Secret and optional TLS mount
         run: helm template vectors deploy/helm/vlite --set auth.token=abcdefghijklmnopqrstuvwxyz012345 --set tls.existingSecret=vlite-tls
+
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - run: cargo check --locked --target wasm32-unknown-unknown --no-default-features --lib
+      - name: Build and run the WebAssembly package in Node
+        working-directory: bindings/wasm
+        run: |
+          cargo install wasm-bindgen-cli --version 0.2.129 --locked
+          cargo build --locked --release --target wasm32-unknown-unknown
+          wasm-bindgen target/wasm32-unknown-unknown/release/vlite_wasm.wasm --target nodejs --out-dir pkg
+          node test/smoke.mjs pkg/vlite_wasm.js

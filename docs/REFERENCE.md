@@ -12,8 +12,10 @@ and atomic batch mutations, and exact nearest-neighbor search.
 Optional REST and gRPC services expose the same engine. Optional in-memory HNSW
 search supports approximate retrieval without changing the database file;
 an explicit snapshot sidecar can cache derived graph state across restarts.
-Distributed operation, interactive transactions, encryption and
-read-only/multi-reader handles are deferred.
+Distributed operation, interactive transactions and multi-reader handles are
+deferred; see [storage features](STORAGE-FEATURES.md) for opt-in encryption at
+rest, point-in-time restore, change feed, file-shipped replicas, disk ANN, GPU
+and WebAssembly.
 This is a correctness-first MVP, not a production-hardened storage engine.
 
 See [collections and advanced retrieval](CAPABILITIES.md) for opt-in v4/v5,
@@ -1278,7 +1280,8 @@ Rerunning copy commands with the same destinations fails intentionally. Use new
 names or a separate Compose project for a fresh run; do not delete real backups
 merely to rerun examples. Staged outputs use restrictive `tempfile` permissions
 (owner-only on Unix); share backups only through explicitly managed OS access.
-Backups are not encrypted and inherit the same sensitive payloads as the source.
+Backups are not encrypted unless the source is an encrypted v5 database (then
+they are byte-identical encrypted copies) and inherit the same sensitive payloads as the source.
 
 ## One file and ownership
 

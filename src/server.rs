@@ -2654,7 +2654,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("poison.vlite");
         let mut db = Database::create(&path, 1).unwrap();
-        db.file = crate::LockedFile(std::fs::File::open(&path).unwrap());
+        db.file = crate::LockedFile::disk(std::fs::File::open(&path).unwrap());
         assert!(matches!(
             db.put(0, &[1.0], b""),
             Err(Error::CommitIndeterminate(_))
@@ -2719,7 +2719,7 @@ mod tests {
         let path = directory.path().join("conditional-failure.vlite");
         let mut db = Database::create(&path, 1).unwrap();
         db.put(1, &[1.0], b"").unwrap();
-        db.file = crate::LockedFile(std::fs::File::open(&path).unwrap());
+        db.file = crate::LockedFile::disk(std::fs::File::open(&path).unwrap());
         let service = Service::new(db);
         let app = router(service.clone());
         let send = |method: &str, tag: Option<&str>| {
@@ -2763,7 +2763,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("failure.vlite");
         let mut db = Database::create(&path, 1).unwrap();
-        db.file = crate::LockedFile(std::fs::File::open(&path).unwrap());
+        db.file = crate::LockedFile::disk(std::fs::File::open(&path).unwrap());
         let service = Service::new(db);
         let error = service
             .run(|db| {

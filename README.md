@@ -39,9 +39,11 @@ It uses its own storage format and does not require an external database.
   no-clobber copy-out compaction.
 
 VLite is licensed under the MIT License; see
-[LICENSE](LICENSE). There is no inner-product ANN, distributed
-replication, multi-reader handle, encryption at rest, or approximate metadata
-filtering.
+[LICENSE](LICENSE). There is no inner-product ANN, networked
+replication, multi-reader handle, or approximate metadata
+filtering. Opt-in [storage features](docs/STORAGE-FEATURES.md) add encryption at
+rest, point-in-time restore, a change feed, file-shipped read replicas, a
+disk-based ANN sidecar, optional GPU exact search and a WebAssembly build.
 See the [technical reference](docs/REFERENCE.md) for contracts and limits.
 See [offline command-line tools](docs/TOOLS.md) for the interactive shell,
 CSV/JSONL/pgvector/FAISS and optional Parquet/Arrow imports, HNSW tuning, and

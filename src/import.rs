@@ -717,7 +717,7 @@ mod tests {
             .unwrap();
         let durable = std::fs::metadata(&path).unwrap().len();
         // A read-only descriptor deterministically fails the next write.
-        db.file = LockedFile(File::open(&path).unwrap());
+        db.file = LockedFile::disk(File::open(&path).unwrap());
         let second = [put(2, &[2.0, 2.0])];
         assert!(matches!(
             db.import_chunk(1, 2, &second, InvalidRowPolicy::RejectChunk),

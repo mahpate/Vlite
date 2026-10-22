@@ -8,6 +8,7 @@ license = "MIT"
 
 [workspace]
 members = ["bindings/c"]
+exclude = ["bindings/wasm"]
 resolver = "3"
 
 [features]
@@ -27,8 +28,12 @@ grpc = [
     "dep:tonic-prost-build",
     "dep:protox",
 ]
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 
 [dependencies]
+wgpu = { version = "30.0.1", optional = true, default-features = false, features = ["wgsl", "dx12", "metal", "vulkan"] }
+pollster = { version = "1.0.1", optional = true }
+bytemuck = { version = "1.25", optional = true }
 reqwest = { version = "0.12", optional = true, default-features = false, features = ["blocking", "json", "rustls-tls"] }
 opentelemetry = { version = "0.31", optional = true, default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "0.31", optional = true, default-features = false, features = ["trace"] }
@@ -51,9 +56,14 @@ getrandom = "0.4"
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 sha2 = "0.10"
+chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["alloc"] }
+argon2 = { version = "0.5.3", default-features = false, features = ["alloc"] }
 tempfile = "3"
 subtle = { version = "2.6", optional = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "io-util"], optional = true }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [build-dependencies]
 protox = { version = "0.10", optional = true }

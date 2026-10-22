@@ -2,7 +2,11 @@
 //!
 //! No function repairs sources, overwrites destinations, or replaces open files.
 
-use crate::{Database, Error, LockedFile, Result, format, import, lock};
+use crate::crypto::Cipher;
+pub use crate::logops::{
+    LogSegment, RestoreReport, RestoreTarget, export_log_segment, reencrypt, restore_to,
+};
+use crate::{Database, EncryptionKey, Error, LockedFile, Result, format, import, lock};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -57,11 +61,11 @@ pub struct CompactionReport {
     pub output: Inspection,
 }
 
-fn source(path: &Path) -> Result<LockedFile> {
+pub(crate) fn source(path: &Path) -> Result<LockedFile> {
     lock(File::open(path)?)
 }
 
-fn inspection(loaded: &format::Loaded) -> Inspection {
+pub(crate) fn inspection(loaded: &format::Loaded) -> Inspection {
     Inspection {
         format_version: loaded.version,
         dimensions: loaded.dimensions,
@@ -73,7 +77,7 @@ fn inspection(loaded: &format::Loaded) -> Inspection {
     }
 }
 
-fn require_complete(loaded: &format::Loaded) -> Result<()> {
+pub(crate) fn require_complete(loaded: &format::Loaded) -> Result<()> {
     if loaded.incomplete_bytes != 0 {
         return Err(Error::IncompleteTail {
             offset: loaded.end,
@@ -88,8 +92,17 @@ fn require_complete(loaded: &format::Loaded) -> Result<()> {
 /// An incomplete tail is reported, not repaired. Corruption is returned as an
 /// error. The source is opened read-only and its bytes are never modified.
 pub fn inspect(path: impl AsRef<Path>) -> Result<Inspection> {
-    let mut file = source(path.as_ref())?;
-    Ok(inspection(&format::load(&mut file)?))
+    inspect_inner(path.as_ref(), None)
+}
+
+/// `inspect` for an encrypted file; validates every frame's authentication tag.
+pub fn inspect_with_key(path: impl AsRef<Path>, key: &EncryptionKey) -> Result<Inspection> {
+    inspect_inner(path.as_ref(), Some(key))
+}
+
+fn inspect_inner(path: &Path, key: Option<&EncryptionKey>) -> Result<Inspection> {
+    let mut file = source(path)?;
+    Ok(inspection(&format::load_with(&mut file, key)?))
 }
 
 /// Like `inspect`, also reporting lineage, collections and open import jobs.
@@ -109,8 +122,17 @@ pub fn inspect_detail(path: impl AsRef<Path>) -> Result<InspectionDetail> {
 /// Fully validates a complete closed file and computes a CRC-32 over all of
 /// its bytes. An incomplete tail is an error. The file is never modified.
 pub fn verify(path: impl AsRef<Path>) -> Result<Verification> {
-    let mut file = source(path.as_ref())?;
-    let loaded = format::load(&mut file)?;
+    verify_inner(path.as_ref(), None)
+}
+
+/// `verify` for an encrypted file.
+pub fn verify_with_key(path: impl AsRef<Path>, key: &EncryptionKey) -> Result<Verification> {
+    verify_inner(path.as_ref(), Some(key))
+}
+
+fn verify_inner(path: &Path, key: Option<&EncryptionKey>) -> Result<Verification> {
+    let mut file = source(path)?;
+    let loaded = format::load_with(&mut file, key)?;
     require_complete(&loaded)?;
     let inspection = inspection(&loaded);
     file.seek(SeekFrom::Start(0))?;
@@ -118,7 +140,7 @@ pub fn verify(path: impl AsRef<Path>) -> Result<Verification> {
     let mut bytes = 0u64;
     let mut buffer = vec![0u8; 1 << 16];
     loop {
-        let read = file.0.read(&mut buffer)?;
+        let read = file.read(&mut buffer)?;
         if read == 0 {
             break;
         }
@@ -143,13 +165,31 @@ pub fn verify(path: impl AsRef<Path>) -> Result<Verification> {
 /// durability is not guaranteed. On Unix, a directory-sync error after publication
 /// returns PublicationIndeterminate with the already-published destination.
 pub fn backup(source_path: impl AsRef<Path>, destination: impl AsRef<Path>) -> Result<Inspection> {
-    let mut file = source(source_path.as_ref())?;
-    let loaded = format::load(&mut file)?;
+    backup_inner(source_path.as_ref(), destination.as_ref(), None)
+}
+
+/// `backup` of an encrypted file: a byte-identical copy that stays encrypted
+/// under the same key.
+pub fn backup_with_key(
+    source_path: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+    key: &EncryptionKey,
+) -> Result<Inspection> {
+    backup_inner(source_path.as_ref(), destination.as_ref(), Some(key))
+}
+
+fn backup_inner(
+    source_path: &Path,
+    destination: &Path,
+    key: Option<&EncryptionKey>,
+) -> Result<Inspection> {
+    let mut file = source(source_path)?;
+    let loaded = format::load_with(&mut file, key)?;
     require_complete(&loaded)?;
     let expected = inspection(&loaded);
-    publish(destination.as_ref(), |output| {
+    publish_with(destination, key, |output| {
         file.seek(SeekFrom::Start(0))?;
-        let copied = io::copy(&mut file.0, output)?;
+        let copied = io::copy(&mut file, output)?;
         if copied != expected.file_bytes {
             return Err(io::Error::other("source size changed during backup").into());
         }
@@ -165,8 +205,26 @@ pub fn backup(source_path: impl AsRef<Path>, destination: impl AsRef<Path>) -> R
 /// except for a fresh lineage in the header (bytes 16..24 and header CRC), so a
 /// restored copy never shares an identity with the database it came from.
 pub fn restore(backup_path: impl AsRef<Path>, destination: impl AsRef<Path>) -> Result<Inspection> {
-    let mut file = source(backup_path.as_ref())?;
-    let loaded = format::load(&mut file)?;
+    restore_inner(backup_path.as_ref(), destination.as_ref(), None)
+}
+
+/// `restore` of an encrypted backup (same key; the restored copy keeps its
+/// salt and key ID but gets a new lineage).
+pub fn restore_with_key(
+    backup_path: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+    key: &EncryptionKey,
+) -> Result<Inspection> {
+    restore_inner(backup_path.as_ref(), destination.as_ref(), Some(key))
+}
+
+fn restore_inner(
+    backup_path: &Path,
+    destination: &Path,
+    key: Option<&EncryptionKey>,
+) -> Result<Inspection> {
+    let mut file = source(backup_path)?;
+    let loaded = format::load_with(&mut file, key)?;
     require_complete(&loaded)?;
     let expected = inspection(&loaded);
     let lineage = if loaded.version >= format::V4 {
@@ -174,16 +232,22 @@ pub fn restore(backup_path: impl AsRef<Path>, destination: impl AsRef<Path>) -> 
     } else {
         None
     };
-    publish(destination.as_ref(), |output| {
+    publish_with(destination, key, |output| {
         file.seek(SeekFrom::Start(0))?;
-        let copied = io::copy(&mut file.0, output)?;
+        let copied = io::copy(&mut file, output)?;
         if copied != expected.file_bytes {
             return Err(io::Error::other("source size changed during restore").into());
         }
         if let Some(lineage) = lineage {
             output.seek(SeekFrom::Start(0))?;
             output.write_all(&if loaded.version >= format::V5 {
-                format::header_v5(loaded.dimensions, lineage, loaded.collection_floor)
+                format::header_v5_flags(
+                    loaded.dimensions,
+                    lineage,
+                    loaded.collection_floor,
+                    loaded.flags,
+                    None,
+                )
             } else {
                 format::header_v4(loaded.dimensions, lineage, loaded.collection_floor)
             })?;
@@ -216,21 +280,46 @@ pub fn compact_at(
     destination: impl AsRef<Path>,
     now_ms: u64,
 ) -> Result<CompactionReport> {
-    let mut file = source(source_path.as_ref())?;
-    let loaded = format::load(&mut file)?;
+    compact_inner(source_path.as_ref(), destination.as_ref(), now_ms, None)
+}
+
+/// Compacts an encrypted v5 file into a new encrypted file under the same key
+/// (fresh salt, so every ciphertext differs from the source).
+pub fn compact_with_key(
+    source_path: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+    key: &EncryptionKey,
+) -> Result<CompactionReport> {
+    compact_inner(
+        source_path.as_ref(),
+        destination.as_ref(),
+        crate::current_time_ms(),
+        Some(key),
+    )
+}
+
+fn compact_inner(
+    source_path: &Path,
+    destination: &Path,
+    now_ms: u64,
+    key: Option<&EncryptionKey>,
+) -> Result<CompactionReport> {
+    let mut file = source(source_path)?;
+    let loaded = format::load_with(&mut file, key)?;
     require_complete(&loaded)?;
     let source = inspection(&loaded);
+    let cipher = key.map(Cipher::create).transpose()?;
     let output = if loaded.version >= format::V4 {
         let lineage = format::new_lineage()?;
-        publish(destination.as_ref(), |output| {
+        publish_with(destination, key, |output| {
             if loaded.version >= format::V5 {
-                write_v5(output, &loaded, lineage, now_ms)
+                write_v5(output, &loaded, lineage, now_ms, cipher.as_ref())
             } else {
                 write_v4(output, &loaded, lineage)
             }
         })?
     } else {
-        publish(destination.as_ref(), |output| {
+        publish(destination, |output| {
             output.write_all(&format::header(loaded.dimensions))?;
             let mut sequence = 0u64;
             for (&id, record) in loaded.default_records() {
@@ -259,7 +348,7 @@ pub fn upgrade(
     let lineage = format::new_lineage()?;
     let output = publish(destination.as_ref(), |output| {
         if loaded.version >= format::V5 {
-            write_v5(output, &loaded, lineage, crate::current_time_ms())
+            write_v5(output, &loaded, lineage, crate::current_time_ms(), None)
         } else {
             write_v4(output, &loaded, lineage)
         }
@@ -394,13 +483,21 @@ fn probe(path: &Path, expected: &[(String, usize)]) -> Result<(Option<u64>, usiz
 }
 
 fn publish(destination: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Result<Inspection> {
+    publish_with(destination, None, write)
+}
+
+pub(crate) fn publish_with(
+    destination: &Path,
+    key: Option<&EncryptionKey>,
+    write: impl FnOnce(&mut File) -> Result<()>,
+) -> Result<Inspection> {
     let parent = destination
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     let mut staging = NamedTempFile::new_in(parent)?;
     write(staging.as_file_mut())?;
-    let loaded = format::load(staging.as_file_mut())?;
+    let loaded = format::load_with(staging.as_file_mut(), key)?;
     require_complete(&loaded)?;
     let report = inspection(&loaded);
     staging.as_file().sync_all()?;
@@ -420,17 +517,46 @@ fn publish(destination: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> R
     Ok(report)
 }
 
-fn write_v5(output: &mut File, loaded: &format::Loaded, lineage: u64, now_ms: u64) -> Result<()> {
+/// Writes frames to a file, sealing them when the output is encrypted.
+struct Sink<'a> {
+    file: &'a mut File,
+    cipher: Option<&'a Cipher>,
+}
+
+impl Sink<'_> {
+    fn write_all(&mut self, frame: &[u8]) -> Result<()> {
+        match self.cipher {
+            Some(cipher) => self.file.write_all(&cipher.seal_frame(frame)?)?,
+            None => self.file.write_all(frame)?,
+        }
+        Ok(())
+    }
+}
+
+fn write_v5(
+    file: &mut File,
+    loaded: &format::Loaded,
+    lineage: u64,
+    now_ms: u64,
+    cipher: Option<&Cipher>,
+) -> Result<()> {
     let mut sequence = 0u64;
     let mut next = || -> Result<u64> {
         sequence = sequence.checked_add(1).ok_or(Error::SequenceExhausted)?;
         Ok(sequence)
     };
-    output.write_all(&format::header_v5(
+    file.write_all(&format::header_v5_flags(
         loaded.dimensions,
         lineage,
         loaded.collection_high,
+        if cipher.is_some() {
+            format::FLAG_ENCRYPTED
+        } else {
+            0
+        },
+        cipher,
     ))?;
+    let mut output = Sink { file, cipher };
     for (&id, collection) in loaded.collections.range(1..) {
         output.write_all(&format::collection_create_frame(
             next()?,

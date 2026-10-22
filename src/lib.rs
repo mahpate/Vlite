@@ -3,7 +3,21 @@
 //! See the project README for the durability and explicit tail-repair contract.
 
 mod ann_snapshot;
+pub mod changes;
 mod collection;
+mod crypto;
+pub mod disk_ann;
+#[cfg(feature = "gpu")]
+pub mod gpu;
+mod storage;
+pub use disk_ann::{DiskAnnIndex, DiskAnnMemory, DiskAnnOptions, DiskAnnSource};
+#[cfg(feature = "gpu")]
+pub use gpu::GpuExactSearcher;
+pub mod replica;
+pub use replica::{ReplicaFollower, ReplicaStatus};
+mod logops;
+pub use crypto::{EncryptionKey, KdfParams};
+pub use logops::LogSegment;
 pub mod embedding;
 mod format;
 mod hnsw;
@@ -57,7 +71,6 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fmt;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, Seek, SeekFrom, Write};
-use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 
 use collection::Collection;
@@ -69,12 +82,28 @@ pub const MAX_BATCH_OPERATIONS: usize = 4_096;
 pub const MAX_BATCH_BYTES: usize = 16_777_216;
 pub type Result<T> = std::result::Result<T, Error>;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn current_time_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
         .min(u128::from(u64::MAX)) as u64
+}
+
+#[cfg(target_arch = "wasm32")]
+static WASM_CLOCK_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// WebAssembly has no system clock; the host (for example `Date.now()`) sets
+/// the current Unix-millisecond time used for TTL expiry and commit timestamps.
+#[cfg(target_arch = "wasm32")]
+pub fn set_wasm_clock_ms(now_ms: u64) {
+    WASM_CLOCK_MS.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn current_time_ms() -> u64 {
+    WASM_CLOCK_MS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 fn vector_norm(vector: &[f32]) -> f64 {
@@ -205,6 +234,44 @@ pub enum Error {
     ImportNotFound,
     TooManyImports,
     InvalidQuery(&'static str),
+    /// The file is encrypted and no key was supplied.
+    EncryptionKeyRequired,
+    /// The supplied key does not match the file; `key_id` is the file's key ID.
+    EncryptionKeyMismatch {
+        key_id: u64,
+    },
+    /// A key was supplied but the file is not encrypted.
+    NotEncrypted,
+    InvalidEncryptionOptions(&'static str),
+    /// The header declares optional features this build does not understand.
+    UnsupportedFeature(u16),
+    /// A derived sidecar cannot be written for this database (for example an
+    /// encrypted one, whose sidecars would contain plaintext vectors).
+    SidecarUnavailable(&'static str),
+    ChangeFeedRequiresUpgrade,
+    /// The cursor belongs to an earlier file lineage (the log was compacted,
+    /// restored or replaced); take a fresh snapshot and restart the feed.
+    CursorCompacted {
+        cursor_lineage: u64,
+        current_lineage: u64,
+    },
+    /// The cursor is past the end of the log (for example after tail repair).
+    CursorAhead {
+        cursor: u64,
+        head: u64,
+    },
+    InvalidCursor(&'static str),
+    /// A timestamp restore needs a file created with commit timestamps.
+    TimestampsUnavailable,
+    InvalidRestoreTarget(&'static str),
+    /// Writes are refused by a read-only replica follower.
+    ReadOnlyReplica,
+    /// A shipped log segment does not continue this follower's log.
+    ReplicaDiverged(&'static str),
+    /// A disk index was built for a different committed state.
+    StaleIndex,
+    /// The GPU path failed; callers may fall back to the CPU search.
+    GpuUnavailable(&'static str),
 }
 
 impl fmt::Display for Error {
@@ -347,6 +414,49 @@ impl fmt::Display for Error {
             Self::ImportNotFound => write!(f, "import job not found"),
             Self::TooManyImports => write!(f, "at most 64 import jobs may be open"),
             Self::InvalidQuery(reason) => write!(f, "invalid query: {reason}"),
+            Self::EncryptionKeyRequired => {
+                write!(f, "database is encrypted; an encryption key is required")
+            }
+            Self::EncryptionKeyMismatch { key_id } => write!(
+                f,
+                "encryption key does not match this database (file key ID {key_id:016x})"
+            ),
+            Self::NotEncrypted => write!(f, "database is not encrypted"),
+            Self::InvalidEncryptionOptions(reason) => {
+                write!(f, "invalid encryption options: {reason}")
+            }
+            Self::UnsupportedFeature(flags) => write!(
+                f,
+                "database header declares unsupported feature flags {flags:#06x}"
+            ),
+            Self::SidecarUnavailable(reason) => write!(f, "sidecar unavailable: {reason}"),
+            Self::ChangeFeedRequiresUpgrade => {
+                write!(f, "the change feed requires format v4 or newer")
+            }
+            Self::CursorCompacted {
+                cursor_lineage,
+                current_lineage,
+            } => write!(
+                f,
+                "cursor compacted away: cursor lineage {cursor_lineage:016x} is not the current lineage {current_lineage:016x}; take a new snapshot and restart the feed"
+            ),
+            Self::CursorAhead { cursor, head } => write!(
+                f,
+                "cursor sequence {cursor} is past the end of the log ({head}); the log was truncated or replaced"
+            ),
+            Self::InvalidCursor(reason) => write!(f, "invalid cursor: {reason}"),
+            Self::TimestampsUnavailable => write!(
+                f,
+                "this database was not created with commit timestamps; restore by sequence instead"
+            ),
+            Self::InvalidRestoreTarget(reason) => write!(f, "invalid restore target: {reason}"),
+            Self::ReadOnlyReplica => write!(f, "read replica followers refuse writes"),
+            Self::ReplicaDiverged(reason) => write!(f, "replica log diverged: {reason}"),
+            Self::StaleIndex => write!(
+                f,
+                "disk index was built for a different committed state; rebuild it"
+            ),
+            Self::GpuUnavailable(reason) => write!(f, "GPU search unavailable: {reason}"),
         }
     }
 }
@@ -505,21 +615,168 @@ pub struct Database {
     /// Highest collection ID ever assigned in this lineage history; new
     /// collections get the next ID, so IDs are never reused.
     collection_high: u16,
+    flags: u16,
+    cipher: Option<crypto::Cipher>,
+    /// `(sequence, ms)` per commit for files created with commit timestamps.
+    commit_times: Vec<(u64, u64)>,
+    clock: Option<CommitClock>,
 }
 
-struct LockedFile(File);
+/// Source of commit timestamps (milliseconds since the Unix epoch).
+pub type CommitClock = Box<dyn FnMut() -> u64 + Send + Sync>;
 
-impl Deref for LockedFile {
-    type Target = File;
+/// Optional features for `Database::create_with_options`.
+#[derive(Debug, Default)]
+pub struct CreateOptions {
+    /// Defaults to V3 unless a feature below requires V5.
+    pub format: Option<FormatVersion>,
+    /// Encrypt frame bodies at rest (requires, and implies, format V5).
+    pub encryption: Option<EncryptionKey>,
+    /// Record a wall-clock timestamp per commit so the file supports
+    /// timestamp point-in-time restore (requires, and implies, format V5).
+    pub commit_timestamps: bool,
+}
 
-    fn deref(&self) -> &File {
-        &self.0
+enum Backing {
+    Disk(File),
+    Memory(storage::MemFile),
+}
+
+struct LockedFile(Backing);
+
+/// Minimal stand-in for `fs::Metadata` that works for every backing.
+#[allow(dead_code)]
+struct BackingLen(u64);
+
+#[allow(dead_code)]
+impl BackingLen {
+    fn len(&self) -> u64 {
+        self.0
     }
 }
 
-impl DerefMut for LockedFile {
-    fn deref_mut(&mut self) -> &mut File {
-        &mut self.0
+#[allow(dead_code)]
+impl Backing {
+    fn metadata(&self) -> io::Result<BackingLen> {
+        match self {
+            Backing::Disk(file) => Ok(BackingLen(file.metadata()?.len())),
+            Backing::Memory(memory) => Ok(BackingLen(memory.len())),
+        }
+    }
+}
+
+impl io::Read for Backing {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Backing::Disk(file) => file.read(buf),
+            Backing::Memory(memory) => memory.read(buf),
+        }
+    }
+}
+
+impl Seek for Backing {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        match self {
+            Backing::Disk(file) => file.seek(position),
+            Backing::Memory(memory) => memory.seek(position),
+        }
+    }
+}
+
+impl LockedFile {
+    fn disk(file: File) -> Self {
+        Self(Backing::Disk(file))
+    }
+
+    fn memory(bytes: Vec<u8>) -> Self {
+        Self(Backing::Memory(storage::MemFile::from_bytes(bytes)))
+    }
+
+    fn sync_all(&self) -> io::Result<()> {
+        match &self.0 {
+            Backing::Disk(file) => file.sync_all(),
+            Backing::Memory(_) => Ok(()),
+        }
+    }
+
+    fn set_len(&self, length: u64) -> io::Result<()> {
+        match &self.0 {
+            Backing::Disk(file) => file.set_len(length),
+            Backing::Memory(memory) => memory.set_len(length),
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> io::Result<u64> {
+        match &self.0 {
+            Backing::Disk(file) => Ok(file.metadata()?.len()),
+            Backing::Memory(memory) => Ok(memory.len()),
+        }
+    }
+
+    fn unlock(&self) -> io::Result<()> {
+        match &self.0 {
+            Backing::Disk(file) => file.unlock(),
+            Backing::Memory(_) => Ok(()),
+        }
+    }
+
+    #[cfg(test)]
+    fn try_clone(&self) -> io::Result<File> {
+        match &self.0 {
+            Backing::Disk(file) => file.try_clone(),
+            Backing::Memory(_) => Err(io::Error::other("in-memory storage")),
+        }
+    }
+
+    fn memory_bytes(&self) -> Option<Vec<u8>> {
+        match &self.0 {
+            Backing::Disk(_) => None,
+            Backing::Memory(memory) => Some(memory.to_bytes()),
+        }
+    }
+}
+
+impl io::Read for &LockedFile {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match &self.0 {
+            Backing::Disk(file) => (&*file).read(buf),
+            Backing::Memory(memory) => memory.read(buf),
+        }
+    }
+}
+
+impl io::Read for LockedFile {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        (&*self).read(buf)
+    }
+}
+
+impl Seek for &LockedFile {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        match &self.0 {
+            Backing::Disk(file) => (&*file).seek(position),
+            Backing::Memory(memory) => memory.seek(position),
+        }
+    }
+}
+
+impl Seek for LockedFile {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        (&*self).seek(position)
+    }
+}
+
+impl Write for LockedFile {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match &self.0 {
+            Backing::Disk(file) => (&*file).write(buf),
+            Backing::Memory(memory) => memory.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -528,13 +785,13 @@ impl Drop for LockedFile {
         // Explicit unlock also releases Unix locks briefly inherited by a
         // concurrent fork/exec. File close alone can leave those locks alive.
         // Destructors cannot return errors; close() reports unlock failures.
-        let _ = self.0.unlock();
+        let _ = self.unlock();
     }
 }
 
 fn lock(file: File) -> Result<LockedFile> {
     match file.try_lock() {
-        Ok(()) => Ok(LockedFile(file)),
+        Ok(()) => Ok(LockedFile::disk(file)),
         Err(TryLockError::WouldBlock) => Err(Error::Locked),
         Err(TryLockError::Error(error)) => Err(Error::Io(error)),
     }
@@ -587,7 +844,86 @@ impl Database {
         dimensions: usize,
         format: FormatVersion,
     ) -> Result<Self> {
+        Self::create_with_options(
+            path,
+            dimensions,
+            CreateOptions {
+                format: Some(format),
+                ..CreateOptions::default()
+            },
+        )
+    }
+
+    /// Creates a new database with optional encryption and commit timestamps.
+    /// Either feature needs format V5 (the default when one is requested; an
+    /// explicit older format is rejected).
+    pub fn create_with_options(
+        path: impl AsRef<Path>,
+        dimensions: usize,
+        options: CreateOptions,
+    ) -> Result<Self> {
+        let path = path.as_ref();
+        Self::create_backed(dimensions, options, |header| {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(path)?;
+            let mut file = lock(file)?;
+            file.write_all(header)?;
+            file.sync_all()?;
+            Ok(file)
+        })
+    }
+
+    /// Creates a database held entirely in memory (no file, no lock): the
+    /// WebAssembly backend. Commits are durable only as far as the caller
+    /// persists `to_bytes()`.
+    pub fn create_in_memory(dimensions: usize, options: CreateOptions) -> Result<Self> {
+        Self::create_backed(dimensions, options, |header| {
+            Ok(LockedFile::memory(header.to_vec()))
+        })
+    }
+
+    /// Opens a database from a complete byte image (as produced by `to_bytes`,
+    /// `backup` or a closed file). Corrupt or incomplete images are rejected.
+    pub fn open_from_bytes(bytes: Vec<u8>, key: Option<&EncryptionKey>) -> Result<Self> {
+        Self::open_backed(LockedFile::memory(bytes), key)
+    }
+
+    /// The full committed byte image of an in-memory database, or `None` for a
+    /// file-backed one. Opening it with `open_from_bytes` reproduces the state.
+    pub fn to_bytes(&self) -> Option<Vec<u8>> {
+        self.file.memory_bytes()
+    }
+
+    fn create_backed(
+        dimensions: usize,
+        options: CreateOptions,
+        make: impl FnOnce(&[u8]) -> Result<LockedFile>,
+    ) -> Result<Self> {
         validate_dimensions(dimensions)?;
+        let featured = options.encryption.is_some() || options.commit_timestamps;
+        let format = match (options.format, featured) {
+            (None, false) => FormatVersion::V3,
+            (None, true) => FormatVersion::V5,
+            (Some(FormatVersion::V5), _) => FormatVersion::V5,
+            (Some(_), true) => {
+                return Err(Error::InvalidEncryptionOptions(
+                    "encryption and commit timestamps require format V5",
+                ));
+            }
+            (Some(format), false) => format,
+        };
+        let mut flags = 0u16;
+        let mut cipher = None;
+        if let Some(key) = &options.encryption {
+            flags |= format::FLAG_ENCRYPTED;
+            cipher = Some(crypto::Cipher::create(key)?);
+        }
+        if options.commit_timestamps {
+            flags |= format::FLAG_TIMESTAMPS;
+        }
         let (version, lineage, header) = match format {
             FormatVersion::V3 => (format::CURRENT_VERSION, None, format::header(dimensions)),
             FormatVersion::V4 => {
@@ -603,24 +939,17 @@ impl Database {
                 (
                     format::V5,
                     Some(lineage),
-                    format::header_v5(dimensions, lineage, 0),
+                    format::header_v5_flags(dimensions, lineage, 0, flags, cipher.as_ref()),
                 )
             }
         };
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(path)?;
-        let mut file = lock(file)?;
-        file.write_all(&header)?;
-        file.sync_all()?;
+        let file = make(&header)?;
         Ok(Self {
             file,
             version,
             lineage,
             sequence: 0,
-            end: format::HEADER_SIZE,
+            end: header.len() as u64,
             poisoned: false,
             collections: BTreeMap::from([(
                 0,
@@ -629,15 +958,33 @@ impl Database {
             rebuild: None,
             imports: import::Registry::default(),
             collection_high: 0,
+            flags,
+            cipher,
+            commit_times: Vec::new(),
+            clock: None,
         })
     }
 
     /// Opens an existing database, validating every record without modifying it.
     ///
     /// Corrupt files and incomplete trailing writes are rejected, not truncated.
+    /// Encrypted files need `open_encrypted`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let mut file = open_locked(path.as_ref())?;
-        let loaded = format::load(&mut file)?;
+        Self::open_inner(path.as_ref(), None)
+    }
+
+    /// Opens an encrypted database. A wrong key is `EncryptionKeyMismatch`
+    /// (never garbage data); an unencrypted file is `NotEncrypted`.
+    pub fn open_encrypted(path: impl AsRef<Path>, key: &EncryptionKey) -> Result<Self> {
+        Self::open_inner(path.as_ref(), Some(key))
+    }
+
+    fn open_inner(path: &Path, key: Option<&EncryptionKey>) -> Result<Self> {
+        Self::open_backed(open_locked(path)?, key)
+    }
+
+    fn open_backed(mut file: LockedFile, key: Option<&EncryptionKey>) -> Result<Self> {
+        let loaded = format::load_with(&mut file, key)?;
         if loaded.incomplete_bytes != 0 {
             return Err(Error::IncompleteTail {
                 offset: loaded.end,
@@ -660,6 +1007,10 @@ impl Database {
             rebuild: None,
             imports,
             collection_high: loaded.collection_high,
+            flags: loaded.flags,
+            cipher: loaded.cipher,
+            commit_times: loaded.commit_times,
+            clock: None,
         })
     }
 
@@ -669,9 +1020,21 @@ impl Database {
     /// cannot be distinguished from an interrupted write. Calling this method
     /// explicitly accepts that potential data loss. Complete corrupt frames
     /// are never repaired. A failed repair sync has an indeterminate outcome.
+    /// Encrypted files need `discard_incomplete_tail_encrypted`.
     pub fn discard_incomplete_tail(path: impl AsRef<Path>) -> Result<RepairReport> {
-        let mut file = open_locked(path.as_ref())?;
-        let loaded = format::load(&mut file)?;
+        Self::discard_tail_inner(path.as_ref(), None)
+    }
+
+    pub fn discard_incomplete_tail_encrypted(
+        path: impl AsRef<Path>,
+        key: &EncryptionKey,
+    ) -> Result<RepairReport> {
+        Self::discard_tail_inner(path.as_ref(), Some(key))
+    }
+
+    fn discard_tail_inner(path: &Path, key: Option<&EncryptionKey>) -> Result<RepairReport> {
+        let mut file = open_locked(path)?;
+        let loaded = format::load_with(&mut file, key)?;
         let report = RepairReport {
             discarded_bytes: loaded.incomplete_bytes,
             retained_commits: loaded.sequence,
@@ -1115,23 +1478,156 @@ impl Database {
     }
 
     fn commit_frame(&mut self, sequence: u64, frame: &[u8]) -> Result<()> {
-        self.commit_frame_with_sync(sequence, frame, File::sync_all)
+        self.commit_frame_with_sync(sequence, frame, LockedFile::sync_all)
     }
 
     fn commit_frame_with_sync(
         &mut self,
         sequence: u64,
         frame: &[u8],
-        sync: impl FnOnce(&File) -> io::Result<()>,
+        sync: impl FnOnce(&LockedFile) -> io::Result<()>,
     ) -> Result<()> {
-        let result = append_and_sync(&mut self.file.0, self.end, frame, sync);
+        let mut bytes = Vec::new();
+        let mut stamp = None;
+        if self.flags & format::FLAG_TIMESTAMPS != 0 {
+            let now = match &mut self.clock {
+                Some(clock) => clock(),
+                None => current_time_ms(),
+            };
+            stamp = Some(now);
+            bytes.extend_from_slice(&format::time_anchor_frame(sequence, now));
+        }
+        bytes.extend_from_slice(frame);
+        let sealed;
+        let output: &[u8] = if let Some(cipher) = &self.cipher {
+            let mut out = Vec::new();
+            let anchor_len = bytes.len() - frame.len();
+            if anchor_len > 0 {
+                out.extend_from_slice(&cipher.seal_frame(&bytes[..anchor_len])?);
+            }
+            out.extend_from_slice(&cipher.seal_frame(frame)?);
+            sealed = out;
+            &sealed
+        } else {
+            &bytes
+        };
+        let result = append_and_sync(&mut self.file, self.end, output, sync);
         if let Err(error) = result {
             self.poisoned = true;
             return Err(Error::CommitIndeterminate(error));
         }
         self.sequence = sequence;
-        self.end += frame.len() as u64;
+        self.end += output.len() as u64;
+        if let Some(now) = stamp {
+            self.commit_times.push((sequence, now));
+        }
         Ok(())
+    }
+
+    /// Key ID (non-secret fingerprint) of the encryption key, if encrypted.
+    pub fn encryption_key_id(&self) -> Option<u64> {
+        self.cipher.as_ref().map(|cipher| cipher.descriptor.key_id)
+    }
+
+    pub fn is_encrypted(&self) -> bool {
+        self.cipher.is_some()
+    }
+
+    /// Whether commits carry wall-clock timestamps (timestamp restore).
+    pub fn has_commit_timestamps(&self) -> bool {
+        self.flags & format::FLAG_TIMESTAMPS != 0
+    }
+
+    /// Replaces the commit timestamp source (deterministic tests, simulated time).
+    pub fn set_commit_clock(&mut self, clock: CommitClock) {
+        self.clock = Some(clock);
+    }
+
+    /// Cursor positioned at the current head: `changes_after` returns only
+    /// commits made after this call. Needs format v4 or newer.
+    pub fn feed_cursor(&self) -> Result<changes::FeedCursor> {
+        Ok(changes::FeedCursor {
+            lineage: self.lineage.ok_or(Error::ChangeFeedRequiresUpgrade)?,
+            sequence: self.sequence,
+        })
+    }
+
+    /// Reads up to about `max_events` committed changes after `cursor`, cut on
+    /// commit boundaries (a batch commit is never split). Reads the durable log
+    /// with a separate handle, so it observes exactly what a crash would keep.
+    /// Cost is one sequential scan of the log per call.
+    pub fn changes_after(
+        &self,
+        cursor: &changes::FeedCursor,
+        max_events: usize,
+    ) -> Result<changes::ChangeBatch> {
+        self.lineage.ok_or(Error::ChangeFeedRequiresUpgrade)?;
+        let mut file = &self.file;
+        changes::read_changes(&mut file, None, self.cipher.as_ref(), cursor, max_events)
+    }
+
+    /// Cuts a log segment of commits after `after_sequence` for replication
+    /// (see `ReplicaFollower`). `max_bytes` bounds the segment softly: whole
+    /// commits are included until it is reached.
+    pub fn export_log(&self, after_sequence: u64, max_bytes: usize) -> Result<LogSegment> {
+        let mut file = &self.file;
+        logops::read_segment(
+            &mut file,
+            None,
+            self.cipher.as_ref(),
+            after_sequence,
+            max_bytes,
+        )
+    }
+
+    /// Replica apply step: appends whole, already-authenticated commits to this
+    /// follower's own log, then replays the entire file to rebuild state.
+    /// On any failure the file is truncated back and the old in-memory state
+    /// is kept.
+    pub(crate) fn replica_extend(
+        &mut self,
+        bytes: &[u8],
+        expected_last: u64,
+        key: Option<&EncryptionKey>,
+    ) -> Result<()> {
+        let previous = self.end;
+        let outcome = (|| -> Result<format::Loaded> {
+            append_and_sync(&mut self.file, previous, bytes, |file| file.sync_all())?;
+            self.file.seek(SeekFrom::Start(0))?;
+            let loaded = format::load_with(&mut self.file, key)?;
+            if loaded.incomplete_bytes != 0
+                || loaded.sequence != expected_last
+                || loaded.lineage != self.lineage
+                || loaded.flags != self.flags
+            {
+                return Err(Error::ReplicaDiverged(
+                    "segment does not extend the follower log",
+                ));
+            }
+            Ok(loaded)
+        })();
+        match outcome {
+            Ok(loaded) => {
+                self.sequence = loaded.sequence;
+                self.end = loaded.end;
+                self.collections = loaded
+                    .collections
+                    .into_iter()
+                    .map(|(id, collection)| (id, Collection::from_loaded(collection)))
+                    .collect();
+                self.rebuild = None;
+                self.imports = import::Registry::from_markers(&loaded.imports);
+                self.collection_high = loaded.collection_high;
+                self.commit_times = loaded.commit_times;
+                Ok(())
+            }
+            Err(error) => {
+                if self.file.set_len(previous).is_err() || self.file.sync_all().is_err() {
+                    self.poisoned = true;
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Single post-commit hook: rebuild catch-up, ANN buffer, derived indexes,
@@ -2001,6 +2497,11 @@ impl Database {
     /// The sidecar contains vector data; protect it like the datafile.
     pub fn save_ann_snapshot(&self, path: impl AsRef<Path>) -> Result<AnnSnapshotReport> {
         self.ensure_healthy()?;
+        if self.cipher.is_some() {
+            return Err(Error::SidecarUnavailable(
+                "ANN snapshots hold plaintext vectors and are not written for encrypted databases; rebuild indexes after open",
+            ));
+        }
         ann_snapshot::save(self, path.as_ref())
     }
 
@@ -2172,7 +2673,7 @@ mod tests {
             db.default_state().index.as_ref().unwrap().buffer_usage(),
             (0, 0)
         );
-        db.file = LockedFile(File::open(directory.path().join("buffer.vlite")).unwrap());
+        db.file = LockedFile::disk(File::open(directory.path().join("buffer.vlite")).unwrap());
         assert!(matches!(
             db.put(999, &[0.0], b""),
             Err(Error::CommitIndeterminate(_))
@@ -2259,7 +2760,7 @@ mod tests {
         db.put(1, &[1.0], b"original").unwrap();
         db.build_hnsw(HnswConfig::default()).unwrap();
         // A read-only descriptor deterministically fails the next disk write.
-        db.file = LockedFile(File::open(&path).unwrap());
+        db.file = LockedFile::disk(File::open(&path).unwrap());
         assert!(matches!(
             db.put(1, &[2.0], b"replacement"),
             Err(Error::CommitIndeterminate(_))
@@ -2310,7 +2811,7 @@ mod tests {
         db.write_batch(&[]).unwrap();
         assert!(!db.poisoned);
         assert!(db.get(1).unwrap().is_none());
-        assert_eq!(db.file.metadata().unwrap().len(), format::HEADER_SIZE);
+        assert_eq!(db.file.len().unwrap(), format::HEADER_SIZE);
     }
 
     #[test]
@@ -2338,7 +2839,7 @@ mod tests {
         let path = directory.path().join("batch-poison.vlite");
         let mut db = Database::create(&path, 1).unwrap();
         db.put(1, &[1.0], b"old").unwrap();
-        db.file = LockedFile(File::open(&path).unwrap());
+        db.file = LockedFile::disk(File::open(&path).unwrap());
         assert!(matches!(
             db.write_batch(&[
                 Mutation::Delete { id: 1 },

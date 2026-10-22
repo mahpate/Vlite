@@ -76,6 +76,12 @@ impl Ord for Candidate {
     }
 }
 
+/// `(id, norm, links per layer)` for every node, in node order.
+pub(crate) struct GraphExport {
+    pub entry: Option<usize>,
+    pub nodes: Vec<(u64, f64, Vec<Vec<usize>>)>,
+}
+
 struct Node {
     id: u64,
     norm: f64,
@@ -150,6 +156,22 @@ struct Buffered {
 }
 
 impl Index {
+    /// Plain-data copy of the base graph for the disk-based ANN sidecar. `None`
+    /// for quantized graphs (their vectors are not stored here).
+    pub(crate) fn export_graph(&self) -> Option<GraphExport> {
+        if self.quantized() {
+            return None;
+        }
+        Some(GraphExport {
+            entry: self.entry,
+            nodes: self
+                .nodes
+                .iter()
+                .map(|node| (node.id, node.norm, node.links.clone()))
+                .collect(),
+        })
+    }
+
     fn distance(&self, a: &[f32], b: &[f32], a_norm: f64, b_norm: f64) -> f64 {
         metric_distance(a, b, self.metric, a_norm, b_norm)
             .expect("cosine graph contains only nonzero vectors")

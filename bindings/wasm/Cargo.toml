@@ -1,0 +1,17 @@
+[package]
+name = "vlite-wasm"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT"
+description = "In-memory VLite for WebAssembly (wasm-bindgen)"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+vlite = { path = "../.." }
+wasm-bindgen = "=0.2.129"
+
+[workspace]

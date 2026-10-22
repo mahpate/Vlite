@@ -16,3 +16,5 @@ bindings/node/prebuilds/
 bindings/node/*.tgz
 /node-packages/
 /node-linux-packages/
+bindings/wasm/target/
+bindings/wasm/pkg/
