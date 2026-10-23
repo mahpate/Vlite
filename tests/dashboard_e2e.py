@@ -178,7 +178,7 @@ def exercise(page, base, token):
     expect(page.locator("#vectors tbody")).to_contain_text("2")
     expect(page.locator("#vectors tbody")).not_to_contain_text("18446744073709551615")
     expect(page.locator("#next-page")).to_be_enabled()
-    page.get_by_role("button", name="Next page", exact=True).click()
+    page.locator("#next-page").click()
     expect(page.locator("#vectors tbody")).to_contain_text("18446744073709551615")
     expect(page.locator("#next-page")).to_be_disabled()
     page.get_by_role("button", name="First page / refresh", exact=True).click()
