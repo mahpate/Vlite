@@ -86,7 +86,7 @@
     <h2>Why VLite</h2>
     <p>VLite started as a question: how small can a production-grade vector database be? The answer is a single, checksummed <code>.vlite</code> file with durable atomic commits, exact and HNSW search, typed filters and hybrid retrieval &mdash; usable as an embedded library or as a REST/gRPC service, without changing the file format.</p>
     <ul class="list">
-      <li>Written from scratch in Rust; no SQLite or third-party storage engine underneath.</li>
+      <li>Written from scratch in Rust with its own custom storage engine.</li>
       <li>Committed data is never silently discarded; corruption is distinguished from an incomplete trailing write.</li>
       <li>Benchmarks are published with methodology, raw JSON and the places where VLite still needs work.</li>
     </ul>

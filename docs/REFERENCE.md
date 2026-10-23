@@ -4,7 +4,7 @@ Commands in this reference run from the repository root. For installation,
 project status and common workflows, start with the [README](../README.md).
 
 VLite is an experimental embedded vector database written in Rust. It owns its
-storage engine: it is not a SQLite wrapper. Legacy files expose one
+custom storage engine. Legacy files expose one
 fixed-dimension vector space. Opt-in v4 files support named collections with
 independent dimensions; opt-in v5 adds record expiry and GeoPoint metadata. Both support opaque payloads, durable single-record
 and atomic batch mutations, and exact nearest-neighbor search.
@@ -1540,6 +1540,6 @@ Linux and macOS GitHub Actions jobs on minimum and stable Rust, along with lint
 and Linux Docker end-to-end checks. The same CI matrix runs the optional REST
 feature and native TCP tests; Docker additionally checks the HTTP container
 lifecycle and SIGTERM shutdown. Docker on macOS and Linux arm64 images have not been tested.
-Container testing does not verify physical power-loss durability. No on-disk compatibility
-with SQLite, redb, or Qdrant is claimed; their storage/ownership/index-separation
-designs are conceptual references only.
+Container testing does not verify physical power-loss durability. VLite uses
+its own storage format; on-disk compatibility with other database engines is
+not claimed.

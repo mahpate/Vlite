@@ -25,11 +25,9 @@ then query from Search.
 
 ## Studio workflow improvements
 
-The original VLite controls take workflow inspiration from
-[zvec-studio](https://github.com/zvec-ai/zvec-studio)'s create → write → query
-quick start, theme-aware presentation, onboarding and SDK-code roadmap. No
-zvec-studio source code, assets, frameworks or runtime dependencies are used.
-VLite retains its own REST schema, decimal u64 IDs and typed metadata.
+VLite provides a create → write → query quick start, theme-aware presentation,
+onboarding and SDK-code generation. It uses its own REST schema, decimal u64
+IDs and typed metadata.
 
 - **Appearance:** Light, Dark or System, with live system-theme changes. The
   existing density selector remains. Appearance persistence is opt-in: check
