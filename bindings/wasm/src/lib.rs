@@ -1,7 +1,8 @@
 //! WebAssembly bindings: an in-memory VLite database persisted by the host as
 //! a byte image (`toBytes` / `fromBytes`). No files, locks or threads.
 
-use vlite::{CreateOptions, Database, EncryptionKey};
+use vlite::changes::{Change, ChangeKind, FeedCursor};
+use vlite::{CreateOptions, Database, EncryptionKey, FormatVersion, Metadata, MetadataValue};
 use wasm_bindgen::prelude::*;
 
 fn js_error(error: impl std::fmt::Display) -> JsError {
@@ -27,7 +28,11 @@ pub struct VLiteDatabase {
 impl VLiteDatabase {
     /// New empty database. A 32-byte `key` enables authenticated encryption.
     #[wasm_bindgen(js_name = create)]
-    pub fn create(dimensions: usize, key: Option<Vec<u8>>) -> Result<VLiteDatabase, JsError> {
+    pub fn create(
+        dimensions: usize,
+        key: Option<Vec<u8>>,
+        format_v5: Option<bool>,
+    ) -> Result<VLiteDatabase, JsError> {
         let encryption = match key {
             Some(bytes) => Some(EncryptionKey::from_bytes(key_bytes(&bytes)?)),
             None => None,
@@ -36,6 +41,7 @@ impl VLiteDatabase {
             dimensions,
             CreateOptions {
                 encryption,
+                format: format_v5.unwrap_or(false).then_some(FormatVersion::V5),
                 ..CreateOptions::default()
             },
         )
@@ -64,6 +70,102 @@ impl VLiteDatabase {
         self.inner
             .put(id_of(id)?, &vector, &payload)
             .map_err(js_error)
+    }
+
+    /// Puts a record with typed metadata and an optional absolute Unix-ms expiry. Requires V5.
+    #[wasm_bindgen(js_name = putWithExpiry)]
+    pub fn put_with_expiry(
+        &mut self,
+        id: f64,
+        vector: Vec<f32>,
+        payload: Vec<u8>,
+        expires_at_ms: Option<f64>,
+        metadata_json: Option<String>,
+    ) -> Result<(), JsError> {
+        let metadata = parse_metadata(metadata_json.as_deref().unwrap_or("{}"))?;
+        let expiry = expires_at_ms
+            .map(|value| {
+                if value.is_finite()
+                    && value >= 0.0
+                    && value.fract() == 0.0
+                    && value <= 9_007_199_254_740_991.0
+                {
+                    Ok(value as u64)
+                } else {
+                    Err(JsError::new("expiry must be a non-negative safe integer"))
+                }
+            })
+            .transpose()?;
+        self.inner
+            .put_with_expiry(id_of(id)?, &vector, &payload, &metadata, expiry)
+            .map_err(js_error)?;
+        Ok(())
+    }
+
+    /// Replaces only metadata; requires a V5 database.
+    #[wasm_bindgen(js_name = updateMetadata)]
+    pub fn update_metadata(&mut self, id: f64, metadata_json: String) -> Result<(), JsError> {
+        let metadata = parse_metadata(&metadata_json)?;
+        self.inner
+            .update_metadata(id_of(id)?, &metadata)
+            .map_err(js_error)?;
+        Ok(())
+    }
+
+    /// Returns exact results grouped by typed metadata values, encoded as JSON.
+    #[wasm_bindgen(js_name = groupedSearch)]
+    pub fn grouped_search(
+        &self,
+        query: Vec<f32>,
+        groups: usize,
+        hits_per_group: usize,
+        field: String,
+    ) -> Result<String, JsError> {
+        let result = self
+            .inner
+            .collection("default")
+            .map_err(js_error)?
+            .search_grouped(
+                &query,
+                groups,
+                hits_per_group,
+                &field,
+                &[],
+                vlite::DistanceMetric::SquaredL2,
+            )
+            .map_err(js_error)?;
+        let groups: Vec<_> = result.into_iter().map(|group| serde_json::json!({
+            "value": metadata_value_json(&group.value),
+            "hits": group.hits.into_iter().map(|hit| serde_json::json!({"id": hit.id.to_string(), "distance": hit.distance})).collect::<Vec<_>>(),
+        })).collect();
+        serde_json::to_string(&groups).map_err(js_error)
+    }
+
+    /// Cursor positioned at the current database head.
+    #[wasm_bindgen(js_name = feedCursor)]
+    pub fn feed_cursor(&self) -> Result<String, JsError> {
+        self.inner
+            .feed_cursor()
+            .map(|cursor| cursor.to_token())
+            .map_err(js_error)
+    }
+
+    /// Reads committed changes after an opaque feed cursor; result is JSON text.
+    #[wasm_bindgen(js_name = changesAfter)]
+    pub fn changes_after(
+        &self,
+        cursor_token: String,
+        max_events: usize,
+    ) -> Result<String, JsError> {
+        let cursor = FeedCursor::from_token(&cursor_token).map_err(js_error)?;
+        let batch = self
+            .inner
+            .changes_after(&cursor, max_events)
+            .map_err(js_error)?;
+        let changes: Vec<_> = batch.changes.iter().map(change_json).collect();
+        serde_json::to_string(&serde_json::json!({
+            "changes": changes, "next": batch.next.to_token(), "has_more": batch.has_more, "head": batch.head.to_string()
+        })).map_err(js_error)
     }
 
     pub fn delete(&mut self, id: f64) -> Result<(), JsError> {
@@ -112,4 +214,60 @@ fn id_of(id: f64) -> Result<u64, JsError> {
     } else {
         Err(JsError::new("id must be a non-negative safe integer"))
     }
+}
+
+fn parse_metadata(text: &str) -> Result<Metadata, JsError> {
+    serde_json::from_str(text).map_err(js_error)
+}
+
+fn metadata_value_json(value: &MetadataValue) -> serde_json::Value {
+    match value {
+        MetadataValue::String(value) => serde_json::json!({"type":"string", "value":value}),
+        MetadataValue::Integer(value) => {
+            serde_json::json!({"type":"integer", "value":value.to_string()})
+        }
+        MetadataValue::Float(value) => serde_json::json!({"type":"float", "value":value}),
+        MetadataValue::Boolean(value) => serde_json::json!({"type":"boolean", "value":value}),
+        MetadataValue::GeoPoint {
+            latitude,
+            longitude,
+        } => {
+            serde_json::json!({"type":"geopoint", "value":{"latitude":latitude,"longitude":longitude}})
+        }
+    }
+}
+
+fn change_json(change: &Change) -> serde_json::Value {
+    let (kind, id, record, expiry, metadata) = match &change.kind {
+        ChangeKind::Put {
+            id,
+            record,
+            expires_at_ms,
+        } => ("put", Some(*id), Some(record), *expires_at_ms, None),
+        ChangeKind::Delete { id } => ("delete", Some(*id), None, None, None),
+        ChangeKind::MetadataUpdate { id, metadata } => {
+            ("metadata_update", Some(*id), None, None, Some(metadata))
+        }
+        ChangeKind::CollectionCreated { .. } => ("collection_created", None, None, None, None),
+        ChangeKind::CollectionDropped => ("collection_dropped", None, None, None, None),
+        ChangeKind::SettingsUpdated { .. } => ("settings_updated", None, None, None, None),
+        ChangeKind::VectorsUpdated => ("vectors_updated", None, None, None, None),
+    };
+    let metadata_json = |values: &Metadata| {
+        values
+            .iter()
+            .map(|(key, value)| (key.clone(), metadata_value_json(value)))
+            .collect::<serde_json::Map<_, _>>()
+    };
+    let mut output = serde_json::json!({"sequence":change.sequence.to_string(),"ordinal":change.ordinal,"collection":change.collection,"committed_at_ms":change.committed_at_ms,"kind":kind,"id":id.map(|value| value.to_string())});
+    if let Some(record) = record {
+        output["vector"] = serde_json::json!(record.vector);
+        output["payload"] = serde_json::json!(record.payload);
+        output["metadata"] = serde_json::Value::Object(metadata_json(&record.metadata));
+        output["expires_at_ms"] = serde_json::json!(expiry.map(|value| value.to_string()));
+    }
+    if let Some(metadata) = metadata {
+        output["metadata"] = serde_json::Value::Object(metadata_json(metadata));
+    }
+    output
 }

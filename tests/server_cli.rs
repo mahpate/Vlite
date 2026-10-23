@@ -223,10 +223,38 @@ fn startup_never_overwrites_repairs_or_silently_changes_dimensions() {
 fn create_format_selects_v4_and_invalid_operational_options_fail_before_creation() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("v4.vlite");
-    assert!(
-        fails(&path, &["--create-format", "5", "--create-if-missing", "2"])
-            .contains("create-format")
+    let v5_path = directory.path().join("v5.vlite");
+    let mut v5_command = Command::new(env!("CARGO_BIN_EXE_vlite-server"));
+    v5_command
+        .arg(&v5_path)
+        .args([
+            "--create-if-missing",
+            "2",
+            "--create-format",
+            "5",
+            "--bind",
+            "127.0.0.1:0",
+        ])
+        .env_remove("VLITE_AUTH_TOKEN_FILE")
+        .env("VLITE_AUTH_TOKEN", TOKEN);
+    let mut v5_child = v5_command.stdout(Stdio::piped()).spawn().unwrap();
+    let mut line = String::new();
+    BufReader::new(v5_child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let v5_server = Server {
+        child: v5_child,
+        address: line
+            .trim()
+            .strip_prefix("LISTENING http://")
+            .unwrap()
+            .to_owned(),
+    };
+    assert_eq!(
+        v5_server.request("GET", "/v1/database", Value::Null).1["format_version"],
+        5
     );
+    drop(v5_server);
     assert!(fails(&path, &["--create-format", "4"]).contains("--create-if-missing"));
     let output = Command::new(env!("CARGO_BIN_EXE_vlite-server"))
         .arg(&path)

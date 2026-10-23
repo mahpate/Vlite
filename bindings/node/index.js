@@ -67,14 +67,34 @@ export class NativeLibrary {
       catch { this.#pending.delete(id); reject(new EmbeddedError("worker_failed", "Cannot admit operation; worker unavailable")); }
     });
   }
-  async create(path, dimensions, { format } = {}) {
-    // Format 3 remains the default; pass { format: 4 } for named collections and imports.
-    const result = await this._request("0", { op: "create", path, dimensions, ...(format === undefined ? {} : { format }) });
+  async create(path, dimensions, { format, key, passphrase, commitTimestamps = false } = {}) {
+    if (format === 5 || key !== undefined || passphrase !== undefined || commitTimestamps) {
+      return this.#createFeature(path, dimensions, { format, key, passphrase, commitTimestamps });
+    }
+    const result = await this._request("0", { op: "create", path, dimensions, ...optional("format", format) });
     return new Database(this, result.handle);
   }
-  async open(path) {
-    const result = await this._request("0", { op: "open", path });
+  _feature(op, fields = {}) { return this._request("0", { op: "features", request: { op, ...fields } }); }
+  async #createFeature(path, dimensions, { format, key, passphrase, commitTimestamps = false }) {
+    const result = await this._feature("create", { path, dimensions, options: {
+      ...optional("format", format), credentials: credentials(key, passphrase), commit_timestamps: commitTimestamps,
+    } });
     return new Database(this, result.handle);
+  }
+  createInMemory(dimensions, options = {}) { return this.#createFeature(null, dimensions, options); }
+  async open(path, { key, passphrase } = {}) {
+    const result = key === undefined && passphrase === undefined
+      ? await this._request("0", { op: "open", path })
+      : await this._feature("open", { path, credentials: credentials(key, passphrase) });
+    return new Database(this, result.handle);
+  }
+  async openFromBytes(data, { key, passphrase } = {}) {
+    const result = await this._feature("open_from_bytes", { bytes_base64: bytesBase64(data), credentials: credentials(key, passphrase) });
+    return new Database(this, result.handle);
+  }
+  restoreTo(logPath, destination, { sequence, timestampMs, baseBackup, key, passphrase } = {}) {
+    return this._feature("restore_to", { log_path: logPath, destination, ...optional("base_backup", baseBackup),
+      ...optional("sequence", decimalOption(sequence)), ...optional("timestamp_ms", decimalOption(timestampMs)), credentials: credentials(key, passphrase) });
   }
   close() {
     if (this.#closing) return this.#closing;
@@ -114,8 +134,13 @@ export class Database {
   info() { return this.#call("info"); }
   get(id, { collection } = {}) { return this.#call("get", { id, ...scope(collection) }); }
   async getMany(ids, { collection } = {}) { return (await this.#call("get_many", { ids, ...scope(collection) })).records; }
-  async put(id, vector, { payload = new Uint8Array(), metadata = {}, collection, expectedRevision } = {}) {
+  async put(id, vector, { payload = new Uint8Array(), metadata = {}, collection, expectedRevision, expiresAtMs } = {}) {
     if (!(payload instanceof Uint8Array)) throw new TypeError("payload must be Uint8Array or Buffer");
+    if (expiresAtMs !== undefined) {
+      if (expectedRevision !== undefined) throw new TypeError("expiry writes do not support expectedRevision");
+      await this.putWithExpiry(id, vector, { payload, metadata, collection, expiresAtMs });
+      return;
+    }
     const result = await this.#call("put", { id, vector, payload_base64: Buffer.from(payload).toString("base64"), metadata,
       ...scope(collection), ...optional("expected_revision", expectedRevision) });
     // Only conditional writes report the committed revision; unconditional puts keep resolving to undefined.
@@ -171,6 +196,57 @@ export class Database {
     return this.#call("ann_memory", { ...scope(collection), ...optional("metric", metric),
       ...annFields({ quantization, rerankMultiplier }) });
   }
+  #feature(op, fields = {}) { return this.#call("features", { request: { op, ...fields } }); }
+  async putWithExpiry(id, vector, { payload = new Uint8Array(), metadata = {}, expiresAtMs, collection } = {}) {
+    const result = await this.#feature("put_with_expiry", { id, vector, payload_base64: bytesBase64(payload), metadata,
+      expires_at_ms: decimalOption(expiresAtMs) ?? null, ...scope(collection) });
+    return result.revision;
+  }
+  async updateMetadata(id, metadata, { collection } = {}) {
+    return (await this.#feature("update_metadata", { id, metadata, ...scope(collection) })).revision;
+  }
+  searchGrouped(vector, groups, hitsPerGroup, field, { filter = [], metric, collection } = {}) {
+    return this.#feature("search_grouped", { vector, groups, hits_per_group: hitsPerGroup, field, filter, ...optional("metric", metric), ...scope(collection) });
+  }
+  recommend(k, { positiveIds = [], negativeIds = [], positiveVectors = [], negativeVectors = [], filter = [], metric, collection } = {}) {
+    return this.#feature("recommend", { k, positive_ids: positiveIds, negative_ids: negativeIds, positive_vectors: positiveVectors,
+      negative_vectors: negativeVectors, filter, ...optional("metric", metric), ...scope(collection) });
+  }
+  facets(field, { filter = [], collection } = {}) { return this.#feature("facets", { field, filter, ...scope(collection) }); }
+  numericStats(field, { filter = [], collection } = {}) { return this.#feature("numeric_stats", { field, filter, ...scope(collection) }); }
+  searchGeo(vector, k, field, latitude, longitude, radiusMeters, { filter = [], metric, sort = "vector_distance", collection } = {}) {
+    return this.#feature("search_geo", { vector, k, field, latitude, longitude, radius_meters: radiusMeters, filter, sort,
+      ...optional("metric", metric), ...scope(collection) });
+  }
+  async configureVector(name, dimensions, { activeVersion, metric = "squared_l2", history = 0, collection } = {}) {
+    await this.#feature("configure_vector", { name, dimensions, active_version: activeVersion, metric, history, ...scope(collection) });
+  }
+  vectorSpecs({ collection } = {}) { return this.#feature("vector_specs", scope(collection)); }
+  recordVectors(id, { collection } = {}) { return this.#feature("record_vectors", { id, ...scope(collection) }); }
+  async putVectors(id, { dense = {}, sparse = {}, collection } = {}) { await this.#feature("put_vectors", { id, dense, sparse, ...scope(collection) }); }
+  async putVectorVersion(id, name, version, vector, { collection } = {}) { await this.#feature("put_vector_version", { id, name, version, vector, ...scope(collection) }); }
+  async pruneVectorHistory(name, history, { collection } = {}) { await this.#feature("prune_vector_history", { name, history, ...scope(collection) }); }
+  searchNamed(name, vector, k, { version, collection } = {}) { return this.#feature("search_named", { name, vector, k, ...optional("version", version), ...scope(collection) }); }
+  searchSparse(name, vector, k, { collection } = {}) { return this.#feature("search_sparse", { name, vector, k, ...scope(collection) }); }
+  searchDenseSparse(denseName, dense, sparseName, sparse, k, { version, fusion, collection } = {}) {
+    return this.#feature("search_dense_sparse", { dense_name: denseName, dense, sparse_name: sparseName, sparse, k,
+      ...optional("version", version), ...optional("fusion", snake(fusion)), ...scope(collection) });
+  }
+  rerank(vector, candidates, limit, { method = "exact", metric, lambda, collection } = {}) {
+    return this.#feature("rerank", { vector, candidates, limit, method, ...optional("metric", metric), ...optional("lambda", lambda), ...scope(collection) });
+  }
+  query(query, parameters = {}, { collection } = {}) { return this.#feature("query", { query, parameters, ...scope(collection) }); }
+  feedCursor() { return this.#feature("feed_cursor"); }
+  changesAfter(cursor, maxEvents = 1000) { return this.#feature("changes_after", { cursor: cursor ?? null, max_events: maxEvents }); }
+  encryptionInfo() { return this.#feature("encryption_info"); }
+  async isEncrypted() { return (await this.encryptionInfo()).is_encrypted; }
+  async encryptionKeyId() { return (await this.encryptionInfo()).key_id; }
+  buildDiskAnn(path, { metric, collection } = {}) { return this.#feature("build_disk_ann", { path, ...optional("metric", metric), ...scope(collection) }); }
+  searchDiskAnn(path, vector, k, { efSearch = 100, cacheBytes = 8 * 1024 * 1024 } = {}) {
+    return this.#feature("search_disk_ann", { path, vector, k, ef_search: efSearch, cache_bytes: cacheBytes });
+  }
+  async toBytes() { return Buffer.from((await this.#feature("to_bytes")).bytes_base64, "base64"); }
+
 }
 
 // Omitted options are not sent, so the native side applies the collection's declared defaults.
@@ -187,4 +263,18 @@ function snake(value) {
   if (value === null || typeof value !== "object") return value;
   return Object.fromEntries(Object.entries(value).map(([key, item]) =>
     [key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`), snake(item)]));
+}
+
+function bytesBase64(data) {
+  if (!(data instanceof Uint8Array)) throw new TypeError("expected Uint8Array or Buffer");
+  return Buffer.from(data).toString("base64");
+}
+function credentials(key, passphrase) {
+  if (key !== undefined && passphrase !== undefined) throw new TypeError("provide key or passphrase, not both");
+  return { ...optional("key_base64", key === undefined ? undefined : bytesBase64(key)), ...optional("passphrase", passphrase) };
+}
+function decimalOption(value) {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "number" && (!Number.isSafeInteger(value) || value < 0)) throw new TypeError("timestamp/sequence must be a safe non-negative integer or decimal string");
+  return String(value);
 }

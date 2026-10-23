@@ -124,7 +124,7 @@ await db.importFinish(job, { collection: "docs" });
   Job and chunk numbers are decimal strings.
 
 Automatic maintenance, scheduled backups, metrics and slow-query logs, and
-credentials and audit logs are server-only; this package has no API for them.
+server authentication credentials and audit logs are server-only; this package has no API for them.
 
 ## Lifetime and failure behavior
 
@@ -156,3 +156,86 @@ For advanced deployments, pass absolute `libraryPath` and `addonPath` to the
 constructor. There is no PATH search or automatic native download. N-API v8
 avoids binding to one Node major version, but the native platform must match.
 This package is Node-only, not a browser or edge-runtime binding.
+
+
+## V5 embedded feature API
+
+New methods use additive JSON operations through the existing ABI-1 library and
+worker; there are no new native symbols and no network calls. Use a matching
+new bundled library. Default creation remains format 3. Pass `{format:5}` for
+TTL/metadata-only mutations and named/sparse/model-versioned vectors.
+
+```js
+const db = await native.createInMemory(2, { format: 5 });
+try {
+  const cursor = await db.feedCursor();
+  await db.putWithExpiry("1", [1, 0], {
+    expiresAtMs: "2000000000000", metadata: { tag: { type: "string", value: "example" } },
+  });
+  await db.updateMetadata("1", { tag: { type: "string", value: "updated" } });
+  console.log(await db.searchGrouped([1, 0], 5, 2, "tag"));
+  await db.configureVector("text", 2, { activeVersion: "model-v1", history: 1 });
+  await db.putVectors("1", {
+    dense: { text: [{ version: "model-v1", vector: [1, 0] }] }, sparse: { terms: [[7, 0.8]] },
+  });
+  console.log(await db.searchNamed("text", [1, 0], 5));
+  console.log(await db.searchDenseSparse("text", [1, 0], "terms", [[7, 1]], 5));
+  console.log(await db.query("SEARCH default NEAR $q K 5", { q: [1, 0] }));
+  console.log(await db.changesAfter(cursor));
+  const image = await db.toBytes(); // save these bytes in host-owned storage
+  const restored = await native.openFromBytes(image);
+  await restored.close();
+} finally { await db.close(); }
+```
+
+Also exposed, with explicit TypeScript declarations and `{collection}` support:
+
+- `put(...,{expiresAtMs})` for unconditional TTL writes, or `putWithExpiry` for
+  a returned revision and optional null expiry. Expiry is absolute Unix-ms, not a
+  duration. `updateMetadata` returns a revision, replacing metadata but retaining
+  vector/payload/expiry; ordinary puts clear additional vectors. TTL writes
+  reject revision preconditions rather than ignoring them.
+- `recommend(k,{positiveIds,negativeIds,positiveVectors,negativeVectors})`,
+  `facets(field)`, `numericStats(field)`, and
+  `searchGeo(vector,k,field,latitude,longitude,radiusMeters,{sort:"geo_distance"})`.
+  These retrieval methods support optional filters/metrics. Geo metadata uses
+  `{type:"geopoint",value:{latitude:0,longitude:0}}`.
+- `vectorSpecs`, `recordVectors`, `putVectorVersion`, `pruneVectorHistory`,
+  `searchSparse`; `searchNamed(...,{version})` chooses retained history.
+  `putVectors` replaces all additional vectors, not a partial merge. Sparse
+  pairs must be sorted by unique u32 index; distance is negative dot product.
+- `rerank(vector,candidates,limit,{method:"exact",metric})` or
+  `{method:"mmr",lambda:0.5}`. MMR always uses cosine; omit `metric`. Candidate
+  IDs resolve current live records. No cross-encoder callback crosses the worker.
+- `feedCursor()` starts at head. `changesAfter(cursor,maxEvents)` returns
+  `{changes,next,has_more,head}`; omit the cursor to start at the beginning.
+  Persist `next`; committed batches are never split. TTL expiry is not an event.
+  `query` executes only the bounded, read-only grammar in `docs/VECTORS.md`.
+- `native.create/open(...,{key:Uint8Array32})` or `{passphrase:"..."}`;
+  credentials also work for in-memory create and byte-image open. Never pass
+  both. Encryption implies V5 unless an incompatible explicit format was given.
+  `isEncrypted()`, `encryptionKeyId()` and `encryptionInfo()` expose status only.
+- `native.restoreTo(closedLog,newPath,{sequence:"42"})` or `{timestampMs:...}`,
+  optionally `baseBackup`/credentials. Timestamp restore needs database creation
+  with `{commitTimestamps:true}`. Sources must be closed/copied; destination must
+  not exist. Restore never edits a source and assigns a fresh lineage.
+- `buildDiskAnn(path,{metric})`, `searchDiskAnn(path,vector,k,{efSearch,cacheBytes})`.
+  Each search opens/closes its own sidecar and cache; any database commit makes
+  the index stale. Disk ANN does not filter metadata/expiry and encrypted
+  databases refuse plaintext sidecars. Builds use ordinary HNSW build memory.
+
+IDs/revisions remain decimal strings. Input expiry/restore timestamps and
+sequences accept decimal strings or non-negative safe JS integers; unsafe numbers
+are rejected. Feed heads/timestamps, lineage, key IDs and restored revisions are
+strings. New retrieval methods return arrays directly; `query` returns an object
+with `hits`, `groups`, and `facets`. Returned option/status keys retain native
+snake_case. Byte images are Uint8Array-compatible Buffers. JSON requests/responses
+have an 8-MiB limit including base64 overhead, limiting the image sizes supported.
+
+Encryption protects frame contents, not frame prefixes/access patterns or live
+process memory. Worker/JSON credential copies cannot be reliably wiped: do not
+log requests. In-memory data is durable only after the host saves `toBytes()`.
+Read replicas, GPU, named ANN and re-embedding workers are not exposed. See
+`bindings/c/FEATURES.md` for the complete result/error and ownership contract.
+`npm test` runs both legacy tests and six real-engine feature scenarios;
+`npm run typecheck` also checks compile-time examples of every new method.

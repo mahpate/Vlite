@@ -21,6 +21,28 @@ const reopened = pkg.VLiteDatabase.fromBytes(image);
 assert.equal(reopened.len(), 1);
 assert.equal(reopened.search(new Float32Array([0, 1]), 1)[0], 2);
 
+// Opt-in V5 enables expiry, metadata-only writes, grouping and the durable change feed.
+pkg.setClock(100);
+const advanced = pkg.VLiteDatabase.create(2, undefined, true);
+advanced.putWithExpiry(10, new Float32Array([1, 0]), new Uint8Array(), 500, JSON.stringify({
+  category: { type: 'string', value: 'a' }, score: { type: 'integer', value: '7' },
+}));
+advanced.putWithExpiry(11, new Float32Array([0, 1]), new Uint8Array(), undefined, JSON.stringify({
+  category: { type: 'string', value: 'b' },
+}));
+const cursor = advanced.feedCursor();
+advanced.updateMetadata(10, JSON.stringify({ category: { type: 'string', value: 'b' } }));
+const grouped = JSON.parse(advanced.groupedSearch(new Float32Array([1, 0]), 2, 2, 'category'));
+assert.equal(grouped.length, 1);
+assert.equal(grouped[0].value.value, 'b');
+const changes = JSON.parse(advanced.changesAfter(cursor, 20));
+assert.equal(changes.changes.length, 1);
+assert.equal(changes.changes[0].kind, 'metadata_update');
+assert.equal(changes.changes[0].id, '10');
+assert.equal(changes.has_more, false);
+pkg.setClock(500);
+assert.equal(advanced.get(10), undefined);
+
 const key = new Uint8Array(32).fill(7);
 const secret = pkg.VLiteDatabase.create(2, key);
 secret.put(5, new Float32Array([1, 1]), new TextEncoder().encode('classified'));

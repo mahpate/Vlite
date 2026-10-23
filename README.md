@@ -213,13 +213,17 @@ see [measured Python binding/batch performance](benchmarks/RESULTS.md#python-emb
 
 ## Python and TypeScript/JavaScript REST clients
 
-First-party REST clients support vector CRUD, atomic batches, typed metadata,
-all search modes, cursor browsing, index maintenance and metrics. Python 3.11+
-uses the standard library; the Node.js 22+ ESM client includes TypeScript types
-and has no runtime dependencies. Both preserve full-width IDs as strings,
-expose structured errors and never automatically retry writes.
+First-party REST clients support vector CRUD, atomic batches, TTL and metadata
+updates, grouped/recommendation/faceted retrieval, named/sparse vectors, query
+language, text-embedding calls, change-feed browsing, webhook administration,
+index maintenance and metrics. The server also provides HMAC-signed webhook
+subscriptions; see [WEBHOOKS.md](docs/WEBHOOKS.md). Python 3.11+ uses the
+standard library; the Node.js 22+ ESM client includes TypeScript types and has
+no runtime dependencies. Both preserve full-width IDs as strings, expose
+structured errors and never automatically retry writes.
 
-See [client installation, examples and error handling](clients/README.md).
+See [client installation, examples and error handling](clients/README.md) and
+the [REST API reference](docs/API.md).
 Packages are currently installed from this checkout, not published registries.
 
 ## Browser dashboard

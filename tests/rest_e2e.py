@@ -87,7 +87,8 @@ def run():
     request(port, "PUT", "/v1/vectors/4", {"vector": [1, 0, 0]}, expected=401, token="x" * 43)
     request(port, "GET", "/metrics", expected=401, token=None)
     assert request(port, "GET", "/v1/database") == {
-        "dimensions": 3, "format_version": 3, "records": 0
+        "dimensions": 3, "format_version": 3, "records": 0,
+        "is_encrypted": False, "encryption_key_id": None
     }
     request(port, "PUT", "/v1/vectors/18446744073709551615",
             {"vector": [1, 0, 0], "payload_base64": "AP8=", "metadata": {

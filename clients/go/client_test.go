@@ -29,6 +29,9 @@ func TestRoutes(t *testing.T) {
 		{"PUT", "/v1/vectors/18446744073709551615", "", func(c *Client) error {
 			return c.Put(context.Background(), "18446744073709551615", Put{Vector: []float32{1, 0, 0}})
 		}},
+		{"PATCH", "/v1/vectors/1/metadata", "", func(c *Client) error { return c.UpdateMetadata(context.Background(), "1", Metadata{}) }},
+        {"GET", "/v1/changes?limit=50", `{"changes":[]}`, func(c *Client) error { _, e := c.Changes(context.Background(), "", 50); return e }},
+        {"GET", "/v1/admin/webhooks", `{"items":[]}`, func(c *Client) error { _, e := c.ListWebhooks(context.Background()); return e }},
 		{"GET", "/v1/vectors/1", `{"id":"1","vector":[1,0,0],"payload_base64":"","metadata":{}}`, func(c *Client) error {
 			r, e := c.Get(context.Background(), "1")
 			if r.ID != "1" {

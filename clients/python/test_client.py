@@ -18,6 +18,7 @@ RECORD = {"id": MAX_ID, "vector": [1.0], "payload_base64": "", "metadata": {}}
 class Handler(BaseHTTPRequestHandler):
     calls = []
     requests = []
+    request_bodies = []
     mode = "ok"
     etags = [TAG]
     caps = CAPS
@@ -78,8 +79,26 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"items": [], "next_after": None}).encode())
 
     def do_PUT(self):
-        self.rfile.read(int(self.headers.get("Content-Length", "0")))
-        self.do_GET()
+        length = int(self.headers.get("Content-Length", "0"))
+        body = json.loads(self.rfile.read(length)) if length else None
+        self.calls.append((self.path, self.headers.get("Authorization")))
+        self.requests.append((self.command, self.path, self.headers.get_all("If-Match")))
+        self.request_bodies.append(body)
+        if self.mode == "timeout":
+            try:
+                self.timeout_release.wait(60)
+            finally:
+                self.timeout_finished.set()
+            self.send_response(204)
+            self.end_headers()
+        elif self.mode == "precondition":
+            self.send_response(412)
+            self.send_header("X-Request-ID", "test-412")
+            self.end_headers()
+            self.wfile.write(b'{"error":{"code":"precondition_failed","message":"Record changed"}}')
+        else:
+            self.send_response(204)
+            self.end_headers()
 
     do_DELETE = do_GET
 
@@ -114,10 +133,23 @@ class ClientTests(unittest.TestCase):
     def setUp(self):
         Handler.calls = []
         Handler.requests = []
+        Handler.request_bodies = []
         Handler.mode = "ok"
         Handler.etags = [TAG]
         Handler.caps = CAPS
         self.client = Client(self.base, TOKEN)
+
+    def test_change_feed_request_and_expiry_write_shape(self):
+        self.client.changes(cursor="vlc1.0000000000000001.0000000000000002.00000000", limit=20)
+        self.assertEqual(Handler.calls[-1][0], "/v1/changes?limit=20&cursor=vlc1.0000000000000001.0000000000000002.00000000")
+        self.client.collection("docs").grouped_search({"vector": [1.0], "field": "category", "groups": 2, "hits_per_group": 3})
+        self.assertEqual(Handler.requests[-1][1], "/v1/collections/docs/search/grouped")
+        self.client.collection("docs").embed_text("query text")
+        self.assertEqual(Handler.requests[-1][1], "/v1/collections/docs/embed")
+        self.client.put("7", {"vector": [1.0], "ttl_ms": 30000})
+        self.assertEqual(Handler.requests[-1][0], "PUT")
+        self.assertEqual(Handler.requests[-1][1], "/v1/vectors/7")
+        self.assertEqual(Handler.request_bodies[-1]["ttl_ms"], 30000)
 
     def test_cursor_and_auth(self):
         self.assertEqual(self.client.list_vectors(after="18446744073709551615")["next_after"], None)

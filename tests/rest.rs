@@ -312,7 +312,7 @@ async fn crud_search_batch_and_reopen_preserve_binary_payloads_and_full_u64_ids(
     );
     assert_eq!(
         request(&app, "GET", "/v1/database", Value::Null).await.1,
-        json!({"dimensions":2,"format_version":3,"records":2})
+        json!({"dimensions":2,"format_version":3,"records":2,"is_encrypted":false,"encryption_key_id":null})
     );
     service.close().await.unwrap();
     assert_eq!(request(&app, "GET", "/health", Value::Null).await.0, 200);

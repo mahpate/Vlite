@@ -22,7 +22,7 @@ public sealed class TransportException(Exception cause) : Exception(
 }
 
 public sealed record MetadataValue(string Type, object Value);
-public sealed record PutRequest(float[] Vector, string PayloadBase64 = "", Dictionary<string, MetadataValue>? Metadata = null);
+public sealed record PutRequest(float[] Vector, string PayloadBase64 = "", Dictionary<string, MetadataValue>? Metadata = null, ulong? ExpiresAtMs = null, ulong? TtlMs = null);
 public sealed record VectorRecord(string Id, float[] Vector, string PayloadBase64, Dictionary<string, MetadataValue> Metadata, string? Revision = null);
 public sealed record Hit(string Id, double Distance, double? Score = null);
 public sealed record Summary(string Id, Dictionary<string, MetadataValue> Metadata);
@@ -98,6 +98,24 @@ public sealed class Client : Records, IDisposable
     public Task<JsonElement> HealthAsync(CancellationToken cancellation = default) => RequestAsync("GET", "/health", null, cancellation);
     public Task<JsonElement> ReadyAsync(CancellationToken cancellation = default) => RequestAsync("GET", "/ready", null, cancellation);
     public Task<JsonElement> DatabaseAsync(CancellationToken cancellation = default) => RequestAsync("GET", "/v1/database", null, cancellation);
+    public Task<JsonElement> ChangesAsync(string? cursor = null, int limit = 1000, CancellationToken cancellation = default)
+    {
+        if (limit is < 1 or > 10000) throw new ArgumentOutOfRangeException(nameof(limit));
+        var query = "?limit=" + limit + (cursor is null ? "" : "&cursor=" + Uri.EscapeDataString(cursor));
+        return RequestAsync("GET", "/v1/changes" + query, null, cancellation);
+    }
+    public Task<JsonElement> ListWebhooksAsync(CancellationToken cancellation = default) => RequestAsync("GET", "/v1/admin/webhooks", null, cancellation);
+    public Task<JsonElement> CreateWebhookAsync(object request, CancellationToken cancellation = default) => RequestAsync("POST", "/v1/admin/webhooks", request, cancellation);
+    public Task<JsonElement> DeleteWebhookAsync(string id, CancellationToken cancellation = default)
+    {
+        if (!Regex.IsMatch(id, @"\A[a-f0-9]{24}\z")) throw new ArgumentException("Invalid webhook ID", nameof(id));
+        return RequestAsync("DELETE", "/v1/admin/webhooks/" + id, null, cancellation);
+    }
+    public Task<JsonElement> WebhookStatusAsync(string id, CancellationToken cancellation = default)
+    {
+        if (!Regex.IsMatch(id, @"\A[a-f0-9]{24}\z")) throw new ArgumentException("Invalid webhook ID", nameof(id));
+        return RequestAsync("GET", "/v1/admin/webhooks/" + id, null, cancellation);
+    }
     public Task<JsonElement> ListCollectionsAsync(CancellationToken cancellation = default) => RequestAsync("GET", "/v1/collections", null, cancellation);
     public Task<JsonElement> CreateCollectionAsync(string name, int dimensions, object? settings = null, CancellationToken cancellation = default)
     {
@@ -160,6 +178,12 @@ public class Records
         if (prefix == "/v1") throw new InvalidOperationException("Select a collection before updating settings");
         return Transport.RequestAsync("PUT", prefix + "/settings", settings, cancellation);
     }
+    public Task<JsonElement> UpdateMetadataAsync(string id, Dictionary<string, MetadataValue> metadata, CancellationToken cancellation = default) =>
+        Transport.RequestAsync("PATCH", prefix + "/vectors/" + Id(id) + "/metadata", new { metadata }, cancellation);
+    public Task<JsonElement> GroupedSearchAsync(object request, CancellationToken cancellation = default) =>
+        Transport.RequestAsync("POST", (prefix == "/v1" ? "/v1/collections/default" : prefix) + "/search/grouped", request, cancellation);
+    public Task<JsonElement> RecommendAsync(object request, CancellationToken cancellation = default) =>
+        Transport.RequestAsync("POST", (prefix == "/v1" ? "/v1/collections/default" : prefix) + "/recommend", request, cancellation);
     public Task<JsonElement> IndexStatusAsync(CancellationToken cancellation = default) => Transport.RequestAsync("GET", prefix + "/index/hnsw", null, cancellation);
     public async Task BuildIndexAsync(object? options = null, CancellationToken cancellation = default) =>
         _ = await Transport.RequestAsync("POST", prefix + "/index/hnsw", options ?? new { }, cancellation).ConfigureAwait(false);

@@ -35,6 +35,7 @@ mod admin;
 mod audit;
 mod collections;
 mod credentials;
+mod features;
 #[cfg(feature = "grpc")]
 pub mod grpc;
 mod observability;
@@ -43,6 +44,7 @@ mod ops;
 pub mod telemetry;
 mod tenants;
 pub mod tls;
+mod webhooks;
 pub use admin::{ServerOptions, configured_admin_router, read_token_file, selected_database};
 
 pub const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
@@ -152,6 +154,8 @@ pub struct Service {
     published_admin: Arc<Mutex<Option<Arc<admin::AdminState>>>>,
     tls: Arc<Mutex<Vec<tls::TlsIdentity>>>,
     rate_limits: Arc<Mutex<BTreeMap<String, (f64, Instant)>>>,
+    webhooks: Arc<webhooks::Dispatcher>,
+    encryption_key: Option<crate::EncryptionKey>,
 }
 
 impl Service {
@@ -178,6 +182,20 @@ impl Service {
 
     /// Fails explicitly, never falling back, when OS randomness is unavailable.
     pub fn try_new(database: Database) -> std::io::Result<Self> {
+        Self::try_new_with_key(database, None)
+    }
+
+    pub fn try_new_with_encryption_key(
+        database: Database,
+        key: crate::EncryptionKey,
+    ) -> std::io::Result<Self> {
+        Self::try_new_with_key(database, Some(key))
+    }
+
+    fn try_new_with_key(
+        database: Database,
+        encryption_key: Option<crate::EncryptionKey>,
+    ) -> std::io::Result<Self> {
         let mut nonce = [0u8; 16];
         getrandom::fill(&mut nonce).map_err(|error| {
             std::io::Error::other(format!("operating-system randomness unavailable: {error}"))
@@ -212,6 +230,8 @@ impl Service {
             published_admin: Arc::default(),
             tls: Arc::default(),
             rate_limits: Arc::default(),
+            webhooks: Arc::default(),
+            encryption_key,
         })
     }
 
@@ -251,7 +271,9 @@ impl Service {
     pub async fn close(&self) -> crate::Result<()> {
         let database = self.database.clone();
         let ops = self.ops.clone();
+        let webhooks = self.webhooks.clone();
         tokio::task::spawn_blocking(move || {
+            webhooks.shutdown();
             ops.shutdown();
             let mut owner = database
                 .lock()
@@ -276,7 +298,9 @@ impl Service {
         let path = path.into();
         let database = self.database.clone();
         let ops = self.ops.clone();
+        let webhooks = self.webhooks.clone();
         tokio::task::spawn_blocking(move || {
+            webhooks.shutdown();
             ops.shutdown();
             let owner = database
                 .lock()
@@ -331,6 +355,10 @@ fn data_routes() -> Router<Service> {
         )
         .route("/v1/batches", post(batch))
         .route("/v1/search", post(search))
+        .route(
+            "/v1/vectors/{id}/metadata",
+            axum::routing::patch(update_metadata),
+        )
         .route("/v1/index/hnsw", get(index_status).post(build_index))
         .route("/v1/index/hnsw/quality", post(quality))
         .route(
@@ -342,6 +370,10 @@ fn data_routes() -> Router<Service> {
             get(collection_fetch)
                 .put(collection_put)
                 .delete(collection_delete),
+        )
+        .route(
+            "/v1/collections/{collection}/vectors/{id}/metadata",
+            axum::routing::patch(collection_update_metadata),
         )
         .route(
             "/v1/collections/{collection}/batches",
@@ -369,10 +401,12 @@ fn configured_routes(service: Service) -> Router {
     admin::routes()
         .merge(tls::routes())
         .merge(tenants::routes())
+        .merge(webhooks::routes())
         .merge(collections::routes())
         .merge(ops::routes())
         .merge(credentials::routes())
         .merge(data_routes())
+        .merge(features::routes())
         .merge(
             Router::new()
                 .route("/health", get(|| async { Json(json!({"status": "ok"})) }))
@@ -539,6 +573,9 @@ fn permission(method: &Method, route: &str) -> Need {
             Need::Op(Op::Diagnostics, Reach::Filtered)
         }
         ("GET" | "HEAD", "/v1/collections") => Need::Op(Op::Read, Reach::Filtered),
+        ("GET" | "HEAD", "/v1/changes" | "/v1/admin/replication/export") => {
+            Need::Op(Op::Read, Reach::All)
+        }
         ("POST", "/v1/collections") => Need::Op(Op::Collections, Reach::All),
         ("DELETE", "/v1/collections/{collection}")
         | ("PUT", "/v1/collections/{collection}/settings") => {
@@ -552,14 +589,50 @@ fn permission(method: &Method, route: &str) -> Need {
             | "/v1/collections/{collection}"
             | "/v1/collections/{collection}/vectors"
             | "/v1/collections/{collection}/vectors/{id}"
+            | "/v1/collections/{collection}/search/grouped"
+            | "/v1/collections/{collection}/recommend"
+            | "/v1/collections/{collection}/facets"
+            | "/v1/collections/{collection}/stats/numeric"
+            | "/v1/collections/{collection}/search/geo"
+            | "/v1/collections/{collection}/search/named"
+            | "/v1/collections/{collection}/search/sparse"
+            | "/v1/collections/{collection}/search/dense-sparse"
+            | "/v1/collections/{collection}/search/disk-ann"
+            | "/v1/collections/{collection}/query"
             | "/v1/imports/{job}",
         ) => Need::Op(Op::Read, Reach::Collection),
         ("PUT" | "DELETE", "/v1/vectors/{id}" | "/v1/collections/{collection}/vectors/{id}")
+        | (
+            "PATCH",
+            "/v1/vectors/{id}/metadata" | "/v1/collections/{collection}/vectors/{id}/metadata",
+        )
         | ("POST", "/v1/batches" | "/v1/collections/{collection}/batches") => {
             Need::Op(Op::Write, Reach::Collection)
         }
-        ("POST", "/v1/search" | "/v1/collections/{collection}/search") => {
-            Need::Op(Op::Search, Reach::Collection)
+        (
+            "POST",
+            "/v1/search"
+            | "/v1/collections/{collection}/search"
+            | "/v1/collections/{collection}/search/grouped"
+            | "/v1/collections/{collection}/recommend"
+            | "/v1/collections/{collection}/facets"
+            | "/v1/collections/{collection}/stats/numeric"
+            | "/v1/collections/{collection}/search/geo"
+            | "/v1/collections/{collection}/search/named"
+            | "/v1/collections/{collection}/search/sparse"
+            | "/v1/collections/{collection}/search/dense-sparse"
+            | "/v1/collections/{collection}/search/disk-ann"
+            | "/v1/collections/{collection}/query"
+            | "/v1/collections/{collection}/embed",
+        ) => Need::Op(Op::Search, Reach::Collection),
+        ("POST", "/v1/collections/{collection}/vectors/configure") => {
+            Need::Op(Op::Collections, Reach::Collection)
+        }
+        ("POST", "/v1/collections/{collection}/index/disk-ann") => {
+            Need::Op(Op::Index, Reach::Collection)
+        }
+        ("PUT", "/v1/collections/{collection}/vectors/{id}/named") => {
+            Need::Op(Op::Write, Reach::Collection)
         }
         (
             "POST",
@@ -601,7 +674,15 @@ fn authorize(
 ) -> Result<(), ApiError> {
     let read = method == Method::GET || method == Method::HEAD;
     let search = method == Method::POST
-        && (path == "/v1/search" || route == "/v1/collections/{collection}/search");
+        && (path == "/v1/search"
+            || route == "/v1/collections/{collection}/search"
+            || route.starts_with("/v1/collections/{collection}/search/")
+            || route == "/v1/collections/{collection}/recommend"
+            || route == "/v1/collections/{collection}/facets"
+            || route == "/v1/collections/{collection}/stats/numeric"
+            || route == "/v1/collections/{collection}/query"
+            || route == "/v1/collections/{collection}/embed"
+            || route == "/v1/collections/{collection}/search/disk-ann");
     let read_only_allowed = !path.starts_with("/v1/admin/") && (read || search);
     // Legacy routes address `default` (ID 0); their handlers may not resolve
     // a collection, so the binding is checked here as well.
@@ -1020,7 +1101,9 @@ impl From<Error> for ApiError {
                 "invalid_input",
                 error.to_string(),
             ),
-            Error::BatchRequiresUpgrade | Error::MetadataRequiresUpgrade => {
+            Error::BatchRequiresUpgrade
+            | Error::MetadataRequiresUpgrade
+            | Error::ExpiryRequiresUpgrade => {
                 Self::new(StatusCode::CONFLICT, "upgrade_required", error.to_string())
             }
             Error::CollectionNotFound => Self::new(
@@ -1335,7 +1418,9 @@ async fn info(
             Ok(Json(json!({
                 "dimensions": db.dimensions(),
                 "format_version": db.format_version(),
-                "records": db.len()
+                "records": db.len(),
+                "is_encrypted": db.is_encrypted(),
+                "encryption_key_id": db.encryption_key_id().map(|key_id| key_id.to_string())
             })))
         })
         .await
@@ -1503,6 +1588,26 @@ struct Put {
     payload_base64: String,
     #[serde(default)]
     metadata: crate::Metadata,
+    expires_at_ms: Option<u64>,
+    #[serde(alias = "ttl")]
+    ttl_ms: Option<u64>,
+}
+
+fn expiry(input: &Put) -> Result<Option<u64>, ApiError> {
+    if input.expires_at_ms.is_some() && input.ttl_ms.is_some() {
+        return Err(unprocessable(
+            "expires_at_ms and ttl_ms are mutually exclusive",
+        ));
+    }
+    if let Some(ttl) = input.ttl_ms {
+        let now = u64::try_from(admin::now_ms())
+            .map_err(|_| unprocessable("server clock exceeds u64 milliseconds"))?;
+        return now
+            .checked_add(ttl)
+            .map(Some)
+            .ok_or_else(|| unprocessable("ttl_ms overflows Unix milliseconds"));
+    }
+    Ok(input.expires_at_ms)
 }
 
 async fn put_vector(
@@ -1545,6 +1650,7 @@ async fn put_in(
     let expected = Guard::ETag(if_match(&headers)?);
     let input = body(input)?;
     let payload = payload(&input.payload_base64)?;
+    let expires_at_ms = expiry(&input)?;
     let written = put_core(
         &service,
         role,
@@ -1554,6 +1660,7 @@ async fn put_in(
         input.vector,
         payload,
         input.metadata,
+        expires_at_ms,
     )
     .await?;
     let mut response = StatusCode::NO_CONTENT.into_response();
@@ -1561,6 +1668,88 @@ async fn put_in(
         .headers_mut()
         .insert(header::ETAG, written.etag.parse().map_err(internal)?);
     Ok(response)
+}
+
+async fn update_metadata(
+    State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
+    input: Result<Path<String>, PathRejection>,
+    headers: HeaderMap,
+    payload: Result<Json<MetadataPatch>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    update_metadata_in(
+        service,
+        role,
+        Target::Legacy,
+        path(input)?,
+        headers,
+        payload,
+    )
+    .await
+}
+
+async fn collection_update_metadata(
+    State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
+    input: Result<Path<(String, String)>, PathRejection>,
+    headers: HeaderMap,
+    payload: Result<Json<MetadataPatch>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let (target, id) = record_path(input)?;
+    update_metadata_in(service, role, target, id, headers, payload).await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MetadataPatch {
+    metadata: crate::Metadata,
+}
+
+async fn update_metadata_in(
+    service: Service,
+    role: admin::Role,
+    target: Target,
+    id: u64,
+    headers: HeaderMap,
+    payload: Result<Json<MetadataPatch>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let expected = if_match(&headers)?;
+    let MetadataPatch { metadata } = body(payload)?;
+    let ident = service.etag_ident.clone();
+    service
+        .run(move |db| {
+            let collection = open(db, &role, &target)?;
+            if let Some(expected) = expected.as_deref() {
+                let Some((current, _)) = current_etag(db, &ident, collection, id)? else {
+                    return Err(ApiError::new(
+                        StatusCode::PRECONDITION_FAILED,
+                        "precondition_failed",
+                        "record changed or was removed",
+                    ));
+                };
+                if current != expected {
+                    return Err(ApiError::new(
+                        StatusCode::PRECONDITION_FAILED,
+                        "precondition_failed",
+                        "record changed; fetch a fresh ETag",
+                    ));
+                }
+            }
+            let revision = db
+                .collection_mut(target.name())?
+                .update_metadata(id, &metadata)?;
+            let (tag, _) = current_etag(db, &ident, collection, id)?
+                .ok_or_else(|| internal("metadata update record missing"))?;
+            Ok((revision, tag))
+        })
+        .await
+        .map(|(_, tag)| {
+            let mut response = StatusCode::NO_CONTENT.into_response();
+            if let Ok(value) = tag.parse() {
+                response.headers_mut().insert(header::ETAG, value);
+            }
+            response
+        })
 }
 
 /// Write precondition in transport form, resolved under the owner lock so
@@ -1607,6 +1796,7 @@ async fn put_core(
     vector: Vec<f32>,
     payload: Vec<u8>,
     metadata: crate::Metadata,
+    expires_at_ms: Option<u64>,
 ) -> Result<Written, ApiError> {
     if payload.len() > MAX_PAYLOAD_BYTES {
         return Err(Error::PayloadTooLarge(payload.len()).into());
@@ -1619,7 +1809,17 @@ async fn put_core(
             enforce_quota(&quota_service, db, &role, collection, &[(id, true)])?;
             let expected = guard.resolve(db, &ident, collection, id)?;
             let created = db.revision_in(collection, id)?.is_none();
-            db.put_in(collection, id, &vector, &payload, &metadata, expected)?;
+            if let Some(expires_at_ms) = expires_at_ms {
+                crate::CollectionMut { db, id: collection }.put_with_expiry(
+                    id,
+                    &vector,
+                    &payload,
+                    &metadata,
+                    Some(expires_at_ms),
+                )?;
+            } else {
+                db.put_in(collection, id, &vector, &payload, &metadata, expected)?;
+            }
             let (etag, revision) = current_etag(db, &ident, collection, id)?
                 .ok_or_else(|| internal("acknowledged put is not readable under the same lock"))?;
             Ok(Written {
@@ -1886,6 +2086,7 @@ struct Search {
     filter: Option<Vec<crate::Condition>>,
     quantization: Option<collections::QuantizationName>,
     rerank_multiplier: Option<u8>,
+    rerank: Option<RerankRequest>,
     text: Option<String>,
     fusion: Option<Fusion>,
     vector_leg: Option<VectorLegName>,
@@ -1893,10 +2094,47 @@ struct Search {
     explain: bool,
 }
 
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum RerankMode {
+    Exact,
+    Mmr,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RerankRequest {
+    mode: RerankMode,
+    candidates: Option<usize>,
+    lambda: Option<f64>,
+}
+
 impl Search {
     /// Request-shape rules that do not depend on database state.
     fn validate(&self, role: &admin::Role) -> Result<(), ApiError> {
         let hybrid = self.mode == SearchMode::Hybrid;
+        if let Some(rerank) = &self.rerank {
+            if hybrid {
+                return Err(unprocessable("reranking is only valid for vector search"));
+            }
+            if rerank.lambda.is_some() && rerank.mode != RerankMode::Mmr {
+                return Err(unprocessable("lambda is only valid for MMR reranking"));
+            }
+            let candidates = rerank.candidates.unwrap_or(self.k.max(50));
+            if self.k == 0 || self.k > 1000 || !(self.k..=1000).contains(&candidates) {
+                return Err(unprocessable(
+                    "rerank candidates must be between k and 1000",
+                ));
+            }
+            if rerank
+                .lambda
+                .is_some_and(|lambda| !lambda.is_finite() || !(0.0..=1.0).contains(&lambda))
+            {
+                return Err(unprocessable(
+                    "MMR lambda must be finite and between 0 and 1",
+                ));
+            }
+        }
         if self.mode == SearchMode::Approximate {
             match role {
                 admin::Role::ReadOnly => {
@@ -2044,14 +2282,24 @@ fn execute(
         ));
     }
     let live = db.state(collection).records.len();
+    let candidate_k = input.rerank.as_ref().map_or(input.k, |rerank| {
+        rerank.candidates.unwrap_or(input.k.max(50))
+    });
     let filter = input.filter.as_deref().unwrap_or(&[]);
     let vector = input.vector.as_deref().unwrap_or(&[]);
-    let default_ef = 100.max(input.k.min(live));
+    let default_ef = 100.max(candidate_k.min(live));
     let mut stats = SearchStats::default();
     let distances = Hits::Vector;
-    Ok(match input.mode {
+    let mut executed = match input.mode {
         SearchMode::Exact => Executed {
-            hits: distances(db.search_in(collection, vector, input.k, filter, metric, &mut stats)?),
+            hits: distances(db.search_in(
+                collection,
+                vector,
+                candidate_k,
+                filter,
+                metric,
+                &mut stats,
+            )?),
             stats,
             plan: None,
             ef_search: None,
@@ -2059,7 +2307,15 @@ fn execute(
         SearchMode::Approximate | SearchMode::ApproximateReady => {
             let ef = input.ef_search.unwrap_or(default_ef);
             if input.mode == SearchMode::Approximate {
-                db.validate_hnsw_query(collection, vector, input.k, ef, config, filter, metric)?;
+                db.validate_hnsw_query(
+                    collection,
+                    vector,
+                    candidate_k,
+                    ef,
+                    config,
+                    filter,
+                    metric,
+                )?;
                 let stale =
                     input.k > 0
                         && live > 0
@@ -2079,7 +2335,15 @@ fn execute(
             }
             Executed {
                 hits: distances(db.search_ready_with_options_in(
-                    collection, vector, input.k, ef, config, options, filter, metric, &mut stats,
+                    collection,
+                    vector,
+                    candidate_k,
+                    ef,
+                    config,
+                    options,
+                    filter,
+                    metric,
+                    &mut stats,
                 )?),
                 stats,
                 plan: None,
@@ -2092,7 +2356,7 @@ fn execute(
                 db: &*db,
                 id: collection,
             }
-            .search_auto(vector, input.k, filter, metric, config, options, ef)?;
+            .search_auto(vector, candidate_k, filter, metric, config, options, ef)?;
             Executed {
                 hits: distances(planned.hits),
                 stats: planned.stats,
@@ -2157,7 +2421,30 @@ fn execute(
                 ef_search,
             }
         }
-    })
+    };
+    if let Some(rerank) = &input.rerank {
+        let reranker: Box<dyn crate::rerank::Reranker> = match rerank.mode {
+            RerankMode::Exact => Box::new(crate::rerank::ExactReranker { metric }),
+            RerankMode::Mmr => Box::new(crate::rerank::MmrReranker {
+                lambda: rerank.lambda.unwrap_or(0.5),
+            }),
+        };
+        let (reranked, candidate_count) = {
+            let Hits::Vector(candidates) = &executed.hits else {
+                return Err(unprocessable("reranking is only valid for vector search"));
+            };
+            let count = candidates.len() as u64;
+            let reranked = CollectionRef {
+                db: &*db,
+                id: collection,
+            }
+            .rerank(vector, candidates, input.k, reranker.as_ref())?;
+            (reranked, count)
+        };
+        executed.hits = Hits::Vector(reranked);
+        executed.stats.reranked_candidates = candidate_count;
+    }
+    Ok(executed)
 }
 
 async fn search_in(

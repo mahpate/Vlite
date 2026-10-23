@@ -13,12 +13,17 @@ wasm-bindgen target/wasm32-unknown-unknown/release/vlite_wasm.wasm --target node
 node test/smoke.mjs pkg/vlite_wasm.js
 ```
 
-Use `--target web` or `bundler` for browsers. Call `setClock(Date.now())` before
-operations that depend on time (TTL, commit timestamps): WebAssembly has no
-system clock.
+Use `--target web` or `bundler` for browsers. Pass `true` as the third
+`create` argument when V5-only mutations or the change feed are needed. Metadata
+arguments are JSON strings in the engine typed-metadata format. `feedCursor()`
+and `changesAfter()` return opaque cursor tokens and JSON strings respectively.
+Call `setClock(Date.now())` before operations that depend on time (TTL, commit
+timestamps): WebAssembly has no system clock.
 
-API: `VLiteDatabase.create(dimensions, key?)`, `VLiteDatabase.fromBytes(bytes, key?)`,
-`put(id, Float32Array, Uint8Array)`, `get(id)`, `delete(id)`, `search(query, k)`
+API: `VLiteDatabase.create(dimensions, key?, formatV5?)`, `VLiteDatabase.fromBytes(bytes, key?)`,
+`put(id, Float32Array, Uint8Array)`, `putWithExpiry(id, vector, payload, expiresAtMs?, metadataJson?)`,
+`updateMetadata(id, metadataJson)`, `groupedSearch(query, groups, hitsPerGroup, field)`,
+`feedCursor()`, `changesAfter(cursorToken, maxEvents)`, `get(id)`, `delete(id)`, `search(query, k)`
 (flat `[id, distance, ...]`), `len()`, `isEmpty()`, `toBytes()`. IDs are JS safe
 integers. Limits: file/path APIs, background HNSW rebuilds (no threads), sidecars
 and GPU search are unavailable; exact search and synchronous `build_hnsw` work.

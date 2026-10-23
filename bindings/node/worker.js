@@ -7,8 +7,12 @@ const handles = new Set();
 function execute(handle, request) {
   const response = JSON.parse(addon.execute(BigInt(handle), Buffer.from(request)));
   if (!response.ok) return response;
-  const op = JSON.parse(request).op;
-  if (op === "create" || op === "open") handles.add(response.result.handle);
+  const parsed = JSON.parse(request);
+  const op = parsed.op;
+  const featureOp = op === "features" ? parsed.request.op : undefined;
+  if (op === "create" || op === "open" || ["create", "open", "open_from_bytes"].includes(featureOp)) {
+    handles.add(response.result.handle);
+  }
   if (op === "close") handles.delete(handle);
   return response;
 }

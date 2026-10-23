@@ -1,5 +1,7 @@
 //! C ABI: owned UTF-8 JSON responses, opaque numeric handles, no network runtime.
 
+mod features;
+
 use base64::{Engine, prelude::BASE64_STANDARD};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -33,6 +35,9 @@ static STATE: OnceLock<Mutex<State>> = OnceLock::new();
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
+    Features {
+        request: features::Request,
+    },
     Create {
         path: String,
         dimensions: usize,
@@ -356,6 +361,20 @@ fn failure(error: vlite::Error) -> Failure {
         vlite::Error::ImportConflict(_) => "import_conflict",
         vlite::Error::TooManyImports => "import_limit",
         vlite::Error::RevisionMismatch { .. } => "precondition_failed",
+        vlite::Error::EncryptionKeyRequired => "encryption_key_required",
+        vlite::Error::EncryptionKeyMismatch { .. } => "encryption_key_mismatch",
+        vlite::Error::NotEncrypted => "not_encrypted",
+        vlite::Error::InvalidEncryptionOptions(_) => "invalid_encryption_options",
+        vlite::Error::ExpiryRequiresUpgrade => "requires_format_v5",
+        vlite::Error::ChangeFeedRequiresUpgrade => "change_feed_requires_upgrade",
+        vlite::Error::CursorCompacted { .. } => "cursor_compacted",
+        vlite::Error::CursorAhead { .. } => "cursor_ahead",
+        vlite::Error::InvalidCursor(_) => "invalid_cursor",
+        vlite::Error::TimestampsUnavailable => "timestamps_unavailable",
+        vlite::Error::InvalidRestoreTarget(_) => "invalid_restore_target",
+        vlite::Error::StaleIndex => "stale_index",
+        vlite::Error::SidecarUnavailable(_) => "sidecar_unavailable",
+        vlite::Error::PublicationIndeterminate { .. } => "publication_indeterminate",
         _ => "invalid_input",
     };
     (code, error.to_string())
@@ -665,6 +684,17 @@ fn execute(handle: u64, request: Request) -> Result<Value> {
         .get_or_init(Mutex::default)
         .lock()
         .map_err(|_| ("panic", "Native owner poisoned; restart the process".into()))?;
+    if let Request::Features { request } = request {
+        let result = features::execute(&mut state, handle, request)?;
+        if result.to_string().len() > 8 * 1024 * 1024 - 1024 {
+            return Err((
+                "response_too_large",
+                "Feature response exceeds 8 MiB; request fewer results or a smaller byte image"
+                    .into(),
+            ));
+        }
+        return Ok(result);
+    }
     match request {
         Request::Create { .. } | Request::Open { .. } => {
             if handle != 0 {
@@ -1148,7 +1178,10 @@ fn execute(handle: u64, request: Request) -> Result<Value> {
                 "resident_vector_bytes": report.resident_vector_bytes,
             }))
         }
-        Request::Create { .. } | Request::Open { .. } | Request::Close {} => unreachable!(),
+        Request::Create { .. }
+        | Request::Open { .. }
+        | Request::Close {}
+        | Request::Features { .. } => unreachable!(),
     }
 }
 

@@ -486,3 +486,25 @@ test("admin operations, credentials, scoped capabilities and Prometheus text", a
     assert.ok(!JSON.stringify(scoped.collection("docs")).includes(scopedToken));
   });
 });
+
+test("feature REST methods use the documented routes", async () => {
+  const calls = [];
+  const server = createServer(async (req, res) => {
+    let body = ""; for await (const chunk of req) body += chunk;
+    calls.push({ method: req.method, path: req.url, body: body ? JSON.parse(body) : null });
+    res.end(JSON.stringify({ hits: [], changes: [], next_cursor: "cursor" }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const client = new Client(`http://127.0.0.1:${server.address().port}`, token);
+    await client.changes({ limit: 20 });
+    await client.collection("docs").groupedSearch({ vector: [1], field: "group", groups: 2, hits_per_group: 3 });
+    await client.put("1", { vector: [1], ttl_ms: 30000 });
+    assert.equal(calls[0].path, "/v1/changes?limit=20");
+    assert.equal(calls[1].path, "/v1/collections/docs/search/grouped");
+    assert.equal(calls[2].body.ttl_ms, 30000);
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});

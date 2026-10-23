@@ -39,6 +39,9 @@ class Put(TypedDict):
     vector: list[float]
     payload_base64: NotRequired[str]
     metadata: NotRequired[Metadata]
+    expires_at_ms: NotRequired[int | None]
+    ttl_ms: NotRequired[int]
+    ttl: NotRequired[int]
 
 
 class Record(TypedDict):
@@ -541,6 +544,58 @@ class _Records:
         carries ``stats`` and ``plan`` (``plan`` is null outside ``auto`` mode)."""
         return self._transport()._request("POST", self._prefix + "/search", request)
 
+    def _feature_prefix(self) -> str:
+        return "/v1/collections/default" if self._prefix == "/v1" else self._prefix
+
+    def embed_text(self, text: str, *, provider: str = "hashing") -> dict:
+        if not isinstance(text, str) or len(text.encode("utf-8")) > 16384:
+            raise ValueError("text must be at most 16384 UTF-8 bytes")
+        if provider not in {"hashing", "http"}:
+            raise ValueError("provider must be hashing or http")
+        return self._transport()._request(
+            "POST", self._feature_prefix() + "/embed", {"text": text, "provider": provider}
+        )
+
+    def update_metadata(self, id: str, metadata: Metadata, *, if_match: str | None = None) -> None:
+        """Replace metadata without rewriting vector or payload; requires V5."""
+        if not isinstance(metadata, dict):
+            raise ValueError("metadata must be an object")
+        self._transport()._request("PATCH", self._feature_prefix() + "/vectors/" + _id(id) + "/metadata",
+                                   {"metadata": metadata}, if_match=self._transport()._conditional(if_match))
+
+    def grouped_search(self, request: dict) -> dict:
+        return self._transport()._request("POST", self._feature_prefix() + "/search/grouped", _object(request, "request"))
+
+    def recommend(self, request: dict) -> dict:
+        return self._transport()._request("POST", self._feature_prefix() + "/recommend", _object(request, "request"))
+
+    def facets(self, field: str, *, filter: list | None = None) -> dict:
+        return self._transport()._request("POST", self._feature_prefix() + "/facets", {"field": field, "filter": filter or []})
+
+    def numeric_stats(self, field: str, *, filter: list | None = None) -> dict:
+        return self._transport()._request("POST", self._feature_prefix() + "/stats/numeric", {"field": field, "filter": filter or []})
+
+    def geo_search(self, request: dict) -> dict:
+        return self._transport()._request("POST", self._feature_prefix() + "/search/geo", _object(request, "request"))
+
+    def configure_vector(self, name: str, *, dimensions: int, metric: str = "squared_l2", active_version: str = "v1", history: int = 0) -> dict:
+        return self._transport()._request("POST", self._feature_prefix() + "/vectors/configure", {"name": name, "dimensions": dimensions, "metric": metric, "active_version": active_version, "history": history})
+
+    def put_named_vectors(self, id: str, *, dense: dict | None = None, sparse: dict | None = None) -> dict:
+        return self._transport()._request("PUT", self._feature_prefix() + "/vectors/" + _id(id) + "/named", {"dense": dense or {}, "sparse": sparse or {}})
+
+    def search_named(self, request: dict) -> dict:
+        return self._transport()._request("POST", self._feature_prefix() + "/search/named", _object(request, "request"))
+
+    def search_sparse(self, request: dict) -> dict:
+        return self._transport()._request("POST", self._feature_prefix() + "/search/sparse", _object(request, "request"))
+
+    def search_dense_sparse(self, request: dict) -> dict:
+        return self._transport()._request("POST", self._feature_prefix() + "/search/dense-sparse", _object(request, "request"))
+
+    def query(self, query: str, vectors: dict | None = None) -> dict:
+        return self._transport()._request("POST", self._feature_prefix() + "/query", {"query": query, "vectors": vectors or {}})
+
     def build_index(self, *, metric: Literal["squared_l2", "cosine"] | None = None,
                     quantization: Literal["none", "scalar_u8"] | None = None,
                     rerank_multiplier: int | None = None) -> None:
@@ -852,6 +907,30 @@ class Client(_Records):
             raise
 
     # Operations (admin).
+
+    def changes(self, *, cursor: str | None = None, limit: int = 1000) -> dict:
+        if type(limit) is not int or not 1 <= limit <= 10000:
+            raise ValueError("limit must be an integer in 1..10000")
+        query = {"limit": str(limit)}
+        if cursor is not None:
+            query["cursor"] = cursor
+        return self._request("GET", "/v1/changes?" + urlencode(query))
+
+    def list_webhooks(self) -> dict:
+        return self._request("GET", "/v1/admin/webhooks")
+
+    def create_webhook(self, request: dict) -> dict:
+        return self._request("POST", "/v1/admin/webhooks", _object(request, "request"))
+
+    def webhook_status(self, webhook_id: str) -> dict:
+        if not re.fullmatch(r"[a-f0-9]{24}", webhook_id):
+            raise ValueError("invalid webhook ID")
+        return self._request("GET", "/v1/admin/webhooks/" + webhook_id)
+
+    def delete_webhook(self, webhook_id: str) -> bool:
+        if not re.fullmatch(r"[a-f0-9]{24}", webhook_id):
+            raise ValueError("invalid webhook ID")
+        return self._request("DELETE", "/v1/admin/webhooks/" + webhook_id)["deleted"]
 
     def auto_maintenance(self) -> dict:
         """``{"config": {..., "interval_ms", ...}, "state": {...}}``."""

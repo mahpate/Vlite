@@ -57,6 +57,45 @@ REST remains the operational interface for auto retrieval, index quality and
 maintenance, backup/restore, credentials and diagnostics. There is no
 reflection API.
 
+## Extended engine RPCs
+
+The additive RPCs expose the engine's V5 record and retrieval APIs. `PutVector`
+accepts optional absolute `expires_at_ms`; `UpdateMetadata` changes metadata
+without replacing the vector or payload. Both require a V5 file. Grouped search,
+recommendations, facets, numeric statistics and geographic search preserve the
+engine's typed metadata, filters, metrics and stable ID tie-breaking.
+
+`SearchRequest.rerank_mode` optionally applies exact metric re-scoring or MMR to
+returned vector candidates. `rerank_candidates` sets candidate depth (bounded to
+4096 and at least `k`); MMR defaults to lambda 0.5. Hybrid result sets cannot be
+post-reranked. Named-vector configuration, version upserts, vector/sparse puts,
+named and sparse searches, and dense+sparse fusion are also V5-only. These RPCs
+operate on the collection named in the request and follow the corresponding
+read/search/write scoped-credential permissions.
+
+`Query` accepts the bounded read-only query language described in
+[VECTORS.md](VECTORS.md); vector parameters are supplied separately in the
+request map. `Changes` returns a durable cursor token and commit-boundary batch.
+`WatchChanges` starts at that token (or the beginning when empty), emits batches
+as they appear, and continues polling until the client cancels. Watch/change
+access is admin-only because feed batches may contain events from any
+collection. The watch interval is clamped to 100 ms–60 s, and credentials are
+rechecked while polling.
+
+`BuildDiskAnn` and `SearchDiskAnn` use an operator-specified sidecar path. They
+are not available for encrypted databases; the sidecar contains plaintext
+vectors, so callers must protect its directory and restrict these admin/index
+operations. `Info` reports format, sequence, lineage, timestamp support, and
+whether the database is encrypted plus its non-secret key ID—never key material.
+This gRPC server currently owns a primary `Database`, not a
+`ReplicaFollower`; `is_replica` is false and the optional replica detail is
+absent. Replica transport/status RPCs are not yet provided.
+
+There is no server-configured embedding provider in the current server
+configuration. Consequently this API does not expose text-to-vector embedding;
+clients can send vectors from their own provider. The embedded engine's
+`Embedder` trait and optional HTTP provider remain usable by applications.
+
 ## Streaming export and import
 
 `ExportVectors` is a server stream of `Vector` messages for one collection, in

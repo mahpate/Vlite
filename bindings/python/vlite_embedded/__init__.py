@@ -1,4 +1,5 @@
 """Embedded VLite using ctypes and an ABI-v1 native shared library."""
+import base64
 import ctypes
 import json
 import os
@@ -50,17 +51,55 @@ class NativeLibrary:
             raise EmbeddedError(error["code"], error["message"])
         return response["result"]
 
-    def create(self, path: str | os.PathLike[str], dimensions: int, *, format: int | None = None) -> "Database":
-        """Create a database. ``format`` defaults to 3; pass 4 for named collections and imports."""
+    def create(self, path: str | os.PathLike[str], dimensions: int, *, format: int | None = None,
+               key: bytes | None = None, passphrase: str | None = None,
+               commit_timestamps: bool = False) -> "Database":
+        """Create without overwrite. Default format is 3; 5 enables all new surfaces."""
+        if format == 5 or key is not None or passphrase is not None or commit_timestamps:
+            return self._create_feature(str(Path(path)), dimensions, format, key, passphrase, commit_timestamps)
         request = {"op": "create", "path": str(Path(path)), "dimensions": dimensions}
         if format is not None:
             request["format"] = format
-        result = self._execute(0, request)
+        return Database(self, int(self._execute(0, request)["handle"]))
+
+    def _feature(self, operation: str, **fields):
+        return self._execute(0, {"op": "features", "request": {"op": operation, **fields}})
+
+    def _create_feature(self, path, dimensions, format, key, passphrase, commit_timestamps):
+        options = {"credentials": _credentials(key, passphrase), "commit_timestamps": commit_timestamps,
+                   **_given(format=format)}
+        result = self._feature("create", path=path, dimensions=dimensions, options=options)
         return Database(self, int(result["handle"]))
 
-    def open(self, path: str | os.PathLike[str]) -> "Database":
-        result = self._execute(0, {"op": "open", "path": str(Path(path))})
+    def create_in_memory(self, dimensions: int, *, format: int | None = None, key: bytes | None = None,
+                         passphrase: str | None = None, commit_timestamps: bool = False) -> "Database":
+        """Host-owned byte-image database; persist with Database.to_bytes()."""
+        return self._create_feature(None, dimensions, format, key, passphrase, commit_timestamps)
+
+    def open(self, path: str | os.PathLike[str], *, key: bytes | None = None,
+             passphrase: str | None = None) -> "Database":
+        if key is None and passphrase is None:
+            result = self._execute(0, {"op": "open", "path": str(Path(path))})
+        else:
+            result = self._feature("open", path=str(Path(path)), credentials=_credentials(key, passphrase))
         return Database(self, int(result["handle"]))
+
+    def open_from_bytes(self, data: bytes, *, key: bytes | None = None,
+                        passphrase: str | None = None) -> "Database":
+        result = self._feature("open_from_bytes", bytes_base64=_bytes_base64(data),
+                               credentials=_credentials(key, passphrase))
+        return Database(self, int(result["handle"]))
+
+    def restore_to(self, log_path: str | os.PathLike[str], destination: str | os.PathLike[str], *,
+                   sequence: str | int | None = None, timestamp_ms: str | int | None = None,
+                   base_backup: str | os.PathLike[str] | None = None,
+                   key: bytes | None = None, passphrase: str | None = None) -> dict:
+        """Restore a closed log into a new path; choose exactly one sequence or timestamp."""
+        return self._feature("restore_to", log_path=str(Path(log_path)), destination=str(Path(destination)),
+                             **_given(sequence=None if sequence is None else str(sequence),
+                                      timestamp_ms=None if timestamp_ms is None else str(timestamp_ms),
+                                      base_backup=None if base_backup is None else str(Path(base_backup))),
+                             credentials=_credentials(key, passphrase))
 
 
 class Database:
@@ -102,9 +141,16 @@ class Database:
         return self._execute("get_many", ids=ids, **_given(collection=collection))["records"]
 
     def put(self, id: str, vector: list[float], *, payload_base64: str = "", metadata: dict | None = None,
-            collection: str | None = None, expected_revision: str | None = None) -> str | None:
+            collection: str | None = None, expected_revision: str | None = None,
+            expires_at_ms: int | str | None = None) -> str | None:
         """Write a record. With ``expected_revision`` (``"absent"`` or a decimal revision string)
         the write is compare-and-set and returns the new revision; otherwise it returns None."""
+        if expires_at_ms is not None:
+            if expected_revision is not None:
+                raise ValueError("expiry writes do not support expected_revision")
+            self.put_with_expiry(id, vector, expires_at_ms=expires_at_ms, payload_base64=payload_base64,
+                                 metadata=metadata, collection=collection)
+            return None
         result = self._execute("put", id=id, vector=vector, payload_base64=payload_base64,
                                metadata={} if metadata is None else metadata,
                                **_given(collection=collection, expected_revision=expected_revision))
@@ -202,7 +248,133 @@ class Database:
         return self._execute("ann_memory", **_given(collection=collection, metric=metric, quantization=quantization,
                                                     rerank_multiplier=rerank_multiplier))
 
+    def _feature(self, operation: str, **fields):
+        return self._execute("features", request={"op": operation, **fields})
+
+    def put_with_expiry(self, id: str, vector: list[float], *, expires_at_ms: int | str | None = None,
+                        payload_base64: str = "", metadata: dict | None = None,
+                        collection: str | None = None) -> str:
+        """Put with absolute Unix-ms expiry (None means no expiry); returns revision. Requires V5."""
+        return self._feature("put_with_expiry", id=id, vector=vector, payload_base64=payload_base64,
+                             metadata={} if metadata is None else metadata,
+                             expires_at_ms=None if expires_at_ms is None else str(expires_at_ms),
+                             **_given(collection=collection))["revision"]
+
+    def update_metadata(self, id: str, metadata: dict, *, collection: str | None = None) -> str:
+        """Replace metadata, retaining vectors, payload, and expiry; returns revision. Requires V5."""
+        return self._feature("update_metadata", id=id, metadata=metadata, **_given(collection=collection))["revision"]
+
+    def search_grouped(self, vector: list[float], groups: int, hits_per_group: int, field: str, *,
+                       filter: list[dict] | None = None, metric: str | None = None,
+                       collection: str | None = None) -> list[dict]:
+        return self._feature("search_grouped", vector=vector, groups=groups, hits_per_group=hits_per_group,
+                             field=field, filter=[] if filter is None else filter, **_given(metric=metric, collection=collection))
+
+    def recommend(self, k: int, *, positive_ids: list[str] | None = None, negative_ids: list[str] | None = None,
+                  positive_vectors: list[list[float]] | None = None, negative_vectors: list[list[float]] | None = None,
+                  filter: list[dict] | None = None, metric: str | None = None, collection: str | None = None) -> list[dict]:
+        return self._feature("recommend", k=k, positive_ids=[] if positive_ids is None else positive_ids,
+                             negative_ids=[] if negative_ids is None else negative_ids,
+                             positive_vectors=[] if positive_vectors is None else positive_vectors,
+                             negative_vectors=[] if negative_vectors is None else negative_vectors,
+                             filter=[] if filter is None else filter, **_given(metric=metric, collection=collection))
+
+    def facets(self, field: str, *, filter: list[dict] | None = None, collection: str | None = None) -> list[dict]:
+        return self._feature("facets", field=field, filter=[] if filter is None else filter, **_given(collection=collection))
+
+    def numeric_stats(self, field: str, *, filter: list[dict] | None = None, collection: str | None = None) -> dict:
+        return self._feature("numeric_stats", field=field, filter=[] if filter is None else filter, **_given(collection=collection))
+
+    def search_geo(self, vector: list[float], k: int, field: str, latitude: float, longitude: float,
+                   radius_meters: float, *, sort: str = "vector_distance", filter: list[dict] | None = None,
+                   metric: str | None = None, collection: str | None = None) -> list[dict]:
+        return self._feature("search_geo", vector=vector, k=k, field=field, latitude=latitude, longitude=longitude,
+                             radius_meters=radius_meters, sort=sort, filter=[] if filter is None else filter,
+                             **_given(metric=metric, collection=collection))
+
+    def configure_vector(self, name: str, dimensions: int, *, active_version: str, metric: str = "squared_l2",
+                         history: int = 0, collection: str | None = None) -> None:
+        self._feature("configure_vector", name=name, dimensions=dimensions, active_version=active_version,
+                      metric=metric, history=history, **_given(collection=collection))
+
+    def vector_specs(self, *, collection: str | None = None) -> dict:
+        return self._feature("vector_specs", **_given(collection=collection))
+
+    def record_vectors(self, id: str, *, collection: str | None = None) -> dict | None:
+        return self._feature("record_vectors", id=id, **_given(collection=collection))
+
+    def put_vectors(self, id: str, *, dense: dict | None = None, sparse: dict | None = None,
+                    collection: str | None = None) -> None:
+        """Replace all additional vectors: dense name -> [{version, vector}], sparse name -> [(index, weight)]."""
+        self._feature("put_vectors", id=id, dense={} if dense is None else dense, sparse={} if sparse is None else sparse,
+                      **_given(collection=collection))
+
+    def put_vector_version(self, id: str, name: str, version: str, vector: list[float], *, collection: str | None = None) -> None:
+        self._feature("put_vector_version", id=id, name=name, version=version, vector=vector, **_given(collection=collection))
+
+    def prune_vector_history(self, name: str, history: int, *, collection: str | None = None) -> None:
+        self._feature("prune_vector_history", name=name, history=history, **_given(collection=collection))
+
+    def search_named(self, name: str, vector: list[float], k: int, *, version: str | None = None,
+                     collection: str | None = None) -> list[dict]:
+        return self._feature("search_named", name=name, vector=vector, k=k, **_given(version=version, collection=collection))
+
+    def search_sparse(self, name: str, vector: list[tuple[int, float]], k: int, *, collection: str | None = None) -> list[dict]:
+        return self._feature("search_sparse", name=name, vector=vector, k=k, **_given(collection=collection))
+
+    def search_dense_sparse(self, dense_name: str, dense: list[float], sparse_name: str, sparse: list[tuple[int, float]],
+                            k: int, *, version: str | None = None, fusion: dict | None = None,
+                            collection: str | None = None) -> list[dict]:
+        return self._feature("search_dense_sparse", dense_name=dense_name, dense=dense, sparse_name=sparse_name,
+                             sparse=sparse, k=k, **_given(version=version, fusion=fusion, collection=collection))
+
+    def rerank(self, vector: list[float], candidates: list[dict], limit: int, *, method: str = "exact",
+               metric: str | None = None, lambda_: float | None = None, collection: str | None = None) -> list[dict]:
+        return self._feature("rerank", vector=vector, candidates=candidates, limit=limit, method=method,
+                             **_given(metric=metric, collection=collection, **{"lambda": lambda_}))
+
+    def query(self, query: str, parameters: dict[str, list[float]] | None = None, *, collection: str | None = None) -> dict:
+        return self._feature("query", query=query, parameters={} if parameters is None else parameters, **_given(collection=collection))
+
+    def feed_cursor(self) -> str:
+        return self._feature("feed_cursor")
+
+    def changes_after(self, cursor: str | None = None, max_events: int = 1000) -> dict:
+        """Read commits after cursor, or from the beginning when cursor is None. Does not split batch commits."""
+        return self._feature("changes_after", cursor=cursor, max_events=max_events)
+
+    def encryption_info(self) -> dict:
+        return self._feature("encryption_info")
+
+    def is_encrypted(self) -> bool:
+        return self.encryption_info()["is_encrypted"]
+
+    def encryption_key_id(self) -> str | None:
+        return self.encryption_info()["key_id"]
+
+    def build_disk_ann(self, path: str | os.PathLike[str], *, metric: str | None = None, collection: str | None = None) -> dict:
+        return self._feature("build_disk_ann", path=str(Path(path)), **_given(metric=metric, collection=collection))
+
+    def search_disk_ann(self, path: str | os.PathLike[str], vector: list[float], k: int, *, ef_search: int = 100,
+                        cache_bytes: int = 8 * 1024 * 1024) -> list[dict]:
+        return self._feature("search_disk_ann", path=str(Path(path)), vector=vector, k=k, ef_search=ef_search, cache_bytes=cache_bytes)
+
+    def to_bytes(self) -> bytes:
+        return base64.b64decode(self._feature("to_bytes")["bytes_base64"], validate=True)
+
 
 def _given(**fields) -> dict:
     """Drop omitted options so the native layer applies the collection's declared defaults."""
     return {name: value for name, value in fields.items() if value is not None}
+
+
+def _bytes_base64(data: bytes) -> str:
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        raise TypeError("expected bytes-like data")
+    return base64.b64encode(data).decode("ascii")
+
+
+def _credentials(key: bytes | None, passphrase: str | None) -> dict:
+    if key is not None and passphrase is not None:
+        raise ValueError("provide key or passphrase, not both")
+    return _given(key_base64=None if key is None else _bytes_base64(key), passphrase=passphrase)

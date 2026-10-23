@@ -315,6 +315,13 @@ fn target(collection: String) -> Target {
     }
 }
 
+/// Opens a collection name already qualified for a scoped tenant, without
+/// applying tenant qualification twice.
+fn open_qualified(db: &Database, role: &admin::Role, name: &str) -> Result<u16, ApiError> {
+    let raw = tenants::unqualify(role, name);
+    open(db, role, &Target::Named(raw))
+}
+
 fn value_in(value: Option<proto::MetadataValue>) -> Result<crate::MetadataValue, ApiError> {
     use proto::metadata_value::Kind;
     match value.and_then(|value| value.kind) {
@@ -489,6 +496,7 @@ fn search_input(request: proto::SearchRequest) -> Result<Search, ApiError> {
         filter: (!filter.is_empty()).then_some(filter),
         quantization,
         rerank_multiplier,
+        rerank: None,
         text: request.text,
         fusion,
         vector_leg,
@@ -539,6 +547,123 @@ fn import_json(value: Value) -> Result<proto::ImportJsonResponse, ApiError> {
 }
 
 use credentials::Op;
+
+fn metric_in(metric: i32) -> Result<DistanceMetric, ApiError> {
+    match proto::Metric::try_from(metric) {
+        Ok(proto::Metric::Unspecified | proto::Metric::SquaredL2) => Ok(DistanceMetric::SquaredL2),
+        Ok(proto::Metric::Cosine) => Ok(DistanceMetric::Cosine),
+        Ok(proto::Metric::InnerProduct) => Ok(DistanceMetric::InnerProduct),
+        Err(_) => Err(unprocessable("unknown metric")),
+    }
+}
+
+fn conditions_in(items: Vec<proto::Condition>) -> Result<Vec<crate::Condition>, ApiError> {
+    items.into_iter().map(condition).collect()
+}
+
+fn hits_out(hits: Vec<crate::SearchHit>) -> proto::SearchResponse {
+    proto::SearchResponse {
+        hits: hits
+            .into_iter()
+            .map(|hit| proto::Hit {
+                id: hit.id,
+                distance: hit.distance,
+            })
+            .collect(),
+        hybrid_hits: Vec::new(),
+    }
+}
+
+fn sparse_in(indices: Vec<u32>, values: Vec<f32>) -> Result<Vec<(u32, f32)>, ApiError> {
+    if indices.len() != values.len() {
+        return Err(unprocessable(
+            "sparse indices and values must have equal lengths",
+        ));
+    }
+    Ok(indices.into_iter().zip(values).collect())
+}
+
+fn change_out(change: crate::changes::Change) -> proto::ChangeEvent {
+    use crate::changes::ChangeKind;
+    let mut event = proto::ChangeEvent {
+        sequence: change.sequence,
+        ordinal: change.ordinal,
+        collection: change.collection,
+        committed_at_ms: change.committed_at_ms,
+        kind: proto::ChangeKind::Unspecified as i32,
+        id: None,
+        expires_at_ms: None,
+        vector: Vec::new(),
+        payload: Vec::new(),
+        metadata: HashMap::new(),
+        dimensions: None,
+        settings_json: String::new(),
+    };
+    match change.kind {
+        ChangeKind::Put {
+            id,
+            record,
+            expires_at_ms,
+        } => {
+            event.kind = proto::ChangeKind::Put as i32;
+            event.id = Some(id);
+            event.expires_at_ms = expires_at_ms;
+            event.vector = record.vector;
+            event.payload = record.payload;
+            event.metadata = metadata_out(record.metadata);
+        }
+        ChangeKind::Delete { id } => {
+            event.kind = proto::ChangeKind::Delete as i32;
+            event.id = Some(id);
+        }
+        ChangeKind::MetadataUpdate { id, metadata } => {
+            event.kind = proto::ChangeKind::MetadataUpdate as i32;
+            event.id = Some(id);
+            event.metadata = metadata_out(metadata);
+        }
+        ChangeKind::CollectionCreated {
+            dimensions,
+            settings,
+        } => {
+            event.kind = proto::ChangeKind::CollectionCreated as i32;
+            event.dimensions = u32::try_from(dimensions).ok();
+            event.settings_json = collections::settings_json(&settings).to_string();
+        }
+        ChangeKind::CollectionDropped => event.kind = proto::ChangeKind::CollectionDropped as i32,
+        ChangeKind::SettingsUpdated { settings } => {
+            event.kind = proto::ChangeKind::SettingsUpdated as i32;
+            event.settings_json = collections::settings_json(&settings).to_string();
+        }
+        ChangeKind::VectorsUpdated => event.kind = proto::ChangeKind::VectorsUpdated as i32,
+    }
+    event
+}
+
+async fn poll_changes(
+    service: &Service,
+    headers: &axum::http::HeaderMap,
+    cursor: crate::changes::FeedCursor,
+    limit: usize,
+) -> Result<crate::changes::ChangeBatch, ApiError> {
+    let _permit = service
+        .requests
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(internal)?;
+    let role = authenticate(service, headers)?.ok_or_else(|| {
+        ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "valid bearer token required",
+        )
+    })?;
+    rate_limit(service, &role)?;
+    authorize_need(service, &role, Need::Admin, false, false)?;
+    service
+        .run(move |db| Ok(db.changes_after(&cursor, limit)?))
+        .await
+}
 
 #[tonic::async_trait]
 impl VLite for Adapter {
@@ -643,14 +768,26 @@ impl VLite for Adapter {
             legacy,
             |service, role, _, request| async move {
                 let id = request.id;
-                let fetched = fetch_core(&service, role, target(request.collection), id).await?;
-                Ok(proto::Vector {
-                    id,
-                    vector: fetched.record.vector,
-                    payload: fetched.record.payload,
-                    metadata: metadata_out(fetched.record.metadata),
-                    revision: fetched.revision,
-                })
+                let addressed = target(request.collection);
+                service
+                    .run(move |db| {
+                        let collection = open(db, &role, &addressed)?;
+                        let not_found = || {
+                            ApiError::new(StatusCode::NOT_FOUND, "not_found", "vector not found")
+                        };
+                        let record = db.get_in(collection, id)?.ok_or_else(not_found)?.clone();
+                        let revision = db.revision_in(collection, id)?.ok_or_else(not_found)?;
+                        let expires_at_ms = db.state(collection).expiries.get(&id).copied();
+                        Ok(proto::Vector {
+                            id,
+                            vector: record.vector,
+                            payload: record.payload,
+                            metadata: metadata_out(record.metadata),
+                            revision,
+                            expires_at_ms,
+                        })
+                    })
+                    .await
             },
         )
         .await
@@ -670,20 +807,58 @@ impl VLite for Adapter {
             legacy,
             |service, role, _, request| async move {
                 let metadata = metadata_in(request.metadata)?;
-                let written = put_core(
-                    &service,
-                    role,
-                    target(request.collection),
-                    request.id,
-                    expected(request.expected),
-                    request.vector,
-                    request.payload,
-                    metadata,
-                )
-                .await?;
+                let addressed = target(request.collection);
+                let written = if let Some(expiry) = request.expires_at_ms {
+                    if request.payload.len() > MAX_PAYLOAD_BYTES {
+                        return Err(Error::PayloadTooLarge(request.payload.len()).into());
+                    }
+                    let quota_service = service.clone();
+                    let ident = service.etag_ident.clone();
+                    let guard = expected(request.expected);
+                    let id = request.id;
+                    let vector = request.vector;
+                    let payload = request.payload;
+                    let expiry_target = addressed.clone();
+                    service
+                        .run(move |db| {
+                            let collection = open(db, &role, &expiry_target)?;
+                            enforce_quota(&quota_service, db, &role, collection, &[(id, true)])?;
+                            let expected = guard.resolve(db, &ident, collection, id)?;
+                            let created = db.revision_in(collection, id)?.is_none();
+                            let revision = db.put_with_expiry_in(
+                                collection,
+                                id,
+                                &vector,
+                                &payload,
+                                &metadata,
+                                Some(expiry),
+                                expected,
+                            )?;
+                            Ok(Written {
+                                revision,
+                                created,
+                                etag: String::new(),
+                            })
+                        })
+                        .await?
+                } else {
+                    put_core(
+                        &service,
+                        role,
+                        addressed,
+                        request.id,
+                        expected(request.expected),
+                        request.vector,
+                        request.payload,
+                        metadata,
+                        None,
+                    )
+                    .await?
+                };
                 Ok(proto::PutVectorResponse {
                     revision: written.revision,
                     created: written.created,
+                    expires_at_ms: request.expires_at_ms,
                 })
             },
         )
@@ -760,20 +935,86 @@ impl VLite for Adapter {
             legacy,
             |service, role, request_id, request| async move {
                 let target = target(request.collection.clone());
-                let input = search_input(request)?;
+                let requested_k = request.k as usize;
+                let rerank_metric = metric_in(request.metric)?;
+                let rerank_metric_explicit = request.metric != proto::Metric::Unspecified as i32;
+                let rerank_mode = proto::RerankMode::try_from(request.rerank_mode)
+                    .map_err(|_| unprocessable("unknown rerank mode"))?;
+                let candidate_count = request.rerank_candidates.map_or_else(
+                    || requested_k.saturating_mul(4).max(requested_k),
+                    |value| value as usize,
+                );
+                if rerank_mode != proto::RerankMode::None
+                    && (requested_k > crate::MAX_BATCH_OPERATIONS
+                        || candidate_count < requested_k
+                        || candidate_count > crate::MAX_BATCH_OPERATIONS)
+                {
+                    return Err(unprocessable(
+                        "rerank candidate count must be at least k and at most 4096",
+                    ));
+                }
+                if rerank_mode != proto::RerankMode::None
+                    && proto::SearchMode::try_from(request.mode) == Ok(proto::SearchMode::Hybrid)
+                {
+                    return Err(unprocessable(
+                        "reranking is only available for vector search",
+                    ));
+                }
+                if (request.mmr_lambda.is_some() && rerank_mode != proto::RerankMode::Mmr)
+                    || (request.rerank_candidates.is_some()
+                        && rerank_mode == proto::RerankMode::None)
+                {
+                    return Err(unprocessable(
+                        "MMR lambda and candidate depth require a matching rerank mode",
+                    ));
+                }
+                let mmr_lambda = request.mmr_lambda.unwrap_or(0.5);
+                let mut input = search_input(request)?;
+                if rerank_mode != proto::RerankMode::None {
+                    input.k = candidate_count;
+                }
+                let rerank_role = role.clone();
+                let rerank_target = target.clone();
+                let query = input.vector.clone().unwrap_or_default();
                 let (_, executed) =
                     search_core(&service, role, &request_id, ROUTE, target, input).await?;
                 match executed.hits {
-                    Hits::Vector(hits) => Ok(proto::SearchResponse {
-                        hits: hits
-                            .into_iter()
-                            .map(|hit| proto::Hit {
-                                id: hit.id,
-                                distance: hit.distance,
-                            })
-                            .collect(),
-                        hybrid_hits: Vec::new(),
-                    }),
+                    Hits::Vector(hits) => {
+                        let hits = if rerank_mode == proto::RerankMode::None {
+                            hits
+                        } else {
+                            let name = tenants::qualify(&rerank_role, rerank_target.name());
+                            service
+                                .run(move |db| {
+                                    let collection = open(db, &rerank_role, &rerank_target)?;
+                                    let metric = if rerank_metric_explicit {
+                                        rerank_metric
+                                    } else {
+                                        identity(db, collection, &rerank_target).0
+                                    };
+                                    let reranker: Box<dyn crate::rerank::Reranker> =
+                                        match rerank_mode {
+                                            proto::RerankMode::Exact => {
+                                                Box::new(crate::rerank::ExactReranker { metric })
+                                            }
+                                            proto::RerankMode::Mmr => {
+                                                Box::new(crate::rerank::MmrReranker {
+                                                    lambda: mmr_lambda,
+                                                })
+                                            }
+                                            proto::RerankMode::None => unreachable!(),
+                                        };
+                                    Ok(db.collection(&name)?.rerank(
+                                        &query,
+                                        &hits,
+                                        requested_k,
+                                        reranker.as_ref(),
+                                    )?)
+                                })
+                                .await?
+                        };
+                        Ok(hits_out(hits))
+                    }
                     Hits::Hybrid(hits) => {
                         let hybrid_hits = hits
                             .into_iter()
@@ -805,6 +1046,779 @@ impl VLite for Adapter {
                         })
                     }
                 }
+            },
+        )
+        .await
+    }
+
+    async fn update_metadata(
+        &self,
+        request: Request<proto::UpdateMetadataRequest>,
+    ) -> Result<Response<proto::UpdateMetadataResponse>, Status> {
+        let legacy = request.get_ref().collection.is_empty();
+        self.call(
+            "grpc:/vlite.v1.VLite/UpdateMetadata",
+            request,
+            Need::Op(Op::Write, Reach::Collection),
+            false,
+            legacy,
+            |service, role, _, request| async move {
+                let name = tenants::qualify(&role, target(request.collection).name());
+                let id = request.id;
+                let metadata = metadata_in(request.metadata)?;
+                service
+                    .run(move |db| {
+                        open_qualified(db, &role, &name)?;
+                        let revision = db.collection_mut(&name)?.update_metadata(id, &metadata)?;
+                        Ok(proto::UpdateMetadataResponse { revision })
+                    })
+                    .await
+            },
+        )
+        .await
+    }
+
+    async fn search_grouped(
+        &self,
+        request: Request<proto::GroupedSearchRequest>,
+    ) -> Result<Response<proto::GroupedSearchResponse>, Status> {
+        let legacy = request.get_ref().collection.is_empty();
+        self.call(
+            "grpc:/vlite.v1.VLite/SearchGrouped",
+            request,
+            Need::Op(Op::Search, Reach::Collection),
+            true,
+            legacy,
+            |service, role, _, request| async move {
+                let name = tenants::qualify(&role, target(request.collection).name());
+                let filters = conditions_in(request.filter)?;
+                let metric = metric_in(request.metric)?;
+                service
+                    .run(move |db| {
+                        open_qualified(db, &role, &name)?;
+                        let groups = db.collection(&name)?.search_grouped(
+                            &request.vector,
+                            request.groups as usize,
+                            request.hits_per_group as usize,
+                            &request.field,
+                            &filters,
+                            metric,
+                        )?;
+                        Ok(proto::GroupedSearchResponse {
+                            groups: groups
+                                .into_iter()
+                                .map(|group| proto::SearchGroup {
+                                    value: Some(value_out(group.value)),
+                                    hits: group
+                                        .hits
+                                        .into_iter()
+                                        .map(|hit| proto::Hit {
+                                            id: hit.id,
+                                            distance: hit.distance,
+                                        })
+                                        .collect(),
+                                })
+                                .collect(),
+                        })
+                    })
+                    .await
+            },
+        )
+        .await
+    }
+
+    async fn recommend(
+        &self,
+        request: Request<proto::RecommendRequest>,
+    ) -> Result<Response<proto::SearchResponse>, Status> {
+        let legacy = request.get_ref().collection.is_empty();
+        self.call(
+            "grpc:/vlite.v1.VLite/Recommend",
+            request,
+            Need::Op(Op::Search, Reach::Collection),
+            true,
+            legacy,
+            |service, role, _, request| async move {
+                let name = tenants::qualify(&role, target(request.collection).name());
+                let conditions = conditions_in(request.filter)?;
+                let metric = metric_in(request.metric)?;
+                let query = crate::RecommendationQuery {
+                    positive_ids: request.positive_ids,
+                    negative_ids: request.negative_ids,
+                    positive_vectors: request
+                        .positive_vectors
+                        .into_iter()
+                        .map(|v| v.vector)
+                        .collect(),
+                    negative_vectors: request
+                        .negative_vectors
+                        .into_iter()
+                        .map(|v| v.vector)
+                        .collect(),
+                    k: request.k as usize,
+                    conditions,
+                    metric,
+                };
+                service
+                    .run(move |db| {
+                        open_qualified(db, &role, &name)?;
+                        Ok(hits_out(db.collection(&name)?.recommend(&query)?))
+                    })
+                    .await
+            },
+        )
+        .await
+    }
+
+    async fn facets(
+        &self,
+        request: Request<proto::FacetsRequest>,
+    ) -> Result<Response<proto::FacetsResponse>, Status> {
+        let legacy = request.get_ref().collection.is_empty();
+        self.call(
+            "grpc:/vlite.v1.VLite/Facets",
+            request,
+            Need::Op(Op::Read, Reach::Collection),
+            true,
+            legacy,
+            |service, role, _, request| async move {
+                let name = tenants::qualify(&role, target(request.collection).name());
+                let filters = conditions_in(request.filter)?;
+                service
+                    .run(move |db| {
+                        open_qualified(db, &role, &name)?;
+                        let facets = db.collection(&name)?.facets(&request.field, &filters)?;
+                        Ok(proto::FacetsResponse {
+                            facets: facets
+                                .into_iter()
+                                .map(|facet| proto::Facet {
+                                    value: Some(value_out(facet.value)),
+                                    count: facet.count,
+                                })
+                                .collect(),
+                        })
+                    })
+                    .await
+            },
+        )
+        .await
+    }
+
+    async fn numeric_stats(
+        &self,
+        request: Request<proto::NumericStatsRequest>,
+    ) -> Result<Response<proto::NumericStatsResponse>, Status> {
+        let legacy = request.get_ref().collection.is_empty();
+        self.call(
+            "grpc:/vlite.v1.VLite/NumericStats",
+            request,
+            Need::Op(Op::Read, Reach::Collection),
+            true,
+            legacy,
+            |service, role, _, request| async move {
+                let name = tenants::qualify(&role, target(request.collection).name());
+                let filters = conditions_in(request.filter)?;
+                service
+                    .run(move |db| {
+                        open_qualified(db, &role, &name)?;
+                        let stats = db
+                            .collection(&name)?
+                            .numeric_stats(&request.field, &filters)?;
+                        Ok(proto::NumericStatsResponse {
+                            count: stats.count,
+                            min: stats.min,
+                            max: stats.max,
+                            sum: stats.sum,
+                            average: stats.average,
+                        })
+                    })
+                    .await
+            },
+        )
+        .await
+    }
+
+    async fn geo_search(
+        &self,
+        request: Request<proto::GeoSearchRequest>,
+    ) -> Result<Response<proto::GeoSearchResponse>, Status> {
+        let legacy = request.get_ref().collection.is_empty();
+        self.call(
+            "grpc:/vlite.v1.VLite/GeoSearch",
+            request,
+            Need::Op(Op::Search, Reach::Collection),
+            true,
+            legacy,
+            |service, role, _, request| async move {
+                let name = tenants::qualify(&role, target(request.collection).name());
+                let conditions = conditions_in(request.filter)?;
+                let metric = metric_in(request.metric)?;
+                let sort = match proto::GeoSort::try_from(request.sort) {
+                    Ok(proto::GeoSort::VectorDistance) => crate::GeoSort::VectorDistance,
+                    Ok(proto::GeoSort::GeographicDistance) => crate::GeoSort::GeoDistance,
+                    Err(_) => return Err(unprocessable("unknown geo sort")),
+                };
+                let query = crate::GeoSearchQuery {
+                    vector: request.vector,
+                    k: request.k as usize,
+                    field: request.field,
+                    latitude: request.latitude,
+                    longitude: request.longitude,
+                    radius_meters: request.radius_meters,
+                    conditions,
+                    metric,
+                    sort,
+                };
+                service
+                    .run(move |db| {
+                        open_qualified(db, &role, &name)?;
+                        let hits = db.collection(&name)?.search_geo(&query)?;
+                        Ok(proto::GeoSearchResponse {
+                            hits: hits
+                                .into_iter()
+                                .map(|hit| proto::GeoHit {
+                                    id: hit.id,
+                                    vector_distance: hit.vector_distance,
+                                    geo_distance_meters: hit.geo_distance_meters,
+                                })
+                                .collect(),
+                        })
+                    })
+                    .await
+            },
+        )
+        .await
+    }
+
+    async fn configure_named_vector(
+        &self,
+        request: Request<proto::ConfigureNamedVectorRequest>,
+    ) -> Result<Response<proto::Empty>, Status> {
+        let legacy = request.get_ref().collection.is_empty();
+        self.call(
+            "grpc:/vlite.v1.VLite/ConfigureNamedVector",
+            request,
+            Need::Op(Op::Write, Reach::Collection),
+            false,
+            legacy,
+            |service, role, _, request| async move {
+                let spec = request
+                    .spec
+                    .ok_or_else(|| unprocessable("named vector spec is required"))?;
+                let name = tenants::qualify(&role, target(request.collection).name());
+                let vector_metric = metric_in(spec.metric)?;
+                service
+                    .run(move |db| {
+                        open_qualified(db, &role, &name)?;
+                        db.collection_mut(&name)?.configure_vector(
+                            &spec.name,
+                            crate::vectors::VectorSpec {
+                                dimensions: spec.dimensions as usize,
+                                metric: vector_metric,
+                                active_version: spec.active_version,
+                                history: spec.history as usize,
+                            },
+                        )?;
+                        Ok(proto::Empty {})
+                    })
+                    .await
+            },
+        )
+        .await
+    }
+
+    async fn put_named_vectors(
+        &self,
+        request: Request<proto::PutNamedVectorsRequest>,
+    ) -> Result<Response<proto::Empty>, Status> {
+        let legacy = request.get_ref().collection.is_empty();
+        self.call(
+            "grpc:/vlite.v1.VLite/PutNamedVectors",
+            request,
+            Need::Op(Op::Write, Reach::Collection),
+            false,
+            legacy,
+            |service, role, _, request| async move {
+                let name = tenants::qualify(&role, target(request.collection).name());
+                let mut vectors = crate::vectors::RecordVectors::default();
+                for vector in request.dense {
+                    vectors.dense.entry(vector.name).or_default().push(
+                        crate::vectors::VersionedVector {
+                            version: vector.version,
+                            vector: vector.vector,
+                        },
+                    );
+                }
+                for sparse in request.sparse {
+                    let values = sparse_in(sparse.indices, sparse.values)?;
+                    if vectors.sparse.insert(sparse.name, values).is_some() {
+                        return Err(unprocessable("duplicate sparse vector name"));
+                    }
+                }
+                service
+                    .run(move |db| {
+                        open_qualified(db, &role, &name)?;
+                        db.collection_mut(&name)?.put_vectors(request.id, vectors)?;
+                        Ok(proto::Empty {})
+                    })
+                    .await
+            },
+        )
+        .await
+    }
+
+    async fn put_vector_version(
+        &self,
+        request: Request<proto::PutVectorVersionRequest>,
+    ) -> Result<Response<proto::Empty>, Status> {
+        let legacy = request.get_ref().collection.is_empty();
+        self.call(
+            "grpc:/vlite.v1.VLite/PutVectorVersion",
+            request,
+            Need::Op(Op::Write, Reach::Collection),
+            false,
+            legacy,
+            |service, role, _, request| async move {
+                let name = tenants::qualify(&role, target(request.collection).name());
+                service
+                    .run(move |db| {
+                        open_qualified(db, &role, &name)?;
+                        db.collection_mut(&name)?.put_vector_version(
+                            request.id,
+                            &request.name,
+                            &request.version,
+                            request.vector,
+                        )?;
+                        Ok(proto::Empty {})
+                    })
+                    .await
+            },
+        )
+        .await
+    }
+
+    async fn search_named(
+        &self,
+        request: Request<proto::SearchNamedRequest>,
+    ) -> Result<Response<proto::SearchResponse>, Status> {
+        let legacy = request.get_ref().collection.is_empty();
+        self.call(
+            "grpc:/vlite.v1.VLite/SearchNamed",
+            request,
+            Need::Op(Op::Search, Reach::Collection),
+            true,
+            legacy,
+            |service, role, _, request| async move {
+                let name = tenants::qualify(&role, target(request.collection).name());
+                service
+                    .run(move |db| {
+                        open_qualified(db, &role, &name)?;
+                        Ok(hits_out(db.collection(&name)?.search_named(
+                            &request.name,
+                            request.version.as_deref(),
+                            &request.vector,
+                            request.k as usize,
+                        )?))
+                    })
+                    .await
+            },
+        )
+        .await
+    }
+
+    async fn search_sparse(
+        &self,
+        request: Request<proto::SearchSparseRequest>,
+    ) -> Result<Response<proto::SearchResponse>, Status> {
+        let legacy = request.get_ref().collection.is_empty();
+        self.call(
+            "grpc:/vlite.v1.VLite/SearchSparse",
+            request,
+            Need::Op(Op::Search, Reach::Collection),
+            true,
+            legacy,
+            |service, role, _, request| async move {
+                let name = tenants::qualify(&role, target(request.collection).name());
+                let query = sparse_in(request.indices, request.values)?;
+                service
+                    .run(move |db| {
+                        open_qualified(db, &role, &name)?;
+                        Ok(hits_out(db.collection(&name)?.search_sparse(
+                            &request.name,
+                            &query,
+                            request.k as usize,
+                        )?))
+                    })
+                    .await
+            },
+        )
+        .await
+    }
+
+    async fn search_dense_sparse(
+        &self,
+        request: Request<proto::SearchDenseSparseRequest>,
+    ) -> Result<Response<proto::SearchResponse>, Status> {
+        let legacy = request.get_ref().collection.is_empty();
+        self.call(
+            "grpc:/vlite.v1.VLite/SearchDenseSparse",
+            request,
+            Need::Op(Op::Search, Reach::Collection),
+            true,
+            legacy,
+            |service, role, _, request| async move {
+                let name = tenants::qualify(&role, target(request.collection).name());
+                let sparse = sparse_in(request.sparse_indices, request.sparse_values)?;
+                let fusion =
+                    request
+                        .fusion
+                        .map_or_else(crate::hybrid::FusionOptions::default, |options| {
+                            crate::hybrid::FusionOptions {
+                                candidates: options.candidates.map(|v| v as usize),
+                                rrf_k: options.rrf_k.unwrap_or(60),
+                                vector_weight: options.vector_weight.unwrap_or(1.0),
+                                text_weight: options.text_weight.unwrap_or(1.0),
+                            }
+                        });
+                let query = crate::vectors::DenseSparseQuery {
+                    dense_name: request.dense_name,
+                    version: request.version,
+                    dense: request.dense,
+                    sparse_name: request.sparse_name,
+                    sparse,
+                    k: request.k as usize,
+                    fusion,
+                };
+                service
+                    .run(move |db| {
+                        open_qualified(db, &role, &name)?;
+                        let hits = db.collection(&name)?.search_dense_sparse(&query)?;
+                        Ok(proto::SearchResponse {
+                            hits: Vec::new(),
+                            hybrid_hits: hits
+                                .into_iter()
+                                .map(|hit| proto::HybridHit {
+                                    id: hit.id,
+                                    score: hit.score,
+                                    distance: hit.distance,
+                                    bm25: hit.bm25,
+                                    vector_rank: hit.vector_rank,
+                                    text_rank: hit.text_rank,
+                                })
+                                .collect(),
+                        })
+                    })
+                    .await
+            },
+        )
+        .await
+    }
+
+    async fn query(
+        &self,
+        request: Request<proto::QueryRequest>,
+    ) -> Result<Response<proto::QueryResponse>, Status> {
+        let legacy = request.get_ref().collection.is_empty();
+        self.call(
+            "grpc:/vlite.v1.VLite/Query",
+            request,
+            Need::Op(Op::Search, Reach::Collection),
+            true,
+            legacy,
+            |service, role, _, request| async move {
+                let name = tenants::qualify(&role, target(request.collection).name());
+                let parsed = crate::query_language::parse(&request.query)
+                    .map_err(|e| unprocessable(e.to_string()))?;
+                let parameters = request
+                    .parameters
+                    .into_iter()
+                    .map(|(name, vector)| (name, vector.vector))
+                    .collect();
+                service
+                    .run(move |db| {
+                        open_qualified(db, &role, &name)?;
+                        let output = parsed.execute(db.collection(&name)?, &parameters)?;
+                        Ok(proto::QueryResponse {
+                            hits: output
+                                .hits
+                                .into_iter()
+                                .map(|hit| proto::Hit {
+                                    id: hit.id,
+                                    distance: hit.distance,
+                                })
+                                .collect(),
+                            groups: output
+                                .groups
+                                .into_iter()
+                                .map(|group| proto::SearchGroup {
+                                    value: Some(value_out(group.value)),
+                                    hits: group
+                                        .hits
+                                        .into_iter()
+                                        .map(|hit| proto::Hit {
+                                            id: hit.id,
+                                            distance: hit.distance,
+                                        })
+                                        .collect(),
+                                })
+                                .collect(),
+                            facets: output
+                                .facets
+                                .into_iter()
+                                .map(|facet| proto::Facet {
+                                    value: Some(value_out(facet.value)),
+                                    count: facet.count,
+                                })
+                                .collect(),
+                        })
+                    })
+                    .await
+            },
+        )
+        .await
+    }
+
+    async fn changes(
+        &self,
+        request: Request<proto::ChangesRequest>,
+    ) -> Result<Response<proto::ChangesResponse>, Status> {
+        self.call(
+            "grpc:/vlite.v1.VLite/Changes",
+            request,
+            Need::Admin,
+            false,
+            false,
+            |service, _, _, request| async move {
+                let cursor = if request.cursor.is_empty() {
+                    crate::changes::FeedCursor::beginning()
+                } else {
+                    crate::changes::FeedCursor::from_token(&request.cursor)?
+                };
+                let limit = if request.limit == 0 {
+                    crate::changes::DEFAULT_FEED_BATCH
+                } else {
+                    request.limit as usize
+                };
+                if limit > crate::changes::MAX_FEED_BATCH {
+                    return Err(unprocessable("change limit exceeds 10000"));
+                }
+                service
+                    .run(move |db| {
+                        let batch = db.changes_after(&cursor, limit)?;
+                        Ok(proto::ChangesResponse {
+                            cursor: batch.next.to_token(),
+                            has_more: batch.has_more,
+                            head: batch.head,
+                            changes: batch.changes.into_iter().map(change_out).collect(),
+                        })
+                    })
+                    .await
+            },
+        )
+        .await
+    }
+
+    type WatchChangesStream = std::pin::Pin<
+        Box<
+            dyn tokio_stream::Stream<Item = Result<proto::ChangesResponse, Status>>
+                + Send
+                + 'static,
+        >,
+    >;
+
+    async fn watch_changes(
+        &self,
+        request: Request<proto::WatchChangesRequest>,
+    ) -> Result<Response<Self::WatchChangesStream>, Status> {
+        let headers = request.metadata().clone().into_headers();
+        let opened = self
+            .call(
+                "grpc:/vlite.v1.VLite/WatchChanges",
+                request,
+                Need::Admin,
+                false,
+                false,
+                |_service, _, request_id, request| async move {
+                    let cursor = if request.cursor.is_empty() {
+                        crate::changes::FeedCursor::beginning()
+                    } else {
+                        crate::changes::FeedCursor::from_token(&request.cursor)?
+                    };
+                    let limit = if request.limit == 0 {
+                        crate::changes::DEFAULT_FEED_BATCH
+                    } else {
+                        request.limit as usize
+                    };
+                    if limit > crate::changes::MAX_FEED_BATCH {
+                        return Err(unprocessable("change limit exceeds 10000"));
+                    }
+                    let interval = std::time::Duration::from_millis(
+                        u64::from(request.poll_interval_ms).clamp(100, 60_000),
+                    );
+                    Ok((request_id, cursor, limit, interval))
+                },
+            )
+            .await?;
+        let (request_id, mut cursor, limit, interval) = opened.into_inner();
+        let service = self.service.clone();
+        let response_request_id = request_id.clone();
+        let (sender, receiver) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(async move {
+            loop {
+                if sender.is_closed() {
+                    return;
+                }
+                match poll_changes(&service, &headers, cursor, limit).await {
+                    Ok(batch) => {
+                        cursor = batch.next;
+                        if !batch.changes.is_empty() || batch.has_more {
+                            let response = proto::ChangesResponse {
+                                cursor: cursor.to_token(),
+                                has_more: batch.has_more,
+                                head: batch.head,
+                                changes: batch.changes.into_iter().map(change_out).collect(),
+                            };
+                            if sender.send(Ok(response)).await.is_err() {
+                                return;
+                            }
+                            service
+                                .metrics
+                                .grpc_stream_messages
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    Err(error) => {
+                        record_stream_failure(
+                            &service,
+                            "grpc:/vlite.v1.VLite/WatchChanges",
+                            &request_id,
+                            &error,
+                        );
+                        let _ = sender.send(Err(status(error, &request_id))).await;
+                        return;
+                    }
+                }
+                tokio::select! {
+                    _ = sender.closed() => return,
+                    _ = tokio::time::sleep(interval) => {},
+                }
+            }
+        });
+        let mut response: Response<Self::WatchChangesStream> = Response::new(Box::pin(
+            tokio_stream::wrappers::ReceiverStream::new(receiver),
+        ));
+        if let Ok(value) = response_request_id.parse() {
+            response.metadata_mut().insert("x-request-id", value);
+        }
+        Ok(response)
+    }
+
+    async fn build_disk_ann(
+        &self,
+        request: Request<proto::BuildDiskAnnRequest>,
+    ) -> Result<Response<proto::DiskAnnBuildResponse>, Status> {
+        self.call(
+            "grpc:/vlite.v1.VLite/BuildDiskAnn",
+            request,
+            Need::Op(Op::Index, Reach::Collection),
+            false,
+            false,
+            |service, role, _, request| async move {
+                if request.path.is_empty() {
+                    return Err(unprocessable("disk ANN path is required"));
+                }
+                let name = tenants::qualify(&role, target(request.collection).name());
+                let metric = metric_in(request.metric)?;
+                let config = request
+                    .config
+                    .map(|c| crate::HnswConfig {
+                        m: c.m.unwrap_or(16) as usize,
+                        ef_construction: c.ef_construction.unwrap_or(200) as usize,
+                        seed: c.seed.unwrap_or(42),
+                    })
+                    .unwrap_or_default();
+                service
+                    .run(move |db| {
+                        let collection_id = open_qualified(db, &role, &name)?;
+                        let source = db.build_disk_ann(&name, &request.path, config, metric)?;
+                        Ok(proto::DiskAnnBuildResponse {
+                            lineage: source.lineage,
+                            sequence: source.sequence,
+                            collection_id: u32::from(collection_id),
+                            live_records: source.live_records,
+                        })
+                    })
+                    .await
+            },
+        )
+        .await
+    }
+
+    async fn search_disk_ann(
+        &self,
+        request: Request<proto::SearchDiskAnnRequest>,
+    ) -> Result<Response<proto::SearchResponse>, Status> {
+        let legacy = request.get_ref().collection.is_empty();
+        self.call(
+            "grpc:/vlite.v1.VLite/SearchDiskAnn",
+            request,
+            Need::Op(Op::Search, Reach::Collection),
+            true,
+            legacy,
+            |service, role, _, request| async move {
+                if request.path.is_empty() {
+                    return Err(unprocessable("disk ANN path is required"));
+                }
+                let name = tenants::qualify(&role, target(request.collection).name());
+                let options = crate::DiskAnnOptions {
+                    cache_bytes: if request.cache_bytes == 0 {
+                        crate::disk_ann::DEFAULT_CACHE_BYTES
+                    } else {
+                        request.cache_bytes as usize
+                    },
+                };
+                let index = crate::DiskAnnIndex::open(&request.path, options)?;
+                service
+                    .run(move |db| {
+                        open_qualified(db, &role, &name)?;
+                        Ok(hits_out(db.search_disk_ann(
+                            &index,
+                            &request.vector,
+                            request.k as usize,
+                            request.ef_search as usize,
+                        )?))
+                    })
+                    .await
+            },
+        )
+        .await
+    }
+
+    async fn info(
+        &self,
+        request: Request<proto::InfoRequest>,
+    ) -> Result<Response<proto::InfoResponse>, Status> {
+        self.call(
+            "grpc:/vlite.v1.VLite/Info",
+            request,
+            Need::Admin,
+            false,
+            false,
+            |service, _, _, _| async move {
+                service
+                    .run(move |db| {
+                        Ok(proto::InfoResponse {
+                            format_version: db.format_version(),
+                            sequence: db.sequence,
+                            lineage: db.lineage(),
+                            encrypted: db.is_encrypted(),
+                            encryption_key_id: db.encryption_key_id(),
+                            commit_timestamps: db.has_commit_timestamps(),
+                            is_replica: false,
+                            replica: None,
+                        })
+                    })
+                    .await
             },
         )
         .await
@@ -1068,6 +2082,7 @@ async fn export_page(
                     payload: record.payload.clone(),
                     metadata: metadata_out(record.metadata.clone()),
                     revision,
+                    expires_at_ms: state.expiries.get(&id).copied(),
                 });
             }
             Ok((items, records.peek().is_some()))

@@ -221,6 +221,9 @@ pub fn configured_admin_router(
         audit_log,
         ..AdminState::default()
     });
+    service
+        .webhooks
+        .configure(service.admin.directory.clone(), service.clone())?;
     Ok(super::configured_routes(service))
 }
 
@@ -336,6 +339,53 @@ async fn capabilities(
         "/v1/admin/backups/schedule/run","/v1/admin/backups/{name}/verify","/v1/admin/backups/{name}/drill",
         "/v1/admin/diagnostics/slow-queries","/v1/admin/credentials","/v1/admin/credentials/{id}/rotate",
         "/v1/admin/credentials/{id}/revoke","/v1/admin/audit/persistent"]});
+    let features = value["features"]
+        .as_object_mut()
+        .expect("capability features object");
+    for (name, enabled) in [
+        ("change_feed", v4),
+        ("record_expiry", s.format_version >= 5),
+        ("metadata_updates", s.format_version >= 5),
+        ("grouped_search", s.format_version >= 5),
+        ("recommendations", s.format_version >= 5),
+        ("facets", s.format_version >= 5),
+        ("numeric_stats", s.format_version >= 5),
+        ("geo_search", s.format_version >= 5),
+        ("named_vectors", s.format_version >= 5),
+        ("sparse_vectors", s.format_version >= 5),
+        ("webhooks", s.admin.directory.is_some()),
+        ("disk_ann", s.admin.directory.is_some()),
+    ] {
+        features.insert(name.to_owned(), json!(enabled));
+    }
+    let routes = value["routes"]
+        .as_array_mut()
+        .expect("capability routes array");
+    routes.extend(
+        [
+            "/v1/changes",
+            "/v1/admin/webhooks",
+            "/v1/admin/webhooks/{id}",
+            "/v1/admin/replication/export",
+            "/v1/vectors/{id}/metadata",
+            "/v1/collections/{collection}/vectors/{id}/metadata",
+            "/v1/collections/{collection}/vectors/{id}/named",
+            "/v1/collections/{collection}/vectors/configure",
+            "/v1/collections/{collection}/search/grouped",
+            "/v1/collections/{collection}/recommend",
+            "/v1/collections/{collection}/facets",
+            "/v1/collections/{collection}/stats/numeric",
+            "/v1/collections/{collection}/search/geo",
+            "/v1/collections/{collection}/search/named",
+            "/v1/collections/{collection}/search/sparse",
+            "/v1/collections/{collection}/search/dense-sparse",
+            "/v1/collections/{collection}/query",
+            "/v1/collections/{collection}/index/disk-ann",
+            "/v1/collections/{collection}/search/disk-ann",
+        ]
+        .into_iter()
+        .map(|route| json!(route)),
+    );
     if let Role::Scoped(grant) = &role {
         value["scope"] = grant.json();
     }
@@ -838,17 +888,50 @@ async fn backup(State(s): State<Service>) -> Result<(StatusCode, Json<Value>), A
 #[serde(deny_unknown_fields)]
 struct Restore {
     backup: String,
+    sequence: Option<u64>,
+    timestamp_ms: Option<u64>,
 }
 async fn restore(
     State(s): State<Service>,
     input: Result<Json<Restore>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let input = body(input)?;
+    if input.sequence.is_some() && input.timestamp_ms.is_some() {
+        return Err(invalid("sequence and timestamp_ms are mutually exclusive"));
+    }
     let dir = directory(&s)?;
+    let encryption_key = s.encryption_key.clone();
     s.run(move |_| {
         let source = safe_file(&dir, &input.backup, "backup-")?;
         let name = name("restore-");
-        let report = crate::maintenance::restore(source, dir.join(&name))?;
+        let destination = dir.join(&name);
+        let report = match (input.sequence, input.timestamp_ms) {
+            (Some(sequence), None) => {
+                crate::maintenance::restore_to(
+                    None,
+                    &source,
+                    &destination,
+                    crate::maintenance::RestoreTarget::Sequence(sequence),
+                    encryption_key.as_ref(),
+                )?
+                .output
+            }
+            (None, Some(timestamp)) => {
+                crate::maintenance::restore_to(
+                    None,
+                    &source,
+                    &destination,
+                    crate::maintenance::RestoreTarget::TimestampMs(timestamp),
+                    encryption_key.as_ref(),
+                )?
+                .output
+            }
+            (None, None) => match encryption_key.as_ref() {
+                Some(key) => crate::maintenance::restore_with_key(source, destination, key)?,
+                None => crate::maintenance::restore(source, destination)?,
+            },
+            (Some(_), Some(_)) => unreachable!(),
+        };
         Ok((
             StatusCode::CREATED,
             Json(json!({"name":name,"inspection":inspection(report),"restart_required":true})),

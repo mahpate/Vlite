@@ -124,7 +124,7 @@ test("format v4 collections, revisions, planned/hybrid/quantized search and resu
   let native = new NativeLibrary();
   try {
     const path = join(directory, "v4.vlite");
-    await assert.rejects(native.create(join(directory, "bad.vlite"), 2, { format: 5 }), code("invalid_input"));
+    await assert.rejects(native.create(join(directory, "bad.vlite"), 2, { format: 6 }), code("invalid_input"));
     const legacy = await native.create(join(directory, "v3.vlite"), 2);
     await assert.rejects(legacy.createCollection("docs", 2), code("requires_format_v4"));
     await legacy.close();

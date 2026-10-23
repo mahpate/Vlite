@@ -4,7 +4,7 @@ export type MetadataValue =
   | { type: "float"; value: number }
   | { type: "boolean"; value: boolean };
 export type Metadata = Record<string, MetadataValue>;
-export interface Put { vector: number[]; payload_base64?: string; metadata?: Metadata }
+export interface Put { vector: number[]; payload_base64?: string; metadata?: Metadata; expires_at_ms?: number | null; ttl_ms?: number; ttl?: number }
 /** `revision` (decimal u64 string) is returned by servers advertising `features.per_record_etags`. */
 export interface VectorRecord extends Put { id: string; payload_base64: string; metadata: Metadata; revision?: string }
 /**
@@ -230,6 +230,19 @@ declare class Records {
   getVersioned(id: string): Promise<VersionedRecord>;
   put(id: string, record: Put, options?: WriteOptions): Promise<void>;
   delete(id: string, options?: WriteOptions): Promise<boolean>;
+  updateMetadata(id: string, metadata: Metadata, options?: WriteOptions): Promise<void>;
+  embedText(text: string, options?: { provider?: "hashing" | "http" }): Promise<{ vector: number[]; dimensions: number; provider: string }>;
+  groupedSearch(request: object): Promise<object>;
+  recommend(request: object): Promise<object>;
+  facets(field: string, filter?: Condition[]): Promise<object>;
+  numericStats(field: string, filter?: Condition[]): Promise<object>;
+  geoSearch(request: object): Promise<object>;
+  configureVector(name: string, options: { dimensions: number; metric?: Metric; activeVersion?: string; history?: number }): Promise<object>;
+  putNamedVectors(id: string, vectors: object): Promise<object>;
+  searchNamed(request: object): Promise<object>;
+  searchSparse(request: object): Promise<object>;
+  searchDenseSparse(request: object): Promise<object>;
+  query(query: string, vectors?: Record<string, number[]>): Promise<object>;
   listVectors(options?: { limit?: number; after?: string }): Promise<Page>;
   batch(operations: BatchOperation[]): Promise<void>;
   search(request: Search): Promise<(Hit | HybridHit)[]>;
@@ -257,6 +270,11 @@ export class Client extends Records {
   health(): Promise<{ status: "ok" }>;
   ready(): Promise<{ status: "ready" }>;
   database(): Promise<DatabaseInfo>;
+  changes(options?: { cursor?: string; limit?: number }): Promise<object>;
+  listWebhooks(): Promise<object>;
+  createWebhook(request: object): Promise<object>;
+  webhookStatus(id: string): Promise<object>;
+  deleteWebhook(id: string): Promise<boolean>;
   metrics(): Promise<Record<string, unknown>>;
   /** GET /metrics?format=prometheus as text/plain. */
   prometheusMetrics(): Promise<string>;

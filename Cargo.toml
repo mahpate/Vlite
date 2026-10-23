@@ -18,7 +18,7 @@ otel = ["server", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemet
 tools = ["json", "dep:csv"]
 import-formats = ["tools", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc", "dep:parquet"]
 json = ["dep:serde", "dep:serde_json"]
-server = ["json", "dep:axum", "dep:base64", "dep:tokio", "dep:subtle", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:tokio-stream"]
+server = ["json", "dep:axum", "dep:base64", "dep:tokio", "dep:subtle", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:tokio-stream", "dep:reqwest"]
 grpc = [
     "server",
     "dep:tonic",

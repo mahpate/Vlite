@@ -228,6 +228,31 @@ class Records {
   }
   async search(request) { return (await this.searchDetailed(request)).hits; }
   searchDetailed(request) { return this.#t.request("POST", `${this.#prefix}/search`, request); }
+  embedText(text, { provider = "hashing" } = {}) {
+    if (typeof text !== "string" || Buffer.byteLength(text, "utf8") > 16384) throw new TypeError("text must be at most 16384 UTF-8 bytes");
+    if (provider !== "hashing" && provider !== "http") throw new TypeError("provider must be hashing or http");
+    const prefix = this.#prefix === "/v1" ? "/v1/collections/default" : this.#prefix;
+    return this.#t.request("POST", `${prefix}/embed`, { text, provider });
+  }
+  async updateMetadata(recordId, metadata, options) {
+    const prefix = this.#prefix === "/v1" ? "/v1/collections/default" : this.#prefix;
+    const path = `${prefix}/vectors/${id(recordId)}/metadata`;
+    const ifMatch = await this.#t.conditional(options);
+    return this.#t.request("PATCH", path, { metadata: object(metadata, "metadata") }, { ifMatch });
+  }
+  groupedSearch(request) { return this.#t.request("POST", `${this.#prefix === "/v1" ? "/v1/collections/default" : this.#prefix}/search/grouped`, object(request, "request")); }
+  recommend(request) { return this.#t.request("POST", `${this.#prefix === "/v1" ? "/v1/collections/default" : this.#prefix}/recommend`, object(request, "request")); }
+  facets(field, filter = []) { return this.#t.request("POST", `${this.#prefix === "/v1" ? "/v1/collections/default" : this.#prefix}/facets`, { field, filter }); }
+  numericStats(field, filter = []) { return this.#t.request("POST", `${this.#prefix === "/v1" ? "/v1/collections/default" : this.#prefix}/stats/numeric`, { field, filter }); }
+  geoSearch(request) { return this.#t.request("POST", `${this.#prefix === "/v1" ? "/v1/collections/default" : this.#prefix}/search/geo`, object(request, "request")); }
+  configureVector(name, { dimensions, metric = "squared_l2", activeVersion = "v1", history = 0 }) {
+    return this.#t.request("POST", `${this.#prefix === "/v1" ? "/v1/collections/default" : this.#prefix}/vectors/configure`, { name, dimensions, metric, active_version: activeVersion, history });
+  }
+  putNamedVectors(recordId, vectors) { return this.#t.request("PUT", `${this.#prefix === "/v1" ? "/v1/collections/default" : this.#prefix}/vectors/${id(recordId)}/named`, object(vectors, "vectors")); }
+  searchNamed(request) { return this.#t.request("POST", `${this.#prefix === "/v1" ? "/v1/collections/default" : this.#prefix}/search/named`, object(request, "request")); }
+  searchSparse(request) { return this.#t.request("POST", `${this.#prefix === "/v1" ? "/v1/collections/default" : this.#prefix}/search/sparse`, object(request, "request")); }
+  searchDenseSparse(request) { return this.#t.request("POST", `${this.#prefix === "/v1" ? "/v1/collections/default" : this.#prefix}/search/dense-sparse`, object(request, "request")); }
+  query(query, vectors = {}) { return this.#t.request("POST", `${this.#prefix === "/v1" ? "/v1/collections/default" : this.#prefix}/query`, { query, vectors }); }
   indexStatus() { return this.#t.request("GET", `${this.#prefix}/index/hnsw`); }
   async buildIndex({ metric, quantization, rerankMultiplier } = {}) {
     // Legacy routes keep the historical body ({} for squared_l2); collection routes
@@ -348,6 +373,21 @@ export class Client extends Records {
     }
   }
 
+  changes({ cursor, limit = 1000 } = {}) {
+    integer(limit, 1, 10000, "limit");
+    const params = new URLSearchParams({ limit: String(limit), ...(cursor === undefined ? {} : { cursor }) });
+    return this.#t.request("GET", `/v1/changes?${params}`);
+  }
+  listWebhooks() { return this.#t.request("GET", "/v1/admin/webhooks"); }
+  createWebhook(request) { return this.#t.request("POST", "/v1/admin/webhooks", object(request, "request")); }
+  webhookStatus(webhookId) {
+    if (typeof webhookId !== "string" || !/^[a-f0-9]{24}$/.test(webhookId)) throw new TypeError("invalid webhook ID");
+    return this.#t.request("GET", `/v1/admin/webhooks/${webhookId}`);
+  }
+  deleteWebhook(webhookId) {
+    if (typeof webhookId !== "string" || !/^[a-f0-9]{24}$/.test(webhookId)) throw new TypeError("invalid webhook ID");
+    return this.#t.request("DELETE", `/v1/admin/webhooks/${webhookId}`).then((value) => value.deleted);
+  }
   autoMaintenance() { return this.#t.request("GET", "/v1/admin/maintenance/auto"); }
   setAutoMaintenance(policyValue) { return this.#t.request("PUT", "/v1/admin/maintenance/auto", object(policyValue, "policy")); }
   tickAutoMaintenance() { return this.#t.request("POST", "/v1/admin/maintenance/auto/tick"); }

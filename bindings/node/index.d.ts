@@ -2,12 +2,14 @@ export type MetadataValue =
   | { type: "string"; value: string }
   | { type: "integer"; value: string }
   | { type: "float"; value: number }
-  | { type: "boolean"; value: boolean };
+  | { type: "boolean"; value: boolean }
+  | { type: "geopoint"; value: { latitude: number; longitude: number } };
 export type Metadata = Record<string, MetadataValue>;
 export type NumericValue = Extract<MetadataValue, { type: "integer" | "float" }>;
 export type Condition =
   | { op: "eq"; field: string; value: MetadataValue }
-  | { op: "range"; field: string; min?: NumericValue | null; max?: NumericValue | null };
+  | { op: "range"; field: string; min?: NumericValue | null; max?: NumericValue | null }
+  | { op: "georadius"; field: string; latitude: number; longitude: number; radius_meters: number };
 /** `revision` is the record's current revision as a decimal u64 string. */
 export interface VectorRecord { id: string; vector: number[]; payload_base64: string; metadata: Metadata; revision: string }
 export type BatchOperation =
@@ -80,8 +82,14 @@ export class EmbeddedError extends Error {
 export class NativeLibrary {
   constructor(options?: { libraryPath?: string; addonPath?: string; maxPending?: number });
   /** `format` defaults to 3; 4 enables named collections and resumable imports. */
-  create(path: string, dimensions: number, options?: { format?: 3 | 4 }): Promise<Database>;
-  open(path: string): Promise<Database>;
+  create(path: string, dimensions: number, options?: CreateOptions): Promise<Database>;
+  open(path: string, options?: Credentials): Promise<Database>;
+  createInMemory(dimensions: number, options?: CreateOptions): Promise<Database>;
+  openFromBytes(data: Uint8Array, options?: Credentials): Promise<Database>;
+  /** Closed/copied log; new destination. Exactly one of sequence/timestampMs is required. */
+  restoreTo(logPath: string, destination: string, options: Credentials & {
+    sequence?: string | number; timestampMs?: string | number; baseBackup?: string;
+  }): Promise<RestoreReport>;
   close(): Promise<void>;
 }
 export class Database {
@@ -92,7 +100,7 @@ export class Database {
   get(id: string, options?: Scope): Promise<VectorRecord>;
   getMany(ids: string[], options?: Scope): Promise<(VectorRecord | null)[]>;
   put(id: string, vector: number[], options: Scope & { payload?: Uint8Array; metadata?: Metadata; expectedRevision: ExpectedRevision }): Promise<string>;
-  put(id: string, vector: number[], options?: Scope & { payload?: Uint8Array; metadata?: Metadata }): Promise<void>;
+  put(id: string, vector: number[], options?: Scope & { payload?: Uint8Array; metadata?: Metadata; expiresAtMs?: string | number }): Promise<void>;
   delete(id: string, options?: Scope & { expectedRevision?: ExpectedRevision }): Promise<boolean>;
   batch(operations: BatchOperation[], options?: Scope): Promise<void>;
   revision(id: string, options?: Scope): Promise<string | null>;
@@ -122,4 +130,68 @@ export class Database {
     metric?: "squared_l2" | "cosine"; samples?: number; k?: number; efSearch?: number; seed?: string; maxDistanceEvaluations?: number;
   }): Promise<AnnQualityReport>;
   annMemory(options?: Scope & AnnOptions & { metric?: "squared_l2" | "cosine" }): Promise<AnnMemoryReport>;
+  putWithExpiry(id: string, vector: number[], options?: Scope & {
+    payload?: Uint8Array; metadata?: Metadata; expiresAtMs?: string | number | null;
+  }): Promise<string>;
+  updateMetadata(id: string, metadata: Metadata, options?: Scope): Promise<string>;
+  searchGrouped(vector: number[], groups: number, hitsPerGroup: number, field: string, options?: FilterOptions): Promise<SearchGroup[]>;
+  recommend(k: number, options?: FilterOptions & {
+    positiveIds?: string[]; negativeIds?: string[]; positiveVectors?: number[][]; negativeVectors?: number[][];
+  }): Promise<Hit[]>;
+  facets(field: string, options?: Scope & { filter?: Condition[] }): Promise<FacetCount[]>;
+  numericStats(field: string, options?: Scope & { filter?: Condition[] }): Promise<NumericStats>;
+  searchGeo(vector: number[], k: number, field: string, latitude: number, longitude: number, radiusMeters: number,
+    options?: FilterOptions & { sort?: "vector_distance" | "geo_distance" }): Promise<GeoHit[]>;
+  configureVector(name: string, dimensions: number, options: Scope & {
+    activeVersion: string; metric?: DistanceMetric; history?: number;
+  }): Promise<void>;
+  vectorSpecs(options?: Scope): Promise<Record<string, VectorSpec>>;
+  recordVectors(id: string, options?: Scope): Promise<RecordVectors | null>;
+  /** Replaces all additional vectors on a live record. */
+  putVectors(id: string, options?: Scope & { dense?: Record<string, VectorVersion[]>; sparse?: Record<string, SparseVector> }): Promise<void>;
+  putVectorVersion(id: string, name: string, version: string, vector: number[], options?: Scope): Promise<void>;
+  pruneVectorHistory(name: string, history: number, options?: Scope): Promise<void>;
+  searchNamed(name: string, vector: number[], k: number, options?: Scope & { version?: string }): Promise<Hit[]>;
+  searchSparse(name: string, vector: SparseVector, k: number, options?: Scope): Promise<Hit[]>;
+  searchDenseSparse(denseName: string, dense: number[], sparseName: string, sparse: SparseVector, k: number,
+    options?: Scope & { version?: string; fusion?: FusionOptions }): Promise<HybridHit[]>;
+  rerank(vector: number[], candidates: { id: string; distance?: number }[], limit: number, options?: Scope & {
+    method?: "exact" | "mmr"; metric?: DistanceMetric; lambda?: number;
+  }): Promise<Hit[]>;
+  query(query: string, parameters?: Record<string, number[]>, options?: Scope): Promise<QueryOutput>;
+  feedCursor(): Promise<string>;
+  /** Omit cursor to start at the beginning; batches are never split. */
+  changesAfter(cursor?: string | null, maxEvents?: number): Promise<ChangeBatch>;
+  encryptionInfo(): Promise<{ is_encrypted: boolean; key_id: string | null }>;
+  isEncrypted(): Promise<boolean>;
+  encryptionKeyId(): Promise<string | null>;
+  buildDiskAnn(path: string, options?: Scope & { metric?: "squared_l2" | "cosine" }): Promise<DiskAnnSource>;
+  searchDiskAnn(path: string, vector: number[], k: number, options?: { efSearch?: number; cacheBytes?: number }): Promise<Hit[]>;
+  toBytes(): Promise<Uint8Array>;
+
 }
+export interface Credentials { key?: Uint8Array; passphrase?: string }
+export interface CreateOptions extends Credentials { format?: 3 | 4 | 5; commitTimestamps?: boolean }
+export interface FilterOptions extends Scope { filter?: Condition[]; metric?: DistanceMetric }
+export interface SearchGroup { value: MetadataValue; hits: Hit[] }
+export interface FacetCount { value: MetadataValue; count: number }
+export interface NumericStats { count: number; min: number | null; max: number | null; sum: number; average: number | null }
+export interface GeoHit { id: string; vector_distance: number; geo_distance_meters: number }
+export interface VectorSpec { dimensions: number; metric: DistanceMetric; active_version: string; history: number }
+export interface VectorVersion { version: string; vector: number[] }
+export type SparseVector = [number, number][];
+export interface RecordVectors { dense: Record<string, VectorVersion[]>; sparse: Record<string, SparseVector> }
+export interface FusionOptions { candidates?: number; rrfK?: number; vectorWeight?: number; textWeight?: number }
+export interface QueryOutput { hits: Hit[]; groups: SearchGroup[]; facets: FacetCount[] }
+export interface ChangeBase { sequence: string; ordinal: number; collection: string; committed_at_ms: string | null }
+export type Change = ChangeBase & (
+  | { kind: "put"; id: string; record: VectorRecord; expires_at_ms: string | null }
+  | { kind: "delete"; id: string }
+  | { kind: "metadata_update"; id: string; metadata: Metadata }
+  | { kind: "collection_created"; dimensions: number; settings: CollectionSettings }
+  | { kind: "settings_updated"; settings: CollectionSettings }
+  | { kind: "collection_dropped" | "vectors_updated" }
+);
+export interface ChangeBatch { changes: Change[]; next: string; has_more: boolean; head: string }
+export interface RestoreReport { restored_sequence: string; source_head: string; restored_at_ms: string | null }
+export interface DiskAnnSource { lineage: string; sequence: string; collection_id: number; live_records: number }

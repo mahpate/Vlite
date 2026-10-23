@@ -17,7 +17,11 @@ extern "C" {
 VLITE_API uint32_t vlite_abi_version(void);
 /* Input is borrowed for the call; output must be freed with this library.
    handle=0 for create/open. Handles belong to this loaded library/process.
-   Invalid non-NULL pointers remain caller undefined behavior. */
+   Invalid non-NULL pointers remain caller undefined behavior.
+   Additive features use {"op":"features","request":{"op":..., ...}}.
+   See FEATURES.md for operations, typed values, limits and error codes.
+   Feature create/open/open_from_bytes/restore_to require handle=0.
+   Feature-created database handles use the same close/free functions. */
 VLITE_API char *vlite_execute(uint64_t handle, const uint8_t *input, size_t length);
 VLITE_API void vlite_response_free(char *response);
 

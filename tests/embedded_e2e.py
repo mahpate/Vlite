@@ -111,7 +111,7 @@ with NativeLibrary(sys.argv[1]).open(sys.argv[2]) as db:
 
 
 def v4_surface(native, directory):
-    fails("invalid_input", lambda: native.create(directory / "bad.vlite", 2, format=5))
+    fails("invalid_input", lambda: native.create(directory / "bad.vlite", 2, format=6))
     with native.create(directory / "legacy.vlite", 2) as legacy:
         fails("requires_format_v4", lambda: legacy.create_collection("docs", 2))
         legacy.put("1", [1, 0])

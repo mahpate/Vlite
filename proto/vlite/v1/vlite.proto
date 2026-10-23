@@ -25,6 +25,24 @@ service VLite {
   rpc WriteBatch(WriteBatchRequest) returns (WriteBatchResponse);
   // Exact or ready-index ANN search. Never builds an index.
   rpc Search(SearchRequest) returns (SearchResponse);
+  rpc UpdateMetadata(UpdateMetadataRequest) returns (UpdateMetadataResponse);
+  rpc SearchGrouped(GroupedSearchRequest) returns (GroupedSearchResponse);
+  rpc Recommend(RecommendRequest) returns (SearchResponse);
+  rpc Facets(FacetsRequest) returns (FacetsResponse);
+  rpc NumericStats(NumericStatsRequest) returns (NumericStatsResponse);
+  rpc GeoSearch(GeoSearchRequest) returns (GeoSearchResponse);
+  rpc ConfigureNamedVector(ConfigureNamedVectorRequest) returns (Empty);
+  rpc PutNamedVectors(PutNamedVectorsRequest) returns (Empty);
+  rpc PutVectorVersion(PutVectorVersionRequest) returns (Empty);
+  rpc SearchNamed(SearchNamedRequest) returns (SearchResponse);
+  rpc SearchSparse(SearchSparseRequest) returns (SearchResponse);
+  rpc SearchDenseSparse(SearchDenseSparseRequest) returns (SearchResponse);
+  rpc Query(QueryRequest) returns (QueryResponse);
+  rpc Changes(ChangesRequest) returns (ChangesResponse);
+  rpc WatchChanges(WatchChangesRequest) returns (stream ChangesResponse);
+  rpc BuildDiskAnn(BuildDiskAnnRequest) returns (DiskAnnBuildResponse);
+  rpc SearchDiskAnn(SearchDiskAnnRequest) returns (SearchResponse);
+  rpc Info(InfoRequest) returns (InfoResponse);
   rpc ReserveImport(ReserveImportRequest) returns (ImportJsonResponse);
   rpc GetImportStatus(ImportJobRequest) returns (ImportJsonResponse);
   rpc ImportChunk(ImportChunkRequest) returns (ImportJsonResponse);
@@ -115,6 +133,7 @@ message Vector {
   bytes payload = 3;
   map<string, MetadataValue> metadata = 4;
   uint64 revision = 5;
+  optional uint64 expires_at_ms = 6;
 }
 
 message PutVectorRequest {
@@ -124,11 +143,14 @@ message PutVectorRequest {
   bytes payload = 4;
   map<string, MetadataValue> metadata = 5;
   Expected expected = 6;
+  // Optional absolute Unix-millisecond expiry; requires format V5.
+  optional uint64 expires_at_ms = 7;
 }
 
 message PutVectorResponse {
   uint64 revision = 1;
   bool created = 2;
+  optional uint64 expires_at_ms = 3;
 }
 
 message DeleteVectorRequest {
@@ -232,6 +254,10 @@ message SearchRequest {
   bool vector_enabled = 12;
   FusionOptions fusion = 13;
   HybridVectorLeg vector_leg = 14;
+  // Optional post-ranking over exact candidates returned by this query.
+  RerankMode rerank_mode = 15;
+  optional double mmr_lambda = 16;
+  optional uint32 rerank_candidates = 17;
 }
 
 message Hit {
@@ -311,4 +337,182 @@ message StreamImportRequest {
   repeated Operation operations = 3;
   ImportPolicy policy = 4;
   bool finish = 5;
+}
+
+
+message Empty {}
+
+message UpdateMetadataRequest {
+  string collection = 1;
+  uint64 id = 2;
+  map<string, MetadataValue> metadata = 3;
+}
+message UpdateMetadataResponse { uint64 revision = 1; }
+
+enum RerankMode {
+  RERANK_MODE_NONE = 0;
+  RERANK_MODE_EXACT = 1;
+  RERANK_MODE_MMR = 2;
+}
+message GroupedSearchRequest {
+  string collection = 1;
+  repeated float vector = 2;
+  uint32 groups = 3;
+  uint32 hits_per_group = 4;
+  string field = 5;
+  repeated Condition filter = 6;
+  Metric metric = 7;
+}
+message SearchGroup { MetadataValue value = 1; repeated Hit hits = 2; }
+message GroupedSearchResponse { repeated SearchGroup groups = 1; }
+message RecommendRequest {
+  string collection = 1;
+  repeated uint64 positive_ids = 2;
+  repeated uint64 negative_ids = 3;
+  repeated VectorInput positive_vectors = 4;
+  repeated VectorInput negative_vectors = 5;
+  uint32 k = 6;
+  repeated Condition filter = 7;
+  Metric metric = 8;
+}
+message VectorInput { repeated float vector = 1; }
+message FacetsRequest { string collection = 1; string field = 2; repeated Condition filter = 3; }
+message Facet { MetadataValue value = 1; uint64 count = 2; }
+message FacetsResponse { repeated Facet facets = 1; }
+message NumericStatsRequest { string collection = 1; string field = 2; repeated Condition filter = 3; }
+message NumericStatsResponse {
+  uint64 count = 1;
+  optional double min = 2;
+  optional double max = 3;
+  double sum = 4;
+  optional double average = 5;
+}
+enum GeoSort { GEO_SORT_VECTOR_DISTANCE = 0; GEO_SORT_GEOGRAPHIC_DISTANCE = 1; }
+message GeoSearchRequest {
+  string collection = 1;
+  repeated float vector = 2;
+  uint32 k = 3;
+  string field = 4;
+  double latitude = 5;
+  double longitude = 6;
+  double radius_meters = 7;
+  repeated Condition filter = 8;
+  Metric metric = 9;
+  GeoSort sort = 10;
+}
+message GeoHit { uint64 id = 1; double vector_distance = 2; double geo_distance_meters = 3; }
+message GeoSearchResponse { repeated GeoHit hits = 1; }
+message NamedVectorSpec {
+  string name = 1;
+  uint32 dimensions = 2;
+  Metric metric = 3;
+  string active_version = 4;
+  uint32 history = 5;
+}
+message ConfigureNamedVectorRequest { string collection = 1; NamedVectorSpec spec = 2; }
+message NamedVector { string name = 1; string version = 2; repeated float vector = 3; }
+message SparseVector { string name = 1; repeated uint32 indices = 2; repeated float values = 3; }
+message PutNamedVectorsRequest {
+  string collection = 1;
+  uint64 id = 2;
+  repeated NamedVector dense = 3;
+  repeated SparseVector sparse = 4;
+}
+message PutVectorVersionRequest {
+  string collection = 1;
+  uint64 id = 2;
+  string name = 3;
+  string version = 4;
+  repeated float vector = 5;
+}
+message SearchNamedRequest {
+  string collection = 1;
+  string name = 2;
+  optional string version = 3;
+  repeated float vector = 4;
+  uint32 k = 5;
+}
+message SearchSparseRequest {
+  string collection = 1;
+  string name = 2;
+  repeated uint32 indices = 3;
+  repeated float values = 4;
+  uint32 k = 5;
+}
+message SearchDenseSparseRequest {
+  string collection = 1;
+  string dense_name = 2;
+  optional string version = 3;
+  repeated float dense = 4;
+  string sparse_name = 5;
+  repeated uint32 sparse_indices = 6;
+  repeated float sparse_values = 7;
+  uint32 k = 8;
+  FusionOptions fusion = 9;
+}
+message QueryRequest { string collection = 1; string query = 2; map<string, VectorInput> parameters = 3; }
+message QueryResponse { repeated Hit hits = 1; repeated SearchGroup groups = 2; repeated Facet facets = 3; }
+message ChangesRequest { string cursor = 1; uint32 limit = 2; }
+message WatchChangesRequest { string cursor = 1; uint32 limit = 2; uint32 poll_interval_ms = 3; }
+enum ChangeKind {
+  CHANGE_KIND_UNSPECIFIED = 0;
+  CHANGE_KIND_PUT = 1;
+  CHANGE_KIND_DELETE = 2;
+  CHANGE_KIND_METADATA_UPDATE = 3;
+  CHANGE_KIND_COLLECTION_CREATED = 4;
+  CHANGE_KIND_COLLECTION_DROPPED = 5;
+  CHANGE_KIND_SETTINGS_UPDATED = 6;
+  CHANGE_KIND_VECTORS_UPDATED = 7;
+}
+message ChangeEvent {
+  uint64 sequence = 1;
+  uint32 ordinal = 2;
+  string collection = 3;
+  optional uint64 committed_at_ms = 4;
+  ChangeKind kind = 5;
+  optional uint64 id = 6;
+  optional uint64 expires_at_ms = 7;
+  repeated float vector = 8;
+  bytes payload = 9;
+  map<string, MetadataValue> metadata = 10;
+  optional uint32 dimensions = 11;
+  string settings_json = 12;
+}
+message ChangesResponse {
+  string cursor = 1;
+  bool has_more = 2;
+  uint64 head = 3;
+  repeated ChangeEvent changes = 4;
+}
+message BuildDiskAnnRequest {
+  string collection = 1;
+  string path = 2;
+  HnswConfig config = 3;
+  Metric metric = 4;
+}
+message DiskAnnBuildResponse {
+  uint64 lineage = 1;
+  uint64 sequence = 2;
+  uint32 collection_id = 3;
+  uint64 live_records = 4;
+}
+message SearchDiskAnnRequest {
+  string collection = 1;
+  string path = 2;
+  repeated float vector = 3;
+  uint32 k = 4;
+  uint32 ef_search = 5;
+  uint32 cache_bytes = 6;
+}
+message InfoRequest {}
+message ReplicaInfo { uint64 lineage = 1; uint64 applied_sequence = 2; uint64 primary_head = 3; uint64 lag = 4; }
+message InfoResponse {
+  uint32 format_version = 1;
+  uint64 sequence = 2;
+  optional uint64 lineage = 3;
+  bool encrypted = 4;
+  optional uint64 encryption_key_id = 5;
+  bool commit_timestamps = 6;
+  bool is_replica = 7;
+  optional ReplicaInfo replica = 8;
 }

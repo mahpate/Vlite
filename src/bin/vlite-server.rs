@@ -15,7 +15,7 @@ use vlite::{
     },
 };
 
-const USAGE: &str = "usage: vlite-server <database-path> [--create-if-missing <dimensions> [--create-format 3|4]] [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS";
+const USAGE: &str = "usage: vlite-server <database-path> [--create-if-missing <dimensions> [--create-format 3|4|5]] [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--encryption-key-file <path> | VLITE_ENCRYPTION_KEY | VLITE_ENCRYPTION_KEY_HEX] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS";
 
 struct Config {
     otlp_endpoint: Option<String>,
@@ -31,6 +31,7 @@ struct Config {
     grpc_tls: Option<vlite::server::tls::TlsIdentity>,
     /// Load `<active>.ann` after open; save it after both listeners drain.
     ann_snapshot: bool,
+    encryption_key: Option<vlite::EncryptionKey>,
     token: Option<BearerToken>,
     token_file: Option<PathBuf>,
     read_only_token: Option<BearerToken>,
@@ -102,6 +103,19 @@ fn options(config: &Config, database_path: Option<PathBuf>) -> ServerOptions {
     }
 }
 
+fn decode_hex_key(value: &str) -> Result<[u8; 32], Box<dyn Error>> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(
+            "VLITE_ENCRYPTION_KEY_HEX must contain exactly 64 hexadecimal characters".into(),
+        );
+    }
+    let mut key = [0u8; 32];
+    for (index, byte) in key.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)?;
+    }
+    Ok(key)
+}
+
 fn config() -> Result<Config, Box<dyn Error>> {
     let mut args = std::env::args_os().skip(1);
     let path = args.next().ok_or(USAGE)?;
@@ -115,6 +129,7 @@ fn config() -> Result<Config, Box<dyn Error>> {
     let mut insecure_local = false;
     let mut grpc_bind: Option<SocketAddr> = None;
     let mut ann_snapshot = false;
+    let mut encryption_key_file: Option<PathBuf> = None;
     let mut tls_cert: Option<PathBuf> = None;
     let mut tls_key: Option<PathBuf> = None;
     let mut grpc_tls_client_ca: Option<PathBuf> = None;
@@ -137,7 +152,8 @@ fn config() -> Result<Config, Box<dyn Error>> {
                 format = Some(match args.next().ok_or(USAGE)?.to_str() {
                     Some("3") => FormatVersion::V3,
                     Some("4") => FormatVersion::V4,
-                    _ => return Err("--create-format must be 3 or 4".into()),
+                    Some("5") => FormatVersion::V5,
+                    _ => return Err("--create-format must be 3, 4 or 5".into()),
                 });
             }
             Some("--bind") if !seen_bind => {
@@ -163,6 +179,9 @@ fn config() -> Result<Config, Box<dyn Error>> {
                 grpc_tls_key = Some(args.next().ok_or(USAGE)?.into());
             }
             Some("--ann-snapshot") if !ann_snapshot => ann_snapshot = true,
+            Some("--encryption-key-file") if encryption_key_file.is_none() => {
+                encryption_key_file = Some(args.next().ok_or(USAGE)?.into());
+            }
             Some("--allow-remote") if !allow_remote => allow_remote = true,
             Some("--token-file") if token_file.is_none() => {
                 token_file = Some(args.next().ok_or(USAGE)?);
@@ -278,17 +297,61 @@ fn config() -> Result<Config, Box<dyn Error>> {
     if insecure_local && (read_only_token.is_some() || read_only_file.is_some()) {
         return Err("read-only credentials require admin bearer authentication".into());
     }
+    let env_key = std::env::var_os("VLITE_ENCRYPTION_KEY");
+    let env_hex = std::env::var_os("VLITE_ENCRYPTION_KEY_HEX");
+    if usize::from(encryption_key_file.is_some())
+        + usize::from(env_key.is_some())
+        + usize::from(env_hex.is_some())
+        > 1
+    {
+        return Err("select only one encryption key source".into());
+    }
+    let encryption_key = if let Some(path) = encryption_key_file {
+        let bytes = std::fs::read(path)?;
+        Some(if bytes.len() == 32 {
+            vlite::EncryptionKey::from_bytes(bytes.as_slice().try_into().expect("32-byte key"))
+        } else {
+            let end = bytes
+                .iter()
+                .rposition(|byte| !matches!(byte, b'\r' | b'\n'))
+                .map_or(0, |n| n + 1);
+            vlite::EncryptionKey::from_passphrase(&bytes[..end])?
+        })
+    } else if let Some(hex) = env_hex {
+        let text = hex
+            .into_string()
+            .map_err(|_| "encryption key hex must be ASCII")?;
+        let raw = decode_hex_key(&text)?;
+        Some(vlite::EncryptionKey::from_bytes(raw))
+    } else if let Some(passphrase) = env_key {
+        Some(vlite::EncryptionKey::from_passphrase(
+            passphrase.to_string_lossy().as_bytes(),
+        )?)
+    } else {
+        None
+    };
+    if encryption_key.is_some()
+        && dimensions.is_some()
+        && format.is_some_and(|f| f != FormatVersion::V5)
+    {
+        return Err("encryption requires --create-format 5".into());
+    }
     let config = Config {
         otlp_endpoint,
         path: path.into(),
         dimensions,
-        format: format.unwrap_or(FormatVersion::V3),
+        format: format.unwrap_or(if encryption_key.is_some() {
+            FormatVersion::V5
+        } else {
+            FormatVersion::V3
+        }),
         bind,
         grpc_bind,
         rest_tls,
         #[cfg(feature = "grpc")]
         grpc_tls,
         ann_snapshot,
+        encryption_key,
         token,
         token_file: token_file.map(PathBuf::from),
         read_only_token,
@@ -309,18 +372,33 @@ fn open(config: &Config) -> vlite::Result<(Database, PathBuf)> {
         .transpose()?
         .flatten();
     let path = selected.as_deref().unwrap_or(&config.path);
-    let db = match Database::open(path) {
+    let db = match config.encryption_key.as_ref().map_or_else(
+        || Database::open(path),
+        |key| Database::open_encrypted(path, key),
+    ) {
         Ok(db) => db,
         Err(vlite::Error::Io(error))
             if error.kind() == std::io::ErrorKind::NotFound
                 && config.dimensions.is_some()
                 && selected.is_none() =>
         {
-            Database::create_with_format(
-                &config.path,
-                config.dimensions.expect("guarded dimensions"),
-                config.format,
-            )?
+            if let Some(key) = &config.encryption_key {
+                Database::create_with_options(
+                    &config.path,
+                    config.dimensions.expect("guarded dimensions"),
+                    vlite::CreateOptions {
+                        format: Some(config.format),
+                        encryption: Some(key.clone()),
+                        ..Default::default()
+                    },
+                )?
+            } else {
+                Database::create_with_format(
+                    &config.path,
+                    config.dimensions.expect("guarded dimensions"),
+                    config.format,
+                )?
+            }
         }
         Err(error) => return Err(error),
     };
@@ -450,7 +528,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
     if let Some(path) = &snapshot {
         load_ann_snapshot(&mut database, path);
     }
-    let service = Service::try_new(database)?;
+    let service = match config.encryption_key.clone() {
+        Some(key) => Service::try_new_with_encryption_key(database, key)?,
+        None => Service::try_new(database)?,
+    };
     if let Some(tls) = &config.rest_tls {
         service.register_tls(tls.clone())?;
     }
