@@ -202,21 +202,43 @@ equal ef. Preserve underperforming runs, tail latency and indexing costs.
 This bounded standard-library harness rejects more than 100 million oracle
 distance components; large-scale work needs an efficient validated oracle.
 
-## Adding zvec or another engine
+## Embedded comparison with zvec
 
-For zvec, use its [collection schema and optimization API](https://zvec.org/en/docs/db/quickstart/)
-in a separate in-process adapter. Pin the package/wheel and index parameters;
-create the same vectors/IDs/scalar field; use L2 rather than default cosine;
-time ingestion, `optimize()`, warmups, queries and mixed mutations separately.
-Check scores, ties and recall against the same oracle before trusting timings.
-Report Python-to-native overhead versus Rust direct-call overhead, or expose
-both through equivalent wrappers and measure that track separately.
+`compare_zvec.py` compares the VLite Python embedded package with the
+[zvec](https://zvec.org/en/) Python package in-process (Linux; `/proc` is used
+for memory). Both engines see the same seeded dataset, the same ingest batch
+size, L2 distance and the same HNSW parameters (`m=16`, `ef_construction=100`,
+`ef=100`; zvec's larger defaults are overridden). Each (trial, mode, engine)
+runs in a fresh process and the engine order alternates between trials.
+
+```text
+python -m venv .venv && . .venv/bin/activate
+pip install zvec numpy <vlite_embedded-0.3.0-...-manylinux_2_28_x86_64.whl>
+python benchmarks/compare_zvec.py --records 20000 --dimensions 128 --trials 3 \
+  --output benchmarks/results/zvec-20k-128d-wsl.json
+python benchmarks/compare_zvec.py --records 100000 --dimensions 768 --trials 2 \
+  --output benchmarks/results/zvec-100k-768d-wsl.json
+```
+
+It reports ingest, index build (`build_index()` / `optimize()`), per-query
+p50/p95/p99, sequential QPS, tie-aware recall@k against a float64 oracle,
+resident-memory growth, on-disk footprint and reopen-plus-first-query time.
+VLite fsyncs each batch as an atomic commit and keeps HNSW in memory, so its
+ANN reopen includes a full index rebuild; zvec persists its index. The VLite
+Python binding sends JSON through a C ABI, which adds wrapper overhead that a
+Rust caller would not pay. Published results and caveats are on the
+[comparison page](https://mahpate.github.io/Vlite/compare.html).
+
+For other engines, pin the package and index parameters, use the same
+vectors/IDs and metric, and check recall against the same oracle before
+trusting timings.
 
 FAISS is an index library, not a durable vector database; durability/CRUD
 comparisons require an application storage layer. For Milvus/Weaviate, record
 all supporting services and total resource allocation, not just the query node.
 Do not borrow marketing numbers from upstream benchmark pages for our table.
-No external engine numbers are published here until its adapter has actually run.
+Only engines whose adapters have actually run here (Qdrant over REST, zvec
+embedded) have published numbers.
 
 ## Native profiling, real vectors and mixed updates
 

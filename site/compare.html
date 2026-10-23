@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VLite benchmarks | Measured embedded performance</title>
+  <meta name="description" content="A measured, reproducible comparison of the VLite and zvec embedded vector databases: features, latency, recall, ingest, memory, disk and reopen time.">
+  <meta property="og:title" content="VLite benchmarks">
+  <meta property="og:description" content="Measured side by side in-process on the same data, metric and HNSW parameters.">
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="assets/site.js"></script>
+</head>
+<body>
+<header class="nav">
+  <div class="wrap">
+    <a class="brand" href="./"><img src="assets/logo.svg" alt="">VLite</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="./#features">Features</a>
+      <a href="./#products">Products</a>
+      <a href="./#quickstart">Quickstart</a>
+      <a href="compare.html" aria-current="page">Benchmarks</a>
+      <a href="https://github.com/mahpate/Vlite/blob/main/docs/REFERENCE.md">Docs</a>
+    </nav>
+    <div class="nav-actions">
+      <button class="icon-btn" id="theme-toggle" aria-label="Toggle dark mode">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+      </button>
+      <a class="icon-btn" href="https://github.com/mahpate/Vlite" aria-label="GitHub repository">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5a11.5 11.5 0 0 0-3.6 22.4c.6.1.8-.3.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.2 1.2a11 11 0 0 1 5.8 0c2.2-1.5 3.2-1.2 3.2-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A11.5 11.5 0 0 0 12 .5z"/></svg>
+      </a>
+    </div>
+  </div>
+</header>
+
+<main>
+  <section class="hero">
+    <div class="wrap">
+      <span class="eyebrow">Measured, not quoted</span>
+      <h1>VLite <span class="grad">benchmarks</span></h1>
+      <p class="lead">Reproducible performance numbers for VLite's embedded engine, measured in-process
+        against another embeddable vector database (zvec) on the same data, metric and HNSW parameters.</p>
+      <div class="cta">
+        <a class="btn primary" href="#results">Results</a>
+        <a class="btn" href="#reproduce">Reproduce</a>
+        <a class="btn" href="./#features">VLite features</a>
+      </div>
+    </div>
+  </section>
+
+  <section id="summary" class="alt">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="kicker">Summary</div>
+        <h2>What the measurements show</h2>
+      </div>
+      <div class="grid cols-2">
+        <div class="card">
+          <h3>Where VLite leads</h3>
+          <ul class="list">
+            <li>Lower memory growth and a smaller on-disk footprint, in one portable file.</li>
+            <li>Every ingest batch is a checksummed, fsync-before-ack atomic commit with fail-closed recovery.</li>
+            <li>Recall matches the exact oracle, with query latency in the same range.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>Where VLite is improving</h3>
+          <ul class="list">
+            <li>HNSW build time: VLite builds single-threaded today.</li>
+            <li>Reopen with ANN: the HNSW index is rebuilt in memory unless an index snapshot is enabled.</li>
+            <li>Bulk ingest throughput and Python binding overhead (JSON over the C ABI).</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="results">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="kicker">Benchmark</div>
+        <h2>Embedded Python, same process model</h2>
+        <p>Medians across trials. VLite 0.3.0 wheel vs zvec 0.8.0 from PyPI, Linux x86_64 (WSL2, 16 vCPU, 31 GiB).
+          Top-10, L2, 200 queries, sequential single client. Highlighted cells are the better value.</p>
+      </div>
+
+      <h3>20,000 × 128 dimensions <span class="muted">(3 trials, 64 Gaussian clusters)</span></h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Metric</th><th>VLite exact</th><th>zvec flat</th><th>VLite HNSW</th><th>zvec HNSW</th></tr></thead>
+          <tbody>
+            <tr><td>Recall@10</td><td>1.000</td><td>1.000</td><td>1.000</td><td>1.000</td></tr>
+            <tr><td>Query p50</td><td>1.55 ms</td><td class="win">1.28 ms</td><td>0.51 ms</td><td class="win">0.45 ms</td></tr>
+            <tr><td>Query p99</td><td>1.95 ms</td><td class="win">1.85 ms</td><td>0.74 ms</td><td class="win">0.72 ms</td></tr>
+            <tr><td>Sequential QPS</td><td>637</td><td class="win">754</td><td>1,933</td><td class="win">2,185</td></tr>
+            <tr><td>Ingest (20k vectors)</td><td>1.87 s</td><td class="win">0.37 s</td><td>1.83 s</td><td class="win">0.34 s</td></tr>
+            <tr><td>Index build</td><td>—</td><td>0.03 s</td><td>12.75 s</td><td class="win">0.40 s</td></tr>
+            <tr><td>Memory growth</td><td class="win">32 MiB</td><td>53 MiB</td><td class="win">32 MiB</td><td>69 MiB</td></tr>
+            <tr><td>On-disk size</td><td class="win">10.2 MiB</td><td>13.7 MiB</td><td class="win">10.2 MiB</td><td>15.4 MiB</td></tr>
+            <tr><td>Reopen + first query</td><td>0.07 s</td><td class="win">0.03 s</td><td>12.96 s</td><td class="win">0.03 s</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- RESULTS-100K -->
+
+      <h3 style="margin-top:36px">What the numbers say</h3>
+      <div class="grid cols-3">
+        <div class="card"><h3>Query speed: close</h3><p>Exact and HNSW latency are within roughly 10–20%. zvec is slightly faster;
+          part of VLite's gap is its Python binding, which passes JSON through a C ABI on every call.</p></div>
+        <div class="card"><h3>Build and reopen: zvec</h3><p>VLite builds HNSW single-threaded and keeps it in memory, so a reopen
+          rebuilds it. zvec persists its index and reopens almost instantly. This is VLite's biggest gap.</p></div>
+        <div class="card"><h3>Footprint and durability: VLite</h3><p>VLite uses less memory and disk, and every ingest batch above is an
+          fsync'd, checksummed atomic commit, which accounts for part of its slower ingest.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="features" class="alt">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="kicker">Feature matrix</div>
+        <h2>Feature comparison</h2>
+        <p>zvec entries reflect what <a href="https://zvec.org/en/">zvec.org</a> documents; "Not listed" means we found no mention, not that it is impossible.</p>
+      </div>
+      <div class="table-wrap">
+        <table class="matrix">
+          <thead><tr><th>Capability</th><th>VLite 0.3.0</th><th>zvec 0.8.0</th></tr></thead>
+          <tbody>
+            <tr class="group"><td colspan="3">Storage &amp; durability</td></tr>
+            <tr><td>Deployment model</td><td>Single <code>.vlite</code> file (+ optional sidecars)</td><td>Collection directory</td></tr>
+            <tr><td>Commit semantics</td><td class="yes">Checksummed, fsync before ack, atomic batches</td><td>Not listed</td></tr>
+            <tr><td>Encryption at rest</td><td class="yes">Yes (opt-in)</td><td class="no">Not listed</td></tr>
+            <tr><td>Point-in-time restore / change feed</td><td class="yes">Yes</td><td class="no">Not listed</td></tr>
+            <tr><td>Read replicas</td><td class="yes">Export/apply replication</td><td class="no">Not listed</td></tr>
+            <tr><td>Persisted ANN index</td><td>Snapshot sidecar / disk-ANN sidecar</td><td class="yes">Yes, native</td></tr>
+            <tr class="group"><td colspan="3">Retrieval</td></tr>
+            <tr><td>Dense vectors</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+            <tr><td>Multiple / named vectors</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+            <tr><td>Sparse vectors</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+            <tr><td>Full-text / hybrid</td><td class="yes">BM25 hybrid</td><td class="yes">BM25 full-text, hybrid</td></tr>
+            <tr><td>Grouped search</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+            <tr><td>Scalar filters</td><td class="yes">Typed filters + metadata indexes</td><td class="yes">Yes</td></tr>
+            <tr><td>Recommendations, facets, geo</td><td class="yes">Yes</td><td class="no">Not listed</td></tr>
+            <tr class="group"><td colspan="3">Indexes &amp; performance</td></tr>
+            <tr><td>Index types</td><td>Flat, HNSW, disk-ANN sidecar</td><td class="yes">Flat, HNSW, IVF, DiskANN/Vamana</td></tr>
+            <tr><td>Quantization</td><td>Scalar u8</td><td class="yes">FP16, INT8, INT4, RaBitQ, PQ</td></tr>
+            <tr><td>GPU search</td><td class="yes">Exact L2 via wgpu (opt-in)</td><td class="no">Not listed</td></tr>
+            <tr><td>Runtime optimizations</td><td>In-memory scans, HNSW snapshots</td><td class="yes">SIMD, mmap, buffer pool, thread pool</td></tr>
+            <tr class="group"><td colspan="3">Interfaces &amp; operations</td></tr>
+            <tr><td>Embedded SDKs</td><td>Rust, Python, Node.js, C ABI, WASM</td><td>Python, Node.js</td></tr>
+            <tr><td>Network server</td><td class="yes">REST + OpenAPI, gRPC (streaming, TLS)</td><td class="no">Not listed</td></tr>
+            <tr><td>Remote clients</td><td class="yes">Python, JS, Go, .NET</td><td class="no">Not listed</td></tr>
+            <tr><td>Auth</td><td class="yes">Scoped credentials, rate limits</td><td>Not applicable (embedded)</td></tr>
+            <tr><td>Web dashboard</td><td class="yes">Yes</td><td class="no">Not listed</td></tr>
+            <tr><td>Agent tooling</td><td class="no">Not yet</td><td class="yes">CLI, MCP, Zvec-Grep</td></tr>
+            <tr><td>Platforms</td><td>Windows, Linux, macOS (x86_64/arm64)</td><td class="yes">Linux, macOS, Windows, Android, iOS</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section id="reproduce">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="kicker">Methodology</div>
+        <h2>How it was measured</h2>
+      </div>
+      <div class="grid cols-2">
+        <div class="card">
+          <h3>Setup</h3>
+          <ul class="list">
+            <li>One seeded dataset (64 Gaussian clusters, σ = 0.35), SHA-256 recorded in the results.</li>
+            <li>Same ingest batches for both engines; VLite commits each batch durably.</li>
+            <li>HNSW <code>m = 16</code>, <code>ef_construction = 100</code>, <code>ef = 100</code> for both (zvec defaults overridden).</li>
+            <li>Every (trial, mode, engine) runs in a fresh process; engine order alternates by trial.</li>
+            <li>Recall is ID-based and tie-aware against a float64 brute-force oracle.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>Caveats</h3>
+          <ul class="list">
+            <li>Synthetic clustered data; real embeddings and larger collections can rank differently.</li>
+            <li>Shared WSL2 host; single sequential client, no concurrent load.</li>
+            <li>Python wrappers differ: VLite uses JSON over a C ABI, zvec uses native bindings.</li>
+            <li>Memory growth is resident memory after build minus before opening.</li>
+            <li>Durability contracts differ, so ingest times are not like-for-like.</li>
+          </ul>
+        </div>
+      </div>
+      <h3 style="margin-top:28px">Reproduce</h3>
+      <button class="copy" data-copy="c-repro">Copy</button>
+<pre class="code" id="c-repro"><span class="c-c"># Linux x86_64, Python 3.10+</span>
+python -m venv .venv &amp;&amp; . .venv/bin/activate
+pip install zvec numpy https://github.com/mahpate/Vlite/releases/download/v0.3.0/vlite_embedded-0.3.0-py3-none-manylinux_2_28_x86_64.whl
+git clone https://github.com/mahpate/Vlite &amp;&amp; cd Vlite
+python benchmarks/compare_zvec.py --records 20000 --dimensions 128 --trials 3 --output zvec-20k.json</pre>
+      <p class="muted">Raw results: <a href="results/zvec-20k-128d-wsl.json">20k × 128</a> ·
+        <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/compare_zvec.py">benchmark source</a></p>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>© VLite contributors · MIT License · zvec is a separate project; no affiliation is implied.</span>
+    <nav>
+      <a href="https://github.com/mahpate/Vlite">GitHub</a>
+      <a href="https://github.com/mahpate/Vlite/releases">Releases</a>
+      <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/README.md">Benchmarks</a>
+      <a href="./">Home</a>
+    </nav>
+  </div>
+</footer>
+</body>
+</html>

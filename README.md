@@ -8,6 +8,10 @@ Use it in-process through native language bindings, embed the Rust library
 directly, or connect through authenticated REST or the optional gRPC transport.
 It uses its own storage format and does not require an external database.
 
+🌐 **Website:** [mahpate.github.io/Vlite](https://mahpate.github.io/Vlite/) ·
+[features](https://mahpate.github.io/Vlite/#features) ·
+[benchmarks](https://mahpate.github.io/Vlite/compare.html)
+
 > **Operating model:** the live dataset resides in memory, and the log is
 > replayed on open. One database owner serializes access to each file.
 > Size deployments for the full dataset and validate recovery and workload
