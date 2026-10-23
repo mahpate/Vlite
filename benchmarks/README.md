@@ -19,6 +19,37 @@ number on a small synthetic workload.
 
 ## Native VLite benchmark
 
+### HNSW visited-membership optimization (unreleased source)
+
+Construction and filtered search use a dense visited bitmap instead of hashing
+node positions on graphs up to 8,388,608 nodes. Each traversal owns its bitmap,
+so concurrent readers share no mutable visited state. The bitmap uses one bit per
+graph node, rounded up to 64-bit words (at most 1 MiB per traversal); larger graphs
+retain the sparse hash-set path. This bounds only the bitmap, not total traversal
+memory. Graph-selection rules, distance precision, filtering and durability are
+unchanged.
+
+A native Windows release run on 5,000 synthetic 128-dimensional vectors
+(M=16, ef_construction=100, ef_search=100, k=10) measured median rebuild time
+**5.552 s before / 5.080 s after** (8.5% lower). The mean duration of two
+100-query batches was **76.392 ms / 60.795 ms** (20.4% lower).
+These are batch durations, not per-query p50 or other latency percentiles. Each
+campaign measured three rebuilds and two query batches (before snapshot save and
+after snapshot load). Snapshot/rebuild results matched within each campaign;
+these checks do not establish before/after equivalence. A separate regression
+test pins the graph topology to a baseline fingerprint.
+
+See [raw timings and limitations](results/hnsw-visited-windows.json). This is a
+small warm-cache before/after experiment on a shared host, not a new zvec
+comparison or evidence of a universal gain. No results were collected at
+100k × 768, on other operating systems or above the sparse-fallback threshold.
+Run this command separately on baseline `bb627b6` and the candidate source to
+repeat the experiment (timings will vary):
+
+```text
+cargo run --quiet --release --example ann_restart_bench -- --count 5000 --dims 128 --query-count 100 --metric l2 --rebuild-trials 3
+```
+
 ### Persisted ANN restart measurement
 
 With the licensed, hash-verified GloVe subset prepared by the existing

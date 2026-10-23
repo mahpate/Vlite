@@ -19,6 +19,38 @@ use crate::{
     vector_norm,
 };
 
+/// Graph node positions are dense, so membership needs one bit rather than
+/// hashing each visited node. Bound zero-initialization work for huge graphs.
+enum Visited {
+    Dense(Vec<u64>),
+    Sparse(HashSet<usize>),
+}
+
+impl Visited {
+    fn new(nodes: usize, entry: usize) -> Self {
+        let mut visited = if nodes <= 8 * 1024 * 1024 {
+            Self::Dense(vec![0; nodes.div_ceil(64)])
+        } else {
+            Self::Sparse(HashSet::new())
+        };
+        visited.insert(entry);
+        visited
+    }
+
+    fn insert(&mut self, node: usize) -> bool {
+        match self {
+            Self::Dense(words) => {
+                let word = &mut words[node / 64];
+                let mask = 1u64 << (node % 64);
+                let fresh = *word & mask == 0;
+                *word |= mask;
+                fresh
+            }
+            Self::Sparse(nodes) => nodes.insert(node),
+        }
+    }
+}
+
 /// Index construction parameters. A changed configuration requires a rebuild.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HnswConfig {
@@ -473,7 +505,7 @@ impl Index {
         records: &BTreeMap<u64, Record>,
         visits: &Cell<u64>,
     ) -> Vec<Candidate> {
-        let mut visited = HashSet::from([entry.node]);
+        let mut visited = Visited::new(self.nodes.len(), entry.node);
         let mut candidates = BinaryHeap::from([Reverse(entry)]);
         let mut nearest = BinaryHeap::from([entry]);
         while let Some(Reverse(current)) = candidates.pop() {
@@ -655,7 +687,7 @@ impl Index {
                     .get(&id)
                     .is_some_and(|record| metadata::matches(&record.metadata, conditions))
         };
-        let mut visited = HashSet::from([entry.node]);
+        let mut visited = Visited::new(self.nodes.len(), entry.node);
         let mut candidates = BinaryHeap::from([Reverse(entry)]);
         let mut results = BinaryHeap::with_capacity(ef.min(self.nodes.len()).saturating_add(1));
         if eligible(entry.node) {
@@ -1158,6 +1190,52 @@ impl Index {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn visited_membership_matches_hash_set_across_word_boundaries() {
+        for nodes in [1, 63, 64, 65, 129, 8 * 1024 * 1024, 8 * 1024 * 1024 + 1] {
+            let mut visited = Visited::new(nodes, nodes - 1);
+            let mut reference = HashSet::from([nodes - 1]);
+            for node in (0..nodes.min(1024)).rev().chain(0..nodes.min(1024)).chain([
+                nodes - 1,
+                nodes / 2,
+                nodes / 2,
+            ]) {
+                assert_eq!(visited.insert(node), reference.insert(node));
+            }
+        }
+    }
+
+    #[test]
+    fn traversal_preserves_reference_graph_topology() {
+        let records = (0..256)
+            .map(|id| {
+                (
+                    id,
+                    Record {
+                        vector: (0..32).map(|d| ((id * 17 + d * 13) % 101) as f32).collect(),
+                        payload: vec![],
+                        metadata: crate::Metadata::new(),
+                    },
+                )
+            })
+            .collect();
+        let index = Index::build(
+            &records,
+            HnswConfig::default(),
+            DistanceMetric::SquaredL2,
+            AnnOptions::default(),
+        );
+        let mut fingerprint = 0xcbf2_9ce4_8422_2325u64;
+        for node in &index.nodes {
+            for value in std::iter::once(node.id).chain(node.links.iter().flat_map(|links| {
+                std::iter::once(links.len() as u64).chain(links.iter().map(|&link| link as u64))
+            })) {
+                fingerprint = (fingerprint ^ value).wrapping_mul(0x100_0000_01b3);
+            }
+        }
+        assert_eq!(fingerprint, 5_875_114_205_367_767_947);
+    }
 
     #[test]
     fn buffer_preserves_original_vectors_and_enforces_exact_limits() {

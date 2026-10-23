@@ -176,6 +176,30 @@
     </div>
   </section>
 
+  <section id="hnsw-traversal">
+    <div class="wrap">
+      <h2>HNSW traversal optimization (unreleased source)</h2>
+      <p>A bounded visited-node bitmap replaces per-node hashing during graph
+        construction and search on graphs up to 8,388,608 nodes. Each traversal
+        owns one bit per node, rounded up to 64-bit words (at most 1 MiB);
+        larger graphs retain a sparse hash set. This is not a bound on total
+        traversal memory. On 5,000 synthetic 128-dimensional vectors,
+        median rebuild time fell from <strong>5.552 s to 5.080 s</strong> (8.5%),
+        and the mean duration of two 100-query batches fell from
+        <strong>76.392 ms to 60.795 ms</strong> (20.4%).</p>
+      <p class="muted">Native Windows release build; squared L2, M=16,
+        ef_construction=100, ef_search=100, k=10. One before/after campaign
+        (three rebuilds and two query batches per version) on a shared host with
+        warm caches, not per-query p50 or other latency percentiles, a universal
+        gain or a new zvec comparison. No 100k &times; 768, other-OS or
+        sparse-fallback measurements were collected. Existing cross-engine
+        results above have not been revised. Distance precision, graph-selection
+        rules, filtering and durability are unchanged.
+        <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/README.md#hnsw-visited-membership-optimization-unreleased-source">Methodology and reproduction</a> &middot;
+        <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/results/hnsw-visited-windows.json">Raw timings and limitations</a>.</p>
+    </div>
+  </section>
+
   <section id="features" class="alt">
     <div class="wrap">
       <div class="section-head">

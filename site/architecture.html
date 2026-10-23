@@ -397,6 +397,14 @@ flowchart TD
     <p>The HNSW index uses a seeded, deterministic level assignment. Changing <code>m</code>, <code>ef_construction</code>
       or the seed requires a rebuild. With ScalarU8, each dimension is trained into a codebook, traversal uses
       asymmetric u8 distances, and the candidate set is reranked against the original f32 vectors.</p>
+    <p>Unreleased source uses a traversal-local visited bitmap during construction
+      and search for graphs up to 8,388,608 nodes: one bit per graph node,
+      rounded up to 64-bit words, at most 1 MiB per traversal. Larger graphs use
+      a sparse hash set. Concurrent traversals do not share mutable visited state;
+      the bitmap cap is not a total search-memory bound. This changes membership
+      bookkeeping, not distance precision, graph-selection rules, filtering or
+      durability. See the <a href="compare.html#hnsw-traversal">small Windows
+      before/after experiment and its limitations</a>.</p>
     <figure class="diagram">
 <pre class="mermaid">
 flowchart LR
