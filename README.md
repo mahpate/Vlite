@@ -343,14 +343,27 @@ Prometheus on older servers; missing measurements show a dash, and rates need
 two samples. Unavailable admin endpoints are identified without breaking the
 rest of the console.
 
-The console has sidebar shortcuts for overview, browsing, editing, search,
-index maintenance and REST inspection. Snapshot cards show vector count,
+The current-source console groups tools into six focused workspaces, with
+Records, Write, Search, Index and Settings tabs for collection work. A responsive
+navigation drawer, keyboard-accessible tabs and advanced-panel disclosures keep
+the interface usable on smaller screens. Navigation preserves in-page drafts;
+it does not persist records or credentials. Snapshot cards show vector count,
 dimensions, file bytes and index readiness. **Fill example** prepares a
 dimension-matched vector and typed metadata without saving; choose an ID and
 use **Put / replace** to commit it. **Use editor vector as query** makes a
 self-match search easy. Select a browse or search result ID to inspect the
 record in the editor. Mutation confirmations remain required. Each server owns
 one database file; opt-in v4 files support named collections in that file.
+
+The record inspector separates Payload, Metadata, Vector and Raw JSON, with
+bounded readable previews and full raw record data. Search keeps the previous
+successful results visible during refresh or failure and explicitly reports
+errors; distances are labeled rather than presented as generic similarity.
+Database workflows remain serialized, but navigation, help and appearance
+controls stay usable while a request is pending. Stopping the browser wait does
+not cancel server work or automatically retry it.
+These dashboard updates are available in current source builds; published
+v0.3.0 images and Python packages are not evidence of these newer UI features.
 
 The expanded [testing console guide](docs/CONSOLE.md) covers guided demo data,
 bounded JSON/CSV import and export, batch editing, a visual filter builder,
