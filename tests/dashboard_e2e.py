@@ -1252,12 +1252,15 @@ def exercise_features_mocked(browser):
     assert "if-match" in patch["headers"] and list(patch["body"]) == ["metadata"]
     page.locator("#collection").select_option("docs")
     confirm(page, "unsaved record editor changes")
+    # The switch resets the search form after its confirmation round-trip; wait so it cannot erase the inputs below.
+    expect(page.locator("#status")).to_contain_text("Collection docs selected")
     page.locator("#query").fill("[1,0]")
     page.locator("#rerank-mode").select_option("mmr")
     page.locator("#mmr-lambda").fill("0.25")
     page.locator("#search-form button[type=submit]").click()
     expect(page.locator("#hits tbody tr")).to_have_count(1)
-    assert fake.log[-1]["body"]["rerank"] == {"mode": "mmr", "candidates": 50, "lambda": .25}
+    searches = [entry for entry in fake.log if entry["method"] == "POST" and entry["path"] == "/v1/collections/docs/search"]
+    assert searches[-1]["body"]["rerank"] == {"mode": "mmr", "candidates": 50, "lambda": .25}
     cases = [("group-search", "group-result", "/search/grouped"), ("geo-search", "geo-result", "/search/geo"),
              ("facets-run", "facets-result", "/facets"), ("stats-run", "stats-result", "/stats/numeric")]
     for button, result, suffix in cases:
