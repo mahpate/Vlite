@@ -13,7 +13,7 @@ It uses its own storage format and does not require an external database.
 [dashboard](https://mahpate.github.io/Vlite/dashboard.html) ·
 [CLI tools](https://mahpate.github.io/Vlite/docs/TOOLS.html) ·
 [benchmarks](https://mahpate.github.io/Vlite/compare.html) ·
-[benchmark methodology and raw results](benchmarks/README.md)
+[multi-engine methodology and raw results](benchmarks/README.md#multi-engine-comparison)
 
 > **Operating model:** the live dataset resides in memory, and the log is
 > replayed on open. Each file permits one exclusive writer or multiple shared-lock

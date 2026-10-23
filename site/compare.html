@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>VLite benchmarks | Measured embedded performance</title>
-  <meta name="description" content="VLite benchmark results: query latency, recall, index build, restart and concurrent readers.">
+  <meta name="description" content="Reproducible VLite benchmarks against zvec, Chroma, LanceDB, FAISS, Qdrant and pgvector: latency, recall, build, disk and reopen.">
   <meta property="og:title" content="VLite benchmarks">
-  <meta property="og:description" content="Measured VLite performance with reproducible methodology and explicit limitations.">
+  <meta property="og:description" content="Measured side by side in-process on the same data, metric and HNSW parameters.">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
   <script src="assets/site.js"></script>
@@ -40,31 +40,131 @@
 </header>
 
 <main>
-  <section class="hero"><div class="wrap">
-    <span class="eyebrow">Measured, not quoted</span>
-    <h1>VLite <span class="grad">benchmarks</span></h1>
-    <p class="lead">Query latency, recall, durable ingestion, index build and restart measurements for VLite.</p>
-    <div class="cta"><a class="btn primary" href="#results">Results</a>
-      <a class="btn" href="#reproduce">Reproduce</a>
-      <a class="btn" href="./#features">VLite features</a></div>
-  </div></section>
-  <section id="results"><div class="wrap">
-    <div class="section-head"><h2>VLite baseline measurements</h2>
-      <p>VLite 0.3.0 baseline, not current-source performance. Embedded and REST measurements describe different execution paths and must be interpreted separately.</p></div>
-    <p>Shared WSL2 host, 16 vCPU Intel Xeon Platinum 8370C. Medians of three trials at 20k &times; 128 and two at 100k &times; 768.
-      Seeded float32 Gaussian clusters (64 clusters, sigma=0.35, seed 42), squared L2, 200 top-10 queries and a tie-aware float64 oracle.
-      HNSW M=16, ef_construction=100, ef_search=100; ten warmups and one sequential client.
-      Server containers used 4 CPUs and 4 GiB. QPS is sequential queries/second, not maximum sustainable throughput.</p>
-<h3>20,000 &times; 128: embedded</h3><div class="table-wrap"><table><thead><tr><th>Mode</th><th>Interface</th><th>p50 ms</th><th>Sequential QPS</th><th>Recall@10</th><th>Ingest + build s</th><th>Build s</th><th>Disk MiB</th><th>Reopen + first query s</th></tr></thead><tbody><tr><td>exact</td><td>VLite 0.3.0</td><td>1.413</td><td>695</td><td>1.0000</td><td>1.80</td><td>0.00</td><td>10.2</td><td>0.07</td></tr><tr><td>ann</td><td>VLite 0.3.0</td><td>0.454</td><td>2,154</td><td>1.0000</td><td>13.73</td><td>11.99</td><td>10.2</td><td>12.08</td></tr></tbody></table></div>
-<h3>20,000 &times; 128: REST server</h3><div class="table-wrap"><table><thead><tr><th>Mode</th><th>Interface</th><th>p50 ms</th><th>Sequential QPS</th><th>Recall@10</th><th>Ingest + build s</th><th>Build s</th><th>Disk MiB</th><th>Reopen + first query s</th></tr></thead><tbody><tr><td>exact</td><td>VLite server 0.3.0 (REST)</td><td>2.061</td><td>481</td><td>1.0000</td><td>1.87</td><td>0.00</td><td>10.1</td><td>1.32</td></tr><tr><td>ann</td><td>VLite server 0.3.0 (REST)</td><td>1.149</td><td>845</td><td>1.0000</td><td>14.06</td><td>12.25</td><td>10.1</td><td>13.96</td></tr></tbody></table></div>
-<h3>100,000 &times; 768: embedded</h3><div class="table-wrap"><table><thead><tr><th>Mode</th><th>Interface</th><th>p50 ms</th><th>Sequential QPS</th><th>Recall@10</th><th>Ingest + build s</th><th>Build s</th><th>Disk MiB</th><th>Reopen + first query s</th></tr></thead><tbody><tr><td>exact</td><td>VLite 0.3.0</td><td>32.210</td><td>31</td><td>1.0000</td><td>50.62</td><td>0.00</td><td>295.3</td><td>1.89</td></tr><tr><td>ann</td><td>VLite 0.3.0</td><td>3.545</td><td>282</td><td>0.9680</td><td>576.06</td><td>524.57</td><td>295.3</td><td>518.75</td></tr></tbody></table></div>
-<h3>100,000 &times; 768: REST server</h3><div class="table-wrap"><table><thead><tr><th>Mode</th><th>Interface</th><th>p50 ms</th><th>Sequential QPS</th><th>Recall@10</th><th>Ingest + build s</th><th>Build s</th><th>Disk MiB</th><th>Reopen + first query s</th></tr></thead><tbody><tr><td>exact</td><td>VLite server 0.3.0 (REST)</td><td>34.022</td><td>29</td><td>1.0000</td><td>56.37</td><td>0.00</td><td>294.5</td><td>3.16</td></tr><tr><td>ann</td><td>VLite server 0.3.0 (REST)</td><td>4.942</td><td>198</td><td>0.9680</td><td>696.57</td><td>637.08</td><td>294.5</td><td>605.54</td></tr></tbody></table></div>
-    <p>Each acknowledged VLite batch is synchronized to disk. Python embedded timings include JSON C-ABI conversion;
-      REST timings include serialization, transport and authentication. These runs did not enable ANN snapshots,
-      so ANN reopen includes graph rebuild. Shared-host contention and small trial counts limit generalization.
-      The 100k REST ANN trials had substantial build/query variation. Disk is the measured database footprint, not peak process memory.
-      Archived samples and provenance remain in the <a href="https://github.com/mahpate/Vlite/tree/main/benchmarks/results">raw results directory</a>.</p>
-  </div></section>
+  <section class="hero">
+    <div class="wrap">
+      <span class="eyebrow">Measured, not quoted</span>
+      <h1>VLite <span class="grad">benchmarks</span></h1>
+      <p class="lead">Reproducible performance numbers for VLite's embedded engine, measured in-process
+        against zvec, Chroma, LanceDB and FAISS, plus a separate server tier with Qdrant and pgvector.</p>
+      <div class="cta">
+        <a class="btn primary" href="#results">Results</a>
+        <a class="btn" href="#reproduce">Reproduce</a>
+        <a class="btn" href="./#features">VLite features</a>
+      </div>
+    </div>
+  </section>
+
+  <section id="summary" class="alt">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="kicker">Summary</div>
+        <h2>What the measurements show</h2>
+      </div>
+      <div class="grid cols-2">
+        <div class="card">
+          <h3>Where VLite leads</h3>
+          <ul class="list">
+            <li>Smallest measured ANN database footprint in these runs, in one portable file.</li>
+            <li>Every ingest batch is a checksummed, fsync-before-ack atomic commit with fail-closed recovery.</li>
+            <li>Recall@10 is 1.0 at 20k × 128 and about 0.968 at 100k × 768; latency depends on dimensionality.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>Where VLite is improving</h3>
+          <ul class="list">
+            <li>HNSW build time: VLite builds single-threaded today.</li>
+            <li>Reopen with ANN: the HNSW index is rebuilt in memory unless an index snapshot is enabled.</li>
+            <li>Bulk ingest throughput and Python binding overhead (JSON over the C ABI).</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="results">
+    <div class="wrap">
+      <div class="section-head"><div class="kicker">Multi-engine benchmark</div>
+        <h2>Embedded and server tiers, measured separately</h2>
+        <p>WSL2, 16 vCPU Intel Xeon Platinum 8370C. Medians of 3 trials at 20k × 128 and 2 at 100k × 768.
+          These are VLite 0.3.0 baseline runs, not measurements of the new concurrent-reader implementation.</p>
+      </div>
+      <p>Seeded float32 Gaussian clusters (64 clusters, σ = 0.35, seed 42), squared L2, 200 top-10 queries;
+        recall against a tie-aware float64 oracle. HNSW M=16, ef_construction=100, ef_search=100 where exposed;
+        10 warmups, one sequential client, one query in flight. QPS is sequential queries/second, not maximum service throughput.
+        Each engine/mode/trial uses a fresh process; server containers each have 4 CPUs and 4 GiB, with direct bridge-IP connections.</p>
+<h3 style="margin-top:36px">20,000 × 128 · Embedded tier</h3>
+<p class="muted">Raw trials, versions, hashes and parameters: <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/results/engines-embedded-20k-128d-wsl.json">engines-embedded-20k-128d-wsl.json</a>.</p>
+<div class="table-wrap"><table><thead><tr><th>Mode</th><th>Engine</th><th>p50 ms</th><th>Sequential QPS</th><th>Recall@10</th><th>Ingest + build s</th><th>Build s</th><th>Disk MiB</th><th>Reopen + first query s</th></tr></thead><tbody>
+<tr><td>exact</td><td>VLite 0.3.0</td><td>1.413</td><td>695</td><td>1.0000</td><td>1.80</td><td>0.00</td><td>10.2</td><td>0.07</td></tr>
+<tr><td>exact</td><td>zvec 0.8.0</td><td>1.153</td><td>842</td><td>1.0000</td><td>0.36</td><td>0.03</td><td>13.7</td><td>0.02</td></tr>
+<tr><td>exact</td><td>Chroma 1.5.9</td><td>N/A</td><td>N/A</td><td>N/A</td><td>N/A</td><td>N/A</td><td>N/A</td><td>N/A</td></tr>
+<tr><td>exact</td><td>LanceDB 0.40.0</td><td>10.525</td><td>92</td><td>1.0000</td><td>0.19</td><td>0.00</td><td>9.8</td><td>0.01</td></tr>
+<tr><td>exact</td><td>FAISS 1.15.1 (library)</td><td>0.251</td><td>2,739</td><td>1.0000</td><td>0.01</td><td>0.00</td><td>N/A</td><td>N/A</td></tr>
+<tr><td>ann</td><td>VLite 0.3.0</td><td>0.454</td><td>2,154</td><td>1.0000</td><td>13.73</td><td>11.99</td><td>10.2</td><td>12.08</td></tr>
+<tr><td>ann</td><td>zvec 0.8.0</td><td>0.438</td><td>2,212</td><td>1.0000</td><td>0.66</td><td>0.35</td><td>15.4</td><td>0.03</td></tr>
+<tr><td>ann</td><td>Chroma 1.5.9</td><td>1.672</td><td>591</td><td>1.0000</td><td>5.65</td><td>0.00</td><td>16.5</td><td>0.08</td></tr>
+<tr><td>ann</td><td>LanceDB 0.40.0 (IVF_HNSW_SQ)</td><td>7.188</td><td>133</td><td>0.9485</td><td>1.12</td><td>0.93</td><td>15.4</td><td>0.03</td></tr>
+<tr><td>ann</td><td>FAISS 1.15.1 (library)</td><td>0.079</td><td>11,339</td><td>0.9995</td><td>2.52</td><td>0.00</td><td>N/A</td><td>N/A</td></tr>
+</tbody></table></div>
+<h3 style="margin-top:36px">20,000 × 128 · Server tier</h3>
+<p class="muted">Raw trials, versions, hashes and parameters: <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/results/engines-server-20k-128d-wsl.json">engines-server-20k-128d-wsl.json</a>.</p>
+<div class="table-wrap"><table><thead><tr><th>Mode</th><th>Engine</th><th>p50 ms</th><th>Sequential QPS</th><th>Recall@10</th><th>Ingest + build s</th><th>Build s</th><th>Disk MiB</th><th>Reopen + first query s</th></tr></thead><tbody>
+<tr><td>exact</td><td>VLite server 0.3.0 (REST)</td><td>2.061</td><td>481</td><td>1.0000</td><td>1.87</td><td>0.00</td><td>10.1</td><td>1.32</td></tr>
+<tr><td>exact</td><td>Qdrant 1.15.5 (REST)</td><td>1.413</td><td>699</td><td>1.0000</td><td>1.85</td><td>0.00</td><td>196.5</td><td>1.62</td></tr>
+<tr><td>exact</td><td>Qdrant 1.15.5 (gRPC)</td><td>1.926</td><td>512</td><td>1.0000</td><td>0.70</td><td>0.00</td><td>196.1</td><td>1.79</td></tr>
+<tr><td>exact</td><td>pgvector 0.8.1 / PG 17.8</td><td>4.189</td><td>234</td><td>1.0000</td><td>0.26</td><td>0.04</td><td>66.2</td><td>1.41</td></tr>
+<tr><td>ann</td><td>VLite server 0.3.0 (REST)</td><td>1.149</td><td>845</td><td>1.0000</td><td>14.06</td><td>12.25</td><td>10.1</td><td>13.96</td></tr>
+<tr><td>ann</td><td>Qdrant 1.15.5 (REST)</td><td>0.965</td><td>1,027</td><td>1.0000</td><td>2.82</td><td>0.93</td><td>165.3</td><td>1.63</td></tr>
+<tr><td>ann</td><td>Qdrant 1.15.5 (gRPC)</td><td>1.464</td><td>681</td><td>1.0000</td><td>1.63</td><td>0.93</td><td>165.3</td><td>1.67</td></tr>
+<tr><td>ann</td><td>pgvector 0.8.1 / PG 17.8</td><td>1.016</td><td>961</td><td>1.0000</td><td>2.95</td><td>2.72</td><td>98.1</td><td>1.40</td></tr>
+</tbody></table></div>
+<h3 style="margin-top:36px">100,000 × 768 · Embedded tier</h3>
+<p class="muted">Raw trials, versions, hashes and parameters: <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/results/engines-embedded-100k-768d-wsl.json">engines-embedded-100k-768d-wsl.json</a>.</p>
+<div class="table-wrap"><table><thead><tr><th>Mode</th><th>Engine</th><th>p50 ms</th><th>Sequential QPS</th><th>Recall@10</th><th>Ingest + build s</th><th>Build s</th><th>Disk MiB</th><th>Reopen + first query s</th></tr></thead><tbody>
+<tr><td>exact</td><td>VLite 0.3.0</td><td>32.210</td><td>31</td><td>1.0000</td><td>50.62</td><td>0.00</td><td>295.3</td><td>1.89</td></tr>
+<tr><td>exact</td><td>zvec 0.8.0</td><td>27.033</td><td>37</td><td>1.0000</td><td>5.53</td><td>0.53</td><td>300.9</td><td>0.11</td></tr>
+<tr><td>exact</td><td>Chroma 1.5.9</td><td>N/A</td><td>N/A</td><td>N/A</td><td>N/A</td><td>N/A</td><td>N/A</td><td>N/A</td></tr>
+<tr><td>exact</td><td>LanceDB 0.40.0</td><td>70.423</td><td>14</td><td>1.0000</td><td>3.63</td><td>0.00</td><td>302.6</td><td>0.07</td></tr>
+<tr><td>exact</td><td>FAISS 1.15.1 (library)</td><td>21.585</td><td>48</td><td>1.0000</td><td>0.37</td><td>0.00</td><td>N/A</td><td>N/A</td></tr>
+<tr><td>ann</td><td>VLite 0.3.0</td><td>3.545</td><td>282</td><td>0.9680</td><td>576.06</td><td>524.57</td><td>295.3</td><td>518.75</td></tr>
+<tr><td>ann</td><td>zvec 0.8.0</td><td>0.901</td><td>1,075</td><td>0.9657</td><td>12.42</td><td>7.75</td><td>314.7</td><td>0.04</td></tr>
+<tr><td>ann</td><td>Chroma 1.5.9</td><td>2.474</td><td>397</td><td>0.9692</td><td>54.14</td><td>0.00</td><td>326.7</td><td>0.68</td></tr>
+<tr><td>ann</td><td>LanceDB 0.40.0 (IVF_HNSW_SQ)</td><td>10.160</td><td>96</td><td>0.9055</td><td>20.27</td><td>16.58</td><td>391.8</td><td>0.30</td></tr>
+<tr><td>ann</td><td>FAISS 1.15.1 (library)</td><td>0.505</td><td>1,938</td><td>0.9550</td><td>53.18</td><td>0.00</td><td>N/A</td><td>N/A</td></tr>
+</tbody></table></div>
+<h3 style="margin-top:36px">100,000 × 768 · Server tier</h3>
+<p class="muted">Raw trials, versions, hashes and parameters: <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/results/engines-server-100k-768d-wsl.json">engines-server-100k-768d-wsl.json</a>.</p>
+<div class="table-wrap"><table><thead><tr><th>Mode</th><th>Engine</th><th>p50 ms</th><th>Sequential QPS</th><th>Recall@10</th><th>Ingest + build s</th><th>Build s</th><th>Disk MiB</th><th>Reopen + first query s</th></tr></thead><tbody>
+<tr><td>exact</td><td>VLite server 0.3.0 (REST)</td><td>34.022</td><td>29</td><td>1.0000</td><td>56.37</td><td>0.00</td><td>294.5</td><td>3.16</td></tr>
+<tr><td>exact</td><td>Qdrant 1.15.5 (REST)</td><td>16.710</td><td>58</td><td>1.0000</td><td>55.17</td><td>0.00</td><td>486.1</td><td>2.03</td></tr>
+<tr><td>exact</td><td>Qdrant 1.15.5 (gRPC)</td><td>17.859</td><td>55</td><td>1.0000</td><td>18.08</td><td>0.00</td><td>486.1</td><td>1.92</td></tr>
+<tr><td>exact</td><td>pgvector 0.8.1 / PG 17.8</td><td>320.618</td><td>3</td><td>1.0000</td><td>8.03</td><td>0.03</td><td>777.5</td><td>2.19</td></tr>
+<tr><td>ann</td><td>VLite server 0.3.0 (REST)</td><td>4.942</td><td>198</td><td>0.9680</td><td>696.57</td><td>637.08</td><td>294.5</td><td>605.54</td></tr>
+<tr><td>ann</td><td>Qdrant 1.15.5 (REST)</td><td>1.957</td><td>501</td><td>0.9693</td><td>95.06</td><td>21.21</td><td>491.8</td><td>1.70</td></tr>
+<tr><td>ann</td><td>Qdrant 1.15.5 (gRPC)</td><td>2.465</td><td>405</td><td>0.9750</td><td>32.07</td><td>18.85</td><td>491.8</td><td>1.84</td></tr>
+<tr><td>ann</td><td>pgvector 0.8.1 / PG 17.8</td><td>2.797</td><td>351</td><td>0.9753</td><td>84.46</td><td>78.97</td><td>1,488.2</td><td>1.60</td></tr>
+</tbody></table></div>
+      <div class="grid cols-3" style="margin-top:28px">
+        <div class="card"><h3>Latency depends on dimensions</h3><p>At 128d, VLite embedded HNSW is close to zvec (0.454 vs 0.438 ms).
+          At 768d, VLite is about 4× slower than zvec embedded and 2–2.5× slower than Qdrant over REST in the server tier.
+          Recall is comparable, not identical; LanceDB's quantized configuration has lower recall.</p></div>
+        <div class="card"><h3>Build and reopen remain the gap</h3><p>At 100k × 768, VLite embedded builds in 524.57 s and
+          reopens plus first query in 518.75 s without an ANN snapshot. These runs rebuild the graph; opt-in snapshots
+          were not measured here. Chroma and FAISS include graph construction in ingest, so compare ingest + build.</p></div>
+        <div class="card"><h3>Footprint with caveats</h3><p>VLite has the smallest measured ANN database footprint:
+          10.2 MiB at 20k × 128 embedded and 295.3 MiB at 100k × 768. It is not smallest in every exact-mode row
+          (LanceDB exact uses 9.8 MiB at 20k). FAISS is an in-memory index library, with no durability or persisted footprint here.</p></div>
+      </div>
+      <p class="muted">Defaults are not durability-equivalent: VLite fsyncs every acknowledged batch; pgvector uses synchronous WAL commits;
+        zvec/LanceDB per-write fsync was not verified; Chroma/Qdrant persistence is asynchronous. Ingest is not a fair durability ranking.
+        LanceDB uses one-partition IVF_HNSW_SQ, not plain HNSW; Chroma has no exact mode. Synthetic data, wrapper overhead,
+        shared-host contention and just 2 large-data trials limit generalization. Embedded and server tiers must not be ranked together.
+        Complete methodology, durability contracts, memory/tail-latency data and reproduction commands:
+        <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/README.md#multi-engine-comparison">benchmark README</a> ·
+        <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/compare_engines.py">harness</a>.</p>
+    </div>
+  </section>
+
   <section id="concurrent-readers" class="alt">
     <div class="wrap">
       <h2>Concurrent readers</h2>
@@ -93,40 +193,107 @@
         ef_construction=100, ef_search=100, k=10. One before/after campaign
         (three rebuilds and two query batches per version) on a shared host with
         warm caches, not per-query p50 or other latency percentiles, a universal
-        gain. No 100k &times; 768, other-OS or
-        sparse-fallback measurements were collected. Distance precision, graph-selection
+        gain or a new zvec comparison. No 100k &times; 768, other-OS or
+        sparse-fallback measurements were collected. Existing cross-engine
+        results above have not been revised. Distance precision, graph-selection
         rules, filtering and durability are unchanged.
         <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/README.md#hnsw-visited-membership-optimization-unreleased-source">Methodology and reproduction</a> &middot;
         <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/results/hnsw-visited-windows.json">Raw timings and limitations</a>.</p>
     </div>
   </section>
 
+  <section id="features" class="alt">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="kicker">Feature matrix</div>
+        <h2>Feature comparison</h2>
+        <p>zvec entries reflect what <a href="https://zvec.org/en/">zvec.org</a> documents; "Not listed" means we found no mention, not that it is impossible.</p>
+      </div>
+      <div class="table-wrap">
+        <table class="matrix">
+          <thead><tr><th>Capability</th><th>VLite current source</th><th>zvec 0.8.0 / ecosystem</th></tr></thead>
+          <tbody>
+            <tr class="group"><td colspan="3">Storage &amp; durability</td></tr>
+            <tr><td>Deployment model</td><td>Single <code>.vlite</code> file (+ optional sidecars)</td><td>Collection directory</td></tr>
+            <tr><td>Commit semantics</td><td class="yes">Checksummed, fsync before ack, atomic batches</td><td>Not listed</td></tr>
+            <tr><td>Encryption at rest</td><td class="yes">Yes (opt-in)</td><td class="no">Not listed</td></tr>
+            <tr><td>Point-in-time restore / change feed</td><td class="yes">Yes</td><td class="no">Not listed</td></tr>
+            <tr><td>Read replicas</td><td class="yes">Export/apply replication</td><td class="no">Not listed</td></tr>
+            <tr><td>Persisted ANN index</td><td>Snapshot sidecar / disk-ANN sidecar</td><td class="yes">Yes, native</td></tr>
+            <tr class="group"><td colspan="3">Retrieval</td></tr>
+            <tr><td>Dense vectors</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+            <tr><td>Multiple / named vectors</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+            <tr><td>Sparse vectors</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+            <tr><td>Full-text / hybrid</td><td class="yes">BM25 hybrid</td><td class="yes">BM25 full-text, hybrid</td></tr>
+            <tr><td>Grouped search</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+            <tr><td>Scalar filters</td><td class="yes">Typed filters + metadata indexes</td><td class="yes">Yes</td></tr>
+            <tr><td>Recommendations, facets, geo</td><td class="yes">Yes</td><td class="no">Not listed</td></tr>
+            <tr class="group"><td colspan="3">Indexes &amp; performance</td></tr>
+            <tr><td>Index types</td><td>Flat, HNSW, disk-ANN sidecar</td><td class="yes">Flat, HNSW, IVF, DiskANN/Vamana</td></tr>
+            <tr><td>Quantization</td><td>Scalar u8</td><td class="yes">FP16, INT8, INT4, RaBitQ, PQ</td></tr>
+            <tr><td>GPU search</td><td class="yes">Exact L2 via wgpu (opt-in)</td><td class="no">Not listed</td></tr>
+            <tr><td>Runtime optimizations</td><td>Rayon parallel exact scans (native), HNSW snapshots</td><td class="yes">SIMD, mmap, buffer pool, thread pool</td></tr>
+            <tr class="group"><td colspan="3">Interfaces &amp; operations</td></tr>
+            <tr><td>Embedded SDKs</td><td>Rust, Python, Node.js, C ABI, WASM</td><td>Python, Node.js</td></tr>
+            <tr><td>Network server</td><td class="yes">REST + OpenAPI, gRPC (streaming, TLS)</td><td class="no">Not listed</td></tr>
+            <tr><td>Remote clients</td><td class="yes">Python, JS, Go, .NET</td><td class="no">Not listed</td></tr>
+            <tr><td>Auth</td><td class="yes">Scoped credentials, rate limits</td><td>Not applicable (embedded)</td></tr>
+            <tr><td>Multi-process embedded readers</td><td class="yes"><code>open_read_only</code> shared locks; exclusive writer</td><td class="yes"><code>read_only</code> opens</td></tr>
+            <tr><td>Concurrent server reads</td><td class="yes">Shared RwLock reads; exclusive writes</td><td>Not applicable (embedded)</td></tr>
+            <tr><td>Visual UI</td><td class="yes">Focused workspaces, collection tabs, responsive drawer, record inspector, JSON writes, themes, copy-as-code, bounded PCA</td><td><a href="https://github.com/zvec-ai/zvec-studio">zvec-studio</a> (separate project)</td></tr>
+            <tr><td>Metrics &amp; logs</td><td class="yes">Prometheus, metric cards, route latency, filtered live logs, JSONL export</td><td class="no">Not listed in core API comparison</td></tr>
+            <tr><td>Agent tooling</td><td class="yes">CLI, stdio MCP server, four agent skills</td><td class="yes">CLI, MCP, Zvec-Grep</td></tr>
+            <tr><td>Platforms</td><td>Windows, Linux, macOS (x86_64/arm64)</td><td class="yes">Linux, macOS, Windows, Android, iOS</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
 
-  <section id="features" class="alt"><div class="wrap">
-    <h2>Performance and operating model</h2>
-    <p>VLite supports exact scans, rebuildable HNSW, optional scalar-u8 traversal, ANN restart snapshots,
-      metadata indexes, shared-lock read-only opens and concurrent server reads.
-      The live dataset resides in memory. HNSW build cost, high-dimensional search, binding overhead
-      and mixed-write tail latency remain important optimization targets.</p>
-    <p>See <a href="./#features">VLite capabilities</a> and the
-      <a href="docs/REFERENCE.html">technical reference</a> for contracts and limitations.</p>
-  </div></section>
-  <section id="reproduce"><div class="wrap">
-    <h2>Reproduce and interpret results</h2>
-    <p>The <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/README.md">benchmark guide</a>
-      documents native campaigns, exact/ANN recall checks, filters, mixed updates, real embeddings and restart measurements.
-      <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/RESULTS.md">Published measurements</a>
-      retain workload-specific results and limitations.</p>
-    <pre class="code"><code>cargo run --locked --release --bin vlite-bench -- 10000 32 100 100 10 42
-cargo run --locked --release --bin vlite-bench -- --ann 16 100 100 10000 32 100 100 10 42</code></pre>
-    <p>Record source revision, hardware, dataset provenance, dimensions, metric, recall, concurrency,
-      latency percentiles, build/reopen cost and durability settings. Before/after campaigns must use
-      the same workload and preserve raw samples; no single run establishes a universal speed claim.</p>
-  </div></section>
+  <section id="reproduce">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="kicker">Methodology</div>
+        <h2>Reproduction and earlier zvec-only runs</h2>
+      </div>
+      <div class="grid cols-2">
+        <div class="card">
+          <h3>Setup</h3>
+          <ul class="list">
+            <li>One seeded dataset (64 Gaussian clusters, σ = 0.35), SHA-256 recorded in the results.</li>
+            <li>Same ingest batches for both engines; VLite commits each batch durably.</li>
+            <li>HNSW <code>m = 16</code>, <code>ef_construction = 100</code>, <code>ef = 100</code> for both (zvec defaults overridden).</li>
+            <li>Every (trial, mode, engine) runs in a fresh process; engine order alternates by trial.</li>
+            <li>Recall is ID-based and tie-aware against a float64 brute-force oracle.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>Caveats</h3>
+          <ul class="list">
+            <li>Synthetic clustered data; real embeddings and larger collections can rank differently.</li>
+            <li>Shared WSL2 host; these baseline runs use a single sequential client, no concurrent load.</li>
+            <li>Python wrappers differ: VLite uses JSON over a C ABI, zvec uses native bindings.</li>
+            <li>Memory growth is resident memory after build minus before opening.</li>
+            <li>Durability contracts differ, so ingest times are not like-for-like.</li>
+          </ul>
+        </div>
+      </div>
+      <h3 style="margin-top:28px">Reproduce</h3>
+      <button class="copy" data-copy="c-repro">Copy</button>
+<pre class="code" id="c-repro"><span class="c-c"># Linux x86_64, Python 3.11+</span>
+python -m venv .venv &amp;&amp; . .venv/bin/activate
+python -m pip install zvec numpy vlite-embedded==0.3.0
+git clone https://github.com/mahpate/Vlite &amp;&amp; cd Vlite
+python benchmarks/compare_zvec.py --records 20000 --dimensions 128 --trials 3 --output zvec-20k.json</pre>
+      <p class="muted">Raw results: <a href="results/zvec-20k-128d-wsl.json">20k × 128</a> ·
+        <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/compare_zvec.py">benchmark source</a></p>
+    </div>
+  </section>
 </main>
+
 <footer>
   <div class="wrap">
-    <span>© VLite contributors · MIT License</span>
+    <span>© VLite contributors · MIT License · zvec is a separate project; no affiliation is implied.</span>
     <nav>
       <a href="https://github.com/mahpate/Vlite">GitHub</a>
       <a href="https://github.com/mahpate/Vlite/releases">Releases</a>
