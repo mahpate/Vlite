@@ -2,8 +2,10 @@ name: Publish to PyPI
 
 # Uploads the already-verified wheels attached to a GitHub release, so the
 # bytes on PyPI match the bytes behind the release's SHA256SUMS.
-# Requires a PyPI trusted publisher for this repository, workflow file
-# `pypi.yml` and environment `pypi` on both `vlite-embedded` and `vlite-client`.
+# Requires PyPI trusted publishers for this repository and workflow file
+# `pypi.yml`: environment `pypi` for `vlite-client` and environment
+# `pypi-embedded` for `vlite-embedded`. Distinct environments give each project
+# its own OIDC identity, so PyPI scopes each upload token to one project.
 on:
   workflow_run:
     workflows: ["VLite release"]
@@ -23,11 +25,22 @@ concurrency:
 
 jobs:
   publish:
+    name: publish (${{ matrix.project }})
     if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'v'))
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - project: vlite-client
+            prefix: vlite_client
+            environment: pypi
+          - project: vlite-embedded
+            prefix: vlite_embedded
+            environment: pypi-embedded
     environment:
-      name: pypi
-      url: https://pypi.org/project/vlite-embedded/
+      name: ${{ matrix.environment }}
+      url: https://pypi.org/project/${{ matrix.project }}/
     permissions:
       contents: read
       id-token: write
@@ -42,6 +55,7 @@ jobs:
         shell: python
         env:
           TAG: ${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
+          PREFIX: ${{ matrix.prefix }}
         run: |
           import hashlib, os, pathlib, shutil
           release = pathlib.Path("release")
@@ -50,6 +64,7 @@ jobs:
               digest, name = line.split(maxsplit=1)
               sums[pathlib.PurePosixPath(name.lstrip("*")).name] = digest
           version = os.environ["TAG"].removeprefix("v")
+          prefix = os.environ["PREFIX"]
           out = pathlib.Path("pypi-dist")
           out.mkdir()
           for wheel in sorted(release.glob("*.whl")):
@@ -57,13 +72,14 @@ jobs:
               parts = wheel.stem.split("-")
               assert parts[1] == version, f"{wheel.name} does not match {version}"
               # PyPI rejects bare linux_* tags; the audited manylinux wheel covers Linux.
-              if parts[0] in {"vlite_embedded", "vlite_client"} and not parts[-1].startswith("linux_"):
+              if parts[0] == prefix and not parts[-1].startswith("linux_"):
                   shutil.copy2(wheel, out / wheel.name)
           names = sorted(path.name for path in out.iterdir())
           print("\n".join(names))
-          assert any(name.startswith("vlite_client-") for name in names)
-          for platform in ["manylinux", "win_amd64", "macosx"]:
-              assert any(name.startswith("vlite_embedded-") and platform in name for name in names), platform
+          assert names, f"no {prefix} wheels in release"
+          if prefix == "vlite_embedded":
+              for platform in ["manylinux", "win_amd64", "macosx"]:
+                  assert any(platform in name for name in names), platform
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: pypi-dist

@@ -172,10 +172,13 @@ One-time maintainer setup, required before the first upload:
 
 1. Sign in to <https://pypi.org> (create an account and enable 2FA if needed).
 2. Under **Your projects → Publishing → Add a new pending publisher**, add one
-   for each project name, `vlite-embedded` and `vlite-client`, with owner
-   `mahpate`, repository `Vlite`, workflow `pypi.yml`, environment `pypi`.
-3. In GitHub, create the `pypi` environment (Settings → Environments), ideally
-   with a required reviewer.
+   per project with owner `mahpate`, repository `Vlite` and workflow `pypi.yml`:
+   environment `pypi` for `vlite-client` and environment `pypi-embedded` for
+   `vlite-embedded`. The environments must differ: PyPI matches an upload token
+   to one publisher identity, so two projects sharing one identity cannot both
+   be created by the workflow.
+3. In GitHub, create the `pypi` and `pypi-embedded` environments
+   (Settings → Environments), ideally with a required reviewer.
 4. Run **Actions → Publish to PyPI → Run workflow** with tag `v0.3.0`, or push
    the next release tag.
 
