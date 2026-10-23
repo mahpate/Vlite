@@ -309,15 +309,48 @@ func (r *Records) BuildIndex(ctx context.Context, options Object) error {
 
 // UpdateMetadata replaces only metadata on a V5 record.
 func (r *Records) UpdateMetadata(ctx context.Context, id string, metadata Metadata) error {
- if err := validID(id); err != nil { return err }; return r.client.request(ctx, "PATCH", r.prefix+"/vectors/"+id+"/metadata", Object{"metadata": metadata}, nil)
+	if err := validID(id); err != nil {
+		return err
+	}
+	return r.client.request(ctx, "PATCH", r.prefix+"/vectors/"+id+"/metadata", Object{"metadata": metadata}, nil)
 }
+
 // GroupedSearch and Recommend expose collection-scoped retrieval APIs.
-func (r *Records) GroupedSearch(ctx context.Context, request Object) (Object, error) { prefix:=r.prefix;if prefix=="/v1"{prefix="/v1/collections/default"};return r.client.object(ctx, "POST", prefix+"/search/grouped", request) }
-func (r *Records) Recommend(ctx context.Context, request Object) (Object, error) { prefix:=r.prefix;if prefix=="/v1"{prefix="/v1/collections/default"};return r.client.object(ctx, "POST", prefix+"/recommend", request) }
+func (r *Records) GroupedSearch(ctx context.Context, request Object) (Object, error) {
+	prefix := r.prefix
+	if prefix == "/v1" {
+		prefix = "/v1/collections/default"
+	}
+	return r.client.object(ctx, "POST", prefix+"/search/grouped", request)
+}
+func (r *Records) Recommend(ctx context.Context, request Object) (Object, error) {
+	prefix := r.prefix
+	if prefix == "/v1" {
+		prefix = "/v1/collections/default"
+	}
+	return r.client.object(ctx, "POST", prefix+"/recommend", request)
+}
+
 // Changes returns a durable cursor page from the default collection's feed.
 func (c *Client) Changes(ctx context.Context, cursor string, limit int) (Object, error) {
- if limit < 1 || limit > 10000 { return nil, errors.New("limit must be in 1..10000") }; q:=url.Values{"limit":{strconv.Itoa(limit)}}; if cursor!="" {q.Set("cursor",cursor)}; return c.object(ctx,"GET","/v1/changes?"+q.Encode(),nil)
+	if limit < 1 || limit > 10000 {
+		return nil, errors.New("limit must be in 1..10000")
+	}
+	q := url.Values{"limit": {strconv.Itoa(limit)}}
+	if cursor != "" {
+		q.Set("cursor", cursor)
+	}
+	return c.object(ctx, "GET", "/v1/changes?"+q.Encode(), nil)
 }
-func (c *Client) ListWebhooks(ctx context.Context) (Object,error) { return c.object(ctx,"GET","/v1/admin/webhooks",nil) }
-func (c *Client) CreateWebhook(ctx context.Context, request Object) (Object,error) { return c.object(ctx,"POST","/v1/admin/webhooks",request) }
-func (c *Client) WebhookStatus(ctx context.Context, id string) (Object,error) { if !regexp.MustCompile(`^[a-f0-9]{24}$`).MatchString(id){return nil,errors.New("invalid webhook ID")};return c.object(ctx,"GET","/v1/admin/webhooks/"+id,nil) }
+func (c *Client) ListWebhooks(ctx context.Context) (Object, error) {
+	return c.object(ctx, "GET", "/v1/admin/webhooks", nil)
+}
+func (c *Client) CreateWebhook(ctx context.Context, request Object) (Object, error) {
+	return c.object(ctx, "POST", "/v1/admin/webhooks", request)
+}
+func (c *Client) WebhookStatus(ctx context.Context, id string) (Object, error) {
+	if !regexp.MustCompile(`^[a-f0-9]{24}$`).MatchString(id) {
+		return nil, errors.New("invalid webhook ID")
+	}
+	return c.object(ctx, "GET", "/v1/admin/webhooks/"+id, nil)
+}

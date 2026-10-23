@@ -134,6 +134,9 @@ remaining database handles and stops the worker. Do not forcibly terminate a
 worker during a write; a disconnect/crash may leave the mutation outcome unknown.
 Database close rejects new database calls and drains previously admitted ones.
 Explicit close is required; there is no finalizer that hides failures.
+On Linux, the native library remains mapped until process exit so Rust's
+thread-local destructors stay valid after worker cleanup. Database handles and
+file locks are still released by close; this does not keep workers alive.
 
 The queue admits at most 64 pending operations by default (`maxPending`: 1..1024);
 `busy` means rejection before admission. Library shutdown bypasses that cap so

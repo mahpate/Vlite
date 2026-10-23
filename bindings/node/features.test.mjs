@@ -136,3 +136,17 @@ test("point-in-time sequence/timestamp restore and bounded-cache disk ANN with s
   const secret = await native.createInMemory(2, { key: new Uint8Array(32) });
   await assert.rejects(secret.buildDiskAnn(join(directory, "secret.dann")), code("sidecar_unavailable"));
 }));
+
+test("native TLS destructors remain valid across repeated disk-index worker shutdowns", async () => {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await fixture(async (native, directory) => {
+      const db = await native.create(join(directory, "data.vlite"), 2, { format: 5 });
+      await db.put("1", [1, 0]);
+      const sidecar = join(directory, "index.dann");
+      await db.buildDiskAnn(sidecar);
+      assert.equal((await db.searchDiskAnn(sidecar, [1, 0], 1))[0].id, "1");
+      // Closing every handle does not remove Rust's thread-local destructors.
+      await db.close();
+    });
+  }
+});

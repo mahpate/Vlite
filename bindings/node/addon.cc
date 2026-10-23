@@ -63,7 +63,13 @@ static napi_value load(napi_env env, napi_callback_info info) {
   std::vector<char> path(size + 1);
   if (napi_get_value_string_utf8(env, arg, path.data(), path.size(), &size) != napi_ok)
     return fail(env, "Invalid library path");
-  library->module = dlopen(path.data(), RTLD_NOW | RTLD_LOCAL);
+  int flags = RTLD_NOW | RTLD_LOCAL;
+#ifdef __linux__
+  // Rust registers pthread TLS destructors that run after N-API cleanup. Keep
+  // their code mapped until process exit, even when the last worker dlcloses it.
+  flags |= RTLD_NODELETE;
+#endif
+  library->module = dlopen(path.data(), flags);
 #define SYMBOL(name) dlsym(library->module, name)
 #endif
   if (!library->module) return fail(env, "Cannot load native VLite library for this platform");
