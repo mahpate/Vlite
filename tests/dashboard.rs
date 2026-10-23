@@ -19,6 +19,11 @@ async fn public_dashboard_assets_are_hardened_but_do_not_exempt_data_routes() {
         ("/dashboard", "text/html", "VLite dashboard"),
         ("/dashboard/app.js", "text/javascript", "confirmOperation"),
         ("/dashboard/style.css", "text/css", "color-scheme"),
+        (
+            "/dashboard/console-tools.js",
+            "text/javascript",
+            "function advancedTools",
+        ),
     ] {
         let response = app
             .clone()
@@ -43,6 +48,35 @@ async fn public_dashboard_assets_are_hardened_but_do_not_exempt_data_routes() {
         let content = std::str::from_utf8(&bytes).unwrap();
         assert!(content.contains(marker));
         assert!(!content.contains(token));
+        if uri == "/dashboard" {
+            for control in [
+                "record-ttl",
+                "patch-metadata",
+                "rerank-mode",
+                "group-search",
+                "named-search",
+                "dense-sparse-search",
+                "geo-search",
+                "recommend-run",
+                "facets-run",
+                "stats-run",
+                "language-run",
+                "feed-cursor",
+                "feed-next",
+                "webhook-create",
+                "webhook-delete",
+                "webhook-status",
+                "disk-build",
+                "disk-probe",
+                "pitr-run",
+                "encryption-badge",
+            ] {
+                assert!(content.contains(&format!("id=\"{control}\"")), "{control}");
+            }
+            assert!(content.contains("id=\"webhook-secret\" type=\"password\""));
+            assert!(content.contains("id=\"pitr-run\" type=\"button\" data-admin"));
+            assert!(!content.contains("onclick="));
+        }
     }
     for uri in [
         "/v1/database",
@@ -52,6 +86,9 @@ async fn public_dashboard_assets_are_hardened_but_do_not_exempt_data_routes() {
         "/dashboard/../metrics",
         "/dashboard/private",
         "/dashboard/app.js/other",
+        "/v1/changes",
+        "/v1/admin/webhooks",
+        "/v1/collections/default/query",
     ] {
         let response = app
             .clone()

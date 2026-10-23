@@ -1,7 +1,7 @@
 # VLite testing console
 
-The console is a single-database development tool, not a collections manager,
-embedding generator or production observability system. Open the standalone
+The console is a single-database development tool with collection management,
+not an embedding generator or production observability system. Open the standalone
 Compose UI (default `http://localhost:8081`), enter a bearer token and connect.
 The embedded console remains available at the API's `/dashboard` route.
 All tools appear on one continuous page, without expandable panels. The left
@@ -246,3 +246,56 @@ the list and leaves revoking or re-issuing to the admin.
 Page exports and batch metadata replacement use only the writable record fields
 (`id`, `vector`, `metadata`, `payload_base64`); the server-owned `revision`
 is dropped, so exports remain importable.
+
+## Advanced retrieval, expiry and change feed
+
+The V5 controls use the existing bearer token, active collection, request inspector
+and scope gates. They do not persist drafts or credentials in browser storage.
+Unsupported feature controls remain disabled. The assets are embedded with
+`include_str!` by the Rust server and are also used by the standalone dashboard;
+there are no additional scripts, dependencies or external connections.
+
+- **TTL on put:** enter a nonnegative integer in milliseconds. Blank omits expiry
+  on replacement; zero expires immediately. Expiry requires a V5 database. Get
+  clears the TTL draft: a relative lifetime is never silently copied/restarted.
+- **Save metadata only:** replaces the entire typed metadata map using PATCH,
+  retaining vector, payload, expiry and additional vectors. The same optional
+  If-Match from Get applies; a 412 requires reloading before another conditional
+  edit. Other editor drafts are not saved by this action.
+- **Candidate reranking:** exact f32 or MMR on ordinary vector search. Candidates
+  must be at least k and at most 1,000. MMR lambda ranges from 0 (diversity) to 1
+  (relevance); it requires a nonzero query. It is not available for lexical hybrid.
+  Version 2 saved queries preserve optional reranking and still load older files.
+- **Group by:** grouped search uses the playground vector, metric and filter,
+  with independent group and per-group limits. Values and hits are displayed as
+  safe JSON, not flattened into the ordinary neighbor list.
+- **Geo radius:** uses the playground vector/metric/filter and a location field,
+  latitude, longitude, radius in meters and vector/geographic sort selection.
+- **Named vectors:** enter a declared dense name, optional model version and query
+  vector. Named dimensions are independent of the base collection dimensions.
+  **Dense + sparse** adds a sparse name and sorted unique `[u32_index, f32_value]`
+  pairs. Fusion uses equal weights, RRF k=60 and 100 candidates per leg. Higher
+  fused scores are better; named distances are lower-is-better. These routes do
+  not accept the playground metadata filter or reranking; no filter is silently
+  sent or applied. Configure/store additional vectors through the API or SDK.
+- **Recommend:** positive/negative decimal-string IDs and/or vector examples;
+  uses the playground k, metric and filter. A positive example is required.
+- **Facets / numeric stats:** aggregates matching collection records with the
+  playground filter, not a browser sample or only the current search results.
+- **Query language:** a bounded read-only SEARCH statement and JSON vector
+  parameter map. See [VECTORS.md](VECTORS.md) for grammar, typing and limits;
+  this is not SQL or a script engine. Read-only credentials can use these POST
+  retrieval routes; scoped credentials require search for the active collection.
+- **Change feed:** database-wide, not selected-collection events. Requires read
+  across all collections (a scoped credential must include `*`). Load a supplied
+  opaque cursor or begin retained history with a blank cursor; Next page follows
+  the returned cursor while `has_more` is true. The cursor is encoded as a query
+  parameter without interpretation. Limits are approximate because commits are
+  not split. To check for later events, Load the last next cursor explicitly.
+  Compacted-history errors require consumer resynchronization. Expiry emits no
+  independent event. Disconnect clears displayed events and cursor state.
+
+Advanced results are text-only JSON, cleared on collection switches; the global
+feed and admin views remain database-wide until disconnect/reconnect. Disk ANN,
+PITR, webhooks and the encryption badge are described in
+[CONSOLE-ADMIN.md](CONSOLE-ADMIN.md).

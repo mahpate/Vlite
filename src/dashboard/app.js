@@ -21,7 +21,7 @@
   let loaded = null; // { collection, id, revision, etag } of the record last fetched into the editor
   const utils = () => window.VLiteTools.utils;
   const path = (suffix) => utils().collectionPath(collection, suffix);
-  const isSearchPath = (value) => /^\/v1(?:\/collections\/[a-z][a-z0-9_-]{0,62})?\/search$/.test(value);
+  const isSearchPath = (value) => utils().isSearch(value);
   const feature = (name) => capabilities?.features?.[name] === true;
   // Newer servers report format_version; older servers have none of the EPIC-015 routes.
   const extended = () => capabilities !== null && capabilities.format_version !== undefined;
@@ -118,6 +118,8 @@
     $("record-vector").value = "";
     $("payload").value = "";
     $("metadata").value = "{}";
+    $("record-ttl").value = "";
+    $("rerank-mode").value = "";
     $("query").value = "";
     $("filter").value = "[]";
     $("search-text").value = "";
@@ -138,6 +140,7 @@
     collectionState();
     for (const id of ["stat-records", "stat-dimensions", "stat-bytes"]) $(id).textContent = "--";
     $("stat-index").textContent = "Not checked";
+    $("encryption-badge").textContent = "Encryption: not checked";
     $("snapshot-note").textContent = "Connect to view a database snapshot. Refresh after external writes.";
   }
   function disconnect() {
@@ -340,6 +343,7 @@
     $("record-vector").value = JSON.stringify(result.vector);
     $("payload").value = result.payload_base64;
     $("metadata").value = JSON.stringify(result.metadata, null, 2);
+    $("record-ttl").value = "";
     loaded = { collection: owner, id: result.id, revision: result.revision ?? null, etag };
     editorDirty = false;
     $("record-revision").textContent = `Loaded from collection ${owner}${result.revision !== undefined ? `, revision ${result.revision}` : ""}${etag ? ". Saving with \"Only if unchanged\" sends If-Match with this record's tag." : ". No ETag returned; writes are unconditional."}`;
@@ -347,7 +351,7 @@
     show("browse-preview", { id: result.id, dimensions: result.vector.length, vector_first_32: result.vector.slice(0, 32), metadata: result.metadata });
     $("browse-preview").textContent += `\nPayload preview:\n${$("payload-preview").textContent.slice(0, 4096)}`;
   }
-  for (const id of ["id", "record-vector", "payload", "metadata"]) $(id).addEventListener("input", () => { editorDirty = true; });
+  for (const id of ["id", "record-vector", "payload", "metadata", "record-ttl"]) $(id).addEventListener("input", () => { editorDirty = true; });
   async function inspectRecord(recordPath) {
     await loadRecord(recordPath);
     $("editor").scrollIntoView({ block: "start" });
@@ -516,6 +520,9 @@
       if (capabilities.role !== "scoped" || can("diagnostics")) overview.metrics = await api("GET", "/metrics");
       if (info) overview.collection = info;
       show("overview", overview);
+      $("encryption-badge").textContent = overview.database?.is_encrypted === true
+        ? `Encrypted (key ID ${overview.database.encryption_key_id ?? "unavailable"})`
+        : overview.database?.is_encrypted === false ? "Encryption: off" : "Encryption: unavailable to this credential/server";
       showCollectionStats(collection === "default" && overview.database ? overview.database : info);
       $("stat-bytes").textContent = String(overview.metrics?.database_bytes ?? "Unavailable");
       $("snapshot-note").textContent = "Snapshot from the last connection refresh. External writes may change these values.";
@@ -569,7 +576,10 @@
       const id = $("id").value;
       const metadata = parse("metadata");
       if (!metadata || Array.isArray(metadata) || typeof metadata !== "object") throw new Error("Metadata must be a typed JSON object");
-      const body = { vector: vector("record-vector"), payload_base64: $("payload").value, metadata };
+      utils().metadata(metadata);
+      const ttl = utils().expiry($("record-ttl").value.trim());
+      if (ttl.ttl_ms !== undefined && !feature("record_expiry")) throw new Error("This server does not support record expiry");
+      const body = { vector: vector("record-vector"), payload_base64: $("payload").value, metadata, ...ttl };
       const condition = preconditionFor(id);
       if (!await confirmOperation(`Replace ${target} (record ${id} in collection ${owner})? The vector, payload and entire metadata map will be durably replaced.${condition ? ` Only if unchanged since revision ${condition.revision ?? "loaded"}.` : " Unconditional write."}`)) return;
       if (owner !== collection) throw new Error("Collection changed before the write; nothing sent");
@@ -589,6 +599,23 @@
       staleSnapshot();
     });
   });
+  $("patch-metadata").addEventListener("click", () => run(async () => {
+    const target = recordPath();
+    const owner = collection;
+    const condition = preconditionFor($("id").value);
+    const metadata = utils().metadata(parse("metadata"));
+    if (!feature("metadata_updates") || !can("write")) throw new Error("HTTP 403: metadata updates are unavailable for this credential/server");
+    if (!await confirmOperation(`Replace only metadata for ${target} in collection ${owner}? Vector, payload, named vectors and expiry are retained.${condition ? " Only if unchanged since Get." : " Unconditional update."}`)) return;
+    try {
+      await api("PATCH", `${target}/metadata`, { metadata }, condition ? { headers: { "If-Match": condition.etag } } : {});
+    } catch (error) { preconditionFailed(error); throw error; }
+    loaded = null;
+    // Only metadata was saved: vector, payload and TTL drafts may still be unsaved.
+    editorDirty = true;
+    mutationChanged();
+    $("record-revision").textContent = "Metadata saved. Get again before another conditional edit. Other editor drafts were not written.";
+    show("record", { metadata_updated: true, collection: owner });
+  }));
   $("delete-vector").addEventListener("click", () => run(async () => {
     const target = recordPath();
     const owner = collection;
@@ -643,6 +670,7 @@
       Object.assign(body, annOptions());
     }
     if ($("explain").checked && feature("search_explain")) body.explain = true;
+    Object.assign(body, utils().rerank($("rerank-mode").value, $("rerank-candidates").value, $("mmr-lambda").value, body.k, mode));
     return body;
   }
   async function search() {

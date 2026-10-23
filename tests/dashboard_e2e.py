@@ -1179,7 +1179,171 @@ def exercise_operations_mocked(browser):
     assert not errors, errors
     context.close()
 
+class FeatureApi(FakeApi):
+    def __init__(self, role="admin", scope=None):
+        super().__init__(role=role, format_version=5, scope=scope, features=ALL_FEATURES + [
+            "record_expiry", "metadata_updates", "grouped_search", "geo_search", "recommendations",
+            "facets", "numeric_stats", "named_vectors", "sparse_vectors", "change_feed", "webhooks", "disk_ann"])
+        self.caps["routes"] = ["/v1/collections/{collection}/query"]
+        self.hooks = []
+
+    def api(self, method, path, query, body, headers):
+        if path == "/v1/database":
+            return 200, {"dimensions": 3, "records": 1, "is_encrypted": True, "encryption_key_id": "18446744073709551615"}, {}
+        if path == "/v1/changes":
+            from urllib.parse import parse_qs
+            cursor = parse_qs(query).get("cursor", [""])[0]
+            return 200, {"changes": [{"sequence": "18446744073709551615", "collection": "docs", "change": {"type": "put", "id": "5"}}],
+                         "head": "18446744073709551615", "next_cursor": "a+b/=&?", "has_more": not cursor}, {}
+        if path == "/v1/admin/restores":
+            return 201, {"name": "vlite-restored-1.vlite", "restart_required": False}, {}
+        if path == "/v1/admin/webhooks":
+            if method == "POST":
+                self.hooks.append({"id": "a" * 24, "url": body["url"], "attempts": 2, "last_error": "receiver unavailable", "last_success_unix_ms": None})
+                return 201, self.hooks[-1], {}
+            return 200, {"subscriptions": self.hooks}, {}
+        if path.startswith("/v1/admin/webhooks/"):
+            if method == "DELETE":
+                self.hooks.clear()
+                return 200, {"deleted": True}, {}
+            return 200, self.hooks[0], {}
+        collection, rest = self.collection_route(path)
+        if rest.endswith("/metadata") and method == "PATCH":
+            key = (collection, rest.split("/")[2])
+            if headers.get("if-match") != self.etag(*key):
+                return self.error(412, "precondition_failed")
+            self.records[key]["revision"] += 1
+            return 200, {"updated": True}, {}
+        if rest == "/index/disk-ann":
+            return 200, {"collection_id": 1, "sequence": "44", "path_name": "disk-ann-1.dann"}, {}
+        if rest in ["/recommend", "/search/named", "/search/dense-sparse", "/search/geo", "/search/disk-ann"]:
+            return 200, {"hits": [{"id": "5", "distance": 0, "score": 0.032}]}, {}
+        if rest == "/search/grouped":
+            return 200, {"groups": [{"value": {"type": "string", "value": "<script>unsafe</script>"}, "hits": [{"id": "5", "distance": 0}]}]}, {}
+        if rest == "/facets":
+            return 200, {"facets": [{"value": {"type": "string", "value": "docs"}, "count": 1}]}, {}
+        if rest == "/stats/numeric":
+            return 200, {"count": 1, "min": 2, "max": 2, "sum": 2, "average": 2}, {}
+        if rest == "/query":
+            return 200, {"hits": [{"id": "5", "distance": 0}], "groups": [], "facets": []}, {}
+        return super().api(method, path, query, body, headers)
+
+
+def exercise_features_mocked(browser):
+    fake = FeatureApi()
+    context, page, errors = mocked_page(browser, fake)
+    expect(page.locator("#encryption-badge")).to_contain_text("Encrypted (key ID 18446744073709551615)")
+    page.locator("#id").fill("1")
+    page.locator("#get-vector").click()
+    expect(page.locator("#record-revision")).to_contain_text("revision 1")
+    page.locator("#record-ttl").fill("60000")
+    page.locator("#vector-form button[type=submit]").click()
+    confirm(page, "record 1 in collection default")
+    expect(page.locator("#record")).to_contain_text('"committed": true')
+    assert fake.log[-1]["body"]["ttl_ms"] == 60000
+    page.locator("#get-vector").click()
+    expect(page.locator("#record-revision")).to_contain_text("revision 2")
+    page.locator("#metadata").fill('{"label":{"type":"string","value":"edited"}}')
+    page.locator("#patch-metadata").click()
+    confirm(page, "Replace only metadata")
+    expect(page.locator("#record")).to_contain_text('"metadata_updated": true')
+    patch = fake.log[-1]
+    assert patch["method"] == "PATCH" and patch["path"] == "/v1/vectors/1/metadata"
+    assert "if-match" in patch["headers"] and list(patch["body"]) == ["metadata"]
+    page.locator("#collection").select_option("docs")
+    confirm(page, "unsaved record editor changes")
+    page.locator("#query").fill("[1,0]")
+    page.locator("#rerank-mode").select_option("mmr")
+    page.locator("#mmr-lambda").fill("0.25")
+    page.locator("#search-form button[type=submit]").click()
+    expect(page.locator("#hits tbody tr")).to_have_count(1)
+    assert fake.log[-1]["body"]["rerank"] == {"mode": "mmr", "candidates": 50, "lambda": .25}
+    cases = [("group-search", "group-result", "/search/grouped"), ("geo-search", "geo-result", "/search/geo"),
+             ("facets-run", "facets-result", "/facets"), ("stats-run", "stats-result", "/stats/numeric")]
+    for button, result, suffix in cases:
+        page.locator("#" + button).click()
+        expect(page.locator("#" + result)).not_to_have_text("Request pending")
+        assert fake.log[-1]["path"] == "/v1/collections/docs" + suffix
+        assert fake.log[-1]["body"]["filter"] == []
+    expect(page.locator("#group-result")).to_contain_text("<script>unsafe</script>")
+    expect(page.locator("#group-result script")).to_have_count(0)
+    page.locator("#named-query").fill("[0,1,0,0]")  # named dimensions need not match the collection
+    page.locator("#named-version").fill("model-v2")
+    page.locator("#sparse-query").fill("[[1,1]]")
+    for button, suffix in [("named-search", "/search/named"), ("dense-sparse-search", "/search/dense-sparse")]:
+        page.locator("#" + button).click()
+        expect(page.locator("#named-result")).to_contain_text('"hits"')
+        assert fake.log[-1]["path"] == "/v1/collections/docs" + suffix
+        assert fake.log[-1]["body"]["version"] == "model-v2"
+    page.locator("#recommend-positive").fill("18446744073709551615")
+    page.locator("#recommend-run").click()
+    expect(page.locator("#recommend-result")).to_contain_text('"hits"')
+    assert fake.log[-1]["body"]["positive_ids"] == ["18446744073709551615"]
+    page.locator("#language-vectors").fill('{"q":[1,0]}')
+    page.locator("#language-run").click()
+    expect(page.locator("#language-result")).to_contain_text('"facets"')
+    assert fake.log[-1]["body"]["vectors"] == {"q": [1, 0]}
+    page.locator("#disk-build").click()
+    confirm(page, "Build disk ANN for collection docs")
+    expect(page.locator("#disk-result")).to_contain_text("disk-ann-1.dann")
+    page.locator("#disk-probe").click()
+    expect(page.locator("#disk-result")).to_contain_text('"hits"')
+    assert fake.log[-1]["body"] == {"vector": [1, 0], "k": 1, "ef_search": 100}
+    page.locator("#feed-load").click()
+    expect(page.locator("#feed-result")).to_contain_text("18446744073709551615")
+    page.locator("#feed-next").click()
+    expect(page.locator("#feed-next")).to_be_disabled()
+    assert "cursor=a%2Bb%2F%3D%26%3F" in fake.log[-1]["query"]
+    page.locator("#webhook-url").fill("https://consumer.example/hook")
+    page.locator("#webhook-secret").fill("cancelled-signing-secret")
+    before = len(fake.log)
+    page.locator("#webhook-create").click()
+    confirm(page, "Create this webhook", accept=False)
+    expect(page.locator("#webhook-secret")).to_have_value("")
+    assert len(fake.log) == before and "cancelled-signing-secret" not in visible_state(page)
+    page.locator("#webhook-secret").fill("local-webhook-signing-secret")
+    page.locator("#webhook-create").click()
+    confirm(page, "Create this webhook")
+    expect(page.locator("#webhook-result")).to_contain_text("receiver unavailable")
+    expect(page.locator("#webhook-secret")).to_have_value("")
+    assert "local-webhook-signing-secret" not in visible_state(page)
+    page.locator("#webhook-list").click()
+    expect(page.locator("#webhook-result")).to_contain_text('"attempts": 2')
+    page.locator("#webhook-id").fill("a" * 24)
+    page.locator("#webhook-status").click()
+    expect(page.locator("#webhook-result")).to_contain_text('"last_error"')
+    page.locator("#webhook-delete").click()
+    confirm(page, "Delete webhook")
+    expect(page.locator("#webhook-result")).to_contain_text('"subscriptions": []')
+    page.locator("#pitr-backup").fill("vlite-backup-1.vlite")
+    page.locator("#pitr-target").fill("42")
+    page.locator("#pitr-run").click()
+    confirm(page, "at sequence 42")
+    expect(page.locator("#pitr-result")).to_contain_text("vlite-restored-1.vlite")
+    assert fake.log[-1]["body"] == {"backup": "vlite-backup-1.vlite", "sequence": 42}
+    assert not any(item["path"].endswith("/select") for item in fake.log)
+    page.locator("#disconnect").click()
+    for name in ["group-result", "named-result", "geo-result", "recommend-result", "facets-result", "stats-result", "language-result", "disk-result", "feed-result", "webhook-result", "pitr-result"]:
+        expect(page.locator("#" + name)).to_have_text("")
+    assert not errors, errors
+    context.close()
+    # Read-only retrieval POSTs are not mistaken for mutations; admin actions stay gated.
+    for role, scope in [("read_only", None), ("scoped", {"collections": ["docs"], "operations": ["read", "search"], "expires_unix_ms": 2000000000000})]:
+        fake = FeatureApi(role, scope)
+        context, page, errors = mocked_page(browser, fake)
+        for name in ["patch-metadata", "webhook-create", "webhook-list", "pitr-run", "disk-build"]:
+            expect(page.locator("#" + name)).to_be_disabled()
+        if scope:
+            expect(page.locator("#feed-load")).to_be_disabled()
+        page.locator("#facets-run").click()
+        expect(page.locator("#facets-result")).to_contain_text('"facets"')
+        assert not errors, errors
+        context.close()
+    print("PASS V5 console: TTL, metadata If-Match, MMR, grouped/geo/named/dense+sparse/recommend/facets/stats/query, cursor paging, webhooks secret hygiene, disk ANN, PITR, encryption and role gates")
+
+
 def exercise_epic015_mocked(browser):
+    exercise_features_mocked(browser)
     exercise_collections_mocked(browser)
     exercise_scoped_mocked(browser)
     exercise_legacy_mocked(browser)

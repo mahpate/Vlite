@@ -312,7 +312,12 @@
     if (collection !== undefined && value.collection !== collection) throw new Error(`Query belongs to collection "${value.collection}"; select that collection first. Nothing was loaded.`);
     const q = value.query;
     const keys = ["config", "ef_search", "explain", "filter", "fusion", "k", "metric", "mode", "quantization", "rerank_multiplier", "text", "vector", "vector_leg"];
-    if (!object(q) || Object.keys(q).some((key) => !keys.includes(key)) || keys.some((key) => !(key in q))) throw new Error("Unknown or missing query fields; credentials are not accepted");
+    if (!object(q) || Object.keys(q).some((key) => ![...keys, "rerank"].includes(key)) || keys.some((key) => !(key in q))) throw new Error("Unknown or missing query fields; credentials are not accepted");
+    if (q.rerank !== undefined) {
+      exactKeys(q.rerank, ["mode", "candidates", "lambda"], ["mode", "candidates"], "Reranking");
+      if (!["exact", "mmr"].includes(q.rerank.mode) || typeof q.rerank.candidates !== "number" || ("lambda" in q.rerank && (q.rerank.mode !== "mmr" || typeof q.rerank.lambda !== "number"))) throw new Error("Invalid rerank candidate count or lambda");
+      rerank(q.rerank.mode, q.rerank.candidates, q.rerank.lambda ?? 0.5, q.k, q.mode);
+    }
     if (!["exact", "approximate", "approximate_ready", "auto", "hybrid"].includes(q.mode)) throw new Error("Invalid query mode");
     if (!["exact", "approximate_ready"].includes(q.vector_leg) || !Number.isInteger(q.rerank_multiplier) || q.rerank_multiplier < 1 || q.rerank_multiplier > 16) throw new Error("Invalid vector_leg or rerank_multiplier");
     if (typeof q.text !== "string" || new TextEncoder().encode(q.text).length > 1024) throw new Error("Query text must be at most 1024 bytes");
@@ -381,7 +386,202 @@
     }[method] || [];
     return patterns.some((pattern) => new RegExp(pattern).test(path));
   }
-  const isSearch = (path) => new RegExp(`^/v1${SCOPED}/search$`).test(path);
+  const isSearch = (path) => new RegExp(`^/v1${SCOPED}/(?:search(?:/(?:grouped|geo|named|sparse|dense-sparse|disk-ann))?|recommend|facets|stats/numeric|query)$`).test(path);
+  function expiry(value) {
+    if (value === "") return {};
+    if (!/^(0|[1-9][0-9]*)$/.test(String(value))) throw new Error("TTL must be a nonnegative integer in milliseconds");
+    return { ttl_ms: boundedInteger(value, 0, Number.MAX_SAFE_INTEGER, "TTL milliseconds") };
+  }
+  function rerank(mode, candidates, lambda, k, searchMode) {
+    if (!mode) return {};
+    if (!["exact", "mmr"].includes(mode) || searchMode === "hybrid") throw new Error("Reranking requires vector search and an exact or MMR mode");
+    if (String(candidates).trim() === "") throw new Error("Rerank candidates are required");
+    const result = { mode, candidates: boundedInteger(candidates, Math.max(k, 1), 1000, "Rerank candidates") };
+    if (mode === "mmr") {
+      const value = Number(lambda);
+      if (lambda === "" || !Number.isFinite(value) || value < 0 || value > 1) throw new Error("MMR lambda must be 0..1");
+      result.lambda = value;
+    }
+    return { rerank: result };
+  }
+  function sparseVector(value) {
+    if (!Array.isArray(value) || value.length > 65536) throw new Error("Expected up to 65536 sparse pairs");
+    let previous = -1;
+    for (const pair of value) {
+      if (!Array.isArray(pair) || pair.length !== 2 || !Number.isInteger(pair[0]) || pair[0] <= previous || pair[0] > 4294967295 || typeof pair[1] !== "number" || !Number.isFinite(pair[1]) || Math.abs(pair[1]) > 3.4028234663852886e38) throw new Error("Sparse entries require increasing unique u32 indices and finite f32 values");
+      previous = pair[0];
+    }
+    return value;
+  }
+  function webhookRequest(input) {
+    const url = new URL(input.url);
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.hash) throw new Error("Webhook URL must use HTTP(S), without credentials or fragment");
+    const secretBytes = new TextEncoder().encode(input.secret).length;
+    if (secretBytes < 16 || secretBytes > 256) throw new Error("Signing secret must contain 16..256 bytes");
+    const events = input.events.split(",").map((v) => v.trim()).filter(Boolean);
+    if (!events.length || new Set(events).size !== events.length || events.some((v) => !["put", "delete", "metadata_update", "collection_created", "collection_dropped", "settings_updated", "vectors_updated"].includes(v))) throw new Error("Select unique supported webhook events");
+    const collections = input.collections.split(",").map((v) => v.trim()).filter(Boolean);
+    collections.forEach(collectionName);
+    if (new Set(collections).size !== collections.length) throw new Error("Duplicate webhook collection");
+    return { url: url.href, events, secret: input.secret, ...(collections.length ? { collections } : {}) };
+  }
+  function pitrRequest(backup, kind, target) {
+    if (!/^[a-zA-Z0-9_.-]{1,96}$/.test(backup) || backup.includes("..")) throw new Error("Use an existing generated backup name, not a path");
+    if (!["sequence", "timestamp_ms"].includes(kind) || !/^(0|[1-9][0-9]*)$/.test(target)) throw new Error("Choose a PITR target and a canonical nonnegative integer");
+    return { backup, [kind]: boundedInteger(target, 0, Number.MAX_SAFE_INTEGER, "PITR target") };
+  }
+  function feedPath(cursor, limit) {
+    const query = new URLSearchParams({ limit: String(boundedInteger(limit, 1, 10000, "Feed limit")) });
+    if (cursor) query.set("cursor", cursor);
+    return `/v1/changes?${query}`;
+  }
+  function advancedTools(ctx, on, get) {
+    let nextCursor = null, hasMore = false, draftDirty = false;
+    document.querySelectorAll("#retrieval input, #retrieval textarea, #retrieval select").forEach((element) => {
+      element.addEventListener("input", () => { draftDirty = true; });
+      element.addEventListener("change", () => { draftDirty = true; });
+    });
+    const route = (suffix) => `/v1/collections/${collectionName(ctx.collection())}${suffix}`;
+    const display = (name, value) => text(name, redact(value));
+    const field = (name) => {
+      const value = $(name).value.trim();
+      if (!value || new TextEncoder().encode(value).length > 256) throw new Error("Field/name must contain 1..256 bytes");
+      return value;
+    };
+    const limit = () => boundedInteger($("k").value, 0, 1000, "Result limit");
+    const filter = () => {
+      const value = get("filter");
+      if (!Array.isArray(value) || value.length > 64) throw new Error("Expected up to 64 filter conditions");
+      return value;
+    };
+    const base = () => ({ vector: vector(get("query"), ctx.dimensions()), metric: $("metric").value, filter: filter() });
+    async function read(suffix, body, result) {
+      if (!ctx.can("search")) throw new Error("HTTP 403: search is not permitted for this collection");
+      text(result, "Request pending");
+      try { display(result, await ctx.api("POST", route(suffix), body, { data: false })); }
+      catch (error) { text(result, "Request failed; see status and request inspector. No results retained."); throw error; }
+    }
+    on("group-search", () => read("/search/grouped", { ...base(), field: field("group-field"), groups: boundedInteger($("group-count").value, 1, 1000, "Groups"), hits_per_group: boundedInteger($("group-hits").value, 1, 1000, "Hits per group") }, "group-result"));
+    const named = () => ({ name: field("named-name"), vector: vector(get("named-query"), null), k: boundedInteger($("named-k").value, 0, 1000, "Result limit"), ...($("named-version").value ? { version: field("named-version") } : {}) });
+    on("named-search", () => read("/search/named", named(), "named-result"));
+    on("dense-sparse-search", () => {
+      const q = named();
+      return read("/search/dense-sparse", { dense_name: q.name, dense: q.vector, k: q.k, ...(q.version ? { version: q.version } : {}), sparse_name: field("sparse-name"), sparse: sparseVector(get("sparse-query")), fusion: { candidates: 100, rrf_k: 60, vector_weight: 1, text_weight: 1 } }, "named-result");
+    });
+    on("geo-search", () => {
+      const number = (name, min, max) => {
+        const value = Number($(name).value);
+        if (!$(name).value.trim() || !Number.isFinite(value) || value < min || value > max) throw new Error(`${name} must be ${min}..${max}`);
+        return value;
+      };
+      return read("/search/geo", { ...base(), k: limit(), field: field("geo-field"), latitude: number("geo-latitude", -90, 90), longitude: number("geo-longitude", -180, 180), radius_meters: number("geo-radius", 0, Number.MAX_SAFE_INTEGER), sort: $("geo-sort").value }, "geo-result");
+    });
+    on("recommend-run", () => {
+      const ids = (name) => $(name).value.split(",").map((v) => v.trim()).filter(Boolean).map(id);
+      const examples = (name) => {
+        const rows = get(name);
+        if (!Array.isArray(rows) || rows.length > 1000) throw new Error("Expected up to 1000 example vectors");
+        return rows.map((row) => vector(row, ctx.dimensions()));
+      };
+      const positive_ids = ids("recommend-positive"), positive_vectors = examples("recommend-vectors");
+      if (!positive_ids.length && !positive_vectors.length) throw new Error("Recommend requires positive IDs or vectors");
+      return read("/recommend", { positive_ids, negative_ids: ids("recommend-negative"), positive_vectors, negative_vectors: examples("recommend-negative-vectors"), k: limit(), metric: $("metric").value, filter: filter() }, "recommend-result");
+    });
+    on("facets-run", () => read("/facets", { field: field("facet-field"), filter: filter() }, "facets-result"));
+    on("stats-run", () => read("/stats/numeric", { field: field("facet-field"), filter: filter() }, "stats-result"));
+    on("language-run", () => {
+      const query = $("language-query").value;
+      if (!query.trim() || new TextEncoder().encode(query).length > 16384) throw new Error("Query must contain 1..16384 bytes");
+      const vectors = get("language-vectors");
+      if (!object(vectors)) throw new Error("Vector parameters must be a JSON object");
+      Object.values(vectors).forEach((v) => vector(v, null));
+      return read("/query", { query, vectors }, "language-result");
+    });
+    on("disk-build", async () => {
+      if (!ctx.can("index")) throw new Error("HTTP 403: index operation required");
+      const metric = $("metric").value;
+      if (!["squared_l2", "cosine"].includes(metric)) throw new Error("Disk ANN supports squared L2 and cosine");
+      if (!await ctx.confirm(`Build disk ANN for collection ${ctx.collection()}? The private sidecar is replaced; encrypted databases are unsupported.`)) return;
+      text("disk-result", "Build pending; no automatic retry");
+      display("disk-result", await ctx.api("POST", route("/index/disk-ann"), { metric, config: ctx.indexConfig() }, { data: false }));
+    });
+    on("disk-probe", () => read("/search/disk-ann", { vector: vector(get("query"), ctx.dimensions()), k: 1, ef_search: boundedInteger($("ef").value, 1, 100000, "Search ef") }, "disk-result"));
+    const feedAllowed = () => {
+      const caps = ctx.capabilities();
+      return caps?.role === "admin" || caps?.role === "read_only" || (caps?.role === "scoped" && caps.scope.operations.includes("read") && caps.scope.collections.includes("*"));
+    };
+    async function loadFeed(cursor) {
+      if (!feedAllowed()) throw new Error("HTTP 403: change feed requires read over all collections");
+      nextCursor = null; hasMore = false;
+      text("feed-result", ""); text("feed-status", "Loading page");
+      const result = await ctx.api("GET", feedPath(cursor, $("feed-limit").value));
+      nextCursor = result.next_cursor; hasMore = result.has_more === true;
+      display("feed-result", result.changes);
+      text("feed-status", { head: result.head, next_cursor: nextCursor, has_more: hasMore });
+    }
+    on("feed-load", () => loadFeed($("feed-cursor").value.trim()));
+    on("feed-next", () => {
+      if (!hasMore || !nextCursor) throw new Error("No next page; load a cursor to refresh the feed");
+      $("feed-cursor").value = nextCursor;
+      return loadFeed(nextCursor);
+    });
+    $("feed-cursor").addEventListener("input", () => { nextCursor = null; hasMore = false; $("feed-next").disabled = true; });
+    const admin = () => { if (ctx.capabilities()?.role !== "admin") throw new Error("HTTP 403: bootstrap admin required"); };
+    const webhookId = () => {
+      const value = $("webhook-id").value.trim();
+      if (!/^[a-f0-9]{24}$/.test(value)) throw new Error("Expected a 24-character hexadecimal subscription ID");
+      return value;
+    };
+    const list = async () => { admin(); display("webhook-result", await ctx.api("GET", "/v1/admin/webhooks")); };
+    on("webhook-list", list);
+    on("webhook-status", async () => { admin(); display("webhook-result", await ctx.api("GET", `/v1/admin/webhooks/${webhookId()}`)); });
+    on("webhook-create", async () => {
+      admin();
+      let body;
+      try {
+        body = webhookRequest({ url: $("webhook-url").value, collections: $("webhook-collections").value, events: $("webhook-events").value, secret: $("webhook-secret").value });
+        if (!await ctx.confirm("Create this webhook subscription? Committed changes will be sent to the configured destination. Its signing secret cannot be recovered from the API.")) return;
+        display("webhook-result", await ctx.api("POST", "/v1/admin/webhooks", body, { data: false, sensitive: true }));
+      } finally { $("webhook-secret").value = ""; if (body) body.secret = ""; }
+    });
+    on("webhook-delete", async () => {
+      admin(); const value = webhookId();
+      if (await ctx.confirm(`Delete webhook subscription ${value}? Delivery to this subscription stops.`)) {
+        await ctx.api("DELETE", `/v1/admin/webhooks/${value}`, undefined, { data: false });
+        await list();
+      }
+    });
+    on("pitr-run", async () => {
+      admin(); const body = pitrRequest($("pitr-backup").value.trim(), $("pitr-kind").value, $("pitr-target").value.trim());
+      if (await ctx.confirm(`Restore backup ${body.backup} at ${$("pitr-kind").value} ${$("pitr-target").value} into a new copy? The live database is unchanged; no startup selection is made.`)) display("pitr-result", await ctx.api("POST", "/v1/admin/restores", body, { data: false }));
+    });
+    const results = ["group-result", "named-result", "geo-result", "recommend-result", "facets-result", "stats-result", "language-result", "disk-result"];
+    return {
+      dirty: () => draftDirty ? ["advanced retrieval draft"] : [],
+      reset(all = false) {
+        draftDirty = false;
+        for (const name of results) text(name, "");
+        for (const name of ["record-ttl", "named-version", "recommend-positive", "recommend-negative"]) $(name).value = "";
+        $("named-query").value = "[]"; $("language-vectors").value = "{}";
+        $("sparse-query").value = "[]";
+        $("language-query").value = "SEARCH default NEAR $q K 10";
+        $("recommend-vectors").value = $("recommend-negative-vectors").value = "[]";
+        if (all) {
+          nextCursor = null; hasMore = false;
+          for (const name of ["feed-cursor", "webhook-url", "webhook-collections", "webhook-secret", "webhook-id", "pitr-backup", "pitr-target"]) $(name).value = "";
+          for (const name of ["feed-result", "feed-status", "webhook-result", "pitr-result"]) text(name, "");
+        }
+      },
+      gate() {
+        const caps = ctx.capabilities();
+        document.querySelectorAll("[data-route]").forEach((element) => { element.disabled = !caps?.routes?.includes(element.dataset.route); });
+        document.querySelectorAll("[data-feed]").forEach((element) => { if (!feedAllowed()) element.disabled = true; });
+        if (!hasMore || !nextCursor) $("feed-next").disabled = true;
+        $("record-ttl").disabled = !ctx.feature("record_expiry") || !ctx.can("write");
+        $("rerank-mode").disabled = !caps?.routes?.includes("/v1/collections/{collection}/query");
+      },
+    };
+  }
   function init(ctx) {
     let preview = [], previewCollection = null, sample = [], refreshing = false;
     // Resumable import state: prepared file chunks and the job being driven (never persisted).
@@ -396,6 +596,7 @@
       element.addEventListener("click", () => ctx.run(action));
     };
     const get = (name) => JSON.parse($(name).value);
+    const advanced = advancedTools(ctx, on, get);
     // Record fields only: newer servers add server-owned fields (e.g. `revision`) that are not writable and would make
     // exports non-importable and read-then-rewrite batches fail validation.
     const fetchRecord = async (value) => {
@@ -446,11 +647,13 @@
       ctx.status("Visual fields applied to JSON draft only; use Put / replace to save");
     });
     on("query-save", async () => {
+      if (!ctx.extended() && $("rerank-mode").value) throw new Error("Legacy query files cannot store reranking; disable it first");
       const base = { k: Number($("k").value), mode: $("mode").value, metric: $("metric").value, ef_search: Number($("ef").value), filter: get("filter"), config: ctx.indexConfig() };
       let value;
       if (ctx.extended()) {
         const query = $("query").value.trim();
         value = savedQueryV2({ version: 2, name: $("query-name").value, collection: ctx.collection(), query: { ...base,
+          ...rerank($("rerank-mode").value, $("rerank-candidates").value, $("mmr-lambda").value, base.k, base.mode),
           vector: query ? get("query") : null, text: $("search-text").value, explain: $("explain").checked,
           quantization: $("quantization").value, rerank_multiplier: Number($("rerank-multiplier").value), vector_leg: $("vector-leg").value,
           fusion: { rrf_k: Number($("rrf-k").value), vector_weight: Number($("vector-weight").value), text_weight: Number($("text-weight").value), candidates: Number($("fusion-candidates").value) },
@@ -467,6 +670,9 @@
       if (["auto", "hybrid"].includes(q.mode) && $("mode").querySelector(`option[value="${q.mode}"]`).disabled) throw new Error(`This server does not advertise ${q.mode} search; nothing was loaded`);
       $("query-name").value = value.name; $("query").value = q.vector === null ? "" : JSON.stringify(q.vector);
       $("mode").value = q.mode;
+      $("rerank-mode").value = q.rerank?.mode ?? "";
+      $("rerank-candidates").value = q.rerank?.candidates ?? 50;
+      $("mmr-lambda").value = q.rerank?.lambda ?? 0.5;
       $("metric").value = q.metric; $("k").value = q.k; $("ef").value = q.ef_search;
       $("filter").value = JSON.stringify(q.filter, null, 2);
       $("hnsw-m").value = q.config.m; $("hnsw-ef").value = q.config.ef_construction; $("hnsw-seed").value = q.config.seed;
@@ -1152,6 +1358,7 @@
     } catch (error) { ctx.status(`Appearance preferences could not be loaded: ${error.message}`, true); }
     return {
       clear() {
+        advanced.reset(true);
         $("metadata-fields").replaceChildren();
         $("query-name").value = "my-query"; $("query-file").value = "";
         text("query-workspace-status", "");
@@ -1191,7 +1398,7 @@
       },
       // Collection-bound pending work that a collection switch would discard.
       dirty() {
-        const lost = [];
+        const lost = advanced.dirty();
         if (preview.length) lost.push(`validated import preview (${preview.length} records)`);
         if (prepared) lost.push(`prepared resumable import file ${prepared.file} (${prepared.chunks.length} chunks)`);
         if (job) lost.push(`progress view of import job ${job.id} (the job stays open on the server)`);
@@ -1200,6 +1407,7 @@
         return lost;
       },
       collectionChanged(info) {
+        advanced.reset();
         preview = []; previewCollection = null; sample = []; prepared = null; stopRequested = true;
         // Follow the selection only while the scope field still holds the untouched default.
         if (info?.name && $("cred-collections").value === credentialDefault) $("cred-collections").value = credentialDefault = info.name;
@@ -1216,6 +1424,7 @@
       },
       // Runs after every operation (buttons are re-enabled first): state-dependent disabling.
       gate() {
+        advanced.gate();
         if (!ctx.connected()) return;
         document.querySelectorAll("[data-extended]").forEach((element) => { if (!ctx.extended()) element.disabled = true; });
         $("cred-copy").disabled = $("cred-clear").disabled = secret === null;
@@ -1229,6 +1438,7 @@
   window.VLiteTools = { init, utils: {
     id, vector, metadata, record, savedQuery, csvParse, csvExport, distances, analyze, pca,
     collectionName, collectionPath, settings, scoreDirection, redact, maskSecret, OPERATIONS, credentialRequest, graceSeconds,
+    expiry, rerank, sparseVector, webhookRequest, pitrRequest, feedPath,
     boundedInteger, importRows, chunk, resumePlan, savedQueryV2, autoMaintenance, autoMaintenanceForm, backupSchedule, memoryRows, requestAllowed, isSearch,
   } };
 })();

@@ -167,3 +167,40 @@ power-loss durability retains the engine's documented limitation. An I/O failure
 after publication can leave the named output present: inspect before retrying.
 Administration is experimental: protect plain HTTP with a trusted TLS proxy,
 retain independent off-host backups, and use least privilege for console tokens.
+
+## Webhooks, disk ANN, PITR and encryption status
+
+**Webhooks and point-in-time restore** contains bootstrap-admin-only controls.
+These require a private `VLITE_ADMIN_DIR`. Refresh subscriptions lists delivery
+attempts, last success and last error; enter a returned 24-hex ID for individual
+status or confirmed deletion. Create accepts an HTTP(S) URL without embedded
+credentials/fragments, optional comma-separated collections (blank means all),
+known event names, and a 16–256-byte signing secret in a password field. Creation
+is confirmed. The input is cleared even on cancel/failure; the secret is redacted
+from the request inspector and is never returned or displayed after submission.
+Save the signing secret securely before creating the subscription; the console
+cannot recover it. See [WEBHOOKS.md](WEBHOOKS.md) for HMAC verification, at-least-once
+delivery, shared cursor, retries and consumer deduplication. Destination URLs are
+operator-controlled; the console does not send the bearer token to receivers.
+
+**Disk ANN** in Advanced retrieval uses the selected collection. Build requires
+index scope and explicit confirmation, uses the playground L2/cosine metric and
+HNSW configuration, and shows sidecar lineage/sequence/path-name metadata. Probe
+requires search scope and runs a one-neighbor query with the playground vector
+and ef. There is no status GET endpoint: the probe is an explicit read-only query,
+not polling or a build. A missing/stale sidecar errors; it never rebuilds silently.
+Sidecars require `VLITE_ADMIN_DIR` and are unsupported for encrypted databases.
+Build metadata is a snapshot and may become stale after external writes.
+
+**PITR** takes an existing generated backup name and either a commit sequence or
+Unix millisecond timestamp. Only nonnegative JavaScript-safe integers are accepted
+(up to 9,007,199,254,740,991); larger u64 values must use an exact-integer API client.
+The confirmed operation creates a new restored copy. It never replaces the live
+database or automatically selects the copy for startup. Existing restore-selection
+controls remain a separate confirmed action. No path/upload input is accepted.
+
+**Encryption badge:** Overview shows `is_encrypted` and the server's decimal-string
+key ID, not secret key material. If database information is unavailable to the
+credential/server (including scoped credentials), the badge says unavailable,
+never incorrectly claims encryption is off. It resets on disconnect. Encryption
+configuration and keys remain offline/server concerns; see [SECURITY.md](SECURITY.md).

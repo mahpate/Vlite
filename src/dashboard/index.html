@@ -18,6 +18,9 @@
     <a href="#browse">Browse vectors</a>
     <a href="#editor">Vector editor</a>
     <a href="#search">Search playground</a>
+    <a href="#retrieval">Advanced retrieval</a>
+    <a href="#change-feed">Change feed</a>
+    <a href="#webhooks">Webhooks / PITR</a>
     <a href="#index">Index maintenance</a>
     <a href="#requests">Request inspector</a>
     <a href="#data-tools">Import / export</a>
@@ -57,6 +60,7 @@
       <div><span>HNSW index</span><strong id="stat-index">Not checked</strong></div>
     </div>
     <p id="snapshot-note">Connect to view a database snapshot. Refresh after external writes.</p>
+    <span id="encryption-badge" class="badge">Encryption: not checked</span>
     <pre id="compatibility" aria-label="Server compatibility"></pre>
     <div class="tool-group"><h3>Database details and metrics (JSON)</h3><pre id="overview" aria-label="Database overview"></pre></div>
   </section>
@@ -115,6 +119,7 @@
       <label>ID (decimal u64) <input id="id" value="1" required inputmode="numeric" spellcheck="false"></label>
       <label>Vector (JSON array) <textarea id="record-vector" rows="3">[1, 0, 0]</textarea></label>
       <label>Payload (standard base64) <textarea id="payload" rows="2"></textarea></label>
+      <label>TTL (milliseconds, optional; blank means no expiry on replacement)<input id="record-ttl" type="number" min="0" step="1" data-feature="record_expiry"></label>
       <label>Typed metadata (JSON object) <textarea id="metadata" rows="4">{}</textarea></label>
       <div class="tool-group">
         <h3>Visual metadata editor</h3>
@@ -125,6 +130,7 @@
         <button id="metadata-apply" type="button" class="secondary">Apply fields to JSON draft</button>
       </div>
       <button type="submit">Put / replace</button><button id="get-vector" class="secondary" type="button">Get</button><button id="delete-vector" class="danger" type="button">Delete</button>
+      <button id="patch-metadata" type="button" data-write data-feature="metadata_updates">Save metadata only</button>
       <label><input id="if-match" type="checkbox" checked> Only if unchanged since Get (sends If-Match when the server returned an ETag)</label>
       <p id="record-revision" role="status"></p>
     </form>
@@ -134,6 +140,98 @@
     <button id="vector-slice" type="button" class="secondary">Inspect 32 components</button>
     <pre id="vector-slice-result"></pre>
     <h3>Safe payload preview</h3><p>UTF-8 / JSON text only. HTML is never rendered.</p><pre id="payload-preview"></pre>
+  </section>
+  <section id="retrieval" class="wide">
+    <span class="eyebrow">RETRIEVAL</span><h2>Advanced retrieval</h2>
+    <p>Uses the active collection. Grouped and geo search use the playground vector, metric and metadata filter. Named and dense+sparse search use the vector below (independent dimensions); they do not accept metadata filters or reranking. Results are JSON, rendered as text.</p>
+    <div class="tool-group"><h3>Group by metadata</h3>
+      <label>Group by field<input id="group-field" value="category" maxlength="256"></label>
+      <label>Groups<input id="group-count" type="number" min="1" max="1000" value="10"></label>
+      <label>Hits per group<input id="group-hits" type="number" min="1" max="1000" value="3"></label>
+      <button id="group-search" type="button" data-feature="grouped_search" data-op="search">Search grouped</button>
+      <pre id="group-result" aria-live="polite"></pre>
+    </div>
+    <div class="tool-group"><h3>Named vectors and hybrid dense + sparse</h3>
+      <label>Dense vector name<input id="named-name" value="text" maxlength="256"></label>
+      <label>Model version (blank selects active)<input id="named-version" maxlength="256"></label>
+      <label>Named query vector (JSON array)<textarea id="named-query" rows="2">[1,0,0]</textarea></label>
+      <label>Result limit<input id="named-k" type="number" min="0" max="1000" value="10"></label>
+      <button id="named-search" type="button" data-feature="named_vectors" data-op="search">Search named vector</button>
+      <label>Sparse vector name<input id="sparse-name" value="terms" maxlength="256"></label>
+      <label>Sparse query (sorted unique [index, value] pairs)<textarea id="sparse-query" rows="2">[[1,1]]</textarea></label>
+      <p>Dense+sparse uses equal-weight RRF (k=60) with 100 candidates per leg. Higher scores are better; named search returns distances (lower is better).</p>
+      <button id="dense-sparse-search" type="button" data-feature="named_vectors sparse_vectors" data-op="search">Search dense + sparse</button>
+      <pre id="named-result" aria-live="polite"></pre>
+    </div>
+    <div class="tool-group"><h3>Geo radius filter</h3>
+      <label>Location field<input id="geo-field" value="location" maxlength="256"></label>
+      <label>Latitude<input id="geo-latitude" type="number" min="-90" max="90" step="any" value="0"></label>
+      <label>Longitude<input id="geo-longitude" type="number" min="-180" max="180" step="any" value="0"></label>
+      <label>Radius (meters)<input id="geo-radius" type="number" min="0" step="any" value="1000"></label>
+      <label>Sort<select id="geo-sort"><option value="vector_distance">Vector distance</option><option value="geo_distance">Geographic distance</option></select></label>
+      <button id="geo-search" type="button" data-feature="geo_search" data-op="search">Search within radius</button>
+      <pre id="geo-result" aria-live="polite"></pre>
+    </div>
+    <div class="tool-group"><h3>Recommend</h3>
+      <label>Positive IDs (comma-separated decimal strings)<input id="recommend-positive" placeholder="1,2"></label>
+      <label>Negative IDs (optional)<input id="recommend-negative" placeholder="3"></label>
+      <label>Positive example vectors (JSON array)<textarea id="recommend-vectors" rows="2">[]</textarea></label>
+      <label>Negative example vectors (JSON array)<textarea id="recommend-negative-vectors" rows="2">[]</textarea></label>
+      <p>Uses playground k, metric and filter. At least one positive example is required.</p>
+      <button id="recommend-run" type="button" data-feature="recommendations" data-op="search">Recommend neighbors</button>
+      <pre id="recommend-result" aria-live="polite"></pre>
+    </div>
+    <div class="tool-group"><h3>Facets and numeric stats</h3>
+      <label>Metadata field<input id="facet-field" value="category" maxlength="256"></label>
+      <p>Aggregates matching collection records using the playground metadata filter (not just loaded search hits).</p>
+      <button id="facets-run" type="button" data-feature="facets" data-op="search">Count facets</button>
+      <button id="stats-run" type="button" data-feature="numeric_stats" data-op="search">Numeric stats</button>
+      <pre id="facets-result" aria-live="polite"></pre>
+      <pre id="stats-result" aria-live="polite"></pre>
+    </div>
+    <div class="tool-group"><h3>Read-only query language</h3>
+      <label>Query (bounded SEARCH grammar, not SQL)<textarea id="language-query" rows="3" maxlength="16384">SEARCH default NEAR $q K 10</textarea></label>
+      <label>Vector parameters (JSON object)<textarea id="language-vectors" rows="3">{"q":[1,0,0]}</textarea></label>
+      <button id="language-run" type="button" data-route="/v1/collections/{collection}/query" data-op="search">Run query</button>
+      <pre id="language-result" aria-live="polite"></pre>
+    </div>
+    <div class="tool-group"><h3>Disk ANN</h3>
+      <p>Requires VLITE_ADMIN_DIR and an unencrypted database. Build uses the playground metric and HNSW configuration. Probe searches with its query vector; missing/stale sidecars return 409. No dedicated status endpoint or automatic polling is available.</p>
+      <button id="disk-build" type="button" data-feature="disk_ann" data-op="index">Build disk ANN</button>
+      <button id="disk-probe" type="button" data-feature="disk_ann" data-op="search">Probe disk ANN readiness</button>
+      <pre id="disk-result" aria-live="polite"></pre>
+    </div>
+  </section>
+  <section id="change-feed" class="wide">
+    <h2>Change feed</h2><p>Database-wide committed events, not filtered to the active collection. Scoped credentials need read over all collections. Pages retain whole commits; limits are approximate. Compacted cursors require a full consumer resync. Expiry emits no event.</p>
+    <label>Opaque cursor (blank starts retained history)<textarea id="feed-cursor" rows="2"></textarea></label>
+    <label>Page limit<input id="feed-limit" type="number" min="1" max="10000" value="100"></label>
+    <button id="feed-load" type="button" data-feature="change_feed" data-feed>Load page</button>
+    <button id="feed-next" type="button" data-feature="change_feed" data-feed>Next page</button>
+    <p id="feed-status" role="status"></p><pre id="feed-result" aria-live="polite"></pre>
+  </section>
+  <section id="webhooks" class="wide">
+    <h2>Webhooks and point-in-time restore</h2><p>Bootstrap admin only. Requires a private VLITE_ADMIN_DIR. Webhooks deliver at least once; consumers must deduplicate. New subscriptions start at the shared dispatcher position, not historical replay.</p>
+    <div class="tool-group"><h3>Webhook subscriptions and delivery status</h3>
+      <button id="webhook-list" type="button" data-admin data-feature="webhooks">Refresh subscriptions</button>
+      <pre id="webhook-result" aria-live="polite"></pre>
+      <label>Destination HTTP(S) URL<input id="webhook-url" type="url" autocomplete="off"></label>
+      <label>Collections (comma-separated; blank means all)<input id="webhook-collections"></label>
+      <label>Events (comma-separated)<input id="webhook-events" value="put,delete,metadata_update"></label>
+      <label>Signing secret (16..256 bytes; never returned or displayed)<input id="webhook-secret" type="password" autocomplete="new-password"></label>
+      <button id="webhook-create" type="button" data-admin data-feature="webhooks">Create subscription</button>
+      <label>Subscription ID (24 hex characters)<input id="webhook-id" maxlength="24"></label>
+      <button id="webhook-status" type="button" data-admin data-feature="webhooks">Delivery status / last error</button>
+      <button id="webhook-delete" type="button" class="danger" data-admin data-feature="webhooks">Delete subscription</button>
+    </div>
+    <div class="tool-group"><h3>PITR restore into a new copy</h3>
+      <label>Existing generated backup name<input id="pitr-backup" maxlength="96"></label>
+      <label>Target<select id="pitr-kind"><option value="sequence">Commit sequence</option><option value="timestamp_ms">Unix timestamp (milliseconds)</option></select></label>
+      <label>Target value (nonnegative safe integer)<input id="pitr-target" inputmode="numeric"></label>
+      <p>Creates a new restored copy; never replaces or selects the live database. Use the existing restore-selection controls for the next startup.</p>
+      <button id="pitr-run" type="button" data-admin data-feature="backup_restore">Create PITR copy</button>
+      <pre id="pitr-result" aria-live="polite"></pre>
+    </div>
   </section>
   <section id="search" class="wide">
     <span class="eyebrow">04 / TEST SIMILARITY</span><h2>Search playground</h2>
@@ -160,7 +258,10 @@
       <label><input id="explain" type="checkbox" disabled> Explain (return plan and work counters)</label>
       <label>Metadata filter (JSON AND array) <textarea id="filter" rows="4">[]</textarea></label>
       <p>Example: [{"op":"eq","field":"category","value":{"type":"string","value":"docs"}}]. The same conditions work in exact and filter-aware ANN search. ANN can return fewer than k matches and has no exact fallback. Selective filters may traverse many graph nodes; ef is not a visit/time limit.</p>
-      <button type="submit">Search</button>
+      <label>Candidate reranking (vector modes only)<select id="rerank-mode"><option value="">None</option><option value="exact">Exact f32</option><option value="mmr">MMR diversity</option></select></label>
+      <label>Rerank candidates (at least k, at most 1000)<input id="rerank-candidates" type="number" min="1" max="1000" value="50"></label>
+      <label>MMR lambda (0 diversity .. 1 relevance)<input id="mmr-lambda" type="number" min="0" max="1" step="0.05" value="0.5"></label>
+      <button type="submit" data-op="search">Search</button>
     </form>
     </div><div class="search-results"><h3>Nearest neighbors</h3><p id="search-summary" role="status">Run a search to compare vectors. Lower distance is better.</p>
     <div class="table-scroll"><table id="hits"><caption>Search results (lower distance is better)</caption><thead><tr><th>ID</th><th>Distance</th></tr></thead><tbody></tbody></table></div>
