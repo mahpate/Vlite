@@ -336,7 +336,7 @@ async fn capabilities(
         "scoped_credentials":scoped,"persistent_audit":audit_log,
         "native_tls":true,"tls_reload":!s.tls.lock().map_err(internal)?.is_empty(),
         "tenants":s.admin.tenants.is_some(),"credential_rate_limits":scoped,"credential_vector_quotas":scoped,"otel":cfg!(feature="otel")},
-        "routes":["/health","/ready","/metrics","/openapi.json","/dashboard","/dashboard/app.js","/dashboard/style.css","/dashboard/console-tools.js","/dashboard/observability.js",
+        "routes":["/health","/ready","/metrics","/openapi.json","/dashboard","/dashboard/app.js","/dashboard/style.css","/dashboard/console-tools.js","/dashboard/observability.js","/dashboard/navigation.js",
         "/v1/admin/tls/reload","/v1/admin/tenants","/v1/admin/tenants/{id}",
         "/v1/capabilities","/v1/database","/v1/vectors","/v1/vectors/{id}","/v1/batches","/v1/search",
         "/v1/index/hnsw","/v1/index/hnsw/quality","/v1/index/hnsw/rebuild","/v1/index/hnsw/rebuild/poll","/v1/index/hnsw/rebuild/cancel",

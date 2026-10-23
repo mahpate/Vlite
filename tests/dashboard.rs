@@ -19,6 +19,11 @@ async fn public_dashboard_assets_are_hardened_but_do_not_exempt_data_routes() {
         ("/dashboard", "text/html", "VLite dashboard"),
         ("/dashboard/app.js", "text/javascript", "confirmOperation"),
         (
+            "/dashboard/navigation.js",
+            "text/javascript",
+            "VLiteNavigation",
+        ),
+        (
             "/dashboard/observability.js",
             "text/javascript",
             "parsePrometheus",

@@ -1,8 +1,59 @@
 "use strict";
 (() => {
   const $ = (id) => document.getElementById(id);
-  const text = (id, value) => { $(id).textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2); };
   const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+  function responseSummary(value) {
+    if (Array.isArray(value)) return `Response contains ${value.length} item${value.length === 1 ? "" : "s"}. Raw JSON details follow.`;
+    if (!object(value)) return "";
+    const parts = [];
+    if (Number.isInteger(value.valid) && Number.isInteger(value.invalid)) parts.push(`Preview: ${value.valid} valid, ${value.invalid} invalid.`);
+    for (const key of ["hits", "items", "records", "entries", "results"]) {
+      if (Array.isArray(value[key])) {
+        const label = key === "hits" ? "hit" : key === "records" ? "record" : "item";
+        parts.push(`${value[key].length} ${label}${value[key].length === 1 ? "" : "s"} returned.`);
+        break;
+      }
+    }
+    if (!parts.length && typeof value.id === "string") parts.push(`Record ${value.id} returned.`);
+    if (!parts.length && typeof value.state === "string") {
+      const committed = Number.isInteger(value.rows_committed) ? `${value.rows_committed} rows committed` :
+        Number.isInteger(value.last_chunk) ? `${value.last_chunk} chunks committed` : "";
+      parts.push(`Job state: ${value.state}${committed ? `; ${committed}` : ""}.`);
+    }
+    if (!parts.length) parts.push(`Response received with ${Object.keys(value).length} field${Object.keys(value).length === 1 ? "" : "s"}.`);
+    return `${parts.join(" ")} Raw JSON details follow.`;
+  }
+  const responseSummaries = new WeakMap();
+  const text = (id, value) => {
+    const element = $(id);
+    const isRawOutput = element?.tagName === "PRE";
+    const summary = isRawOutput && (object(value) || Array.isArray(value)) ? responseSummary(value) : "";
+    let summaryElement = responseSummaries.get(element);
+    if (summary && element.parentNode) {
+      if (!summaryElement) {
+        summaryElement = document.createElement("p");
+        summaryElement.className = "console-result-summary";
+        summaryElement.setAttribute("role", "status");
+        summaryElement.setAttribute("aria-live", "polite");
+        summaryElement.setAttribute("aria-atomic", "true");
+        element.parentNode.insertBefore(summaryElement, element);
+        responseSummaries.set(element, summaryElement);
+      }
+      summaryElement.textContent = summary;
+    } else if (summaryElement) {
+      summaryElement.remove();
+      responseSummaries.delete(element);
+    }
+    element.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  };
+  function revealAndScroll(target) {
+    const navigation = window.VLiteNavigation;
+    if (navigation?.reveal) navigation.reveal(target);
+    else if (location.hash !== `#${target}`) location.hash = target;
+    const element = $(target);
+    element?.scrollIntoView({ block: "start", behavior: "instant" });
+    return element;
+  }
   function id(value) {
     if (typeof value !== "string" || !/^(0|[1-9][0-9]*)$/.test(value) || value.length > 20 || BigInt(value) > 18446744073709551615n) throw new Error("Expected a canonical decimal u64 string ID");
     return value;
@@ -637,8 +688,8 @@
       gate() {
         const caps = ctx.capabilities();
         document.querySelectorAll("[data-route]").forEach((element) => { element.disabled = !caps?.routes?.includes(element.dataset.route); });
-        document.querySelectorAll("[data-feed]").forEach((element) => { if (!feedAllowed()) element.disabled = true; });
-        if (!hasMore || !nextCursor) $("feed-next").disabled = true;
+        document.querySelectorAll("[data-feed]").forEach((element) => { element.disabled = !ctx.connected() || !ctx.feature("change_feed") || !feedAllowed(); });
+        $("feed-next").disabled = !ctx.connected() || !ctx.feature("change_feed") || !feedAllowed() || !hasMore || !nextCursor;
         $("record-ttl").disabled = !ctx.feature("record_expiry") || !ctx.can("write");
         $("rerank-mode").disabled = !caps?.routes?.includes("/v1/collections/{collection}/query");
       },
@@ -650,6 +701,10 @@
     const invalidate = () => { validated = null; text("write-result", "Draft changed. Validate again before writing."); clearCode(); };
     $("write-documents").addEventListener("input", invalidate);
     $("write-stop").addEventListener("click", () => { stop = true; $("write-stop").disabled = true; });
+    const requestIntro = $("requests").querySelector("p");
+    if (requestIntro) requestIntro.textContent = "Latest request only. Authorization is hidden. Timing includes browser and network time. Requests are never retried automatically.";
+    text("code-examples", "No example generated. Choose an allowlisted request and generate a text-only example; this does not send the request.");
+    text("scenario-result", "No scenario run yet. Loading a file validates it locally; Run scenario sends the read-only requests.");
     on("write-validate", async () => {
       validated = null;
       $("write-progress").value = 0;
@@ -714,7 +769,7 @@
     });
     const steps = [
       ["database", "Connect", "Enter your bearer token and connect. Tokens stay only in page memory."],
-      ["collections", "Choose a collection", "Select a collection, or define its dimensions, metric and metadata indexes, review, then create it."],
+      ["new-collection-name", "Choose a collection", "Select a collection, or create an empty one with its dimensions, metric and indexes; review before creating."],
       ["write-json", "Write JSON", "Paste documents, validate dimensions and IDs, inspect the preview, then confirm batches. This tour never writes data."],
       ["search", "Search", "Paste a query vector and choose Top K. Start with exact search; use hybrid text retrieval only with configured text fields."],
       ["observability", "Observe", "Inspect health, queue pressure and latency. Observability values are live diagnostics, not a production monitoring service."],
@@ -732,9 +787,8 @@
       text("tour-title", `${step + 1}/${steps.length} — ${title}`); text("tour-description", description);
       text("tour-next", step === steps.length - 1 ? "Finish tour" : "Next step");
       unhighlight();
-      const element = $(target) || $("diagnostics");
+      const element = revealAndScroll($(target) ? target : "diagnostics");
       element?.classList.add("studio-highlight");
-      element?.scrollIntoView({ block: "start", behavior: "instant" });
       // Keep tour controls visible without a blocking modal or moving focus to a write control.
       $("studio-tour").classList.add("studio-tour-active");
     }
@@ -962,7 +1016,7 @@
       $("query").value = JSON.stringify(item.vector);
       $("filter").value = "[]"; $("mode").value = "exact"; $("mode").dispatchEvent(new Event("change"));
       await ctx.search();
-      $("search").scrollIntoView({ block: "start" });
+      revealAndScroll("search");
     });
     on("compare-search", async () => {
       if ($("metric").value === "inner_product") throw new Error("ANN comparison supports squared L2 and cosine only");
@@ -1607,22 +1661,23 @@
         text("job-result", previousJob ? `Import job ${previousJob.id} (collection ${previousJob.collection}) remains open on the server; select that collection and Resume to continue.` : "");
         $("scenario").value = JSON.stringify({ name: "get-record", steps: [{ path: ctx.path("/vectors/1"), expected_ids: ["1"] }] }, null, 2);
       },
-      // Runs after every operation (buttons are re-enabled first): state-dependent disabling.
+      // Recompute state gates in both directions; authorization gates run afterward.
       gate() {
         advanced.gate();
         studio.gate();
-        if (!ctx.connected()) return;
-        document.querySelectorAll("[data-extended]").forEach((element) => { if (!ctx.extended()) element.disabled = true; });
-        $("cred-copy").disabled = $("cred-clear").disabled = secret === null;
+        document.querySelectorAll("[data-extended]").forEach((element) => { element.disabled = !ctx.connected() || !ctx.extended(); });
+        $("cred-copy").disabled = $("cred-clear").disabled = !ctx.connected() || secret === null;
         $("job-stop").disabled = true;
-        if (ctx.collection() !== "default") $("save-maintenance").disabled = true;
+        $("save-maintenance").disabled = !ctx.connected() || ctx.collection() !== "default";
         const caps = ctx.capabilities();
-        if (caps?.role === "scoped" && !ctx.can("diagnostics")) { $("prometheus").disabled = true; $("refresh-health").disabled = true; }
+        const diagnosticsAllowed = ctx.connected() && (caps?.role !== "scoped" || ctx.can("diagnostics"));
+        $("prometheus").disabled = !diagnosticsAllowed || !ctx.feature("prometheus_metrics");
+        $("refresh-health").disabled = !diagnosticsAllowed;
       },
     };
   }
   window.VLiteTools = { init, utils: {
-    jsonDocuments, collectionDraft, codeSnippet,
+    jsonDocuments, collectionDraft, codeSnippet, responseSummary,
     id, vector, metadata, record, savedQuery, csvParse, csvExport, distances, analyze, pca,
     collectionName, collectionPath, settings, scoreDirection, redact, maskSecret, OPERATIONS, credentialRequest, graceSeconds,
     expiry, rerank, sparseVector, webhookRequest, pitrRequest, feedPath,

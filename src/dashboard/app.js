@@ -1,5 +1,29 @@
 "use strict";
 (() => {
+  function payloadPreview(base64, limit = 4096) {
+    if (base64 === undefined || base64 === null) return "Payload not included. Select the ID to load the full record.";
+    try {
+      const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
+      const decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(decoded)) throw new Error("Binary control characters");
+      return decoded ? decoded.slice(0, limit) + (decoded.length > limit ? `\n… Preview truncated (${bytes.length} bytes); full payload in Raw JSON.` : "") : "(empty payload)";
+    } catch {
+      return "Binary or invalid UTF-8 payload. Inspect payload_base64 in Raw JSON; no text preview available.";
+    }
+  }
+  function metadataPreview(metadata, fields = Object.keys(metadata || {}).slice(0, 4)) {
+    const entries = fields.filter((field) => Object.hasOwn(metadata || {}, field));
+    return entries.length ? entries.map((field) => {
+      const entry = metadata[field];
+      const value = typeof entry?.value === "string" ? entry.value : JSON.stringify(entry?.value ?? entry);
+      return `${field}: ${String(value).slice(0, 180)}${String(value).length > 180 ? "…" : ""}${entry?.type ? ` (${entry.type})` : ""}`;
+    }).join("\n") : "(no metadata)";
+  }
+  function vectorPreview(vector) {
+    return Array.isArray(vector)
+      ? `${vector.length} components${vector.length > 32 ? "; first 32 shown, full vector in Raw JSON" : ""}\n${JSON.stringify(vector.slice(0, 32))}`
+      : "Vector not included. Select the ID to load the full record.";
+  }
   const $ = (id) => document.getElementById(id);
   const apiBase = document.querySelector('meta[name="vlite-api-base"]')?.content || "";
   let token = "";
@@ -10,6 +34,8 @@
   let dimensions = null;
   let capabilities = null;
   let activeRequest = null;
+  let connectionGeneration = 0;
+  let operationGeneration = null;
   let tools = null;
   let lastSearch = null;
   let browseItems = [];
@@ -38,16 +64,15 @@
     return scope.operations.includes(operation) && (scope.collections.includes("*") || scope.collections.includes(target));
   }
   function applyRoleGates() {
-    if (!capabilities) return;
-    const admin = capabilities.role === "admin";
-    document.querySelectorAll("[data-admin]").forEach((element) => { if (!admin) element.disabled = true; });
-    document.querySelectorAll("[data-write], #delete-vector, #vector-form button[type=submit]").forEach((element) => { if (!can("write")) element.disabled = true; });
-    document.querySelectorAll("#build-index, [data-op]").forEach((element) => {
-      const operation = element.dataset.op || "index";
-      if (!can(operation)) element.disabled = true;
-    });
-    document.querySelectorAll("[data-feature]").forEach((element) => {
-      if (!element.dataset.feature.split(" ").every(feature)) element.disabled = true;
+    const selectors = "[data-admin], [data-write], #delete-vector, #vector-form button[type=submit], #build-index, [data-op], [data-feature]";
+    document.querySelectorAll(selectors).forEach((element) => {
+      const allowed = connected && capabilities
+        && (!element.hasAttribute("data-admin") || capabilities.role === "admin")
+        && (!element.matches("[data-write], #delete-vector, #vector-form button[type=submit]") || can("write"))
+        && (!element.matches("#build-index, [data-op]") || can(element.dataset.op || "index"))
+        && (!element.dataset.feature || element.dataset.feature.split(" ").every(feature));
+      if (!allowed) element.disabled = true;
+      element.dataset.interactionGate = allowed ? "allowed" : "blocked";
     });
   }
   function collectionState() {
@@ -71,6 +96,7 @@
     clearBrowse();
     $("hits").querySelector("tbody").replaceChildren();
     for (const id of ["payload-preview", "vector-slice-result", "vector-summary"]) $(id).textContent = "";
+    clearRecordInspector();
   }
   function clearBrowse() {
     browseItems = [];
@@ -129,6 +155,7 @@
     editorDirty = false;
     lastSearch = null;
     $("search-summary").textContent = "Run a search to compare vectors. Lower distance is better.";
+    clearRecordInspector();
   }
   function clearData() {
     for (const id of ["overview", "inspector"]) $(id).textContent = "";
@@ -144,50 +171,106 @@
     $("snapshot-note").textContent = "Connect to view a database snapshot. Refresh after external writes.";
   }
   function disconnect() {
+    connectionGeneration++;
     token = "";
     connected = false;
     connectionState();
     activeRequest?.abort();
+    window.VLiteObservabilityConnection?.request.invalidate();
     capabilities = null;
     tools?.clear();
     $("token").value = "";
     clearData();
     status("Disconnected; token and displayed results cleared");
   }
+  // Only the currently serialized workflow may intentionally advance its context.
+  // Disconnect does not adopt the new generation, so its old workflow stays invalid.
+  function advanceWorkflowContext() {
+    connectionGeneration++;
+    operationGeneration = connectionGeneration;
+    window.VLiteObservabilityConnection?.request.invalidate();
+  }
   function confirmOperation(message) {
     $("confirmation-text").textContent = message;
     const dialog = $("confirmation");
     dialog.returnValue = "cancel";
+    const generation = connectionGeneration;
     return new Promise((resolve) => {
-      dialog.addEventListener("close", () => resolve(dialog.returnValue === "confirm"), { once: true });
+      dialog.addEventListener("close", () => resolve(dialog.returnValue === "confirm" && generation === connectionGeneration), { once: true });
       dialog.showModal();
     });
+  }
+  function passiveControl(element) {
+    return Boolean(element.closest("nav, [role=tablist], #confirmation, #studio-tour, [data-record-tab], [data-workspace], [data-section]"))
+      || ["theme", "density", "remember-preferences", "tour-start", "cancel-request", "job-stop", "write-stop", "disconnect", "navigation-toggle", "navigation-backdrop", "navigation-close"].includes(element.id);
+  }
+  // Preserve each control's semantic disabled state. Inert is a temporary interaction lock,
+  // not a role/feature gate; gate() may still update disabled while a workflow is running.
+  function lockWorkflowControls() {
+    const controls = [...document.querySelectorAll("button, input, select, textarea")].filter((element) => !passiveControl(element));
+    const saved = controls.map((element) => [element, element.inert, element.getAttribute("aria-disabled")]);
+    for (const [element] of saved) { element.inert = true; element.setAttribute("aria-disabled", "true"); }
+    return () => {
+      for (const [element, inert, ariaDisabled] of saved) {
+        element.inert = inert;
+        if (ariaDisabled === null) element.removeAttribute("aria-disabled");
+        else element.setAttribute("aria-disabled", ariaDisabled);
+      }
+    };
+  }
+  // Also covers controls created by a workflow after its initial lock snapshot.
+  for (const type of ["click", "submit", "beforeinput", "change", "keydown", "pointerdown"]) {
+    document.addEventListener(type, (event) => {
+      const control = event.target.closest?.("button, input, select, textarea, form");
+      if (busy && control && !passiveControl(control)) { event.preventDefault(); event.stopImmediatePropagation(); }
+    }, true);
   }
   async function run(operation) {
     if (busy) return;
     busy = true;
-    document.querySelectorAll("button").forEach((button) => { button.disabled = true; });
-    $("collection").disabled = true;
-    // Dialog controls must remain usable while an operation awaits confirmation.
-    $("confirmation").querySelectorAll("button").forEach((button) => { button.disabled = false; });
+    operationGeneration = connectionGeneration;
+    const initiator = document.activeElement;
+    const unlock = lockWorkflowControls();
+    const localRegion = initiator && !passiveControl(initiator) ? initiator.closest("form, section") : null;
+    const previousBusy = localRegion?.getAttribute("aria-busy");
+    localRegion?.setAttribute("aria-busy", "true");
+    const previousLoading = initiator?.getAttribute("data-loading");
+    initiator?.setAttribute("data-loading", "true");
     // A running resumable import can be paused between chunks.
     $("job-stop").disabled = false;
     try { await operation(); }
-    catch (error) { status(error.message, true); }
+    catch (error) { if (operationGeneration === connectionGeneration && !error.stale) status(error.message, true); }
     finally {
       busy = false;
-      document.querySelectorAll("button").forEach((button) => { button.disabled = false; });
+      operationGeneration = null;
+      unlock();
+      if (previousBusy == null) localRegion?.removeAttribute("aria-busy");
+      else localRegion?.setAttribute("aria-busy", previousBusy);
+      if (previousLoading == null) initiator?.removeAttribute("data-loading");
+      else initiator?.setAttribute("data-loading", previousLoading);
       $("collection").disabled = !connected || !feature("collections");
       $("next-page").disabled = nextAfter === null || !connected;
       $("cancel-request").disabled = activeRequest === null;
+      // Remove only our previous authorization gates before recomputing feature/state gates.
+      document.querySelectorAll('[data-interaction-gate="blocked"]').forEach((element) => { element.disabled = false; });
+      modeChanged();
       tools?.gate();
       applyRoleGates();
     }
   }
+  function staleRequest() {
+    const error = new Error("Connection or collection changed; response discarded");
+    error.stale = true;
+    return error;
+  }
   // options: { headers, withHeaders (returns { value, etag, status }), data: false for
   // requests that never change records, sensitive (response holds a one-time secret) }.
   async function api(method, path, body, options = {}) {
+    if (busy && operationGeneration !== connectionGeneration) throw staleRequest();
     if (!connected) throw new Error("Connect before accessing the database");
+    const generation = connectionGeneration;
+    const owner = collection;
+    const current = () => generation === connectionGeneration && owner === collection;
     const search = isSearchPath(path);
     if (capabilities?.role === "read_only" && method !== "GET" && !search) throw new Error("HTTP 403: read-only credentials cannot mutate data");
     const changesData = method !== "GET" && !search && options.data !== false;
@@ -209,11 +292,13 @@
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
       const text = await response.text();
+      if (!current()) throw staleRequest();
       value = options.text && response.ok ? text : text ? JSON.parse(text) : null;
     } catch (error) {
+      if (!current() || error.stale) throw staleRequest();
       if (changesData) mutationChanged();
       show("inspector", { request, error: "Network or response parsing failed", latency_ms: performance.now() - started });
-      throw new Error(`${method} ${path} failed; mutation outcome may be unknown. Do not blindly retry.`);
+      throw new Error(`${method} ${path} failed${controller.signal.aborted ? "; browser stopped waiting (server work was not cancelled)" : ""}.${changesData ? " Mutation outcome may be unknown. Verify before retrying." : " Read not completed; previous results may still be displayed."}`);
     } finally {
       clearTimeout(timeout);
       if (activeRequest === controller) activeRequest = null;
@@ -228,6 +313,8 @@
     if (!response.ok) {
       if (response.status >= 500 && changesData) mutationChanged();
       if (response.status === 401) {
+        connectionGeneration++;
+        window.VLiteObservabilityConnection?.request.invalidate();
         token = "";
         connected = false;
         connectionState();
@@ -243,6 +330,7 @@
       failure.status = response.status;
       failure.code = detail?.code;
       failure.body = options.sensitive ? null : value;
+      if (response.status === 401) status(failure.message, true);
       throw failure;
     }
     if (changesData) {
@@ -348,12 +436,43 @@
     editorDirty = false;
     $("record-revision").textContent = `Loaded from collection ${owner}${result.revision !== undefined ? `, revision ${result.revision}` : ""}${etag ? ". Saving with \"Only if unchanged\" sends If-Match with this record's tag." : ". No ETag returned; writes are unconditional."}`;
     tools?.loaded(result);
-    show("browse-preview", { id: result.id, dimensions: result.vector.length, vector_first_32: result.vector.slice(0, 32), metadata: result.metadata });
-    $("browse-preview").textContent += `\nPayload preview:\n${$("payload-preview").textContent.slice(0, 4096)}`;
+    presentRecord(result);
+  }
+  function clearRecordInspector() {
+    for (const name of ["payload", "metadata", "vector", "raw"]) {
+      const panel = name === "raw" ? $("record-inspector-raw-content") || $("record-inspector-raw") : $(`record-inspector-${name}`);
+      if (panel) panel.textContent = "Select a record ID to inspect it.";
+    }
+  }
+  function presentRecord(result) {
+    const panels = {
+      payload: payloadPreview(result.payload_base64),
+      metadata: JSON.stringify(result.metadata || {}, null, 2),
+      vector: vectorPreview(result.vector),
+      raw: JSON.stringify(result, null, 2),
+    };
+    for (const [name, content] of Object.entries(panels)) {
+      const panel = name === "raw" ? $("record-inspector-raw-content") || $("record-inspector-raw") : $(`record-inspector-${name}`);
+      if (panel) panel.textContent = content;
+    }
+    // Keep legacy outputs for integrations and the editor while avoiding a wall of vector values.
+    $("browse-preview").textContent = `Record ${result.id} · collection ${collection}\n\nPayload preview:\n${panels.payload}\n\nSelected metadata:\n${metadataPreview(result.metadata)}\n\nVector:\n${panels.vector}`;
+    for (const tableId of ["vectors", "hits"]) {
+      $(`${tableId}`).querySelectorAll("tbody tr").forEach((row) => {
+        const selected = row.dataset.recordId === String(result.id);
+        if (selected) row.setAttribute("aria-current", "true");
+        else row.removeAttribute("aria-current");
+        if (selected) {
+          const preview = row.querySelector("[data-record-preview]");
+          if (preview) preview.textContent = `${payloadPreview(result.payload_base64, 240)}\n${metadataPreview(result.metadata)}`;
+        }
+      });
+    }
   }
   for (const id of ["id", "record-vector", "payload", "metadata", "record-ttl"]) $(id).addEventListener("input", () => { editorDirty = true; });
   async function inspectRecord(recordPath) {
     await loadRecord(recordPath);
+    window.VLiteNavigation?.reveal("editor");
     $("editor").scrollIntoView({ block: "start" });
     $("id").focus({ preventScroll: true });
   }
@@ -380,7 +499,7 @@
     const columns = [...$("browse-columns").selectedOptions].map((option) => option.value);
     const header = $("vectors").querySelector("thead tr");
     header.replaceChildren();
-    for (const title of ["ID (select to inspect)", "Typed metadata", ...columns]) {
+    for (const title of ["ID (select to inspect)", "Metadata preview", ...columns]) {
       const cell = document.createElement("th"); cell.textContent = title; header.append(cell);
     }
     const field = $("browse-sort").value;
@@ -398,6 +517,7 @@
     });
     for (const item of ordered) {
       const row = document.createElement("tr");
+      row.dataset.recordId = String(item.id);
       const idCell = document.createElement("td");
       const button = document.createElement("button");
       button.type = "button";
@@ -405,7 +525,7 @@
       button.addEventListener("click", () => run(() => loadRecord(path(`/vectors/${item.id}`))));
       idCell.append(button);
       const metadata = document.createElement("td");
-      metadata.textContent = JSON.stringify(item.metadata);
+      metadata.textContent = metadataPreview(item.metadata, columns.length ? columns : undefined);
       row.append(idCell, metadata);
       for (const field of columns) {
         const cell = document.createElement("td");
@@ -471,6 +591,7 @@
     }
     const info = await api("GET", `/v1/collections/${next}`);
     if (info.name !== next) throw new Error("Server returned a different collection; selection unchanged");
+    advanceWorkflowContext();
     collection = next;
     resetCollectionData();
     tools?.collectionChanged(info);
@@ -491,6 +612,7 @@
     event.preventDefault();
     run(async () => {
       if (!tools) throw new Error("Console tools failed to initialize; reload the page. Not connecting (fails closed).");
+      advanceWorkflowContext();
       token = $("token").value || token;
       $("token").value = "";
       const previous = collection;
@@ -541,7 +663,11 @@
     });
   });
   $("disconnect").addEventListener("click", disconnect);
-  $("cancel-request").addEventListener("click", () => activeRequest?.abort());
+  $("cancel-request").addEventListener("click", () => {
+    if (!activeRequest) return;
+    activeRequest.abort();
+    status("Stopped waiting in this browser; server work was not cancelled. Verify any mutation outcome before retrying.", true);
+  });
   $("example-record").addEventListener("click", () => run(async () => {
     if (!connected || dimensions === null) throw new Error("Connect before filling a dimension-matched example");
     if (dimensions > 4096) throw new Error("Example generation is limited to 4096 dimensions; enter your vector manually");
@@ -675,15 +801,26 @@
   }
   async function search() {
       const table = $("hits").querySelector("tbody");
-      table.replaceChildren();
-      $("search-summary").textContent = "Search not completed";
-      $("search-plan").textContent = "";
       const owner = collection;
       const body = searchBody();
+      const generation = connectionGeneration;
+      const previousSummary = $("search-summary").textContent;
+      $("search-summary").textContent = lastSearch ? "Refreshing search… Previous results remain below until the new search succeeds." : "Searching…";
+      $("hits").setAttribute("aria-busy", "true");
       const started = performance.now();
-      const result = await api("POST", settingsPath("/search"), body);
+      let result;
+      try {
+        result = await api("POST", settingsPath("/search"), body);
+      } catch (error) {
+        if (generation === connectionGeneration) $("search-summary").textContent = `${lastSearch ? "Refresh failed; previous results retained. " : "Search failed. "}${previousSummary}`;
+        throw error;
+      } finally {
+        $("hits").removeAttribute("aria-busy");
+      }
       if (owner !== collection) throw new Error("Collection changed during search; results discarded");
       lastSearch = { body, result, collection: owner };
+      table.replaceChildren();
+      $("search-plan").textContent = "";
       const direction = utils().scoreDirection(body.mode, body.metric);
       $("search-summary").textContent = `${result.hits.length} neighbors returned in ${(performance.now() - started).toFixed(1)} ms (browser-observed); collection ${owner}; ${body.mode}, ${body.metric}. ${direction.label}. ${body.mode !== "exact" && body.filter.length ? "Filter-aware ANN may return fewer than k; no exact fallback. " : ""}Select an ID to inspect.`;
       $("hits").querySelector("caption").textContent = body.mode === "hybrid"
@@ -692,7 +829,7 @@
       const columns = body.mode === "hybrid" ? ["score", "distance", "bm25", "vector_rank", "text_rank"] : ["distance"];
       const header = $("hits").querySelector("thead tr");
       header.replaceChildren();
-      for (const title of ["ID", ...columns]) {
+      for (const title of ["ID", ...columns, "Record preview"]) {
         const cell = document.createElement("th"); cell.scope = "col";
         cell.textContent = title === "ID" ? "ID" : title === "score" ? "Score (higher is better)" : title === "distance" ? "Distance (lower is better)" : title;
         cell.dataset.field = title === "ID" ? "id" : title;
@@ -700,11 +837,15 @@
       }
       for (const hit of result.hits) {
         const row = document.createElement("tr");
+        row.dataset.recordId = String(hit.id);
         const idCell = document.createElement("td");
         const button = document.createElement("button");
         button.type = "button";
         button.textContent = hit.id;
-        button.addEventListener("click", () => run(() => inspectRecord(utils().collectionPath(owner, `/vectors/${hit.id}`))));
+        button.addEventListener("click", () => run(async () => {
+          await loadRecord(utils().collectionPath(owner, `/vectors/${hit.id}`));
+          $("record-inspector")?.scrollIntoView({ block: "nearest" });
+        }));
         idCell.append(button);
         row.append(idCell);
         for (const field of columns) {
@@ -712,6 +853,12 @@
           cell.textContent = hit[field] === null || hit[field] === undefined ? "--" : String(hit[field]);
           row.append(cell);
         }
+        const preview = document.createElement("td");
+        preview.setAttribute("data-record-preview", "");
+        preview.textContent = hit.payload_base64 !== undefined || hit.metadata
+          ? `${payloadPreview(hit.payload_base64, 240)}\n${metadataPreview(hit.metadata)}`
+          : "Select the ID to load payload and metadata.";
+        row.append(preview);
         table.append(row);
       }
       if (result.plan || result.stats) show("search-plan", { plan: result.plan ?? null, stats: result.stats ?? null });
@@ -748,6 +895,7 @@
       const listed = await api("GET", "/v1/collections");
       const current = listed.items.find((item) => item.name === collection);
       if (!current) {
+        advanceWorkflowContext();
         populateCollections(listed.items, listed.items[0]?.name);
         collection = listed.items[0]?.name ?? "default";
         resetCollectionData();
@@ -770,26 +918,40 @@
   // A read-only bridge shares the in-memory connection without exposing its token.
   window.VLiteObservabilityConnection = {
     connected: () => connected,
-    request: async (route, options = {}) => {
-      if (!connected) throw new Error("Connect before accessing the database");
-      const endpoint = route.split("?")[0];
-      if (!["/metrics", "/v1/admin/metrics/summary", "/v1/admin/logs", "/v1/admin/diagnostics/slow-queries", "/v1/admin/audit"].includes(endpoint)) throw new Error("Unsupported observability endpoint");
-      // Background reads must not replace the foreground request's cancel handle or inspector.
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 15000);
-      try {
-        const response = await fetch(`${apiBase}${route}`, {
-          method: "GET", signal: controller.signal, cache: "no-store", credentials: "omit", redirect: "error",
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!response.ok) {
-          const error = new Error(`HTTP ${response.status}`);
-          error.status = response.status;
-          throw error;
-        }
-        return options.text ? await response.text() : await response.json();
-      } finally { clearTimeout(timeout); }
-    },
+    request: (() => {
+      let generation = 0;
+      const controllers = new Set();
+      async function request(route, options = {}) {
+        if (!connected) throw new Error("Connect before accessing the database");
+        const endpoint = route.split("?")[0];
+        if (!["/metrics", "/v1/admin/metrics/summary", "/v1/admin/logs", "/v1/admin/diagnostics/slow-queries", "/v1/admin/audit"].includes(endpoint)) throw new Error("Unsupported observability endpoint");
+        // Independent reads never replace the foreground cancel handle or request inspector.
+        const controller = new AbortController();
+        const snapshot = generation;
+        const credential = token;
+        controllers.add(controller);
+        const timeout = setTimeout(() => controller.abort(), 15000);
+        try {
+          const response = await fetch(`${apiBase}${route}`, {
+            method: "GET", signal: controller.signal, cache: "no-store", credentials: "omit", redirect: "error",
+            headers: { Authorization: `Bearer ${credential}` },
+          });
+          if (!response.ok) {
+            const error = new Error(`HTTP ${response.status}`);
+            error.status = response.status;
+            throw error;
+          }
+          const result = options.text ? await response.text() : await response.json();
+          if (snapshot !== generation) throw new Error("Connection or collection changed; response discarded");
+          return result;
+        } finally { clearTimeout(timeout); controllers.delete(controller); }
+      }
+      request.invalidate = () => {
+        generation++;
+        controllers.forEach((controller) => controller.abort());
+      };
+      return request;
+    })(),
   };
   window.addEventListener("pagehide", disconnect);
 })();

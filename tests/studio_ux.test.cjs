@@ -6,7 +6,7 @@ const { test } = require("node:test");
 const { spawnSync } = require("node:child_process");
 global.window = {};
 vm.runInThisContext(fs.readFileSync("src/dashboard/console-tools.js", "utf8"));
-const { jsonDocuments, collectionDraft, codeSnippet, pca } = window.VLiteTools.utils;
+const { jsonDocuments, collectionDraft, codeSnippet, pca, responseSummary } = window.VLiteTools.utils;
 const document = { id: "18446744073709551615", vector: [1, 0], metadata: { category: { type: "string", value: "a'\\\"\n雪" }, ok: { type: "boolean", value: true } }, payload: "AP8=" };
 
 test("Write JSON normalizes base64 alias and preserves full-width IDs and typed fields", () => {
@@ -49,6 +49,15 @@ test("Collection review validates declarations, advanced fields and overrides ex
   const draft = { name: "x", dimensions: "3", settings: "{}" };
   for (const extra of [{ dimensions: 0 }, { name: "../x" }, { metric: "bad" }, { indexes: '[{"field":"x","kind":"unknown"}]' }, { indexes: '[{"field":"x","kind":"eq"},{"field":"x","kind":"range"}]' }, { settings: '{"surprise":true}' }]) assert.throws(() => collectionDraft({ ...draft, ...extra }));
   assert.deepEqual(collectionDraft(draft), { name: "x", dimensions: 3, settings: {} });
+});
+
+test("Raw JSON summaries surface safe counts without replacing response details", () => {
+  assert.match(responseSummary({ valid: 3, invalid: 1, errors: ["bad row"] }), /3 valid, 1 invalid/);
+  assert.match(responseSummary({ hits: [{ id: "1" }, { id: "2" }] }), /2 hits returned/);
+  assert.match(responseSummary({ state: "open", rows_committed: 42 }), /Job state: open; 42 rows committed/);
+  assert.match(responseSummary([]), /0 items/);
+  assert.match(responseSummary({ token: "secret" }), /1 field/);
+  assert.doesNotMatch(responseSummary({ token: "secret" }), /secret/);
 });
 
 const query = { vector: [1, 0], k: 4, mode: "hybrid", text: "it's snowing 雪", filter: [], explain: true, fusion: { rrf_k: 60 }, rerank: { type: "mmr" } };

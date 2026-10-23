@@ -471,6 +471,15 @@ fn configured_routes(service: Service) -> Router {
                     }),
                 )
                 .route(
+                    "/dashboard/navigation.js",
+                    get(|| async {
+                        dashboard_asset(
+                            "text/javascript; charset=utf-8",
+                            include_str!("dashboard/navigation.js"),
+                        )
+                    }),
+                )
+                .route(
                     "/dashboard/observability.js",
                     get(|| async {
                         dashboard_asset(
@@ -844,6 +853,7 @@ async fn observe(
             | "/dashboard/style.css"
             | "/dashboard/console-tools.js"
             | "/dashboard/observability.js"
+            | "/dashboard/navigation.js"
     );
     let authentication = authenticate(&service, request.headers());
     let role = authentication.as_ref().ok().cloned().flatten();

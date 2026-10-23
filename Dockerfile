@@ -48,6 +48,7 @@ RUN sed -i \
     -e 's|src="/dashboard/app.js"|src="/app.js"|' \
     -e 's|src="/dashboard/console-tools.js"|src="/console-tools.js"|' \
     -e 's|src="/dashboard/observability.js"|src="/observability.js"|' \
+    -e 's|src="/dashboard/navigation.js"|src="/navigation.js"|' \
     /usr/share/nginx/html/index.html
 USER 101
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \

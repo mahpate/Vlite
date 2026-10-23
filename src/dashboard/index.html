@@ -7,46 +7,38 @@
   <title>VLite dashboard</title>
   <link rel="stylesheet" href="/dashboard/style.css">
   <script src="/dashboard/console-tools.js" defer></script>
+  <script src="/dashboard/navigation.js" defer></script>
   <script src="/dashboard/app.js" defer></script>
   <script src="/dashboard/observability.js" defer></script>
 </head>
 <body>
-<aside class="sidebar">
+<button id="navigation-toggle" class="navigation-toggle secondary" type="button" aria-controls="dashboard-sidebar" aria-expanded="false">☰ Menu</button>
+<button id="navigation-backdrop" class="navigation-backdrop" type="button" aria-label="Close navigation" hidden></button>
+<aside id="dashboard-sidebar" class="sidebar" aria-label="Workspace navigation">
+  <button id="navigation-close" class="navigation-close secondary" type="button" aria-label="Close navigation">Close menu</button>
   <a class="brand" href="#database">V<span>Lite</span><small>DATABASE CONSOLE</small></a>
   <nav aria-label="Dashboard navigation">
-    <a href="#database">Overview</a>
-    <a href="#collections">Collections</a>
-    <a href="#browse">Browse vectors</a>
-    <a href="#editor">Vector editor</a>
-    <a href="#write-json">Write JSON</a>
-    <a href="#search">Search playground</a>
-    <a href="#retrieval">Advanced retrieval</a>
-    <a href="#change-feed">Change feed</a>
-    <a href="#webhooks">Webhooks / PITR</a>
-    <a href="#index">Index maintenance</a>
-    <a href="#requests">Request inspector</a>
-    <a href="#data-tools">Import / export</a>
-    <a href="#resumable-import">Resumable import</a>
-    <a href="#explore">Explore / compare</a>
-    <a href="#operations">Operations</a>
-    <a href="#observability">Observability</a>
-    <a href="#diagnostics">Diagnostics</a>
-    <a href="#credentials">Scoped credentials</a>
+    <a href="#database" data-workspace="overview" aria-current="page">Overview</a>
+    <a href="#browse" data-workspace="collections">Collections</a>
+    <a href="#search" data-workspace="search">Search</a>
+    <a href="#observability" data-workspace="observability">Observability</a>
+    <a href="#operations" data-workspace="administration">Administration</a>
+    <a href="#requests" data-workspace="developer">Developer Console</a>
   </nav>
   <label class="collection-picker">Active collection<select id="collection" disabled><option value="default">default</option></select></label>
   <p id="collection-note" class="collection-note">Default collection (legacy routes). Every browse, edit, search, import and index action applies only to this collection.</p>
   <div class="sidebar-note"><strong>One file. Your vectors.</strong><p>One database file per server. Named collections need a format v4 file and a server that advertises them. Embedding generation is not supported.</p></div>
 </aside>
 <div class="workspace">
-<header class="topbar"><div><span class="eyebrow">LOCAL WORKSPACE / DATABASE</span><h1>Database explorer</h1><p>Browse records, test similarity search, and inspect every REST request.</p></div><div class="badges"><span id="collection-badge" class="badge">Collection: default</span><span id="connection-badge" class="badge">Disconnected</span></div></header>
+<header class="topbar"><div><span class="eyebrow">VLITE / DATABASE WORKSPACE</span><h1 id="workspace-title">Overview</h1><p id="workspace-description">Connect to your database and review its current state.</p></div><div class="badges"><span id="collection-badge" class="badge">Collection: default</span><span id="connection-badge" class="badge">Disconnected</span></div></header>
 <a class="skip-link" href="#database">Skip to database controls</a>
-<div class="preferences">
+<details class="appearance-settings"><summary>Appearance and preferences</summary><div class="preferences">
   <label>Theme <select id="theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
   <label>Density <select id="density"><option value="comfortable">Comfortable</option><option value="compact">Compact</option></select></label>
   <label><input id="remember-preferences" type="checkbox"> Remember appearance only</label>
   <button id="tour-start" type="button" class="secondary">Quick tour</button>
   <button id="cancel-request" type="button" class="secondary" disabled>Stop waiting</button>
-</div>
+</div></details>
 <p id="status" class="status-bar" role="status" aria-live="polite">Disconnected</p>
 <p id="error-help" role="status"></p>
 <aside id="studio-tour" class="studio-tour" aria-labelledby="tour-title" hidden>
@@ -55,7 +47,9 @@
   <button id="tour-next" type="button">Show me</button>
   <button id="tour-dismiss" type="button" class="secondary">Dismiss tour</button>
 </aside>
-<main>
+<div id="workspace-tabs" class="workspace-tabs" role="tablist" aria-label="Workspace views" hidden></div>
+<div id="workspace-subtabs" class="workspace-subtabs" role="tablist" aria-label="Collection tools" hidden></div>
+<main id="workspace-content">
   <section id="database" class="wide">
     <div class="section-heading"><div><span class="eyebrow">01 / GET STARTED</span><h2>Connection</h2></div><span class="badge">Single-file database</span></div>
     <form id="connection">
@@ -80,7 +74,7 @@
     <p id="collections-format" role="status">Connect to discover collection support.</p>
     <button id="collections-refresh" data-extended type="button" class="secondary">Refresh collection list</button>
     <div class="table-scroll"><table id="collections-table"><caption>Collections visible to this credential</caption><thead><tr><th>Name</th><th>Dimensions</th><th>Live records</th><th>Metric</th><th>Quantization</th><th>Settings</th></tr></thead><tbody></tbody></table></div>
-    <div class="tool-group"><h3>Create an empty collection</h3>
+    <details class="operation-view"><summary>Create an empty collection</summary>
       <label>Name (lowercase; a-z, 0-9, _ and -)<input id="new-collection-name" maxlength="63" spellcheck="false"></label>
       <label>Dimensions (1..65536)<input id="new-collection-dimensions" type="number" min="1" max="65536" value="3"></label>
       <p>Step 1: define the collection. Step 2: review the complete request, then create. No data is written during review.</p>
@@ -91,19 +85,19 @@
       <button id="collection-review" type="button" class="secondary">Review collection (step 2)</button>
       <pre id="collection-create-summary" aria-live="polite"></pre>
       <button id="collection-create" data-feature="collections" data-op="collections" type="button">Create empty collection</button>
-    </div>
-    <div class="tool-group"><h3>Drop an empty collection</h3>
+    </details>
+    <details class="operation-view"><summary>Drop an empty collection</summary>
       <p>The server refuses to drop a collection that still holds records, and never drops <code>default</code>. Type the exact name to confirm.</p>
       <label>Collection to drop<input id="drop-collection-name" maxlength="63" spellcheck="false"></label>
       <button id="collection-drop" data-feature="collections" data-op="collections" type="button" class="danger">Drop empty collection</button>
-    </div>
-    <div class="tool-group"><h3>Settings of the active collection</h3>
+    </details>
+    <details class="operation-view" open><summary>Settings of the active collection</summary>
       <p>Partial update: omitted fields keep their current values. Metric, HNSW, quantization and rerank are the defaults for collection routes; metadata indexes and text fields drive auto planning and hybrid BM25. On a format v3 file, <code>default</code> settings apply in memory only until restart.</p>
       <button id="settings-load" data-extended type="button" class="secondary">Load current settings</button>
       <label>Settings JSON<textarea id="collection-settings" rows="8">{}</textarea></label>
       <button id="settings-save" data-extended data-op="collections" type="button">Apply settings to active collection</button>
       <pre id="collection-result" role="status"></pre>
-    </div>
+    </details>
   </section>
   <section id="browse">
     <span class="eyebrow">02 / EXPLORE</span><h2>Browse vectors</h2>
@@ -113,12 +107,27 @@
       <button type="submit">First page / refresh</button><button id="next-page" type="button" disabled>Next page</button>
     </form>
     <p id="browse-status" role="status">Connect, then refresh to load records.</p>
+    <details class="advanced-settings"><summary>Columns and page sorting</summary>
     <label>Additional metadata columns (select multiple)<select id="browse-columns" multiple size="4" aria-describedby="browse-sort-note"></select></label>
     <label>Sort loaded page<select id="browse-sort"><option value="">ID</option></select></label>
     <label>Direction<select id="browse-direction"><option value="ascending">Ascending</option><option value="descending">Descending</option></select></label>
     <p id="browse-sort-note">Sorting applies only to the loaded page, not the whole database. Missing fields sort last. Select a record to preview it below and load the editor.</p>
+    </details>
     <div class="table-scroll"><table id="vectors"><caption>Committed live records</caption><thead><tr><th>ID (select to inspect)</th><th>Typed metadata</th></tr></thead><tbody></tbody></table></div>
-    <h3>Selected record preview</h3><pre id="browse-preview" aria-live="polite"></pre>
+    <div id="browse-inspector-slot"><div id="record-inspector" class="record-inspector" aria-labelledby="record-inspector-title">
+      <div class="section-heading"><h3 id="record-inspector-title">Selected record</h3><span class="badge">Read-only inspector</span></div>
+      <div class="inspector-tabs" role="tablist" aria-label="Selected record views">
+        <button id="record-tab-payload" type="button" role="tab" data-record-tab="payload" aria-controls="record-inspector-payload" aria-selected="true">Payload</button>
+        <button id="record-tab-metadata" type="button" role="tab" data-record-tab="metadata" aria-controls="record-inspector-metadata" aria-selected="false" tabindex="-1">Metadata</button>
+        <button id="record-tab-vector" type="button" role="tab" data-record-tab="vector" aria-controls="record-inspector-vector" aria-selected="false" tabindex="-1">Vector</button>
+        <button id="record-tab-raw" type="button" role="tab" data-record-tab="raw" aria-controls="record-inspector-raw" aria-selected="false" tabindex="-1">Raw JSON</button>
+      </div>
+      <div id="record-inspector-payload" role="tabpanel" aria-labelledby="record-tab-payload" tabindex="0"><p>Select a record to inspect its payload.</p></div>
+      <div id="record-inspector-metadata" role="tabpanel" aria-labelledby="record-tab-metadata" tabindex="0" hidden><p>Select a record to inspect its typed metadata.</p></div>
+      <div id="record-inspector-vector" role="tabpanel" aria-labelledby="record-tab-vector" tabindex="0" hidden><p>Select a record to inspect its vector.</p></div>
+      <div id="record-inspector-raw" role="tabpanel" aria-labelledby="record-tab-raw" tabindex="0" hidden><pre id="record-inspector-raw-content"></pre></div>
+    </div></div>
+    <details class="advanced-settings"><summary>Legacy record preview (JSON)</summary><pre id="browse-preview" aria-live="polite"></pre></details>
     <a href="#editor">Edit the selected record</a>
     <label>Select IDs from this page (comma-separated, decimal strings)<input id="batch-ids" placeholder="1,2,3"></label>
     <label>Batch metadata replacement (typed JSON object)<textarea id="batch-metadata" rows="2">{}</textarea></label>
@@ -277,6 +286,7 @@
       <label>k <input id="k" type="number" value="10" min="0" max="10000" required></label>
       <label>Mode <select id="mode"><option value="exact">Exact</option><option value="approximate">Approximate (may build synchronously)</option><option value="approximate_ready">Approximate ready-only (409 if unavailable)</option><option value="auto" disabled>Auto (server planner; never builds)</option><option value="hybrid" disabled>Hybrid text + vector (score; higher is better)</option></select></label>
       <p id="mode-help" role="status">Exact: scans every matching record. Distances; lower is better.</p>
+      <details class="advanced-settings"><summary>Index, hybrid and reranking options</summary>
       <label>Search ef (ANN only) <input id="ef" type="number" value="100" min="1" max="100000" disabled></label>
       <label>Metric (search and index build) <select id="metric"><option value="squared_l2">Squared L2</option><option value="cosine">Cosine distance</option><option value="inner_product">Negative inner product (exact only)</option></select></label>
       <label>Quantization (ANN search and build) <select id="quantization" disabled><option value="none">None (full f32 vectors)</option><option value="scalar_u8">Scalar u8 (smaller graph scoring, then f32 rerank)</option></select></label>
@@ -290,15 +300,17 @@
         <label>Candidates per leg <input id="fusion-candidates" type="number" min="1" max="10000" value="100" disabled></label>
       </fieldset>
       <label><input id="explain" type="checkbox" disabled> Explain (return plan and work counters)</label>
-      <label>Metadata filter (JSON AND array) <textarea id="filter" rows="4">[]</textarea></label>
-      <p>Example: [{"op":"eq","field":"category","value":{"type":"string","value":"docs"}}]. The same conditions work in exact and filter-aware ANN search. ANN can return fewer than k matches and has no exact fallback. Selective filters may traverse many graph nodes; ef is not a visit/time limit.</p>
       <label>Candidate reranking (vector modes only)<select id="rerank-mode"><option value="">None</option><option value="exact">Exact f32</option><option value="mmr">MMR diversity</option></select></label>
       <label>Rerank candidates (at least k, at most 1000)<input id="rerank-candidates" type="number" min="1" max="1000" value="50"></label>
       <label>MMR lambda (0 diversity .. 1 relevance)<input id="mmr-lambda" type="number" min="0" max="1" step="0.05" value="0.5"></label>
+      </details>
+      <label>Metadata filter (JSON AND array) <textarea id="filter" rows="4">[]</textarea></label>
+      <p>Example: [{"op":"eq","field":"category","value":{"type":"string","value":"docs"}}]. The same conditions work in exact and filter-aware ANN search. ANN can return fewer than k matches and has no exact fallback. Selective filters may traverse many graph nodes; ef is not a visit/time limit.</p>
       <button type="submit" data-op="search">Search</button>
     </form>
     </div><div class="search-results"><h3>Nearest neighbors</h3><p id="search-summary" role="status">Run a search to compare vectors. Lower distance is better.</p>
     <div class="table-scroll"><table id="hits"><caption>Search results (lower distance is better)</caption><thead><tr><th>ID</th><th>Distance</th></tr></thead><tbody></tbody></table></div>
+    <div id="search-inspector-slot"></div>
     <h3>Plan and work counters (Explain)</h3><pre id="search-plan" aria-label="Search plan"></pre>
     </div></div>
     <div class="tool-group"><h3>Build a metadata filter</h3>
@@ -427,7 +439,7 @@
     <pre id="health-result"></pre>
     <div id="admin-controls">
       <p id="admin-note">Connect to discover server administration features. These operations require an admin credential.</p>
-      <h3>Credentials and audit</h3>
+      <details class="operation-view" open><summary>Credentials and audit</summary>
       <button id="token-status" data-admin type="button" class="secondary">Inspect credential sources</button>
       <button id="token-reload" data-admin data-write type="button">Reload configured token files</button>
       <button id="token-revoke" data-admin data-write type="button" class="danger">Revoke read-only credential</button>
@@ -436,7 +448,8 @@
       <button id="read-audit" data-admin type="button" class="secondary">Read sanitized audit trail</button>
       <p>Last 256 process-local requests only; not a durable compliance log. No credentials or record contents.</p>
       <pre id="audit-result"></pre>
-      <h3>Backup and staged restore</h3>
+      </details>
+      <details class="operation-view"><summary>Backup and staged restore</summary>
       <button id="list-backups" data-admin type="button" class="secondary">List snapshots</button>
       <button id="create-backup" data-admin data-write type="button">Create consistent backup</button>
       <label>Backup to restore<select id="backup-name"></select></label>
@@ -448,20 +461,23 @@
       <button id="backup-drill" data-admin data-feature="backup_verify_drill" type="button">Run restore drill on selected backup</button>
       <p>Verify checks the backup file's integrity (CRC) and records the result in its manifest. A drill restores it to a scratch file, opens and validates it, compares collections/counts with the manifest, runs a self-match query, then deletes the scratch file; the active database and restart selection are never touched.</p>
       <pre id="backup-result"></pre>
-      <h3>Scheduled backups</h3>
+      </details>
+      <details class="operation-view"><summary>Scheduled backups</summary>
       <p>Off by default. Runtime changes are memory-only: the server's environment configuration applies again after restart. Retention is a separate opt-in: when enabled it deletes generated backups ranked beyond retain_last (and, if retain_days is set, older than it), but never the newest verified backup, restored copies, drill scratch files or the next-startup selection.</p>
       <button id="backup-schedule-read" data-admin data-feature="backup_schedule" type="button" class="secondary">Read backup schedule</button>
       <label>Backup schedule changes (JSON; fields are merged, omitted fields keep their current value; Read first)<textarea id="backup-schedule" rows="6">{"enabled":false}</textarea></label>
       <button id="backup-schedule-save" data-admin data-feature="backup_schedule" type="button">Update backup schedule</button>
       <button id="backup-schedule-run" data-admin data-feature="backup_schedule" type="button" class="secondary">Run one scheduled cycle now</button>
       <pre id="backup-schedule-result"></pre>
-      <h3>Automatic index maintenance</h3>
-      <p>Off by default and memory-only (resets to the environment configuration on restart). When enabled, each tick takes at most one action for one collection (round-robin), starts at most one background rebuild, skips and counts busy ticks, and never runs a synchronous build. Thresholds are the global maintenance policy above plus the stale ratio and optional low-recall trigger here.</p>
+      </details>
+      <details class="operation-view"><summary>Automatic index maintenance</summary>
+      <p>Off by default and memory-only (resets to the environment configuration on restart). When enabled, each tick takes at most one action for one collection (round-robin), starts at most one background rebuild, skips and counts busy ticks, and never runs a synchronous build. Thresholds use the collection maintenance policy in Index plus the stale ratio and optional low-recall trigger here.</p>
       <button id="auto-maintenance-read" data-admin data-feature="auto_maintenance" type="button" class="secondary">Read automatic maintenance</button>
       <label>Automatic maintenance changes (JSON; merged: enabled, interval_secs 10..3600, stale_ratio, rebuild_on_low_recall, min_recall, quality_samples 1..32)<textarea id="auto-maintenance" rows="5">{"enabled":false}</textarea></label>
       <button id="auto-maintenance-save" data-admin data-feature="auto_maintenance" type="button">Update automatic maintenance</button>
       <button id="auto-maintenance-tick" data-admin data-feature="auto_maintenance" type="button" class="secondary">Run one automatic tick now</button>
       <pre id="auto-maintenance-result"></pre>
+      </details>
     </div>
   </section>
   <section id="diagnostics" class="wide">

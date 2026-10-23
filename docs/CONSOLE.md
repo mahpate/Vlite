@@ -8,9 +8,20 @@ The current-source dashboard/observability features are server-side repository
 features, not APIs bundled with the published PyPI 0.3.0 Python packages.
 Install the separate Python embedded or REST package with
 `python -m pip install vlite-embedded` or `python -m pip install vlite-client`.
-All tools appear on one continuous page, without expandable panels. The left
-navigation stays visible while scrolling, including as a compact rail on small
-screens, and jumps directly to each tool.
+The dashboard uses focused primary views instead of one long tools page. On a
+narrow screen, open the navigation drawer; Escape or the backdrop closes it and
+returns focus to the navigation control. Collection work is grouped into
+Records, Write, Search, Index and Settings tabs. Write separates the record
+editor from JSON documents; Search separates the playground, advanced
+retrieval and exploration. The selected-record inspector stays available from
+Records without leaving the collection workflow, with Payload, Metadata, Vector
+and Raw JSON tabs. Navigation reveals the selected view and any containing
+advanced panel. The Developer Console remains the dedicated `#requests` view
+for the request inspector, REST playground and read-only scenarios; its
+inspector shows the latest request only.
+The usual Create → Write → Query path is: review/create an empty collection in
+Settings, select it as active, write with the record editor or JSON documents,
+then query from Search.
 
 ## Studio workflow improvements
 
@@ -21,14 +32,15 @@ zvec-studio source code, assets, frameworks or runtime dependencies are used.
 VLite retains its own REST schema, decimal u64 IDs and typed metadata.
 
 - **Appearance:** Light, Dark or System, with live system-theme changes. The
-  existing density selector remains. Appearance is remembered by default in
-  `vlite-appearance`; uncheck **Remember appearance only** for this visit only.
+  existing density selector remains. Appearance persistence is opt-in: check
+  **Remember appearance only** to save it in `vlite-appearance`.
   Storage-disabled browsers still apply changes. Neither records nor tokens are
   saved. Existing light/dark preferences are preserved.
 - **Quick tour:** a dismissible first-visit orientation highlights Connect →
   Collections → Write JSON → Search → Observability (Diagnostics on an older
-  dashboard). It sends no requests or writes. Dismissal is remembered separately
-  as `vlite-studio-tour`; **Quick tour** reopens it at any time.
+  dashboard). It reveals each focused view before scrolling, and sends no
+  requests or writes. Dismissal is remembered separately as
+  `vlite-studio-tour`; **Quick tour** reopens it at any time.
 - **Collection creation:** define a name and dimensions, choose a metric and
   optionally declare metadata indexes as `[{"field":"category","kind":"eq"}]`.
   Supported kinds are `eq`, `range`, `eq_range`. Advanced settings remain JSON;
@@ -59,10 +71,11 @@ VLite retains its own REST schema, decimal u64 IDs and typed metadata.
   hybrid and rerank parameters), editor upsert, or JSON write draft. Choose POSIX
   curl, Python `vlite-client` (`vlite_client.Client`), or the repository's JavaScript
   `@vlite/client` SDK (`clients/javascript`, currently private / not npm-published).
-  Set `VLITE_BASE` to the API origin and `VLITE_TOKEN` locally; curl shows
-  `$VLITE_TOKEN`, SDKs read the environment. No connected token is passed to the
-  generator. Known credential-shaped fields/values are redacted; review the output
-  before execution or sharing because vector/metadata content may still be private.
+  Set `VLITE_BASE` to the API origin and `VLITE_TOKEN` locally. SDK examples read
+  them from the environment; curl uses a masked authorization placeholder. No
+  connected token is passed to the generator. Known credential-shaped fields
+  and values are redacted; review the output before execution or sharing because
+  vector/metadata content may still be private.
   Write examples retain 20-operation batching; none automatically retries. Editor
   examples deliberately use unconditional upserts, **not** the editor's If-Match
   constraint. If browser clipboard access is unavailable, copy the text manually.
@@ -204,11 +217,23 @@ errors use live status announcements; search/sample inspection moves focus to
 the editor, while browse selections retain their place and show an inline preview.
 Light/dark themes, compact/comfortable density and responsive tables are available.
 
-**Stop waiting** aborts the browser fetch, not necessarily server work. Ordinary
-requests time out after 60 seconds, index operations after one hour. A disconnected
-writer can still finish. Verify mutation outcomes before any manual retry. Error
-help covers authorization, dimensions, index readiness, overload and unknown
-outcomes; it never automatically retries writes.
+Selecting a file does not send it to the API. Import preview and resumable-file
+validation parse locally; loading a saved query validates and fills the form
+without searching. Loading a scenario file validates it locally; its read-only
+requests run only after **Run scenario**. Imports require an explicit preview
+and confirmed commit/start action. Database workflows are serialized by the UI;
+this is not a concurrent-request runner. Navigation, appearance, help,
+cancellation, disconnect and existing pause controls remain available while a
+workflow is running. Search keeps the previous results and plan until a refresh
+succeeds, while its status reports that refresh or a failure.
+
+**Stop waiting** aborts the browser's fetch and stops waiting for its response;
+it does not cancel work already accepted by the server. The UI warns that server
+work may continue. Ordinary requests time out after 60 seconds, index operations
+after one hour. A disconnected writer can still finish. Verify mutation
+outcomes before any manual retry. Error help covers authorization, dimensions,
+index readiness, overload and unknown outcomes; writes are never retried
+automatically.
 
 Health refresh is opt-in every 10 seconds only while the page is visible,
 connected and idle. It reads existing metrics and index status with a timestamp.
