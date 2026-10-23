@@ -191,7 +191,10 @@ Keep encryption keys and the original logs/backups needed by consumers and PITR.
 
 Verify downloads against `SHA256SUMS` and check `release-manifest.json` for source
 identity. Checksums detect corruption; they are not signatures. Use matching
-API/dashboard versions or immutable image digests. Automation gates publication
-on native tests, installed SDK checks, gRPC smoke tests, multi-platform image
-checks, HTTPS and browser verification. Registry publication is not automatic.
-See [installation and platform limits](INSTALL.md) before choosing an asset.
+API/dashboard versions or immutable image digests. Automation gates release
+assets on native tests, installed SDK checks, gRPC smoke tests, multi-platform
+image checks, HTTPS and browser verification. PyPI publication is handled by a
+separate trusted-publisher workflow; the Python 0.3.0 packages are available as
+[vlite-embedded](https://pypi.org/project/vlite-embedded/) and
+[vlite-client](https://pypi.org/project/vlite-client/). See
+[installation and platform limits](INSTALL.md) before choosing an asset.

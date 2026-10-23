@@ -53,8 +53,10 @@ pre-approvals are bundled; normal host permissions still apply.
 
 ## Run the ingestion example
 
-Python 3.11+ and `vlite-embedded` are required. A platform wheel bundles the
-native library (`pip install vlite-embedded`). This uses three-dimensional toy
+Python 3.11+ and the published
+[`vlite-embedded` package](https://pypi.org/project/vlite-embedded/) are
+required. Install with `python -m pip install vlite-embedded`. A platform wheel
+bundles the native library. This uses three-dimensional toy
 vectors, not a production text embedder, and refuses to overwrite a file:
 
 ```powershell

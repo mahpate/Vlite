@@ -13,6 +13,10 @@ description: Operate VLite safely with file locking, read-only snapshots, backup
   `native.open(path, read_only=True)`, and Node
   `native.open(path, {readOnly: true})` acquire shared locks. Many readers may
   share a file across processes, but no writer may coexist with them.
+- The Python `read_only` argument is available in current repository source,
+  not in the published [PyPI 0.3.0 package](https://pypi.org/project/vlite-embedded/).
+  Install that release with `python -m pip install vlite-embedded`; build current
+  source when you need the newer option.
 - Each reader sees the snapshot at open time. Close **all** readers to let a
   writer commit, close the writer, then reopen readers to see new commits.
   This is not live refresh or concurrent writer/read-snapshot MVCC.

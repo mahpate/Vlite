@@ -2,6 +2,11 @@
 
 `vlite-mcp` exposes a VLite database to MCP clients over the standard input/output (stdio) transport. It speaks newline-delimited JSON-RPC 2.0 and supports the MCP lifecycle, `ping`, and tool discovery/calls. Protocol messages alone are written to stdout; diagnostics are written to stderr.
 
+The MCP server is a repository/server feature; it is not bundled in either
+published Python package. Install the Python packages separately with
+`python -m pip install vlite-embedded` or `python -m pip install vlite-client`.
+Current MCP APIs and observability changes on `main` are not part of PyPI 0.3.0.
+
 ## Install and launch
 
 Build from the VLite checkout with the small `mcp` feature (which enables JSON support):
@@ -84,4 +89,3 @@ Read-only is the safe default and opens the file through VLite's shared-lock rea
 ## Security notes
 
 MCP tools grant a client access to the selected database and should be treated as privileged. Keep stdio configurations local and under user control; select the intended database path explicitly, use read-only mode unless mutations are required, and review tool calls in the host application. Writable mode can replace and delete stored records. Encryption protects database contents at rest but does not restrict access for a process holding the key. Avoid putting keys/passphrases in source-controlled configuration or command history. The stdio server does not bind a network port.
-

@@ -5,14 +5,23 @@ First-party clients for Python 3.11+, TypeScript/JavaScript (Node.js 22+),
 They call the existing REST service; they are not embedded database bindings.
 For server-free access, use the separate [Python/native bindings](../bindings/README.md)
 or [embedded Node.js/TypeScript addon](../bindings/node/README.md).
-Both use the MIT License. Install the wheel or tarball from
-[GitHub release assets](../docs/INSTALL.md), or build from this checkout.
-The Python client is published to PyPI as `vlite-client` once registry publication
-is configured ([details](../docs/INSTALL.md#registry-publication)); npm packages are not published.
+Both use the MIT License. The Python client is published as
+[vlite-client on PyPI](https://pypi.org/project/vlite-client/) (0.3.0):
+install it with `python -m pip install vlite-client`. The Python embedded
+binding is [vlite-embedded on PyPI](https://pypi.org/project/vlite-embedded/);
+see the [embedded deployment guide](../bindings/README.md). npm packages are
+not published. The GitHub release assets and checkout installation below are
+available for alternatives and contributor development.
 
 ## Python
 
-Install from the repository root:
+Install the published package for application use:
+
+```text
+python -m pip install vlite-client
+```
+
+For contributor development, install the checkout from the repository root:
 
 ```text
 python -m pip install ./clients/python
@@ -559,9 +568,18 @@ removes its project-local database directory. It never reuses a user database.
 Optional extras do not affect the standard-library Python client:
 
 ```sh
+python -m pip install 'vlite-client[langchain]'
+python -m pip install 'vlite-client[llamaindex]'
+# Or install both:
+python -m pip install 'vlite-client[integrations]'
+```
+
+For contributor development from a checkout, extras can instead be installed
+from the source directory:
+
+```sh
 python -m pip install './clients/python[langchain]'
 python -m pip install './clients/python[llamaindex]'
-# Or install both:
 python -m pip install './clients/python[integrations]'
 ```
 

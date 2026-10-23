@@ -6,6 +6,17 @@ at runtime. Install the wheel matching your operating system and architecture,
 then use `NativeLibrary()` to load the included library automatically.
 An explicit native library path is still supported.
 
+For application use, install the published
+[vlite-embedded package from PyPI](https://pypi.org/project/vlite-embedded/):
+
+```text
+python -m pip install vlite-embedded
+```
+
+The current published version is 0.3.0, with wheels for Windows x64, macOS
+arm64 and Linux x86_64/glibc 2.28+. The API below also documents current
+repository-source additions; those may not be present in the published wheel.
+
 `native.create(path, dims)` creates format 3; `native.create(path, dims,
 format=4)` enables named collections (`create_collection`, `list_collections`,
 `set_collection_settings`, `drop_collection`) and resumable imports
@@ -25,13 +36,15 @@ for builds, installation, examples, ABI ownership and limits.
 Licensed under MIT.
 
 
-## Read-only multi-process access
+## Current-source only: read-only multi-process access
 
-Use `native.open(path, read_only=True)` to open an existing database with a shared
-OS lock. Multiple read-only handles may coexist, including in different
-processes. `get` and `search` work normally; mutations raise `EmbeddedError` with
-`code == "read_only"` without invalidating the handle. Read-only opening also
-accepts `key=` or `passphrase=` for encrypted files.
+This feature is not included in the published PyPI 0.3.0 package. It is available
+from the current repository source. There, `native.open(path, read_only=True)`
+opens an existing database with a shared OS lock. Multiple read-only handles may
+coexist, including in different processes. `get` and `search` work normally;
+mutations raise `EmbeddedError` with `code == "read_only"` without invalidating
+the handle. Read-only opening also accepts `key=` or `passphrase=` for encrypted
+files.
 
 A writer (`native.open(path)`, the default) holds an exclusive lock: opening a
 writer while any reader exists raises code `"locked"`, and opening a reader while

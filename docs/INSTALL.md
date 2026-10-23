@@ -1,11 +1,18 @@
 # Install a versioned VLite release
 
-Download packages from [GitHub releases](https://github.com/mahpate/Vlite/releases).
-There is no need to clone the repository or install Rust when using a prebuilt
-SDK. Python wheels are published to PyPI as `vlite-embedded` and `vlite-client`
-by [`pypi.yml`](../.github/workflows/pypi.yml) once its trusted publisher is
-configured (see [Registry publication](#registry-publication)). npm packages are
-not published; do not assume any other registry name belongs to this project.
+Python packages are published on PyPI: [vlite-embedded](https://pypi.org/project/vlite-embedded/)
+for in-process use and [vlite-client](https://pypi.org/project/vlite-client/)
+for the REST API. The currently published versions are 0.3.0. Install them
+directly with pip; no repository clone or Rust toolchain is needed. Other
+prebuilt release assets are available from
+[GitHub releases](https://github.com/mahpate/Vlite/releases). npm packages are
+not published.
+
+The repository's `main` branch can contain newer APIs than the 0.3.0 PyPI
+packages. In particular, Python `read_only=True` opens and the current MCP and
+observability work are source-only; do not assume they are available by
+installing either published Python package. Use the package's versioned API or
+build the current source when you need those changes.
 
 ## Verify before installing
 
@@ -34,8 +41,17 @@ signature. Obtain both packages and hashes from the intended GitHub release.
 
 ## Embedded Python
 
-Requires Python 3.11+. Choose a `vlite_embedded-*.whl` matching your OS and
-architecture, then install the downloaded filename:
+Requires Python 3.11+. The recommended end-user installation is:
+
+```text
+python -m pip install vlite-embedded
+```
+
+PyPI 0.3.0 provides Windows x64, macOS arm64 and Linux x86_64/glibc 2.28+
+wheels. For supported platforms, pip selects the matching wheel and
+`NativeLibrary()` loads its bundled native library. If you need a release asset
+instead, choose a `vlite_embedded-*.whl` matching your OS and architecture and
+install its downloaded filename:
 
 ```text
 python -m pip install ./vlite_embedded-0.3.0-py3-none-win_amd64.whl
@@ -114,7 +130,7 @@ authenticated VLite server separately and provide its URL and token.
 Python 3.11+:
 
 ```text
-python -m pip install ./vlite_client-0.3.0-py3-none-any.whl
+python -m pip install vlite-client
 ```
 
 Node.js 22+:
@@ -150,7 +166,7 @@ wrapper sources are included in desktop/x64 archives; see the
 and [WASM build instructions](../bindings/wasm/README.md). Generated WASM bundles
 and NuGet packages are not prebuilt release assets.
 
-## Registry publication
+## PyPI publication details for maintainers
 
 ### PyPI
 
@@ -158,7 +174,10 @@ and NuGet packages are not prebuilt release assets.
 release (or manually with an existing tag). It downloads that release's wheels,
 verifies them against `SHA256SUMS`, skips the bare `linux_x86_64` wheel (PyPI
 only accepts `manylinux` Linux tags), and uploads with PyPI trusted publishing
-(OIDC; no API token is stored). Once published:
+(OIDC; no API token is stored). The 0.3.0 distributions are published at
+[vlite-embedded](https://pypi.org/project/vlite-embedded/) and
+[vlite-client](https://pypi.org/project/vlite-client/). End users should use
+the pip commands above.
 
 ```sh
 python -m pip install vlite-embedded   # in-process engine (Windows x64, macOS arm64, Linux x86_64 glibc 2.28+)
@@ -168,7 +187,7 @@ python -m pip install vlite-client     # REST client
 Platforms without a wheel (for example Linux arm64 or Intel macOS) must use a
 release asset or build from source with `bindings/build_wheel.py`.
 
-One-time maintainer setup, required before the first upload:
+One-time publisher configuration (only if setting up a new publisher):
 
 1. Sign in to <https://pypi.org> (create an account and enable 2FA if needed).
 2. Under **Your projects → Publishing → Add a new pending publisher**, add one
@@ -179,8 +198,8 @@ One-time maintainer setup, required before the first upload:
    be created by the workflow.
 3. In GitHub, create the `pypi` and `pypi-embedded` environments
    (Settings → Environments), ideally with a required reviewer.
-4. Run **Actions → Publish to PyPI → Run workflow** with tag `v0.3.0`, or push
-   the next release tag.
+4. Run **Actions → Publish to PyPI → Run workflow** with an existing release
+   tag, or push the next release tag.
 
 ### npm
 

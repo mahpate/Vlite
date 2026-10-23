@@ -254,9 +254,9 @@
       </div>
       <h3 style="margin-top:28px">Reproduce</h3>
       <button class="copy" data-copy="c-repro">Copy</button>
-<pre class="code" id="c-repro"><span class="c-c"># Linux x86_64, Python 3.10+</span>
+<pre class="code" id="c-repro"><span class="c-c"># Linux x86_64, Python 3.11+</span>
 python -m venv .venv &amp;&amp; . .venv/bin/activate
-pip install zvec numpy https://github.com/mahpate/Vlite/releases/download/v0.3.0/vlite_embedded-0.3.0-py3-none-manylinux_2_28_x86_64.whl
+python -m pip install zvec numpy vlite-embedded==0.3.0
 git clone https://github.com/mahpate/Vlite &amp;&amp; cd Vlite
 python benchmarks/compare_zvec.py --records 20000 --dimensions 128 --trials 3 --output zvec-20k.json</pre>
       <p class="muted">Raw results: <a href="results/zvec-20k-128d-wsl.json">20k × 128</a> ·

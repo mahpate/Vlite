@@ -83,6 +83,12 @@
     <p class="lead">One engine, several surfaces. Embed VLite in-process from Python, Node.js, Rust or C,
       or run <code>vlite-server</code> and talk to it over REST or gRPC. All surfaces share the same
       single-file storage, durability and search semantics.</p>
+    <p class="callout"><strong>Version note:</strong> This reference follows the current repository source.
+      Install the published Python packages with <code>python -m pip install vlite-embedded</code> or
+      <code>python -m pip install vlite-client</code> from
+      <a href="https://pypi.org/project/vlite-embedded/">PyPI</a> /
+      <a href="https://pypi.org/project/vlite-client/">PyPI</a>. Both are version 0.3.0;
+      the newer Python <code>read_only=True</code> option and current MCP/observability changes are source-only.</p>
 
     <div class="grid cols-3 docs-cards">
       <a class="card" href="#py-nativelibrary"><span class="label">Embedded</span><h3>Python</h3><p class="muted"><code>vlite_embedded</code> wheel &middot; synchronous, thread-safe handle</p></a>
@@ -104,7 +110,7 @@
 
     <!-- ============ PYTHON ============ -->
     <h2 id="py-nativelibrary">Python &middot; <code>NativeLibrary</code></h2>
-    <p>Install the platform wheel from <a href="https://github.com/mahpate/Vlite/releases">Releases</a> with <code>python -m pip install &lt;wheel&gt;</code>. <code>NativeLibrary</code> loads the bundled native library and opens databases. One instance per process; do not use it after <code>fork()</code>.</p>
+    <p>Install the published <a href="https://pypi.org/project/vlite-embedded/"><code>vlite-embedded</code> package</a> with <code>python -m pip install vlite-embedded</code> (Python 3.11+). PyPI 0.3.0 has wheels for Windows x64, macOS arm64 and Linux x86_64/glibc 2.28+. <code>NativeLibrary</code> loads the bundled native library and opens databases. One instance per process; do not use it after <code>fork()</code>.</p>
 <pre class="code sig">from vlite_embedded import NativeLibrary, EmbeddedError
 
 class NativeLibrary(path: str | os.PathLike | None = None)</pre>

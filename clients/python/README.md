@@ -1,7 +1,16 @@
 # VLite Python client
 
 Synchronous, typed REST client for Python 3.11+ with no runtime dependencies.
-Install with `pip install ./clients/python` from a VLite checkout.
+For application use, install the published
+[vlite-client package from PyPI](https://pypi.org/project/vlite-client/):
+
+```text
+python -m pip install vlite-client
+```
+
+The current published version is 0.3.0. For contributor development from a
+VLite checkout, install the working tree with
+`python -m pip install ./clients/python`.
 
 See the [client guide](https://github.com/mahpate/Vlite/blob/main/clients/README.md)
 for authentication, examples, supported operations and uncertain-write handling.

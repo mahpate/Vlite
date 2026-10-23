@@ -34,8 +34,20 @@ ARM and other targets require their own builds and validation.
 
 ## Python embedded usage
 
-Build a platform-specific wheel from a checkout (build host needs Rust, a
-native linker, Python and access to Python build dependencies):
+For application use, install the published
+[vlite-embedded package from PyPI](https://pypi.org/project/vlite-embedded/)
+with Python 3.11+:
+
+```text
+python -m pip install vlite-embedded
+```
+
+PyPI 0.3.0 includes bundled wheels for Windows x64, macOS arm64 and Linux
+x86_64/glibc 2.28+. `NativeLibrary()` loads the bundled native library.
+
+For contributors or source-only APIs, build a platform-specific wheel from the
+checkout (the build host needs Rust, a native linker, Python and access to
+Python build dependencies):
 
 ```text
 python bindings/build_wheel.py --output embedded-wheels
@@ -46,9 +58,15 @@ Install the generated `.whl` into the consuming application with
 `python -m pip install <wheel-path>`. The consuming machine needs only Python
 and its normal native OS runtime, not Rust or a server. CI retains these wheels
 as artifacts and the release workflow includes them with checksums. Tagged
-releases are uploaded to PyPI as `vlite-embedded` by `.github/workflows/pypi.yml`
-once its trusted publisher is configured; see
-[Registry publication](../docs/INSTALL.md#registry-publication).
+releases are uploaded to PyPI as `vlite-embedded` by
+[`.github/workflows/pypi.yml`](../.github/workflows/pypi.yml); see the
+[published package](https://pypi.org/project/vlite-embedded/) and
+[maintainer publication details](../docs/INSTALL.md#pypi-publication-details-for-maintainers).
+
+The current checkout has APIs not present in the published 0.3.0 wheel,
+including `NativeLibrary.open(..., read_only=True)`. Install from PyPI for the
+released API; use the source-build instructions above when you need current
+unreleased APIs.
 
 For installation without a checkout or Rust toolchain, use the
 [versioned release packages and installation guide](../docs/INSTALL.md).

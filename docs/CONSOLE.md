@@ -4,6 +4,10 @@ The console is a single-database development tool with collection management,
 not an embedding generator or production observability system. Open the standalone
 Compose UI (default `http://localhost:8081`), enter a bearer token and connect.
 The embedded console remains available at the API's `/dashboard` route.
+The current-source dashboard/observability features are server-side repository
+features, not APIs bundled with the published PyPI 0.3.0 Python packages.
+Install the separate Python embedded or REST package with
+`python -m pip install vlite-embedded` or `python -m pip install vlite-client`.
 All tools appear on one continuous page, without expandable panels. The left
 navigation stays visible while scrolling, including as a compact rail on small
 screens, and jumps directly to each tool.

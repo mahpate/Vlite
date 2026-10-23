@@ -8,11 +8,15 @@ description: Build grounded retrieval-augmented generation with VLite embedded P
 ## Choose the deployment
 
 - Choose `vlite-embedded` for local, in-process retrieval without an HTTP server.
-  A platform wheel bundles the native library. Use `NativeLibrary()` or an
-  explicit `NativeLibrary(path)` for a local build.
+  Install the published [PyPI package](https://pypi.org/project/vlite-embedded/)
+  with `python -m pip install vlite-embedded`; its platform wheel bundles the
+  native library. Use `NativeLibrary()` or an explicit `NativeLibrary(path)`
+  for a local build.
 - Choose `vlite-server` and `vlite-client` for a shared network service,
   authentication, REST/gRPC, dashboard and metrics. Do not open its active file
   separately with an embedded writer.
+  Install the published [REST client](https://pypi.org/project/vlite-client/)
+  with `python -m pip install vlite-client`.
 - Supply a real embedding model for production. Keep document/query model,
   version, dimensions and preprocessing identical. Never silently mix embedding
   models in one vector space.
@@ -93,3 +97,5 @@ k and known limitations.
 Repository references: `docs/CAPABILITIES.md`, `docs/API.md` and
 `bindings/python/README.md`. Use `vlite-index-tuning` for performance experiments
 and `vlite-ops` before maintenance.
+The PyPI 0.3.0 embedded package does not include the newer `read_only=True`
+open option; use current repository source for that feature.

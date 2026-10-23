@@ -1,8 +1,12 @@
 # Verified Python retrieval APIs
 
-Examples match `bindings/python/vlite_embedded/__init__.py` and
-`clients/python/vlite_client/__init__.py`. Use Python 3.11+. IDs/revisions are
-stringified u64 values; payloads are base64 bytes. Match binding/native versions.
+Examples describe current repository source in
+`bindings/python/vlite_embedded/__init__.py` and
+`clients/python/vlite_client/__init__.py`. For the published 0.3.0 packages,
+install with `python -m pip install vlite-embedded` or
+`python -m pip install vlite-client`; both require Python 3.11+.
+IDs/revisions are stringified u64 values; payloads are base64 bytes. Match
+binding/native versions.
 
 ## Embedded: create, upsert, filter, fetch
 
@@ -36,8 +40,10 @@ with native.create("documents.vlite", 3, format=4) as db:
         print(record["metadata"]["source"]["value"], hit["id"], excerpt)
 ```
 
-Reopen with `with native.open("documents.vlite", read_only=True) as db:`.
-Close every reader before opening a writer; the two cannot coexist on one file.
+Reopen with `with native.open("documents.vlite", read_only=True) as db:` when
+using current repository source. The `read_only` option is not in the PyPI
+0.3.0 `vlite-embedded` package. Close every reader before opening a writer; the
+two cannot coexist on one file.
 `db.search(..., explain=True)` returns a dictionary with `hits`/`stats` instead
 of a hit list. `db.search_auto(..., filter=tenant_filter, collection="docs",
 explain=True)` returns a dictionary and selects exact or a ready ANN index

@@ -13,6 +13,18 @@ from playwright.sync_api import Error as PlaywrightError, sync_playwright, expec
 expect.set_options(timeout=30000)
 
 
+def assert_no_stored_credentials(page, token):
+    stored = page.evaluate("""() => ({
+        local: Object.fromEntries(Object.entries(localStorage)),
+        session: Object.fromEntries(Object.entries(sessionStorage))
+    })""")
+    assert stored["session"] == {}, stored
+    assert set(stored["local"]) <= {"vlite-studio-tour"}, stored
+    if "vlite-studio-tour" in stored["local"]:
+        assert stored["local"]["vlite-studio-tour"] == "dismissed", stored
+    assert token not in json.dumps(stored), "Bearer token persisted in browser storage"
+
+
 def docker(*args, **kwargs):
     result = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=600, **kwargs)
     if result.returncode:
@@ -56,6 +68,16 @@ def exercise_layout(page, url):
     page.set_viewport_size({"width": 1280, "height": 844})
 
 
+def exercise_observability(page, vectors):
+    page.locator("#observability").scroll_into_view_if_needed()
+    page.locator("#obs-interval").select_option("0")
+    page.locator("#obs-refresh").click()
+    expect(page.locator("#obs-metrics-status")).to_contain_text("Live metrics")
+    expect(page.locator("#obs-vectors")).to_have_text(str(vectors))
+    expect(page.locator("#obs-logs-status")).to_contain_text("Tailing server log ring")
+    expect(page.locator("#obs-log-view details").first).to_be_visible()
+
+
 def exercise(page, base, token):
     errors = []
     assets = {}
@@ -63,6 +85,7 @@ def exercise(page, base, token):
     page.on("response", lambda response: assets.update({response.url: response.status}) if "/dashboard/" in response.url else None)
     page.goto(base + "/dashboard")
     assert assets.get(base + "/dashboard/app.js") == 200, assets
+    assert assets.get(base + "/dashboard/observability.js") == 200, assets
     assert assets.get(base + "/dashboard/style.css") == 200, assets
     assert not errors, errors
     expect(page.get_by_role("heading", name="Connection", exact=True)).to_be_visible()
@@ -78,6 +101,7 @@ def exercise(page, base, token):
     expect(page.locator("#connection-badge")).to_have_text("Connected")
     expect(page.locator("#stat-records")).to_have_text("0")
     expect(page.locator("#stat-dimensions")).to_have_text("3")
+    exercise_observability(page, 0)
     page.get_by_role("button", name="Fill example", exact=True).click()
     expect(page.locator("#record-vector")).to_have_value("[1,0,0]")
     assert json.loads(page.locator("#metadata").input_value())["category"]["value"] == "demo"
@@ -191,7 +215,7 @@ def exercise(page, base, token):
     expect(page.locator("#index-status")).to_contain_text("Data changed")
     page.get_by_role("button", name="Refresh index status", exact=True).click()
     expect(page.locator("#index-status")).to_contain_text("Ready; metric squared_l2; buffer 2/256")
-    assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+    assert_no_stored_credentials(page, token)
     page.get_by_role("button", name="Disconnect", exact=True).click()
     expect(page.locator("#overview")).to_have_text("")
     expect(page.locator("#inspector")).to_have_text("")
@@ -215,6 +239,7 @@ def exercise_separate_app(page, base, token, expected_index="Ready;"):
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.on("request", lambda request: api_requests.append(request.url) if "/api/" in request.url else None)
     page.goto(base + "/")
+    assert page.request.get(base + "/observability.js").status == 200
     expect(page.get_by_role("heading", name="Connection", exact=True)).to_be_visible()
     expect(page.locator("#status")).to_have_text("Disconnected")
     page.locator("#token").fill("x" * 32)
@@ -226,6 +251,7 @@ def exercise_separate_app(page, base, token, expected_index="Ready;"):
     expect(page.locator("#overview")).to_contain_text('"dimensions": 3')
     expect(page.locator("#stat-records")).to_have_text("2")
     expect(page.locator("#stat-dimensions")).to_have_text("3")
+    exercise_observability(page, 2)
     page.get_by_role("navigation", name="Dashboard navigation").get_by_role("link", name="Search playground", exact=True).click()
     assert page.url.endswith("#search")
     expect(page.locator("#index-status")).to_contain_text(expected_index)
@@ -243,7 +269,7 @@ def exercise_separate_app(page, base, token, expected_index="Ready;"):
     assert any(url.endswith("/api/v1/database") for url in api_requests), api_requests
     # Newer servers route default-collection search through /v1/collections/default so its stored settings apply.
     assert any(url.endswith(("/api/v1/search", "/api/v1/collections/default/search")) for url in api_requests), api_requests
-    assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+    assert_no_stored_credentials(page, token)
     page.get_by_role("button", name="Disconnect", exact=True).click()
     expect(page.locator("#overview")).to_have_text("")
     assert not errors, errors
@@ -255,14 +281,18 @@ def exercise_console_tools(page, base, token):
     page.get_by_role("button", name="Connect / refresh").click()
     expect(page.locator("#status")).to_have_text("Connected; overview refreshed")
     expect(page.locator("#compatibility")).to_contain_text("version")
+    expect(page.locator("#remember-preferences")).not_to_be_checked()
+    page.locator("#tour-start").click()
+    page.locator("#tour-dismiss").click()
+    assert page.evaluate("localStorage.getItem('vlite-studio-tour')") == "dismissed"
     page.locator("#theme").select_option("dark")
     page.locator("#density").select_option("compact")
     assert page.evaluate("document.documentElement.dataset.theme") == "dark"
-    assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+    assert_no_stored_credentials(page, token)
     page.locator("#remember-preferences").check()
     assert page.evaluate("JSON.parse(localStorage.getItem('vlite-appearance')).theme") == "dark"
     page.locator("#remember-preferences").uncheck()
-    assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+    assert_no_stored_credentials(page, token)
     page.get_by_role("button", name="Prepare 3 demo vectors", exact=True).click()
     expect(page.locator("#import-result")).to_contain_text("Preview only")
     page.get_by_role("button", name="Commit previewed records", exact=True).click()
@@ -561,6 +591,8 @@ def exercise_epic015_real(page, base, token):
     page.locator("#new-collection-name").fill("e2e_docs")
     page.locator("#new-collection-dimensions").fill("2")
     page.locator("#new-collection-settings").fill('{"metric":"cosine","text_fields":["title"]}')
+    page.locator("#collection-review").click()
+    expect(page.locator("#collection-create-summary")).to_contain_text("nothing written")
     page.locator("#collection-create").click()
     confirm(page, "Create empty collection e2e_docs with 2 dimensions")
     expect(page.locator("#collections-table tbody")).to_contain_text("e2e_docs")

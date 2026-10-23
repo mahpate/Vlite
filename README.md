@@ -47,7 +47,10 @@ It uses its own storage format and does not require an external database.
   OS locks across processes. Readers exclude writers and see open-time snapshots;
   reopen to see later commits. Mutations return `Error::ReadOnly` without poisoning.
   In-memory ANN builds are allowed. Python C ABI calls remain serialized within
-  one process; use multiple reader processes. See [locking contracts](docs/REFERENCE.md).
+  one process; use multiple reader processes. The Python/Node read-only options
+  are source-only and are not in the published Python 0.3.0 wheel or Node 0.3.0
+  release tarball.
+  See [locking contracts](docs/REFERENCE.md).
 - **Observability and studio UX:** [dashboard](docs/CONSOLE.md) metric cards,
   sparklines, per-route latency, filtered live logs and JSONL export; Prometheus
   at `/metrics`, `/v1/admin/metrics/summary` and `/v1/admin/logs` (in-memory ring,
@@ -96,9 +99,9 @@ service. Embedded access permits one exclusive writer or multiple read-only
 snapshots per file, not both at once. Use the service when applications need
 concurrent reads alongside coordinated writes.
 
-Use [versioned release assets and installation instructions](docs/INSTALL.md)
-for installation without cloning. Packages are not published to public package
-registries. See the [embedded deployment guide](bindings/README.md)
+Use the [published Python packages](docs/INSTALL.md#pypi) or
+[versioned release assets and installation instructions](docs/INSTALL.md) for
+installation without cloning. See the [embedded deployment guide](bindings/README.md)
 and [REST client guide](clients/README.md) for installation and examples.
 Additional clients: [Go](clients/README.md#go), [.NET](clients/README.md#net),
 [LangChain and LlamaIndex adapters](clients/README.md#langchain-and-llamaindex-integrations);
@@ -106,8 +109,8 @@ Kubernetes deployment: [Helm chart](deploy/helm/vlite/README.md).
 
 ## Quick start: embedded Python
 
-Install a matching platform wheel from the build artifacts with
-`python -m pip install <wheel-path>`, then:
+Install the published [vlite-embedded](https://pypi.org/project/vlite-embedded/)
+package with `python -m pip install vlite-embedded` (Python 3.11+), then:
 
 ```python
 from vlite_embedded import NativeLibrary
@@ -119,7 +122,8 @@ with native.create("documents.vlite", dimensions=3) as db:
 ```
 
 Use `native.open("documents.vlite")` to reopen; creation never overwrites.
-Use `native.open("documents.vlite", read_only=True)` for a shared-lock snapshot.
+The published 0.3.0 package does not include the newer `read_only=True`
+argument; shared read-only opens are available from current repository source.
 See [Python installation and native platform support](bindings/README.md).
 
 ## Quick start: embedded Node.js / TypeScript
@@ -260,10 +264,12 @@ Build once for the target OS/architecture; Rust is not required at runtime.
 The database retains its single-owner file-locking and durability contracts.
 
 See [embedded installation, Python examples and the C ABI](bindings/README.md).
-Platform-specific Python wheels bundle the native library: install a matching
-wheel and use `NativeLibrary()` without supplying a DLL path. Native wheel
-builds and isolated installation checks are wired into CI/release workflows;
-packages have not yet been published to a registry.
+Platform-specific Python wheels bundle the native library and are published as
+[vlite-embedded on PyPI](https://pypi.org/project/vlite-embedded/); install with
+`python -m pip install vlite-embedded` and use `NativeLibrary()` without
+supplying a DLL path. PyPI 0.3.0 wheels support Windows x64, macOS arm64 and
+Linux x86_64/glibc 2.28+; current-source APIs such as `read_only=True` require
+a source build and are not included in that published version.
 A dedicated audited manylinux wheel targets Linux x86_64/glibc 2.28+;
 host-native wheels remain available for Windows and macOS.
 The [embedded Node package](bindings/node/README.md) bundles its addon and
@@ -285,7 +291,10 @@ structured errors and never automatically retry writes.
 
 See [client installation, examples and error handling](clients/README.md) and
 the [REST API reference](docs/API.md).
-Packages are currently installed from this checkout, not published registries.
+The Python REST client is published as
+[vlite-client on PyPI](https://pypi.org/project/vlite-client/); install it with
+`python -m pip install vlite-client`. Current-source MCP and observability
+features are not part of the published Python 0.3.0 client.
 
 ## Browser dashboard
 
