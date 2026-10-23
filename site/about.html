@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>About | VLite</title>
+  <meta name="description" content="About Mahendra Patel, creator of VLite.">
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="assets/site.js"></script>
+</head>
+<body>
+<header class="nav">
+  <div class="wrap">
+    <a class="brand" href="./"><img src="assets/logo.svg" alt="">VLite</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="./#features">Features</a>
+      <a href="./#products">Products</a>
+      <a href="./#quickstart">Quickstart</a>
+      <a href="api.html">API</a>
+      <a href="compare.html">Benchmarks</a>
+      <a href="https://github.com/mahpate/Vlite/blob/main/docs/REFERENCE.md">Docs</a>
+      <a href="about.html" aria-current="page">About</a>
+      <a href="https://asendme.com" target="_blank" rel="noopener">ASENDME ↗</a>
+    </nav>
+    <div class="nav-actions">
+      <button class="icon-btn" id="theme-toggle" aria-label="Toggle dark mode">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+      </button>
+      <a class="icon-btn" href="https://github.com/mahpate/Vlite" aria-label="GitHub repository">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5a11.5 11.5 0 0 0-3.6 22.4c.6.1.8-.3.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.2 1.2a11 11 0 0 1 5.8 0c2.2-1.5 3.2-1.2 3.2-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A11.5 11.5 0 0 0 12 .5z"/></svg>
+      </a>
+    </div>
+  </div>
+</header>
+
+<main class="about">
+  <div class="about-card">
+    <div class="avatar" aria-hidden="true">MP</div>
+    <div>
+      <p class="kicker">About me</p>
+      <h1>Mahendra Patel</h1>
+      <p class="lead">Software engineer and creator of VLite. I build practical, durable infrastructure &mdash; storage engines, retrieval systems and developer tools &mdash; with a focus on correctness, simplicity and honest benchmarks.</p>
+      <div class="cta">
+        <a class="btn primary" href="https://www.linkedin.com/in/mahendra-patel" target="_blank" rel="noopener">Connect on LinkedIn ↗</a>
+        <a class="btn" href="https://github.com/mahpate" target="_blank" rel="noopener">GitHub ↗</a>
+        <a class="btn" href="https://asendme.com" target="_blank" rel="noopener">ASENDME ↗</a>
+      </div>
+    </div>
+  </div>
+
+  <section class="about-section">
+    <h2>Why VLite</h2>
+    <p>VLite started as a question: how small can a production-grade vector database be? The answer is a single, checksummed <code>.vlite</code> file with durable atomic commits, exact and HNSW search, typed filters and hybrid retrieval &mdash; usable as an embedded library or as a REST/gRPC service, without changing the file format.</p>
+    <ul class="list">
+      <li>Written from scratch in Rust; no SQLite or third-party storage engine underneath.</li>
+      <li>Committed data is never silently discarded; corruption is distinguished from an incomplete trailing write.</li>
+      <li>Benchmarks are published with methodology, raw JSON and the places where VLite still needs work.</li>
+    </ul>
+  </section>
+
+  <section class="about-section">
+    <h2>Get in touch</h2>
+    <p>Questions, ideas or feedback on VLite? Open an <a href="https://github.com/mahpate/Vlite/issues">issue on GitHub</a> or reach out on <a href="https://www.linkedin.com/in/mahendra-patel" target="_blank" rel="noopener">LinkedIn</a>.</p>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>© VLite contributors · MIT License</span>
+    <nav>
+      <a href="https://github.com/mahpate/Vlite">GitHub</a>
+      <a href="https://github.com/mahpate/Vlite/releases">Releases</a>
+      <a href="api.html">API</a>
+      <a href="compare.html">Benchmarks</a>
+      <a href="about.html">About</a>
+      <a href="https://asendme.com" target="_blank" rel="noopener">ASENDME</a>
+    </nav>
+  </div>
+</footer>
+</body>
+</html>

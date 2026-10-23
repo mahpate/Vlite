@@ -17,11 +17,14 @@
   <div class="wrap">
     <a class="brand" href="./"><img src="assets/logo.svg" alt="">VLite</a>
     <nav class="nav-links" aria-label="Primary">
-      <a href="#features">Features</a>
-      <a href="#products">Products</a>
-      <a href="#quickstart">Quickstart</a>
+      <a href="#features" aria-current="page">Features</a>
+      <a href="#products" aria-current="page">Products</a>
+      <a href="#quickstart" aria-current="page">Quickstart</a>
+      <a href="api.html">API</a>
       <a href="compare.html">Benchmarks</a>
-      <a href="https://github.com/mahpate/Vlite/blob/main/docs/REFERENCE.md">Docs</a>
+      <a href="https://github.com/mahpate/Vlite/blob/main/docs/REFERENCE.md" aria-current="page">Docs</a>
+      <a href="about.html">About</a>
+      <a href="https://asendme.com" target="_blank" rel="noopener">ASENDME ↗</a>
     </nav>
     <div class="nav-actions">
       <button class="icon-btn" id="theme-toggle" aria-label="Toggle dark mode">
@@ -236,35 +239,69 @@ vlite-maintain verify  documents-v5.vlite
   <section id="products" class="alt">
     <div class="wrap">
       <div class="section-head">
-        <div class="kicker">One engine, three ways to run</div>
-        <h2>From an in-process library to a self-hosted service</h2>
-        <p>The same storage engine and file format power every surface, so you can start embedded and move to a service without migrating data.</p>
+        <div class="kicker">Products</div>
+        <h2>One engine across every retrieval workflow</h2>
+        <p>Embed VLite in your application, run it as a service, or browse it in the console &mdash; the same single-file format everywhere, with no data migration.</p>
       </div>
-      <div class="grid cols-3">
-        <article class="card feature">
-          <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 9h6v6H9z"/></svg></div>
-          <div class="label">Embedded engine</div>
-          <h3>VLite Core</h3>
-          <p>Open a <code>.vlite</code> file in-process. Durable atomic commits, exact and HNSW search, typed metadata filters.</p>
-          <div class="chips"><span class="chip">Rust</span><span class="chip">Python</span><span class="chip">Node.js / TS</span><span class="chip">C ABI</span><span class="chip">WASM</span></div>
-          <a class="more" href="https://github.com/mahpate/Vlite/blob/main/bindings/README.md">Embedding guide →</a>
-        </article>
-        <article class="card feature">
-          <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01"/></svg></div>
-          <div class="label">Self-hosted service</div>
-          <h3>VLite Server</h3>
-          <p>Authenticated REST with OpenAPI, optional gRPC with streaming and TLS, metrics, webhooks and scoped credentials.</p>
-          <div class="chips"><span class="chip">REST</span><span class="chip">gRPC</span><span class="chip">OpenAPI</span><span class="chip">Docker</span><span class="chip">linux/arm64</span></div>
-          <a class="more" href="https://github.com/mahpate/Vlite/blob/main/docs/API.md">API reference →</a>
-        </article>
-        <article class="card feature">
-          <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M3 9h18M9 21V9"/></svg></div>
-          <div class="label">Web console</div>
-          <h3>VLite Dashboard</h3>
-          <p>Browse records, edit metadata, compare exact and ANN results, import/export data and inspect every REST call.</p>
-          <div class="chips"><span class="chip">Browse</span><span class="chip">Search</span><span class="chip">Index admin</span><span class="chip">REST playground</span></div>
-          <a class="more" href="https://github.com/mahpate/Vlite/blob/main/docs/CONSOLE.md">Console guide →</a>
-        </article>
+      <div class="product-panel">
+        <div class="pp-hero">
+          <div class="pp-eyebrow"><span class="pp-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg></span>Embedded engine</div>
+          <h3>VLite</h3>
+          <p>Dense, sparse, full-text and hybrid retrieval in one durable <code>.vlite</code> file &mdash; in-process or behind REST and gRPC.</p>
+          <div class="chips"><span class="chip">Private</span><span class="chip">Open source</span><span class="chip">MIT</span></div>
+          <a class="more" href="#features">Explore VLite →</a>
+        </div>
+
+        <div class="pp-rows">
+          <div class="pp-row pp-sdk">
+            <div class="pp-row-title"><span class="pp-icon">{ }</span>SDK &amp; APIs</div>
+            <div class="pp-langs">
+              <a href="api.html#py-nativelibrary">Python</a>
+              <a href="api.html#node">Node.js</a>
+              <a href="api.html#rust">Rust</a>
+              <a href="https://github.com/mahpate/Vlite/blob/main/bindings/README.md">C ABI</a>
+              <a href="https://github.com/mahpate/Vlite/blob/main/bindings/README.md">WASM</a>
+              <a href="api.html#rest">REST</a>
+              <a href="api.html#grpc">gRPC</a>
+            </div>
+          </div>
+
+          <div class="pp-row">
+            <div class="pp-row-title"><span class="pp-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></span>Search &amp; indexes</div>
+            <div class="pp-groups">
+              <div class="wide"><div class="pp-label">Retrieval</div><div class="chips"><span class="chip">Dense vectors</span><span class="chip">Sparse vectors</span><span class="chip">Full-text &middot; BM25</span><span class="chip">Hybrid retrieval</span><span class="chip">Grouped search</span><span class="chip">Typed filters</span><span class="chip">Geo radius</span><span class="chip">Recommend</span><span class="chip">MMR rerank</span></div></div>
+              <div><div class="pp-label">Index types</div><div class="chips"><span class="chip">Exact (flat)</span><span class="chip">HNSW</span><span class="chip">Disk ANN</span><span class="chip">Metadata indexes</span></div></div>
+              <div><div class="pp-label">Quantization</div><div class="chips"><span class="chip">FP32</span><span class="chip">Scalar U8 + rerank</span></div></div>
+            </div>
+          </div>
+
+          <div class="pp-row">
+            <div class="pp-row-title"><span class="pp-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg></span>Runtime &amp; platform</div>
+            <div class="pp-groups">
+              <div><div class="pp-label">Infrastructure</div><div class="chips"><span class="chip">Single file + WAL</span><span class="chip">Checksummed pages</span><span class="chip">Encryption at rest</span><span class="chip">Point-in-time restore</span><span class="chip">GPU exact (wgpu)</span></div></div>
+              <div><div class="pp-label">Runtimes</div><div class="chips"><span class="chip">Linux x86_64</span><span class="chip">Linux arm64</span><span class="chip">macOS arm64</span><span class="chip">Windows</span><span class="chip">Docker</span></div></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="pp-side">
+          <a class="pp-perf" href="compare.html">
+            <div class="pp-side-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 14l4-4M3.3 17a9 9 0 1 1 17.4 0"/></svg>Performance <span class="arrow">↗</span></div>
+            <p class="muted">Clustered 20k &times; 128 &middot; HNSW ef=100 &middot; 16 vCPU WSL &middot; sequential queries</p>
+            <div class="pp-stats">
+              <div><strong>1.0</strong><span>recall@10</span></div>
+              <div><strong>1,900+</strong><span>QPS</span></div>
+              <div><strong>0.5 ms</strong><span>p50</span></div>
+            </div>
+          </a>
+          <div class="pp-tools">
+            <div class="pp-side-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 2 9 5-9 5-9-5 9-5zM3 12l9 5 9-5M3 17l9 5 9-5"/></svg>Tools &amp; agents</div>
+            <a class="pp-tool" href="https://github.com/mahpate/Vlite/blob/main/docs/CONSOLE.md"><strong>VLite Dashboard</strong><span>Visual workbench &amp; REST playground</span></a>
+            <a class="pp-tool" href="https://github.com/mahpate/Vlite/blob/main/docs/TOOLS.md"><strong>vlite-shell &amp; vlite-maintain</strong><span>Interactive CLI, verify, compact, backup</span></a>
+            <div class="pp-tool soon"><strong>MCP Server <em>Planned</em></strong><span>Agent-ready VLite tools</span></div>
+            <div class="pp-tool soon"><strong>Agent Skills <em>Planned</em></strong><span>Reusable retrieval guidance</span></div>
+          </div>
+        </div>
       </div>
     </div>
   </section>
@@ -402,9 +439,10 @@ git clone https://github.com/mahpate/Vlite; cd Vlite
     <nav>
       <a href="https://github.com/mahpate/Vlite">GitHub</a>
       <a href="https://github.com/mahpate/Vlite/releases">Releases</a>
-      <a href="https://github.com/mahpate/Vlite/blob/main/docs/INSTALL.md">Install</a>
-      <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/README.md">Benchmarks</a>
+      <a href="api.html">API</a>
       <a href="compare.html">Benchmarks</a>
+      <a href="about.html">About</a>
+      <a href="https://asendme.com" target="_blank" rel="noopener">ASENDME</a>
     </nav>
   </div>
 </footer>

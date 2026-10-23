@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>API Reference | VLite</title>
+  <meta name="description" content="VLite API reference: Python, Node.js and Rust embedded SDKs, REST endpoints and gRPC services.">
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="assets/site.js"></script>
+</head>
+<body>
+<header class="nav">
+  <div class="wrap">
+    <a class="brand" href="./"><img src="assets/logo.svg" alt="">VLite</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="./#features">Features</a>
+      <a href="./#products">Products</a>
+      <a href="./#quickstart">Quickstart</a>
+      <a href="api.html" aria-current="page">API</a>
+      <a href="compare.html">Benchmarks</a>
+      <a href="https://github.com/mahpate/Vlite/blob/main/docs/REFERENCE.md">Docs</a>
+      <a href="about.html">About</a>
+      <a href="https://asendme.com" target="_blank" rel="noopener">ASENDME ↗</a>
+    </nav>
+    <div class="nav-actions">
+      <button class="icon-btn" id="theme-toggle" aria-label="Toggle dark mode">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+      </button>
+      <a class="icon-btn" href="https://github.com/mahpate/Vlite" aria-label="GitHub repository">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5a11.5 11.5 0 0 0-3.6 22.4c.6.1.8-.3.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.2 1.2a11 11 0 0 1 5.8 0c2.2-1.5 3.2-1.2 3.2-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A11.5 11.5 0 0 0 12 .5z"/></svg>
+      </a>
+    </div>
+  </div>
+</header>
+
+<div class="docs-layout">
+  <aside class="docs-sidebar" aria-label="API sections">
+    <div class="docs-group">
+      <h4>Getting started</h4>
+      <a href="#overview">Overview</a>
+      <a href="#conventions">Conventions</a>
+    </div>
+    <div class="docs-group">
+      <h4>Python</h4>
+      <a href="#py-nativelibrary">NativeLibrary</a>
+      <a href="#py-database">Database</a>
+      <a href="#py-write">Write records</a>
+      <a href="#py-read">Read records</a>
+      <a href="#py-search">Search</a>
+      <a href="#py-index">HNSW index</a>
+      <a href="#py-collections">Collections &amp; imports</a>
+      <a href="#py-advanced">Advanced retrieval</a>
+      <a href="#py-errors">EmbeddedError</a>
+    </div>
+    <div class="docs-group">
+      <h4>Node.js</h4>
+      <a href="#node">NativeLibrary &amp; Database</a>
+    </div>
+    <div class="docs-group">
+      <h4>Rust</h4>
+      <a href="#rust">vlite::Database</a>
+    </div>
+    <div class="docs-group">
+      <h4>Data types</h4>
+      <a href="#types-metadata">Metadata</a>
+      <a href="#types-filter">Filter conditions</a>
+      <a href="#types-hit">Search hits</a>
+      <a href="#types-metric">Distance metrics</a>
+    </div>
+    <div class="docs-group">
+      <h4>Server</h4>
+      <a href="#rest">REST endpoints</a>
+      <a href="#grpc">gRPC service</a>
+    </div>
+  </aside>
+
+  <main class="docs-main">
+    <p class="kicker">API Reference</p>
+    <h1 id="overview">VLite API Reference</h1>
+    <p class="lead">One engine, several surfaces. Embed VLite in-process from Python, Node.js, Rust or C,
+      or run <code>vlite-server</code> and talk to it over REST or gRPC. All surfaces share the same
+      single-file storage, durability and search semantics.</p>
+
+    <div class="grid cols-3 docs-cards">
+      <a class="card" href="#py-nativelibrary"><span class="label">Embedded</span><h3>Python</h3><p class="muted"><code>vlite_embedded</code> wheel &middot; synchronous, thread-safe handle</p></a>
+      <a class="card" href="#node"><span class="label">Embedded</span><h3>Node.js</h3><p class="muted"><code>@vlite/embedded</code> &middot; Promise-based &middot; Node 22.9+</p></a>
+      <a class="card" href="#rust"><span class="label">Embedded</span><h3>Rust</h3><p class="muted"><code>vlite</code> crate &middot; <code>vlite::Database</code></p></a>
+      <a class="card" href="#rest"><span class="label">Service</span><h3>REST</h3><p class="muted">JSON over HTTP &middot; bearer auth &middot; OpenAPI</p></a>
+      <a class="card" href="#grpc"><span class="label">Service</span><h3>gRPC</h3><p class="muted"><code>vlite.v1.VLite</code> &middot; streaming import/export</p></a>
+      <a class="card" href="https://github.com/mahpate/Vlite/blob/main/docs/REFERENCE.md"><span class="label">Docs</span><h3>Engine reference</h3><p class="muted">File format, recovery, limits</p></a>
+    </div>
+
+    <h2 id="conventions">Conventions</h2>
+    <ul class="list">
+      <li><strong>Record IDs</strong> are unsigned 64-bit integers. SDKs and REST pass them as decimal strings (e.g. <code>"42"</code>) so JavaScript keeps all 64 bits.</li>
+      <li><strong>Distances</strong>: lower is always nearer, for every metric.</li>
+      <li><strong>Writes are durable</strong> when the call returns. Batches commit atomically, all-or-nothing.</li>
+      <li><strong>Optional keyword arguments</strong> that are omitted fall back to the collection's settings (metric, quantization, rerank multiplier).</li>
+      <li><strong>File formats</strong>: <code>create()</code> defaults to format 3. Format 4 adds named collections and resumable imports; format 5 adds expiry, geo metadata, named/sparse vectors and the other <a href="#py-advanced">advanced APIs</a>.</li>
+    </ul>
+
+    <!-- ============ PYTHON ============ -->
+    <h2 id="py-nativelibrary">Python &middot; <code>NativeLibrary</code></h2>
+    <p>Install the platform wheel from <a href="https://github.com/mahpate/Vlite/releases">Releases</a> with <code>python -m pip install &lt;wheel&gt;</code>. <code>NativeLibrary</code> loads the bundled native library and opens databases. One instance per process; do not use it after <code>fork()</code>.</p>
+<pre class="code sig">from vlite_embedded import NativeLibrary, EmbeddedError
+
+class NativeLibrary(path: str | os.PathLike | None = None)</pre>
+    <table class="param-table">
+      <thead><tr><th>Parameter</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody><tr><td><code>path</code></td><td><code>str | PathLike | None</code></td><td>Explicit ABI-v1 library path. Defaults to the library bundled in the wheel.</td></tr></tbody>
+    </table>
+
+    <h3 id="py-create" class="method">create()</h3>
+<pre class="code sig">NativeLibrary.create(path, dimensions, *, format=None, key=None,
+                     passphrase=None, commit_timestamps=False) -&gt; Database</pre>
+    <p>Creates a new database file. Never overwrites an existing file.</p>
+    <table class="param-table">
+      <thead><tr><th>Parameter</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>path</code></td><td><code>str | PathLike</code></td><td>Destination file, e.g. <code>"docs.vlite"</code>.</td></tr>
+        <tr><td><code>dimensions</code></td><td><code>int</code></td><td>Vector dimensionality of the default collection.</td></tr>
+        <tr><td><code>format</code></td><td><code>int | None</code></td><td>File format; default 3. Use 5 to enable all newer features.</td></tr>
+        <tr><td><code>key</code> / <code>passphrase</code></td><td><code>bytes</code> / <code>str</code></td><td>Optional at-rest encryption credentials (choose one).</td></tr>
+        <tr><td><code>commit_timestamps</code></td><td><code>bool</code></td><td>Record commit timestamps, enabling point-in-time restore by time.</td></tr>
+      </tbody>
+    </table>
+    <p><strong>Returns</strong> an open <a href="#py-database"><code>Database</code></a>.</p>
+
+    <h3 id="py-open" class="method">open()</h3>
+<pre class="code sig">NativeLibrary.open(path, *, key=None, passphrase=None) -&gt; Database</pre>
+    <p>Opens an existing file, validates checksums and recovers committed records. Holds an exclusive lock until closed.</p>
+
+    <h3 id="py-memory" class="method">create_in_memory() / open_from_bytes()</h3>
+<pre class="code sig">NativeLibrary.create_in_memory(dimensions, *, format=None, key=None,
+                               passphrase=None, commit_timestamps=False) -&gt; Database
+NativeLibrary.open_from_bytes(data: bytes, *, key=None, passphrase=None) -&gt; Database</pre>
+    <p>Host-owned byte-image databases. Persist them with <code>Database.to_bytes()</code>.</p>
+
+    <h3 id="py-restore" class="method">restore_to()</h3>
+<pre class="code sig">NativeLibrary.restore_to(log_path, destination, *, sequence=None, timestamp_ms=None,
+                         base_backup=None, key=None, passphrase=None) -&gt; dict</pre>
+    <p>Point-in-time restore of a closed log into a new path. Pass exactly one of <code>sequence</code> or <code>timestamp_ms</code>.</p>
+
+    <h2 id="py-database">Python &middot; <code>Database</code></h2>
+    <p>A database handle returned by <code>create()</code> or <code>open()</code>. Calls are serialized by an internal lock, so one handle can be shared across threads. Use it as a context manager to close it automatically.</p>
+<pre class="code">native = NativeLibrary()
+with native.create("docs.vlite", dimensions=3) as db:
+    db.put("1", [1.0, 0.0, 0.0], metadata={"category": {"type": "string", "value": "docs"}})
+    print(db.search([0.9, 0.1, 0.0], k=5))   # [{'id': '1', 'distance': 0.02}]</pre>
+
+    <h3 class="method">close() / info()</h3>
+<pre class="code sig">Database.close() -&gt; None
+Database.info() -&gt; dict          # {"dimensions", "format_version", "records", ...}</pre>
+    <p><code>close()</code> is idempotent and releases the file lock.</p>
+
+    <h3 id="py-write" class="method">put()</h3>
+<pre class="code sig">Database.put(id, vector, *, payload_base64="", metadata=None, collection=None,
+             expected_revision=None, expires_at_ms=None) -&gt; str | None</pre>
+    <p>Inserts or replaces a record. The write is durable when the call returns.</p>
+    <table class="param-table">
+      <thead><tr><th>Parameter</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td><code>str</code></td><td>Decimal u64 record ID.</td></tr>
+        <tr><td><code>vector</code></td><td><code>list[float]</code></td><td>Exactly <code>dimensions</code> finite values.</td></tr>
+        <tr><td><code>payload_base64</code></td><td><code>str</code></td><td>Opaque payload, base64-encoded.</td></tr>
+        <tr><td><code>metadata</code></td><td><code>dict | None</code></td><td>Typed <a href="#types-metadata">metadata map</a>; replaces the whole map.</td></tr>
+        <tr><td><code>collection</code></td><td><code>str | None</code></td><td>Target collection (format 4+). Default collection when omitted.</td></tr>
+        <tr><td><code>expected_revision</code></td><td><code>str | None</code></td><td>Compare-and-set: <code>"absent"</code> or a decimal revision.</td></tr>
+        <tr><td><code>expires_at_ms</code></td><td><code>int | str | None</code></td><td>Absolute Unix-ms expiry (format 5). Not combinable with <code>expected_revision</code>.</td></tr>
+      </tbody>
+    </table>
+    <p><strong>Returns</strong> the new revision when <code>expected_revision</code> is given, otherwise <code>None</code>.</p>
+
+    <h3 class="method">delete()</h3>
+<pre class="code sig">Database.delete(id, *, collection=None, expected_revision=None) -&gt; bool</pre>
+    <p>Returns <code>True</code> if a record was deleted. Deleting a missing ID is a successful no-op returning <code>False</code>.</p>
+
+    <h3 class="method">batch()</h3>
+<pre class="code sig">Database.batch(operations: list[dict], *, collection=None) -&gt; None</pre>
+    <p>Applies all operations atomically, in order, in one durable commit.</p>
+<pre class="code">db.batch([
+    {"op": "put", "id": "2", "vector": [0.0, 1.0, 0.0]},
+    {"op": "delete", "id": "1"},
+])</pre>
+
+    <h3 class="method">update_metadata() / put_with_expiry()</h3>
+<pre class="code sig">Database.update_metadata(id, metadata, *, collection=None) -&gt; str
+Database.put_with_expiry(id, vector, *, expires_at_ms=None, payload_base64="",
+                         metadata=None, collection=None) -&gt; str</pre>
+    <p>Format 5. Both return the new revision. <code>update_metadata</code> keeps vectors, payload and expiry.</p>
+
+    <h3 id="py-read" class="method">get() / get_many() / revision()</h3>
+<pre class="code sig">Database.get(id, *, collection=None) -&gt; dict
+Database.get_many(ids: list[str], *, collection=None) -&gt; list[dict | None]
+Database.revision(id, *, collection=None) -&gt; str | None</pre>
+    <p>A record is <code>{"id", "vector", "payload_base64", "metadata", "revision"}</code>. <code>get_many</code> returns <code>None</code> for missing IDs.</p>
+
+    <h3 id="py-search" class="method">search()</h3>
+<pre class="code sig">Database.search(vector, k, *, filter=None, metric=None, collection=None,
+                explain=False) -&gt; list[dict] | dict</pre>
+    <p>Exact nearest-neighbor search. Filters are applied <em>before</em> top-k selection, so results are always exact.</p>
+    <table class="param-table">
+      <thead><tr><th>Parameter</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>vector</code></td><td><code>list[float]</code></td><td>Query vector.</td></tr>
+        <tr><td><code>k</code></td><td><code>int</code></td><td>Maximum number of hits.</td></tr>
+        <tr><td><code>filter</code></td><td><code>list[dict] | None</code></td><td>AND of up to 64 <a href="#types-filter">conditions</a>.</td></tr>
+        <tr><td><code>metric</code></td><td><code>str | None</code></td><td><code>"squared_l2"</code>, <code>"cosine"</code> or <code>"inner_product"</code>.</td></tr>
+        <tr><td><code>explain</code></td><td><code>bool</code></td><td>Return <code>{"hits", "stats"}</code> instead of a hit list.</td></tr>
+      </tbody>
+    </table>
+    <p><strong>Returns</strong> a list of <a href="#types-hit">hits</a>, nearest first.</p>
+
+    <h3 class="method">search_auto()</h3>
+<pre class="code sig">Database.search_auto(vector, k, *, filter=None, metric=None, collection=None,
+                     ef_search=None, quantization=None, rerank_multiplier=None,
+                     explain=False) -&gt; dict</pre>
+    <p>Lets the planner choose exact scan, indexed exact, filtered ANN or ANN. Returns <code>{"hits"}</code> plus <code>plan</code> and <code>stats</code> when <code>explain=True</code>.</p>
+
+    <h3 class="method">search_hybrid()</h3>
+<pre class="code sig">Database.search_hybrid(text, k, *, vector=None, filter=None, metric=None, collection=None,
+                       fusion=None, vector_leg=None, ef_search=None, quantization=None,
+                       rerank_multiplier=None, explain=False) -&gt; dict</pre>
+    <p>BM25 over the collection's declared text fields, optionally fused with a vector leg.</p>
+
+    <h3 id="py-index" class="method">build_index()</h3>
+<pre class="code sig">Database.build_index(*, metric=None, collection=None, quantization=None,
+                     rerank_multiplier=None) -&gt; None</pre>
+    <p>Builds the in-memory HNSW graph (<code>squared_l2</code> or <code>cosine</code>). Indexes are rebuildable and never stored as the source of truth.</p>
+
+    <h3 class="method">search_approximate_ready()</h3>
+<pre class="code sig">Database.search_approximate_ready(vector, k, *, ef_search=100, metric=None, collection=None,
+                                  quantization=None, rerank_multiplier=None) -&gt; list[dict]</pre>
+    <p>Approximate search on a ready index. Raises <code>index_not_ready</code> instead of silently building or falling back.</p>
+
+    <h3 class="method">ann_quality() / ann_memory()</h3>
+<pre class="code sig">Database.ann_quality(*, collection=None, metric=None, quantization=None, ...) -&gt; dict
+Database.ann_memory(*, collection=None, metric=None, quantization=None, ...) -&gt; dict</pre>
+    <p>Sampled recall@k against exact search, and graph memory usage.</p>
+
+    <h3 class="method">build_disk_ann() / search_disk_ann()</h3>
+<pre class="code sig">Database.build_disk_ann(path, *, metric=None, collection=None) -&gt; dict
+Database.search_disk_ann(path, vector, k, *, ef_search=100, cache_bytes=8*1024*1024) -&gt; list[dict]</pre>
+    <p>Builds and queries a disk-resident ANN sidecar for datasets larger than memory.</p>
+
+    <h3 id="py-collections" class="method">Collections</h3>
+<pre class="code sig">Database.list_collections() -&gt; list[dict]
+Database.create_collection(name, dimensions, *, settings=None) -&gt; dict
+Database.drop_collection(name) -&gt; None
+Database.set_collection_settings(name, settings) -&gt; dict</pre>
+    <p>Format 4+. Each collection has its own dimensions and settings (metric, HNSW parameters, quantization, text fields).</p>
+
+    <h3 class="method">Resumable imports</h3>
+<pre class="code sig">Database.next_import_job_id() -&gt; str
+Database.import_chunk(job, chunk, operations, *, collection=None, ...) -&gt; dict
+Database.import_status(job) -&gt; dict
+Database.import_finish(job, *, collection=None) -&gt; dict
+Database.import_abort(job, *, collection=None) -&gt; dict</pre>
+    <p>Each chunk commits durably and replays idempotently, so a crashed import resumes from its last checkpoint.</p>
+
+    <h3 id="py-advanced" class="method">Advanced retrieval (format 5)</h3>
+    <table class="param-table">
+      <thead><tr><th>Method</th><th>Purpose</th></tr></thead>
+      <tbody>
+        <tr><td><code>search_grouped(vector, groups, hits_per_group, field, *, filter, metric, collection)</code></td><td>Top hits grouped by a metadata value.</td></tr>
+        <tr><td><code>recommend(k, *, positive_ids, negative_ids, positive_vectors, negative_vectors, filter, ...)</code></td><td>Recommendations from positive/negative examples.</td></tr>
+        <tr><td><code>facets(field, *, filter, collection)</code></td><td>Value counts for a metadata field.</td></tr>
+        <tr><td><code>numeric_stats(field, *, filter, collection)</code></td><td>Min, max, sum, count and average.</td></tr>
+        <tr><td><code>search_geo(vector, k, field, latitude, longitude, radius_meters, *, sort, ...)</code></td><td>Vector search inside a geo radius.</td></tr>
+        <tr><td><code>configure_vector(name, dimensions, *, active_version, metric, history)</code></td><td>Declare a named dense vector.</td></tr>
+        <tr><td><code>put_vectors(id, *, dense, sparse)</code> / <code>put_vector_version(...)</code></td><td>Write named dense and sparse vectors.</td></tr>
+        <tr><td><code>search_named</code> / <code>search_sparse</code> / <code>search_dense_sparse</code></td><td>Search named, sparse or fused dense+sparse vectors.</td></tr>
+        <tr><td><code>rerank(vector, candidates, limit, *, method="exact", lambda_=None)</code></td><td>Exact or MMR reranking of candidates.</td></tr>
+        <tr><td><code>query(query, parameters=None)</code></td><td>Bounded read-only query-language statement.</td></tr>
+        <tr><td><code>feed_cursor()</code> / <code>changes_after(cursor, max_events=1000)</code></td><td>Change feed of committed writes.</td></tr>
+        <tr><td><code>encryption_info()</code> / <code>is_encrypted()</code> / <code>to_bytes()</code></td><td>Encryption status and byte-image export.</td></tr>
+      </tbody>
+    </table>
+
+    <h3 id="py-errors" class="method">EmbeddedError</h3>
+<pre class="code sig">class EmbeddedError(Exception):
+    code: str      # stable machine-readable code, e.g. "not_found", "dimension_mismatch", "index_not_ready"
+    message: str</pre>
+<pre class="code">try:
+    db.get("404")
+except EmbeddedError as e:
+    print(e.code, e.message)</pre>
+
+    <!-- ============ NODE ============ -->
+    <h2 id="node">Node.js</h2>
+    <p>The Node addon mirrors the Python API with camelCase names and Promises. Requires Node.js 22.9+. Install the platform tarball from <a href="https://github.com/mahpate/Vlite/releases">Releases</a>.</p>
+<pre class="code sig">import { NativeLibrary, EmbeddedError } from "@vlite/embedded";
+
+new NativeLibrary(options?: { libraryPath?: string; addonPath?: string; maxPending?: number })
+native.create(path: string, dimensions: number, options?: CreateOptions): Promise&lt;Database&gt;
+native.open(path: string, options?: Credentials): Promise&lt;Database&gt;
+native.close(): Promise&lt;void&gt;</pre>
+    <table class="param-table">
+      <thead><tr><th>Python</th><th>Node.js</th></tr></thead>
+      <tbody>
+        <tr><td><code>put(id, vector, metadata=...)</code></td><td><code>put(id, vector, { metadata, payload, expectedRevision })</code></td></tr>
+        <tr><td><code>get_many(ids)</code></td><td><code>getMany(ids)</code></td></tr>
+        <tr><td><code>search(vector, k, filter=...)</code></td><td><code>search(vector, k, { filter, metric, explain })</code></td></tr>
+        <tr><td><code>search_auto</code> / <code>search_hybrid</code></td><td><code>searchAuto</code> / <code>searchHybrid</code></td></tr>
+        <tr><td><code>build_index()</code></td><td><code>buildIndex()</code></td></tr>
+        <tr><td><code>search_approximate_ready(q, k, ef_search=)</code></td><td><code>searchApproximateReady(q, k, { efSearch })</code></td></tr>
+        <tr><td><code>create_collection(name, dims)</code></td><td><code>createCollection(name, dims)</code></td></tr>
+      </tbody>
+    </table>
+<pre class="code">const native = new NativeLibrary();
+const db = await native.create("docs.vlite", 3);
+await db.put("1", [1, 0, 0]);
+console.log(await db.search([0.9, 0.1, 0], 5));
+await db.close();
+await native.close();</pre>
+
+    <!-- ============ RUST ============ -->
+    <h2 id="rust">Rust &middot; <code>vlite::Database</code></h2>
+<pre class="code sig">impl Database {
+    pub fn create(path: impl AsRef&lt;Path&gt;, dimensions: usize) -&gt; Result&lt;Self&gt;;
+    pub fn open(path: impl AsRef&lt;Path&gt;) -&gt; Result&lt;Self&gt;;
+    pub fn put(&amp;mut self, id: u64, vector: &amp;[f32], payload: &amp;[u8]) -&gt; Result&lt;()&gt;;
+    pub fn put_with_metadata(&amp;mut self, id: u64, vector: &amp;[f32], payload: &amp;[u8],
+                             metadata: &amp;Metadata) -&gt; Result&lt;()&gt;;
+    pub fn get(&amp;self, id: u64) -&gt; Result&lt;Option&lt;&amp;Record&gt;&gt;;
+    pub fn delete(&amp;mut self, id: u64) -&gt; Result&lt;bool&gt;;
+    pub fn write_batch(&amp;mut self, operations: &amp;[Mutation]) -&gt; Result&lt;()&gt;;
+    pub fn search(&amp;self, query: &amp;[f32], k: usize) -&gt; Result&lt;Vec&lt;SearchHit&gt;&gt;;
+    pub fn search_filtered(&amp;self, query: &amp;[f32], k: usize,
+                           conditions: &amp;[Condition]) -&gt; Result&lt;Vec&lt;SearchHit&gt;&gt;;
+    pub fn search_with_metric(&amp;self, query: &amp;[f32], k: usize,
+                              metric: DistanceMetric) -&gt; Result&lt;Vec&lt;SearchHit&gt;&gt;;
+    pub fn build_hnsw(&amp;mut self, config: HnswConfig) -&gt; Result&lt;()&gt;;
+    pub fn search_approximate_ready(&amp;self, query: &amp;[f32], k: usize, ef_search: usize,
+                                    config: HnswConfig) -&gt; Result&lt;Vec&lt;SearchHit&gt;&gt;;
+    pub fn dimensions(&amp;self) -&gt; usize;
+    pub fn len(&amp;self) -&gt; usize;
+    pub fn close(self) -&gt; Result&lt;()&gt;;
+}</pre>
+<pre class="code">use vlite::Database;
+
+let mut db = Database::create("docs.vlite", 3)?;
+db.put(1, &amp;[1.0, 0.0, 0.0], b"hello")?;
+for hit in db.search(&amp;[0.9, 0.1, 0.0], 5)? {
+    println!("{} {}", hit.id, hit.distance);
+}
+db.close()?;</pre>
+    <p><code>HnswConfig { m, ef_construction, seed }</code> implements <code>Default</code>. <code>_with_metric</code> variants exist for the HNSW methods.</p>
+
+    <!-- ============ TYPES ============ -->
+    <h2 id="types-metadata">Metadata values</h2>
+    <p>Metadata is a flat map of field name to a tagged value. Nested maps and nulls are rejected; types never coerce.</p>
+    <table class="param-table">
+      <thead><tr><th>Type</th><th>JSON form</th></tr></thead>
+      <tbody>
+        <tr><td>string</td><td><code>{"type": "string", "value": "docs"}</code></td></tr>
+        <tr><td>integer</td><td><code>{"type": "integer", "value": "2026"}</code> &mdash; decimal i64 string</td></tr>
+        <tr><td>float</td><td><code>{"type": "float", "value": 1.5}</code></td></tr>
+        <tr><td>boolean</td><td><code>{"type": "boolean", "value": true}</code></td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="types-filter">Filter conditions</h2>
+    <p>A filter is an AND of at most 64 conditions. Missing fields and mismatched types do not match; an empty filter matches everything.</p>
+<pre class="code">[
+  {"op": "eq",    "field": "category", "value": {"type": "string",  "value": "docs"}},
+  {"op": "range", "field": "year",     "min":   {"type": "integer", "value": "2025"}}
+]</pre>
+    <p><code>range</code> accepts an inclusive <code>min</code> and/or <code>max</code> of one numeric type.</p>
+
+    <h2 id="types-hit">Search hits</h2>
+<pre class="code">{"id": "1", "distance": 0.02}   // Rust: SearchHit { id: u64, distance: f64 }</pre>
+
+    <h2 id="types-metric">Distance metrics</h2>
+    <table class="param-table">
+      <thead><tr><th>Metric</th><th>Distance</th><th>ANN</th></tr></thead>
+      <tbody>
+        <tr><td><code>squared_l2</code> (default)</td><td>Σ (a − b)²</td><td>Yes</td></tr>
+        <tr><td><code>cosine</code></td><td>1 − cosine similarity</td><td>Yes</td></tr>
+        <tr><td><code>inner_product</code></td><td>− (a · b)</td><td>Exact only</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ============ REST ============ -->
+    <h2 id="rest">REST endpoints</h2>
+    <p>Run <code>vlite-server</code> (or the <code>ghcr.io/mahpate/vlite-api</code> image) and send <code>Authorization: Bearer $VLITE_AUTH_TOKEN</code>. The full contract is served at <code>/openapi.json</code>.</p>
+<pre class="code">curl -s -X PUT localhost:8080/v1/vectors/1 \
+  -H "Authorization: Bearer $VLITE_AUTH_TOKEN" -H "Content-Type: application/json" \
+  -d '{"vector":[1,0,0]}'
+
+curl -s -X POST localhost:8080/v1/search \
+  -H "Authorization: Bearer $VLITE_AUTH_TOKEN" -H "Content-Type: application/json" \
+  -d '{"vector":[0.9,0.1,0],"k":5}'</pre>
+
+    <h3 class="method">Records &amp; search</h3>
+    <table class="param-table endpoints">
+      <tbody>
+        <tr><td><span class="verb get">GET</span></td><td><code>/v1/database</code></td><td>Dimensions, format, record count, encryption status</td></tr>
+        <tr><td><span class="verb get">GET</span></td><td><code>/v1/vectors</code></td><td>Paged listing of IDs and metadata</td></tr>
+        <tr><td><span class="verb get">GET</span></td><td><code>/v1/vectors/{id}</code></td><td>Read vector, payload and metadata</td></tr>
+        <tr><td><span class="verb put">PUT</span></td><td><code>/v1/vectors/{id}</code></td><td>Durably replace a record</td></tr>
+        <tr><td><span class="verb patch">PATCH</span></td><td><code>/v1/vectors/{id}/metadata</code></td><td>Replace metadata only (V5)</td></tr>
+        <tr><td><span class="verb delete">DELETE</span></td><td><code>/v1/vectors/{id}</code></td><td>Durably delete (missing ID is a no-op)</td></tr>
+        <tr><td><span class="verb post">POST</span></td><td><code>/v1/batches</code></td><td>Atomic ordered batch</td></tr>
+        <tr><td><span class="verb post">POST</span></td><td><code>/v1/search</code></td><td>Search the default collection (<code>mode</code>: exact, approximate, approximate_ready)</td></tr>
+        <tr><td><span class="verb get">GET</span></td><td><code>/v1/changes</code></td><td>Change feed after a cursor</td></tr>
+      </tbody>
+    </table>
+
+    <h3 class="method">Collections</h3>
+    <table class="param-table endpoints">
+      <tbody>
+        <tr><td><span class="verb get">GET</span> <span class="verb post">POST</span></td><td><code>/v1/collections</code></td><td>List or create collections</td></tr>
+        <tr><td><span class="verb get">GET</span> <span class="verb delete">DELETE</span></td><td><code>/v1/collections/{c}</code></td><td>Inspect or drop a collection</td></tr>
+        <tr><td><span class="verb put">PUT</span></td><td><code>/v1/collections/{c}/settings</code></td><td>Update collection settings</td></tr>
+        <tr><td><span class="verb get">GET</span> <span class="verb put">PUT</span> <span class="verb delete">DELETE</span></td><td><code>/v1/collections/{c}/vectors/{id}</code></td><td>Collection-scoped record CRUD</td></tr>
+        <tr><td><span class="verb post">POST</span></td><td><code>/v1/collections/{c}/batches</code></td><td>Atomic collection batch</td></tr>
+        <tr><td><span class="verb post">POST</span></td><td><code>/v1/collections/{c}/search</code></td><td>Search with collection defaults</td></tr>
+        <tr><td><span class="verb post">POST</span></td><td><code>/v1/collections/{c}/search/{grouped|geo|named|sparse|dense-sparse|disk-ann}</code></td><td>Advanced search variants</td></tr>
+        <tr><td><span class="verb post">POST</span></td><td><code>/v1/collections/{c}/{recommend|facets|stats/numeric|query|embed}</code></td><td>Recommend, facets, stats, query language, text embedding</td></tr>
+      </tbody>
+    </table>
+
+    <h3 class="method">Indexes &amp; imports</h3>
+    <table class="param-table endpoints">
+      <tbody>
+        <tr><td><span class="verb get">GET</span> <span class="verb post">POST</span></td><td><code>/v1/index/hnsw</code></td><td>Readiness, or explicitly rebuild</td></tr>
+        <tr><td><span class="verb post">POST</span></td><td><code>/v1/index/hnsw/rebuild[/poll|/cancel]</code></td><td>Bounded background rebuild</td></tr>
+        <tr><td><span class="verb post">POST</span></td><td><code>/v1/collections/{c}/index/hnsw/quality</code></td><td>Sample recall against exact search</td></tr>
+        <tr><td><span class="verb post">POST</span></td><td><code>/v1/collections/{c}/imports</code></td><td>Reserve a resumable import</td></tr>
+        <tr><td><span class="verb put">PUT</span></td><td><code>/v1/imports/{job}/chunks/{n}</code></td><td>Commit or replay a chunk</td></tr>
+        <tr><td><span class="verb post">POST</span></td><td><code>/v1/imports/{job}/{finish|abort}</code></td><td>Finish or abort an import</td></tr>
+      </tbody>
+    </table>
+
+    <h3 class="method">Operations &amp; admin</h3>
+    <table class="param-table endpoints">
+      <tbody>
+        <tr><td><span class="verb get">GET</span></td><td><code>/health</code> &middot; <code>/ready</code></td><td>Liveness and readiness (no auth for <code>/health</code>)</td></tr>
+        <tr><td><span class="verb get">GET</span></td><td><code>/metrics</code></td><td>JSON or Prometheus metrics</td></tr>
+        <tr><td><span class="verb get">GET</span></td><td><code>/v1/capabilities</code></td><td>Version, role and compatibility</td></tr>
+        <tr><td><span class="verb get">GET</span> <span class="verb post">POST</span></td><td><code>/v1/admin/backups</code> &middot; <code>/v1/admin/restores</code></td><td>Online backups and validated restores</td></tr>
+        <tr><td><span class="verb get">GET</span> <span class="verb post">POST</span></td><td><code>/v1/admin/credentials</code></td><td>Scoped, expiring credentials with rotation and revocation</td></tr>
+        <tr><td><span class="verb get">GET</span> <span class="verb post">POST</span></td><td><code>/v1/admin/tenants</code> &middot; <code>/v1/admin/webhooks</code></td><td>Tenants and signed change-feed webhooks</td></tr>
+        <tr><td><span class="verb get">GET</span></td><td><code>/dashboard</code></td><td>Built-in web console</td></tr>
+      </tbody>
+    </table>
+    <p class="muted">See the complete list with request and response schemas in <a href="https://github.com/mahpate/Vlite/blob/main/src/openapi.json">openapi.json</a> and <a href="https://github.com/mahpate/Vlite/blob/main/docs/API.md">docs/API.md</a>.</p>
+
+    <!-- ============ gRPC ============ -->
+    <h2 id="grpc">gRPC service</h2>
+    <p>Package <code>vlite.v1</code>, service <code>VLite</code>, defined in <a href="https://github.com/mahpate/Vlite/blob/main/proto/vlite/v1/vlite.proto">proto/vlite/v1/vlite.proto</a>. Uses the same bearer tokens and optional mutual TLS.</p>
+    <table class="param-table">
+      <thead><tr><th>Area</th><th>RPCs</th></tr></thead>
+      <tbody>
+        <tr><td>Collections</td><td><code>ListCollections</code>, <code>GetCollection</code>, <code>CreateCollection</code>, <code>DropCollection</code>, <code>Info</code></td></tr>
+        <tr><td>Records</td><td><code>GetVector</code>, <code>PutVector</code>, <code>DeleteVector</code>, <code>WriteBatch</code>, <code>UpdateMetadata</code></td></tr>
+        <tr><td>Search</td><td><code>Search</code>, <code>SearchGrouped</code>, <code>Recommend</code>, <code>GeoSearch</code>, <code>SearchNamed</code>, <code>SearchSparse</code>, <code>SearchDenseSparse</code>, <code>SearchDiskAnn</code>, <code>Query</code></td></tr>
+        <tr><td>Analytics</td><td><code>Facets</code>, <code>NumericStats</code></td></tr>
+        <tr><td>Vectors</td><td><code>ConfigureNamedVector</code>, <code>PutNamedVectors</code>, <code>PutVectorVersion</code>, <code>BuildDiskAnn</code></td></tr>
+        <tr><td>Change feed</td><td><code>Changes</code>, <code>WatchChanges</code> (server stream)</td></tr>
+        <tr><td>Bulk data</td><td><code>ReserveImport</code>, <code>ImportChunk</code>, <code>GetImportStatus</code>, <code>FinishImport</code>, <code>AbortImport</code>, <code>StreamImport</code> (client stream), <code>ExportVectors</code> (server stream)</td></tr>
+      </tbody>
+    </table>
+<pre class="code">grpcurl -H "authorization: Bearer $VLITE_AUTH_TOKEN" \
+  -d '{"vector":[0.9,0.1,0],"k":5}' localhost:50051 vlite.v1.VLite/Search</pre>
+    <p class="muted">See <a href="https://github.com/mahpate/Vlite/blob/main/docs/GRPC.md">docs/GRPC.md</a> for message fields, ports and TLS configuration.</p>
+  </main>
+
+  <aside class="docs-toc" aria-label="On this page">
+    <h4>On this page</h4>
+    <a href="#overview">Overview</a>
+    <a href="#py-nativelibrary">Python</a>
+    <a href="#node">Node.js</a>
+    <a href="#rust">Rust</a>
+    <a href="#types-metadata">Data types</a>
+    <a href="#rest">REST</a>
+    <a href="#grpc">gRPC</a>
+  </aside>
+</div>
+
+<footer>
+  <div class="wrap">
+    <span>© VLite contributors · MIT License</span>
+    <nav>
+      <a href="https://github.com/mahpate/Vlite">GitHub</a>
+      <a href="https://github.com/mahpate/Vlite/releases">Releases</a>
+      <a href="api.html">API</a>
+      <a href="compare.html">Benchmarks</a>
+      <a href="about.html">About</a>
+      <a href="https://asendme.com" target="_blank" rel="noopener">ASENDME</a>
+    </nav>
+  </div>
+</footer>
+</body>
+</html>

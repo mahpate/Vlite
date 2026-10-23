@@ -19,8 +19,11 @@
       <a href="./#features">Features</a>
       <a href="./#products">Products</a>
       <a href="./#quickstart">Quickstart</a>
+      <a href="api.html">API</a>
       <a href="compare.html" aria-current="page">Benchmarks</a>
       <a href="https://github.com/mahpate/Vlite/blob/main/docs/REFERENCE.md">Docs</a>
+      <a href="about.html">About</a>
+      <a href="https://asendme.com" target="_blank" rel="noopener">ASENDME ↗</a>
     </nav>
     <div class="nav-actions">
       <button class="icon-btn" id="theme-toggle" aria-label="Toggle dark mode">
@@ -102,7 +105,24 @@
         </table>
       </div>
 
-      <!-- RESULTS-100K -->
+      <h3 style="margin-top:36px">100,000 × 768 dimensions <span class="muted">(2 trials, 64 Gaussian clusters)</span></h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Metric</th><th>VLite exact</th><th>zvec flat</th><th>VLite HNSW</th><th>zvec HNSW</th></tr></thead>
+          <tbody>
+            <tr><td>Recall@10</td><td>1.000</td><td>1.000</td><td>0.968</td><td class="win">0.972</td></tr>
+            <tr><td>Query p50</td><td>32.3 ms</td><td class="win">27.6 ms</td><td>3.39 ms</td><td class="win">1.06 ms</td></tr>
+            <tr><td>Query p99</td><td>37.8 ms</td><td class="win">35.6 ms</td><td>4.33 ms</td><td class="win">1.60 ms</td></tr>
+            <tr><td>Sequential QPS</td><td>31</td><td class="win">36</td><td>292</td><td class="win">930</td></tr>
+            <tr><td>Ingest (100k vectors)</td><td>52.8 s</td><td class="win">4.9 s</td><td>52.4 s</td><td class="win">4.7 s</td></tr>
+            <tr><td>Index build</td><td>—</td><td>0.64 s</td><td>541 s</td><td class="win">9.1 s</td></tr>
+            <tr><td>Memory growth</td><td class="win">335 MiB</td><td>350 MiB</td><td class="win">355 MiB</td><td>378 MiB</td></tr>
+            <tr><td>On-disk size</td><td class="win">295 MiB</td><td>301 MiB</td><td class="win">295 MiB</td><td>315 MiB</td></tr>
+            <tr><td>Reopen + first query</td><td>1.96 s</td><td class="win">0.07 s</td><td>538 s</td><td class="win">0.04 s</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="muted">At 768 dimensions VLite's HNSW build and reopen are the clear gap: the graph is rebuilt in memory on reopen in this configuration, while zvec reopens its index almost instantly. VLite also makes every ingest batch durable before returning, which contributes to the slower ingest. Raw data: <a href="results/zvec-100k-768d-wsl.json">zvec-100k-768d-wsl.json</a>.</p>
 
       <h3 style="margin-top:36px">What the numbers say</h3>
       <div class="grid cols-3">
@@ -208,8 +228,10 @@ python benchmarks/compare_zvec.py --records 20000 --dimensions 128 --trials 3 --
     <nav>
       <a href="https://github.com/mahpate/Vlite">GitHub</a>
       <a href="https://github.com/mahpate/Vlite/releases">Releases</a>
-      <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/README.md">Benchmarks</a>
-      <a href="./">Home</a>
+      <a href="api.html">API</a>
+      <a href="compare.html">Benchmarks</a>
+      <a href="about.html">About</a>
+      <a href="https://asendme.com" target="_blank" rel="noopener">ASENDME</a>
     </nav>
   </div>
 </footer>
