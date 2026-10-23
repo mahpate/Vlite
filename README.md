@@ -157,10 +157,48 @@ entire record and clears prior metadata. `put_with_metadata` replaces all
 three components. IDs are u64; each legacy vector space has one fixed dimension. Opt-in v5
 [named vectors](docs/VECTORS.md) add independent per-name dimensions and metrics.
 
+## Quick start: Windows devbox (Docker in WSL)
+
+The fastest way to try the web dashboard on a Windows machine. Requires WSL 2
+with Docker Engine inside a distro (default `Ubuntu-24.04`) or Docker Desktop
+WSL integration. From a PowerShell prompt in the repository root:
+
+```powershell
+.\scripts\devbox.ps1           # pull the v0.3.0 images and start API + dashboard
+.\scripts\devbox.ps1 -Token    # copy the API token to the clipboard
+```
+
+Open **http://localhost:8082**, paste the token into the connection field and
+select **Connect**. The REST API is at **http://localhost:18085**.
+
+The script writes `compose.yaml`, an image override, `.env` and a randomly
+generated token to `/root/vlite-deploy` inside WSL, then runs
+`docker compose --profile dashboard up -d --wait`. Running it again
+updates the deployment and keeps the existing token and data. Everything is
+published on loopback only.
+
+| Task | Command |
+|---|---|
+| Show container status | `.\scripts\devbox.ps1 -Status` |
+| Stop (data kept) | `.\scripts\devbox.ps1 -Down` |
+| Stop and delete the database volumes | `.\scripts\devbox.ps1 -Reset` |
+| Print the token without the script | `wsl -d Ubuntu-24.04 -e cat /root/vlite-deploy/.secrets/api-token` |
+| Other ports, distro or version | `.\scripts\devbox.ps1 -ApiPort 18090 -DashboardPort 8090 -Distro Ubuntu -Version v0.3.0` |
+| Database dimensions for a new volume | `.\scripts\devbox.ps1 -Dimensions 384` |
+
+WSL shuts its VM down shortly after the last WSL process exits, which also
+stops Docker. The script therefore starts a hidden `sleep infinity` keepalive
+in the distro; `-Down` stops it. The keepalive does not survive sign-out or a
+reboot, so rerun the script afterwards (the containers restart automatically
+once WSL is running). If `localhost` is unreachable from the Windows browser,
+check that WSL is running (`wsl -l -v`) and that the ports are not already used.
+`-Dimensions` only applies when the data volume is first created.
+
 ## Quick start: Docker REST service
 
 Requires Docker Engine with **Linux containers**, Compose v2, and Python 3 for
-secret generation. On Windows with Docker in WSL, run these commands inside WSL.
+secret generation. On Windows with Docker in WSL, run these commands inside WSL,
+or use the [devbox script](#quick-start-windows-devbox-docker-in-wsl) above.
 From the repository root:
 
 ```text
@@ -293,8 +331,9 @@ private vectors or payloads. Explicit builds still block the single owner.
 
 The binary serves plain HTTP. Use the supplied
 [HTTPS deployment](docs/REFERENCE.md#https-observability-and-releases) before
-exposing it beyond loopback. One token grants full access; there are no roles
-or per-client quotas. Read the
+exposing it beyond loopback. The bootstrap token grants full access; v4 files
+can add expiring, collection- and operation-scoped
+[credentials](docs/CAPABILITIES.md#rest-service-and-scoped-credentials). Read the
 [REST contract](docs/REFERENCE.md#rest-service-optional) and
 [OpenAPI specification](src/openapi.json) before integrating.
 
@@ -367,8 +406,7 @@ The caller-driven `maintain_hnsw` tick can start earlier at configurable
 high-water marks (default 128 distinct IDs / 4 MiB), with read-only capacity,
 processed-record progress and explicit pressure status. It does not run inside
 writes or queries and cannot guarantee readiness when mutations outpace rebuilds.
-The background lifecycle is Rust-only for now, not a REST/C/Python/Node API
-and not part of the existing v0.1.2 binaries.
+The background lifecycle is Rust-only for now, not a REST/C/Python/Node API.
 
 - [Benchmark methodology and reproducible runs](benchmarks/README.md)
 - [Published measurements and raw results](benchmarks/RESULTS.md)
@@ -470,12 +508,15 @@ to this small fixed dataset with ef-search=1000, not arbitrary workloads.
 
 CI covers Windows, Linux, and macOS on Rust minimum/stable, plus Linux Docker
 REST persistence and verified HTTPS. Docker on a Windows/macOS host still
-executes Linux code; it does not replace native filesystem testing. ARM release
-publication is configured but not yet exercised.
+executes Linux code; it does not replace native filesystem testing. Linux arm64
+native tests run in CI, and v0.3.0 publishes arm64 archives and container images.
 
 ## Stable release criteria
 
-The current package version is **0.1.2**. A stable release requires a verified
+The current package version is **0.3.0**
+([release](https://github.com/mahpate/Vlite/releases/tag/v0.3.0), images
+`ghcr.io/mahpate/vlite`, `vlite-api` and `vlite-dashboard`). It is a pre-1.0
+release: formats and APIs may still change. A stable release requires a verified
 compatibility and operational baseline, not just a version or wording change:
 
 1. **Freeze the supported contracts:** document the Rust API, REST/OpenAPI
@@ -500,8 +541,8 @@ compatibility and operational baseline, not just a version or wording change:
 
 The existing tag-triggered workflow builds native archives/checksums and
 multi-architecture container images, with acceptance gates. A manual workflow
-run can validate a candidate without publishing it. No published release or
-registry image is implied by the presence of that workflow.
+run can validate a candidate without publishing it. See
+[installation](docs/INSTALL.md) for release archives and checksums.
 
 ## License
 
