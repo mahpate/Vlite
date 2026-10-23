@@ -43,6 +43,7 @@
       <p>This is the dashboard product and setup page, not a hosted database or public live console. Run your own instance using the instructions below.</p>
       <div class="cta">
         <a class="btn primary" href="#start">Run the dashboard</a>
+        <a class="btn" href="#screenshots">See screenshots</a>
         <a class="btn" href="docs/CONSOLE.html">Dashboard guide</a>
         <a class="btn" href="docs/CONSOLE-ADMIN.html">Administration guide</a>
       </div>
@@ -71,6 +72,36 @@
           <h3>Metrics and live logs</h3>
           <p>Request/search rates, latency percentiles, route tables, sparklines and filtered JSONL log exports. Global metrics/log views require a bootstrap admin token. Logs are a bounded, memory-only ring, not a durable archive.</p>
         </div>
+      </div>
+    </div>
+  </section>
+  <section id="screenshots" class="alt">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="kicker">Inside the dashboard</div>
+        <h2>A closer look at the workspace</h2>
+        <p>Actual current-source dashboard captures using five synthetic demonstration records in an isolated database.
+          Metrics and timings reflect this small demo session, not a performance benchmark. Select an image to view it at full size.</p>
+      </div>
+      <div class="dashboard-gallery">
+        <figure>
+          <a href="assets/dashboard/collections.png" aria-label="View full-size collection workspace screenshot">
+            <img src="assets/dashboard/collections.png" alt="VLite Collections workspace with record browsing, typed title and category metadata, and a selected-record inspector." width="1600" height="1400" loading="lazy" decoding="async">
+          </a>
+          <figcaption><strong>Collections and records.</strong> Browse typed metadata and inspect a selected record without leaving the collection workflow.</figcaption>
+        </figure>
+        <figure>
+          <a href="assets/dashboard/search.png" aria-label="View full-size search playground screenshot">
+            <img src="assets/dashboard/search.png" alt="VLite Search playground showing an exact vector query, three nearest neighbors ordered by distance, and a readable payload inspector." width="1600" height="1400" loading="lazy" decoding="async">
+          </a>
+          <figcaption><strong>Search and inspection.</strong> Enter a query, review distances and open payload, metadata, vector or raw JSON views.</figcaption>
+        </figure>
+        <figure>
+          <a href="assets/dashboard/observability.png" aria-label="View full-size observability screenshot">
+            <img src="assets/dashboard/observability.png" alt="VLite Observability workspace showing live request and search metrics, latency cards, sparklines and route counters for the demo server." width="1600" height="1400" loading="lazy" decoding="async">
+          </a>
+          <figcaption><strong>Server observability.</strong> Monitor request activity, latency and route counters from the same interface. The live log tail is further down this workspace.</figcaption>
+        </figure>
       </div>
     </div>
   </section>
