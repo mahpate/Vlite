@@ -61,7 +61,7 @@ code, pre { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, 
 .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 18px; color: var(--text); }
 .brand:hover { text-decoration: none; }
 .brand img { width: 28px; height: 28px; }
-.nav-links { display: flex; gap: 22px; flex: 1; }
+.nav-links { display: flex; gap: 22px; flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; }
 .nav-links a { color: var(--muted); font-size: 14px; font-weight: 500; }
 .nav-links a:hover, .nav-links a[aria-current="page"] { color: var(--text); text-decoration: none; }
 .nav-actions { display: flex; gap: 10px; align-items: center; }
@@ -194,7 +194,9 @@ footer a { color: var(--muted); }
 
 @media (max-width: 900px) {
   .grid.cols-3, .grid.cols-4, .stats { grid-template-columns: 1fr 1fr; }
-  .nav-links { display: none; }
+  .nav .wrap { height: auto; min-height: 60px; flex-wrap: wrap; gap: 12px; padding-top: 12px; }
+  .nav-links { order: 3; flex-basis: 100%; padding-bottom: 12px; }
+  .nav-actions { margin-left: auto; }
 }
 @media (max-width: 600px) {
   .grid.cols-3, .grid.cols-2, .grid.cols-4, .stats { grid-template-columns: 1fr; }

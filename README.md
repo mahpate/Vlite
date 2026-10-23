@@ -10,6 +10,8 @@ It uses its own storage format and does not require an external database.
 
 🌐 **Website:** [mahpate.github.io/Vlite](https://mahpate.github.io/Vlite/) ·
 [features](https://mahpate.github.io/Vlite/#features) ·
+[dashboard](https://mahpate.github.io/Vlite/dashboard.html) ·
+[CLI tools](https://mahpate.github.io/Vlite/docs/TOOLS.html) ·
 [benchmarks](https://mahpate.github.io/Vlite/compare.html) ·
 [multi-engine methodology and raw results](benchmarks/README.md#multi-engine-comparison)
 
@@ -59,6 +61,9 @@ It uses its own storage format and does not require an external database.
 - **Agent tooling:** [stdio MCP server](docs/MCP.md), read-only by default with
   opt-in write tools; [four agent skills](docs/AGENT-SKILLS.md) for RAG, MCP,
   operations and index tuning.
+- **CLI tools:** [vlite-shell, vlite-maintain, vlite-import, vlite-tune and
+  vlite-ann-compare](docs/TOOLS.md) for interactive/scripted queries, offline
+  maintenance, validated imports and index evaluation.
 - **Maintenance:** offline inspection, byte-preserving backup/restore, and
   no-clobber copy-out compaction.
 
@@ -72,6 +77,22 @@ See the [technical reference](docs/REFERENCE.md) for contracts and limits, and
 See [offline command-line tools](docs/TOOLS.md) for the interactive shell,
 CSV/JSONL/pgvector/FAISS and optional Parquet/Arrow imports, HNSW tuning, and
 ANN quality/configuration comparisons.
+
+## Command-line quickstart
+
+From a source checkout with Rust 1.89 or later, build the offline tools:
+
+```text
+cargo build --locked --features tools --bins
+cargo run --locked --features tools --bin vlite-shell -- --db example.vlite --create 3
+```
+
+The shell creates a **new** three-dimensional database and refuses an existing
+path. Enter `help` for commands or `quit` to close it. For an existing database,
+omit `--create 3`. These tools acquire an exclusive file lock: stop the server
+and other owners before opening the same file, even with the shell's
+`--read-only` safety guard. See the [CLI guide](docs/TOOLS.md) for scripted input,
+imports, maintenance and optional Arrow/Parquet support.
 
 ## Choose how to use VLite
 

@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dashboard | VLite</title>
+  <meta name="description" content="Run the VLite Dashboard locally: collection workspaces, vector search, record inspection, metrics and live logs.">
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="assets/site.js"></script>
+</head>
+<body>
+<header class="nav">
+  <div class="wrap">
+    <a class="brand" href="./"><img src="assets/logo.svg" alt="">VLite</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="./#features">Features</a>
+      <a href="./#products">Products</a>
+      <a href="./#quickstart">Quickstart</a>
+      <a href="api.html">API</a>
+      <a href="dashboard.html" aria-current="page">Dashboard</a>
+      <a href="docs/TOOLS.html">CLI</a>
+      <a href="architecture.html">Architecture</a>
+      <a href="compare.html">Benchmarks</a>
+      <a href="docs/">Docs</a>
+      <a href="about.html">About</a>
+      <a href="asendme.html">ASENDME</a>
+    </nav>
+    <div class="nav-actions">
+      <button class="icon-btn" id="theme-toggle" aria-label="Toggle dark mode">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+      </button>
+      <a class="btn" href="https://github.com/mahpate/Vlite">GitHub</a>
+    </div>
+  </div>
+</header>
+<main>
+  <section class="hero">
+    <div class="wrap">
+      <div class="kicker">VLite Dashboard</div>
+      <h1>Your database, in focus</h1>
+      <p class="lead">Browse collections, inspect records, run vector searches and monitor your VLite server in one web interface.</p>
+      <p>This is the dashboard product and setup page, not a hosted database or public live console. Run your own instance using the instructions below.</p>
+      <div class="cta">
+        <a class="btn primary" href="#start">Run the dashboard</a>
+        <a class="btn" href="docs/CONSOLE.html">Dashboard guide</a>
+        <a class="btn" href="docs/CONSOLE-ADMIN.html">Administration guide</a>
+      </div>
+    </div>
+  </section>
+  <section>
+    <div class="wrap">
+      <div class="section-head">
+        <h2>From records to operations</h2>
+        <p>These features describe current source builds. Published v0.3.0 images and Python packages do not include every newer dashboard feature.</p>
+      </div>
+      <div class="grid cols-2">
+        <div class="card">
+          <h3>Focused collection workflows</h3>
+          <p>Six workspaces with Records, Write, Search, Index and Settings collection tabs. Use keyboard navigation or the mobile drawer without losing in-page drafts.</p>
+        </div>
+        <div class="card">
+          <h3>Readable record inspection</h3>
+          <p>Separate Payload, Metadata, Vector and Raw JSON panels, bounded previews, typed metadata editing and explicit mutation confirmations.</p>
+        </div>
+        <div class="card">
+          <h3>Search and ingestion</h3>
+          <p>Exact and ANN search, typed filters, validated JSON writes, bounded import/export and copy-as-code. Failed search refreshes retain prior results with an explicit error.</p>
+        </div>
+        <div class="card">
+          <h3>Metrics and live logs</h3>
+          <p>Request/search rates, latency percentiles, route tables, sparklines and filtered JSONL log exports. Global metrics/log views require a bootstrap admin token. Logs are a bounded, memory-only ring, not a durable archive.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+  <section id="start" class="alt">
+    <div class="wrap">
+      <div class="section-head"><h2>Run locally from source</h2></div>
+      <p>Clone the repository and follow the <a href="docs/INSTALL.html">installation guide</a>.
+        From its root, with Docker running, prepare the API configuration and private token using the
+        <a href="https://github.com/mahpate/Vlite#quick-start-docker-rest-service">Docker REST quickstart</a>.
+        Then build both services from the current checkout:</p>
+      <pre class="code"><code>docker compose --profile dashboard up --build -d api dashboard</code></pre>
+      <p>Open <code>http://localhost:8081</code> for the standalone UI, or
+        <code>http://localhost:18084/dashboard</code> for the embedded UI.
+        Paste your existing <code>.secrets/api-token</code> value into the connection field.
+        These addresses refer to your own machine and only work after startup.</p>
+      <p>The standalone frontend proxies authenticated requests to the API; both views use the same database.
+        Tokens stay in page memory and are cleared on reload or Disconnect.
+        Keep the default loopback bindings; use the documented
+        <a href="docs/DOCKER-OPERATIONS.html">HTTPS deployment</a> before remote access.</p>
+      <p>The dashboard does not generate embeddings. Writes replace records and require confirmation.
+        Stopping a browser wait does not cancel server work or retry it. For offline workflows, use the
+        <a href="docs/TOOLS.html">VLite CLI tools</a>; stop the server before opening its file with an exclusive-lock tool.</p>
+    </div>
+  </section>
+</main>
+<footer>
+  <div class="wrap">
+    <p>VLite &middot; Single-file vector database &middot; MIT</p>
+    <nav aria-label="Footer">
+      <a href="./">Home</a>
+      <a href="docs/CONSOLE.html">Dashboard guide</a>
+      <a href="docs/TOOLS.html">CLI tools</a>
+      <a href="https://github.com/mahpate/Vlite">GitHub</a>
+    </nav>
+  </div>
+</footer>
+</body>
+</html>

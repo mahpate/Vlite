@@ -7,6 +7,7 @@ on:
       - "site/**"
       - "docs/**"
       - "scripts/build_site_docs.py"
+      - "tests/site_links.py"
       - "benchmarks/results/engines-*.json"
       - "benchmarks/results/zvec-*.json"
       - ".github/workflows/pages.yml"
@@ -41,6 +42,8 @@ jobs:
           for f in benchmarks/results/engines-*.json; do [ -e "$f" ] && cp "$f" _site/results/; done
           python scripts/build_site_docs.py site _site/docs
           touch _site/.nojekyll
+      - name: Check site links and fragments
+        run: python tests/site_links.py _site
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v4
         with:
