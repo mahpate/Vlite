@@ -11,5 +11,11 @@ readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 
+[project.urls]
+Homepage = "https://mahpate.github.io/Vlite/"
+Documentation = "https://mahpate.github.io/Vlite/api.html"
+Repository = "https://github.com/mahpate/Vlite"
+Issues = "https://github.com/mahpate/Vlite/issues"
+
 [tool.setuptools.package-data]
 vlite_embedded = ["py.typed"]

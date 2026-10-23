@@ -2,8 +2,10 @@
 
 Download packages from [GitHub releases](https://github.com/mahpate/Vlite/releases).
 There is no need to clone the repository or install Rust when using a prebuilt
-SDK. Packages are not published to PyPI or npm; do not assume an unqualified
-package-registry name belongs to this project.
+SDK. Python wheels are published to PyPI as `vlite-embedded` and `vlite-client`
+by [`pypi.yml`](../.github/workflows/pypi.yml) once its trusted publisher is
+configured (see [Registry publication](#registry-publication)). npm packages are
+not published; do not assume any other registry name belongs to this project.
 
 ## Verify before installing
 
@@ -150,9 +152,35 @@ and NuGet packages are not prebuilt release assets.
 
 ## Registry publication
 
-PyPI/npm trusted publishing is not configured by a repository workflow alone.
-It requires control of the destination project/scope and an explicitly
-configured trusted publisher at that registry. Native npm packages also need
-platform-specific package names and a public loader to avoid publishing
-different binaries under one name/version. Until those identities and packaging
-contracts are established, install the GitHub assets above.
+### PyPI
+
+[`pypi.yml`](../.github/workflows/pypi.yml) runs after a successful tagged
+release (or manually with an existing tag). It downloads that release's wheels,
+verifies them against `SHA256SUMS`, skips the bare `linux_x86_64` wheel (PyPI
+only accepts `manylinux` Linux tags), and uploads with PyPI trusted publishing
+(OIDC; no API token is stored). Once published:
+
+```sh
+python -m pip install vlite-embedded   # in-process engine (Windows x64, macOS arm64, Linux x86_64 glibc 2.28+)
+python -m pip install vlite-client     # REST client
+```
+
+Platforms without a wheel (for example Linux arm64 or Intel macOS) must use a
+release asset or build from source with `bindings/build_wheel.py`.
+
+One-time maintainer setup, required before the first upload:
+
+1. Sign in to <https://pypi.org> (create an account and enable 2FA if needed).
+2. Under **Your projects → Publishing → Add a new pending publisher**, add one
+   for each project name, `vlite-embedded` and `vlite-client`, with owner
+   `mahpate`, repository `Vlite`, workflow `pypi.yml`, environment `pypi`.
+3. In GitHub, create the `pypi` environment (Settings → Environments), ideally
+   with a required reviewer.
+4. Run **Actions → Publish to PyPI → Run workflow** with tag `v0.3.0`, or push
+   the next release tag.
+
+### npm
+
+Native npm packages need platform-specific package names and a public loader to
+avoid publishing different binaries under one name/version, plus control of the
+`@vlite` scope. Until then, install the GitHub tarballs above.

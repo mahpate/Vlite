@@ -45,8 +45,10 @@ python tests/embedded_wheel.py embedded-wheels
 Install the generated `.whl` into the consuming application with
 `python -m pip install <wheel-path>`. The consuming machine needs only Python
 and its normal native OS runtime, not Rust or a server. CI retains these wheels
-as artifacts and the release workflow includes them with checksums; no PyPI
-upload or published release is implied.
+as artifacts and the release workflow includes them with checksums. Tagged
+releases are uploaded to PyPI as `vlite-embedded` by `.github/workflows/pypi.yml`
+once its trusted publisher is configured; see
+[Registry publication](../docs/INSTALL.md#registry-publication).
 
 For installation without a checkout or Rust toolchain, use the
 [versioned release packages and installation guide](../docs/INSTALL.md).

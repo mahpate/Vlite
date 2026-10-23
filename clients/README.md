@@ -7,7 +7,8 @@ For server-free access, use the separate [Python/native bindings](../bindings/RE
 or [embedded Node.js/TypeScript addon](../bindings/node/README.md).
 Both use the MIT License. Install the wheel or tarball from
 [GitHub release assets](../docs/INSTALL.md), or build from this checkout.
-Packages are not published to PyPI or npm.
+The Python client is published to PyPI as `vlite-client` once registry publication
+is configured ([details](../docs/INSTALL.md#registry-publication)); npm packages are not published.
 
 ## Python
 

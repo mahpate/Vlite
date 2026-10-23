@@ -1,0 +1,70 @@
+name: Publish to PyPI
+
+# Uploads the already-verified wheels attached to a GitHub release, so the
+# bytes on PyPI match the bytes behind the release's SHA256SUMS.
+# Requires a PyPI trusted publisher for this repository, workflow file
+# `pypi.yml` and environment `pypi` on both `vlite-embedded` and `vlite-client`.
+on:
+  workflow_run:
+    workflows: ["VLite release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to publish (for example v0.3.0)"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pypi-${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/vlite-embedded/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download release wheels and checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir release --pattern '*.whl' --pattern SHA256SUMS
+      - name: Verify checksums and select registry-compatible wheels
+        shell: python
+        env:
+          TAG: ${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
+        run: |
+          import hashlib, os, pathlib, shutil
+          release = pathlib.Path("release")
+          sums = {}
+          for line in (release / "SHA256SUMS").read_text().splitlines():
+              digest, name = line.split(maxsplit=1)
+              sums[pathlib.PurePosixPath(name.lstrip("*")).name] = digest
+          version = os.environ["TAG"].removeprefix("v")
+          out = pathlib.Path("pypi-dist")
+          out.mkdir()
+          for wheel in sorted(release.glob("*.whl")):
+              assert hashlib.sha256(wheel.read_bytes()).hexdigest() == sums[wheel.name], wheel.name
+              parts = wheel.stem.split("-")
+              assert parts[1] == version, f"{wheel.name} does not match {version}"
+              # PyPI rejects bare linux_* tags; the audited manylinux wheel covers Linux.
+              if parts[0] in {"vlite_embedded", "vlite_client"} and not parts[-1].startswith("linux_"):
+                  shutil.copy2(wheel, out / wheel.name)
+          names = sorted(path.name for path in out.iterdir())
+          print("\n".join(names))
+          assert any(name.startswith("vlite_client-") for name in names)
+          for platform in ["manylinux", "win_amd64", "macosx"]:
+              assert any(name.startswith("vlite_embedded-") and platform in name for name in names), platform
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: pypi-dist
+          skip-existing: true
