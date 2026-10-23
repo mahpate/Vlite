@@ -18,6 +18,7 @@ otel = ["server", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemet
 tools = ["json", "dep:csv"]
 import-formats = ["tools", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc", "dep:parquet"]
 json = ["dep:serde", "dep:serde_json"]
+mcp = ["json"]
 server = ["json", "dep:axum", "dep:base64", "dep:tokio", "dep:subtle", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:tokio-stream", "dep:reqwest"]
 grpc = [
     "server",
@@ -62,6 +63,9 @@ tempfile = "3"
 subtle = { version = "2.6", optional = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "io-util"], optional = true }
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rayon = "1.10"
+
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 getrandom = { version = "0.4", features = ["wasm_js"] }
 
@@ -105,3 +109,11 @@ required-features = ["tools"]
 [[bin]]
 name = "vlite-quality"
 required-features = ["tools"]
+
+[[bin]]
+name = "vlite-mcp"
+required-features = ["mcp"]
+
+[[test]]
+name = "mcp"
+required-features = ["mcp"]

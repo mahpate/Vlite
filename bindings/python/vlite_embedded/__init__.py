@@ -77,11 +77,23 @@ class NativeLibrary:
         return self._create_feature(None, dimensions, format, key, passphrase, commit_timestamps)
 
     def open(self, path: str | os.PathLike[str], *, key: bytes | None = None,
-             passphrase: str | None = None) -> "Database":
+             passphrase: str | None = None, read_only: bool = False) -> "Database":
+        """Open an existing file. ``read_only=True`` takes a shared OS lock so any
+        number of processes can read the same file concurrently; mutations raise
+        ``EmbeddedError`` with code ``read_only`` and writers get ``locked``.
+        The handle reads a snapshot at open; close and reopen to see new commits.
+        C ABI calls are serialized within one process. For parallel reads, spawn
+        multiple processes, each opening its own ``read_only=True`` handle.
+        Key/passphrase credentials also work with read-only opens.
+        """
         if key is None and passphrase is None:
-            result = self._execute(0, {"op": "open", "path": str(Path(path))})
+            request = {"op": "open", "path": str(Path(path))}
+            if read_only:
+                request["read_only"] = True
+            result = self._execute(0, request)
         else:
-            result = self._feature("open", path=str(Path(path)), credentials=_credentials(key, passphrase))
+            result = self._feature("open", path=str(Path(path)), credentials=_credentials(key, passphrase),
+                                   **({"read_only": True} if read_only else {}))
         return Database(self, int(result["handle"]))
 
     def open_from_bytes(self, data: bytes, *, key: bytes | None = None,

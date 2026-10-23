@@ -115,7 +115,7 @@ struct Inner {
 }
 
 pub(super) struct Ops {
-    database: Weak<Mutex<Option<Database>>>,
+    database: Weak<RwLock<Option<Database>>>,
     workers: Arc<Semaphore>,
     metrics: Arc<Metrics>,
     inner: Mutex<Inner>,
@@ -144,7 +144,7 @@ fn lock<T>(mutex: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, ApiError> {
 
 impl Ops {
     pub(super) fn new(
-        database: Weak<Mutex<Option<Database>>>,
+        database: Weak<RwLock<Option<Database>>>,
         workers: Arc<Semaphore>,
         metrics: Arc<Metrics>,
     ) -> Self {
@@ -211,7 +211,11 @@ impl Ops {
             Ok(handle) => inner.thread = Some(handle),
             Err(error) => {
                 inner.spawn_error = Some(error.to_string());
-                eprintln!("{}", json!({"event":"ops_thread_spawn_failed"}));
+                super::logs::stderr(
+                    "error",
+                    "maintenance",
+                    json!({"event":"ops_thread_spawn_failed"}).to_string(),
+                );
             }
         }
     }
@@ -286,7 +290,7 @@ impl Ops {
         operation: impl FnOnce(&mut Database) -> Result<T, ApiError>,
     ) -> Result<T, ApiError> {
         let database = self.database.upgrade().ok_or_else(unavailable)?;
-        let mut owner = database.lock().map_err(internal)?;
+        let mut owner = database.write().map_err(internal)?;
         let db = owner.as_mut().ok_or_else(unavailable)?;
         operation(db)
     }
@@ -564,9 +568,10 @@ impl Ops {
                 inner.backup_state.last_failure_unix_ms = Some(now_ms());
                 inner.backup_state.last_error = Some(error.message.clone());
                 drop(inner);
-                eprintln!(
-                    "{}",
-                    json!({"event":"scheduled_backup_failed","code":error.code})
+                super::logs::stderr(
+                    "error",
+                    "maintenance",
+                    json!({"event":"scheduled_backup_failed","code":error.code}).to_string(),
                 );
                 self.audit(json!({"event":"backup_scheduled_failed","code":error.code}));
                 Err(error)

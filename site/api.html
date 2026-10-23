@@ -73,6 +73,7 @@
       <h4>Server</h4>
       <a href="#rest">REST endpoints</a>
       <a href="#grpc">gRPC service</a>
+      <a href="#mcp">MCP server</a>
     </div>
   </aside>
 
@@ -129,8 +130,12 @@ class NativeLibrary(path: str | os.PathLike | None = None)</pre>
     <p><strong>Returns</strong> an open <a href="#py-database"><code>Database</code></a>.</p>
 
     <h3 id="py-open" class="method">open()</h3>
-<pre class="code sig">NativeLibrary.open(path, *, key=None, passphrase=None) -&gt; Database</pre>
-    <p>Opens an existing file, validates checksums and recovers committed records. Holds an exclusive lock until closed.</p>
+<pre class="code sig">NativeLibrary.open(path, *, key=None, passphrase=None, read_only=False) -&gt; Database</pre>
+    <p>Opens an existing file and validates committed records. Default: exclusive writer lock until closed.
+      With <code>read_only=True</code>, multiple processes can open shared-lock snapshots; writers are excluded and
+      conflicting opens return <code>locked</code>. Mutations return <code>read_only</code> without invalidating the handle.
+      Reopen to see later commits; in-memory ANN builds are allowed, but the datafile is never written.
+      Calls within one Python process remain serialized by the C ABI; use multiple processes for parallel embedded reads.</p>
 
     <h3 id="py-memory" class="method">create_in_memory() / open_from_bytes()</h3>
 <pre class="code sig">NativeLibrary.create_in_memory(dimensions, *, format=None, key=None,
@@ -295,7 +300,7 @@ except EmbeddedError as e:
 
 new NativeLibrary(options?: { libraryPath?: string; addonPath?: string; maxPending?: number })
 native.create(path: string, dimensions: number, options?: CreateOptions): Promise&lt;Database&gt;
-native.open(path: string, options?: Credentials): Promise&lt;Database&gt;
+native.open(path: string, options?: Credentials &amp; { readOnly?: boolean }): Promise&lt;Database&gt;
 native.close(): Promise&lt;void&gt;</pre>
     <table class="param-table">
       <thead><tr><th>Python</th><th>Node.js</th></tr></thead>
@@ -321,6 +326,9 @@ await native.close();</pre>
 <pre class="code sig">impl Database {
     pub fn create(path: impl AsRef&lt;Path&gt;, dimensions: usize) -&gt; Result&lt;Self&gt;;
     pub fn open(path: impl AsRef&lt;Path&gt;) -&gt; Result&lt;Self&gt;;
+    pub fn open_read_only(path: impl AsRef&lt;Path&gt;) -&gt; Result&lt;Self&gt;;
+    pub fn open_read_only_encrypted(path: impl AsRef&lt;Path&gt;, key: &amp;EncryptionKey) -&gt; Result&lt;Self&gt;;
+    pub fn is_read_only(&amp;self) -&gt; bool;
     pub fn put(&amp;mut self, id: u64, vector: &amp;[f32], payload: &amp;[u8]) -&gt; Result&lt;()&gt;;
     pub fn put_with_metadata(&amp;mut self, id: u64, vector: &amp;[f32], payload: &amp;[u8],
                              metadata: &amp;Metadata) -&gt; Result&lt;()&gt;;
@@ -435,11 +443,16 @@ curl -s -X POST localhost:8080/v1/search \
       </tbody>
     </table>
 
-    <h3 class="method">Operations &amp; admin</h3>
+    <h3 id="observability" class="method">Operations &amp; admin</h3>
+    <p>Read routes share the server's RwLock; writes and rebuild-triggering ANN queries take exclusive access.
+      Observability adds a process-local structured ring buffer (<code>--log-buffer 2000</code>, maximum 100000),
+      sanitized access logs and a compact metrics snapshot. These admin endpoints require a bootstrap admin credential. Ring entries are not durable audit records.</p>
     <table class="param-table endpoints">
       <tbody>
         <tr><td><span class="verb get">GET</span></td><td><code>/health</code> &middot; <code>/ready</code></td><td>Liveness and readiness (no auth for <code>/health</code>)</td></tr>
         <tr><td><span class="verb get">GET</span></td><td><code>/metrics</code></td><td>JSON or Prometheus metrics</td></tr>
+        <tr><td><span class="verb get">GET</span></td><td><code>/v1/admin/logs</code></td><td>Bounded entries, next_seq, dropped, capacity. Filters: since (sequence), level, q, limit (1–1000, default 200).</td></tr>
+        <tr><td><span class="verb get">GET</span></td><td><code>/v1/admin/metrics/summary</code></td><td>Uptime, request/search counters, per-route latency percentiles, database and log-buffer state. Recent 1024 observations per route.</td></tr>
         <tr><td><span class="verb get">GET</span></td><td><code>/v1/capabilities</code></td><td>Version, role and compatibility</td></tr>
         <tr><td><span class="verb get">GET</span> <span class="verb post">POST</span></td><td><code>/v1/admin/backups</code> &middot; <code>/v1/admin/restores</code></td><td>Online backups and validated restores</td></tr>
         <tr><td><span class="verb get">GET</span> <span class="verb post">POST</span></td><td><code>/v1/admin/credentials</code></td><td>Scoped, expiring credentials with rotation and revocation</td></tr>
@@ -448,6 +461,19 @@ curl -s -X POST localhost:8080/v1/search \
       </tbody>
     </table>
     <p class="muted">See the complete list with request and response schemas in <a href="https://github.com/mahpate/Vlite/blob/main/src/openapi.json">openapi.json</a> and <a href="https://github.com/mahpate/Vlite/blob/main/docs/API.md">docs/API.md</a>.</p>
+
+    <h2 id="mcp">MCP · <code>vlite-mcp</code></h2>
+    <p>Build from a checkout with <code>cargo install --path . --features mcp</code>, then run
+      <code>vlite-mcp --db ./vectors.vlite</code>. Stdio JSON-RPC only (no network listener), read-only by default.
+      <code>--writable</code> enables <code>vlite_upsert</code> and <code>vlite_delete</code> and requires exclusive file access.</p>
+    <p>Default tools: <code>vlite_info</code>, <code>vlite_list_collections</code>, <code>vlite_search</code>,
+      <code>vlite_get</code>, <code>vlite_list</code>, <code>vlite_index_status</code>, <code>vlite_build_index</code>.
+      Index builds affect memory only in read-only mode. Encryption: <code>--encryption-key-file</code>,
+      <code>VLITE_ENCRYPTION_KEY</code> or <code>VLITE_ENCRYPTION_KEY_HEX</code> (choose one).
+      <a href="https://github.com/mahpate/Vlite/blob/main/docs/MCP.md">Exact schemas and VS Code / Copilot CLI / Claude Desktop configurations</a>.</p>
+    <p>C ABI Open accepts <code>"read_only": true</code>; Node accepts <code>open(path, {readOnly: true})</code>.
+      Rust exposes <code>open_read_only</code>, <code>open_read_only_encrypted</code> and <code>is_read_only</code>.
+      All use shared locks and open-time snapshots, not a live view alongside a writer.</p>
 
     <!-- ============ gRPC ============ -->
     <h2 id="grpc">gRPC service</h2>

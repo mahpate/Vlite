@@ -219,7 +219,9 @@ vlite-maintain verify  documents-v5.vlite
           <p>Operate VLite like any modern service, from a laptop to a container platform.</p>
           <ul class="list">
             <li>REST with OpenAPI, and gRPC with streaming import, export and watch.</li>
-            <li>Prometheus-style metrics, slow-query logging and optional OpenTelemetry.</li>
+            <li><a href="api.html#py-open">Shared-lock read-only snapshots</a> across processes, concurrent server reads and native parallel exact scans.</li>
+            <li>Prometheus metrics, a structured in-memory log tail, route latency cards and optional OpenTelemetry.</li>
+            <li>Light/dark/system dashboard, collection review wizard, validated batched JSON writes and copy-as-code.</li>
             <li>Scheduled backups with retention and restore drills; multi-arch container images.</li>
           </ul>
           <a class="more" href="https://github.com/mahpate/Vlite/blob/main/docs/DOCKER-OPERATIONS.md">Operations guide →</a>
@@ -271,7 +273,7 @@ vlite-maintain verify  documents-v5.vlite
             <div class="pp-row-title"><span class="pp-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></span>Search &amp; indexes</div>
             <div class="pp-groups">
               <div class="wide"><div class="pp-label">Retrieval</div><div class="chips"><span class="chip">Dense vectors</span><span class="chip">Sparse vectors</span><span class="chip">Full-text &middot; BM25</span><span class="chip">Hybrid retrieval</span><span class="chip">Grouped search</span><span class="chip">Typed filters</span><span class="chip">Geo radius</span><span class="chip">Recommend</span><span class="chip">MMR rerank</span></div></div>
-              <div><div class="pp-label">Index types</div><div class="chips"><span class="chip">Exact (flat)</span><span class="chip">HNSW</span><span class="chip">Disk ANN</span><span class="chip">Metadata indexes</span></div></div>
+              <div><div class="pp-label">Index types</div><div class="chips"><span class="chip">Exact (flat)</span><span class="chip">Parallel exact scans</span><span class="chip">HNSW</span><span class="chip">Disk ANN</span><span class="chip">Metadata indexes</span></div></div>
               <div><div class="pp-label">Quantization</div><div class="chips"><span class="chip">FP32</span><span class="chip">Scalar U8 + rerank</span></div></div>
             </div>
           </div>
@@ -279,7 +281,7 @@ vlite-maintain verify  documents-v5.vlite
           <div class="pp-row">
             <div class="pp-row-title"><span class="pp-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg></span>Runtime &amp; platform</div>
             <div class="pp-groups">
-              <div><div class="pp-label">Infrastructure</div><div class="chips"><span class="chip">Single file + WAL</span><span class="chip">Checksummed pages</span><span class="chip">Encryption at rest</span><span class="chip">Point-in-time restore</span><span class="chip">GPU exact (wgpu)</span></div></div>
+              <div><div class="pp-label">Infrastructure</div><div class="chips"><span class="chip">Single append-only file</span><span class="chip">Checksummed frames</span><span class="chip">Shared read-only opens</span><span class="chip">Concurrent server reads</span><span class="chip">Encryption at rest</span><span class="chip">Point-in-time restore</span><span class="chip">GPU exact (wgpu)</span></div></div>
               <div><div class="pp-label">Runtimes</div><div class="chips"><span class="chip">Linux x86_64</span><span class="chip">Linux arm64</span><span class="chip">macOS arm64</span><span class="chip">Windows</span><span class="chip">Docker</span></div></div>
             </div>
           </div>
@@ -291,16 +293,16 @@ vlite-maintain verify  documents-v5.vlite
             <p class="muted">Clustered 20k &times; 128 &middot; HNSW ef=100 &middot; 16 vCPU WSL &middot; sequential queries</p>
             <div class="pp-stats">
               <div><strong>1.0</strong><span>recall@10</span></div>
-              <div><strong>1,900+</strong><span>QPS</span></div>
-              <div><strong>0.5 ms</strong><span>p50</span></div>
+              <div><strong>2,154</strong><span>QPS</span></div>
+              <div><strong>0.454 ms</strong><span>p50</span></div>
             </div>
           </a>
           <div class="pp-tools">
             <div class="pp-side-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 2 9 5-9 5-9-5 9-5zM3 12l9 5 9-5M3 17l9 5 9-5"/></svg>Tools &amp; agents</div>
-            <a class="pp-tool" href="https://github.com/mahpate/Vlite/blob/main/docs/CONSOLE.md"><strong>VLite Dashboard</strong><span>Visual workbench &amp; REST playground</span></a>
+            <a class="pp-tool" href="https://github.com/mahpate/Vlite/blob/main/docs/CONSOLE.md"><strong>VLite Dashboard</strong><span>Studio workflows, observability, metrics &amp; logs</span></a>
             <a class="pp-tool" href="https://github.com/mahpate/Vlite/blob/main/docs/TOOLS.md"><strong>vlite-shell &amp; vlite-maintain</strong><span>Interactive CLI, verify, compact, backup</span></a>
-            <div class="pp-tool soon"><strong>MCP Server <em>Planned</em></strong><span>Agent-ready VLite tools</span></div>
-            <div class="pp-tool soon"><strong>Agent Skills <em>Planned</em></strong><span>Reusable retrieval guidance</span></div>
+            <a class="pp-tool" href="https://github.com/mahpate/Vlite/blob/main/docs/MCP.md"><strong>vlite-mcp</strong><span>Stdio MCP tools; read-only by default</span></a>
+            <a class="pp-tool" href="https://github.com/mahpate/Vlite/blob/main/docs/AGENT-SKILLS.md"><strong>Agent Skills</strong><span>RAG, MCP, operations &amp; index tuning</span></a>
           </div>
         </div>
       </div>
@@ -325,7 +327,7 @@ vlite-maintain verify  documents-v5.vlite
         <div class="card">
           <h3>Indexes</h3>
           <div class="chip-group"><div class="label">Index types</div>
-            <div class="chips"><span class="chip">Exact (flat)</span><span class="chip">HNSW</span><span class="chip">Disk ANN sidecar</span><span class="chip">Metadata indexes</span><span class="chip">GPU exact (opt-in)</span></div></div>
+            <div class="chips"><span class="chip">Exact (flat)</span><span class="chip">Parallel exact scans</span><span class="chip">HNSW</span><span class="chip">Disk ANN sidecar</span><span class="chip">Metadata indexes</span><span class="chip">GPU exact (opt-in)</span></div></div>
           <div class="chip-group"><div class="label">Quantization &amp; maintenance</div>
             <div class="chips"><span class="chip">Scalar u8</span><span class="chip">HNSW snapshots</span><span class="chip">Background rebuilds</span><span class="chip">Filter-aware ANN</span></div></div>
         </div>
@@ -335,7 +337,7 @@ vlite-maintain verify  documents-v5.vlite
         </div>
         <div class="card">
           <h3>Runtime &amp; platforms</h3>
-          <div class="chips"><span class="chip">Windows</span><span class="chip">Linux x86_64</span><span class="chip">Linux arm64</span><span class="chip">macOS arm64</span><span class="chip">Non-root containers</span><span class="chip">TLS</span><span class="chip">Prometheus-style metrics</span><span class="chip">OpenTelemetry (opt-in)</span><span class="chip">Go / .NET / JS / Python clients</span></div>
+          <div class="chips"><span class="chip">Windows</span><span class="chip">Linux x86_64</span><span class="chip">Linux arm64</span><span class="chip">macOS arm64</span><span class="chip">Non-root containers</span><span class="chip">TLS</span><span class="chip">Shared read-only handles</span><span class="chip">Concurrent server reads</span><span class="chip">Metrics &amp; live logs</span><span class="chip">MCP server</span><span class="chip">Agent skills</span><span class="chip">Prometheus-style metrics</span><span class="chip">OpenTelemetry (opt-in)</span><span class="chip">Go / .NET / JS / Python clients</span></div>
         </div>
       </div>
     </div>

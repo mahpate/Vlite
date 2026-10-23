@@ -84,6 +84,8 @@ pub struct ServerOptions {
     pub backup_drill_max_bytes: Option<u64>,
     /// Slow-query log threshold (default 500 ms).
     pub slow_query_threshold: Option<Duration>,
+    /// In-memory structured log capacity (default 2000 entries; allowed 1..100000).
+    pub log_buffer_capacity: Option<usize>,
     /// Active database path, protected from retention.
     pub database_path: Option<PathBuf>,
 }
@@ -145,6 +147,14 @@ impl ServerOptions {
             return Err(std::io::Error::other("backup drill-every must be 0..100"));
         }
         if self
+            .log_buffer_capacity
+            .is_some_and(|n| !(1..=100_000).contains(&n))
+        {
+            return Err(std::io::Error::other(
+                "log buffer capacity must be 1..100000",
+            ));
+        }
+        if self
             .slow_query_threshold
             .is_some_and(|d| d.is_zero() || d.as_secs() > 3600)
         {
@@ -161,6 +171,11 @@ pub fn configured_admin_router(
     options: ServerOptions,
 ) -> std::io::Result<Router> {
     options.validate()?;
+    super::logs::configure(
+        options
+            .log_buffer_capacity
+            .unwrap_or(super::logs::DEFAULT_CAPACITY),
+    );
     let directory = options
         .admin_directory
         .map(|p| {
@@ -321,7 +336,7 @@ async fn capabilities(
         "scoped_credentials":scoped,"persistent_audit":audit_log,
         "native_tls":true,"tls_reload":!s.tls.lock().map_err(internal)?.is_empty(),
         "tenants":s.admin.tenants.is_some(),"credential_rate_limits":scoped,"credential_vector_quotas":scoped,"otel":cfg!(feature="otel")},
-        "routes":["/health","/ready","/metrics","/openapi.json","/dashboard","/dashboard/app.js","/dashboard/style.css","/dashboard/console-tools.js",
+        "routes":["/health","/ready","/metrics","/openapi.json","/dashboard","/dashboard/app.js","/dashboard/style.css","/dashboard/console-tools.js","/dashboard/observability.js",
         "/v1/admin/tls/reload","/v1/admin/tenants","/v1/admin/tenants/{id}",
         "/v1/capabilities","/v1/database","/v1/vectors","/v1/vectors/{id}","/v1/batches","/v1/search",
         "/v1/index/hnsw","/v1/index/hnsw/quality","/v1/index/hnsw/rebuild","/v1/index/hnsw/rebuild/poll","/v1/index/hnsw/rebuild/cancel",
@@ -337,7 +352,7 @@ async fn capabilities(
         "/v1/imports/{job}","/v1/imports/{job}/chunks/{chunk}","/v1/imports/{job}/finish","/v1/imports/{job}/abort",
         "/v1/admin/maintenance/auto","/v1/admin/maintenance/auto/tick","/v1/admin/backups/schedule",
         "/v1/admin/backups/schedule/run","/v1/admin/backups/{name}/verify","/v1/admin/backups/{name}/drill",
-        "/v1/admin/diagnostics/slow-queries","/v1/admin/credentials","/v1/admin/credentials/{id}/rotate",
+        "/v1/admin/diagnostics/slow-queries","/v1/admin/logs","/v1/admin/metrics/summary","/v1/admin/credentials","/v1/admin/credentials/{id}/rotate",
         "/v1/admin/credentials/{id}/revoke","/v1/admin/audit/persistent"]});
     let features = value["features"]
         .as_object_mut()

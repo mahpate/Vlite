@@ -18,6 +18,11 @@ async fn public_dashboard_assets_are_hardened_but_do_not_exempt_data_routes() {
     for (uri, content_type, marker) in [
         ("/dashboard", "text/html", "VLite dashboard"),
         ("/dashboard/app.js", "text/javascript", "confirmOperation"),
+        (
+            "/dashboard/observability.js",
+            "text/javascript",
+            "parsePrometheus",
+        ),
         ("/dashboard/style.css", "text/css", "color-scheme"),
         (
             "/dashboard/console-tools.js",

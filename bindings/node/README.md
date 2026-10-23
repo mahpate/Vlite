@@ -87,6 +87,21 @@ Inner-product ANN is rejected. Cosine ANN requires a v0.1.2+ wrapper
 and native library; v0.1.1 has L2 ANN only.
 See [ABI contracts and limitations](../README.md).
 
+## Read-only multi-process access
+
+Use `await native.open(path, { readOnly: true })` for an existing database with a
+shared OS lock. Multiple readers may coexist across handles and processes.
+`get` and `search` work normally; mutations reject with `EmbeddedError.code ===
+"read_only"` without invalidating the handle. Add `key` or `passphrase` to the
+options for encrypted files.
+
+The default `native.open(path)` is an exclusive writer: it rejects with `"locked"`
+while any reader exists, and readers likewise reject while a writer holds the
+file. Close every reader before opening a writer. A reader uses a snapshot at
+open; close and reopen to see new commits rather than expecting live refresh.
+Native C ABI calls are serialized within one process, including across workers.
+For parallel reads use separate processes, each opening its own read-only handle.
+
 ## Format 4: collections, revisions, planned search and imports
 
 `native.create(path, dims)` still creates format 3. Pass `{ format: 4 }` for
@@ -152,8 +167,8 @@ The internal worker does not inherit the application's `execArgv` flags/loaders.
 `native_failure` mean a native outcome may be unknown; do not blindly retry a
 mutation. Native process crashes cannot be contained by a worker thread.
 The native ABI serializes all handles through one mutex; multiple workers do
-not make the engine parallel. File ownership remains exclusive across
-processes/REST/native bindings.
+not make the engine parallel. Writers retain exclusive file ownership across
+processes/REST/native bindings; only read-only handles share file locks.
 
 For advanced deployments, pass absolute `libraryPath` and `addonPath` to the
 constructor. There is no PATH search or automatic native download. N-API v8
@@ -240,5 +255,9 @@ process memory. Worker/JSON credential copies cannot be reliably wiped: do not
 log requests. In-memory data is durable only after the host saves `toBytes()`.
 Read replicas, GPU, named ANN and re-embedding workers are not exposed. See
 `bindings/c/FEATURES.md` for the complete result/error and ownership contract.
-`npm test` runs both legacy tests and six real-engine feature scenarios;
+`npm test` runs both legacy tests and real-engine feature scenarios, including
+cross-process read-only locking. Set `VLITE_TEST_LIBRARY` when running
+`node --test bindings/node/features.test.mjs` to select an alternate native library;
+the default uses the package's platform prebuild.
+
 `npm run typecheck` also checks compile-time examples of every new method.

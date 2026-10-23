@@ -15,7 +15,7 @@ use vlite::{
     },
 };
 
-const USAGE: &str = "usage: vlite-server <database-path> [--create-if-missing <dimensions> [--create-format 3|4|5]] [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--encryption-key-file <path> | VLITE_ENCRYPTION_KEY | VLITE_ENCRYPTION_KEY_HEX] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS";
+const USAGE: &str = "usage: vlite-server <database-path> [--create-if-missing <dimensions> [--create-format 3|4|5]] [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--encryption-key-file <path> | VLITE_ENCRYPTION_KEY | VLITE_ENCRYPTION_KEY_HEX] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS; [--log-buffer <n>] (default 2000, maximum 100000)";
 
 struct Config {
     otlp_endpoint: Option<String>,
@@ -37,6 +37,7 @@ struct Config {
     read_only_token: Option<BearerToken>,
     read_only_file: Option<PathBuf>,
     admin_directory: Option<PathBuf>,
+    log_buffer_capacity: usize,
     schedule: Schedule,
 }
 
@@ -99,6 +100,7 @@ fn options(config: &Config, database_path: Option<PathBuf>) -> ServerOptions {
         backup_drill_every: s.backup_drill_every,
         backup_drill_max_bytes: s.backup_drill_max_bytes,
         slow_query_threshold: s.slow_query_threshold,
+        log_buffer_capacity: Some(config.log_buffer_capacity),
         database_path,
     }
 }
@@ -135,6 +137,8 @@ fn config() -> Result<Config, Box<dyn Error>> {
     let mut grpc_tls_client_ca: Option<PathBuf> = None;
     let mut grpc_tls_cert: Option<PathBuf> = None;
     let mut grpc_tls_key: Option<PathBuf> = None;
+    let mut log_buffer_capacity = 2_000usize;
+    let mut seen_log_buffer = false;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--otlp-endpoint") => {
@@ -177,6 +181,13 @@ fn config() -> Result<Config, Box<dyn Error>> {
             }
             Some("--grpc-tls-key") if grpc_tls_key.is_none() => {
                 grpc_tls_key = Some(args.next().ok_or(USAGE)?.into());
+            }
+            Some("--log-buffer") if !seen_log_buffer => {
+                log_buffer_capacity = args.next().ok_or(USAGE)?.to_str().ok_or(USAGE)?.parse()?;
+                if !(1..=100_000).contains(&log_buffer_capacity) {
+                    return Err("--log-buffer must be 1..100000".into());
+                }
+                seen_log_buffer = true;
             }
             Some("--ann-snapshot") if !ann_snapshot => ann_snapshot = true,
             Some("--encryption-key-file") if encryption_key_file.is_none() => {
@@ -357,6 +368,7 @@ fn config() -> Result<Config, Box<dyn Error>> {
         read_only_token,
         read_only_file,
         admin_directory: std::env::var_os("VLITE_ADMIN_DIR").map(PathBuf::from),
+        log_buffer_capacity,
         schedule: schedule()?,
     };
     // Validate every option before creating or opening a database.
@@ -471,7 +483,7 @@ fn load_ann_snapshot(database: &mut Database, path: &Path) {
         Err(error) => json!({"event":"ann_snapshot_load","outcome":"error",
             "reason":error.to_string(),"indexes":0,"duration_ms":elapsed_ms(started)}),
     };
-    eprintln!("{line}");
+    vlite::server::log_stderr("info", "maintenance", line.to_string());
 }
 
 /// Saves after both listeners drained. A failed save is logged and never
@@ -484,7 +496,7 @@ async fn save_ann_snapshot(service: &Service, path: &Path) {
         Err(error) => json!({"event":"ann_snapshot_save","outcome":"failed",
             "reason":error.to_string(),"indexes":0,"bytes":0,"duration_ms":elapsed_ms(started)}),
     };
-    eprintln!("{line}");
+    vlite::server::log_stderr("info", "maintenance", line.to_string());
 }
 
 #[cfg(feature = "grpc")]
@@ -586,6 +598,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
     } else {
         "http"
     };
+    vlite::server::log_stderr(
+        "info",
+        "server",
+        json!({"event":"server_start","address":address.to_string()}).to_string(),
+    );
     println!("LISTENING {scheme}://{address}");
     if let Some((_, listener)) = &grpc {
         #[cfg(feature = "grpc")]
@@ -638,6 +655,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
         save_ann_snapshot(&service, path).await;
     }
     let closing = service.close().await;
+    vlite::server::log_stderr(
+        "info",
+        "server",
+        json!({"event":"server_shutdown"}).to_string(),
+    );
     rest?;
     grpc?;
     closing?;
@@ -657,10 +679,7 @@ async fn main() -> std::process::ExitCode {
     match run().await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!(
-                "{}",
-                serde_json::json!({"event":"startup_or_shutdown_failure","message":error.to_string()})
-            );
+            vlite::server::log_stderr("error", "server", serde_json::json!({"event":"startup_or_shutdown_failure","message":error.to_string()}).to_string());
             std::process::ExitCode::FAILURE
         }
     }

@@ -767,5 +767,29 @@
     tools = null;
     status(`Console tools failed to initialize (${error.message}); reload the page. Connecting is disabled.`, true);
   }
+  // A read-only bridge shares the in-memory connection without exposing its token.
+  window.VLiteObservabilityConnection = {
+    connected: () => connected,
+    request: async (route, options = {}) => {
+      if (!connected) throw new Error("Connect before accessing the database");
+      const endpoint = route.split("?")[0];
+      if (!["/metrics", "/v1/admin/metrics/summary", "/v1/admin/logs", "/v1/admin/diagnostics/slow-queries", "/v1/admin/audit"].includes(endpoint)) throw new Error("Unsupported observability endpoint");
+      // Background reads must not replace the foreground request's cancel handle or inspector.
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      try {
+        const response = await fetch(`${apiBase}${route}`, {
+          method: "GET", signal: controller.signal, cache: "no-store", credentials: "omit", redirect: "error",
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!response.ok) {
+          const error = new Error(`HTTP ${response.status}`);
+          error.status = response.status;
+          throw error;
+        }
+        return options.text ? await response.text() : await response.json();
+      } finally { clearTimeout(timeout); }
+    },
+  };
   window.addEventListener("pagehide", disconnect);
 })();

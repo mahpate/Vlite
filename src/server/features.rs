@@ -107,7 +107,7 @@ async fn changes(
         return Err(unprocessable("limit must be 1..=10000"));
     }
     let result = service
-        .run(move |db| {
+        .run_read(move |db| {
             open(db, &role, &Target::Legacy)?;
             let cursor = match cursor {
                 Some(cursor) => cursor,
@@ -141,7 +141,7 @@ async fn grouped(
     let target = collection_path(target)?;
     let request = body(input)?;
     let result = service
-        .run(move |db| {
+        .run_read(move |db| {
             let id = open(db, &role, &target)?;
             let r = collection_ref(db, id)?;
             let metric = request.metric.unwrap_or(identity(db, id, &target).0);
@@ -195,7 +195,7 @@ async fn recommend(
         .map(|s| id(s))
         .collect::<Result<Vec<_>, _>>()?;
     let result = service
-        .run(move |db| {
+        .run_read(move |db| {
             let cid = open(db, &role, &target)?;
             let metric = request.metric.unwrap_or(identity(db, cid, &target).0);
             let query = RecommendationQuery {
@@ -231,7 +231,7 @@ async fn facets(
     let target = collection_path(target)?;
     let request = body(input)?;
     let result = service
-        .run(move |db| {
+        .run_read(move |db| {
             let cid = open(db, &role, &target)?;
             collection_ref(db, cid)?
                 .facets(&request.field, &request.filter)
@@ -251,7 +251,7 @@ async fn numeric_stats(
     let target = collection_path(target)?;
     let request = body(input)?;
     let result = service
-        .run(move |db| {
+        .run_read(move |db| {
             let cid = open(db, &role, &target)?;
             collection_ref(db, cid)?
                 .numeric_stats(&request.field, &request.filter)
@@ -294,7 +294,7 @@ async fn geo_search(
     let target = collection_path(target)?;
     let request = body(input)?;
     let result = service
-        .run(move |db| {
+        .run_read(move |db| {
             let cid = open(db, &role, &target)?;
             let metric = request.metric.unwrap_or(identity(db, cid, &target).0);
             let query = GeoSearchQuery {
@@ -425,7 +425,7 @@ async fn search_named(
     let target = collection_path(target)?;
     let request = body(input)?;
     let hits = service
-        .run(move |db| {
+        .run_read(move |db| {
             let _cid = open(db, &role, &target)?;
             db.collection(target.name())?
                 .search_named(
@@ -455,7 +455,7 @@ async fn search_sparse(
     let target = collection_path(target)?;
     let request = body(input)?;
     let hits = service
-        .run(move |db| {
+        .run_read(move |db| {
             let _cid = open(db, &role, &target)?;
             db.collection(target.name())?
                 .search_sparse(&request.name, &request.vector, request.k)
@@ -492,7 +492,7 @@ async fn search_dense_sparse(
     let target = collection_path(target)?;
     let request = body(input)?;
     let hits = service
-        .run(move |db| {
+        .run_read(move |db| {
             let cid = open(db, &role, &target)?;
             let defaults = crate::hybrid::FusionOptions::default();
             let supplied = request.fusion;
@@ -545,7 +545,7 @@ async fn query_language(
     let target = collection_path(target)?;
     let request = body(input)?;
     let (hits, groups, facets) = service
-        .run(move |db| {
+        .run_read(move |db| {
             let cid = open(db, &role, &target)?;
             let parsed = crate::query_language::parse(&request.query)
                 .map_err(|e| unprocessable(e.to_string()))?;
@@ -673,7 +673,7 @@ async fn search_disk_ann(
         )
     })?;
     let hits = service
-        .run(move |db| {
+        .run_read(move |db| {
             let cid = open(db, &role, &target)?;
             let path = dir.join(format!("disk-ann-{cid}.dann"));
             let index = crate::DiskAnnIndex::open(path, crate::DiskAnnOptions::default())?;

@@ -83,7 +83,12 @@ export class NativeLibrary {
   constructor(options?: { libraryPath?: string; addonPath?: string; maxPending?: number });
   /** `format` defaults to 3; 4 enables named collections and resumable imports. */
   create(path: string, dimensions: number, options?: CreateOptions): Promise<Database>;
-  open(path: string, options?: Credentials): Promise<Database>;
+  /**
+   * `readOnly: true` shares the OS lock; mutations reject with `read_only`.
+   * Writers require exclusive access (`locked` while readers exist, and vice versa).
+   * Snapshot at open: close and reopen to see new commits. Parallel reads need separate processes.
+   */
+  open(path: string, options?: Credentials & { readOnly?: boolean }): Promise<Database>;
   createInMemory(dimensions: number, options?: CreateOptions): Promise<Database>;
   openFromBytes(data: Uint8Array, options?: Credentials): Promise<Database>;
   /** Closed/copied log; new destination. Exactly one of sequence/timestampMs is required. */

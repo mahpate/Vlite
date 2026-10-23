@@ -8,6 +8,25 @@ V5 files they do not understand (unknown header flags give `UnsupportedFeature`)
 No operation here modifies a source file in place: each one writes a new file
 through staged, fully revalidated publication, or reads a closed or copied file.
 
+## Shared-lock read-only snapshots
+
+Current-source `Database::open_read_only(path)` and
+`open_read_only_encrypted(path, &key)` open existing files read-only under a
+shared OS file lock. Multiple processes can read the same file; a writer still
+requires exclusive ownership. Conflicting opens return `Error::Locked`, not a
+wait. Handles see the committed state at open time; reopen to observe later
+commits. They do not read alongside an active writer. Mutations return
+`Error::ReadOnly` without poisoning, and incomplete tails are rejected rather
+than repaired. `is_read_only()` reports the mode. In-memory ANN builds are
+allowed without writing the datafile. These APIs add no new file format.
+
+Python: `native.open(path, read_only=True)`; Node:
+`native.open(path, {readOnly: true})`; C ABI Open: `"read_only": true`.
+The C ABI serializes calls per process, so parallel embedded Python reads use
+separate processes. The server instead keeps its exclusive file lock and uses
+an RwLock for concurrent read routes and exclusive writes. See
+[reference locking contracts](REFERENCE.md) and [MCP read-only access](MCP.md).
+
 ## Encryption at rest (#15)
 
 ```rust

@@ -217,7 +217,7 @@ async fn reload(State(service): State<Service>) -> Result<Json<Value>, ApiError>
             .map(TlsIdentity::candidate)
             .collect::<io::Result<Vec<_>>>()
             .map_err(|error| {
-                eprintln!("TLS reload failed: {error}");
+                super::logs::stderr("error", "tls", format!("TLS reload failed: {error}"));
                 ApiError::new(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     "tls_reload_failed",

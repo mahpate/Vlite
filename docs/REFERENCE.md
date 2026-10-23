@@ -12,8 +12,8 @@ and atomic batch mutations, and exact nearest-neighbor search.
 Optional REST and gRPC services expose the same engine. Optional in-memory HNSW
 search supports approximate retrieval without changing the database file;
 an explicit snapshot sidecar can cache derived graph state across restarts.
-Distributed operation, interactive transactions and multi-reader handles are
-deferred; see [storage features](STORAGE-FEATURES.md) for opt-in encryption at
+Distributed operation and interactive transactions are deferred; shared-lock
+read-only handles and concurrent server reads are available in current source; see [storage features](STORAGE-FEATURES.md) for opt-in encryption at
 rest, point-in-time restore, change feed, file-shipped replicas, disk ANN, GPU
 and WebAssembly.
 This is a correctness-first MVP, not a production-hardened storage engine.
@@ -299,7 +299,7 @@ marks it stale after its own writes and offers manual refresh. External writes
 can invalidate readiness immediately afterward; it is not a reservation.
 Inspector latency includes browser/network/parsing, not isolated engine CPU.
 Results may contain private data; screenshots/inspection should be handled
-accordingly. Builds use the same serialized worker and can block other requests.
+accordingly. Builds take an exclusive database guard and can block read requests.
 Failures are shown without automatic retry; a lost mutation response may be
 indeterminate. The dashboard does not provide roles, undo, backups or recovery.
 
@@ -372,13 +372,15 @@ rebuildable HNSW index; optional `ef_search` defaults to `max(100,min(k,records)
 and must be 1..100,000 and at least `min(k,records)`. It is rejected in exact
 mode. REST construction uses m=16, ef_construction=100, seed=42 (not
 per-request configurable). Approximate recall and a full k results are not
-guaranteed. Rebuilds are serialized with all other database operations.
+guaranteed. A stale-index approximate query retries with the exclusive write
+guard to rebuild; ready-index searches share the read guard.
 
 Transport limits are **8 MiB of JSON per request**, **16 in-flight requests**,
 and **16 queued/running database workers**. These are additional to the core's
 batch/payload limits: a valid 16 MiB engine batch may be too large for this API.
-Database operations are serialized on blocking workers, not asynchronous I/O
-threads. Slow requests and exact searches can occupy slots; no per-client
+Read routes run concurrently on blocking workers under a shared
+`Arc<RwLock<Option<Database>>>` read guard; writes take the exclusive guard.
+Database work does not run on asynchronous I/O threads. Slow requests and exact searches can occupy slots; no per-client
 fairness, streaming, rate limiting or execution deadline is promised. Use a
 proxy for connection/header/body timeouts and network-level limits.
 
@@ -495,9 +497,22 @@ current live buffered vectors, not payloads or metadata, and are not RSS.
 Request timing ends when response headers/body are produced, not after streaming
 to the client; canceled middleware requests may not produce a completion log.
 The current metrics request is counted but not yet timed. Snapshots are
-non-transactional; database gauges serialize behind other work and return 503
+non-transactional; database gauges take a shared read guard, wait for writes and return 503
 when busy or closed. A poisoned owner still exposes failure counters with
 `database_healthy: false` and null database gauges, never stale live data.
+Current-source observability also exposes authenticated `GET /v1/admin/logs`
+(`since` sequence cursor, `level`, `q`, `limit` 1..1000, default 200), returning
+`entries`, `next_seq`, `dropped` and `capacity`. The structured log ring is
+process-local and non-durable; `--log-buffer` defaults to 2000 (1..100000).
+Sanitized access events omit tokens, raw URLs, vectors and payloads.
+`GET /v1/admin/metrics/summary` returns uptime, request/search counters,
+per-route latency percentiles over recent 1024 samples, database state and ring
+state. `/metrics` remains available in JSON or Prometheus format. The dashboard
+adds cards/sparklines, a sortable route table, live filtered tail/JSONL export,
+slow queries and audit; see [console](CONSOLE.md). These are live diagnostics,
+not a persistent monitoring backend. [MCP](MCP.md) exposes embedded tools over
+stdio, and [agent skills](AGENT-SKILLS.md) provide portable workflows.
+
 Metrics share the full-access token: give access
 only to trusted monitoring and never expose an unauthenticated scrape endpoint.
 There are no histogram/percentile claims; aggregate durations are totals.
@@ -1292,11 +1307,32 @@ the complete live-vector map is rebuilt in RAM on every open. Future versions
 may introduce explicitly documented transient sidecars, but none are required
 to move a closed database of either supported version.
 
-An exclusive, nonblocking OS file lock is held for the handle's entire lifetime.
-Even another reader must wait until the owner closes. Attempts to open or repair
-an owned database return `Error::Locked`. Threads may serialize access using a
-`Mutex<Database>`; there are no background workers. `close()` consumes the handle;
-dropping it also releases the lock and requires no commit-on-drop.
+`Database::open` / `open_encrypted` hold an exclusive, nonblocking OS file lock
+for the handle's lifetime. `Database::open_read_only` /
+`open_read_only_encrypted(path, &key)` instead open the file read-only with a
+shared OS lock. Any number of readers may coexist across processes, but no
+reader coexists with a writer. Conflicting opens and repairs return
+`Error::Locked` immediately. `is_read_only()` identifies a read-only handle.
+Each handle replays committed state at open time; close and reopen to see later
+commits. It is not a live tail or MVCC reader alongside a writer. Incomplete tails
+are rejected, never silently repaired. Mutations return `Error::ReadOnly` without
+writing or poisoning the handle. Building an in-memory HNSW index is allowed;
+the datafile is never written by a read-only handle.
+
+Rust `&self` reads can run concurrently; mutations require exclusive access.
+The REST/gRPC server shares one exclusively file-locked database through an
+`Arc<RwLock<Option<Database>>>`: read routes use shared guards on blocking
+workers, writes use an exclusive guard. A stale-index ANN search retries under
+the write guard to rebuild. Explicit background builds construct from a snapshot
+and catch up/publish exclusively. Python `open(path, read_only=True)`, Node
+`open(path, {readOnly: true})` and C ABI Open `"read_only": true` expose shared
+reader mode. The C ABI serializes calls within a process: use separate Python
+processes for parallel embedded requests.
+
+Native exact scans use Rayon with at least 4,096 candidate rows and
+rows × dimensions ≥ 524,288, when the Rayon pool has multiple workers. The
+merged results retain distance-then-ID ordering; wasm32 scans remain serial.
+`close()` consumes the handle; dropping it releases its lock with no commit-on-drop.
 
 Use local filesystems that honor OS file locks and flush requests. Do not use NFS,
 SMB, cloud-synced directories, multiple hard-link/symlink aliases, or concurrent

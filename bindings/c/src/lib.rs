@@ -47,6 +47,9 @@ enum Request {
     },
     Open {
         path: String,
+        /// Shared-lock read-only handle (`Database::open_read_only`).
+        #[serde(default)]
+        read_only: bool,
     },
     Close {},
     Info {},
@@ -341,6 +344,7 @@ fn failure(error: vlite::Error) -> Failure {
         vlite::Error::CommitIndeterminate(_) => "commit_indeterminate",
         vlite::Error::Poisoned => "poisoned",
         vlite::Error::Locked => "locked",
+        vlite::Error::ReadOnly => "read_only",
         vlite::Error::Corrupt { .. } => "corrupt",
         vlite::Error::IncompleteTail { .. } => "incomplete_tail",
         vlite::Error::IndexNotReady => "index_not_ready",
@@ -714,7 +718,13 @@ fn execute(handle: u64, request: Request) -> Result<Value> {
                     Some(4) => Database::create_with_format(path, dimensions, FormatVersion::V4),
                     Some(_) => return Err(invalid("format must be 3 or 4")),
                 },
-                Request::Open { path } => Database::open(path),
+                Request::Open { path, read_only } => {
+                    if read_only {
+                        Database::open_read_only(path)
+                    } else {
+                        Database::open(path)
+                    }
+                }
                 _ => unreachable!(),
             }
             .map_err(failure)?;
@@ -1338,6 +1348,89 @@ mod tests {
             .unwrap()
             .parse()
             .unwrap()
+    }
+
+    #[test]
+    fn read_only_handles_share_locks_reject_writes_and_remain_usable() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        for encrypted in [false, true] {
+            let path = directory.path().join(if encrypted {
+                "encrypted.vlite"
+            } else {
+                "plain.vlite"
+            });
+            let credentials = json!({"key_base64":"BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="});
+            let feature = |value| json!({"op":"features","request":value});
+            let writer = if encrypted {
+                ok(0, feature(json!({"op":"create","path":path,"dimensions":2,"options":{"credentials":credentials}})))["handle"]
+                    .as_str().unwrap().parse().unwrap()
+            } else {
+                create(&path, 2, None)
+            };
+            ok(writer, json!({"op":"put","id":"1","vector":[1,0]}));
+            let open_request = |read_only: Option<bool>| {
+                let mut value = json!({"op":"open","path":path});
+                if let Some(read_only) = read_only {
+                    value["read_only"] = json!(read_only);
+                }
+                if encrypted {
+                    value["credentials"] = credentials.clone();
+                    feature(value)
+                } else {
+                    value
+                }
+            };
+            assert_eq!(code(0, open_request(Some(true))), "locked");
+            ok(writer, json!({"op":"close"}));
+            let first: u64 = ok(0, open_request(Some(true)))["handle"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            let second: u64 = ok(0, open_request(Some(true)))["handle"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert_eq!(code(0, open_request(None)), "locked");
+            for mutation in [
+                json!({"op":"put","id":"2","vector":[0,1]}),
+                json!({"op":"delete","id":"1"}),
+                json!({"op":"batch","operations":[{"op":"put","id":"2","vector":[0,1]},{"op":"delete","id":"1"}]}),
+            ] {
+                assert_eq!(code(first, mutation), "read_only");
+                for reader in [first, second] {
+                    assert_eq!(
+                        ok(reader, json!({"op":"get","id":"1"}))["vector"],
+                        json!([1.0, 0.0])
+                    );
+                    assert_eq!(
+                        ok(reader, json!({"op":"search","vector":[1,0],"k":1}))["hits"][0]["id"],
+                        "1"
+                    );
+                    assert_eq!(ok(reader, json!({"op":"info"}))["records"], 1);
+                }
+            }
+            ok(first, json!({"op":"close"}));
+            assert_eq!(code(0, open_request(None)), "locked");
+            ok(second, json!({"op":"close"}));
+            // Omitting read_only retains exclusive, writable open behavior on both routes.
+            let writer: u64 = ok(0, open_request(None))["handle"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            ok(writer, json!({"op":"put","id":"2","vector":[0,1]}));
+            assert_eq!(code(0, open_request(Some(true))), "locked");
+            ok(writer, json!({"op":"close"}));
+            let reopened: u64 = ok(0, open_request(Some(true)))["handle"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert_eq!(ok(reopened, json!({"op":"get","id":"2"}))["id"], "2");
+            ok(reopened, json!({"op":"close"}));
+        }
     }
 
     fn tag(value: &str) -> Value {

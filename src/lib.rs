@@ -266,6 +266,9 @@ pub enum Error {
     InvalidRestoreTarget(&'static str),
     /// Writes are refused by a read-only replica follower.
     ReadOnlyReplica,
+    /// The handle was opened with `open_read_only`; commits are refused
+    /// before any byte is written, so the handle stays healthy.
+    ReadOnly,
     /// A shipped log segment does not continue this follower's log.
     ReplicaDiverged(&'static str),
     /// A disk index was built for a different committed state.
@@ -451,6 +454,7 @@ impl fmt::Display for Error {
             ),
             Self::InvalidRestoreTarget(reason) => write!(f, "invalid restore target: {reason}"),
             Self::ReadOnlyReplica => write!(f, "read replica followers refuse writes"),
+            Self::ReadOnly => write!(f, "database was opened read-only"),
             Self::ReplicaDiverged(reason) => write!(f, "replica log diverged: {reason}"),
             Self::StaleIndex => write!(
                 f,
@@ -620,6 +624,8 @@ pub struct Database {
     /// `(sequence, ms)` per commit for files created with commit timestamps.
     commit_times: Vec<(u64, u64)>,
     clock: Option<CommitClock>,
+    /// Opened with `open_read_only`: shared OS lock, read-only file handle.
+    read_only: bool,
 }
 
 /// Source of commit timestamps (milliseconds since the Unix epoch).
@@ -802,6 +808,17 @@ fn open_locked(path: &Path) -> Result<LockedFile> {
     lock(file)
 }
 
+/// Read-only handle under a shared OS lock: any number of shared holders
+/// coexist (across processes too), but never alongside an exclusive writer.
+fn open_shared(path: &Path) -> Result<LockedFile> {
+    let file = OpenOptions::new().read(true).open(path)?;
+    match file.try_lock_shared() {
+        Ok(()) => Ok(LockedFile::disk(file)),
+        Err(TryLockError::WouldBlock) => Err(Error::Locked),
+        Err(TryLockError::Error(error)) => Err(Error::Io(error)),
+    }
+}
+
 fn validate_dimensions(dimensions: usize) -> Result<()> {
     if !(1..=MAX_DIMENSIONS).contains(&dimensions) {
         return Err(Error::InvalidDimensions(dimensions));
@@ -962,6 +979,7 @@ impl Database {
             cipher,
             commit_times: Vec::new(),
             clock: None,
+            read_only: false,
         })
     }
 
@@ -981,6 +999,36 @@ impl Database {
 
     fn open_inner(path: &Path, key: Option<&EncryptionKey>) -> Result<Self> {
         Self::open_backed(open_locked(path)?, key)
+    }
+
+    /// Opens an existing database for reading only, under a shared OS lock.
+    ///
+    /// Any number of read-only handles may be open at once, in this process
+    /// or in others, and each serves concurrent `&self` reads from multiple
+    /// threads. While at least one is open, `open` (the exclusive writer)
+    /// returns `Locked`; while a writer is open, this returns `Locked`. Each
+    /// handle sees the committed state at open time; reopen to observe later
+    /// commits. Validation matches `open`: an incomplete tail is rejected and
+    /// never repaired. Commits return `ReadOnly` without touching the file.
+    /// In-memory ANN indexes may still be built; the datafile is never written.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_read_only_inner(path.as_ref(), None)
+    }
+
+    /// Encrypted variant of `open_read_only`.
+    pub fn open_read_only_encrypted(path: impl AsRef<Path>, key: &EncryptionKey) -> Result<Self> {
+        Self::open_read_only_inner(path.as_ref(), Some(key))
+    }
+
+    fn open_read_only_inner(path: &Path, key: Option<&EncryptionKey>) -> Result<Self> {
+        let mut database = Self::open_backed(open_shared(path)?, key)?;
+        database.read_only = true;
+        Ok(database)
+    }
+
+    /// Whether this handle came from `open_read_only`.
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     fn open_backed(mut file: LockedFile, key: Option<&EncryptionKey>) -> Result<Self> {
@@ -1011,6 +1059,7 @@ impl Database {
             cipher: loaded.cipher,
             commit_times: loaded.commit_times,
             clock: None,
+            read_only: false,
         })
     }
 
@@ -1487,6 +1536,9 @@ impl Database {
         frame: &[u8],
         sync: impl FnOnce(&LockedFile) -> io::Result<()>,
     ) -> Result<()> {
+        if self.read_only {
+            return Err(Error::ReadOnly);
+        }
         let mut bytes = Vec::new();
         let mut stamp = None;
         if self.flags & format::FLAG_TIMESTAMPS != 0 {
@@ -1590,6 +1642,9 @@ impl Database {
         expected_last: u64,
         key: Option<&EncryptionKey>,
     ) -> Result<()> {
+        if self.read_only {
+            return Err(Error::ReadOnly);
+        }
         let previous = self.end;
         let outcome = (|| -> Result<format::Loaded> {
             append_and_sync(&mut self.file, previous, bytes, |file| file.sync_all())?;
@@ -2549,6 +2604,115 @@ fn exact_search(
         None => Box::new(records.iter()),
         Some(ids) => Box::new(ids.iter().filter_map(|id| records.get_key_value(id))),
     };
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let rows = candidates.map_or(records.len(), BTreeSet::len);
+        if rows >= PARALLEL_MIN_ROWS
+            && rows.saturating_mul(query.len()) >= PARALLEL_MIN_WORK
+            && rayon::current_num_threads() > 1
+        {
+            return parallel_exact_search(
+                scan.collect(),
+                expiries,
+                query,
+                query_norm,
+                limit,
+                conditions,
+                metric,
+                now_ms,
+                stats,
+            );
+        }
+    }
+    exact_scan(
+        scan, expiries, query, query_norm, limit, conditions, metric, now_ms, stats,
+    )
+    .into_sorted_vec()
+    .into_iter()
+    .map(|hit| hit.0)
+    .collect()
+}
+
+/// Minimum rows and rows×dimensions before an exact scan is split across the
+/// shared rayon pool; below this, task overhead outweighs the parallel win.
+#[cfg(not(target_arch = "wasm32"))]
+const PARALLEL_MIN_ROWS: usize = 4096;
+#[cfg(not(target_arch = "wasm32"))]
+const PARALLEL_MIN_WORK: usize = 1 << 19;
+
+/// Splits the scan into chunks, keeps a bounded top-k per chunk and merges.
+/// `RankedHit` is a total order (distance, then ID), so the merged result is
+/// identical to the serial scan; scan statistics are summed per chunk.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+fn parallel_exact_search(
+    rows: Vec<(&u64, &Record)>,
+    expiries: &BTreeMap<u64, u64>,
+    query: &[f32],
+    query_norm: f64,
+    limit: usize,
+    conditions: &[Condition],
+    metric: DistanceMetric,
+    now_ms: u64,
+    stats: &mut SearchStats,
+) -> Vec<SearchHit> {
+    use rayon::prelude::*;
+    let chunk = rows
+        .len()
+        .div_ceil(rayon::current_num_threads() * 4)
+        .max(1024);
+    let partials: Vec<(BinaryHeap<RankedHit>, SearchStats)> = rows
+        .par_chunks(chunk)
+        .map(|part| {
+            let mut local = SearchStats::default();
+            let heap = exact_scan(
+                part.iter().copied(),
+                expiries,
+                query,
+                query_norm,
+                limit,
+                conditions,
+                metric,
+                now_ms,
+                &mut local,
+            );
+            (heap, local)
+        })
+        .collect();
+    let mut merged: BinaryHeap<RankedHit> = BinaryHeap::with_capacity(limit + 1);
+    for (heap, local) in partials {
+        stats.records_scanned += local.records_scanned;
+        stats.distance_evaluations += local.distance_evaluations;
+        for hit in heap {
+            if merged.len() < limit {
+                merged.push(hit);
+            } else if let Some(mut worst) = merged.peek_mut()
+                && hit < *worst
+            {
+                *worst = hit;
+            }
+        }
+    }
+    merged
+        .into_sorted_vec()
+        .into_iter()
+        .map(|hit| hit.0)
+        .collect()
+}
+
+/// Serial bounded top-k over `scan`; returns the unsorted heap.
+#[allow(clippy::too_many_arguments)]
+fn exact_scan<'a>(
+    scan: impl Iterator<Item = (&'a u64, &'a Record)>,
+    expiries: &BTreeMap<u64, u64>,
+    query: &[f32],
+    query_norm: f64,
+    limit: usize,
+    conditions: &[Condition],
+    metric: DistanceMetric,
+    now_ms: u64,
+    stats: &mut SearchStats,
+) -> BinaryHeap<RankedHit> {
     let mut hits: BinaryHeap<RankedHit> = BinaryHeap::with_capacity(limit);
     'records: for (&id, record) in scan {
         stats.records_scanned += 1;
@@ -2607,10 +2771,7 @@ fn exact_search(
             *worst = hit;
         }
     }
-    hits.into_sorted_vec()
-        .into_iter()
-        .map(|hit| hit.0)
-        .collect()
+    hits
 }
 
 fn append_and_sync<W: Write + Seek>(

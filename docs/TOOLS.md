@@ -11,8 +11,21 @@ cargo build --locked --features import-formats --bins
 `tools` enables JSON and CSV; `import-formats` additionally enables optional
 Arrow/Parquet dependencies. Neither is enabled in the default embedded build.
 Each tool supports `--help`; unknown/duplicate options and failures exit nonzero.
-All tools use public embedded APIs, acquire the engine's exclusive file lock,
-and require the database's server/other owner to be stopped first.
+The offline shell/import/tuning tools use public embedded APIs, acquire the
+engine's exclusive file lock, and require the server/other owner to be stopped
+first. The separate MCP server defaults to shared-lock read-only access (below).
+
+## MCP server and agent skills
+
+Build/install `vlite-mcp` separately with `cargo install --path . --features mcp`,
+then run `vlite-mcp --db ./vectors.vlite`. It uses stdio JSON-RPC (no HTTP proxy
+or network listener), opens a shared-lock read-only snapshot by default, and
+exposes info, collection listing, search, get/list, index status and in-memory
+index build tools. `--writable` explicitly enables upsert/delete and requires an
+exclusive writer lock. Encryption key-file/environment options are supported.
+See [MCP installation, schemas and client configuration](MCP.md). Portable
+[agent skills](AGENT-SKILLS.md) cover RAG, MCP, operations and index tuning;
+installing a skill does not start the server or grant write permissions.
 
 ## Interactive or scripted shell
 
@@ -55,8 +68,9 @@ committed. Interactive command errors are printed and the REPL continues.
 
 `--read-only` is a **tool-level safety guard**: forbids put/delete/create and
 copy-out maintenance; ANN/rebuild only changes in-memory indexes. It does not
-provide concurrent readers or an OS read-only database handle: the public engine
-open API still requests read/write permissions. `verify` uses the engine's
+make this shell use the shared-lock read-only engine API: the shell still
+opens with read/write permissions and an exclusive lock. Use
+`Database::open_read_only` or `vlite-mcp` for shared-lock readers. `verify` uses the engine's
 read-only maintenance API, releasing/reopening the database handle around it.
 Header/stats describe the selected collection plus file format/size, not raw
 header bytes. Browse uses the public bounded, ascending-ID page API: `browse LIMIT [AFTER_ID]`

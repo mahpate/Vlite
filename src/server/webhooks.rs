@@ -361,10 +361,10 @@ fn run_dispatcher(dispatcher: Arc<Dispatcher>, service: Service, stopping: Arc<A
         }
         let current = dispatcher.cursor.lock().ok().and_then(|cursor| *cursor);
         let (cursor, batch) = {
-            let Ok(mut owner) = service.database.lock() else {
+            let Ok(owner) = service.database.read() else {
                 continue;
             };
-            let Some(database) = owner.as_mut() else {
+            let Some(database) = owner.as_ref() else {
                 break;
             };
             let cursor = match current {

@@ -3,7 +3,7 @@
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, RwLock,
         atomic::{AtomicU64, Ordering},
     },
     time::Instant,
@@ -38,6 +38,7 @@ mod credentials;
 mod features;
 #[cfg(feature = "grpc")]
 pub mod grpc;
+mod logs;
 mod observability;
 mod ops;
 #[cfg(feature = "otel")]
@@ -46,6 +47,11 @@ mod tenants;
 pub mod tls;
 mod webhooks;
 pub use admin::{ServerOptions, configured_admin_router, read_token_file, selected_database};
+
+/// Emit a legacy stderr line and also capture it in the bounded server log buffer.
+pub fn log_stderr(level: &'static str, target: &'static str, message: impl Into<String>) {
+    logs::stderr(level, target, message);
+}
 
 pub const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SEARCH_K: usize = 10_000;
@@ -76,6 +82,8 @@ struct Metrics {
     slow_queries: AtomicU64,
     slow: Mutex<VecDeque<Value>>,
     slow_threshold_ns: AtomicU64,
+    in_flight: AtomicU64,
+    by_route: Mutex<BTreeMap<(String, String), RouteStats>>,
     import_chunks: AtomicU64,
     import_rows_skipped: AtomicU64,
     credential_denials: AtomicU64,
@@ -84,6 +92,13 @@ struct Metrics {
     quota_exceeded: AtomicU64,
     /// f64 bits of the last sampled recall plus a presence flag.
     ann_quality_last_recall: Mutex<Option<f64>>,
+}
+
+#[derive(Default)]
+struct RouteStats {
+    count: u64,
+    errors: u64,
+    durations_ms: VecDeque<u64>,
 }
 
 impl Metrics {
@@ -136,7 +151,7 @@ impl BearerToken {
 /// Cloneable service state. Database work runs off the asynchronous I/O threads.
 #[derive(Clone)]
 pub struct Service {
-    database: Arc<Mutex<Option<Database>>>,
+    database: Arc<RwLock<Option<Database>>>,
     requests: Arc<Semaphore>,
     workers: Arc<Semaphore>,
     metrics: Arc<Metrics>,
@@ -156,6 +171,7 @@ pub struct Service {
     rate_limits: Arc<Mutex<BTreeMap<String, (f64, Instant)>>>,
     webhooks: Arc<webhooks::Dispatcher>,
     encryption_key: Option<crate::EncryptionKey>,
+    started: Instant,
 }
 
 impl Service {
@@ -206,7 +222,7 @@ impl Service {
             Some(lineage) => format!("{lineage:016x}").into(),
             None => hex(&nonce).into(),
         };
-        let database = Arc::new(Mutex::new(Some(database)));
+        let database = Arc::new(RwLock::new(Some(database)));
         let workers = Arc::new(Semaphore::new(MAX_IN_FLIGHT));
         let metrics = Arc::new(Metrics::default());
         metrics
@@ -232,6 +248,7 @@ impl Service {
             rate_limits: Arc::default(),
             webhooks: Arc::default(),
             encryption_key,
+            started: Instant::now(),
         })
     }
 
@@ -251,7 +268,7 @@ impl Service {
         tokio::task::spawn_blocking(move || {
             // The permit stays with the worker even if the HTTP client disconnects.
             let _permit = permit;
-            let mut owner = database.lock().map_err(internal)?;
+            let mut owner = database.write().map_err(internal)?;
             let db = owner.as_mut().ok_or_else(unavailable)?;
             let result = operation(db);
             if result
@@ -261,6 +278,31 @@ impl Service {
                 metrics.commit_failures.fetch_add(1, Ordering::Relaxed);
             }
             result
+        })
+        .await
+        .map_err(internal)?
+    }
+
+    /// Shared-lock variant of `run` for operations that only read. Readers
+    /// run concurrently on the blocking pool; a writer in `run` waits for
+    /// in-flight readers and blocks new ones until its commit returns, so a
+    /// reader never observes a partially applied batch.
+    async fn run_read<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&Database) -> Result<T, ApiError> + Send + 'static,
+    ) -> Result<T, ApiError> {
+        let permit = self.workers.clone().try_acquire_owned().map_err(|_| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "busy",
+                "database queue is full",
+            )
+        })?;
+        let database = self.database.clone();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let owner = database.read().map_err(internal)?;
+            operation(owner.as_ref().ok_or_else(unavailable)?)
         })
         .await
         .map_err(internal)?
@@ -276,7 +318,7 @@ impl Service {
             webhooks.shutdown();
             ops.shutdown();
             let mut owner = database
-                .lock()
+                .write()
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
             if let Some(db) = owner.take() {
                 db.close()?;
@@ -303,7 +345,7 @@ impl Service {
             webhooks.shutdown();
             ops.shutdown();
             let owner = database
-                .lock()
+                .read()
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
             owner
                 .as_ref()
@@ -429,6 +471,15 @@ fn configured_routes(service: Service) -> Router {
                     }),
                 )
                 .route(
+                    "/dashboard/observability.js",
+                    get(|| async {
+                        dashboard_asset(
+                            "text/javascript; charset=utf-8",
+                            include_str!("dashboard/observability.js"),
+                        )
+                    }),
+                )
+                .route(
                     "/dashboard/console-tools.js",
                     get(|| async {
                         dashboard_asset(
@@ -448,6 +499,8 @@ fn configured_routes(service: Service) -> Router {
                 )
                 .route("/ready", get(ready))
                 .route("/metrics", get(observability::metrics_route))
+                .route("/v1/admin/logs", get(observability::logs))
+                .route("/v1/admin/metrics/summary", get(observability::summary))
                 .route(
                     "/v1/admin/diagnostics/slow-queries",
                     get(observability::slow_queries),
@@ -745,6 +798,8 @@ async fn observe(
     next: Next,
 ) -> Response {
     let started = Instant::now();
+    service.metrics.in_flight.fetch_add(1, Ordering::Relaxed);
+    let request_path = request.uri().path().to_owned();
     let request_id = next_request_id(&service);
     let route = request
         .extensions()
@@ -788,6 +843,7 @@ async fn observe(
             | "/dashboard/app.js"
             | "/dashboard/style.css"
             | "/dashboard/console-tools.js"
+            | "/dashboard/observability.js"
     );
     let authentication = authenticate(&service, request.headers());
     let role = authentication.as_ref().ok().cloned().flatten();
@@ -848,6 +904,8 @@ async fn observe(
             started,
         },
     );
+    record_http_access(&request_path, method, response.status(), started);
+    service.metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
     response.headers_mut().insert(
         "x-request-id",
         request_id.parse().expect("generated ASCII ID"),
@@ -923,11 +981,25 @@ fn record_request(service: &Service, record: &RequestRecord<'_>) {
         }
     }
     let elapsed = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let failed = status.is_client_error() || status.is_server_error();
+    if let Ok(mut routes) = service.metrics.by_route.lock() {
+        let stats = routes
+            .entry((method.to_owned(), route.to_owned()))
+            .or_default();
+        stats.count = stats.count.saturating_add(1);
+        if failed {
+            stats.errors = stats.errors.saturating_add(1);
+        }
+        if stats.durations_ms.len() == 1024 {
+            stats.durations_ms.pop_front();
+        }
+        stats.durations_ms.push_back(elapsed_ms);
+    }
     service
         .metrics
         .duration_ns
         .fetch_add(elapsed, Ordering::Relaxed);
-    let failed = status.is_client_error() || status.is_server_error();
     if failed {
         service.metrics.failures.fetch_add(1, Ordering::Relaxed);
     }
@@ -947,17 +1019,50 @@ fn record_request(service: &Service, record: &RequestRecord<'_>) {
         Some(admin::Role::Scoped(grant)) => Some(grant.id.clone()),
         _ => None,
     };
-    eprintln!(
-        "{}",
-        json!({"event":"request", "request_id":request_id, "method":method,
+    let request_line = json!({"event":"request", "request_id":request_id, "method":method,
         "route":route, "status":status.as_u16(), "duration_ns":elapsed,
         "credential_id":credential})
-    );
+    .to_string();
+    logs::stderr("info", "server", request_line);
     service.admin.record(
         json!({"request_id":request_id,"method":method,"route":route,
         "status":status.as_u16(),"role":role.map(admin::Role::name),
         "credential_id":credential,
         "duration_ns":elapsed,"timestamp_unix_ms":admin::now_ms()}),
+    );
+}
+
+fn record_http_access(path: &str, method: &str, status: StatusCode, started: Instant) {
+    let skip = matches!(
+        path,
+        "/metrics" | "/health" | "/ready" | "/v1/admin/logs" | "/v1/admin/metrics/summary"
+    ) || path.starts_with("/dashboard");
+    if skip {
+        return;
+    }
+    let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let collection = path
+        .strip_prefix("/v1/collections/")
+        .and_then(|tail| tail.split('/').next())
+        .filter(|name| !name.is_empty());
+    let level = if status.is_server_error() {
+        "error"
+    } else if status.is_client_error() {
+        "warn"
+    } else {
+        "info"
+    };
+    logs::buffer().record(
+        level,
+        "http",
+        format!("{method} {path} {}", status.as_u16()),
+        json!({
+            "method": method,
+            "path": path,
+            "status": status.as_u16(),
+            "duration_ms": duration_ms,
+            "collection": collection
+        }),
     );
 }
 
@@ -980,10 +1085,12 @@ fn record_stream_failure(service: &Service, route: &str, request_id: &str, error
         .metrics
         .grpc_failures
         .fetch_add(1, Ordering::Relaxed);
-    eprintln!(
-        "{}",
+    logs::stderr(
+        "error",
+        "grpc",
         json!({"event":"stream_error", "request_id":request_id, "method":"grpc",
-        "route":route, "status":error.status.as_u16(), "code":error.code})
+            "route":route, "status":error.status.as_u16(), "code":error.code})
+        .to_string(),
     );
 }
 
@@ -1050,7 +1157,11 @@ impl IntoResponse for ApiError {
 }
 
 fn internal(_error: impl std::fmt::Display) -> ApiError {
-    eprintln!("{}", json!({"event":"internal_error"}));
+    logs::stderr(
+        "error",
+        "server",
+        json!({"event":"internal_error"}).to_string(),
+    );
     ApiError::new(
         StatusCode::INTERNAL_SERVER_ERROR,
         "internal_error",
@@ -1154,7 +1265,11 @@ impl From<Error> for ApiError {
                 error.to_string(),
             ),
             Error::CommitIndeterminate(_) => {
-                eprintln!("{}", json!({"event":"commit_indeterminate"}));
+                logs::stderr(
+                    "error",
+                    "server",
+                    json!({"event":"commit_indeterminate"}).to_string(),
+                );
                 Self::new(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "commit_indeterminate",
@@ -1339,7 +1454,7 @@ async fn list_in(
         return Err(unprocessable("limit must be 1..100"));
     }
     service
-        .run(move |db| {
+        .run_read(move |db| {
             let collection = open(db, &role, &target)?;
             use std::ops::Bound::{Excluded, Unbounded};
             let mut records = db
@@ -1401,7 +1516,7 @@ fn decode_payload(text: &str) -> Result<Vec<u8>, ApiError> {
 
 async fn ready(State(service): State<Service>) -> Result<Json<Value>, ApiError> {
     service
-        .run(|db| {
+        .run_read(|db| {
             db.get(0)?;
             Ok(Json(json!({"status": "ready"})))
         })
@@ -1413,7 +1528,7 @@ async fn info(
     Extension(role): Extension<admin::Role>,
 ) -> Result<Json<Value>, ApiError> {
     service
-        .run(move |db| {
+        .run_read(move |db| {
             open(db, &role, &Target::Legacy)?;
             Ok(Json(json!({
                 "dimensions": db.dimensions(),
@@ -1565,7 +1680,7 @@ async fn fetch_core(
     id: u64,
 ) -> Result<Fetched, ApiError> {
     service
-        .run(move |db| {
+        .run_read(move |db| {
             let collection = open(db, &role, &target)?;
             let not_found =
                 || ApiError::new(StatusCode::NOT_FOUND, "not_found", "vector not found");
@@ -2253,13 +2368,13 @@ struct Executed {
     ef_search: Option<usize>,
 }
 
-fn execute(
-    db: &mut Database,
+/// Effective metric, HNSW identity and ANN options for one search request.
+fn search_identity(
+    db: &Database,
     collection: u16,
     target: &Target,
     input: &Search,
-    metrics: &Metrics,
-) -> Result<Executed, ApiError> {
+) -> Result<(DistanceMetric, HnswConfig, AnnOptions), ApiError> {
     let (metric, config, options) = identity(db, collection, target);
     let metric = input.metric.unwrap_or(metric);
     let config = match input.config {
@@ -2272,6 +2387,74 @@ fn execute(
             .map_or(options.quantization, |name| name.0),
         rerank_multiplier: input.rerank_multiplier.unwrap_or(options.rerank_multiplier),
     };
+    Ok((metric, config, options))
+}
+
+/// Candidate count and default ef_search for one request.
+fn search_sizes(db: &Database, collection: u16, input: &Search) -> (usize, usize) {
+    let live = db.state(collection).records.len();
+    let candidate_k = input.rerank.as_ref().map_or(input.k, |rerank| {
+        rerank.candidates.unwrap_or(input.k.max(50))
+    });
+    (candidate_k, 100.max(candidate_k.min(live)))
+}
+
+/// `mode=approximate` index (re)build, run under the exclusive lock only
+/// when the shared-lock attempt found the index stale. Rechecks staleness so
+/// concurrent requests that raced to this point rebuild at most once.
+fn rebuild_stale(
+    db: &mut Database,
+    collection: u16,
+    target: &Target,
+    input: &Search,
+    metrics: &Metrics,
+) -> Result<(), ApiError> {
+    let (metric, config, options) = search_identity(db, collection, target, input)?;
+    let (candidate_k, default_ef) = search_sizes(db, collection, input);
+    let ef = input.ef_search.unwrap_or(default_ef);
+    let filter = input.filter.as_deref().unwrap_or(&[]);
+    let vector = input.vector.as_deref().unwrap_or(&[]);
+    db.validate_hnsw_query(collection, vector, candidate_k, ef, config, filter, metric)?;
+    if approximate_stale(db, collection, input, config, metric, options) {
+        let started = Instant::now();
+        db.build_hnsw_with_options_in(collection, config, metric, options)?;
+        metrics.rebuilds.fetch_add(1, Ordering::Relaxed);
+        metrics.built(started);
+        metrics.rebuild_search_ns.fetch_add(
+            started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+            Ordering::Relaxed,
+        );
+    }
+    Ok(())
+}
+
+fn approximate_stale(
+    db: &Database,
+    collection: u16,
+    input: &Search,
+    config: HnswConfig,
+    metric: DistanceMetric,
+    options: AnnOptions,
+) -> bool {
+    input.k > 0
+        && !db.state(collection).records.is_empty()
+        && db
+            .state(collection)
+            .index
+            .as_ref()
+            .is_none_or(|index| !index.ready_for(config, metric, options.quantization))
+}
+
+/// Executes a search under the shared lock. Returns `Ok(None)` only for
+/// `mode=approximate` with a stale index; the caller then runs
+/// `rebuild_stale` exclusively and retries.
+fn execute(
+    db: &Database,
+    collection: u16,
+    target: &Target,
+    input: &Search,
+) -> Result<Option<Executed>, ApiError> {
+    let (metric, config, options) = search_identity(db, collection, target, input)?;
     if matches!(
         input.mode,
         SearchMode::Approximate | SearchMode::ApproximateReady
@@ -2282,12 +2465,9 @@ fn execute(
         ));
     }
     let live = db.state(collection).records.len();
-    let candidate_k = input.rerank.as_ref().map_or(input.k, |rerank| {
-        rerank.candidates.unwrap_or(input.k.max(50))
-    });
+    let (candidate_k, default_ef) = search_sizes(db, collection, input);
     let filter = input.filter.as_deref().unwrap_or(&[]);
     let vector = input.vector.as_deref().unwrap_or(&[]);
-    let default_ef = 100.max(candidate_k.min(live));
     let mut stats = SearchStats::default();
     let distances = Hits::Vector;
     let mut executed = match input.mode {
@@ -2316,21 +2496,8 @@ fn execute(
                     filter,
                     metric,
                 )?;
-                let stale =
-                    input.k > 0
-                        && live > 0
-                        && db.state(collection).index.as_ref().is_none_or(|index| {
-                            !index.ready_for(config, metric, options.quantization)
-                        });
-                if stale {
-                    let started = Instant::now();
-                    db.build_hnsw_with_options_in(collection, config, metric, options)?;
-                    metrics.rebuilds.fetch_add(1, Ordering::Relaxed);
-                    metrics.built(started);
-                    metrics.rebuild_search_ns.fetch_add(
-                        started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-                        Ordering::Relaxed,
-                    );
+                if approximate_stale(db, collection, input, config, metric, options) {
+                    return Ok(None);
                 }
             }
             Executed {
@@ -2352,11 +2519,15 @@ fn execute(
         }
         SearchMode::Auto => {
             let ef = input.ef_search.unwrap_or(default_ef);
-            let planned = CollectionRef {
-                db: &*db,
-                id: collection,
-            }
-            .search_auto(vector, candidate_k, filter, metric, config, options, ef)?;
+            let planned = CollectionRef { db, id: collection }.search_auto(
+                vector,
+                candidate_k,
+                filter,
+                metric,
+                config,
+                options,
+                ef,
+            )?;
             Executed {
                 hits: distances(planned.hits),
                 stats: planned.stats,
@@ -2401,11 +2572,7 @@ fn execute(
                 vector_leg,
                 fusion,
             };
-            let (hits, stats) = CollectionRef {
-                db: &*db,
-                id: collection,
-            }
-            .search_hybrid(&query)?;
+            let (hits, stats) = CollectionRef { db, id: collection }.search_hybrid(&query)?;
             Executed {
                 hits: Hits::Hybrid(
                     hits.into_iter()
@@ -2434,17 +2601,18 @@ fn execute(
                 return Err(unprocessable("reranking is only valid for vector search"));
             };
             let count = candidates.len() as u64;
-            let reranked = CollectionRef {
-                db: &*db,
-                id: collection,
-            }
-            .rerank(vector, candidates, input.k, reranker.as_ref())?;
+            let reranked = CollectionRef { db, id: collection }.rerank(
+                vector,
+                candidates,
+                input.k,
+                reranker.as_ref(),
+            )?;
             (reranked, count)
         };
         executed.hits = Hits::Vector(reranked);
         executed.stats.reranked_candidates = candidate_count;
     }
-    Ok(executed)
+    Ok(Some(executed))
 }
 
 async fn search_in(
@@ -2484,18 +2652,36 @@ async fn search_core(
     input.validate(&role)?;
     let metrics = service.metrics.clone();
     let started = Instant::now();
-    let (input, collection, executed) = service
-        .run(move |db| {
-            let collection = open(db, &role, &target)?;
-            let executed = execute(db, collection, &target, &input, &metrics)?;
-            let binding = (
-                tenants::qualify(&role, target.name()),
-                collection,
-                db.lineage(),
-            );
-            Ok((input, binding, executed))
-        })
+    let attempt = move |db: &Database, role: admin::Role, target: Target, input: Search| {
+        let collection = open(db, &role, &target)?;
+        let executed = execute(db, collection, &target, &input)?;
+        let binding = (
+            tenants::qualify(&role, target.name()),
+            collection,
+            db.lineage(),
+        );
+        Ok::<_, ApiError>((executed, binding, role, target, input))
+    };
+    let (executed, collection, role, target, input) = service
+        .run_read(move |db| attempt(db, role, target, input))
         .await?;
+    let (input, collection, executed) = match executed {
+        Some(executed) => (input, collection, executed),
+        None => {
+            // Rare path: the approximate index is stale. Rebuild exclusively,
+            // then search under the same write guard so a concurrent writer
+            // cannot invalidate the fresh index between the two steps.
+            service
+                .run(move |db| {
+                    let collection = open(db, &role, &target)?;
+                    rebuild_stale(db, collection, &target, &input, &metrics)?;
+                    let (executed, binding, _, _, input) = attempt(&*db, role, target, input)?;
+                    let executed = executed.ok_or_else(|| internal("index stale after rebuild"))?;
+                    Ok((input, binding, executed))
+                })
+                .await?
+        }
+    };
     let (collection, collection_id, lineage) = collection;
     let strategy = executed
         .plan
@@ -2590,7 +2776,7 @@ async fn index_status_in(
     target: Target,
 ) -> Result<Json<Value>, ApiError> {
     service
-        .run(move |db| {
+        .run_read(move |db| {
             let collection = open(db, &role, &target)?;
             Ok(Json(index_json(db, collection, &target)))
         })

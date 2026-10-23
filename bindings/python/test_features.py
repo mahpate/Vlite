@@ -3,6 +3,7 @@ import base64
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import unittest
 import uuid
@@ -123,6 +124,58 @@ class Features(unittest.TestCase):
         self.error("cursor_compacted", lambda: other.changes_after(cursor))
         db.batch([{"op": "put", "id": "2", "vector": [1, 0]}, {"op": "put", "id": "3", "vector": [0, 1]}])
         self.assertEqual(len(db.changes_after(rest["next"], 1)["changes"]), 2)
+
+    def test_read_only_handles_and_spawned_process(self):
+        for credentials in [{}, {"key": bytes([7] * 32)}, {"passphrase": "reader test secret"}]:
+            with self.subTest(credentials=list(credentials)):
+                path = self.directory / (next(iter(credentials), "plain") + ".vlite")
+                writer = self.keep(self.native.create(path, 2, **credentials))
+                writer.put("1", [1, 0])
+                self.error("locked", lambda: self.native.open(path, read_only=True, **credentials))
+                writer.close()
+                first = self.keep(self.native.open(path, read_only=True, **credentials))
+                second = self.keep(self.native.open(path, read_only=True, **credentials))
+                self.error("locked", lambda: self.native.open(path, **credentials))
+                for action in [lambda: first.put("2", [0, 1]), lambda: first.delete("1"),
+                               lambda: first.batch([{"op": "put", "id": "2", "vector": [0, 1]},
+                                                    {"op": "delete", "id": "1"}])]:
+                    self.error("read_only", action)
+                    for reader in [first, second]:
+                        self.assertEqual(reader.get("1")["vector"], [1, 0])
+                        self.assertEqual(reader.search([1, 0], 1)[0]["id"], "1")
+                        self.assertEqual(reader.info()["records"], 1)
+                script = """
+import sys
+from vlite_embedded import NativeLibrary, EmbeddedError
+native = NativeLibrary(sys.argv[1])
+credentials = {} if sys.argv[3] == 'plain' else ({'key': bytes([7] * 32)} if sys.argv[3] == 'key' else {'passphrase': 'reader test secret'})
+with native.open(sys.argv[2], read_only=True, **credentials) as reader:
+    assert reader.get('1')['vector'] == [1, 0]
+    assert reader.search([1, 0], 1)[0]['id'] == '1'
+    try:
+        native.open(sys.argv[2], **credentials)
+    except EmbeddedError as error:
+        assert error.code == 'locked', error
+    else:
+        raise AssertionError('writer unexpectedly opened')
+print('shared reader ok')
+"""
+                env = os.environ.copy()
+                env["PYTHONPATH"] = str(Path(sys.path[0]).resolve()) + os.pathsep + env.get("PYTHONPATH", "")
+                result = subprocess.run([sys.executable, "-c", script, str(LIBRARY.resolve()),
+                                         str(path.resolve()), next(iter(credentials), "plain")],
+                                        env=env, capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("shared reader ok", result.stdout)
+                first.close()
+                self.error("locked", lambda: self.native.open(path, **credentials))
+                second.close()
+                writer = self.keep(self.native.open(path, **credentials))
+                writer.put("2", [0, 1])
+                self.error("locked", lambda: self.native.open(path, read_only=True, **credentials))
+                writer.close()
+                reopened = self.keep(self.native.open(path, read_only=True, **credentials))
+                self.assertEqual(reopened.get("2")["vector"], [0, 1])
 
     def test_encryption_raw_passphrase_and_file_reopen(self):
         for credentials in [{"key": bytes([7] * 32)}, {"passphrase": "test-only secret passphrase"}]:

@@ -10,22 +10,25 @@ It uses its own storage format and does not require an external database.
 
 🌐 **Website:** [mahpate.github.io/Vlite](https://mahpate.github.io/Vlite/) ·
 [features](https://mahpate.github.io/Vlite/#features) ·
-[benchmarks](https://mahpate.github.io/Vlite/compare.html)
+[benchmarks](https://mahpate.github.io/Vlite/compare.html) ·
+[multi-engine methodology and raw results](benchmarks/README.md#multi-engine-comparison)
 
 > **Operating model:** the live dataset resides in memory, and the log is
-> replayed on open. One database owner serializes access to each file.
+> replayed on open. Each file permits one exclusive writer or multiple shared-lock
+> read-only handles. The server allows concurrent read routes behind an RwLock.
 > Size deployments for the full dataset and validate recovery and workload
 > requirements before production use.
 
 ## Capabilities
 
 - **Single-file persistence:** versioned binary records, checksums, synchronous
-  commits, exclusive locking, and explicit interrupted-write recovery. Opt-in v5
+  commits, exclusive writer/shared reader locking, and explicit interrupted-write recovery. Opt-in v5
   adds expiring records and compact metadata-only updates.
 - **Atomic mutations:** vector/payload/metadata replacement and deletion,
   individually or in batches of up to 4,096 operations.
 - **Exact search:** squared Euclidean, cosine and negative inner-product distance with f64 accumulation,
-  deterministic distance/ID ordering, and bounded top-k candidate memory.
+  deterministic distance/ID ordering, and bounded top-k candidate memory. Native
+  scans use Rayon at ≥4,096 rows and ≥524,288 row-dimension components (not wasm32).
 - **Metadata filters:** strict typed equality and inclusive numeric ranges,
   applied before exact top-k selection.
 - **Approximate search:** deterministic, rebuildable HNSW with a bounded
@@ -39,13 +42,26 @@ It uses its own storage format and does not require an external database.
 - **Deployment:** authenticated REST, OpenAPI, JSON metrics, redacted request
   logs, non-root Docker images, optional [gRPC](docs/GRPC.md), and an optional
   HTTPS reverse proxy.
+- **Concurrent reads:** Rust `Database::open_read_only` (including encrypted opens),
+  Python `open(path, read_only=True)` and Node `open(path, {readOnly: true})` share
+  OS locks across processes. Readers exclude writers and see open-time snapshots;
+  reopen to see later commits. Mutations return `Error::ReadOnly` without poisoning.
+  In-memory ANN builds are allowed. Python C ABI calls remain serialized within
+  one process; use multiple reader processes. See [locking contracts](docs/REFERENCE.md).
+- **Observability and studio UX:** [dashboard](docs/CONSOLE.md) metric cards,
+  sparklines, per-route latency, filtered live logs and JSONL export; Prometheus
+  at `/metrics`, `/v1/admin/metrics/summary` and `/v1/admin/logs` (in-memory ring,
+  `--log-buffer`, default 2000). Light/dark/system theme, collection review wizard,
+  validated batched JSON writes with pause/progress, copy-as-code and bounded PCA.
+- **Agent tooling:** [stdio MCP server](docs/MCP.md), read-only by default with
+  opt-in write tools; [four agent skills](docs/AGENT-SKILLS.md) for RAG, MCP,
+  operations and index tuning.
 - **Maintenance:** offline inspection, byte-preserving backup/restore, and
   no-clobber copy-out compaction.
 
 VLite is licensed under the MIT License; see
 [LICENSE](LICENSE). There is no inner-product ANN, networked
-replication, multi-reader handle, or approximate metadata
-filtering. Opt-in [storage features](docs/STORAGE-FEATURES.md) add encryption at
+replication or approximate metadata filtering. Opt-in [storage features](docs/STORAGE-FEATURES.md) add encryption at
 rest, point-in-time restore, a change feed, file-shipped read replicas, a
 disk-based ANN sidecar, optional GPU exact search and a WebAssembly build.
 See the [technical reference](docs/REFERENCE.md) for contracts and limits, and
@@ -76,8 +92,9 @@ ANN quality/configuration comparisons.
 The engine's implementation language does not restrict the language of a
 consuming application. Embedded packages must match their host's OS,
 architecture and native runtime; REST clients only need network access to the
-service. Embedded access still permits one owner per database file. Use the
-service when multiple applications need to share one database.
+service. Embedded access permits one exclusive writer or multiple read-only
+snapshots per file, not both at once. Use the service when applications need
+concurrent reads alongside coordinated writes.
 
 Use [versioned release assets and installation instructions](docs/INSTALL.md)
 for installation without cloning. Packages are not published to public package
@@ -102,6 +119,7 @@ with native.create("documents.vlite", dimensions=3) as db:
 ```
 
 Use `native.open("documents.vlite")` to reopen; creation never overwrites.
+Use `native.open("documents.vlite", read_only=True)` for a shared-lock snapshot.
 See [Python installation and native platform support](bindings/README.md).
 
 ## Quick start: embedded Node.js / TypeScript
@@ -301,6 +319,20 @@ explicit HNSW builds, and a request/response inspector with browser-observed
 latency. Put/delete/build operations require confirmation. It is a testing/admin
 interface, not an embedding generator or production monitor.
 Put replaces the entire record; no undo or automatic retries are provided.
+
+**Observability** adds request/search rates, latency percentiles, sparklines,
+route counters, live server logs, slow queries and recent audit activity to the
+same dashboard. Connect using a bootstrap admin token, then select
+**Observability** in the sidebar. Refresh every 2, 5 or 15 seconds, pause, or
+switch to manual refresh; automatic polling stops while the section or tab is
+hidden. Logs support severity/text/target filters, expandable structured fields,
+auto-scroll and filtered JSONL download. The browser retains at most 5,000 log
+entries and displays the newest 500; **Clear view** clears only the browser's
+buffer. Logs are a bounded in-memory server ring, not a durable log archive;
+the dropped count reports overwritten server entries. Metrics fall back to
+Prometheus on older servers; missing measurements show a dash, and rates need
+two samples. Unavailable admin endpoints are identified without breaking the
+rest of the console.
 
 The console has sidebar shortcuts for overview, browsing, editing, search,
 index maintenance and REST inspection. Snapshot cards show vector count,

@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="/dashboard/style.css">
   <script src="/dashboard/console-tools.js" defer></script>
   <script src="/dashboard/app.js" defer></script>
+  <script src="/dashboard/observability.js" defer></script>
 </head>
 <body>
 <aside class="sidebar">
@@ -17,6 +18,7 @@
     <a href="#collections">Collections</a>
     <a href="#browse">Browse vectors</a>
     <a href="#editor">Vector editor</a>
+    <a href="#write-json">Write JSON</a>
     <a href="#search">Search playground</a>
     <a href="#retrieval">Advanced retrieval</a>
     <a href="#change-feed">Change feed</a>
@@ -27,6 +29,7 @@
     <a href="#resumable-import">Resumable import</a>
     <a href="#explore">Explore / compare</a>
     <a href="#operations">Operations</a>
+    <a href="#observability">Observability</a>
     <a href="#diagnostics">Diagnostics</a>
     <a href="#credentials">Scoped credentials</a>
   </nav>
@@ -38,13 +41,20 @@
 <header class="topbar"><div><span class="eyebrow">LOCAL WORKSPACE / DATABASE</span><h1>Database explorer</h1><p>Browse records, test similarity search, and inspect every REST request.</p></div><div class="badges"><span id="collection-badge" class="badge">Collection: default</span><span id="connection-badge" class="badge">Disconnected</span></div></header>
 <a class="skip-link" href="#database">Skip to database controls</a>
 <div class="preferences">
-  <label>Theme <select id="theme"><option value="light">Light</option><option value="dark">Dark</option></select></label>
+  <label>Theme <select id="theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
   <label>Density <select id="density"><option value="comfortable">Comfortable</option><option value="compact">Compact</option></select></label>
-  <label><input id="remember-preferences" type="checkbox"> Remember appearance only</label>
+  <label><input id="remember-preferences" type="checkbox" checked> Remember appearance only</label>
+  <button id="tour-start" type="button" class="secondary">Quick tour</button>
   <button id="cancel-request" type="button" class="secondary" disabled>Stop waiting</button>
 </div>
 <p id="status" class="status-bar" role="status" aria-live="polite">Disconnected</p>
 <p id="error-help" role="status"></p>
+<aside id="studio-tour" class="studio-tour" aria-labelledby="tour-title" hidden>
+  <strong id="tour-title">Your first VLite workflow</strong>
+  <p id="tour-description" aria-live="polite"></p>
+  <button id="tour-next" type="button">Show me</button>
+  <button id="tour-dismiss" type="button" class="secondary">Dismiss tour</button>
+</aside>
 <main>
   <section id="database" class="wide">
     <div class="section-heading"><div><span class="eyebrow">01 / GET STARTED</span><h2>Connection</h2></div><span class="badge">Single-file database</span></div>
@@ -73,7 +83,13 @@
     <div class="tool-group"><h3>Create an empty collection</h3>
       <label>Name (lowercase; a-z, 0-9, _ and -)<input id="new-collection-name" maxlength="63" spellcheck="false"></label>
       <label>Dimensions (1..65536)<input id="new-collection-dimensions" type="number" min="1" max="65536" value="3"></label>
+      <p>Step 1: define the collection. Step 2: review the complete request, then create. No data is written during review.</p>
+      <label>Distance metric<select id="new-collection-metric"><option value="">Use advanced settings / server default</option><option value="squared_l2">Squared L2</option><option value="cosine">Cosine</option><option value="inner_product">Inner product (exact search)</option></select></label>
+      <label>Metadata indexes (optional JSON; blank uses advanced settings)<textarea id="new-collection-indexes" rows="3" placeholder='[{"field":"category","kind":"eq"}]'></textarea></label>
+      <p>Index kinds: eq, range, eq_range. At most 16 unique fields. Explicit metric / index declarations override the corresponding advanced settings.</p>
       <label>Initial settings (optional JSON; omitted fields use server defaults)<textarea id="new-collection-settings" rows="3">{}</textarea></label>
+      <button id="collection-review" type="button" class="secondary">Review collection (step 2)</button>
+      <pre id="collection-create-summary" aria-live="polite"></pre>
       <button id="collection-create" data-feature="collections" data-op="collections" type="button">Create empty collection</button>
     </div>
     <div class="tool-group"><h3>Drop an empty collection</h3>
@@ -140,6 +156,24 @@
     <button id="vector-slice" type="button" class="secondary">Inspect 32 components</button>
     <pre id="vector-slice-result"></pre>
     <h3>Safe payload preview</h3><p>UTF-8 / JSON text only. HTML is never rendered.</p><pre id="payload-preview"></pre>
+  </section>
+  <section id="write-json" class="wide">
+    <span class="eyebrow">WRITE / PREVIEW / COMMIT</span><h2>Write JSON documents</h2>
+    <p>Paste 1..10000 documents (up to 4 MiB). IDs must be quoted decimal u64 strings. Metadata uses VLite typed values; payload is standard base64 (payload or payload_base64). Existing IDs are replaced, including payload and metadata. TTL is cleared. Preview never writes.</p>
+    <label>Documents (JSON array)<textarea id="write-documents" rows="8" spellcheck="false" placeholder='[{"id":"1","vector":[1,0,0],"metadata":{"category":{"type":"string","value":"demo"}}}]'></textarea></label>
+    <button id="write-validate" type="button" class="secondary">Validate / preview</button>
+    <button id="write-commit" type="button" data-write>Upsert validated documents</button>
+    <button id="write-stop" type="button" class="secondary" disabled>Pause after current batch</button>
+    <progress id="write-progress" max="1" value="0" aria-label="Acknowledged JSON writes"></progress>
+    <pre id="write-result" aria-live="polite"></pre>
+    <p>Atomic batches of up to 20 documents; the complete write is not atomic. Earlier batches remain committed on failure. No automatic retries. Stopping a browser wait does not cancel server work.</p>
+    <h3>Copy as code</h3>
+    <p>Generates from the current form, not an earlier result; never executes. Set VLITE_BASE and VLITE_TOKEN locally. Review private vector / metadata content before sharing. Editor snippets are unconditional upserts, without If-Match.</p>
+    <label>Current operation<select id="studio-code-operation"><option value="search">Search playground</option><option value="upsert">Vector editor upsert</option><option value="write">Write JSON batches</option></select></label>
+    <label>Language<select id="studio-code-language"><option value="curl">curl (POSIX shell)</option><option value="python">Python / vlite-client</option><option value="javascript">JavaScript / @vlite/client</option></select></label>
+    <button id="studio-code-generate" type="button" class="secondary">Generate code</button>
+    <button id="studio-code-copy" type="button" class="secondary">Copy code</button>
+    <pre id="studio-code" tabindex="0" aria-label="Generated code"></pre>
   </section>
   <section id="retrieval" class="wide">
     <span class="eyebrow">RETRIEVAL</span><h2>Advanced retrieval</h2>
@@ -470,6 +504,46 @@
     <label>Entries (1..1000)<input id="audit-limit" type="number" min="1" max="1000" value="100"></label>
     <button id="persistent-audit" data-admin data-feature="persistent_audit" type="button" class="secondary">Read persistent audit</button>
     <pre id="persistent-audit-result"></pre>
+  </section>
+  <section id="observability" class="wide" aria-labelledby="obs-title">
+    <div class="section-heading"><div><span class="eyebrow">SERVER PULSE</span><h2 id="obs-title">Observability</h2></div><span class="badge">Metrics · Logs · Activity</span></div>
+    <p>Monitor this server without leaving the console. Uses the current connection and token; bootstrap admin access is required for logs and audit. Monitoring pauses when this section is off screen or the browser tab is hidden.</p>
+    <div class="obs-toolbar">
+      <label>Refresh interval<select id="obs-interval"><option value="2000">2 seconds</option><option value="5000" selected>5 seconds</option><option value="15000">15 seconds</option><option value="0">Off (manual refresh)</option></select></label>
+      <button id="obs-pause" type="button" class="secondary" aria-pressed="false">Pause monitoring</button>
+      <button id="obs-refresh" type="button">Refresh now</button>
+    </div>
+    <p id="obs-metrics-status" role="status">Connect with an admin token to view metrics.</p>
+    <div class="stat-grid obs-metrics" aria-label="Server metrics">
+      <div><span>Request rate</span><strong class="obs-card-value" id="obs-rps">—</strong><svg id="obs-spark-rps" class="obs-spark" viewBox="0 0 120 34" aria-hidden="true"></svg></div>
+      <div><span>Error rate</span><strong class="obs-card-value" id="obs-errors">—</strong><svg id="obs-spark-errors" class="obs-spark" viewBox="0 0 120 34" aria-hidden="true"></svg></div>
+      <div><span>Request p50</span><strong class="obs-card-value" id="obs-p50">—</strong><svg id="obs-spark-p50" class="obs-spark" viewBox="0 0 120 34" aria-hidden="true"></svg></div>
+      <div><span>Request p95</span><strong class="obs-card-value" id="obs-p95">—</strong><svg id="obs-spark-p95" class="obs-spark" viewBox="0 0 120 34" aria-hidden="true"></svg></div>
+      <div><span>Search QPS</span><strong class="obs-card-value" id="obs-search-qps">—</strong><svg id="obs-spark-search-qps" class="obs-spark" viewBox="0 0 120 34" aria-hidden="true"></svg></div>
+      <div><span>Search p95 / mean</span><strong class="obs-card-value" id="obs-search-latency">—</strong><svg id="obs-spark-search-latency" class="obs-spark" viewBox="0 0 120 34" aria-hidden="true"></svg></div>
+      <div><span>Vectors</span><strong class="obs-card-value" id="obs-vectors">—</strong><svg id="obs-spark-vectors" class="obs-spark" viewBox="0 0 120 34" aria-hidden="true"></svg></div>
+      <div><span>Collections</span><strong class="obs-card-value" id="obs-collections">—</strong><svg id="obs-spark-collections" class="obs-spark" viewBox="0 0 120 34" aria-hidden="true"></svg></div>
+      <div><span>In-flight requests</span><strong class="obs-card-value" id="obs-in-flight">—</strong><svg id="obs-spark-in-flight" class="obs-spark" viewBox="0 0 120 34" aria-hidden="true"></svg></div>
+    </div>
+    <div class="obs-panel"><h3>Requests by route</h3>
+      <div class="table-scroll"><table><caption>Cumulative request counts and latency in milliseconds. Select a column button to sort.</caption><thead><tr><th scope="col">Route</th><th scope="col" data-obs-sort="count" aria-sort="descending"><button type="button" class="secondary">Count</button></th><th scope="col" data-obs-sort="errors" aria-sort="none"><button type="button" class="secondary">Errors</button></th><th scope="col">p50 ms</th><th scope="col" data-obs-sort="p95_ms" aria-sort="none"><button type="button" class="secondary">p95 ms</button></th><th scope="col">p99 ms</th></tr></thead><tbody id="obs-routes"></tbody></table></div>
+    </div>
+    <div class="obs-panel">
+      <h3>Live server logs</h3><p id="obs-logs-status" role="status">Connect with an admin token to tail server logs.</p>
+      <div class="obs-toolbar">
+        <label>Minimum level<select id="obs-level"><option value="trace">Trace</option><option value="debug">Debug</option><option value="info" selected>Info</option><option value="warn">Warn</option><option value="error">Error</option></select></label>
+        <label class="obs-search">Search logs<input id="obs-log-search" type="search" maxlength="256" placeholder="Message, target, or fields" autocomplete="off"></label>
+        <label><input id="obs-auto-scroll" type="checkbox" checked> Auto-scroll</label>
+      </div>
+      <div class="obs-toolbar"><button id="obs-tail-pause" class="secondary" type="button" aria-pressed="false">Pause tail</button><button id="obs-download" class="secondary" type="button">Download filtered logs as JSONL</button><button id="obs-clear" class="secondary" type="button">Clear view</button></div>
+      <div id="obs-targets" class="obs-targets" role="group" aria-label="Filter by log target"></div>
+      <p id="obs-log-count" aria-live="polite" aria-atomic="true">No log entries buffered.</p>
+      <div id="obs-log-view" class="obs-log-view" role="region" aria-label="Server log entries; expand a row to inspect fields" tabindex="0"></div>
+    </div>
+    <div class="obs-diagnostics">
+      <div class="obs-panel"><h3>Slow queries</h3><p id="obs-slow-status" role="status">Waiting for diagnostics.</p><div class="table-scroll"><table><caption>Recent slow queries (newest first)</caption><thead><tr><th scope="col">Time</th><th scope="col">Route</th><th scope="col">Collection</th><th scope="col">Duration ms</th><th scope="col">Plan / fields</th></tr></thead><tbody id="obs-slow-rows"></tbody></table></div></div>
+      <div class="obs-panel"><h3>Recent audit</h3><p id="obs-audit-status" role="status">Waiting for audit entries.</p><div class="table-scroll"><table><caption>Recent admin activity (newest first)</caption><thead><tr><th scope="col">Time</th><th scope="col">Event</th><th scope="col">Resource</th><th scope="col">Fields</th></tr></thead><tbody id="obs-audit-rows"></tbody></table></div></div>
+    </div>
   </section>
 </main>
 <dialog id="confirmation">

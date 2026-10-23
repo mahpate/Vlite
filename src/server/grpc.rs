@@ -661,7 +661,7 @@ async fn poll_changes(
     rate_limit(service, &role)?;
     authorize_need(service, &role, Need::Admin, false, false)?;
     service
-        .run(move |db| Ok(db.changes_after(&cursor, limit)?))
+        .run_read(move |db| Ok(db.changes_after(&cursor, limit)?))
         .await
 }
 
@@ -770,7 +770,7 @@ impl VLite for Adapter {
                 let id = request.id;
                 let addressed = target(request.collection);
                 service
-                    .run(move |db| {
+                    .run_read(move |db| {
                         let collection = open(db, &role, &addressed)?;
                         let not_found = || {
                             ApiError::new(StatusCode::NOT_FOUND, "not_found", "vector not found")
@@ -1094,7 +1094,7 @@ impl VLite for Adapter {
                 let filters = conditions_in(request.filter)?;
                 let metric = metric_in(request.metric)?;
                 service
-                    .run(move |db| {
+                    .run_read(move |db| {
                         open_qualified(db, &role, &name)?;
                         let groups = db.collection(&name)?.search_grouped(
                             &request.vector,
@@ -1160,7 +1160,7 @@ impl VLite for Adapter {
                     metric,
                 };
                 service
-                    .run(move |db| {
+                    .run_read(move |db| {
                         open_qualified(db, &role, &name)?;
                         Ok(hits_out(db.collection(&name)?.recommend(&query)?))
                     })
@@ -1185,7 +1185,7 @@ impl VLite for Adapter {
                 let name = tenants::qualify(&role, target(request.collection).name());
                 let filters = conditions_in(request.filter)?;
                 service
-                    .run(move |db| {
+                    .run_read(move |db| {
                         open_qualified(db, &role, &name)?;
                         let facets = db.collection(&name)?.facets(&request.field, &filters)?;
                         Ok(proto::FacetsResponse {
@@ -1219,7 +1219,7 @@ impl VLite for Adapter {
                 let name = tenants::qualify(&role, target(request.collection).name());
                 let filters = conditions_in(request.filter)?;
                 service
-                    .run(move |db| {
+                    .run_read(move |db| {
                         open_qualified(db, &role, &name)?;
                         let stats = db
                             .collection(&name)?
@@ -1270,7 +1270,7 @@ impl VLite for Adapter {
                     sort,
                 };
                 service
-                    .run(move |db| {
+                    .run_read(move |db| {
                         open_qualified(db, &role, &name)?;
                         let hits = db.collection(&name)?.search_geo(&query)?;
                         Ok(proto::GeoSearchResponse {
@@ -1411,7 +1411,7 @@ impl VLite for Adapter {
             |service, role, _, request| async move {
                 let name = tenants::qualify(&role, target(request.collection).name());
                 service
-                    .run(move |db| {
+                    .run_read(move |db| {
                         open_qualified(db, &role, &name)?;
                         Ok(hits_out(db.collection(&name)?.search_named(
                             &request.name,
@@ -1441,7 +1441,7 @@ impl VLite for Adapter {
                 let name = tenants::qualify(&role, target(request.collection).name());
                 let query = sparse_in(request.indices, request.values)?;
                 service
-                    .run(move |db| {
+                    .run_read(move |db| {
                         open_qualified(db, &role, &name)?;
                         Ok(hits_out(db.collection(&name)?.search_sparse(
                             &request.name,
@@ -1490,7 +1490,7 @@ impl VLite for Adapter {
                     fusion,
                 };
                 service
-                    .run(move |db| {
+                    .run_read(move |db| {
                         open_qualified(db, &role, &name)?;
                         let hits = db.collection(&name)?.search_dense_sparse(&query)?;
                         Ok(proto::SearchResponse {
@@ -1535,7 +1535,7 @@ impl VLite for Adapter {
                     .map(|(name, vector)| (name, vector.vector))
                     .collect();
                 service
-                    .run(move |db| {
+                    .run_read(move |db| {
                         open_qualified(db, &role, &name)?;
                         let output = parsed.execute(db.collection(&name)?, &parameters)?;
                         Ok(proto::QueryResponse {
@@ -1603,7 +1603,7 @@ impl VLite for Adapter {
                     return Err(unprocessable("change limit exceeds 10000"));
                 }
                 service
-                    .run(move |db| {
+                    .run_read(move |db| {
                         let batch = db.changes_after(&cursor, limit)?;
                         Ok(proto::ChangesResponse {
                             cursor: batch.next.to_token(),
@@ -1779,7 +1779,7 @@ impl VLite for Adapter {
                 };
                 let index = crate::DiskAnnIndex::open(&request.path, options)?;
                 service
-                    .run(move |db| {
+                    .run_read(move |db| {
                         open_qualified(db, &role, &name)?;
                         Ok(hits_out(db.search_disk_ann(
                             &index,
@@ -1806,7 +1806,7 @@ impl VLite for Adapter {
             false,
             |service, _, _, _| async move {
                 service
-                    .run(move |db| {
+                    .run_read(move |db| {
                         Ok(proto::InfoResponse {
                             format_version: db.format_version(),
                             sequence: db.sequence,
@@ -1930,7 +1930,7 @@ impl VLite for Adapter {
                     let target = target(request.collection);
                     let check = target.clone();
                     service
-                        .run(move |db| open(db, &role, &check).map(|_| ()))
+                        .run_read(move |db| open(db, &role, &check).map(|_| ()))
                         .await?;
                     Ok((request_id, target, request.after, page))
                 },
@@ -2062,7 +2062,7 @@ async fn export_page(
     })?;
     let target = target.clone();
     service
-        .run(move |db| {
+        .run_read(move |db| {
             use std::ops::Bound::{Excluded, Unbounded};
             let collection = open(db, &role, &target)?;
             let state = db.state(collection);

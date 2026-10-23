@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { mkdir, rm, readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { NativeLibrary, EmbeddedError } from "./index.js";
 
+const nativeOptions = { libraryPath: process.env.VLITE_TEST_LIBRARY };
 const code = expected => error => error instanceof EmbeddedError && error.code === expected;
 const metadata = (group = "a", score = "2", latitude = 0) => ({
   group: { type: "string", value: group }, score: { type: "integer", value: score },
@@ -14,7 +17,7 @@ const metadata = (group = "a", score = "2", latitude = 0) => ({
 async function fixture(fn) {
   const directory = fileURLToPath(new URL(`./test-data-${randomUUID()}/`, import.meta.url));
   await mkdir(directory);
-  const native = new NativeLibrary();
+  const native = new NativeLibrary(nativeOptions);
   try { await fn(native, directory); }
   finally { await native.close(); await rm(directory, { recursive: true }); }
 }
@@ -94,6 +97,57 @@ test("change feed cursors preserve whole batches and typed mutation data", async
   await assert.rejects(other.changesAfter(cursor), code("cursor_compacted"));
   await db.batch([{ op: "put", id: "2", vector: [1, 0] }, { op: "put", id: "3", vector: [0, 1] }]);
   assert.equal((await db.changesAfter(rest.next, 1)).changes.length, 2);
+}));
+
+test("shared read-only handles and spawned readers preserve locks and reject mutations", async () => fixture(async (native, directory) => {
+  for (const credentials of [{}, { key: new Uint8Array(32).fill(7) }, { passphrase: "reader test secret" }]) {
+    const kind = "key" in credentials ? "key" : "passphrase" in credentials ? "passphrase" : "plain";
+    const path = join(directory, `${kind}.vlite`);
+    let writer = await native.create(path, 2, credentials);
+    await writer.put("1", [1, 0]);
+    await assert.rejects(native.open(path, { ...credentials, readOnly: true }), code("locked"));
+    await writer.close();
+    const first = await native.open(path, { ...credentials, readOnly: true });
+    const second = await native.open(path, { ...credentials, readOnly: true });
+    await assert.rejects(native.open(path, credentials), code("locked"));
+    for (const mutate of [() => first.put("2", [0, 1]), () => first.delete("1"),
+      () => first.batch([{ op: "put", id: "2", vector: [0, 1] }, { op: "delete", id: "1" }])]) {
+      await assert.rejects(mutate(), code("read_only"));
+      for (const reader of [first, second]) {
+        assert.deepEqual((await reader.get("1")).vector, [1, 0]);
+        assert.equal((await reader.search([1, 0], 1))[0].id, "1");
+        assert.equal((await reader.info()).records, 1);
+      }
+    }
+    const script = `
+      import assert from "node:assert/strict";
+      const { NativeLibrary, EmbeddedError } = await import(process.argv[1]);
+      const credentials = process.argv[3] === "key" ? { key: new Uint8Array(32).fill(7) }
+        : process.argv[3] === "passphrase" ? { passphrase: "reader test secret" } : {};
+      const native = new NativeLibrary({ libraryPath: process.env.VLITE_TEST_LIBRARY });
+      try {
+        const reader = await native.open(process.argv[2], { ...credentials, readOnly: true });
+        assert.deepEqual((await reader.get("1")).vector, [1, 0]);
+        assert.equal((await reader.search([1, 0], 1))[0].id, "1");
+        await assert.rejects(native.open(process.argv[2], credentials),
+          error => error instanceof EmbeddedError && error.code === "locked");
+        console.log("shared reader ok");
+      } finally { await native.close(); }
+    `;
+    const { stdout } = await promisify(execFile)(process.execPath,
+      ["--input-type=module", "--eval", script, new URL("./index.js", import.meta.url).href, path, kind], { timeout: 60000 });
+    assert.match(stdout, /shared reader ok/);
+    await first.close();
+    await assert.rejects(native.open(path, credentials), code("locked"));
+    await second.close();
+    writer = await native.open(path, credentials);
+    await writer.put("2", [0, 1]);
+    await assert.rejects(native.open(path, { ...credentials, readOnly: true }), code("locked"));
+    await writer.close();
+    const reopened = await native.open(path, { ...credentials, readOnly: true });
+    assert.deepEqual((await reopened.get("2")).vector, [0, 1]);
+    await reopened.close();
+  }
 }));
 
 test("encryption raw/passphrase create/open, wrong keys, and encrypted byte images", async () => fixture(async (native, directory) => {

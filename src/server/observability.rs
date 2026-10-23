@@ -80,7 +80,7 @@ async fn snapshot(service: Service, role: admin::Role) -> Result<Value, ApiError
     let ops = service.ops.metrics_json();
     let format_version = service.format_version;
     service
-        .run(move |db| {
+        .run_read(move |db| {
             let healthy = !db.poisoned;
             let collections = if healthy {
                 collection_metrics(db, &role)
@@ -173,6 +173,111 @@ pub(super) async fn metrics_route(
         )
             .into_response()),
         Some(_) => Err(unprocessable("format must be json or prometheus")),
+    }
+}
+
+pub(super) async fn logs(
+    query: Result<Query<super::logs::Query>, QueryRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let Query(query) = query.map_err(|error| {
+        ApiError::new(StatusCode::BAD_REQUEST, "invalid_query", error.body_text())
+    })?;
+    super::logs::query(query)
+        .map(Json)
+        .map_err(|(code, message)| ApiError::new(StatusCode::BAD_REQUEST, code, message))
+}
+
+/// Compact UI snapshot. Route latency percentiles use the most recent 1024
+/// completed observations per route; search totals use the existing strategy
+/// counters, and database fields come from a shared database read lock.
+pub(super) async fn summary(State(service): State<Service>) -> Result<Json<Value>, ApiError> {
+    let metrics = service.metrics.clone();
+    let route_snapshot = metrics
+        .by_route
+        .lock()
+        .map_err(internal)?
+        .iter()
+        .map(|((method, route), stats)| {
+            (
+                method.clone(),
+                route.clone(),
+                stats.count,
+                stats.errors,
+                stats.durations_ms.iter().copied().collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut all_durations = route_snapshot
+        .iter()
+        .flat_map(|(_, _, _, _, durations)| durations.iter().copied())
+        .collect::<Vec<_>>();
+    let mut search_durations = route_snapshot
+        .iter()
+        .filter(|(_, route, _, _, _)| route.contains("/search"))
+        .flat_map(|(_, _, _, _, durations)| durations.iter().copied())
+        .collect::<Vec<_>>();
+    let route_stats = route_snapshot
+        .iter()
+        .map(|(method, route, count, errors, durations)| {
+            json!({"method":method,"route":route,"count":count,"errors":errors,
+            "p50_ms":percentile(durations, 0.50),"p95_ms":percentile(durations, 0.95),
+            "p99_ms":percentile(durations, 0.99)})
+        })
+        .collect::<Vec<_>>();
+    let strategies = metrics.by_strategy.lock().map_err(internal)?.clone();
+    let search_total = strategies.values().copied().sum::<u64>();
+    let search_mean = (!search_durations.is_empty())
+        .then(|| search_durations.iter().sum::<u64>() as f64 / search_durations.len() as f64);
+    let (log_dropped, log_capacity, last_seq) = super::logs::buffer().stats();
+    let ts_ms = admin::now_ms() as u64;
+    let uptime_s = service.started.elapsed().as_secs_f64();
+    all_durations.sort_unstable();
+    search_durations.sort_unstable();
+    let snapshot = json!({
+        "ts_ms":ts_ms,
+        "uptime_s":uptime_s,
+        "requests":{"total":metrics.requests.load(Ordering::Relaxed),
+            "errors":metrics.failures.load(Ordering::Relaxed),
+            "in_flight":metrics.in_flight.load(Ordering::Relaxed),
+            "p50_ms":percentile_sorted(&all_durations, 0.50),
+            "p95_ms":percentile_sorted(&all_durations, 0.95),
+            "by_route":route_stats},
+        "search":{"total":search_total,"p95_ms":percentile_sorted(&search_durations, 0.95),
+            "mean_ms":search_mean,"by_strategy":strategies,
+            "graph_nodes_visited":metrics.graph_nodes_visited.load(Ordering::Relaxed),
+            "distance_evaluations":metrics.distance_evaluations.load(Ordering::Relaxed),
+            "quantized_distance_evaluations":metrics.quantized_distance_evaluations.load(Ordering::Relaxed),
+            "reranked_candidates":metrics.reranked.load(Ordering::Relaxed)},
+        "logs":{"capacity":log_capacity,"dropped":log_dropped,"last_seq":last_seq}
+    });
+    service
+        .run_read(move |db| {
+            let file_bytes = db.file.0.metadata().ok().map(|metadata| metadata.len());
+            let mut snapshot = snapshot;
+            let vectors = db
+                .collections
+                .values()
+                .map(|collection| collection.records.len())
+                .sum::<usize>();
+            snapshot["database"] = json!({"vectors":vectors,"collections":db.collections.len(),
+            "file_bytes":file_bytes,"read_only":db.is_read_only()});
+            Ok(Json(snapshot))
+        })
+        .await
+}
+
+fn percentile(samples: &[u64], quantile: f64) -> Option<u64> {
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    percentile_sorted(&sorted, quantile)
+}
+
+fn percentile_sorted(sorted: &[u64], quantile: f64) -> Option<u64> {
+    if sorted.is_empty() {
+        None
+    } else {
+        let index = ((sorted.len() as f64 * quantile).ceil() as usize).saturating_sub(1);
+        sorted.get(index).copied()
     }
 }
 

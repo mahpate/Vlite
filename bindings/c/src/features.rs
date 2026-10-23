@@ -17,6 +17,8 @@ pub(super) enum Request {
         path: String,
         #[serde(default)]
         credentials: Credentials,
+        #[serde(default)]
+        read_only: bool,
     },
     OpenFromBytes {
         bytes_base64: String,
@@ -339,11 +341,17 @@ pub(super) fn execute(state: &mut State, handle: u64, request: Request) -> Resul
             .map_err(failure)?;
             return insert(state, handle, db);
         }
-        Request::Open { path, credentials } => {
+        Request::Open {
+            path,
+            credentials,
+            read_only,
+        } => {
             let key = credentials.key()?;
-            let db = match key {
-                Some(key) => Database::open_encrypted(path, &key),
-                None => Database::open(path),
+            let db = match (key, read_only) {
+                (Some(key), false) => Database::open_encrypted(path, &key),
+                (Some(key), true) => Database::open_read_only_encrypted(path, &key),
+                (None, false) => Database::open(path),
+                (None, true) => Database::open_read_only(path),
             }
             .map_err(failure)?;
             return insert(state, handle, db);

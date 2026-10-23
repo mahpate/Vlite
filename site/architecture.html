@@ -110,6 +110,7 @@ flowchart TB
     REST["REST · Axum"]
     GRPC["gRPC · tonic vlite.v1"]
     DASH["Web console"]
+    MCP["vlite-mcp · stdio JSON-RPC"]
   end
   subgraph Core["Database core · src/lib.rs"]
     direction LR
@@ -149,6 +150,7 @@ flowchart TB
     <div class="table-scroll"><table>
       <thead><tr><th>Feature</th><th>Adds</th><th>Key dependencies</th></tr></thead>
       <tbody>
+        <tr><td><code>mcp</code></td><td>Stdio MCP server, read-only by default</td><td>JSON support</td></tr>
         <tr><td><code>json</code></td><td>JSON serialization of API types</td><td>serde</td></tr>
         <tr><td><code>server</code></td><td>REST server, auth, metrics, console</td><td>axum, rustls</td></tr>
         <tr><td><code>grpc</code></td><td>gRPC service (implies <code>server</code>)</td><td>tonic, prost, tonic-health</td></tr>
@@ -303,9 +305,19 @@ flowchart TD
     </figure>
 
     <h2 id="locking">Locking &amp; concurrency</h2>
-    <p>A database file has exactly one owner, enforced by an exclusive OS file lock taken at open. Within the server,
-      all requests share one <code>Database</code> behind a mutex, so operations are serialized. HNSW rebuilds run in the
-      background on a snapshot, then catch up and publish atomically.</p>
+    <p>A file permits either one exclusive writer (<code>Database::open</code>) or multiple shared-lock readers
+      (<code>open_read_only</code> / <code>open_read_only_encrypted</code>), across threads and processes.
+      Conflicting opens fail immediately with <code>Error::Locked</code>; readers do not coexist with a writer.
+      Each reader sees the committed state at open time; close and reopen to observe later commits. Mutations return
+      <code>Error::ReadOnly</code> without poisoning the handle; in-memory ANN builds remain allowed and never write the datafile.</p>
+    <p>The server retains the exclusive file lock, but its <code>Arc&lt;RwLock&lt;Option&lt;Database&gt;&gt;&gt;</code>
+      lets read routes execute concurrently on bounded blocking workers. Writes take the exclusive guard. An approximate
+      search that needs a rebuild retries under a write guard, so that rebuild can block readers. Explicit background HNSW
+      rebuilds construct from a snapshot, then catch up and publish under exclusive access.</p>
+    <p>Native exact scans use Rayon when there are at least 4,096 candidate rows and rows × dimensions ≥ 524,288,
+      with more than one Rayon worker. Chunk-local bounded top-k results merge deterministically by distance then ID;
+      wasm32 retains serial scans. Python calls within one process are serialized by the C ABI: use separate processes
+      with read-only handles for parallel embedded requests.</p>
     <figure class="diagram">
 <pre class="mermaid">
 flowchart LR
@@ -315,9 +327,19 @@ flowchart LR
     H2["HTTP request"]
     G1["gRPC stream"]
   end
-  Clients --> AUTH["bearer auth · scopes · rate limit"] --> MX["Mutex#lt;Database#gt;"] --> LK["exclusive OS lock"] --> FILE[("data.vlite")]
-  MX -. "snapshot" .-> BG["background HNSW build"] -. "catch up + publish" .-> MX
-  OTHER["second process"] -- "open" --x LK
+  Clients --> AUTH["bearer auth · scopes · rate limit"] --> MX["RwLock#lt;Database#gt;"]
+  MX -->|"shared guard"| READ["parallel read routes"]
+  MX -->|"exclusive guard"| WRITE["commits · rebuild / publish"]
+  READ --> CORE["one server-owned Database"]
+  WRITE --> CORE
+  CORE --> LK["exclusive OS file lock"] --> FILE[("data.vlite")]
+  MX -. "snapshot" .-> BG["background HNSW build"] -. "catch up + publish" .-> WRITE
+  subgraph Alternative["Alternative: writer closed"]
+    R1["reader process · open_read_only"] --> SH["shared OS file locks"]
+    R2["reader / MCP process · open_read_only"] --> SH
+    SH --> RF[("data.vlite · open-time snapshots")]
+  end
+  LK -. "mutually exclusive modes" .-> SH
 </pre>
     </figure>
 
@@ -469,9 +491,14 @@ flowchart LR
   L -->|"vlite.v1.VLite"| G["gRPC · tonic&lt;br/&gt;8 MiB messages"]
   R --> A["bearer token&lt;br/&gt;role · scopes · tenant"]
   G --> A
-  A --> RL["token-bucket&lt;br/&gt;rate limit"] --> DB["Mutex#lt;Database#gt;"]
+  A --> RL["token-bucket&lt;br/&gt;rate limit"] --> DB["RwLock#lt;Database#gt;"]
   A -.-> AU["audit.jsonl"]
   DB -.-> OB["metrics: JSON · Prometheus&lt;br/&gt;OTLP traces"]
+  R -. "sanitized access events" .-> LOG["in-memory structured log ring&lt;br/&gt;--log-buffer · default 2000"]
+  LOG --> LG["GET /v1/admin/logs&lt;br/&gt;since · level · q · limit"]
+  OB --> SUM["GET /v1/admin/metrics/summary"]
+  LG --> UI["dashboard Observability&lt;br/&gt;cards · route table · live tail"]
+  SUM --> UI
 </pre>
     </figure>
     <ul class="list">
@@ -480,6 +507,13 @@ flowchart LR
       <li>gRPC <code>ExportVectors</code> streams to the client and <code>StreamImport</code> streams from it; each import chunk commits independently.</li>
       <li>A disconnect after a write is commit-indeterminate: check before retrying.</li>
     </ul>
+
+    <h3 id="mcp">MCP and agent skills</h3>
+    <p><code>vlite-mcp</code> (Cargo feature <code>mcp</code>) is a stdio JSON-RPC client of the embedded engine,
+      not a REST proxy. It opens a shared-lock read-only handle by default; <code>--writable</code> opts into exclusive
+      ownership and upsert/delete tools. Encryption key-file and environment options are supported.
+      See <a href="https://github.com/mahpate/Vlite/blob/main/docs/MCP.md">installation, tools and host configuration</a> and
+      <a href="https://github.com/mahpate/Vlite/blob/main/docs/AGENT-SKILLS.md">RAG, MCP, operations and index-tuning skills</a>.</p>
 
     <h2 id="bindings">Bindings</h2>
     <p>All embedded bindings drive the same engine through a handle-based C ABI:

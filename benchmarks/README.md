@@ -237,8 +237,217 @@ FAISS is an index library, not a durable vector database; durability/CRUD
 comparisons require an application storage layer. For Milvus/Weaviate, record
 all supporting services and total resource allocation, not just the query node.
 Do not borrow marketing numbers from upstream benchmark pages for our table.
-Only engines whose adapters have actually run here (Qdrant over REST, zvec
-embedded) have published numbers.
+Only engines whose adapters have actually run here (see the multi-engine
+comparison below, plus Qdrant over REST and zvec embedded) have published
+numbers.
+
+## Multi-engine comparison
+
+`compare_engines.py` runs VLite next to other popular vector databases on the
+same seeded data, queries and float64 ground truth, in two tiers that are
+**never ranked together**:
+
+| Tier | Engines | Transport |
+|---|---|---|
+| `--tier embedded` (in-process Python) | VLite embedded, zvec, Chroma `PersistentClient`, LanceDB, FAISS | Python calls in the benchmark process |
+| `--tier server` (client/server on localhost) | VLite server, Qdrant (REST), Qdrant (gRPC, extra row), PostgreSQL + pgvector | One persistent connection from the host to the container's bridge IP |
+
+FAISS is an **in-memory library baseline**: no persistence, durability or
+reopen (those columns are N/A). It shows the cost of an index with no storage
+engine around it, not a database to choose instead.
+
+```text
+# Linux/WSL with Docker; one venv
+pip install numpy zvec chromadb lancedb faiss-cpu "psycopg[binary]" pgvector qdrant-client \
+  <vlite_embedded-0.3.0-...-manylinux_2_28_x86_64.whl>
+docker pull qdrant/qdrant:v1.15.5 && docker pull pgvector/pgvector:0.8.1-pg17 \
+  && docker pull ghcr.io/mahpate/vlite-api:v0.3.0
+python benchmarks/compare_engines.py --tier embedded --records 20000 --dimensions 128 --trials 3 \
+  --output benchmarks/results/engines-embedded-20k-128d-wsl.json
+python benchmarks/compare_engines.py --tier server --records 20000 --dimensions 128 --trials 3 \
+  --output benchmarks/results/engines-server-20k-128d-wsl.json
+# 100k x 768d: same commands with --records 100000 --dimensions 768 --trials 2
+#   --output benchmarks/results/engines-{embedded,server}-100k-768d-wsl.json
+python benchmarks/compare_engines.py --summary benchmarks/results/engines-*.json   # median tables
+```
+
+`--engines vlite,faiss` and `--modes ann` select subsets; `--cpus`/`--memory`
+(default 4 CPUs / 4 GiB) apply identically to every server container;
+`--build-timeout` (default 1200 s) records slower builds as `timeout`.
+
+### Methodology
+
+- **Data:** clustered Gaussian float32 vectors and queries (`--clusters 64
+  --spread 0.35 --seed 42`, 200 queries, k=10); the dataset SHA-256 is in the
+  JSON. Recall@10 is ID-based and tie-aware against a float64 NumPy oracle
+  computed outside timing. Squared L2 everywhere (Qdrant `Euclid` and Chroma
+  `l2` rank identically).
+- **Isolation:** each (engine, mode, trial) runs in a fresh child process and,
+  for servers, a fresh container and volume; engine order rotates per trial.
+- **Ingest:** identical batch size for every engine (`max(1, min(1000,
+  4_000_000 // (dims*24)))`, i.e. 1000 at 128d, 217 at 768d), one commit per
+  batch: VLite `batch()` / `POST /v1/batches`, zvec `insert`, Chroma `add`,
+  LanceDB `add`, FAISS `add`, Qdrant upsert `wait=true`, pgvector `COPY BINARY`
+  in one transaction per batch.
+- **Exact:** brute force — VLite `search`, zvec flat index, LanceDB
+  `bypass_vector_index`, FAISS `IndexFlatL2`, Qdrant `exact=true` (no HNSW
+  built), pgvector sequential scan. Chroma has no exact mode (N/A).
+- **ANN:** HNSW with VLite's defaults `M=16, ef_construction=100` set
+  explicitly on every engine that exposes them, `ef_search=100`. LanceDB has no
+  plain HNSW, so it uses `IVF_HNSW_SQ` with one partition (8-bit scalar
+  quantized, no refine), which explains its lower recall. Qdrant bulk-loads with
+  `indexing_threshold=0` and the build step enables indexing and waits for
+  `green` with all vectors indexed (`full_scan_threshold=10` so HNSW serves
+  queries). pgvector builds `CREATE INDEX ... USING hnsw` after ingest. Chroma
+  and FAISS insert into the graph during `add`, so their graph cost is in
+  *ingest*; compare **ingest+build** across engines.
+- **Latency:** sequential, one client thread, one query in flight, after 10
+  warmup queries; QPS = queries / sum(latency). This is not a throughput or
+  concurrency benchmark.
+- **Memory:** embedded = process VmRSS growth from "empty database opened" to
+  "index built"; server = container memory (`docker stats`) growth over the
+  same span. **Disk:** bytes after clean close / container stop. **Reopen:**
+  reopen (or `docker start`) + readiness + any required index rebuild + first
+  query.
+- **Server containers:** the same `--cpus 4 --memory 4g` for all three images.
+  Postgres gets `shared_buffers=1GB`, `maintenance_work_mem=1GB` (standard
+  pgvector build tuning) and `--shm-size 1g`. Clients connect to the container
+  IP because Docker's userland port proxy added ~0.5–1 ms per round trip in
+  smoke tests (`--published-ports` restores the proxy path).
+
+### Durability defaults (not changed; differ between engines)
+
+| Engine | Default durability per acknowledged write |
+|---|---|
+| VLite (embedded and server) | Each batch is one atomic commit, fsynced before acknowledgment |
+| zvec | Defaults; harness calls `flush()` before close; per-insert fsync not verified |
+| Chroma | SQLite WAL; HNSW segment files persisted asynchronously in batches |
+| LanceDB | Each `add` commits a new table version; per-commit fsync not verified |
+| FAISS | None (in-memory only) |
+| Qdrant | WAL appended per request; WAL/segments flushed every 5 s, not fsync per request |
+| pgvector | `fsync=on`, `synchronous_commit=on`: WAL fsync at each batch commit |
+
+VLite pays an fsync for every batch while some engines do not; that is part of
+its ingest time.
+
+### Results: 20,000 x 128d (WSL2, 16 vCPU Xeon Platinum 8370C, medians)
+
+Embedded tier, 3 trials
+([engines-embedded-20k-128d-wsl.json](results/engines-embedded-20k-128d-wsl.json)):
+
+| mode | engine | p50 ms | p95 ms | QPS | recall@10 | ingest s | build s | ingest+build s | RSS growth MiB | disk MiB | reopen+1st query s |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| exact | vlite 0.3.0 | 1.413 | 1.553 | 695 | 1.0000 | 1.80 | 0.00 | 1.80 | 30.8 | 10.2 | 0.07 |
+| exact | zvec 0.8.0 | 1.153 | 1.482 | 842 | 1.0000 | 0.33 | 0.03 | 0.36 | 49.8 | 13.7 | 0.02 |
+| exact | chroma 1.5.9 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| exact | lancedb 0.40.0 | 10.525 | 12.083 | 92 | 1.0000 | 0.19 | 0.00 | 0.19 | 130.8 | 9.8 | 0.01 |
+| exact | faiss 1.15.1 (library) | 0.251 | 0.701 | 2,739 | 1.0000 | 0.01 | 0.00 | 0.01 | 25.1 | N/A | N/A |
+| ann | vlite 0.3.0 | 0.454 | 0.556 | 2,154 | 1.0000 | 1.74 | 11.99 | 13.73 | 31.0 | 10.2 | 12.08 |
+| ann | zvec 0.8.0 | 0.438 | 0.559 | 2,212 | 1.0000 | 0.31 | 0.35 | 0.66 | 65.9 | 15.4 | 0.03 |
+| ann | chroma 1.5.9 | 1.672 | 1.886 | 591 | 1.0000 | 5.65 | 0.00 | 5.65 | 94.4 | 16.5 | 0.08 |
+| ann | lancedb 0.40.0 (IVF_HNSW_SQ) | 7.188 | 8.279 | 133 | 0.9485 | 0.19 | 0.93 | 1.12 | 228.5 | 15.4 | 0.03 |
+| ann | faiss 1.15.1 (library) | 0.079 | 0.147 | 11,339 | 0.9995 | 2.52 | 0.00 | 2.52 | 31.1 | N/A | N/A |
+
+Server tier, 3 trials, 4 CPUs / 4 GiB per container
+([engines-server-20k-128d-wsl.json](results/engines-server-20k-128d-wsl.json)):
+
+| mode | engine | p50 ms | p95 ms | QPS | recall@10 | ingest s | build s | ingest+build s | memory growth MiB | disk MiB | restart+1st query s |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| exact | vlite-server v0.3.0 (REST) | 2.061 | 2.328 | 481 | 1.0000 | 1.87 | 0.00 | 1.87 | 26.6 | 10.1 | 1.32 |
+| exact | qdrant 1.15.5 (REST) | 1.413 | 1.621 | 699 | 1.0000 | 1.85 | 0.00 | 1.85 | 66.7 | 196.5 | 1.62 |
+| exact | qdrant 1.15.5 (gRPC) | 1.926 | 2.270 | 512 | 1.0000 | 0.70 | 0.00 | 0.70 | 19.5 | 196.1 | 1.79 |
+| exact | pgvector 0.8.1 / PG 17.8 | 4.189 | 4.719 | 234 | 1.0000 | 0.23 | 0.04 | 0.26 | 13.2 | 66.2 | 1.41 |
+| ann | vlite-server v0.3.0 (REST) | 1.149 | 1.356 | 845 | 1.0000 | 1.82 | 12.25 | 14.06 | 29.0 | 10.1 | 13.96 |
+| ann | qdrant 1.15.5 (REST) | 0.965 | 1.127 | 1,027 | 1.0000 | 1.89 | 0.93 | 2.82 | 92.7 | 165.3 | 1.63 |
+| ann | qdrant 1.15.5 (gRPC) | 1.464 | 1.641 | 681 | 1.0000 | 0.70 | 0.93 | 1.63 | 60.6 | 165.3 | 1.67 |
+| ann | pgvector 0.8.1 / PG 17.8 | 1.016 | 1.236 | 961 | 1.0000 | 0.23 | 2.72 | 2.95 | 32.1 | 98.1 | 1.40 |
+
+### Results: 100,000 x 768d (same host, medians of 2 trials, batch 217)
+
+Embedded tier
+([engines-embedded-100k-768d-wsl.json](results/engines-embedded-100k-768d-wsl.json)):
+
+| mode | engine | p50 ms | p95 ms | QPS | recall@10 | ingest s | build s | ingest+build s | RSS growth MiB | disk MiB | reopen+1st query s |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| exact | vlite 0.3.0 | 32.210 | 34.627 | 31 | 1.0000 | 50.62 | 0.00 | 50.62 | 333.6 | 295.3 | 1.89 |
+| exact | zvec 0.8.0 | 27.033 | 29.036 | 37 | 1.0000 | 5.00 | 0.53 | 5.53 | 346.6 | 300.9 | 0.11 |
+| exact | chroma 1.5.9 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| exact | lancedb 0.40.0 | 70.423 | 85.269 | 14 | 1.0000 | 3.63 | 0.00 | 3.63 | 193.2 | 302.6 | 0.07 |
+| exact | faiss 1.15.1 (library) | 21.585 | 33.797 | 48 | 1.0000 | 0.37 | 0.00 | 0.37 | 307.5 | N/A | N/A |
+| ann | vlite 0.3.0 | 3.545 | 3.936 | 282 | 0.9680 | 51.49 | 524.57 | 576.06 | 354.3 | 295.3 | 518.75 |
+| ann | zvec 0.8.0 | 0.901 | 1.194 | 1,075 | 0.9657 | 4.67 | 7.75 | 12.42 | 375.3 | 314.7 | 0.04 |
+| ann | chroma 1.5.9 | 2.474 | 2.837 | 397 | 0.9692 | 54.14 | 0.00 | 54.14 | 427.2 | 326.7 | 0.68 |
+| ann | lancedb 0.40.0 (IVF_HNSW_SQ) | 10.160 | 12.602 | 96 | 0.9055 | 3.69 | 16.58 | 20.27 | 554.4 | 391.8 | 0.30 |
+| ann | faiss 1.15.1 (library) | 0.505 | 0.597 | 1,938 | 0.9550 | 53.18 | 0.00 | 53.18 | 343.5 | N/A | N/A |
+
+Server tier, 4 CPUs / 4 GiB per container
+([engines-server-100k-768d-wsl.json](results/engines-server-100k-768d-wsl.json)):
+
+| mode | engine | p50 ms | p95 ms | QPS | recall@10 | ingest s | build s | ingest+build s | memory growth MiB | disk MiB | restart+1st query s |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| exact | vlite-server v0.3.0 (REST) | 34.022 | 37.257 | 29 | 1.0000 | 56.37 | 0.00 | 56.37 | 339.9 | 294.5 | 3.16 |
+| exact | qdrant 1.15.5 (REST) | 16.710 | 20.066 | 58 | 1.0000 | 55.16 | 0.00 | 55.17 | 39.5 | 486.1 | 2.03 |
+| exact | qdrant 1.15.5 (gRPC) | 17.859 | 22.309 | 55 | 1.0000 | 18.08 | 0.00 | 18.08 | 56.2 | 486.1 | 1.92 |
+| exact | pgvector 0.8.1 / PG 17.8 | 320.618 | 381.030 | 3 | 1.0000 | 8.00 | 0.03 | 8.03 | 428.4 | 777.5 | 2.19 |
+| ann | vlite-server v0.3.0 (REST) | 4.942 | 8.215 | 198 | 0.9680 | 59.49 | 637.08 | 696.57 | 369.5 | 294.5 | 605.54 |
+| ann | qdrant 1.15.5 (REST) | 1.957 | 2.307 | 501 | 0.9693 | 73.85 | 21.21 | 95.06 | 370.9 | 491.8 | 1.70 |
+| ann | qdrant 1.15.5 (gRPC) | 2.465 | 2.882 | 405 | 0.9750 | 13.22 | 18.85 | 32.07 | 374.6 | 491.8 | 1.84 |
+| ann | pgvector 0.8.1 / PG 17.8 | 2.797 | 3.379 | 351 | 0.9753 | 5.49 | 78.97 | 84.46 | 857.5 | 1488.2 | 1.60 |
+
+Two trial-0 cells (Qdrant gRPC exact, Qdrant REST ANN) first failed because the
+harness reused a keep-alive REST socket that Qdrant had closed while idle; the
+harness now reconnects for idempotent requests and those two cells were re-run
+alone afterwards (marked `rerun_note` in the JSON). The two VLite server ANN
+trials differ widely (build 518 s vs 756 s, p50 4.2 vs 5.7 ms), so treat that
+row as noisy. pgvector's unindexed exact scan reads TOASTed 3 KiB vectors with
+default parallelism (`relation_bytes` 403 MiB exact / 794 MiB with HNSW).
+
+At 768d the gap in **index build** dominates: VLite needs ~9–12 minutes for
+100k vectors (and the same again on every reopen/restart, since the graph is
+not persisted here) where zvec takes 8 s, LanceDB 17 s, Qdrant ~20 s and
+pgvector ~80 s. VLite's ANN recall (0.968) is in line with the other HNSW
+engines at the same `M/ef` (0.955–0.978), but its p50 is 2–4x zvec/FAISS in
+process and ~2x Qdrant/pgvector over the network. Exact scans are comparable
+in process (VLite 32 ms vs zvec 27 ms, FAISS 22 ms) but Qdrant's server-side
+scan is ~2x faster than VLite server's. VLite's ingest (~50 s) is ~10x zvec /
+LanceDB and close to Chroma, FAISS-HNSW and Qdrant REST, mostly JSON encoding
+plus one fsync per 217-vector batch. VLite keeps the smallest disk footprint
+of the persistent databases.
+
+### Reading these results
+
+- **Query latency.** VLite's HNSW query latency matches zvec in-process and is
+  within ~0.2 ms of Qdrant/pgvector over the network at 100% recall. Its exact
+  scan is slower than zvec/FAISS (the Python binding marshals JSON through a C
+  ABI) and, as a server, slower than Qdrant's multi-segment parallel scan.
+  FAISS is fastest because it is a bare in-memory index.
+- **Index build is VLite's clear weakness** at this release: 12 s for 20k x
+  128d versus 0.35 s (zvec), ~1 s (Qdrant, LanceDB) and 2.7 s (pgvector).
+  Because the graph is in memory only, VLite's ANN reopen also rebuilds it,
+  while the other databases persist their index and reopen in milliseconds
+  (embedded) or ~1.5 s (container start). Opt-in HNSW snapshots (see
+  [Persisted ANN restart measurement](#persisted-ann-restart-measurement)) are
+  not used here.
+- **Ingest.** VLite fsyncs every batch; Qdrant and Chroma do not, pgvector
+  fsyncs WAL per commit but uses binary `COPY`. Qdrant REST ingest equals VLite
+  REST; gRPC halves it (JSON encoding cost on both REST rows).
+- **Footprint.** VLite has the smallest disk and memory growth of the
+  databases. Qdrant's ~165–196 MiB is mostly preallocated WAL segments; the
+  pgvector volume includes ~40 MiB of cluster catalog/WAL — the `items` table
+  plus index itself is 11.6 MiB (exact) / 27.5 MiB (ANN), recorded as
+  `relation_bytes`.
+- **Recall.** All engines but LanceDB reach ≥0.9995 at `ef_search=100` on this
+  easy clustered set; LanceDB's 0.9485 reflects its quantized
+  `IVF_HNSW_SQ` index without refine.
+
+Caveats: one host, synthetic data, WSL2 virtualization, small datasets that
+fit in cache, single-threaded sequential queries, Python client overhead in
+every row (and VLite embedded crosses a JSON C ABI). Server latency includes
+the localhost round trip: in a 2,000-vector smoke run every server engine
+measured ~0.9–1.0 ms p50, so most of the server p50 here is transport. Use the
+raw JSON (per-query
+samples, versions, params, durability notes, container image IDs) before
+drawing conclusions.
 
 ## Native profiling, real vectors and mixed updates
 
@@ -497,3 +706,50 @@ Use a source commit plus any dirty-state disclosure; the results commit itself
 will naturally differ from the tested source. Never publish tokens, Docker
 environment dumps, private datasets or internal host addresses. Label toy runs
 as smoke measurements. Do not claim a winner from one workload.
+
+## Concurrent readers
+
+Three-run REST comparison of committed `HEAD` versus an isolated snapshot of the
+reader changes ([raw JSON](results/concurrent-readers-windows.json)). Both were
+built as release `vlite-server` v0.3.0 binaries from commit
+`34c491b61189b6c7b397466bd5224dffde7c8a3a`; the after snapshot was dirty and
+included the reader-lock and parallel exact-search work. It was captured before
+later unrelated observability/MCP edits landed in the live checkout. The two
+binary SHA-256 hashes, source state, full trial metrics, and database format are
+in the JSON.
+
+Measured natively on Windows 11 because WSL had no `cargo`: Intel Xeon Platinum
+8370C, 8 physical / 16 logical cores. A per-trial host CPU gate waited for total
+CPU load at or below 50%; observed pre-trial loads were below that threshold.
+Each run used 20,000 x 128 clustered synthetic vectors, k=10, 2 s warmup and a
+10 s measurement window, with one persistent HTTP/1.1 connection per worker.
+Exact uses `mode=exact`; HNSW was built outside timing and queried with
+`mode=approximate_ready`, `ef_search=100`. Table entries are median QPS and
+median per-trial p50/p95/p99 latency; errors are baseline/after.
+
+| Search | Readers | Baseline QPS; p50/p95/p99 ms | After QPS; p50/p95/p99 ms | QPS change | Errors |
+|---|---:|---:|---:|---:|---:|
+| Exact | 1 | 483; 2.00 / 2.51 / 3.21 | 788; 1.25 / 1.41 / 1.65 | +63% | 0 / 0 |
+| Exact | 4 | 636; 6.11 / 7.21 / 8.52 | 1,529; 2.62 / 3.22 / 3.52 | +140% | 0 / 0 |
+| Exact | 8 | 634; 12.27 / 14.16 / 18.30 | 1,927; 4.22 / 5.95 / 6.89 | +204% | 0 / 0 |
+| Exact | 16 | 629; 24.77 / 29.44 / 35.89 | 2,155; 7.58 / 11.37 / 12.77 | +243% | 0 / 0 |
+| HNSW | 1 | 1,528; 0.64 / 0.78 / 0.97 | 1,560; 0.62 / 0.76 / 0.97 | +2% | 0 / 0 |
+| HNSW | 4 | 3,521; 1.13 / 1.30 / 1.67 | 4,038; 0.95 / 1.37 / 1.65 | +15% | 0 / 0 |
+| HNSW | 8 | 3,491; 2.26 / 2.54 / 3.75 | 4,310; 1.77 / 2.92 / 3.59 | +23% | 0 / 0 |
+| HNSW | 16 | 3,447; 4.58 / 5.16 / 8.38 | 4,648; 3.22 / 6.18 / 7.80 | +35% | 0 / 0 |
+
+Single-reader exact on the separate 100,000 x 768 dataset (three 10 s runs):
+
+| Version | QPS | p50 / p95 / p99 ms | Errors |
+|---|---:|---:|---:|
+| Baseline | 22.2 | 44.76 / 46.60 / 48.70 | 0 |
+| After | 98.2 | 10.24 / 11.13 / 12.16 | 0 |
+
+The exact concurrent path gains substantially as shared readers avoid the old
+serialization; throughput still flattens at high reader counts under this
+8-physical-core host. The 100k exact result is about 4.4x faster after, combining
+the new Rayon scan with the server read-lock change. HNSW's single-reader result
+is nearly unchanged, with a more modest 35% QPS gain at 16 readers. These are
+synthetic, warm-cache, single-host REST measurements with no concurrent writes;
+they are not production tail-latency guarantees. The optional embedded
+multi-process benchmark was not run.

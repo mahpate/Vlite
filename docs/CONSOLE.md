@@ -8,6 +8,99 @@ All tools appear on one continuous page, without expandable panels. The left
 navigation stays visible while scrolling, including as a compact rail on small
 screens, and jumps directly to each tool.
 
+## Studio workflow improvements
+
+The original VLite controls take workflow inspiration from
+[zvec-studio](https://github.com/zvec-ai/zvec-studio)'s create → write → query
+quick start, theme-aware presentation, onboarding and SDK-code roadmap. No
+zvec-studio source code, assets, frameworks or runtime dependencies are used.
+VLite retains its own REST schema, decimal u64 IDs and typed metadata.
+
+- **Appearance:** Light, Dark or System, with live system-theme changes. The
+  existing density selector remains. Appearance is remembered by default in
+  `vlite-appearance`; uncheck **Remember appearance only** for this visit only.
+  Storage-disabled browsers still apply changes. Neither records nor tokens are
+  saved. Existing light/dark preferences are preserved.
+- **Quick tour:** a dismissible first-visit orientation highlights Connect →
+  Collections → Write JSON → Search → Observability (Diagnostics on an older
+  dashboard). It sends no requests or writes. Dismissal is remembered separately
+  as `vlite-studio-tour`; **Quick tour** reopens it at any time.
+- **Collection creation:** define a name and dimensions, choose a metric and
+  optionally declare metadata indexes as `[{"field":"category","kind":"eq"}]`.
+  Supported kinds are `eq`, `range`, `eq_range`. Advanced settings remain JSON;
+  explicit metric/index fields override the same advanced settings. **Review
+  collection (step 2)** validates and displays the complete request before the
+  existing confirmation/create action. Any edit requires a new review. Creating
+  does not switch the active collection.
+- **Write JSON:** paste an array of 1..10000 documents, at most 4 MiB, with quoted
+  decimal string IDs, a finite f32 vector matching the active collection, and
+  optional typed metadata / standard-base64 `payload` (or `payload_base64`, not
+  both). Example for a three-dimensional collection:
+
+  ```json
+  [{"id":"1","vector":[1,0,0],"metadata":{"category":{"type":"string","value":"demo"}},"payload":""}]
+  ```
+
+  **Validate / preview** checks every document and duplicate IDs, reports counts
+  and the first 20 row errors, and shows sample IDs. All errors must be corrected
+  before upserting. Any draft change or collection switch invalidates the preview.
+  Confirmation names the target collection. Writes use existing batch routes in
+  chunks of 20; progress counts acknowledged records. **Pause after current batch**
+  stops before another batch, not during a commit. Each batch is atomic, the whole
+  operation is not. Earlier batches remain committed if another fails. Unknown
+  outcomes are never retried automatically. The preview is consumed on commit;
+  inspect the data before preparing remaining records or manually retrying. Upserts
+  replace vector, payload, metadata and TTL, rather than merging fields.
+- **Copy as code:** generate from the current search form (including ANN, filter,
+  hybrid and rerank parameters), editor upsert, or JSON write draft. Choose POSIX
+  curl, Python `vlite-client` (`vlite_client.Client`), or the repository's JavaScript
+  `@vlite/client` SDK (`clients/javascript`, currently private / not npm-published).
+  Set `VLITE_BASE` to the API origin and `VLITE_TOKEN` locally; curl shows
+  `$VLITE_TOKEN`, SDKs read the environment. No connected token is passed to the
+  generator. Known credential-shaped fields/values are redacted; review the output
+  before execution or sharing because vector/metadata content may still be private.
+  Write examples retain 20-operation batching; none automatically retries. Editor
+  examples deliberately use unconditional upserts, **not** the editor's If-Match
+  constraint. If browser clipboard access is unavailable, copy the text manually.
+- **Vector projection:** the existing Explore / compare tool already provides
+  an original approximate two-axis PCA SVG for the first 32 sampled records
+  (at most 256 dimensions, 4-MiB working set). Select a point or its keyboard
+  accessible ID button to load the record editor. The pure helper additionally
+  rejects more than 2000 points or invalid/mismatched vectors. This is a bounded,
+  non-snapshot view, not UMAP/t-SNE or a guarantee of neighbor preservation.
+
+## Observability: live metrics and logs
+
+Connect with the bootstrap admin token and open **Observability**. The panel
+shows request rate, error percentage, request p50/p95, search rate/latency,
+vector/collection counts and in-flight requests, with bounded sparklines. Rates
+need two samples; `—` means unavailable, not zero. Sort the per-route table by
+count, errors or p50/p95/p99. Metrics use `GET /v1/admin/metrics/summary`; older
+servers returning 404 fall back to Prometheus `/metrics`, with lifetime
+histogram estimates rather than the summary's recent-window percentiles.
+Summary percentiles use the latest 1024 completed samples per route.
+
+The live log tail uses `GET /v1/admin/logs` with a `since` sequence cursor,
+minimum `level` (`trace`, `debug`, `info`, `warn`, `error`), case-insensitive `q`
+(message/target text), and `limit` (1..1000, default 200). Responses contain
+`entries`, `next_seq`, `dropped`, and `capacity`. Use severity/text filters,
+target chips, auto-scroll, pause/resume tail and JSONL export of the filtered
+browser buffer. The UI retains at most 5000 entries and displays the newest
+500 matching rows. An independent monitoring pause stops refreshes; background
+polling also stops when the tab/panel is hidden or disconnected. Slow queries
+and audit entries appear alongside the tail when the credential permits them.
+Unauthorized/unsupported endpoints show an explanation rather than fake data.
+
+The server's structured ring is **memory-only**, default 2000 entries; set
+`vlite-server ... --log-buffer N` (1..100000) to change it. Old entries are
+counted as dropped when overwritten, and all entries disappear on restart.
+It is not a replacement for the persistent administrative audit log or a
+production monitoring/log collector. Sanitized HTTP access events record route
+templates, status and duration without raw URLs, tokens, vectors or payloads.
+Exports can still contain operational details: review them before sharing.
+These admin endpoints require a bootstrap admin credential; a read-only token
+or a collection-scoped token does not grant global log/summary access.
+
 ## Testing workflows
 
 - **Guided demo:** prepare three dimension-matched vectors, inspect the preview,

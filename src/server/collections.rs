@@ -207,7 +207,7 @@ pub(super) async fn list_core(
     role: admin::Role,
 ) -> Result<(Vec<CollectionInfo>, u32), ApiError> {
     service
-        .run(move |db| {
+        .run_read(move |db| {
             let lineage = db.lineage();
             let mut items = db
                 .collections()?
@@ -336,15 +336,11 @@ pub(super) async fn fetch_core(
     target: Target,
 ) -> Result<(CollectionInfo, crate::text_index::TextIndexStatus), ApiError> {
     service
-        .run(move |db| {
+        .run_read(move |db| {
             let collection = open(db, &role, &target)?;
             let mut info = db.info(collection);
             info.name = tenants::unqualify(&role, &info.name);
-            let text = CollectionRef {
-                db: &*db,
-                id: collection,
-            }
-            .text_index_status();
+            let text = CollectionRef { db, id: collection }.text_index_status();
             Ok((info, text))
         })
         .await
@@ -582,7 +578,7 @@ pub(super) async fn status_core(
 ) -> Result<Value, ApiError> {
     let reservations = service.imports.clone();
     service
-        .run(move |db| {
+        .run_read(move |db| {
             let reserved = reservations.lock().map_err(internal)?;
             match locate(db, &reserved, &role, job) {
                 Ok(Job::Durable(_)) => Ok(status_json(&db.import_status(job)?, true)),

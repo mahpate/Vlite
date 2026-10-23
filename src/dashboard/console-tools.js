@@ -40,6 +40,66 @@
     if (payloadBytes > 1048576) throw new Error("Payload exceeds 1 MiB");
     return { id: value.id, vector: value.vector, metadata: value.metadata ?? {}, payload_base64: payload };
   }
+  // ---- studio ux: bounded document previews and SDK examples ----
+  function jsonDocuments(source, dimensions) {
+    if (!Number.isInteger(dimensions) || dimensions < 1) throw new Error("Connect to discover collection dimensions before validating");
+    if (typeof source !== "string" || new TextEncoder().encode(source).length > 4 * 1024 * 1024) throw new Error("JSON documents exceed 4 MiB");
+    const values = JSON.parse(source);
+    if (!Array.isArray(values) || !values.length || values.length > 10000) throw new Error("Paste an array of 1..10000 documents");
+    const records = [], errors = [], seen = new Set();
+    let invalid = 0;
+    values.forEach((value, index) => {
+      try {
+        if (!object(value)) throw new Error("Expected a document object");
+        if (value.payload !== undefined && value.payload_base64 !== undefined) throw new Error("Use payload OR payload_base64, not both");
+        const { payload, ...fields } = value;
+        const item = record(payload === undefined ? fields : { ...fields, payload_base64: payload }, dimensions);
+        if (seen.has(item.id)) throw new Error(`Duplicate ID ${item.id}`);
+        seen.add(item.id); records.push(item);
+      } catch (error) {
+        invalid++;
+        if (errors.length < 20) errors.push(`Document ${index + 1}: ${error.message}`);
+      }
+    });
+    return { count: values.length, valid: records.length, invalid, errors, records: invalid ? [] : records };
+  }
+  function collectionDraft(input) {
+    const initial = settings(JSON.parse(input.settings || "{}"));
+    const declared = { ...initial };
+    if (input.metric) declared.metric = input.metric;
+    if (input.indexes?.trim()) declared.metadata_indexes = JSON.parse(input.indexes);
+    return { name: collectionName(input.name.trim()), dimensions: boundedInteger(input.dimensions, 1, 65536, "Dimensions"), settings: settings(declared) };
+  }
+  function codeSnippet({ kind, collection, body, language, legacy = false, recordId }) {
+    collectionName(collection);
+    if (!["search", "upsert", "write"].includes(kind)) throw new Error("Unsupported code operation");
+    if (!["curl", "python", "javascript"].includes(language)) throw new Error("Unsupported code language");
+    if (kind === "upsert") id(recordId);
+    const prefix = collection === "default" && legacy ? "/v1" : `/v1/collections/${collection}`;
+    const suffix = kind === "search" ? "/search" : kind === "write" ? "/batches" : `/vectors/${recordId}`;
+    const method = kind === "upsert" ? "PUT" : "POST";
+    const bodies = kind === "write" ? chunk(body.operations, 20).map((operations) => ({ operations })) : [body];
+    if (!bodies.length) throw new Error("No operations to generate");
+    const json = (value) => JSON.stringify(redact(value));
+    const shell = (value) => "'" + value.replaceAll("'", "'\\''") + "'";
+    const target = collection === "default" && legacy ? "client" : `client.collection(${JSON.stringify(collection)})`;
+    if (language === "curl") {
+      return '# POSIX shell. Set VLITE_BASE and VLITE_TOKEN locally; no token is embedded.\n# Stop on any failure; verify unknown outcomes before retrying.\n' + bodies.map((item) =>
+        `curl --fail-with-body -X ${method} -H "Authorization: Bearer $VLITE_TOKEN" -H 'Content-Type: application/json' --data-binary ${shell(json(item))} "$VLITE_BASE${prefix}${suffix}" || exit 1`).join("\n");
+    }
+    if (language === "python") {
+      const calls = bodies.map((item) => {
+        const argument = `json.loads(${JSON.stringify(json(kind === "write" ? item.operations : item))})`;
+        return kind === "search" ? `print(records.search_detailed(${argument}))` : kind === "write" ? `records.batch(${argument})` : `records.put(${JSON.stringify(recordId)}, ${argument})`;
+      }).join("\n");
+      return `# pip install vlite-client; set VLITE_BASE and VLITE_TOKEN locally.\nimport os, json\nfrom vlite_client import Client\nclient = Client(os.environ["VLITE_BASE"], os.environ["VLITE_TOKEN"])\nrecords = ${target}\n# No retries; earlier batches remain committed on failure.\n${calls}`;
+    }
+    const calls = bodies.map((item) => {
+      const argument = json(kind === "write" ? item.operations : item);
+      return kind === "search" ? `console.log(await records.searchDetailed(${argument}));` : kind === "write" ? `await records.batch(${argument});` : `await records.put(${JSON.stringify(recordId)}, ${argument});`;
+    }).join("\n");
+    return `// Node.js ES module; use clients/javascript (@vlite/client) from this repository.\nimport { Client } from "@vlite/client";\nconst client = new Client(process.env.VLITE_BASE, process.env.VLITE_TOKEN);\nconst records = ${target};\n// No retries; earlier batches remain committed on failure.\n${calls}`;
+  }
   function savedQuery(value, dimensions) {
     if (!object(value) || Object.keys(value).sort().join(",") !== "name,query,version" || value.version !== 1 ||
         typeof value.name !== "string" || !value.name.trim() || value.name.length > 100) throw new Error("Expected a version 1 named query file without extra fields");
@@ -137,8 +197,10 @@
   }
   function pca(items) {
     if (items.length < 2) throw new Error("PCA requires at least two records");
+    if (items.length > 2000) throw new Error("PCA is limited to 2000 sampled records");
     const dimensions = items[0].vector.length;
     if (dimensions > 256) throw new Error("PCA visualization is limited to 256 dimensions");
+    items.forEach((item) => vector(item.vector, dimensions));
     const mean = Array(dimensions).fill(0);
     items.forEach((item) => item.vector.forEach((v, j) => { mean[j] += v / items.length; }));
     const data = items.map((item) => item.vector.map((v, j) => v - mean[j]));
@@ -582,6 +644,116 @@
       },
     };
   }
+  function studioTools(ctx, on, get) {
+    let validated = null, stop = true, writing = false, reviewed = null;
+    const clearCode = () => { text("studio-code", ""); };
+    const invalidate = () => { validated = null; text("write-result", "Draft changed. Validate again before writing."); clearCode(); };
+    $("write-documents").addEventListener("input", invalidate);
+    $("write-stop").addEventListener("click", () => { stop = true; $("write-stop").disabled = true; });
+    on("write-validate", async () => {
+      validated = null;
+      $("write-progress").value = 0;
+      const result = jsonDocuments($("write-documents").value, ctx.dimensions());
+      text("write-result", { collection: ctx.collection(), documents: result.count, valid: result.valid, invalid: result.invalid, errors: result.errors, preview_ids: result.records.slice(0, 5).map((item) => item.id), note: result.invalid ? "Nothing can be written until all errors are fixed (first 20 shown)." : "Preview only; existing IDs will be replaced after confirmation." });
+      if (!result.invalid) validated = { source: $("write-documents").value, owner: ctx.collection(), dimensions: ctx.dimensions(), records: result.records };
+    });
+    on("write-commit", async () => {
+      if (!ctx.connected() || !ctx.can("write")) throw new Error("HTTP 403: connect with write access to the active collection");
+      const draft = validated;
+      if (!draft || draft.source !== $("write-documents").value || draft.owner !== ctx.collection() || draft.dimensions !== ctx.dimensions()) throw new Error("Validate this draft for the active collection first");
+      if (!await ctx.confirm(`Upsert ${draft.records.length} records in collection ${draft.owner}? Existing vectors, payload, metadata and TTL will be replaced. Batches of 20 are atomic individually, NOT as a whole. Earlier batches remain committed on failure; no automatic retries.`)) return;
+      if (draft.source !== $("write-documents").value || draft.owner !== ctx.collection()) throw new Error("Draft changed while confirming; validate again");
+      validated = null; stop = false; writing = true;
+      $("write-stop").disabled = false;
+      $("write-progress").max = draft.records.length; $("write-progress").value = 0;
+      let acknowledged = 0, batch = 0;
+      const batches = chunk(draft.records.map((item) => ({ op: "put", ...item })), 20);
+      try {
+        for (const operations of batches) {
+          if (stop) break;
+          if (draft.owner !== ctx.collection() || !ctx.connected()) throw new Error("Collection or connection changed");
+          batch++;
+          text("write-result", `Collection ${draft.owner}: ${acknowledged}/${draft.records.length} acknowledged; sending batch ${batch}/${batches.length}.`);
+          await ctx.api("POST", collectionPath(draft.owner, "/batches"), { operations });
+          acknowledged += operations.length;
+          $("write-progress").value = acknowledged;
+        }
+        text("write-result", `${acknowledged}/${draft.records.length} records acknowledged in ${draft.owner}. ${acknowledged === draft.records.length ? "Complete. Refresh Browse to inspect." : "Paused between batches. Earlier batches remain committed. Inspect before preparing a new draft of the remaining records."} Preview consumed; there is no automatic retry.`);
+      } catch (error) {
+        text("write-result", `${acknowledged}/${draft.records.length} records acknowledged in ${draft.owner}. Stopped at batch ${batch}; its outcome may be unknown. Earlier batches remain committed. Inspect server data before any manual retry. Preview consumed.`);
+        throw error;
+      } finally { writing = false; stop = true; $("write-stop").disabled = true; }
+    });
+    const draft = () => collectionDraft({ name: $("new-collection-name").value, dimensions: $("new-collection-dimensions").value, metric: $("new-collection-metric").value, indexes: $("new-collection-indexes").value, settings: $("new-collection-settings").value });
+    const invalidateReview = () => { reviewed = null; text("collection-create-summary", "Step 1 changed. Review again before creating."); };
+    for (const name of ["new-collection-name", "new-collection-dimensions", "new-collection-metric", "new-collection-indexes", "new-collection-settings"]) $(name).addEventListener("input", invalidateReview);
+    on("collection-review", async () => { reviewed = null; const value = draft(); text("collection-create-summary", { step: "2 / Review (nothing written)", request: value, note: "Omitted settings use server defaults. Collection starts empty; active collection does not change." }); reviewed = JSON.stringify(value); });
+    for (const name of ["studio-code-operation", "studio-code-language"]) $(name).addEventListener("input", clearCode);
+    document.querySelectorAll("#search input, #search select, #search textarea, #editor input, #editor select, #editor textarea").forEach((element) => element.addEventListener("input", clearCode));
+    on("studio-code-generate", async () => {
+      clearCode();
+      const operation = $("studio-code-operation").value;
+      let body, recordId;
+      if (operation === "search") body = ctx.searchBody();
+      else if (operation === "upsert") {
+        recordId = id($("id").value);
+        const item = record({ id: recordId, vector: get("record-vector"), metadata: get("metadata"), payload_base64: $("payload").value }, ctx.dimensions());
+        const { id: ignored, ...fields } = item;
+        body = { ...fields, ...expiry($("record-ttl").value.trim()) };
+      } else {
+        const result = jsonDocuments($("write-documents").value, ctx.dimensions());
+        if (result.invalid) throw new Error(result.errors.join("\n"));
+        body = { operations: result.records.map((item) => ({ op: "put", ...item })) };
+      }
+      text("studio-code", codeSnippet({ kind: operation, collection: ctx.collection(), body, recordId, language: $("studio-code-language").value, legacy: operation === "search" ? !ctx.extended() : ctx.collection() === "default" }));
+    });
+    on("studio-code-copy", async () => {
+      if (!$("studio-code").textContent) throw new Error("Generate code first");
+      try { await navigator.clipboard.writeText($("studio-code").textContent); ctx.status("Code copied; the connected token was not included"); }
+      catch { throw new Error("Clipboard unavailable. Select and copy the generated code manually."); }
+    });
+    const steps = [
+      ["database", "Connect", "Enter your bearer token and connect. Tokens stay only in page memory."],
+      ["collections", "Choose a collection", "Select a collection, or define its dimensions, metric and metadata indexes, review, then create it."],
+      ["write-json", "Write JSON", "Paste documents, validate dimensions and IDs, inspect the preview, then confirm batches. This tour never writes data."],
+      ["search", "Search", "Paste a query vector and choose Top K. Start with exact search; use hybrid text retrieval only with configured text fields."],
+      ["observability", "Observe", "Inspect health, queue pressure and latency. Observability values are live diagnostics, not a production monitoring service."],
+    ];
+    let step = -1;
+    const unhighlight = () => document.querySelectorAll(".studio-highlight").forEach((element) => element.classList.remove("studio-highlight"));
+    function tour() {
+      $("studio-tour").hidden = false;
+      if (step < 0) {
+        text("tour-title", "Your first VLite workflow");
+        text("tour-description", "Connect → collections → write → search → observability. A five-step orientation; no requests or writes are made by the tour.");
+        text("tour-next", "Show me"); return;
+      }
+      const [target, title, description] = steps[step];
+      text("tour-title", `${step + 1}/${steps.length} — ${title}`); text("tour-description", description);
+      text("tour-next", step === steps.length - 1 ? "Finish tour" : "Next step");
+      unhighlight();
+      const element = $(target) || $("diagnostics");
+      element?.classList.add("studio-highlight");
+      element?.scrollIntoView({ block: "start", behavior: "instant" });
+      // Keep tour controls visible without a blocking modal or moving focus to a write control.
+      $("studio-tour").classList.add("studio-tour-active");
+    }
+    function dismiss() {
+      $("studio-tour").hidden = true; $("studio-tour").classList.remove("studio-tour-active"); unhighlight();
+      try { localStorage.setItem("vlite-studio-tour", "dismissed"); } catch { /* Storage can be disabled; the tour still closes for this visit. */ }
+    }
+    $("tour-start").addEventListener("click", () => { step = -1; unhighlight(); tour(); });
+    $("tour-next").addEventListener("click", () => { if (++step >= steps.length) dismiss(); else tour(); });
+    $("tour-dismiss").addEventListener("click", dismiss);
+    try { if (localStorage.getItem("vlite-studio-tour") !== "dismissed") tour(); } catch { tour(); }
+    return {
+      draft() { const value = draft(); if (reviewed !== JSON.stringify(value)) throw new Error("Review collection (step 2) before creating, especially after changing fields"); return value; },
+      created() { reviewed = null; text("collection-create-summary", "Collection created. Select it in the sidebar before writing."); },
+      clear() { validated = null; reviewed = null; stop = true; $("write-documents").value = ""; $("write-progress").value = 0; for (const name of ["write-result", "studio-code", "collection-create-summary"]) text(name, ""); },
+      dirty() { return $("write-documents").value.trim() ? ["Write JSON draft / preview"] : []; },
+      gate() { $("write-stop").disabled = !writing || stop; $("write-commit").disabled = !ctx.connected() || !ctx.can("write") || !validated; },
+    };
+  }
   function init(ctx) {
     let preview = [], previewCollection = null, sample = [], refreshing = false;
     // Resumable import state: prepared file chunks and the job being driven (never persisted).
@@ -597,6 +769,7 @@
     };
     const get = (name) => JSON.parse($(name).value);
     const advanced = advancedTools(ctx, on, get);
+    const studio = studioTools(ctx, on, get);
     // Record fields only: newer servers add server-owned fields (e.g. `revision`) that are not writable and would make
     // exports non-importable and read-then-rewrite batches fail validation.
     const fetchRecord = async (value) => {
@@ -1035,15 +1208,14 @@
     on("collection-create", async () => {
       requireExtended();
       if (!ctx.feature("collections")) throw new Error("HTTP 409: requires_format_v4; collections need a format v4 database file");
-      const name = collectionName($("new-collection-name").value.trim());
-      const dimensions = boundedInteger($("new-collection-dimensions").value, 1, 65536, "Dimensions");
-      const initial = settings(get("new-collection-settings"));
-      const body = { name, dimensions, ...(Object.keys(initial).length ? { settings: initial } : {}) };
+      const body = studio.draft();
+      const { name, dimensions } = body;
       if (!await ctx.confirm(`Create empty collection ${name} with ${dimensions} dimensions${body.settings ? " and the given settings" : " and default settings"}? The active collection does not change.`)) return;
       const created = await ctx.api("POST", "/v1/collections", body, { data: false });
       const listed = await ctx.refreshCollections();
       renderCollections(listed.items);
       text("collection-result", { created });
+      studio.created();
       $("new-collection-name").value = "";
     });
     on("collection-drop", async () => {
@@ -1340,25 +1512,37 @@
       ctx.run(health).finally(() => { refreshing = false; });
     }, 10000);
     window.addEventListener("pagehide", () => clearInterval(timer), { once: true });
-    function appearance() {
-      document.documentElement.dataset.theme = $("theme").value;
+    const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
+    function applyAppearance() {
+      const chosen = $("theme").value;
+      document.documentElement.dataset.theme = chosen === "system" ? (systemTheme.matches ? "dark" : "light") : chosen;
       document.documentElement.dataset.density = $("density").value;
-      if ($("remember-preferences").checked) localStorage.setItem("vlite-appearance", JSON.stringify({ theme: $("theme").value, density: $("density").value }));
-      else localStorage.removeItem("vlite-appearance");
+    }
+    function appearance() {
+      applyAppearance();
+      try {
+        if ($("remember-preferences").checked) localStorage.setItem("vlite-appearance", JSON.stringify({ theme: $("theme").value, density: $("density").value }));
+        else localStorage.removeItem("vlite-appearance");
+      } catch { ctx.status("Appearance changed for this visit; browser storage is unavailable"); }
     }
     for (const key of ["theme", "density", "remember-preferences"]) $(key).addEventListener("change", appearance);
+    const systemChanged = () => { if ($("theme").value === "system") applyAppearance(); };
+    systemTheme.addEventListener("change", systemChanged);
+    window.addEventListener("pagehide", () => systemTheme.removeEventListener("change", systemChanged), { once: true });
     try {
       const saved = localStorage.getItem("vlite-appearance");
       if (saved) {
         const value = JSON.parse(saved);
-        if (["light", "dark"].includes(value.theme) && ["compact", "comfortable"].includes(value.density)) {
-          $("theme").value = value.theme; $("density").value = value.density; $("remember-preferences").checked = true; appearance();
+        if (["light", "dark", "system"].includes(value.theme) && ["compact", "comfortable"].includes(value.density)) {
+          $("theme").value = value.theme; $("density").value = value.density; $("remember-preferences").checked = true;
         }
       }
     } catch (error) { ctx.status(`Appearance preferences could not be loaded: ${error.message}`, true); }
+    applyAppearance();
     return {
       clear() {
         advanced.reset(true);
+        studio.clear();
         $("metadata-fields").replaceChildren();
         $("query-name").value = "my-query"; $("query-file").value = "";
         text("query-workspace-status", "");
@@ -1398,7 +1582,7 @@
       },
       // Collection-bound pending work that a collection switch would discard.
       dirty() {
-        const lost = advanced.dirty();
+        const lost = [...advanced.dirty(), ...studio.dirty()];
         if (preview.length) lost.push(`validated import preview (${preview.length} records)`);
         if (prepared) lost.push(`prepared resumable import file ${prepared.file} (${prepared.chunks.length} chunks)`);
         if (job) lost.push(`progress view of import job ${job.id} (the job stays open on the server)`);
@@ -1408,6 +1592,7 @@
       },
       collectionChanged(info) {
         advanced.reset();
+        studio.clear();
         preview = []; previewCollection = null; sample = []; prepared = null; stopRequested = true;
         // Follow the selection only while the scope field still holds the untouched default.
         if (info?.name && $("cred-collections").value === credentialDefault) $("cred-collections").value = credentialDefault = info.name;
@@ -1425,6 +1610,7 @@
       // Runs after every operation (buttons are re-enabled first): state-dependent disabling.
       gate() {
         advanced.gate();
+        studio.gate();
         if (!ctx.connected()) return;
         document.querySelectorAll("[data-extended]").forEach((element) => { if (!ctx.extended()) element.disabled = true; });
         $("cred-copy").disabled = $("cred-clear").disabled = secret === null;
@@ -1436,6 +1622,7 @@
     };
   }
   window.VLiteTools = { init, utils: {
+    jsonDocuments, collectionDraft, codeSnippet,
     id, vector, metadata, record, savedQuery, csvParse, csvExport, distances, analyze, pca,
     collectionName, collectionPath, settings, scoreDirection, redact, maskSecret, OPERATIONS, credentialRequest, graceSeconds,
     expiry, rerank, sparseVector, webhookRequest, pitrRequest, feedPath,

@@ -25,6 +25,24 @@ for builds, installation, examples, ABI ownership and limits.
 Licensed under MIT.
 
 
+## Read-only multi-process access
+
+Use `native.open(path, read_only=True)` to open an existing database with a shared
+OS lock. Multiple read-only handles may coexist, including in different
+processes. `get` and `search` work normally; mutations raise `EmbeddedError` with
+`code == "read_only"` without invalidating the handle. Read-only opening also
+accepts `key=` or `passphrase=` for encrypted files.
+
+A writer (`native.open(path)`, the default) holds an exclusive lock: opening a
+writer while any reader exists raises code `"locked"`, and opening a reader while
+a writer exists does too. Close every reader before opening a writer. Each reader
+uses a snapshot at open; close and reopen it to see new commits (no live refresh).
+
+Within one Python process, C ABI calls on all handles are serialized. For
+parallel reads, use multiple spawned processes, each loading its own
+`NativeLibrary` and opening `read_only=True`; do not reuse inherited handles after
+fork. Explicitly close handles, for example with `with native.open(...) as db:`.
+
 ## V5 embedded feature API
 
 These bindings use ctypes, not PyO3/maturin. The wheel bundles the same ABI-1

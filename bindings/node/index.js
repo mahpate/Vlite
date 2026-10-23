@@ -82,10 +82,12 @@ export class NativeLibrary {
     return new Database(this, result.handle);
   }
   createInMemory(dimensions, options = {}) { return this.#createFeature(null, dimensions, options); }
-  async open(path, { key, passphrase } = {}) {
+  /** Open a snapshot; readOnly shares file locks, rejects mutations, and excludes writers. */
+  async open(path, { key, passphrase, readOnly = false } = {}) {
+    const flag = readOnly ? { read_only: true } : {};
     const result = key === undefined && passphrase === undefined
-      ? await this._request("0", { op: "open", path })
-      : await this._feature("open", { path, credentials: credentials(key, passphrase) });
+      ? await this._request("0", { op: "open", path, ...flag })
+      : await this._feature("open", { path, credentials: credentials(key, passphrase), ...flag });
     return new Database(this, result.handle);
   }
   async openFromBytes(data, { key, passphrase } = {}) {
