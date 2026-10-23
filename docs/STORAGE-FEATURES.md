@@ -2,8 +2,8 @@
 
 Opt-in engine features: encryption at rest, point-in-time restore, change feed,
 read replicas, disk-based ANN, GPU exact search and a WebAssembly build. Every
-feature that persists data lives in **format V5**, which is still opt-in and
-unreleased. V1–V4 files are byte-for-byte unchanged, and older binaries refuse
+V5-only persisted extensions remain opt-in in 0.3.0. Change feeds and sequence
+restore also support V4. V1–V4 encodings are unchanged, and older binaries refuse
 V5 files they do not understand (unknown header flags give `UnsupportedFeature`).
 No operation here modifies a source file in place: each one writes a new file
 through staged, fully revalidated publication, or reads a closed or copied file.
@@ -177,4 +177,6 @@ there. The in-memory backend works natively too, which is how it is unit-tested.
 - A passphrase is only as strong as its entropy; tune `KdfParams` for your
   hardware.
 - Restore, rotation and replica creation need free space for a full copy.
-- None of these features are available through the REST/gRPC servers yet.
+- REST/gRPC expose a subset of these APIs; see [API.md](API.md) and
+  [GRPC.md](GRPC.md). Replica apply/follower ownership, GPU search and WASM
+  persistence remain application-managed, not network-follower services.

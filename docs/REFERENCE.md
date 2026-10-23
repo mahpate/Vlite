@@ -23,7 +23,7 @@ per-record revisions, expiry and metadata-only updates, metadata indexes and que
 quantized ANN, quality diagnostics and resumable ingestion. Later sections
 describe legacy/default workflows unless explicitly marked otherwise.
 See [gRPC](GRPC.md) and [ANN snapshots](ANN-SNAPSHOTS.md) for their opt-in
-contracts and [0.2.0 upgrade guidance](RELEASE-0.2.0.md) before deployment.
+contracts and [0.3.0 upgrade guidance](RELEASE-0.3.0.md) before deployment.
 
 See [embedded vector extensions](VECTORS.md) for v5 named/sparse vectors, model
 version history, resumable re-embedding, provider/reranker traits and parsed queries.

@@ -44,7 +44,8 @@ replication, multi-reader handle, or approximate metadata
 filtering. Opt-in [storage features](docs/STORAGE-FEATURES.md) add encryption at
 rest, point-in-time restore, a change feed, file-shipped read replicas, a
 disk-based ANN sidecar, optional GPU exact search and a WebAssembly build.
-See the [technical reference](docs/REFERENCE.md) for contracts and limits.
+See the [technical reference](docs/REFERENCE.md) for contracts and limits, and
+[0.3.0 upgrade and rollback guidance](docs/RELEASE-0.3.0.md) before deployment.
 See [offline command-line tools](docs/TOOLS.md) for the interactive shell,
 CSV/JSONL/pgvector/FAISS and optional Parquet/Arrow imports, HNSW tuning, and
 ANN quality/configuration comparisons.
@@ -63,8 +64,8 @@ ANN quality/configuration comparisons.
 - **Python and TypeScript/JavaScript, REST:** use the first-party clients to
   connect to a self-hosted VLite service.
 - **Other languages, REST:** call the documented HTTP/JSON API or generate a
-  client from [OpenAPI](src/openapi.json). First-party C#, Java and Go SDKs
-  are not currently included.
+  client from [OpenAPI](src/openapi.json). First-party Go and .NET clients are
+  included; Java consumers can use HTTP or generate a gRPC client.
 - **Other languages, gRPC:** generate a client from the versioned protobuf
   contract; enable the optional transport explicitly.
 

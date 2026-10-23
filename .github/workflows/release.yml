@@ -135,13 +135,16 @@ jobs:
               bundle.write(pathlib.Path("target/release") / library, library)
               if os.name == "nt":
                   bundle.write("target/release/vlite_ffi.dll.lib", "vlite_ffi.dll.lib")
-              for name in ["vlite-server", "vlite-maintain", "vlite-bench", "vlite-smoke"]:
+              for name in ["vlite-server", "vlite-maintain", "vlite-bench", "vlite-smoke",
+                           "vlite-shell", "vlite-import", "vlite-tune", "vlite-quality"]:
                   bundle.write(pathlib.Path("target/release") / (name + suffix), name + suffix)
               for name in ["README.md", "LICENSE", "Cargo.toml", "Cargo.lock", "src/openapi.json",
                            "compose.yaml", "compose.tls.yaml", "deploy/Caddyfile", "deploy/dashboard.conf", "Dockerfile",
                            "docs/REFERENCE.md", "docs/INSTALL.md", "docs/CONSOLE.md",
                            "docs/CONSOLE-ADMIN.md", "docs/DOCKER-OPERATIONS.md", "docs/CAPABILITIES.md",
-                           "docs/RELEASE-0.2.0.md",
+                           "docs/RELEASE-0.3.0.md", "docs/RELEASE-0.2.0.md",
+                           "docs/API.md", "docs/STORAGE-FEATURES.md", "docs/VECTORS.md",
+                           "docs/SECURITY.md", "docs/WEBHOOKS.md", "docs/TOOLS.md",
                            "docs/ANN-SNAPSHOTS.md", "docs/GRPC.md", "proto/vlite/v1/vlite.proto",
                            "benchmarks/README.md", "benchmarks/RESULTS.md",
                            "benchmarks/compare_rest.py", "benchmarks/native_campaign.py", "benchmarks/metric_campaign.py", "benchmarks/embedded.py",
@@ -164,7 +167,12 @@ jobs:
                            "bindings/python/pyproject.toml", "bindings/python/setup.py",
                            "bindings/python/vlite_embedded/__init__.py",
                            "bindings/python/vlite_embedded/py.typed"] + [
-                               str(path) for path in sorted(pathlib.Path("benchmarks/results").glob("*.json"))]:
+                               str(path) for path in sorted(pathlib.Path("benchmarks/results").glob("*.json"))] + [
+                               str(path) for root in ["clients/go", "clients/dotnet",
+                                                      "deploy/helm/vlite", "bindings/wasm"]
+                               for path in sorted(pathlib.Path(root).rglob("*"))
+                               if path.is_file() and not any(part in {"bin", "obj", "target", "pkg"}
+                                                             for part in path.parts)]:
                   bundle.write(name)
           (output / (archive.name + ".sha256")).write_text(
               hashlib.sha256(archive.read_bytes()).hexdigest() + "  " + archive.name + "\n", encoding="ascii")
@@ -200,6 +208,29 @@ jobs:
         env:
           VLITE_SERVER_BIN: target/release/vlite-server
         run: python tests/grpc_smoke.py
+
+      - name: Package Linux arm64 binaries and release guidance
+        shell: python
+        run: |
+          import hashlib, pathlib, zipfile
+          output = pathlib.Path("dist")
+          output.mkdir()
+          archive = output / "vlite-aarch64-unknown-linux-gnu.zip"
+          with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
+              for name in ["vlite-server", "vlite-maintain", "vlite-bench", "vlite-smoke",
+                           "vlite-shell", "vlite-import", "vlite-tune", "vlite-quality"]:
+                  bundle.write(pathlib.Path("target/release") / name, name)
+              for name in ["README.md", "LICENSE", "Cargo.toml", "Cargo.lock", "src/openapi.json",
+                           "proto/vlite/v1/vlite.proto"]:
+                  bundle.write(name)
+              for path in sorted(pathlib.Path("docs").glob("*.md")):
+                  bundle.write(path)
+          (output / (archive.name + ".sha256")).write_text(
+              hashlib.sha256(archive.read_bytes()).hexdigest() + "  " + archive.name + "\n", encoding="ascii")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-Linux-ARM64
+          path: dist/*
 
   manylinux:
     needs: identity

@@ -1,6 +1,7 @@
-# Named vectors, providers and query language (embedded Rust)
+# Named vectors, providers and query language
 
-These additive Rust APIs do not change server or binding contracts. Named dense
+The examples below use embedded Rust. REST/gRPC and binding coverage is
+documented in [API.md](API.md), [GRPC.md](GRPC.md) and the binding guides. Named dense
 vectors, sparse values, model history and re-embedding checkpoints require an
 explicit `Database::create_with_format(path, dimensions, FormatVersion::V5)`.
 The default creation format remains v3. Existing v1–v4 encodings are unchanged.
