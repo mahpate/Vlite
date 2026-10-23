@@ -5,6 +5,9 @@ on:
     branches: [main]
     paths:
       - "site/**"
+      - "docs/**"
+      - "scripts/build_site_docs.py"
+      - "benchmarks/results/engines-*.json"
       - "benchmarks/results/zvec-*.json"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
@@ -26,11 +29,17 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: python -m pip install markdown==3.7
       - name: Assemble site
         run: |
           mkdir -p _site/results
           cp -R site/. _site/
           cp benchmarks/results/zvec-*.json _site/results/
+          for f in benchmarks/results/engines-*.json; do [ -e "$f" ] && cp "$f" _site/results/; done
+          python scripts/build_site_docs.py site _site/docs
           touch _site/.nojekyll
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v4

@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Architecture | VLite</title>
+  <meta name="description" content="In-depth VLite architecture: single-file log format, commit and recovery protocol, locking, HNSW/quantized ANN, hybrid search, encryption, CDC and the REST/gRPC server.">
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="assets/site.js"></script>
+</head>
+<body>
+<header class="nav">
+  <div class="wrap">
+    <a class="brand" href="./"><img src="assets/logo.svg" alt="">VLite</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="./#features">Features</a>
+      <a href="./#products">Products</a>
+      <a href="./#quickstart">Quickstart</a>
+      <a href="api.html">API</a>
+      <a href="architecture.html" aria-current="page">Architecture</a>
+      <a href="compare.html">Benchmarks</a>
+      <a href="docs/">Docs</a>
+      <a href="about.html">About</a>
+      <a href="asendme.html">ASENDME</a>
+    </nav>
+    <div class="nav-actions">
+      <button class="icon-btn" id="theme-toggle" aria-label="Toggle dark mode">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+      </button>
+      <a class="icon-btn" href="https://github.com/mahpate/Vlite" aria-label="GitHub repository">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5a11.5 11.5 0 0 0-3.6 22.4c.6.1.8-.3.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.2 1.2a11 11 0 0 1 5.8 0c2.2-1.5 3.2-1.2 3.2-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A11.5 11.5 0 0 0 12 .5z"/></svg>
+      </a>
+    </div>
+  </div>
+</header>
+
+<div class="docs-layout">
+  <aside class="docs-sidebar" aria-label="Architecture sections">
+    <details class="docs-nav" open>
+      <summary>Sections</summary>
+      <div class="docs-group">
+        <h4>System</h4>
+        <a href="#overview">Overview</a>
+        <a href="#layers">Layered architecture</a>
+        <a href="#features">Build features</a>
+      </div>
+      <div class="docs-group">
+        <h4>Storage engine</h4>
+        <a href="#file-contract">Single-file contract</a>
+        <a href="#header">File header</a>
+        <a href="#frames">Frames</a>
+        <a href="#records">Record encoding</a>
+        <a href="#versions">Format versions</a>
+      </div>
+      <div class="docs-group">
+        <h4>Durability</h4>
+        <a href="#write-path">Write path</a>
+        <a href="#recovery">Open &amp; recovery</a>
+        <a href="#locking">Locking &amp; concurrency</a>
+        <a href="#sidecars">Sidecar files</a>
+      </div>
+      <div class="docs-group">
+        <h4>Query engine</h4>
+        <a href="#memory">In-memory model</a>
+        <a href="#planner">Query planner</a>
+        <a href="#hnsw">HNSW &amp; quantization</a>
+        <a href="#hybrid">Text &amp; hybrid search</a>
+        <a href="#retrieval">Advanced retrieval</a>
+      </div>
+      <div class="docs-group">
+        <h4>Platform</h4>
+        <a href="#security">Encryption &amp; tenancy</a>
+        <a href="#cdc">CDC, PITR &amp; replicas</a>
+        <a href="#server">Server</a>
+        <a href="#bindings">Bindings</a>
+        <a href="#limits">Limits &amp; defaults</a>
+        <a href="#limitations">Limitations</a>
+      </div>
+    </details>
+  </aside>
+
+  <main class="docs-main arch">
+    <p class="kicker">Architecture</p>
+    <h1 id="overview">How VLite works</h1>
+    <p class="lead">VLite is an embedded Rust storage engine. One process owns one database file, every write is an
+      append-only, checksummed frame that is fsynced before it is acknowledged, and every index is derived state that
+      can be rebuilt from that file. REST, gRPC and the language bindings are thin adapters over the same
+      <code>Database</code> core.</p>
+
+    <div class="grid cols-3 docs-cards">
+      <div class="card"><span class="label">Storage</span><h3>Append-only log</h3><p class="muted">32-byte header, then CRC32-framed records. No pages and no WAL sidecar.</p></div>
+      <div class="card"><span class="label">Durability</span><h3>fsync per commit</h3><p class="muted">Append, <code>sync_all</code>, then publish. Torn tails are reported, never silently dropped.</p></div>
+      <div class="card"><span class="label">Indexes</span><h3>Derived &amp; rebuildable</h3><p class="muted">HNSW, ScalarU8, metadata, BM25 and ANN snapshots are caches over the log.</p></div>
+    </div>
+
+    <h2 id="layers">Layered architecture</h2>
+    <p>The core is a library (<code>src/lib.rs</code>). Transports and bindings sit on top, and they all call the same
+      <code>Database</code> API. Storage and format code sit underneath, and derived indexes are maintained after each
+      successful commit.</p>
+    <figure class="diagram">
+<pre class="mermaid">
+flowchart TB
+  subgraph Surfaces["Surfaces"]
+    direction LR
+    PY["Python wheel"]
+    ND["Node.js addon"]
+    C["C ABI vlite_execute"]
+    W["WASM"]
+    REST["REST · Axum"]
+    GRPC["gRPC · tonic vlite.v1"]
+    DASH["Web console"]
+  end
+  subgraph Core["Database core · src/lib.rs"]
+    direction LR
+    COL["Collections"]
+    REC["Records #amp; queries"]
+    VEC["Dense / named vectors"]
+    META["Typed metadata"]
+    CH["Change feed"]
+  end
+  subgraph Derived["Derived indexes · rebuildable"]
+    direction LR
+    PL["Query planner"]
+    HN["HNSW"]
+    Q8["ScalarU8"]
+    MI["Metadata postings"]
+    BM["BM25 text"]
+    HY["Hybrid RRF"]
+    DA["Disk ANN"]
+  end
+  subgraph Storage["Storage #amp; format"]
+    direction LR
+    FMT["format.rs · frames + CRC32"]
+    CRY["crypto.rs · ChaCha20-Poly1305"]
+    STO["storage.rs · file / memory"]
+  end
+  FILE[("data.vlite · single authoritative file")]
+  Surfaces --> Core
+  Core --> Derived
+  Core --> Storage
+  Storage --> FILE
+</pre>
+      <figcaption>Every surface converges on one <code>Database</code>. Only the storage layer touches the file.</figcaption>
+    </figure>
+
+    <h3 id="features">Build features</h3>
+    <p>Heavy dependencies are opt-in Cargo features, so the embedded library stays small.</p>
+    <div class="table-scroll"><table>
+      <thead><tr><th>Feature</th><th>Adds</th><th>Key dependencies</th></tr></thead>
+      <tbody>
+        <tr><td><code>json</code></td><td>JSON serialization of API types</td><td>serde</td></tr>
+        <tr><td><code>server</code></td><td>REST server, auth, metrics, console</td><td>axum, rustls</td></tr>
+        <tr><td><code>grpc</code></td><td>gRPC service (implies <code>server</code>)</td><td>tonic, prost, tonic-health</td></tr>
+        <tr><td><code>gpu</code></td><td>Exact search on the GPU with CPU fallback</td><td>wgpu, pollster, bytemuck</td></tr>
+        <tr><td><code>otel</code></td><td>OpenTelemetry/OTLP tracing</td><td>opentelemetry</td></tr>
+        <tr><td><code>http-embedder</code></td><td>HTTP embedding provider</td><td>HTTP client</td></tr>
+        <tr><td><code>tools</code>, <code>import-formats</code></td><td>Import tooling and file formats</td><td>format readers</td></tr>
+      </tbody>
+    </table></div>
+
+    <h2 id="file-contract">The single-file contract</h2>
+    <p>The primary file, for example <code>data.vlite</code>, is the <strong>only</strong> source of committed records.
+      It is an append-only sequence of variable-length frames after a fixed header. There is no page allocator, no
+      superblock and no separate WAL or journal: the file itself is the log.</p>
+    <figure class="diagram">
+<pre class="mermaid">
+flowchart LR
+  F[("data.vlite&lt;br/&gt;authoritative")]
+  A["data.vlite.ann&lt;br/&gt;ANN snapshot cache"]
+  D["disk-ann-#lt;id#gt;.dann&lt;br/&gt;Disk ANN"]
+  M["In-memory indexes&lt;br/&gt;HNSW · metadata · BM25"]
+  F -- "rebuild on open" --> M
+  F -- "persist graph" --> A
+  F -- "build" --> D
+  A -. "load if identity matches" .-> M
+</pre>
+      <figcaption>Solid: derived from the primary file. Losing any derived file never loses committed data.</figcaption>
+    </figure>
+
+    <h2 id="header">File header</h2>
+    <p>The file starts with a fixed 32-byte little-endian header. Its CRC32 covers bytes 0&ndash;27 and is checked on every open.</p>
+    <div class="bytemap" role="img" aria-label="32-byte header layout">
+      <div class="bm-row">
+        <span class="bm-cell c-magic" style="--w:8">0&ndash;7<b>magic</b><i>VLITEDB\0</i></span>
+        <span class="bm-cell c-ver" style="--w:4">8&ndash;11<b>version</b><i>u32</i></span>
+        <span class="bm-cell c-dim" style="--w:4">12&ndash;15<b>dimensions</b><i>u32</i></span>
+        <span class="bm-cell c-lin" style="--w:8">16&ndash;23<b>lineage</b><i>u64</i></span>
+        <span class="bm-cell c-col" style="--w:2">24&ndash;25<b>coll.</b><i>u16</i></span>
+        <span class="bm-cell c-flag" style="--w:2">26&ndash;27<b>flags</b><i>u16</i></span>
+        <span class="bm-cell c-crc" style="--w:4">28&ndash;31<b>CRC32</b><i>of 0&ndash;27</i></span>
+      </div>
+    </div>
+    <div class="table-scroll"><table>
+      <thead><tr><th>Flag</th><th>Bit</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>FLAG_ENCRYPTED</code></td><td>1</td><td>Frame bodies are sealed; a 64-byte encryption descriptor follows the header.</td></tr>
+        <tr><td><code>FLAG_TIMESTAMPS</code></td><td>2</td><td>Each commit is preceded by a time-anchor frame (opcode 11), enabling point-in-time restore by timestamp.</td></tr>
+      </tbody>
+    </table></div>
+    <p>Unknown flag bits are rejected rather than ignored, so an older binary never misreads a newer file.</p>
+
+    <h2 id="frames">Frames</h2>
+    <p>Every mutation is written as one frame: a 36-byte prefix, a body, optional AEAD overhead and a 16-byte footer.
+      The footer is the commit marker. A frame without a valid footer is never treated as committed.</p>
+    <div class="bytemap" role="img" aria-label="Frame layout">
+      <div class="bm-row">
+        <span class="bm-cell c-magic" style="--w:5">36 B<b>prefix</b><i>VREC + CRC32</i></span>
+        <span class="bm-cell c-body" style="--w:12">variable<b>body</b><i>&le; 256 MiB plaintext</i></span>
+        <span class="bm-cell c-flag" style="--w:4">28 B<b>AEAD</b><i>if encrypted</i></span>
+        <span class="bm-cell c-crc" style="--w:4">16 B<b>footer</b><i>CRC32 + seq</i></span>
+      </div>
+    </div>
+    <p class="muted">Prefix detail (36 bytes):</p>
+    <div class="bytemap small" role="img" aria-label="Frame prefix layout">
+      <div class="bm-row">
+        <span class="bm-cell c-magic" style="--w:4">0<b>VREC</b></span>
+        <span class="bm-cell c-ver" style="--w:1">4<b>op</b></span>
+        <span class="bm-cell c-col" style="--w:3">5<b>collection</b></span>
+        <span class="bm-cell c-lin" style="--w:8">8<b>sequence</b><i>u64</i></span>
+        <span class="bm-cell c-dim" style="--w:8">16<b>record id</b><i>u64</i></span>
+        <span class="bm-cell c-ver" style="--w:4">24<b>count</b></span>
+        <span class="bm-cell c-body" style="--w:4">28<b>length</b></span>
+        <span class="bm-cell c-crc" style="--w:4">32<b>CRC32</b></span>
+      </div>
+    </div>
+    <p>There are three independent CRC32 checks: header, frame prefix (bytes 0&ndash;31) and footer (all preceding frame
+      bytes). The footer also repeats the frame sequence, so a frame spliced from elsewhere fails validation.</p>
+
+    <h2 id="records">Record encoding</h2>
+    <p>Vectors are stored as little-endian <code>f32</code>, always at full precision, even when an index uses ScalarU8.
+      A record body is laid out as:</p>
+    <div class="bytemap small" role="img" aria-label="Record body layout">
+      <div class="bm-row">
+        <span class="bm-cell c-dim" style="--w:10">dims &times; 4 B<b>vector</b><i>f32 LE</i></span>
+        <span class="bm-cell c-ver" style="--w:3">4 B<b>payload len</b></span>
+        <span class="bm-cell c-body" style="--w:7">&le; 1 MiB<b>payload</b></span>
+        <span class="bm-cell c-lin" style="--w:6">variable<b>metadata</b><i>typed</i></span>
+      </div>
+    </div>
+    <p>Metadata-only updates write a frame with just the new metadata, so the vector is not rewritten.</p>
+
+    <h2 id="versions">Format versions</h2>
+    <p>Features that need new on-disk structures bump the format version. Older files are never silently re-encoded;
+      using such a feature on an old file returns <code>BatchRequiresUpgrade</code>, <code>MetadataRequiresUpgrade</code>
+      or <code>ExpiryRequiresUpgrade</code>, and the caller upgrades explicitly through compaction.</p>
+    <figure class="diagram">
+<pre class="mermaid">
+flowchart LR
+  V3["V1–V3&lt;br/&gt;base log · default for create"] --> V4["V4&lt;br/&gt;lineage · collections · import checkpoints"] --> V5["V5&lt;br/&gt;expiry · geo metadata · named/sparse vectors"]
+</pre>
+    </figure>
+
+    <h2 id="write-path">Write path</h2>
+    <p>Commits are synchronous: a call returns only after the frame is on stable storage. In-memory state and indexes
+      change only after the fsync succeeds, so readers never observe uncommitted data.</p>
+    <figure class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant App as Caller
+  participant DB as Database (exclusive owner)
+  participant Enc as format / crypto
+  participant F as data.vlite
+  participant Idx as In-memory indexes
+  App->>DB: put / delete / write_batch
+  DB->>DB: validate limits, dimensions, metadata
+  DB->>Enc: encode frame (prefix, body, footer CRC)
+  Enc-->>DB: bytes (sealed if encrypted)
+  DB->>F: append at end of file
+  DB->>F: sync_all()
+  alt append or fsync failed
+    DB->>F: truncate to previous length + sync
+    DB-->>App: error (state unchanged)
+  else committed
+    DB->>Idx: apply mutation, update HNSW / metadata / BM25
+    DB-->>App: Ok (durable)
+  end
+</pre>
+      <figcaption>Batches of up to 4,096 operations (16 MiB) commit as one atomic unit.</figcaption>
+    </figure>
+
+    <h2 id="recovery">Open &amp; recovery</h2>
+    <p>Opening a file replays the log. VLite separates two cases that many engines merge: a <strong>corrupt</strong>
+      file, and an <strong>incomplete tail</strong> from a crash during an append. Neither is repaired silently.
+      <code>repair</code> is an explicit operation that may discard only the unacknowledged trailing frame.</p>
+    <figure class="diagram">
+<pre class="mermaid">
+flowchart TD
+  O["open(path)"] --> L{"try_lock()"}
+  L -- "held elsewhere" --> EL["Error::Locked"]
+  L -- "ok" --> H{"header magic,&lt;br/&gt;CRC, version, flags"}
+  H -- "bad" --> EC["Error::Corrupt"]
+  H -- "ok" --> N{"next frame"}
+  N -- "end of file" --> R["rebuild indexes&lt;br/&gt;load ANN snapshot if identity matches"]
+  N -- "fewer bytes than&lt;br/&gt;prefix / declared length" --> ET["Error::IncompleteTail&lt;br/&gt;(offset, bytes)"]
+  N -- "bad magic, CRC,&lt;br/&gt;sequence or semantics" --> EC
+  N -- "valid" --> AP["apply committed frame"] --> N
+  R --> RDY["ready"]
+  ET -. "explicit repair()" .-> TR["truncate torn tail"] --> O
+</pre>
+      <figcaption>Acknowledged commits are complete frames, so repair can never remove acknowledged data.</figcaption>
+    </figure>
+
+    <h2 id="locking">Locking &amp; concurrency</h2>
+    <p>A database file has exactly one owner, enforced by an exclusive OS file lock taken at open. Within the server,
+      all requests share one <code>Database</code> behind a mutex, so operations are serialized. HNSW rebuilds run in the
+      background on a snapshot, then catch up and publish atomically.</p>
+    <figure class="diagram">
+<pre class="mermaid">
+flowchart LR
+  subgraph Clients
+    direction TB
+    H1["HTTP request"]
+    H2["HTTP request"]
+    G1["gRPC stream"]
+  end
+  Clients --> AUTH["bearer auth · scopes · rate limit"] --> MX["Mutex#lt;Database#gt;"] --> LK["exclusive OS lock"] --> FILE[("data.vlite")]
+  MX -. "snapshot" .-> BG["background HNSW build"] -. "catch up + publish" .-> MX
+  OTHER["second process"] -- "open" --x LK
+</pre>
+    </figure>
+
+    <h2 id="sidecars">Sidecar files</h2>
+    <div class="table-scroll"><table>
+      <thead><tr><th>File</th><th>Role</th><th>If lost or stale</th></tr></thead>
+      <tbody>
+        <tr><td><code>data.vlite</code></td><td>Authoritative log of all committed records</td><td>This is your data; back it up</td></tr>
+        <tr><td><code>data.vlite.ann</code></td><td>Persisted HNSW graph, keyed by format, lineage and committed sequence</td><td>Rebuilt; any later commit makes it stale; refused for encrypted databases</td></tr>
+        <tr><td><code>disk-ann-&lt;id&gt;.dann</code></td><td>Disk-resident ANN (<code>VLDANN01</code>, 128 B header, 8 MiB default cache)</td><td>Rebuilt; disabled for encrypted databases</td></tr>
+        <tr><td><code>audit.jsonl</code>, <code>audit.1.jsonl</code></td><td>Server audit log, rotated at 16 MiB</td><td>Administrative only</td></tr>
+        <tr><td><code>tenants.json</code></td><td>Server tenant registry</td><td>Administrative only</td></tr>
+      </tbody>
+    </table></div>
+
+    <h2 id="memory">In-memory model</h2>
+    <p>On open, the replayed log becomes an ordered map from <code>u64</code> IDs to records, per collection. Indexes are
+      built from those maps.</p>
+    <figure class="diagram">
+<pre class="mermaid">
+flowchart LR
+  ID["u64 record id"] --> V["dense f32 vector&lt;br/&gt;+ named / versioned vectors"]
+  ID --> P["payload bytes ≤ 1 MiB"]
+  ID --> MD["typed metadata&lt;br/&gt;int · float · string · bool · geo"]
+  ID --> EX["expiry / revision"]
+  MD --> MP["ordered metadata postings ≤ 16 indexes"]
+  MD --> TP["BM25 postings ≤ 8 text fields"]
+  V --> HG["HNSW graph"]
+  V --> QC["ScalarU8 codes"]
+</pre>
+    </figure>
+
+    <h2 id="planner">Query planner</h2>
+    <p>Each search is planned. The planner uses an ANN index only if one is ready and its configuration, metric and
+      quantization match the query; otherwise it falls back to an exact scan. Exact distances accumulate in
+      <code>f64</code>, and lower is always nearer.</p>
+    <figure class="diagram">
+<pre class="mermaid">
+flowchart TD
+  Q["search(vector, k, filter)"] --> M{"metric"}
+  M -- "inner_product" --> EX["exact scan"]
+  M -- "squared_l2 / cosine" --> I{"ready HNSW with&lt;br/&gt;matching config, metric&lt;br/&gt;and quantization?"}
+  I -- "yes" --> ANN["HNSW traversal&lt;br/&gt;ef_search ≥ k"]
+  I -- "no" --> F{"filter uses&lt;br/&gt;metadata index?"}
+  F -- "yes" --> CS["exact scan over&lt;br/&gt;candidate ID set"]
+  F -- "no" --> EX
+  ANN --> RR["exact f32 rerank"]
+  CS --> TOP["top-k hits"]
+  EX --> TOP
+  RR --> TOP
+</pre>
+    </figure>
+
+    <h2 id="hnsw">HNSW &amp; quantization</h2>
+    <p>The HNSW index uses a seeded, deterministic level assignment. Changing <code>m</code>, <code>ef_construction</code>
+      or the seed requires a rebuild. With ScalarU8, each dimension is trained into a codebook, traversal uses
+      asymmetric u8 distances, and the candidate set is reranked against the original f32 vectors.</p>
+    <figure class="diagram">
+<pre class="mermaid">
+flowchart LR
+  R["f32 records"] -->|train per-dimension codebook| CB["ScalarU8 codes&lt;br/&gt;4× smaller"]
+  Q["f32 query"] --> T["graph traversal&lt;br/&gt;asymmetric u8 distance"]
+  CB --> T
+  T --> C["candidates&lt;br/&gt;k × rerank multiplier"]
+  C --> X["exact f32 distance"]
+  R --> X
+  X --> K["top-k"]
+</pre>
+    </figure>
+    <div class="table-scroll"><table>
+      <thead><tr><th>Parameter</th><th>Default</th><th>Range</th></tr></thead>
+      <tbody>
+        <tr><td><code>m</code></td><td>16</td><td>2&ndash;64</td></tr>
+        <tr><td><code>ef_construction</code></td><td>100</td><td><code>m</code>&ndash;4,096</td></tr>
+        <tr><td><code>seed</code></td><td>42</td><td>any u64</td></tr>
+        <tr><td><code>ef_search</code></td><td>per query (commonly 100)</td><td>&le; 100,000, raised to at least <code>k</code></td></tr>
+        <tr><td>Rebuild buffer</td><td>256 IDs / 8 MiB of vectors</td><td>&mdash;</td></tr>
+      </tbody>
+    </table></div>
+
+    <h2 id="hybrid">Text &amp; hybrid search</h2>
+    <p>Text fields are tokenized into BM25 postings (k1&nbsp;=&nbsp;1.2, b&nbsp;=&nbsp;0.75). Hybrid search runs the
+      dense and text legs independently and fuses ranks with weighted reciprocal-rank fusion.</p>
+    <figure class="diagram">
+<pre class="mermaid">
+flowchart LR
+  Q["query"] --> D["dense leg&lt;br/&gt;planner → ranked ids"]
+  Q --> T["text leg&lt;br/&gt;BM25 → ranked ids"]
+  D --> F["weighted RRF&lt;br/&gt;Σ weight / (60 + rank)"]
+  T --> F
+  F --> K["fused top-k ≤ 1,000"]
+</pre>
+    </figure>
+
+    <h2 id="retrieval">Advanced retrieval</h2>
+    <ul class="list">
+      <li><strong>Grouped search</strong> groups hits by a metadata field with per-group limits.</li>
+      <li><strong>Geo search</strong> filters by spherical radius in meters over a geo field (format 5).</li>
+      <li><strong>Recommend</strong> builds a query from positive and negative examples (at least one positive).</li>
+      <li><strong>Rerank / MMR</strong> reorders candidates for relevance and diversity.</li>
+      <li><strong>Query language</strong> supports predicates, <code>IN</code> (&le; 64 values), geo radius and grouping, with at most 64 predicates.</li>
+      <li><strong>GPU exact search</strong> (feature <code>gpu</code>) runs WGSL compute in 16M-float chunks and falls back to the CPU.</li>
+    </ul>
+
+    <h2 id="security">Encryption &amp; tenancy</h2>
+    <p>With encryption on, each frame body is sealed with ChaCha20-Poly1305 (12-byte nonce + 16-byte tag). The key is
+      derived from a passphrase with Argon2id (19,456 KiB, 2 iterations, parallelism 1), with parameters stored in a
+      64-byte descriptor after the header. Frame prefixes stay plaintext so recovery can walk the log, which means
+      operation types, IDs, sizes and sequence numbers are visible. ANN snapshots and Disk ANN would hold plaintext
+      vectors, so both sidecars are refused for encrypted databases.</p>
+    <figure class="diagram">
+<pre class="mermaid">
+flowchart LR
+  PW["passphrase"] -->|Argon2id| K["256-bit key"]
+  K --> S["seal frame body&lt;br/&gt;ChaCha20-Poly1305"]
+  S --> F[("data.vlite&lt;br/&gt;header + descriptor + sealed frames")]
+  F -. "plaintext sidecars refused" .-x DA[".ann · .dann"]
+  subgraph Tenancy["One file, logical tenants"]
+    T1["tenant A · docs"] --> N1["t#lt;hexA#gt;__docs"]
+    T2["tenant B · docs"] --> N2["t#lt;hexB#gt;__docs"]
+  end
+</pre>
+    </figure>
+    <p>Tenants are policy namespaces in the same file, not separate files or cryptographic domains. Physical collection
+      names are <code>t&lt;32-hex-id&gt;__&lt;name&gt;</code>, with up to 1,024 lifetime tenant IDs.</p>
+
+    <h2 id="cdc">CDC, point-in-time restore &amp; replicas</h2>
+    <p>Because the file is a sequenced log, change data capture, restore and replication all read the same frames.</p>
+    <figure class="diagram">
+<pre class="mermaid">
+flowchart LR
+  F[("committed frames&lt;br/&gt;seq 1..n")] --> CF["/v1/changes&lt;br/&gt;durable cursor · ≤ 10,000 events"]
+  F --> SEG["log segments&lt;br/&gt;whole commits · checksummed"]
+  SEG --> RF["ReplicaFollower"]
+  CF --> WH["webhooks&lt;br/&gt;at-least-once"]
+  F --> BK["backup"] --> PITR["restore to commit&lt;br/&gt;sequence or timestamp"]
+</pre>
+    </figure>
+    <p>A restore is selected through the admin API and applied on restart; it never swaps the live owner in place.</p>
+
+    <h2 id="server">Server</h2>
+    <p><code>vlite-server</code> wraps one owned database. REST (Axum) and gRPC (tonic, <code>vlite.v1.VLite</code>,
+      opt-in with <code>--grpc-bind</code>) share authentication, authorization, metrics and the core adapters.</p>
+    <figure class="diagram">
+<pre class="mermaid">
+flowchart LR
+  CL["client"] -->|"TLS 1.2/1.3 · rustls"| L{"listener"}
+  L -->|"/v1/..."| R["REST · Axum"]
+  L -->|"vlite.v1.VLite"| G["gRPC · tonic&lt;br/&gt;8 MiB messages"]
+  R --> A["bearer token&lt;br/&gt;role · scopes · tenant"]
+  G --> A
+  A --> RL["token-bucket&lt;br/&gt;rate limit"] --> DB["Mutex#lt;Database#gt;"]
+  A -.-> AU["audit.jsonl"]
+  DB -.-> OB["metrics: JSON · Prometheus&lt;br/&gt;OTLP traces"]
+</pre>
+    </figure>
+    <ul class="list">
+      <li>Remote listeners require <code>--allow-remote</code> plus bearer auth. TLS does not replace auth.</li>
+      <li>Credentials are admin, read-only or scoped (<code>read</code>, <code>search</code>, <code>write</code>, <code>import</code>, <code>index</code>, <code>collections</code>, <code>diagnostics</code>, <code>backup</code>, &hellip;).</li>
+      <li>gRPC <code>ExportVectors</code> streams to the client and <code>StreamImport</code> streams from it; each import chunk commits independently.</li>
+      <li>A disconnect after a write is commit-indeterminate: check before retrying.</li>
+    </ul>
+
+    <h2 id="bindings">Bindings</h2>
+    <p>All embedded bindings drive the same engine through a handle-based C ABI:
+      <code>char *vlite_execute(uint64_t handle, const uint8_t *input, size_t length)</code> takes a request envelope and
+      returns a response string. Python (<code>vlite_embedded</code>) and Node.js (<code>@vlite/embedded</code>) wrap it;
+      WASM builds the core separately with an injected clock (<code>set_wasm_clock_ms</code>).</p>
+    <figure class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+  participant L as Python / Node
+  participant C as C ABI
+  participant D as Database
+  L->>C: open(path) → u64 handle
+  L->>C: vlite_execute(handle, request bytes)
+  C->>D: decode + dispatch
+  D-->>C: result / typed error
+  C-->>L: response string (freed by caller)
+  L->>C: close(handle) → releases file lock
+</pre>
+    </figure>
+
+    <h2 id="limits">Limits &amp; defaults</h2>
+    <div class="table-scroll"><table>
+      <thead><tr><th>Item</th><th>Value</th><th>Item</th><th>Value</th></tr></thead>
+      <tbody>
+        <tr><td>Dimensions</td><td>&le; 65,536</td><td>Collections</td><td>&le; 64 (names &le; 63 B)</td></tr>
+        <tr><td>Payload</td><td>&le; 1 MiB</td><td>Metadata indexes</td><td>&le; 16</td></tr>
+        <tr><td>Batch</td><td>&le; 4,096 ops / 16 MiB</td><td>Text fields</td><td>&le; 8</td></tr>
+        <tr><td>Frame body</td><td>&le; 256 MiB</td><td>Text postings</td><td>&le; 16,777,216</td></tr>
+        <tr><td>Header / prefix / footer</td><td>32 / 36 / 16 B</td><td>Tokens</td><td>&le; 64 B, &le; 4,096 per field</td></tr>
+        <tr><td>Hybrid k</td><td>&le; 1,000</td><td>Hybrid text</td><td>&le; 1,024 B, 32 tokens</td></tr>
+        <tr><td>Filter predicates</td><td>&le; 64</td><td><code>IN</code> values</td><td>&le; 64</td></tr>
+        <tr><td>Change-feed batch</td><td>1,000 default, 10,000 max</td><td>Browse page</td><td>&le; 1,000</td></tr>
+        <tr><td>gRPC message</td><td>&le; 8 MiB</td><td>Tenants</td><td>&le; 1,024 lifetime IDs</td></tr>
+      </tbody>
+    </table></div>
+
+    <h2 id="limitations">Honest limitations</h2>
+    <ul class="list">
+      <li><strong>Single writer.</strong> One process owns a file; it is not a multi-writer or multi-process database.</li>
+      <li><strong>Per-operation fsync.</strong> No group commit or async durability mode, so small-write throughput is bounded by the device's fsync latency. Batch writes to amortize it.</li>
+      <li><strong>Startup replays the log.</strong> Open time and memory grow with data size; compaction reclaims deleted and overwritten bytes.</li>
+      <li><strong>No automatic tail repair.</strong> A crash mid-append surfaces as <code>IncompleteTail</code> until you call <code>repair</code>.</li>
+      <li><strong>ANN is approximate.</strong> HNSW and ScalarU8 trade recall for speed; inner product always uses exact search.</li>
+      <li><strong>Exact search is scalar CPU code</strong> unless the optional GPU path is enabled.</li>
+      <li><strong>Logical tenancy</strong> only; streaming exports are not point-in-time snapshots; webhooks are at-least-once.</li>
+    </ul>
+    <p class="muted">Facts on this page are taken from the source (<code>src/format.rs</code>, <code>src/lib.rs</code>,
+      <code>src/hnsw.rs</code>, <code>src/planner.rs</code>, <code>src/crypto.rs</code>, <code>src/server/</code>) and the
+      <a href="docs/">documentation</a>. Internal heuristics such as HNSW neighbor selection and planner thresholds are not public contracts.</p>
+  </main>
+
+  <aside class="docs-toc" aria-label="On this page">
+    <h4>On this page</h4>
+    <a href="#layers">Layers</a>
+    <a href="#header">File format</a>
+    <a href="#write-path">Write path</a>
+    <a href="#recovery">Recovery</a>
+    <a href="#locking">Locking</a>
+    <a href="#planner">Planner</a>
+    <a href="#hnsw">HNSW</a>
+    <a href="#hybrid">Hybrid</a>
+    <a href="#security">Security</a>
+    <a href="#cdc">CDC &amp; PITR</a>
+    <a href="#server">Server</a>
+    <a href="#limits">Limits</a>
+  </aside>
+</div>
+
+<footer>
+  <div class="wrap">
+    <span>© VLite contributors · MIT License</span>
+    <nav>
+      <a href="https://github.com/mahpate/Vlite">GitHub</a>
+      <a href="https://github.com/mahpate/Vlite/releases">Releases</a>
+      <a href="api.html">API</a>
+      <a href="architecture.html">Architecture</a>
+      <a href="compare.html">Benchmarks</a>
+      <a href="about.html">About</a>
+      <a href="asendme.html">ASENDME</a>
+    </nav>
+  </div>
+</footer>
+<script>
+  if (window.matchMedia("(max-width: 800px)").matches) document.querySelectorAll("details.docs-nav").forEach((d) => d.removeAttribute("open"));
+</script>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  const nodes = [...document.querySelectorAll("pre.mermaid")];
+  nodes.forEach((n) => { n.dataset.src = n.textContent; });
+  const render = async () => {
+    const dark = document.documentElement.getAttribute("data-theme") === "dark";
+    mermaid.initialize({
+      startOnLoad: false, securityLevel: "strict", theme: "base",
+      fontFamily: "Inter, system-ui, sans-serif",
+      themeVariables: dark
+        ? { primaryColor: "#1e2235", primaryTextColor: "#e6e8f2", primaryBorderColor: "#7c6cff", lineColor: "#8a90b4", secondaryColor: "#14233a", tertiaryColor: "#161a29", clusterBkg: "#141826", clusterBorder: "#3a3f5c", noteBkgColor: "#1e2235", actorBkg: "#1e2235", actorTextColor: "#e6e8f2", signalTextColor: "#e6e8f2", labelBoxBkgColor: "#1e2235", edgeLabelBackground: "#141826" }
+        : { primaryColor: "#f1efff", primaryTextColor: "#1b1d2b", primaryBorderColor: "#6d5dfc", lineColor: "#6b7090", secondaryColor: "#e8f4ff", tertiaryColor: "#f8f9fc", clusterBkg: "#fafbff", clusterBorder: "#d7d9e8", noteBkgColor: "#fff8e1", actorBkg: "#f1efff", edgeLabelBackground: "#ffffff" },
+    });
+    nodes.forEach((n) => { n.removeAttribute("data-processed"); n.textContent = n.dataset.src; });
+    await mermaid.run({ nodes });
+  };
+  await render();
+  new MutationObserver(render).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+</script>
+</body>
+</html>
