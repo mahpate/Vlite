@@ -19,6 +19,18 @@ number on a small synthetic workload.
 
 ## Native VLite benchmark
 
+### Mixed-load maintenance regression
+
+`examples/maintenance_mixed_load.rs` is a seeded correctness workload with
+exact/ready-ANN reads, durable mixed writes and background index maintenance.
+It records raw operation latencies and tail summaries, not a pass/fail speed
+threshold. The native CI matrix runs it on supported runner platforms.
+The archived [Windows x86_64 development capture](results/maintenance-mixed-load-windows-x86_64.json)
+records its configuration, platform, digest and raw samples. It is a debug-build,
+shared-host diagnostic run, not a release benchmark or a cross-engine comparison.
+Do not interpret single-process operation latency as concurrent HTTP service
+latency or a guarantee that maintenance improves p99.
+
 ### Current-source performance work, October 23, 2026
 
 Three bounded optimizations retain existing durability, distance precision and

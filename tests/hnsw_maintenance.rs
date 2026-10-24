@@ -230,8 +230,10 @@ fn observation_does_not_publish_finished_worker_and_reports_processed_zero_recor
         assert!(job.processed_records <= 2);
         previous = job.processed_records;
         if job.worker_finished {
+            assert_eq!(job.phase, "ready_to_publish");
             break;
         }
+        assert_eq!(job.phase, "building");
         assert!(Instant::now() < deadline);
         std::thread::yield_now();
     }
@@ -267,6 +269,14 @@ fn cancellation_tick_does_not_restart_and_invalid_configuration_never_polls() {
         Err(Error::UnsupportedAnnMetric)
     ));
     assert!(db.cancel_hnsw_rebuild());
+    assert!(matches!(
+        db.hnsw_maintenance_status(config, DistanceMetric::Cosine, policy)
+            .unwrap()
+            .rebuild
+            .unwrap()
+            .phase,
+        "cancelling" | "discard_pending"
+    ));
     let deadline = Instant::now() + Duration::from_secs(600);
     loop {
         let report = db

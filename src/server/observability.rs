@@ -79,6 +79,8 @@ async fn snapshot(service: Service, role: admin::Role) -> Result<Value, ApiError
     let metrics = service.metrics.clone();
     let ops = service.ops.metrics_json();
     let format_version = service.format_version;
+    let snapshot_reads = service.snapshot_reads;
+    let group_stats = service.group_commit.as_ref().map(|group| group.stats());
     service
         .run_read(move |db| {
             let healthy = !db.poisoned;
@@ -146,6 +148,34 @@ async fn snapshot(service: Service, role: admin::Role) -> Result<Value, ApiError
                 "searches_by_strategy": metrics.by_strategy.lock().map(|m| m.clone()).unwrap_or_default(),
                 "collections": collections,
             });
+            value["snapshot_reads_enabled"] = json!(snapshot_reads);
+            let retention = db.snapshot_retention_stats();
+            value["read_snapshot_active_captures"] = json!(retention.active_captures);
+            value["read_snapshot_retained_logical_bytes"] = json!(retention.retained_logical_bytes);
+            value["group_commit_enabled"] = json!(group_stats.is_some());
+            if let Some(stats) = group_stats {
+                for (name, metric) in [
+                    ("admitted_requests", stats.admitted_requests),
+                    ("admitted_bytes", stats.admitted_bytes),
+                    ("peak_requests", stats.peak_requests),
+                    ("peak_bytes", stats.peak_bytes),
+                    ("queued_requests", stats.queued_requests),
+                    ("rejected_requests_total", stats.rejected_requests),
+                    ("rejected_bytes_total", stats.rejected_bytes),
+                    ("rejected_closed_total", stats.rejected_closed),
+                    ("queue_wait_count_total", stats.queue_wait_count),
+                    ("queue_wait_nanoseconds_total", stats.queue_wait_ns),
+                    ("queue_wait_max_nanoseconds", stats.queue_wait_max_ns),
+                    ("sync_count_total", stats.sync_count),
+                    ("sync_requests_total", stats.sync_requests),
+                    ("sync_failures_total", stats.sync_failures),
+                    ("sync_nanoseconds_total", stats.sync_ns),
+                    ("sync_max_nanoseconds", stats.sync_max_ns),
+                    ("disconnected_replies_total", stats.disconnected_replies),
+                ] {
+                    value[format!("group_commit_{name}")] = json!(metric);
+                }
+            }
             if let (Value::Object(target), Value::Object(extra)) = (&mut value, ops) {
                 target.extend(extra);
             }

@@ -96,6 +96,13 @@ vector bodies; the first later write can still copy the ID tree. Startup uses
 compatible faster CRC validation and reusable replay buffers, not a new
 checkpoint or storage format.
 
+Current source exposes snapshot-retention and grouped-write admission/queue/sync
+diagnostics in global metrics. `--lock-held-reads` keeps exact scans under the
+owner read lock when generation copying is a poor workload trade-off; snapshot
+reads remain the default. Recovery regressions cover interrupted subprocesses,
+short writes and failed syncs, but do not qualify physical power-loss behavior.
+See the [operational guide](docs/CONSOLE-ADMIN.md) for metric semantics and limits.
+
 VLite is licensed under the MIT License; see
 [LICENSE](LICENSE). There is no inner-product ANN, networked
 replication or approximate metadata filtering. Opt-in [storage features](docs/STORAGE-FEATURES.md) add encryption at

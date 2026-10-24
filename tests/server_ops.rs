@@ -237,6 +237,22 @@ async fn scoped_credentials_enforce_collection_and_operation_scope_without_leaks
         metrics.get("requests_total").is_none(),
         "no global counters"
     );
+    for key in [
+        "group_commit_enabled",
+        "snapshot_reads_enabled",
+        "read_snapshot_active_captures",
+        "read_snapshot_retained_logical_bytes",
+    ] {
+        assert!(metrics.get(key).is_none(), "scoped metrics leaked {key}");
+    }
+    assert!(
+        metrics
+            .as_object()
+            .unwrap()
+            .keys()
+            .all(|key| !key.starts_with("group_commit_")),
+        "scoped metrics leaked group-commit counters"
+    );
     let names = metrics["collections"]
         .as_array()
         .unwrap()
@@ -703,7 +719,47 @@ async fn auto_maintenance_is_off_by_default_bounded_and_rebuilds_stale_indexes()
     let (service, app) = start(db, options(&dir.path().join("admin")));
     let auto = admin(&app, "GET", "/v1/admin/maintenance/auto", None).await;
     assert_eq!(auto["config"]["enabled"], false);
+    assert_eq!(auto["config"]["retry_backoff_initial_ms"], 0);
+    assert_eq!(auto["config"]["retry_backoff_max_ms"], 0);
     assert_eq!(auto["state"]["worker_running"], false);
+    for body in [
+        json!({"retry_backoff_initial_ms":100}),
+        json!({"retry_backoff_initial_ms":100,"retry_backoff_max_ms":50}),
+        json!({"retry_backoff_initial_ms":0,"retry_backoff_max_ms":1}),
+        json!({"retry_backoff_initial_ms":1,"retry_backoff_max_ms":3600001}),
+    ] {
+        let (status, _) = call(
+            &app,
+            Some(ADMIN),
+            "PUT",
+            "/v1/admin/maintenance/auto",
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    let configured = admin(
+        &app,
+        "PUT",
+        "/v1/admin/maintenance/auto",
+        Some(json!({
+            "retry_backoff_initial_ms":100,
+            "retry_backoff_max_ms":500
+        })),
+    )
+    .await;
+    assert_eq!(configured["config"]["retry_backoff_initial_ms"], 100);
+    assert_eq!(configured["config"]["retry_backoff_max_ms"], 500);
+    admin(
+        &app,
+        "PUT",
+        "/v1/admin/maintenance/auto",
+        Some(json!({
+            "retry_backoff_initial_ms":0,
+            "retry_backoff_max_ms":0
+        })),
+    )
+    .await;
     // No index yet: nothing to do.
     let tick = admin(&app, "POST", "/v1/admin/maintenance/auto/tick", None).await;
     assert_eq!(tick["result"]["action"], "idle");
@@ -718,6 +774,11 @@ async fn auto_maintenance_is_off_by_default_bounded_and_rebuilds_stale_indexes()
     let tick = admin(&app, "POST", "/v1/admin/maintenance/auto/tick", None).await;
     assert_eq!(tick["result"]["action"], "rebuild_started", "{tick}");
     assert_eq!(tick["result"]["reason"], "stale_ratio");
+    let status = admin(&app, "GET", "/v1/index/hnsw/maintenance", None).await;
+    assert!(matches!(
+        status["status"]["rebuild"]["phase"].as_str(),
+        Some("building" | "cancelling" | "ready_to_publish" | "discard_pending")
+    ));
     let deadline = std::time::Instant::now() + Duration::from_secs(120);
     loop {
         let tick = admin(&app, "POST", "/v1/admin/maintenance/auto/tick", None).await;

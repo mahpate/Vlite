@@ -50,6 +50,35 @@ filters only in exact mode. Collections and hybrid/import workflows require
 explicit v4 creation or an offline copy-out upgrade; enabling the console does
 not migrate any file.
 
+## ANN maintenance observations and retry backoff
+
+`GET /v1/index/hnsw/maintenance` (or the collection-scoped equivalent) reports
+whether the active graph is ready and whether maintenance pressure recommends
+a rebuild. Readiness applies to the current active graph; it can remain ready
+while a background replacement is being constructed. Its optional `rebuild`
+object includes `phase`: `building`, `cancelling`, `ready_to_publish` (worker
+finished, still awaiting an explicit owner poll), or `discard_pending` (a
+terminal outcome still awaits polling). The same phase is available as
+`HnswRebuildProgress.phase` in the in-process Rust API. A status observation
+never publishes a finished rebuild. The active index is retained until explicit
+publication/discard; writes do not synchronously rebuild and ready-only search
+does not silently fall back to exact search.
+
+Automatic server maintenance retries scheduled rebuilds that end in catch-up
+overflow or supersession. Its retry backoff is disabled by default and does not
+change explicit `maintain_hnsw` calls. To opt in, set both fields in
+`PUT /v1/admin/maintenance/auto`:
+
+```json
+{"retry_backoff_initial_ms":250,"retry_backoff_max_ms":4000}
+```
+
+The initial delay doubles on repeated failures for the same collection, capped
+at the configured maximum. Both values must be zero to disable, or satisfy
+`1 <= initial <= max <= 3600000` milliseconds. Tick responses identify a
+deferred retry as `retry_backoff` and report the attempt count and remaining
+delay; the auto-maintenance configuration response reports both settings.
+
 ## Opt-in durable group commit
 
 `vlite-server <path> --group-commit` coalesces concurrent record puts, deletes
@@ -101,12 +130,65 @@ publishing their service. `GET /metrics` includes
 `group_commit_groups_total` and `group_commit_requests_total`; these are attempted
 groups/requests, not a count of successful syncs.
 
+The coordinator also samples retained admission and queue gauges, request/byte
+high-water marks, request-limit/byte-budget/closed-queue rejections, queue-wait
+count/total/max nanoseconds, shared-sync count/total/max nanoseconds and failures,
+mutating requests per sync, and disconnected reply counts. Admission includes
+active work until completion, not just the pending channel; queue wait includes
+the collection window, owner-lock contention and earlier operations in the group.
+Sync timing starts after the final operation and includes durability-boundary
+health checks/bookkeeping, not mutation execution. No-op or validation-only groups
+do not increment sync counters. Requests per sync counts requests that appended
+frames, not frames or acknowledged responses. A failed shared sync still counts
+as an attempted sync. Independently sampled process-local counters are diagnostic,
+not an atomic accounting ledger.
+
+Global JSON and Prometheus metrics use the `group_commit_` prefix (Prometheus
+adds `vlite_`). Gauges include `admitted_requests`, `admitted_bytes`,
+`queued_requests`, `peak_requests` and `peak_bytes`. Counters include
+`rejected_requests_total`, `rejected_bytes_total`, `rejected_closed_total`,
+`queue_wait_count_total`, `queue_wait_nanoseconds_total`, `sync_count_total`,
+`sync_requests_total`, `sync_failures_total`, `sync_nanoseconds_total` and
+`disconnected_replies_total`; maxima are `queue_wait_max_nanoseconds` and
+`sync_max_nanoseconds`. Detailed group metrics are absent when disabled;
+`group_commit_enabled` always identifies the policy.
+
+Run the targeted fault/recovery coverage with:
+
+```text
+cargo test --features server --lib server::group_commit::tests
+```
+
+It checks v3/v4/v5 real coordinator subprocess exit after acknowledged groups and
+after an unacknowledged batch append before shared sync; every reported acknowledgement
+must reopen intact, and uncertain batches must remain atomic. Real-file,
+one-byte short writes exercise the storage append primitive at every byte cut
+of an atomic batch, including disk-full errors and write-zero outcomes. Partial
+tails must be reported without modification and require explicit
+`Database::discard_incomplete_tail` before reopening. Separate injected
+shared-sync failures verify no neighboring successes, preserved validation errors,
+poisoning, disconnected callers, bounded retained admission and graceful drain.
+Short-write injection tests the shared append primitive, not an injected device
+inside the coordinator. Process exit and injected I/O errors are not physical
+power-loss or filesystem/device fault qualification.
+
 Simple exact searches (without reranking or an indexed-filter path) capture a
 bounded immutable collection snapshot, then scan outside the owner lock while
 retaining the existing worker permit. Their results reflect the captured state;
 writes can commit during the scan. ANN, hybrid, reranking and indexed filtering
 keep their existing execution paths. Snapshot retention/cardinality/byte-limit
 exhaustion falls back to lock-held execution, not a new request error.
+For workloads where generation copying/reclamation worsens latency, start with
+`--lock-held-reads` to retain the owner read lock throughout exact scans.
+Embedded servers can use `Service::with_snapshot_reads(false)` before cloning
+the service. The default remains snapshot-enabled; `snapshot_reads_enabled` in
+global metrics exposes the selected policy. Neither policy weakens committed
+visibility or changes query results.
+Global metrics also expose `read_snapshot_active_captures` and
+`read_snapshot_retained_logical_bytes`. The latter counts capture-time logical
+bodies per distinct capture, including shared bodies more than once, not unique
+allocations or resident memory. Neither global retention nor group diagnostics
+are returned to collection-scoped principals.
 
 Reproduce the bounded local-disk comparison with:
 

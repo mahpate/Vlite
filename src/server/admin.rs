@@ -595,7 +595,7 @@ fn status(s: crate::HnswMaintenanceStatus) -> Value {
         "active_buffer":s.active_buffer.map(capacity),"rebuild":s.rebuild.map(|p| json!({
             "config":{"m":p.config.m,"ef_construction":p.config.ef_construction,"seed":p.config.seed.to_string()},
             "metric":p.metric,"snapshot_records":p.snapshot_records,"processed_records":p.processed_records,
-            "worker_finished":p.worker_finished,"terminal_reason":p.terminal_reason.map(outcome),
+            "worker_finished":p.worker_finished,"phase":p.phase,"terminal_reason":p.terminal_reason.map(outcome),
             "catchup_buffer":p.catchup_buffer.map(capacity)}))})
 }
 fn current(s: &Service) -> Result<Maintenance, ApiError> {

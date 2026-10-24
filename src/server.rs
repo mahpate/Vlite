@@ -177,6 +177,7 @@ pub struct Service {
     encryption_key: Option<crate::EncryptionKey>,
     started: Instant,
     group_commit: Option<Arc<group_commit::Coordinator>>,
+    snapshot_reads: bool,
 }
 
 impl Service {
@@ -255,7 +256,20 @@ impl Service {
             encryption_key,
             started: Instant::now(),
             group_commit: None,
+            snapshot_reads: true,
         })
+    }
+
+    /// Choose snapshot-based simple exact reads, or the original lock-held path.
+    /// Configure before cloning the service so all listeners share one policy.
+    pub fn with_snapshot_reads(mut self, enabled: bool) -> std::io::Result<Self> {
+        if Arc::strong_count(&self.database) != 1 {
+            return Err(std::io::Error::other(
+                "configure snapshot reads before cloning the service",
+            ));
+        }
+        self.snapshot_reads = enabled;
+        Ok(self)
     }
 
     /// Enable bounded durable coalescing before cloning or publishing the service.
@@ -2784,11 +2798,13 @@ async fn search_core(
         );
         Ok::<_, ApiError>((executed, binding, role, target, input))
     };
+    let snapshot_reads = service.snapshot_reads;
     let (executed, collection, role, target, input) = service
         .run_read_then(
             move |db| {
                 let collection = open(db, &role, &target)?;
-                if input.mode == SearchMode::Exact
+                if snapshot_reads
+                    && input.mode == SearchMode::Exact
                     && input.rerank.is_none()
                     && (input.filter.as_ref().is_none_or(Vec::is_empty)
                         || db.state(collection).settings.metadata_indexes.is_empty())

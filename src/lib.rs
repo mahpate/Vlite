@@ -61,7 +61,7 @@ pub use rebuild::{
 };
 pub use records::{
     BrowseHit, BrowsePage, FacetCount, GeoSearchHit, GeoSearchQuery, GeoSort, NumericStats,
-    ReadSnapshot, RecommendationQuery, SearchGroup,
+    ReadSnapshot, RecommendationQuery, SearchGroup, SnapshotRetentionStats,
 };
 pub use stats::{PlanStrategy, QueryPlan, SearchStats};
 pub mod maintenance;
@@ -615,6 +615,7 @@ pub struct Database {
     /// Internal server-only durability scope; never exposed to embedded callers.
     group_active: bool,
     snapshot_readers: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    snapshot_retained_bytes: std::sync::Arc<std::sync::atomic::AtomicU64>,
     #[cfg(test)]
     fail_next_group_sync: bool,
     /// Live collections by ID; ID 0 (`default`) is always present.
@@ -976,6 +977,7 @@ impl Database {
             poisoned: false,
             group_active: false,
             snapshot_readers: Default::default(),
+            snapshot_retained_bytes: Default::default(),
             #[cfg(test)]
             fail_next_group_sync: false,
             collections: BTreeMap::from([(
@@ -1059,6 +1061,7 @@ impl Database {
             poisoned: false,
             group_active: false,
             snapshot_readers: Default::default(),
+            snapshot_retained_bytes: Default::default(),
             #[cfg(test)]
             fail_next_group_sync: false,
             collections: loaded

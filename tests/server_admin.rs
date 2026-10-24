@@ -55,6 +55,53 @@ fn options() -> ServerOptions {
 }
 
 #[tokio::test]
+async fn global_metrics_expose_the_configured_exact_read_policy() {
+    for enabled in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::create(dir.path().join("policy.vlite"), 2).unwrap();
+        let service = Service::new(db).with_snapshot_reads(enabled).unwrap();
+        let app = configured_admin_router(service, options()).unwrap();
+        for token in [ADMIN, READ] {
+            let (status, metrics) = call(&app, token, "GET", "/metrics", Value::Null).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(metrics["snapshot_reads_enabled"], enabled);
+            assert_eq!(metrics["read_snapshot_active_captures"], 0);
+            assert_eq!(metrics["read_snapshot_retained_logical_bytes"], 0);
+            assert_eq!(metrics["group_commit_enabled"], false);
+            assert!(metrics.get("group_commit_sync_count_total").is_none());
+        }
+    }
+}
+
+#[tokio::test]
+async fn grouped_write_metrics_track_admission_and_shared_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::create(dir.path().join("group-metrics.vlite"), 2).unwrap();
+    let service = Service::new(db)
+        .with_group_commit(vlite::server::GroupCommitConfig::default())
+        .unwrap();
+    let app = configured_admin_router(service, options()).unwrap();
+    let (status, _) = call(
+        &app,
+        ADMIN,
+        "PUT",
+        "/v1/vectors/1",
+        json!({"vector":[1.0,2.0]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, metrics) = call(&app, ADMIN, "GET", "/metrics", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(metrics["group_commit_enabled"], true);
+    assert_eq!(metrics["group_commit_admitted_requests"], 0);
+    assert_eq!(metrics["group_commit_admitted_bytes"], 0);
+    assert_eq!(metrics["group_commit_sync_count_total"], 1);
+    assert_eq!(metrics["group_commit_sync_requests_total"], 1);
+    assert_eq!(metrics["group_commit_sync_failures_total"], 0);
+    assert_eq!(metrics["group_commit_queue_wait_count_total"], 1);
+}
+
+#[tokio::test]
 async fn roles_enforce_every_mutation_and_lazy_ann_without_hiding_reads() {
     let dir = tempfile::tempdir().unwrap();
     let mut db = Database::create(dir.path().join("db"), 2).unwrap();

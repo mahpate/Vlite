@@ -79,6 +79,18 @@ fn group_commit_configuration_is_validated_before_file_creation() {
 }
 
 #[test]
+fn lock_held_read_policy_is_explicit_and_rejects_duplicate_flags() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("locked-reads.vlite");
+    let mut server = Server::start_with_options(&path, false, &["--lock-held-reads"]);
+    server.child.kill().unwrap();
+    server.child.wait().unwrap();
+    let invalid = directory.path().join("duplicate.vlite");
+    assert!(fails(&invalid, &["--lock-held-reads", "--lock-held-reads"]).contains("usage:"));
+    assert!(!invalid.exists());
+}
+
+#[test]
 fn grouped_acknowledged_writes_survive_abrupt_process_termination() {
     let directory = tempfile::tempdir_in(".").unwrap();
     let path = directory.path().join("group-crash.vlite");

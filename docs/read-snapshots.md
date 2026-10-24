@@ -44,6 +44,16 @@ overhead, metadata allocation overhead and the current live database.
 Capture returns `InvalidQuery` when limits are exceeded. Applications can
 explicitly fall back to their ordinary lock-held reads.
 
+`Database::snapshot_retention_stats()` reports `active_captures` and
+`retained_logical_bytes` for monitoring. The byte count adds the logical body
+size of every active capture at its capture time; it intentionally counts
+shared bodies once per distinct capture, just like the per-capture retention
+budget. It is not an allocation estimate, a unique-live-body count, or RSS.
+Snapshot clones do not add to either counter, and the counters return to zero
+when the final clone of each capture is dropped. A rejected capture does not
+change them. The two counters are sampled independently, so concurrent capture
+or reclamation can briefly expose values from adjacent states.
+
 ### Record allocation and locality trade-off
 
 The shared representation is used even when no snapshot is active. Instead

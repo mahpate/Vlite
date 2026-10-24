@@ -15,9 +15,10 @@ use vlite::{
     },
 };
 
-const USAGE: &str = "usage: vlite-server <database-path> [--create-if-missing <dimensions> [--create-format 3|4|5]] [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--group-commit [--group-commit-requests <1..16>] [--group-commit-bytes <1024..268435456>] [--group-commit-delay-ms <0..100>]] [--encryption-key-file <path> | VLITE_ENCRYPTION_KEY | VLITE_ENCRYPTION_KEY_HEX] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS; [--log-buffer <n>] (default 2000, maximum 100000)";
+const USAGE: &str = "usage: vlite-server <database-path> [--create-if-missing <dimensions> [--create-format 3|4|5]] [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--lock-held-reads] [--group-commit [--group-commit-requests <1..16>] [--group-commit-bytes <1024..268435456>] [--group-commit-delay-ms <0..100>]] [--encryption-key-file <path> | VLITE_ENCRYPTION_KEY | VLITE_ENCRYPTION_KEY_HEX] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS; [--log-buffer <n>] (default 2000, maximum 100000)";
 
 struct Config {
+    lock_held_reads: bool,
     group_commit: Option<GroupCommitConfig>,
     otlp_endpoint: Option<String>,
     path: PathBuf,
@@ -141,8 +142,10 @@ fn config() -> Result<Config, Box<dyn Error>> {
     let mut log_buffer_capacity = 2_000usize;
     let mut seen_log_buffer = false;
     let mut group_commit = None;
+    let mut lock_held_reads = false;
     while let Some(arg) = args.next() {
         match arg.to_str() {
+            Some("--lock-held-reads") if !lock_held_reads => lock_held_reads = true,
             Some("--group-commit") if group_commit.is_none() => {
                 group_commit = Some(GroupCommitConfig::default());
             }
@@ -370,6 +373,7 @@ fn config() -> Result<Config, Box<dyn Error>> {
         return Err("encryption requires --create-format 5".into());
     }
     let config = Config {
+        lock_held_reads,
         group_commit,
         otlp_endpoint,
         path: path.into(),
@@ -574,6 +578,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Some(group) => service.with_group_commit(group)?,
         None => service,
     };
+    let service = service.with_snapshot_reads(!config.lock_held_reads)?;
     if let Some(tls) = &config.rest_tls {
         service.register_tls(tls.clone())?;
     }

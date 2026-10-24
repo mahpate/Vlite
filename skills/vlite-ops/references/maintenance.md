@@ -49,6 +49,34 @@ distinguished from an interrupted unacknowledged write; repair may lose
 acknowledged data. Never truncate arbitrary bytes by hand or invoke repair
 automatically. Inspect, reopen and verify the retained prefix afterward.
 
+## ANN rebuild observations and retry policy
+
+`HnswMaintenanceStatus.ready` describes whether the active graph can serve
+ready-only ANN queries; a rebuild may run while that graph remains ready.
+`rebuild.phase` distinguishes `building`, `cancelling`, `ready_to_publish`
+(worker finished, owner has not polled/published), and `discard_pending`
+(terminal cancellation/overflow/supersession awaits owner polling). Observe
+status without publishing; use an explicit poll/maintenance call to publish or
+discard. Writes and ready-only searches do not synchronously rebuild or fall
+back to exact search.
+
+Automatic server maintenance leaves retry backoff disabled by default. An
+administrator may opt in with a paired configuration update, for example
+`PUT /v1/admin/maintenance/auto` with
+`{"retry_backoff_initial_ms":250,"retry_backoff_max_ms":4000}`. After a
+catch-up overflow or superseded automatic job, retries for that collection use
+exponential delays capped at the configured maximum. Set both values to zero
+to disable. This setting affects only scheduled automatic maintenance; explicit
+`maintain_hnsw` calls are unchanged. Tick results report `retry_backoff`,
+attempt count, and remaining delay while a retry is deferred.
+
+The bounded mixed-load latency capture can be repeated with
+`cargo run --locked --release --features json --example maintenance_mixed_load -- maintenance-mixed-load.json`.
+The JSON archive includes raw nanosecond samples, workload parameters, a
+deterministic vector digest, and platform/build provenance. It has no hard
+latency thresholds and creates the requested output file without overwriting
+an existing archive.
+
 ## Error triage
 
 These are Rust `Error` variants in `src/lib.rs`. Wire protocols commonly use

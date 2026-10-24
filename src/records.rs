@@ -3,7 +3,13 @@ use crate::{
     Record, Result, SearchHit, current_time_ms, metadata, validate_vector,
 };
 use std::collections::HashMap;
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 /// A generation shares immutable records; a writer copies only the ID tree
 /// and the modified record, never the unmodified vectors or payloads.
@@ -101,11 +107,30 @@ pub const MAX_READ_SNAPSHOTS: usize = 8;
 pub const MAX_READ_SNAPSHOT_BYTES: u64 = 128 * 1024 * 1024;
 pub const MAX_READ_SNAPSHOT_RECORDS: usize = 100_000;
 
-struct SnapshotLease(Arc<std::sync::atomic::AtomicUsize>);
+/// Current read-snapshot retention counters for one database.
+///
+/// `retained_logical_bytes` sums the logical record-body size at capture time
+/// for every live capture. It is a retention-budget measure, not an estimate
+/// of allocator usage or process RSS. Counters are sampled independently, so a
+/// concurrent capture or final drop may briefly make them reflect adjacent
+/// states.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SnapshotRetentionStats {
+    pub active_captures: usize,
+    pub retained_logical_bytes: u64,
+}
+
+struct SnapshotLease {
+    readers: Arc<std::sync::atomic::AtomicUsize>,
+    retained_logical_bytes_counter: Arc<AtomicU64>,
+    retained_logical_bytes: u64,
+}
 
 impl Drop for SnapshotLease {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        self.readers.fetch_sub(1, Ordering::Relaxed);
+        self.retained_logical_bytes_counter
+            .fetch_sub(self.retained_logical_bytes, Ordering::Relaxed);
     }
 }
 
@@ -132,6 +157,14 @@ impl Database {
     /// Captures the default collection at one committed version.
     pub fn read_snapshot(&self) -> Result<ReadSnapshot> {
         self.collection("default")?.read_snapshot()
+    }
+
+    /// Returns per-database snapshot retention counters.
+    pub fn snapshot_retention_stats(&self) -> SnapshotRetentionStats {
+        SnapshotRetentionStats {
+            active_captures: self.snapshot_readers.load(Ordering::Relaxed),
+            retained_logical_bytes: self.snapshot_retained_bytes.load(Ordering::Relaxed),
+        }
     }
 }
 
@@ -161,7 +194,15 @@ impl CollectionRef<'_> {
                 (count < MAX_READ_SNAPSHOTS).then_some(count + 1)
             })
             .map_err(|_| Error::InvalidQuery("read snapshot retention budget exhausted"))?;
-        let lease = Arc::new(SnapshotLease(Arc::clone(&self.db.snapshot_readers)));
+        let retained_logical_bytes = state.live_body_bytes;
+        self.db
+            .snapshot_retained_bytes
+            .fetch_add(retained_logical_bytes, Ordering::Relaxed);
+        let lease = Arc::new(SnapshotLease {
+            readers: Arc::clone(&self.db.snapshot_readers),
+            retained_logical_bytes_counter: Arc::clone(&self.db.snapshot_retained_bytes),
+            retained_logical_bytes,
+        });
         Ok(ReadSnapshot {
             records: state.records.clone(),
             expiries: Arc::clone(&state.expiries),
@@ -236,11 +277,207 @@ mod snapshot_tests {
         let mut db = database();
         db.state_mut(0).live_body_bytes = MAX_READ_SNAPSHOT_BYTES + 1;
         assert!(db.read_snapshot().is_err());
+        assert_eq!(
+            db.snapshot_retention_stats(),
+            SnapshotRetentionStats::default()
+        );
         db.state_mut(0).live_body_bytes = 0;
         let snapshot = db.read_snapshot().unwrap();
+        assert_eq!(
+            db.snapshot_retention_stats(),
+            SnapshotRetentionStats {
+                active_captures: 1,
+                retained_logical_bytes: 0,
+            }
+        );
         db.poisoned = true;
         assert!(matches!(db.read_snapshot(), Err(Error::Poisoned)));
         assert!(snapshot.search(&[0.0], 1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn retention_counters_count_distinct_captures_until_the_last_clone_drops() {
+        let mut db = Database::create_in_memory(
+            1,
+            crate::CreateOptions {
+                format: Some(crate::FormatVersion::V5),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        db.put_with_expiry(1, &[1.0], b"payload", &crate::Metadata::new(), Some(1))
+            .unwrap();
+        let captured_bytes = db.default_state().live_body_bytes;
+        let first = db.read_snapshot().unwrap();
+        let first_clone = first.clone();
+        assert!(
+            first.get(1).unwrap().is_none(),
+            "TTL visibility does not remove the physical record from retention accounting"
+        );
+        assert_eq!(
+            db.snapshot_retention_stats(),
+            SnapshotRetentionStats {
+                active_captures: 1,
+                retained_logical_bytes: captured_bytes,
+            }
+        );
+
+        let second = db.read_snapshot().unwrap();
+        assert_eq!(
+            db.snapshot_retention_stats(),
+            SnapshotRetentionStats {
+                active_captures: 2,
+                retained_logical_bytes: captured_bytes * 2,
+            }
+        );
+        db.put(1, &[2.0], b"replacement with a different length")
+            .unwrap();
+        assert_eq!(
+            db.snapshot_retention_stats().retained_logical_bytes,
+            captured_bytes * 2,
+            "accounting follows captured generations, not the live state"
+        );
+
+        drop(first);
+        assert_eq!(db.snapshot_retention_stats().active_captures, 2);
+        drop(first_clone);
+        assert_eq!(
+            db.snapshot_retention_stats(),
+            SnapshotRetentionStats {
+                active_captures: 1,
+                retained_logical_bytes: captured_bytes,
+            }
+        );
+        drop(second);
+        assert_eq!(
+            db.snapshot_retention_stats(),
+            SnapshotRetentionStats::default()
+        );
+    }
+
+    #[test]
+    fn record_count_limit_accepts_boundary_and_rejects_larger_captures() {
+        let mut db = database();
+        db.state_mut(0).records = (0..MAX_READ_SNAPSHOT_RECORDS as u64)
+            .map(|id| {
+                (
+                    id,
+                    Record {
+                        vector: Vec::new(),
+                        payload: Vec::new(),
+                        metadata: crate::Metadata::new(),
+                    },
+                )
+            })
+            .collect();
+        let boundary = db.read_snapshot().unwrap();
+        assert_eq!(boundary.len(), MAX_READ_SNAPSHOT_RECORDS);
+        drop(boundary);
+        db.state_mut(0).records.insert(
+            MAX_READ_SNAPSHOT_RECORDS as u64,
+            Record {
+                vector: Vec::new(),
+                payload: Vec::new(),
+                metadata: crate::Metadata::new(),
+            },
+        );
+        assert!(db.read_snapshot().is_err());
+        assert_eq!(
+            db.snapshot_retention_stats(),
+            SnapshotRetentionStats::default()
+        );
+    }
+
+    #[test]
+    fn named_collection_drop_and_recreation_keep_each_capture_accounted() {
+        let mut db = Database::create_in_memory(
+            1,
+            crate::CreateOptions {
+                format: Some(crate::FormatVersion::V5),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let spec = crate::CollectionSpec {
+            dimensions: 1,
+            settings: Default::default(),
+        };
+        db.create_collection("named", spec.clone()).unwrap();
+        db.collection_mut("named")
+            .unwrap()
+            .put(1, &[1.0], b"old")
+            .unwrap();
+        let old_bytes = db
+            .state(db.collection("named").unwrap().id())
+            .live_body_bytes;
+        let old = db.collection("named").unwrap().read_snapshot().unwrap();
+        db.collection_mut("named").unwrap().delete(1).unwrap();
+        db.drop_collection("named").unwrap();
+        db.create_collection("named", spec).unwrap();
+        db.collection_mut("named")
+            .unwrap()
+            .put(2, &[2.0], b"new generation")
+            .unwrap();
+        let new_bytes = db
+            .state(db.collection("named").unwrap().id())
+            .live_body_bytes;
+        let new = db.collection("named").unwrap().read_snapshot().unwrap();
+
+        assert_eq!(
+            db.snapshot_retention_stats(),
+            SnapshotRetentionStats {
+                active_captures: 2,
+                retained_logical_bytes: old_bytes + new_bytes,
+            }
+        );
+        drop(old);
+        assert_eq!(
+            db.snapshot_retention_stats(),
+            SnapshotRetentionStats {
+                active_captures: 1,
+                retained_logical_bytes: new_bytes,
+            }
+        );
+        drop(new);
+        assert_eq!(
+            db.snapshot_retention_stats(),
+            SnapshotRetentionStats::default()
+        );
+    }
+
+    #[test]
+    fn concurrent_snapshot_reclamation_never_exceeds_the_captured_budget() {
+        let mut db = database();
+        db.put(1, &[1.0], b"payload").unwrap();
+        let bytes_per_capture = db.default_state().live_body_bytes;
+        let captures = (0..MAX_READ_SNAPSHOTS)
+            .map(|_| db.read_snapshot().unwrap())
+            .collect::<Vec<_>>();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let drop_barrier = Arc::clone(&barrier);
+        let drop_done = Arc::clone(&done);
+        let dropper = std::thread::spawn(move || {
+            drop_barrier.wait();
+            for capture in captures {
+                drop(capture);
+                std::thread::yield_now();
+            }
+            drop_done.store(true, Ordering::Release);
+        });
+
+        barrier.wait();
+        while !done.load(Ordering::Acquire) {
+            let stats = db.snapshot_retention_stats();
+            assert!(stats.active_captures <= MAX_READ_SNAPSHOTS);
+            assert!(stats.retained_logical_bytes <= bytes_per_capture * MAX_READ_SNAPSHOTS as u64);
+            std::thread::yield_now();
+        }
+        dropper.join().unwrap();
+        assert_eq!(
+            db.snapshot_retention_stats(),
+            SnapshotRetentionStats::default()
+        );
     }
 
     #[test]

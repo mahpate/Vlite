@@ -128,11 +128,19 @@ fn retention_is_bounded_and_released_only_after_last_clone() {
         captures.push(db.read_snapshot().unwrap());
     }
     assert!(db.read_snapshot().is_err());
+    assert_eq!(
+        db.snapshot_retention_stats().active_captures,
+        vlite::records::MAX_READ_SNAPSHOTS
+    );
     let clone = captures[0].clone();
     captures.remove(0);
     assert!(db.read_snapshot().is_err());
     drop(clone);
     let capture = db.read_snapshot().unwrap();
+    assert_eq!(
+        db.snapshot_retention_stats().active_captures,
+        vlite::records::MAX_READ_SNAPSHOTS
+    );
     drop(db);
     assert!(capture.is_empty());
 }

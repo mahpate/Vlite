@@ -11,6 +11,41 @@ use vlite::{
     server::{Service, router},
 };
 
+#[tokio::test]
+async fn snapshot_and_lock_held_exact_search_are_identical_and_policy_precedes_cloning() {
+    fn populated_database() -> Database {
+        let mut db = Database::create_in_memory(2, Default::default()).unwrap();
+        db.put(9, &[1.0, 0.0], b"first").unwrap();
+        db.put(3, &[0.0, 1.0], b"second").unwrap();
+        db.put(5, &[-1.0, 0.0], b"third").unwrap();
+        db
+    }
+
+    let snapshot_service = Service::new(populated_database())
+        .with_snapshot_reads(true)
+        .unwrap();
+    let lock_held_service = Service::new(populated_database())
+        .with_snapshot_reads(false)
+        .unwrap();
+    let snapshot_app = router(snapshot_service.clone());
+    let lock_held_app = router(lock_held_service.clone());
+    let search_body = json!({"vector":[0.75,0.25],"k":3,"metric":"cosine"});
+    let (snapshot_status, snapshot_response) =
+        request(&snapshot_app, "POST", "/v1/search", search_body.clone()).await;
+    let (lock_held_status, lock_held_response) =
+        request(&lock_held_app, "POST", "/v1/search", search_body).await;
+    assert_eq!(snapshot_status, StatusCode::OK);
+    assert_eq!(lock_held_status, StatusCode::OK);
+    assert_eq!(snapshot_response, lock_held_response);
+
+    let shared = Service::new(populated_database());
+    let clone = shared.clone();
+    assert!(
+        clone.with_snapshot_reads(false).is_err(),
+        "read policy must be finalized before the service is cloned"
+    );
+}
+
 async fn request(app: &Router, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
     raw(app, method, path, &body.to_string(), true).await
 }

@@ -85,6 +85,9 @@ pub enum HnswPressure {
 /// Processed records, not percent CPU time or an estimated completion deadline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HnswRebuildProgress {
+    /// `building`, `cancelling`, `ready_to_publish`, or `discard_pending`.
+    /// A finished worker is still not published until an explicit poll.
+    pub phase: &'static str,
     pub config: HnswConfig,
     pub metric: DistanceMetric,
     pub snapshot_records: usize,
@@ -256,7 +259,14 @@ impl Job {
     }
 
     pub fn progress(&self) -> HnswRebuildProgress {
+        let phase = match (self.terminal, self.finished()) {
+            (None, false) => "building",
+            (Some(_), false) => "cancelling",
+            (None, true) => "ready_to_publish",
+            (Some(_), true) => "discard_pending",
+        };
         HnswRebuildProgress {
+            phase,
             config: self.config,
             metric: self.metric,
             snapshot_records: self.snapshot_records,

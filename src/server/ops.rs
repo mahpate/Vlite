@@ -7,6 +7,7 @@
 use super::*;
 use crate::{HnswMaintenancePolicy, HnswPressure, HnswRebuildStatus};
 use std::{
+    collections::BTreeMap,
     io::{Read, Seek, SeekFrom, Write},
     path::{Path as FilePath, PathBuf},
     sync::{Condvar, Weak},
@@ -16,11 +17,19 @@ use std::{
 
 const MANIFEST_LIMIT: u64 = 64 * 1024;
 const DAY_MS: u64 = 86_400_000;
+type AutoTickOutcome = (
+    &'static str,
+    Option<String>,
+    Option<&'static str>,
+    Option<u16>,
+);
 
 #[derive(Clone)]
 struct AutoConfig {
     enabled: bool,
     interval: Duration,
+    retry_backoff_initial: Duration,
+    retry_backoff_max: Duration,
     stale_ratio: f64,
     rebuild_on_low_recall: bool,
     min_recall: f64,
@@ -33,6 +42,8 @@ impl Default for AutoConfig {
         Self {
             enabled: false,
             interval: Duration::from_secs(60),
+            retry_backoff_initial: Duration::ZERO,
+            retry_backoff_max: Duration::ZERO,
             stale_ratio: 0.2,
             rebuild_on_low_recall: false,
             min_recall: 0.9,
@@ -53,6 +64,13 @@ struct AutoState {
     last_collection: Option<String>,
     last_action: Option<&'static str>,
     last_error: Option<String>,
+    retries: BTreeMap<u16, RetryState>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct RetryState {
+    attempts: u32,
+    until: Option<Instant>,
 }
 
 #[derive(Clone)]
@@ -136,6 +154,15 @@ pub(super) struct Schedule {
 
 fn now_ms() -> u64 {
     admin::now_ms() as u64
+}
+
+fn retry_delay(initial: Duration, maximum: Duration, attempts: u32) -> Duration {
+    if initial.is_zero() || maximum.is_zero() {
+        return Duration::ZERO;
+    }
+    initial
+        .saturating_mul(1u32 << attempts.saturating_sub(1).min(31))
+        .min(maximum)
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, ApiError> {
@@ -324,79 +351,89 @@ impl Ops {
             Err(_) => return json!({"action":"error","error":"internal state unavailable"}),
         };
         let mut next_cursor = cursor;
-        let result =
-            (|| -> Result<(&'static str, Option<String>, Option<&'static str>), ApiError> {
-                if let Some((owner, _)) = &db.rebuild {
-                    let owner = *owner;
-                    let name = db.collections.get(&owner).map(|c| c.name.clone());
-                    let status = db.poll_rebuild_in(owner)?;
-                    if status == HnswRebuildStatus::Published {
-                        self.metrics
-                            .background_published
-                            .fetch_add(1, Ordering::Relaxed);
-                    }
-                    return Ok((admin::outcome(status), name, None));
+        let result = (|| -> Result<AutoTickOutcome, ApiError> {
+            if let Some((owner, _)) = &db.rebuild {
+                let owner = *owner;
+                let name = db.collections.get(&owner).map(|c| c.name.clone());
+                let status = db.poll_rebuild_in(owner)?;
+                if status == HnswRebuildStatus::Published {
+                    self.metrics
+                        .background_published
+                        .fetch_add(1, Ordering::Relaxed);
                 }
-                let candidates = db
-                    .collections
-                    .iter()
-                    .filter(|(_, c)| {
-                        c.index
-                            .as_ref()
-                            .is_some_and(|i| i.metric != DistanceMetric::InnerProduct)
-                    })
-                    .map(|(&id, _)| id)
-                    .collect::<Vec<_>>();
-                let Some(&first) = candidates.first() else {
-                    return Ok(("idle", None, None));
-                };
-                let id = candidates
-                    .iter()
-                    .copied()
-                    .find(|&id| cursor.is_none_or(|c| id > c))
-                    .unwrap_or(first);
-                next_cursor = Some(id);
-                let state = db.state(id);
-                let index = state.index.as_ref().expect("filtered on index");
-                let (hnsw, metric, options) = (index.config, index.metric, index.options);
-                let (graph, stale) = (index.graph_nodes(), index.stale_nodes());
-                let name = state.name.clone();
-                let policy = HnswMaintenancePolicy {
-                    limits: config.limits.core(),
-                    ..HnswMaintenancePolicy::default()
-                };
-                let status =
-                    db.maintenance_status_with_options_in(id, hnsw, metric, options, policy)?;
-                let mut reason = if !matches!(status.pressure, HnswPressure::Healthy) {
-                    Some("pressure")
-                } else if graph > 0 && stale as f64 / graph as f64 >= config.stale_ratio {
-                    Some("stale_ratio")
-                } else {
-                    None
-                };
-                if reason.is_none() && config.rebuild_on_low_recall {
-                    let report = CollectionRef { db: &*db, id }.ann_quality(
-                        hnsw,
-                        metric,
-                        options,
-                        crate::quality::QualitySampleOptions {
-                            samples: config.quality_samples,
-                            ..Default::default()
-                        },
-                    )?;
-                    if report.recall_at_k.is_some_and(|r| r < config.min_recall) {
-                        reason = Some("low_recall");
-                    }
+                return Ok((admin::outcome(status), name, None, Some(owner)));
+            }
+            let candidates = db
+                .collections
+                .iter()
+                .filter(|(_, c)| {
+                    c.index
+                        .as_ref()
+                        .is_some_and(|i| i.metric != DistanceMetric::InnerProduct)
+                })
+                .map(|(&id, _)| id)
+                .collect::<Vec<_>>();
+            let Some(&first) = candidates.first() else {
+                return Ok(("idle", None, None, None));
+            };
+            let id = candidates
+                .iter()
+                .copied()
+                .find(|&id| cursor.is_none_or(|c| id > c))
+                .unwrap_or(first);
+            next_cursor = Some(id);
+            let state = db.state(id);
+            let index = state.index.as_ref().expect("filtered on index");
+            let (hnsw, metric, options) = (index.config, index.metric, index.options);
+            let (graph, stale) = (index.graph_nodes(), index.stale_nodes());
+            let name = state.name.clone();
+            let policy = HnswMaintenancePolicy {
+                limits: config.limits.core(),
+                ..HnswMaintenancePolicy::default()
+            };
+            let status =
+                db.maintenance_status_with_options_in(id, hnsw, metric, options, policy)?;
+            let mut reason = if !matches!(status.pressure, HnswPressure::Healthy) {
+                Some("pressure")
+            } else if graph > 0 && stale as f64 / graph as f64 >= config.stale_ratio {
+                Some("stale_ratio")
+            } else {
+                None
+            };
+            if reason.is_none() && config.rebuild_on_low_recall {
+                let report = CollectionRef { db: &*db, id }.ann_quality(
+                    hnsw,
+                    metric,
+                    options,
+                    crate::quality::QualitySampleOptions {
+                        samples: config.quality_samples,
+                        ..Default::default()
+                    },
+                )?;
+                if report.recall_at_k.is_some_and(|r| r < config.min_recall) {
+                    reason = Some("low_recall");
                 }
-                if reason.is_none() {
-                    return Ok(("healthy", Some(name), None));
-                }
-                db.start_rebuild_with_options_in(id, hnsw, metric, options, config.limits.core())?;
-                self.metrics
-                    .background_started
-                    .fetch_add(1, Ordering::Relaxed);
-                Ok(("rebuild_started", Some(name), reason))
-            })();
+            }
+            if reason.is_none() {
+                return Ok(("healthy", Some(name), None, Some(id)));
+            }
+            let retry_wait = self
+                .inner
+                .lock()
+                .ok()
+                .filter(|inner| inner.auto.retry_backoff_initial > Duration::ZERO)
+                .and_then(|inner| inner.auto_state.retries.get(&id).copied())
+                .and_then(|retry| retry.until)
+                .map(|until| until.saturating_duration_since(Instant::now()));
+            if retry_wait.is_some_and(|wait| wait > Duration::ZERO) {
+                return Ok(("retry_backoff", Some(name), reason, Some(id)));
+            }
+            db.start_rebuild_with_options_in(id, hnsw, metric, options, config.limits.core())?;
+            self.metrics
+                .background_started
+                .fetch_add(1, Ordering::Relaxed);
+            Ok(("rebuild_started", Some(name), reason, Some(id)))
+        })();
         let Ok(mut inner) = self.inner.lock() else {
             return json!({"action":"error","error":"internal state unavailable"});
         };
@@ -405,15 +442,40 @@ impl Ops {
         state.ticks += 1;
         state.last_tick_unix_ms = Some(now_ms());
         match result {
-            Ok((action, collection, reason)) => {
+            Ok((action, collection, reason, collection_id)) => {
                 match action {
                     "rebuild_started" => state.rebuilds_started += 1,
                     "published" => state.rebuilds_published += 1,
                     _ => {}
                 }
+                if matches!(action, "catch_up_overflow" | "superseded")
+                    && config.retry_backoff_initial > Duration::ZERO
+                {
+                    let retry = state
+                        .retries
+                        .entry(collection_id.expect("rebuild owner"))
+                        .or_default();
+                    retry.attempts = retry.attempts.saturating_add(1);
+                    let delay = retry_delay(
+                        config.retry_backoff_initial,
+                        config.retry_backoff_max,
+                        retry.attempts,
+                    );
+                    retry.until = Some(Instant::now() + delay);
+                } else if matches!(action, "published" | "healthy")
+                    && let Some(id) = collection_id
+                {
+                    state.retries.remove(&id);
+                }
                 state.last_action = Some(action);
                 state.last_collection = collection.clone();
-                json!({"action": action, "collection": collection, "reason": reason})
+                let retry = collection_id.and_then(|id| state.retries.get(&id).copied());
+                let retry_after_ms = retry.and_then(|retry| retry.until).map(|until| {
+                    until.saturating_duration_since(Instant::now()).as_millis() as u64
+                });
+                json!({"action": action, "collection": collection, "reason": reason,
+                    "retry_attempts": retry.map_or(0, |retry| retry.attempts),
+                    "retry_after_ms": retry_after_ms})
             }
             Err(error) => {
                 state.errors += 1;
@@ -429,6 +491,8 @@ impl Ops {
         let s = &inner.auto_state;
         json!({
             "config": {"enabled": c.enabled, "interval_ms": c.interval.as_millis() as u64,
+                "retry_backoff_initial_ms": c.retry_backoff_initial.as_millis() as u64,
+                "retry_backoff_max_ms": c.retry_backoff_max.as_millis() as u64,
                 "stale_ratio": c.stale_ratio, "rebuild_on_low_recall": c.rebuild_on_low_recall,
                 "min_recall": c.min_recall, "quality_samples": c.quality_samples,
                 "limits": c.limits.json()},
@@ -436,7 +500,8 @@ impl Ops {
                 "rebuilds_started": s.rebuilds_started, "rebuilds_published": s.rebuilds_published,
                 "errors": s.errors, "last_tick_unix_ms": s.last_tick_unix_ms,
                 "last_collection": s.last_collection, "last_action": s.last_action,
-                "last_error": s.last_error, "worker_running": inner.thread.is_some(),
+                "last_error": s.last_error, "retry_collections": s.retries.len(),
+                "worker_running": inner.thread.is_some(),
                 "worker_spawn_error": inner.spawn_error},
         })
     }
@@ -844,6 +909,8 @@ async fn auto_get(State(service): State<Service>) -> Result<Json<Value>, ApiErro
 struct AutoInput {
     enabled: Option<bool>,
     interval_secs: Option<u64>,
+    retry_backoff_initial_ms: Option<u64>,
+    retry_backoff_max_ms: Option<u64>,
     stale_ratio: Option<f64>,
     rebuild_on_low_recall: Option<bool>,
     min_recall: Option<f64>,
@@ -862,6 +929,21 @@ async fn auto_put(
     {
         return Err(unprocessable("interval_secs must be 10..3600"));
     }
+    if input.retry_backoff_initial_ms.is_some() != input.retry_backoff_max_ms.is_some() {
+        return Err(unprocessable(
+            "retry_backoff_initial_ms and retry_backoff_max_ms must be set together",
+        ));
+    }
+    if let (Some(initial), Some(maximum)) =
+        (input.retry_backoff_initial_ms, input.retry_backoff_max_ms)
+        && (maximum > 3_600_000
+            || (initial == 0 && maximum != 0)
+            || (initial > 0 && initial > maximum))
+    {
+        return Err(unprocessable(
+            "retry backoff must be disabled with both values zero, or initial <= max <= 3600000 ms",
+        ));
+    }
     if input.stale_ratio.is_some_and(|r| !(r > 0.0 && r <= 1.0)) {
         return Err(unprocessable("stale_ratio must be in (0, 1]"));
     }
@@ -879,27 +961,38 @@ async fn auto_put(
     }
     let ops = service.ops.clone();
     let mut inner = lock(&ops.inner)?;
-    let config = &mut inner.auto;
-    if let Some(enabled) = input.enabled {
-        config.enabled = enabled;
+    {
+        let config = &mut inner.auto;
+        if let Some(enabled) = input.enabled {
+            config.enabled = enabled;
+        }
+        if let Some(secs) = input.interval_secs {
+            config.interval = Duration::from_secs(secs);
+        }
+        if let (Some(initial), Some(maximum)) =
+            (input.retry_backoff_initial_ms, input.retry_backoff_max_ms)
+        {
+            config.retry_backoff_initial = Duration::from_millis(initial);
+            config.retry_backoff_max = Duration::from_millis(maximum);
+        }
+        if let Some(ratio) = input.stale_ratio {
+            config.stale_ratio = ratio;
+        }
+        if let Some(flag) = input.rebuild_on_low_recall {
+            config.rebuild_on_low_recall = flag;
+        }
+        if let Some(recall) = input.min_recall {
+            config.min_recall = recall;
+        }
+        if let Some(samples) = input.quality_samples {
+            config.quality_samples = samples;
+        }
+        if let Some(limits) = input.limits {
+            config.limits = limits;
+        }
     }
-    if let Some(secs) = input.interval_secs {
-        config.interval = Duration::from_secs(secs);
-    }
-    if let Some(ratio) = input.stale_ratio {
-        config.stale_ratio = ratio;
-    }
-    if let Some(flag) = input.rebuild_on_low_recall {
-        config.rebuild_on_low_recall = flag;
-    }
-    if let Some(recall) = input.min_recall {
-        config.min_recall = recall;
-    }
-    if let Some(samples) = input.quality_samples {
-        config.quality_samples = samples;
-    }
-    if let Some(limits) = input.limits {
-        config.limits = limits;
+    if input.retry_backoff_initial_ms.is_some() {
+        inner.auto_state.retries.clear();
     }
     inner.next_auto = Some(Instant::now() + inner.auto.interval);
     ops.ensure_thread(&mut inner);
@@ -1121,4 +1214,94 @@ async fn drill(
         Ok(Json(value))
     })
     .await
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::{Ops, retry_delay};
+    use crate::server::Metrics;
+    use crate::{Database, DistanceMetric, HnswConfig, Mutation};
+    use std::{
+        sync::{Arc, RwLock},
+        time::{Duration, Instant},
+    };
+    use tokio::sync::Semaphore;
+
+    #[test]
+    fn retry_backoff_is_disabled_by_default_and_doubles_only_to_configured_cap() {
+        assert_eq!(
+            retry_delay(Duration::ZERO, Duration::ZERO, 4),
+            Duration::ZERO
+        );
+        let initial = Duration::from_millis(250);
+        let maximum = Duration::from_secs(1);
+        assert_eq!(retry_delay(initial, maximum, 1), initial);
+        assert_eq!(retry_delay(initial, maximum, 2), Duration::from_millis(500));
+        assert_eq!(retry_delay(initial, maximum, 3), maximum);
+        assert_eq!(retry_delay(initial, maximum, u32::MAX), maximum);
+    }
+
+    #[test]
+    fn superseded_auto_rebuild_waits_for_explicitly_configured_backoff() {
+        let mut db = Database::create_in_memory(2, crate::CreateOptions::default()).unwrap();
+        let config = HnswConfig::default();
+        let metric = DistanceMetric::SquaredL2;
+        db.put(0, &[0.0, 0.0], b"").unwrap();
+        db.build_hnsw_with_metric(config, metric).unwrap();
+        let writes = |start: u64| {
+            (start..start + 129)
+                .map(|id| Mutation::Put {
+                    id,
+                    vector: vec![id as f32, 1.0],
+                    payload: Vec::new(),
+                })
+                .collect::<Vec<_>>()
+        };
+        db.write_batch(&writes(1)).unwrap();
+
+        let database = Arc::new(RwLock::new(Some(db)));
+        let ops = Arc::new(Ops::new(
+            Arc::downgrade(&database),
+            Arc::new(Semaphore::new(1)),
+            Arc::new(Metrics::default()),
+        ));
+        {
+            let mut inner = ops.inner.lock().unwrap();
+            inner.auto.enabled = true;
+            inner.auto.retry_backoff_initial = Duration::from_secs(5);
+            inner.auto.retry_backoff_max = Duration::from_secs(20);
+        }
+        {
+            let mut owner = database.write().unwrap();
+            assert_eq!(
+                ops.auto_tick(owner.as_mut().unwrap())["action"],
+                "rebuild_started"
+            );
+            let db = owner.as_mut().unwrap();
+            db.build_hnsw_with_metric(config, metric).unwrap();
+            db.write_batch(&writes(1_000)).unwrap();
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let result = {
+                let mut owner = database.write().unwrap();
+                ops.auto_tick(owner.as_mut().unwrap())
+            };
+            if result["action"] == "superseded" {
+                break;
+            }
+            assert_eq!(result["action"], "cancelling", "{result}");
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        let result = {
+            let mut owner = database.write().unwrap();
+            ops.auto_tick(owner.as_mut().unwrap())
+        };
+        assert_eq!(result["action"], "retry_backoff");
+        assert_eq!(result["retry_attempts"], 1);
+        assert!(result["retry_after_ms"].as_u64().unwrap() > 0);
+        assert!(database.read().unwrap().as_ref().unwrap().rebuild.is_none());
+    }
 }

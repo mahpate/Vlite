@@ -215,6 +215,24 @@
         latency but increased reader latency; copy-on-write and reclamation still
         have costs. These Windows shared-host measurements do not establish a
         universal throughput or tail-latency improvement.</p>
+      <h3>Workload-selectable read policy</h3>
+      <p>Current source also supports <code>--lock-held-reads</code> for workloads
+        where immutable-generation copying is a worse trade-off than holding
+        the owner read lock during exact scans. Snapshot reads remain the default.
+        Compare correctness and reader/writer tail latency on your own workload;
+        this operational control is not a claim of a new benchmark speedup.</p>
+      <p>New global diagnostics report snapshot capture retention, grouped-write
+        admission, queue waits and shared-sync outcomes. Coordinator regression
+        tests cover subprocess interruption, short writes, failed syncs,
+        overload and disconnected callers; they are not physical power-loss
+        qualification. See the
+        <a href="docs/CONSOLE-ADMIN.html">operational metrics and recovery guide</a>.</p>
+      <p>Background rebuild status exposes its stage without publishing a graph.
+        Scheduled retries can use opt-in bounded per-collection backoff after
+        catch-up overflow or supersession. A seeded mixed-load regression
+        exercises exact and ready-ANN queries, TTL/metadata/payload writes and
+        background maintenance, recording raw latency samples without flaky
+        speed thresholds or silent exact fallback.</p>
     </div>
   </section>
   <section id="hnsw-traversal">
