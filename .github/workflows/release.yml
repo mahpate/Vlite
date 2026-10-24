@@ -465,5 +465,10 @@ jobs:
           DASHBOARD_DIGEST: ${{ needs.image-publish.outputs.dashboard_digest }}
         run: |
           printf '%s\n\n%s\n%s\n%s\n\n%s\n\n%s\n' "Container images (linux/amd64 and linux/arm64):" "- REST API: $API_IMAGE@$API_DIGEST" "- Dashboard: $DASHBOARD_IMAGE@$DASHBOARD_DIGEST" "- Smoke/maintenance tools (legacy entrypoint): $RUNTIME_IMAGE@$RUNTIME_DIGEST" "Download the matching SDK below. Installation and platform limits: https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/docs/INSTALL.md" "Verify SHA256SUMS before installing. Back up before upgrading; see the Docker upgrade and rollback procedure in docs/DOCKER-OPERATIONS.md. Python wheels are uploaded to PyPI (vlite-embedded, vlite-client) by the separate pypi.yml workflow when its trusted publisher is configured; npm packages are not published. Checksums are integrity checks, not signatures." > release-notes.txt
+          version="${GITHUB_REF_NAME#v}"
+          if [ -f "docs/RELEASE-$version.md" ]; then
+            printf '\n\n' >> release-notes.txt
+            cat "docs/RELEASE-$version.md" >> release-notes.txt
+          fi
           gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "VLite $GITHUB_REF_NAME" --notes-file release-notes.txt
           gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false

@@ -18,7 +18,7 @@
 #>
 [CmdletBinding(DefaultParameterSetName = 'Up')]
 param(
-    [string]$Version = 'v0.3.0',
+    [string]$Version = 'v0.4.0',
     [string]$Distro = 'Ubuntu-24.04',
     [string]$DeployDir = '/root/vlite-deploy',
     [int]$ApiPort = 18085,

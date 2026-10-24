@@ -1,5 +1,11 @@
 # Install a versioned VLite release
 
+The 0.4.0 release packages the newer read-only, typed-input, dashboard and
+observability APIs described below as source additions relative to 0.3.0.
+Use [0.4.0 upgrade guidance](RELEASE-0.4.0.md) and its matching GitHub assets.
+PyPI uploads follow the verified release workflow separately; check the
+registry version before assuming an upload has completed.
+
 Python packages are published on PyPI: [vlite-embedded](https://pypi.org/project/vlite-embedded/)
 for in-process use and [vlite-client](https://pypi.org/project/vlite-client/)
 for the REST API. The currently published versions are 0.3.0. Install them

@@ -23,6 +23,10 @@ It uses its own storage format and does not require an external database.
 
 ## Capabilities
 
+**Release 0.4.0:** concurrency, typed bindings, dashboard and stability updates;
+see [upgrade and rollback guidance](docs/RELEASE-0.4.0.md).
+Registry uploads are verified separately from tagged GitHub builds.
+
 - **Single-file persistence:** versioned binary records, checksums, synchronous
   commits, exclusive writer/shared reader locking, and explicit interrupted-write recovery. Opt-in v5
   adds expiring records and compact metadata-only updates.

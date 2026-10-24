@@ -43,18 +43,18 @@
 <main>
   <section class="hero">
     <div class="wrap">
-      <span class="eyebrow">v0.3.0 · MIT licensed · written in Rust</span>
+      <span class="eyebrow">v0.4.0 · MIT licensed · written in Rust</span>
       <h1>Vector search in <span class="grad">one durable file</span>.</h1>
       <p class="lead">VLite is a single-file vector database. Embed it directly in Rust, Python, Node.js or C,
         or run it as a REST and gRPC service with a built-in web dashboard. No external database required.</p>
       <div class="cta">
         <a class="btn primary" href="#quickstart">Get started</a>
         <a class="btn" href="#features">Explore features</a>
-        <a class="btn" href="https://github.com/mahpate/Vlite/releases/latest">Download v0.3.0</a>
+        <a class="btn" href="https://github.com/mahpate/Vlite/releases/latest">Download v0.4.0</a>
       </div>
       <div class="install">
         <span class="prompt">$</span>
-        <code id="hero-install">export VLITE_AUTH_TOKEN=$(openssl rand -hex 32); docker run --rm -p 127.0.0.1:8080:8080 -e VLITE_AUTH_TOKEN ghcr.io/mahpate/vlite-api:v0.3.0</code>
+        <code id="hero-install">export VLITE_AUTH_TOKEN=$(openssl rand -hex 32); docker run --rm -p 127.0.0.1:8080:8080 -e VLITE_AUTH_TOKEN ghcr.io/mahpate/vlite-api:v0.4.0</code>
         <button class="copy" data-copy="hero-install">Copy</button>
       </div>
     </div>
@@ -389,7 +389,7 @@ native = NativeLibrary()
         </div>
         <div class="tabpanel" role="tabpanel" id="p-rust" aria-labelledby="t-rust" hidden>
 <button class="copy" data-copy="c-rust">Copy</button>
-<pre class="code" id="c-rust"><span class="c-c">// Cargo.toml: vlite = { git = "https://github.com/mahpate/Vlite", tag = "v0.3.0" }</span>
+<pre class="code" id="c-rust"><span class="c-c">// Cargo.toml: vlite = { git = "https://github.com/mahpate/Vlite", tag = "v0.4.0" }</span>
 <span class="c-k">use</span> vlite::Database;
 
 <span class="c-k">fn</span> main() -&gt; vlite::Result&lt;()&gt; {
@@ -415,7 +415,7 @@ cat .secrets/api-token   <span class="c-c"># paste into the dashboard connection
 <button class="copy" data-copy="c-devbox">Copy</button>
 <pre class="code" id="c-devbox"><span class="c-c"># PowerShell on Windows with Docker inside WSL</span>
 git clone https://github.com/mahpate/Vlite; cd Vlite
-.\scripts\devbox.ps1          <span class="c-c"># pulls v0.3.0 images, starts API + dashboard</span>
+.\scripts\devbox.ps1          <span class="c-c"># pulls v0.4.0 images, starts API + dashboard</span>
 .\scripts\devbox.ps1 -Token   <span class="c-c"># copies the API token to the clipboard</span>
 <span class="c-c"># Dashboard: http://localhost:8082   API: http://localhost:18085</span></pre>
         </div>
