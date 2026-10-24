@@ -8,7 +8,7 @@ registry version before assuming an upload has completed.
 
 Python packages are published on PyPI: [vlite-embedded](https://pypi.org/project/vlite-embedded/)
 for in-process use and [vlite-client](https://pypi.org/project/vlite-client/)
-for the REST API. The currently published versions are 0.3.0. Install them
+for the REST API. Both packages are published as version 0.4.1. Install them
 directly with pip; no repository clone or Rust toolchain is needed. Other
 prebuilt release assets are available from
 [GitHub releases](https://github.com/mahpate/Vlite/releases). npm packages are
@@ -53,7 +53,7 @@ Requires Python 3.11+. The recommended end-user installation is:
 python -m pip install vlite-embedded
 ```
 
-PyPI 0.3.0 provides Windows x64, macOS arm64 and Linux x86_64/glibc 2.28+
+PyPI 0.4.1 provides Windows x64, macOS arm64 and Linux x86_64/glibc 2.28+
 wheels. For supported platforms, pip selects the matching wheel and
 `NativeLibrary()` loads its bundled native library. If you need a release asset
 instead, choose a `vlite_embedded-*.whl` matching your OS and architecture and

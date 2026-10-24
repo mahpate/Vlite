@@ -13,7 +13,7 @@ For application use, install the published
 python -m pip install vlite-embedded
 ```
 
-The current published version is 0.3.0, with wheels for Windows x64, macOS
+The current published version is 0.4.1, with wheels for Windows x64, macOS
 arm64 and Linux x86_64/glibc 2.28+. The API below also documents current
 repository-source additions; those may not be present in the published wheel.
 

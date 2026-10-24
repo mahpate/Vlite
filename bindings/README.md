@@ -42,7 +42,7 @@ with Python 3.11+:
 python -m pip install vlite-embedded
 ```
 
-PyPI 0.3.0 includes bundled wheels for Windows x64, macOS arm64 and Linux
+PyPI 0.4.1 includes bundled wheels for Windows x64, macOS arm64 and Linux
 x86_64/glibc 2.28+. `NativeLibrary()` loads the bundled native library.
 
 For contributors or source-only APIs, build a platform-specific wheel from the
