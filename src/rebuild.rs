@@ -259,7 +259,8 @@ impl Job {
     }
 
     pub fn progress(&self) -> HnswRebuildProgress {
-        let phase = match (self.terminal, self.finished()) {
+        let worker_finished = self.finished();
+        let phase = match (self.terminal, worker_finished) {
             (None, false) => "building",
             (Some(_), false) => "cancelling",
             (None, true) => "ready_to_publish",
@@ -271,7 +272,7 @@ impl Job {
             metric: self.metric,
             snapshot_records: self.snapshot_records,
             processed_records: self.processed.load(Ordering::Relaxed),
-            worker_finished: self.finished(),
+            worker_finished,
             terminal_reason: self.terminal,
             catchup_buffer: self.changes.as_ref().map(HnswBufferCapacity::of),
         }
