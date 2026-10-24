@@ -168,7 +168,7 @@
   <section id="concurrent-readers" class="alt">
     <div class="wrap">
       <h2>Concurrent readers</h2>
-      <p>Current source adds shared-lock read-only embedded handles, concurrent server read routes and parallel exact scans.
+      <p>VLite 0.4.1 includes shared-lock read-only embedded handles, concurrent server read routes and parallel exact scans.
         Throughput before vs after with 1&ndash;16 concurrent search clients:</p>
       <div class="table-wrap"><table><thead><tr><th>Search</th><th>Concurrent readers</th><th>QPS before</th><th>QPS after</th><th>p50 / p95 / p99 ms before</th><th>p50 / p95 / p99 ms after</th></tr></thead><tbody><tr><td>Exact</td><td>1</td><td>483</td><td><strong>788</strong></td><td>2.00 / 2.51 / 3.21</td><td>1.25 / 1.41 / 1.65</td></tr><tr><td>Exact</td><td>4</td><td>636</td><td><strong>1,529</strong></td><td>6.11 / 7.21 / 8.52</td><td>2.62 / 3.22 / 3.52</td></tr><tr><td>Exact</td><td>8</td><td>634</td><td><strong>1,927</strong></td><td>12.27 / 14.16 / 18.30</td><td>4.22 / 5.95 / 6.89</td></tr><tr><td>Exact</td><td>16</td><td>629</td><td><strong>2,155</strong></td><td>24.77 / 29.44 / 35.89</td><td>7.58 / 11.37 / 12.77</td></tr><tr><td>HNSW</td><td>1</td><td>1,528</td><td><strong>1,560</strong></td><td>0.64 / 0.78 / 0.97</td><td>0.62 / 0.76 / 0.97</td></tr><tr><td>HNSW</td><td>4</td><td>3,521</td><td><strong>4,038</strong></td><td>1.13 / 1.30 / 1.67</td><td>0.95 / 1.37 / 1.65</td></tr><tr><td>HNSW</td><td>8</td><td>3,491</td><td><strong>4,310</strong></td><td>2.26 / 2.54 / 3.75</td><td>1.77 / 2.92 / 3.59</td></tr><tr><td>HNSW</td><td>16</td><td>3,447</td><td><strong>4,648</strong></td><td>4.58 / 5.16 / 8.38</td><td>3.22 / 6.18 / 7.80</td></tr></tbody></table></div>
       <p>Single-reader exact search on 100k &times; 768: p50 <strong>44.8 ms &rarr; 10.2 ms</strong> (22 &rarr; 98 QPS) from the parallel exact scan.</p>
@@ -180,7 +180,12 @@
 
   <section id="current-source-performance">
     <div class="wrap">
-      <h2>Current-source optimization work</h2>
+      <h2>Optimizations included in VLite 0.4.1</h2>
+      <p>These features are available in the
+        <a href="https://github.com/mahpate/Vlite/releases/tag/v0.4.1">official v0.4.1 release</a>
+        and matching Python packages. The development measurements below were
+        collected before release; they are not fresh v0.4.1 benchmark runs.
+        Historical 0.3.0 cross-engine results above retain their original versions.</p>
       <p>HNSW neighbor selection now reuses borrowed accepted vectors; ANN snapshot
         hashing batches identical bytes and numeric decoding avoids an intermediate
         byte-vector allocation. Optional C/Python float32 inputs reduce vector JSON
@@ -189,9 +194,9 @@
         save/load and typed-input overhead. These were shared-host measurements,
         not isolated end-to-end speedup evidence, and do not update the release
         comparisons above. A distance-loop unroll was rejected after inconsistent
-        timings. Published Python 0.3.0 wheels do not include the new buffer methods.</p>
+        timings. Python 0.4.1 wheels include the buffer methods; older 0.3.0 wheels do not.</p>
       <p><a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/README.md#current-source-performance-work-october-23-2026">Workloads, raw samples, reproduction and remaining bottlenecks</a></p>
-      <h3>Next source-only concurrency and binding work</h3>
+      <h3>Released concurrency and binding capabilities</h3>
       <p>Opt-in durable group commit coalesces bounded concurrent record writes
         while retaining separate recovery frames and sync-before-acknowledgement.
         It is disabled by default and can reduce sequential throughput.
@@ -200,8 +205,8 @@
       <p>The Node.js embedded binding adds opt-in Float32Array search, atomic bulk
         puts and bounded multi-query calls. Inputs are privately copied, not
         zero-copy, and multi-query calls do not promise a shared snapshot across
-        other owners. These source changes are not included in previously
-        published packages and do not revise the cross-engine results above.
+        other owners. These capabilities are included in 0.4.1 packages,
+        but do not revise the historical cross-engine results above.
         See <a href="docs/CONSOLE-ADMIN.html#opt-in-durable-group-commit">group-commit
         configuration and limitations</a> and the
         <a href="https://github.com/mahpate/Vlite/blob/main/bindings/node/README.md">Node.js guide</a>.</p>
@@ -216,7 +221,7 @@
         have costs. These Windows shared-host measurements do not establish a
         universal throughput or tail-latency improvement.</p>
       <h3>Workload-selectable read policy</h3>
-      <p>Current source also supports <code>--lock-held-reads</code> for workloads
+      <p>VLite 0.4.1 also supports <code>--lock-held-reads</code> for workloads
         where immutable-generation copying is a worse trade-off than holding
         the owner read lock during exact scans. Snapshot reads remain the default.
         Compare correctness and reader/writer tail latency on your own workload;
@@ -237,7 +242,7 @@
   </section>
   <section id="hnsw-traversal">
     <div class="wrap">
-      <h2>HNSW traversal optimization (unreleased source)</h2>
+      <h2>HNSW traversal optimization (released in 0.4.1)</h2>
       <p>A bounded visited-node bitmap replaces per-node hashing during graph
         construction and search on graphs up to 8,388,608 nodes. Each traversal
         owns one bit per node, rounded up to 64-bit words (at most 1 MiB);
@@ -268,7 +273,7 @@
       </div>
       <div class="table-wrap">
         <table class="matrix">
-          <thead><tr><th>Capability</th><th>VLite current source</th><th>zvec 0.8.0 / ecosystem</th></tr></thead>
+          <thead><tr><th>Capability</th><th>VLite 0.4.1</th><th>zvec 0.8.0 / ecosystem</th></tr></thead>
           <tbody>
             <tr class="group"><td colspan="3">Storage &amp; durability</td></tr>
             <tr><td>Deployment model</td><td>Single <code>.vlite</code> file (+ optional sidecars)</td><td>Collection directory</td></tr>

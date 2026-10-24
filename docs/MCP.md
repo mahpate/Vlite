@@ -5,7 +5,8 @@
 The MCP server is a repository/server feature; it is not bundled in either
 published Python package. Install the Python packages separately with
 `python -m pip install vlite-embedded` or `python -m pip install vlite-client`.
-Current MCP APIs and observability changes on `main` are not part of PyPI 0.3.0.
+The v0.4.1 native release archives include `vlite-mcp`; Python packages do not
+install that server executable.
 
 ## Install and launch
 

@@ -2,7 +2,7 @@
 
 Opt-in engine features: encryption at rest, point-in-time restore, change feed,
 read replicas, disk-based ANN, GPU exact search and a WebAssembly build. Every
-V5-only persisted extensions remain opt-in in 0.3.0. Change feeds and sequence
+V5-only persisted extensions remain opt-in in 0.4.1. Change feeds and sequence
 restore also support V4. V1–V4 encodings are unchanged, and older binaries refuse
 V5 files they do not understand (unknown header flags give `UnsupportedFeature`).
 No operation here modifies a source file in place: each one writes a new file
@@ -10,7 +10,7 @@ through staged, fully revalidated publication, or reads a closed or copied file.
 
 ## Shared-lock read-only snapshots
 
-Current-source `Database::open_read_only(path)` and
+VLite 0.4.1 `Database::open_read_only(path)` and
 `open_read_only_encrypted(path, &key)` open existing files read-only under a
 shared OS file lock. Multiple processes can read the same file; a writer still
 requires exclusive ownership. Conflicting opens return `Error::Locked`, not a

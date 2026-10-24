@@ -399,7 +399,7 @@ flowchart TD
     <p>The HNSW index uses a seeded, deterministic level assignment. Changing <code>m</code>, <code>ef_construction</code>
       or the seed requires a rebuild. With ScalarU8, each dimension is trained into a codebook, traversal uses
       asymmetric u8 distances, and the candidate set is reranked against the original f32 vectors.</p>
-    <p>Unreleased source uses a traversal-local visited bitmap during construction
+    <p>VLite 0.4.1 uses a traversal-local visited bitmap during construction
       and search for graphs up to 8,388,608 nodes: one bit per graph node,
       rounded up to 64-bit words, at most 1 MiB per traversal. Larger graphs use
       a sparse hash set. Concurrent traversals do not share mutable visited state;

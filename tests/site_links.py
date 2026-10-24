@@ -13,7 +13,11 @@ class Page(HTMLParser):
         self.links = []
         self.primary_links = []
         self.in_primary = False
+        self.text = []
         self.feed(text)
+
+    def handle_data(self, data):
+        self.text.append(data)
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
@@ -41,6 +45,15 @@ def check(root):
     errors = []
     for path, page in pages.items():
         if path.parent == root:
+            visible = " ".join(" ".join(page.text).lower().split())
+            for stale in (
+                "unreleased source",
+                "next source-only",
+                "current-source optimization work",
+                "these source changes are not included in previously published packages",
+            ):
+                if stale in visible:
+                    errors.append(f"{path.name}: stale released-feature label {stale!r}")
             for required in ("dashboard.html", "docs/TOOLS.html"):
                 if required not in page.primary_links:
                     errors.append(f"{path.name}: missing primary navigation link {required}")

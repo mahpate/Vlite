@@ -14,8 +14,8 @@ python -m pip install vlite-embedded
 ```
 
 The current published version is 0.4.1, with wheels for Windows x64, macOS
-arm64 and Linux x86_64/glibc 2.28+. The API below also documents current
-repository-source additions; those may not be present in the published wheel.
+arm64 and Linux x86_64/glibc 2.28+. The read-only and typed float32 APIs below
+are included in the 0.4.1 wheel.
 
 `native.create(path, dims)` creates format 3; `native.create(path, dims,
 format=4)` enables named collections (`create_collection`, `list_collections`,

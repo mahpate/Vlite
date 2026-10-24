@@ -39,7 +39,7 @@ On Windows, calculate a file's hash and compare it with its entry in
 `SHA256SUMS`:
 
 ```powershell
-Get-FileHash .\vlite-embedded-0.3.0-win32-x64.tgz -Algorithm SHA256
+Get-FileHash .\vlite-embedded-0.4.1-win32-x64.tgz -Algorithm SHA256
 ```
 
 Checksums detect altered or incomplete downloads; they are not a publisher
@@ -60,7 +60,7 @@ instead, choose a `vlite_embedded-*.whl` matching your OS and architecture and
 install its downloaded filename:
 
 ```text
-python -m pip install ./vlite_embedded-0.3.0-py3-none-win_amd64.whl
+python -m pip install ./vlite_embedded-0.4.1-py3-none-win_amd64.whl
 ```
 
 That example is for Windows x64. Linux x86_64/glibc 2.28+ should use the
@@ -105,7 +105,7 @@ exact-only. No file format migration is required; back up before any upgrade.
 Requires Node.js 22.9+. Choose a host-matching tarball:
 
 ```text
-npm install ./vlite-embedded-0.3.0-win32-x64.tgz
+npm install ./vlite-embedded-0.4.1-win32-x64.tgz
 ```
 
 Use `linux-x64` or the macOS `darwin-<architecture>` asset instead on those
@@ -142,7 +142,7 @@ python -m pip install vlite-client
 Node.js 22+:
 
 ```text
-npm install ./vlite-client-0.3.0.tgz
+npm install ./vlite-client-0.4.1.tgz
 ```
 
 Import `Client` from `vlite_client` in Python or `@vlite/client` in JavaScript.
@@ -162,9 +162,9 @@ need shared access. The live dataset must fit in RAM. Back up before upgrading;
 v0.1.x releases do not claim that a 1.0 stability contract
 or physical power-loss certification has been achieved.
 
-## Additional 0.3.0 packages
+## Additional 0.4.1 packages
 
-See [0.3.0 upgrade and rollback guidance](RELEASE-0.3.0.md) before selecting a
+See [0.4.1 upgrade and rollback guidance](RELEASE-0.4.1.md) before selecting a
 new binary or database format. The native archives also ship the offline shell,
 import, tuning and quality tools. Go/.NET clients, the Helm chart and WASM
 wrapper sources are included in desktop/x64 archives; see the
@@ -180,7 +180,7 @@ and NuGet packages are not prebuilt release assets.
 release (or manually with an existing tag). It downloads that release's wheels,
 verifies them against `SHA256SUMS`, skips the bare `linux_x86_64` wheel (PyPI
 only accepts `manylinux` Linux tags), and uploads with PyPI trusted publishing
-(OIDC; no API token is stored). The 0.3.0 distributions are published at
+(OIDC; no API token is stored). The 0.4.1 distributions are published at
 [vlite-embedded](https://pypi.org/project/vlite-embedded/) and
 [vlite-client](https://pypi.org/project/vlite-client/). End users should use
 the pip commands above.

@@ -31,7 +31,13 @@ shared-host diagnostic run, not a release benchmark or a cross-engine comparison
 Do not interpret single-process operation latency as concurrent HTTP service
 latency or a guarantee that maintenance improves p99.
 
-### Current-source performance work, October 23, 2026
+<a id="current-source-performance-work-october-23-2026"></a>
+
+### Performance work included in 0.4.1, measured October 23, 2026
+
+The optimizations below are released in v0.4.1. Measurements retain their
+original development-build provenance; release availability does not turn them
+into new tagged-release or cross-engine measurements.
 
 Three bounded optimizations retain existing durability, distance precision and
 index validation. Native Windows release measurements were collected on a
@@ -84,7 +90,7 @@ group commit or rebuild snapshot ownership. The follow-on source work below
 addresses those separately. Eventual consistency and weaker durability are not
 prerequisites for these improvements.
 
-### Next source-only concurrency and Node.js work
+### Concurrency and Node.js capabilities released in 0.4.1
 
 Embedded read captures and unquantized background HNSW capture share immutable
 record generations instead of deep-copying vector bodies. Read captures are
@@ -164,10 +170,12 @@ The initial Windows sample used in-memory databases, 512 records, 384 dimensions
 and 40 exact L2 queries. Its fixed variant order can favor later runs through
 cache/JIT warming; no durable-ingest, zero-copy or production speedup claim is
 made. See the [binding guide](../bindings/node/README.md) for bounds and fallback.
-These source-only capabilities do not revise historical cross-engine tables or
-previously published packages.
+These capabilities are included in 0.4.1 packages. They do not revise historical
+cross-engine tables or change the contents of older published packages.
 
-### HNSW visited-membership optimization (unreleased source)
+<a id="hnsw-visited-membership-optimization-unreleased-source"></a>
+
+### HNSW visited-membership optimization (released in 0.4.1)
 
 Construction and filtered search use a dense visited bitmap instead of hashing
 node positions on graphs up to 8,388,608 nodes. Each traversal owns its bitmap,
@@ -693,7 +701,7 @@ the bounded native tool is not a million-vector production load generator.
 
 ## Real GloVe embeddings and mixed deletions
 
-This harness and its new CLI flags are current-source additions after v0.1.2.
+This harness and its CLI flags are included in 0.4.1 (added after v0.1.2).
 Build the benchmark from this checkout; the existing v0.1.2 release binary
 does not contain them. No engine/SDK API or storage format changes are required.
 
@@ -813,7 +821,7 @@ Record/vector limits are **not** total RSS limits. Worker cancellation/close
 are not request latency. This experiment tests an explicitly selected Rust
 API/policy, not automatic background behavior in REST or embedded wrappers.
 Use [the lifecycle contract](../docs/REFERENCE.md#background-hnsw-rebuilds-rust)
-for failure, overload, shutdown and current-source compatibility details.
+for failure, overload, shutdown and version compatibility details.
 
 ### Proactive maintenance experiment
 
@@ -850,7 +858,7 @@ arrival rate**: oracle time, CPU contention and request work also affect it.
 
 ### Exact metrics and cosine ANN
 
-Current-source `vlite-bench` accepts `--metric squared_l2|cosine|inner_product`
+VLite 0.4.1 `vlite-bench` accepts `--metric squared_l2|cosine|inner_product`
 before `--filter-every`/`--ann`. Omission preserves L2. Cosine ANN uses the same
 explicit metric for construction, traversal, buffered updates and its independent
 exact oracle. Inner-product ANN is rejected. Zero-norm dataset records are

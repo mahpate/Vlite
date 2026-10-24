@@ -13,7 +13,7 @@ Optional REST and gRPC services expose the same engine. Optional in-memory HNSW
 search supports approximate retrieval without changing the database file;
 an explicit snapshot sidecar can cache derived graph state across restarts.
 Distributed operation and interactive transactions are deferred; shared-lock
-read-only handles and concurrent server reads are available in current source; see [storage features](STORAGE-FEATURES.md) for opt-in encryption at
+read-only handles and concurrent server reads are available in 0.4.1; see [storage features](STORAGE-FEATURES.md) for opt-in encryption at
 rest, point-in-time restore, change feed, file-shipped replicas, disk ANN, GPU
 and WebAssembly.
 This is a correctness-first MVP, not a production-hardened storage engine.
@@ -23,7 +23,7 @@ per-record revisions, expiry and metadata-only updates, metadata indexes and que
 quantized ANN, quality diagnostics and resumable ingestion. Later sections
 describe legacy/default workflows unless explicitly marked otherwise.
 See [gRPC](GRPC.md) and [ANN snapshots](ANN-SNAPSHOTS.md) for their opt-in
-contracts and [0.3.0 upgrade guidance](RELEASE-0.3.0.md) before deployment.
+contracts and [0.4.1 upgrade guidance](RELEASE-0.4.1.md) before deployment.
 
 See [embedded vector extensions](VECTORS.md) for v5 named/sparse vectors, model
 version history, resumable re-embedding, provider/reranker traits and parsed queries.
@@ -505,7 +505,7 @@ The current metrics request is counted but not yet timed. Snapshots are
 non-transactional; database gauges take a shared read guard, wait for writes and return 503
 when busy or closed. A poisoned owner still exposes failure counters with
 `database_healthy: false` and null database gauges, never stale live data.
-Current-source observability also exposes authenticated `GET /v1/admin/logs`
+VLite 0.4.1 observability also exposes authenticated `GET /v1/admin/logs`
 (`since` sequence cursor, `level`, `q`, `limit` 1..1000, default 200), returning
 `entries`, `next_seq`, `dropped` and `capacity`. The structured log ring is
 process-local and non-durable; `--log-buffer` defaults to 2000 (1..100000).
@@ -920,7 +920,7 @@ and verifies immediate buffer visibility and reopen recovery.
 
 ## Proactive HNSW maintenance (Rust)
 
-Current-source Rust callers can opt into an explicit owner-thread tick:
+Rust callers can opt into an explicit owner-thread tick in 0.4.1:
 `maintain_hnsw(config, metric, policy)`. `HnswMaintenancePolicy` defaults to
 starting a replacement at **128 buffered distinct IDs or 4 MiB of buffered
 original-plus-current vector bytes**. Either threshold triggers; configure
@@ -990,7 +990,7 @@ synchronous and ready-only searches retain their behavior.
 
 ## Background HNSW rebuilds (Rust)
 
-Current-source addition after v0.1.2. The Rust owner has an **opt-in** lifecycle:
+Included in 0.4.1 (added after v0.1.2). The Rust owner has an **opt-in** lifecycle:
 `start_hnsw_rebuild(config, metric, limits)`, `poll_hnsw_rebuild()` and
 `cancel_hnsw_rebuild()`. REST, C ABI, Python/Node wrappers and console controls
 also expose the lifecycle. Optional server scheduling is disabled by default;
@@ -1101,7 +1101,7 @@ External mixed writes require `--update-vectors <file>` with exactly
 `queries * mixed-writes` rows (synthetic replacements are not implicit).
 Per-query live counts/recall, one-based rebuild query numbers, final live count
 and decoded update checksums are reported alongside raw latency samples.
-These flags are current-source additions after v0.1.2, not new SDK/engine APIs.
+These flags are included in 0.4.1 (added after v0.1.2), not new SDK/engine APIs.
 Place these
 flags before the filtering/ANN flags. See the
 [native campaign guide](../benchmarks/README.md#native-profiling-real-vectors-and-mixed-updates)
