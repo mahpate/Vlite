@@ -36,10 +36,11 @@ for builds, installation, examples, ABI ownership and limits.
 Licensed under MIT.
 
 
-## Current-source only: read-only multi-process access
+## Since 0.4.1: read-only multi-process access
 
-This feature is not included in the published PyPI 0.3.0 package. It is available
-from the current repository source. There, `native.open(path, read_only=True)`
+This feature is included in 0.4.1 builds, not the PyPI 0.3.0 package.
+Check the release and PyPI publication status before installing.
+`native.open(path, read_only=True)`
 opens an existing database with a shared OS lock. Multiple read-only handles may
 coexist, including in different processes. `get` and `search` work normally;
 mutations raise `EmbeddedError` with `code == "read_only"` without invalidating

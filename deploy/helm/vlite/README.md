@@ -9,11 +9,11 @@ backup system. The complete live dataset must fit in the container memory limit.
 Build and push the API image from the repository before installation:
 
 ```sh
-docker build --target api -t registry.example/vlite:0.4.0 .
-docker push registry.example/vlite:0.4.0
+docker build --target api -t registry.example/vlite:0.4.1 .
+docker push registry.example/vlite:0.4.1
 kubectl create secret generic vlite-auth --from-literal=token="$VLITE_AUTH_TOKEN"
 helm upgrade --install vectors deploy/helm/vlite \
-  --set image.repository=registry.example/vlite --set image.tag=0.4.0 \
+  --set image.repository=registry.example/vlite --set image.tag=0.4.1 \
   --set auth.existingSecret=vlite-auth --set database.dimensions=3
 kubectl port-forward service/vectors-vlite 8080:8080
 ```

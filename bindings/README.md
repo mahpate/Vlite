@@ -63,10 +63,11 @@ releases are uploaded to PyPI as `vlite-embedded` by
 [published package](https://pypi.org/project/vlite-embedded/) and
 [maintainer publication details](../docs/INSTALL.md#pypi-publication-details-for-maintainers).
 
-The current checkout has APIs not present in the published 0.3.0 wheel,
-including `NativeLibrary.open(..., read_only=True)`. Install from PyPI for the
-released API; use the source-build instructions above when you need current
-unreleased APIs.
+Version 0.4.1 builds add APIs absent from the older 0.3.0 wheel, including
+`NativeLibrary.open(..., read_only=True)` and typed float32 inputs.
+Check [release assets](https://github.com/mahpate/Vlite/releases/tag/v0.4.1)
+and the actual PyPI version; registry uploads follow release verification.
+Use source-build instructions when the required package is not yet available.
 
 For installation without a checkout or Rust toolchain, use the
 [versioned release packages and installation guide](../docs/INSTALL.md).

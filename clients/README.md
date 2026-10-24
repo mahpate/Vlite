@@ -12,6 +12,9 @@ binding is [vlite-embedded on PyPI](https://pypi.org/project/vlite-embedded/);
 see the [embedded deployment guide](../bindings/README.md). npm packages are
 not published. The GitHub release assets and checkout installation below are
 available for alternatives and contributor development.
+Version 0.4.1 builds include the newer client APIs; check the
+[release](https://github.com/mahpate/Vlite/releases/tag/v0.4.1) and PyPI version
+separately before assuming registry publication has completed.
 
 ## Python
 

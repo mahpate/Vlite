@@ -371,7 +371,7 @@ fn commit(
             }
         }
     }
-    for (reply, outcome, _worker, _slot, _bytes, _admission) in completed {
+    for (reply, outcome, worker, slot, bytes, admission) in completed {
         // Validation failures retain their own status. A failed shared sync
         // invalidates every would-be success, including disconnected callers.
         let outcome = match (&result, outcome) {
@@ -384,6 +384,9 @@ fn commit(
         {
             metrics.commit_failures.fetch_add(1, Ordering::Relaxed);
         }
+        // Completion must release admission before waking a caller that may
+        // immediately enqueue another write or inspect retained-work gauges.
+        drop((worker, slot, bytes, admission));
         if reply.send(outcome).is_err() {
             counters
                 .disconnected_replies
@@ -653,6 +656,25 @@ mod tests {
         assert_eq!(db.get(1).unwrap().unwrap().vector, vec![1.0]);
         assert!(db.get(9).unwrap().is_none());
         assert!(db.get(10).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn acknowledged_writes_release_single_slot_admission_before_reply() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let service = service(&directory.path().join("single-slot.vlite"), 1);
+        for id in 0..64 {
+            service
+                .run_mutation(1024, move |db| {
+                    db.put(id, &[id as f32], b"")?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            let stats = service.group_commit.as_ref().unwrap().stats();
+            assert_eq!(stats.admitted_requests, 0);
+            assert_eq!(stats.admitted_bytes, 0);
+        }
+        service.close().await.unwrap();
     }
 
     #[tokio::test]

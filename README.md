@@ -23,8 +23,10 @@ It uses its own storage format and does not require an external database.
 
 ## Capabilities
 
-**Release 0.4.0:** concurrency, typed bindings, dashboard and stability updates;
-see [upgrade and rollback guidance](docs/RELEASE-0.4.0.md).
+**Release 0.4.1:** concurrency, typed bindings, dashboard and stability updates;
+see [upgrade and rollback guidance](docs/RELEASE-0.4.1.md).
+Track [release assets](https://github.com/mahpate/Vlite/releases/tag/v0.4.1)
+and [build/publication status](https://github.com/mahpate/Vlite/actions/workflows/release.yml).
 Registry uploads are verified separately from tagged GitHub builds.
 
 - **Single-file persistence:** versioned binary records, checksums, synchronous
@@ -54,8 +56,8 @@ Registry uploads are verified separately from tagged GitHub builds.
   reopen to see later commits. Mutations return `Error::ReadOnly` without poisoning.
   In-memory ANN builds are allowed. Python C ABI calls remain serialized within
   one process; use multiple reader processes. The Python/Node read-only options
-  are source-only and are not in the published Python 0.3.0 wheel or Node 0.3.0
-  release tarball.
+  are included in 0.4.1 builds, not the older Python 0.3.0 wheel or Node 0.3.0
+  release tarball. Check release/registry availability before installing.
   See [locking contracts](docs/REFERENCE.md).
 - **Observability and studio UX:** [dashboard](docs/CONSOLE.md) metric cards,
   sparklines, per-route latency, filtered live logs and JSONL export; Prometheus
@@ -184,7 +186,7 @@ with native.create("documents.vlite", dimensions=3) as db:
 
 Use `native.open("documents.vlite")` to reopen; creation never overwrites.
 The published 0.3.0 package does not include the newer `read_only=True`
-argument; shared read-only opens are available from current repository source.
+argument; shared read-only opens are included in 0.4.1 builds.
 See [Python installation and native platform support](bindings/README.md).
 
 ## Quick start: embedded Node.js / TypeScript
@@ -354,8 +356,8 @@ See [client installation, examples and error handling](clients/README.md) and
 the [REST API reference](docs/API.md).
 The Python REST client is published as
 [vlite-client on PyPI](https://pypi.org/project/vlite-client/); install it with
-`python -m pip install vlite-client`. Current-source MCP and observability
-features are not part of the published Python 0.3.0 client.
+`python -m pip install vlite-client`. Version 0.4.1 builds include the newer
+MCP and observability work; the older Python 0.3.0 client does not.
 
 ## Browser dashboard
 

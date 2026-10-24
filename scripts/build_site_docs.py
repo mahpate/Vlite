@@ -21,7 +21,7 @@ GROUPS = [
     ("Storage & indexes", ["STORAGE-FEATURES", "ANN-SNAPSHOTS"]),
     ("Operations", ["DOCKER-OPERATIONS", "SECURITY", "WEBHOOKS", "TOOLS"]),
     ("Console", ["CONSOLE", "CONSOLE-ADMIN"]),
-    ("Releases", ["RELEASE-0.4.0", "RELEASE-0.3.0", "RELEASE-0.2.0"]),
+    ("Releases", ["RELEASE-0.4.1", "RELEASE-0.4.0", "RELEASE-0.3.0", "RELEASE-0.2.0"]),
 ]
 
 

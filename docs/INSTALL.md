@@ -1,8 +1,8 @@
 # Install a versioned VLite release
 
-The 0.4.0 release packages the newer read-only, typed-input, dashboard and
+The 0.4.1 release packages the newer read-only, typed-input, dashboard and
 observability APIs described below as source additions relative to 0.3.0.
-Use [0.4.0 upgrade guidance](RELEASE-0.4.0.md) and its matching GitHub assets.
+Use [0.4.1 upgrade guidance](RELEASE-0.4.1.md) and its matching GitHub assets.
 PyPI uploads follow the verified release workflow separately; check the
 registry version before assuming an upload has completed.
 
@@ -14,11 +14,11 @@ prebuilt release assets are available from
 [GitHub releases](https://github.com/mahpate/Vlite/releases). npm packages are
 not published.
 
-The repository's `main` branch can contain newer APIs than the 0.3.0 PyPI
-packages. In particular, Python `read_only=True` opens and the current MCP and
-observability work are source-only; do not assume they are available by
-installing either published Python package. Use the package's versioned API or
-build the current source when you need those changes.
+Version 0.4.1 builds include Python `read_only=True`, typed float32 inputs and
+the newer MCP/observability work. These are absent from 0.3.0 packages.
+Check the exact installed version and
+[release publication status](https://github.com/mahpate/Vlite/actions/workflows/release.yml);
+`main` can still contain later unreleased APIs.
 
 ## Verify before installing
 
