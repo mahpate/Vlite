@@ -1,4 +1,4 @@
-import { NativeLibrary, EmbeddedError } from "./index.js";
+import { NativeLibrary, EmbeddedError, type Hit } from "./index.js";
 
 export async function example(path: string): Promise<void> {
   const native = new NativeLibrary();
@@ -61,6 +61,11 @@ async function featureTypes(native: NativeLibrary) {
   const db = await native.createInMemory(2, { format: 5, commitTimestamps: true });
   await db.putWithExpiry("1", [1, 0], { expiresAtMs: "18446744073709551615" });
   await db.put("2", [0, 1], { expiresAtMs: 1 });
+  const typedVector = new Float32Array([1, 0]);
+  await db.batchPutF32([{ id: "typed", vector: typedVector, payload: new Uint8Array([0, 255]) }]);
+  const typedHits: Hit[][] = await db.searchManyF32([typedVector, new Float32Array([0, 1])], 2);
+  await db.searchF32(typedVector, 2, { explain: true });
+  void typedHits;
   await db.updateMetadata("1", { point: { type: "geopoint", value: { latitude: 0, longitude: 0 } } });
   const groups = await db.searchGrouped([1, 0], 2, 1, "tag");
   const hits = await db.recommend(2, { positiveIds: ["1"] });

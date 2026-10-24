@@ -201,7 +201,7 @@ pub(crate) struct LoadedCollection {
     pub settings: CollectionSettings,
     /// True once a create (op 5) or settings (op 7) frame stored the settings.
     pub settings_persisted: bool,
-    pub records: BTreeMap<u64, Record>,
+    pub records: crate::records::RecordMap,
     pub expiries: BTreeMap<u64, u64>,
     /// Sequence of the frame that last put each live record.
     pub revisions: BTreeMap<u64, u64>,
@@ -216,7 +216,7 @@ impl LoadedCollection {
             dimensions,
             settings,
             settings_persisted: false,
-            records: BTreeMap::new(),
+            records: crate::records::RecordMap::new(),
             expiries: BTreeMap::new(),
             revisions: BTreeMap::new(),
             live_body_bytes: 0,
@@ -302,7 +302,7 @@ impl Loaded {
     }
 
     /// Records of the default collection.
-    pub(crate) fn default_records(&self) -> &BTreeMap<u64, Record> {
+    pub(crate) fn default_records(&self) -> &crate::records::RecordMap {
         &self.collections[&0].records
     }
 }
@@ -310,14 +310,49 @@ impl Loaded {
 /// Streaming IEEE CRC-32: `crc32_update(crc32_update(0, a), b) == crc32(a ++ b)`.
 pub(crate) fn crc32_update(previous: u32, bytes: &[u8]) -> u32 {
     let mut crc = !previous;
-    for &byte in bytes {
-        crc ^= u32::from(byte);
-        for _ in 0..8 {
-            crc = (crc >> 1) ^ (0xedb8_8320 & (0u32.wrapping_sub(crc & 1)));
-        }
+    let (chunks, tail) = bytes.as_chunks::<8>();
+    for chunk in chunks {
+        let low = u32::from_le_bytes(chunk[..4].try_into().unwrap()) ^ crc;
+        crc = CRC32_TABLE[7][low as u8 as usize]
+            ^ CRC32_TABLE[6][(low >> 8) as u8 as usize]
+            ^ CRC32_TABLE[5][(low >> 16) as u8 as usize]
+            ^ CRC32_TABLE[4][(low >> 24) as usize]
+            ^ CRC32_TABLE[3][chunk[4] as usize]
+            ^ CRC32_TABLE[2][chunk[5] as usize]
+            ^ CRC32_TABLE[1][chunk[6] as usize]
+            ^ CRC32_TABLE[0][chunk[7] as usize];
+    }
+    for &byte in tail {
+        crc = (crc >> 8) ^ CRC32_TABLE[0][((crc as u8) ^ byte) as usize];
     }
     !crc
 }
+
+const CRC32_TABLE: [[u32; 256]; 8] = {
+    let mut table = [[0; 256]; 8];
+    let mut byte = 0;
+    while byte < 256 {
+        let mut crc = byte as u32;
+        let mut bit = 0;
+        while bit < 8 {
+            crc = (crc >> 1) ^ (0xedb8_8320 & (0u32.wrapping_sub(crc & 1)));
+            bit += 1;
+        }
+        table[0][byte] = crc;
+        byte += 1;
+    }
+    let mut slice = 1;
+    while slice < 8 {
+        byte = 0;
+        while byte < 256 {
+            let crc = table[slice - 1][byte];
+            table[slice][byte] = (crc >> 8) ^ table[0][(crc & 255) as usize];
+            byte += 1;
+        }
+        slice += 1;
+    }
+    table
+};
 
 // IEEE CRC-32, reflected polynomial. Checksums detect accidents, not tampering.
 pub(crate) fn crc32(bytes: &[u8]) -> u32 {
@@ -1162,7 +1197,7 @@ pub(crate) fn next_frame<R: Read + Seek>(
     disk.resize(disk_len, 0);
     file.read_exact(&mut disk[PREFIX_SIZE..])?;
     let sequence = u64_at(&prefix, 8);
-    let plain = verified_frame(&disk, header.cipher.as_ref(), sequence, offset)?;
+    let plain = verified_frame(&disk, header.cipher.as_ref(), sequence, offset)?.into_owned();
     Ok(Some(RawFrame {
         operation,
         collection: u16_at(&prefix, 5),
@@ -1223,6 +1258,7 @@ pub(crate) fn load_with<R: Read + Seek>(
     let mut creates_seen = 0u64;
     // A time anchor read ahead of its commit frame: (timestamp, frame bytes).
     let mut anchor: Option<(u64, u64)> = None;
+    let mut disk = Vec::new();
     loop {
         let anchor_len = anchor.map_or(0, |(_, len)| len);
         let offset = loaded.end + anchor_len;
@@ -1266,7 +1302,8 @@ pub(crate) fn load_with<R: Read + Seek>(
                 loaded.incomplete_bytes = remaining;
                 break;
             }
-            let mut disk = prefix.to_vec();
+            disk.clear();
+            disk.extend_from_slice(&prefix);
             disk.resize(length_on_disk as usize, 0);
             file.read_exact(&mut disk[PREFIX_SIZE..])?;
             let plain = verified_frame(&disk, cipher.as_ref(), u64_at(&prefix, 8), offset)?;
@@ -1392,7 +1429,8 @@ pub(crate) fn load_with<R: Read + Seek>(
             loaded.incomplete_bytes = remaining + anchor_len;
             break;
         }
-        let mut disk = prefix.to_vec();
+        disk.clear();
+        disk.extend_from_slice(&prefix);
         disk.resize(frame_len as usize, 0);
         file.read_exact(&mut disk[PREFIX_SIZE..])?;
         let frame = verified_frame(&disk, cipher.as_ref(), sequence, offset)?;
@@ -1561,12 +1599,12 @@ pub(crate) fn load_with<R: Read + Seek>(
 
 /// Verifies a complete on-disk frame (footer, checksum, and for encrypted files
 /// the authentication tag) and returns it in plaintext `wrap` layout.
-pub(crate) fn verified_frame(
-    disk: &[u8],
+pub(crate) fn verified_frame<'a>(
+    disk: &'a [u8],
     cipher: Option<&Cipher>,
     sequence: u64,
     offset: u64,
-) -> Result<Vec<u8>> {
+) -> Result<std::borrow::Cow<'a, [u8]>> {
     let footer = &disk[disk.len() - FOOTER_SIZE..];
     if &footer[..4] != b"VCMT"
         || u64_at(footer, 8) != sequence
@@ -1575,9 +1613,10 @@ pub(crate) fn verified_frame(
         return Err(corrupt(offset, "commit footer or record checksum mismatch"));
     }
     match cipher {
-        None => Ok(disk.to_vec()),
+        None => Ok(std::borrow::Cow::Borrowed(disk)),
         Some(cipher) => cipher
             .open_frame(disk)
+            .map(std::borrow::Cow::Owned)
             .ok_or_else(|| corrupt(offset, "frame authentication failed")),
     }
 }
@@ -1596,6 +1635,76 @@ pub(crate) fn vector_frame(sequence: u64, collection: u16, body: &[u8]) -> Vec<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reference_crc32(previous: u32, bytes: &[u8]) -> u32 {
+        let mut crc = !previous;
+        for &byte in bytes {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (0xedb8_8320 & (0u32.wrapping_sub(crc & 1)));
+            }
+        }
+        !crc
+    }
+
+    #[test]
+    fn slicing_crc_matches_bitwise_reference_for_lengths_offsets_and_streaming() {
+        let bytes: Vec<_> = (0..4104).map(|i| ((i * 37 + i / 19) & 255) as u8).collect();
+        for offset in 0..8 {
+            for length in 0..=4096 {
+                let data = &bytes[offset..offset + length];
+                let expected = reference_crc32(0, data);
+                assert_eq!(crc32(data), expected);
+                for split in [0, length / 2, length] {
+                    assert_eq!(
+                        crc32_update(crc32(&data[..split]), &data[split..]),
+                        expected
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "bounded component timing; run explicitly in release mode"]
+    fn replay_component_profile() {
+        use std::{hint::black_box, time::Instant};
+        let bytes: Vec<_> = (0..2048 * 512)
+            .flat_map(|i| ((i % 997) as f32 / 997.0).to_le_bytes())
+            .collect();
+        let mut scalar = Vec::new();
+        let mut sliced = Vec::new();
+        let mut decode = Vec::new();
+        for trial in 0..9 {
+            let mut measure_crc = |reference: bool| {
+                let start = Instant::now();
+                let crc = if reference {
+                    reference_crc32(0, black_box(&bytes))
+                } else {
+                    crc32(black_box(&bytes))
+                };
+                if reference {
+                    scalar.push(start.elapsed().as_nanos());
+                } else {
+                    sliced.push(start.elapsed().as_nanos());
+                }
+                black_box(crc)
+            };
+            let (a, b) = if trial % 2 == 0 {
+                (measure_crc(true), measure_crc(false))
+            } else {
+                (measure_crc(false), measure_crc(true))
+            };
+            assert_eq!(a, b);
+            let start = Instant::now();
+            black_box(decode_vector(black_box(&bytes), 0).unwrap());
+            decode.push(start.elapsed().as_nanos());
+        }
+        println!(
+            "bytes={} scalar_crc_ns={scalar:?} slicing_crc_ns={sliced:?} decode_ns={decode:?}",
+            bytes.len()
+        );
+    }
 
     #[test]
     fn standard_crc32_check_vector() {

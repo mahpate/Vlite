@@ -16,6 +16,8 @@ struct Library {
 #endif
   uint32_t (*version)() = nullptr;
   char *(*execute)(uint64_t, const uint8_t *, size_t) = nullptr;
+  char *(*search_f32)(uint64_t, const uint8_t *, size_t, const float *, size_t) = nullptr;
+  char *(*batch_put_f32)(uint64_t, const uint8_t *, size_t, const float *, size_t) = nullptr;
   void (*free_response)(char *) = nullptr;
   ~Library() {
     if (module) {
@@ -75,6 +77,8 @@ static napi_value load(napi_env env, napi_callback_info info) {
   if (!library->module) return fail(env, "Cannot load native VLite library for this platform");
   library->version = reinterpret_cast<decltype(library->version)>(SYMBOL("vlite_abi_version"));
   library->execute = reinterpret_cast<decltype(library->execute)>(SYMBOL("vlite_execute"));
+  library->search_f32 = reinterpret_cast<decltype(library->search_f32)>(SYMBOL("vlite_search_f32"));
+  library->batch_put_f32 = reinterpret_cast<decltype(library->batch_put_f32)>(SYMBOL("vlite_batch_put_f32"));
   library->free_response = reinterpret_cast<decltype(library->free_response)>(SYMBOL("vlite_response_free"));
 #undef SYMBOL
   if (!library->version || !library->execute || !library->free_response || library->version() != 1)
@@ -82,6 +86,125 @@ static napi_value load(napi_env env, napi_callback_info info) {
   napi_value result;
   napi_get_undefined(env, &result);
   return result;
+}
+
+struct TypedInput {
+  Library *library;
+  uint64_t handle;
+  const uint8_t *request;
+  size_t request_length;
+  const float *vectors;
+  size_t vector_count;
+};
+
+static bool read_typed_input(napi_env env, napi_callback_info info, size_t expected_argc,
+                             napi_value *args, TypedInput *input) {
+  size_t argc = expected_argc;
+  if (napi_get_cb_info(env, info, &argc, args, nullptr, nullptr) != napi_ok || argc != expected_argc) {
+    fail(env, "Expected handle, request buffer and Float32Array");
+    return false;
+  }
+  if (napi_get_instance_data(env, reinterpret_cast<void **>(&input->library)) != napi_ok ||
+      !input->library || !input->library->execute || !input->library->free_response) {
+    fail(env, "Native library not loaded");
+    return false;
+  }
+  bool lossless;
+  if (napi_get_value_bigint_uint64(env, args[0], &input->handle, &lossless) != napi_ok || !lossless) {
+    fail(env, "Handle must be a lossless u64 bigint");
+    return false;
+  }
+  bool is_buffer;
+  void *request_data;
+  if (napi_is_buffer(env, args[1], &is_buffer) != napi_ok || !is_buffer ||
+      napi_get_buffer_info(env, args[1], &request_data, &input->request_length) != napi_ok) {
+    fail(env, "Request must be a buffer");
+    return false;
+  }
+  input->request = static_cast<const uint8_t *>(request_data);
+  bool is_typed_array;
+  if (napi_is_typedarray(env, args[2], &is_typed_array) != napi_ok || !is_typed_array) {
+    fail(env, "Vectors must be a Float32Array");
+    return false;
+  }
+  napi_typedarray_type type;
+  void *data;
+  napi_value array_buffer;
+  size_t byte_offset;
+  if (napi_get_typedarray_info(env, args[2], &type, &input->vector_count, &data,
+                               &array_buffer, &byte_offset) != napi_ok ||
+      type != napi_float32_array) {
+    fail(env, "Vectors must be a Float32Array");
+    return false;
+  }
+  input->vectors = static_cast<const float *>(data);
+  return true;
+}
+
+static napi_value native_string(napi_env env, Library *library, char *response) {
+  if (!response) return fail(env, "Native response missing; mutation outcome unknown");
+  napi_value result;
+  napi_status status = napi_create_string_utf8(env, response, NAPI_AUTO_LENGTH, &result);
+  library->free_response(response);
+  if (status != napi_ok) return fail(env, "Cannot decode native response; mutation outcome unknown");
+  return result;
+}
+
+static napi_value typed_available(napi_env env, napi_callback_info info) {
+  Library *library;
+  if (napi_get_instance_data(env, reinterpret_cast<void **>(&library)) != napi_ok || !library) {
+    return fail(env, "Missing addon state");
+  }
+  napi_value result;
+  napi_get_boolean(env, library->search_f32 && library->batch_put_f32, &result);
+  return result;
+}
+
+static napi_value search_f32(napi_env env, napi_callback_info info) {
+  napi_value args[3];
+  TypedInput input{};
+  if (!read_typed_input(env, info, 3, args, &input)) return nullptr;
+  if (!input.library->search_f32) return fail(env, "Native library does not export vlite_search_f32");
+  return native_string(env, input.library, input.library->search_f32(
+      input.handle, input.request, input.request_length, input.vectors, input.vector_count));
+}
+
+static napi_value batch_put_f32(napi_env env, napi_callback_info info) {
+  napi_value args[3];
+  TypedInput input{};
+  if (!read_typed_input(env, info, 3, args, &input)) return nullptr;
+  if (!input.library->batch_put_f32) return fail(env, "Native library does not export vlite_batch_put_f32");
+  return native_string(env, input.library, input.library->batch_put_f32(
+      input.handle, input.request, input.request_length, input.vectors, input.vector_count));
+}
+
+static napi_value search_many_f32(napi_env env, napi_callback_info info) {
+  napi_value args[4];
+  TypedInput input{};
+  if (!read_typed_input(env, info, 4, args, &input)) return nullptr;
+  if (!input.library->search_f32) return fail(env, "Native library does not export vlite_search_f32");
+  uint32_t dimensions;
+  if (napi_get_value_uint32(env, args[3], &dimensions) != napi_ok || dimensions == 0 ||
+      input.vector_count % dimensions != 0 || input.vector_count / dimensions > 128) {
+    return fail(env, "Invalid bounded Float32Array search matrix");
+  }
+  const size_t queries = input.vector_count / dimensions;
+  napi_value results;
+  if (napi_create_array_with_length(env, queries, &results) != napi_ok) {
+    return fail(env, "Cannot allocate search result array");
+  }
+  for (size_t i = 0; i < queries; ++i) {
+    char *response = input.library->search_f32(input.handle, input.request, input.request_length,
+                                                input.vectors + i * dimensions, dimensions);
+    if (!response) return fail(env, "Native response missing; read outcome unknown");
+    napi_value item;
+    napi_status status = napi_create_string_utf8(env, response, NAPI_AUTO_LENGTH, &item);
+    input.library->free_response(response);
+    if (status != napi_ok || napi_set_element(env, results, i, item) != napi_ok) {
+      return fail(env, "Cannot decode native response; read outcome unknown");
+    }
+  }
+  return results;
 }
 
 static napi_value execute(napi_env env, napi_callback_info info) {
@@ -121,9 +244,13 @@ static napi_value init(napi_env env, napi_value exports) {
   }
   napi_property_descriptor properties[] = {
     {"load", nullptr, load, nullptr, nullptr, nullptr, napi_default, nullptr},
-    {"execute", nullptr, execute, nullptr, nullptr, nullptr, napi_default, nullptr}
+    {"execute", nullptr, execute, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"typedAvailable", nullptr, typed_available, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"searchF32", nullptr, search_f32, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"batchPutF32", nullptr, batch_put_f32, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"searchManyF32", nullptr, search_many_f32, nullptr, nullptr, nullptr, napi_default, nullptr}
   };
-  if (napi_define_properties(env, exports, 2, properties) != napi_ok)
+  if (napi_define_properties(env, exports, 6, properties) != napi_ok)
     return fail(env, "Cannot export addon");
   return exports;
 }

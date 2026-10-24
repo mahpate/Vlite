@@ -1,0 +1,156 @@
+{
+  "status": "Accepted engine work complete; reusable construction scratch trial rejected, no new contiguous vector layout or startup checkpoint implemented.",
+  "source_baseline": "Same native Windows checkout before immutable RecordMap and CRC/replay changes, based on HEAD 62e2902. Optional internal group fields do not affect the default-feature benchmark.",
+  "files": [
+    "src/lib.rs",
+    "src/collection.rs",
+    "src/records.rs",
+    "src/rebuild.rs",
+    "src/hnsw.rs",
+    "src/format.rs",
+    "src/disk_ann.rs",
+    "src/metadata_index.rs",
+    "src/text_index.rs",
+    "src/vectors.rs",
+    "tests/read_snapshots.rs",
+    "tests/support/hnsw_selection_perf.rs",
+    "examples/engine_snapshot_perf.rs",
+    "docs/read-snapshots.md"
+  ],
+  "api": [
+    "Database::read_snapshot() -> Result<ReadSnapshot>",
+    "CollectionRef::read_snapshot() -> Result<ReadSnapshot>",
+    "ReadSnapshot::{sequence,lineage,dimensions,len,is_empty,get,get_at,browse,browse_at,search,search_filtered_with_metric,search_filtered_with_metric_at}",
+    "crate-private Database::durable_group<T>(FnOnce(&mut Self)->T)->Result<T>; server owns owner-lock discipline and sends no provisional success before outer Ok"
+  ],
+  "semantics": [
+    "O(1) immutable generation capture; COW ID tree on first following write, immutable Arc<Record> bodies share unchanged vectors/payloads/metadata; public Record unchanged.",
+    "At most 8 distinct read captures per Database, each <=100000 physical records and <=128MiB logical body bytes; clones share one lease; no hidden retained-version registry.",
+    "Default snapshot TTL frozen at capture time; explicit _at APIs available.",
+    "Background unquantized capture shares records with total retained logical body cap256MiB, in addition to configured vector/record limits; ScalarU8 still trains/encodes synchronously.",
+    "Publication rejects worker when collection vector version is not covered by bounded catchup.",
+    "Group callback results are provisional, not externally committed until final sync. Validation rejects remain per-frame. Append/final-sync errors poison; callback unwind resets scope and poisons before resume. Group is NOT one transaction and does NOT roll back valid neighboring frames."
+  ],
+  "commands": [
+    "cargo run --release --example engine_snapshot_perf -- baseline",
+    "cargo run --release --example engine_snapshot_perf -- final",
+    "cargo test --release --lib replay_component_profile -- --ignored --nocapture",
+    "cargo test --lib --test read_snapshots --test background_hnsw --test ann_snapshot --test snapshot_lifecycle_boundaries --test batches --test encryption --test format_v5 --test hnsw_maintenance --test metrics --test conditional --test replica --test named_vectors --test metadata_index --test hybrid --quiet",
+    "cargo clippy --lib --features grpc -- -D warnings",
+    "cargo test --test read_snapshots --quiet",
+    "cargo clippy --lib --test read_snapshots --example engine_snapshot_perf -- -D warnings"
+  ],
+  "validation_before_last_metadata_named_snapshot_extension": {
+    "passed": 136,
+    "ignored": 2,
+    "clippy_grpc_lib": "passed"
+  },
+  "median_ns": {
+    "baseline": {
+      "capture_ns": 1932000,
+      "reopen_ns": 28845800
+    },
+    "final": {
+      "capture_ns": 40000,
+      "reopen_ns": 7776600
+    },
+    "capture_speedup": 48.3,
+    "reopen_speedup": 3.7093074094077103,
+    "component": {
+      "scalar_crc_ns": 22026900,
+      "slicing_crc_ns": 2428900,
+      "decode_ns": 2035100
+    }
+  },
+  "limitations": [
+    "Warm-cache bounded synthetic 2048x512 data, 11 capture and21 reopen samples; shared host, not production throughput/latency guarantees.",
+    "Read snapshots are exact/browse/get only, no derived ANN/text/metadata/sparse/disk/GPU indexes. Server uses snapshots only on simple unindexed exact/no-rerank path, with explicit fallback at limits.",
+    "First writer may still copy O(n) ID tree; this is not lock-free persistent-tree MVCC. Modified metadata can copy that record vector/payload while old generation is retained.",
+    "Shared rebuild retains complete immutable record bodies, hence the new256MiB retention cap. This can reject payload-heavy collections that fit vector-only limits.",
+    "Slicing8 CRC and borrowed/reusable verified replay frame buffers accepted; no on-disk format/checksum changes, no checkpoint. Decoding itself remains same, profiled at~2ms per4MiB.",
+    "Reusable HNSW construction scratch and reusable result buffer prototyped; six paired9-trial campaigns had mixed wins/regressions and no reliable gain, so all candidate scratch code/tests removed. Existing prior selected-vector cache preserved. No new contiguous vector layout implemented."
+  ],
+  "raw_logs": {
+    "engine-baseline.log": "label=baseline records=2048 dimensions=512 capture_ns=[2374800, 2477600, 1950800, 1957300, 1826500, 1932000, 1875800, 1735200, 1896800, 1900500, 1933100] reopen_ns=[28948400, 29003400, 28007600, 28477200, 28247800, 30074100, 28699400, 28845800, 30411600, 29659500, 28422400, 28261500, 28187000, 29847700, 27930500, 28347100, 28233900, 34006200, 31658100, 29603200, 29225600]\n",
+    "engine-shared.log": "label=shared-records records=2048 dimensions=512 capture_ns=[114800, 76000, 44000, 38700, 31400, 30700, 34100, 43900, 29600, 29300, 29500] reopen_ns=[29078100, 28056800, 27819800, 28118100, 28735900, 28428200, 28086300, 28420300, 29018400, 28364700, 28655400, 28133300, 28073900, 28172900, 28080100, 28290200, 28505800, 29184400, 27999800, 28173400, 28085500]\n",
+    "engine-table-crc.log": "label=shared-records-table-crc records=2048 dimensions=512 capture_ns=[123500, 42600, 33700, 32900, 35300, 33100, 31200, 43700, 32700, 32200, 31800] reopen_ns=[17214400, 16538800, 16454500, 16904000, 18264300, 16970400, 18042400, 16821100, 16810300, 16455600, 16553500, 16631400, 16674300, 16791300, 16298500, 16291800, 16210300, 16448800, 16349600, 17006100, 16795200]\n",
+    "engine-slicing-crc.log": "label=slicing-crc records=2048 dimensions=512 capture_ns=[129700, 69500, 75900, 70500, 52200, 52400, 50600, 69900, 51500, 47300, 44100] reopen_ns=[11389900, 11289000, 10812500, 11844800, 11290400, 10924000, 10377900, 10781800, 12052100, 11349700, 11151300, 10506600, 9966400, 10271100, 10401200, 10174100, 9087800, 9077400, 10568100, 11293700, 10892400]\n",
+    "engine-replay-reuse.log": "label=replay-reuse records=2048 dimensions=512 capture_ns=[114100, 49100, 52700, 52000, 39200, 35200, 63200, 54600, 46400, 32200, 30400] reopen_ns=[9276300, 8290500, 7626800, 8024800, 7766200, 7559200, 7784700, 7483700, 7631900, 7407500, 8462300, 7676900, 8834400, 9181600, 7589300, 7760800, 7436600, 8096700, 7579000, 7820000, 8039000]\n",
+    "engine-final-perf.log": "label=final records=2048 dimensions=512 capture_ns=[108400, 40000, 32200, 33300, 32100, 30500, 30300, 41200, 60600, 73200, 52400] reopen_ns=[9064000, 9034400, 8646400, 8070600, 7776600, 7538800, 9382600, 7774800, 7336500, 7486000, 7555400, 8473200, 8494600, 7529700, 7625600, 8332100, 7893900, 7757900, 7714700, 7765900, 8435000]\n",
+    "engine-final-components.log": "\nrunning 1 test\nbytes=4194304 scalar_crc_ns=[23264400, 25365600, 21880300, 21639500, 21928300, 22873000, 22469100, 22026900, 21434500] slicing_crc_ns=[3161700, 2507000, 2346900, 2354600, 2371700, 2433300, 2428900, 2446500, 2356700] decode_ns=[2548100, 2367200, 1982300, 2035100, 2595900, 1948600, 2587600, 1948400, 1936200]\ntest format::tests::replay_component_profile ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 65 filtered out; finished in 0.25s\n\n",
+    "engine-scratch-paired.log": "\nrunning 2 tests\ntest hnsw::selection_perf::reusable_build_scratch_matches_allocating_traversal_and_clears_state ... ok\ntraversals_per_trial=1600 allocating_ns=[112685800, 107738300, 120360400, 93855800, 93938700, 107002400, 96457500, 94767500, 100756400] reusable_ns=[107640200, 104968700, 106093400, 94339000, 110256800, 91902100, 90348000, 90194200, 93221500]\ntest hnsw::selection_perf::profile_reusable_build_scratch ... ok\n\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 66 filtered out; finished in 2.15s\n\n",
+    "engine-scratch-paired-repeat.log": "\nrunning 1 test\ntraversals_per_trial=1600 allocating_ns=[121170200, 119890000, 106894500, 98340800, 101907900, 108144800, 121890100, 97796700, 97656700] reusable_ns=[114426300, 115362800, 112536500, 108594400, 94427500, 97120700, 109451000, 96310400, 93451700]\ntest hnsw::selection_perf::profile_reusable_build_scratch ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 67 filtered out; finished in 2.25s\n\n",
+    "engine-scratch-paired-repeat2.log": "\nrunning 1 test\ntraversals_per_trial=1600 allocating_ns=[108654700, 141020300, 94702000, 93247100, 96137500, 101261200, 95661900, 107205700, 113296700] reusable_ns=[93463300, 123496500, 96081100, 108041100, 98355700, 98215700, 99587200, 96093000, 95631500]\ntest hnsw::selection_perf::profile_reusable_build_scratch ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 67 filtered out; finished in 2.15s\n\n",
+    "engine-scratch-output-reuse.log": "\nrunning 2 tests\ntest hnsw::selection_perf::reusable_build_scratch_matches_allocating_traversal_and_clears_state ... ok\ntraversals_per_trial=1600 allocating_ns=[116017700, 110722500, 95113300, 107372100, 110765100, 120452500, 113952400, 93327800, 92833400] reusable_ns=[116469700, 117313100, 106209700, 103242700, 120550500, 117223500, 100388800, 102807200, 96638400]\ntest hnsw::selection_perf::profile_reusable_build_scratch ... ok\n\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 66 filtered out; finished in 2.29s\n\n",
+    "engine-scratch-output-repeat.log": "\nrunning 1 test\ntraversals_per_trial=1600 allocating_ns=[97148900, 111711800, 119580800, 120195900, 130230700, 113466100, 106210100, 103477500, 109754000] reusable_ns=[99399200, 94089500, 123856000, 123224600, 104308600, 104442800, 107770700, 117152500, 105046800]\ntest hnsw::selection_perf::profile_reusable_build_scratch ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 67 filtered out; finished in 2.32s\n\n",
+    "engine-scratch-output-repeat2.log": "\nrunning 1 test\ntraversals_per_trial=1600 allocating_ns=[136540000, 152990100, 154749300, 126708300, 104159900, 104788100, 93096900, 93183000, 98281500] reusable_ns=[127070800, 135737000, 138718900, 116480200, 100964000, 114513300, 103287900, 90783800, 92748300]\ntest hnsw::selection_perf::profile_reusable_build_scratch ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 67 filtered out; finished in 2.49s\n\n",
+    "engine-final-tests.log": "\nrunning 66 tests\ni..i..................................................\nrunning 1 test\n............\ntest result: ok. 64 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 47.30s\n\n\nrunning 15 tests\n...............\ntest result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 39.85s\n\n\nrunning 6 tests\n......\ntest result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s\n\n\nrunning 7 tests\n.......\ntest result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.50s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 10 tests\n..........\ntest result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.84s\n\n\nrunning 3 tests\n...\ntest result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s\n\n\nrunning 7 tests\n.......\ntest result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s\n\n\nrunning 4 tests\n....\ntest result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s\n\n\nrunning 2 tests\n..\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.25s\n\n\nrunning 3 tests\n...\ntest result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s\n\n\nrunning 5 tests\n.....\ntest result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.81s\n\n\nrunning 4 tests\n....\ntest result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 5 tests\n.....\ntest result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s\n\n\nrunning 1 test\n.\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.47s\n\n",
+    "engine-final-clippy.log": "    Blocking waiting for file lock on package cache\n    Blocking waiting for file lock on package cache\n    Blocking waiting for file lock on package cache\n   Compiling vlite v0.3.0 (Q:\\VLite)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 25.08s\n",
+    "engine-snapshot-final-tests.log": "\nrunning 5 tests\n.....\ntest result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s\n\n",
+    "engine-snapshot-final-clippy.log": "    Checking vlite v0.3.0 (Q:\\VLite)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.68s\n"
+  },
+  "final_snapshot_extension": {
+    "passed": 5,
+    "strict_clippy": "passed",
+    "tests": "Metadata-only update isolation and collection drop/recreation lifetime added to the existing4 snapshot tests."
+  },
+  "durable_group_server_confirmation": "Server owner confirmed all eligible callbacks are known record mutations under one owner guard, provisional quota/ETag reads only, no callbacks perform admin/reopen/close/snapshot or webhook notification, no responses before final outer result and guard release. Outer error replaces every provisional success.",
+  "blockers": [],
+  "provenance": {
+    "head": "62e29022ac916168fd3eb7b8e2058df3683b9b31",
+    "platform": "Native Windows x64; shared development host",
+    "toolchain_current": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-pc-windows-msvc\nrelease: 1.99.1\nLLVM version: 23.1.1",
+    "cargo_current": "cargo 1.99.1 (5f94df478 2026-08-27)",
+    "baseline_binary_sha256": null,
+    "baseline_exact_source_manifest_sha256": null,
+    "baseline_hash_limitations": "Baseline executable was overwritten by later cargo builds. No contemporaneous binary digest or complete dirty-tree source manifest was captured. HEAD identifies the tracked reference only, not the complete baseline dirty tree; unavailable hashes are intentionally null.",
+    "candidate_binary": "target\\release\\examples\\engine_snapshot_perf.exe",
+    "candidate_binary_sha256_collected_after_run": "240e273f403771d103ccf6d07d04e0c24bd73c9a044d82198eec77e97e4e4576",
+    "candidate_binary_hash_limitations": "Digest collected after the final measured run from the remaining benchmark executable; no digest was recorded at launch. Do not interpret this as independently verified build-source provenance.",
+    "current_engine_source_manifest_sha256": "742a001d9cc48b4c816fd2ec3a5f32e5b23f9eee540dc85ebbb09497fd01ebeb",
+    "current_engine_source_sha256": {
+      "src/lib.rs": "5f77b0303d2d11e72cdca978fe53dd91cf0ac24a549da78f30f646d6085d7483",
+      "src/collection.rs": "fef12faa19f0b6e77c14bd133a12654a8f9be92ae135241cf4b2a94f1b566d24",
+      "src/records.rs": "55f0a355d02a975dae0fcda459b5c1dad26f0b351fa6e194d42196e7b5fb58ea",
+      "src/rebuild.rs": "bb6e1c3bfc8a1d18bddfea9fa8877b39412f2963508f2bf406a099d169eaf628",
+      "src/hnsw.rs": "d324912b365bc291ee5355036fe02c606ac923b40aa007fe42e48567976c5861",
+      "src/format.rs": "190c3b41af7384f9223f03700fdd955b7aa4817a1a5b8e57c24fbb0f99d31f2b",
+      "src/disk_ann.rs": "cf70133be3fd00df3f2c27e085c26df775f5d2f680cea7c0e3a98696d74fcb1a",
+      "src/metadata_index.rs": "0be535306d4966b141ac738473324b5e11d3a63e7d02c7c7607ec585d37bf9ae",
+      "src/text_index.rs": "8014cd9e9d3c63c825574465204c4f2e4f1010882f0b5c71fc6f262cb944ca40",
+      "src/vectors.rs": "94777dab2cfc8eba7f5d98f37b7997c3ee0640cda43cb061cd398554e488826f",
+      "tests/read_snapshots.rs": "06e01234da3c5135ff487d2d28a307d24bb6cd49c90b7966ee9bdb4f9742f37b",
+      "tests/support/hnsw_selection_perf.rs": "164295af25ee82b7b79ecda2d0199d8e3d7eada71c0c7f8e4f09e507b830ba0e",
+      "examples/engine_snapshot_perf.rs": "a3a7fa7f108b5f9d6a3ed86cdb44c421bd77576360e38df8c628cf5bb30402fd",
+      "docs/read-snapshots.md": "d2e6b79b1547e75747e1b7395c62311d44231473531b924b334945d52f9346bc",
+      "Cargo.toml": "4dd0b1808c556e6fd4471f40f81b01d45c27e16bd793e904fe81bcc5415bbf24",
+      "Cargo.lock": "1b2432a8f569ff351632afe0d156c9bb6df1ec04da29535bd5abb92c86b94c65",
+      "build.rs": "41fb7e13afe635cd49f9213fa4457069c254b8d316af4c8e3b32c998098b1dbf"
+    },
+    "source_hash_limitations": "Manifest records current engine-owned source, tests, example, direct engine documentation and shared Cargo/build manifests at evidence preservation time. It is NOT a reconstruction of the exact baseline or candidate build inputs. Shared Cargo/graph edits are present. Documentation and final extra tests/error text changed after measured executable build."
+  },
+  "memory_and_locality_tradeoff": {
+    "representation_before": "BTreeMap<u64, Record>; Record inline in B-tree, Vec data separately allocated.",
+    "representation_after": "Arc<BTreeMap<u64, Arc<Record>>>; one new Arc allocation and pointer indirection per record, Vec data still separately allocated.",
+    "unconditional_cost": "Applies even when no read snapshot or rebuild is active: per-record allocation at put/replay, extra record pointer dereference in scans/ANN lookups; vectors are NOT newly contiguous.",
+    "nominal_64bit_increment_bytes_per_live_record": 24,
+    "nominal_increment_derivation": "Two pointer-sized strong/weak counts (16 bytes) plus one pointer stored in tree (8 bytes), because inline Record bytes move from tree to Arc allocation. Ignores allocator bookkeeping/alignment and B-tree capacity/padding effects; not an RSS measurement.",
+    "nominal_2048_record_increment_bytes": 49152,
+    "nominal_100000_record_increment_bytes": 2400000,
+    "measured_resident_memory_or_allocations": null,
+    "measurement_limitations": "No allocator/RSS comparison was performed. Do not claim total-memory reduction or locality improvement. Small vectors and metadata-heavy workloads may regress despite the 512-dimensional benchmark gains.",
+    "reopen_tradeoff": "Replay reconstructs an additional Arc allocation for each live record, although repeated updates replace/drop prior Arc values. Observed final reopen gain combines compatible CRC acceleration and borrowed/reused frame buffers with this allocation regression; no isolated Arc reconstruction speedup is claimed.",
+    "retention_tradeoff": "O(1) capture avoids deep vector/payload/metadata copy; first write while retained clones O(n) ID tree and increments shared record references. Superseded record bodies persist until last snapshot/job reference drops. Logical retention caps exclude allocator overhead/current live database.",
+    "new_contiguous_vector_layout": false,
+    "reusable_hnsw_scratch": "Rejected/reverted: mixed paired measurements, no reliable gain.",
+    "checkpoint": "Not added: measured compatible CRC/replay-buffer improvements addressed profiled bottleneck without format or recovery changes."
+  },
+  "integration_note": "This measurement-time artifact predates final integration. A concurrent, unpublished graph OpenAPI baseline initially failed; that baseline was subsequently reconciled. The later unfiltered workspace validation passed 458 tests with 4 ignored. Graph changes are not part of this optimization publication; historical measurement logs are not a current CI-status report.",
+  "mixed_workload_followup": {
+    "artifact": "engine-mixed-windows.json",
+    "example": "examples/engine_mixed_perf.rs",
+    "scope": "Same-engine lock-held vs snapshot read scans with concurrent durable writes, correctness assertions, separate warmed first-write COW pairs. Not a pre-Arc baseline.",
+    "summary": "Median writer lock wait0.710ms->0.0002ms, durable write1.221ms->0.828ms; reader total0.729ms->0.903ms (regression). In-memory first-write unique0.002ms vs retained0.124ms. Snapshot write max14.523ms vs lock-held2.838ms. No universal speedup claim.",
+    "source_manifest_note": "Original collected source hashes above remain historical, unchanged; direct snapshot documentation subsequently expanded with mixed-workload followup. See companion artifact for newly measured example/executable digests."
+  }
+}

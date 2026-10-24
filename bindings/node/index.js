@@ -3,6 +3,9 @@ import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 import { join } from "node:path";
 
+const MAX_FLOAT32_VALUES = 2 * 1024 * 1024;
+const MAX_FLOAT32_SEARCHES = 128;
+
 export class EmbeddedError extends Error {
   constructor(code, message) { super(`${code}: ${message}`); this.name = "EmbeddedError"; this.code = code; }
 }
@@ -59,11 +62,20 @@ export class NativeLibrary {
     catch (error) { return Promise.reject(error); }
     return this.#send({ handle, request: encoded });
   }
-  #send(message) {
+  _typedRequest(handle, request, vectors, typed, dimensions) {
+    if (this.#failure) return Promise.reject(this.#failure);
+    if (this.#closed) return Promise.reject(new EmbeddedError("closed", "Native library is closed"));
+    if (this.#pending.size >= this.#maxPending) return Promise.reject(new EmbeddedError("busy", "Pending request limit reached; no request admitted"));
+    let encoded;
+    try { encoded = encode(request); }
+    catch (error) { return Promise.reject(error); }
+    return this.#send({ handle, request: encoded, typed, vectors, dimensions }, [vectors.buffer]);
+  }
+  #send(message, transferList = []) {
     const id = ++this.#next;
     return new Promise((resolve, reject) => {
       this.#pending.set(id, { resolve, reject });
-      try { this.#worker.postMessage({ id, ...message }); }
+      try { this.#worker.postMessage({ id, ...message }, transferList); }
       catch { this.#pending.delete(id); reject(new EmbeddedError("worker_failed", "Cannot admit operation; worker unavailable")); }
     });
   }
@@ -118,6 +130,10 @@ export class Database {
     if (this.#handle === null) return Promise.reject(new EmbeddedError("closed", "Database is closed"));
     return this.#library._request(this.#handle, { ...fields, op });
   }
+  #typedCall(request, vectors, typed, dimensions) {
+    if (this.#handle === null) return Promise.reject(new EmbeddedError("closed", "Database is closed"));
+    return this.#library._typedRequest(this.#handle, request, vectors, typed, dimensions);
+  }
   close() {
     if (this.#closing) return this.#closing;
     if (this.#handle === null) return Promise.resolve();
@@ -152,11 +168,74 @@ export class Database {
     return (await this.#call("delete", { id, ...scope(collection), ...optional("expected_revision", expectedRevision) })).deleted;
   }
   async batch(operations, { collection } = {}) { await this.#call("batch", { operations, ...scope(collection) }); }
+  async batchPutF32(operations, { collection } = {}) {
+    if (!Array.isArray(operations) || operations.length < 1 || operations.length > 4096) {
+      throw new RangeError("operations must contain 1..4096 puts");
+    }
+    const rows = operations.map((operation, index) => {
+      if (!operation || typeof operation !== "object" || Array.isArray(operation)) {
+        throw new TypeError(`operations[${index}] must be an object`);
+      }
+      const extra = Object.keys(operation).find((key) => !["id", "vector", "payload", "metadata"].includes(key));
+      if (extra !== undefined) throw new TypeError(`operations[${index}] has unsupported field ${extra}`);
+      if (typeof operation.id !== "string") throw new TypeError(`operations[${index}].id must be a string`);
+      const vector = requireFloat32Array(operation.vector, `operations[${index}].vector`);
+      if (vector.length === 0) throw new RangeError(`operations[${index}].vector must not be empty`);
+      if (index && vector.length !== operations[0].vector.length) {
+        throw new RangeError("all vectors must have the same dimensions");
+      }
+      if (vector.length * operations.length > MAX_FLOAT32_VALUES) {
+        throw new RangeError("bulk vectors exceed 2097152 float32 values");
+      }
+      for (const value of vector) {
+        if (!Number.isFinite(value)) throw new TypeError("vector values must be finite");
+      }
+      const payload = operation.payload ?? new Uint8Array();
+      if (!(payload instanceof Uint8Array)) throw new TypeError(`operations[${index}].payload must be Uint8Array or Buffer`);
+      return { id: operation.id, vector, payload_base64: Buffer.from(payload).toString("base64"),
+        metadata: operation.metadata ?? {} };
+    });
+    const dimensions = rows[0].vector.length;
+    const vectors = new Float32Array(dimensions * rows.length);
+    rows.forEach((row, index) => vectors.set(row.vector, index * dimensions));
+    const request = { dimensions, operations: rows.map(({ id, payload_base64, metadata }) => ({ id, payload_base64, metadata })),
+      ...scope(collection) };
+    await this.#typedCall(request, vectors, "batch_put_f32");
+  }
   async revision(id, { collection } = {}) { return (await this.#call("revision", { id, ...scope(collection) })).revision; }
   async search(vector, k, { filter = [], metric, collection, explain = false } = {}) {
     const result = await this.#call("search", { vector, k, filter, ...optional("metric", metric), ...scope(collection),
       ...(explain ? { explain } : {}) });
     return explain ? result : result.hits;
+  }
+  async searchF32(vector, k, { filter = [], metric, collection, explain = false } = {}) {
+    const snapshot = snapshotFloat32(vector);
+    const request = { op: "search", k, filter, ...optional("metric", metric), ...scope(collection),
+      ...(explain ? { explain: true } : {}) };
+    const result = await this.#typedCall(request, snapshot, "search_f32");
+    return explain ? result : result.hits;
+  }
+  async searchManyF32(vectors, k, { filter = [], metric, collection, explain = false } = {}) {
+    if (!Array.isArray(vectors) || vectors.length < 1 || vectors.length > MAX_FLOAT32_SEARCHES) {
+      throw new RangeError(`vectors must contain 1..${MAX_FLOAT32_SEARCHES} queries`);
+    }
+    const dimensions = requireFloat32Array(vectors[0], "vectors[0]").length;
+    if (dimensions === 0 || dimensions * vectors.length > MAX_FLOAT32_VALUES) {
+      throw new RangeError("search matrix must contain 1..2097152 float32 values");
+    }
+    const snapshot = new Float32Array(dimensions * vectors.length);
+    vectors.forEach((vector, index) => {
+      requireFloat32Array(vector, `vectors[${index}]`);
+      if (vector.length !== dimensions) throw new RangeError("all query vectors must have the same dimensions");
+      for (const value of vector) {
+        if (!Number.isFinite(value)) throw new TypeError("vector values must be finite");
+      }
+      snapshot.set(vector, index * dimensions);
+    });
+    const request = { op: "search", k, filter, ...optional("metric", metric), ...scope(collection),
+      ...(explain ? { explain: true } : {}) };
+    const results = await this.#typedCall(request, snapshot, "search_many_f32", dimensions);
+    return explain ? results : results.map((result) => result.hits);
   }
   searchAuto(vector, k, { filter = [], metric, collection, efSearch, quantization, rerankMultiplier, explain = false } = {}) {
     return this.#call("search", { mode: "auto", vector, k, filter, explain, ...optional("metric", metric), ...scope(collection),
@@ -254,6 +333,24 @@ export class Database {
 // Omitted options are not sent, so the native side applies the collection's declared defaults.
 function optional(name, value) { return value === undefined ? {} : { [name]: value }; }
 function scope(collection) { return optional("collection", collection); }
+function requireFloat32Array(value, name) {
+  if (!(value instanceof Float32Array)) throw new TypeError(`${name} must be a Float32Array`);
+  if (typeof SharedArrayBuffer !== "undefined" && value.buffer instanceof SharedArrayBuffer) {
+    throw new TypeError(`${name} must not use SharedArrayBuffer`);
+  }
+  return value;
+}
+function snapshotFloat32(value) {
+  requireFloat32Array(value, "vector");
+  if (value.length < 1 || value.length > MAX_FLOAT32_VALUES) {
+    throw new RangeError("vector must contain 1..2097152 float32 values");
+  }
+  const snapshot = new Float32Array(value);
+  for (const item of snapshot) {
+    if (!Number.isFinite(item)) throw new TypeError("vector values must be finite");
+  }
+  return snapshot;
+}
 function annFields({ efSearch, quantization, rerankMultiplier }) {
   return { ...optional("ef_search", efSearch), ...optional("quantization", quantization),
     ...optional("rerank_multiplier", rerankMultiplier) };

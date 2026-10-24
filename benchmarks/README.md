@@ -67,10 +67,93 @@ for the fixed-workload snapshot probe (the argument labels the output), and
 `python bindings/python/benchmark_typed_vectors.py --help` for typed-input
 campaign options.
 
-Remaining architecture work includes immutable version-consistent readers,
-group commit with durable acknowledgments, and reducing rebuild snapshot clones.
-These are not implemented by this optimization batch. Eventual consistency and
-weaker durability are not prerequisites for the retained improvements.
+The initial selection/codec/Python batch did not change reader generations,
+group commit or rebuild snapshot ownership. The follow-on source work below
+addresses those separately. Eventual consistency and weaker durability are not
+prerequisites for these improvements.
+
+### Next source-only concurrency and Node.js work
+
+Embedded read captures and unquantized background HNSW capture share immutable
+record generations instead of deep-copying vector bodies. Read captures are
+limited to eight per database, each at most 100,000 records/128 MiB logical
+bodies. Rebuild retention adds a 256 MiB body cap. First writes can still copy
+the ID tree, and per-record shared ownership adds allocation/indirection; this
+is not a packed-vector layout or lock-free persistent tree. See
+[visibility, retention and publication contracts](../docs/read-snapshots.md).
+
+The bounded 2,048 x 512 Windows experiment recorded median capture 1.932 ->
+0.040 ms and warm-cache reopen 28.846 -> 7.777 ms. Reopen combines compatible
+slicing-by-eight IEEE CRC validation with borrowed/reused verified-frame
+buffers, while retaining full-log validation and replay. These before/after
+shared-host observations are not isolated production gains. Quantized capture
+remains synchronous, and there is no checkpoint or storage-format change.
+Reusable construction scratch was prototyped and rejected after mixed paired
+results; no scratch/layout speedup is claimed.
+See [raw samples, provenance gaps and memory trade-offs](results/engine-snapshots-windows.json).
+Baseline binary/source hashes were not retained, so the observed end-to-end
+differences are not a fully archived A/B campaign.
+
+```text
+cargo run --release --example engine_snapshot_perf -- candidate
+cargo test --release --lib replay_component_profile -- --ignored --nocapture
+```
+
+The [mixed-read/write experiment](results/engine-mixed-windows.json) compares
+lock-held exact scans with snapshot scans in three paired, controlled-schedule
+trials. Median durable writer latency fell from 1.221 to 0.828 ms, but reader
+latency increased from 0.729 to 0.903 ms. A warmed first write with a retained
+generation cost 0.124 ms versus 0.002 ms with a unique generation; maximum
+snapshot-mode write latency reached 14.523 ms. These warm-cache, shared-host
+results expose a trade-off, not a universal speedup or tail-latency guarantee.
+Correctness checks verify pre/post-write state and exact distance bits.
+
+```text
+cargo run --release --example engine_mixed_perf
+```
+
+Opt-in server group commit keeps individual record-write recovery frames but
+shares a sync across concurrently admitted requests. It does not acknowledge
+before that sync. The default remains independent commits. Queues and retained
+inputs are bounded, validation remains per request, and sync failure turns every
+would-be success into `commit_indeterminate`. See
+[configuration, route coverage and failure semantics](../docs/CONSOLE-ADMIN.md#opt-in-durable-group-commit).
+
+Two paired Windows release runs of 512 durable writes, 16-dimensional vectors
+and 128-byte payloads measured zero-delay grouping at 12,571-15,617 writes/s
+versus 1,926-2,910 writes/s at concurrency 16. Sequential grouping was 6-8%
+slower. An explicit 2 ms wait caused roughly 16 ms sequential latency on that
+host, so the opt-in default only collects already queued work. These are noisy
+shared-host, in-process observations, not network throughput or production SLOs.
+Each case reopens and verifies all acknowledged records. See
+[raw output and workload](results/group-commit-windows.txt).
+
+```text
+cargo test --release --features server --lib comparative_durable_write_benchmark -- --ignored --nocapture
+```
+
+Simple exact server searches can scan bounded immutable collection generations
+outside the owner lock. This preserves one captured state per search, not one
+snapshot across separate requests. ANN, reranking and indexed-filter paths
+remain unchanged; exhausted snapshot budgets use the existing lock-held path.
+
+The Node.js binding adds opt-in `searchF32`, `searchManyF32` and atomic
+`batchPutF32`. Private input snapshots avoid vector JSON conversion; multi-query
+calls amortize worker messaging, not native engine locking or transaction
+boundaries. Existing APIs remain unchanged. The bounded benchmark checks record,
+revision and ordered-hit parity and records native/source hashes:
+
+```text
+npm --prefix bindings/node run build
+node bindings/node/benchmark-f32.mjs node-f32-results.json
+```
+
+The initial Windows sample used in-memory databases, 512 records, 384 dimensions
+and 40 exact L2 queries. Its fixed variant order can favor later runs through
+cache/JIT warming; no durable-ingest, zero-copy or production speedup claim is
+made. See the [binding guide](../bindings/node/README.md) for bounds and fallback.
+These source-only capabilities do not revise historical cross-engine tables or
+previously published packages.
 
 ### HNSW visited-membership optimization (unreleased source)
 

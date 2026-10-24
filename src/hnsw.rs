@@ -146,7 +146,7 @@ pub(crate) struct QuantizedSnapshot {
 
 impl QuantizedSnapshot {
     /// Trains bounds on, and encodes, every graph-eligible record.
-    pub fn encode(records: &BTreeMap<u64, Record>, metric: DistanceMetric) -> Self {
+    pub fn encode(records: &crate::records::RecordMap, metric: DistanceMetric) -> Self {
         let eligible = || {
             records.iter().filter(move |(_, record)| {
                 metric != DistanceMetric::Cosine || vector_norm(&record.vector) != 0.0
@@ -259,7 +259,7 @@ impl Index {
         node: usize,
         query: &[f32],
         query_norm: f64,
-        records: &BTreeMap<u64, Record>,
+        records: &crate::records::RecordMap,
     ) -> f64 {
         match &self.quantizer {
             Some(quantizer) => quantizer.distance(
@@ -279,7 +279,11 @@ impl Index {
     }
 
     /// A node's traversal vector as a query: f32 or dequantized codes.
-    fn node_query<'a>(&'a self, node: usize, records: &'a BTreeMap<u64, Record>) -> Cow<'a, [f32]> {
+    fn node_query<'a>(
+        &'a self,
+        node: usize,
+        records: &'a crate::records::RecordMap,
+    ) -> Cow<'a, [f32]> {
         match &self.quantizer {
             Some(quantizer) => Cow::Owned(quantizer.decode(self.codes_of(node))),
             None => Cow::Borrowed(self.vector(node, records)),
@@ -297,7 +301,7 @@ impl Index {
     }
 
     pub fn build(
-        records: &BTreeMap<u64, Record>,
+        records: &crate::records::RecordMap,
         config: HnswConfig,
         metric: DistanceMetric,
         options: AnnOptions,
@@ -307,7 +311,7 @@ impl Index {
     }
 
     pub fn build_cancellable(
-        records: &BTreeMap<u64, Record>,
+        records: &crate::records::RecordMap,
         config: HnswConfig,
         metric: DistanceMetric,
         options: AnnOptions,
@@ -324,7 +328,7 @@ impl Index {
     }
 
     pub fn build_with_progress(
-        records: &BTreeMap<u64, Record>,
+        records: &crate::records::RecordMap,
         config: HnswConfig,
         metric: DistanceMetric,
         options: AnnOptions,
@@ -369,7 +373,7 @@ impl Index {
         let mut index = Self::empty(config, metric, options, snapshot.ids.len());
         index.codes = snapshot.codes;
         index.quantizer = Some(snapshot.quantizer);
-        let no_records = BTreeMap::new();
+        let no_records = crate::records::RecordMap::new();
         for id in snapshot.ids {
             if cancel.load(Ordering::Relaxed) {
                 return None;
@@ -444,7 +448,7 @@ impl Index {
         true
     }
 
-    fn vector<'a>(&'a self, node: usize, records: &'a BTreeMap<u64, Record>) -> &'a [f32] {
+    fn vector<'a>(&'a self, node: usize, records: &'a crate::records::RecordMap) -> &'a [f32] {
         let id = self.nodes[node].id;
         if let Some(entry) = self.buffered.get(&id) {
             entry
@@ -461,7 +465,7 @@ impl Index {
         node: usize,
         query: &[f32],
         query_norm: f64,
-        records: &BTreeMap<u64, Record>,
+        records: &crate::records::RecordMap,
         visits: &Cell<u64>,
     ) -> Candidate {
         visits.set(visits.get() + 1);
@@ -477,7 +481,7 @@ impl Index {
         query_norm: f64,
         mut best: Candidate,
         layer: usize,
-        records: &BTreeMap<u64, Record>,
+        records: &crate::records::RecordMap,
         visits: &Cell<u64>,
     ) -> Candidate {
         loop {
@@ -502,7 +506,7 @@ impl Index {
         entry: Candidate,
         layer: usize,
         ef: usize,
-        records: &BTreeMap<u64, Record>,
+        records: &crate::records::RecordMap,
         visits: &Cell<u64>,
     ) -> Vec<Candidate> {
         let mut visited = Visited::new(self.nodes.len(), entry.node);
@@ -535,7 +539,7 @@ impl Index {
         &self,
         candidates: &[Candidate],
         limit: usize,
-        records: &BTreeMap<u64, Record>,
+        records: &crate::records::RecordMap,
     ) -> Vec<usize> {
         let mut selected: Vec<usize> = Vec::with_capacity(limit);
         // Selection repeatedly compares against the same accepted vectors.
@@ -596,7 +600,7 @@ impl Index {
         }
     }
 
-    fn insert(&mut self, id: u64, records: &BTreeMap<u64, Record>) {
+    fn insert(&mut self, id: u64, records: &crate::records::RecordMap) {
         let level = self.level(id);
         let new = self.nodes.len();
         let cosine = self.metric == DistanceMetric::Cosine;
@@ -690,7 +694,7 @@ impl Index {
         query_norm: f64,
         entry: Candidate,
         ef: usize,
-        records: &BTreeMap<u64, Record>,
+        records: &crate::records::RecordMap,
         expiries: &BTreeMap<u64, u64>,
         now_ms: u64,
         conditions: &[Condition],
@@ -742,7 +746,7 @@ impl Index {
         k: usize,
         ef: usize,
         rerank: AnnOptions,
-        records: &BTreeMap<u64, Record>,
+        records: &crate::records::RecordMap,
         expiries: &BTreeMap<u64, u64>,
         now_ms: u64,
         conditions: &[Condition],
@@ -779,7 +783,7 @@ impl Index {
         query_norm: f64,
         k: usize,
         width: usize,
-        records: &BTreeMap<u64, Record>,
+        records: &crate::records::RecordMap,
         stats: &mut SearchStats,
     ) -> Vec<SearchHit> {
         if self.quantizer.is_none() {
@@ -842,7 +846,7 @@ impl Index {
         query: &[f32],
         query_norm: f64,
         entry: usize,
-        records: &BTreeMap<u64, Record>,
+        records: &crate::records::RecordMap,
         visits: &Cell<u64>,
     ) -> Candidate {
         let mut best = self.candidate(entry, query, query_norm, records, visits);
@@ -859,7 +863,7 @@ impl Index {
         query: &[f32],
         query_norm: f64,
         k: usize,
-        records: &BTreeMap<u64, Record>,
+        records: &crate::records::RecordMap,
         expiries: &BTreeMap<u64, u64>,
         now_ms: u64,
         conditions: &[Condition],
@@ -978,7 +982,7 @@ impl Index {
     /// in-memory state and by the unread file bytes before allocation.
     pub(crate) fn read_snapshot<R: Read>(
         source: &mut Source<R>,
-        records: &BTreeMap<u64, Record>,
+        records: &crate::records::RecordMap,
         dimensions: usize,
     ) -> Parse<Self> {
         let m = source.u32()? as usize;
@@ -1112,7 +1116,7 @@ impl Index {
     /// Semantic invariants that make every later search, `track` and
     /// `stale_nodes` call total (no panics) and that reject any state the
     /// builder could not have produced for the current records.
-    fn check_snapshot(&self, records: &BTreeMap<u64, Record>, dimensions: usize) -> Parse<()> {
+    fn check_snapshot(&self, records: &crate::records::RecordMap, dimensions: usize) -> Parse<()> {
         let count = self.nodes.len();
         let top = self.nodes.iter().map(|node| node.links.len()).max();
         let first_top = top.and_then(|top| self.nodes.iter().position(|n| n.links.len() == top));
@@ -1265,7 +1269,7 @@ mod tests {
             payload: vec![],
             metadata: crate::Metadata::new(),
         };
-        let records = BTreeMap::from([(0, record.clone())]);
+        let records = crate::records::RecordMap::from([(0, record.clone())]);
         let mut index = Index::build(
             &records,
             HnswConfig::default(),
@@ -1278,12 +1282,15 @@ mod tests {
         }
         assert_eq!(index.buffer_usage(), (16, MAX_HNSW_BUFFER_VECTOR_BYTES));
         assert!(index.track(0, Some(&record), 0));
-        assert_eq!(index.vector(0, &BTreeMap::new()), record.vector);
+        assert_eq!(
+            index.vector(0, &crate::records::RecordMap::new()),
+            record.vector
+        );
         assert!(index.track(0, Some(&record), vector_bytes));
         assert!(!index.track(16, Some(&record), vector_bytes));
         assert_eq!(index.buffer_usage(), (16, MAX_HNSW_BUFFER_VECTOR_BYTES));
         let mut index = Index::build(
-            &BTreeMap::new(),
+            &crate::records::RecordMap::new(),
             HnswConfig::default(),
             DistanceMetric::SquaredL2,
             AnnOptions::default(),

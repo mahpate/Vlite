@@ -19,10 +19,15 @@ impl Server {
     }
 
     fn start_with_source(path: &Path, file: bool) -> Self {
+        Self::start_with_options(path, file, &[])
+    }
+
+    fn start_with_options(path: &Path, file: bool, options: &[&str]) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_vlite-server"));
         command
             .arg(path)
             .args(["--create-if-missing", "2", "--bind", "127.0.0.1:0"])
+            .args(options)
             .env_remove("VLITE_AUTH_TOKEN")
             .env_remove("VLITE_AUTH_TOKEN_FILE");
         if file {
@@ -54,7 +59,65 @@ impl Server {
             .to_owned();
         server
     }
+}
 
+#[test]
+fn group_commit_configuration_is_validated_before_file_creation() {
+    let directory = tempfile::tempdir_in(".").unwrap();
+    let path = directory.path().join("group-invalid.vlite");
+    for args in [
+        vec!["--group-commit", "--group-commit-requests", "0"],
+        vec!["--group-commit", "--group-commit-requests", "17"],
+        vec!["--group-commit", "--group-commit-bytes", "268435457"],
+        vec!["--group-commit", "--group-commit-delay-ms", "101"],
+        vec!["--group-commit-bytes", "1024"],
+    ] {
+        let error = fails(&path, &args);
+        assert!(error.contains("group commit"), "{error}");
+        assert!(!path.exists());
+    }
+}
+
+#[test]
+fn grouped_acknowledged_writes_survive_abrupt_process_termination() {
+    let directory = tempfile::tempdir_in(".").unwrap();
+    let path = directory.path().join("group-crash.vlite");
+    let server = Server::start_with_options(
+        &path,
+        false,
+        &["--group-commit", "--group-commit-delay-ms", "5"],
+    );
+    std::thread::scope(|scope| {
+        let mut threads = Vec::new();
+        for id in 0..8 {
+            let server = &server;
+            threads.push(scope.spawn(move || {
+                assert_eq!(
+                    server
+                        .request(
+                            "PUT",
+                            &format!("/v1/vectors/{id}"),
+                            json!({"vector":[id,1]})
+                        )
+                        .0,
+                    204
+                );
+            }));
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+    });
+    drop(server); // Kill, not graceful shutdown: acknowledgements must already be durable.
+    let server = Server::start(&path);
+    for id in 0..8 {
+        let (status, record) = server.request("GET", &format!("/v1/vectors/{id}"), Value::Null);
+        assert_eq!(status, 200);
+        assert_eq!(record["vector"], json!([id as f64, 1.0]));
+    }
+}
+
+impl Server {
     fn request(&self, method: &str, path: &str, body: Value) -> (u16, Value) {
         let body = body.to_string();
         let mut stream = TcpStream::connect(&self.address).unwrap();

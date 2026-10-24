@@ -3,6 +3,383 @@ use crate::{
     Record, Result, SearchHit, current_time_ms, metadata, validate_vector,
 };
 use std::collections::HashMap;
+use std::{collections::BTreeMap, sync::Arc};
+
+/// A generation shares immutable records; a writer copies only the ID tree
+/// and the modified record, never the unmodified vectors or payloads.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct RecordMap(Arc<BTreeMap<u64, Arc<Record>>>);
+
+type RecordIter<'a> = std::iter::Map<
+    std::collections::btree_map::Iter<'a, u64, Arc<Record>>,
+    fn((&'a u64, &'a Arc<Record>)) -> (&'a u64, &'a Record),
+>;
+
+impl RecordMap {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn contains_key(&self, id: &u64) -> bool {
+        self.0.contains_key(id)
+    }
+    pub fn get(&self, id: &u64) -> Option<&Record> {
+        self.0.get(id).map(Arc::as_ref)
+    }
+    pub fn get_key_value(&self, id: &u64) -> Option<(&u64, &Record)> {
+        self.0
+            .get_key_value(id)
+            .map(|(id, record)| (id, record.as_ref()))
+    }
+    pub fn get_mut(&mut self, id: &u64) -> Option<&mut Record> {
+        Arc::make_mut(&mut self.0).get_mut(id).map(Arc::make_mut)
+    }
+    pub fn insert(&mut self, id: u64, record: Record) -> Option<Arc<Record>> {
+        Arc::make_mut(&mut self.0).insert(id, Arc::new(record))
+    }
+    pub fn remove(&mut self, id: &u64) -> Option<Arc<Record>> {
+        Arc::make_mut(&mut self.0).remove(id)
+    }
+    pub fn iter(&self) -> RecordIter<'_> {
+        self.0.iter().map(|(id, record)| (id, record.as_ref()))
+    }
+    pub fn keys(&self) -> impl DoubleEndedIterator<Item = &u64> + ExactSizeIterator {
+        self.0.keys()
+    }
+    pub fn values(&self) -> impl DoubleEndedIterator<Item = &Record> + ExactSizeIterator {
+        self.0.values().map(Arc::as_ref)
+    }
+    pub fn range(
+        &self,
+        range: impl std::ops::RangeBounds<u64>,
+    ) -> impl DoubleEndedIterator<Item = (&u64, &Record)> {
+        self.0
+            .range(range)
+            .map(|(id, record)| (id, record.as_ref()))
+    }
+}
+
+impl<'a> IntoIterator for &'a RecordMap {
+    type Item = (&'a u64, &'a Record);
+    type IntoIter = RecordIter<'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl std::ops::Index<&u64> for RecordMap {
+    type Output = Record;
+    fn index(&self, id: &u64) -> &Record {
+        &self.0[id]
+    }
+}
+
+impl FromIterator<(u64, Record)> for RecordMap {
+    fn from_iter<T: IntoIterator<Item = (u64, Record)>>(iter: T) -> Self {
+        Self(Arc::new(
+            iter.into_iter()
+                .map(|(id, record)| (id, Arc::new(record)))
+                .collect(),
+        ))
+    }
+}
+
+impl<const N: usize> From<[(u64, Record); N]> for RecordMap {
+    fn from(records: [(u64, Record); N]) -> Self {
+        records.into_iter().collect()
+    }
+}
+
+/// Maximum distinct live read captures per database. Clones share one capture.
+pub const MAX_READ_SNAPSHOTS: usize = 8;
+/// Bounds retained logical record bodies per capture (not total allocator RSS).
+pub const MAX_READ_SNAPSHOT_BYTES: u64 = 128 * 1024 * 1024;
+pub const MAX_READ_SNAPSHOT_RECORDS: usize = 100_000;
+
+struct SnapshotLease(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for SnapshotLease {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// An immutable, committed collection generation. It owns no file handle or
+/// database lock and can outlive its database. Capturing is O(1); the first
+/// subsequent write copies the ID tree, sharing unchanged record bodies.
+///
+/// Exact scans do not use derived indexes. Default TTL visibility is frozen
+/// at capture time; `_at` methods allow an explicit clock. Drop captures
+/// promptly: at most eight captures, each <=100k records/128 MiB of logical
+/// record bodies, may be retained per database. Clones share the same budget.
+#[derive(Clone)]
+pub struct ReadSnapshot {
+    records: RecordMap,
+    expiries: Arc<BTreeMap<u64, u64>>,
+    dimensions: usize,
+    sequence: u64,
+    lineage: Option<u64>,
+    captured_at_ms: u64,
+    _lease: Arc<SnapshotLease>,
+}
+
+impl Database {
+    /// Captures the default collection at one committed version.
+    pub fn read_snapshot(&self) -> Result<ReadSnapshot> {
+        self.collection("default")?.read_snapshot()
+    }
+}
+
+impl CollectionRef<'_> {
+    /// Captures this collection without retaining the database owner lock.
+    /// Returns `InvalidQuery` when the retention budget is exhausted.
+    pub fn read_snapshot(&self) -> Result<ReadSnapshot> {
+        use std::sync::atomic::Ordering;
+        self.db.ensure_healthy()?;
+        if self.db.group_active {
+            return Err(Error::InvalidQuery(
+                "cannot capture an uncommitted durability group",
+            ));
+        }
+        let state = self.db.state(self.id);
+        if state.records.len() > MAX_READ_SNAPSHOT_RECORDS
+            || state.live_body_bytes > MAX_READ_SNAPSHOT_BYTES
+        {
+            return Err(Error::InvalidQuery(
+                "collection exceeds read snapshot retention limits",
+            ));
+        }
+        #[allow(deprecated)] // Keep the Rust 1.89 minimum supported version.
+        self.db
+            .snapshot_readers
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                (count < MAX_READ_SNAPSHOTS).then_some(count + 1)
+            })
+            .map_err(|_| Error::InvalidQuery("read snapshot retention budget exhausted"))?;
+        let lease = Arc::new(SnapshotLease(Arc::clone(&self.db.snapshot_readers)));
+        Ok(ReadSnapshot {
+            records: state.records.clone(),
+            expiries: Arc::clone(&state.expiries),
+            dimensions: state.dimensions,
+            sequence: self.db.sequence,
+            lineage: self.db.lineage,
+            captured_at_ms: current_time_ms(),
+            _lease: lease,
+        })
+    }
+}
+
+impl ReadSnapshot {
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+    pub fn lineage(&self) -> Option<u64> {
+        self.lineage
+    }
+    pub fn dimensions(&self) -> usize {
+        self.dimensions
+    }
+    /// Physical records at capture time, including records hidden by TTL.
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+    pub fn get(&self, id: u64) -> Result<Option<&Record>> {
+        self.get_at(id, self.captured_at_ms)
+    }
+    pub fn get_at(&self, id: u64, now_ms: u64) -> Result<Option<&Record>> {
+        Ok(self.records.get(&id).filter(|_| {
+            !self
+                .expiries
+                .get(&id)
+                .is_some_and(|expiry| *expiry <= now_ms)
+        }))
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    fn database() -> Database {
+        Database::create_in_memory(1, crate::CreateOptions::default()).unwrap()
+    }
+
+    #[test]
+    fn generations_share_unchanged_record_bodies_and_release_obsolete_bodies() {
+        let mut db = database();
+        db.put(1, &[1.0], b"first").unwrap();
+        db.put(2, &[2.0], b"second").unwrap();
+        let snapshot = db.read_snapshot().unwrap();
+        let old = Arc::downgrade(&snapshot.records.0[&1]);
+        let unchanged = snapshot.get(2).unwrap().unwrap().vector.as_ptr();
+        db.put(1, &[3.0], b"replacement").unwrap();
+        assert!(Arc::ptr_eq(
+            &snapshot.records.0[&2],
+            &db.default_state().records.0[&2]
+        ));
+        assert_eq!(unchanged, db.get(2).unwrap().unwrap().vector.as_ptr());
+        assert_eq!(old.upgrade().unwrap().payload, b"first");
+        drop(snapshot);
+        assert!(old.upgrade().is_none());
+    }
+
+    #[test]
+    fn snapshot_byte_budget_and_poisoned_owner_reject_new_captures() {
+        let mut db = database();
+        db.state_mut(0).live_body_bytes = MAX_READ_SNAPSHOT_BYTES + 1;
+        assert!(db.read_snapshot().is_err());
+        db.state_mut(0).live_body_bytes = 0;
+        let snapshot = db.read_snapshot().unwrap();
+        db.poisoned = true;
+        assert!(matches!(db.read_snapshot(), Err(Error::Poisoned)));
+        assert!(snapshot.search(&[0.0], 1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn durability_group_syncs_once_rejects_nested_captures_and_preserves_validation_boundaries() {
+        let mut db = database();
+        let mut syncs = 0;
+        let results = db
+            .durable_group_with_sync(
+                |db| {
+                    assert!(db.read_snapshot().is_err());
+                    assert!(db.durable_group(|_| ()).is_err());
+                    [
+                        db.put(1, &[1.0], b"one"),
+                        db.put(2, &[f32::NAN], b"invalid"),
+                        db.put(3, &[3.0], b"three"),
+                    ]
+                },
+                |_| {
+                    syncs += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(syncs, 1);
+        assert!(results[0].is_ok() && results[1].is_err() && results[2].is_ok());
+        assert_eq!(db.len(), 2);
+        let bytes = db.to_bytes().unwrap();
+        let recovered = Database::open_from_bytes(bytes, None).unwrap();
+        assert_eq!(recovered.len(), 2);
+        assert!(recovered.get(2).unwrap().is_none());
+    }
+
+    #[test]
+    fn group_final_sync_failure_and_unwind_poison_owner_but_not_prior_snapshots() {
+        let mut db = database();
+        db.put(1, &[1.0], b"committed").unwrap();
+        let before = db.read_snapshot().unwrap();
+        db.fail_next_group_sync = true;
+        let result = db.durable_group(|db| db.put(1, &[2.0], b"unacknowledged"));
+        assert!(matches!(result, Err(Error::CommitIndeterminate(_))));
+        assert!(matches!(db.get(1), Err(Error::Poisoned)));
+        assert!(matches!(db.read_snapshot(), Err(Error::Poisoned)));
+        assert_eq!(before.get(1).unwrap().unwrap().payload, b"committed");
+        let mut db = database();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = db.durable_group(|db| {
+                db.put(2, &[2.0], b"").unwrap();
+                panic!("injected callback unwind");
+            });
+        }));
+        assert!(result.is_err());
+        assert!(db.poisoned);
+        assert!(!db.group_active);
+    }
+}
+impl ReadSnapshot {
+    pub fn browse(&self, after: Option<u64>, limit: usize) -> Result<BrowsePage> {
+        self.browse_at(after, limit, self.captured_at_ms)
+    }
+    pub fn browse_at(&self, after: Option<u64>, limit: usize, now_ms: u64) -> Result<BrowsePage> {
+        if !(1..=MAX_BROWSE_PAGE).contains(&limit) {
+            return Err(Error::InvalidQuery("browse limit must be 1..=1000"));
+        }
+        use std::ops::Bound::{Excluded, Unbounded};
+        let mut hits: Vec<_> = self
+            .records
+            .range((after.map_or(Unbounded, Excluded), Unbounded))
+            .filter(|(id, _)| {
+                !self
+                    .expiries
+                    .get(id)
+                    .is_some_and(|expiry| *expiry <= now_ms)
+            })
+            .take(limit + 1)
+            .map(|(&id, record)| BrowseHit {
+                id,
+                record: record.clone(),
+            })
+            .collect();
+        let more = hits.len() > limit;
+        hits.truncate(limit);
+        let next_after = more.then(|| hits.last().expect("nonempty page").id);
+        Ok(BrowsePage { hits, next_after })
+    }
+    pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<SearchHit>> {
+        self.search_filtered_with_metric(query, k, &[], DistanceMetric::SquaredL2)
+    }
+    pub fn search_filtered_with_metric(
+        &self,
+        query: &[f32],
+        k: usize,
+        conditions: &[Condition],
+        metric: DistanceMetric,
+    ) -> Result<Vec<SearchHit>> {
+        self.search_filtered_with_metric_at(query, k, conditions, metric, self.captured_at_ms)
+    }
+    pub fn search_filtered_with_metric_at(
+        &self,
+        query: &[f32],
+        k: usize,
+        conditions: &[Condition],
+        metric: DistanceMetric,
+        now_ms: u64,
+    ) -> Result<Vec<SearchHit>> {
+        self.search_with_stats_at(
+            query,
+            k,
+            conditions,
+            metric,
+            now_ms,
+            &mut crate::SearchStats::default(),
+        )
+    }
+    pub(crate) fn search_with_stats_at(
+        &self,
+        query: &[f32],
+        k: usize,
+        conditions: &[Condition],
+        metric: DistanceMetric,
+        now_ms: u64,
+        stats: &mut crate::SearchStats,
+    ) -> Result<Vec<SearchHit>> {
+        validate_vector(self.dimensions, query)?;
+        metadata::validate_filter(conditions)?;
+        let norm = crate::validate_metric_query(query, metric)?;
+        Ok(crate::exact_search(
+            &self.records,
+            &self.expiries,
+            query,
+            norm,
+            k,
+            conditions,
+            metric,
+            None,
+            now_ms,
+            stats,
+        ))
+    }
+}
 
 /// Maximum number of records returned by one embedded browse call.
 pub const MAX_BROWSE_PAGE: usize = 1_000;

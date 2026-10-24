@@ -819,8 +819,15 @@ impl VLite for Adapter {
                     let vector = request.vector;
                     let payload = request.payload;
                     let expiry_target = addressed.clone();
+                    let bytes = group_commit::record_bytes(
+                        vector.capacity(),
+                        payload.capacity(),
+                        &metadata,
+                    )
+                    .saturating_add(expiry_target.retained_bytes())
+                    .saturating_add(guard.retained_bytes());
                     service
-                        .run(move |db| {
+                        .run_mutation(bytes, move |db| {
                             let collection = open(db, &role, &expiry_target)?;
                             enforce_quota(&quota_service, db, &role, collection, &[(id, true)])?;
                             let expected = guard.resolve(db, &ident, collection, id)?;
@@ -1066,8 +1073,10 @@ impl VLite for Adapter {
                 let name = tenants::qualify(&role, target(request.collection).name());
                 let id = request.id;
                 let metadata = metadata_in(request.metadata)?;
+                let bytes =
+                    group_commit::record_bytes(0, 0, &metadata).saturating_add(name.capacity());
                 service
-                    .run(move |db| {
+                    .run_mutation(bytes, move |db| {
                         open_qualified(db, &role, &name)?;
                         let revision = db.collection_mut(&name)?.update_metadata(id, &metadata)?;
                         Ok(proto::UpdateMetadataResponse { revision })

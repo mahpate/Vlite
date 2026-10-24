@@ -36,6 +36,8 @@ mod audit;
 mod collections;
 mod credentials;
 mod features;
+mod group_commit;
+pub use group_commit::GroupCommitConfig;
 #[cfg(feature = "grpc")]
 pub mod grpc;
 mod logs;
@@ -68,6 +70,8 @@ struct Metrics {
     grpc_failures: AtomicU64,
     grpc_stream_messages: AtomicU64,
     commit_failures: AtomicU64,
+    group_commit_groups: AtomicU64,
+    group_commit_requests: AtomicU64,
     rebuilds: AtomicU64,
     rebuild_search_ns: AtomicU64,
     /// Nanoseconds of the last synchronous HNSW build plus one; 0 = none yet.
@@ -172,6 +176,7 @@ pub struct Service {
     webhooks: Arc<webhooks::Dispatcher>,
     encryption_key: Option<crate::EncryptionKey>,
     started: Instant,
+    group_commit: Option<Arc<group_commit::Coordinator>>,
 }
 
 impl Service {
@@ -249,7 +254,42 @@ impl Service {
             webhooks: Arc::default(),
             encryption_key,
             started: Instant::now(),
+            group_commit: None,
         })
+    }
+
+    /// Enable bounded durable coalescing before cloning or publishing the service.
+    /// Record puts, deletes and batches retain individual validation and frames.
+    pub fn with_group_commit(mut self, config: GroupCommitConfig) -> std::io::Result<Self> {
+        if self.group_commit.is_some() || Arc::strong_count(&self.database) != 1 {
+            return Err(std::io::Error::other(
+                "configure group commit once, before cloning the service",
+            ));
+        }
+        self.group_commit = Some(Arc::new(group_commit::Coordinator::start(
+            Arc::downgrade(&self.database),
+            self.metrics.clone(),
+            config,
+        )?));
+        Ok(self)
+    }
+
+    async fn run_mutation<T: Send + 'static>(
+        &self,
+        bytes: usize,
+        operation: impl FnOnce(&mut Database) -> Result<T, ApiError> + Send + 'static,
+    ) -> Result<T, ApiError> {
+        let Some(group) = &self.group_commit else {
+            return self.run(operation).await;
+        };
+        let permit = self.workers.clone().try_acquire_owned().map_err(|_| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "busy",
+                "database queue is full",
+            )
+        })?;
+        group.submit(bytes, permit, operation).await
     }
 
     async fn run<T: Send + 'static>(
@@ -291,6 +331,16 @@ impl Service {
         &self,
         operation: impl FnOnce(&Database) -> Result<T, ApiError> + Send + 'static,
     ) -> Result<T, ApiError> {
+        self.run_read_then(operation, Ok).await
+    }
+
+    /// Capture bounded immutable state under the owner lock, then perform work
+    /// outside it while retaining the same blocking-worker admission permit.
+    async fn run_read_then<P: Send + 'static, T: Send + 'static>(
+        &self,
+        prepare: impl FnOnce(&Database) -> Result<P, ApiError> + Send + 'static,
+        complete: impl FnOnce(P) -> Result<T, ApiError> + Send + 'static,
+    ) -> Result<T, ApiError> {
         let permit = self.workers.clone().try_acquire_owned().map_err(|_| {
             ApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -301,8 +351,11 @@ impl Service {
         let database = self.database.clone();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            let owner = database.read().map_err(internal)?;
-            operation(owner.as_ref().ok_or_else(unavailable)?)
+            let prepared = {
+                let owner = database.read().map_err(internal)?;
+                prepare(owner.as_ref().ok_or_else(unavailable)?)?
+            };
+            complete(prepared)
         })
         .await
         .map_err(internal)?
@@ -314,7 +367,11 @@ impl Service {
         let database = self.database.clone();
         let ops = self.ops.clone();
         let webhooks = self.webhooks.clone();
+        let group = self.group_commit.clone();
         tokio::task::spawn_blocking(move || {
+            if let Some(group) = group {
+                group.shutdown()?;
+            }
             webhooks.shutdown();
             ops.shutdown();
             let mut owner = database
@@ -341,7 +398,11 @@ impl Service {
         let database = self.database.clone();
         let ops = self.ops.clone();
         let webhooks = self.webhooks.clone();
+        let group = self.group_commit.clone();
         tokio::task::spawn_blocking(move || {
+            if let Some(group) = group {
+                group.shutdown()?;
+            }
             webhooks.shutdown();
             ops.shutdown();
             let owner = database
@@ -1351,6 +1412,13 @@ enum Target {
 }
 
 impl Target {
+    fn retained_bytes(&self) -> usize {
+        match self {
+            Self::Legacy => 0,
+            Self::Named(name) => name.capacity(),
+        }
+    }
+
     fn name(&self) -> &str {
         match self {
             Self::Legacy => "default",
@@ -1841,8 +1909,11 @@ async fn update_metadata_in(
     let expected = if_match(&headers)?;
     let MetadataPatch { metadata } = body(payload)?;
     let ident = service.etag_ident.clone();
+    let bytes = group_commit::record_bytes(0, 0, &metadata)
+        .saturating_add(target.retained_bytes())
+        .saturating_add(expected.as_ref().map_or(0, String::capacity));
     service
-        .run(move |db| {
+        .run_mutation(bytes, move |db| {
             let collection = open(db, &role, &target)?;
             if let Some(expected) = expected.as_deref() {
                 let Some((current, _)) = current_etag(db, &ident, collection, id)? else {
@@ -1888,6 +1959,13 @@ enum Guard {
 }
 
 impl Guard {
+    fn retained_bytes(&self) -> usize {
+        match self {
+            Self::ETag(Some(tag)) => tag.capacity(),
+            _ => 0,
+        }
+    }
+
     fn resolve(
         self,
         db: &Database,
@@ -1928,8 +2006,11 @@ async fn put_core(
     }
     let ident = service.etag_ident.clone();
     let quota_service = service.clone();
+    let bytes = group_commit::record_bytes(vector.capacity(), payload.capacity(), &metadata)
+        .saturating_add(target.retained_bytes())
+        .saturating_add(guard.retained_bytes());
     service
-        .run(move |db| {
+        .run_mutation(bytes, move |db| {
             let collection = open(db, &role, &target)?;
             enforce_quota(&quota_service, db, &role, collection, &[(id, true)])?;
             let expected = guard.resolve(db, &ident, collection, id)?;
@@ -1996,8 +2077,11 @@ async fn delete_core(
     guard: Guard,
 ) -> Result<bool, ApiError> {
     let ident = service.etag_ident.clone();
+    let bytes = 1024usize
+        .saturating_add(target.retained_bytes())
+        .saturating_add(guard.retained_bytes());
     service
-        .run(move |db| {
+        .run_mutation(bytes, move |db| {
             let collection = open(db, &role, &target)?;
             let expected = guard.resolve(db, &ident, collection, id)?;
             Ok(db.delete_in(collection, id, expected)?)
@@ -2115,8 +2199,36 @@ async fn batch_core(
         }
     }
     let quota_service = service.clone();
+    let bytes = operations
+        .iter()
+        .fold(
+            operations
+                .capacity()
+                .saturating_mul(std::mem::size_of::<Mutation>())
+                .saturating_add(1024),
+            |bytes, operation| {
+                bytes.saturating_add(match operation {
+                    Mutation::Put {
+                        vector, payload, ..
+                    } => vector
+                        .capacity()
+                        .saturating_mul(4)
+                        .saturating_add(payload.capacity()),
+                    Mutation::PutWithMetadata {
+                        vector,
+                        payload,
+                        metadata,
+                        ..
+                    } => {
+                        group_commit::record_bytes(vector.capacity(), payload.capacity(), metadata)
+                    }
+                    Mutation::Delete { .. } => 0,
+                })
+            },
+        )
+        .saturating_add(target.retained_bytes());
     service
-        .run(move |db| {
+        .run_mutation(bytes, move |db| {
             let collection = open(db, &role, &target)?;
             enforce_quota(
                 &quota_service,
@@ -2673,7 +2785,64 @@ async fn search_core(
         Ok::<_, ApiError>((executed, binding, role, target, input))
     };
     let (executed, collection, role, target, input) = service
-        .run_read(move |db| attempt(db, role, target, input))
+        .run_read_then(
+            move |db| {
+                let collection = open(db, &role, &target)?;
+                if input.mode == SearchMode::Exact
+                    && input.rerank.is_none()
+                    && (input.filter.as_ref().is_none_or(Vec::is_empty)
+                        || db.state(collection).settings.metadata_indexes.is_empty())
+                {
+                    let (metric, _, _) = search_identity(db, collection, &target, &input)?;
+                    match (CollectionRef { db, id: collection }).read_snapshot() {
+                        Ok(snapshot) => {
+                            let binding = (
+                                tenants::qualify(&role, target.name()),
+                                collection,
+                                db.lineage(),
+                            );
+                            return Ok((
+                                Some((snapshot, metric, crate::current_time_ms())),
+                                None,
+                                binding,
+                                role,
+                                target,
+                                input,
+                            ));
+                        }
+                        // Retention/cardinality/byte limits are optimization limits,
+                        // never a new API failure. Keep the indexed/locked path.
+                        Err(Error::InvalidQuery(
+                            "collection exceeds read snapshot retention limits"
+                            | "read snapshot retention budget exhausted",
+                        )) => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                let (executed, binding, role, target, input) = attempt(db, role, target, input)?;
+                Ok((None, executed, binding, role, target, input))
+            },
+            |(snapshot, mut executed, binding, role, target, input)| {
+                if let Some((snapshot, metric, now_ms)) = snapshot {
+                    let mut stats = SearchStats::default();
+                    let hits = snapshot.search_with_stats_at(
+                        input.vector.as_deref().unwrap_or(&[]),
+                        input.k,
+                        input.filter.as_deref().unwrap_or(&[]),
+                        metric,
+                        now_ms,
+                        &mut stats,
+                    )?;
+                    executed = Some(Executed {
+                        hits: Hits::Vector(hits),
+                        stats,
+                        plan: None,
+                        ef_search: None,
+                    });
+                }
+                Ok((executed, binding, role, target, input))
+            },
+        )
         .await?;
     let (input, collection, executed) = match executed {
         Some(executed) => (input, collection, executed),

@@ -87,6 +87,42 @@ Inner-product ANN is rejected. Cosine ANN requires a v0.1.2+ wrapper
 and native library; v0.1.1 has L2 ANN only.
 See [ABI contracts and limitations](../README.md).
 
+## Opt-in Float32Array inputs
+
+`searchF32(vector, k, options)` and `batchPutF32(puts, options)` accept native
+`Float32Array` vectors. `searchManyF32(vectors, k, options)` accepts 1–128
+equal-dimension queries and submits them in one worker request. Bulk puts remain
+atomic like `batch`; each row is `{ id, vector, payload?, metadata? }`.
+`Float32Array` inputs must be finite, non-empty, and use at most 2,097,152
+float values per request. Bulk put rows are limited to 4,096. These methods keep
+the regular search result/error shapes and native atomicity rules. Multi-query
+results retain input order; any engine error rejects the entire Promise without
+partial results. The queries are separate native calls, not one atomic read
+snapshot across other owners or processes.
+
+The binding synchronously copies every supplied typed array before returning
+control, then transfers that private snapshot to the worker. Caller-owned
+buffers are not detached or borrowed during asynchronous execution. Shared
+`SharedArrayBuffer` vector inputs are rejected. This is an opt-in typed-input path, not
+a zero-copy guarantee. When loaded ABI-1 libraries export `vlite_search_f32`
+and `vlite_batch_put_f32`, the addon passes the snapshots to those native entry
+points. Older ABI-1 libraries remain usable through JSON fallback; fallback
+requests still observe the 8 MiB native JSON limit. No method or behavior of
+the existing JSON-backed API changes.
+
+Reproduce the bounded paired microbenchmark after building:
+
+```text
+node bindings/node/benchmark-f32.mjs node-f32-benchmark.json
+```
+
+The optional output path retains raw JSON timings, exact invocation, binary and
+source hashes, working-tree status, and correctness checks. `VLITE_TEST_LIBRARY`
+and `VLITE_TEST_ADDON` can select explicit binaries. Retain the preceding build
+log as provenance: hashes identify binaries but cannot prove how a pre-existing
+binary was built. The fixed-order benchmark uses in-memory databases on one
+potentially shared host; it is not a disk-ingest or production speed guarantee.
+
 ## Read-only multi-process access
 
 Use `await native.open(path, { readOnly: true })` for an existing database with a

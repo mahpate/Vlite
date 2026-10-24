@@ -50,6 +50,79 @@ filters only in exact mode. Collections and hybrid/import workflows require
 explicit v4 creation or an offline copy-out upgrade; enabling the console does
 not migrate any file.
 
+## Opt-in durable group commit
+
+`vlite-server <path> --group-commit` coalesces concurrent record puts, deletes
+and atomic batch/metadata-patch requests (including collection REST routes and
+gRPC Put/Delete/WriteBatch/UpdateMetadata calls) into one shared datafile sync. The default remains
+one durable commit per request. Configure limits after the enabling flag:
+
+```text
+--group-commit --group-commit-requests 16 --group-commit-bytes 67108864 --group-commit-delay-ms 0
+```
+
+Defaults are 16 outstanding grouped writes, 64 MiB retained-input budget and a
+zero-delay opportunistic collection window. Valid bounds are 1–16 writes, 1024–268435456 bytes and
+0–100 ms. The byte budget conservatively charges retained vector/payload
+capacities and metadata/tree storage; it is not a total-process-memory limit.
+HTTP JSON/body limits and the existing 16 request/worker admission limits still
+apply. Full queues or budgets return HTTP 503 `busy` immediately; they do not
+spawn waiting tasks. A single request larger than the configured byte budget is
+also rejected as `busy`. The collection window bounds intentional accumulation,
+not disk-sync, lock-wait or end-to-end latency.
+Zero delay drains already queued work without waiting for additional requests;
+a positive delay can improve coalescing at low arrival rates but adds latency.
+OS timer granularity and scheduling can exceed the requested wait (on the tested
+Windows host, a 2 ms wait produced roughly 16 ms sequential-write latency).
+
+Accepted grouped requests execute FIFO by coordinator admission, under one
+exclusive owner lock. Authorization scope, quotas, conditional revisions/ETags,
+and atomic-batch validation run separately for each request against preceding
+accepted writes. A rejected request does not mutate the database or invalidate
+valid neighbors. Each accepted request keeps its own recovery frame and sequence;
+a group is **not** an all-or-nothing transaction across requests. Readers cannot
+observe partially applied groups, and no success response is released before
+the shared sync succeeds. Import, collection/admin and maintenance
+operations retain their existing independent durability paths and can interleave
+between groups; concurrent arrival across these paths does not establish order.
+
+On shared sync failure every would-be success becomes HTTP 503
+`commit_indeterminate`; validation failures keep their original status. Append
+failures also prevent neighboring successes and poison the owner. No automatic
+retry occurs. An unacknowledged group may recover wholly or partly after a crash;
+never infer absence from a disconnect or error. Disconnects retain admission and
+memory reservations until the worker completes. Graceful close (and ANN snapshot
+save during shutdown) stops admissions, drains/join the coordinator, then closes
+the owner. Abrupt termination does not drain it.
+
+In-process servers can opt in with
+`Service::with_group_commit(GroupCommitConfig::default())` **before** cloning or
+publishing their service. `GET /metrics` includes
+`group_commit_groups_total` and `group_commit_requests_total`; these are attempted
+groups/requests, not a count of successful syncs.
+
+Simple exact searches (without reranking or an indexed-filter path) capture a
+bounded immutable collection snapshot, then scan outside the owner lock while
+retaining the existing worker permit. Their results reflect the captured state;
+writes can commit during the scan. ANN, hybrid, reranking and indexed filtering
+keep their existing execution paths. Snapshot retention/cardinality/byte-limit
+exhaustion falls back to lock-held execution, not a new request error.
+
+Reproduce the bounded local-disk comparison with:
+
+```text
+cargo test --release --features server --lib comparative_durable_write_benchmark -- --ignored --nocapture
+```
+
+It checks reopening all 512 acknowledged records, with 16-dimensional vectors
+and 128-byte payloads, at concurrency 1 and 16. Two paired runs on a shared Windows
+host measured zero-delay grouping at 12571–15617 writes/s versus 1926–2910 writes/s
+with independent syncs at concurrency 16 (5.4–6.5x); grouped p99 was 1.52–1.65 ms
+versus 5.93–16.43 ms. This is a small noisy in-process workload, not a network or
+production SLO. Sequential zero-delay throughput was 6–8% lower; an explicit 2 ms
+window was dramatically slower sequentially due to host timer granularity.
+Tune against actual arrivals and storage rather than assuming grouping helps.
+
 ## Token lifecycle and audit (admin only)
 
 - `GET /v1/admin/tokens` returns

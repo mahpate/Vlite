@@ -8,7 +8,9 @@
 //! `Integer` and `Float` are distinct (`Integer(1)` never matches `Float(1.0)`)
 //! and `-0.0` equals `0.0`.
 
-use crate::{Condition, Metadata, MetadataValue, Record};
+#[cfg(test)]
+use crate::Record;
+use crate::{Condition, Metadata, MetadataValue};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -308,7 +310,11 @@ fn field_of(condition: &Condition) -> &str {
 
 impl MetadataIndexes {
     /// Rebuilds from all live records after open or a declaration change.
-    pub(crate) fn rebuild(&mut self, specs: &[MetadataIndexSpec], records: &BTreeMap<u64, Record>) {
+    pub(crate) fn rebuild(
+        &mut self,
+        specs: &[MetadataIndexSpec],
+        records: &crate::records::RecordMap,
+    ) {
         self.fields.clear();
         for spec in specs {
             let index = self.fields.entry(spec.field.clone()).or_default();
@@ -422,7 +428,7 @@ mod tests {
     #[test]
     fn typed_equality_ranges_and_negative_zero_follow_filter_semantics() {
         use MetadataValue::{Float, Integer, String as Text};
-        let records = BTreeMap::from([
+        let records = crate::records::RecordMap::from([
             (1, record(&[("n", Integer(1))])),
             (2, record(&[("n", Float(1.0))])),
             (3, record(&[("n", Float(-0.0))])),
@@ -487,7 +493,7 @@ mod tests {
                 spec("a", MetadataIndexKind::Eq),
                 spec("b", MetadataIndexKind::Range),
             ],
-            &BTreeMap::new(),
+            &crate::records::RecordMap::new(),
         );
         for id in 0..10 {
             let metadata = record(&[

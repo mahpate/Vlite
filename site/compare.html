@@ -191,6 +191,30 @@
         comparisons above. A distance-loop unroll was rejected after inconsistent
         timings. Published Python 0.3.0 wheels do not include the new buffer methods.</p>
       <p><a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/README.md#current-source-performance-work-october-23-2026">Workloads, raw samples, reproduction and remaining bottlenecks</a></p>
+      <h3>Next source-only concurrency and binding work</h3>
+      <p>Opt-in durable group commit coalesces bounded concurrent record writes
+        while retaining separate recovery frames and sync-before-acknowledgement.
+        It is disabled by default and can reduce sequential throughput.
+        Simple exact searches use bounded immutable snapshots to scan outside
+        the owner lock; ANN, reranking and indexed filtering keep existing paths.</p>
+      <p>The Node.js embedded binding adds opt-in Float32Array search, atomic bulk
+        puts and bounded multi-query calls. Inputs are privately copied, not
+        zero-copy, and multi-query calls do not promise a shared snapshot across
+        other owners. These source changes are not included in previously
+        published packages and do not revise the cross-engine results above.
+        See <a href="docs/CONSOLE-ADMIN.html#opt-in-durable-group-commit">group-commit
+        configuration and limitations</a> and the
+        <a href="https://github.com/mahpate/Vlite/blob/main/bindings/node/README.md">Node.js guide</a>.</p>
+      <p>Unquantized background HNSW builds now share immutable record generations,
+        and startup reuses replay buffers with compatible table-based CRC
+        validation. The first write after a capture can still copy the ID tree;
+        retained snapshots have explicit budgets. No checkpoint or storage-format
+        change is introduced. See the
+        <a href="docs/read-snapshots.html">snapshot visibility, limits and rebuild guide</a>.</p>
+      <p class="muted">A bounded mixed-workload experiment reduced median writer
+        latency but increased reader latency; copy-on-write and reclamation still
+        have costs. These Windows shared-host measurements do not establish a
+        universal throughput or tail-latency improvement.</p>
     </div>
   </section>
   <section id="hnsw-traversal">

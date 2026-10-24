@@ -200,7 +200,7 @@ impl Database {
 fn write_sidecar(
     path: &Path,
     graph: &hnsw::GraphExport,
-    records: &BTreeMap<u64, crate::Record>,
+    records: &crate::records::RecordMap,
     dimensions: usize,
     config: HnswConfig,
     metric: DistanceMetric,

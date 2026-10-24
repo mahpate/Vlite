@@ -1,0 +1,2496 @@
+{
+  "schema": 1,
+  "purpose": "Controlled exact-scan reader/writer interference plus isolated first-write COW cost; no universal speedup claim.",
+  "command": "$env:CARGO_TARGET_DIR='target\\perf2-engine-measure'; $env:RAYON_NUM_THREADS='1'; cargo run --locked --release --example engine_mixed_perf -- mixed-final",
+  "validation_command": "cargo clippy --locked --example engine_mixed_perf -- -D warnings",
+  "validation": "passed; all benchmark assertions completed; 3 paired trials24 rounds per mode;21 warmed COW pairs",
+  "provenance": {
+    "git_head": "62e29022ac916168fd3eb7b8e2058df3683b9b31",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-pc-windows-msvc\nrelease: 1.99.1\nLLVM version: 23.1.1",
+    "example_sha256": "d2d0b74d8df97d9e8dbf3846a1442979ae2ee4e4e8b17c77ef2efcc666185e48",
+    "executable_sha256": "5efa8ce6b06fd7866f8ada856357c883f0013a14366d6b8597ad7ce94344da22",
+    "engine_evidence": "engine-snapshots-windows.json",
+    "hash_scope": "Example and executable digests collected directly after successful measured execution; exact baseline binary unavailable, both modes run same executable. Current engine dirty-tree source manifests recorded in companion artifact, not independently reconstructed build provenance."
+  },
+  "configuration": {
+    "records": 8192,
+    "dimensions": 128,
+    "readers": 1,
+    "writers": 1,
+    "k": 10,
+    "rayon_threads": 1,
+    "trials": 3,
+    "rounds_per_mode_per_trial": 24,
+    "mode_order": [
+      "lock-held,snapshot",
+      "snapshot,lock-held",
+      "lock-held,snapshot"
+    ],
+    "mutations": "Round%4==0 deletes ID round%64, others upsert deterministic replacement vector; independent mirrored database updated after each completed round.",
+    "storage": "Mixed writes use disk-backed Database and ordinary per-write sync; COW pairs use in-memory database to exclude disk sync.",
+    "schedule": "Reader computes mirrored-state reference outside timer, acquires owner read lock, captures generation if snapshot mode, then signals waiting writer. Lock-held mode retains guard throughout scan; snapshot mode drops guard before signal. Main reader waits for write completion before next round. This deliberately creates contention, not arbitrary arrivals."
+  },
+  "correctness": [
+    "Every scan result IDs and f64 distance bits equal independently mirrored pre-write state.",
+    "After every durable write, current result bits and physical row count equal mirrored post-write state.",
+    "Read and write rounds include deletes/upserts. Snapshot scan observes old state even when writer completes before scan returns.",
+    "Warm COW pairs verify record count and replacement vector, with reference capture kept alive through timed first write."
+  ],
+  "timing_columns": {
+    "read_raw_ns": [
+      "lock_wait",
+      "capture",
+      "handshake",
+      "scan",
+      "total_including_capture_handshake_snapshot_drop",
+      "writer_finished_before_read_end_boolean"
+    ],
+    "write_raw_ns": [
+      "lock_wait",
+      "mutation_including_sync",
+      "total_including_unlock"
+    ],
+    "cow": "First write after optional capture,21 alternating pairs following untimed unique+shared warmup; drop old generation outside write timing."
+  },
+  "limits": [
+    "Native Windows shared development host, warm4MiB vector working set, one reader and writer, single Rayon thread; scheduling/CPU/storage noise remain.",
+    "Controlled reader-first schedule favors exposing lock interference; not representative production arrival rate, throughput, or tail-latency guarantee.",
+    "Reference scan precedes measured scan and warms caches. Modes alternate order by trial but individual samples are not independent. p95 uses nearest-rank across only72 samples; no confidence intervals.",
+    "Snapshot total includes final snapshot release, which may free old ID tree/record bodies after concurrent COW; scan duration excludes that release.",
+    "Snapshot writer lock wait can shrink while its mutation work grows due O(n) ID-tree copy and Arc refcount traffic. Read total may worsen due concurrent memory traffic and generation reclamation.",
+    "No isolated historical pre-Arc scan benchmark or RSS/allocator measurement; companion artifact explicitly documents per-record allocation/pointer-locality cost.",
+    "No fixed general speedup claim; first-write COW costs apply when old generations are retained, logical retention caps are not RSS limits."
+  ],
+  "aggregate": {
+    "lock-held": {
+      "read_total": {
+        "samples": 72,
+        "median_ns": 728900.0,
+        "p95_nearest_rank_ns": 1074300,
+        "min_ns": 582300,
+        "max_ns": 1446400
+      },
+      "read_scan": {
+        "samples": 72,
+        "median_ns": 696750.0,
+        "p95_nearest_rank_ns": 1045800,
+        "min_ns": 560100,
+        "max_ns": 1401100
+      },
+      "write_total": {
+        "samples": 72,
+        "median_ns": 1220850.0,
+        "p95_nearest_rank_ns": 1724000,
+        "min_ns": 897600,
+        "max_ns": 2837900
+      },
+      "write_wait": {
+        "samples": 72,
+        "median_ns": 710450.0,
+        "p95_nearest_rank_ns": 1054800,
+        "min_ns": 565000,
+        "max_ns": 1412800
+      },
+      "write_mutation_including_sync": {
+        "samples": 72,
+        "median_ns": 465900.0,
+        "p95_nearest_rank_ns": 790600,
+        "min_ns": 302300,
+        "max_ns": 1424500
+      },
+      "writer_completed_before_read_end": 0
+    },
+    "snapshot": {
+      "read_total": {
+        "samples": 72,
+        "median_ns": 903100.0,
+        "p95_nearest_rank_ns": 1310000,
+        "min_ns": 638600,
+        "max_ns": 1505400
+      },
+      "read_scan": {
+        "samples": 72,
+        "median_ns": 780400.0,
+        "p95_nearest_rank_ns": 1114700,
+        "min_ns": 620200,
+        "max_ns": 1291700
+      },
+      "write_total": {
+        "samples": 72,
+        "median_ns": 828000.0,
+        "p95_nearest_rank_ns": 1536000,
+        "min_ns": 553200,
+        "max_ns": 14523300
+      },
+      "write_wait": {
+        "samples": 72,
+        "median_ns": 200.0,
+        "p95_nearest_rank_ns": 300,
+        "min_ns": 100,
+        "max_ns": 400
+      },
+      "write_mutation_including_sync": {
+        "samples": 72,
+        "median_ns": 827650.0,
+        "p95_nearest_rank_ns": 1535700,
+        "min_ns": 552900,
+        "max_ns": 14522900
+      },
+      "writer_completed_before_read_end": 41
+    }
+  },
+  "cow_raw": {
+    "unique_first_write_ns": [
+      5800,
+      2600,
+      2400,
+      2600,
+      1400,
+      6300,
+      1900,
+      2700,
+      1600,
+      2300,
+      1400,
+      2000,
+      1300,
+      3500,
+      1200,
+      2000,
+      1000,
+      2300,
+      1000,
+      2000,
+      1600
+    ],
+    "retained_first_write_ns": [
+      178500,
+      137100,
+      133100,
+      126400,
+      123700,
+      125100,
+      316500,
+      130900,
+      124100,
+      135800,
+      121900,
+      122800,
+      121600,
+      122700,
+      144300,
+      123000,
+      123600,
+      121800,
+      119600,
+      123100,
+      120500
+    ]
+  },
+  "cow_summary": {
+    "unique_first_write_ns": {
+      "samples": 21,
+      "median_ns": 2000,
+      "p95_nearest_rank_ns": 5800,
+      "min_ns": 1000,
+      "max_ns": 6300
+    },
+    "retained_first_write_ns": {
+      "samples": 21,
+      "median_ns": 123700,
+      "p95_nearest_rank_ns": 178500,
+      "min_ns": 119600,
+      "max_ns": 316500
+    }
+  },
+  "runs": [
+    {
+      "trial": 0,
+      "mode": "lock-held",
+      "read_raw_ns": [
+        [
+          200,
+          0,
+          14500,
+          1106500,
+          1129900,
+          false
+        ],
+        [
+          100,
+          100,
+          16400,
+          936100,
+          963700,
+          false
+        ],
+        [
+          100,
+          0,
+          14600,
+          868100,
+          896100,
+          false
+        ],
+        [
+          300,
+          0,
+          56200,
+          746000,
+          823000,
+          false
+        ],
+        [
+          200,
+          100,
+          17900,
+          873100,
+          911500,
+          false
+        ],
+        [
+          400,
+          100,
+          19100,
+          680700,
+          710300,
+          false
+        ],
+        [
+          100,
+          100,
+          17200,
+          641300,
+          673600,
+          false
+        ],
+        [
+          200,
+          100,
+          19000,
+          639700,
+          672700,
+          false
+        ],
+        [
+          100,
+          100,
+          16300,
+          605600,
+          635900,
+          false
+        ],
+        [
+          200,
+          0,
+          13000,
+          656600,
+          680300,
+          false
+        ],
+        [
+          200,
+          0,
+          14300,
+          619400,
+          646700,
+          false
+        ],
+        [
+          100,
+          0,
+          15700,
+          637000,
+          656400,
+          false
+        ],
+        [
+          200,
+          0,
+          13800,
+          576900,
+          603200,
+          false
+        ],
+        [
+          200,
+          100,
+          12300,
+          560100,
+          584300,
+          false
+        ],
+        [
+          200,
+          0,
+          9700,
+          560100,
+          582300,
+          false
+        ],
+        [
+          100,
+          0,
+          14000,
+          616200,
+          645100,
+          false
+        ],
+        [
+          300,
+          100,
+          15000,
+          654300,
+          682800,
+          false
+        ],
+        [
+          100,
+          0,
+          16000,
+          709300,
+          735500,
+          false
+        ],
+        [
+          200,
+          0,
+          13900,
+          623400,
+          649600,
+          false
+        ],
+        [
+          200,
+          0,
+          15600,
+          643900,
+          672200,
+          false
+        ],
+        [
+          100,
+          100,
+          14400,
+          632100,
+          659000,
+          false
+        ],
+        [
+          100,
+          0,
+          14600,
+          665700,
+          693700,
+          false
+        ],
+        [
+          100,
+          0,
+          14900,
+          608000,
+          635200,
+          false
+        ],
+        [
+          400,
+          100,
+          14500,
+          671200,
+          698800,
+          false
+        ]
+      ],
+      "write_raw_ns": [
+        [
+          1113100,
+          563800,
+          1677400
+        ],
+        [
+          945900,
+          505900,
+          1452100
+        ],
+        [
+          880000,
+          377100,
+          1257400
+        ],
+        [
+          777700,
+          357100,
+          1135200
+        ],
+        [
+          889500,
+          790600,
+          1680500
+        ],
+        [
+          689800,
+          525200,
+          1215400
+        ],
+        [
+          652100,
+          519200,
+          1171600
+        ],
+        [
+          651800,
+          380100,
+          1032300
+        ],
+        [
+          619100,
+          328500,
+          947900
+        ],
+        [
+          665800,
+          649500,
+          1315600
+        ],
+        [
+          632800,
+          434500,
+          1067700
+        ],
+        [
+          639600,
+          484300,
+          1124400
+        ],
+        [
+          588000,
+          360900,
+          949300
+        ],
+        [
+          574200,
+          358100,
+          932600
+        ],
+        [
+          565000,
+          755600,
+          1320800
+        ],
+        [
+          635700,
+          399600,
+          1035700
+        ],
+        [
+          666800,
+          369700,
+          1037000
+        ],
+        [
+          720100,
+          359200,
+          1079700
+        ],
+        [
+          634000,
+          506400,
+          1140700
+        ],
+        [
+          656400,
+          444200,
+          1100900
+        ],
+        [
+          642000,
+          465600,
+          1108100
+        ],
+        [
+          678000,
+          411300,
+          1089800
+        ],
+        [
+          619400,
+          392600,
+          1012300
+        ],
+        [
+          683900,
+          447700,
+          1131900
+        ]
+      ],
+      "read_summary": {
+        "lock_wait": {
+          "samples": 24,
+          "median_ns": 200.0,
+          "p95_nearest_rank_ns": 400,
+          "min_ns": 100,
+          "max_ns": 400
+        },
+        "capture": {
+          "samples": 24,
+          "median_ns": 0.0,
+          "p95_nearest_rank_ns": 100,
+          "min_ns": 0,
+          "max_ns": 100
+        },
+        "handshake": {
+          "samples": 24,
+          "median_ns": 14750.0,
+          "p95_nearest_rank_ns": 19100,
+          "min_ns": 9700,
+          "max_ns": 56200
+        },
+        "scan": {
+          "samples": 24,
+          "median_ns": 642600.0,
+          "p95_nearest_rank_ns": 936100,
+          "min_ns": 560100,
+          "max_ns": 1106500
+        },
+        "total": {
+          "samples": 24,
+          "median_ns": 673150.0,
+          "p95_nearest_rank_ns": 963700,
+          "min_ns": 582300,
+          "max_ns": 1129900
+        }
+      },
+      "write_summary": {
+        "lock_wait": {
+          "samples": 24,
+          "median_ns": 654250.0,
+          "p95_nearest_rank_ns": 945900,
+          "min_ns": 565000,
+          "max_ns": 1113100
+        },
+        "mutation_including_sync": {
+          "samples": 24,
+          "median_ns": 439350.0,
+          "p95_nearest_rank_ns": 755600,
+          "min_ns": 328500,
+          "max_ns": 790600
+        },
+        "total": {
+          "samples": 24,
+          "median_ns": 1116250.0,
+          "p95_nearest_rank_ns": 1677400,
+          "min_ns": 932600,
+          "max_ns": 1680500
+        }
+      },
+      "writer_completed_before_read_end": 0
+    },
+    {
+      "trial": 0,
+      "mode": "snapshot",
+      "read_raw_ns": [
+        [
+          300,
+          2000,
+          12700,
+          1040200,
+          1298100,
+          true
+        ],
+        [
+          100,
+          1500,
+          13700,
+          700800,
+          886000,
+          true
+        ],
+        [
+          100,
+          1400,
+          16900,
+          732400,
+          751500,
+          false
+        ],
+        [
+          100,
+          1600,
+          18800,
+          848900,
+          870000,
+          false
+        ],
+        [
+          200,
+          1400,
+          13100,
+          780400,
+          795600,
+          false
+        ],
+        [
+          100,
+          1300,
+          16600,
+          620200,
+          638600,
+          false
+        ],
+        [
+          100,
+          1100,
+          14400,
+          640400,
+          656600,
+          false
+        ],
+        [
+          100,
+          1600,
+          18200,
+          762100,
+          782800,
+          false
+        ],
+        [
+          200,
+          1500,
+          11600,
+          685500,
+          699300,
+          false
+        ],
+        [
+          200,
+          1400,
+          19600,
+          794900,
+          816700,
+          false
+        ],
+        [
+          300,
+          1300,
+          13700,
+          756700,
+          962800,
+          true
+        ],
+        [
+          100,
+          1400,
+          16400,
+          708400,
+          727000,
+          false
+        ],
+        [
+          200,
+          1200,
+          9300,
+          770600,
+          989100,
+          true
+        ],
+        [
+          0,
+          1300,
+          22200,
+          837000,
+          1047100,
+          true
+        ],
+        [
+          100,
+          1300,
+          18100,
+          721600,
+          741600,
+          false
+        ],
+        [
+          200,
+          1500,
+          13000,
+          771300,
+          786700,
+          false
+        ],
+        [
+          100,
+          1100,
+          16500,
+          868400,
+          1087900,
+          true
+        ],
+        [
+          200,
+          1300,
+          13300,
+          877100,
+          892600,
+          false
+        ],
+        [
+          200,
+          1700,
+          13200,
+          859900,
+          875800,
+          false
+        ],
+        [
+          200,
+          1800,
+          19600,
+          969200,
+          1163600,
+          true
+        ],
+        [
+          200,
+          1400,
+          16000,
+          919800,
+          1126000,
+          true
+        ],
+        [
+          100,
+          1200,
+          16200,
+          777600,
+          989900,
+          true
+        ],
+        [
+          300,
+          1200,
+          16400,
+          818100,
+          1014200,
+          true
+        ],
+        [
+          0,
+          1300,
+          14700,
+          818300,
+          1011500,
+          true
+        ]
+      ],
+      "write_raw_ns": [
+        [
+          100,
+          955700,
+          956000
+        ],
+        [
+          100,
+          675900,
+          676200
+        ],
+        [
+          200,
+          979100,
+          979600
+        ],
+        [
+          200,
+          1016500,
+          1016900
+        ],
+        [
+          200,
+          884100,
+          884500
+        ],
+        [
+          200,
+          878700,
+          879100
+        ],
+        [
+          200,
+          898500,
+          899000
+        ],
+        [
+          200,
+          1028600,
+          1029100
+        ],
+        [
+          100,
+          857000,
+          857400
+        ],
+        [
+          100,
+          929700,
+          930100
+        ],
+        [
+          200,
+          721000,
+          721900
+        ],
+        [
+          200,
+          829700,
+          830100
+        ],
+        [
+          200,
+          734500,
+          735200
+        ],
+        [
+          200,
+          739600,
+          739900
+        ],
+        [
+          200,
+          923000,
+          923500
+        ],
+        [
+          300,
+          912400,
+          913000
+        ],
+        [
+          200,
+          801300,
+          801900
+        ],
+        [
+          100,
+          902100,
+          902500
+        ],
+        [
+          100,
+          1983700,
+          1984100
+        ],
+        [
+          300,
+          708700,
+          709100
+        ],
+        [
+          200,
+          776600,
+          777000
+        ],
+        [
+          200,
+          747100,
+          747600
+        ],
+        [
+          200,
+          733900,
+          734400
+        ],
+        [
+          200,
+          720800,
+          721200
+        ]
+      ],
+      "read_summary": {
+        "lock_wait": {
+          "samples": 24,
+          "median_ns": 150.0,
+          "p95_nearest_rank_ns": 300,
+          "min_ns": 0,
+          "max_ns": 300
+        },
+        "capture": {
+          "samples": 24,
+          "median_ns": 1400.0,
+          "p95_nearest_rank_ns": 1800,
+          "min_ns": 1100,
+          "max_ns": 2000
+        },
+        "handshake": {
+          "samples": 24,
+          "median_ns": 16100.0,
+          "p95_nearest_rank_ns": 19600,
+          "min_ns": 9300,
+          "max_ns": 22200
+        },
+        "scan": {
+          "samples": 24,
+          "median_ns": 779000.0,
+          "p95_nearest_rank_ns": 969200,
+          "min_ns": 620200,
+          "max_ns": 1040200
+        },
+        "total": {
+          "samples": 24,
+          "median_ns": 880900.0,
+          "p95_nearest_rank_ns": 1163600,
+          "min_ns": 638600,
+          "max_ns": 1298100
+        }
+      },
+      "write_summary": {
+        "lock_wait": {
+          "samples": 24,
+          "median_ns": 200.0,
+          "p95_nearest_rank_ns": 300,
+          "min_ns": 100,
+          "max_ns": 300
+        },
+        "mutation_including_sync": {
+          "samples": 24,
+          "median_ns": 867850.0,
+          "p95_nearest_rank_ns": 1028600,
+          "min_ns": 675900,
+          "max_ns": 1983700
+        },
+        "total": {
+          "samples": 24,
+          "median_ns": 868250.0,
+          "p95_nearest_rank_ns": 1029100,
+          "min_ns": 676200,
+          "max_ns": 1984100
+        }
+      },
+      "writer_completed_before_read_end": 11
+    },
+    {
+      "trial": 1,
+      "mode": "snapshot",
+      "read_raw_ns": [
+        [
+          400,
+          2300,
+          14700,
+          1291700,
+          1310000,
+          false
+        ],
+        [
+          200,
+          1900,
+          15500,
+          874700,
+          1065600,
+          true
+        ],
+        [
+          0,
+          1100,
+          16300,
+          664100,
+          682100,
+          false
+        ],
+        [
+          300,
+          2000,
+          22000,
+          991900,
+          1258500,
+          true
+        ],
+        [
+          300,
+          2000,
+          14300,
+          968700,
+          1260700,
+          true
+        ],
+        [
+          200,
+          1300,
+          20400,
+          1020900,
+          1326200,
+          true
+        ],
+        [
+          100,
+          1300,
+          9500,
+          737200,
+          936100,
+          true
+        ],
+        [
+          100,
+          1600,
+          23500,
+          1086200,
+          1307000,
+          true
+        ],
+        [
+          200,
+          1400,
+          15600,
+          664700,
+          682400,
+          false
+        ],
+        [
+          400,
+          1400,
+          16400,
+          670800,
+          689700,
+          false
+        ],
+        [
+          100,
+          1500,
+          17000,
+          780400,
+          991000,
+          true
+        ],
+        [
+          100,
+          1200,
+          16000,
+          636400,
+          830500,
+          true
+        ],
+        [
+          100,
+          1200,
+          13600,
+          657700,
+          860000,
+          true
+        ],
+        [
+          100,
+          1200,
+          20000,
+          639100,
+          660900,
+          false
+        ],
+        [
+          0,
+          1000,
+          16400,
+          713400,
+          913600,
+          true
+        ],
+        [
+          300,
+          900,
+          12900,
+          736100,
+          929600,
+          true
+        ],
+        [
+          100,
+          1100,
+          15400,
+          693900,
+          710900,
+          false
+        ],
+        [
+          200,
+          900,
+          12700,
+          651400,
+          857400,
+          true
+        ],
+        [
+          100,
+          1300,
+          15600,
+          660600,
+          678300,
+          false
+        ],
+        [
+          100,
+          1300,
+          11700,
+          695800,
+          879300,
+          true
+        ],
+        [
+          100,
+          900,
+          12400,
+          693300,
+          707200,
+          false
+        ],
+        [
+          100,
+          1400,
+          17900,
+          840100,
+          1043500,
+          true
+        ],
+        [
+          100,
+          1200,
+          14800,
+          678800,
+          868300,
+          true
+        ],
+        [
+          100,
+          1200,
+          15700,
+          671500,
+          887600,
+          true
+        ]
+      ],
+      "write_raw_ns": [
+        [
+          100,
+          1535700,
+          1536000
+        ],
+        [
+          200,
+          726200,
+          726600
+        ],
+        [
+          200,
+          868800,
+          869300
+        ],
+        [
+          200,
+          640400,
+          640700
+        ],
+        [
+          300,
+          770100,
+          770600
+        ],
+        [
+          200,
+          698200,
+          698700
+        ],
+        [
+          200,
+          713800,
+          714100
+        ],
+        [
+          200,
+          694600,
+          695000
+        ],
+        [
+          200,
+          940200,
+          940600
+        ],
+        [
+          200,
+          953400,
+          953700
+        ],
+        [
+          200,
+          715200,
+          715600
+        ],
+        [
+          300,
+          590900,
+          591300
+        ],
+        [
+          200,
+          636500,
+          636800
+        ],
+        [
+          200,
+          785100,
+          785500
+        ],
+        [
+          200,
+          695300,
+          695600
+        ],
+        [
+          200,
+          663600,
+          663800
+        ],
+        [
+          200,
+          836100,
+          836400
+        ],
+        [
+          100,
+          592100,
+          592300
+        ],
+        [
+          200,
+          897600,
+          897900
+        ],
+        [
+          200,
+          658400,
+          658800
+        ],
+        [
+          200,
+          873500,
+          873800
+        ],
+        [
+          200,
+          697900,
+          698200
+        ],
+        [
+          200,
+          591700,
+          592000
+        ],
+        [
+          100,
+          552900,
+          553200
+        ]
+      ],
+      "read_summary": {
+        "lock_wait": {
+          "samples": 24,
+          "median_ns": 100.0,
+          "p95_nearest_rank_ns": 400,
+          "min_ns": 0,
+          "max_ns": 400
+        },
+        "capture": {
+          "samples": 24,
+          "median_ns": 1300.0,
+          "p95_nearest_rank_ns": 2000,
+          "min_ns": 900,
+          "max_ns": 2300
+        },
+        "handshake": {
+          "samples": 24,
+          "median_ns": 15600.0,
+          "p95_nearest_rank_ns": 22000,
+          "min_ns": 9500,
+          "max_ns": 23500
+        },
+        "scan": {
+          "samples": 24,
+          "median_ns": 694850.0,
+          "p95_nearest_rank_ns": 1086200,
+          "min_ns": 636400,
+          "max_ns": 1291700
+        },
+        "total": {
+          "samples": 24,
+          "median_ns": 883450.0,
+          "p95_nearest_rank_ns": 1310000,
+          "min_ns": 660900,
+          "max_ns": 1326200
+        }
+      },
+      "write_summary": {
+        "lock_wait": {
+          "samples": 24,
+          "median_ns": 200.0,
+          "p95_nearest_rank_ns": 300,
+          "min_ns": 100,
+          "max_ns": 300
+        },
+        "mutation_including_sync": {
+          "samples": 24,
+          "median_ns": 706000.0,
+          "p95_nearest_rank_ns": 953400,
+          "min_ns": 552900,
+          "max_ns": 1535700
+        },
+        "total": {
+          "samples": 24,
+          "median_ns": 706400.0,
+          "p95_nearest_rank_ns": 953700,
+          "min_ns": 553200,
+          "max_ns": 1536000
+        }
+      },
+      "writer_completed_before_read_end": 16
+    },
+    {
+      "trial": 1,
+      "mode": "lock-held",
+      "read_raw_ns": [
+        [
+          800,
+          0,
+          18500,
+          1084400,
+          1117000,
+          false
+        ],
+        [
+          200,
+          200,
+          17600,
+          1045800,
+          1074300,
+          false
+        ],
+        [
+          200,
+          100,
+          16100,
+          932400,
+          958000,
+          false
+        ],
+        [
+          100,
+          100,
+          15100,
+          664600,
+          692300,
+          false
+        ],
+        [
+          200,
+          100,
+          15800,
+          776800,
+          807300,
+          false
+        ],
+        [
+          100,
+          100,
+          23200,
+          732900,
+          770600,
+          false
+        ],
+        [
+          200,
+          200,
+          16700,
+          726400,
+          756700,
+          false
+        ],
+        [
+          300,
+          0,
+          15300,
+          659800,
+          689400,
+          false
+        ],
+        [
+          200,
+          0,
+          17000,
+          769100,
+          798800,
+          false
+        ],
+        [
+          200,
+          100,
+          17300,
+          692500,
+          724200,
+          false
+        ],
+        [
+          300,
+          0,
+          15700,
+          627300,
+          656300,
+          false
+        ],
+        [
+          100,
+          100,
+          15800,
+          622100,
+          646900,
+          false
+        ],
+        [
+          100,
+          0,
+          14300,
+          577900,
+          605200,
+          false
+        ],
+        [
+          0,
+          0,
+          15300,
+          616500,
+          643100,
+          false
+        ],
+        [
+          200,
+          100,
+          15100,
+          619500,
+          647600,
+          false
+        ],
+        [
+          100,
+          0,
+          16300,
+          680100,
+          706600,
+          false
+        ],
+        [
+          100,
+          0,
+          15400,
+          649200,
+          677900,
+          false
+        ],
+        [
+          100,
+          100,
+          16400,
+          675800,
+          705500,
+          false
+        ],
+        [
+          100,
+          0,
+          14200,
+          633900,
+          660900,
+          false
+        ],
+        [
+          0,
+          0,
+          16300,
+          695500,
+          726400,
+          false
+        ],
+        [
+          200,
+          0,
+          14100,
+          704800,
+          732900,
+          false
+        ],
+        [
+          100,
+          0,
+          19800,
+          723700,
+          759200,
+          false
+        ],
+        [
+          100,
+          100,
+          19000,
+          708700,
+          736600,
+          false
+        ],
+        [
+          100,
+          100,
+          19600,
+          698000,
+          731400,
+          false
+        ]
+      ],
+      "write_raw_ns": [
+        [
+          1097600,
+          625900,
+          1724000
+        ],
+        [
+          1054800,
+          634900,
+          1690200
+        ],
+        [
+          941300,
+          535300,
+          1476900
+        ],
+        [
+          676900,
+          432600,
+          1109900
+        ],
+        [
+          784700,
+          619600,
+          1404800
+        ],
+        [
+          746300,
+          569300,
+          1315900
+        ],
+        [
+          737500,
+          547400,
+          1285300
+        ],
+        [
+          671600,
+          375300,
+          1047200
+        ],
+        [
+          781500,
+          422100,
+          1203900
+        ],
+        [
+          703500,
+          577300,
+          1281200
+        ],
+        [
+          631600,
+          454300,
+          1086300
+        ],
+        [
+          631400,
+          376500,
+          1008200
+        ],
+        [
+          590600,
+          306600,
+          897600
+        ],
+        [
+          627700,
+          913400,
+          1541400
+        ],
+        [
+          630400,
+          426300,
+          1057000
+        ],
+        [
+          690100,
+          357300,
+          1047600
+        ],
+        [
+          661900,
+          348200,
+          1010600
+        ],
+        [
+          672800,
+          302300,
+          975600
+        ],
+        [
+          645300,
+          580700,
+          1226300
+        ],
+        [
+          706600,
+          526100,
+          1233100
+        ],
+        [
+          716500,
+          469400,
+          1186300
+        ],
+        [
+          735400,
+          581200,
+          1317100
+        ],
+        [
+          719200,
+          382100,
+          1101600
+        ],
+        [
+          713000,
+          388400,
+          1101800
+        ]
+      ],
+      "read_summary": {
+        "lock_wait": {
+          "samples": 24,
+          "median_ns": 100.0,
+          "p95_nearest_rank_ns": 300,
+          "min_ns": 0,
+          "max_ns": 800
+        },
+        "capture": {
+          "samples": 24,
+          "median_ns": 50.0,
+          "p95_nearest_rank_ns": 200,
+          "min_ns": 0,
+          "max_ns": 200
+        },
+        "handshake": {
+          "samples": 24,
+          "median_ns": 16200.0,
+          "p95_nearest_rank_ns": 19800,
+          "min_ns": 14100,
+          "max_ns": 23200
+        },
+        "scan": {
+          "samples": 24,
+          "median_ns": 694000.0,
+          "p95_nearest_rank_ns": 1045800,
+          "min_ns": 577900,
+          "max_ns": 1084400
+        },
+        "total": {
+          "samples": 24,
+          "median_ns": 725300.0,
+          "p95_nearest_rank_ns": 1074300,
+          "min_ns": 605200,
+          "max_ns": 1117000
+        }
+      },
+      "write_summary": {
+        "lock_wait": {
+          "samples": 24,
+          "median_ns": 705050.0,
+          "p95_nearest_rank_ns": 1054800,
+          "min_ns": 590600,
+          "max_ns": 1097600
+        },
+        "mutation_including_sync": {
+          "samples": 24,
+          "median_ns": 461850.0,
+          "p95_nearest_rank_ns": 634900,
+          "min_ns": 302300,
+          "max_ns": 913400
+        },
+        "total": {
+          "samples": 24,
+          "median_ns": 1195100.0,
+          "p95_nearest_rank_ns": 1690200,
+          "min_ns": 897600,
+          "max_ns": 1724000
+        }
+      },
+      "writer_completed_before_read_end": 0
+    },
+    {
+      "trial": 2,
+      "mode": "lock-held",
+      "read_raw_ns": [
+        [
+          300,
+          0,
+          22600,
+          1401100,
+          1446400,
+          false
+        ],
+        [
+          300,
+          200,
+          13400,
+          1031100,
+          1059300,
+          false
+        ],
+        [
+          200,
+          100,
+          18000,
+          1015300,
+          1048900,
+          false
+        ],
+        [
+          400,
+          100,
+          15300,
+          938000,
+          968100,
+          false
+        ],
+        [
+          100,
+          100,
+          38900,
+          943100,
+          995000,
+          false
+        ],
+        [
+          100,
+          0,
+          21700,
+          946600,
+          982700,
+          false
+        ],
+        [
+          200,
+          100,
+          16800,
+          958200,
+          988300,
+          false
+        ],
+        [
+          100,
+          100,
+          19200,
+          885400,
+          918100,
+          false
+        ],
+        [
+          0,
+          200,
+          16000,
+          893700,
+          923400,
+          false
+        ],
+        [
+          100,
+          100,
+          18700,
+          869100,
+          907500,
+          false
+        ],
+        [
+          100,
+          0,
+          17000,
+          862500,
+          891200,
+          false
+        ],
+        [
+          100,
+          100,
+          15800,
+          988800,
+          1023200,
+          false
+        ],
+        [
+          200,
+          100,
+          16000,
+          695100,
+          723600,
+          false
+        ],
+        [
+          200,
+          100,
+          13000,
+          678200,
+          704600,
+          false
+        ],
+        [
+          100,
+          100,
+          15600,
+          693400,
+          717000,
+          false
+        ],
+        [
+          200,
+          0,
+          14500,
+          692800,
+          722800,
+          false
+        ],
+        [
+          200,
+          0,
+          16300,
+          772300,
+          800600,
+          false
+        ],
+        [
+          100,
+          0,
+          17100,
+          694400,
+          726000,
+          false
+        ],
+        [
+          300,
+          100,
+          17500,
+          702100,
+          733400,
+          false
+        ],
+        [
+          200,
+          100,
+          14900,
+          717800,
+          746600,
+          false
+        ],
+        [
+          200,
+          0,
+          16600,
+          752200,
+          782600,
+          false
+        ],
+        [
+          200,
+          100,
+          20400,
+          1004600,
+          1036500,
+          false
+        ],
+        [
+          100,
+          0,
+          15500,
+          733500,
+          753200,
+          false
+        ],
+        [
+          100,
+          100,
+          18600,
+          742700,
+          775200,
+          false
+        ]
+      ],
+      "write_raw_ns": [
+        [
+          1412800,
+          1424500,
+          2837900
+        ],
+        [
+          1030900,
+          739700,
+          1771100
+        ],
+        [
+          1026200,
+          509600,
+          1536000
+        ],
+        [
+          953100,
+          691600,
+          1645000
+        ],
+        [
+          962600,
+          1073800,
+          2037200
+        ],
+        [
+          960900,
+          478400,
+          1439700
+        ],
+        [
+          973600,
+          401100,
+          1375300
+        ],
+        [
+          887500,
+          424600,
+          1312400
+        ],
+        [
+          905100,
+          388000,
+          1293500
+        ],
+        [
+          888400,
+          579600,
+          1468400
+        ],
+        [
+          874300,
+          489700,
+          1364300
+        ],
+        [
+          1002800,
+          526200,
+          1529300
+        ],
+        [
+          704200,
+          527600,
+          1232100
+        ],
+        [
+          698400,
+          432400,
+          1131200
+        ],
+        [
+          702300,
+          425300,
+          1127900
+        ],
+        [
+          706600,
+          363500,
+          1070300
+        ],
+        [
+          787100,
+          466200,
+          1253500
+        ],
+        [
+          707900,
+          529400,
+          1237600
+        ],
+        [
+          722800,
+          576700,
+          1299900
+        ],
+        [
+          729200,
+          367100,
+          1096800
+        ],
+        [
+          762600,
+          340800,
+          1103700
+        ],
+        [
+          1014400,
+          385200,
+          1400000
+        ],
+        [
+          739900,
+          518100,
+          1258400
+        ],
+        [
+          771300,
+          610800,
+          1382600
+        ]
+      ],
+      "read_summary": {
+        "lock_wait": {
+          "samples": 24,
+          "median_ns": 200.0,
+          "p95_nearest_rank_ns": 300,
+          "min_ns": 0,
+          "max_ns": 400
+        },
+        "capture": {
+          "samples": 24,
+          "median_ns": 100.0,
+          "p95_nearest_rank_ns": 200,
+          "min_ns": 0,
+          "max_ns": 200
+        },
+        "handshake": {
+          "samples": 24,
+          "median_ns": 16700.0,
+          "p95_nearest_rank_ns": 22600,
+          "min_ns": 13000,
+          "max_ns": 38900
+        },
+        "scan": {
+          "samples": 24,
+          "median_ns": 865800.0,
+          "p95_nearest_rank_ns": 1031100,
+          "min_ns": 678200,
+          "max_ns": 1401100
+        },
+        "total": {
+          "samples": 24,
+          "median_ns": 899350.0,
+          "p95_nearest_rank_ns": 1059300,
+          "min_ns": 704600,
+          "max_ns": 1446400
+        }
+      },
+      "write_summary": {
+        "lock_wait": {
+          "samples": 24,
+          "median_ns": 880900.0,
+          "p95_nearest_rank_ns": 1030900,
+          "min_ns": 698400,
+          "max_ns": 1412800
+        },
+        "mutation_including_sync": {
+          "samples": 24,
+          "median_ns": 499650.0,
+          "p95_nearest_rank_ns": 1073800,
+          "min_ns": 340800,
+          "max_ns": 1424500
+        },
+        "total": {
+          "samples": 24,
+          "median_ns": 1338350.0,
+          "p95_nearest_rank_ns": 2037200,
+          "min_ns": 1070300,
+          "max_ns": 2837900
+        }
+      },
+      "writer_completed_before_read_end": 0
+    },
+    {
+      "trial": 2,
+      "mode": "snapshot",
+      "read_raw_ns": [
+        [
+          200,
+          2000,
+          20000,
+          1114700,
+          1137900,
+          false
+        ],
+        [
+          200,
+          2100,
+          26200,
+          1177000,
+          1469100,
+          true
+        ],
+        [
+          200,
+          1700,
+          15400,
+          966100,
+          1195500,
+          true
+        ],
+        [
+          100,
+          1500,
+          9500,
+          800100,
+          988600,
+          true
+        ],
+        [
+          100,
+          1500,
+          18100,
+          820200,
+          1029500,
+          true
+        ],
+        [
+          100,
+          1400,
+          15900,
+          774200,
+          792300,
+          false
+        ],
+        [
+          100,
+          1600,
+          12100,
+          737900,
+          934300,
+          true
+        ],
+        [
+          100,
+          1100,
+          14300,
+          941000,
+          1148000,
+          true
+        ],
+        [
+          200,
+          1300,
+          16300,
+          743800,
+          762300,
+          false
+        ],
+        [
+          100,
+          1600,
+          18300,
+          774300,
+          795300,
+          false
+        ],
+        [
+          100,
+          1300,
+          12900,
+          653100,
+          668000,
+          false
+        ],
+        [
+          100,
+          1400,
+          16700,
+          628600,
+          647400,
+          false
+        ],
+        [
+          400,
+          1300,
+          16400,
+          808300,
+          1071000,
+          true
+        ],
+        [
+          100,
+          1000,
+          14400,
+          739600,
+          755700,
+          false
+        ],
+        [
+          100,
+          1100,
+          16500,
+          799800,
+          1000700,
+          true
+        ],
+        [
+          100,
+          1200,
+          17500,
+          808600,
+          828100,
+          false
+        ],
+        [
+          100,
+          1000,
+          14900,
+          812200,
+          828800,
+          false
+        ],
+        [
+          0,
+          1200,
+          18700,
+          849800,
+          1098200,
+          true
+        ],
+        [
+          0,
+          1600,
+          16300,
+          967800,
+          1177800,
+          true
+        ],
+        [
+          200,
+          2700,
+          17300,
+          863400,
+          884200,
+          false
+        ],
+        [
+          0,
+          1900,
+          18300,
+          1076000,
+          1298900,
+          true
+        ],
+        [
+          200,
+          1700,
+          15400,
+          984400,
+          1190400,
+          true
+        ],
+        [
+          400,
+          3000,
+          26500,
+          1209000,
+          1505400,
+          true
+        ],
+        [
+          300,
+          2200,
+          16900,
+          917300,
+          1172900,
+          true
+        ]
+      ],
+      "write_raw_ns": [
+        [
+          200,
+          1540200,
+          1540600
+        ],
+        [
+          400,
+          937000,
+          937700
+        ],
+        [
+          200,
+          877200,
+          877700
+        ],
+        [
+          200,
+          742800,
+          743200
+        ],
+        [
+          200,
+          743200,
+          743700
+        ],
+        [
+          200,
+          1041000,
+          1041400
+        ],
+        [
+          300,
+          709000,
+          709400
+        ],
+        [
+          200,
+          822900,
+          823400
+        ],
+        [
+          200,
+          903200,
+          903500
+        ],
+        [
+          200,
+          1096700,
+          1097200
+        ],
+        [
+          300,
+          961900,
+          962400
+        ],
+        [
+          300,
+          825600,
+          825900
+        ],
+        [
+          200,
+          782900,
+          783200
+        ],
+        [
+          200,
+          933300,
+          933700
+        ],
+        [
+          200,
+          741000,
+          741400
+        ],
+        [
+          200,
+          958600,
+          959000
+        ],
+        [
+          200,
+          1106700,
+          1107000
+        ],
+        [
+          200,
+          748600,
+          749000
+        ],
+        [
+          200,
+          885100,
+          885500
+        ],
+        [
+          200,
+          14522900,
+          14523300
+        ],
+        [
+          200,
+          866100,
+          866500
+        ],
+        [
+          100,
+          841700,
+          842000
+        ],
+        [
+          200,
+          775900,
+          776300
+        ],
+        [
+          300,
+          873700,
+          874100
+        ]
+      ],
+      "read_summary": {
+        "lock_wait": {
+          "samples": 24,
+          "median_ns": 100.0,
+          "p95_nearest_rank_ns": 400,
+          "min_ns": 0,
+          "max_ns": 400
+        },
+        "capture": {
+          "samples": 24,
+          "median_ns": 1500.0,
+          "p95_nearest_rank_ns": 2700,
+          "min_ns": 1000,
+          "max_ns": 3000
+        },
+        "handshake": {
+          "samples": 24,
+          "median_ns": 16450.0,
+          "p95_nearest_rank_ns": 26200,
+          "min_ns": 9500,
+          "max_ns": 26500
+        },
+        "scan": {
+          "samples": 24,
+          "median_ns": 816200.0,
+          "p95_nearest_rank_ns": 1177000,
+          "min_ns": 628600,
+          "max_ns": 1209000
+        },
+        "total": {
+          "samples": 24,
+          "median_ns": 1015100.0,
+          "p95_nearest_rank_ns": 1469100,
+          "min_ns": 647400,
+          "max_ns": 1505400
+        }
+      },
+      "write_summary": {
+        "lock_wait": {
+          "samples": 24,
+          "median_ns": 200.0,
+          "p95_nearest_rank_ns": 300,
+          "min_ns": 100,
+          "max_ns": 400
+        },
+        "mutation_including_sync": {
+          "samples": 24,
+          "median_ns": 875450.0,
+          "p95_nearest_rank_ns": 1540200,
+          "min_ns": 709000,
+          "max_ns": 14522900
+        },
+        "total": {
+          "samples": 24,
+          "median_ns": 875900.0,
+          "p95_nearest_rank_ns": 1540600,
+          "min_ns": 709400,
+          "max_ns": 14523300
+        }
+      },
+      "writer_completed_before_read_end": 14
+    }
+  ],
+  "raw_stdout": "    Finished `release` profile [optimized] target(s) in 0.40s\n     Running `target\\perf2-engine-measure\\release\\examples\\engine_mixed_perf.exe mixed-final`\nlabel=mixed-final records=8192 dimensions=128 readers=1 writers=1 k=10 rayon_threads=1 deterministic_seed_formula=true durable_mixed_writes=true\nlabel=mixed-final trial=0 mode=lock-held rounds=24 read_columns=lock_wait,capture,handshake,scan,total,writer_finished_before_read_end read_ns=[(200, 0, 14500, 1106500, 1129900, false), (100, 100, 16400, 936100, 963700, false), (100, 0, 14600, 868100, 896100, false), (300, 0, 56200, 746000, 823000, false), (200, 100, 17900, 873100, 911500, false), (400, 100, 19100, 680700, 710300, false), (100, 100, 17200, 641300, 673600, false), (200, 100, 19000, 639700, 672700, false), (100, 100, 16300, 605600, 635900, false), (200, 0, 13000, 656600, 680300, false), (200, 0, 14300, 619400, 646700, false), (100, 0, 15700, 637000, 656400, false), (200, 0, 13800, 576900, 603200, false), (200, 100, 12300, 560100, 584300, false), (200, 0, 9700, 560100, 582300, false), (100, 0, 14000, 616200, 645100, false), (300, 100, 15000, 654300, 682800, false), (100, 0, 16000, 709300, 735500, false), (200, 0, 13900, 623400, 649600, false), (200, 0, 15600, 643900, 672200, false), (100, 100, 14400, 632100, 659000, false), (100, 0, 14600, 665700, 693700, false), (100, 0, 14900, 608000, 635200, false), (400, 100, 14500, 671200, 698800, false)] write_columns=lock_wait,mutation_including_sync,total write_ns=[(1113100, 563800, 1677400), (945900, 505900, 1452100), (880000, 377100, 1257400), (777700, 357100, 1135200), (889500, 790600, 1680500), (689800, 525200, 1215400), (652100, 519200, 1171600), (651800, 380100, 1032300), (619100, 328500, 947900), (665800, 649500, 1315600), (632800, 434500, 1067700), (639600, 484300, 1124400), (588000, 360900, 949300), (574200, 358100, 932600), (565000, 755600, 1320800), (635700, 399600, 1035700), (666800, 369700, 1037000), (720100, 359200, 1079700), (634000, 506400, 1140700), (656400, 444200, 1100900), (642000, 465600, 1108100), (678000, 411300, 1089800), (619400, 392600, 1012300), (683900, 447700, 1131900)] old_generation_bits_match=true committed_state_match=true\nlabel=mixed-final trial=0 mode=snapshot rounds=24 read_columns=lock_wait,capture,handshake,scan,total,writer_finished_before_read_end read_ns=[(300, 2000, 12700, 1040200, 1298100, true), (100, 1500, 13700, 700800, 886000, true), (100, 1400, 16900, 732400, 751500, false), (100, 1600, 18800, 848900, 870000, false), (200, 1400, 13100, 780400, 795600, false), (100, 1300, 16600, 620200, 638600, false), (100, 1100, 14400, 640400, 656600, false), (100, 1600, 18200, 762100, 782800, false), (200, 1500, 11600, 685500, 699300, false), (200, 1400, 19600, 794900, 816700, false), (300, 1300, 13700, 756700, 962800, true), (100, 1400, 16400, 708400, 727000, false), (200, 1200, 9300, 770600, 989100, true), (0, 1300, 22200, 837000, 1047100, true), (100, 1300, 18100, 721600, 741600, false), (200, 1500, 13000, 771300, 786700, false), (100, 1100, 16500, 868400, 1087900, true), (200, 1300, 13300, 877100, 892600, false), (200, 1700, 13200, 859900, 875800, false), (200, 1800, 19600, 969200, 1163600, true), (200, 1400, 16000, 919800, 1126000, true), (100, 1200, 16200, 777600, 989900, true), (300, 1200, 16400, 818100, 1014200, true), (0, 1300, 14700, 818300, 1011500, true)] write_columns=lock_wait,mutation_including_sync,total write_ns=[(100, 955700, 956000), (100, 675900, 676200), (200, 979100, 979600), (200, 1016500, 1016900), (200, 884100, 884500), (200, 878700, 879100), (200, 898500, 899000), (200, 1028600, 1029100), (100, 857000, 857400), (100, 929700, 930100), (200, 721000, 721900), (200, 829700, 830100), (200, 734500, 735200), (200, 739600, 739900), (200, 923000, 923500), (300, 912400, 913000), (200, 801300, 801900), (100, 902100, 902500), (100, 1983700, 1984100), (300, 708700, 709100), (200, 776600, 777000), (200, 747100, 747600), (200, 733900, 734400), (200, 720800, 721200)] old_generation_bits_match=true committed_state_match=true\nlabel=mixed-final trial=1 mode=snapshot rounds=24 read_columns=lock_wait,capture,handshake,scan,total,writer_finished_before_read_end read_ns=[(400, 2300, 14700, 1291700, 1310000, false), (200, 1900, 15500, 874700, 1065600, true), (0, 1100, 16300, 664100, 682100, false), (300, 2000, 22000, 991900, 1258500, true), (300, 2000, 14300, 968700, 1260700, true), (200, 1300, 20400, 1020900, 1326200, true), (100, 1300, 9500, 737200, 936100, true), (100, 1600, 23500, 1086200, 1307000, true), (200, 1400, 15600, 664700, 682400, false), (400, 1400, 16400, 670800, 689700, false), (100, 1500, 17000, 780400, 991000, true), (100, 1200, 16000, 636400, 830500, true), (100, 1200, 13600, 657700, 860000, true), (100, 1200, 20000, 639100, 660900, false), (0, 1000, 16400, 713400, 913600, true), (300, 900, 12900, 736100, 929600, true), (100, 1100, 15400, 693900, 710900, false), (200, 900, 12700, 651400, 857400, true), (100, 1300, 15600, 660600, 678300, false), (100, 1300, 11700, 695800, 879300, true), (100, 900, 12400, 693300, 707200, false), (100, 1400, 17900, 840100, 1043500, true), (100, 1200, 14800, 678800, 868300, true), (100, 1200, 15700, 671500, 887600, true)] write_columns=lock_wait,mutation_including_sync,total write_ns=[(100, 1535700, 1536000), (200, 726200, 726600), (200, 868800, 869300), (200, 640400, 640700), (300, 770100, 770600), (200, 698200, 698700), (200, 713800, 714100), (200, 694600, 695000), (200, 940200, 940600), (200, 953400, 953700), (200, 715200, 715600), (300, 590900, 591300), (200, 636500, 636800), (200, 785100, 785500), (200, 695300, 695600), (200, 663600, 663800), (200, 836100, 836400), (100, 592100, 592300), (200, 897600, 897900), (200, 658400, 658800), (200, 873500, 873800), (200, 697900, 698200), (200, 591700, 592000), (100, 552900, 553200)] old_generation_bits_match=true committed_state_match=true\nlabel=mixed-final trial=1 mode=lock-held rounds=24 read_columns=lock_wait,capture,handshake,scan,total,writer_finished_before_read_end read_ns=[(800, 0, 18500, 1084400, 1117000, false), (200, 200, 17600, 1045800, 1074300, false), (200, 100, 16100, 932400, 958000, false), (100, 100, 15100, 664600, 692300, false), (200, 100, 15800, 776800, 807300, false), (100, 100, 23200, 732900, 770600, false), (200, 200, 16700, 726400, 756700, false), (300, 0, 15300, 659800, 689400, false), (200, 0, 17000, 769100, 798800, false), (200, 100, 17300, 692500, 724200, false), (300, 0, 15700, 627300, 656300, false), (100, 100, 15800, 622100, 646900, false), (100, 0, 14300, 577900, 605200, false), (0, 0, 15300, 616500, 643100, false), (200, 100, 15100, 619500, 647600, false), (100, 0, 16300, 680100, 706600, false), (100, 0, 15400, 649200, 677900, false), (100, 100, 16400, 675800, 705500, false), (100, 0, 14200, 633900, 660900, false), (0, 0, 16300, 695500, 726400, false), (200, 0, 14100, 704800, 732900, false), (100, 0, 19800, 723700, 759200, false), (100, 100, 19000, 708700, 736600, false), (100, 100, 19600, 698000, 731400, false)] write_columns=lock_wait,mutation_including_sync,total write_ns=[(1097600, 625900, 1724000), (1054800, 634900, 1690200), (941300, 535300, 1476900), (676900, 432600, 1109900), (784700, 619600, 1404800), (746300, 569300, 1315900), (737500, 547400, 1285300), (671600, 375300, 1047200), (781500, 422100, 1203900), (703500, 577300, 1281200), (631600, 454300, 1086300), (631400, 376500, 1008200), (590600, 306600, 897600), (627700, 913400, 1541400), (630400, 426300, 1057000), (690100, 357300, 1047600), (661900, 348200, 1010600), (672800, 302300, 975600), (645300, 580700, 1226300), (706600, 526100, 1233100), (716500, 469400, 1186300), (735400, 581200, 1317100), (719200, 382100, 1101600), (713000, 388400, 1101800)] old_generation_bits_match=true committed_state_match=true\nlabel=mixed-final trial=2 mode=lock-held rounds=24 read_columns=lock_wait,capture,handshake,scan,total,writer_finished_before_read_end read_ns=[(300, 0, 22600, 1401100, 1446400, false), (300, 200, 13400, 1031100, 1059300, false), (200, 100, 18000, 1015300, 1048900, false), (400, 100, 15300, 938000, 968100, false), (100, 100, 38900, 943100, 995000, false), (100, 0, 21700, 946600, 982700, false), (200, 100, 16800, 958200, 988300, false), (100, 100, 19200, 885400, 918100, false), (0, 200, 16000, 893700, 923400, false), (100, 100, 18700, 869100, 907500, false), (100, 0, 17000, 862500, 891200, false), (100, 100, 15800, 988800, 1023200, false), (200, 100, 16000, 695100, 723600, false), (200, 100, 13000, 678200, 704600, false), (100, 100, 15600, 693400, 717000, false), (200, 0, 14500, 692800, 722800, false), (200, 0, 16300, 772300, 800600, false), (100, 0, 17100, 694400, 726000, false), (300, 100, 17500, 702100, 733400, false), (200, 100, 14900, 717800, 746600, false), (200, 0, 16600, 752200, 782600, false), (200, 100, 20400, 1004600, 1036500, false), (100, 0, 15500, 733500, 753200, false), (100, 100, 18600, 742700, 775200, false)] write_columns=lock_wait,mutation_including_sync,total write_ns=[(1412800, 1424500, 2837900), (1030900, 739700, 1771100), (1026200, 509600, 1536000), (953100, 691600, 1645000), (962600, 1073800, 2037200), (960900, 478400, 1439700), (973600, 401100, 1375300), (887500, 424600, 1312400), (905100, 388000, 1293500), (888400, 579600, 1468400), (874300, 489700, 1364300), (1002800, 526200, 1529300), (704200, 527600, 1232100), (698400, 432400, 1131200), (702300, 425300, 1127900), (706600, 363500, 1070300), (787100, 466200, 1253500), (707900, 529400, 1237600), (722800, 576700, 1299900), (729200, 367100, 1096800), (762600, 340800, 1103700), (1014400, 385200, 1400000), (739900, 518100, 1258400), (771300, 610800, 1382600)] old_generation_bits_match=true committed_state_match=true\nlabel=mixed-final trial=2 mode=snapshot rounds=24 read_columns=lock_wait,capture,handshake,scan,total,writer_finished_before_read_end read_ns=[(200, 2000, 20000, 1114700, 1137900, false), (200, 2100, 26200, 1177000, 1469100, true), (200, 1700, 15400, 966100, 1195500, true), (100, 1500, 9500, 800100, 988600, true), (100, 1500, 18100, 820200, 1029500, true), (100, 1400, 15900, 774200, 792300, false), (100, 1600, 12100, 737900, 934300, true), (100, 1100, 14300, 941000, 1148000, true), (200, 1300, 16300, 743800, 762300, false), (100, 1600, 18300, 774300, 795300, false), (100, 1300, 12900, 653100, 668000, false), (100, 1400, 16700, 628600, 647400, false), (400, 1300, 16400, 808300, 1071000, true), (100, 1000, 14400, 739600, 755700, false), (100, 1100, 16500, 799800, 1000700, true), (100, 1200, 17500, 808600, 828100, false), (100, 1000, 14900, 812200, 828800, false), (0, 1200, 18700, 849800, 1098200, true), (0, 1600, 16300, 967800, 1177800, true), (200, 2700, 17300, 863400, 884200, false), (0, 1900, 18300, 1076000, 1298900, true), (200, 1700, 15400, 984400, 1190400, true), (400, 3000, 26500, 1209000, 1505400, true), (300, 2200, 16900, 917300, 1172900, true)] write_columns=lock_wait,mutation_including_sync,total write_ns=[(200, 1540200, 1540600), (400, 937000, 937700), (200, 877200, 877700), (200, 742800, 743200), (200, 743200, 743700), (200, 1041000, 1041400), (300, 709000, 709400), (200, 822900, 823400), (200, 903200, 903500), (200, 1096700, 1097200), (300, 961900, 962400), (300, 825600, 825900), (200, 782900, 783200), (200, 933300, 933700), (200, 741000, 741400), (200, 958600, 959000), (200, 1106700, 1107000), (200, 748600, 749000), (200, 885100, 885500), (200, 14522900, 14523300), (200, 866100, 866500), (100, 841700, 842000), (200, 775900, 776300), (300, 873700, 874100)] old_generation_bits_match=true committed_state_match=true\nlabel=mixed-final cow_records=8192 dimensions=128 trials=21 unique_first_write_ns=[5800, 2600, 2400, 2600, 1400, 6300, 1900, 2700, 1600, 2300, 1400, 2000, 1300, 3500, 1200, 2000, 1000, 2300, 1000, 2000, 1600] retained_first_write_ns=[178500, 137100, 133100, 126400, 123700, 125100, 316500, 130900, 124100, 135800, 121900, 122800, 121600, 122700, 144300, 123000, 123600, 121800, 119600, 123100, 120500] memory_storage=true fsync_excluded=true\n",
+  "clippy_stdout": "    Checking vlite v0.3.0 (Q:\\VLite)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.68s\n"
+}

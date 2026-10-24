@@ -7,7 +7,9 @@
 //! rejecting a durable write; changing the declarations (or reopening)
 //! rebuilds it.
 
-use crate::{CollectionMut, CollectionRef, Database, Metadata, MetadataValue, Record};
+#[cfg(test)]
+use crate::Record;
+use crate::{CollectionMut, CollectionRef, Database, Metadata, MetadataValue};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Maximum declared text fields per collection.
@@ -91,7 +93,7 @@ impl TextIndex {
     }
 
     /// Rebuilds from all live records after open or a declaration change.
-    pub(crate) fn rebuild(&mut self, fields: &[String], records: &BTreeMap<u64, Record>) {
+    pub(crate) fn rebuild(&mut self, fields: &[String], records: &crate::records::RecordMap) {
         *self = Self {
             fields: fields.to_vec(),
             limit: self.limit,
@@ -237,7 +239,7 @@ impl Database {
 mod tests {
     use super::*;
 
-    fn records(texts: &[(u64, &str)]) -> BTreeMap<u64, Record> {
+    fn records(texts: &[(u64, &str)]) -> crate::records::RecordMap {
         texts
             .iter()
             .map(|&(id, text)| {
@@ -298,7 +300,7 @@ mod tests {
             ..TextIndex::default()
         };
         let data = records(&[(1, "a b"), (2, "c d")]);
-        index.rebuild(&["body".into()], &BTreeMap::new());
+        index.rebuild(&["body".into()], &crate::records::RecordMap::new());
         index.track(1, None, Some(&data[&1].metadata));
         assert!(index.status().available);
         index.track(2, None, Some(&data[&2].metadata));

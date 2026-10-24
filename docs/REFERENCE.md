@@ -378,8 +378,13 @@ guard to rebuild; ready-index searches share the read guard.
 Transport limits are **8 MiB of JSON per request**, **16 in-flight requests**,
 and **16 queued/running database workers**. These are additional to the core's
 batch/payload limits: a valid 16 MiB engine batch may be too large for this API.
-Read routes run concurrently on blocking workers under a shared
-`Arc<RwLock<Option<Database>>>` read guard; writes take the exclusive guard.
+Read routes run concurrently on blocking workers. Simple exact searches capture
+a bounded immutable collection generation under the shared owner guard and scan
+outside it; ANN, reranking and indexed-filter paths retain the guard. Exhausted
+snapshot limits use the existing lock-held path. Writes take the exclusive guard.
+Opt-in [durable group commit](CONSOLE-ADMIN.md#opt-in-durable-group-commit)
+coalesces supported record writes without acknowledging before the shared sync;
+other mutations retain independent commits. It is disabled by default.
 Database work does not run on asynchronous I/O threads. Slow requests and exact searches can occupy slots; no per-client
 fairness, streaming, rate limiting or execution deadline is promised. Use a
 proxy for connection/header/body timeouts and network-level limits.
@@ -998,11 +1003,14 @@ cargo run --locked --example background_hnsw
 ```
 
 `start_hnsw_rebuild` validates health, HNSW configuration, L2/cosine metric and
-limits before creating the worker. It copies **only vectors and IDs** from the
-committed live map (no payloads/metadata). Copying is synchronous on the owner;
+limits before creating the worker. Unquantized builds share the committed
+immutable record generation instead of copying vector bodies. The first later
+write can copy the ID tree, but unchanged record bodies remain shared. Quantized
+builds still train/encode their bounded snapshot synchronously on the owner;
 graph construction runs on one named owned thread, without the file or database
-lock. Caller operations on `Database` remain serialized; this does not add
-concurrent reads/writes to the handle. Exactly one job may be pending, including
+lock. Caller operations on `Database` remain serialized; owned
+[read snapshots](read-snapshots.md) provide a separate bounded read surface.
+Exactly one job may be pending, including
 a finished-but-unpolled or cancelling job. A second start returns
 `HnswRebuildBusy`. Thread creation failure returns `Io` and leaves the current
 index intact.
@@ -1010,7 +1018,10 @@ index intact.
 `HnswRebuildLimits` defaults to **100,000 snapshot records / 128 MiB snapshot
 vector bytes**. Caller limits must be positive, at most 1,000,000 records /
 256 MiB vector bytes; exceeding the configured budget returns
-`HnswRebuildTooLarge` before cloning. These bound vector bytes and graph
+`HnswRebuildTooLarge` before capture. Unquantized capture additionally refuses
+more than 256 MiB of retained logical record bodies, including payloads/metadata;
+payload-heavy collections can therefore exceed this limit even when their
+vectors fit. These bound retained logical bytes and graph
 cardinality, **not total RSS or recoverable allocation failure**: BTreeMap/node
 overhead, graph links, construction scratch, current records, existing graph
 and mutation-original copies additionally consume memory. Old and replacement
@@ -1024,6 +1035,8 @@ original-plus-current-vector-byte** limits. It handles deletes, inserts,
 delete/reinsert in the same batch, metadata puts and cosine zero transitions.
 If either limit overflows, the job is cancelled and eventually reports
 `CatchUpOverflow`; writes stay committed and **no stale graph is published**.
+Publication also checks that the job's catch-up vector version covers the
+collection's current version; an uncovered generation is superseded.
 The old graph independently obeys its original buffer limits and may also become
 unavailable. There is no implicit fallback to exact or synchronous construction.
 

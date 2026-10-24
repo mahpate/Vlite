@@ -108,9 +108,17 @@ export class Database {
   put(id: string, vector: number[], options?: Scope & { payload?: Uint8Array; metadata?: Metadata; expiresAtMs?: string | number }): Promise<void>;
   delete(id: string, options?: Scope & { expectedRevision?: ExpectedRevision }): Promise<boolean>;
   batch(operations: BatchOperation[], options?: Scope): Promise<void>;
+  /** Snapshots and atomically inserts 1..4096 Float32Array-backed puts. */
+  batchPutF32(operations: Float32PutOperation[], options?: Scope): Promise<void>;
   revision(id: string, options?: Scope): Promise<string | null>;
   search(vector: number[], k: number, options: Scope & { filter?: Condition[]; metric?: DistanceMetric; explain: true }): Promise<{ hits: Hit[]; stats: SearchStats }>;
   search(vector: number[], k: number, options?: Scope & { filter?: Condition[]; metric?: DistanceMetric; explain?: false }): Promise<Hit[]>;
+  /** Opt-in typed search; the input is copied before it is queued to the native worker. */
+  searchF32(vector: Float32Array, k: number, options: Scope & { filter?: Condition[]; metric?: DistanceMetric; explain: true }): Promise<{ hits: Hit[]; stats: SearchStats }>;
+  searchF32(vector: Float32Array, k: number, options?: Scope & { filter?: Condition[]; metric?: DistanceMetric; explain?: false }): Promise<Hit[]>;
+  /** Executes 1..128 equal-dimension queries in one worker request. */
+  searchManyF32(vectors: Float32Array[], k: number, options: Scope & { filter?: Condition[]; metric?: DistanceMetric; explain: true }): Promise<Array<{ hits: Hit[]; stats: SearchStats }>>;
+  searchManyF32(vectors: Float32Array[], k: number, options?: Scope & { filter?: Condition[]; metric?: DistanceMetric; explain?: false }): Promise<Hit[][]>;
   /** Planned search; `plan` and `stats` are present only with `explain: true`. */
   searchAuto(vector: number[], k: number, options?: Scope & AnnOptions & { filter?: Condition[]; metric?: DistanceMetric; efSearch?: number; explain?: boolean }): Promise<{ hits: Hit[]; plan?: QueryPlan; stats?: SearchStats }>;
   /** BM25 over the collection's declared text fields fused with an optional vector leg. */
@@ -176,6 +184,7 @@ export class Database {
 
 }
 export interface Credentials { key?: Uint8Array; passphrase?: string }
+export interface Float32PutOperation { id: string; vector: Float32Array; payload?: Uint8Array; metadata?: Metadata }
 export interface CreateOptions extends Credentials { format?: 3 | 4 | 5; commitTimestamps?: boolean }
 export interface FilterOptions extends Scope { filter?: Condition[]; metric?: DistanceMetric }
 export interface SearchGroup { value: MetadataValue; hits: Hit[] }

@@ -75,6 +75,27 @@ existing methods are unchanged. See [measured scope and limitations](benchmarks/
 and the [Python buffer API](bindings/python/README.md). These additions are not
 included in published Python 0.3.0 wheels.
 
+The current-source Node.js embedded binding also offers opt-in `searchF32`,
+`searchManyF32` and atomic `batchPutF32` methods. Float32Array inputs are copied
+into private snapshots before asynchronous execution; this is not zero-copy.
+See the [Node.js binding guide](bindings/node/README.md) for limits, compatibility
+fallback and the bounded benchmark. Multi-query calls reduce worker crossings,
+but do not establish a transaction-wide snapshot across other owners.
+
+Current-source servers can enable [durable group commit](docs/CONSOLE-ADMIN.md#opt-in-durable-group-commit)
+with `--group-commit`: bounded concurrent record writes keep separate atomic
+frames and share a filesystem sync before acknowledgement. It is off by default;
+sequential workloads can be slower. Simple exact searches can scan bounded
+immutable collection snapshots outside the writer lock; ANN, indexed filtering
+and reranking retain their existing paths. No eventual-consistency mode or
+weaker acknowledgement durability is required.
+Embedded callers can also capture bounded [committed read snapshots](docs/read-snapshots.md)
+for exact search, get and browse without holding the owner lock. Unquantized
+background HNSW builds share immutable record generations instead of copying
+vector bodies; the first later write can still copy the ID tree. Startup uses
+compatible faster CRC validation and reusable replay buffers, not a new
+checkpoint or storage format.
+
 VLite is licensed under the MIT License; see
 [LICENSE](LICENSE). There is no inner-product ANN, networked
 replication or approximate metadata filtering. Opt-in [storage features](docs/STORAGE-FEATURES.md) add encryption at
@@ -484,7 +505,7 @@ Performance numbers are workload-specific, not product rankings.
 
 Current-source Rust callers can opt into
 [bounded background HNSW rebuilds](docs/REFERENCE.md#background-hnsw-rebuilds-rust):
-copy a committed-vector snapshot, build on one worker, then explicitly poll to
+capture a committed generation, build on one worker, then explicitly poll to
 publish with mutation catch-up. Ready-only queries never rebuild or fall back.
 Catch-up overflow is explicit; sustained writes may make ANN temporarily
 unavailable. Snapshot copying/publication still use the owner thread, so this

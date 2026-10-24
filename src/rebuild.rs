@@ -1,6 +1,7 @@
 //! Opt-in background graph construction; publication stays on the database owner.
+#[cfg(test)]
+use std::collections::BTreeMap;
 use std::{
-    collections::BTreeMap,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -109,11 +110,17 @@ pub struct HnswMaintenanceReport {
 }
 
 /// Bounds snapshot vectors and graph cardinality, not allocator/total process RSS.
+/// Shared unquantized record bodies also obey `MAX_HNSW_RETAINED_RECORD_BYTES`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HnswRebuildLimits {
     pub max_records: usize,
     pub max_snapshot_vector_bytes: usize,
 }
+
+/// Shared unquantized generations retain complete immutable record bodies.
+/// This additional cap prevents payload-heavy generations being retained
+/// without a byte bound while the owner replaces their records.
+pub const MAX_HNSW_RETAINED_RECORD_BYTES: u64 = 256 * 1024 * 1024;
 
 impl Default for HnswRebuildLimits {
     fn default() -> Self {
@@ -180,41 +187,28 @@ pub(crate) struct Job {
     options: AnnOptions,
     snapshot_records: usize,
     processed: Arc<AtomicUsize>,
+    vector_sequence: u64,
 }
 
 impl Job {
-    /// Copies a snapshot synchronously, then builds on one owned thread.
+    /// Shares an immutable record generation, then builds on one owned thread.
     ///
-    /// Unquantized snapshots copy f32 vectors; ScalarU8 snapshots are trained
-    /// and encoded here and hold only IDs and u8 codes. Neither copies
-    /// payloads or metadata.
+    /// Unquantized snapshots retain immutable records without copying vectors.
+    /// ScalarU8 snapshots are trained and encoded here and hold only IDs and
+    /// u8 codes. A writer copies the ID tree, not unchanged record bodies.
     pub fn start(
-        records: &BTreeMap<u64, Record>,
+        records: &crate::records::RecordMap,
         config: HnswConfig,
         metric: DistanceMetric,
         options: AnnOptions,
     ) -> Result<Self> {
         enum Snapshot {
-            Vectors(BTreeMap<u64, Record>),
+            Vectors(crate::records::RecordMap),
             Codes(QuantizedSnapshot),
         }
         let snapshot = match options.quantization {
             Quantization::ScalarU8 => Snapshot::Codes(QuantizedSnapshot::encode(records, metric)),
-            Quantization::None => Snapshot::Vectors(
-                records
-                    .iter()
-                    .map(|(&id, record)| {
-                        (
-                            id,
-                            Record {
-                                vector: record.vector.clone(),
-                                payload: Vec::new(),
-                                metadata: BTreeMap::new(),
-                            },
-                        )
-                    })
-                    .collect(),
-            ),
+            Quantization::None => Snapshot::Vectors(records.clone()),
         };
         let cancel = Arc::new(AtomicBool::new(false));
         let stop = Arc::clone(&cancel);
@@ -234,17 +228,31 @@ impl Job {
             worker: Some(worker),
             cancel,
             terminal: None,
-            changes: Some(Index::build(&BTreeMap::new(), config, metric, options)),
+            changes: Some(Index::build(
+                &crate::records::RecordMap::new(),
+                config,
+                metric,
+                options,
+            )),
             config,
             metric,
             options,
             snapshot_records: records.len(),
             processed,
+            vector_sequence: 0,
         })
     }
 
     pub fn options(&self) -> AnnOptions {
         self.options
+    }
+
+    pub fn set_vector_sequence(&mut self, sequence: u64) {
+        self.vector_sequence = sequence;
+    }
+
+    pub fn covers_vector_sequence(&self, sequence: u64) -> bool {
+        self.vector_sequence == sequence
     }
 
     pub fn progress(&self) -> HnswRebuildProgress {
@@ -322,6 +330,53 @@ mod tests {
     use crate::{Database, MAX_DIMENSIONS};
     use std::time::{Duration, Instant};
 
+    #[test]
+    fn publication_rejects_a_generation_not_covered_by_catchup() {
+        let mut db = Database::create_in_memory(1, crate::CreateOptions::default()).unwrap();
+        db.put(1, &[1.0], b"").unwrap();
+        db.build_hnsw(HnswConfig::default()).unwrap();
+        db.start_hnsw_rebuild(
+            HnswConfig::default(),
+            DistanceMetric::SquaredL2,
+            HnswRebuildLimits::default(),
+        )
+        .unwrap();
+        // Simulate a state replacement that bypasses the committed catch-up hook.
+        db.state_mut(0).vector_sequence += 1;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match db.poll_hnsw_rebuild().unwrap() {
+                HnswRebuildStatus::Running => {
+                    assert!(Instant::now() < deadline);
+                    thread::yield_now();
+                }
+                status => {
+                    assert_eq!(status, HnswRebuildStatus::Superseded);
+                    break;
+                }
+            }
+        }
+        assert!(
+            db.search_approximate_ready(&[1.0], 1, 1, HnswConfig::default())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn shared_rebuild_retained_body_budget_includes_payloads() {
+        let mut db = Database::create_in_memory(1, crate::CreateOptions::default()).unwrap();
+        db.state_mut(0).live_body_bytes = MAX_HNSW_RETAINED_RECORD_BYTES + 1;
+        assert!(matches!(
+            db.start_hnsw_rebuild(
+                HnswConfig::default(),
+                DistanceMetric::SquaredL2,
+                HnswRebuildLimits::default()
+            ),
+            Err(Error::HnswRebuildTooLarge)
+        ));
+        assert!(db.rebuild.is_none());
+    }
+
     fn failed_job() -> Job {
         Job {
             worker: Some(thread::spawn(|| {
@@ -330,7 +385,7 @@ mod tests {
             cancel: Arc::new(AtomicBool::new(false)),
             terminal: None,
             changes: Some(Index::build(
-                &BTreeMap::new(),
+                &crate::records::RecordMap::new(),
                 HnswConfig::default(),
                 DistanceMetric::SquaredL2,
                 AnnOptions::default(),
@@ -340,6 +395,7 @@ mod tests {
             options: AnnOptions::default(),
             snapshot_records: 0,
             processed: Arc::new(AtomicUsize::new(0)),
+            vector_sequence: 0,
         }
     }
 
@@ -374,7 +430,7 @@ mod tests {
     #[test]
     fn byte_catchup_limit_and_repeated_ids_reuse_existing_index_accounting() {
         let mut job = Job::start(
-            &BTreeMap::new(),
+            &crate::records::RecordMap::new(),
             HnswConfig::default(),
             DistanceMetric::SquaredL2,
             AnnOptions::default(),
@@ -404,7 +460,7 @@ mod tests {
     fn cancellation_before_build_and_invalid_limits_are_explicit() {
         assert!(
             Index::build_cancellable(
-                &BTreeMap::new(),
+                &crate::records::RecordMap::new(),
                 HnswConfig::default(),
                 DistanceMetric::Cosine,
                 AnnOptions::default(),

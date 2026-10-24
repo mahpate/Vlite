@@ -112,6 +112,8 @@ async fn snapshot(service: Service, role: admin::Role) -> Result<Value, ApiError
                 "grpc_request_failures_total": load(&metrics.grpc_failures),
                 "grpc_stream_messages_total": load(&metrics.grpc_stream_messages),
                 "commit_failures_total": load(&metrics.commit_failures),
+                "group_commit_groups_total": load(&metrics.group_commit_groups),
+                "group_commit_requests_total": load(&metrics.group_commit_requests),
                 "hnsw_rebuilds_total": load(&metrics.rebuilds),
                 "hnsw_buffered_ids": buffered_ids,
                 "hnsw_buffer_vector_bytes": buffer_bytes,

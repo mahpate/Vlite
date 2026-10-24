@@ -4,7 +4,7 @@
 use super::*;
 use std::{hint::black_box, time::Instant};
 
-fn records(count: usize, dimensions: usize, ties: bool) -> BTreeMap<u64, Record> {
+fn records(count: usize, dimensions: usize, ties: bool) -> crate::records::RecordMap {
     let mut state = 42u64;
     (0..count)
         .map(|id| {
@@ -35,7 +35,7 @@ fn reference_select<const PROFILE: bool>(
     index: &Index,
     candidates: &[Candidate],
     limit: usize,
-    records: &BTreeMap<u64, Record>,
+    records: &crate::records::RecordMap,
 ) -> (Vec<usize>, usize, usize) {
     let mut selected = Vec::with_capacity(limit);
     let mut candidate_queries = 0;
@@ -78,7 +78,11 @@ fn fingerprint(index: &Index) -> u64 {
     })
 }
 
-fn candidates(index: &Index, records: &BTreeMap<u64, Record>, query_node: usize) -> Vec<Candidate> {
+fn candidates(
+    index: &Index,
+    records: &crate::records::RecordMap,
+    query_node: usize,
+) -> Vec<Candidate> {
     let query = index.node_query(query_node, records);
     let visits = Cell::new(0);
     let mut candidates = (0..index.nodes.len())

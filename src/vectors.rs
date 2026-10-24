@@ -383,13 +383,13 @@ impl<'a> CollectionRef<'a> {
         &self,
         n: &str,
         version: Option<&str>,
-    ) -> Result<(VectorSpec, BTreeMap<u64, Record>)> {
+    ) -> Result<(VectorSpec, crate::records::RecordMap)> {
         self.db.ensure_healthy()?;
         let state = self.db.state(self.id);
         let spec = state.vectors.specs.get(n).ok_or_else(invalid)?.clone();
         let version = version.unwrap_or(&spec.active_version);
         name(version)?;
-        let mut records = BTreeMap::new();
+        let mut records = crate::records::RecordMap::new();
         for (&id, r) in &state.vectors.records {
             if state.records.contains_key(&id)
                 && let Some(v) = r

@@ -57,10 +57,11 @@ pub use quantize::{AnnOptions, Quantization};
 pub use rebuild::{
     HnswBufferCapacity, HnswMaintenancePolicy, HnswMaintenanceReport, HnswMaintenanceStatus,
     HnswPressure, HnswRebuildLimits, HnswRebuildProgress, HnswRebuildStatus,
+    MAX_HNSW_RETAINED_RECORD_BYTES,
 };
 pub use records::{
     BrowseHit, BrowsePage, FacetCount, GeoSearchHit, GeoSearchQuery, GeoSort, NumericStats,
-    RecommendationQuery, SearchGroup,
+    ReadSnapshot, RecommendationQuery, SearchGroup,
 };
 pub use stats::{PlanStrategy, QueryPlan, SearchStats};
 pub mod maintenance;
@@ -325,7 +326,7 @@ impl fmt::Display for Error {
             ),
             Self::HnswRebuildTooLarge => write!(
                 f,
-                "background HNSW snapshot exceeds configured record or vector-byte limit"
+                "background HNSW snapshot exceeds configured record/vector-byte limits or the retained-record-body limit"
             ),
             Self::HnswRebuildBusy => write!(
                 f,
@@ -611,6 +612,11 @@ pub struct Database {
     sequence: u64,
     end: u64,
     poisoned: bool,
+    /// Internal server-only durability scope; never exposed to embedded callers.
+    group_active: bool,
+    snapshot_readers: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    fail_next_group_sync: bool,
     /// Live collections by ID; ID 0 (`default`) is always present.
     collections: BTreeMap<u16, Collection>,
     /// At most one background rebuild per database, owned by one collection.
@@ -968,6 +974,10 @@ impl Database {
             sequence: 0,
             end: header.len() as u64,
             poisoned: false,
+            group_active: false,
+            snapshot_readers: Default::default(),
+            #[cfg(test)]
+            fail_next_group_sync: false,
             collections: BTreeMap::from([(
                 0,
                 Collection::empty("default".into(), dimensions, CollectionSettings::default()),
@@ -1047,6 +1057,10 @@ impl Database {
             sequence: loaded.sequence,
             end: loaded.end,
             poisoned: false,
+            group_active: false,
+            snapshot_readers: Default::default(),
+            #[cfg(test)]
+            fail_next_group_sync: false,
             collections: loaded
                 .collections
                 .into_iter()
@@ -1527,7 +1541,63 @@ impl Database {
     }
 
     fn commit_frame(&mut self, sequence: u64, frame: &[u8]) -> Result<()> {
-        self.commit_frame_with_sync(sequence, frame, LockedFile::sync_all)
+        if self.group_active {
+            self.commit_frame_with_sync(sequence, frame, |_| Ok(()))
+        } else {
+            self.commit_frame_with_sync(sequence, frame, LockedFile::sync_all)
+        }
+    }
+
+    /// Internal owner-locked group of record mutations. Only put, delete,
+    /// metadata update and batch operations may run inside this scope. The
+    /// server must not release the owner lock or acknowledge any result until
+    /// this returns successfully. Individual frames retain their recovery
+    /// boundaries; a group is not one atomic transaction.
+    #[cfg(any(feature = "server", test))]
+    pub(crate) fn durable_group<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> Result<T> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_group_sync) {
+            return self.durable_group_with_sync(f, |_| {
+                Err(io::Error::other("injected group sync failure"))
+            });
+        }
+        self.durable_group_with_sync(f, LockedFile::sync_all)
+    }
+
+    #[cfg(any(feature = "server", test))]
+    fn durable_group_with_sync<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> T,
+        sync: impl FnOnce(&LockedFile) -> io::Result<()>,
+    ) -> Result<T> {
+        self.ensure_healthy()?;
+        if self.read_only {
+            return Err(Error::ReadOnly);
+        }
+        if self.group_active {
+            return Err(Error::InvalidQuery(
+                "nested durability groups are not supported",
+            ));
+        }
+        let sequence = self.sequence;
+        self.group_active = true;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
+        self.group_active = false;
+        let value = match result {
+            Ok(value) => value,
+            Err(panic) => {
+                self.poisoned = true;
+                std::panic::resume_unwind(panic);
+            }
+        };
+        self.ensure_healthy()?;
+        if self.sequence != sequence
+            && let Err(error) = sync(&self.file)
+        {
+            self.poisoned = true;
+            return Err(Error::CommitIndeterminate(error));
+        }
+        Ok(value)
     }
 
     fn commit_frame_with_sync(
@@ -1704,6 +1774,7 @@ impl Database {
             && *owner == collection
         {
             job.track(id, state.records.get(&id), vector_bytes);
+            job.set_vector_sequence(sequence);
         }
         state.apply_committed(id, record, sequence, vector_bytes, expires_at_ms);
     }
@@ -1920,9 +1991,12 @@ impl Database {
         Ok(())
     }
 
-    /// Copies a bounded committed-vector snapshot, then builds on one owned thread.
+    /// Captures a bounded committed-vector generation, then builds on one owned thread.
     ///
-    /// Snapshot copying is synchronous; graph construction is not. The current
+    /// Unquantized capture shares immutable record bodies in O(1); the first
+    /// subsequent write copies the ID tree only. ScalarU8 training/encoding
+    /// remains synchronous. Shared record bodies are capped at 256 MiB,
+    /// in addition to the supplied vector and record limits. The current
     /// graph is retained until normal mutation-buffer overflow. No automatic
     /// fallback, retry, polling or publication occurs in search/write methods.
     /// Use ready-only queries and poll explicitly to avoid synchronous builds.
@@ -1966,10 +2040,16 @@ impl Database {
         options.validate()?;
         let state = self.state(collection);
         limits.validate_for(state.records.len(), state.dimensions, options)?;
+        if options.quantization == Quantization::None
+            && state.live_body_bytes > rebuild::MAX_HNSW_RETAINED_RECORD_BYTES
+        {
+            return Err(Error::HnswRebuildTooLarge);
+        }
         if self.rebuild.is_some() {
             return Err(Error::HnswRebuildBusy);
         }
-        let job = rebuild::Job::start(&state.records, config, metric, options)?;
+        let mut job = rebuild::Job::start(&state.records, config, metric, options)?;
+        job.set_vector_sequence(state.vector_sequence);
         self.rebuild = Some((collection, job));
         Ok(())
     }
@@ -1992,7 +2072,10 @@ impl Database {
             }
             _ => return Ok(HnswRebuildStatus::Idle),
         }
-        let (_, job) = self.rebuild.take().expect("pending job");
+        let (_, mut job) = self.rebuild.take().expect("pending job");
+        if !job.covers_vector_sequence(self.state(collection).vector_sequence) {
+            job.stop(HnswRebuildStatus::Superseded);
+        }
         let (status, index) = job.finish()?;
         if let Some(index) = index {
             self.state_mut(collection).index = Some(index);
@@ -2581,7 +2664,7 @@ impl Database {
 /// identical to a full scan restricted to that set. Inputs are prevalidated.
 #[allow(clippy::too_many_arguments)]
 fn exact_search(
-    records: &BTreeMap<u64, Record>,
+    records: &records::RecordMap,
     expiries: &BTreeMap<u64, u64>,
     query: &[f32],
     query_norm: f64,

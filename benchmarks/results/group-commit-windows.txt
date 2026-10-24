@@ -1,0 +1,95 @@
+VLite durable group commit: paired native Windows measurements
+Recorded: 2026-10-23, America/Los_Angeles; exact run timestamps not captured.
+Artifact prepared from original tool-call output (PowerShell execution shellId 483);
+not a new rerun. Both original complete result blocks are transcribed below.
+
+Repository: Q:\VLite
+Base HEAD: 62e29022ac916168fd3eb7b8e2058df3683b9b31
+Working tree: uncommitted concurrent engine/server optimization changes on that base.
+Implementation: src\server\group_commit.rs,
+  server::group_commit::tests::comparative_durable_write_benchmark.
+Engine coordination: Database::durable_group, implemented by engine owner.
+Toolchain (verified 2026-10-23):
+  rustc 1.99.1 (58cf8f9c3 2026-10-13)
+  cargo 1.99.1 (5f94df478 2026-08-27)
+OS: Windows, native Rust release build, no WSL/container.
+Host shared, not isolated; other engine source work occurred between builds.
+Filesystem storage device model/cache/power-loss behavior not characterized.
+
+Command, run twice sequentially in the same PowerShell execution:
+  & "$env:USERPROFILE\.cargo\bin\cargo.exe" test --release --features server --lib comparative_durable_write_benchmark -- --ignored --nocapture
+
+Workload/provenance:
+  Each case creates a fresh on-disk V3 database in a project-relative test directory.
+  512 individual put_core calls, dimensions=16, vector=[id as f32;16],
+  payload=128 zero bytes, empty metadata, no expiry, Expected::Any.
+  Concurrency=1 or16; waves wait for every call before the next wave.
+  Individual mode uses existing Service::run, one sync per mutation.
+  Grouped mode uses max_requests=16, max_bytes=67108864, delays0ms or2ms.
+  Every request keeps its own frame; Database::durable_group syncs once per
+  nonempty successful group before result dispatch.
+  "groups" counts attempted coordinator groups, not independently traced fsyncs.
+  Timing includes mutation preparation, queuing, filesystem sync and response
+  construction in-process; excludes database creation and close/reopen.
+  Every case closes, reopens and asserts exactly512 recovered records.
+  p50/p95/p99 are sorted per-request wall-clock latency order statistics at
+  indices n/2, n*95/100 and n*99/100 (not interpolated).
+  No network transport, background index, large metadata or production SLO claim.
+  Test directories are deleted on completion.
+  Subsequent final default changed from2ms to0ms; explicit paired0ms measurements
+  below directly measure the final default's grouping policy.
+
+RAW RUN1
+    Finished `release` profile [optimized] target(s) in 45.83s
+running 1 test
+delay_ms=None writes=512 concurrency=1 elapsed_ms=260.131 writes_per_sec=1968.2 groups=0 p50_ms=0.421 p95_ms=0.601 p99_ms=1.052
+delay_ms=Some(0) writes=512 concurrency=1 elapsed_ms=282.829 writes_per_sec=1810.3 groups=512 p50_ms=0.431 p95_ms=0.584 p99_ms=0.873
+delay_ms=Some(2) writes=512 concurrency=1 elapsed_ms=8188.091 writes_per_sec=62.5 groups=512 p50_ms=16.016 p95_ms=17.189 p99_ms=17.803
+delay_ms=None writes=512 concurrency=16 elapsed_ms=175.956 writes_per_sec=2909.8 groups=0 p50_ms=2.878 p95_ms=5.211 p99_ms=5.930
+delay_ms=Some(0) writes=512 concurrency=16 elapsed_ms=32.784 writes_per_sec=15617.3 groups=62 p50_ms=0.688 p95_ms=1.206 p99_ms=1.516
+delay_ms=Some(2) writes=512 concurrency=16 elapsed_ms=20.325 writes_per_sec=25191.1 groups=32 p50_ms=0.523 p95_ms=0.996 p99_ms=1.030
+test server::group_commit::tests::comparative_durable_write_benchmark ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 84 filtered out; finished in 8.99s
+
+RAW RUN2
+    Finished `release` profile [optimized] target(s) in 42.84s
+running 1 test
+delay_ms=None writes=512 concurrency=1 elapsed_ms=231.363 writes_per_sec=2213.0 groups=0 p50_ms=0.377 p95_ms=0.536 p99_ms=0.748
+delay_ms=Some(0) writes=512 concurrency=1 elapsed_ms=246.006 writes_per_sec=2081.2 groups=512 p50_ms=0.405 p95_ms=0.582 p99_ms=0.921
+delay_ms=Some(2) writes=512 concurrency=1 elapsed_ms=8208.984 writes_per_sec=62.4 groups=512 p50_ms=16.056 p95_ms=17.095 p99_ms=18.811
+delay_ms=None writes=512 concurrency=16 elapsed_ms=265.834 writes_per_sec=1926.0 groups=0 p50_ms=4.003 p95_ms=8.017 p99_ms=16.426
+delay_ms=Some(0) writes=512 concurrency=16 elapsed_ms=40.728 writes_per_sec=12571.3 groups=57 p50_ms=0.820 p95_ms=1.531 p99_ms=1.647
+delay_ms=Some(2) writes=512 concurrency=16 elapsed_ms=41.137 writes_per_sec=12446.3 groups=32 p50_ms=0.874 p95_ms=2.862 p99_ms=3.687
+test server::group_commit::tests::comparative_durable_write_benchmark ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 86 filtered out; finished in 9.08s
+
+Interpretation:
+  concurrency16 zero-delay speedups:5.367x and6.527x.
+  concurrency1 zero-delay throughput decreases:8.02% and5.96%.
+  Explicit2ms accumulation performs poorly sequentially on this Windows host,
+  with ~16ms p50, consistent with OS wait/scheduling granularity. This is why
+  the opt-in default now accumulates only work already queued (delay0).
+  No timing guarantee: delay bounds intentional waiting, not scheduling,
+  lock contention, disk I/O or end-to-end latency.
+
+Validation associated with final implementation:
+  cargo test --features server --test server_cli --quiet
+    8 passed, includes concurrent network writes acknowledged then process kill,
+    restart and fetch verification; invalid CLI settings create no file.
+  cargo test --features grpc --lib server:: --quiet
+    20 passed,1 ignored (benchmark).
+  cargo test --features grpc --test grpc --test rest --test rest_collections --test server_features --test server_ops --test server_admin --test server_logs --quiet
+    50 passed across selected suites.
+  python tests\openapi_contract.py
+    4 passed.
+  cargo clippy --features grpc --lib --bin vlite-server --test server_cli --test rest --test rest_collections --test grpc --test server_features --test server_ops --test server_admin --test server_logs -- -D warnings
+    passed.
+
+Unrelated broad all-tests clippy finding (left unchanged):
+  tests\graph_baseline\scenario.rs:142:48
+  error: manual implementation of `.is_multiple_of()`
+  ("even".into(), MetadataValue::Boolean(id % 2 == 0)),
+  help: replace with: `id.is_multiple_of(2)`
+  = help: .../clippy/.../index.html#manual_is_multiple_of
+  = note: `-D clippy::manual-is-multiple-of` implied by `-D warnings`
+  error: could not compile `vlite` (test "graph_regression") due to 1 previous error

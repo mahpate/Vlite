@@ -136,12 +136,14 @@ pub(crate) struct Collection {
     pub dimensions: usize,
     pub settings: CollectionSettings,
     pub settings_persisted: bool,
-    pub records: BTreeMap<u64, Record>,
+    pub records: crate::records::RecordMap,
+    /// Latest record-vector mutation covered by background catch-up.
+    pub vector_sequence: u64,
     /// Commit sequence that last put each live record (its revision).
     pub revisions: BTreeMap<u64, u64>,
     /// Persisted absolute Unix-millisecond expiry times. Derived visibility is
     /// evaluated against the query clock; expired records are removed by compaction.
-    pub expiries: BTreeMap<u64, u64>,
+    pub expiries: std::sync::Arc<BTreeMap<u64, u64>>,
     pub live_body_bytes: u64,
     pub index: Option<hnsw::Index>,
     pub metadata_indexes: MetadataIndexes,
@@ -159,8 +161,9 @@ impl Collection {
             settings: loaded.settings,
             settings_persisted: loaded.settings_persisted,
             records: loaded.records,
+            vector_sequence: 0,
             revisions: loaded.revisions,
-            expiries: loaded.expiries,
+            expiries: std::sync::Arc::new(loaded.expiries),
             live_body_bytes: loaded.live_body_bytes,
             index: None,
             metadata_indexes: MetadataIndexes::default(),
@@ -235,6 +238,7 @@ impl Collection {
         vector_bytes: usize,
         expires_at_ms: Option<u64>,
     ) {
+        self.vector_sequence = sequence;
         self.vectors.records.remove(&id);
         self.sparse_index.remove(id);
         self.vector_indexes.clear();
@@ -255,9 +259,9 @@ impl Collection {
                 }
                 self.revisions.insert(id, sequence);
                 if let Some(expiry) = expires_at_ms {
-                    self.expiries.insert(id, expiry);
+                    std::sync::Arc::make_mut(&mut self.expiries).insert(id, expiry);
                 } else {
-                    self.expiries.remove(&id);
+                    std::sync::Arc::make_mut(&mut self.expiries).remove(&id);
                 }
             }
             None => {
@@ -265,7 +269,7 @@ impl Collection {
                     self.live_body_bytes -= format::record_body_len(&previous);
                 }
                 self.revisions.remove(&id);
-                self.expiries.remove(&id);
+                std::sync::Arc::make_mut(&mut self.expiries).remove(&id);
             }
         }
     }
