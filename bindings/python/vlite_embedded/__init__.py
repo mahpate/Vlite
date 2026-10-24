@@ -2,6 +2,7 @@
 import base64
 import ctypes
 import json
+import math
 import os
 from pathlib import Path
 import threading
@@ -12,6 +13,21 @@ class EmbeddedError(Exception):
     def __init__(self, code: str, message: str):
         self.code = code
         super().__init__(f"{code}: {message}")
+
+
+def _float32_snapshot(vectors):
+    # Own a stable snapshot: ctypes releases the GIL during the native call.
+    view = memoryview(vectors)
+    native_format = "<f" if sys.byteorder == "little" else ">f"
+    if not view.c_contiguous or view.format not in ("f", "@f", "=f", native_format) or view.itemsize != 4:
+        raise ValueError("vectors must be a C-contiguous native-endian float32 buffer")
+    count = view.nbytes // 4
+    if count > 2097152:
+        raise ValueError("vector buffer exceeds 2097152 float32 values")
+    snapshot = (ctypes.c_float * count).from_buffer_copy(view)
+    if any(not math.isfinite(value) for value in snapshot):
+        raise ValueError("vector values must be finite")
+    return snapshot
 
 
 class NativeLibrary:
@@ -33,6 +49,19 @@ class NativeLibrary:
         self._lib.vlite_execute.restype = ctypes.c_void_p
         self._lib.vlite_response_free.argtypes = [ctypes.c_void_p]
         self._lib.vlite_response_free.restype = None
+        self._float32_functions = {}
+        for name in ("vlite_search_f32", "vlite_batch_put_f32"):
+            function = getattr(self._lib, name, None)
+            if function is not None:
+                function.argtypes = [ctypes.c_uint64, ctypes.c_void_p, ctypes.c_size_t,
+                                     ctypes.POINTER(ctypes.c_float), ctypes.c_size_t]
+                function.restype = ctypes.c_void_p
+                self._float32_functions[name] = function
+
+    @property
+    def supports_float32(self) -> bool:
+        """Whether both optional typed-vector entry points are available."""
+        return len(self._float32_functions) == 2
 
     def _execute(self, handle: int, request: dict):
         if os.getpid() != self._pid:
@@ -40,6 +69,9 @@ class NativeLibrary:
         data = json.dumps(request, allow_nan=False).encode("utf-8")
         buffer = ctypes.create_string_buffer(data)
         pointer = self._lib.vlite_execute(handle, buffer, len(data))
+        return self._response(pointer)
+
+    def _response(self, pointer):
         if not pointer:
             raise RuntimeError("Native library returned a null response; mutation outcome unknown")
         try:
@@ -193,6 +225,61 @@ class Database:
                              filter=[] if filter is None else filter,
                              **_given(metric=metric, collection=collection, ef_search=ef_search,
                                       quantization=quantization, rerank_multiplier=rerank_multiplier))
+
+    def _execute_float32(self, name, request, vectors, require_native):
+        if os.getpid() != self._library._pid:
+            raise RuntimeError("VLite cannot be used after fork; use a fresh spawned process")
+        snapshot = _float32_snapshot(vectors)
+        with self._lock:
+            if self._handle is None:
+                raise EmbeddedError("invalid_handle", "Database is closed")
+            function = self._library._float32_functions.get(name)
+            if function is None:
+                if require_native:
+                    raise EmbeddedError("unsupported", "Native library lacks the float32 entry point")
+                if name == "vlite_search_f32":
+                    request = {**request, "vector": list(snapshot)}
+                else:
+                    dimensions = request["dimensions"]
+                    request = {"op": "batch", **_given(collection=request.get("collection")),
+                               "operations": [{"op": "put", **row,
+                                               "vector": list(snapshot[i * dimensions:(i + 1) * dimensions])}
+                                              for i, row in enumerate(request["operations"])]}
+                return self._library._execute(self._handle, request)
+            data = json.dumps(request, allow_nan=False).encode("utf-8")
+            buffer = ctypes.create_string_buffer(data)
+            return self._library._response(function(self._handle, buffer, len(data), snapshot, len(snapshot)))
+
+    def search_f32(self, vector, k: int, *, filter: list[dict] | None = None, metric: str | None = None,
+                   collection: str | None = None, explain: bool = False, mode: str = "exact",
+                   ef_search: int | None = None, quantization: str | None = None,
+                   rerank_multiplier: int | None = None, require_native: bool = False) -> list[dict] | dict:
+        """Search a contiguous float32 buffer. Exact returns hits (or explained result);
+        auto returns the same dict as search_auto. Old libraries fall back to JSON."""
+        if mode not in ("exact", "auto"):
+            raise ValueError("mode must be exact or auto")
+        result = self._execute_float32("vlite_search_f32",
+                                      {"op": "search", "mode": mode, "k": k, "explain": explain,
+                                       "filter": [] if filter is None else filter,
+                                       **_given(metric=metric, collection=collection, ef_search=ef_search,
+                                                quantization=quantization, rerank_multiplier=rerank_multiplier)},
+                                      vector, require_native)
+        return result if mode == "auto" or explain else result["hits"]
+
+    def batch_put_f32(self, records: list[dict], vectors, dimensions: int, *,
+                      collection: str | None = None, require_native: bool = False) -> None:
+        """Atomic put-only batch: records contain id and optional metadata/payload_base64;
+        vectors is a flat or row-major contiguous float32 buffer."""
+        if isinstance(dimensions, bool) or not isinstance(dimensions, int) or dimensions <= 0:
+            raise ValueError("dimensions must be a positive integer")
+        if len(records) > 4096 or memoryview(vectors).nbytes != len(records) * dimensions * 4:
+            raise ValueError("bulk requires at most 4096 rows and rows * dimensions float32 values")
+        if any(not isinstance(row, dict) or "id" not in row
+               or row.keys() - {"id", "payload_base64", "metadata"} for row in records):
+            raise ValueError("records require id and only optional payload_base64/metadata")
+        self._execute_float32("vlite_batch_put_f32",
+                              {"dimensions": dimensions, "operations": records,
+                               **_given(collection=collection)}, vectors, require_native)
 
     def search_hybrid(self, text: str, k: int, *, vector: list[float] | None = None, filter: list[dict] | None = None,
                       metric: str | None = None, collection: str | None = None, fusion: dict | None = None,

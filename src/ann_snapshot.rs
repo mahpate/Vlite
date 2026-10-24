@@ -185,23 +185,40 @@ impl<R: Read> Source<R> {
     }
 
     pub fn f32s(&mut self, count: usize) -> Parse<Vec<f32>> {
-        let bytes = self.bytes(count.checked_mul(4).ok_or_else(|| corrupt("truncated"))?)?;
-        Ok(bytes
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|&chunk| f32::from_le_bytes(chunk))
-            .collect())
+        self.numbers(count, f32::from_le_bytes)
     }
 
     pub fn f64s(&mut self, count: usize) -> Parse<Vec<f64>> {
-        let bytes = self.bytes(count.checked_mul(8).ok_or_else(|| corrupt("truncated"))?)?;
-        Ok(bytes
-            .as_chunks::<8>()
-            .0
-            .iter()
-            .map(|&chunk| f64::from_le_bytes(chunk))
-            .collect())
+        self.numbers(count, f64::from_le_bytes)
+    }
+
+    /// Decode into the final allocation using bounded stack scratch space,
+    /// rather than retaining a second, equally large byte vector.
+    fn numbers<const WIDTH: usize, T>(
+        &mut self,
+        count: usize,
+        decode: impl Fn([u8; WIDTH]) -> T,
+    ) -> Parse<Vec<T>> {
+        let bytes = count
+            .checked_mul(WIDTH)
+            .ok_or_else(|| corrupt("truncated"))?;
+        if bytes as u64 > self.remaining {
+            return Err(corrupt("truncated"));
+        }
+        let mut values = Vec::with_capacity(count);
+        let mut buffer = [0; 4096];
+        while values.len() < count {
+            let length = (count - values.len()).min(buffer.len() / WIDTH) * WIDTH;
+            self.fill(&mut buffer[..length])?;
+            values.extend(
+                buffer[..length]
+                    .as_chunks::<WIDTH>()
+                    .0
+                    .iter()
+                    .map(|&chunk| decode(chunk)),
+            );
+        }
+        Ok(values)
     }
 }
 
@@ -234,12 +251,18 @@ impl<W: Write> Write for Sink<W> {
 /// `id u64 LE ‖ revision u64 LE ‖ dimensions × f32 bits LE`.
 fn content_digest(collection: &Collection) -> [u8; 32] {
     let mut hasher = Sha256::new();
+    let mut buffer = [0; 4096];
     for (&id, record) in &collection.records {
         hasher.update(id.to_le_bytes());
         let revision = collection.revisions.get(&id).copied().unwrap_or(0);
         hasher.update(revision.to_le_bytes());
-        for value in &record.vector {
-            hasher.update(value.to_bits().to_le_bytes());
+        // Preserve the v1 byte stream, batching SHA updates instead of
+        // invoking the hasher once for every four-byte component.
+        for values in record.vector.chunks(buffer.len() / 4) {
+            for (value, bytes) in values.iter().zip(buffer.as_chunks_mut::<4>().0.iter_mut()) {
+                bytes.copy_from_slice(&value.to_bits().to_le_bytes());
+            }
+            hasher.update(&buffer[..values.len() * 4]);
         }
     }
     hasher.finalize().into()
@@ -537,6 +560,107 @@ pub(crate) fn sidecar_path(datafile: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numeric_decoding_preserves_bits_and_hashes_across_scratch_boundaries() {
+        for count in [0, 1, 511, 512, 513, 1023, 1024, 1025, 4097] {
+            let f32_bits = [0, 0x8000_0000, 1, 0x7f7f_ffff, 0xff7f_ffff, 0x7fc0_0042];
+            let mut bytes = Vec::new();
+            for position in 0..count {
+                bytes.extend_from_slice(&u32::to_le_bytes(f32_bits[position % f32_bits.len()]));
+            }
+            bytes.push(0xa5);
+            let mut source = Source::new(bytes.as_slice(), bytes.len() as u64);
+            let values = source.f32s(count).unwrap();
+            assert_eq!(values.len(), count);
+            for (position, value) in values.iter().enumerate() {
+                assert_eq!(value.to_bits(), f32_bits[position % f32_bits.len()]);
+            }
+            assert_eq!(source.remaining(), 1);
+            assert_eq!(source.u8().unwrap(), 0xa5);
+            assert_eq!(source.hasher.finalize(), Sha256::digest(&bytes));
+
+            let f64_bits = [
+                0,
+                0x8000_0000_0000_0000,
+                1,
+                0x7fef_ffff_ffff_ffff,
+                0xffef_ffff_ffff_ffff,
+                0x7ff8_0000_0000_0042,
+            ];
+            bytes.clear();
+            for position in 0..count {
+                bytes.extend_from_slice(&u64::to_le_bytes(f64_bits[position % f64_bits.len()]));
+            }
+            bytes.push(0x5a);
+            let mut source = Source::new(bytes.as_slice(), bytes.len() as u64);
+            let values = source.f64s(count).unwrap();
+            assert_eq!(values.len(), count);
+            for (position, value) in values.iter().enumerate() {
+                assert_eq!(value.to_bits(), f64_bits[position % f64_bits.len()]);
+            }
+            assert_eq!(source.remaining(), 1);
+            assert_eq!(source.u8().unwrap(), 0x5a);
+            assert_eq!(source.hasher.finalize(), Sha256::digest(&bytes));
+        }
+    }
+
+    #[test]
+    fn numeric_decoding_rejects_oversized_counts_and_truncation() {
+        for count in [1, 1025, usize::MAX] {
+            let mut source = Source::new(io::empty(), 3);
+            assert_eq!(source.f32s(count), Err(corrupt("truncated")));
+            assert_eq!(source.remaining(), 3);
+            assert_eq!(source.f64s(count), Err(corrupt("truncated")));
+            assert_eq!(source.remaining(), 3);
+        }
+        let mut source = Source::new(&[0; 4096][..], 4100);
+        assert_eq!(source.f32s(1025), Err(corrupt("truncated")));
+        let mut source = Source::new(&[0; 4096][..], 4104);
+        assert_eq!(source.f64s(513), Err(corrupt("truncated")));
+    }
+
+    #[test]
+    fn batched_content_digest_matches_v1_component_stream() {
+        for dimensions in [1, 511, 512, 513, 1023, 1024, 1025, 4097] {
+            let mut db = Database::create_in_memory(dimensions, Default::default()).unwrap();
+            for id in [9, 2, 37] {
+                let vector: Vec<_> = (0..dimensions)
+                    .map(|component| match component % 7 {
+                        0 => -0.0,
+                        1 => f32::MIN_POSITIVE,
+                        2 => f32::MAX,
+                        3 => f32::MIN,
+                        4 => f32::from_bits(1),
+                        _ => (component as f32 - 17.0) / 13.0,
+                    })
+                    .collect();
+                db.put(id, &vector, b"not included in the digest").unwrap();
+            }
+            db.delete(9).unwrap();
+            db.put(2, &vec![0.25; dimensions], b"new revision").unwrap();
+            let collection = db.default_state();
+            let mut reference = Sha256::new();
+            for (&id, record) in &collection.records {
+                reference.update(id.to_le_bytes());
+                reference.update(
+                    collection
+                        .revisions
+                        .get(&id)
+                        .copied()
+                        .unwrap_or(0)
+                        .to_le_bytes(),
+                );
+                for value in &record.vector {
+                    reference.update(value.to_bits().to_le_bytes());
+                }
+            }
+            assert_eq!(
+                content_digest(collection),
+                <[u8; 32]>::from(reference.finalize())
+            );
+        }
+    }
 
     #[test]
     fn size_checks_precede_reading_and_codes_are_stable() {

@@ -1,6 +1,7 @@
 //! C ABI: owned UTF-8 JSON responses, opaque numeric handles, no network runtime.
 
 mod features;
+mod typed;
 
 use base64::{Engine, prelude::BASE64_STANDARD};
 use serde::Deserialize;
@@ -1229,6 +1230,10 @@ pub unsafe extern "C" fn vlite_execute(
             "Native panic; owner may be poisoned; restart the process".into(),
         ))
     });
+    response(result)
+}
+
+fn response(result: Result<Value>) -> *mut c_char {
     let envelope = match result {
         Ok(value) => json!({"ok":true,"result":value}),
         Err((code, message)) => json!({"ok":false,"error":{"code":code,"message":message}}),

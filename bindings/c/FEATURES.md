@@ -136,3 +136,40 @@ wiped; protect process access and do not log requests. Keys are not returned;
 key IDs are non-secret. Passphrases use engine Argon2id defaults and stored KDF
 parameters. Losing keys loses data. In-memory databases are durable only after
 the host saves `to_bytes()` output.
+
+## Optional float32 input entry points
+
+`vlite_search_f32` and `vlite_batch_put_f32` are additive, optional ABI-1 exports
+declared in `vlite.h`. They do not replace `vlite_execute`; detect their presence
+with the platform's dynamic symbol lookup before calling against an older
+library. Existing published 0.3.0 binaries lack these symbols. The source Python
+wrapper detects them and offers JSON fallback or explicit `unsupported` errors.
+
+Both borrow immutable JSON options and an aligned native-endian IEEE float32
+buffer until return, with the same owned JSON envelope and
+`vlite_response_free` allocator. Invalid non-null/inaccessible pointers remain
+caller undefined behavior: length checks cannot establish pointer validity.
+Null/misaligned float pointers, excessive counts, nonfinite values, invalid JSON
+and mismatched bulk dimensions/counts are rejected as `invalid_input` before
+mutation. A null float pointer is permitted only for count zero. JSON options
+are independently limited to 8 MiB and vectors to 2097152 float32 values (8 MiB).
+
+Search accepts an existing `{"op":"search",...}` JSON request with `vector`
+omitted and inserts the borrowed vector into the existing execution path.
+Supplying both a JSON vector and a typed vector is an error. Exact, auto and
+hybrid engine validation and option/response rules are unchanged.
+
+Bulk options have this shape (no `op` or vector fields):
+
+```json
+{"dimensions":2,"operations":[{"id":"1"},{"id":"2","payload_base64":"AP8="}],"collection":"default"}
+```
+
+Each row accepts only `id`, optional `payload_base64` and optional `metadata`.
+Floats are row-major, dimensions must be positive, and the count must equal
+`operations.length * dimensions` without overflow, with at most 4096 rows.
+An empty row list accepts a zero-length buffer. Puts go through the existing
+atomic batch implementation, including validation, read-only protection,
+serialization and sync-before-acknowledgment. Input vectors are copied into
+owned operations before execution; neither call retains caller pointers.
+No owner locks, file locks or durability policies are relaxed.

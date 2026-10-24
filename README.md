@@ -67,6 +67,14 @@ It uses its own storage format and does not require an external database.
 - **Maintenance:** offline inspection, byte-preserving backup/restore, and
   no-clobber copy-out compaction.
 
+Current-source performance work caches accepted HNSW neighbor vectors during
+construction and reduces ANN snapshot hashing/decoding overhead without changing
+snapshot bytes or validation. The Python embedded wrapper also offers opt-in
+`search_f32` and `batch_put_f32` buffer inputs to avoid vector JSON encoding;
+existing methods are unchanged. See [measured scope and limitations](benchmarks/README.md#current-source-performance-work-october-23-2026)
+and the [Python buffer API](bindings/python/README.md). These additions are not
+included in published Python 0.3.0 wheels.
+
 VLite is licensed under the MIT License; see
 [LICENSE](LICENSE). There is no inner-product ANN, networked
 replication or approximate metadata filtering. Opt-in [storage features](docs/STORAGE-FEATURES.md) add encryption at

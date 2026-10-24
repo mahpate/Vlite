@@ -537,15 +537,32 @@ impl Index {
         limit: usize,
         records: &BTreeMap<u64, Record>,
     ) -> Vec<usize> {
-        let mut selected = Vec::with_capacity(limit);
+        let mut selected: Vec<usize> = Vec::with_capacity(limit);
+        // Selection repeatedly compares against the same accepted vectors.
+        // Cache their borrowed slices instead of repeating record-tree lookups.
+        // Validated m <= 64 bounds every layer's selection limit to 2m <= 128.
+        let mut selected_vectors: [&[f32]; 128] = [&[]; 128];
         for candidate in candidates {
             let candidate_query = self.node_query(candidate.node, records);
             let candidate_norm = self.nodes[candidate.node].norm;
             // Preserve directionally diverse links rather than only a dense local cluster.
-            if selected.iter().all(|&node| {
-                self.node_distance(node, &candidate_query, candidate_norm, records)
-                    >= candidate.distance
-            }) {
+            let diverse = match &candidate_query {
+                Cow::Borrowed(query) => selected.iter().enumerate().all(|(position, &node)| {
+                    self.distance(
+                        selected_vectors[position],
+                        query,
+                        self.nodes[node].norm,
+                        candidate_norm,
+                    ) >= candidate.distance
+                }),
+                Cow::Owned(query) => selected.iter().all(|&node| {
+                    self.node_distance(node, query, candidate_norm, records) >= candidate.distance
+                }),
+            };
+            if diverse {
+                if let Cow::Borrowed(vector) = candidate_query {
+                    selected_vectors[selected.len()] = vector;
+                }
                 selected.push(candidate.node);
                 if selected.len() == limit {
                     return selected;
@@ -1186,6 +1203,10 @@ impl Index {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/support/hnsw_selection_perf.rs"]
+mod selection_perf;
 
 #[cfg(test)]
 mod tests {

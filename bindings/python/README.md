@@ -149,3 +149,83 @@ python tests/embedded_wheel.py embedded-wheels
 The direct feature suite defaults to `target/debug` and accepts
 `VLITE_TEST_LIBRARY` to validate an exact alternate/bundled library. It creates
 and cleans its test files below the binding directory.
+
+## Optional contiguous float32 search and bulk puts
+
+Source builds provide opt-in `search_f32` and `batch_put_f32` methods. Existing
+list-based methods and the JSON ABI are unchanged. These methods avoid converting
+each vector component to JSON; results and metadata still use JSON.
+
+```python
+from array import array
+from vlite_embedded import NativeLibrary
+
+native = NativeLibrary("target/debug/vlite_ffi.dll")
+with native.create_in_memory(2) as db:
+    db.batch_put_f32(
+        [{"id": "18446744073709551615"}, {"id": "2", "payload_base64": "AP8="}],
+        array("f", [1, 0, 0, 1]), 2,
+    )
+    hits = db.search_f32(array("f", [1, 0]), 2)
+    planned = db.search_f32(array("f", [1, 0]), 2, mode="auto", explain=True)
+```
+
+Use a native-endian, C-contiguous float32 buffer, such as `array("f")`, a ctypes
+float array, or an appropriately typed NumPy array (NumPy is not required).
+Read-only buffers are accepted; strided, non-native-endian, float64, byte and
+nonfinite buffers are rejected. Bulk buffers may be flat or row-major; they must
+contain exactly `len(records) * dimensions` floats. Dimensions must be positive,
+with at most 4096 rows and 2097152 floats per call. Record dictionaries contain
+`id` and optional `payload_base64`/`metadata`; IDs retain canonical decimal u64
+validation. Bulk puts retain `batch`'s atomic validation, commit and durability
+semantics; they are not individually acknowledged writes.
+
+`search_f32` exact mode has the same options/return shape as `search`; auto mode
+returns the `search_auto` dictionary and accepts `ef_search`, `quantization` and
+`rerank_multiplier`. Filters, metrics, named collections, explain output and
+errors use the existing engine path. Unsupported option combinations are still
+errors. The Python wrapper owns a validated snapshot during the call because
+ctypes releases the GIL. This is a copy-reducing path, **not zero-copy**. The
+existing per-handle Python lock and global native owner lock remain in place.
+
+Published 0.3.0 wheels lack these native symbols (and their bundled Python API
+may lack these methods). With this source wrapper and an older ABI-1 library,
+`native.supports_float32` is false and the new methods fall back to JSON using
+the buffer's exact float32 values. Set `require_native=True` on either method to
+reject that fallback with `EmbeddedError(code="unsupported")`. Loading an old
+library never requires a new symbol. Non-ABI-1 libraries remain unsupported.
+Fallback retains the existing 8 MiB JSON request cap; a large typed buffer may
+need smaller batches to fit the older library's JSON representation.
+
+### Reproducing the bounded comparison
+
+From the repository root, build a dedicated release library and run:
+
+```text
+cargo build -p vlite-ffi
+python -m unittest discover -s bindings/python -p test_typed_vectors.py -v
+cargo build -p vlite-ffi --release --target-dir target/perf-bindings
+python bindings/python/benchmark_typed_vectors.py --library target/perf-bindings/release/vlite_ffi.dll --output target/perf-bindings/typed-results.json
+```
+
+Use `libvlite_ffi.so` on Linux or `libvlite_ffi.dylib` on macOS. The test defaults
+to `target/debug`, like the existing binding suites; override
+`VLITE_TEST_LIBRARY` to select another build, including the release benchmark library.
+The benchmark uses only the standard library, alternates baseline/candidate
+order, checks identical f32 values/results (including durable reopen), and
+reports separate wrapper-conversion, search, in-memory bulk and durable bulk
+timings. Both bulk modes execute the same one-batch commit, with creation,
+verification and close outside the timing. It records raw samples, environment
+and binary/source hashes; its bounds and workload are configurable.
+
+One Windows shared-host run (5 rounds, 128D, 256 records, 80 queries,
+128-row batches) measured these median JSON → float32 timings: query conversion
+107.9 → 43.8 µs, bulk conversion 12.76 → 3.44 ms, search 185.5 → 125.5 µs,
+in-memory bulk 19.70 → 6.03 ms, durable bulk 19.91 → 7.18 ms. A bounded 768D
+run (128 records, 40 queries, 64-row batches) measured query conversion
+549.9 → 201.1 µs and search 691.2 → 311.6 µs. Baseline lists were already
+materialized; typed timings include snapshot copying and finite validation.
+Concurrent build/benchmark agents can distort end-to-end results: this is not
+isolated speedup evidence, nor a claim about cold cache, peak RSS, concurrent
+throughput or all dimensions. Tiny vectors and JSON fallback can see no gain;
+the fast path remains opt-in.

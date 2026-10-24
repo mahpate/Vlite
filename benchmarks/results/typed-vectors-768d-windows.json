@@ -1,0 +1,137 @@
+{
+  "verified": true,
+  "workload": {
+    "rounds": 5,
+    "queries": 40,
+    "records": 128,
+    "dimensions": 768,
+    "bulk_rows": 64
+  },
+  "environment": {
+    "platform": "Windows-11-10.0.26300-SP0",
+    "python": "3.15.0",
+    "cpu_count": 16
+  },
+  "library_sha256": "0ea53b7bf369459526eac3a3c4e1c8978447e3aae24c348c98c110e2ede8740b",
+  "source_sha256": {
+    "bindings\\python\\benchmark_typed_vectors.py": "6cb865cb5f41cc9f89faf4fa25345112afd0a67df198ea4f0c7a839d945c860d",
+    "bindings\\python\\vlite_embedded\\__init__.py": "3818184ca954fedb15516a932763e7f27ed8923f215ca2994cf989668e230cc5",
+    "bindings\\c\\src\\typed.rs": "c7e49a159df2e659fac0cad4a5071319c6c20159c478ab7e592bf542acb20f3e",
+    "bindings\\c\\src\\lib.rs": "d15e33f97f7ec5bab54fde260aa7d4708354db3c0c04f6f9220d9847269f1b99"
+  },
+  "scope": "Paired same-library JSON baseline/typed candidate; f32-identical values; no index changes",
+  "limitations": [
+    "Shared host: other build/benchmark agents may contend for CPU; not isolated speedup evidence",
+    "Warm single-threaded reads; no RSS, cold-cache or concurrency throughput claims",
+    "Durable mode compares one identical atomic batch/sync, not per-record acknowledgments",
+    "Conversion includes stable snapshot/finite validation; baseline uses pre-existing Python lists",
+    "Bulk end-to-end timing excludes creation, validation reads and close"
+  ],
+  "measurements": {
+    "query_conversion": {
+      "json_median_us": 549.945,
+      "float32_median_us": 201.075,
+      "ratio_json_over_float32": 2.735024244684819,
+      "samples_ns": {
+        "json": [
+          801007.5,
+          385165.0,
+          549945.0,
+          408527.5,
+          568895.0
+        ],
+        "float32": [
+          254922.5,
+          118002.5,
+          201075.0,
+          112895.0,
+          218252.5
+        ]
+      }
+    },
+    "bulk_conversion": {
+      "json_median_us": 30817.88,
+      "float32_median_us": 9729.72,
+      "ratio_json_over_float32": 3.1673963896186117,
+      "samples_ns": {
+        "json": [
+          42971900.0,
+          27416680.0,
+          34675100.0,
+          30148120.0,
+          30817880.0
+        ],
+        "float32": [
+          8073300.0,
+          9804080.0,
+          7665280.0,
+          10389860.0,
+          9729720.0
+        ]
+      }
+    },
+    "search": {
+      "json_median_us": 691.185,
+      "float32_median_us": 311.5625,
+      "ratio_json_over_float32": 2.2184473420260784,
+      "samples_ns": {
+        "json": [
+          615620.0,
+          661137.5,
+          691185.0,
+          849260.0,
+          717850.0
+        ],
+        "float32": [
+          294595.0,
+          279297.5,
+          318667.5,
+          456507.5,
+          311562.5
+        ]
+      }
+    },
+    "bulk_memory": {
+      "json_median_us": 38195.8,
+      "float32_median_us": 10135.5,
+      "ratio_json_over_float32": 3.768516600069064,
+      "samples_ns": {
+        "json": [
+          38195800.0,
+          47067000.0,
+          34906200.0,
+          42739900.0,
+          37048100.0
+        ],
+        "float32": [
+          14967300.0,
+          9977800.0,
+          10135500.0,
+          11723500.0,
+          9802300.0
+        ]
+      }
+    },
+    "bulk_durable": {
+      "json_median_us": 37026.8,
+      "float32_median_us": 11468.5,
+      "ratio_json_over_float32": 3.2285652003313423,
+      "samples_ns": {
+        "json": [
+          34815600.0,
+          37531100.0,
+          37026800.0,
+          48771300.0,
+          35037300.0
+        ],
+        "float32": [
+          12175200.0,
+          10520100.0,
+          11468500.0,
+          10887600.0,
+          16840300.0
+        ]
+      }
+    }
+  }
+}

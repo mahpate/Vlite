@@ -23,6 +23,19 @@ VLITE_API uint32_t vlite_abi_version(void);
    Feature create/open/open_from_bytes/restore_to require handle=0.
    Feature-created database handles use the same close/free functions. */
 VLITE_API char *vlite_execute(uint64_t handle, const uint8_t *input, size_t length);
+/* Optional additive symbols: detect availability when loading older ABI-1 builds.
+   vectors is borrowed, aligned native-endian IEEE float32, immutable until return.
+   count is the number of floats (not bytes), at most 2097152; all must be finite.
+   NULL vectors is allowed only for count=0. JSON options are 1..8388608 bytes.
+   Search: existing {"op":"search",...} request with vector omitted.
+   Bulk: {"dimensions":D,"operations":[{"id":"1",...},...],"collection":...};
+   put fields are id, payload_base64 and metadata; vectors are row-major.
+   D>0, rows<=4096, count=rows*D. Uses the existing atomic batch/sync contract.
+   Responses/errors/free and serialization are identical to vlite_execute. */
+VLITE_API char *vlite_search_f32(uint64_t handle, const uint8_t *input, size_t length,
+                               const float *vectors, size_t count);
+VLITE_API char *vlite_batch_put_f32(uint64_t handle, const uint8_t *input, size_t length,
+                                  const float *vectors, size_t count);
 VLITE_API void vlite_response_free(char *response);
 
 #ifdef __cplusplus

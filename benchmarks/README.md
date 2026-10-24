@@ -19,6 +19,59 @@ number on a small synthetic workload.
 
 ## Native VLite benchmark
 
+### Current-source performance work, October 23, 2026
+
+Three bounded optimizations retain existing durability, distance precision and
+index validation. Native Windows release measurements were collected on a
+shared host alongside other builds; they are development observations, not
+isolated production speedups or revised cross-engine results.
+
+- **HNSW construction:** accepted unquantized neighbor vectors are borrowed once
+  per selection instead of repeatedly fetched from the record tree. A paired
+  reference/candidate microbenchmark of 6,400 selections over 3,000 32-dimensional
+  records measured median L2 selection 127.141 -> 91.315 ms and cosine
+  77.787 -> 52.580 ms. Quantized traversal retains its existing path. Reference
+  equivalence and snapshot fingerprints check that selection semantics remain
+  unchanged. These timings cover selection, not whole-query latency.
+- **ANN snapshot codec:** batched SHA updates preserve the exact byte stream;
+  numeric decoding writes into the final vector using bounded stack scratch,
+  avoiding an intermediate equally sized byte vector. Across 18 samples per
+  version/mode on 1,024 x 512 records plus 128 buffered updates, median save/load
+  was 10.762/4.394 -> 9.591/3.957 ms without quantization and
+  14.116/7.418 -> 12.818/6.915 ms with scalar u8. Snapshot hashes and search
+  results matched. Database replay, owner snapshot cloning and full snapshot
+  self-validation remain; total restart speedup is not established.
+- **Typed embedded inputs:** opt-in C/Python float32 search and put-batch entry
+  points retain JSON options/results but omit vector JSON encoding. Python
+  snapshots buffers before releasing the GIL; this is not zero-copy. One paired
+  128-dimensional campaign measured median query conversion 107.9 -> 43.8 us,
+  search 185.5 -> 125.5 us and a durable 128-record batch 19.91 -> 7.18 ms.
+  Tiny inputs can regress; existing JSON methods remain unchanged. Capability
+  detection supports old native libraries with JSON fallback, or explicit
+  `unsupported` when `require_native=True`.
+
+A four-way distance-loop unroll was tested and **not retained**: its final
+seven-trial median was 1,931 ns versus 1,918 ns for the scalar kernel, reversing
+an earlier apparent gain. No SIMD, lower-precision accumulation or distance
+speedup is claimed.
+
+Raw samples:
+[HNSW selection](results/hnsw-selection-windows.txt),
+[snapshot codec](results/snapshot-codec-windows.txt),
+[typed 128D](results/typed-vectors-128d-windows.json),
+[typed 768D](results/typed-vectors-768d-windows.json).
+Run the selection probe with
+`cargo test --locked --release --lib profile_construction_and_selection -- --ignored --nocapture --test-threads=1`;
+run `cargo run --locked --release --example snapshot_lifecycle_perf -- candidate`
+for the fixed-workload snapshot probe (the argument labels the output), and
+`python bindings/python/benchmark_typed_vectors.py --help` for typed-input
+campaign options.
+
+Remaining architecture work includes immutable version-consistent readers,
+group commit with durable acknowledgments, and reducing rebuild snapshot clones.
+These are not implemented by this optimization batch. Eventual consistency and
+weaker durability are not prerequisites for the retained improvements.
+
 ### HNSW visited-membership optimization (unreleased source)
 
 Construction and filtered search use a dense visited bitmap instead of hashing

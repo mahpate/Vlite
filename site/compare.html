@@ -178,6 +178,21 @@
     </div>
   </section>
 
+  <section id="current-source-performance">
+    <div class="wrap">
+      <h2>Current-source optimization work</h2>
+      <p>HNSW neighbor selection now reuses borrowed accepted vectors; ANN snapshot
+        hashing batches identical bytes and numeric decoding avoids an intermediate
+        byte-vector allocation. Optional C/Python float32 inputs reduce vector JSON
+        conversion while retaining existing JSON methods and durable batch commits.</p>
+      <p>Bounded Windows development measurements found lower selection, snapshot
+        save/load and typed-input overhead. These were shared-host measurements,
+        not isolated end-to-end speedup evidence, and do not update the release
+        comparisons above. A distance-loop unroll was rejected after inconsistent
+        timings. Published Python 0.3.0 wheels do not include the new buffer methods.</p>
+      <p><a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/README.md#current-source-performance-work-october-23-2026">Workloads, raw samples, reproduction and remaining bottlenecks</a></p>
+    </div>
+  </section>
   <section id="hnsw-traversal">
     <div class="wrap">
       <h2>HNSW traversal optimization (unreleased source)</h2>

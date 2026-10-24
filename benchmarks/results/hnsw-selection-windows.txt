@@ -1,0 +1,20 @@
+   Compiling vlite v0.3.0 (Q:\VLite)
+    Finished `release` profile [optimized] target(s) in 15.39s
+     Running unittests src\lib.rs (target\perf-hnsw\release\deps\vlite-d5a92a156fe956ad.exe)
+
+running 1 test
+test hnsw::selection_perf::profile_construction_and_selection ... construction metric=SquaredL2 quantization=None us=[791792, 721948, 688672] snapshot_fingerprint=16929988181799570983
+selection_profile metric=SquaredL2 quantization=None calls=64 candidate_queries=4279 pair_distances=17308 selected=1024 reference_vector_fetches=21587 cached_vector_fetches=4279
+selection_timing metric=SquaredL2 quantization=None reference_us=[124645, 124959, 131623, 131556, 125400, 141217, 127141] current_us=[88309, 88419, 92966, 91315, 90666, 95801, 95912] selections_per_sample=6400
+construction metric=SquaredL2 quantization=ScalarU8 us=[578621, 572948, 560824] snapshot_fingerprint=2198838869134152650
+selection_profile metric=SquaredL2 quantization=ScalarU8 calls=64 candidate_queries=4253 pair_distances=17424 selected=1024 reference_vector_fetches=21677 cached_vector_fetches=21677
+selection_timing metric=SquaredL2 quantization=ScalarU8 reference_us=[107340, 109259, 102041, 103508, 103068, 107290, 121345] current_us=[104510, 101550, 103584, 116067, 107769, 104841, 103527] selections_per_sample=6400
+construction metric=Cosine quantization=None us=[660808, 647917, 664271] snapshot_fingerprint=8897825992413431978
+selection_profile metric=Cosine quantization=None calls=64 candidate_queries=1805 pair_distances=11626 selected=1024 reference_vector_fetches=13431 cached_vector_fetches=1805
+selection_timing metric=Cosine quantization=None reference_us=[82181, 75732, 77787, 77077, 77915, 78488, 74643] current_us=[52786, 53613, 52587, 52090, 52580, 52291, 51061] selections_per_sample=6400
+construction metric=Cosine quantization=ScalarU8 us=[531886, 536280, 542700] snapshot_fingerprint=3242429306425500422
+selection_profile metric=Cosine quantization=ScalarU8 calls=64 candidate_queries=1798 pair_distances=11568 selected=1024 reference_vector_fetches=13366 cached_vector_fetches=13366
+selection_timing metric=Cosine quantization=ScalarU8 reference_us=[62396, 61407, 60674, 61628, 65653, 63433, 60965] current_us=[61488, 59726, 61385, 63434, 63151, 60541, 69329] selections_per_sample=6400
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 58 filtered out; finished in 12.43s
