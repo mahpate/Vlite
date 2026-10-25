@@ -605,13 +605,13 @@ not proof of causation. No performance figures from either rejected campaign
 are recorded here or accepted as baseline evidence. `baseline.md` is untouched
 and the historical `81ff901` claims stand.
 
-The original evidence is outside the repository in
-`C:\Users\mahpate\.copilot\session-state\f54d7318-2b89-49f0-9711-4b06ab8b3fdf\files\`
-and must be preserved until the decision below. It includes
+The raw logs are retained outside the repository in the private recovery
+handoff and must be preserved until the decision below. They are not accepted
+baseline evidence. The retained artifacts include
 `graph-off-reference-059650e.json`, `graph-off-reference-4312fb3.json` and its
 log, diagnostic JSON/log, machine identity and process CPU snapshots. The
-source report is the timestamped assistant message in that session's
-`events.jsonl`. Large run artifacts are not copied into this repository.
+source report is the timestamped final assistant message retained in the
+recovery handoff. Large run artifacts are not copied into this repository.
 
 **Open decision; owner: user/maintainers.** Decide whether
 benchmark-attributable scanner/System CPU counts as background CPU for
