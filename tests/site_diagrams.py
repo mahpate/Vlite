@@ -24,6 +24,16 @@ class QuietHandler(SimpleHTTPRequestHandler):
         pass
 
 
+def decode_image(page, image, theme):
+    image.scroll_into_view_if_needed()
+    page.wait_for_function(
+        """([img, suffix]) => img.complete && img.naturalWidth > 0
+            && img.currentSrc.endsWith(suffix)""",
+        arg=[image.element_handle(), f"-{theme}.svg"],
+    )
+    image.evaluate("img => img.decode()")
+
+
 def check(site, screenshots=None):
     assets = site / "assets" / "diagrams"
     palette = json.loads((assets / "palette.json").read_text(encoding="utf-8"))
@@ -69,8 +79,7 @@ def check(site, screenshots=None):
                             images = page.locator(".diagram img")
                             assert images.count() == 14
                             for image in images.all():
-                                image.scroll_into_view_if_needed()
-                                image.evaluate("img => img.decode()")
+                                decode_image(page, image, theme)
                                 assert image.evaluate("img => img.naturalWidth > 0 && img.alt.length > 30")
                                 assert image.evaluate("img => img.currentSrc").endswith(f"-{theme}.svg")
                             page.locator("#layers").scroll_into_view_if_needed()
@@ -78,8 +87,7 @@ def check(site, screenshots=None):
                             images = page.locator(".deployment-options img")
                             assert images.count() == 2
                             for image in images.all():
-                                image.scroll_into_view_if_needed()
-                                image.evaluate("img => img.decode()")
+                                decode_image(page, image, theme)
                                 assert image.evaluate("img => img.currentSrc").endswith(f"-{theme}.svg")
                                 assert image.evaluate("img => img.naturalWidth > 0 && img.alt.length > 30")
                         else:
@@ -99,9 +107,8 @@ def check(site, screenshots=None):
                 page.goto(f"{url}/architecture.html")
                 page.locator("#theme-toggle").click()
                 first = page.locator(".diagram img").first
-                first.scroll_into_view_if_needed()
-                first.evaluate("img => img.decode()")
                 opposite = "dark" if theme == "light" else "light"
+                decode_image(page, first, opposite)
                 assert first.evaluate("img => img.currentSrc").endswith(f"-{opposite}.svg")
                 assert not external, external
                 context.close()
@@ -109,9 +116,8 @@ def check(site, screenshots=None):
             page = context.new_page()
             page.goto(f"{url}/architecture.html")
             image = page.locator(".diagram img").first
-            image.scroll_into_view_if_needed()
+            decode_image(page, image, "dark")
             assert image.evaluate("img => img.currentSrc").endswith("-dark.svg")
-            image.evaluate("img => img.decode()")
             context.close()
             browser.close()
     finally:
