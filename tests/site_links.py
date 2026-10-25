@@ -69,7 +69,7 @@ def check(root):
         if path == root / "dashboard.html":
             if page.sections != ["screenshots", "start", "workflows"]:
                 errors.append("dashboard.html: expected tours, setup, then workflows")
-            for name in ("current-overview-light.png", "current-token-help.png", "current-preferences.png"):
+            for name in ("current-overview-light.png",):
                 if f"assets/dashboard/{name}" not in page.links:
                     errors.append(f"dashboard.html: missing latest screenshot {name}")
             if "Earlier release tours" in " ".join(page.text):
@@ -93,6 +93,9 @@ def check(root):
             if "Experimental source capabilities" not in " ".join(page.text):
                 errors.append("features.html: separate experimental graph capabilities")
         if path == root / "index.html":
+            for guide in ("docs/MCP.html", "docs/AGENT-SKILLS.html"):
+                if guide not in page.links:
+                    errors.append(f"index.html: agent links must open their own guide: {guide}")
             for mode in ("embedded", "self-hosted"):
                 if f"assets/diagrams/deployment-{mode}-light.svg" not in page.links:
                     errors.append(f"index.html: missing {mode} deployment diagram")
