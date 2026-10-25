@@ -1,29 +1,16 @@
-"""Website tour checks. Requires tests/requirements-dashboard.txt.
+"""Check the current screenshot tour, autoplay, controls and accessible fallbacks.
 
-Usage: python tests/dashboard_tours.py <assembled-site> [screenshot-directory]
+Usage: python tests/dashboard_tours.py <assembled-site>
+Requires tests/requirements-dashboard.txt.
 """
 
 from functools import partial
-from html.parser import HTMLParser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-import struct
 import sys
 from threading import Thread
 
 from playwright.sync_api import expect, sync_playwright
-
-
-class Tours(HTMLParser):
-    def __init__(self, text):
-        super().__init__()
-        self.buttons = []
-        self.feed(text)
-
-    def handle_starttag(self, tag, attrs):
-        attrs = dict(attrs)
-        if tag == "button" and "data-tour" in attrs:
-            self.buttons.append(attrs)
 
 
 class QuietHandler(SimpleHTTPRequestHandler):
@@ -31,114 +18,86 @@ class QuietHandler(SimpleHTTPRequestHandler):
         pass
 
 
-def check(root, screenshots=None):
-    buttons = Tours((root / "dashboard.html").read_text(encoding="utf-8")).buttons
-    assert len(buttons) == 3
-    for button in buttons:
-        data = (root / button["data-tour"]).read_bytes()
-        assert data[:8] == b"\x89PNG\r\n\x1a\n"
-        assert len(data) < 3_000_000
-        position, frames, duration, expected = 8, 0, 0, 0
-        while position < len(data):
-            size = struct.unpack_from(">I", data, position)[0]
-            kind = data[position + 4:position + 8]
-            chunk = data[position + 8:position + 8 + size]
-            if kind == b"IHDR":
-                assert struct.unpack_from(">II", chunk) == (1440, 1100)
-            elif kind == b"acTL":
-                expected, loops = struct.unpack(">II", chunk)
-                assert loops == 1
-            elif kind == b"fcTL":
-                numerator, denominator = struct.unpack_from(">HH", chunk, 20)
-                duration += 1000 * numerator / (denominator or 100)
-                frames += 1
-            position += size + 12
-        assert frames == expected and frames > 1
-        assert duration == int(button["data-duration"])
-        poster = (root / button["data-poster"]).read_bytes()
-        assert b"acTL" not in poster
-
+def check(root):
+    html = (root / "dashboard.html").read_text(encoding="utf-8")
+    assert "Earlier release tours" not in html
+    assert "records-tour" not in html and "search-tour" not in html
+    frames = ("current-overview-light.png", "current-token-help.png",
+              "current-overview-dark.png", "current-preferences.png")
+    for frame in frames:
+        assert (root / "assets" / "dashboard" / frame).is_file()
     server = ThreadingHTTPServer(("127.0.0.1", 0), partial(QuietHandler, directory=str(root)))
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch()
-            page = browser.new_page(reduced_motion="no-preference")
-            errors, animations = [], []
+            context = browser.new_context(reduced_motion="no-preference")
+            page = context.new_page()
+            errors = []
             page.on("pageerror", lambda error: errors.append(str(error)))
-            page.on("request", lambda request: animations.append(request.url)
-                    if any(request.url.endswith(b["data-tour"]) for b in buttons) else None)
             base = f"http://127.0.0.1:{server.server_port}"
             for width in (1440, 900, 390, 320):
                 page.set_viewport_size({"width": width, "height": 1000})
-                for path in ("/", "/dashboard.html"):
-                    page.goto(base + path)
-                    for theme in ("light", "dark"):
-                        page.evaluate("(theme) => document.documentElement.dataset.theme = theme", theme)
-                        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), (width, path)
-                        if path == "/":
-                            nav = page.get_by_role("navigation", name="Primary")
-                            assert nav.get_by_role("link").count() == 11
-                            for label in ("Products", "API", "Architecture", "About", "ASENDME"):
-                                expect(nav.get_by_role("link", name=label, exact=True)).to_have_count(1)
-                        elif screenshots and width in (1440, 390):
-                            screenshots.mkdir(parents=True, exist_ok=True)
-                            page.locator(".dashboard-tour img").evaluate_all(
-                                "images => Promise.all(images.map(image => { image.loading='eager'; return image.decode(); }))")
-                            page.screenshot(path=str(screenshots / f"dashboard-{width}-{theme}.png"), full_page=True)
-            assert not animations, "Animations must not be requested before play"
-            page.set_viewport_size({"width": 1440, "height": 1000})
+                page.goto(base + "/dashboard.html")
+                image = page.locator("#dashboard-guided-tour")
+                toggle = page.locator("[data-tour-toggle]")
+                image.scroll_into_view_if_needed()
+                expect(toggle).to_have_text("Pause tour")
+                expect(image).to_have_attribute("src", "assets/dashboard/" + frames[1], timeout=5000)
+                toggle.click()
+                expect(toggle).to_have_text("Play tour")
+                paused = image.get_attribute("src")
+                page.wait_for_timeout(1700)
+                expect(image).to_have_attribute("src", paused)
+                page.locator("[data-tour-next]").click()
+                assert image.get_attribute("src") != paused
+                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+                page.goto(base + "/docs/CONSOLE.html")
+                for screenshot in page.locator(".docs-main img").all():
+                    screenshot.scroll_into_view_if_needed()
+                    screenshot.evaluate("img => img.decode()")
+                    assert screenshot.evaluate("img => img.naturalWidth === 1440")
+                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
             page.goto(base + "/dashboard.html")
-            for attrs in buttons:
-                button = page.locator(f'[aria-controls="{attrs["aria-controls"]}"]')
-                image = page.locator("#" + attrs["aria-controls"])
-                button.focus()
-                page.keyboard.press("Enter")
-                expect(image).to_have_attribute("src", attrs["data-tour"])
-                expect(button).to_have_attribute("aria-pressed", "true")
-                expect(button.locator("..").locator(".tour-status")).to_contain_text("Playing once")
-                button.click()
-                expect(image).to_have_attribute("src", attrs["data-poster"])
-            first = page.locator("[data-tour]").first
-            first.click()
-            page.locator("#start").scroll_into_view_if_needed()
-            expect(first).to_have_attribute("aria-pressed", "false")
-            first.click()
+            image = page.locator("#dashboard-guided-tour")
+            toggle = page.locator("[data-tour-toggle]")
+            image.scroll_into_view_if_needed()
             page.emulate_media(reduced_motion="reduce")
-            for button in page.locator("[data-tour]").all():
-                expect(button).to_be_enabled()
-                expect(button).to_have_attribute("aria-pressed", "false")
-            first.click()
-            expect(first).to_have_attribute("aria-pressed", "true")
-            expect(first.locator("..").locator(".tour-status")).to_contain_text("Playing once")
-            before = page.screenshot()
-            page.wait_for_timeout(2600)
-            assert page.screenshot() != before, "Explicit play must change visible image frames, including reduced motion"
-            first.click()
+            expect(toggle).to_have_text("Play tour")
+            paused = image.get_attribute("src")
+            page.wait_for_timeout(1700)
+            expect(image).to_have_attribute("src", paused)
+            toggle.focus()
+            page.keyboard.press("Enter")
+            expect(toggle).to_have_text("Pause tour")
+            expect(image).not_to_have_attribute("src", paused, timeout=5000)
+            toggle.click()
+            image.scroll_into_view_if_needed()
+            page.locator("[data-tour-next]").click()
+            expect(toggle).to_have_text("Play tour")
             page.emulate_media(reduced_motion="no-preference")
-            first.click()
-            expect(first.locator("..").locator(".tour-status")).to_contain_text("Playing once")
-            expect(first).to_have_attribute("aria-pressed", "false", timeout=21000)
-            expect(first.locator("..").locator(".tour-status")).to_contain_text("Tour finished")
-            page.goto(base + "/")
-            for tab in page.get_by_role("tab").all():
-                tab.click()
-                expect(page.locator("#" + tab.get_attribute("aria-controls"))).to_be_visible()
+            page.locator("#start").scroll_into_view_if_needed()
+            page.wait_for_timeout(300)
+            paused = image.get_attribute("src")
+            page.wait_for_timeout(1700)
+            expect(image).to_have_attribute("src", paused)
             assert not errors, errors
             fallback = browser.new_context(java_script_enabled=False)
             static = fallback.new_page()
             static.goto(base + "/dashboard.html")
-            for attrs in buttons:
-                expect(static.locator("#" + attrs["aria-controls"])).to_have_attribute("src", attrs["data-poster"])
-            expect(static.locator("[data-tour]:visible")).to_have_count(0)
+            expect(static.locator("#dashboard-guided-tour")).to_have_attribute(
+                "src", "assets/dashboard/" + frames[0])
+            expect(static.locator(".tour-controls")).to_be_hidden()
+            fallback.close()
+            context.close()
             browser.close()
     finally:
         server.shutdown()
         server.server_close()
         thread.join()
-    print("Dashboard APNG, controls, motion, fallback, navigation and responsive checks passed.")
+    print("Current screenshot tour: autoplay, pause, next, motion, offscreen, no-JS and guide images passed.")
 
 
 if __name__ == "__main__":
-    check(Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve() if len(sys.argv) > 2 else None)
+    check(Path(sys.argv[1]).resolve())

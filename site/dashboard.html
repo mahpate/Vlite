@@ -7,7 +7,7 @@
   <meta name="description" content="Run the VLite Dashboard locally: collection workspaces, vector search, record inspection, metrics and live logs.">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
-  <script src="assets/site.js?v=tour-playback-2"></script>
+  <script src="assets/site.js?v=current-tour-3"></script>
 </head>
 <body class="dashboard-product">
 <header class="nav">
@@ -39,7 +39,7 @@
       <p class="lead">Browse records, run searches and monitor your own VLite server.</p>
       <div class="cta">
         <a class="btn primary" href="#start">Run the dashboard</a>
-        <a class="btn" href="#screenshots">See the latest interface</a>
+        <a class="btn" href="#screenshots">Take a tour</a>
         <a class="btn" href="docs/CONSOLE.html">Dashboard guide</a>
         <a class="btn" href="docs/CONSOLE-ADMIN.html">Administration guide</a>
       </div>
@@ -52,6 +52,17 @@
         <h2>Your workspace, at a glance</h2>
         <p>Browse your data, manage connections and make the workspace your own.</p>
       </div>
+      <figure class="dashboard-tour dashboard-guided-tour" data-guided-tour>
+        <a href="assets/dashboard/current-overview-light.png" data-tour-full>
+          <img id="dashboard-guided-tour" src="assets/dashboard/current-overview-light.png" alt="VLite overview with connection controls and database snapshot cards." width="1440" height="1100" decoding="async">
+        </a>
+        <figcaption><h3>Take a quick look around</h3><p data-tour-caption>Overview: connect to your database and see its status.</p></figcaption>
+        <div class="tour-controls" hidden>
+          <button class="btn" type="button" data-tour-toggle aria-controls="dashboard-guided-tour" aria-pressed="false">Play tour</button>
+          <button class="btn" type="button" data-tour-next aria-controls="dashboard-guided-tour">Next view</button>
+          <span data-tour-position>1 / 4</span>
+        </div>
+      </figure>
       <div class="dashboard-tours">
         <figure class="dashboard-tour">
           <a href="assets/dashboard/current-overview-light.png">
@@ -71,41 +82,6 @@
           <figcaption><h3>Your preferences, always nearby</h3><p>Choose theme and density from the sticky header in any workspace.</p></figcaption>
         </figure>
       </div>
-      <details class="dashboard-stills"><summary>Earlier release tours</summary>
-        <p>Previous interface with sample records.</p>
-        <p>Select Play for one pass, or open a still image. No autoplay, including with reduced motion.</p>
-      <div class="dashboard-tours">
-        <figure class="dashboard-tour">
-          <a href="assets/dashboard/records-tour-poster.png" aria-label="Open full-size records tour still image">
-            <img id="records-tour" src="assets/dashboard/records-tour-poster.png" alt="Collections workspace with five synthetic records; the tour also shows Payload, Metadata, Vector, Raw JSON, Write, Index and Settings views." width="1440" height="1100" loading="lazy" decoding="async">
-          </a>
-          <figcaption><h3>1. Collections and records</h3><p>Browse records, inspect metadata and vectors, then explore the write editor, index controls and collection settings. Editor and settings frames show the controls; they do not demonstrate mutations.</p></figcaption>
-          <button class="btn" type="button" data-tour="assets/dashboard/records-tour.png" data-poster="assets/dashboard/records-tour-poster.png" data-duration="17600" aria-controls="records-tour" aria-label="Play collections and records tour" aria-pressed="false" hidden>Play tour &middot; 18 seconds</button>
-          <span class="tour-status" role="status"></span>
-        </figure>
-        <figure class="dashboard-tour">
-          <a href="assets/dashboard/search-tour-poster.png" aria-label="Open full-size search tour still image">
-            <img id="search-tour" src="assets/dashboard/search-tour-poster.png" alt="Search playground with a real vector query and five nearest neighbors; the tour shows result inspection and approximate search." width="1440" height="1100" loading="lazy" decoding="async">
-          </a>
-          <figcaption><h3>2. Search and inspection</h3><p>Run an exact query, inspect a returned record, then run approximate search against the same tiny dataset. Bring your own vectors; the dashboard does not generate embeddings.</p></figcaption>
-          <button class="btn" type="button" data-tour="assets/dashboard/search-tour.png" data-poster="assets/dashboard/search-tour-poster.png" data-duration="6600" aria-controls="search-tour" aria-label="Play search and inspection tour" aria-pressed="false" hidden>Play tour &middot; 7 seconds</button>
-          <span class="tour-status" role="status"></span>
-        </figure>
-        <figure class="dashboard-tour">
-          <a href="assets/dashboard/operations-tour-poster.png" aria-label="Open full-size operations tour still image">
-            <img id="operations-tour" src="assets/dashboard/operations-tour-poster.png" alt="Database overview with connection and storage statistics; the tour visits Observability, Administration and Developer Console." width="1440" height="1100" loading="lazy" decoding="async">
-          </a>
-          <figcaption><h3>3. Database operations</h3><p>Move between Overview, Observability, Administration and Developer Console. Review server activity and discover maintenance and request-inspection controls without executing destructive operations.</p></figcaption>
-          <button class="btn" type="button" data-tour="assets/dashboard/operations-tour.png" data-poster="assets/dashboard/operations-tour-poster.png" data-duration="8800" aria-controls="operations-tour" aria-label="Play database operations tour" aria-pressed="false" hidden>Play tour &middot; 9 seconds</button>
-          <span class="tour-status" role="status"></span>
-        </figure>
-      </div>
-      <details class="dashboard-stills"><summary>More full-size screenshots</summary>
-        <p><a href="assets/dashboard/collections.png">Collection browsing and record inspection</a> &middot;
-          <a href="assets/dashboard/search.png">Search results and payload inspection</a> &middot;
-          <a href="assets/dashboard/observability.png">Metrics and route counters</a></p>
-      </details>
-      </details>
     </div>
   </section>
   <section id="start">

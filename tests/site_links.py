@@ -72,8 +72,8 @@ def check(root):
             for name in ("current-overview-light.png", "current-token-help.png", "current-preferences.png"):
                 if f"assets/dashboard/{name}" not in page.links:
                     errors.append(f"dashboard.html: missing latest screenshot {name}")
-            if "Earlier release tours" not in " ".join(page.text):
-                errors.append("dashboard.html: earlier tour captures must be labeled separately")
+            if "Earlier release tours" in " ".join(page.text):
+                errors.append("dashboard.html: remove historical dashboard tours")
         if path == root / "index.html":
             for mode in ("embedded", "self-hosted"):
                 if f"assets/diagrams/deployment-{mode}-light.svg" not in page.links:

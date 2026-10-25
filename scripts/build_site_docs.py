@@ -146,6 +146,7 @@ def main():
         md = markdown.Markdown(extensions=["fenced_code", "tables", "sane_lists", "toc"],
                                extension_configs={"toc": {"slugify": slugify, "toc_depth": "2-3"}})
         body = md.convert(text)
+        body = re.sub(r'((?:src|srcset|data-light|data-dark)=)"\.\./site/assets/', r'\1"../assets/', body)
         body = re.sub(r'(href=)"([^"]+)"', lambda m: rewrite_link(m, meta), body)
         body = body.replace("<pre><code", '<pre class="code"><code')
         body = re.sub(r"<table>", '<div class="table-scroll"><table>', body).replace("</table>", "</table></div>")

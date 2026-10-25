@@ -62,60 +62,73 @@
     });
 
     const motion = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const tours = [...document.querySelectorAll("[data-tour]")].map((button) => {
-      const image = document.getElementById(button.getAttribute("aria-controls"));
-      const status = button.parentElement.querySelector(".tour-status");
-      const label = button.textContent;
-      const accessibleLabel = button.getAttribute("aria-label");
+    document.querySelectorAll("[data-guided-tour]").forEach((figure) => {
+      const frames = [
+        ["current-overview-light.png", "Overview: connect to your database and see its status."],
+        ["current-token-help.png", "Connection help: find the token for your server."],
+        ["current-overview-dark.png", "Dark theme: choose the appearance that suits you."],
+        ["current-preferences.png", "Preferences: change theme and spacing from the top bar."],
+      ];
+      const image = figure.querySelector("img");
+      const link = figure.querySelector("[data-tour-full]");
+      const caption = figure.querySelector("[data-tour-caption]");
+      const toggle = figure.querySelector("[data-tour-toggle]");
+      const next = figure.querySelector("[data-tour-next]");
+      const position = figure.querySelector("[data-tour-position]");
+      let index = 0;
+      let enabled = !motion.matches;
+      let visible = false;
       let timer;
-      let playing = false;
-      const stop = (message = "") => {
-        playing = false;
+      let failed = false;
+      const show = () => {
+        image.src = `assets/dashboard/${frames[index][0]}`;
+        image.alt = frames[index][1];
+        link.href = image.src;
+        caption.textContent = frames[index][1];
+        position.textContent = `${index + 1} / ${frames.length}`;
+      };
+      const update = () => {
         clearTimeout(timer);
-        image.src = button.dataset.poster;
-        button.textContent = label;
-        button.setAttribute("aria-label", accessibleLabel);
-        button.setAttribute("aria-pressed", "false");
-        status.textContent = message;
+        toggle.textContent = enabled ? "Pause tour" : "Play tour";
+        toggle.setAttribute("aria-pressed", String(enabled));
+        if (enabled && visible && !document.hidden && !failed && image.complete && image.naturalWidth) {
+          timer = setTimeout(() => {
+            index = (index + 1) % frames.length;
+            show();
+          }, 1400);
+        }
       };
-      image.addEventListener("load", () => {
-        if (!playing) return;
-        status.textContent = "Playing once. Stop returns to the still image.";
-        timer = setTimeout(() => stop("Tour finished. Play again to replay."), Number(button.dataset.duration));
-      });
+      image.addEventListener("load", update);
       image.addEventListener("error", () => {
-        // Do not retry a failed poster indefinitely.
-        if (playing) stop("The animation could not load. Open the still image instead.");
+        failed = true;
+        enabled = false;
+        caption.textContent = "This view could not load. Use Next view to continue.";
+        update();
       });
-      button.addEventListener("click", () => {
-        if (playing) { stop(); return; }
-        tours.forEach((tour) => tour.stop());
-        playing = true;
-        button.textContent = "Stop tour";
-        button.setAttribute("aria-label", accessibleLabel.replace("Play ", "Stop "));
-        button.setAttribute("aria-pressed", "true");
-        status.textContent = "Loading tour...";
-        image.src = button.dataset.tour;
-        image.scrollIntoView({ block: "start", behavior: "instant" });
+      toggle.addEventListener("click", () => {
+        enabled = !enabled;
+        if (failed) { failed = false; show(); }
+        update();
       });
-      const updateMotion = () => {
-        stop(motion.matches ? "Reduced motion is enabled. Play explicitly to watch this tour once." : "");
-      };
-      updateMotion();
-      button.hidden = false;
-      motion.addEventListener("change", updateMotion);
-      return { stop, figure: button.parentElement };
+      next.addEventListener("click", () => {
+        enabled = false;
+        failed = false;
+        index = (index + 1) % frames.length;
+        show();
+        update();
+      });
+      motion.addEventListener("change", () => { enabled = !motion.matches; update(); });
+      document.addEventListener("visibilitychange", update);
+      if ("IntersectionObserver" in window) {
+        new IntersectionObserver(([entry]) => {
+          visible = entry.isIntersecting;
+          update();
+        }, { threshold: 0.2 }).observe(figure);
+      } else {
+        visible = true;
+      }
+      figure.querySelector(".tour-controls").hidden = false;
+      update();
     });
-    document.addEventListener("visibilitychange", () => {
-      if (document.hidden) tours.forEach((tour) => tour.stop());
-    });
-    if ("IntersectionObserver" in window) {
-      const observer = new IntersectionObserver((entries) => {
-        entries.filter((entry) => !entry.isIntersecting).forEach((entry) => {
-          tours.find((tour) => tour.figure === entry.target)?.stop();
-        });
-      });
-      tours.forEach((tour) => observer.observe(tour.figure));
-    }
   });
 })();

@@ -22,6 +22,16 @@ The usual Create → Write → Query path is: review/create an empty collection 
 Settings, select it as active, write with the record editor or JSON documents,
 then query from Search.
 
+## A look around
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../site/assets/dashboard/current-overview-dark.png">
+  <img src="../site/assets/dashboard/current-overview-light.png" data-light="../site/assets/dashboard/current-overview-light.png" data-dark="../site/assets/dashboard/current-overview-dark.png" alt="Dashboard overview with navigation, connection controls and database snapshot cards." width="1440" height="1100">
+</picture>
+
+Use the sidebar to switch workspaces. The top bar keeps your active collection,
+connection status and appearance preferences within reach.
+
 ### Find your bearer token
 
 Open **Where do I get a token?** beside the connection field. Paste the token
@@ -38,6 +48,14 @@ value only, without the `Bearer` prefix.
 
 Treat tokens as secrets; do not include them in screenshots or logs. The dashboard
 cannot retrieve an administrator token.
+
+![Connection help with instructions for finding a bearer token](../site/assets/dashboard/current-token-help.png)
+
+### Set your appearance
+
+Open **Appearance and preferences** in the top bar to choose your theme and spacing.
+
+![Appearance controls in the dashboard top bar](../site/assets/dashboard/current-preferences.png)
 
 ## Studio workflow improvements
 

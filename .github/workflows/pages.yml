@@ -50,6 +50,12 @@ jobs:
         run: |
           python tests/site_links.py _site
           python tests/release_docs.py
+      - name: Check diagrams and dashboard tour
+        run: |
+          python -m pip install -r tests/requirements-dashboard.txt
+          python -m playwright install --with-deps chromium
+          python tests/site_diagrams.py _site
+          python tests/dashboard_tours.py _site
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v4
         with:
