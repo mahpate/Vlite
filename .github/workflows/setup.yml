@@ -1,0 +1,38 @@
+name: First-time setup scripts
+
+on:
+  push:
+    paths:
+      - "scripts/devbox.ps1"
+      - "scripts/docker-dashboard.sh"
+      - "tests/devbox_setup.ps1"
+      - "tests/docker_setup.py"
+      - ".github/workflows/setup.yml"
+  pull_request:
+    paths:
+      - "scripts/devbox.ps1"
+      - "scripts/docker-dashboard.sh"
+      - "tests/devbox_setup.ps1"
+      - "tests/docker_setup.py"
+      - ".github/workflows/setup.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mocked-setup:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Check Linux bootstrap without changing system packages
+        run: python tests/docker_setup.py
+      - name: Check Windows bootstrap without enabling WSL or installing packages
+        shell: pwsh
+        run: ./tests/devbox_setup.ps1

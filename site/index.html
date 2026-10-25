@@ -107,21 +107,23 @@ native = NativeLibrary()
         </div>
         <div class="tabpanel" role="tabpanel" id="p-docker" aria-labelledby="t-docker" hidden>
 <button class="copy" data-copy="c-docker">Copy</button>
-<pre class="code" id="c-docker"><span class="c-c"># Linux or WSL; Docker required</span>
+<pre class="code" id="c-docker"><span class="c-c"># Ubuntu 22.04/24.04 terminal. On Windows, use the Windows devbox tab.</span>
+sudo apt-get update &amp;&amp; sudo apt-get install -y git
 git clone https://github.com/mahpate/Vlite &amp;&amp; cd Vlite
-mkdir -m 700 -p .secrets &amp;&amp; head -c 32 /dev/urandom | base64 | tr -d '=+/\n' &gt; .secrets/api-token
-chmod 644 .secrets/api-token
-docker compose --profile dashboard up --build -d dashboard
-<span class="c-c"># Dashboard: http://localhost:8081   API: http://localhost:18084</span>
-cat .secrets/api-token   <span class="c-c"># paste into the dashboard connection field</span></pre>
+sudo sh scripts/docker-dashboard.sh
+<span class="c-c"># Offers to install Docker + Compose; starts published images, no Rust build.</span>
+<span class="c-c"># Dashboard: http://127.0.0.1:8081   API: http://127.0.0.1:18084</span>
+<span class="c-c"># Follow the printed token command, then paste its value into the dashboard.</span></pre>
         </div>
         <div class="tabpanel" role="tabpanel" id="p-devbox" aria-labelledby="t-devbox" hidden>
 <button class="copy" data-copy="c-devbox">Copy</button>
-<pre class="code" id="c-devbox"><span class="c-c"># PowerShell on Windows with Docker inside WSL</span>
-git clone https://github.com/mahpate/Vlite; cd Vlite
-.\scripts\devbox.ps1          <span class="c-c"># starts the API and dashboard</span>
-.\scripts\devbox.ps1 -Token   <span class="c-c"># copies the API token to the clipboard</span>
-<span class="c-c"># Dashboard: http://localhost:8082   API: http://localhost:18085</span></pre>
+<pre class="code" id="c-devbox"><span class="c-c"># Windows 10 (build 19041+) or Windows 11; open PowerShell.</span>
+Invoke-WebRequest https://raw.githubusercontent.com/mahpate/Vlite/main/scripts/devbox.ps1 -OutFile devbox.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\devbox.ps1
+<span class="c-c"># Approve prerequisite installation. If asked to restart, restart and rerun that command.</span>
+<span class="c-c"># Sets up WSL 2, Ubuntu 24.04 and Docker; no Git or Rust required.</span>
+powershell -NoProfile -ExecutionPolicy Bypass -File .\devbox.ps1 -Token
+<span class="c-c"># Dashboard: http://127.0.0.1:8082   API: http://127.0.0.1:18085</span></pre>
         </div>
       </div>
       <p class="note landing-note">Supply your own embeddings; these examples use three-dimensional sample vectors. See <a href="api.html">API examples</a> and the <a href="docs/INSTALL.html">installation guide</a> for package and platform details.</p>

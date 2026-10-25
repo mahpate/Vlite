@@ -11,6 +11,15 @@ not published.
 See [upgrade and rollback guidance](RELEASE-0.4.1.md) before upgrading an
 existing deployment.
 
+## API and dashboard: first-time setup
+
+Use the [guided Docker setup](DOCKER-OPERATIONS.md#first-deployment) for the
+API and dashboard. On Windows, it checks/installs WSL 2, Ubuntu 24.04 and Docker
+after confirmation, and explains when to restart and rerun. On Ubuntu
+22.04/24.04, the bootstrap installs missing Docker Engine/Compose packages.
+Both use published images; no Rust toolchain or local image build is needed.
+Existing Docker Desktop WSL integration can be reused.
+
 ## Verify before installing
 
 Download `SHA256SUMS`, `release-manifest.json`, and the desired assets from the

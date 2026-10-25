@@ -277,21 +277,34 @@ three components. IDs are u64; each legacy vector space has one fixed dimension.
 
 ## Quick start: Windows devbox (Docker in WSL)
 
-The fastest way to try the web dashboard on a Windows machine. Requires WSL 2
-with Docker Engine inside a distro (default `Ubuntu-24.04`) or Docker Desktop
-WSL integration. From a PowerShell prompt in the repository root:
+On Windows 10 (build 19041+) or Windows 11, the script checks WSL 2, the
+selected Ubuntu distribution (default `Ubuntu-24.04`), Docker and Compose.
+Missing prerequisites are installed after confirmation; Windows may request
+administrator approval and a restart. Save your work, restart if asked, then
+run the same command again. Hardware virtualization and internet access are
+required. No Git, Rust or Docker Desktop installation is needed.
+
+From PowerShell, without cloning the repository:
+
+```powershell
+Invoke-WebRequest https://raw.githubusercontent.com/mahpate/Vlite/main/scripts/devbox.ps1 -OutFile devbox.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\devbox.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\devbox.ps1 -Token
+```
+
+Or, from an existing checkout:
 
 ```powershell
 .\scripts\devbox.ps1           # start the API and dashboard
 .\scripts\devbox.ps1 -Token    # copy the API token to the clipboard
 ```
 
-Open **http://localhost:8082**, paste the token into the connection field and
-select **Connect**. The REST API is at **http://localhost:18085**.
+Open **http://127.0.0.1:8082**, paste the token into the connection field and
+select **Connect**. The REST API is at **http://127.0.0.1:18085**.
 
-The script writes `compose.yaml`, an image override, `.env` and a randomly
+The script writes `compose.yaml`, `.env` and a randomly
 generated token to `/root/vlite-deploy` inside WSL, then runs
-`docker compose --profile dashboard up -d --wait`. Running it again
+`docker compose -f compose.yaml --profile dashboard up -d --no-build --wait`. Running it again
 updates the deployment and keeps the existing token and data. Everything is
 published on loopback only.
 
@@ -300,7 +313,7 @@ published on loopback only.
 | Show container status | `.\scripts\devbox.ps1 -Status` |
 | Stop (data kept) | `.\scripts\devbox.ps1 -Down` |
 | Stop and delete the database volumes | `.\scripts\devbox.ps1 -Reset` |
-| Print the token without the script | `wsl -d Ubuntu-24.04 -e cat /root/vlite-deploy/.secrets/api-token` |
+| Print the token without the script | `wsl -d Ubuntu-24.04 -u root -e cat /root/vlite-deploy/.secrets/api-token` |
 | Other ports, distro or version | `.\scripts\devbox.ps1 -ApiPort 18090 -DashboardPort 8090 -Distro Ubuntu -Version v0.4.1` |
 | Database dimensions for a new volume | `.\scripts\devbox.ps1 -Dimensions 384` |
 
@@ -311,6 +324,31 @@ reboot, so rerun the script afterwards (the containers restart automatically
 once WSL is running). If `localhost` is unreachable from the Windows browser,
 check that WSL is running (`wsl -l -v`) and that the ports are not already used.
 `-Dimensions` only applies when the data volume is first created.
+Use `-Yes` to approve prerequisite installation noninteractively (Windows UAC
+still applies). Management switches never install prerequisites; `-Reset`
+always requires a separate typed deletion confirmation. Existing Docker or
+containerd installations are not replaced: repair Compose or enable Docker
+Desktop's WSL integration if the script reports a conflict. Automatic package
+installation supports Ubuntu 22.04/24.04, not arbitrary distributions.
+
+### Ubuntu: Docker and dashboard
+
+From an Ubuntu 22.04/24.04 terminal:
+
+```sh
+sudo apt-get update && sudo apt-get install -y git
+git clone https://github.com/mahpate/Vlite && cd Vlite
+sudo sh scripts/docker-dashboard.sh
+```
+
+The script offers to install Docker Engine/Compose from Docker's official
+Ubuntu repository, preserves existing tokens/volumes and starts published
+images without a source build. Open **http://127.0.0.1:8081**; the script prints
+how to read the token locally. Options include `--yes`, `--version`,
+`--deploy-dir`, `--api-port`, `--dashboard-port` and `--dimensions`.
+It does not add users to the privileged Docker group. Other Linux distributions
+can use an existing working Docker/Compose installation, but automatic package
+installation is Ubuntu-only. See [Docker operations](docs/DOCKER-OPERATIONS.md).
 
 ## Quick start: Docker REST service
 

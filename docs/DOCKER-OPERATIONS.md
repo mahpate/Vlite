@@ -32,6 +32,45 @@ deployment.
 
 ## First deployment
 
+**First time on Windows?** Use the
+[Windows setup script](https://github.com/mahpate/Vlite/blob/main/scripts/devbox.ps1):
+
+```powershell
+Invoke-WebRequest https://raw.githubusercontent.com/mahpate/Vlite/main/scripts/devbox.ps1 -OutFile devbox.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\devbox.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\devbox.ps1 -Token
+```
+
+It checks/installs WSL 2, Ubuntu 24.04 and Docker/Compose after confirmation.
+Windows 10 build 19041+ or Windows 11, administrator approval, hardware
+virtualization and internet access are required. If installation requests a
+restart, save your work, restart and rerun the same command. Complete Ubuntu
+first-run setup if prompted. The script never restarts Windows automatically.
+No Git or Rust is needed. Open <http://127.0.0.1:8082> and paste the copied token,
+without a `Bearer` prefix. Docker Desktop users can reuse working WSL integration;
+the script does not replace an existing container runtime.
+
+**First time on Ubuntu 22.04/24.04?** Install Git, clone the repository and run
+the bootstrap script:
+
+```sh
+sudo apt-get update && sudo apt-get install -y git
+git clone https://github.com/mahpate/Vlite && cd Vlite
+sudo sh scripts/docker-dashboard.sh
+```
+
+It offers to install Docker Engine and Compose v2 from Docker's official
+Ubuntu repository, starts published API/dashboard images, checks both URLs
+and prints how to read the token. Data and the existing token survive reruns.
+The default directory is `~/vlite-deploy` for the user running the script
+(`/root/vlite-deploy` under sudo); the dashboard uses
+<http://127.0.0.1:8081> and API <http://127.0.0.1:18084>.
+Use `--deploy-dir /path` to choose a stable location. `--yes` approves package
+installation without prompting. Other distributions require a working Docker
+Engine/Compose installation already. Neither setup installs Rust or builds images.
+
+### Manual setup with Docker already installed
+
 Run Docker Engine with Linux containers and Docker Compose v2. These commands
 are suitable for Docker running inside WSL; run them from the repository in
 the same WSL distribution that owns the Docker engine. The default published
