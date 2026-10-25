@@ -53,6 +53,8 @@ def capture(output):
                 backend + path, data=json.dumps(body).encode() if body is not None else None,
                 method=method, headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
             with urllib.request.urlopen(request, timeout=15) as response:
+                if response.status == 204:
+                    return None
                 return json.load(response)
 
         deadline = time.monotonic() + 60
@@ -178,6 +180,13 @@ def capture(output):
                 page.get_by_role("tablist", name="Selected record views").get_by_role("tab", name=tab, exact=True).click()
                 save(f"current-{tab.lower()}.png", "#record-inspector")
             page.get_by_role("tab", name="Write", exact=True).click()
+            page.locator("#write-documents").fill(json.dumps([{
+                "id": "201", "vector": [.85, .15, .1],
+                "metadata": {"title": {"type": "string", "value": "A new support article"}},
+                "payload": base64.b64encode(b"Ready for validation, not committed.").decode(),
+            }], indent=2))
+            page.locator("#write-validate").click()
+            expect(page.locator("#write-commit")).to_be_enabled()
             save("current-write.png")
             page.get_by_role("tab", name="Index", exact=True).click()
             show("#index-status")
@@ -211,11 +220,15 @@ def capture(output):
             expect(page.locator("#obs-routes tr")).not_to_have_count(0)
             save("current-observability.png")
             nav.get_by_role("link", name="Administration", exact=True).click()
+            page.locator("#refresh-health").click()
+            expect(page.locator("#health-result")).to_contain_text("observed_at")
             show("#list-backups").click()
             expect(page.locator("#backup-name option")).to_have_count(1)
             save("current-administration.png")
             save("current-backups.png", "#backup-result")
             nav.get_by_role("link", name="Developer Console", exact=True).click()
+            page.locator("#send-request").click()
+            expect(page.locator("#inspector")).to_contain_text("/v1/database")
             save("current-developer.png")
             nav.get_by_role("link", name="Overview", exact=True).click()
             preferences.locator("summary").click()
