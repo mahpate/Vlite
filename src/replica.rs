@@ -88,6 +88,11 @@ impl ReplicaFollower {
     /// primary still has.
     pub fn open(path: impl AsRef<Path>, key: Option<&EncryptionKey>) -> Result<Self> {
         let path = path.as_ref();
+        // Graph-enabled files cannot be replicated yet (H-5/H-6). The
+        // graph-unaware header reader rejects them exactly as vector-only
+        // builds do, before open or tail repair could touch the file.
+        #[cfg(feature = "graph")]
+        crate::format::read_log_header(&mut std::fs::File::open(path)?, key)?;
         let db = match Database::open_inner(path, key) {
             Err(Error::IncompleteTail { .. }) => {
                 match key {
@@ -100,6 +105,10 @@ impl ReplicaFollower {
         };
         if db.lineage.is_none() {
             return Err(Error::ChangeFeedRequiresUpgrade);
+        }
+        #[cfg(feature = "graph")]
+        if db.is_graph_enabled() {
+            return Err(Error::UnsupportedFeature(crate::format::FLAG_GRAPH));
         }
         Ok(Self {
             path: path.to_path_buf(),

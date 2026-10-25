@@ -12,6 +12,7 @@ COPY src ./src
 COPY tests ./tests
 COPY examples ./examples
 COPY bindings/c ./bindings/c
+COPY crates ./crates
 COPY bindings/node ./bindings/node
 RUN npm --prefix bindings/node ci --ignore-scripts \
     && npm --prefix bindings/node run build \

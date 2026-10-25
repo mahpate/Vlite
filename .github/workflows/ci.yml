@@ -23,9 +23,22 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
       - run: cargo check --locked --no-default-features --lib
       - run: cargo test --locked --workspace --all-targets --all-features
+      - run: cargo test --locked -p vlite-graph
+      - name: Graph feature alone (ITEM-009/ITEM-014; catches cfg gaps hidden by --all-features)
+        run: cargo test --locked --features graph --lib --test graph_storage --test graph_compat --test graph_integrity --test graph_traversal
+      - name: Graph-off parity in default features (C-1; includes graph_regression and graph_compat)
+        run: cargo test --locked --workspace --all-targets
+      - name: REG-008 served OpenAPI bytes and MCP tools/list/outputs match the baseline capture
+        run: cargo test --locked --features server,mcp --test graph_surface_parity
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
+      - name: REG-001 public API item list matches the baseline
+        if: matrix.toolchain == 'stable'
+        run: python scripts/api_surface.py check
+      - name: REG-001 with graph, only additions under vlite::property_graph are allowed (C-2)
+        if: matrix.toolchain == 'stable'
+        run: python scripts/api_surface.py check --features graph
       - name: Build optional gRPC server
         run: cargo build --locked --features grpc --bin vlite-server
       - name: Install protobuf smoke-test dependencies
@@ -47,8 +60,12 @@ jobs:
         run: python tests/search_capabilities_campaign.py
       - name: Verify restart measurement contracts
         run: python tests/ann_restart_campaign.py
-      - name: Verify container code-generation inputs
+      - name: Verify container code-generation and workspace inputs
         run: python tests/docker_build_inputs.py
+      - name: Verify vlite-graph dependency boundary and artifact feature pins
+        run: python tests/graph_build_boundary.py
+      - name: Verify graph reference measurement runner
+        run: python tests/graph_reference_runner.py
       - name: Verify bundled OpenAPI references and route parameters
         run: python tests/openapi_contract.py
       - name: Verify v4 collection, revision and import example

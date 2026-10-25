@@ -1,0 +1,767 @@
+[
+  {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "capabilities": {
+        "tools": {}
+      },
+      "instructions": "VLite vector database tools. Read-only is the default; write tools are exposed only with --writable.",
+      "protocolVersion": "2025-06-18",
+      "serverInfo": {
+        "name": "vlite-mcp",
+        "version": "0.3.0"
+      }
+    }
+  },
+  {
+    "id": 2,
+    "jsonrpc": "2.0",
+    "result": {
+      "tools": [
+        {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "readOnlyHint": true
+          },
+          "description": "Describe database format, dimensions, record counts, collections and access mode.",
+          "inputSchema": {
+            "additionalProperties": false,
+            "properties": {},
+            "type": "object"
+          },
+          "name": "vlite_info"
+        },
+        {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "readOnlyHint": true
+          },
+          "description": "List VLite collections and their dimensions and live record counts.",
+          "inputSchema": {
+            "additionalProperties": false,
+            "properties": {},
+            "type": "object"
+          },
+          "name": "vlite_list_collections"
+        },
+        {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "readOnlyHint": true
+          },
+          "description": "Search vectors using exact or approximate search. Filters use VLite typed metadata conditions.",
+          "inputSchema": {
+            "additionalProperties": false,
+            "properties": {
+              "collection": {
+                "description": "Collection name; defaults to default.",
+                "type": "string"
+              },
+              "filter": {
+                "items": {
+                  "oneOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "field": {
+                          "type": "string"
+                        },
+                        "op": {
+                          "const": "eq"
+                        },
+                        "value": {
+                          "oneOf": [
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "type": {
+                                  "const": "string"
+                                },
+                                "value": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "value"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "type": {
+                                  "const": "integer"
+                                },
+                                "value": {
+                                  "pattern": "^-?(0|[1-9][0-9]*)$",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "value"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "type": {
+                                  "const": "float"
+                                },
+                                "value": {
+                                  "type": "number"
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "value"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "type": {
+                                  "const": "boolean"
+                                },
+                                "value": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "value"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "type": {
+                                  "const": "geopoint"
+                                },
+                                "value": {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "latitude": {
+                                      "maximum": 90,
+                                      "minimum": -90,
+                                      "type": "number"
+                                    },
+                                    "longitude": {
+                                      "maximum": 180,
+                                      "minimum": -180,
+                                      "type": "number"
+                                    }
+                                  },
+                                  "required": [
+                                    "latitude",
+                                    "longitude"
+                                  ],
+                                  "type": "object"
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "value"
+                              ],
+                              "type": "object"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "op",
+                        "field",
+                        "value"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "field": {
+                          "type": "string"
+                        },
+                        "max": {
+                          "anyOf": [
+                            {
+                              "oneOf": [
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "type": {
+                                      "const": "string"
+                                    },
+                                    "value": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "type",
+                                    "value"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "type": {
+                                      "const": "integer"
+                                    },
+                                    "value": {
+                                      "pattern": "^-?(0|[1-9][0-9]*)$",
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "type",
+                                    "value"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "type": {
+                                      "const": "float"
+                                    },
+                                    "value": {
+                                      "type": "number"
+                                    }
+                                  },
+                                  "required": [
+                                    "type",
+                                    "value"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "type": {
+                                      "const": "boolean"
+                                    },
+                                    "value": {
+                                      "type": "boolean"
+                                    }
+                                  },
+                                  "required": [
+                                    "type",
+                                    "value"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "type": {
+                                      "const": "geopoint"
+                                    },
+                                    "value": {
+                                      "additionalProperties": false,
+                                      "properties": {
+                                        "latitude": {
+                                          "maximum": 90,
+                                          "minimum": -90,
+                                          "type": "number"
+                                        },
+                                        "longitude": {
+                                          "maximum": 180,
+                                          "minimum": -180,
+                                          "type": "number"
+                                        }
+                                      },
+                                      "required": [
+                                        "latitude",
+                                        "longitude"
+                                      ],
+                                      "type": "object"
+                                    }
+                                  },
+                                  "required": [
+                                    "type",
+                                    "value"
+                                  ],
+                                  "type": "object"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "min": {
+                          "anyOf": [
+                            {
+                              "oneOf": [
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "type": {
+                                      "const": "string"
+                                    },
+                                    "value": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "type",
+                                    "value"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "type": {
+                                      "const": "integer"
+                                    },
+                                    "value": {
+                                      "pattern": "^-?(0|[1-9][0-9]*)$",
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "type",
+                                    "value"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "type": {
+                                      "const": "float"
+                                    },
+                                    "value": {
+                                      "type": "number"
+                                    }
+                                  },
+                                  "required": [
+                                    "type",
+                                    "value"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "type": {
+                                      "const": "boolean"
+                                    },
+                                    "value": {
+                                      "type": "boolean"
+                                    }
+                                  },
+                                  "required": [
+                                    "type",
+                                    "value"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "type": {
+                                      "const": "geopoint"
+                                    },
+                                    "value": {
+                                      "additionalProperties": false,
+                                      "properties": {
+                                        "latitude": {
+                                          "maximum": 90,
+                                          "minimum": -90,
+                                          "type": "number"
+                                        },
+                                        "longitude": {
+                                          "maximum": 180,
+                                          "minimum": -180,
+                                          "type": "number"
+                                        }
+                                      },
+                                      "required": [
+                                        "latitude",
+                                        "longitude"
+                                      ],
+                                      "type": "object"
+                                    }
+                                  },
+                                  "required": [
+                                    "type",
+                                    "value"
+                                  ],
+                                  "type": "object"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "op": {
+                          "const": "range"
+                        }
+                      },
+                      "required": [
+                        "op",
+                        "field"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "field": {
+                          "type": "string"
+                        },
+                        "latitude": {
+                          "maximum": 90,
+                          "minimum": -90,
+                          "type": "number"
+                        },
+                        "longitude": {
+                          "maximum": 180,
+                          "minimum": -180,
+                          "type": "number"
+                        },
+                        "op": {
+                          "const": "geo_radius"
+                        },
+                        "radius_meters": {
+                          "exclusiveMinimum": 0,
+                          "type": "number"
+                        }
+                      },
+                      "required": [
+                        "op",
+                        "field",
+                        "latitude",
+                        "longitude",
+                        "radius_meters"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                },
+                "type": "array"
+              },
+              "k": {
+                "default": 10,
+                "maximum": 100,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "metric": {
+                "default": "squared_l2",
+                "enum": [
+                  "squared_l2",
+                  "cosine",
+                  "inner_product"
+                ],
+                "type": "string"
+              },
+              "mode": {
+                "default": "exact",
+                "enum": [
+                  "exact",
+                  "approximate"
+                ],
+                "type": "string"
+              },
+              "vector": {
+                "items": {
+                  "type": "number"
+                },
+                "maxItems": 65536,
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "vector"
+            ],
+            "type": "object"
+          },
+          "name": "vlite_search"
+        },
+        {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "readOnlyHint": true
+          },
+          "description": "Fetch one record by unsigned 64-bit ID; vectors are omitted unless requested.",
+          "inputSchema": {
+            "additionalProperties": false,
+            "properties": {
+              "collection": {
+                "description": "Collection name; defaults to default.",
+                "type": "string"
+              },
+              "id": {
+                "oneOf": [
+                  {
+                    "pattern": "^(0|[1-9][0-9]*)$",
+                    "type": "string"
+                  },
+                  {
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                ]
+              },
+              "include_vector": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "id"
+            ],
+            "type": "object"
+          },
+          "name": "vlite_get"
+        },
+        {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "readOnlyHint": true
+          },
+          "description": "List records in ascending ID order using cursor pagination; vectors are omitted.",
+          "inputSchema": {
+            "additionalProperties": false,
+            "properties": {
+              "after": {
+                "oneOf": [
+                  {
+                    "pattern": "^(0|[1-9][0-9]*)$",
+                    "type": "string"
+                  },
+                  {
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                ]
+              },
+              "collection": {
+                "description": "Collection name; defaults to default.",
+                "type": "string"
+              },
+              "limit": {
+                "default": 20,
+                "maximum": 100,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "name": "vlite_list"
+        },
+        {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "readOnlyHint": true
+          },
+          "description": "Report the collection's in-memory HNSW index readiness and maintenance pressure.",
+          "inputSchema": {
+            "additionalProperties": false,
+            "properties": {
+              "collection": {
+                "description": "Collection name; defaults to default.",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "name": "vlite_index_status"
+        },
+        {
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "readOnlyHint": true
+          },
+          "description": "Build an in-memory HNSW index for a collection; it does not modify the database file.",
+          "inputSchema": {
+            "additionalProperties": false,
+            "properties": {
+              "collection": {
+                "description": "Collection name; defaults to default.",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "name": "vlite_build_index"
+        }
+      ]
+    }
+  },
+  {
+    "id": 3,
+    "jsonrpc": "2.0",
+    "result": {
+      "content": [
+        {
+          "text": "{\"collections\":[{\"count\":3,\"dimensions\":2,\"id\":0,\"name\":\"default\"}]}",
+          "type": "text"
+        }
+      ],
+      "isError": false,
+      "structuredContent": {
+        "collections": [
+          {
+            "count": 3,
+            "dimensions": 2,
+            "id": 0,
+            "name": "default"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": 4,
+    "jsonrpc": "2.0",
+    "result": {
+      "content": [
+        {
+          "text": "{\"hits\":[{\"distance\":0.020000000596046452,\"id\":\"1\"},{\"distance\":1.6199999946355819,\"id\":\"2\"}]}",
+          "type": "text"
+        }
+      ],
+      "isError": false,
+      "structuredContent": {
+        "hits": [
+          {
+            "distance": 0.020000000596046452,
+            "id": "1"
+          },
+          {
+            "distance": 1.6199999946355819,
+            "id": "2"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": 5,
+    "jsonrpc": "2.0",
+    "result": {
+      "content": [
+        {
+          "text": "{\"record\":{\"id\":\"2\",\"metadata\":{},\"payload\":\"near\"}}",
+          "type": "text"
+        }
+      ],
+      "isError": false,
+      "structuredContent": {
+        "record": {
+          "id": "2",
+          "metadata": {},
+          "payload": "near"
+        }
+      }
+    }
+  },
+  {
+    "id": 6,
+    "jsonrpc": "2.0",
+    "result": {
+      "content": [
+        {
+          "text": "{\"next_after\":\"2\",\"records\":[{\"id\":\"1\",\"metadata\":{},\"payload\":\"origin\"},{\"id\":\"2\",\"metadata\":{},\"payload\":\"near\"}]}",
+          "type": "text"
+        }
+      ],
+      "isError": false,
+      "structuredContent": {
+        "next_after": "2",
+        "records": [
+          {
+            "id": "1",
+            "metadata": {},
+            "payload": "origin"
+          },
+          {
+            "id": "2",
+            "metadata": {},
+            "payload": "near"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": 7,
+    "jsonrpc": "2.0",
+    "result": {
+      "content": [
+        {
+          "text": "{\"active_buffer\":null,\"pressure\":\"Unavailable\",\"ready\":false,\"rebuild_active\":false}",
+          "type": "text"
+        }
+      ],
+      "isError": false,
+      "structuredContent": {
+        "active_buffer": null,
+        "pressure": "Unavailable",
+        "ready": false,
+        "rebuild_active": false
+      }
+    }
+  },
+  {
+    "id": 8,
+    "jsonrpc": "2.0",
+    "result": {
+      "content": [
+        {
+          "text": "database is read-only; vlite_upsert is unavailable",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": "database is read-only; vlite_upsert is unavailable"
+      }
+    }
+  },
+  {
+    "id": 9,
+    "jsonrpc": "2.0",
+    "result": {
+      "content": [
+        {
+          "text": "unknown tool: nope",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "error": "unknown tool: nope"
+      }
+    }
+  },
+  {
+    "error": {
+      "code": -32601,
+      "message": "Method not found"
+    },
+    "id": 10,
+    "jsonrpc": "2.0"
+  }
+]

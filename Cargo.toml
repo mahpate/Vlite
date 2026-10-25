@@ -7,7 +7,7 @@ description = "A single-file vector database with embedded bindings and an optio
 license = "MIT"
 
 [workspace]
-members = ["bindings/c"]
+members = ["bindings/c", "crates/vlite-graph"]
 exclude = ["bindings/wasm"]
 resolver = "3"
 
@@ -30,6 +30,9 @@ grpc = [
     "dep:protox",
 ]
 gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+# Property-graph storage (EPIC-003, unreleased): never in `default` or in the
+# pinned artifact feature lists until the release gate approves it.
+graph = []
 
 [dependencies]
 wgpu = { version = "30.0.1", optional = true, default-features = false, features = ["wgsl", "dx12", "metal", "vulkan"] }
@@ -117,3 +120,27 @@ required-features = ["mcp"]
 [[test]]
 name = "mcp"
 required-features = ["mcp"]
+
+[[test]]
+name = "graph_surface_parity"
+required-features = ["server", "mcp"]
+
+[[test]]
+name = "graph_storage"
+required-features = ["graph"]
+
+[[test]]
+name = "graph_integrity"
+required-features = ["graph"]
+
+[[test]]
+name = "graph_traversal"
+required-features = ["graph"]
+
+[[example]]
+name = "graph_bench"
+required-features = ["graph"]
+
+[[example]]
+name = "graph_memory"
+required-features = ["graph"]

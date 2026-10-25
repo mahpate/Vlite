@@ -1,0 +1,104 @@
+format_version: 4
+dimensions: 4
+len: 12
+has_lineage: true
+collections: Ok([CollectionInfo { id: 0, name: "default", dimensions: 4, live_records: 12, settings: CollectionSettings { metric: SquaredL2, hnsw: HnswConfig { m: 16, ef_construction: 100, seed: 42 }, quantization: None, rerank_multiplier: 4, planner: PlannerPolicy { exact_max_candidates: 4096, exact_max_selectivity_ppm: 20000 }, metadata_indexes: [], text_fields: ["title", "body"] }, settings_persisted: true }, CollectionInfo { id: 2, name: "kept", dimensions: 2, live_records: 2, settings: CollectionSettings { metric: SquaredL2, hnsw: HnswConfig { m: 16, ef_construction: 100, seed: 42 }, quantization: None, rerank_multiplier: 4, planner: PlannerPolicy { exact_max_candidates: 4096, exact_max_selectivity_ppm: 20000 }, metadata_indexes: [], text_fields: [] }, settings_persisted: true }])
+browse: Ok(BrowsePage { hits: [BrowseHit { id: 21, record: Record { vector: [1.0, 0.0, 2.625, 3.0], payload: [112, 108, 97, 105, 110], metadata: {} } }, BrowseHit { id: 40, record: Record { vector: [0.0, 2.5, 5.0, 5.0], payload: [105, 109, 112, 111, 114, 116], metadata: {} } }, BrowseHit { id: 101, record: Record { vector: [1.0, 1.5, 12.625, 1.0], payload: [118, 49, 48, 49], metadata: {} } }, BrowseHit { id: 102, record: Record { vector: [2.0, 2.0, 12.75, 4.0], payload: [118, 49, 48, 50], metadata: {} } }, BrowseHit { id: 103, record: Record { vector: [3.0, 2.5, 12.875, -4.0], payload: [118, 49, 48, 51], metadata: {} } }, BrowseHit { id: 104, record: Record { vector: [4.0, 3.0, 13.0, -1.0], payload: [118, 49, 48, 52], metadata: {} } }, BrowseHit { id: 105, record: Record { vector: [0.0, 0.0, 13.125, 2.0], payload: [118, 49, 48, 53], metadata: {} } }, BrowseHit { id: 106, record: Record { vector: [1.0, 0.5, 13.25, 5.0], payload: [118, 49, 48, 54], metadata: {} } }, BrowseHit { id: 107, record: Record { vector: [2.0, 1.0, 13.375, -3.0], payload: [118, 49, 48, 55], metadata: {} } }, BrowseHit { id: 108, record: Record { vector: [3.0, 1.5, 13.5, 0.0], payload: [118, 49, 48, 56], metadata: {} } }, BrowseHit { id: 109, record: Record { vector: [4.0, 2.0, 13.625, 3.0], payload: [118, 49, 48, 57], metadata: {} } }, BrowseHit { id: 110, record: Record { vector: [0.0, 2.5, 13.75, -5.0], payload: [118, 49, 49, 48], metadata: {} } }], next_after: None })
+get(1): Ok(None)
+get_at(1,now): Ok(None)
+expires_at(1): Ok(None)
+revision(1): Ok(None)
+get(2): Ok(None)
+get_at(2,now): Ok(None)
+expires_at(2): Ok(None)
+revision(2): Ok(None)
+get(5): Ok(None)
+get_at(5,now): Ok(None)
+expires_at(5): Ok(None)
+revision(5): Ok(None)
+get(6): Ok(None)
+get_at(6,now): Ok(None)
+expires_at(6): Ok(None)
+revision(6): Ok(None)
+get(21): Ok(Some(Record { vector: [1.0, 0.0, 2.625, 3.0], payload: [112, 108, 97, 105, 110], metadata: {} }))
+get_at(21,now): Ok(Some(Record { vector: [1.0, 0.0, 2.625, 3.0], payload: [112, 108, 97, 105, 110], metadata: {} }))
+expires_at(21): Ok(None)
+revision(21): Ok(Some(2))
+get(23): Ok(None)
+get_at(23,now): Ok(None)
+expires_at(23): Ok(None)
+revision(23): Ok(None)
+get(24): Ok(None)
+get_at(24,now): Ok(None)
+expires_at(24): Ok(None)
+revision(24): Ok(None)
+get(25): Ok(None)
+get_at(25,now): Ok(None)
+expires_at(25): Ok(None)
+revision(25): Ok(None)
+get(40): Ok(Some(Record { vector: [0.0, 2.5, 5.0, 5.0], payload: [105, 109, 112, 111, 114, 116], metadata: {} }))
+get_at(40,now): Ok(Some(Record { vector: [0.0, 2.5, 5.0, 5.0], payload: [105, 109, 112, 111, 114, 116], metadata: {} }))
+expires_at(40): Ok(None)
+revision(40): Ok(Some(22))
+get(41): Ok(None)
+get_at(41,now): Ok(None)
+expires_at(41): Ok(None)
+revision(41): Ok(None)
+get(101): Ok(Some(Record { vector: [1.0, 1.5, 12.625, 1.0], payload: [118, 49, 48, 49], metadata: {} }))
+get_at(101,now): Ok(Some(Record { vector: [1.0, 1.5, 12.625, 1.0], payload: [118, 49, 48, 49], metadata: {} }))
+expires_at(101): Ok(None)
+revision(101): Ok(Some(3))
+get(110): Ok(Some(Record { vector: [0.0, 2.5, 13.75, -5.0], payload: [118, 49, 49, 48], metadata: {} }))
+get_at(110,now): Ok(Some(Record { vector: [0.0, 2.5, 13.75, -5.0], payload: [118, 49, 49, 48], metadata: {} }))
+expires_at(110): Ok(None)
+revision(110): Ok(Some(12))
+get(999): Ok(None)
+get_at(999,now): Ok(None)
+expires_at(999): Ok(None)
+revision(999): Ok(None)
+search: Ok([SearchHit { id: 21, distance: 27.890625 }, SearchHit { id: 40, distance: 70.0 }, SearchHit { id: 101, distance: 145.140625 }, SearchHit { id: 103, distance: 153.015625 }, SearchHit { id: 107, distance: 155.390625 }])
+search_with_metric(cosine): Ok([SearchHit { id: 103, distance: 0.28399554190534504 }, SearchHit { id: 110, distance: 0.32627846314678477 }, SearchHit { id: 107, distance: 0.36998267428531095 }, SearchHit { id: 104, distance: 0.412785803287665 }, SearchHit { id: 108, distance: 0.5039692432641834 }])
+search_with_metric(inner_product): Ok([SearchHit { id: 103, distance: -25.125 }, SearchHit { id: 110, distance: -25.0 }, SearchHit { id: 107, distance: -21.875 }, SearchHit { id: 104, distance: -20.5 }, SearchHit { id: 108, distance: -17.25 }])
+search_filtered(group=1): Ok([])
+search_filtered(score 1..4): Ok([])
+search_approximate(hnsw seed 7): Ok([SearchHit { id: 21, distance: 27.890625 }, SearchHit { id: 40, distance: 70.0 }, SearchHit { id: 101, distance: 145.140625 }, SearchHit { id: 103, distance: 153.015625 }, SearchHit { id: 107, distance: 155.390625 }])
+build_hnsw_with_options(scalar_u8): Ok(())
+search_approximate_ready_with_options(scalar_u8): Ok([SearchHit { id: 21, distance: 27.890625 }, SearchHit { id: 40, distance: 70.0 }, SearchHit { id: 101, distance: 145.140625 }, SearchHit { id: 103, distance: 153.015625 }, SearchHit { id: 107, distance: 155.390625 }])
+search_hybrid(lexical rust): Ok([])
+search_hybrid(vector+graph): Ok([HybridHit { id: 21, score: 0.01639344262295082, distance: Some(27.890625), bm25: None, vector_rank: Some(1), text_rank: None }, HybridHit { id: 40, score: 0.016129032258064516, distance: Some(70.0), bm25: None, vector_rank: Some(2), text_rank: None }, HybridHit { id: 101, score: 0.015873015873015872, distance: Some(145.140625), bm25: None, vector_rank: Some(3), text_rank: None }, HybridHit { id: 103, score: 0.015625, distance: Some(153.015625), bm25: None, vector_rank: Some(4), text_rank: None }, HybridHit { id: 107, score: 0.015384615384615385, distance: Some(155.390625), bm25: None, vector_rank: Some(5), text_rank: None }])
+search_grouped(group): Ok([])
+facets(group): Ok([])
+numeric_stats(score): Ok(NumericStats { count: 0, min: None, max: None, sum: 0.0, average: None })
+search_geo: Ok([])
+kept.search: Ok([SearchHit { id: 1, distance: 0.010000000298023226 }, SearchHit { id: 2, distance: 1.809999997317791 }])
+query_language::parse(SEARCH text NEAR $q K 10 WHERE lang = "en" AND price < 20 AND doc_id IN (0,1) AND EXISTS place AND GEO(place,0,0,100) GROUP BY doc_id FACET lang ORDER BY price DESC LIMIT 2): Ok(ParsedQuery { name: Some("text"), parameter: Some("q"), text: None, version: None, predicates: [Compare("lang", "=", String("en")), Compare("price", "<", Integer(20)), In("doc_id", [Integer(0), Integer(1)]), Exists("place"), Geo(GeoRadius { field: "place", latitude: 0.0, longitude: 0.0, radius_meters: 100.0 })], group: Some("doc_id"), facet: Some("lang"), order: Some(("price", true)), limit: 2 })
+query_language::parse(SEARCH NEAR $q K 3): Err(ParseError { position: 12, message: "expected NEAR" })
+query_language::parse(SEARCH text NEAR $q K 3 WHERE): Err(ParseError { position: 29, message: "unexpected end" })
+query_language::parse(DROP everything; SEARCH): Err(ParseError { position: 15, message: "statements are not supported" })
+changes.head: 23
+changes.has_more: false
+changes.next.sequence: 23
+change: Change { sequence: 1, ordinal: 0, collection: "default", committed_at_ms: None, kind: SettingsUpdated { settings: CollectionSettings { metric: SquaredL2, hnsw: HnswConfig { m: 16, ef_construction: 100, seed: 42 }, quantization: None, rerank_multiplier: 4, planner: PlannerPolicy { exact_max_candidates: 4096, exact_max_selectivity_ppm: 20000 }, metadata_indexes: [], text_fields: ["title", "body"] } } }
+change: Change { sequence: 2, ordinal: 0, collection: "default", committed_at_ms: None, kind: Put { id: 21, record: Record { vector: [1.0, 0.0, 2.625, 3.0], payload: [112, 108, 97, 105, 110], metadata: {} }, expires_at_ms: None } }
+change: Change { sequence: 3, ordinal: 0, collection: "default", committed_at_ms: None, kind: Put { id: 101, record: Record { vector: [1.0, 1.5, 12.625, 1.0], payload: [118, 49, 48, 49], metadata: {} }, expires_at_ms: None } }
+change: Change { sequence: 4, ordinal: 0, collection: "default", committed_at_ms: None, kind: Put { id: 102, record: Record { vector: [2.0, 2.0, 12.75, 4.0], payload: [118, 49, 48, 50], metadata: {} }, expires_at_ms: None } }
+change: Change { sequence: 5, ordinal: 0, collection: "default", committed_at_ms: None, kind: Put { id: 103, record: Record { vector: [3.0, 2.5, 12.875, -4.0], payload: [118, 49, 48, 51], metadata: {} }, expires_at_ms: None } }
+change: Change { sequence: 6, ordinal: 0, collection: "default", committed_at_ms: None, kind: Put { id: 104, record: Record { vector: [4.0, 3.0, 13.0, -1.0], payload: [118, 49, 48, 52], metadata: {} }, expires_at_ms: None } }
+change: Change { sequence: 7, ordinal: 0, collection: "default", committed_at_ms: None, kind: Put { id: 105, record: Record { vector: [0.0, 0.0, 13.125, 2.0], payload: [118, 49, 48, 53], metadata: {} }, expires_at_ms: None } }
+change: Change { sequence: 8, ordinal: 0, collection: "default", committed_at_ms: None, kind: Put { id: 106, record: Record { vector: [1.0, 0.5, 13.25, 5.0], payload: [118, 49, 48, 54], metadata: {} }, expires_at_ms: None } }
+change: Change { sequence: 9, ordinal: 0, collection: "default", committed_at_ms: None, kind: Put { id: 107, record: Record { vector: [2.0, 1.0, 13.375, -3.0], payload: [118, 49, 48, 55], metadata: {} }, expires_at_ms: None } }
+change: Change { sequence: 10, ordinal: 0, collection: "default", committed_at_ms: None, kind: Put { id: 108, record: Record { vector: [3.0, 1.5, 13.5, 0.0], payload: [118, 49, 48, 56], metadata: {} }, expires_at_ms: None } }
+change: Change { sequence: 11, ordinal: 0, collection: "default", committed_at_ms: None, kind: Put { id: 109, record: Record { vector: [4.0, 2.0, 13.625, 3.0], payload: [118, 49, 48, 57], metadata: {} }, expires_at_ms: None } }
+change: Change { sequence: 12, ordinal: 0, collection: "default", committed_at_ms: None, kind: Put { id: 110, record: Record { vector: [0.0, 2.5, 13.75, -5.0], payload: [118, 49, 49, 48], metadata: {} }, expires_at_ms: None } }
+change: Change { sequence: 13, ordinal: 0, collection: "aux", committed_at_ms: None, kind: CollectionCreated { dimensions: 2, settings: CollectionSettings { metric: SquaredL2, hnsw: HnswConfig { m: 16, ef_construction: 100, seed: 42 }, quantization: None, rerank_multiplier: 4, planner: PlannerPolicy { exact_max_candidates: 4096, exact_max_selectivity_ppm: 20000 }, metadata_indexes: [], text_fields: [] } } }
+change: Change { sequence: 14, ordinal: 0, collection: "aux", committed_at_ms: None, kind: Put { id: 1, record: Record { vector: [0.5, 0.5], payload: [97, 117, 120], metadata: {} }, expires_at_ms: None } }
+change: Change { sequence: 15, ordinal: 0, collection: "aux", committed_at_ms: None, kind: Delete { id: 1 } }
+change: Change { sequence: 16, ordinal: 0, collection: "aux", committed_at_ms: None, kind: CollectionDropped }
+change: Change { sequence: 17, ordinal: 0, collection: "kept", committed_at_ms: None, kind: CollectionCreated { dimensions: 2, settings: CollectionSettings { metric: SquaredL2, hnsw: HnswConfig { m: 16, ef_construction: 100, seed: 42 }, quantization: None, rerank_multiplier: 4, planner: PlannerPolicy { exact_max_candidates: 4096, exact_max_selectivity_ppm: 20000 }, metadata_indexes: [], text_fields: [] } } }
+change: Change { sequence: 18, ordinal: 0, collection: "kept", committed_at_ms: None, kind: Put { id: 1, record: Record { vector: [1.0, 0.0], payload: [107, 49], metadata: {} }, expires_at_ms: None } }
+change: Change { sequence: 19, ordinal: 0, collection: "kept", committed_at_ms: None, kind: Put { id: 2, record: Record { vector: [0.0, 1.0], payload: [107, 50], metadata: {} }, expires_at_ms: None } }
+change: Change { sequence: 20, ordinal: 0, collection: "default", committed_at_ms: None, kind: Put { id: 40, record: Record { vector: [0.0, 2.5, 5.0, 5.0], payload: [105, 109, 112, 111, 114, 116], metadata: {} }, expires_at_ms: None } }
+change: Change { sequence: 22, ordinal: 0, collection: "default", committed_at_ms: None, kind: Put { id: 40, record: Record { vector: [0.0, 2.5, 5.0, 5.0], payload: [105, 109, 112, 111, 114, 116], metadata: {} }, expires_at_ms: None } }
+export_log(base,last,head,header_len,frames_len): (0, 23, 23, 32, 1907)
+follower(applied,lag,len): (23, 0, 12)
+follower.search: Ok([SearchHit { id: 21, distance: 27.890625 }, SearchHit { id: 40, distance: 70.0 }, SearchHit { id: 101, distance: 145.140625 }, SearchHit { id: 103, distance: 153.015625 }, SearchHit { id: 107, distance: 155.390625 }])

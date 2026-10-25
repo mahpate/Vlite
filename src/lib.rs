@@ -26,6 +26,8 @@ pub mod import;
 mod metadata;
 pub mod metadata_index;
 pub mod planner;
+#[cfg(feature = "graph")]
+pub mod property_graph;
 pub mod quality;
 pub mod quantize;
 pub mod query_language;
@@ -276,6 +278,68 @@ pub enum Error {
     StaleIndex,
     /// The GPU path failed; callers may fall back to the CPU search.
     GpuUnavailable(&'static str),
+    /// The file was not created with `create_with_graph`.
+    #[cfg(feature = "graph")]
+    GraphsNotEnabled,
+    /// Graph-enabled files need format V5.
+    #[cfg(feature = "graph")]
+    GraphsRequireV5,
+    #[cfg(feature = "graph")]
+    InvalidGraphName,
+    #[cfg(feature = "graph")]
+    GraphExists,
+    #[cfg(feature = "graph")]
+    GraphNotFound,
+    /// Drop refused: the graph still has nodes or edges.
+    #[cfg(feature = "graph")]
+    GraphNotEmpty,
+    /// At most 64 graphs may be live at once.
+    #[cfg(feature = "graph")]
+    TooManyGraphs,
+    /// `create_node` on a key that already names a live node.
+    #[cfg(feature = "graph")]
+    GraphKeyExists,
+    /// An edge key exists with a different source, relationship type,
+    /// destination or properties (REQ-009).
+    #[cfg(feature = "graph")]
+    GraphKeyConflict,
+    /// No live node has the given key.
+    #[cfg(feature = "graph")]
+    GraphNodeNotFound,
+    /// No live edge has the given ID or key.
+    #[cfg(feature = "graph")]
+    GraphEdgeNotFound,
+    /// Node delete refused: `incident` edges still reference the node.
+    #[cfg(feature = "graph")]
+    GraphNodeHasEdges {
+        incident: usize,
+    },
+    /// The node already has an attachment in this collection, or the record
+    /// is already attached to a node.
+    #[cfg(feature = "graph")]
+    GraphAttachmentConflict,
+    /// The node has no attachment in this collection.
+    #[cfg(feature = "graph")]
+    GraphAttachmentNotFound,
+    /// Only live records without an expiry can be attached.
+    #[cfg(feature = "graph")]
+    GraphRecordNotAttachable,
+    /// Delete refused: the record is attached to a graph node; detach it first.
+    #[cfg(feature = "graph")]
+    GraphAttachedRecord,
+    /// Expiry refused: attached records cannot expire.
+    #[cfg(feature = "graph")]
+    GraphAttachedRecordExpiry,
+    /// A graph read limit is above its ceiling; limits are never clamped.
+    #[cfg(feature = "graph")]
+    GraphLimitExceedsCeiling {
+        limit: &'static str,
+        requested: u64,
+        ceiling: u64,
+    },
+    /// The graph changed after the page cursor was issued; restart the read.
+    #[cfg(feature = "graph")]
+    GraphCursorStale,
 }
 
 impl fmt::Display for Error {
@@ -462,6 +526,77 @@ impl fmt::Display for Error {
                 "disk index was built for a different committed state; rebuild it"
             ),
             Self::GpuUnavailable(reason) => write!(f, "GPU search unavailable: {reason}"),
+            #[cfg(feature = "graph")]
+            Self::GraphsNotEnabled => write!(
+                f,
+                "this database is not graph-enabled; create it with create_with_graph"
+            ),
+            #[cfg(feature = "graph")]
+            Self::GraphsRequireV5 => write!(f, "graph-enabled databases require format V5"),
+            #[cfg(feature = "graph")]
+            Self::InvalidGraphName => {
+                write!(f, "graph names must match ^[a-z][a-z0-9_-]{{0,62}}$")
+            }
+            #[cfg(feature = "graph")]
+            Self::GraphExists => write!(f, "graph already exists"),
+            #[cfg(feature = "graph")]
+            Self::GraphNotFound => write!(f, "graph not found"),
+            #[cfg(feature = "graph")]
+            Self::GraphNotEmpty => write!(f, "graph has nodes or edges; empty it first"),
+            #[cfg(feature = "graph")]
+            Self::TooManyGraphs => write!(f, "at most 64 graphs may be live at once"),
+            #[cfg(feature = "graph")]
+            Self::GraphKeyExists => write!(f, "graph node key already exists"),
+            #[cfg(feature = "graph")]
+            Self::GraphKeyConflict => write!(
+                f,
+                "graph edge key already exists with different endpoints, type or properties"
+            ),
+            #[cfg(feature = "graph")]
+            Self::GraphNodeNotFound => write!(f, "graph node not found"),
+            #[cfg(feature = "graph")]
+            Self::GraphEdgeNotFound => write!(f, "graph edge not found"),
+            #[cfg(feature = "graph")]
+            Self::GraphNodeHasEdges { incident } => write!(
+                f,
+                "graph node has {incident} incident edges; delete them first"
+            ),
+            #[cfg(feature = "graph")]
+            Self::GraphAttachmentConflict => write!(
+                f,
+                "the node already has an attachment in this collection, or the record is attached elsewhere"
+            ),
+            #[cfg(feature = "graph")]
+            Self::GraphAttachmentNotFound => {
+                write!(f, "the node has no attachment in this collection")
+            }
+            #[cfg(feature = "graph")]
+            Self::GraphRecordNotAttachable => {
+                write!(f, "only live records without an expiry can be attached")
+            }
+            #[cfg(feature = "graph")]
+            Self::GraphAttachedRecord => write!(
+                f,
+                "record is attached to a graph node; detach it before deleting"
+            ),
+            #[cfg(feature = "graph")]
+            Self::GraphAttachedRecordExpiry => {
+                write!(f, "records attached to a graph node cannot expire")
+            }
+            #[cfg(feature = "graph")]
+            Self::GraphLimitExceedsCeiling {
+                limit,
+                requested,
+                ceiling,
+            } => write!(
+                f,
+                "graph limit {limit} = {requested} exceeds its ceiling {ceiling}"
+            ),
+            #[cfg(feature = "graph")]
+            Self::GraphCursorStale => write!(
+                f,
+                "the graph changed after the cursor was issued; restart the read"
+            ),
         }
     }
 }
@@ -633,6 +768,9 @@ pub struct Database {
     clock: Option<CommitClock>,
     /// Opened with `open_read_only`: shared OS lock, read-only file handle.
     read_only: bool,
+    /// Named graphs; `Some` exactly for graph-enabled (`FLAG_GRAPH`) files.
+    #[cfg(feature = "graph")]
+    graph: Option<property_graph::engine::GraphState>,
 }
 
 /// Source of commit timestamps (milliseconds since the Unix epoch).
@@ -886,8 +1024,17 @@ impl Database {
         dimensions: usize,
         options: CreateOptions,
     ) -> Result<Self> {
-        let path = path.as_ref();
-        Self::create_backed(dimensions, options, |header| {
+        Self::create_file(path.as_ref(), dimensions, options, 0)
+    }
+
+    /// `extra_flags` is 0, or `FLAG_GRAPH` from `create_with_graph`.
+    fn create_file(
+        path: &Path,
+        dimensions: usize,
+        options: CreateOptions,
+        extra_flags: u16,
+    ) -> Result<Self> {
+        Self::create_backed(dimensions, options, extra_flags, |header| {
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -904,7 +1051,7 @@ impl Database {
     /// WebAssembly backend. Commits are durable only as far as the caller
     /// persists `to_bytes()`.
     pub fn create_in_memory(dimensions: usize, options: CreateOptions) -> Result<Self> {
-        Self::create_backed(dimensions, options, |header| {
+        Self::create_backed(dimensions, options, 0, |header| {
             Ok(LockedFile::memory(header.to_vec()))
         })
     }
@@ -924,10 +1071,12 @@ impl Database {
     fn create_backed(
         dimensions: usize,
         options: CreateOptions,
+        extra_flags: u16,
         make: impl FnOnce(&[u8]) -> Result<LockedFile>,
     ) -> Result<Self> {
         validate_dimensions(dimensions)?;
-        let featured = options.encryption.is_some() || options.commit_timestamps;
+        let featured =
+            options.encryption.is_some() || options.commit_timestamps || extra_flags != 0;
         let format = match (options.format, featured) {
             (None, false) => FormatVersion::V3,
             (None, true) => FormatVersion::V5,
@@ -948,6 +1097,7 @@ impl Database {
         if options.commit_timestamps {
             flags |= format::FLAG_TIMESTAMPS;
         }
+        flags |= extra_flags;
         let (version, lineage, header) = match format {
             FormatVersion::V3 => (format::CURRENT_VERSION, None, format::header(dimensions)),
             FormatVersion::V4 => {
@@ -992,6 +1142,8 @@ impl Database {
             commit_times: Vec::new(),
             clock: None,
             read_only: false,
+            #[cfg(feature = "graph")]
+            graph: (flags & format::FLAG_GRAPH != 0).then(property_graph::engine::GraphState::new),
         })
     }
 
@@ -1044,7 +1196,7 @@ impl Database {
     }
 
     fn open_backed(mut file: LockedFile, key: Option<&EncryptionKey>) -> Result<Self> {
-        let loaded = format::load_with(&mut file, key)?;
+        let loaded = format::load_database(&mut file, key)?;
         if loaded.incomplete_bytes != 0 {
             return Err(Error::IncompleteTail {
                 offset: loaded.end,
@@ -1077,6 +1229,8 @@ impl Database {
             commit_times: loaded.commit_times,
             clock: None,
             read_only: false,
+            #[cfg(feature = "graph")]
+            graph: loaded.graph,
         })
     }
 
@@ -1100,7 +1254,7 @@ impl Database {
 
     fn discard_tail_inner(path: &Path, key: Option<&EncryptionKey>) -> Result<RepairReport> {
         let mut file = open_locked(path)?;
-        let loaded = format::load_with(&mut file, key)?;
+        let loaded = format::load_database(&mut file, key)?;
         let report = RepairReport {
             discarded_bytes: loaded.incomplete_bytes,
             retained_commits: loaded.sequence,
@@ -1309,6 +1463,10 @@ impl Database {
             return Err(Error::ExpiryRequiresUpgrade);
         }
         expected.check(state.revisions.get(&id).copied())?;
+        #[cfg(feature = "graph")]
+        if expiry.is_some() && self.is_attached(collection, id) {
+            return Err(Error::GraphAttachedRecordExpiry);
+        }
         let record = Record {
             vector: vector.to_vec(),
             payload: payload.to_vec(),
@@ -1346,6 +1504,8 @@ impl Database {
         self.commit_frame(sequence, &frame)?;
         self.state_mut(collection)
             .apply_metadata_committed(id, metadata.clone(), sequence);
+        #[cfg(feature = "graph")]
+        self.touch_graph_record(collection, id, sequence);
         Ok(sequence)
     }
 
@@ -1402,6 +1562,10 @@ impl Database {
         if current.is_none() {
             return Ok(false);
         }
+        #[cfg(feature = "graph")]
+        if self.is_attached(collection, id) {
+            return Err(Error::GraphAttachedRecord);
+        }
         let sequence = self.next_sequence()?;
         let frame = format::record_frame(sequence, collection, id, None);
         self.commit_frame(sequence, &frame)?;
@@ -1428,6 +1592,8 @@ impl Database {
             return Err(Error::BatchRequiresUpgrade);
         }
         let body_bytes = self.validate_batch(collection, operations)?;
+        #[cfg(feature = "graph")]
+        self.ensure_no_attached_delete(collection, operations)?;
         let sequence = self.next_sequence()?;
         let frame = if collection == 0 {
             format::batch_frame(sequence, operations, body_bytes)
@@ -1769,6 +1935,8 @@ impl Database {
         expires_at_ms: Option<u64>,
     ) {
         let vector_bytes = record.as_ref().map_or(0, |record| record.vector.len() * 4);
+        #[cfg(feature = "graph")]
+        self.touch_graph_record(collection, id, sequence);
         let state = self
             .collections
             .get_mut(&collection)

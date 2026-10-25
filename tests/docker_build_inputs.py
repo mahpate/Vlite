@@ -1,6 +1,7 @@
-"""Keep Rust build-script and protobuf inputs available to container builds."""
+"""Keep Rust build-script, protobuf and workspace inputs available to container builds."""
 from pathlib import Path
 import re
+import tomllib
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +28,24 @@ class DockerInputs(unittest.TestCase):
         ignores = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
         for rule in ("!build.rs", "!proto/", "!proto/**"):
             self.assertIn(rule, ignores)
+
+    def test_build_stages_copy_workspace_members(self):
+        # Cargo loads every workspace member, even when building a single package.
+        members = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["workspace"]["members"]
+        for name in ("Dockerfile", "bindings/manylinux.Dockerfile", "bindings/node/Dockerfile"):
+            lines = (ROOT / name).read_text(encoding="utf-8").splitlines()
+            copied = [match.group(1) for line in lines if (match := re.fullmatch(r"COPY (\S+) \./\1", line.strip()))]
+            for member in members:
+                with self.subTest(dockerfile=name, member=member):
+                    self.assertTrue(any(member == path or member.startswith(path + "/") for path in copied))
+        ignores = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+        for member in members:
+            parts = member.split("/")
+            prefixes = ["/".join(parts[:end]) for end in range(1, len(parts) + 1)]
+            with self.subTest(dockerignore=member):
+                self.assertTrue(any(
+                    f"!{prefix}/**" in ignores and all(f"!{parent}/" in ignores for parent in prefixes[:end])
+                    for end, prefix in enumerate(prefixes, 1)))
 
 
 if __name__ == "__main__":

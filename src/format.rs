@@ -18,6 +18,20 @@ pub(crate) const FLAG_ENCRYPTED: u16 = 1;
 /// Header flag: every commit is preceded by a time-anchor frame (op 11).
 pub(crate) const FLAG_TIMESTAMPS: u16 = 2;
 pub(crate) const KNOWN_FLAGS: u16 = FLAG_ENCRYPTED | FLAG_TIMESTAMPS;
+/// Header flag (v5, DO-001): the file stores named property graphs in op-12
+/// frames. Only the graph-aware open and tail-repair paths of builds with the
+/// `graph` feature accept it; every other reader keeps rejecting it with
+/// `UnsupportedFeature(FLAG_GRAPH)`.
+#[cfg(feature = "graph")]
+pub(crate) const FLAG_GRAPH: u16 = crate::property_graph::engine::codec::FLAG_GRAPH;
+/// Graph frame operation (DO-003), valid only in files carrying `FLAG_GRAPH`.
+#[cfg(feature = "graph")]
+const OP_GRAPH: u8 = crate::property_graph::engine::codec::OP_GRAPH;
+/// Header flags a graph-aware reader accepts in addition to `KNOWN_FLAGS`.
+#[cfg(feature = "graph")]
+const GRAPH_READER_FLAGS: u16 = FLAG_GRAPH;
+#[cfg(not(feature = "graph"))]
+const GRAPH_READER_FLAGS: u16 = 0;
 pub(crate) const OP_TIME_ANCHOR: u8 = 11;
 pub(crate) const PREFIX_SIZE: usize = 36;
 pub(crate) const FOOTER_SIZE: usize = 16;
@@ -223,7 +237,13 @@ impl LoadedCollection {
         }
     }
 
-    fn put(&mut self, id: u64, record: Record, sequence: u64, expires_at_ms: Option<u64>) {
+    pub(crate) fn put(
+        &mut self,
+        id: u64,
+        record: Record,
+        sequence: u64,
+        expires_at_ms: Option<u64>,
+    ) {
         self.vectors.records.remove(&id);
         self.live_body_bytes += record_body_len(&record);
         if let Some(previous) = self.records.insert(id, record) {
@@ -237,7 +257,7 @@ impl LoadedCollection {
         }
     }
 
-    fn delete(&mut self, id: u64) {
+    pub(crate) fn delete(&mut self, id: u64) {
         self.vectors.records.remove(&id);
         if let Some(previous) = self.records.remove(&id) {
             self.live_body_bytes -= record_body_len(&previous);
@@ -290,6 +310,10 @@ pub(crate) struct Loaded {
     /// Per-commit wall-clock milliseconds `(sequence, timestamp)`, ascending,
     /// for files created with commit timestamps.
     pub commit_times: Vec<(u64, u64)>,
+    /// Replayed named graphs; `Some` exactly when the header has `FLAG_GRAPH`
+    /// (only graph-aware loads accept such files).
+    #[cfg(feature = "graph")]
+    pub graph: Option<crate::property_graph::engine::GraphState>,
 }
 
 impl Loaded {
@@ -483,6 +507,13 @@ fn wrap(
     bytes.extend_from_slice(&checksum.to_le_bytes());
     bytes.extend_from_slice(&sequence.to_le_bytes());
     bytes
+}
+
+/// Graph frame (op 12, DO-003) carrying one encoded graph body of `count`
+/// entries. Collection, reserved and ID prefix fields are zero.
+#[cfg(feature = "graph")]
+pub(crate) fn graph_frame(sequence: u64, count: u32, body: &[u8]) -> Vec<u8> {
+    wrap(OP_GRAPH, 0, sequence, 0, count, body.len() as u32, body)
 }
 
 /// Single put/delete frame for the default collection (byte-identical to v1–v3).
@@ -1059,6 +1090,17 @@ pub(crate) fn read_log_header_with<R: Read + Seek>(
     key: Option<&EncryptionKey>,
     known: Option<&Cipher>,
 ) -> Result<LogHeader> {
+    read_header(file, key, known, false)
+}
+
+/// `allow_graph` additionally accepts `FLAG_GRAPH` in builds with the `graph`
+/// feature; graph-unaware callers pass `false` and reject graph files.
+fn read_header<R: Read + Seek>(
+    file: &mut R,
+    key: Option<&EncryptionKey>,
+    known: Option<&Cipher>,
+    allow_graph: bool,
+) -> Result<LogHeader> {
     let length = file.seek(SeekFrom::End(0))?;
     file.seek(SeekFrom::Start(0))?;
     if length < HEADER_SIZE {
@@ -1080,8 +1122,13 @@ pub(crate) fn read_log_header_with<R: Read + Seek>(
     let (lineage, collection_floor) = if version >= V4 {
         if version >= V5 {
             flags = u16_at(&bytes, 26);
-            if flags & !KNOWN_FLAGS != 0 {
-                return Err(Error::UnsupportedFeature(flags & !KNOWN_FLAGS));
+            let known_flags = if allow_graph {
+                KNOWN_FLAGS | GRAPH_READER_FLAGS
+            } else {
+                KNOWN_FLAGS
+            };
+            if flags & !known_flags != 0 {
+                return Err(Error::UnsupportedFeature(flags & !known_flags));
             }
         } else if bytes[26..28] != [0; 2] {
             return Err(corrupt(0, "nonzero reserved database header bytes"));
@@ -1215,11 +1262,30 @@ pub(crate) fn load<R: Read + Seek>(file: &mut R) -> Result<Loaded> {
     load_with(file, None)
 }
 
+/// Graph-unaware full replay: graph-enabled files are `UnsupportedFeature`.
 pub(crate) fn load_with<R: Read + Seek>(
     file: &mut R,
     key: Option<&EncryptionKey>,
 ) -> Result<Loaded> {
-    let header = read_log_header(file, key)?;
+    load_inner(file, key, false)
+}
+
+/// Full replay for `Database` open and tail repair. With the `graph` feature
+/// it also accepts graph-enabled files and replays their op-12 frames;
+/// without it, it is exactly `load_with`.
+pub(crate) fn load_database<R: Read + Seek>(
+    file: &mut R,
+    key: Option<&EncryptionKey>,
+) -> Result<Loaded> {
+    load_inner(file, key, cfg!(feature = "graph"))
+}
+
+fn load_inner<R: Read + Seek>(
+    file: &mut R,
+    key: Option<&EncryptionKey>,
+    allow_graph: bool,
+) -> Result<Loaded> {
+    let header = read_header(file, key, None, allow_graph)?;
     let length = header.length;
     let LogHeader {
         version,
@@ -1250,6 +1316,8 @@ pub(crate) fn load_with<R: Read + Seek>(
         flags,
         cipher: cipher.clone(),
         commit_times: Vec::new(),
+        #[cfg(feature = "graph")]
+        graph: (flags & FLAG_GRAPH != 0).then(crate::property_graph::engine::GraphState::new),
     };
     let mut jobs: HashMap<u64, JobReplay> = HashMap::new();
     // Highest collection ID created by an op 5 in this log so far, and how
@@ -1320,6 +1388,9 @@ pub(crate) fn load_with<R: Read + Seek>(
             5..=7 => version >= V4,
             8 => version >= V5,
             9 | 10 => version >= V5,
+            // Only graph-aware loads let FLAG_GRAPH through, and only on v5.
+            #[cfg(feature = "graph")]
+            OP_GRAPH => version >= V5 && flags & FLAG_GRAPH != 0,
             _ => false,
         };
         let reserved_clear = if version >= V4 && matches!(operation, 1..=4 | 8 | 9 | 10) {
@@ -1341,6 +1412,15 @@ pub(crate) fn load_with<R: Read + Seek>(
         let id = u64_at(&prefix, 16);
         let count = u32_at(&prefix, 24) as usize;
         let payload_len = u32_at(&prefix, 28) as usize;
+        #[cfg(feature = "graph")]
+        if operation == OP_GRAPH
+            && !crate::property_graph::valid_frame_prefix(id, count, payload_len)
+        {
+            return Err(corrupt(
+                offset,
+                "invalid graph frame count, reserved ID or body length",
+            ));
+        }
         let target_dimensions = if operation <= 4 || operation == 9 {
             loaded
                 .collections
@@ -1415,7 +1495,7 @@ pub(crate) fn load_with<R: Read + Seek>(
                 return Err(corrupt(offset, "invalid expiring record length"));
             }
             payload_len
-        } else {
+        } else if operation <= 2 {
             if (operation == 1 && count != target_dimensions)
                 || (operation == 2 && (count != 0 || payload_len != 0))
                 || payload_len > MAX_PAYLOAD_BYTES
@@ -1423,6 +1503,9 @@ pub(crate) fn load_with<R: Read + Seek>(
                 return Err(corrupt(offset, "invalid vector or payload length"));
             }
             count * 4 + payload_len
+        } else {
+            // Op 12 in graph-aware loads; its prefix was validated above.
+            payload_len
         };
         let frame_len = (PREFIX_SIZE + body_len + seal + FOOTER_SIZE) as u64;
         if remaining < frame_len {
@@ -1460,10 +1543,14 @@ pub(crate) fn load_with<R: Read + Seek>(
                     metadata: crate::Metadata::new(),
                 };
                 collection_mut(&mut loaded, collection_id).put(id, record, sequence, None);
+                #[cfg(feature = "graph")]
+                touch_attached(&mut loaded, collection_id, id, sequence);
             }
             4 => {
                 let record = decode_extended(body, target_dimensions, offset, version >= V5)?;
                 collection_mut(&mut loaded, collection_id).put(id, record, sequence, None);
+                #[cfg(feature = "graph")]
+                touch_attached(&mut loaded, collection_id, id, sequence);
             }
             9 => {
                 let expiry_flag = body[0];
@@ -1471,21 +1558,54 @@ pub(crate) fn load_with<R: Read + Seek>(
                     return Err(corrupt(offset, "invalid expiry marker"));
                 }
                 let expiry = (expiry_flag == 1).then(|| u64_at(body, 1));
+                #[cfg(feature = "graph")]
+                ensure_attached_record_survives(
+                    &loaded,
+                    collection_id,
+                    id,
+                    expiry.is_some(),
+                    offset,
+                )?;
                 let record = decode_extended(&body[9..], target_dimensions, offset, true)?;
                 collection_mut(&mut loaded, collection_id).put(id, record, sequence, expiry);
+                #[cfg(feature = "graph")]
+                touch_attached(&mut loaded, collection_id, id, sequence);
             }
             8 => {
                 let metadata = crate::metadata::decode(body)
                     .map_err(|_| corrupt(offset, "invalid metadata update"))?;
                 collection_mut(&mut loaded, collection_id)
                     .update_metadata(id, metadata, sequence, offset)?;
+                #[cfg(feature = "graph")]
+                touch_attached(&mut loaded, collection_id, id, sequence);
             }
-            2 => collection_mut(&mut loaded, collection_id).delete(id),
+            2 => {
+                #[cfg(feature = "graph")]
+                ensure_attached_record_survives(&loaded, collection_id, id, true, offset)?;
+                collection_mut(&mut loaded, collection_id).delete(id);
+            }
             3 => {
                 let (operations, marker) =
                     decode_batch(body, count, target_dimensions, offset, version)?;
                 if let Some(marker) = &marker {
                     replay_marker(&mut jobs, collection_id, marker, operations.len(), offset)?;
+                }
+                #[cfg(feature = "graph")]
+                for operation in &operations {
+                    match operation {
+                        Mutation::Delete { id } => {
+                            ensure_attached_record_survives(
+                                &loaded,
+                                collection_id,
+                                *id,
+                                true,
+                                offset,
+                            )?;
+                        }
+                        Mutation::Put { id, .. } | Mutation::PutWithMetadata { id, .. } => {
+                            touch_attached(&mut loaded, collection_id, *id, sequence);
+                        }
+                    }
                 }
                 let collection = collection_mut(&mut loaded, collection_id);
                 for operation in operations {
@@ -1578,6 +1698,17 @@ pub(crate) fn load_with<R: Read + Seek>(
                     .imports
                     .push(LoadedImportMarker::CollectionDropped(collection));
             }
+            #[cfg(feature = "graph")]
+            OP_GRAPH => crate::property_graph::frame::replay(
+                loaded
+                    .graph
+                    .get_or_insert_with(crate::property_graph::engine::GraphState::new),
+                &mut loaded.collections,
+                sequence,
+                count as u32,
+                body,
+                offset,
+            )?,
             _ => {
                 let settings = decode_settings(body).map_err(|reason| corrupt(offset, reason))?;
                 let collection = loaded
@@ -1626,6 +1757,37 @@ fn collection_mut(loaded: &mut Loaded, id: u16) -> &mut LoadedCollection {
         .collections
         .get_mut(&id)
         .expect("collection existence checked before decoding")
+}
+
+#[cfg(feature = "graph")]
+fn ensure_attached_record_survives(
+    loaded: &Loaded,
+    collection: u16,
+    record: u64,
+    deleting_or_expiring: bool,
+    offset: u64,
+) -> Result<()> {
+    if deleting_or_expiring
+        && loaded
+            .graph
+            .as_ref()
+            .is_some_and(|graph| graph.attachment_owner(collection, record).is_some())
+    {
+        return Err(corrupt(
+            offset,
+            "graph attachment references a missing or expiring record",
+        ));
+    }
+    Ok(())
+}
+
+/// Live writes advance the owning graph's `graph_sequence` when an attached
+/// record changes (Section 3.5); replay must rebuild the same value.
+#[cfg(feature = "graph")]
+fn touch_attached(loaded: &mut Loaded, collection: u16, record: u64, sequence: u64) {
+    if let Some(graph) = loaded.graph.as_mut() {
+        graph.touch_record(collection, record, sequence);
+    }
 }
 
 pub(crate) fn vector_frame(sequence: u64, collection: u16, body: &[u8]) -> Vec<u8> {

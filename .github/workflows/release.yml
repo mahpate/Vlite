@@ -23,6 +23,7 @@ jobs:
           import json, os, pathlib, tomllib
           version = tomllib.loads(pathlib.Path("Cargo.toml").read_text())["package"]["version"]
           assert tomllib.loads(pathlib.Path("bindings/c/Cargo.toml").read_text())["package"]["version"] == version
+          assert tomllib.loads(pathlib.Path("crates/vlite-graph/Cargo.toml").read_text())["package"]["version"] == version
           assert json.loads(pathlib.Path("src/openapi.json").read_text())["info"]["version"] == version
           for name in ["clients/python/pyproject.toml", "bindings/python/pyproject.toml"]:
               assert tomllib.loads(pathlib.Path(name).read_text())["project"]["version"] == version
@@ -96,7 +97,7 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --locked --workspace --all-targets --all-features
       - run: cargo check --locked --no-default-features --lib
-      - run: cargo build --locked --release --bins --all-features
+      - run: cargo build --locked --release --bins --features http-embedder,otel,tools,import-formats,json,mcp,server,grpc,gpu
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
@@ -199,7 +200,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --locked --workspace --all-targets --all-features
-      - run: cargo build --locked --release --bins --all-features
+      - run: cargo build --locked --release --bins --features http-embedder,otel,tools,import-formats,json,mcp,server,grpc,gpu
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"

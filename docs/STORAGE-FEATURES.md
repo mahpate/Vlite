@@ -188,6 +188,62 @@ threads and return an error. `bindings/wasm` is a wasm-bindgen package with a
 Node smoke test (see its README). Path-based APIs compile but fail at runtime
 there. The in-memory backend works natively too, which is how it is unit-tested.
 
+## Graph-enabled files (experimental, `graph` feature)
+
+The non-default Cargo feature `graph` (not shipped in release artifacts) stores
+named property graphs in the same log as vectors. `Database::create_with_graph`
+creates a V5 file with header flag `FLAG_GRAPH = 4`. Encryption and commit
+timestamps work as usual. Ordinary files never become graph-enabled.
+`create_graph` and `drop_graph` (empty graphs only) each commit one op-12 frame;
+`list_graphs` reads the directory without a commit. The frame goes through the
+same writer, sequence, lock,
+checksums, sealing and timestamp anchors as vector commits. Vector frames in a
+graph file are byte-identical to an ordinary V5 file.
+
+Format rules:
+
+- Names follow the collection-name rule. At most 64 graphs can exist at once;
+  the internal ID of a dropped graph can be reused.
+- Op 12 is valid only in V5 files carrying the flag.
+- The frame prefix is plaintext: collection 0, record ID 0, 1..=4,096 entries,
+  body ≤ 16 MiB. Graph names, keys, labels and properties exist only in the
+  body, which is encrypted in encrypted files.
+- On open, each graph body is checksum-verified, decrypted, fully decoded and
+  validated, then applied atomically. A malformed or inconsistent graph frame
+  fails the whole open with `Corrupt`; there is no partial graph state.
+- A graph body may interleave graph entries with vector-mutation entries (one
+  canonical op-3 batch entry each, decoded with the target collection's
+  dimensions) and node attachments. Vector entries apply in body order at the
+  frame's sequence; every attachment the body touches must end on a live
+  record without expiry.
+
+Compatibility:
+
+- Builds without `graph` and older releases reject graph-enabled files with
+  `UnsupportedFeature(4)`.
+- In graph builds, the following also still reject them until graph-aware
+  versions exist: maintenance (`inspect`, `verify`, `backup`, `restore`,
+  `compact`, `upgrade`, `reencrypt`, `restore_to`, `drill`), the change feed,
+  log-segment export and read replicas.
+- `graph_mut(name).write_batch(&[GraphOp])` writes nodes, edges, attachments
+  and vector mutations of any collection as one atomic op-12 frame (at most
+  4,096 operations; nothing is written on any error). Attaching requires a
+  live record without expiry. While a record is attached, ordinary delete,
+  conditional delete, batch delete and import deletes fail with
+  `GraphAttachedRecord` and setting an expiry fails with
+  `GraphAttachedRecordExpiry`, without writing; overwrites and metadata
+  updates are allowed and keep the attachment. Detach first to delete.
+- `graph(name)` provides node/edge gets, paged `find_nodes` and `neighbors`,
+  breadth-first `traverse`, canonical `shortest_path` and `explain`. Read results
+  carry `view_sequence`, `complete`, truncation reasons and work statistics.
+  `ReadOptions` bounds work and output and supports cancellation; exceeding a
+  hard ceiling is an error, not a silent clamp. A truncated shortest-path search
+  reports `Exhausted`, never an uncertified no-path answer.
+- Paged cursors are bound to the query and graph sequence. Graph writes and
+  updates of attached records invalidate them; unrelated vector writes do not.
+  A read-only database retains its open-time view. Schema/property indexes,
+  hybrid graph retrieval, and graph-specific server/MCP/SDK APIs are later work.
+
 ## Durability and security caveats
 
 - The in-memory backend is durable only as far as you persist `to_bytes()`.

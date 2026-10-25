@@ -1,0 +1,432 @@
+# feature-agent-graph — Decision outputs DO-001..DO-006 (EPIC-002)
+
+Companion to [`feature-agent-graph.prd.md`](feature-agent-graph.prd.md) v1.2.10, Section 4.12. This records EPIC-002 decisions and supporting evidence; implementation now exists for the graph feature, op tag 12, adapter and public API, but no release gate is approved by this document. The DO-001/DO-002 compatibility probes ran against commit `81ff901c54d674d1ad519dd4fa722e937db46c4b` (HEAD when EPIC-001/EPIC-002 started) and release tags `v0.1.0`, `v0.1.1`, `v0.1.2`, `v0.2.0`, `v0.3.0`, all available locally; every revision was extracted with `git archive` into `%TEMP%` and built offline into its own target directory. That evidence is historical and is not regenerated. The REG-001..REG-008 regression and surface-parity baseline was re-pinned to `347b01dcb437051fd02816443f8f0bbad082b866` in v1.2.10 (see [Baseline re-pin](#baseline-re-pin-v1210)).
+
+| ID | Status | Outcome | Approval still needed |
+|----|--------|---------|-----------------------|
+| DO-001 | **Decided** (deterministic rule satisfied) | V5 + `FLAG_GRAPH = 4` | None for the rule; the format itself is part of the GATE-002 proposal review |
+| DO-002 | **Decided** (deterministic rule satisfied) | Attachments (PD-012) | None for the rule |
+| DO-003 | **Proposed final, pending review** | Op tag 12 (lowest unused, proven); the shared engine codec implements tags 1..11 and VLite's graph-aware loader dispatches op-12 frames through `property_graph::frame::replay`. Vector mutations reuse `encode_batch_entries`; public graph-batch writing is ITEM-015 and not yet implemented. | GATE-003 and EPIC-003 code review must accept the full entry table, including the `PatchNode`/`PatchEdge` field-name length change (`u16`, see below) |
+| DO-004 | **Decided** (re-grep done) | LEG-001..LEG-020 plus LEG-021..LEG-026 | Folded into PRD Section 3.4 (v1.2.9, before EPIC-004 code) |
+| DO-005 | **Recorded** | Reference baseline of clean `81ff901` (5 runs, 100,000 × 384, 10 queries) in [`baseline.md`](baseline.md); storage details were queried after the run, not captured with it | REG-010 budgets (PD-014) remain proposals for GATE-004. The REG-001..REG-008 fixtures moved to `347b01d` in v1.2.10; this performance record stays at `81ff901` and must be re-measured at `347b01d` on the reference machine before REG-010 is enforced or GATE-008 is requested |
+| DO-006 | **Chosen under delegation** | PD-001 string keys (1..=256 UTF-8 bytes, unique per graph) + internal monotonic `u64` IDs, never reused | Chosen by the delegated workflow on the user's instruction to proceed; formal GATE-002 sign-off still to be recorded |
+
+## DO-001 — Graph-file marker
+
+**Rule (PRD 4.12):** select V5 + `FLAG_GRAPH = 4` if every REQ-055 entry point in HEAD-default and in each release tag rejects a V5 file with flag bit 4 set (plus an op-12 frame) explicitly. Pre-V5 tags (`v0.1.0`..`v0.2.0`) must answer `UnsupportedVersion(5)`. `v0.3.0` and HEAD must answer `UnsupportedFeature(4)`.
+
+**Fixtures** (`tests\fixtures\graph_compat\`, SHA-256 manifest `MANIFEST.sha256` over decoded bytes):
+
+| File | Content |
+|------|---------|
+| `v5_graph_plain.hex` | V5 header (flags = 4, valid header CRC) + one op-12 frame (draft DO-003 body, valid prefix CRC and commit footer) |
+| `v5_graph_timestamps.hex` | Same with `FLAG_COMMIT_TIMESTAMPS` (flags = 4 \| 2) |
+| `v5_control_plain.hex`, `v5_control_timestamps.hex` | Identical files without bit 4 (controls; must open) |
+| `v5_control_op12_without_flag.hex` | Op-12 frame smuggled into a non-graph V5 file (must be rejected as corruption) |
+| encrypted fixture | Created at run time by each revision's own public API (encrypted V5), then bit 4 set and the header CRC recomputed; header-only (no op-12 frame), because a sealed op-12 body would require the revision's AEAD internals |
+
+The fixtures are produced by two independent encoders (Python in `scripts\graph_compat_check.py fixtures`, Rust in `tests\graph_compat.rs`); `graph_compat.rs` asserts that they agree byte for byte, that HEAD rejects each graph fixture with `UnsupportedFeature(4)`, that the controls open, and that the smuggled op 12 is rejected.
+
+**Result** (`python scripts\graph_compat_check.py run`, re-run 2026-10-23; rustc/cargo 1.99.1, Python 3.15.0, Node v24.22.1): **PASS, 348/348 probes matched**.
+
+| Revision | Rust entry-point probes | Python (C ABI) | Node | Results |
+|----------|-------------------------|----------------|------|---------|
+| `81ff901` (HEAD, default features) | 111 | 9 | 3 | 117 × `UnsupportedFeature(4)`, 6 × `ReplicaDiverged` |
+| `v0.3.0` | 105 (no `open_read_only*` in this tag) | 9 | 3 | 111 × `UnsupportedFeature(4)`, 6 × `ReplicaDiverged` |
+| `v0.2.0` | 30 | 3 | 3 | 36 × `UnsupportedVersion(5)` |
+| `v0.1.0`, `v0.1.1`, `v0.1.2` | 18 each | 3 each | 3 each | 24 × `UnsupportedVersion(5)` each |
+
+Entry points probed (where present in the revision), each against plain, timestamps and encrypted fixtures:
+- `Database::{open, open_read_only, open_encrypted, open_read_only_encrypted, open_from_bytes(None|key), discard_incomplete_tail, discard_incomplete_tail_encrypted}`;
+- `maintenance::{inspect, inspect_detail, inspect_with_key, verify, verify_with_key, backup, backup_with_key, restore, restore_with_key, drill, compact, compact_at, compact_with_key, upgrade}`;
+- `logops::{reencrypt, restore_to, export_log_segment}` (both key forms);
+- `changes::read_log_changes`;
+- `ReplicaFollower::{create, open, sync_from_log, apply, apply_file}`;
+- the C ABI via the Python binding `NativeLibrary.{open, open(key), open_from_bytes}`, and the Node binding `NativeLibrary.open`.
+
+Entry points absent in a revision are recorded per revision in the JSON output under `entry_points_absent_in_revision`; they are not counted as probes.
+
+**Nuance:** `ReplicaFollower::apply` and `apply_file` answer `ReplicaDiverged`, not `UnsupportedFeature(4)`. The follower's own (valid) file is opened first, and the graph-flagged source header is rejected by the lineage/header comparison before any frame is replayed. This is an explicit rejection that applies no data, so it satisfies the rule. The script expects exactly this result for those two probes.
+
+**Decision:** **V5 + `FLAG_GRAPH = 4`**. No HEAD-default entry point accepts the file, so no INV-001 exception is needed. Op 12 without the flag is already rejected as `Corrupt`, so a graph frame can never be silently replayed by a vector-only build.
+
+**Reproduce:** `python scripts\graph_compat_check.py run [--revs 81ff901 v0.3.0 ...] [--skip-bindings] [--json PATH]`. The run reads nothing from the working tree except the script, the probe source `scripts\graph_compat_probe.rs` and Git objects. Fast in-tree subset: `cargo test --locked --test graph_compat`.
+
+## DO-002 — Association of vectors to nodes
+
+**Rule:** select attachments if a prototype attaches nodes to collection records without changing `Record`, `Mutation`, collection search code or `hybrid.rs`.
+
+**Prototype:**
+- Lives in a throwaway `git archive` copy of `81ff901` at `%TEMP%\vlite-graph-baseline\do002-81ff901\tests\do002_attachments.rs`, file SHA-256 `4703221753B55392A9EE648127D58689DD96EED1EEF55F6AF97DE12385648AFC`.
+- It is never merged, and no branch was created because branch operations were not authorized. A copy outside version control is the equivalent isolation.
+- It models attachments as graph-owned state keyed by `(collection id: u16, record id: u64)` plus the record revision at attach time.
+
+The prototype enforces:
+- PD-012: one node per record across the file;
+- REQ-013: one attachment per (node, collection), the record must exist, and it must have no expiry.
+
+It shows:
+- `search`, `CollectionRef::search` and `search_hybrid` results map to nodes after the unchanged search returns (pivot mapping);
+- staleness is detected through existing revisions (`Live` / `Changed` / `Missing`);
+- detach works;
+- keys are stable across close/reopen;
+- a dropped collection is detectably dangling. LEG-008 makes this unreachable in the real design.
+
+**Result:**
+- `cargo test --offline --locked --test do002_attachments` passes (1 test).
+- The SHA-256 of every file under the copy's `src\` was compared before and after: 0 changes. So `Record`, `Mutation`, `collection.rs`, the search code and `hybrid.rs` are untouched.
+
+**Decision:** **Attachments (PD-012)**. Persisting `Attach`/`Detach` belongs to DO-003 and was not prototyped. Enforcing LEG-001..LEG-008 belongs to EPIC-004.
+
+## DO-003 — Graph frame byte layout and op tag
+
+**Op tag:** the current decoder rejects every op value 12..=255 (`Corrupt: invalid operation or reserved record bytes`; proven by `v5_control_op12_without_flag.hex`), and 1..=11 are in use. **12 is the lowest unused tag.** This part is decided.
+
+All integers below are little-endian.
+
+**Frame (existing layout, unchanged).** Prefix (36 bytes, plaintext even in encrypted files):
+
+| Offset | Size | Field | Graph frame value |
+|--------|------|-------|-------------------|
+| 0 | 4 | magic `VREC` | — |
+| 4 | 1 | op | `12` |
+| 5 | 2 | collection | `0` (SEC-001: no graph identifier in plaintext) |
+| 7 | 1 | reserved | `0` |
+| 8 | 8 | sequence | commit sequence (= revision of every entry) |
+| 16 | 8 | id | `0` |
+| 24 | 4 | count | number of entries |
+| 28 | 4 | payload_len | body length (as op 3 batch frames) |
+| 32 | 4 | prefix CRC32 | existing |
+
+The body follows (sealed with the existing AEAD in encrypted files: 12-byte nonce + ciphertext + 16-byte tag), then the footer `VCMT` + CRC32 u32 + sequence u64.
+
+**Body (tested):**
+
+| Offset | Size | Field |
+|--------|------|-------|
+| 0 | 1 | body_version = `1` |
+| 1 | 1 | reserved = `0` |
+| 2 | 2 | graph_id (u16, < PD-002 = 64) |
+| 4 | … | `count` entries |
+
+**Entry envelope (tested):** `tag u8 | flags u8 = 0 | reserved u16 = 0 | payload_len u32 | payload`. Unknown tags, non-zero flags or reserved bytes, a trailing remainder, or a count mismatch are corruption.
+
+**Entry tags.** "Tested" means encoded by `tests\graph_compat.rs`, cross-checked against the Python encoder, and also produced byte-for-byte by the crate codec. "Unit-tested" means implemented in `crates\vlite-graph\src\codec.rs` and covered by its unit tests (golden bytes, round trip, every truncation, trailing bytes, field validation, maximum sizes); the runtime does not write or read these entries yet. "Metadata" below is the existing record metadata encoding from `src\metadata.rs`, re-implemented byte-identically in `crates\vlite-graph\src\properties.rs`; it is always preceded by `len u32` with `4 <= len <= 65,536` (4 = the `count` field alone, i.e. no fields), at most 64 fields (the `count` field is `u32` but values above 64 are rejected), sorted unique field names of 1..=256 bytes. Its layout (little-endian):
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 4 | `count u32` (≤ 64) |
+| 4 | — | `count` fields in strictly ascending byte order of the name, each: |
+| +0 | 2 | `key_len u16` (1..=256) |
+| +2 | `key_len` | key (UTF-8) |
+| +2+`key_len` | 1 | `type u8` |
+| +3+`key_len` | value | `1` String: `len u32` + UTF-8 bytes (≤ 4,096); `2` Integer: `i64` (8); `3` Float: `f64` (8); `4` Boolean: `u8` 0 or 1 (1); `5` GeoPoint: `latitude f64`, `longitude f64` (16) |
+
+| Tag | Entry | Payload (field order) | Max size / validation | Status |
+|-----|-------|-----------------------|-----------------------|--------|
+| 1 | `CreateGraph` | `name_len u8`, `name` (UTF-8) | name follows the collection-name rule `^[a-z][a-z0-9_-]{0,62}$` (REQ-005), graph_id in body header | Tested |
+| 2 | `DropGraph` | empty | graph must exist and be empty | Unit-tested |
+| 3 | `GraphHighWater` | `next_node_id u64`, `next_edge_id u64` | monotonic; never decreases | Unit-tested |
+| 4 | `PutNode` | `node_id u64`, `key_len u16`, `key`, `label_count u8`, labels × (`len u8`, bytes), `metadata_len u32`, metadata | key 1..=256 UTF-8 bytes (PD-001), ≤ 8 labels of 1..=63 bytes `[A-Za-z0-9_]` (PD-003), strictly ascending, 64 fields / 64 KiB | Unit-tested |
+| 5 | `PatchNode` | `node_id u64`, `add_count u8` + labels, `remove_count u8` + labels, `set_len u32` + metadata, `unset_count u8` + field names × (`len u16`, bytes) | add/remove ≤ 8 each, disjoint; unset ≤ 64, strictly ascending, disjoint from set; tag-4 limits hold after applying | Unit-tested |
+| 6 | `DeleteNode` | `node_id u64` | no incident edges (REQ-012) | Unit-tested |
+| 7 | `PutEdge` | `edge_id u64`, `source u64`, `destination u64`, `type_len u8`, `type`, `key_len u16` (0 = no key), `key`, `metadata_len u32`, metadata | type 1..=63 `[A-Za-z0-9_]`, key ≤ 256 UTF-8 bytes | Unit-tested |
+| 8 | `PatchEdge` | `edge_id u64`, `set_len u32` + metadata, `unset_count u8` + field names × (`len u16`, bytes) | as tag 5 | Unit-tested |
+| 9 | `DeleteEdge` | `edge_id u64` | — | Unit-tested |
+| 10 | `Attach` | `node_id u64`, `collection u16`, `reserved u16 = 0`, `record_id u64` | PD-012 / REQ-013 | Unit-tested |
+| 11 | `Detach` | `node_id u64`, `collection u16`, `reserved u16 = 0` | — | Unit-tested |
+| 12 | `PutSchema` (P2) | reserved; layout deferred to P2 | rejected as an unknown tag | Reserved |
+| 64 | `VectorMutation` | `collection u16`, `reserved u16 = 0`, then exactly one `encode_batch_entries` entry verbatim (Put: `[1,0,0,0] id u64 payload_len u32 f32s payload`; Delete: `[2,0,0,0] id u64 0u32`; PutWithMetadata: `[4,0,0,0] id u64 body_len u32` + `extended_body(vector, payload, metadata)`) | REQ-010: batch ≤ `MAX_BATCH_OPERATIONS` (4,096) entries and `MAX_BATCH_BYTES` (16 MiB); the crate checks only the entry structure, the adapter checks content | Tested |
+
+**Change from the draft (needs review):** field names in the `unset` lists of tags 5 and 8 use `len u16`, not `len u8`, because field names may be up to 256 bytes (same as metadata keys). No other draft row changed.
+
+**Further rules implemented by the crate codec:** a body has 1..=4,096 entries (an empty batch is never written, as `write_batch_in` returns early for empty batches) and at most 16 MiB; `count` from the frame prefix must equal the decoded entry count; tags outside {1..=11, 64}, non-zero entry flags or reserved bytes, and graph IDs ≥ 64 are corruption; lists must be canonical so `encode(decode(bytes)) == bytes`.
+
+**Status:**
+- Decided: the op tag, the prefix use, the body header, the entry envelope, and tags 1 and 64.
+- Proposed final, pending GATE-003 and EPIC-003 code review: the payloads for tags 2..11 and the metadata encoding reuse, all now implemented and unit-tested in `crates\vlite-graph`.
+- v1.2.6: the engine source now lives in `src\property_graph\engine\` (see "EPIC-003 storage integration" below). With `--features graph`, `vlite` writes op-12 frames for tags 1 and 2 and replays tags 1..=9; tags 10, 11 and 64 are refused at replay until EPIC-004 adds the attachment and vector-entry adapter (ITEM-011 `frame.rs`). The crate is still not a dependency of `vlite`.
+- v1.2.7: replay accepts tags 10, 11 and 64 through `src\property_graph\frame.rs` (see "EPIC-003 adapter completion" below). Writers still emit only tags 1 and 2 until EPIC-004.
+
+## DO-004 — Hook inventory confirmation
+
+**Method:**
+- Grepped every `pub fn` in `81ff901` `src\{lib, collection, maintenance, logops, replica, import, changes, ann_snapshot, disk_ann}.rs`.
+- Kept the mutating, deleting, expiring, importing, dropping, maintenance and open/recovery entry points.
+- Compared them with LEG-001..LEG-020.
+
+Read-only functions (search, get, inspect reports, statuses) are excluded. CLI binaries (`vlite-maintain`, `vlite-import`, `vlite-shell`, `vlite-smoke`, `vlite-tune`, `vlite-quality`) and the server routes call these library functions and inherit their behavior.
+
+**Already covered by LEG-001..LEG-020:**
+- `put*`, `update_metadata`, `delete*`, `write_batch*` and their collection equivalents;
+- `import_chunk` / `finish_import` / `abort_import` (both `Database` and collection forms);
+- `drop_collection`;
+- `compact*`, `upgrade`, `backup*`, `restore*`, `drill`, `inspect*`, `verify*`, `reencrypt`, `restore_to`;
+- `changes_after`, `feed_cursor`, `read_log_changes`;
+- `export_log` and `ReplicaFollower::{create, apply, apply_file, sync_from_log, promote}`;
+- HNSW build/rebuild/maintain, ANN snapshot save/load and disk-ANN (LEG-015);
+- query language;
+- server, gRPC and webhooks;
+- binding open paths.
+
+**Not in the table:** proposed additions, to be folded into PRD Section 3.4 before EPIC-004 starts.
+
+| ID | Entry point (81ff901) | Vector-only file / feature off | Graph-enabled file |
+|----|-----------------------|-------------------------------|--------------------|
+| LEG-021 | `Database::open_from_bytes`, `create_in_memory`, `to_bytes` (`src\lib.rs` 899-913) | Unchanged | Same replay and header-flag rules as `open`; `to_bytes` must keep `FLAG_GRAPH` (same rule as Section 3.3 item 6) |
+| LEG-022 | `Database::discard_incomplete_tail`, `discard_incomplete_tail_encrypted` (`src\lib.rs` 1073-1077) and the automatic tail discard in `ReplicaFollower::open` (`src\replica.rs` 89) | Unchanged | A torn graph frame is an incomplete tail and is discarded exactly like a torn vector frame; the header (and `FLAG_GRAPH`) is never rewritten |
+| LEG-023 | `logops::export_log_segment`, `LogSegment::{save, load, to_bytes, from_bytes}` (`src\logops.rs` 236-370) | Unchanged | Segments carry graph frames verbatim; applying them is governed by LEG-014 |
+| LEG-024 | `create_collection`, `set_collection_settings` (`src\lib.rs` 1761, 1832) | Unchanged | Unchanged (collections are not graph objects); collection ids stay stable, so attachment keys stay valid (DO-002) |
+| LEG-025 | `set_commit_clock`, `set_wasm_clock_ms` (`src\lib.rs` 1594, 100) | Unchanged | Unchanged; graph entries carry no time fields (REQ-014) |
+| LEG-026 | `Database::close`, `FeedCursor::{save, load}` (`src\lib.rs` 2522; `src\changes.rs` 74-98) | Unchanged | `close` unchanged; feed cursors cannot be obtained on graph-enabled files (LEG-013) |
+
+`ReplicaFollower::{put, delete, write_batch}` always return `ReadOnlyReplica` at `81ff901`, so they need no hook.
+
+**Decision:** LEG table + LEG-021..LEG-026. Five of the six additions change no behavior. LEG-021 and LEG-022 are hooks that EPIC-003 must honor (flag preservation, torn-tail handling).
+
+## DO-005 — Baseline capture
+
+**Status: Recorded (v1.2.7).** The reference run is recorded in [`baseline.md`](baseline.md) (FILE-024): clean `81ff901`, default features, 5 runs per workload, seeded 100,000 × 384 dataset with 10 queries per run plus the existing CI `vlite-bench` workloads, REG-013 `pass`. Medians: exact ingest 62,489 vectors/s, p50/p99 9.968/12.080 ms, reopen 1,131.702 ms, RSS 329.0 MiB; filtered ingest 56,274 vectors/s, p50/p99 4.762/8.039 ms, reopen 1,179.414 ms, RSS 384.7 MiB; HNSW ingest 60,903 vectors/s, build 930,819.669 ms (about 15.5 minutes), HNSW query p50/p99 3.072/3.630 ms, recall 0.26.
+- Reference machine: Windows 11 build 26300, Xeon Platinum 8370C, 16 logical CPUs, 64 GiB RAM, rustc/cargo 1.99.1, Python 3.15, Node 24.22.
+- Storage: `Q:` is a ReFS Dev Drive on a Windows-reported virtual SAS disk (`Msft Virtual Disk`) with unknown physical backing. **These storage details were queried after the measurement; the JSON records storage as "unrecorded".** The current script requires `--storage-description` for reference runs.
+- 10 queries, not 1,000: a 1,000-query attempt exceeded `vlite-bench`'s 500-million distance-component limit for exact search.
+- Not decided here: the REG-010 budgets (PD-014, GATE-004) and whether to re-pin to `62e2902` or later (baseline validity note below).
+
+The earlier pending state and the smoke evidence are kept below for traceability.
+
+**Tooling delivered:**
+- `scripts\graph_baseline.py measure --rev <sha> --profile smoke|reference --runs N [--reference-machine-confirmed] [--output PATH]`.
+- It builds the exact revision from `git archive` into an isolated target directory and runs the existing `vlite-bench` workloads.
+- It records:
+  - put, exact, HNSW and filtered search medians and p99;
+  - `reopen_ms`, as reported by `vlite-bench`;
+  - peak RSS through the existing `tests\measure_benchmark.py` (`PeakWorkingSetSize` on Windows, `getrusage` `ru_maxrss` on Linux/macOS);
+  - release binary sizes for `vlite-bench` and `vlite-ffi`;
+  - REG-013 (pinned artifact features versus the `Cargo.toml` feature set).
+- `--profile reference` (100,000 × 384, seeded, 5 runs) refuses to run without `--reference-machine-confirmed` (exit 2).
+
+**Smoke evidence** (not a baseline): `python scripts\graph_baseline.py measure --rev 81ff901 --profile smoke --runs 1` succeeded and REG-013 passed.
+
+| Item | Value |
+|------|-------|
+| Machine | Windows 11 build 26300, Intel Family 6 Model 106, 16 logical CPUs, 64 GiB RAM; storage not recorded |
+| Toolchain | rustc 1.99.1, cargo 1.99.1, Python 3.15.0 |
+| Release binary sizes at `81ff901` | `vlite-bench` 1,146,368 bytes; `vlite-ffi` 2,830,336 bytes |
+
+**Missing before DO-005 could be recorded (both resolved in v1.2.7):**
+1. User confirmation that this machine (or another) is the reference machine for REG-010, NFR-002 and NFR-003, including its storage device.
+2. Then run `python scripts\graph_baseline.py measure --rev 81ff901 --profile reference --runs 5 --reference-machine-confirmed --output %TEMP%\vlite-graph-baseline\reference-81ff901.json`, then record the machine, toolchain, commands and results in `docs\projects\feature-agent-graph\baseline.md` (FILE-024) and mark DO-005 decided here.
+
+**Limitations to record with the baseline:**
+- RSS is the Windows peak working set on Windows and `ru_maxrss` elsewhere, so numbers are comparable only on the same OS.
+- `reopen_ms` measures `vlite-bench`'s reopen of its own file.
+- Medians are taken over runs, not over requests inside a run.
+
+## DO-006 — Identity model
+
+**Status: PD-001 chosen under delegation; formal GATE-002 sign-off still to be recorded.**
+- Chosen: PD-001, a caller-supplied string key (UTF-8, 1..=256 bytes, unique per graph) mapped to an internal monotonic `u64` node ID that is never reused. The workflow chose it on the user's instruction to proceed without stopping; it is implemented in `crates\vlite-graph`.
+- Implemented rules: node keys and edge keys are separate namespaces, each unique per graph. A deleted key can be reused, but its ID cannot. New IDs must be at least the graph's high-water mark (gaps are allowed so a compaction rewrite can keep old IDs), and the high-water mark becomes `id + 1`. `u64::MAX` is never assigned. `PutNode` on an existing ID must use the same key.
+- Rejected alternative: caller-supplied `u64` node IDs with the same uniqueness rules.
+- Record identity is decided independently by DO-002: `(collection id u16, record id u64)`. It does not depend on this choice.
+
+## EPIC-003 storage integration (v1.2.6, uncommitted, pending review)
+
+Recorded under the user's delegation. These are engineering decisions, not GATE approvals.
+
+**Packaging (supersedes PRD Section 3.2.1 rule 5's dependency plan).**
+- The pure engine source moved from `crates\vlite-graph\src\` to `src\property_graph\engine\`, which the root package already ships (`src/**`).
+- `crates\vlite-graph\src\lib.rs` is now a thin harness: `#[path = "../../../src/property_graph/engine/mod.rs"] mod engine; pub use engine::*;`. The crate stays `publish = false`, workspace-only and dependency-free. `cargo test --locked -p vlite-graph` still builds and tests the engine in isolation.
+- `vlite` declares `graph = []`. This is not a crate dependency, and `graph` is not in `default` or in any artifact feature pin (REG-013).
+- The engine uses only module-relative paths (`super::`), never `crate::`, and no `unsafe`, `vlite` types or I/O. `tests\graph_build_boundary.py` enforces this, plus:
+  - the crate source is only the harness;
+  - there is no `vlite-graph` entry in any `vlite` dependency table;
+  - `cargo package --list -p vlite` ships every engine file.
+- Result: `cargo package --locked -p vlite` passes both with and without `--features graph`, and nothing has to be published. The isolated crate, the `vlite` feature build and the `graph_storage` test target all compile the same files, so their engine unit tests are identical by construction.
+
+**Graph IDs (`GraphId`, body header) can be reused.**
+- The engine no longer keeps a graph-ID high-water mark. `CreateGraph` requires an ID below 64 that is not live, and writers use the lowest free ID.
+- Dropping a graph needs it to be empty, which leaves no nodes, edges or attachments. Per-graph node and edge high-water marks live only inside the graph, and the public API names graphs, never IDs. So reusing an ID cannot alias data, and creation is not limited to 64 over the file's lifetime.
+- The limit is 64 live graphs (PD-002). An atomic `DropGraph` + `CreateGraph` of the same ID in one body is valid.
+
+**Storage integration (`--features graph`).**
+- `FLAG_GRAPH = 4` and `OP_GRAPH = 12` are defined in `src\format.rs` only under the feature.
+- Only the graph-aware loader (`format::load_database`, used by `Database` open, read-only open, `open_from_bytes` and tail repair) accepts the flag. It accepts op 12 only in V5 files whose header has the flag.
+- Every other reader still rejects graph files with `UnsupportedFeature(4)`, even in graph builds, until hooks H-5/H-6 make them graph-aware: maintenance, change feed, log export and `ReplicaFollower`, whose open checks the header before any repair.
+- Frame prefix:
+  - `collection` and `reserved` are 0, `id` is 0;
+  - `1 <= count <= 4,096`;
+  - `payload_len` is between the body length implied by `count` (`4 + 8·count`) and 16 MiB.
+- Replay order: the prefix CRC, body CRC and sequence are checked, encrypted bodies are opened, and the body is then decoded completely and applied by the atomic `GraphState::apply` (validate first, roll back on error). Any failure fails the whole open with `Corrupt`; no partial graph state is ever published.
+- Writes use the existing commit path: sequence, lock, CRC, sealing, timestamp anchors and `durable_group`.
+- `create_with_graph` creates a V5 file with `FLAG_GRAPH`. An explicit V3 or V4 request returns `GraphsRequireV5`.
+- Public API:
+  - `create_graph`, `drop_graph`, `list_graphs` (name order) and `is_graph_enabled` exist.
+  - Ordinary files return `GraphsNotEnabled`.
+  - Read-only handles refuse writes.
+  - In-memory databases cannot be graph-enabled (WASM is out of scope).
+- Not exposed in v1.2.6: `graph`/`graph_mut` handles (added in v1.2.7) and node/edge mutations (EPIC-004).
+
+## EPIC-003 adapter completion (v1.2.7, uncommitted, pending review)
+
+Engineering decisions under the user's delegation; no gate is approved.
+
+**Vector and attachment entries at replay (ITEM-011).**
+- A `VectorMutation` entry carries exactly one canonical batch entry (op 1, 2 or 4) from `format::encode_batch_entries`. The engine envelope check refuses import markers (op 8) and reserved bytes. The adapter decodes the entry with `format::decode_batch` using the target collection's dimensions, so vector bytes and rules are identical to op-3 batches. Unknown collections, dimension mismatches and non-finite components are `Corrupt` at the frame offset.
+- Order: decode every entry first, then apply the graph entries atomically (`GraphState::apply`), then apply the vector entries in body order at the frame sequence (record revision = frame sequence, expiry cleared as with op-3 puts).
+- Attachment integrity is checked on the body's final state. Every attachment the body touches (an `Attach` entry, or an attached record changed by a vector entry) must reference a live record without expiry. Otherwise the open fails with `Corrupt` ("graph attachment references a missing or expiring record"). A record created earlier in the same body may be attached. An attached record can be deleted only after a `Detach` in the same or an earlier body.
+- Ordinary op-2/3/9 frames that delete or expire an attached record were not checked at replay in v1.2.7. EPIC-004 (v1.2.9) closed this: replay of such a frame fails the open with `Corrupt` ("graph attachment references a missing or expiring record"), in addition to the H-4 write hooks that prevent a writer from producing it.
+
+**Handles, conversions and errors (ITEM-012/013).**
+- `Database::graph(name) -> GraphRef` and `graph_mut(name) -> GraphMut` (`name`, `info`). `graph_mut` returns `ReadOnly` on read-only handles before the name lookup.
+- Engine mirror types: `PropertyCondition` (mirrors `Condition`) and `Precondition` (mirrors `Expected`). `src\property_graph\convert.rs` validates with `metadata::validate`/`validate_filter` before converting, so non-finite floats never reach the engine. Conversions are total and lossless, and property encodings are byte-identical.
+- The `GraphError` → `Error` mapping is exhaustive: lifecycle errors map exactly, `BatchSize` to `BatchTooLarge`, `InvalidProperties` to `InvalidMetadata`, and the rest to `InvalidQuery` with a fixed message until EPIC-004 adds the FILE-002 variants.
+
+**Unresolved (GPEND):**
+- GATE-002 and GATE-003 sign-off (DO-003 tags 2..11, DO-006).
+- GATE-008 release bundle and graph artifact feature.
+- H-5/H-6: graph-aware maintenance, change feed, log export and replication, including preserving `FLAG_GRAPH` on copies (TEST-008).
+
+## Baseline re-pin (v1.2.10)
+
+Decision made autonomously under the user's delegation (the user is unavailable and asked for good decisions); the user should review it, and it approves no gate.
+
+- **Why.** The earlier note below the fixtures said the working tree contained other contributors' engine changes that REG-001 and REG-008 flagged, and that re-pinning after they landed was a user decision. They landed as `04014fc` (optimization-only) and `347b01d` ("Harden durability diagnostics and bounded maintenance behavior"), both on `origin/main`. The peer session that owns them asked for the graph baselines to be re-pinned against `347b01d`. Treating published, reviewed, test-passing upstream commits as regressions would make every graph check fail until they are reverted, which is not the intent of the baseline.
+- **What changed.** `python scripts\graph_baseline.py fixtures --rev 347b01d` and `python scripts\api_surface.py baseline --rev 347b01d` regenerated `tests\fixtures\graph_baseline\` and `tests\fixtures\api_surface\vlite-default.txt`. Script defaults, test headers and docs now name `347b01d`.
+- **Review of the regenerated files against the `81ff901` set.**
+  - `vlite-default.txt`: six added items and no removals (`MAX_HNSW_RETAINED_RECORD_BYTES`, `records::{MAX_READ_SNAPSHOTS, MAX_READ_SNAPSHOT_BYTES, MAX_READ_SNAPSHOT_RECORDS, ReadSnapshot, SnapshotRetentionStats}`).
+  - `openapi.json`: additions only. They are the `x-durable-group-commit` block, the `AutoMaintenancePolicy` retry-backoff fields and description, and the `MaintenanceStatus.rebuild.phase` enum.
+  - V4/V5 `.vlite.hex` files differ only in the random lineage, header CRC and encrypted salt/nonce/ciphertext bytes that REG-003 masks.
+  - MCP transcripts and the V3 file are unchanged.
+- **Consequences.**
+  - `APPROVED_OPENAPI_ADDITIONS` in `tests\graph_surface_parity.rs` is now empty because the golden already contains the block it used to allow. The allowlist mechanism is kept (its two tests use a test-local synthetic addition) for future reviewed additions.
+  - `scripts\api_surface.py check --features graph` now implements the C-2 allowance: additions under `vlite::property_graph::` are reported as ALLOWED and any other addition or any removal fails.
+  - The DO-005 performance record stays at `81ff901`. Re-measure at `347b01d` before REG-010 is enforced or GATE-008 is requested (the reference profile takes hours; run it on an otherwise idle machine).
+  - `scripts\graph_compat_check.py` keeps `81ff901` and the release tags in `DEFAULT_REVS` because that is the DO-001/DO-002 evidence; its recorded results are not regenerated.
+- **Later upstream commit.** `5227fad` ("Sample rebuild worker completion once per status observation") changes only `src\rebuild.rs` (a local variable so `phase` and `worker_finished` agree). It changes no public item, OpenAPI field or fixture, so the pin stays at `347b01d`. `api_surface.py check` (default and `--features graph`) and the `graph_regression`, `graph_compat`, `graph_surface_parity` and `graph_integrity` suites pass on that tree.
+- **Going forward.** Every upstream commit that changes the public item list or the served OpenAPI needs the same two commands, run from a clean checkout of that commit, plus a review of the diff. The graph work still must not edit those upstream files except for the `cfg(feature = "graph")` hunks recorded in the PRD.
+
+## EPIC-004 mutations and integrity hooks (v1.2.9, uncommitted, pending review)
+
+These are engineering decisions made autonomously under the user's delegation. No gate is approved.
+
+- **Location.** The planner lives in `src/property_graph/engine/mutate.rs`, the shared engine source, not in `crates/vlite-graph/src/mutate.rs`. The harness compiles the same file.
+- **Planning.** `GraphState::planner(sequence, graph)` applies each mutation tentatively and rolls back on drop. Later operations in a batch see earlier ones, and a failed batch leaves the state untouched. The adapter then commits through the existing validate → append → apply path. Vector operations reuse `validate_batch` and are applied after the graph state, under the same sequence.
+- **Attach liveness.** An attach requires a live record without expiry, taking earlier vector operations in the same batch into account. Otherwise it returns `GraphRecordNotAttachable`. A vector delete of a record that is attached at that point of the batch returns `GraphAttachedRecord`.
+- **Edge keys.** Creating an edge with a live key succeeds without writing when the edge is identical: same endpoints, type and bit-identical properties. It returns `created = false` and the existing revision. Any other reuse of the key returns `GraphKeyConflict`. A batch that writes no entries returns `revision: None`.
+- **Preconditions.** Preconditions are checked before existence. A failure maps to the existing `RevisionMismatch { current }` instead of a new graph-specific error.
+- **Import.** The LEG-007 check runs after the idempotency and conflict checks, so an already-committed chunk is still `AlreadyCommitted`. It runs before the `RejectChunk` invalid-row outcome, so an attached delete is an error under either policy.
+- **`graph_sequence`.** It is raised to the commit sequence (as a maximum) for the owner of an attached record changed by `apply` (put, batch put, import) or by a metadata update, and by that record's delete or expiry, which the H-4 hooks reject while it is attached. Replay does the same in `format.rs`. Named and sparse vector writes (`vectors.rs`) deliberately do not raise it. This is a decision for user review, not a known gap: those writes replace a collection's side-vector data in one vector frame and cannot be attributed to individual records without diffing the old and new data, and graph read results carry no vectors by default (PRD Section 3.6) while evidence items never do (REQ-042), so they cannot change any default traversal result or evidence field (record ID, revision, metadata, payload). If a later epic adds an explicit vector projection to a core read API, this decision must be revisited. The PRD Section 3.5 wording now says "the base record".
+- **New public errors.** These variants go beyond the FILE-002 list: `GraphEdgeNotFound`, `GraphAttachmentConflict`, `GraphAttachmentNotFound` and `GraphRecordNotAttachable`. They are `cfg(feature = "graph")` variants of the non-exhaustive public `Error` enum; the vector-only API surface is unchanged.
+- **GPEND:**
+  - TEST-005 rows LEG-009..LEG-016 and LEG-018 (EPIC-006/EPIC-007);
+  - a file-backed model at the full TEST-003 scale (10,000 steps per seed, reopen every 500);
+  - formal GATE-002/GATE-003 sign-off.
+
+## EPIC-005 bounded reads (v1.2.11 engine, v1.2.12 public surface; uncommitted, pending review)
+
+These are engineering decisions made autonomously under the user's delegation. No gate is approved. The engine is `src/property_graph/engine/` (`query.rs`, `traverse.rs`, `cursor.rs`, `meter.rs`, `limits.rs`, `filter.rs`), compiled unchanged by the `vlite-graph` harness. The public adapter is `src/property_graph/read.rs`.
+
+- **One IR, one executor.** Every read, including `explain`, builds the engine's `GraphQuery` IR and runs `engine::execute`. `explain` validates and plans exactly like the read, then returns the normalized query, effective limits, projection and index choices. It examines no node or edge, and its stats counters stay at zero.
+- **Public shape.** The `GraphRef` methods are `view_sequence`, `query`, `explain`, `get_node`, `get_node_by_id`, `get_edge`, `get_edge_by_key`, `find_nodes`, `neighbors`, `traverse` and `shortest_path`.
+  - Each read returns `GraphRead<T> { output, complete, truncation, view_sequence, stats, cursor }`.
+  - Requests are plain structs with public fields (`FindNodes`, `Neighbors`, `Traverse`, `ShortestPath`). Per-call `ReadOptions { limits, projection, cancel }` carries the limits, projection and cancel flag.
+  - Output, query and error-adjacent enums are `#[non_exhaustive]`.
+  - Inputs use the crate's `Condition` and `Metadata`, and results never carry vectors.
+  - Everything is exported under `vlite::property_graph::` only (the C-2 allowance). `GraphLimits::validate` is crate-private, so the public `GraphLimits` exposes no engine error type.
+- **Conditions.** Every condition list is checked with `metadata::validate_filter` before conversion, so invalid conditions fail exactly like record filters, and matching is identical to `metadata::matches`. Randomized adapter tests compare the two directly and through `find_nodes`/`neighbors` on a file.
+- **`view_sequence`.** It is the database commit sequence when the `GraphRef` was obtained. A `GraphRef` borrows the `Database`, so no commit can happen while it lives. A read-only handle therefore reports its open-time sequence for its whole lifetime, and unrelated vector writes advance it.
+- **Limits.** Validation runs before anything else.
+  - A value above `GraphLimits::CEILING` fails with `GraphLimitExceedsCeiling`, naming the first offending field in declaration order. Limits are never clamped.
+  - `max_hops` and the output caps may be zero. The work budgets (`max_visited_nodes`, `max_edges_examined`, `max_edges_per_node`, `deadline_ms`) must be at least 1, or the read fails with `InvalidQuery`.
+  - A paged read's `limit` (default: the matching `max_output_*` cap) must be between 1 and that cap's ceiling.
+- **Failure precedence.** Public entry points check limits before converting query inputs. The engine then validates query structure (labels, types, conditions, projection), the cursor, and node resolution. Work limits, deadlines and cancellation produce truncation reasons; an internal invariant violation remains an explicit error. The adapter regression test combines invalid filters/selectors with invalid limits to preserve this ordering.
+- **Scan budget (PD-006).** `find_nodes` charges one unit of `max_edges_examined` per scanned candidate node. `neighbors`, `traverse` and `shortest_path` charge one unit per adjacency entry examined. When `find_nodes` runs out of budget, it returns `EdgeLimit` with a cursor positioned after the last scanned candidate, so paging can always continue.
+- **Cursors.** The v1 layout is version, kind, graph ID, graph sequence, query fingerprint, position, then a checksum.
+  - The fingerprint is FNV-1a 64 over the normalized query, including page size and projection. The checksum is FNV-1a over the preceding bytes; it detects accidents and is not a MAC.
+  - Decoding checks structure, checksum, kind, graph and fingerprint. Any failure is `InvalidQuery`.
+  - A graph sequence that differs from the current one then fails with `GraphCursorStale`. A cursor survives reopen and unrelated vector writes, but not writes to the graph or to an attached record's base record.
+- **Deadline and cancellation (PD-008, PD-010).**
+  - Both are checked once before any work and then at least every 64 budget units (`CHECK_INTERVAL`).
+  - A stop before any work returns empty output, and a paged read's cursor repeats the page.
+  - The adapter uses a monotonic `Instant` clock (the host clock on wasm32), and the engine tolerates a clock that goes backwards.
+  - Deadline expiry is tested with an injected clock in the engine tests. Cancellation is tested through the public API.
+- **Traversal.**
+  - The search is FIFO breadth-first. Adjacency is ordered by (relationship type, edge ID), `Both` merges both directions, and a self-loop appears once.
+  - Nodes at depth `max_hops`, and nodes failing `expand_filter`, are visited but not expanded.
+  - Every edge that passes the edge filter and is examined from an expanded node is returned once, in first-examined order. This includes edges to already-visited nodes and self-loops.
+  - Returned nodes are the discovered nodes that pass `return_filter`, in discovery order, each with its minimum depth.
+- **Canonical paths.** Among the shortest paths from the start set, a read returns the lexicographically smallest edge-ID sequence. It is computed exactly over the BFS layer DAG, which is cheap because the hop ceiling is 4.
+  - Intermediate nodes of traversal paths must be expandable.
+  - A traversal path is returned only if all of its edges are among the kept (output-capped) edges. Otherwise the read reports `OutputLimit`.
+  - `shortest_path` takes only direction and types. When source equals destination, it returns `Found` with no edges.
+- **Certification.** Any truncation during `shortest_path` yields `Exhausted { truncation }`, so `Found` and `NoPathWithinHops` are always certified. The destination counts towards `max_visited_nodes`.
+- **Truncation.** Reasons are deduplicated and listed in declaration order (`VisitedLimit`, `EdgeLimit`, `DegreeLimit { node_ids }` with at most 64 IDs, `OutputLimit`, `Deadline`, `Cancelled`). `complete == truncation.is_empty()`. Output caps never stop exploration.
+- **Evidence.** The adapter tests in `src/property_graph/read/tests.rs` cover condition parity, invalid-filter parity and `view_sequence`. `tests/graph_traversal.rs` compares the public reads with the independent BFS model in `tests/graph_model/`, and also covers truncation soundness, the 100,000-edge hub, cursor staleness and reopen, cancellation and ceilings. `examples/graph_bench.rs`, the allocation-counting `examples/graph_memory.rs` and the runner described below produced the accepted five-repetition measurement in [`graph-measurements.md`](graph-measurements.md) and `measurements/epic005-reference-0.4.1.json`. Medians: replay 3.52 s per million edges, `neighbors` p99 69.5 µs, `traverse` p99 677.2 µs, and 1,015,992,601 retained allocator bytes (about 1,016 B per edge, 15.5 times the log, edge records 75% of it). The host is a virtual machine that is never idle (see the protocol). The cost per edge is a review flag for GATE-004, not a decision. Hybrid-retrieve latency and property-index memory remain with ITEM-039 and EPIC-008.
+
+### Reference collection protocol
+
+`scripts/graph_reference.py` records five latency/allocation repetitions using
+prebuilt release examples, with database files explicitly on the DO-005 `Q:`
+ReFS volume. It checks the recorded CPU, logical CPU count, RAM, OS build and
+Windows-reported disk identity. No process is stopped or reprioritized.
+
+The DO-005 host is a virtual machine whose security and management agents are
+always running, so it is never idle. A passive three-minute survey with the
+runner's own clock (360 half-second samples) measured a 4.99% mean background
+load across the 16 logical CPUs, 17% of samples above 10% and a worst sample of
+45.1%. Only 13% of five-second windows, and none of the 50- or 100-second
+windows, met the first draft's 2% mean / 10% sample criterion, so that
+criterion could never accept a benchmark. It is replaced by a gate calibrated
+to the measured floor: a five-second preflight and each benchmark must have mean
+background CPU at most 10% of the 16-logical-CPU machine (twice the floor), with
+no half-second sample over 50% (just above the worst surveyed sample). A
+preflight that fails is repeated for up to twelve probes, and every rejected
+probe is recorded in the report.
+
+Background CPU is Windows guest system busy CPU minus the benchmark process's
+CPU, conservatively including supporting OS work. During preparation the
+contributors included Microsoft Defender scanning, the Global Secure Access
+client, authentication helpers, WMI and the application's WebView. The gate
+catches builds, test runs and similar competing work. It is a collection-quality
+check, not an idle-machine claim and not a new graph performance guarantee. Because
+it is looser than the first draft, the published figures are medians with their
+five-run ranges and each run's measured background load, never a single best
+run. A failed check during a benchmark preserves the raw attempt and rejects the
+whole collection; it is not silently counted among the five repetitions. This
+cannot establish that the backing hypervisor or physical disk is idle.
+
+The report records the base commit and dirty-worktree status, SHA-256 hashes of
+the source inputs and executables, toolchain, complete stdout/stderr and CPU
+samples. It does not claim that unpublished graph changes are part of the base
+commit. Timing and allocator-instrumented measurements use separate executables.
+NFR-002 metrics follow implementation order: nonexistent property indexes have
+no allocated component yet (EPIC-008), and hybrid-retrieve latency remains an
+explicit ITEM-039 measurement after EPIC-010 supplies that operation.
+
+### Memory attribution method
+
+`examples/graph_memory.rs` splits the retained memory of the replayed graph
+state by component without estimating anything. A counting global allocator
+(`examples/graph_support/counting_alloc.rs`) tracks live requested heap bytes
+and blocks for the whole process. It is compiled only into that example, so the
+latency executable is never instrumented. `GraphState::release_components` takes
+the state by value and drops its owned components one at a time in a documented
+order (`MemoryComponent`: the name index and attachment owners, then for each
+graph its table, name, node records, edge records, attachments, node and edge
+key indexes, out and in adjacency, and label index). It calls an observer after
+each drop, and the bytes freed since the previous call belong to the component
+just reported. Nothing is cloned or sized by formula. The method allocates
+nothing, and the observer must not allocate or free.
+
+The example exits non-zero unless the components add up to the retained total in
+bytes and blocks, no drop increased the live count, the live count returns to
+its value before the replay, and every measured read returns it to where it
+started. It also fails if the file's frames differ from the frames the shared
+engine source plans, so the attributed state is the state a replay of the file
+builds. Opening the file read-only retains 7,391 B (6 blocks) more than that
+state, a 0.001% difference that serves as a cross-check. The unit is requested
+allocator bytes, not resident set size. The counters are process-wide, so every
+window runs on the main thread. The example compiles its own copy of the engine
+source through `#[path]`; the extra CI test time is recorded in the PRD (v1.2.14
+"Wiring").

@@ -3227,6 +3227,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "vlite-graph"
+version = "0.4.1"
+
+[[package]]
 name = "want"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

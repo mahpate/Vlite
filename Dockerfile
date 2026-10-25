@@ -8,11 +8,12 @@ COPY src ./src
 COPY tests ./tests
 COPY examples ./examples
 COPY bindings/c ./bindings/c
+COPY crates ./crates
 # Release publishing sets VLITE_IMAGE_TESTS=0 for emulated cross-builds; the
 # same suite has already passed natively on each published architecture.
 ARG VLITE_IMAGE_TESTS=1
 RUN if [ "$VLITE_IMAGE_TESTS" = "1" ]; then cargo test --locked --workspace --all-targets --all-features; fi \
-    && cargo build --locked --release --bins --all-features \
+    && cargo build --locked --release --bins --features http-embedder,otel,tools,import-formats,json,mcp,server,grpc,gpu \
     && cargo build --locked --release -p vlite-ffi
 
 FROM build AS test
