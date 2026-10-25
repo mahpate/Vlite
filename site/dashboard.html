@@ -40,7 +40,7 @@
       <p>Self-hosted dashboard; this page is not a live console.</p>
       <div class="cta">
         <a class="btn primary" href="#start">Run the dashboard</a>
-        <a class="btn" href="#screenshots">Explore dashboard tours</a>
+        <a class="btn" href="#screenshots">See the latest interface</a>
         <a class="btn" href="docs/CONSOLE.html">Dashboard guide</a>
         <a class="btn" href="docs/CONSOLE-ADMIN.html">Administration guide</a>
       </div>
@@ -50,10 +50,32 @@
     <div class="wrap">
       <div class="section-head">
         <div class="kicker">Inside the dashboard</div>
-        <h2>See the dashboard in action</h2>
-        <p>Real v0.4.1 captures with five synthetic records. Demo metrics are not benchmarks.</p>
-        <p>Select Play for one pass, or open a still image. No autoplay, including with reduced motion.</p>
+        <h2>The latest dashboard</h2>
+        <p>Actual current-source UI, captured October 24, 2026. Disconnected views: no credentials or database data.</p>
+        <p>This visual refresh is available when built from source, not in the published release images.</p>
       </div>
+      <div class="dashboard-tours">
+        <figure class="dashboard-tour">
+          <a href="assets/dashboard/current-overview-light.png">
+            <picture>
+              <source media="(prefers-color-scheme: dark)" srcset="assets/dashboard/current-overview-dark.png">
+              <img src="assets/dashboard/current-overview-light.png" data-light="assets/dashboard/current-overview-light.png" data-dark="assets/dashboard/current-overview-dark.png" alt="Current VLite overview with modern sidebar, connection panel, snapshot cards and sticky top-bar preferences; disconnected, with no database loaded." width="1440" height="1100" loading="lazy" decoding="async">
+            </picture>
+          </a>
+          <figcaption><h3>A clearer workspace</h3><p>Six focused views, light and dark themes, and appearance controls that stay within reach.</p><p><a href="assets/dashboard/current-overview-light.png">Light screenshot</a> &middot; <a href="assets/dashboard/current-overview-dark.png">Dark screenshot</a></p></figcaption>
+        </figure>
+        <figure class="dashboard-tour">
+          <a href="assets/dashboard/current-token-help.png"><img src="assets/dashboard/current-token-help.png" alt="Expanded Where do I get a token help beside the empty connection field, with Docker, devbox and administrator instructions." width="1440" height="1100" loading="lazy" decoding="async"></a>
+          <figcaption><h3>Connect without guesswork</h3><p>Token instructions are beside the field, with guidance for local and shared servers.</p></figcaption>
+        </figure>
+        <figure class="dashboard-tour">
+          <a href="assets/dashboard/current-preferences.png"><img src="assets/dashboard/current-preferences.png" alt="Dark dashboard with Appearance and preferences expanded from the sticky top-right header." width="1440" height="1100" loading="lazy" decoding="async"></a>
+          <figcaption><h3>Your preferences, always nearby</h3><p>Choose theme and density from the sticky header in any workspace.</p></figcaption>
+        </figure>
+      </div>
+      <details class="dashboard-stills"><summary>Earlier release tours</summary>
+        <p>Real published-release captures with five synthetic records. They show the previous visual design, not the current-source screenshots above. Demo metrics are not benchmarks.</p>
+        <p>Select Play for one pass, or open a still image. No autoplay, including with reduced motion.</p>
       <div class="dashboard-tours">
         <figure class="dashboard-tour">
           <a href="assets/dashboard/records-tour-poster.png" aria-label="Open full-size records tour still image">
@@ -85,6 +107,7 @@
           <a href="assets/dashboard/search.png">Search results and payload inspection</a> &middot;
           <a href="assets/dashboard/observability.png">Metrics and route counters</a></p>
         <p>Earlier development captures of the dashboard included in v0.4.1, also using five synthetic records.</p>
+      </details>
       </details>
     </div>
   </section>

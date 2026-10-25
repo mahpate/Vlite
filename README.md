@@ -379,6 +379,16 @@ observability updates.
 
 ## Browser dashboard
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="site/assets/dashboard/current-overview-dark.png">
+  <img src="site/assets/dashboard/current-overview-light.png" alt="Current VLite dashboard overview with modern navigation, a connection panel and sticky-header preferences; disconnected, with no database loaded." width="1440" height="1100">
+</picture>
+
+Current-source UI, captured October 24, 2026, disconnected: no credentials or
+database data. Build from source for this visual refresh; published release
+images retain the previous design. See [latest screenshots and earlier release
+tours](https://mahpate.github.io/Vlite/dashboard.html#screenshots).
+
 After starting the Docker API above, open **http://localhost:18084/dashboard**
 and paste the existing `.secrets/api-token` value into the connection field.
 This built-in option requires no separate frontend container. The native REST
