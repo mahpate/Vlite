@@ -32,9 +32,16 @@ pub(super) enum Op {
     Collections,
     Diagnostics,
     Backup,
+    /// EPIC-011 graph reads on the graphs named by `Entry::graphs`.
+    #[cfg(feature = "graph")]
+    GraphRead,
+    /// EPIC-011 graph lifecycle and batch writes on the bound graphs.
+    #[cfg(feature = "graph")]
+    GraphWrite,
 }
 
-const OPS: [(Op, &str); 9] = [
+#[cfg(not(feature = "graph"))]
+const OPS: &[(Op, &str)] = &[
     (Op::Read, "read"),
     (Op::Search, "search"),
     (Op::SearchBuild, "search_build"),
@@ -44,6 +51,23 @@ const OPS: [(Op, &str); 9] = [
     (Op::Collections, "collections"),
     (Op::Diagnostics, "diagnostics"),
     (Op::Backup, "backup"),
+];
+
+/// Builds without `graph` do not know the graph operations, so a credential
+/// store naming them fails to load there (fail closed).
+#[cfg(feature = "graph")]
+const OPS: &[(Op, &str)] = &[
+    (Op::Read, "read"),
+    (Op::Search, "search"),
+    (Op::SearchBuild, "search_build"),
+    (Op::Write, "write"),
+    (Op::Import, "import"),
+    (Op::Index, "index"),
+    (Op::Collections, "collections"),
+    (Op::Diagnostics, "diagnostics"),
+    (Op::Backup, "backup"),
+    (Op::GraphRead, "graph_read"),
+    (Op::GraphWrite, "graph_write"),
 ];
 
 fn bit(op: Op) -> u16 {
@@ -89,6 +113,10 @@ pub(super) struct Grant {
     ops: u16,
     pub lineage: u64,
     pub expires: u64,
+    /// Graph names the graph operations apply to; `["*"]` is every graph.
+    /// Empty when the credential has no graph operation.
+    #[cfg(feature = "graph")]
+    pub graphs: Vec<String>,
 }
 
 impl Grant {
@@ -114,6 +142,8 @@ impl Grant {
             ops: ops.iter().fold(0, |mask, op| mask | bit(*op)),
             lineage,
             expires,
+            #[cfg(feature = "graph")]
+            graphs: Vec::new(),
         }
     }
     pub(super) fn qualify(&self, name: &str) -> String {
@@ -147,7 +177,25 @@ impl Grant {
                     .any(|(n, id)| *id == collection && n == name))
     }
 
+    /// Graph name binding. Names, not IDs: a dropped graph's name may be
+    /// recreated and is then covered again (graphs hold no vector data of
+    /// their own; attachments are authorized per collection).
+    #[cfg(feature = "graph")]
+    pub(super) fn graph_allowed(&self, name: &str) -> bool {
+        self.tenant_id.is_none() && self.graphs.iter().any(|g| g == "*" || g == name)
+    }
+
     pub(super) fn json(&self) -> Value {
+        #[cfg(feature = "graph")]
+        if !self.graphs.is_empty() {
+            let mut value = self.json_base();
+            value["graphs"] = json!(self.graphs);
+            return value;
+        }
+        self.json_base()
+    }
+
+    fn json_base(&self) -> Value {
         json!({"credential_id": self.id,
             "collections": if self.all { vec!["*".to_owned()] } else {
                 self.collections.iter().map(|(n, _)| self.tenant_id.as_ref()
@@ -188,6 +236,10 @@ struct Entry {
     max_vectors: Option<u64>,
     #[serde(default)]
     max_vectors_per_collection: Option<u64>,
+    /// EPIC-011: graph name binding for `graph_read` / `graph_write`.
+    #[cfg(feature = "graph")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    graphs: Option<Vec<String>>,
 }
 
 impl Entry {
@@ -202,6 +254,16 @@ impl Entry {
     }
 
     fn view(&self, now: u64) -> Value {
+        #[cfg(feature = "graph")]
+        if let Some(graphs) = &self.graphs {
+            let mut value = self.view_base(now);
+            value["graphs"] = json!(graphs);
+            return value;
+        }
+        self.view_base(now)
+    }
+
+    fn view_base(&self, now: u64) -> Value {
         json!({"id": self.id, "name": self.name,
             "collections": if self.all { vec!["*".to_owned()] } else {
                 self.collections.iter().map(|s| s.name.clone()).collect() },
@@ -228,11 +290,72 @@ impl Entry {
                 .tenant_id
                 .as_ref()
                 .is_none_or(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
-            && parse_ops(&self.operations).is_ok()
+            && parse_ops(&self.operations).is_ok_and(|ops| self.graph_scope(ops).is_ok())
             && (self.all == self.collections.is_empty())
             && !self.name.is_empty()
             && self.name.len() <= 64)
             .then_some(())
+    }
+}
+
+impl Entry {
+    #[cfg(feature = "graph")]
+    fn graph_scope(&self, ops: u16) -> Result<(), ApiError> {
+        graph_scope(ops, self.graphs.as_deref(), self.tenant_id.is_some())
+    }
+
+    #[cfg(not(feature = "graph"))]
+    fn graph_scope(&self, _: u16) -> Result<(), ApiError> {
+        Ok(())
+    }
+}
+
+/// EPIC-011 graph scope rules, shared by issue and load:
+/// - `graph_read` / `graph_write` require a `graphs` binding and a binding
+///   requires one of them (collection scope never implies graph scope);
+/// - the binding is `["*"]` or up to 64 distinct valid graph names;
+/// - tenant credentials cannot hold graph scope (graphs are not tenant
+///   qualified).
+#[cfg(feature = "graph")]
+fn graph_scope(ops: u16, graphs: Option<&[String]>, tenant: bool) -> Result<(), ApiError> {
+    let graph_ops = ops & (bit(Op::GraphRead) | bit(Op::GraphWrite)) != 0;
+    let Some(graphs) = graphs else {
+        return if graph_ops {
+            Err(unprocessable(
+                "graph_read and graph_write require a graphs binding",
+            ))
+        } else {
+            Ok(())
+        };
+    };
+    if !graph_ops {
+        return Err(unprocessable(
+            "graphs requires graph_read or graph_write in operations",
+        ));
+    }
+    if tenant {
+        return Err(unprocessable("tenant credentials cannot hold graph scope"));
+    }
+    let valid = |name: &String| {
+        let bytes = name.as_bytes();
+        (1..=63).contains(&bytes.len())
+            && bytes[0].is_ascii_lowercase()
+            && bytes[1..]
+                .iter()
+                .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+    };
+    let distinct = graphs
+        .iter()
+        .enumerate()
+        .all(|(i, name)| !graphs[..i].contains(name));
+    if graphs == ["*"]
+        || (!graphs.is_empty() && graphs.len() <= 64 && distinct && graphs.iter().all(valid))
+    {
+        Ok(())
+    } else {
+        Err(unprocessable(
+            "graphs must be [\"*\"] or 1..64 distinct graph names",
+        ))
     }
 }
 
@@ -366,6 +489,8 @@ impl Store {
             ops: parse_ops(&entry.operations).map_err(|_| unauthorized())?,
             lineage: u64::from_str_radix(&entry.lineage, 16).map_err(|_| unauthorized())?,
             expires: entry.expires_unix_ms,
+            #[cfg(feature = "graph")]
+            graphs: entry.graphs.clone().unwrap_or_default(),
         }))
     }
 
@@ -519,6 +644,8 @@ struct Create {
     requests_per_second: Option<u32>,
     max_vectors: Option<u64>,
     max_vectors_per_collection: Option<u64>,
+    #[cfg(feature = "graph")]
+    graphs: Option<Vec<String>>,
 }
 
 /// Adds an entry, pruning inactive ones only when at capacity.
@@ -552,6 +679,12 @@ async fn create(
         return Err(unprocessable("name must be 1..64 printable characters"));
     }
     let operations = parse_ops(&input.operations)?;
+    #[cfg(feature = "graph")]
+    graph_scope(
+        operations,
+        input.graphs.as_deref(),
+        input.tenant_id.is_some(),
+    )?;
     if input
         .requests_per_second
         .is_some_and(|r| r == 0 || r > 1_000_000)
@@ -637,6 +770,8 @@ async fn create(
         requests_per_second: input.requests_per_second,
         max_vectors: input.max_vectors,
         max_vectors_per_collection: input.max_vectors_per_collection,
+        #[cfg(feature = "graph")]
+        graphs: input.graphs,
     };
     let view = entry.view(now);
     let token = token(&entry, &secret);
@@ -819,6 +954,8 @@ pub(super) mod tests {
             requests_per_second: None,
             max_vectors: None,
             max_vectors_per_collection: None,
+            #[cfg(feature = "graph")]
+            graphs: None,
         }
     }
 

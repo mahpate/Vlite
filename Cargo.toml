@@ -140,6 +140,12 @@ required-features = ["graph", "json"]
 name = "graph_cli"
 required-features = ["graph", "json"]
 
+# TEST-012 (EPIC-011): REST graph routes, graph-scoped credentials and the
+# merged OpenAPI document.
+[[test]]
+name = "rest_graph"
+required-features = ["server", "graph"]
+
 [[test]]
 name = "graph_storage"
 required-features = ["graph"]

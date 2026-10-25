@@ -1,0 +1,2345 @@
+{
+  "paths": {
+    "/v1/graphs": {
+      "get": {
+        "operationId": "GraphList",
+        "summary": "List graphs (scoped credentials see only bound graphs)",
+        "description": "Requires the admin token, the read-only token, or a scoped credential with graph_read whose graphs binding names this graph (or is [\"*\"]). Collection scope never implies graph scope. Runs under one database read guard.",
+        "responses": {
+          "200": {
+            "description": "Graphs sorted by name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "graphs": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "node_count": {
+                            "type": "integer"
+                          },
+                          "edge_count": {
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "node_count",
+                          "edge_count"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "graphs"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "forbidden_scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "graphs_not_enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "busy or unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "GraphCreate",
+        "summary": "Create an empty graph",
+        "description": "Requires the admin token or a scoped credential with graph_write whose graphs binding names the new graph (or is [\"*\"]).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "graph": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+                  }
+                },
+                "required": [
+                  "graph"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "graph": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "node_count": {
+                          "type": "integer"
+                        },
+                        "edge_count": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "node_count",
+                        "edge_count"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "graph"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_json",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "forbidden_scope or read_only",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "graphs_not_enabled, graph_exists or too_many_graphs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "invalid_json or invalid_graph_name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "busy, unavailable or commit_indeterminate",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/graphs/{graph}": {
+      "parameters": [
+        {
+          "name": "graph",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "GraphInfo",
+        "summary": "Graph node and edge counts",
+        "description": "Requires the admin token, the read-only token, or a scoped credential with graph_read whose graphs binding names this graph (or is [\"*\"]). Collection scope never implies graph scope. Runs under one database read guard.",
+        "responses": {
+          "200": {
+            "description": "Graph",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "graph": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "node_count": {
+                          "type": "integer"
+                        },
+                        "edge_count": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "node_count",
+                        "edge_count"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "graph"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_path",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "forbidden_scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "graphs_not_enabled or graph_not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "invalid_graph_name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "busy or unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "GraphDrop",
+        "summary": "Drop an empty graph",
+        "description": "Requires the admin token or graph_write on this graph. Only graphs without nodes and edges can be dropped.",
+        "responses": {
+          "200": {
+            "description": "Dropped",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "dropped": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "dropped"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_path",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "forbidden_scope or read_only",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "graphs_not_enabled, graph_not_found or graph_not_empty",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "invalid_graph_name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "busy, unavailable or commit_indeterminate",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/graphs/{graph}/nodes/get": {
+      "parameters": [
+        {
+          "name": "graph",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "GraphGetNode",
+        "summary": "Get one node by ID or key",
+        "description": "Requires the admin token, the read-only token, or a scoped credential with graph_read whose graphs binding names this graph (or is [\"*\"]). Collection scope never implies graph scope. Runs under one database read guard.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "node": {
+                    "type": "object",
+                    "description": "Exactly one of id or key",
+                    "minProperties": 1,
+                    "maxProperties": 1,
+                    "properties": {
+                      "id": {
+                        "oneOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^(0|[1-9][0-9]{0,19})$"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0
+                          }
+                        ],
+                        "description": "u64 as a canonical decimal string (preferred) or JSON integer"
+                      },
+                      "key": {
+                        "type": "string"
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "limits": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "description": "Unset fields use GraphLimits::DEFAULT (max_hops 2, max_visited_nodes 1000, max_edges_examined 10000, max_edges_per_node 1000, deadline_ms 250, max_output_nodes 100, max_output_edges 200, max_output_paths 20). Values above the ceiling (4, 10000, 100000, 10000, 5000, 1000, 2000, 100) are rejected with 422 graph_limit_exceeds_ceiling, never clamped.",
+                    "properties": {
+                      "max_hops": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_visited_nodes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_edges_examined": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_edges_per_node": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "deadline_ms": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_output_nodes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_output_edges": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_output_paths": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    }
+                  },
+                  "projection": {
+                    "oneOf": [
+                      {
+                        "enum": [
+                          "all",
+                          "none"
+                        ]
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "only": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "required": [
+                          "only"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "node"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Read result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Same JSON as vlite-graph-cli: graph, view_sequence (decimal string), complete, truncation, stats, cursor, and node | edge | nodes | edges | paths | shortest_path. Results carry graph structure only, never vector record data.",
+                  "properties": {
+                    "graph": {
+                      "type": "string"
+                    },
+                    "view_sequence": {
+                      "type": "string"
+                    },
+                    "complete": {
+                      "type": "boolean"
+                    },
+                    "truncation": {
+                      "type": "array"
+                    },
+                    "stats": {
+                      "type": "object"
+                    },
+                    "cursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "graph",
+                    "view_sequence",
+                    "complete",
+                    "truncation",
+                    "stats",
+                    "cursor"
+                  ],
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed JSON (invalid_json) or path (invalid_path)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "forbidden_scope: credential lacks graph_read or the graph is outside its graphs binding; read_only does not apply to graph reads",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "graphs_not_enabled (vector-only file), graph_not_found, graph_cursor_stale or another graph conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Read request body above 1 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "invalid_json (unknown field, bad ID), invalid_input (bad cursor), graph_limit_exceeds_ceiling or graph_invalid_options",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "busy or unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/graphs/{graph}/edges/get": {
+      "parameters": [
+        {
+          "name": "graph",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "GraphGetEdge",
+        "summary": "Get one edge by ID or key",
+        "description": "Requires the admin token, the read-only token, or a scoped credential with graph_read whose graphs binding names this graph (or is [\"*\"]). Collection scope never implies graph scope. Runs under one database read guard.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "edge": {
+                    "type": "object",
+                    "description": "Exactly one of id or key",
+                    "minProperties": 1,
+                    "maxProperties": 1,
+                    "properties": {
+                      "id": {
+                        "oneOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^(0|[1-9][0-9]{0,19})$"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0
+                          }
+                        ],
+                        "description": "u64 as a canonical decimal string (preferred) or JSON integer"
+                      },
+                      "key": {
+                        "type": "string"
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "limits": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "description": "Unset fields use GraphLimits::DEFAULT (max_hops 2, max_visited_nodes 1000, max_edges_examined 10000, max_edges_per_node 1000, deadline_ms 250, max_output_nodes 100, max_output_edges 200, max_output_paths 20). Values above the ceiling (4, 10000, 100000, 10000, 5000, 1000, 2000, 100) are rejected with 422 graph_limit_exceeds_ceiling, never clamped.",
+                    "properties": {
+                      "max_hops": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_visited_nodes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_edges_examined": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_edges_per_node": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "deadline_ms": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_output_nodes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_output_edges": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_output_paths": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    }
+                  },
+                  "projection": {
+                    "oneOf": [
+                      {
+                        "enum": [
+                          "all",
+                          "none"
+                        ]
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "only": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "required": [
+                          "only"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "edge"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Read result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Same JSON as vlite-graph-cli: graph, view_sequence (decimal string), complete, truncation, stats, cursor, and node | edge | nodes | edges | paths | shortest_path. Results carry graph structure only, never vector record data.",
+                  "properties": {
+                    "graph": {
+                      "type": "string"
+                    },
+                    "view_sequence": {
+                      "type": "string"
+                    },
+                    "complete": {
+                      "type": "boolean"
+                    },
+                    "truncation": {
+                      "type": "array"
+                    },
+                    "stats": {
+                      "type": "object"
+                    },
+                    "cursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "graph",
+                    "view_sequence",
+                    "complete",
+                    "truncation",
+                    "stats",
+                    "cursor"
+                  ],
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed JSON (invalid_json) or path (invalid_path)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "forbidden_scope: credential lacks graph_read or the graph is outside its graphs binding; read_only does not apply to graph reads",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "graphs_not_enabled (vector-only file), graph_not_found, graph_cursor_stale or another graph conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Read request body above 1 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "invalid_json (unknown field, bad ID), invalid_input (bad cursor), graph_limit_exceeds_ceiling or graph_invalid_options",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "busy or unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/graphs/{graph}/nodes/find": {
+      "parameters": [
+        {
+          "name": "graph",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "GraphFindNodes",
+        "summary": "Find nodes by label and property conditions (paged)",
+        "description": "Requires the admin token, the read-only token, or a scoped credential with graph_read whose graphs binding names this graph (or is [\"*\"]). Collection scope never implies graph scope. Runs under one database read guard.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "label": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "conditions": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/Condition"
+                    }
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "cursor": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "pattern": "^([0-9a-f]{2})*$",
+                    "description": "Lowercase hex cursor returned by the previous page"
+                  },
+                  "limits": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "description": "Unset fields use GraphLimits::DEFAULT (max_hops 2, max_visited_nodes 1000, max_edges_examined 10000, max_edges_per_node 1000, deadline_ms 250, max_output_nodes 100, max_output_edges 200, max_output_paths 20). Values above the ceiling (4, 10000, 100000, 10000, 5000, 1000, 2000, 100) are rejected with 422 graph_limit_exceeds_ceiling, never clamped.",
+                    "properties": {
+                      "max_hops": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_visited_nodes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_edges_examined": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_edges_per_node": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "deadline_ms": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_output_nodes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_output_edges": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_output_paths": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    }
+                  },
+                  "projection": {
+                    "oneOf": [
+                      {
+                        "enum": [
+                          "all",
+                          "none"
+                        ]
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "only": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "required": [
+                          "only"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
+                },
+                "required": []
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Read result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Same JSON as vlite-graph-cli: graph, view_sequence (decimal string), complete, truncation, stats, cursor, and node | edge | nodes | edges | paths | shortest_path. Results carry graph structure only, never vector record data.",
+                  "properties": {
+                    "graph": {
+                      "type": "string"
+                    },
+                    "view_sequence": {
+                      "type": "string"
+                    },
+                    "complete": {
+                      "type": "boolean"
+                    },
+                    "truncation": {
+                      "type": "array"
+                    },
+                    "stats": {
+                      "type": "object"
+                    },
+                    "cursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "graph",
+                    "view_sequence",
+                    "complete",
+                    "truncation",
+                    "stats",
+                    "cursor"
+                  ],
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed JSON (invalid_json) or path (invalid_path)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "forbidden_scope: credential lacks graph_read or the graph is outside its graphs binding; read_only does not apply to graph reads",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "graphs_not_enabled (vector-only file), graph_not_found, graph_cursor_stale or another graph conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Read request body above 1 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "invalid_json (unknown field, bad ID), invalid_input (bad cursor), graph_limit_exceeds_ceiling or graph_invalid_options",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "busy or unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/graphs/{graph}/neighbors": {
+      "parameters": [
+        {
+          "name": "graph",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "GraphNeighbors",
+        "summary": "Adjacent edges and nodes of one node (paged)",
+        "description": "Requires the admin token, the read-only token, or a scoped credential with graph_read whose graphs binding names this graph (or is [\"*\"]). Collection scope never implies graph scope. Runs under one database read guard.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "node": {
+                    "type": "object",
+                    "description": "Exactly one of id or key",
+                    "minProperties": 1,
+                    "maxProperties": 1,
+                    "properties": {
+                      "id": {
+                        "oneOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^(0|[1-9][0-9]{0,19})$"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0
+                          }
+                        ],
+                        "description": "u64 as a canonical decimal string (preferred) or JSON integer"
+                      },
+                      "key": {
+                        "type": "string"
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "direction": {
+                    "enum": [
+                      "out",
+                      "in",
+                      "both"
+                    ],
+                    "default": "out"
+                  },
+                  "types": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "edge_conditions": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/Condition"
+                    }
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "cursor": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "pattern": "^([0-9a-f]{2})*$",
+                    "description": "Lowercase hex cursor returned by the previous page"
+                  },
+                  "limits": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "description": "Unset fields use GraphLimits::DEFAULT (max_hops 2, max_visited_nodes 1000, max_edges_examined 10000, max_edges_per_node 1000, deadline_ms 250, max_output_nodes 100, max_output_edges 200, max_output_paths 20). Values above the ceiling (4, 10000, 100000, 10000, 5000, 1000, 2000, 100) are rejected with 422 graph_limit_exceeds_ceiling, never clamped.",
+                    "properties": {
+                      "max_hops": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_visited_nodes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_edges_examined": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_edges_per_node": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "deadline_ms": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_output_nodes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_output_edges": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_output_paths": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    }
+                  },
+                  "projection": {
+                    "oneOf": [
+                      {
+                        "enum": [
+                          "all",
+                          "none"
+                        ]
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "only": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "required": [
+                          "only"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "node"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Read result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Same JSON as vlite-graph-cli: graph, view_sequence (decimal string), complete, truncation, stats, cursor, and node | edge | nodes | edges | paths | shortest_path. Results carry graph structure only, never vector record data.",
+                  "properties": {
+                    "graph": {
+                      "type": "string"
+                    },
+                    "view_sequence": {
+                      "type": "string"
+                    },
+                    "complete": {
+                      "type": "boolean"
+                    },
+                    "truncation": {
+                      "type": "array"
+                    },
+                    "stats": {
+                      "type": "object"
+                    },
+                    "cursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "graph",
+                    "view_sequence",
+                    "complete",
+                    "truncation",
+                    "stats",
+                    "cursor"
+                  ],
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed JSON (invalid_json) or path (invalid_path)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "forbidden_scope: credential lacks graph_read or the graph is outside its graphs binding; read_only does not apply to graph reads",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "graphs_not_enabled (vector-only file), graph_not_found, graph_cursor_stale or another graph conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Read request body above 1 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "invalid_json (unknown field, bad ID), invalid_input (bad cursor), graph_limit_exceeds_ceiling or graph_invalid_options",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "busy or unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/graphs/{graph}/traverse": {
+      "parameters": [
+        {
+          "name": "graph",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "GraphTraverse",
+        "summary": "Bounded breadth-first traversal from start nodes",
+        "description": "Requires the admin token, the read-only token, or a scoped credential with graph_read whose graphs binding names this graph (or is [\"*\"]). Collection scope never implies graph scope. Runs under one database read guard.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "start": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "description": "Exactly one of id or key",
+                      "minProperties": 1,
+                      "maxProperties": 1,
+                      "properties": {
+                        "id": {
+                          "oneOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^(0|[1-9][0-9]{0,19})$"
+                            },
+                            {
+                              "type": "integer",
+                              "minimum": 0
+                            }
+                          ],
+                          "description": "u64 as a canonical decimal string (preferred) or JSON integer"
+                        },
+                        "key": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "direction": {
+                    "enum": [
+                      "out",
+                      "in",
+                      "both"
+                    ],
+                    "default": "out"
+                  },
+                  "types": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "expand_filter": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "labels": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "conditions": {
+                        "type": "array",
+                        "items": {
+                          "$ref": "#/components/schemas/Condition"
+                        }
+                      }
+                    }
+                  },
+                  "return_filter": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "labels": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "conditions": {
+                        "type": "array",
+                        "items": {
+                          "$ref": "#/components/schemas/Condition"
+                        }
+                      }
+                    }
+                  },
+                  "edge_filter": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/Condition"
+                    }
+                  },
+                  "include_paths": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "limits": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "description": "Unset fields use GraphLimits::DEFAULT (max_hops 2, max_visited_nodes 1000, max_edges_examined 10000, max_edges_per_node 1000, deadline_ms 250, max_output_nodes 100, max_output_edges 200, max_output_paths 20). Values above the ceiling (4, 10000, 100000, 10000, 5000, 1000, 2000, 100) are rejected with 422 graph_limit_exceeds_ceiling, never clamped.",
+                    "properties": {
+                      "max_hops": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_visited_nodes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_edges_examined": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_edges_per_node": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "deadline_ms": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_output_nodes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_output_edges": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_output_paths": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    }
+                  },
+                  "projection": {
+                    "oneOf": [
+                      {
+                        "enum": [
+                          "all",
+                          "none"
+                        ]
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "only": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "required": [
+                          "only"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "start"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Read result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Same JSON as vlite-graph-cli: graph, view_sequence (decimal string), complete, truncation, stats, cursor, and node | edge | nodes | edges | paths | shortest_path. Results carry graph structure only, never vector record data.",
+                  "properties": {
+                    "graph": {
+                      "type": "string"
+                    },
+                    "view_sequence": {
+                      "type": "string"
+                    },
+                    "complete": {
+                      "type": "boolean"
+                    },
+                    "truncation": {
+                      "type": "array"
+                    },
+                    "stats": {
+                      "type": "object"
+                    },
+                    "cursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "graph",
+                    "view_sequence",
+                    "complete",
+                    "truncation",
+                    "stats",
+                    "cursor"
+                  ],
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed JSON (invalid_json) or path (invalid_path)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "forbidden_scope: credential lacks graph_read or the graph is outside its graphs binding; read_only does not apply to graph reads",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "graphs_not_enabled (vector-only file), graph_not_found, graph_cursor_stale or another graph conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Read request body above 1 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "invalid_json (unknown field, bad ID), invalid_input (bad cursor), graph_limit_exceeds_ceiling or graph_invalid_options",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "busy or unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/graphs/{graph}/shortest-path": {
+      "parameters": [
+        {
+          "name": "graph",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "GraphShortestPath",
+        "summary": "Bounded unweighted shortest path",
+        "description": "Requires the admin token, the read-only token, or a scoped credential with graph_read whose graphs binding names this graph (or is [\"*\"]). Collection scope never implies graph scope. Runs under one database read guard.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "source": {
+                    "type": "object",
+                    "description": "Exactly one of id or key",
+                    "minProperties": 1,
+                    "maxProperties": 1,
+                    "properties": {
+                      "id": {
+                        "oneOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^(0|[1-9][0-9]{0,19})$"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0
+                          }
+                        ],
+                        "description": "u64 as a canonical decimal string (preferred) or JSON integer"
+                      },
+                      "key": {
+                        "type": "string"
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "destination": {
+                    "type": "object",
+                    "description": "Exactly one of id or key",
+                    "minProperties": 1,
+                    "maxProperties": 1,
+                    "properties": {
+                      "id": {
+                        "oneOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^(0|[1-9][0-9]{0,19})$"
+                          },
+                          {
+                            "type": "integer",
+                            "minimum": 0
+                          }
+                        ],
+                        "description": "u64 as a canonical decimal string (preferred) or JSON integer"
+                      },
+                      "key": {
+                        "type": "string"
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "direction": {
+                    "enum": [
+                      "out",
+                      "in",
+                      "both"
+                    ],
+                    "default": "out"
+                  },
+                  "types": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "limits": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "description": "Unset fields use GraphLimits::DEFAULT (max_hops 2, max_visited_nodes 1000, max_edges_examined 10000, max_edges_per_node 1000, deadline_ms 250, max_output_nodes 100, max_output_edges 200, max_output_paths 20). Values above the ceiling (4, 10000, 100000, 10000, 5000, 1000, 2000, 100) are rejected with 422 graph_limit_exceeds_ceiling, never clamped.",
+                    "properties": {
+                      "max_hops": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_visited_nodes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_edges_examined": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_edges_per_node": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "deadline_ms": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_output_nodes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_output_edges": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_output_paths": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    }
+                  },
+                  "projection": {
+                    "oneOf": [
+                      {
+                        "enum": [
+                          "all",
+                          "none"
+                        ]
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "only": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "required": [
+                          "only"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "source",
+                  "destination"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Read result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Same JSON as vlite-graph-cli: graph, view_sequence (decimal string), complete, truncation, stats, cursor, and node | edge | nodes | edges | paths | shortest_path. Results carry graph structure only, never vector record data.",
+                  "properties": {
+                    "graph": {
+                      "type": "string"
+                    },
+                    "view_sequence": {
+                      "type": "string"
+                    },
+                    "complete": {
+                      "type": "boolean"
+                    },
+                    "truncation": {
+                      "type": "array"
+                    },
+                    "stats": {
+                      "type": "object"
+                    },
+                    "cursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "graph",
+                    "view_sequence",
+                    "complete",
+                    "truncation",
+                    "stats",
+                    "cursor"
+                  ],
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed JSON (invalid_json) or path (invalid_path)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "forbidden_scope: credential lacks graph_read or the graph is outside its graphs binding; read_only does not apply to graph reads",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "graphs_not_enabled (vector-only file), graph_not_found, graph_cursor_stale or another graph conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Read request body above 1 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "invalid_json (unknown field, bad ID), invalid_input (bad cursor), graph_limit_exceeds_ceiling or graph_invalid_options",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "busy or unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/graphs/{graph}/explain": {
+      "parameters": [
+        {
+          "name": "graph",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "GraphExplain",
+        "summary": "Plan a graph read without running it",
+        "description": "Requires the admin token, the read-only token, or a scoped credential with graph_read whose graphs binding names this graph (or is [\"*\"]). Collection scope never implies graph scope. Runs under one database read guard. The body is a read request body plus \"operation\".",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "operation": {
+                    "enum": [
+                      "get-node",
+                      "get-edge",
+                      "find-nodes",
+                      "neighbors",
+                      "traverse",
+                      "shortest-path"
+                    ]
+                  }
+                },
+                "required": [
+                  "operation"
+                ],
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Normalized query, limits, projection and index choices",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "graph": {
+                      "type": "string"
+                    },
+                    "explain": {
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "graph",
+                    "explain"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed JSON (invalid_json) or path (invalid_path)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "forbidden_scope: credential lacks graph_read or the graph is outside its graphs binding; read_only does not apply to graph reads",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "graphs_not_enabled (vector-only file), graph_not_found, graph_cursor_stale or another graph conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Read request body above 1 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "invalid_json (unknown field, bad ID), invalid_input (bad cursor), graph_limit_exceeds_ceiling or graph_invalid_options",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "busy or unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/graphs/{graph}/batch": {
+      "parameters": [
+        {
+          "name": "graph",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "GraphBatch",
+        "summary": "Apply one atomic graph batch",
+        "description": "Requires the admin token or graph_write on this graph. attach, detach, put_vector and delete_vector additionally require the write operation and a collection binding covering each named collection; live-vector quotas apply. Runs under the database write guard as one durable frame; nothing is written on error.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ops": {
+                    "type": "array",
+                    "maxItems": 4096,
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "op"
+                      ],
+                      "description": "One of create_node, upsert_node, patch_node, delete_node, create_edge, patch_edge, delete_edge, attach, detach, put_vector, delete_vector (vlite-graph-cli batch JSON).",
+                      "properties": {
+                        "op": {
+                          "enum": [
+                            "create_node",
+                            "upsert_node",
+                            "patch_node",
+                            "delete_node",
+                            "create_edge",
+                            "patch_edge",
+                            "delete_edge",
+                            "attach",
+                            "detach",
+                            "put_vector",
+                            "delete_vector"
+                          ]
+                        }
+                      },
+                      "additionalProperties": true
+                    }
+                  }
+                },
+                "required": [
+                  "ops"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Committed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "graph": {
+                      "type": "string"
+                    },
+                    "revision": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "outcomes": {
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "graph",
+                    "revision",
+                    "outcomes"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_json or invalid_path",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "forbidden_scope or read_only",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "collection_not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "graphs_not_enabled or a graph conflict (graph_key_exists, graph_node_not_found, graph_attachment_conflict, ...)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body above 8 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "invalid_json, invalid_input (more than 4096 operations, invalid vector or metadata)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited or quota_exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "busy, unavailable or commit_indeterminate",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/graph/stats": {
+      "get": {
+        "operationId": "GraphGuardStats",
+        "summary": "Graph read/write guard hold times (admin only)",
+        "description": "Hold time of the database guard per graph request in microseconds over the most recent 4096 samples (nearest-rank p50/p99, max), total counts and truncation counts by reason since start.",
+        "responses": {
+          "200": {
+            "description": "Statistics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "read_guard": {
+                      "type": "object"
+                    },
+                    "write_guard": {
+                      "type": "object"
+                    },
+                    "requests": {
+                      "type": "object"
+                    },
+                    "truncations": {
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "read_guard",
+                    "write_guard",
+                    "requests",
+                    "truncations"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "forbidden_scope or read_only",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

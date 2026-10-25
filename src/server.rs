@@ -36,6 +36,8 @@ mod audit;
 mod collections;
 mod credentials;
 mod features;
+#[cfg(feature = "graph")]
+mod graph;
 mod group_commit;
 pub use group_commit::GroupCommitConfig;
 #[cfg(feature = "grpc")]
@@ -182,6 +184,9 @@ pub struct Service {
     /// Fixed for the service lifetime: the owned file never changes.
     #[cfg(feature = "graph")]
     graph_enabled: bool,
+    /// EPIC-011: graph read/write guard hold times.
+    #[cfg(feature = "graph")]
+    graph_stats: Arc<graph::GuardStats>,
 }
 
 impl Service {
@@ -265,6 +270,8 @@ impl Service {
             snapshot_reads: true,
             #[cfg(feature = "graph")]
             graph_enabled,
+            #[cfg(feature = "graph")]
+            graph_stats: Arc::default(),
         })
     }
 
@@ -534,7 +541,12 @@ fn configured_routes(service: Service) -> Router {
         *published = Some(service.admin.clone());
     }
     let observation = service.clone();
+    #[cfg(feature = "graph")]
+    let graph_routes = graph::routes();
+    #[cfg(not(feature = "graph"))]
+    let graph_routes = Router::new();
     admin::routes()
+        .merge(graph_routes)
         .merge(tls::routes())
         .merge(tenants::routes())
         .merge(users::routes())
@@ -623,7 +635,7 @@ fn configured_routes(service: Service) -> Router {
                     get(|| async {
                         (
                             [(header::CONTENT_TYPE, "application/json")],
-                            include_str!("openapi.json"),
+                            openapi_document(),
                         )
                     }),
                 )
@@ -642,6 +654,15 @@ fn configured_routes(service: Service) -> Router {
         .layer(middleware::from_fn_with_state(service.clone(), admission))
         .layer(middleware::from_fn_with_state(observation, observe))
         .with_state(service)
+}
+
+/// The served OpenAPI document: `openapi.json` unchanged, plus the graph
+/// paths fragment in graph builds (RD-013).
+fn openapi_document() -> &'static str {
+    #[cfg(feature = "graph")]
+    return graph::openapi();
+    #[cfg(not(feature = "graph"))]
+    include_str!("openapi.json")
 }
 
 fn dashboard_asset(content_type: &'static str, content: &'static str) -> impl IntoResponse {
@@ -731,6 +752,10 @@ enum Need {
 /// listed is admin-only (deny-unmapped).
 fn permission(method: &Method, route: &str) -> Need {
     use credentials::Op;
+    #[cfg(feature = "graph")]
+    if let Some(op) = graph::route_op(method, route) {
+        return Need::Op(op, Reach::Filtered);
+    }
     let index = route.starts_with("/v1/index/hnsw")
         || route.starts_with("/v1/collections/{collection}/index/hnsw");
     match (method.as_str(), route) {
@@ -851,6 +876,8 @@ fn authorize(
             || route == "/v1/collections/{collection}/query"
             || route == "/v1/collections/{collection}/embed"
             || route == "/v1/collections/{collection}/search/disk-ann");
+    #[cfg(feature = "graph")]
+    let search = search || graph::read_post(method, route);
     let read_only_allowed =
         path.starts_with("/v1/auth/") || (!path.starts_with("/v1/admin/") && (read || search));
     // Legacy routes address `default` (ID 0); their handlers may not resolve

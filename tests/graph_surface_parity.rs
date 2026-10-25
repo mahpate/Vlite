@@ -338,6 +338,15 @@ async fn reg008_served_openapi_matches_baseline_except_approved_additions() {
     let served = String::from_utf8(bytes.to_vec())
         .unwrap()
         .replace("\r\n", "\n");
+    // EPIC-011: graph builds merge whole graph path lines (RD-013); every
+    // other served line must still match the baseline.
+    #[cfg(feature = "graph")]
+    let served: String = served
+        .split_inclusive('\n')
+        .filter(|line| {
+            !line.starts_with("    \"/v1/graphs") && !line.starts_with("    \"/v1/admin/graph/")
+        })
+        .collect();
     let version = openapi_matches_baseline(
         &served,
         &fixture("openapi.json"),
