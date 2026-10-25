@@ -83,7 +83,7 @@
         ["current-administration.png", "Administration: inspect server health and manage operational controls."],
         ["current-backups.png", "Backups: inspect a consistent snapshot and available restore controls."],
         ["current-credentials.png", "Credentials: issue limited access, rotate secrets and inspect audit history."],
-        ["current-tenants.png", "Tenants: create isolated namespaces and set their vector limits."],
+        ["current-tenants.png", "Tenants: create isolated namespaces, set vector limits and see each tenant's state and usage."],
         ["current-automation.png", "Automation: inspect and configure scheduled index maintenance."],
         ["current-webhooks.png", "Webhooks: manage change notifications and inspect delivery status."],
         ["current-tls.png", "TLS certificates: reload configured files; this HTTP demo explains why reload is unavailable."],
