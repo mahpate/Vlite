@@ -1,8 +1,8 @@
 ---
 goal: Optional embedded property-graph layer for VLite with schema-guided agent operations, bounded traversal and hybrid vector/graph retrieval, delivered with minimum impact on existing VLite behavior
-version: 1.2.16
+version: 1.2.17
 date_created: 2026-10-23
-last_updated: 2026-10-24
+last_updated: 2026-10-25
 owner: VLite maintainers (mahpate/Vlite)
 tags: [feature, architecture, storage-format, graph, agents, mcp, retrieval]
 ---
@@ -39,6 +39,9 @@ Not yet implemented:
 The user-requested command-line and Dashboard follow-ups are tracked in
 [Section 14.3](#143-requested-command-line-and-dashboard-follow-ups). They are
 not implemented by the P1 work above and do not include a graph query language.
+The command-line follow-up is now available as the source-only
+`vlite-graph-cli` (v1.2.17, implemented and reviewed; source-only, not distributed); it is not in distributed artifacts
+and approves no gate.
 
 The REG-001..REG-008 regression baseline is pinned to commit `347b01d` (re-pinned in v1.2.10, see `decisions.md`). The DO-005 performance record is still the `81ff901` measurement in [`baseline.md`](baseline.md) and must be re-measured before REG-010 budgets are enforced.
 
@@ -966,13 +969,15 @@ All EPIC-003 implementation items are done. The epic stays open for its formal g
 
 The user requested graph command-line and Dashboard support **after** the
 current graph implementation, validation, publication and DO-005 graph-off
-refresh. This backlog records that request in the repository rather than only
+refresh. In v1.2.17 the user moved the command-line follow-up ahead of that
+benchmark work as a source-only build; the Dashboard ordering is unchanged.
+This backlog records that request in the repository rather than only
 in session todos. It does not expand the delivered P1 scope, remove the MVP UI
 non-goal, approve an open gate or change distributed artifact feature sets.
 
 | Follow-up | Scope to define before implementation | Prerequisites | Status |
 |-----------|---------------------------------------|---------------|--------|
-| FOLLOWUP-001: command-line graph operations | A user-facing interface to the existing typed graph operations, beyond `vlite-maintain enable-graph` and `strip-graph`. Define command placement, read/write coverage, explicit file enablement, read-only behavior, bounded results and machine-readable output before adding commands. Reuse the graph adapter rather than introducing a text query language. | Complete current publication and DO-005 refresh; review the command contract. Preserve opt-in builds, existing vector commands, file-lock ownership and applicable phase/release gates. | Requested; not implemented |
+| FOLLOWUP-001: command-line graph operations | A user-facing interface to the existing typed graph operations, beyond `vlite-maintain enable-graph` and `strip-graph`. Define command placement, read/write coverage, explicit file enablement, read-only behavior, bounded results and machine-readable output before adding commands. Reuse the graph adapter rather than introducing a text query language. | v1.2.17: the user moved this ahead of publication and the DO-005 refresh (source-only build, kept out of distributed artifacts); review the command contract. Preserve opt-in builds, existing vector commands, file-lock ownership and applicable phase/release gates. | Implemented as source-only `vlite-graph-cli` (`graph,json` features; [contract](../../TOOLS.md#graph-operations-experimental-source-only), [decision](decisions.md#followup-001-source-only-graph-cli-v1217-implemented-and-reviewed-source-only-not-distributed)); implemented and reviewed; source-only, not distributed. Gates unchanged |
 | FOLLOWUP-002: Dashboard graph support | Define graph discovery, operation coverage and presentation of bounds, truncation and errors in the existing Dashboard. Browser access must use the server owner, never open the database independently or bypass authorization. | Complete current publication and DO-005 refresh; EPIC-011 graph REST routes, graph-scoped credentials, authorization, graph-build OpenAPI and endpoint tests (ITEM-040..ITEM-042, ITEM-044). EPIC-011 retains its P3 entry gates, including GATE-007; the UI contract must then be reviewed. | Requested; blocked on REST/authorization prerequisites |
 
 Dashboard controls must remain unavailable when the server lacks graph
@@ -1116,3 +1121,4 @@ prerequisites for typed CLI or Dashboard operations.
     - `python tests\graph_build_boundary.py` (7), `tests\openapi_contract.py` (4), `tests\graph_reference_runner.py` (8) and `tests\docker_build_inputs.py` (4) pass. `cargo check --locked --no-default-features --lib` passes. `cargo package --locked -p vlite --allow-dirty` passes with and without `--features graph`.
   - **Still open:** the DO-005 graph-off record is still `81ff901` and must be re-measured before REG-010 budgets are enforced or GATE-008 is requested. Every gate stays open. Graph command-line and Dashboard support were requested after this change; the PRD keeps a Dashboard graph UI as an MVP non-goal and plans REST graph routes in EPIC-011 behind GATE-007, so that work needs a PRD amendment first.
 - 2026-10-24 — v1.2.16: recorded the user-requested command-line and Dashboard follow-ups in Section 14.3, including their ordering after current publication and the DO-005 refresh, the Dashboard's EPIC-011 REST/authorization prerequisites, and the continued exclusion of graph query-language work. This is backlog tracking, not implemented CLI/UI support or approval of any phase, security or distribution gate. The [rejected DO-005 refresh record](decisions.md#do-005-graph-off-refresh-attempts-rejected) preserves the failed attempts and the open CPU-attribution decision without accepting their performance figures or changing the historical baseline.
+- 2026-10-25 — v1.2.17: implemented FOLLOWUP-001 as the source-only `vlite-graph-cli` binary (`required-features = ["graph", "json"]`): typed JSON reads with explicit limits, truncation and cursors, `--explain`, and atomic `batch` writes through `GraphMut::write_batch` behind `--writable`, with exact u64 identifiers and structured errors. At the user's request this precedes publication and the DO-005 refresh; it is not in distributed artifacts, approves no phase, security or release gate (including GATE-008), and leaves the rejected DO-005 attempts, the historical baseline and the benchmark backlog unchanged. See [the decision](decisions.md#followup-001-source-only-graph-cli-v1217-implemented-and-reviewed-source-only-not-distributed) and [`docs/TOOLS.md`](../../TOOLS.md#graph-operations-experimental-source-only).

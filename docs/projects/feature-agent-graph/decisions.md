@@ -628,3 +628,60 @@ sub-second workloads. The alternatives are:
 No option is chosen, no thresholds are changed and no new run is authorized
 by this record. The graph-off refresh remains blocked pending that decision
 and a genuine coordinated quiet host window; existing gates remain unchanged.
+
+## FOLLOWUP-001 source-only graph CLI (v1.2.17; implemented and reviewed; source-only, not distributed)
+
+**Ordering.** The user chose to implement and test a source-only, opt-in graph
+CLI ahead of the deferred benchmark work. This removes FOLLOWUP-001's
+dependency on the current publication and the DO-005 refresh. It approves no
+phase, security or release gate: GATE-008 and the other open gates are
+unchanged, the rejected DO-005 attempts and the `81ff901` baseline stay as
+recorded above, and the refresh remains blocked. FOLLOWUP-002 (Dashboard) is
+unchanged.
+
+**Placement.** A new binary, `vlite-graph-cli` (`src/bin/vlite-graph-cli.rs`),
+with `required-features = ["graph", "json"]`. The name avoids confusion with the
+`crates/vlite-graph` harness. `json` is needed because the existing
+`Metadata`/`MetadataValue`/`Condition` serde implementations live behind it.
+`vlite-shell` and `vlite-maintain` are unchanged. Artifact builds pin features
+without `graph`, so the binary is never built for release archives, the Docker
+image or packages; `tests/graph_build_boundary.py`
+(`test_graph_binaries_stay_source_only`) asserts that it is the only
+graph-requiring binary and that `Dockerfile` and `release.yml` do not name it.
+
+**Contract.** `vlite-graph-cli --db PATH [--writable] [--explain] COMMAND [REQUEST]`,
+one JSON request object per call (`-` for stdin, capped at 64 MiB). The full
+user contract is in [`docs/TOOLS.md`](../../TOOLS.md#graph-operations-experimental-source-only).
+
+- Reads (`graphs`, `get-node`, `get-edge`, `find-nodes`, `neighbors`,
+  `traverse`, `shortest-path`) use `Database::open_read_only` and
+  `GraphRef::query`/`explain`; they never write and share the file with
+  other readers.
+- Writes need `--writable` and the exclusive lock: `init` (new file only,
+  `create_with_graph`), `create-graph`, `drop-graph` and `batch`. `batch` maps
+  every `GraphOp` variant, plus `Mutation::Put`/`PutWithMetadata`/`Delete`, to
+  one `GraphMut::write_batch` call, so mutation semantics, atomicity and
+  limits come from the adapter. There are no separate single-operation write
+  commands; a one-element batch is the same call.
+- Requests are parsed with unknown fields and repeated property or metadata
+  keys rejected before the file is opened, so a bad request leaves the file
+  untouched and no input is silently ignored.
+  Vector-only files are never enabled implicitly (`graphs_not_enabled`).
+- Limits use `GraphLimits::DEFAULT` for omitted fields and pass the result to
+  the adapter, which rejects values above the ceiling instead of clamping.
+  Truncation, cursors, statistics and `view_sequence` are returned as-is.
+- Output is one JSON object on stdout (exit 0) or
+  `{"error":{"code","message"}}` on stderr (exit 1). Graph error codes reuse
+  the REST names; `server.rs` keeps its mapping private, so the CLI holds a
+  copy. All u64 IDs, revisions and sequences are decimal strings in output and
+  accept strings or JSON integers in input, so values up to `u64::MAX` keep
+  full precision.
+
+**Not covered.** Encrypted files (no key option), non-UTF-8 vector payloads,
+interactive shell integration, schema, hybrid retrieval and any graph query
+language. REST, MCP, SDK and Dashboard surfaces are unchanged.
+
+**Evidence.** `tests/graph_cli.rs` (6 tests, written first and run failing
+against a stub) covers round trips, atomic batches with vector mutations and
+`u64::MAX` records, unchanged file bytes after failed requests and reads, lock
+ownership, refusal of non-graph files and the help contract.

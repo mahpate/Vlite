@@ -664,11 +664,15 @@ release artifacts, see
 `crates/vlite-graph` is an unpublished workspace harness that tests the same
 engine source in isolation. Graph cost measurements and their scope are recorded
 in the [benchmark report](docs/projects/feature-agent-graph/graph-measurements.md).
+The source-only `vlite-graph-cli` (`--features graph,json`) exposes those reads
+and write batches as JSON commands; see
+[graph operations](docs/TOOLS.md#graph-operations-experimental-source-only).
 
 ```text
 cargo test --locked --all-targets --all-features
 cargo test --locked -p vlite-graph
 cargo test --locked --features graph --test graph_storage --test graph_compat --test graph_traversal --test graph_maintenance --test graph_recovery
+cargo test --locked --features graph,json --test graph_cli
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo fmt --check
 docker compose --profile test run --build --rm tests

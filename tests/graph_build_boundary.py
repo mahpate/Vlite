@@ -107,6 +107,18 @@ class GraphBuildBoundary(unittest.TestCase):
                     self.assertIsNotNone(match)
                     self.assertEqual(sorted(match.group(1).split(",")), expected)
 
+    def test_graph_binaries_stay_source_only(self):
+        # FOLLOWUP-001: graph command-line binaries require `graph`, so the
+        # pinned artifact builds above never compile them, and no artifact
+        # recipe copies or lists them.
+        bins = load_toml(ROOT / "Cargo.toml")["bin"]
+        graph_bins = [entry["name"] for entry in bins if "graph" in entry.get("required-features", [])]
+        self.assertEqual(graph_bins, ["vlite-graph-cli"])
+        for name in graph_bins:
+            for recipe in ARTIFACT_BUILDS:
+                with self.subTest(binary=name, file=recipe):
+                    self.assertNotIn(name, (ROOT / recipe).read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

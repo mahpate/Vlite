@@ -125,6 +125,16 @@ required-features = ["mcp"]
 name = "graph_surface_parity"
 required-features = ["server", "mcp"]
 
+# FOLLOWUP-001: source-only graph command line. `graph` keeps it out of every
+# distributed artifact (their pinned feature lists exclude `graph`).
+[[bin]]
+name = "vlite-graph-cli"
+required-features = ["graph", "json"]
+
+[[test]]
+name = "graph_cli"
+required-features = ["graph", "json"]
+
 [[test]]
 name = "graph_storage"
 required-features = ["graph"]

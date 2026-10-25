@@ -259,6 +259,10 @@ Compatibility:
   updates of attached records invalidate them; unrelated vector writes do not.
   A read-only database retains its open-time view. Schema/property indexes,
   hybrid graph retrieval, and graph-specific server/MCP/SDK APIs are later work.
+- `vlite-graph-cli`, built from source with `--features graph,json`, runs these
+  typed reads and atomic write batches from the command line with JSON input and
+  output; see [Graph operations](TOOLS.md#graph-operations-experimental-source-only).
+  Like the feature, it is not in release artifacts.
 
 ## Durability and security caveats
 

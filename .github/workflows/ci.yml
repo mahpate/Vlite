@@ -26,6 +26,8 @@ jobs:
       - run: cargo test --locked -p vlite-graph
       - name: Graph feature alone (ITEM-009/ITEM-014/ITEM-022; catches cfg gaps hidden by --all-features)
         run: cargo test --locked --features graph --lib --test graph_storage --test graph_compat --test graph_integrity --test graph_traversal --test graph_maintenance --test graph_recovery
+      - name: Source-only graph CLI (FOLLOWUP-001; graph,json without tools or server)
+        run: cargo test --locked --features graph,json --test graph_cli
       - name: Server with graph but without grpc or mcp (ITEM-027..030; catches cfg gaps hidden by --all-features)
         run: cargo test --locked --features server,graph --test graph_server_surfaces
       - name: Graph-off parity in default features (C-1; includes graph_regression and graph_compat)

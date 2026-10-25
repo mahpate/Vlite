@@ -10,6 +10,7 @@ REST or gRPC server.
 - [Search quality](#search-quality-and-configurationdatabase-comparison): measure recall and compare database or index configurations.
 - [Index tuning](#index-tuning-advisor): find HNSW parameters for a target recall.
 - [MCP and agent skills](#mcp-server-and-agent-skills): connect an agent to a database through a separate stdio server.
+- [Graph operations](#graph-operations-experimental-source-only): typed reads and atomic writes on graph-enabled files (experimental `graph` builds from source only).
 
 **Before opening a file:** stop its server or other exclusive owner. The offline
 shell/import/tuning tools acquire an exclusive file lock, even when the shell's
@@ -216,6 +217,98 @@ MCP opens the database file directly, read-only by default; it is not a REST
 proxy. Installing an agent skill does not start that server or grant write
 permissions.
 
+## Graph operations (experimental, source-only)
+
+`vlite-graph-cli` runs one typed property-graph operation per invocation on a
+[graph-enabled file](STORAGE-FEATURES.md#graph-enabled-files-experimental-graph-feature).
+It needs the non-default `graph` and `json` features, so it is **not** in
+release archives, the Docker image or packages; build it from a source checkout:
+
+```powershell
+cargo build --locked --features graph,json --bin vlite-graph-cli
+# or install it into ~/.cargo/bin from the checkout
+cargo install --locked --path . --features graph,json --bin vlite-graph-cli
+```
+
+Usage: `vlite-graph-cli --db PATH [--writable] [--explain] COMMAND [REQUEST]`.
+`REQUEST` is one JSON object; `-` reads it from stdin (at most 64 MiB) and
+omitting it means `{}`. Every command maps to one existing
+`vlite::property_graph` call; there is no graph query language.
+
+| Command | Access | Library call |
+|---------|--------|--------------|
+| `graphs` | read | `list_graphs` |
+| `get-node`, `get-edge`, `find-nodes`, `neighbors`, `traverse`, `shortest-path` | read | `GraphRef::query` (with `--explain`: `GraphRef::explain`) |
+| `init` | write | `Database::create_with_graph` (new file only) |
+| `create-graph`, `drop-graph` | write | `create_graph`, `drop_graph` (empty graphs only) |
+| `batch` | write | `GraphMut::write_batch` (one atomic frame) |
+
+```powershell
+vlite-graph-cli --db kb.vlite --writable init '{"dimensions":3}'
+vlite-graph-cli --db kb.vlite --writable create-graph '{"graph":"kb"}'
+Get-Content ops.json | vlite-graph-cli --db kb.vlite --writable batch -
+vlite-graph-cli --db kb.vlite graphs
+vlite-graph-cli --db kb.vlite neighbors '{"graph":"kb","node":{"key":"api"},"direction":"both"}'
+vlite-graph-cli --db kb.vlite --explain traverse '{"graph":"kb","start":[{"key":"api"}],"limits":{"max_hops":3}}'
+```
+
+`ops.json` holds one batch; operations apply in order and commit together or
+not at all (at most 4,096 operations):
+
+```json
+{"graph":"kb","ops":[
+  {"op":"create_node","key":"api","labels":["Service"],"properties":{"tier":{"type":"integer","value":"1"}}},
+  {"op":"create_node","key":"db","labels":["Database"]},
+  {"op":"create_edge","key":"api-db","source":"api","relationship":"READS","destination":"db"},
+  {"op":"put_vector","collection":"default","id":"7","vector":[1,0,0],"payload":"runbook","metadata":{}},
+  {"op":"attach","node":"api","collection":"default","record":"7"}
+]}
+```
+
+Batch operations: `create_node`, `upsert_node`, `patch_node` (`add_labels`,
+`remove_labels`, `set`, `unset`), `delete_node`, `create_edge`, `patch_edge`,
+`delete_edge`, `attach`, `detach`, and the vector mutations `put_vector`
+(`Mutation::PutWithMetadata` when `metadata` is given, otherwise
+`Mutation::Put`; `payload` is UTF-8 text) and `delete_vector`. Nodes are
+addressed by key, edges by `{"id":...}` or `{"key":...}`. `expected` is `"any"`
+(default), `"absent"` or `{"revision":"N"}`.
+
+Contract:
+
+- **Access.** Reads open the file with `Database::open_read_only` (shared
+  lock) and never write; they coexist with other readers, such as read-only
+  `vlite-mcp`, and fail with `locked` while a writer owns the file. Writes
+  require `--writable`, take the exclusive lock for that one command and fail
+  with `locked` while any other handle is open. Passing `--writable` to a read,
+  or omitting it for a write, is a `usage` error. Stop the server or other
+  exclusive owner first, as for the other offline tools.
+- **Graph-enabled files only.** Files are never converted: graph commands on a
+  vector-only file fail with `graphs_not_enabled`, and `init` refuses an
+  existing path. Copy a v4/v5 file out as a graph-enabled one with
+  `vlite-maintain enable-graph SOURCE DESTINATION` (also a graph build).
+  Encrypted files are not supported by this tool.
+- **Bounded reads.** Queries accept `"limits"` (fields of `GraphLimits`;
+  defaults apply to omitted fields; values above the ceiling fail with
+  `graph_limit_exceeds_ceiling`, never clamped) and `"projection"` (`"all"`,
+  `"none"` or `{"only":[...]}`). Every result carries `graph`, `view_sequence`,
+  `complete`, `truncation`, `stats` and `cursor`. Pass a returned `cursor`
+  (lowercase hex) with the same request to continue `find-nodes` or
+  `neighbors`; a write in between fails it with `graph_cursor_stale`.
+  `--explain` returns the normalized query, effective limits, projection and
+  index choices without reading nodes or edges.
+- **Output.** Success prints one JSON object on stdout and exits 0. Failure
+  prints `{"error":{"code":"...","message":"..."}}` on stderr and exits 1.
+  Codes are `usage`, `invalid_request` (malformed JSON, unknown or repeated
+  fields, keys or operations, malformed IDs and cursors that are not lowercase
+  hex), `invalid_input` (values the library rejects, such as invalid keys,
+  labels or query bounds, or a cursor from another query), the REST graph codes (for example
+  `graph_not_found`, `graph_node_not_found`, `graph_attached_record`) and
+  `locked`, `precondition_failed`, `io_error` and others for
+  database errors. Node, edge and record IDs, revisions and sequences are
+  decimal strings in output and accepted as decimal strings or JSON integers,
+  so values up to 2^64-1 keep full precision. Counts and limits are numbers.
+  Enumerations use `"name"` or `{"name":{...}}`.
+
 ## Tests
 
 The following commands are for contributors validating the tools:
@@ -223,6 +316,7 @@ The following commands are for contributors validating the tools:
 ```powershell
 cargo test --locked --features tools --test shell_cli --test import_tools --test tune_cli
 cargo test --locked --all-features --test shell_cli --test import_tools --test tune_cli
+cargo test --locked --features graph,json --test graph_cli
 ```
 
 Fixtures are small and generated in-test: CSV, JSONL, COPY, both FAISS flat metric
