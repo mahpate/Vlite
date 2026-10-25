@@ -44,11 +44,11 @@
     <div class="wrap">
       <span class="eyebrow">Measured, not quoted</span>
       <h1>VLite <span class="grad">benchmarks</span></h1>
-      <p class="lead">Reproducible performance numbers for VLite's embedded engine, measured in-process
-        against zvec, Chroma, LanceDB and FAISS, plus a separate server tier with Qdrant and pgvector.</p>
+      <p class="lead">Current-source vector measurements, with recall, latency and optimization priorities.
+        Earlier cross-engine comparisons are preserved in a clearly labeled historical archive.</p>
       <div class="cta">
         <a class="btn primary" href="#current-source">Latest source measurements</a>
-        <a class="btn" href="#results">Multi-engine results</a>
+        <a class="btn" href="#historical-results">Historical multi-engine results</a>
         <a class="btn" href="#reproduce">Reproduce</a>
         <a class="btn" href="./#features">VLite features</a>
       </div>
@@ -99,15 +99,19 @@
     </div>
   </section>
 
+  <details id="historical-results" class="benchmark-archive">
+    <summary class="wrap">Historical multi-engine archive &middot; VLite 0.3.0 &middot; expand earlier results</summary>
   <section id="summary">
     <div class="wrap">
       <div class="section-head">
-        <div class="kicker">Summary</div>
-        <h2>What the measurements show</h2>
+        <div class="kicker">Historical summary &middot; VLite 0.3.0</div>
+        <h2>What the earlier measurements showed</h2>
+        <p>These findings apply to the archived builds and workloads below, not the current-source
+          campaign above. Old version labels are retained because those binaries produced these numbers.</p>
       </div>
       <div class="grid cols-2">
         <div class="card">
-          <h3>Where VLite leads</h3>
+          <h3>Strengths in the archived runs</h3>
           <ul class="list">
             <li>Smallest measured ANN database footprint in these runs, in one portable file.</li>
             <li>Every ingest batch is a checksummed, fsync-before-ack atomic commit with fail-closed recovery.</li>
@@ -115,11 +119,11 @@
           </ul>
         </div>
         <div class="card">
-          <h3>Where VLite is improving</h3>
+          <h3>Bottlenecks identified in the archived runs</h3>
           <ul class="list">
-            <li>HNSW build time: VLite builds single-threaded today.</li>
+            <li>HNSW construction was single-threaded in the measured builds.</li>
             <li>Reopen with ANN: the HNSW index is rebuilt in memory unless an index snapshot is enabled.</li>
-            <li>Bulk ingest throughput and Python binding overhead (JSON over the C ABI).</li>
+            <li>Bulk ingest throughput and the measured JSON-over-C-ABI Python path. Later releases also offer typed-input methods.</li>
           </ul>
         </div>
       </div>
@@ -128,10 +132,11 @@
 
   <section id="results">
     <div class="wrap">
-      <div class="section-head"><div class="kicker">Multi-engine benchmark</div>
-        <h2>Embedded and server tiers, measured separately</h2>
+      <div class="section-head"><div class="kicker">Historical multi-engine benchmark &middot; VLite 0.3.0</div>
+        <h2>Earlier embedded and server tiers</h2>
         <p>WSL2, 16 vCPU Intel Xeon Platinum 8370C. Medians of 3 trials at 20k × 128 and 2 at 100k × 768.
-          These are VLite 0.3.0 baseline runs, not measurements of the new concurrent-reader implementation.</p>
+          These are VLite 0.3.0 baseline runs, not measurements of v0.4.1 or source revision 059650e.
+          No newer cross-engine campaign has been completed.</p>
       </div>
       <p>Seeded float32 Gaussian clusters (64 clusters, σ = 0.35, seed 42), squared L2, 200 top-10 queries;
         recall against a tie-aware float64 oracle. HNSW M=16, ef_construction=100, ef_search=100 where exposed;
@@ -210,9 +215,11 @@
     </div>
   </section>
 
+  </details>
+
   <section id="concurrent-readers" class="alt">
     <div class="wrap">
-      <h2>Concurrent readers</h2>
+      <h2>Earlier concurrency development measurements</h2>
       <p>VLite 0.4.1 includes shared-lock read-only embedded handles, concurrent server read routes and parallel exact scans.
         Throughput before vs after with 1&ndash;16 concurrent search clients:</p>
       <div class="table-wrap"><table><thead><tr><th>Search</th><th>Concurrent readers</th><th>QPS before</th><th>QPS after</th><th>p50 / p95 / p99 ms before</th><th>p50 / p95 / p99 ms after</th></tr></thead><tbody><tr><td>Exact</td><td>1</td><td>483</td><td><strong>788</strong></td><td>2.00 / 2.51 / 3.21</td><td>1.25 / 1.41 / 1.65</td></tr><tr><td>Exact</td><td>4</td><td>636</td><td><strong>1,529</strong></td><td>6.11 / 7.21 / 8.52</td><td>2.62 / 3.22 / 3.52</td></tr><tr><td>Exact</td><td>8</td><td>634</td><td><strong>1,927</strong></td><td>12.27 / 14.16 / 18.30</td><td>4.22 / 5.95 / 6.89</td></tr><tr><td>Exact</td><td>16</td><td>629</td><td><strong>2,155</strong></td><td>24.77 / 29.44 / 35.89</td><td>7.58 / 11.37 / 12.77</td></tr><tr><td>HNSW</td><td>1</td><td>1,528</td><td><strong>1,560</strong></td><td>0.64 / 0.78 / 0.97</td><td>0.62 / 0.76 / 0.97</td></tr><tr><td>HNSW</td><td>4</td><td>3,521</td><td><strong>4,038</strong></td><td>1.13 / 1.30 / 1.67</td><td>0.95 / 1.37 / 1.65</td></tr><tr><td>HNSW</td><td>8</td><td>3,491</td><td><strong>4,310</strong></td><td>2.26 / 2.54 / 3.75</td><td>1.77 / 2.92 / 3.59</td></tr><tr><td>HNSW</td><td>16</td><td>3,447</td><td><strong>4,648</strong></td><td>4.58 / 5.16 / 8.38</td><td>3.22 / 6.18 / 7.80</td></tr></tbody></table></div>
@@ -225,7 +232,7 @@
 
   <section id="current-source-performance">
     <div class="wrap">
-      <h2>Optimizations included in VLite 0.4.1</h2>
+      <h2>Earlier optimization measurements &middot; included in v0.4.1</h2>
       <p>These features are available in the
         <a href="https://github.com/mahpate/Vlite/releases/tag/v0.4.1">official v0.4.1 release</a>
         and matching Python packages. The development measurements below were
@@ -287,7 +294,7 @@
   </section>
   <section id="hnsw-traversal">
     <div class="wrap">
-      <h2>HNSW traversal optimization (released in 0.4.1)</h2>
+      <h2>Earlier HNSW traversal measurement &middot; released in v0.4.1</h2>
       <p>A bounded visited-node bitmap replaces per-node hashing during graph
         construction and search on graphs up to 8,388,608 nodes. Each traversal
         owns one bit per node, rounded up to 64-bit words (at most 1 MiB);
@@ -361,8 +368,18 @@
     <div class="wrap">
       <div class="section-head">
         <div class="kicker">Methodology</div>
-        <h2>Reproduction and earlier zvec-only runs</h2>
+        <h2>Reproduce the latest source campaign</h2>
+        <p>Use isolated exports of the exact measured commits, the same Rust release toolchain,
+          separate build directories and a coordinated measurement window.
+          The <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/README.md#paired-source-revision-regression-october-25-2026-utc">step-by-step source campaign instructions</a>
+          cover building the v0.4.1 baseline and both source variants. Run the
+          <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/revision_campaign.py">revision campaign runner</a>
+          only after all builds finish. It retains five repetitions and raw samples per workload.</p>
       </div>
+      <details class="benchmark-archive">
+        <summary>Historical zvec-only methodology &middot; VLite 0.3.0</summary>
+        <p>The setup below reproduces the older comparison, not the latest source measurements.
+          Its package pin must stay at the version actually measured; changing it would require a new campaign.</p>
       <div class="grid cols-2">
         <div class="card">
           <h3>Setup</h3>
@@ -385,7 +402,7 @@
           </ul>
         </div>
       </div>
-      <h3 style="margin-top:28px">Reproduce</h3>
+      <h3 style="margin-top:28px">Reproduce the historical comparison only</h3>
       <button class="copy" data-copy="c-repro">Copy</button>
 <pre class="code" id="c-repro"><span class="c-c"># Linux x86_64, Python 3.11+</span>
 python -m venv .venv &amp;&amp; . .venv/bin/activate
@@ -394,6 +411,7 @@ git clone https://github.com/mahpate/Vlite &amp;&amp; cd Vlite
 python benchmarks/compare_zvec.py --records 20000 --dimensions 128 --trials 3 --output zvec-20k.json</pre>
       <p class="muted">Raw results: <a href="results/zvec-20k-128d-wsl.json">20k × 128</a> ·
         <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/compare_zvec.py">benchmark source</a></p>
+      </details>
     </div>
   </section>
 </main>
