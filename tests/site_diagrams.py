@@ -40,7 +40,10 @@ def check(site, screenshots=None):
         assert svg.attrib.get("viewBox"), image
         assert not re.search(r"<(?:script|foreignObject)\b", text), image
         assert not re.search(r'(?:href|src)="https?://', text), image
-    assert len(list(assets.glob("*.svg"))) == 28
+    assert len(list(assets.glob("*.svg"))) == 32
+    for mode in ("embedded", "self-hosted"):
+        for theme in ("light", "dark"):
+            assert (assets / f"deployment-{mode}-{theme}.svg").is_file()
     server = ThreadingHTTPServer(("127.0.0.1", 0), partial(QuietHandler, directory=str(site)))
     Thread(target=server.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{server.server_port}"
@@ -71,6 +74,14 @@ def check(site, screenshots=None):
                                 assert image.evaluate("img => img.naturalWidth > 0 && img.alt.length > 30")
                                 assert image.evaluate("img => img.currentSrc").endswith(f"-{theme}.svg")
                             page.locator("#layers").scroll_into_view_if_needed()
+                        else:
+                            images = page.locator(".deployment-options img")
+                            assert images.count() == 2
+                            for image in images.all():
+                                image.scroll_into_view_if_needed()
+                                image.evaluate("img => img.decode()")
+                                assert image.evaluate("img => img.currentSrc").endswith(f"-{theme}.svg")
+                                assert image.evaluate("img => img.naturalWidth > 0 && img.alt.length > 30")
                         if screenshots and width in (1440, 390):
                             screenshots.mkdir(parents=True, exist_ok=True)
                             page.screenshot(path=str(screenshots / f"{Path(path).stem}-{theme}-{width}.png"))
@@ -97,7 +108,7 @@ def check(site, screenshots=None):
     finally:
         server.shutdown()
         server.server_close()
-    print("Checked 28 standalone SVGs, shared palette, both themes, theme toggle, no-JS and responsive pages.")
+    print("Checked 32 standalone SVGs, shared palette, both themes, theme toggle, no-JS and responsive pages.")
 
 
 if __name__ == "__main__":

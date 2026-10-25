@@ -21,6 +21,32 @@ No external database required.
 
 ## Architecture at a glance
 
+### Embedded or self-hosted?
+
+**Embedded:** your application loads the VLite library and opens a local file.
+No API service or dashboard is required.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="site/assets/diagrams/deployment-embedded-dark.svg">
+  <img src="site/assets/diagrams/deployment-embedded-light.svg" alt="Your application calls the embedded VLite engine in the same process; the engine reads and writes a local database file." width="520" height="690">
+</picture>
+
+**Self-hosted:** you run `vlite-server` and provide persistent disk storage.
+The service contains the same VLite engine, owns the database file and handles
+authenticated REST requests and optional gRPC. No separate storage service is needed.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="site/assets/diagrams/deployment-self-hosted-dark.svg">
+  <img src="site/assets/diagrams/deployment-self-hosted-light.svg" alt="Applications and an optional browser dashboard call your API service; its VLite engine owns a file on your disk or persistent Docker volume." width="520" height="690">
+</picture>
+
+The **dashboard is optional**: the API serves it at `/dashboard`, or a separate
+frontend container proxies its requests to the API. Both use the same database.
+You manage service uptime, storage, access, HTTPS, backups and upgrades.
+See the [deployment guide](docs/DOCKER-OPERATIONS.md).
+
+### Inside the engine
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="site/assets/diagrams/layers-dark.svg">
   <img src="site/assets/diagrams/layers-light.svg" alt="VLite architecture: interfaces call the Database core; search indexes are rebuildable; storage writes one authoritative file.">

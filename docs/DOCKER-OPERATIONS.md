@@ -1,5 +1,21 @@
 # VLite Docker operations
 
+## What you run
+
+Self-hosting means operating **the API service and its persistent storage** on
+your own machine or server. `vlite-server` contains the storage engine; it owns
+the `.vlite` file and serves authenticated REST and optional gRPC requests.
+There is no separate database-storage service.
+
+The **dashboard is optional**. Open the UI served by the API at `/dashboard`,
+or run the standalone dashboard container, which proxies requests to the API.
+It does not have a separate database. Compose keeps database files in `api-data`
+and administrative state in `api-admin-data`; you manage access, HTTPS, backups
+and upgrades.
+
+See the [deployment diagrams](https://mahpate.github.io/Vlite/#deployment-options)
+for embedded and self-hosted layouts.
+
 VLite publishes versioned Linux `amd64` and `arm64` images to GitHub Container
 Registry through the release workflow when a matching version tag is released:
 

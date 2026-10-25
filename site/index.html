@@ -178,11 +178,19 @@ git clone https://github.com/mahpate/Vlite; cd Vlite
           <a href="docs/TOOLS.html"><strong>MCP &amp; agent skills</strong><span>Integrate with agent workflows</span></a>
         </aside>
       </div>
-      <div class="section-head"><h3>Embedded or self-hosted</h3><p>Two deployment paths, the same Rust storage engine.</p></div>
-      <div class="grid cols-2">
-        <article class="card"><div class="label">Embedded</div><h3>In your application's process</h3><p>Use Rust, Python, Node.js or C bindings for local-first applications and private retrieval without a separate database service.</p><a class="more" href="#quickstart">Start with an embedded example &#8594;</a></article>
-        <article class="card"><div class="label">Self-hosted</div><h3>Behind REST and gRPC</h3><p>Give your clients an authenticated API, with a dashboard, scoped credentials and server observability. You operate the service.</p><a class="more" href="docs/DOCKER-OPERATIONS.html">Deployment guide &#8594;</a></article>
+      <div class="section-head" id="deployment-options"><h3>Where does VLite run?</h3><p>Inside your app, or as an API service you operate. Both store data in your own database file.</p></div>
+      <div class="grid cols-2 deployment-options">
+        <article class="card"><div class="label">Embedded</div><h3>Your app opens the file</h3>
+          <picture><source media="(prefers-color-scheme: dark)" srcset="assets/diagrams/deployment-embedded-dark.svg"><img src="assets/diagrams/deployment-embedded-light.svg" data-light="assets/diagrams/deployment-embedded-light.svg" data-dark="assets/diagrams/deployment-embedded-dark.svg" alt="Embedded: your application calls the VLite library in the same process; the library owns a local database file. No API service or dashboard is required." width="520" height="690" loading="lazy"></picture>
+          <p>Include the library in your application. You manage the database file; there is no separate database service.</p><a class="more" href="#quickstart">Embedded example &#8594;</a></article>
+        <article class="card"><div class="label">Self-hosted</div><h3>You run the API and keep the data</h3>
+          <picture><source media="(prefers-color-scheme: dark)" srcset="assets/diagrams/deployment-self-hosted-dark.svg"><img src="assets/diagrams/deployment-self-hosted-light.svg" data-light="assets/diagrams/deployment-self-hosted-light.svg" data-dark="assets/diagrams/deployment-self-hosted-dark.svg" alt="Self-hosted: clients and an optional browser dashboard call vlite-server. Its embedded engine owns the database file on your server's persistent storage." width="520" height="690" loading="lazy"></picture>
+          <p>Run <code>vlite-server</code> on your machine or server. It handles API requests and reads/writes the file. No separate storage service is needed.</p><a class="more" href="docs/DOCKER-OPERATIONS.html">Deployment guide &#8594;</a></article>
       </div>
+      <p class="note landing-note"><strong>What do you self-host?</strong> The API service and its persistent storage.
+        The dashboard is optional: serve it from the API at <code>/dashboard</code>, or run the separate frontend
+        container that proxies requests to the API. It uses the same database, not its own.
+        You manage access, HTTPS for remote use, backups and upgrades.</p>
       <p class="note landing-note">Language bindings: Rust, Python, Node.js and C; a separate WASM surface is also available. API coverage and platform support vary by package. <a href="docs/INSTALL.html">Check the installation matrix</a>.</p>
       <aside class="product-adoption" aria-label="Applications using VLite">
         <div><div class="label">Used in real applications</div><h3>VLite powers internal workflows at ASENDME</h3>

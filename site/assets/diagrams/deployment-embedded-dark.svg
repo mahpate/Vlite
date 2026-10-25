@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 690" role="img" aria-labelledby="title desc">
+<title id="title">Embedded VLite deployment</title>
+<desc id="desc">Your application calls the VLite library in the same process. The library reads and writes a local database file. No API service or dashboard is required.</desc>
+<rect width="520" height="690" rx="16" fill="#121729"/>
+<style>text{font-family:ui-sans-serif,system-ui,sans-serif;fill:#e6e9f2;text-anchor:middle}.label{font-size:17px;font-weight:650}.note{font-size:14px;fill:#b4bfd2}</style>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#b4bfd2"/></marker></defs>
+<text x="260" y="36" class="label">YOUR DEVICE / APPLICATION HOST</text>
+<rect x="30" y="65" width="460" height="335" rx="16" fill="none" stroke="#b4bfd2" stroke-dasharray="6 5"/>
+<text x="260" y="98" class="note">One application process</text>
+<rect x="70" y="125" width="380" height="80" rx="12" fill="#2d2146" stroke="#8b5cf6" stroke-width="2"/>
+<text x="260.0" y="155" class="label">Your application</text>
+<text x="260.0" y="179" class="note">Rust, Python, Node.js or C</text>
+<path d="M260 205 V270" fill="none" stroke="#b4bfd2" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="350" y="242.5" class="note">Local calls</text>
+<rect x="70" y="270" width="380" height="95" rx="12" fill="#10392e" stroke="#059669" stroke-width="2"/>
+<text x="260.0" y="300" class="label">VLite library</text>
+<text x="260.0" y="324" class="note">Storage engine + search indexes</text>
+<path d="M260 365 V455" fill="none" stroke="#b4bfd2" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="350" y="415.0" class="note">File I/O</text>
+<path d="M90 471 V527 C90 549 430 549 430 527 V471" fill="#10392e" stroke="#059669" stroke-width="2"/>
+<ellipse cx="260" cy="471" rx="170" ry="16" fill="#10392e" stroke="#059669" stroke-width="2"/>
+<text x="260" y="506" class="label">vectors.vlite</text>
+<text x="260" y="528" class="note">Vectors, metadata and payloads</text>
+<text x="260" y="588" class="label">You manage the file and its backups.</text>
+<text x="260" y="620" class="note">No database server to run.</text>
+<text x="260" y="646" class="note">No network API or dashboard required.</text>
+</svg>

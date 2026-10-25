@@ -75,6 +75,11 @@ def check(root):
             if "Earlier release tours" not in " ".join(page.text):
                 errors.append("dashboard.html: earlier tour captures must be labeled separately")
         if path == root / "index.html":
+            for mode in ("embedded", "self-hosted"):
+                if f"assets/diagrams/deployment-{mode}-light.svg" not in page.links:
+                    errors.append(f"index.html: missing {mode} deployment diagram")
+            if "deployment-options" not in page.ids:
+                errors.append("index.html: missing deployment-options anchor")
             if "assets/dashboard/current-overview-light.png" not in page.links:
                 errors.append("index.html: dashboard preview must show the current interface")
             dashboard = pages.get(root / "dashboard.html")

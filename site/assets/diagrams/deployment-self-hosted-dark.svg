@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 690" role="img" aria-labelledby="title desc">
+<title id="title">Self-hosted VLite deployment</title>
+<desc id="desc">Your clients and optional dashboard call an authenticated API service on your machine or server. The service contains the VLite engine and owns the database file on persistent storage. The dashboard can be served by the API or a separate frontend; it does not store the database.</desc>
+<rect width="520" height="690" rx="16" fill="#121729"/>
+<style>text{font-family:ui-sans-serif,system-ui,sans-serif;fill:#e6e9f2;text-anchor:middle}.label{font-size:17px;font-weight:650}.note{font-size:14px;fill:#b4bfd2}</style>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#b4bfd2"/></marker></defs>
+<text x="260" y="36" class="label">CLIENTS / YOUR BROWSER</text>
+<rect x="30" y="60" width="220" height="80" rx="12" fill="#2d2146" stroke="#8b5cf6" stroke-width="2"/>
+<text x="140.0" y="90" class="label">Your applications</text>
+<text x="140.0" y="114" class="note">REST / gRPC clients</text>
+<rect x="270" y="60" width="220" height="80" rx="12" fill="#2d2146" stroke="#8b5cf6" stroke-width="2"/>
+<text x="380.0" y="90" class="label">Dashboard (optional)</text>
+<text x="380.0" y="114" class="note">Browser UI over REST</text>
+<path d="M140 140 V178 H260 M380 140 V178 H260 V220" fill="none" stroke="#b4bfd2" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="260" y="204" class="note">Authenticated requests</text>
+<rect x="25" y="230" width="470" height="410" rx="16" fill="none" stroke="#b4bfd2" stroke-dasharray="6 5"/>
+<text x="260" y="260" class="label">YOUR MACHINE / SERVER</text>
+<rect x="55" y="280" width="410" height="80" rx="12" fill="#2d2146" stroke="#8b5cf6" stroke-width="2"/>
+<text x="260.0" y="310" class="label">vlite-server</text>
+<text x="260.0" y="334" class="note">REST + optional gRPC + auth</text>
+<rect x="90" y="380" width="340" height="75" rx="12" fill="#10392e" stroke="#059669" stroke-width="2"/>
+<text x="260.0" y="410" class="label">VLite engine in the server</text>
+<text x="260.0" y="434" class="note">Same engine as embedded</text>
+<path d="M260 360 V380" fill="none" stroke="#b4bfd2" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M260 455 V495" fill="none" stroke="#b4bfd2" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="350" y="480.0" class="note">File I/O</text>
+<path d="M90 511 V567 C90 589 430 589 430 567 V511" fill="#10392e" stroke="#059669" stroke-width="2"/>
+<ellipse cx="260" cy="511" rx="170" ry="16" fill="#10392e" stroke="#059669" stroke-width="2"/>
+<text x="260" y="546" class="label">vectors.vlite</text>
+<text x="260" y="568" class="note">Vectors, metadata and payloads</text>
+<text x="260" y="610" class="note">Your disk or persistent Docker volume</text>
+<text x="260" y="670" class="note">You operate the service, storage and backups.</text>
+</svg>
