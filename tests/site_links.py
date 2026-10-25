@@ -74,6 +74,24 @@ def check(root):
                     errors.append(f"dashboard.html: missing latest screenshot {name}")
             if "Earlier release tours" in " ".join(page.text):
                 errors.append("dashboard.html: remove historical dashboard tours")
+        if path == root / "features.html":
+            expected = [
+                "storage", "search", "indexes", "vectors", "interfaces",
+                "security", "operations", "dashboard", "tools", "requirements",
+            ]
+            if page.sections != expected:
+                errors.append("features.html: missing or reordered feature categories")
+            for category in expected:
+                if f"#{category}" not in page.links:
+                    errors.append(f"features.html: missing category navigation {category}")
+            for guide in (
+                "CAPABILITIES", "VECTORS", "STORAGE-FEATURES", "SECURITY",
+                "TOOLS", "CONSOLE", "CONSOLE-ADMIN", "GRPC", "INSTALL",
+            ):
+                if f"docs/{guide}.html" not in page.links:
+                    errors.append(f"features.html: missing feature reference {guide}")
+            if "Experimental source capabilities" not in " ".join(page.text):
+                errors.append("features.html: separate experimental graph capabilities")
         if path == root / "index.html":
             for mode in ("embedded", "self-hosted"):
                 if f"assets/diagrams/deployment-{mode}-light.svg" not in page.links:
@@ -108,9 +126,12 @@ def check(root):
             ):
                 if stale in visible:
                     errors.append(f"{path.name}: stale released-feature label {stale!r}")
-            for required in ("dashboard.html", "docs/TOOLS.html"):
+            for required in ("features.html", "dashboard.html", "docs/TOOLS.html"):
                 if required not in page.primary_links:
                     errors.append(f"{path.name}: missing primary navigation link {required}")
+            features = pages.get(root / "features.html")
+            if features and page.primary_links != features.primary_links:
+                errors.append(f"{path.name}: primary links must match Features navigation")
         for link in page.links:
             url = urlsplit(link)
             if url.scheme or url.netloc:

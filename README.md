@@ -7,7 +7,7 @@ Embed with Rust or native bindings, or connect through REST and gRPC.
 No external database required.
 
 🌐 **Website:** [mahpate.github.io/Vlite](https://mahpate.github.io/Vlite/) ·
-[features](https://mahpate.github.io/Vlite/#features) ·
+[features](https://mahpate.github.io/Vlite/features.html) ·
 [dashboard](https://mahpate.github.io/Vlite/dashboard.html) ·
 [CLI tools](https://mahpate.github.io/Vlite/docs/TOOLS.html) ·
 [benchmarks](https://mahpate.github.io/Vlite/compare.html) ·
@@ -69,6 +69,9 @@ and dark themes. Raw diagnostics stay available in expandable panels.
 See the [console guide](docs/CONSOLE.md#studio-workflow-improvements).
 
 ## Capabilities
+
+See the [complete feature catalogue](https://mahpate.github.io/Vlite/features.html)
+for supported capabilities, optional build features and requirements.
 
 - **Single-file persistence:** versioned binary records, checksums, synchronous
   commits, exclusive writer/shared reader locking, and explicit interrupted-write recovery. Opt-in v5

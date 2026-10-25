@@ -58,7 +58,7 @@ def check(site, screenshots=None):
                 page = context.new_page()
                 for width in (1440, 900, 390, 320):
                     page.set_viewport_size({"width": width, "height": 1050})
-                    for path in ("architecture.html", "index.html"):
+                    for path in ("architecture.html", "index.html", "features.html"):
                         page.goto(f"{url}/{path}")
                         page.wait_for_load_state("networkidle")
                         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), (
@@ -74,7 +74,7 @@ def check(site, screenshots=None):
                                 assert image.evaluate("img => img.naturalWidth > 0 && img.alt.length > 30")
                                 assert image.evaluate("img => img.currentSrc").endswith(f"-{theme}.svg")
                             page.locator("#layers").scroll_into_view_if_needed()
-                        else:
+                        elif path == "index.html":
                             images = page.locator(".deployment-options img")
                             assert images.count() == 2
                             for image in images.all():
@@ -82,6 +82,15 @@ def check(site, screenshots=None):
                                 image.evaluate("img => img.decode()")
                                 assert image.evaluate("img => img.currentSrc").endswith(f"-{theme}.svg")
                                 assert image.evaluate("img => img.naturalWidth > 0 && img.alt.length > 30")
+                        else:
+                            assert page.locator(".feature-catalog section").count() == 10
+                            assert page.locator("table caption").count() == 7
+                            assert page.locator('nav[aria-label="Primary"] a[aria-current="page"]').inner_text() == "Features"
+                            page.locator('.docs-sidebar a[href="#security"]').click()
+                            page.wait_for_function("location.hash === '#security'")
+                            assert page.locator("#security h2").inner_text() == "Security and access control"
+                            page.locator("#requirements summary").click()
+                            assert page.locator("#requirements details").get_attribute("open") is not None
                         if screenshots and width in (1440, 390):
                             screenshots.mkdir(parents=True, exist_ok=True)
                             page.screenshot(path=str(screenshots / f"{Path(path).stem}-{theme}-{width}.png"))
@@ -108,7 +117,7 @@ def check(site, screenshots=None):
     finally:
         server.shutdown()
         server.server_close()
-    print("Checked 32 standalone SVGs, shared palette, both themes, theme toggle, no-JS and responsive pages.")
+    print("Checked 32 standalone SVGs, shared palette, themes, no-JS, feature navigation and responsive pages.")
 
 
 if __name__ == "__main__":
