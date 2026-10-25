@@ -25,7 +25,12 @@ use std::sync::atomic::AtomicBool;
 
 use crate::{Condition, Metadata, Result};
 
-use super::convert::{condition, graph_error, metadata_from_properties, property_conditions};
+use super::convert::{
+    condition, graph_error, metadata_from_properties, property_conditions, property_value,
+};
+pub use super::engine::language::{
+    LanguageError as GraphQueryError, LanguageErrorKind as GraphQueryErrorKind,
+};
 use super::engine::{self, EdgeSelector, ExecutionContext, QueryOp};
 pub use super::engine::{Direction, GraphLimits};
 use super::{EdgeRef, GraphRef, selector};
@@ -342,6 +347,91 @@ pub struct Explanation {
     pub limits: GraphLimits,
     pub projection: PropertyProjection,
     pub indexes: Vec<IndexChoice>,
+}
+
+/// A parsed graph query text (EPIC-015 ITEM-051, REQ-071): exactly one
+/// typed [`GraphQuery`] plus the projection of its `RETURN` clause and the
+/// read-limit overrides it states. See `docs/GRAPH-QUERY.md`.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct GraphTextQuery {
+    pub query: GraphQuery,
+    pub projection: PropertyProjection,
+    /// The upper bound `N` of a `*1..N` hop range.
+    pub max_hops: Option<u64>,
+    /// The `LIMIT` of a traversal (its output node cap).
+    pub max_output_nodes: Option<u64>,
+}
+
+impl GraphTextQuery {
+    /// `base` with this query's overrides applied.
+    pub fn limits(&self, base: GraphLimits) -> GraphLimits {
+        GraphLimits {
+            max_hops: self.max_hops.unwrap_or(base.max_hops),
+            max_output_nodes: self.max_output_nodes.unwrap_or(base.max_output_nodes),
+            ..base
+        }
+    }
+}
+
+/// Why [`GraphRef::query_text`] or [`GraphRef::explain_text`] failed.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum GraphTextError {
+    /// The text was rejected before any graph access.
+    Query(GraphQueryError),
+    /// The equivalent typed read failed.
+    Read(crate::Error),
+}
+
+impl std::fmt::Display for GraphTextError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Query(error) => error.fmt(f),
+            Self::Read(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for GraphTextError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Query(error) => Some(error),
+            Self::Read(error) => Some(error),
+        }
+    }
+}
+
+impl From<GraphQueryError> for GraphTextError {
+    fn from(error: GraphQueryError) -> Self {
+        Self::Query(error)
+    }
+}
+
+impl From<crate::Error> for GraphTextError {
+    fn from(error: crate::Error) -> Self {
+        Self::Read(error)
+    }
+}
+
+/// Parses a read-only graph query text into the typed query it stands for,
+/// binding `$name` parameters from `params` (every parameter must be used).
+/// No graph is touched; the typed query is validated when it runs.
+pub fn parse_graph_query(
+    text: &str,
+    params: &Metadata,
+) -> std::result::Result<GraphTextQuery, GraphQueryError> {
+    let params = params
+        .iter()
+        .map(|(name, value)| (name.clone(), property_value(value)))
+        .collect();
+    let parsed = engine::language::parse(text, &params)?;
+    Ok(GraphTextQuery {
+        query: public_query(&parsed.query.op),
+        projection: public_projection(&parsed.query.projection),
+        max_hops: parsed.max_hops,
+        max_output_nodes: parsed.max_output_nodes,
+    })
 }
 
 // Public inputs → engine IR.
@@ -743,6 +833,47 @@ impl GraphRef<'_> {
             projection: public_projection(&explanation.query.projection),
             indexes: explanation.indexes.into_iter().map(index).collect(),
         })
+    }
+
+    fn text_options(
+        text: &str,
+        params: &Metadata,
+        limits: &GraphLimits,
+    ) -> std::result::Result<(GraphQuery, ReadOptions<'static>), GraphTextError> {
+        limits.validate().map_err(graph_error)?;
+        let parsed = parse_graph_query(text, params)?;
+        let options = ReadOptions {
+            limits: parsed.limits(*limits),
+            projection: parsed.projection,
+            cancel: None,
+        };
+        Ok((parsed.query, options))
+    }
+
+    /// Parses a read-only graph query text (see [`parse_graph_query`]) and
+    /// runs it exactly like [`GraphRef::query`] on the typed query. The
+    /// text's hop range and traversal `LIMIT` override `limits`; the result
+    /// is still validated against [`GraphLimits::CEILING`].
+    pub fn query_text(
+        &self,
+        text: &str,
+        params: &Metadata,
+        limits: &GraphLimits,
+    ) -> std::result::Result<GraphRead<GraphOutput>, GraphTextError> {
+        let (query, options) = Self::text_options(text, params, limits)?;
+        Ok(self.query(&query, &options)?)
+    }
+
+    /// Like [`GraphRef::query_text`] but returns [`GraphRef::explain`]'s
+    /// explanation without executing.
+    pub fn explain_text(
+        &self,
+        text: &str,
+        params: &Metadata,
+        limits: &GraphLimits,
+    ) -> std::result::Result<Explanation, GraphTextError> {
+        let (query, options) = Self::text_options(text, params, limits)?;
+        Ok(self.explain(&query, &options)?)
     }
 
     fn get_node_by(&self, node: NodeSelector) -> Result<GraphRead<Option<NodeView>>> {

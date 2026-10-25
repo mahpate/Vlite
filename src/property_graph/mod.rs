@@ -68,9 +68,10 @@ pub use maintain::{
 };
 pub use read::{
     Direction, EdgeView, Explanation, FindNodes, GraphLimits, GraphOutput, GraphPath, GraphQuery,
-    GraphRead, GraphReadStats, IndexChoice, Neighborhood, Neighbors, NodeFilter, NodeSelector,
-    NodeView, PathOutcome, PropertyProjection, ReadOptions, ShortestPath, Traversal, Traverse,
-    TraversedNode, TruncationReason,
+    GraphQueryError, GraphQueryErrorKind, GraphRead, GraphReadStats, GraphTextError,
+    GraphTextQuery, IndexChoice, Neighborhood, Neighbors, NodeFilter, NodeSelector, NodeView,
+    PathOutcome, PropertyProjection, ReadOptions, ShortestPath, Traversal, Traverse, TraversedNode,
+    TruncationReason, parse_graph_query,
 };
 pub use retrieve::{
     Evidence, EvidenceSpec, Expansion, Pivot, PivotHit, Retrieval, Retrieve, RetrieveStats,

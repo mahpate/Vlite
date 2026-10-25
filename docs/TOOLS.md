@@ -206,13 +206,15 @@ cargo install --locked --path . --features graph,json --bin vlite-graph-cli
 
 Usage: `vlite-graph-cli --db PATH [--writable] [--explain] COMMAND [REQUEST]`.
 `REQUEST` is one JSON object; `-` reads it from stdin (at most 64 MiB) and
-omitting it means `{}`. Each command maps to one `vlite::property_graph` call;
-there is no graph query language.
+omitting it means `{}`. Each command maps to one `vlite::property_graph` call.
+`query` takes one read-only [graph query text](GRAPH-QUERY.md) that translates
+to exactly one typed read; it adds no other capability.
 
 | Command | Access | Library call |
 |---------|--------|--------------|
 | `graphs` | read | `list_graphs` |
 | `get-node`, `get-edge`, `find-nodes`, `neighbors`, `traverse`, `shortest-path` | read | `GraphRef::query` (with `--explain`: `GraphRef::explain`) |
+| `query` | read | `GraphRef::query_text` (with `--explain`: `GraphRef::explain_text`) |
 | `init` | write | `Database::create_with_graph` (new file only) |
 | `create-graph`, `drop-graph` | write | `create_graph`, `drop_graph` (empty graphs only) |
 | `batch` | write | `GraphMut::write_batch` (one atomic frame) |
@@ -224,6 +226,7 @@ Get-Content ops.json | vlite-graph-cli --db kb.vlite --writable batch -
 vlite-graph-cli --db kb.vlite graphs
 vlite-graph-cli --db kb.vlite neighbors '{"graph":"kb","node":{"key":"api"},"direction":"both"}'
 vlite-graph-cli --db kb.vlite --explain traverse '{"graph":"kb","start":[{"key":"api"}],"limits":{"max_hops":3}}'
+vlite-graph-cli --db kb.vlite query '{"graph":"kb","query":"MATCH (a KEY $k)-[:READS*1..3]->(b:Database) RETURN b LIMIT 20","params":{"k":{"type":"string","value":"api"}}}'
 ```
 
 `ops.json` holds one batch of at most 4,096 operations. They apply in order and
@@ -266,6 +269,12 @@ and `delete_vector`. Nodes are addressed by key, edges by `{"id":...}` or
   `find-nodes` or `neighbors`; a write in between fails with
   `graph_cursor_stale`. `--explain` returns the normalized query, effective
   limits, projection and index choices without reading nodes or edges.
+- **Query text.** `query` takes `{"graph","query","params","limits"}`;
+  `params` binds `$name` values and a missing or unused one is an error.
+  `RETURN`, a `*1..N` hop range and `LIMIT` set the projection, `max_hops` and
+  `max_output_nodes`; output equals the equivalent typed command. Text errors
+  (`graph_query_syntax`, `graph_query_unsupported`, `graph_query_parameter`,
+  `graph_query_limit`) name the byte offset and occur before the file opens.
 - **Output.** Success prints one JSON object on stdout and exits 0. Failure
   prints `{"error":{"code":"...","message":"..."}}` on stderr and exits 1.
   Codes include `usage`, `invalid_request` (malformed JSON, unknown or repeated

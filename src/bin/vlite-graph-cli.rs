@@ -2,7 +2,9 @@
 //!
 //! Source-only and opt-in: it requires the non-default `graph` and `json`
 //! features, so no distributed artifact builds it. Every command maps onto an
-//! existing `vlite::property_graph` call; there is no query language. Reads
+//! existing `vlite::property_graph` call; the `query` command parses one
+//! read-only graph query text (docs/GRAPH-QUERY.md) into exactly one typed
+//! read and runs it with `GraphRef::query_text`. Reads
 //! open the file with `Database::open_read_only` (shared lock, never writes);
 //! writes need `--writable` and take the exclusive writer lock for the one
 //! command. Success prints one JSON object on stdout; failure prints
@@ -17,12 +19,15 @@ use std::io::{self, Read};
 use std::process::ExitCode;
 
 use graph_json::{
-    Batch, Empty, Named, batch_output, error_code, explanation, info, read_output, read_request,
+    Batch, Empty, LimitsIn, Named, batch_output, de_properties, error_code, explanation, info,
+    read_output, read_request,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use vlite::property_graph::{GraphOp, ReadOptions};
-use vlite::{CreateOptions, Database, Error};
+use vlite::property_graph::{
+    GraphOp, GraphQueryError, GraphQueryErrorKind, GraphTextError, ReadOptions, parse_graph_query,
+};
+use vlite::{CreateOptions, Database, Error, Metadata};
 
 const HELP: &str = r#"vlite-graph-cli --db PATH [--writable] [--explain] COMMAND [REQUEST]
 Runs one typed graph operation on a graph-enabled VLite file and prints one
@@ -41,6 +46,12 @@ Reads (shared lock, never write; --explain plans a query without running it):
   shortest-path {"graph":"g","source":{...},"destination":{...},"direction":"out","types":["T"]}
   Every query also accepts "limits":{"max_hops":2,...} (above the ceiling is an
   error, never clamped) and "projection":"all"|"none"|{"only":["field"]}.
+  query         {"graph":"g","query":"MATCH (a KEY $k)-[:T*1..3]->(b:L) RETURN b LIMIT 20",
+                 "params":{"k":{"type":"string","value":"a"}},"limits":{...}}
+                one read-only graph query text, translated to exactly one of the
+                reads above (docs/GRAPH-QUERY.md); RETURN sets the projection, a
+                *1..N range max_hops and a traversal LIMIT max_output_nodes.
+                Text errors: graph_query_syntax|unsupported|parameter|limit.
 
 Writes (require --writable; exclusive lock):
   init          {"dimensions":N}   creates a NEW graph-enabled file; never converts
@@ -66,6 +77,7 @@ const READS: &[&str] = &[
     "neighbors",
     "traverse",
     "shortest-path",
+    "query",
 ];
 const WRITES: &[&str] = &["init", "create-graph", "drop-graph", "batch"];
 
@@ -102,6 +114,30 @@ impl From<Error> for Failure {
         Self {
             code: error_code(&error),
             message: error.to_string(),
+        }
+    }
+}
+
+impl From<GraphQueryError> for Failure {
+    fn from(error: GraphQueryError) -> Self {
+        Self {
+            code: match error.kind {
+                GraphQueryErrorKind::Syntax => "graph_query_syntax",
+                GraphQueryErrorKind::Unsupported => "graph_query_unsupported",
+                GraphQueryErrorKind::Parameter => "graph_query_parameter",
+                GraphQueryErrorKind::Limit => "graph_query_limit",
+            },
+            message: error.to_string(),
+        }
+    }
+}
+
+impl From<GraphTextError> for Failure {
+    fn from(error: GraphTextError) -> Self {
+        match error {
+            GraphTextError::Query(error) => error.into(),
+            GraphTextError::Read(error) => error.into(),
+            _ => Failure::internal("unknown graph query error"),
         }
     }
 }
@@ -207,6 +243,19 @@ struct Init {
     dimensions: usize,
 }
 
+/// A graph query text (EPIC-015 ITEM-051); see docs/GRAPH-QUERY.md. The
+/// projection comes from its RETURN clause.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueryIn {
+    graph: String,
+    query: String,
+    #[serde(default, deserialize_with = "de_properties")]
+    params: Metadata,
+    #[serde(default)]
+    limits: LimitsIn,
+}
+
 // Commands. Requests are parsed before the file is opened.
 
 fn execute(cli: &Cli) -> Result<Value, Failure> {
@@ -246,6 +295,21 @@ fn execute(cli: &Cli) -> Result<Value, Failure> {
             let db = Database::open_read_only(&cli.db)?;
             let graphs: Value = db.list_graphs()?.iter().map(info).collect();
             Ok(json!({"graphs": graphs}))
+        }
+        "query" => {
+            let request: QueryIn = parse(&text)?;
+            // Parsed here too so text errors are reported before the file opens.
+            parse_graph_query(&request.query, &request.params)?;
+            let limits = request.limits.resolve();
+            let db = Database::open_read_only(&cli.db)?;
+            let graph = db.graph(&request.graph)?;
+            if cli.explain {
+                let plan = graph.explain_text(&request.query, &request.params, &limits)?;
+                explanation(&request.graph, &plan).map_err(Failure::internal)
+            } else {
+                let read = graph.query_text(&request.query, &request.params, &limits)?;
+                read_output(&request.graph, &read).map_err(Failure::internal)
+            }
         }
         command => {
             let request = read_request(command, &text).map_err(Failure::request)?;

@@ -641,6 +641,137 @@ fn files_are_never_graph_enabled_implicitly() {
 }
 
 #[test]
+fn query_text_runs_exactly_the_equivalent_typed_read() {
+    let fixture = Fixture::new();
+    let db = seeded(&fixture);
+    let pairs = [
+        (
+            json!({"graph": "kb", "query": "MATCH (n KEY $k) RETURN n",
+                   "params": {"k": {"type": "string", "value": "a"}}}),
+            "get-node",
+            json!({"graph": "kb", "node": {"key": "a"}}),
+        ),
+        (
+            json!({"graph": "kb", "query": "MATCH ()-[r KEY \"ab\"]-() RETURN r.weight"}),
+            "get-edge",
+            json!({"graph": "kb", "edge": {"key": "ab"}, "projection": {"only": ["weight"]}}),
+        ),
+        (
+            json!({"graph": "kb", "query": "MATCH (n:Service) WHERE n.tier >= $t RETURN n LIMIT 5",
+                   "params": {"t": {"type": "integer", "value": "1"}}}),
+            "find-nodes",
+            json!({"graph": "kb", "label": "Service", "limit": 5, "conditions": [
+                {"op": "range", "field": "tier", "min": {"type": "integer", "value": "1"}}
+            ]}),
+        ),
+        (
+            json!({"graph": "kb", "query": "MATCH (a KEY \"b\")-[r]-(b) RETURN r, b"}),
+            "neighbors",
+            json!({"graph": "kb", "node": {"key": "b"}, "direction": "both"}),
+        ),
+        (
+            json!({"graph": "kb", "query": "MATCH p = (a KEY \"a\")-[:CALLS|READS*1..3]->(b) RETURN b, p LIMIT 10"}),
+            "traverse",
+            json!({"graph": "kb", "start": [{"key": "a"}], "types": ["CALLS", "READS"],
+                   "include_paths": true,
+                   "limits": {"max_hops": 3, "max_output_nodes": 10}}),
+        ),
+        (
+            json!({"graph": "kb", "query": "MATCH p = SHORTEST PATH (a KEY \"a\")-[*..2]->(b KEY \"c\") RETURN p"}),
+            "shortest-path",
+            json!({"graph": "kb", "source": {"key": "a"}, "destination": {"key": "c"}}),
+        ),
+    ];
+    for (text, command, typed) in pairs {
+        let expected = run(&db, &[command, &request(typed.clone())]).value();
+        let actual = run(&db, &["query", &request(text.clone())]).value();
+        assert_eq!(actual, expected, "{text}");
+        let expected = run(&db, &["--explain", command, &request(typed)]).value();
+        let actual = run(&db, &["--explain", "query", &request(text.clone())]).value();
+        assert_eq!(actual, expected, "{text}");
+    }
+    let path = run(
+        &db,
+        &[
+            "query",
+            &request(json!({"graph": "kb",
+                "query": "MATCH p = SHORTEST PATH (a KEY \"a\")-[*..2]->(b KEY \"c\") RETURN p"})),
+        ],
+    )
+    .value();
+    assert_eq!(
+        path["shortest_path"]["path"],
+        json!({"nodes": ["0", "1", "2"], "edges": ["0", "1"]})
+    );
+
+    // Typed failures: text errors before the file is touched, then the
+    // ordinary read errors.
+    let failures = [
+        (
+            json!({"graph": "kb", "query": "MATCH (n"}),
+            "graph_query_syntax",
+        ),
+        (
+            json!({"graph": "kb", "query": "SEARCH docs NEAR $q"}),
+            "graph_query_unsupported",
+        ),
+        (
+            json!({"graph": "kb", "query": "MATCH (n KEY $k) RETURN n"}),
+            "graph_query_parameter",
+        ),
+        (
+            json!({"graph": "kb", "query": "MATCH (a KEY \"a\")-[*1..9]->(b) RETURN b"}),
+            "graph_query_limit",
+        ),
+        (
+            json!({"graph": "nope", "query": "MATCH (n KEY \"a\") RETURN n"}),
+            "graph_not_found",
+        ),
+        (
+            json!({"graph": "kb", "query": "MATCH (n KEY \"a\") RETURN n",
+                   "limits": {"max_hops": 9}}),
+            "graph_limit_exceeds_ceiling",
+        ),
+        (
+            json!({"graph": "kb", "query": "MATCH (n KEY \"a\") RETURN n", "projection": "none"}),
+            "invalid_request",
+        ),
+    ];
+    for (text, code) in failures {
+        assert_eq!(
+            run(&db, &["query", &request(text.clone())]).error_code(),
+            code,
+            "{text}"
+        );
+    }
+    let missing = fixture.path("missing.vlite");
+    assert_eq!(
+        run(
+            &missing,
+            &[
+                "query",
+                &request(json!({"graph": "kb", "query": "MATCH (n"}))
+            ]
+        )
+        .error_code(),
+        "graph_query_syntax"
+    );
+    assert!(!missing.exists());
+    assert_eq!(
+        run(
+            &db,
+            &[
+                "--writable",
+                "query",
+                &request(json!({"graph": "kb", "query": "MATCH (n KEY \"a\") RETURN n"}))
+            ]
+        )
+        .error_code(),
+        "usage"
+    );
+}
+
+#[test]
 fn help_lists_the_contract() {
     let output = Command::new(BIN).arg("--help").output().unwrap();
     assert!(output.status.success());
@@ -659,6 +790,7 @@ fn help_lists_the_contract() {
         "neighbors",
         "traverse",
         "shortest-path",
+        "query",
     ] {
         assert!(text.contains(word), "{word}");
     }

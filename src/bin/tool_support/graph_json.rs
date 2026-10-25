@@ -442,7 +442,7 @@ pub(crate) struct LimitsIn {
 }
 
 impl LimitsIn {
-    fn resolve(&self) -> GraphLimits {
+    pub(crate) fn resolve(&self) -> GraphLimits {
         let base = GraphLimits::DEFAULT;
         GraphLimits {
             max_hops: self.max_hops.unwrap_or(base.max_hops),

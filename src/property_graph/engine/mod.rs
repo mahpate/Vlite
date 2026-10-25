@@ -48,6 +48,7 @@ pub mod codec;
 mod cursor;
 mod error;
 mod filter;
+pub mod language;
 pub mod limits;
 mod meter;
 pub mod model;
