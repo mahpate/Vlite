@@ -102,10 +102,13 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 case "$VERSION" in ''|*[!a-zA-Z0-9._-]*) fail 'Version must be an image tag.' ;; esac
-for number in "$API_PORT" "$DASHBOARD_PORT" "$DIMENSIONS"; do
-    case "$number" in ''|*[!0-9]*) fail 'Ports and dimensions must be positive integers.' ;; esac
-    [ "${#number}" -le 5 ] && [ "$number" -gt 0 ] && [ "$number" -le 65535 ] || fail 'Ports/dimensions must be between 1 and 65535.'
+for number in "$API_PORT" "$DASHBOARD_PORT"; do
+    case "$number" in ''|*[!0-9]*) fail 'Ports must be positive integers.' ;; esac
+    [ "${#number}" -le 5 ] && [ "$number" -gt 0 ] && [ "$number" -le 65535 ] || fail 'Ports must be between 1 and 65535.'
 done
+case "$DIMENSIONS" in ''|*[!0-9]*) fail 'Dimensions must be a positive integer.' ;; esac
+[ "${#DIMENSIONS}" -le 5 ] && [ "$DIMENSIONS" -gt 0 ] && [ "$DIMENSIONS" -le 65536 ] ||
+    fail 'Dimensions must be between 1 and 65536.'
 [ "$API_PORT" -ne "$DASHBOARD_PORT" ] || fail 'API and dashboard ports must differ.'
 prepare_docker
 [ "$PREPARE_ONLY" -eq 0 ] || exit 0

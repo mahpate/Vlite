@@ -8,6 +8,7 @@ on:
       - "docs/**"
       - "scripts/build_site_docs.py"
       - "tests/site_links.py"
+      - "tests/agent_docs.py"
       - "tests/site_diagrams.py"
       - "tests/dashboard_tours.py"
       - "tests/requirements-dashboard.txt"
@@ -53,6 +54,7 @@ jobs:
         run: |
           python tests/site_links.py _site
           python tests/release_docs.py
+          python tests/agent_docs.py
       - name: Check diagrams and dashboard tour
         run: |
           python -m pip install -r tests/requirements-dashboard.txt

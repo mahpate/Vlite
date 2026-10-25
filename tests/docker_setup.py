@@ -97,6 +97,8 @@ run_case("unsupported Ubuntu", "exit 1", ubuntu="20.04", expected=1, message="no
 run_case("invalid ports", ready, extra=("--api-port", "8081"), expected=1, message="ports must differ")
 run_case("missing option value", ready, extra=("--api-port",), expected=1, message="requires a value")
 run_case("invalid image tag", ready, extra=("--version", "$(id)"), expected=1, message="image tag")
+run_case("maximum dimensions", ready, extra=("--dimensions", "65536"))
+run_case("excessive dimensions", ready, extra=("--dimensions", "65537"), expected=1, message="Dimensions must be between")
 run_case("fresh Docker installation", ready, missing=True, extra=("--yes",))
 run_case("declined installation", ready, missing=True, expected=1, message="Installation declined")
 run_case("missing Docker CE Compose plugin", ready, ce=True, extra=("--yes",))

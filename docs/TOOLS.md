@@ -203,15 +203,18 @@ or settings are persisted and source bytes remain unchanged.
 
 ## MCP server and agent skills
 
-Build/install `vlite-mcp` separately with `cargo install --path . --features mcp`,
-then run `vlite-mcp --db ./vectors.vlite`. It uses stdio JSON-RPC (no HTTP proxy
-or network listener), opens a shared-lock read-only snapshot by default, and
-exposes info, collection listing, search, get/list, index status and in-memory
-index build tools. `--writable` explicitly enables upsert/delete and requires an
-exclusive writer lock. Encryption key-file/environment options are supported.
-See [MCP installation, schemas and client configuration](MCP.md). Portable
-[agent skills](AGENT-SKILLS.md) cover RAG, MCP, operations and index tuning;
-installing a skill does not start the server or grant write permissions.
+These have their own installation guides, separate from the CLI tools:
+
+- **[MCP server: supported tools, installation and client setup](MCP.md)**.
+  One local stdio server exposes seven read-only tools and two opt-in write
+  tools to your assistant. Download a native binary or build `vlite-mcp`.
+- **[Agent skills: the four skills and copy/paste installation](AGENT-SKILLS.md)**.
+  Install `vlite-rag`, `vlite-mcp`, `vlite-ops` and `vlite-index-tuning` as
+  complete folders in your assistant's skill directory.
+
+MCP opens the database file directly, read-only by default; it is not a REST
+proxy. Installing an agent skill does not start that server or grant write
+permissions.
 
 ## Tests
 

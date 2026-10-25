@@ -27,7 +27,7 @@ param(
     [string]$DeployDir = '/root/vlite-deploy',
     [ValidateRange(1, 65535)][int]$ApiPort = 18085,
     [ValidateRange(1, 65535)][int]$DashboardPort = 8082,
-    [ValidateRange(1, 65535)][int]$Dimensions = 3,
+    [ValidateRange(1, 65536)][int]$Dimensions = 3,
     [switch]$Yes,
     [Parameter(ParameterSetName = 'Token')][switch]$Token,
     [Parameter(ParameterSetName = 'Status')][switch]$Status,
