@@ -180,7 +180,7 @@ def capture(output):
                 page.get_by_role("tablist", name="Selected record views").get_by_role("tab", name=tab, exact=True).click()
                 save(f"current-{tab.lower()}.png", "#record-inspector")
             page.get_by_role("tab", name="Write", exact=True).click()
-            page.locator("#write-documents").fill(json.dumps([{
+            show("#write-documents").fill(json.dumps([{
                 "id": "201", "vector": [.85, .15, .1],
                 "metadata": {"title": {"type": "string", "value": "A new support article"}},
                 "payload": base64.b64encode(b"Ready for validation, not committed.").decode(),
@@ -208,6 +208,24 @@ def capture(output):
             expect(page.locator("#search-summary")).to_contain_text("hybrid")
             expect(page.locator("#hits tbody tr")).not_to_have_count(0)
             save("current-hybrid.png", "#search-summary")
+            show("#recommend-positive").fill("101")
+            page.locator("#recommend-run").click()
+            expect(page.locator("#recommend-result")).to_contain_text('"id"')
+            page.locator("#facets-run").click()
+            expect(page.locator("#facets-result")).to_contain_text("guides")
+            save("current-retrieval.png", "#recommend-result")
+            show("#analyze-sample").click()
+            expect(page.locator("#projection svg")).to_be_visible()
+            save("current-explore.png", "#projection")
+
+            show("#import-file").set_input_files({
+                "name": "sample-articles.json", "mimeType": "application/json",
+                "buffer": json.dumps([{"id": "301", "vector": [.8, .2, .1],
+                                       "metadata": {"category": {"type": "string", "value": "guides"}}}]).encode(),
+            })
+            page.locator("#import-preview").click()
+            expect(page.locator("#import-commit")).to_be_enabled()
+            save("current-import.png")
 
             nav.get_by_role("link", name="Observability", exact=True).click()
             page.locator("#obs-interval").select_option("0")
@@ -219,6 +237,9 @@ def capture(output):
             page.locator("#obs-refresh").click()
             expect(page.locator("#obs-routes tr")).not_to_have_count(0)
             save("current-observability.png")
+            show("#feed-load").click()
+            expect(page.locator("#feed-result")).not_to_have_text("")
+            save("current-feed.png")
             nav.get_by_role("link", name="Administration", exact=True).click()
             page.locator("#refresh-health").click()
             expect(page.locator("#health-result")).to_contain_text("observed_at")

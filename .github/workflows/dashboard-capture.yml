@@ -19,6 +19,7 @@ jobs:
       - run: python -m playwright install --with-deps chromium
       - run: python scripts/capture_connected_dashboard.py captures
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: connected-dashboard
           path: captures/
