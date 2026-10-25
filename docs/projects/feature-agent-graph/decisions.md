@@ -568,3 +568,63 @@ These are engineering decisions made autonomously under the user's delegation. N
   - `tests/graph_compat.rs` in the default build: every graph-unaware entry point returns `UnsupportedFeature(4)` on graph fixtures and leaves the source bytes unchanged.
   - `scripts/graph_compat_check.py run` builds a revision without `graph` from a clean `git archive` and checks the Rust probe, the C ABI through Python and the Node addon against graph-enabled files. On the candidate tree of this change (an unpublished commit object with the same tree, because the script archives commits, not the working tree), 123 entry-point probes matched: 117 `UnsupportedFeature(4)` and 6 `ReplicaDiverged` (the follower `apply` calls).
 - **Reference model.** `random_batches_are_atomic_and_replay_identically` in `src/property_graph/tests.rs` now runs 4 seeds × 10,000 steps, each on its own file, mixing graph batches with vector puts and deletes and reopening every 500 steps. Each failed step leaves the file length and the graph state unchanged, the invariants hold after every step, and every reopen reproduces the live state including `graph_sequence`. The seeds run in parallel threads because every commit is synced. The engine-level model (20 seeds × 10,000 mutations) is unchanged.
+
+## Requested command-line and Dashboard follow-ups (v1.2.16)
+
+The user's request to add graph command-line and Dashboard support after the
+current work is now a persistent backlog in PRD Section 14.3
+(FOLLOWUP-001/FOLLOWUP-002). Existing command-line support remains limited to
+the EPIC-006 maintenance commands; no new CLI grammar or operation coverage has
+been selected or implemented.
+
+Dashboard graph support depends on EPIC-011's REST routes, graph-scoped
+credentials, authorization, OpenAPI and endpoint tests, with its existing P3
+entry and security gates. It must use the server's single database owner.
+The MVP UI non-goal and graph-off behavior are unchanged until that follow-up
+is implemented under its own reviewed contract.
+
+This request does not approve any open gate, add graph to distributed
+artifacts, or authorize graph query-language experiments or implementation.
+EPIC-014/EPIC-015 remain separate, conditional work.
+
+### DO-005 graph-off refresh attempts (rejected)
+
+The final session report at 2026-10-25T05:56:47.493Z records the campaign for
+`4312fb30b88e3527c245287858a64bdebf34038e`: default features (graph off),
+release build, `--offline --locked`, from a clean `git archive`. The host
+matched the EPIC-005 reference VM. All 30 workload runs exited zero, but only
+6 of 30 met the unchanged background CPU policy (mean <=10% and <=50% per
+0.5 s sample); no workload passed all five repetitions. The outcome is
+**REJECTED**, not baseline evidence. The earlier `059650e` attempt was also
+rejected, contended by concurrent work.
+
+Observed CPU contributors included Defender, System and the WSL VM. Fifteen
+commits landed during the campaign, including Docker/WSL and Dashboard
+capture work; the intended quiet window did not hold. These are observations,
+not proof of causation. No performance figures from either rejected campaign
+are recorded here or accepted as baseline evidence. `baseline.md` is untouched
+and the historical `81ff901` claims stand.
+
+The original evidence is outside the repository in
+`C:\Users\mahpate\.copilot\session-state\f54d7318-2b89-49f0-9711-4b06ab8b3fdf\files\`
+and must be preserved until the decision below. It includes
+`graph-off-reference-059650e.json`, `graph-off-reference-4312fb3.json` and its
+log, diagnostic JSON/log, machine identity and process CPU snapshots. The
+source report is the timestamped assistant message in that session's
+`events.jsonl`. Large run artifacts are not copied into this repository.
+
+**Open decision; owner: user/maintainers.** Decide whether
+benchmark-attributable scanner/System CPU counts as background CPU for
+sub-second workloads. The alternatives are:
+
+- **A:** Keep the policy unchanged and rerun in an exclusive host window with
+  other sessions and Docker/WSL stopped by their owners. The original report
+  expects the sub-second workloads to fail again under the same policy.
+- **B:** Keep the thresholds but gate acceptance only on workloads long enough
+  to yield several CPU samples; report sub-second workloads as informational.
+- **C:** Exclude attributable scanner CPU from the background figure. This is
+  a policy change that must be documented in `baseline.md` before use.
+
+No option is chosen, no thresholds are changed and no new run is authorized
+by this record. The graph-off refresh remains blocked pending that decision
+and a genuine coordinated quiet host window; existing gates remain unchanged.
