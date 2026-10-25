@@ -8,7 +8,7 @@ For application use, install the published
 python -m pip install vlite-client
 ```
 
-The current published version is 0.3.0. For contributor development from a
+The current published version is 0.4.1. For contributor development from a
 VLite checkout, install the working tree with
 `python -m pip install ./clients/python`.
 

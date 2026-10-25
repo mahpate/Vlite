@@ -16,21 +16,22 @@
 <button id="navigation-backdrop" class="navigation-backdrop" type="button" aria-label="Close navigation" hidden></button>
 <aside id="dashboard-sidebar" class="sidebar" aria-label="Workspace navigation">
   <button id="navigation-close" class="navigation-close secondary" type="button" aria-label="Close navigation">Close menu</button>
-  <a class="brand" href="#database">V<span>Lite</span><small>DATABASE CONSOLE</small></a>
+  <a class="brand" href="#database"><svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="studio-logo" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#22d3ee"/><stop offset="1" stop-color="#6366f1"/></linearGradient></defs><rect x="4" y="4" width="56" height="56" rx="14" fill="url(#studio-logo)"/><path d="M18 20 L32 46 L46 20" fill="none" stroke="#fff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="46" cy="20" r="4" fill="#fff"/><circle cx="18" cy="20" r="4" fill="#fff"/></svg><span>VLite<small>Database studio</small></span></a>
+  <div class="nav-caption">Workspace</div>
   <nav aria-label="Dashboard navigation">
-    <a href="#database" data-workspace="overview" aria-current="page">Overview</a>
-    <a href="#browse" data-workspace="collections">Collections</a>
-    <a href="#search" data-workspace="search">Search</a>
-    <a href="#observability" data-workspace="observability">Observability</a>
-    <a href="#operations" data-workspace="administration">Administration</a>
-    <a href="#requests" data-workspace="developer">Developer Console</a>
+    <a href="#database" data-workspace="overview" aria-current="page"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></svg>Overview</a>
+    <a href="#browse" data-workspace="collections"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v7c0 4 16 4 16 0V5M4 12v7c0 4 16 4 16 0v-7"/></svg>Collections</a>
+    <a href="#search" data-workspace="search"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="7"/><path d="m16 16 5 5"/></svg>Search</a>
+    <a href="#observability" data-workspace="observability"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>Observability</a>
+    <a href="#operations" data-workspace="administration"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6z"/><path d="m8 12 3 3 5-6"/></svg>Administration</a>
+    <a href="#requests" data-workspace="developer"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="3"/><path d="m6 9 3 3-3 3m7 0h5"/></svg>Developer Console</a>
   </nav>
   <label class="collection-picker">Active collection<select id="collection" disabled><option value="default">default</option></select></label>
-  <p id="collection-note" class="collection-note">Default collection (legacy routes). Every browse, edit, search, import and index action applies only to this collection.</p>
-  <div class="sidebar-note"><strong>One file. Your vectors.</strong><p>One database file per server. Named collections need a format v4 file and a server that advertises them. Embedding generation is not supported.</p></div>
+  <p id="collection-note" class="collection-note">Browse, write and search within this collection.</p>
+  <div class="sidebar-note"><strong>One file. Your vectors.</strong><p>Bring your own embeddings. Named collections require format v4 and server support.</p></div>
 </aside>
 <div class="workspace">
-<header class="topbar"><div><span class="eyebrow">VLITE / DATABASE WORKSPACE</span><h1 id="workspace-title">Overview</h1><p id="workspace-description">Connect to your database and review its current state.</p></div><div class="badges"><span id="collection-badge" class="badge">Collection: default</span><span id="connection-badge" class="badge">Disconnected</span></div></header>
+<header class="topbar"><div><span class="eyebrow">WORKSPACE / DATABASE</span><h1 id="workspace-title">Overview</h1><p id="workspace-description">Your database at a glance.</p></div><div class="badges"><span id="collection-badge" class="badge">Collection: default</span><span id="connection-badge" class="badge">Disconnected</span></div></header>
 <a class="skip-link" href="#database">Skip to database controls</a>
 <details class="appearance-settings"><summary>Appearance and preferences</summary><div class="preferences">
   <label>Theme <select id="theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
@@ -51,12 +52,15 @@
 <div id="workspace-subtabs" class="workspace-subtabs" role="tablist" aria-label="Collection tools" hidden></div>
 <main id="workspace-content">
   <section id="database" class="wide">
-    <div class="section-heading"><div><span class="eyebrow">01 / GET STARTED</span><h2>Connection</h2></div><span class="badge">Single-file database</span></div>
+    <div class="section-heading"><div><span class="eyebrow">DATABASE SNAPSHOT</span><h2>Connection</h2></div><span class="badge">Single-file database</span></div>
+    <div class="connection-panel">
+    <div><h3>Your database, connected</h3><p>Connect to load records, run searches and inspect server health.</p></div>
     <form id="connection">
       <label>Bearer token <input id="token" type="password" autocomplete="off" spellcheck="false"></label>
-      <p>Token stays in this page's memory only. Reloading this page or Disconnect clears it. Use HTTPS beyond loopback.</p>
+      <p class="connection-hint">Kept in memory only; reload or Disconnect clears it. Use HTTPS beyond loopback.</p>
       <button type="submit">Connect / refresh</button><button id="disconnect" type="button">Disconnect</button>
     </form>
+    </div>
     <div class="stat-grid" aria-label="Database snapshot">
       <div><span>Committed vectors</span><strong id="stat-records">--</strong></div>
       <div><span>Dimensions</span><strong id="stat-dimensions">--</strong></div>
@@ -65,8 +69,8 @@
     </div>
     <p id="snapshot-note">Connect to view a database snapshot. Refresh after external writes.</p>
     <span id="encryption-badge" class="badge">Encryption: not checked</span>
-    <pre id="compatibility" aria-label="Server compatibility"></pre>
-    <div class="tool-group"><h3>Database details and metrics (JSON)</h3><pre id="overview" aria-label="Database overview"></pre></div>
+    <details class="operation-view"><summary>Server compatibility</summary><pre id="compatibility" aria-label="Server compatibility"></pre></details>
+    <details class="operation-view"><summary>Database details and metrics (JSON)</summary><pre id="overview" aria-label="Database overview"></pre></details>
   </section>
   <section id="collections" class="wide">
     <span class="eyebrow">COLLECTIONS</span><h2>Collections and settings</h2>

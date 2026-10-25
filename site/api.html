@@ -14,9 +14,6 @@
   <div class="wrap">
     <a class="brand" href="./"><img src="assets/logo.svg" alt="">VLite</a>
     <nav class="nav-links" aria-label="Primary">
-      <a href="./#features">Features</a>
-      <a href="./#products">Products</a>
-      <a href="./#quickstart">Quickstart</a>
       <a href="api.html" aria-current="page">API</a>
       <a href="dashboard.html">Dashboard</a>
       <a href="docs/TOOLS.html">CLI</a>
@@ -82,16 +79,14 @@
   <main class="docs-main">
     <p class="kicker">API Reference</p>
     <h1 id="overview">VLite API Reference</h1>
-    <p class="lead">One engine, several surfaces. Embed VLite in-process from Python, Node.js, Rust or C,
-      or run <code>vlite-server</code> and talk to it over REST or gRPC. All surfaces share the same
-      single-file storage, durability and search semantics.</p>
+    <p class="lead">Embed with Python, Node.js, Rust or C. Connect remotely through REST or gRPC. Same engine, same storage contract.</p>
     <p class="callout"><strong>Version note:</strong> This reference follows the current repository source.
       Install the published Python packages with <code>python -m pip install vlite-embedded</code> or
       <code>python -m pip install vlite-client</code> from
       <a href="https://pypi.org/project/vlite-embedded/">PyPI</a> /
       <a href="https://pypi.org/project/vlite-client/">PyPI</a>.
-      Version 0.4.1 builds include Python <code>read_only=True</code>, typed float32 inputs
-      and newer MCP/observability changes; 0.3.0 packages do not.
+      Version 0.4.1 includes Python <code>read_only=True</code>, typed float32 inputs
+      and the MCP/observability updates.
       Check <a href="https://github.com/mahpate/Vlite/releases/tag/v0.4.1">release assets</a>
       and registry availability separately.</p>
 

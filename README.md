@@ -2,11 +2,9 @@
 
 **A single-file vector database for your applications, embedded or self-hosted.**
 
-VLite combines a custom append-only storage engine, durable atomic batches,
-typed metadata, exact similarity search, and optional in-memory HNSW search.
-Use it in-process through native language bindings, embed the Rust library
-directly, or connect through authenticated REST or the optional gRPC transport.
-It uses its own storage format and does not require an external database.
+Durable vector storage, exact and HNSW search, and typed metadata in one file.
+Embed with Rust or native bindings, or connect through REST and gRPC.
+No external database required.
 
 🌐 **Website:** [mahpate.github.io/Vlite](https://mahpate.github.io/Vlite/) ·
 [features](https://mahpate.github.io/Vlite/#features) ·
@@ -20,6 +18,29 @@ It uses its own storage format and does not require an external database.
 > read-only handles. The server allows concurrent read routes behind an RwLock.
 > Size deployments for the full dataset and validate recovery and workload
 > requirements before production use.
+
+## Architecture at a glance
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="site/assets/diagrams/layers-dark.svg">
+  <img src="site/assets/diagrams/layers-light.svg" alt="VLite architecture: interfaces call the Database core; search indexes are rebuildable; storage writes one authoritative file.">
+</picture>
+
+The website and this README share the same diagram images and color key:
+**violet** interfaces, **cyan** search/indexes, **green** storage, **amber**
+operations/decisions, and **red** errors. Boxes denote components, diamonds
+decisions, and cylinders durable files. Solid arrows show calls/data flow;
+dashed arrows show optional, conditional or return paths, labeled where needed.
+See the [architecture guide](https://mahpate.github.io/Vlite/architecture.html)
+for commit, recovery and query diagrams. Contributors can regenerate the light
+and dark SVGs with `python scripts/build_site_diagrams.py` using the existing
+[browser tooling](tests/requirements-dashboard.txt); colors come from
+`site/assets/diagrams/palette.json`.
+
+The current-source dashboard uses the same visual language: a responsive
+studio sidebar, clearer data cards and compact connection controls, with light
+and dark themes. Raw diagnostics stay available in expandable panels.
+See the [console guide](docs/CONSOLE.md#studio-workflow-improvements).
 
 ## Capabilities
 
@@ -56,8 +77,7 @@ Registry uploads are verified separately from tagged GitHub builds.
   reopen to see later commits. Mutations return `Error::ReadOnly` without poisoning.
   In-memory ANN builds are allowed. Python C ABI calls remain serialized within
   one process; use multiple reader processes. The Python/Node read-only options
-  are included in 0.4.1 builds, not the older Python 0.3.0 wheel or Node 0.3.0
-  release tarball. Check release/registry availability before installing.
+  are included in the 0.4.1 release packages.
   See [locking contracts](docs/REFERENCE.md).
 - **Observability and studio UX:** [dashboard](docs/CONSOLE.md) metric cards,
   sparklines, per-route latency, filtered live logs and JSONL export; Prometheus
@@ -73,22 +93,22 @@ Registry uploads are verified separately from tagged GitHub builds.
 - **Maintenance:** offline inspection, byte-preserving backup/restore, and
   no-clobber copy-out compaction.
 
-Current-source performance work caches accepted HNSW neighbor vectors during
+VLite 0.4.1 caches accepted HNSW neighbor vectors during
 construction and reduces ANN snapshot hashing/decoding overhead without changing
 snapshot bytes or validation. The Python embedded wrapper also offers opt-in
 `search_f32` and `batch_put_f32` buffer inputs to avoid vector JSON encoding;
 existing methods are unchanged. See [measured scope and limitations](benchmarks/README.md#current-source-performance-work-october-23-2026)
-and the [Python buffer API](bindings/python/README.md). These additions are not
-included in published Python 0.3.0 wheels.
+and the [Python buffer API](bindings/python/README.md). These additions are
+included in the published 0.4.1 packages.
 
-The current-source Node.js embedded binding also offers opt-in `searchF32`,
+The 0.4.1 Node.js embedded binding also offers opt-in `searchF32`,
 `searchManyF32` and atomic `batchPutF32` methods. Float32Array inputs are copied
 into private snapshots before asynchronous execution; this is not zero-copy.
 See the [Node.js binding guide](bindings/node/README.md) for limits, compatibility
 fallback and the bounded benchmark. Multi-query calls reduce worker crossings,
 but do not establish a transaction-wide snapshot across other owners.
 
-Current-source servers can enable [durable group commit](docs/CONSOLE-ADMIN.md#opt-in-durable-group-commit)
+VLite 0.4.1 servers can enable [durable group commit](docs/CONSOLE-ADMIN.md#opt-in-durable-group-commit)
 with `--group-commit`: bounded concurrent record writes keep separate atomic
 frames and share a filesystem sync before acknowledgement. It is off by default;
 sequential workloads can be slower. Simple exact searches can scan bounded
@@ -102,7 +122,7 @@ vector bodies; the first later write can still copy the ID tree. Startup uses
 compatible faster CRC validation and reusable replay buffers, not a new
 checkpoint or storage format.
 
-Current source exposes snapshot-retention and grouped-write admission/queue/sync
+VLite 0.4.1 exposes snapshot-retention and grouped-write admission/queue/sync
 diagnostics in global metrics. `--lock-held-reads` keeps exact scans under the
 owner read lock when generation copying is a poor workload trade-off; snapshot
 reads remain the default. Recovery regressions cover interrupted subprocesses,
@@ -115,7 +135,7 @@ replication or approximate metadata filtering. Opt-in [storage features](docs/ST
 rest, point-in-time restore, a change feed, file-shipped read replicas, a
 disk-based ANN sidecar, optional GPU exact search and a WebAssembly build.
 See the [technical reference](docs/REFERENCE.md) for contracts and limits, and
-[0.3.0 upgrade and rollback guidance](docs/RELEASE-0.3.0.md) before deployment.
+[0.4.1 upgrade and rollback guidance](docs/RELEASE-0.4.1.md) before deployment.
 See [offline command-line tools](docs/TOOLS.md) for the interactive shell,
 CSV/JSONL/pgvector/FAISS and optional Parquet/Arrow imports, HNSW tuning, and
 ANN quality/configuration comparisons.
@@ -185,8 +205,7 @@ with native.create("documents.vlite", dimensions=3) as db:
 ```
 
 Use `native.open("documents.vlite")` to reopen; creation never overwrites.
-The published 0.3.0 package does not include the newer `read_only=True`
-argument; shared read-only opens are included in 0.4.1 builds.
+The published 0.4.1 package includes shared read-only opens with `read_only=True`.
 See [Python installation and native platform support](bindings/README.md).
 
 ## Quick start: embedded Node.js / TypeScript
@@ -253,7 +272,7 @@ with Docker Engine inside a distro (default `Ubuntu-24.04`) or Docker Desktop
 WSL integration. From a PowerShell prompt in the repository root:
 
 ```powershell
-.\scripts\devbox.ps1           # pull the v0.3.0 images and start API + dashboard
+.\scripts\devbox.ps1           # pull the v0.4.1 images and start API + dashboard
 .\scripts\devbox.ps1 -Token    # copy the API token to the clipboard
 ```
 
@@ -272,7 +291,7 @@ published on loopback only.
 | Stop (data kept) | `.\scripts\devbox.ps1 -Down` |
 | Stop and delete the database volumes | `.\scripts\devbox.ps1 -Reset` |
 | Print the token without the script | `wsl -d Ubuntu-24.04 -e cat /root/vlite-deploy/.secrets/api-token` |
-| Other ports, distro or version | `.\scripts\devbox.ps1 -ApiPort 18090 -DashboardPort 8090 -Distro Ubuntu -Version v0.3.0` |
+| Other ports, distro or version | `.\scripts\devbox.ps1 -ApiPort 18090 -DashboardPort 8090 -Distro Ubuntu -Version v0.4.1` |
 | Database dimensions for a new volume | `.\scripts\devbox.ps1 -Dimensions 384` |
 
 WSL shuts its VM down shortly after the last WSL process exits, which also
@@ -330,9 +349,8 @@ See [embedded installation, Python examples and the C ABI](bindings/README.md).
 Platform-specific Python wheels bundle the native library and are published as
 [vlite-embedded on PyPI](https://pypi.org/project/vlite-embedded/); install with
 `python -m pip install vlite-embedded` and use `NativeLibrary()` without
-supplying a DLL path. PyPI 0.3.0 wheels support Windows x64, macOS arm64 and
-Linux x86_64/glibc 2.28+; current-source APIs such as `read_only=True` require
-a source build and are not included in that published version.
+supplying a DLL path. PyPI 0.4.1 wheels support Windows x64, macOS arm64 and
+Linux x86_64/glibc 2.28+, including `read_only=True` and typed float32 inputs.
 A dedicated audited manylinux wheel targets Linux x86_64/glibc 2.28+;
 host-native wheels remain available for Windows and macOS.
 The [embedded Node package](bindings/node/README.md) bundles its addon and
@@ -356,8 +374,8 @@ See [client installation, examples and error handling](clients/README.md) and
 the [REST API reference](docs/API.md).
 The Python REST client is published as
 [vlite-client on PyPI](https://pypi.org/project/vlite-client/); install it with
-`python -m pip install vlite-client`. Version 0.4.1 builds include the newer
-MCP and observability work; the older Python 0.3.0 client does not.
+`python -m pip install vlite-client`. Version 0.4.1 includes the MCP and
+observability updates.
 
 ## Browser dashboard
 
@@ -406,7 +424,7 @@ Prometheus on older servers; missing measurements show a dash, and rates need
 two samples. Unavailable admin endpoints are identified without breaking the
 rest of the console.
 
-The current-source console groups tools into six focused workspaces, with
+The 0.4.1 console groups tools into six focused workspaces, with
 Records, Write, Search, Index and Settings tabs for collection work. A responsive
 navigation drawer, keyboard-accessible tabs and advanced-panel disclosures keep
 the interface usable on smaller screens. Navigation preserves in-page drafts;
@@ -425,8 +443,7 @@ errors; distances are labeled rather than presented as generic similarity.
 Database workflows remain serialized, but navigation, help and appearance
 controls stay usable while a request is pending. Stopping the browser wait does
 not cancel server work or automatically retry it.
-These dashboard updates are available in current source builds; published
-v0.3.0 images and Python packages are not evidence of these newer UI features.
+These dashboard updates are included in the published v0.4.1 images.
 
 The expanded [testing console guide](docs/CONSOLE.md) covers guided demo data,
 bounded JSON/CSV import and export, batch editing, a visual filter builder,
@@ -499,7 +516,7 @@ inner product returns negative dot product. Cosine rejects zero queries and
 excludes zero-norm records. There is no silent metric fallback.
 See [metric contracts](docs/REFERENCE.md#exact-distance-metrics-v011).
 
-**Cosine ANN (v0.1.2+):** Rust adds
+**Cosine ANN (0.4.1):** Rust provides
 `build_hnsw_with_metric`, `search_approximate_with_metric` and
 `search_approximate_ready_with_metric`, with `DistanceMetric::Cosine`.
 Python uses `db.build_index(metric="cosine")` followed by
@@ -509,8 +526,8 @@ Python uses `db.build_index(metric="cosine")` followed by
 REST builds accept `{"metric":"cosine"}` and searches use the same metric.
 Only one graph is retained: ready-only queries reject a mismatched metric;
 lazy queries rebuild synchronously. Inner-product ANN remains unsupported.
-The v0.1.1 packages support L2 ANN only; use a v0.1.2+ engine
-and SDK together for cosine ANN. No database format change is required.
+Use matching 0.4.1 engine and SDK packages for cosine ANN.
+No database format change is required.
 
 ## Performance
 
@@ -641,12 +658,20 @@ to this small fixed dataset with ef-search=1000, not arbitrary workloads.
 CI covers Windows, Linux, and macOS on Rust minimum/stable, plus Linux Docker
 REST persistence and verified HTTPS. Docker on a Windows/macOS host still
 executes Linux code; it does not replace native filesystem testing. Linux arm64
-native tests run in CI, and v0.3.0 publishes arm64 archives and container images.
+native tests run in CI, and v0.4.1 publishes arm64 archives and container images.
 
 ## Stable release criteria
 
-The current package version is **0.3.0**
-([release](https://github.com/mahpate/Vlite/releases/tag/v0.3.0), images
+When publishing features, update their corresponding website pages and package
+README sections in the same change. Current installation examples and feature
+availability must match the latest published release. Keep experimental source
+features explicitly gated; do not present them as released. Historical raw
+benchmark reports and release notes retain their original provenance rather
+than being relabeled as new measurements. Run `python tests/release_docs.py`
+to catch stale release versions in current product pages and package READMEs.
+
+The current package version is **0.4.1**
+([release](https://github.com/mahpate/Vlite/releases/tag/v0.4.1), images
 `ghcr.io/mahpate/vlite`, `vlite-api` and `vlite-dashboard`). It is a pre-1.0
 release: formats and APIs may still change. A stable release requires a verified
 compatibility and operational baseline, not just a version or wording change:

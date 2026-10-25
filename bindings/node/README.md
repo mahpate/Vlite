@@ -83,8 +83,8 @@ ANN supports L2 (default) and cosine with an explicit matching build:
 `await db.buildIndex({ metric: "cosine" })` then
 `await db.searchApproximateReady(query, k, { metric: "cosine" })`.
 One graph is retained; a different metric returns `index_not_ready`.
-Inner-product ANN is rejected. Cosine ANN requires a v0.1.2+ wrapper
-and native library; v0.1.1 has L2 ANN only.
+Inner-product ANN is rejected. Use matching 0.4.1 wrappers and native
+libraries for cosine ANN.
 See [ABI contracts and limitations](../README.md).
 
 ## Opt-in Float32Array inputs

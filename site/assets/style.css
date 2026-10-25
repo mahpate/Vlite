@@ -1,3 +1,5 @@
+@import url("diagrams/palette.css");
+
 :root {
   --bg: #ffffff;
   --bg-soft: #f6f7fb;
@@ -65,6 +67,37 @@ code, pre { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, 
 .landing .c-c { color: #94a3b8; }
 .landing pre.code { padding-top: 46px; }
 .landing .nav-links { gap: 18px; }
+.product-flow { display: flex; justify-content: center; align-items: center; flex-wrap: wrap; gap: 12px; margin: 0 0 28px; color: var(--muted); font-size: 13px; }
+.product-flow b { color: var(--accent); padding-right: 6px; }
+.product-flow > span:not([aria-hidden]) { border: 1px solid var(--border); border-radius: 24px; padding: 9px 16px; background: var(--card); }
+.product-map { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2.6fr) minmax(0, 1fr); border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border)); border-radius: 20px; background: var(--card); margin-bottom: 40px; overflow: hidden; box-shadow: var(--shadow); }
+.product-map-intro, .product-map-tools { padding: 24px; }
+.product-map-intro { border-right: 1px solid var(--border); display: flex; flex-direction: column; align-items: flex-start; gap: 14px; background: radial-gradient(ellipse at top left, color-mix(in srgb, #8b5cf6 18%, transparent), transparent 75%); }
+.product-map-intro h3 { font-size: 36px; margin: 0; }
+.product-map-intro p, .product-map-tools p { color: var(--muted); font-size: 14px; margin: 0; }
+.product-map-intro > .more { margin-top: auto; }
+.product-map-core { display: grid; gap: 24px; padding: 20px; min-width: 0; }
+.product-map-row { --lane: var(--diagram-interface); position: relative; padding: 20px; border: 1px solid color-mix(in srgb, var(--lane) 45%, var(--border)); border-radius: 12px; background: linear-gradient(120deg, color-mix(in srgb, var(--lane) 8%, var(--card)), var(--card)); }
+.product-retrieve { --lane: var(--diagram-search); }
+.product-store { --lane: var(--diagram-storage); }
+.product-map-row + .product-map-row::before { content: ""; position: absolute; height: 24px; width: 2px; top: -25px; left: 36px; background: linear-gradient(var(--accent), var(--lane)); }
+.product-symbol { display: inline-flex; justify-content: center; align-items: center; width: 32px; height: 32px; margin-right: 8px; border-radius: 9px; color: var(--text); background: color-mix(in srgb, var(--lane) 16%, var(--card)); border: 1px solid color-mix(in srgb, var(--lane) 45%, var(--border)); font-family: ui-monospace, monospace; }
+.product-map-row .product-chips > * { background: color-mix(in srgb, var(--lane) 12%, var(--card)); border-color: color-mix(in srgb, var(--lane) 35%, var(--border)); color: var(--text); }
+.product-map-row h3, .product-map-tools h3 { font-size: 16px; margin: 0 0 16px; }
+.product-map-groups { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.product-map-groups h4 { margin: 0 0 12px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .1em; }
+.product-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.product-chips > * { padding: 6px 10px; border-radius: 20px; background: var(--chip); color: var(--chip-text); font-size: 12px; border: 1px solid var(--border); }
+.product-map-tools { border-left: 1px solid var(--border); background: linear-gradient(160deg, color-mix(in srgb, var(--diagram-operations) 8%, var(--card)), var(--card) 65%); }
+.product-map-tools > a { display: block; padding: 14px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.product-map-tools > a span { display: block; color: var(--muted); font-size: 12px; }
+.product-map-tools h3:not(:first-child) { margin-top: 24px; }
+.product-adoption { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 28px; margin-top: 32px; border: 1px solid color-mix(in srgb, #8b5cf6 35%, var(--border)); border-radius: var(--radius); background: linear-gradient(120deg, color-mix(in srgb, #8b5cf6 9%, var(--card)), color-mix(in srgb, #06b6d4 6%, var(--card))); }
+.product-adoption h3 { margin: 8px 0; }
+.product-adoption p { margin: 0; color: var(--muted); }
+.product-adoption > a { flex-shrink: 0; }
+@media (max-width: 1000px) { .product-map { grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); } .product-map-tools { grid-column: 1 / -1; border-left: 0; border-top: 1px solid var(--border); } }
+@media (max-width: 600px) { .product-map, .product-map-groups { grid-template-columns: minmax(0, 1fr); } .product-map-intro { border-right: 0; border-bottom: 1px solid var(--border); } .product-map-core { padding: 12px; } .product-adoption { flex-direction: column; align-items: flex-start; padding: 20px; } }
 .dashboard-product [id] { scroll-margin-top: 90px; }
 .benchmark-archive { margin: 28px 0; }
 .benchmark-archive > summary { padding-top: 18px; padding-bottom: 18px; cursor: pointer; font-weight: 600; color: var(--accent); }
@@ -350,6 +383,7 @@ a.pp-tool:hover strong { color: var(--accent); }
 .docs-main h2 { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--border); scroll-margin-top: 80px; }
 .docs-main h3.method { margin-top: 32px; font: 600 1.05rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--accent); scroll-margin-top: 80px; }
 .docs-main [id] { scroll-margin-top: 80px; }
+.docs-main { min-width: 0; overflow-wrap: anywhere; }
 .docs-main pre.code { margin: 12px 0; overflow-x: auto; max-width: 100%; }
 .docs-main pre.sig { border-left: 3px solid var(--accent); }
 .docs-cards { margin: 24px 0; }
@@ -411,7 +445,22 @@ table.param-table td:first-child { white-space: nowrap; }
 .about-apps .card:hover { border-color: var(--accent); }
 @media (max-width: 700px) { .about-apps { grid-template-columns: 1fr; } }
 /* Architecture page */
-.arch .diagram { margin: 18px 0 26px; padding: 18px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-soft); overflow-x: auto; }
+.diagram { margin: 18px 0 26px; padding: 22px; border: 1px solid color-mix(in srgb, var(--diagram-interface) 25%, var(--border)); border-radius: 20px; background: radial-gradient(ellipse at top left, color-mix(in srgb, var(--diagram-interface) 6%, var(--card)), var(--card) 70%); box-shadow: var(--shadow); }
+.diagram picture, .diagram img { display: block; width: 100%; height: auto; }
+.diagram img { max-height: 760px; object-fit: contain; }
+.diagram-full { display: inline-block; margin-top: 12px; font-size: 12px; }
+.diagram-source { margin-top: 16px; color: var(--muted); font-size: 12px; }
+.diagram-source summary { cursor: pointer; }
+.diagram-source pre { overflow-x: auto; }
+.diagram-legend { display: flex; flex-wrap: wrap; gap: 10px 20px; padding: 14px 0; font-size: 12px; color: var(--muted); }
+.diagram-legend span { display: inline-flex; gap: 7px; align-items: center; }
+.diagram-legend span::before { content: ""; width: 10px; height: 10px; border: 2px solid var(--role); border-radius: 4px; background: color-mix(in srgb, var(--role) 18%, var(--card)); }
+.diagram-legend .interface { --role: var(--diagram-interface); }
+.diagram-legend .search { --role: var(--diagram-search); }
+.diagram-legend .storage { --role: var(--diagram-storage); }
+.diagram-legend .operations { --role: var(--diagram-operations); }
+.diagram-legend .error { --role: var(--diagram-error); }
+@media (max-width: 600px) { .diagram { padding: 12px; margin-inline: 0; } }
 .arch .diagram pre.mermaid { background: none; margin: 0; padding: 0; color: var(--text); text-align: center; white-space: pre; }
 .arch .diagram svg { max-width: 100%; height: auto; }
 .arch figcaption { margin-top: 10px; font-size: .88rem; color: var(--muted); text-align: center; }
@@ -422,11 +471,6 @@ table.param-table td:first-child { white-space: nowrap; }
 .bm-cell b { font: 600 .85rem/1.2 Inter, system-ui, sans-serif; color: var(--text); }
 .bm-cell i { font-style: normal; opacity: .85; }
 .bytemap.small .bm-cell { padding: 7px 3px; }
-.c-magic { background: color-mix(in srgb, var(--accent) 16%, transparent); }
-.c-ver { background: color-mix(in srgb, var(--accent-2) 14%, transparent); }
-.c-dim { background: color-mix(in srgb, #10b981 14%, transparent); }
-.c-lin { background: color-mix(in srgb, #f59e0b 14%, transparent); }
-.c-col { background: color-mix(in srgb, #ec4899 13%, transparent); }
-.c-flag { background: color-mix(in srgb, #8b5cf6 14%, transparent); }
-.c-crc { background: color-mix(in srgb, #ef4444 14%, transparent); }
-.c-body { background: color-mix(in srgb, var(--muted) 10%, transparent); }
+.c-magic, .c-lin, .c-col, .c-body { background: color-mix(in srgb, var(--diagram-storage) 14%, transparent); }
+.c-dim { background: color-mix(in srgb, var(--diagram-search) 14%, transparent); }
+.c-ver, .c-flag, .c-crc { background: color-mix(in srgb, var(--diagram-operations) 14%, transparent); }

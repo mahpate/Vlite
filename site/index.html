@@ -18,9 +18,6 @@
   <div class="wrap">
     <a class="brand" href="./"><img src="assets/logo.svg" alt="">VLite</a>
     <nav class="nav-links" aria-label="Primary">
-      <a href="#features">Features</a>
-      <a href="#products">Products</a>
-      <a href="#quickstart">Quickstart</a>
       <a href="api.html">API</a>
       <a href="dashboard.html">Dashboard</a>
       <a href="docs/TOOLS.html">CLI</a>
@@ -45,7 +42,7 @@
     <div class="wrap">
       <span class="eyebrow">v0.4.1 &middot; MIT licensed &middot; written in Rust</span>
       <h1>Vector search in <span class="grad">one durable file</span>.</h1>
-      <p class="lead">A single-file vector database. Embed retrieval in your application without a separate database service, or self-host the same engine behind REST and gRPC.</p>
+      <p class="lead">Embed vector search in your app, or self-host it behind REST and gRPC.</p>
       <div class="cta">
         <a class="btn primary" href="#quickstart">Get started</a>
         <a class="btn" href="dashboard.html">View dashboard</a>
@@ -146,18 +143,58 @@ git clone https://github.com/mahpate/Vlite; cd Vlite
 
   <section id="products" class="alt">
     <div class="wrap">
-      <div class="section-head"><div class="kicker">How to run VLite</div><h2>Embedded or self-hosted</h2><p>Two deployment paths, the same Rust storage engine.</p></div>
+      <div class="section-head"><div class="kicker">The VLite toolkit</div><h2>One engine across retrieval workflows</h2></div>
+      <div class="diagram-legend" aria-label="Diagram color key"><span class="interface">Interfaces</span><span class="search">Search &amp; indexes</span><span class="storage">Storage</span><span class="operations">Operations &amp; tools</span><span class="error">Errors</span></div>
+      <div class="product-flow" aria-label="Retrieval workflow">
+        <span><b>01</b> Your application</span><span aria-hidden="true">&#8594;</span>
+        <span><b>02</b> VLite retrieval</span><span aria-hidden="true">&#8594;</span>
+        <span><b>03</b> Your results</span>
+      </div>
+      <div class="product-map" aria-label="VLite product and capability overview">
+        <div class="product-map-intro">
+          <img src="assets/logo.svg" alt="" width="44" height="44">
+          <div class="label">Single-file vector database</div>
+          <h3>VLite</h3>
+          <p>Dense, sparse and hybrid retrieval with explicit durable commits. Written in Rust; embedded first.</p>
+          <div class="product-chips"><span>MIT licensed</span><span>Self-hosted</span></div>
+          <a class="more" href="architecture.html">Explore the engine &#8594;</a>
+        </div>
+        <div class="product-map-core">
+          <div class="product-map-row product-connect"><h3><span class="product-symbol" aria-hidden="true">{ }</span> SDKs &amp; APIs</h3><div class="product-chips"><a href="#quickstart">Rust</a><a href="#quickstart">Python</a><a href="#quickstart">Node.js</a><a href="docs/INSTALL.html">C ABI</a><a href="api.html">REST</a><a href="docs/GRPC.html">gRPC</a></div></div>
+          <div class="product-map-row product-retrieve"><h3><span class="product-symbol" aria-hidden="true">&#8981;</span> Search &amp; indexes</h3><div class="product-map-groups">
+            <div><h4>Retrieval</h4><div class="product-chips"><span>Dense vectors</span><span>Sparse vectors</span><span>BM25 hybrid</span><span>Typed filters</span><span>Grouped search</span></div></div>
+            <div><h4>Acceleration</h4><div class="product-chips"><span>Exact scans</span><span>HNSW</span><span>Scalar u8</span><span>Metadata indexes</span></div></div>
+          </div></div>
+          <div class="product-map-row product-store"><h3><span class="product-symbol" aria-hidden="true">&#9636;</span> Runtime &amp; storage</h3><div class="product-map-groups">
+            <div><h4>Operating model</h4><div class="product-chips"><span>Embedded</span><span>Durable batches</span><span>Collections</span><span>Index snapshots</span></div></div>
+            <div><h4>Platform packages</h4><div class="product-chips"><a href="docs/INSTALL.html">Linux</a><a href="docs/INSTALL.html">macOS</a><a href="docs/INSTALL.html">Windows</a></div></div>
+          </div></div>
+        </div>
+        <aside class="product-map-tools" aria-label="Evidence and tools">
+          <h3>Measured performance</h3><p>Latency, recall, build time and durability trade-offs, with raw samples and workload limits.</p><a class="more" href="compare.html">Explore benchmarks &#8594;</a>
+          <h3>Tools &amp; agents</h3>
+          <a href="dashboard.html"><strong>Dashboard</strong><span>Inspect, search and operate</span></a>
+          <a href="docs/TOOLS.html"><strong>CLI tools</strong><span>Local database workflows</span></a>
+          <a href="docs/TOOLS.html"><strong>MCP &amp; agent skills</strong><span>Integrate with agent workflows</span></a>
+        </aside>
+      </div>
+      <div class="section-head"><h3>Embedded or self-hosted</h3><p>Two deployment paths, the same Rust storage engine.</p></div>
       <div class="grid cols-2">
         <article class="card"><div class="label">Embedded</div><h3>In your application's process</h3><p>Use Rust, Python, Node.js or C bindings for local-first applications and private retrieval without a separate database service.</p><a class="more" href="#quickstart">Start with an embedded example &#8594;</a></article>
         <article class="card"><div class="label">Self-hosted</div><h3>Behind REST and gRPC</h3><p>Give your clients an authenticated API, with a dashboard, scoped credentials and server observability. You operate the service.</p><a class="more" href="docs/DOCKER-OPERATIONS.html">Deployment guide &#8594;</a></article>
       </div>
       <p class="note landing-note">Language bindings: Rust, Python, Node.js and C; a separate WASM surface is also available. API coverage and platform support vary by package. <a href="docs/INSTALL.html">Check the installation matrix</a>.</p>
+      <aside class="product-adoption" aria-label="Applications using VLite">
+        <div><div class="label">Used in real applications</div><h3>VLite powers internal workflows at ASENDME</h3>
+          <p><a href="https://asendme.com">ASENDME.com</a> and <a href="https://asendme.app">ASENDME.app</a> both use VLite internally.</p></div>
+        <a class="btn" href="asendme.html">Explore ASENDME &#8594;</a>
+      </aside>
     </div>
   </section>
 
   <section id="features">
     <div class="wrap">
-      <div class="section-head"><div class="kicker">Features</div><h2>Start simple. Go deeper when needed.</h2><p>Core retrieval and storage, with opt-in features for more demanding workflows. Follow each guide for build, format and configuration requirements.</p></div>
+      <div class="section-head"><div class="kicker">Features</div><h2>Start simple. Go deeper when needed.</h2><p>Check each guide for feature flags, formats and limits.</p></div>
       <div class="grid cols-3" id="capabilities">
         <article class="card"><div class="label">Storage</div><h3>Durable, explicit commits</h3><p>Checksummed frames and synchronization before successful writes. Single-collection atomic batches support up to 4,096 operations.</p><a class="more" href="docs/REFERENCE.html">Storage contract &#8594;</a></article>
         <article class="card"><div class="label">Retrieval</div><h3>Exact to hybrid search</h3><p>Dense and sparse vectors, typed filters, BM25 hybrid ranking, grouped search and recommendations.</p><a class="more" href="docs/VECTORS.html">Retrieval guide &#8594;</a></article>
@@ -179,7 +216,7 @@ git clone https://github.com/mahpate/Vlite; cd Vlite
   </section>
   <section>
     <div class="wrap">
-      <div class="section-head"><h2>Build your first search.</h2><p>Start with a local file, then choose the retrieval and deployment options your application needs.</p></div>
+      <div class="section-head"><h2>Build your first search.</h2></div>
       <div class="cta"><a class="btn primary" href="#quickstart">Get started</a><a class="btn" href="docs/">Read the docs</a></div>
     </div>
   </section>

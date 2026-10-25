@@ -2,25 +2,25 @@
   "use strict";
 
   const workspaces = {
-    overview: { title: "Overview", description: "Connect to your database and review its current state.", tabs: [] },
+    overview: { title: "Overview", description: "Your database at a glance.", tabs: [] },
     collections: {
-      title: "Collections", description: "Work with records, queries and indexes in the active collection.",
+      title: "Collections", description: "Records, queries and indexes in your active collection.",
       tabs: [["browse", "Records / Browse"], ["editor", "Write"], ["collection-search", "Search"], ["index", "Index"], ["collections", "Settings"]]
     },
     search: {
-      title: "Search", description: "Test vector similarity and inspect retrieval behavior. Bring your own vectors; embedding generation is not supported.",
+      title: "Search", description: "Test retrieval with your own vectors. No embedding generation.",
       tabs: [["search", "Playground"], ["retrieval", "Advanced retrieval"], ["explore", "Explore / compare"]]
     },
     observability: {
-      title: "Observability", description: "Monitor server activity, inspect diagnostics and follow committed changes.",
+      title: "Observability", description: "Server activity, diagnostics and committed changes.",
       tabs: [["observability", "Server pulse"], ["diagnostics", "Diagnostics"], ["change-feed", "Change feed"]]
     },
     administration: {
-      title: "Administration", description: "Manage server operations, access and recovery. Writes still require confirmation.",
+      title: "Administration", description: "Operations, access and recovery. Writes require confirmation.",
       tabs: [["operations", "Operations"], ["credentials", "Scoped credentials"], ["webhooks", "Webhooks / PITR"]]
     },
     developer: {
-      title: "Developer Console", description: "Inspect REST requests and run explicit, reviewable data workflows.",
+      title: "Developer Console", description: "Inspect requests and review data workflows.",
       tabs: [["requests", "Request inspector"], ["data-tools", "Import / export"], ["resumable-import", "Resumable import"]]
     }
   };

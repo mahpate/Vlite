@@ -1,5 +1,23 @@
 # Offline command-line tools
 
+VLite 0.4.1 includes tools for working directly with database files, without a
+REST or gRPC server.
+
+## Choose a tool
+
+- [Shell](#interactive-or-scripted-shell): inspect records, run searches and perform maintenance.
+- [Import](#validated-atomic-or-resumable-imports): validate and load vectors from JSONL, CSV, Parquet, Arrow or FAISS.
+- [Search quality](#search-quality-and-configurationdatabase-comparison): measure recall and compare database or index configurations.
+- [Index tuning](#index-tuning-advisor): find HNSW parameters for a target recall.
+- [MCP and agent skills](#mcp-server-and-agent-skills): connect an agent to a database through a separate stdio server.
+
+**Before opening a file:** stop its server or other exclusive owner. The offline
+shell/import/tuning tools acquire an exclusive file lock, even when the shell's
+tool-level `--read-only` guard is enabled. MCP defaults to a shared-lock read-only
+snapshot instead; it can coexist with other shared readers, not an exclusive writer.
+
+## Build and install
+
 Build the shell, import, tuning and quality tools with Rust 1.89 or later:
 
 ```powershell
@@ -11,21 +29,9 @@ cargo build --locked --features import-formats --bins
 `tools` enables JSON and CSV; `import-formats` additionally enables optional
 Arrow/Parquet dependencies. Neither is enabled in the default embedded build.
 Each tool supports `--help`; unknown/duplicate options and failures exit nonzero.
-The offline shell/import/tuning tools use public embedded APIs, acquire the
-engine's exclusive file lock, and require the server/other owner to be stopped
-first. The separate MCP server defaults to shared-lock read-only access (below).
-
-## MCP server and agent skills
-
-Build/install `vlite-mcp` separately with `cargo install --path . --features mcp`,
-then run `vlite-mcp --db ./vectors.vlite`. It uses stdio JSON-RPC (no HTTP proxy
-or network listener), opens a shared-lock read-only snapshot by default, and
-exposes info, collection listing, search, get/list, index status and in-memory
-index build tools. `--writable` explicitly enables upsert/delete and requires an
-exclusive writer lock. Encryption key-file/environment options are supported.
-See [MCP installation, schemas and client configuration](MCP.md). Portable
-[agent skills](AGENT-SKILLS.md) cover RAG, MCP, operations and index tuning;
-installing a skill does not start the server or grant write permissions.
+The binaries are written to `target/debug/` by these build commands. Run them
+from that directory or add it to your PATH. For packaged binaries and platform
+requirements, see [installation](INSTALL.md).
 
 ## Interactive or scripted shell
 
@@ -146,28 +152,6 @@ Repeated IDs retain the engine's ordered upsert semantics; existing IDs are
 replaced, not appended with duplicate identity. Output paths are never clobbered
 by `--create`.
 
-## Index tuning advisor
-
-```powershell
-vlite-tune --db example.vlite --m 8,16,32 --ef-construction 64,128 --ef-search 20,50,100 --k 10 --samples 8 --target-recall 0.95 --json
-```
-
-Sweeps up to 256 parameter combinations, builds deterministic L2 HNSW indexes
-in memory, and uses the same seeded sample of stored vectors for every candidate.
-Samples are bounded to 1–32, k to 1–100. The cheapest configuration meeting the
-target recall@k is recommended by the explicit cost function
-`mean_query_us + memory_weight * component_MiB` (`--memory-weight`, default 1).
-A missing recommendation is JSON `null` and a nonzero exit status. Reports include
-build time, mean/p95 query latency, recall, Jaccard overlap, rank correlation and
-component byte estimates. Memory includes resident vectors and graph links, not
-allocator, record payload/metadata or node-object overhead; it is not peak RSS.
-
-Measurements are local wall-clock estimates, not promises. Stored-vector queries
-include self-neighbors and can overestimate real-world recall. Evaluate production
-queries separately; tiny datasets and single samples are not statistically robust.
-Indexes are built for the full selected collection, not just the sample. No index
-or settings are persisted and source bytes remain unchanged.
-
 ## Search quality and configuration/database comparison
 
 ```powershell
@@ -193,7 +177,45 @@ Rank correlation is Pearson correlation of original rank positions on shared IDs
 penalty-based correlation over missing IDs. Reports use L2; output is compact
 JSON with `--json`, otherwise labeled human-readable summaries.
 
+## Index tuning advisor
+
+After measuring a baseline, sweep parameters to find a candidate configuration:
+
+```powershell
+vlite-tune --db example.vlite --m 8,16,32 --ef-construction 64,128 --ef-search 20,50,100 --k 10 --samples 8 --target-recall 0.95 --json
+```
+
+Sweeps up to 256 parameter combinations, builds deterministic L2 HNSW indexes
+in memory, and uses the same seeded sample of stored vectors for every candidate.
+Samples are bounded to 1–32, k to 1–100. The cheapest configuration meeting the
+target recall@k is recommended by the explicit cost function
+`mean_query_us + memory_weight * component_MiB` (`--memory-weight`, default 1).
+A missing recommendation is JSON `null` and a nonzero exit status. Reports include
+build time, mean/p95 query latency, recall, Jaccard overlap, rank correlation and
+component byte estimates. Memory includes resident vectors and graph links, not
+allocator, record payload/metadata or node-object overhead; it is not peak RSS.
+
+Measurements are local wall-clock estimates, not promises. Stored-vector queries
+include self-neighbors and can overestimate real-world recall. Evaluate production
+queries separately; tiny datasets and single samples are not statistically robust.
+Indexes are built for the full selected collection, not just the sample. No index
+or settings are persisted and source bytes remain unchanged.
+
+## MCP server and agent skills
+
+Build/install `vlite-mcp` separately with `cargo install --path . --features mcp`,
+then run `vlite-mcp --db ./vectors.vlite`. It uses stdio JSON-RPC (no HTTP proxy
+or network listener), opens a shared-lock read-only snapshot by default, and
+exposes info, collection listing, search, get/list, index status and in-memory
+index build tools. `--writable` explicitly enables upsert/delete and requires an
+exclusive writer lock. Encryption key-file/environment options are supported.
+See [MCP installation, schemas and client configuration](MCP.md). Portable
+[agent skills](AGENT-SKILLS.md) cover RAG, MCP, operations and index tuning;
+installing a skill does not start the server or grant write permissions.
+
 ## Tests
+
+The following commands are for contributors validating the tools:
 
 ```powershell
 cargo test --locked --features tools --test shell_cli --test import_tools --test tune_cli

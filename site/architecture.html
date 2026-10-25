@@ -14,9 +14,6 @@
   <div class="wrap">
     <a class="brand" href="./"><img src="assets/logo.svg" alt="">VLite</a>
     <nav class="nav-links" aria-label="Primary">
-      <a href="./#features">Features</a>
-      <a href="./#products">Products</a>
-      <a href="./#quickstart">Quickstart</a>
       <a href="api.html">API</a>
       <a href="dashboard.html">Dashboard</a>
       <a href="docs/TOOLS.html">CLI</a>
@@ -85,10 +82,14 @@
   <main class="docs-main arch">
     <p class="kicker">Architecture</p>
     <h1 id="overview">How VLite works</h1>
-    <p class="lead">VLite is an embedded Rust storage engine. One process owns one database file, every write is an
-      append-only, checksummed frame that is fsynced before it is acknowledged, and every index is derived state that
-      can be rebuilt from that file. REST, gRPC and the language bindings are thin adapters over the same
-      <code>Database</code> core.</p>
+    <p class="lead">One Rust engine, one authoritative file, rebuildable indexes. Embed it or use REST and gRPC.</p>
+    <div class="diagram-legend" aria-label="Diagram color key">
+      <span class="interface">Interfaces</span><span class="search">Search &amp; indexes</span>
+      <span class="storage">Storage</span><span class="operations">Operations &amp; decisions</span>
+      <span class="error">Errors</span>
+    </div>
+    <p class="muted">Boxes are components, diamonds are decisions, cylinders are durable files.
+      Solid arrows show calls or data flow; dashed arrows show optional, conditional or return paths. Arrow labels state the condition.</p>
 
     <div class="grid cols-3 docs-cards">
       <div class="card"><span class="label">Storage</span><h3>Append-only log</h3><p class="muted">32-byte header, then CRC32-framed records. No pages and no WAL sidecar.</p></div>
@@ -97,53 +98,23 @@
     </div>
 
     <h2 id="layers">Layered architecture</h2>
-    <p>The core is a library (<code>src/lib.rs</code>). Transports and bindings sit on top, and they all call the same
-      <code>Database</code> API. Storage and format code sit underneath, and derived indexes are maintained after each
-      successful commit.</p>
-    <figure class="diagram">
+    <p>Every interface calls the same <code>Database</code> API; indexes update after a successful commit.</p>
+    <figure class="diagram" data-diagram="layers">
+      <picture><source srcset="assets/diagrams/layers-dark.svg" media="(prefers-color-scheme: dark)"><img src="assets/diagrams/layers-light.svg" data-light="assets/diagrams/layers-light.svg" data-dark="assets/diagrams/layers-dark.svg" alt="VLite layers: interfaces call the Database core; search indexes are rebuildable; storage writes the authoritative file." loading="lazy"></picture>
+      <a class="diagram-full" href="assets/diagrams/layers-light.svg" data-light="assets/diagrams/layers-light.svg" data-dark="assets/diagrams/layers-dark.svg">Open full-size diagram</a>
+      <details class="diagram-source"><summary>Text diagram</summary>
 <pre class="mermaid">
 flowchart TB
-  subgraph Surfaces["Surfaces"]
-    direction LR
-    PY["Python wheel"]
-    ND["Node.js addon"]
-    C["C ABI vlite_execute"]
-    W["WASM"]
-    REST["REST · Axum"]
-    GRPC["gRPC · tonic vlite.v1"]
-    DASH["Web console"]
-    MCP["vlite-mcp · stdio JSON-RPC"]
-  end
-  subgraph Core["Database core · src/lib.rs"]
-    direction LR
-    COL["Collections"]
-    REC["Records #amp; queries"]
-    VEC["Dense / named vectors"]
-    META["Typed metadata"]
-    CH["Change feed"]
-  end
-  subgraph Derived["Derived indexes · rebuildable"]
-    direction LR
-    PL["Query planner"]
-    HN["HNSW"]
-    Q8["ScalarU8"]
-    MI["Metadata postings"]
-    BM["BM25 text"]
-    HY["Hybrid RRF"]
-    DA["Disk ANN"]
-  end
-  subgraph Storage["Storage #amp; format"]
-    direction LR
-    FMT["format.rs · frames + CRC32"]
-    CRY["crypto.rs · ChaCha20-Poly1305"]
-    STO["storage.rs · file / memory"]
-  end
-  FILE[("data.vlite · single authoritative file")]
-  Surfaces --> Core
-  Core --> Derived
-  Core --> Storage
-  Storage --> FILE
-</pre>
+  SDK["SDKs and APIs&lt;br/&gt;Rust · Python · Node.js · C · WASM&lt;br/&gt;REST · gRPC · console · MCP"]
+  DB["Database core&lt;br/&gt;collections · records · metadata&lt;br/&gt;vectors · queries · change feed"]
+  IDX["Search and indexes · rebuildable&lt;br/&gt;HNSW · ScalarU8 · metadata&lt;br/&gt;BM25 · hybrid RRF · Disk ANN"]
+  STORE["Storage and format&lt;br/&gt;checksummed frames · optional encryption&lt;br/&gt;file / memory backend"]
+  FILE[("data.vlite&lt;br/&gt;authoritative committed records")]
+  SDK -->|"same embedded API"| DB
+  DB -->|"query / rebuild"| IDX
+  DB -->|"durable commits"| STORE
+  STORE --> FILE
+</pre></details>
       <figcaption>Every surface converges on one <code>Database</code>. Only the storage layer touches the file.</figcaption>
     </figure>
 
@@ -167,7 +138,10 @@ flowchart TB
     <p>The primary file, for example <code>data.vlite</code>, is the <strong>only</strong> source of committed records.
       It is an append-only sequence of variable-length frames after a fixed header. There is no page allocator, no
       superblock and no separate WAL or journal: the file itself is the log.</p>
-    <figure class="diagram">
+    <figure class="diagram" data-diagram="single-file">
+      <picture><source srcset="assets/diagrams/single-file-dark.svg" media="(prefers-color-scheme: dark)"><img src="assets/diagrams/single-file-light.svg" data-light="assets/diagrams/single-file-light.svg" data-dark="assets/diagrams/single-file-dark.svg" alt="The authoritative database rebuilds in-memory indexes and optional ANN sidecars; a matching snapshot can reload the cache." loading="lazy"></picture>
+      <a class="diagram-full" href="assets/diagrams/single-file-light.svg" data-light="assets/diagrams/single-file-light.svg" data-dark="assets/diagrams/single-file-dark.svg">Open full-size diagram</a>
+      <details class="diagram-source"><summary>Text diagram</summary>
 <pre class="mermaid">
 flowchart LR
   F[("data.vlite&lt;br/&gt;authoritative")]
@@ -178,7 +152,7 @@ flowchart LR
   F -- "persist graph" --> A
   F -- "build" --> D
   A -. "load if identity matches" .-> M
-</pre>
+</pre></details>
       <figcaption>Solid: derived from the primary file. Losing any derived file never loses committed data.</figcaption>
     </figure>
 
@@ -248,17 +222,23 @@ flowchart LR
     <p>Features that need new on-disk structures bump the format version. Older files are never silently re-encoded;
       using such a feature on an old file returns <code>BatchRequiresUpgrade</code>, <code>MetadataRequiresUpgrade</code>
       or <code>ExpiryRequiresUpgrade</code>, and the caller upgrades explicitly through compaction.</p>
-    <figure class="diagram">
+    <figure class="diagram" data-diagram="formats">
+      <picture><source srcset="assets/diagrams/formats-dark.svg" media="(prefers-color-scheme: dark)"><img src="assets/diagrams/formats-light.svg" data-light="assets/diagrams/formats-light.svg" data-dark="assets/diagrams/formats-dark.svg" alt="Explicit file-format progression from base logs to collections, then expiry and extended vectors." loading="lazy"></picture>
+      <a class="diagram-full" href="assets/diagrams/formats-light.svg" data-light="assets/diagrams/formats-light.svg" data-dark="assets/diagrams/formats-dark.svg">Open full-size diagram</a>
+      <details class="diagram-source"><summary>Text diagram</summary>
 <pre class="mermaid">
 flowchart LR
   V3["V1–V3&lt;br/&gt;base log · default for create"] --> V4["V4&lt;br/&gt;lineage · collections · import checkpoints"] --> V5["V5&lt;br/&gt;expiry · geo metadata · named/sparse vectors"]
-</pre>
+</pre></details>
     </figure>
 
     <h2 id="write-path">Write path</h2>
     <p>Commits are synchronous: a call returns only after the frame is on stable storage. In-memory state and indexes
       change only after the fsync succeeds, so readers never observe uncommitted data.</p>
-    <figure class="diagram">
+    <figure class="diagram" data-diagram="commit">
+      <picture><source srcset="assets/diagrams/commit-dark.svg" media="(prefers-color-scheme: dark)"><img src="assets/diagrams/commit-light.svg" data-light="assets/diagrams/commit-light.svg" data-dark="assets/diagrams/commit-dark.svg" alt="Commit sequence: validate, encode, append, synchronize, publish indexes and acknowledge; failed writes roll back or return an error." loading="lazy"></picture>
+      <a class="diagram-full" href="assets/diagrams/commit-light.svg" data-light="assets/diagrams/commit-light.svg" data-dark="assets/diagrams/commit-dark.svg">Open full-size diagram</a>
+      <details class="diagram-source"><summary>Text diagram</summary>
 <pre class="mermaid">
 sequenceDiagram
   autonumber
@@ -280,7 +260,7 @@ sequenceDiagram
     DB->>Idx: apply mutation, update HNSW / metadata / BM25
     DB-->>App: Ok (durable)
   end
-</pre>
+</pre></details>
       <figcaption>Batches of up to 4,096 operations (16 MiB) commit as one atomic unit.</figcaption>
     </figure>
 
@@ -288,7 +268,10 @@ sequenceDiagram
     <p>Opening a file replays the log. VLite separates two cases that many engines merge: a <strong>corrupt</strong>
       file, and an <strong>incomplete tail</strong> from a crash during an append. Neither is repaired silently.
       <code>repair</code> is an explicit operation that may discard only the unacknowledged trailing frame.</p>
-    <figure class="diagram">
+    <figure class="diagram" data-diagram="recovery">
+      <picture><source srcset="assets/diagrams/recovery-dark.svg" media="(prefers-color-scheme: dark)"><img src="assets/diagrams/recovery-light.svg" data-light="assets/diagrams/recovery-light.svg" data-dark="assets/diagrams/recovery-dark.svg" alt="Recovery validates locking, headers and committed frames; corruption and incomplete tails return distinct errors; tail repair is explicit." loading="lazy"></picture>
+      <a class="diagram-full" href="assets/diagrams/recovery-light.svg" data-light="assets/diagrams/recovery-light.svg" data-dark="assets/diagrams/recovery-dark.svg">Open full-size diagram</a>
+      <details class="diagram-source"><summary>Text diagram</summary>
 <pre class="mermaid">
 flowchart TD
   O["open(path)"] --> L{"try_lock()"}
@@ -302,7 +285,7 @@ flowchart TD
   N -- "valid" --> AP["apply committed frame"] --> N
   R --> RDY["ready"]
   ET -. "explicit repair()" .-> TR["truncate torn tail"] --> O
-</pre>
+</pre></details>
       <figcaption>Acknowledged commits are complete frames, so repair can never remove acknowledged data.</figcaption>
     </figure>
 
@@ -320,7 +303,10 @@ flowchart TD
       with more than one Rayon worker. Chunk-local bounded top-k results merge deterministically by distance then ID;
       wasm32 retains serial scans. Python calls within one process are serialized by the C ABI: use separate processes
       with read-only handles for parallel embedded requests.</p>
-    <figure class="diagram">
+    <figure class="diagram" data-diagram="concurrency">
+      <picture><source srcset="assets/diagrams/concurrency-dark.svg" media="(prefers-color-scheme: dark)"><img src="assets/diagrams/concurrency-light.svg" data-light="assets/diagrams/concurrency-light.svg" data-dark="assets/diagrams/concurrency-dark.svg" alt="A server owns an exclusive file lock; shared reader processes are an alternative mode, not concurrent with that writer." loading="lazy"></picture>
+      <a class="diagram-full" href="assets/diagrams/concurrency-light.svg" data-light="assets/diagrams/concurrency-light.svg" data-dark="assets/diagrams/concurrency-dark.svg">Open full-size diagram</a>
+      <details class="diagram-source"><summary>Text diagram</summary>
 <pre class="mermaid">
 flowchart LR
   subgraph Clients
@@ -342,7 +328,7 @@ flowchart LR
     SH --> RF[("data.vlite · open-time snapshots")]
   end
   LK -. "mutually exclusive modes" .-> SH
-</pre>
+</pre></details>
     </figure>
 
     <h2 id="sidecars">Sidecar files</h2>
@@ -360,7 +346,10 @@ flowchart LR
     <h2 id="memory">In-memory model</h2>
     <p>On open, the replayed log becomes an ordered map from <code>u64</code> IDs to records, per collection. Indexes are
       built from those maps.</p>
-    <figure class="diagram">
+    <figure class="diagram" data-diagram="records">
+      <picture><source srcset="assets/diagrams/records-dark.svg" media="(prefers-color-scheme: dark)"><img src="assets/diagrams/records-light.svg" data-light="assets/diagrams/records-light.svg" data-dark="assets/diagrams/records-dark.svg" alt="Records hold vectors, payload, metadata and expiry; vectors and metadata feed rebuildable indexes." loading="lazy"></picture>
+      <a class="diagram-full" href="assets/diagrams/records-light.svg" data-light="assets/diagrams/records-light.svg" data-dark="assets/diagrams/records-dark.svg">Open full-size diagram</a>
+      <details class="diagram-source"><summary>Text diagram</summary>
 <pre class="mermaid">
 flowchart LR
   ID["u64 record id"] --> V["dense f32 vector&lt;br/&gt;+ named / versioned vectors"]
@@ -371,14 +360,17 @@ flowchart LR
   MD --> TP["BM25 postings ≤ 8 text fields"]
   V --> HG["HNSW graph"]
   V --> QC["ScalarU8 codes"]
-</pre>
+</pre></details>
     </figure>
 
     <h2 id="planner">Query planner</h2>
     <p>Each search is planned. The planner uses an ANN index only if one is ready and its configuration, metric and
       quantization match the query; otherwise it falls back to an exact scan. Exact distances accumulate in
       <code>f64</code>, and lower is always nearer.</p>
-    <figure class="diagram">
+    <figure class="diagram" data-diagram="planner">
+      <picture><source srcset="assets/diagrams/planner-dark.svg" media="(prefers-color-scheme: dark)"><img src="assets/diagrams/planner-light.svg" data-light="assets/diagrams/planner-light.svg" data-dark="assets/diagrams/planner-dark.svg" alt="Query planning chooses matching ready HNSW or exact scans, then returns deterministic top-k results." loading="lazy"></picture>
+      <a class="diagram-full" href="assets/diagrams/planner-light.svg" data-light="assets/diagrams/planner-light.svg" data-dark="assets/diagrams/planner-dark.svg">Open full-size diagram</a>
+      <details class="diagram-source"><summary>Text diagram</summary>
 <pre class="mermaid">
 flowchart TD
   Q["search(vector, k, filter)"] --> M{"metric"}
@@ -392,7 +384,7 @@ flowchart TD
   CS --> TOP["top-k hits"]
   EX --> TOP
   RR --> TOP
-</pre>
+</pre></details>
     </figure>
 
     <h2 id="hnsw">HNSW &amp; quantization</h2>
@@ -407,7 +399,10 @@ flowchart TD
       bookkeeping, not distance precision, graph-selection rules, filtering or
       durability. See the <a href="compare.html#hnsw-traversal">small Windows
       before/after experiment and its limitations</a>.</p>
-    <figure class="diagram">
+    <figure class="diagram" data-diagram="quantization">
+      <picture><source srcset="assets/diagrams/quantization-dark.svg" media="(prefers-color-scheme: dark)"><img src="assets/diagrams/quantization-light.svg" data-light="assets/diagrams/quantization-light.svg" data-dark="assets/diagrams/quantization-dark.svg" alt="ScalarU8 accelerates candidate traversal; final ranking uses original full-precision vectors." loading="lazy"></picture>
+      <a class="diagram-full" href="assets/diagrams/quantization-light.svg" data-light="assets/diagrams/quantization-light.svg" data-dark="assets/diagrams/quantization-dark.svg">Open full-size diagram</a>
+      <details class="diagram-source"><summary>Text diagram</summary>
 <pre class="mermaid">
 flowchart LR
   R["f32 records"] -->|train per-dimension codebook| CB["ScalarU8 codes&lt;br/&gt;4× smaller"]
@@ -417,7 +412,7 @@ flowchart LR
   C --> X["exact f32 distance"]
   R --> X
   X --> K["top-k"]
-</pre>
+</pre></details>
     </figure>
     <div class="table-scroll"><table>
       <thead><tr><th>Parameter</th><th>Default</th><th>Range</th></tr></thead>
@@ -433,7 +428,10 @@ flowchart LR
     <h2 id="hybrid">Text &amp; hybrid search</h2>
     <p>Text fields are tokenized into BM25 postings (k1&nbsp;=&nbsp;1.2, b&nbsp;=&nbsp;0.75). Hybrid search runs the
       dense and text legs independently and fuses ranks with weighted reciprocal-rank fusion.</p>
-    <figure class="diagram">
+    <figure class="diagram" data-diagram="hybrid">
+      <picture><source srcset="assets/diagrams/hybrid-dark.svg" media="(prefers-color-scheme: dark)"><img src="assets/diagrams/hybrid-light.svg" data-light="assets/diagrams/hybrid-light.svg" data-dark="assets/diagrams/hybrid-dark.svg" alt="Dense and BM25 rankings merge through weighted reciprocal-rank fusion into top-k results." loading="lazy"></picture>
+      <a class="diagram-full" href="assets/diagrams/hybrid-light.svg" data-light="assets/diagrams/hybrid-light.svg" data-dark="assets/diagrams/hybrid-dark.svg">Open full-size diagram</a>
+      <details class="diagram-source"><summary>Text diagram</summary>
 <pre class="mermaid">
 flowchart LR
   Q["query"] --> D["dense leg&lt;br/&gt;planner → ranked ids"]
@@ -441,7 +439,7 @@ flowchart LR
   D --> F["weighted RRF&lt;br/&gt;Σ weight / (60 + rank)"]
   T --> F
   F --> K["fused top-k ≤ 1,000"]
-</pre>
+</pre></details>
     </figure>
 
     <h2 id="retrieval">Advanced retrieval</h2>
@@ -460,7 +458,10 @@ flowchart LR
       64-byte descriptor after the header. Frame prefixes stay plaintext so recovery can walk the log, which means
       operation types, IDs, sizes and sequence numbers are visible. ANN snapshots and Disk ANN would hold plaintext
       vectors, so both sidecars are refused for encrypted databases.</p>
-    <figure class="diagram">
+    <figure class="diagram" data-diagram="encryption">
+      <picture><source srcset="assets/diagrams/encryption-dark.svg" media="(prefers-color-scheme: dark)"><img src="assets/diagrams/encryption-light.svg" data-light="assets/diagrams/encryption-light.svg" data-dark="assets/diagrams/encryption-dark.svg" alt="Argon2id derives a key for encrypted frame bodies; plaintext ANN sidecars are refused; logical tenants share one file." loading="lazy"></picture>
+      <a class="diagram-full" href="assets/diagrams/encryption-light.svg" data-light="assets/diagrams/encryption-light.svg" data-dark="assets/diagrams/encryption-dark.svg">Open full-size diagram</a>
+      <details class="diagram-source"><summary>Text diagram</summary>
 <pre class="mermaid">
 flowchart LR
   PW["passphrase"] -->|Argon2id| K["256-bit key"]
@@ -471,14 +472,17 @@ flowchart LR
     T1["tenant A · docs"] --> N1["t#lt;hexA#gt;__docs"]
     T2["tenant B · docs"] --> N2["t#lt;hexB#gt;__docs"]
   end
-</pre>
+</pre></details>
     </figure>
     <p>Tenants are policy namespaces in the same file, not separate files or cryptographic domains. Physical collection
       names are <code>t&lt;32-hex-id&gt;__&lt;name&gt;</code>, with up to 1,024 lifetime tenant IDs.</p>
 
     <h2 id="cdc">CDC, point-in-time restore &amp; replicas</h2>
     <p>Because the file is a sequenced log, change data capture, restore and replication all read the same frames.</p>
-    <figure class="diagram">
+    <figure class="diagram" data-diagram="changes">
+      <picture><source srcset="assets/diagrams/changes-dark.svg" media="(prefers-color-scheme: dark)"><img src="assets/diagrams/changes-light.svg" data-light="assets/diagrams/changes-light.svg" data-dark="assets/diagrams/changes-dark.svg" alt="Committed frames feed change capture, replication, webhooks, backups and point-in-time restore." loading="lazy"></picture>
+      <a class="diagram-full" href="assets/diagrams/changes-light.svg" data-light="assets/diagrams/changes-light.svg" data-dark="assets/diagrams/changes-dark.svg">Open full-size diagram</a>
+      <details class="diagram-source"><summary>Text diagram</summary>
 <pre class="mermaid">
 flowchart LR
   F[("committed frames&lt;br/&gt;seq 1..n")] --> CF["/v1/changes&lt;br/&gt;durable cursor · ≤ 10,000 events"]
@@ -486,14 +490,17 @@ flowchart LR
   SEG --> RF["ReplicaFollower"]
   CF --> WH["webhooks&lt;br/&gt;at-least-once"]
   F --> BK["backup"] --> PITR["restore to commit&lt;br/&gt;sequence or timestamp"]
-</pre>
+</pre></details>
     </figure>
     <p>A restore is selected through the admin API and applied on restart; it never swaps the live owner in place.</p>
 
     <h2 id="server">Server</h2>
     <p><code>vlite-server</code> wraps one owned database. REST (Axum) and gRPC (tonic, <code>vlite.v1.VLite</code>,
       opt-in with <code>--grpc-bind</code>) share authentication, authorization, metrics and the core adapters.</p>
-    <figure class="diagram">
+    <figure class="diagram" data-diagram="server">
+      <picture><source srcset="assets/diagrams/server-dark.svg" media="(prefers-color-scheme: dark)"><img src="assets/diagrams/server-light.svg" data-light="assets/diagrams/server-light.svg" data-dark="assets/diagrams/server-dark.svg" alt="REST and gRPC share authentication, authorization and a Database lock; operations surfaces expose logs and metrics." loading="lazy"></picture>
+      <a class="diagram-full" href="assets/diagrams/server-light.svg" data-light="assets/diagrams/server-light.svg" data-dark="assets/diagrams/server-dark.svg">Open full-size diagram</a>
+      <details class="diagram-source"><summary>Text diagram</summary>
 <pre class="mermaid">
 flowchart LR
   CL["client"] -->|"TLS 1.2/1.3 · rustls"| L{"listener"}
@@ -509,7 +516,7 @@ flowchart LR
   OB --> SUM["GET /v1/admin/metrics/summary"]
   LG --> UI["dashboard Observability&lt;br/&gt;cards · route table · live tail"]
   SUM --> UI
-</pre>
+</pre></details>
     </figure>
     <ul class="list">
       <li>Remote listeners require <code>--allow-remote</code> plus bearer auth. TLS does not replace auth.</li>
@@ -530,7 +537,10 @@ flowchart LR
       <code>char *vlite_execute(uint64_t handle, const uint8_t *input, size_t length)</code> takes a request envelope and
       returns a response string. Python (<code>vlite_embedded</code>) and Node.js (<code>@vlite/embedded</code>) wrap it;
       WASM builds the core separately with an injected clock (<code>set_wasm_clock_ms</code>).</p>
-    <figure class="diagram">
+    <figure class="diagram" data-diagram="bindings">
+      <picture><source srcset="assets/diagrams/bindings-dark.svg" media="(prefers-color-scheme: dark)"><img src="assets/diagrams/bindings-light.svg" data-light="assets/diagrams/bindings-light.svg" data-dark="assets/diagrams/bindings-dark.svg" alt="Python and Node send handle-based requests through the C ABI to Database and release the handle on close." loading="lazy"></picture>
+      <a class="diagram-full" href="assets/diagrams/bindings-light.svg" data-light="assets/diagrams/bindings-light.svg" data-dark="assets/diagrams/bindings-dark.svg">Open full-size diagram</a>
+      <details class="diagram-source"><summary>Text diagram</summary>
 <pre class="mermaid">
 sequenceDiagram
   participant L as Python / Node
@@ -542,7 +552,7 @@ sequenceDiagram
   D-->>C: result / typed error
   C-->>L: response string (freed by caller)
   L->>C: close(handle) → releases file lock
-</pre>
+</pre></details>
     </figure>
 
     <h2 id="limits">Limits &amp; defaults</h2>
@@ -609,25 +619,6 @@ sequenceDiagram
 </footer>
 <script>
   if (window.matchMedia("(max-width: 800px)").matches) document.querySelectorAll("details.docs-nav").forEach((d) => d.removeAttribute("open"));
-</script>
-<script type="module">
-  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
-  const nodes = [...document.querySelectorAll("pre.mermaid")];
-  nodes.forEach((n) => { n.dataset.src = n.textContent; });
-  const render = async () => {
-    const dark = document.documentElement.getAttribute("data-theme") === "dark";
-    mermaid.initialize({
-      startOnLoad: false, securityLevel: "strict", theme: "base",
-      fontFamily: "Inter, system-ui, sans-serif",
-      themeVariables: dark
-        ? { primaryColor: "#1e2235", primaryTextColor: "#e6e8f2", primaryBorderColor: "#7c6cff", lineColor: "#8a90b4", secondaryColor: "#14233a", tertiaryColor: "#161a29", clusterBkg: "#141826", clusterBorder: "#3a3f5c", noteBkgColor: "#1e2235", actorBkg: "#1e2235", actorTextColor: "#e6e8f2", signalTextColor: "#e6e8f2", labelBoxBkgColor: "#1e2235", edgeLabelBackground: "#141826" }
-        : { primaryColor: "#f1efff", primaryTextColor: "#1b1d2b", primaryBorderColor: "#6d5dfc", lineColor: "#6b7090", secondaryColor: "#e8f4ff", tertiaryColor: "#f8f9fc", clusterBkg: "#fafbff", clusterBorder: "#d7d9e8", noteBkgColor: "#fff8e1", actorBkg: "#f1efff", edgeLabelBackground: "#ffffff" },
-    });
-    nodes.forEach((n) => { n.removeAttribute("data-processed"); n.textContent = n.dataset.src; });
-    await mermaid.run({ nodes });
-  };
-  await render();
-  new MutationObserver(render).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
 </script>
 </body>
 </html>

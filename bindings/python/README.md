@@ -38,7 +38,7 @@ Licensed under MIT.
 
 ## Since 0.4.1: read-only multi-process access
 
-This feature is included in 0.4.1 builds, not the PyPI 0.3.0 package.
+This feature is included in the published 0.4.1 package.
 Check the release and PyPI publication status before installing.
 `native.open(path, read_only=True)`
 opens an existing database with a shared OS lock. Multiple read-only handles may
@@ -189,8 +189,8 @@ errors. The Python wrapper owns a validated snapshot during the call because
 ctypes releases the GIL. This is a copy-reducing path, **not zero-copy**. The
 existing per-handle Python lock and global native owner lock remain in place.
 
-Published 0.3.0 wheels lack these native symbols (and their bundled Python API
-may lack these methods). With this source wrapper and an older ABI-1 library,
+The published 0.4.1 wheels include these native symbols and Python methods.
+With this wrapper and a native ABI-1 library lacking the optional symbols,
 `native.supports_float32` is false and the new methods fall back to JSON using
 the buffer's exact float32 values. Set `require_native=True` on either method to
 reject that fallback with `EmbeddedError(code="unsupported")`. Loading an old

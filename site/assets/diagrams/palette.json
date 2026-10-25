@@ -1,0 +1,7 @@
+{
+  "interface": {"color": "#8b5cf6", "light": "#f3edff", "dark": "#2d2146", "label": "Interfaces"},
+  "search": {"color": "#0891b2", "light": "#e6f8fc", "dark": "#103340", "label": "Search and indexes"},
+  "storage": {"color": "#059669", "light": "#e7f8f0", "dark": "#10392e", "label": "Storage and durable state"},
+  "operations": {"color": "#d97706", "light": "#fff4df", "dark": "#3d2e18", "label": "Operations and decisions"},
+  "error": {"color": "#dc2626", "light": "#fff0f0", "dark": "#432126", "label": "Errors and rejected paths"}
+}

@@ -25,6 +25,13 @@ then query from Search.
 
 ## Studio workflow improvements
 
+The current source refreshes the studio with a theme-aware sidebar, vector
+navigation icons, color-coded snapshot cards and a compact connection panel.
+Compatibility and raw metrics are collapsed until requested. All workspace
+routes, permission gates and write confirmations are unchanged. This visual
+refresh is source-only until the next release; the v0.4.1 tours remain labeled
+with their actual capture version.
+
 VLite provides a create → write → query quick start, theme-aware presentation,
 onboarding and SDK-code generation. It uses its own REST schema, decimal u64
 IDs and typed metadata.

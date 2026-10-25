@@ -167,9 +167,9 @@ def main():
         cards.append("</div>")
     index = (f'<div class="docs-layout">\n{sidebar(meta, "index")}\n<main class="docs-main prose">\n'
              '<p class="kicker">Documentation</p><h1>VLite documentation</h1>\n'
-             '<p class="lead">Guides and references for the embedded engine, the REST and gRPC server, storage features and operations. '
-             'Start with <a href="INSTALL.html">Install</a>, read the <a href="../architecture.html">architecture deep dive</a>, '
-             'or jump to the <a href="../api.html">API reference</a>.</p>\n'
+             '<p class="lead"><a href="INSTALL.html">Install VLite</a>, explore the '
+             '<a href="../architecture.html">architecture</a>, or use the '
+             '<a href="../api.html">API reference</a>.</p>\n'
              + "\n".join(cards) + "\n</main>\n</div>")
     (output / "index.html").write_text(page("Documentation", "VLite documentation", header, footer, index), encoding="utf-8")
     print(f"rendered {len(sources)} docs into {output}")

@@ -7,6 +7,19 @@
   system.addEventListener("change", (event) => { if (!stored) apply(event.matches ? "dark" : "light"); });
 
   document.addEventListener("DOMContentLoaded", () => {
+    const updateDiagrams = () => {
+      const dark = root.getAttribute("data-theme") === "dark";
+      document.querySelectorAll("img[data-light][data-dark]").forEach((image) => {
+        const source = image.parentElement.querySelector("source");
+        if (source) source.media = dark ? "all" : "not all";
+        image.src = dark ? image.dataset.dark : image.dataset.light;
+      });
+      document.querySelectorAll("a.diagram-full[data-light][data-dark]").forEach((link) => {
+        link.href = dark ? link.dataset.dark : link.dataset.light;
+      });
+    };
+    updateDiagrams();
+    new MutationObserver(updateDiagrams).observe(root, { attributes: true, attributeFilter: ["data-theme"] });
     const toggle = document.getElementById("theme-toggle");
     if (toggle) {
       toggle.addEventListener("click", () => {

@@ -15,6 +15,7 @@ class Page(HTMLParser):
         self.in_primary = False
         self.text = []
         self.sections = []
+        self.headings = []
         self.feed(text)
 
     def handle_data(self, data):
@@ -30,6 +31,8 @@ class Page(HTMLParser):
             self.ids.add(attrs["id"])
         if tag == "section" and attrs.get("id"):
             self.sections.append(attrs["id"])
+        if tag == "h2" and attrs.get("id"):
+            self.headings.append(attrs["id"])
         for key in ("href", "src", "data-tour", "data-poster"):
             if attrs.get(key):
                 self.links.append(attrs[key])
@@ -47,6 +50,22 @@ def check(root):
     }
     errors = []
     for path, page in pages.items():
+        if path == root / "docs" / "TOOLS.html":
+            expected = [
+                "choose-a-tool",
+                "build-and-install",
+                "interactive-or-scripted-shell",
+                "validated-atomic-or-resumable-imports",
+                "search-quality-and-configurationdatabase-comparison",
+                "index-tuning-advisor",
+                "mcp-server-and-agent-skills",
+                "tests",
+            ]
+            if page.headings != expected:
+                errors.append("docs/TOOLS.html: expected chooser, setup, shell, import, quality, tuning, MCP, then tests")
+        for link in page.primary_links:
+            if urlsplit(link).fragment in ("features", "products", "quickstart"):
+                errors.append(f"{path.relative_to(root)}: redundant homepage link in primary navigation: {link}")
         if path == root / "dashboard.html":
             if page.sections != ["screenshots", "start", "workflows"]:
                 errors.append("dashboard.html: expected tours, setup, then workflows")
