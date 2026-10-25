@@ -1,3 +1,10 @@
+#[cfg(feature = "graph")]
+#[path = "tool_support/graph_json.rs"]
+mod graph_json;
+#[cfg(feature = "graph")]
+#[path = "tool_support/graph_mcp.rs"]
+mod graph_mcp;
+
 use std::{
     collections::BTreeMap,
     error::Error,
@@ -355,23 +362,31 @@ fn record_json(id: u64, record: &vlite::Record, include_vector: bool) -> Value {
     value
 }
 
-fn tool_definitions(read_only: bool) -> Vec<Value> {
-    let id_schema = json!({"oneOf":[{"type":"string","pattern":"^(0|[1-9][0-9]*)$"},{"type":"integer","minimum":0}]});
-    let collection = json!({"type":"string","description":"Collection name; defaults to default."});
-    let vector_schema =
-        json!({"type":"array","items":{"type":"number"},"minItems":1,"maxItems":65536});
-    let metadata_value_schema = json!({"oneOf":[
+fn metadata_value_schema() -> Value {
+    json!({"oneOf":[
         {"type":"object","properties":{"type":{"const":"string"},"value":{"type":"string"}},"required":["type","value"],"additionalProperties":false},
         {"type":"object","properties":{"type":{"const":"integer"},"value":{"type":"string","pattern":"^-?(0|[1-9][0-9]*)$"}},"required":["type","value"],"additionalProperties":false},
         {"type":"object","properties":{"type":{"const":"float"},"value":{"type":"number"}},"required":["type","value"],"additionalProperties":false},
         {"type":"object","properties":{"type":{"const":"boolean"},"value":{"type":"boolean"}},"required":["type","value"],"additionalProperties":false},
         {"type":"object","properties":{"type":{"const":"geopoint"},"value":{"type":"object","properties":{"latitude":{"type":"number","minimum":-90,"maximum":90},"longitude":{"type":"number","minimum":-180,"maximum":180}},"required":["latitude","longitude"],"additionalProperties":false}},"required":["type","value"],"additionalProperties":false}
-    ]});
-    let filter_schema = json!({"type":"array","items":{"oneOf":[
-        {"type":"object","properties":{"op":{"const":"eq"},"field":{"type":"string"},"value":metadata_value_schema.clone()},"required":["op","field","value"],"additionalProperties":false},
-        {"type":"object","properties":{"op":{"const":"range"},"field":{"type":"string"},"min":{"anyOf":[metadata_value_schema.clone(),{"type":"null"}]},"max":{"anyOf":[metadata_value_schema.clone(),{"type":"null"}]}},"required":["op","field"],"additionalProperties":false},
+    ]})
+}
+
+fn filter_schema() -> Value {
+    json!({"type":"array","items":{"oneOf":[
+        {"type":"object","properties":{"op":{"const":"eq"},"field":{"type":"string"},"value":metadata_value_schema()},"required":["op","field","value"],"additionalProperties":false},
+        {"type":"object","properties":{"op":{"const":"range"},"field":{"type":"string"},"min":{"anyOf":[metadata_value_schema(),{"type":"null"}]},"max":{"anyOf":[metadata_value_schema(),{"type":"null"}]}},"required":["op","field"],"additionalProperties":false},
         {"type":"object","properties":{"op":{"const":"geo_radius"},"field":{"type":"string"},"latitude":{"type":"number","minimum":-90,"maximum":90},"longitude":{"type":"number","minimum":-180,"maximum":180},"radius_meters":{"type":"number","exclusiveMinimum":0}},"required":["op","field","latitude","longitude","radius_meters"],"additionalProperties":false}
-    ]}});
+    ]}})
+}
+
+fn tool_definitions(read_only: bool) -> Vec<Value> {
+    let id_schema = json!({"oneOf":[{"type":"string","pattern":"^(0|[1-9][0-9]*)$"},{"type":"integer","minimum":0}]});
+    let collection = json!({"type":"string","description":"Collection name; defaults to default."});
+    let vector_schema =
+        json!({"type":"array","items":{"type":"number"},"minItems":1,"maxItems":65536});
+    let metadata_value_schema = metadata_value_schema();
+    let filter_schema = filter_schema();
     let mut tools = vec![
         json!({"name":"vlite_info","description":"Describe database format, dimensions, record counts, collections and access mode.","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true}}),
         json!({"name":"vlite_list_collections","description":"List VLite collections and their dimensions and live record counts.","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true}}),
@@ -395,6 +410,10 @@ fn tool_call(
     name: &str,
     args: &Value,
 ) -> ToolResult {
+    #[cfg(feature = "graph")]
+    if let Some(result) = graph_mcp::call(db, read_only, name, args) {
+        return result;
+    }
     validate_tool_arguments(name, args)?;
     match name {
         "vlite_info" => {
@@ -409,9 +428,11 @@ fn tool_call(
                 .map_err(|e| e.to_string())?
                 .dimensions();
             let bytes = std::fs::metadata(path).map(|m| m.len()).ok();
-            Ok(
-                json!({"format_version":db.format_version(),"dimensions":dimensions,"count":total,"collections":items,"read_only":read_only,"file_bytes":bytes}),
-            )
+            #[allow(unused_mut)]
+            let mut info = json!({"format_version":db.format_version(),"dimensions":dimensions,"count":total,"collections":items,"read_only":read_only,"file_bytes":bytes});
+            #[cfg(feature = "graph")]
+            graph_mcp::extend_info(db, &mut info)?;
+            Ok(info)
         }
         "vlite_list_collections" => {
             let items: Vec<Value> = db.collections().map_err(|e| e.to_string())?.iter().map(|c| json!({"name":c.name,"dimensions":c.dimensions,"count":c.live_records,"id":c.id})).collect();
@@ -631,7 +652,13 @@ fn dispatch(db: &mut Database, config: &Config, message: Value) -> Option<Value>
         }
         "notifications/initialized" | "notifications/cancelled" | "notifications/progress" => None,
         "ping" => Some(json!({})),
-        "tools/list" => Some(json!({"tools":tool_definitions(config.read_only)})),
+        "tools/list" => {
+            #[allow(unused_mut)]
+            let mut tools = tool_definitions(config.read_only);
+            #[cfg(feature = "graph")]
+            tools.extend(graph_mcp::tool_definitions(db, config.read_only));
+            Some(json!({"tools":tools}))
+        }
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str);
             let args = params

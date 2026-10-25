@@ -18,6 +18,23 @@ schemas are deliberately not duplicated; they need not match REST/embedded APIs.
 - `vlite_build_index`: explicitly build when available/authorized; it may be
   expensive even when changing only in-memory state.
 
+### Experimental graph tools (source-only `graph` builds)
+
+Advertised only by builds with the `graph` feature, and only for graph-enabled
+files. See `docs/MCP.md` for arguments, limits and error codes.
+
+- `vlite_graph_list`: graphs and node/edge counts; call before graph queries.
+- `vlite_graph_get`: one node or edge by key/ID; `null` means absent.
+- `vlite_graph_find_nodes`: label/property lookup with cursor pagination.
+- `vlite_graph_neighbors`: one node's edges and adjacent nodes.
+- `vlite_graph_traverse`: bounded multi-hop expansion; check `complete`.
+- `vlite_graph_shortest_path`: `found`, `no_path_within_hops` or `exhausted`.
+- `vlite_graph_create`, `vlite_graph_drop`, `vlite_graph_write`: **writable
+  mode only**; `vlite_graph_write` applies an atomic batch of operations.
+
+Every graph query accepts `limits` (rejected above their ceilings), `projection`
+and `explain`.
+
 ## Host launch shape
 
 For hosts accepting `mcpServers`, the launch shape is typically:
@@ -41,7 +58,8 @@ retrieval-only configuration. Keep stdout reserved for protocol messages.
 
 ## Failure handling
 
-- Missing tool: rediscover; check version/mode and embedder configuration.
+- Missing tool: rediscover; check version/mode, embedder configuration and,
+  for graph tools, a `graph` source build and a graph-enabled file.
 - Locked: close legitimate owners or use an authorized closed backup. Do not
   bypass locks or kill unrelated processes.
 - Dimensions/model mismatch: use the correct embedding model/collection, never

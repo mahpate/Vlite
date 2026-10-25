@@ -148,6 +148,69 @@ JSON-RPC 2.0, including the MCP lifecycle, `ping` and tool discovery/calls.
 Protocol messages alone are written to stdout; diagnostics are written to stderr.
 Tool failures return `isError: true` with a clear message; malformed JSON and protocol errors use JSON-RPC errors. `vlite_search` returns IDs and distances, not vectors. `vlite_get` and `vlite_list` omit vectors unless explicitly requested by `vlite_get`.
 
+## Property graph tools (experimental, source-only)
+
+> **Experimental.** Graph tools exist only in builds from source with the
+> `graph` feature. Released binaries, Docker images and packages do not include
+> them, and names, arguments and outputs may change before a graph release.
+
+Build with:
+
+```sh
+cargo install --locked --path . --features "mcp graph" --bin vlite-mcp
+```
+
+The graph tools are listed and callable only when the opened file is
+graph-enabled (created with graph support). On a vector-only file, `tools/list`,
+`vlite_info` and every call are byte-identical to a build without `graph`, and
+calling a graph tool returns `unknown tool`. On a graph-enabled file
+`vlite_info` adds `graph_enabled: true` and `graphs` (name, node and edge counts).
+
+Read tools (always listed on graph-enabled files):
+
+- `vlite_graph_list` — graphs with node/edge counts. No arguments.
+- `vlite_graph_get` — `graph` and exactly one of `node` or `edge`, each
+  `{"key": ...}` or `{"id": "<u64>"}`. A missing node/edge returns `null`.
+- `vlite_graph_find_nodes` — `graph`, `label?`, typed `conditions?`
+  (the `vlite_search` filter syntax), `limit?`, `cursor?`.
+- `vlite_graph_neighbors` — `graph`, `node`, `direction?` (`out`/`in`/`both`),
+  `types?`, `edge_conditions?`, `limit?`, `cursor?`.
+- `vlite_graph_traverse` — `graph`, `start` (selectors), `direction?`, `types?`,
+  `expand_filter?`, `return_filter?`, `edge_filter?`, `include_paths?`.
+- `vlite_graph_shortest_path` — `graph`, `source`, `destination`,
+  `direction?`, `types?`. `outcome` is `found`, `no_path_within_hops` (fully
+  explored) or `exhausted` (limits hit; absence is unknown).
+
+Every query tool also accepts `projection?` (`"all"`, `"none"` or
+`{"only": [...]}`), `limits?` and `explain?`. With `explain: true` the tool
+returns the normalized query, effective limits and planned indexes without
+executing. `limits` fields default to `max_hops` 2, `max_visited_nodes` 1000,
+`max_edges_examined` 10000, `max_edges_per_node` 1000, `deadline_ms` 250,
+`max_output_nodes` 100, `max_output_edges` 200 and `max_output_paths` 20. Their
+ceilings are 4, 10000, 100000, 10000, 5000, 1000, 2000 and 100; larger values
+fail with `graph_limit_exceeds_ceiling` rather than being clamped.
+
+Write tools (listed only with `--writable`):
+
+- `vlite_graph_create` / `vlite_graph_drop` — `graph`. Drop fails
+  `graph_not_empty` while the graph has nodes.
+- `vlite_graph_write` — `graph` and `ops` (at most 4096): `create_node`,
+  `upsert_node`, `patch_node`, `delete_node`, `create_edge`, `patch_edge`,
+  `delete_edge`, `attach`, `detach`, `put_vector`, `delete_vector`. The batch
+  commits atomically in order; on error nothing is written. `expected`
+  (`"any"`, `"absent"` or `{"revision": "<u64>"}`) makes an op conditional
+  (`precondition_failed`). Reusing an edge `key` for a different edge fails
+  `graph_key_conflict`.
+
+Outputs are compact JSON matching the source-only `vlite-graph-cli`: u64 IDs,
+revisions and cursors are strings, vectors are never returned, and every read
+reports `complete`, `truncation`, `stats` and `cursor`. Treat a result with
+`complete: false` as partial. Failures return `isError: true` with
+`"<code>: <message>"`, for example `invalid_request: ...`,
+`read_only: ...`, `graph_not_found: ...` or `graph_limit_exceeds_ceiling: ...`.
+A read-only instance sees the graph as of the moment it opened the file; a
+writable instance holds the file's exclusive lock like any other writer.
+
 ## Access and locking
 
 Read-only is the safe default and opens the file through VLite's shared-lock read-only API. Multiple read-only processes may open the same file concurrently. Writable mode opens with an exclusive lock and persists each mutation synchronously. Do not run `vlite-mcp --writable` while `vlite-server` or another writer has the same database open. In-memory ANN index construction is available in read-only mode, but its derived index is not persisted.

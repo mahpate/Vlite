@@ -1,0 +1,129 @@
+{
+  "description": "Deterministic agent task fixtures for the vlite-mcp graph tools (feature-agent-graph REQ-038, AC-018). Scripted tool calls with expected outputs; no LLM. tests/graph_mcp.rs creates a new graph-enabled file per task, runs the named seed through a --writable vlite-mcp session, then runs `steps` in one session opened --writable when `writable` is true and --read-only otherwise. `expect` maps JSON pointers into structuredContent to exact values, `expect_len` maps pointers to array lengths, and `expect_error` is the error code prefix of a failed call (isError true).",
+  "seeds": {
+    "services": [
+      {"tool": "vlite_graph_create", "arguments": {"graph": "services"}},
+      {"tool": "vlite_graph_write", "arguments": {"graph": "services", "ops": [
+        {"op": "create_node", "key": "api", "labels": ["Service"], "properties": {"tier": {"type": "string", "value": "edge"}}},
+        {"op": "create_node", "key": "auth", "labels": ["Service"], "properties": {"tier": {"type": "string", "value": "core"}}},
+        {"op": "create_node", "key": "db", "labels": ["Database"]},
+        {"op": "create_node", "key": "cache", "labels": ["Service"], "properties": {"tier": {"type": "string", "value": "core"}}},
+        {"op": "create_node", "key": "billing", "labels": ["Service"], "properties": {"tier": {"type": "string", "value": "batch"}}},
+        {"op": "create_edge", "key": "api-auth", "source": "api", "relationship": "CALLS", "destination": "auth"},
+        {"op": "create_edge", "key": "auth-db", "source": "auth", "relationship": "DEPENDS_ON", "destination": "db"},
+        {"op": "create_edge", "key": "api-cache", "source": "api", "relationship": "CALLS", "destination": "cache"},
+        {"op": "create_edge", "key": "cache-db", "source": "cache", "relationship": "DEPENDS_ON", "destination": "db"}
+      ]}}
+    ]
+  },
+  "tasks": [
+    {
+      "id": "uc002-agent-memory",
+      "use_case": "UC-002",
+      "goal": "Record entities and evidence-bearing relationships across sessions without overwriting conflicting evidence.",
+      "seed": null,
+      "writable": true,
+      "steps": [
+        {"tool": "vlite_graph_create", "arguments": {"graph": "memory"},
+         "expect": {"/graph": {"name": "memory", "node_count": 0, "edge_count": 0}}},
+        {"tool": "vlite_graph_write", "arguments": {"graph": "memory", "ops": [
+          {"op": "create_node", "key": "person:alice", "labels": ["Person"], "properties": {"name": {"type": "string", "value": "Alice"}}},
+          {"op": "create_node", "key": "org:acme", "labels": ["Organization"], "properties": {"name": {"type": "string", "value": "Acme"}}},
+          {"op": "create_edge", "key": "evidence:doc-1", "source": "person:alice", "relationship": "WORKS_AT", "destination": "org:acme",
+           "properties": {"source_ref": {"type": "string", "value": "doc-1"}, "observed_at_ms": {"type": "integer", "value": "1000"}}}
+        ]},
+         "expect": {"/graph": "memory", "/outcomes/0/node/created": true, "/outcomes/1/node/created": true, "/outcomes/2/edge/created": true},
+         "expect_len": {"/outcomes": 3}},
+        {"tool": "vlite_graph_write", "arguments": {"graph": "memory", "ops": [
+          {"op": "create_edge", "key": "evidence:doc-1", "source": "person:alice", "relationship": "WORKS_AT", "destination": "org:acme",
+           "properties": {"source_ref": {"type": "string", "value": "doc-1"}, "observed_at_ms": {"type": "integer", "value": "1000"}}}
+        ]},
+         "expect": {"/outcomes/0/edge/created": false}},
+        {"tool": "vlite_graph_write", "arguments": {"graph": "memory", "ops": [
+          {"op": "create_edge", "key": "evidence:doc-1", "source": "person:alice", "relationship": "WORKS_AT", "destination": "org:acme",
+           "properties": {"source_ref": {"type": "string", "value": "doc-1"}, "observed_at_ms": {"type": "integer", "value": "2000"}}}
+        ]},
+         "expect_error": "graph_key_conflict"},
+        {"tool": "vlite_graph_write", "arguments": {"graph": "memory", "ops": [
+          {"op": "create_node", "key": "org:globex", "labels": ["Organization"]},
+          {"op": "create_edge", "key": "evidence:doc-2", "source": "person:alice", "relationship": "WORKS_AT", "destination": "org:globex",
+           "properties": {"source_ref": {"type": "string", "value": "doc-2"}, "observed_at_ms": {"type": "integer", "value": "3000"}}}
+        ]},
+         "expect": {"/outcomes/1/edge/created": true}},
+        {"tool": "vlite_graph_write", "arguments": {"graph": "memory", "ops": [
+          {"op": "upsert_node", "key": "person:alice", "labels": ["Person"], "expected": "absent"}
+        ]},
+         "expect_error": "precondition_failed"},
+        {"tool": "vlite_graph_get", "arguments": {"graph": "memory", "node": {"key": "person:alice"}},
+         "expect": {"/node/key": "person:alice", "/node/labels": ["Person"], "/node/properties/name/value": "Alice", "/complete": true}},
+        {"tool": "vlite_graph_get", "arguments": {"graph": "memory", "edge": {"key": "evidence:doc-1"}},
+         "expect": {"/edge/relationship": "WORKS_AT", "/edge/source_key": "person:alice", "/edge/target_key": "org:acme",
+                    "/edge/properties/observed_at_ms/value": "1000"}},
+        {"tool": "vlite_graph_get", "arguments": {"graph": "memory", "node": {"key": "person:bob"}},
+         "expect": {"/node": null, "/complete": true}},
+        {"tool": "vlite_graph_neighbors", "arguments": {"graph": "memory", "node": {"key": "person:alice"}, "types": ["WORKS_AT"]},
+         "expect": {"/complete": true, "/truncation": [], "/edges/0/key": "evidence:doc-1", "/edges/0/properties/source_ref/value": "doc-1",
+                    "/edges/1/key": "evidence:doc-2", "/edges/1/properties/source_ref/value": "doc-2"},
+         "expect_len": {"/edges": 2, "/nodes": 2}},
+        {"tool": "vlite_info", "arguments": {},
+         "expect": {"/graph_enabled": true, "/graphs": [{"name": "memory", "node_count": 3, "edge_count": 2}]}}
+      ]
+    },
+    {
+      "id": "uc003-how-is-a-connected-to-b",
+      "use_case": "UC-003",
+      "goal": "Answer how service api is connected to db, and tell a proven absence from a truncated search.",
+      "seed": "services",
+      "writable": false,
+      "steps": [
+        {"tool": "vlite_graph_shortest_path", "arguments": {"graph": "services", "source": {"key": "api"}, "destination": {"key": "db"}},
+         "expect": {"/complete": true, "/shortest_path/outcome": "found",
+                    "/shortest_path/nodes/0/key": "api", "/shortest_path/nodes/1/key": "auth", "/shortest_path/nodes/2/key": "db",
+                    "/shortest_path/edges/0/key": "api-auth", "/shortest_path/edges/1/key": "auth-db"},
+         "expect_len": {"/shortest_path/path/edges": 2}},
+        {"tool": "vlite_graph_shortest_path", "arguments": {"graph": "services", "source": {"key": "api"}, "destination": {"key": "billing"}, "direction": "both"},
+         "expect": {"/complete": true, "/shortest_path": {"outcome": "no_path_within_hops"}}},
+        {"tool": "vlite_graph_shortest_path", "arguments": {"graph": "services", "source": {"key": "api"}, "destination": {"key": "db"}, "limits": {"max_visited_nodes": 1}},
+         "expect": {"/complete": false, "/shortest_path/outcome": "exhausted", "/shortest_path/truncation": ["visited_limit"]}},
+        {"tool": "vlite_graph_shortest_path", "arguments": {"graph": "services", "source": {"key": "api"}, "destination": {"key": "db"}, "limits": {"max_hops": 5}},
+         "expect_error": "graph_limit_exceeds_ceiling"},
+        {"tool": "vlite_graph_traverse", "arguments": {"graph": "services", "start": [{"key": "api"}], "projection": "none"},
+         "expect": {"/complete": true, "/nodes/0/depth": 0, "/nodes/0/node/key": "api", "/nodes/3/depth": 2, "/nodes/3/node/key": "db",
+                    "/nodes/3/node/properties": {}},
+         "expect_len": {"/nodes": 4, "/edges": 4}},
+        {"tool": "vlite_graph_shortest_path", "arguments": {"graph": "services", "source": {"key": "api"}, "destination": {"key": "db"}, "explain": true},
+         "expect": {"/explain/query/operation": "shortest-path", "/explain/query/source": {"key": "api"}, "/explain/limits/max_hops": 2}},
+        {"tool": "vlite_graph_write", "arguments": {"graph": "services", "ops": [{"op": "delete_edge", "edge": {"key": "api-auth"}}]},
+         "expect_error": "read_only"}
+      ]
+    },
+    {
+      "id": "uc004-discover-before-querying",
+      "use_case": "UC-004",
+      "goal": "Discover graphs, labels and relationship types before querying. Declared-schema tools (EPIC-008) extend this task when they land.",
+      "seed": "services",
+      "writable": false,
+      "steps": [
+        {"tool": "vlite_info", "arguments": {},
+         "expect": {"/graph_enabled": true, "/read_only": true, "/graphs": [{"name": "services", "node_count": 5, "edge_count": 4}]}},
+        {"tool": "vlite_graph_list", "arguments": {},
+         "expect": {"/graphs": [{"name": "services", "node_count": 5, "edge_count": 4}]}},
+        {"tool": "vlite_graph_find_nodes", "arguments": {"graph": "services", "label": "Service", "projection": "none"},
+         "expect": {"/complete": true, "/cursor": null, "/nodes/0/key": "api", "/nodes/3/key": "billing"},
+         "expect_len": {"/nodes": 4}},
+        {"tool": "vlite_graph_find_nodes", "arguments": {"graph": "services", "label": "Service",
+                                                          "conditions": [{"op": "eq", "field": "tier", "value": {"type": "string", "value": "core"}}],
+                                                          "projection": {"only": ["tier"]}},
+         "expect": {"/nodes/0/key": "auth", "/nodes/1/key": "cache", "/nodes/1/properties": {"tier": {"type": "string", "value": "core"}}},
+         "expect_len": {"/nodes": 2}},
+        {"tool": "vlite_graph_neighbors", "arguments": {"graph": "services", "node": {"key": "db"}, "direction": "in", "projection": "none"},
+         "expect": {"/complete": true, "/edges/0/relationship": "DEPENDS_ON", "/edges/1/relationship": "DEPENDS_ON"},
+         "expect_len": {"/edges": 2, "/nodes": 2}},
+        {"tool": "vlite_graph_find_nodes", "arguments": {"graph": "services", "label": "Service", "explain": true},
+         "expect": {"/explain/query/operation": "find-nodes", "/explain/indexes": ["label_index_scan"]}},
+        {"tool": "vlite_graph_get", "arguments": {"graph": "missing", "node": {"key": "api"}},
+         "expect_error": "graph_not_found"}
+      ]
+    }
+  ]
+}
