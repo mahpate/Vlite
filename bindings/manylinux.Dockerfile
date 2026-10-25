@@ -9,6 +9,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY build.rs ./
 COPY proto ./proto
 COPY src ./src
+COPY examples ./examples
 COPY bindings/c ./bindings/c
 COPY crates ./crates
 COPY bindings/python ./bindings/python

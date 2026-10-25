@@ -47,6 +47,18 @@ class DockerInputs(unittest.TestCase):
                     f"!{prefix}/**" in ignores and all(f"!{parent}/" in ignores for parent in prefixes[:end])
                     for end, prefix in enumerate(prefixes, 1)))
 
+    def test_build_stages_copy_explicit_cargo_targets(self):
+        manifest = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+        for name in ("Dockerfile", "bindings/manylinux.Dockerfile", "bindings/node/Dockerfile"):
+            lines = (ROOT / name).read_text(encoding="utf-8").splitlines()
+            copied = [match.group(1) for line in lines if (match := re.fullmatch(r"COPY (\S+) \./\1", line.strip()))]
+            for kind, directory in (("example", "examples"), ("test", "tests")):
+                for target in manifest.get(kind, []):
+                    path = target.get("path", f"{directory}/{target['name']}.rs")
+                    with self.subTest(dockerfile=name, target=path):
+                        self.assertTrue((ROOT / path).is_file())
+                        self.assertTrue(any(path == source or path.startswith(source + "/") for source in copied))
+
 
 if __name__ == "__main__":
     unittest.main()
