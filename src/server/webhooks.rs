@@ -82,6 +82,12 @@ impl Dispatcher {
             .map_err(|_| std::io::Error::other("webhook lock poisoned"))? =
             FeedCursor::load(cursor_path)
                 .map_err(|e| std::io::Error::other(format!("invalid webhook cursor: {e}")))?;
+        // LEG-019: the worker consumes the change feed, which graph-enabled
+        // files reject; never start one that would skip it silently.
+        #[cfg(feature = "graph")]
+        if service.graph_enabled {
+            return reject_graph_subscriptions(&service, Some(&directory));
+        }
         let this = self.clone();
         let stop = self.stopping.clone();
         let worker = thread::Builder::new()
@@ -121,6 +127,30 @@ fn disabled() -> ApiError {
         "webhooks_disabled",
         "webhooks require VLITE_ADMIN_DIR",
     )
+}
+/// LEG-019 startup check, run before anything is written to the admin
+/// directory: subscriptions stored in `webhooks.json` on a graph-enabled
+/// file fail startup with `GraphChangeFeedUnsupported` (REQ-053). No-op for
+/// vector-only files and without an admin directory.
+#[cfg(feature = "graph")]
+pub(super) fn reject_graph_subscriptions(
+    service: &Service,
+    directory: Option<&std::path::Path>,
+) -> std::io::Result<()> {
+    let Some(directory) = directory.filter(|_| service.graph_enabled) else {
+        return Ok(());
+    };
+    let stored = match std::fs::read(directory.join("webhooks.json")) {
+        Ok(bytes) => serde_json::from_slice::<Persisted>(&bytes)
+            .map_err(|e| std::io::Error::other(format!("invalid webhook store: {e}")))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if stored.subscriptions.is_empty() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(Error::GraphChangeFeedUnsupported))
+    }
 }
 fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut tmp = path.as_os_str().to_owned();
@@ -210,6 +240,9 @@ async fn create(
     State(service): State<Service>,
     input: Result<Json<Create>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
+    // LEG-019: rejected before validation; nothing is stored.
+    #[cfg(feature = "graph")]
+    service.reject_graph_feed()?;
     let input = body(input)?;
     validate(&input)?;
     if service

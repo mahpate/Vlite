@@ -6,8 +6,8 @@
 //! vector-mutation and attachment entries interleaved with graph entries,
 //! attachment record checks and atomic state application), the
 //! `graph`/`graph_mut` handles, TEST-009 plaintext leakage, ordinary-file
-//! behavior in graph builds, and graph-unaware paths that must keep rejecting
-//! graph files.
+//! behavior in graph builds, and the EPIC-006 maintenance, replica and feed
+//! contract for graph files.
 
 use std::fs;
 
@@ -234,15 +234,6 @@ fn assert_corrupt<T>(result: vlite::Result<T>, offset: usize, reason: &str) {
         }
         Err(other) => panic!("expected corruption ({reason}), got {other:?}"),
         Ok(_) => panic!("expected corruption ({reason}), but the file opened"),
-    }
-}
-
-#[track_caller]
-fn assert_graph_rejected<T>(name: &str, result: vlite::Result<T>) {
-    match result {
-        Err(Error::UnsupportedFeature(FLAG_GRAPH)) => {}
-        Err(other) => panic!("{name}: expected UnsupportedFeature(4), got {other:?}"),
-        Ok(_) => panic!("{name}: graph file accepted by a graph-unaware path"),
     }
 }
 
@@ -1227,55 +1218,66 @@ fn incomplete_graph_tail_is_rejected_then_explicitly_repaired() {
     assert_eq!(db.list_graphs().unwrap()[0].node_count, 0);
 }
 
+/// EPIC-006: the formerly graph-unaware paths carry graph files (LEG-009,
+/// LEG-011, LEG-014, LEG-022, LEG-023) or reject them explicitly (LEG-010,
+/// LEG-013), and the source never changes. TEST-008
+/// (`tests\graph_maintenance.rs`) covers each path in depth.
 #[test]
-fn graph_unaware_paths_keep_rejecting_graph_files() {
+fn maintenance_replicas_and_feeds_handle_graph_files_explicitly() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("source.vlite");
     let bytes = base_graph_file();
     fs::write(&path, &bytes).unwrap();
     let out = |name: &str| dir.path().join(format!("{name}.vlite"));
 
-    assert_graph_rejected("inspect", maintenance::inspect(&path));
-    assert_graph_rejected("verify", maintenance::verify(&path));
-    assert_graph_rejected("backup", maintenance::backup(&path, out("backup")));
-    assert_graph_rejected("compact", maintenance::compact(&path, out("compact")));
-    assert_graph_rejected("upgrade", maintenance::upgrade(&path, out("upgrade")));
-    assert_graph_rejected(
-        "export_log_segment",
-        maintenance::export_log_segment(&path, None, 0, 1 << 20),
+    assert_eq!(maintenance::inspect(&path).unwrap().commits, 2);
+    assert_eq!(
+        maintenance::verify(&path).unwrap().bytes,
+        bytes.len() as u64
     );
-    assert_graph_rejected(
-        "read_log_changes",
-        read_log_changes(
-            &path,
-            None,
-            &FeedCursor {
-                lineage: 0,
-                sequence: 0,
-            },
-            16,
-        ),
-    );
-    assert_graph_rejected("ReplicaFollower::open", ReplicaFollower::open(&path, None));
-    for name in ["backup", "compact", "upgrade"] {
-        assert!(!out(name).exists(), "{name} published output");
-    }
+    maintenance::backup(&path, out("backup")).unwrap();
+    assert_eq!(fs::read(out("backup")).unwrap(), bytes);
+    maintenance::compact(&path, out("compact")).unwrap();
+    assert_eq!(header_flags(&fs::read(out("compact")).unwrap()), FLAG_GRAPH);
+    let compacted = Database::open(out("compact")).unwrap();
+    assert_eq!(compacted.list_graphs().unwrap()[0].name, "g");
+    drop(compacted);
+    assert!(matches!(
+        maintenance::upgrade(&path, out("upgrade")),
+        Err(Error::GraphUnsupportedOperation)
+    ));
+    assert!(!out("upgrade").exists());
+    let segment = maintenance::export_log_segment(&path, None, 0, 1 << 20).unwrap();
+    assert_eq!([segment.header.as_slice(), &segment.frames].concat(), bytes);
+    let start = FeedCursor {
+        lineage: 0,
+        sequence: 0,
+    };
+    assert!(matches!(
+        read_log_changes(&path, None, &start, 16),
+        Err(Error::GraphChangeFeedUnsupported)
+    ));
+    drop(ReplicaFollower::open(&path, None).unwrap());
 
     let db = Database::open(&path).unwrap();
-    assert_graph_rejected("Database::export_log", db.export_log(0, 1 << 20));
-    let cursor = db.feed_cursor().unwrap();
-    assert_graph_rejected("Database::changes_after", db.changes_after(&cursor, 16));
+    assert_eq!(db.export_log(0, 1 << 20).unwrap(), segment);
+    assert!(matches!(
+        db.feed_cursor(),
+        Err(Error::GraphChangeFeedUnsupported)
+    ));
+    assert!(matches!(
+        db.changes_after(&start, 16),
+        Err(Error::GraphChangeFeedUnsupported)
+    ));
     drop(db);
 
-    // A replica never repairs a graph file's tail before refusing it.
+    // A follower discards a torn graph frame like any torn frame (LEG-022).
     let tail = out("tail");
     let frame = graph_frame(3, 0, vec![put_node(0, "a")]);
-    let torn = [bytes.clone(), frame[..10].to_vec()].concat();
-    fs::write(&tail, &torn).unwrap();
-    assert_graph_rejected(
-        "ReplicaFollower::open(tail)",
-        ReplicaFollower::open(&tail, None),
-    );
-    assert_eq!(fs::read(&tail).unwrap(), torn);
+    fs::write(&tail, [bytes.clone(), frame[..10].to_vec()].concat()).unwrap();
+    let follower = ReplicaFollower::open(&tail, None).unwrap();
+    assert_eq!(follower.applied_sequence(), 2);
+    drop(follower);
+    assert_eq!(fs::read(&tail).unwrap(), bytes);
     assert_eq!(fs::read(&path).unwrap(), bytes);
 }

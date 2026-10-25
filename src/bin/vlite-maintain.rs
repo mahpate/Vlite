@@ -2,9 +2,21 @@ use std::error::Error;
 use std::process::ExitCode;
 use vlite::maintenance::{self, Inspection};
 
-const USAGE: &str = "usage: vlite-maintain inspect SOURCE | backup SOURCE DESTINATION | \
+macro_rules! usage {
+    () => {
+        "usage: vlite-maintain inspect SOURCE | backup SOURCE DESTINATION | \
 restore BACKUP DESTINATION | compact SOURCE DESTINATION | upgrade SOURCE DESTINATION | \
-verify PATH | drill BACKUP WORKDIR";
+verify PATH | drill BACKUP WORKDIR"
+    };
+}
+
+#[cfg(not(feature = "graph"))]
+const USAGE: &str = usage!();
+#[cfg(feature = "graph")]
+const USAGE: &str = concat!(
+    usage!(),
+    " | enable-graph SOURCE DESTINATION | strip-graph SOURCE DESTINATION --confirm-graph-data-loss"
+);
 
 fn print_report(report: &Inspection) {
     println!(
@@ -60,6 +72,33 @@ fn run() -> Result<(), Box<dyn Error>> {
                 "drill=passed collections={} probes={}",
                 report.collections, report.probes
             );
+        }
+        #[cfg(feature = "graph")]
+        (Some("enable-graph"), 3) => {
+            let report = maintenance::enable_graph(&args[1], &args[2], None)?;
+            println!(
+                "source_format_version={} source_bytes={}",
+                report.source.format_version, report.source.file_bytes
+            );
+            print_report(&report.output);
+        }
+        #[cfg(feature = "graph")]
+        (Some("strip-graph"), 3 | 4) => {
+            // Without the flag the library refuses (confirm_graph_data_loss).
+            let confirm = match args.get(3) {
+                None => false,
+                Some(flag) if flag == "--confirm-graph-data-loss" => true,
+                Some(_) => return Err(USAGE.into()),
+            };
+            let report = maintenance::strip_graph(&args[1], &args[2], None, confirm)?;
+            println!(
+                "removed_graphs={} removed_nodes={} removed_edges={} removed_attachments={}",
+                report.removed.graphs,
+                report.removed.nodes,
+                report.removed.edges,
+                report.removed.attachments
+            );
+            print_report(&report.compaction.output);
         }
         _ => return Err(USAGE.into()),
     }

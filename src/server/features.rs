@@ -96,6 +96,8 @@ async fn changes(
     Extension(role): Extension<admin::Role>,
     query: Result<Query<ChangeQuery>, QueryRejection>,
 ) -> Result<Json<Value>, ApiError> {
+    #[cfg(feature = "graph")]
+    service.reject_graph_feed()?;
     let Query(query) = query
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "invalid_query", e.body_text()))?;
     let cursor = query

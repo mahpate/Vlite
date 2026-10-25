@@ -183,6 +183,10 @@ pub fn configured_admin_router(
             std::fs::canonicalize(p)
         })
         .transpose()?;
+    // LEG-019: stored webhooks on a graph-enabled file fail startup before
+    // any audit, credential, scheduler or webhook state is touched.
+    #[cfg(feature = "graph")]
+    super::webhooks::reject_graph_subscriptions(&service, directory.as_deref())?;
     // The audit log and credential store live in the private admin directory.
     // Scoped credentials additionally require an admin token: without one
     // every caller is already admin and scoping would be meaningless.

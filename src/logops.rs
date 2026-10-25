@@ -38,7 +38,9 @@ pub fn reencrypt(
         ));
     }
     let cipher = destination_key.map(Cipher::create).transpose()?;
-    let mut flags = header.flags & FLAG_TIMESTAMPS;
+    // Every flag but encryption (commit timestamps, and `FLAG_GRAPH` in
+    // graph builds) carries over with the frames that depend on it.
+    let mut flags = header.flags & !FLAG_ENCRYPTED;
     if cipher.is_some() {
         flags |= FLAG_ENCRYPTED;
     }

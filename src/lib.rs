@@ -340,6 +340,18 @@ pub enum Error {
     /// The graph changed after the page cursor was issued; restart the read.
     #[cfg(feature = "graph")]
     GraphCursorStale,
+    /// Change feeds do not cover graph-enabled files (REQ-053).
+    #[cfg(feature = "graph")]
+    GraphChangeFeedUnsupported,
+    /// The maintenance operation does not accept graph-enabled files
+    /// (LEG-010: `maintenance::upgrade`); use `maintenance::strip_graph` or
+    /// `maintenance::enable_graph` instead.
+    #[cfg(feature = "graph")]
+    GraphUnsupportedOperation,
+    /// Invalid graph maintenance options, such as `strip_graph` without
+    /// `confirm_graph_data_loss` or `enable_graph` on an unsuitable source.
+    #[cfg(feature = "graph")]
+    GraphInvalidOptions(&'static str),
 }
 
 impl fmt::Display for Error {
@@ -597,6 +609,17 @@ impl fmt::Display for Error {
                 f,
                 "the graph changed after the cursor was issued; restart the read"
             ),
+            #[cfg(feature = "graph")]
+            Self::GraphChangeFeedUnsupported => {
+                write!(f, "change feeds are not supported on graph-enabled files")
+            }
+            #[cfg(feature = "graph")]
+            Self::GraphUnsupportedOperation => write!(
+                f,
+                "operation not supported on graph-enabled files; use maintenance::strip_graph or maintenance::enable_graph"
+            ),
+            #[cfg(feature = "graph")]
+            Self::GraphInvalidOptions(reason) => write!(f, "invalid graph options: {reason}"),
         }
     }
 }
@@ -1196,7 +1219,7 @@ impl Database {
     }
 
     fn open_backed(mut file: LockedFile, key: Option<&EncryptionKey>) -> Result<Self> {
-        let loaded = format::load_database(&mut file, key)?;
+        let loaded = format::load_with(&mut file, key)?;
         if loaded.incomplete_bytes != 0 {
             return Err(Error::IncompleteTail {
                 offset: loaded.end,
@@ -1254,7 +1277,7 @@ impl Database {
 
     fn discard_tail_inner(path: &Path, key: Option<&EncryptionKey>) -> Result<RepairReport> {
         let mut file = open_locked(path)?;
-        let loaded = format::load_database(&mut file, key)?;
+        let loaded = format::load_with(&mut file, key)?;
         let report = RepairReport {
             discarded_bytes: loaded.incomplete_bytes,
             retained_commits: loaded.sequence,
@@ -1837,6 +1860,10 @@ impl Database {
     /// Cursor positioned at the current head: `changes_after` returns only
     /// commits made after this call. Needs format v4 or newer.
     pub fn feed_cursor(&self) -> Result<changes::FeedCursor> {
+        #[cfg(feature = "graph")]
+        if self.graph.is_some() {
+            return Err(Error::GraphChangeFeedUnsupported);
+        }
         Ok(changes::FeedCursor {
             lineage: self.lineage.ok_or(Error::ChangeFeedRequiresUpgrade)?,
             sequence: self.sequence,
@@ -1852,6 +1879,10 @@ impl Database {
         cursor: &changes::FeedCursor,
         max_events: usize,
     ) -> Result<changes::ChangeBatch> {
+        #[cfg(feature = "graph")]
+        if self.graph.is_some() {
+            return Err(Error::GraphChangeFeedUnsupported);
+        }
         self.lineage.ok_or(Error::ChangeFeedRequiresUpgrade)?;
         let mut file = &self.file;
         changes::read_changes(&mut file, None, self.cipher.as_ref(), cursor, max_events)
@@ -1913,6 +1944,12 @@ impl Database {
                 self.imports = import::Registry::from_markers(&loaded.imports);
                 self.collection_high = loaded.collection_high;
                 self.commit_times = loaded.commit_times;
+                // Graph followers replay graph frames too (REQ-054); the
+                // flags check above keeps graph and vector files apart.
+                #[cfg(feature = "graph")]
+                {
+                    self.graph = loaded.graph;
+                }
                 Ok(())
             }
             Err(error) => {

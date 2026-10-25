@@ -562,44 +562,59 @@ fn random_op(rng: &mut Rng) -> GraphOp {
 
 /// Random graph batches interleaved with ordinary vector writes: every
 /// failure leaves the file and state unchanged, and every reopen reproduces
-/// the live graph state, `graph_sequence` included.
+/// the live graph state, `graph_sequence` included. Each seed runs 10,000
+/// steps against its own file and reopens it every 500 steps (TEST-003);
+/// seeds run in parallel because every commit is synced.
 #[test]
 fn random_batches_are_atomic_and_replay_identically() {
+    const SEEDS: u64 = 4;
+    const STEPS: u64 = 10_000;
+    const REOPEN_EVERY: u64 = 500;
     let dir = tempfile::tempdir().unwrap();
-    for seed in 1..=4u64 {
-        let path = dir.path().join(format!("random-{seed}.vlite"));
-        let mut db = graph_db(&path);
-        let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
-        let (mut committed, mut failed) = (0, 0);
-        for step in 0..400 {
-            let before = (len(&path), state(&db).clone());
-            let result = if rng.below(5) == 0 {
-                let id = rng.below(10);
-                if rng.below(2) == 0 {
-                    db.put(id, &[1.0, id as f32], b"").map(drop)
-                } else {
-                    db.delete(id).map(drop)
+    std::thread::scope(|scope| {
+        for seed in 1..=SEEDS {
+            let path = dir.path().join(format!("random-{seed}.vlite"));
+            scope.spawn(move || {
+                let mut db = graph_db(&path);
+                let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+                let (mut committed, mut failed, mut reopens) = (0, 0, 0);
+                for step in 0..STEPS {
+                    let before = (len(&path), state(&db).clone());
+                    let result = if rng.below(5) == 0 {
+                        let id = rng.below(10);
+                        if rng.below(2) == 0 {
+                            db.put(id, &[1.0, id as f32], b"").map(drop)
+                        } else {
+                            db.delete(id).map(drop)
+                        }
+                    } else {
+                        let ops: Vec<_> =
+                            (0..1 + rng.below(4)).map(|_| random_op(&mut rng)).collect();
+                        db.graph_mut("g").unwrap().write_batch(&ops).map(drop)
+                    };
+                    match result {
+                        Ok(()) => committed += 1,
+                        Err(_) => {
+                            failed += 1;
+                            assert_eq!(len(&path), before.0, "seed {seed} step {step}");
+                            assert_eq!(state(&db), &before.1, "seed {seed} step {step}");
+                        }
+                    }
+                    state(&db).check_invariants().unwrap();
+                    if step % REOPEN_EVERY == REOPEN_EVERY - 1 {
+                        let live = state(&db).clone();
+                        db.close().unwrap();
+                        db = reopened(&path);
+                        reopens += 1;
+                        assert_eq!(state(&db), &live, "seed {seed} step {step}");
+                    }
                 }
-            } else {
-                let ops: Vec<_> = (0..1 + rng.below(4)).map(|_| random_op(&mut rng)).collect();
-                db.graph_mut("g").unwrap().write_batch(&ops).map(drop)
-            };
-            match result {
-                Ok(()) => committed += 1,
-                Err(_) => {
-                    failed += 1;
-                    assert_eq!(len(&path), before.0, "seed {seed} step {step}");
-                    assert_eq!(state(&db), &before.1, "seed {seed} step {step}");
-                }
-            }
-            state(&db).check_invariants().unwrap();
-            if step % 50 == 49 {
-                let live = state(&db).clone();
-                db.close().unwrap();
-                db = reopened(&path);
-                assert_eq!(state(&db), &live, "seed {seed} step {step}");
-            }
+                assert!(
+                    committed > 1_000 && failed > 1_000,
+                    "seed {seed}: {committed}/{failed}"
+                );
+                assert_eq!(reopens, STEPS / REOPEN_EVERY, "seed {seed}");
+            });
         }
-        assert!(committed > 50 && failed > 50, "{committed}/{failed}");
-    }
+    });
 }

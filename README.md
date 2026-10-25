@@ -603,7 +603,8 @@ See [maintenance](docs/REFERENCE.md#storage-maintenance),
 The pure graph engine lives in `src/property_graph/engine/` and is compiled by
 the experimental, non-default `graph` feature (graph-enabled files, named
 graphs, atomic node/edge/attachment write batches, paged reads and bounded
-traversal/shortest paths; not in release artifacts, see
+traversal/shortest paths, graph-aware maintenance and replica followers; not in
+release artifacts, see
 [graph-enabled files](docs/STORAGE-FEATURES.md#graph-enabled-files-experimental-graph-feature)).
 `crates/vlite-graph` is an unpublished workspace harness that tests the same
 engine source in isolation. Graph cost measurements and their scope are recorded
@@ -612,7 +613,7 @@ in the [benchmark report](docs/projects/feature-agent-graph/graph-measurements.m
 ```text
 cargo test --locked --all-targets --all-features
 cargo test --locked -p vlite-graph
-cargo test --locked --features graph --test graph_storage --test graph_compat --test graph_traversal
+cargo test --locked --features graph --test graph_storage --test graph_compat --test graph_traversal --test graph_maintenance --test graph_recovery
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo fmt --check
 docker compose --profile test run --build --rm tests

@@ -6,6 +6,12 @@ use crate::crypto::Cipher;
 pub use crate::logops::{
     LogSegment, RestoreReport, RestoreTarget, export_log_segment, reencrypt, restore_to,
 };
+#[cfg(feature = "graph")]
+#[doc(no_inline)]
+pub use crate::property_graph::{
+    GraphCounts, GraphInspection, GraphVerification, StripGraphReport, enable_graph, inspect_graph,
+    strip_graph, verify_graph,
+};
 use crate::{Database, EncryptionKey, Error, LockedFile, Result, format, import, lock};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -131,6 +137,14 @@ pub fn verify_with_key(path: impl AsRef<Path>, key: &EncryptionKey) -> Result<Ve
 }
 
 fn verify_inner(path: &Path, key: Option<&EncryptionKey>) -> Result<Verification> {
+    verify_loaded(path, key).map(|(verification, _)| verification)
+}
+
+/// `verify` that also returns the replayed file.
+pub(crate) fn verify_loaded(
+    path: &Path,
+    key: Option<&EncryptionKey>,
+) -> Result<(Verification, format::Loaded)> {
     let mut file = source(path)?;
     let loaded = format::load_with(&mut file, key)?;
     require_complete(&loaded)?;
@@ -150,11 +164,12 @@ fn verify_inner(path: &Path, key: Option<&EncryptionKey>) -> Result<Verification
     if bytes != inspection.file_bytes {
         return Err(io::Error::other("file size changed during verification").into());
     }
-    Ok(Verification {
+    let verification = Verification {
         inspection,
         bytes,
         crc32: crc,
-    })
+    };
+    Ok((verification, loaded))
 }
 
 /// Creates a validated, byte-identical snapshot at a previously nonexistent path.
@@ -309,11 +324,21 @@ fn compact_inner(
     require_complete(&loaded)?;
     let source = inspection(&loaded);
     let cipher = key.map(Cipher::create).transpose()?;
+    // Graph-enabled sources keep `FLAG_GRAPH` and their graph state; like
+    // vector files, the rewrite carries no commit timestamps.
+    let graph_flags = loaded.flags & !format::KNOWN_FLAGS;
     let output = if loaded.version >= format::V4 {
         let lineage = format::new_lineage()?;
         publish_with(destination, key, |output| {
             if loaded.version >= format::V5 {
-                write_v5(output, &loaded, lineage, now_ms, cipher.as_ref())
+                write_v5(
+                    output,
+                    &loaded,
+                    lineage,
+                    now_ms,
+                    cipher.as_ref(),
+                    graph_flags,
+                )
             } else {
                 write_v4(output, &loaded, lineage)
             }
@@ -337,18 +362,24 @@ fn compact_inner(
 /// IDs, vector bits, payloads and metadata are preserved in the `default`
 /// collection; the output gets a new lineage. The source is never modified and
 /// the destination must not exist. A v4 source is compacted as by `compact`.
+/// With the `graph` feature, graph-enabled sources are refused with
+/// `GraphUnsupportedOperation` (LEG-010).
 pub fn upgrade(
     source_path: impl AsRef<Path>,
     destination: impl AsRef<Path>,
 ) -> Result<CompactionReport> {
     let mut file = source(source_path.as_ref())?;
     let loaded = format::load(&mut file)?;
+    #[cfg(feature = "graph")]
+    if loaded.graph.is_some() {
+        return Err(Error::GraphUnsupportedOperation);
+    }
     require_complete(&loaded)?;
     let source = inspection(&loaded);
     let lineage = format::new_lineage()?;
     let output = publish(destination.as_ref(), |output| {
         if loaded.version >= format::V5 {
-            write_v5(output, &loaded, lineage, crate::current_time_ms(), None)
+            write_v5(output, &loaded, lineage, crate::current_time_ms(), None, 0)
         } else {
             write_v4(output, &loaded, lineage)
         }
@@ -417,15 +448,16 @@ fn drill_failure(reason: &'static str) -> Error {
 /// deleted. Mismatches are reported as `Corrupt` with offset 0. Neither the
 /// backup nor any other file is modified.
 pub fn drill(backup_path: impl AsRef<Path>, workdir: impl AsRef<Path>) -> Result<DrillReport> {
-    let expected: Vec<(String, usize)> = {
+    let (expected, same_graph) = {
         let mut file = source(backup_path.as_ref())?;
         let loaded = format::load(&mut file)?;
         require_complete(&loaded)?;
-        loaded
+        let expected: Vec<(String, usize)> = loaded
             .collections
             .values()
             .map(|collection| (collection.name.clone(), collection.records.len()))
-            .collect()
+            .collect();
+        (expected, graph_check(loaded))
     };
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -435,7 +467,7 @@ pub fn drill(backup_path: impl AsRef<Path>, workdir: impl AsRef<Path>) -> Result
         format::new_lineage()?
     ));
     let backup = restore(backup_path, &scratch)?;
-    let result = probe(&scratch, &expected);
+    let result = probe(&scratch, &expected, same_graph);
     let removed = std::fs::remove_file(&scratch);
     let (scratch_lineage, probes) = result?;
     removed?;
@@ -447,7 +479,24 @@ pub fn drill(backup_path: impl AsRef<Path>, workdir: impl AsRef<Path>) -> Result
     })
 }
 
-fn probe(path: &Path, expected: &[(String, usize)]) -> Result<(Option<u64>, usize)> {
+/// The drill's graph check: a graph-enabled backup must reopen to exactly
+/// its replayed graph state (LEG-011).
+#[cfg(feature = "graph")]
+fn graph_check(loaded: format::Loaded) -> impl FnOnce(&Database) -> bool {
+    let graph = loaded.graph;
+    move |db| db.graph == graph
+}
+
+#[cfg(not(feature = "graph"))]
+fn graph_check(_: format::Loaded) -> impl FnOnce(&Database) -> bool {
+    |_| true
+}
+
+fn probe(
+    path: &Path,
+    expected: &[(String, usize)],
+    same_graph: impl FnOnce(&Database) -> bool,
+) -> Result<(Option<u64>, usize)> {
     let db = Database::open(path)?;
     let infos = db.collections()?;
     if infos.len() != expected.len()
@@ -459,6 +508,9 @@ fn probe(path: &Path, expected: &[(String, usize)]) -> Result<(Option<u64>, usiz
         return Err(drill_failure(
             "drill collection names or live counts differ",
         ));
+    }
+    if !same_graph(&db) {
+        return Err(drill_failure("drill graph state differs"));
     }
     let mut probes = 0;
     for info in &infos {
@@ -533,12 +585,16 @@ impl Sink<'_> {
     }
 }
 
-fn write_v5(
+/// Writes a compacted v5 file: `extra_flags` are added to the header flags
+/// (the encryption flag follows `cipher`), and with `FLAG_GRAPH` the source's
+/// graph state follows the vector data.
+pub(crate) fn write_v5(
     file: &mut File,
     loaded: &format::Loaded,
     lineage: u64,
     now_ms: u64,
     cipher: Option<&Cipher>,
+    extra_flags: u16,
 ) -> Result<()> {
     let mut sequence = 0u64;
     let mut next = || -> Result<u64> {
@@ -550,9 +606,9 @@ fn write_v5(
         lineage,
         loaded.collection_high,
         if cipher.is_some() {
-            format::FLAG_ENCRYPTED
+            format::FLAG_ENCRYPTED | extra_flags
         } else {
-            0
+            extra_flags
         },
         cipher,
     ))?;
@@ -608,6 +664,14 @@ fn write_v5(
             &[],
             Some(&marker),
         ))?;
+    }
+    #[cfg(feature = "graph")]
+    if extra_flags & format::FLAG_GRAPH != 0
+        && let Some(state) = &loaded.graph
+    {
+        crate::property_graph::frame::compacted_bodies(state, |count, body| {
+            output.write_all(&format::graph_frame(next()?, count, body))
+        })?;
     }
     Ok(())
 }

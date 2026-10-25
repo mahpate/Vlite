@@ -13,7 +13,9 @@ use std::collections::BTreeMap;
 use crate::format::{self, LoadedCollection};
 use crate::{Error, Mutation, Record, Result};
 
-use super::engine::{self, GraphEntry, GraphState};
+use super::engine::codec::BODY_HEADER_BYTES;
+use super::engine::limits::{MAX_BATCH_BYTES, MAX_BATCH_ENTRIES};
+use super::engine::{self, GraphBody, GraphEntry, GraphState};
 
 /// Encodes one vector mutation of `collection` as a graph-frame entry.
 pub(crate) fn vector_entry(collection: u16, mutation: &Mutation) -> GraphEntry {
@@ -122,6 +124,81 @@ pub(crate) fn replay(
                 "graph attachment references a missing or expiring record",
             ));
         }
+    }
+    Ok(())
+}
+
+/// Writes `state` as the op-12 bodies of a compacted file (REQ-052): per
+/// graph in ID order (IDs kept), `CreateGraph`, every node, every edge and
+/// every attachment, then a `GraphHighWater` entry with the graph's next node
+/// and edge IDs so deleted IDs are never reused. Bodies stay within the batch
+/// entry and byte limits; `emit` receives each body's entry count and bytes.
+/// Attachments are replayed against live records, so these frames must
+/// follow the record frames.
+pub(crate) fn compacted_bodies(
+    state: &GraphState,
+    mut emit: impl FnMut(u32, &[u8]) -> Result<()>,
+) -> Result<()> {
+    let encode = |body: &GraphBody| {
+        engine::encode_body(body).map_err(|_| corrupt(0, "graph state cannot be re-encoded"))
+    };
+    for graph in state.graphs() {
+        let graph_id = graph.id();
+        let create = GraphEntry::CreateGraph {
+            name: graph.name().into(),
+        };
+        let nodes = graph.nodes().map(|node| GraphEntry::PutNode {
+            node_id: node.id,
+            key: node.key.clone(),
+            labels: node.labels.clone(),
+            properties: node.properties.clone(),
+        });
+        let edges = graph.edges().map(|edge| GraphEntry::PutEdge {
+            edge_id: edge.id,
+            source: edge.source,
+            destination: edge.destination,
+            relationship: edge.relationship.clone(),
+            key: edge.key.clone(),
+            properties: edge.properties.clone(),
+        });
+        let attachments = graph.nodes().flat_map(|node| {
+            graph
+                .attachments(node.id)
+                .map(move |(collection, record_id)| GraphEntry::Attach {
+                    node_id: node.id,
+                    collection,
+                    record_id,
+                })
+        });
+        let high_water = GraphEntry::GraphHighWater {
+            next_node_id: graph.next_node_id(),
+            next_edge_id: graph.next_edge_id(),
+        };
+        let mut body = GraphBody {
+            graph_id,
+            entries: Vec::new(),
+        };
+        let mut used = BODY_HEADER_BYTES;
+        let entries = std::iter::once(create)
+            .chain(nodes)
+            .chain(edges)
+            .chain(attachments)
+            .chain(std::iter::once(high_water));
+        for entry in entries {
+            let single = GraphBody {
+                graph_id,
+                entries: vec![entry],
+            };
+            let len = encode(&single)?.len() - BODY_HEADER_BYTES;
+            if body.entries.len() == MAX_BATCH_ENTRIES || used + len > MAX_BATCH_BYTES {
+                emit(body.entries.len() as u32, &encode(&body)?)?;
+                body.entries.clear();
+                used = BODY_HEADER_BYTES;
+            }
+            used += len;
+            body.entries.extend(single.entries);
+        }
+        emit(body.entries.len() as u32, &encode(&body)?)?;
     }
     Ok(())
 }

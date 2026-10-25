@@ -86,13 +86,12 @@ impl ReplicaFollower {
     /// (`maintenance::backup` keeps the lineage). An incomplete tail left by a
     /// crash during apply is discarded: it is unacknowledged replica data the
     /// primary still has.
+    ///
+    /// Graph-enabled followers replay graph frames like any other commit
+    /// (REQ-054, LEG-014); builds without the `graph` feature reject them at
+    /// the header with `UnsupportedFeature`, before any tail repair.
     pub fn open(path: impl AsRef<Path>, key: Option<&EncryptionKey>) -> Result<Self> {
         let path = path.as_ref();
-        // Graph-enabled files cannot be replicated yet (H-5/H-6). The
-        // graph-unaware header reader rejects them exactly as vector-only
-        // builds do, before open or tail repair could touch the file.
-        #[cfg(feature = "graph")]
-        crate::format::read_log_header(&mut std::fs::File::open(path)?, key)?;
         let db = match Database::open_inner(path, key) {
             Err(Error::IncompleteTail { .. }) => {
                 match key {
@@ -105,10 +104,6 @@ impl ReplicaFollower {
         };
         if db.lineage.is_none() {
             return Err(Error::ChangeFeedRequiresUpgrade);
-        }
-        #[cfg(feature = "graph")]
-        if db.is_graph_enabled() {
-            return Err(Error::UnsupportedFeature(crate::format::FLAG_GRAPH));
         }
         Ok(Self {
             path: path.to_path_buf(),

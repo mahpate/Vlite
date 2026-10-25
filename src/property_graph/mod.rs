@@ -3,9 +3,8 @@
 //! A graph-enabled file is a format-v5 file whose header carries `FLAG_GRAPH`
 //! (DO-001). Graph changes are op-12 frames (DO-003) written through the same
 //! writer, checksums, encryption, sequence and locking as vector commits, and
-//! replayed atomically on open. Builds without the `graph` feature, older
-//! releases and every graph-unaware path (maintenance, change feed, log export
-//! and replicas) reject these files with `Error::UnsupportedFeature(4)`.
+//! replayed atomically on open. Builds without the `graph` feature and older
+//! releases reject these files with `Error::UnsupportedFeature(4)`.
 //!
 //! Status (EPIC-004 mutations): graphs can be created, dropped and listed;
 //! [`GraphMut`] writes nodes, edges, attachments and attached-collection
@@ -15,7 +14,16 @@
 //! `GraphAttachedRecordExpiry`). [`GraphRef`] runs bounded reads (EPIC-005):
 //! node and edge gets, paged `find_nodes` and `neighbors`, breadth-first
 //! traversal, canonical shortest paths and `explain` (see the read types
-//! below). Maintenance support is not implemented yet (EPIC-006).
+//! below).
+//!
+//! Maintenance (EPIC-006): inspect, verify, backup, restore, compact, drill,
+//! reencrypt, point-in-time restore, log export and replica followers carry
+//! graph state; compaction keeps graph IDs and records each graph's
+//! high-water marks so node and edge IDs are never reused. [`enable_graph`]
+//! and [`strip_graph`] (also re-exported from `maintenance`) convert files by
+//! staged copy-out, [`inspect_graph`] and [`verify_graph`] add graph counts,
+//! and `maintenance::upgrade` and change feeds refuse graph files with
+//! `GraphUnsupportedOperation` and `GraphChangeFeedUnsupported`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -35,8 +43,13 @@ pub(crate) mod engine;
 #[allow(dead_code)]
 mod convert;
 pub(crate) mod frame;
+mod maintain;
 mod read;
 
+pub use maintain::{
+    GraphCounts, GraphInspection, GraphVerification, StripGraphReport, enable_graph, inspect_graph,
+    strip_graph, verify_graph,
+};
 pub use read::{
     Direction, EdgeView, Explanation, FindNodes, GraphLimits, GraphOutput, GraphPath, GraphQuery,
     GraphRead, GraphReadStats, IndexChoice, Neighborhood, Neighbors, NodeFilter, NodeSelector,

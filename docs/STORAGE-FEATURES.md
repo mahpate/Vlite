@@ -193,7 +193,8 @@ there. The in-memory backend works natively too, which is how it is unit-tested.
 The non-default Cargo feature `graph` (not shipped in release artifacts) stores
 named property graphs in the same log as vectors. `Database::create_with_graph`
 creates a V5 file with header flag `FLAG_GRAPH = 4`. Encryption and commit
-timestamps work as usual. Ordinary files never become graph-enabled.
+timestamps work as usual. Ordinary files never become graph-enabled in place
+(`maintenance::enable_graph` writes a graph-enabled copy).
 `create_graph` and `drop_graph` (empty graphs only) each commit one op-12 frame;
 `list_graphs` reads the directory without a commit. The frame goes through the
 same writer, sequence, lock,
@@ -221,10 +222,25 @@ Compatibility:
 
 - Builds without `graph` and older releases reject graph-enabled files with
   `UnsupportedFeature(4)`.
-- In graph builds, the following also still reject them until graph-aware
-  versions exist: maintenance (`inspect`, `verify`, `backup`, `restore`,
-  `compact`, `upgrade`, `reencrypt`, `restore_to`, `drill`), the change feed,
-  log-segment export and read replicas.
+- In graph builds, maintenance carries graph files: `inspect`,
+  `inspect_detail`, `verify`, `backup`, `restore`, `compact*`, `reencrypt`,
+  `restore_to`, `drill` and log-segment export accept them, and read replicas
+  replay their graph frames. `compact*` rewrites each graph (IDs kept) and
+  records its node and edge high-water marks, so node and edge IDs are never
+  reused; like vector compaction it restarts sequences and drops commit
+  timestamps. `maintenance::inspect_graph` and `verify_graph` add the graph
+  flag and graph, node, edge and attachment counts. `maintenance::enable_graph`
+  copies a v4 or v5 file out as a graph-enabled file, and
+  `maintenance::strip_graph` copies the vector data of a graph-enabled file out
+  as a v5 file without graphs (it needs `confirm_graph_data_loss = true`).
+  `vlite-maintain` gains `enable-graph` and `strip-graph
+  --confirm-graph-data-loss` in graph builds.
+- `maintenance::upgrade` rejects graph-enabled files with
+  `GraphUnsupportedOperation`. Change feeds (`Database::feed_cursor`,
+  `changes_after` and `changes::read_log_changes`) reject them with
+  `GraphChangeFeedUnsupported`. The server answers `/v1/changes` with 501 and
+  gRPC with `UNIMPLEMENTED`, refuses webhook subscriptions on such files, and
+  maps the other graph errors to 409 (state conflicts) or 422 (invalid input).
 - `graph_mut(name).write_batch(&[GraphOp])` writes nodes, edges, attachments
   and vector mutations of any collection as one atomic op-12 frame (at most
   4,096 operations; nothing is written on any error). Attaching requires a

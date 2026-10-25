@@ -178,6 +178,9 @@ pub struct Service {
     started: Instant,
     group_commit: Option<Arc<group_commit::Coordinator>>,
     snapshot_reads: bool,
+    /// Fixed for the service lifetime: the owned file never changes.
+    #[cfg(feature = "graph")]
+    graph_enabled: bool,
 }
 
 impl Service {
@@ -224,6 +227,8 @@ impl Service {
         })?;
         let format_version = database.format_version();
         let lineage = database.lineage();
+        #[cfg(feature = "graph")]
+        let graph_enabled = database.is_graph_enabled();
         let etag_ident: Arc<str> = match lineage {
             Some(lineage) => format!("{lineage:016x}").into(),
             None => hex(&nonce).into(),
@@ -257,6 +262,8 @@ impl Service {
             started: Instant::now(),
             group_commit: None,
             snapshot_reads: true,
+            #[cfg(feature = "graph")]
+            graph_enabled,
         })
     }
 
@@ -373,6 +380,17 @@ impl Service {
         })
         .await
         .map_err(internal)?
+    }
+
+    /// LEG-019/LEG-020: change-feed consumers (REST `/v1/changes`, gRPC
+    /// `Changes`/`WatchChanges`, webhooks) reject graph-enabled files
+    /// explicitly (REQ-053) before parsing input or opening a stream.
+    #[cfg(feature = "graph")]
+    fn reject_graph_feed(&self) -> Result<(), ApiError> {
+        if self.graph_enabled {
+            return Err(Error::GraphChangeFeedUnsupported.into());
+        }
+        Ok(())
     }
 
     /// Call after HTTP graceful shutdown. Stops and joins the maintenance and
@@ -1366,8 +1384,77 @@ impl From<Error> for ApiError {
                 "poisoned",
                 "database requires operator inspection and reopen after a failed commit",
             ),
+            // LEG-017: every graph variant is explicit, never the 500 below.
+            // State conflicts (including references to missing graph
+            // entities) are 409, invalid input 422, unsupported surfaces 501.
+            #[cfg(feature = "graph")]
+            Error::GraphsNotEnabled
+            | Error::GraphExists
+            | Error::GraphNotFound
+            | Error::GraphNotEmpty
+            | Error::TooManyGraphs
+            | Error::GraphKeyExists
+            | Error::GraphKeyConflict
+            | Error::GraphNodeNotFound
+            | Error::GraphEdgeNotFound
+            | Error::GraphNodeHasEdges { .. }
+            | Error::GraphAttachmentConflict
+            | Error::GraphAttachmentNotFound
+            | Error::GraphRecordNotAttachable
+            | Error::GraphAttachedRecord
+            | Error::GraphAttachedRecordExpiry
+            | Error::GraphCursorStale
+            | Error::GraphUnsupportedOperation => {
+                Self::new(StatusCode::CONFLICT, graph_code(&error), error.to_string())
+            }
+            #[cfg(feature = "graph")]
+            Error::GraphsRequireV5
+            | Error::InvalidGraphName
+            | Error::GraphLimitExceedsCeiling { .. }
+            | Error::GraphInvalidOptions(_) => Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                graph_code(&error),
+                error.to_string(),
+            ),
+            #[cfg(feature = "graph")]
+            Error::GraphChangeFeedUnsupported => Self::new(
+                StatusCode::NOT_IMPLEMENTED,
+                graph_code(&error),
+                error.to_string(),
+            ),
             error => internal(error),
         }
+    }
+}
+
+/// Stable REST error code (gRPC `vlite-error-code` trailer) of each graph
+/// `Error` variant: its snake_case name.
+#[cfg(feature = "graph")]
+fn graph_code(error: &Error) -> &'static str {
+    match error {
+        Error::GraphsNotEnabled => "graphs_not_enabled",
+        Error::GraphsRequireV5 => "graphs_require_v5",
+        Error::InvalidGraphName => "invalid_graph_name",
+        Error::GraphExists => "graph_exists",
+        Error::GraphNotFound => "graph_not_found",
+        Error::GraphNotEmpty => "graph_not_empty",
+        Error::TooManyGraphs => "too_many_graphs",
+        Error::GraphKeyExists => "graph_key_exists",
+        Error::GraphKeyConflict => "graph_key_conflict",
+        Error::GraphNodeNotFound => "graph_node_not_found",
+        Error::GraphEdgeNotFound => "graph_edge_not_found",
+        Error::GraphNodeHasEdges { .. } => "graph_node_has_edges",
+        Error::GraphAttachmentConflict => "graph_attachment_conflict",
+        Error::GraphAttachmentNotFound => "graph_attachment_not_found",
+        Error::GraphRecordNotAttachable => "graph_record_not_attachable",
+        Error::GraphAttachedRecord => "graph_attached_record",
+        Error::GraphAttachedRecordExpiry => "graph_attached_record_expiry",
+        Error::GraphLimitExceedsCeiling { .. } => "graph_limit_exceeds_ceiling",
+        Error::GraphCursorStale => "graph_cursor_stale",
+        Error::GraphChangeFeedUnsupported => "graph_change_feed_unsupported",
+        Error::GraphUnsupportedOperation => "graph_unsupported_operation",
+        Error::GraphInvalidOptions(_) => "graph_invalid_options",
+        _ => "internal_error",
     }
 }
 
@@ -3448,5 +3535,98 @@ mod tests {
         assert!(snapshot["database_bytes"].is_null());
         assert!(snapshot["live_records"].is_null());
         assert!(service.close().await.is_err());
+    }
+}
+
+/// LEG-017 (TEST-015): every graph `Error` variant has an explicit status and
+/// stable code; none reaches the generic 500 arm.
+#[cfg(all(test, feature = "graph"))]
+mod graph_errors {
+    use super::*;
+
+    /// Every graph `Error` variant with its HTTP status and stable code; add
+    /// each new graph variant here and to `From<Error> for ApiError`.
+    pub(super) fn table() -> Vec<(Error, StatusCode, &'static str)> {
+        const CONFLICT: StatusCode = StatusCode::CONFLICT;
+        const INVALID: StatusCode = StatusCode::UNPROCESSABLE_ENTITY;
+        const UNSUPPORTED: StatusCode = StatusCode::NOT_IMPLEMENTED;
+        vec![
+            (Error::GraphsNotEnabled, CONFLICT, "graphs_not_enabled"),
+            (Error::GraphsRequireV5, INVALID, "graphs_require_v5"),
+            (Error::InvalidGraphName, INVALID, "invalid_graph_name"),
+            (Error::GraphExists, CONFLICT, "graph_exists"),
+            (Error::GraphNotFound, CONFLICT, "graph_not_found"),
+            (Error::GraphNotEmpty, CONFLICT, "graph_not_empty"),
+            (Error::TooManyGraphs, CONFLICT, "too_many_graphs"),
+            (Error::GraphKeyExists, CONFLICT, "graph_key_exists"),
+            (Error::GraphKeyConflict, CONFLICT, "graph_key_conflict"),
+            (Error::GraphNodeNotFound, CONFLICT, "graph_node_not_found"),
+            (Error::GraphEdgeNotFound, CONFLICT, "graph_edge_not_found"),
+            (
+                Error::GraphNodeHasEdges { incident: 2 },
+                CONFLICT,
+                "graph_node_has_edges",
+            ),
+            (
+                Error::GraphAttachmentConflict,
+                CONFLICT,
+                "graph_attachment_conflict",
+            ),
+            (
+                Error::GraphAttachmentNotFound,
+                CONFLICT,
+                "graph_attachment_not_found",
+            ),
+            (
+                Error::GraphRecordNotAttachable,
+                CONFLICT,
+                "graph_record_not_attachable",
+            ),
+            (
+                Error::GraphAttachedRecord,
+                CONFLICT,
+                "graph_attached_record",
+            ),
+            (
+                Error::GraphAttachedRecordExpiry,
+                CONFLICT,
+                "graph_attached_record_expiry",
+            ),
+            (
+                Error::GraphLimitExceedsCeiling {
+                    limit: "max_hops",
+                    requested: 9,
+                    ceiling: 8,
+                },
+                INVALID,
+                "graph_limit_exceeds_ceiling",
+            ),
+            (Error::GraphCursorStale, CONFLICT, "graph_cursor_stale"),
+            (
+                Error::GraphChangeFeedUnsupported,
+                UNSUPPORTED,
+                "graph_change_feed_unsupported",
+            ),
+            (
+                Error::GraphUnsupportedOperation,
+                CONFLICT,
+                "graph_unsupported_operation",
+            ),
+            (
+                Error::GraphInvalidOptions("confirm_graph_data_loss is required"),
+                INVALID,
+                "graph_invalid_options",
+            ),
+        ]
+    }
+
+    #[test]
+    fn every_graph_error_maps_explicitly_never_500() {
+        for (error, status, code) in table() {
+            let message = error.to_string();
+            let mapped = ApiError::from(error);
+            assert_eq!((mapped.status, mapped.code), (status, code), "{message}");
+            assert_eq!(mapped.message, message);
+        }
     }
 }

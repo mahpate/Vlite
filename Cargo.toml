@@ -137,6 +137,14 @@ required-features = ["graph"]
 name = "graph_traversal"
 required-features = ["graph"]
 
+[[test]]
+name = "graph_maintenance"
+required-features = ["graph"]
+
+[[test]]
+name = "graph_recovery"
+required-features = ["graph"]
+
 [[example]]
 name = "graph_bench"
 required-features = ["graph"]

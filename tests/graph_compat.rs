@@ -5,6 +5,9 @@
 //! V5 file whose header carries the proposed `FLAG_GRAPH = 4` bit (with a
 //! valid header CRC and one op-12 frame encoded with the DO-003 draft
 //! layout), and that op 12 is not accepted by the current replay allow-list.
+//! In `--features graph` builds the same calls follow the EPIC-006 contract
+//! instead (graph-aware maintenance, replicas and log export; `upgrade` and
+//! change feeds reject explicitly), and every source stays byte-identical.
 //! The release-tag half (C-4) and the C ABI/Python/Node entry points are run by
 //! `scripts\graph_compat_check.py` against isolated `git archive` builds.
 //!
@@ -309,6 +312,58 @@ fn assert_graph_rejected<T>(entry_point: &str, result: vlite::Result<T>) {
     }
 }
 
+/// What a `--features graph` build returns for a graph fixture when the
+/// call's key matches the file (EPIC-006).
+#[derive(Clone, Copy, Debug)]
+enum GraphBuild {
+    /// Graph-aware: LEG-009, LEG-011, LEG-012, LEG-014, LEG-021..023.
+    Accepts,
+    /// LEG-010: `Error::GraphUnsupportedOperation`.
+    Upgrade,
+    /// LEG-013: `Error::GraphChangeFeedUnsupported`.
+    Feed,
+    /// A vector-only follower refuses a graph primary's segment header with
+    /// `Error::ReplicaDiverged` (LEG-014).
+    Diverged,
+}
+
+/// Graph-unaware builds (REQ-055, TEST-002) reject every graph fixture at the
+/// header with `UnsupportedFeature(4)`. Graph builds return `graph` when the
+/// key matches the file (`keyed` exactly for the encrypted fixture) and
+/// otherwise the key error any vector-only file gives. Returns whether the
+/// call was rejected.
+#[track_caller]
+fn assert_outcome(
+    entry_point: &str,
+    encrypted: bool,
+    keyed: bool,
+    graph: GraphBuild,
+    result: vlite::Result<()>,
+) -> bool {
+    let rejected = result.is_err();
+    #[cfg(not(feature = "graph"))]
+    {
+        let _ = (encrypted, keyed, graph);
+        assert_graph_rejected(entry_point, result);
+    }
+    #[cfg(feature = "graph")]
+    match (encrypted, keyed, result) {
+        (true, false, Err(Error::EncryptionKeyRequired))
+        | (false, true, Err(Error::NotEncrypted)) => {}
+        (true, false, result) | (false, true, result) => {
+            panic!("{entry_point}: expected the key error of a vector-only file, got {result:?}")
+        }
+        (_, _, result) => match (graph, result) {
+            (GraphBuild::Accepts, Ok(()))
+            | (GraphBuild::Upgrade, Err(Error::GraphUnsupportedOperation))
+            | (GraphBuild::Feed, Err(Error::GraphChangeFeedUnsupported))
+            | (GraphBuild::Diverged, Err(Error::ReplicaDiverged(_))) => {}
+            (graph, result) => panic!("{entry_point}: expected {graph:?}, got {result:?}"),
+        },
+    }
+    rejected
+}
+
 #[track_caller]
 fn assert_absent(entry_point: &str, path: &Path) {
     assert!(
@@ -322,18 +377,22 @@ struct Fixture {
     name: &'static str,
     path: PathBuf,
     bytes: Vec<u8>,
+    encrypted: bool,
+    /// Committed sequences (graph builds bootstrap a follower from them).
+    commits: u64,
 }
 
 /// Runs every REQ-055 library entry point against one graph-flagged file.
 /// Returns the number of entry-point invocations asserted.
 fn probe_all(fixture: &Fixture, scratch: &Path, follower_base: &Path) -> usize {
+    use GraphBuild::{Accepts, Diverged, Feed, Upgrade};
     let source = fixture.path.as_path();
     let key = key();
     let out = |name: &str| scratch.join(format!("{}-{name}.vlite", fixture.name));
     let mut checked = 0usize;
     // `Database` open/repair entry points become graph-aware in
-    // `--features graph` builds (feature-agent-graph ITEM-010); every other
-    // entry point stays graph-unaware until EPIC-006/H-5/H-6.
+    // `--features graph` builds (feature-agent-graph ITEM-010); the other
+    // entry points follow in EPIC-006 (`assert_outcome`).
     let mut database_check = |name: &str, result: vlite::Result<()>| {
         if cfg!(feature = "graph") {
             if let Err(Error::UnsupportedFeature(FLAG_GRAPH)) = result {
@@ -374,80 +433,128 @@ fn probe_all(fixture: &Fixture, scratch: &Path, follower_base: &Path) -> usize {
         "Database::discard_incomplete_tail_encrypted",
         Database::discard_incomplete_tail_encrypted(source, &key).map(drop),
     );
-    let mut check = |name: &str, result: vlite::Result<()>| {
-        assert_graph_rejected(&format!("{} {name}", fixture.name), result);
+    // Every other entry point: see `assert_outcome`. A destination is
+    // asserted absent after every rejection.
+    let encrypted = fixture.encrypted;
+    let mut check = |name: &str, keyed: bool, graph: GraphBuild, result: vlite::Result<()>| {
         checked += 1;
+        assert_outcome(
+            &format!("{} {name}", fixture.name),
+            encrypted,
+            keyed,
+            graph,
+            result,
+        )
     };
     check(
         "maintenance::inspect",
+        false,
+        Accepts,
         maintenance::inspect(source).map(drop),
     );
     check(
         "maintenance::inspect_with_key",
+        true,
+        Accepts,
         maintenance::inspect_with_key(source, &key).map(drop),
     );
     check(
         "maintenance::inspect_detail",
+        false,
+        Accepts,
         maintenance::inspect_detail(source).map(drop),
     );
-    check("maintenance::verify", maintenance::verify(source).map(drop));
+    check(
+        "maintenance::verify",
+        false,
+        Accepts,
+        maintenance::verify(source).map(drop),
+    );
     check(
         "maintenance::verify_with_key",
+        true,
+        Accepts,
         maintenance::verify_with_key(source, &key).map(drop),
     );
 
     let destination = out("backup");
-    check(
+    if check(
         "maintenance::backup",
+        false,
+        Accepts,
         maintenance::backup(source, &destination).map(drop),
-    );
-    assert_absent("maintenance::backup", &destination);
+    ) {
+        assert_absent("maintenance::backup", &destination);
+    }
     let destination = out("backup-key");
-    check(
+    if check(
         "maintenance::backup_with_key",
+        true,
+        Accepts,
         maintenance::backup_with_key(source, &destination, &key).map(drop),
-    );
-    assert_absent("maintenance::backup_with_key", &destination);
+    ) {
+        assert_absent("maintenance::backup_with_key", &destination);
+    }
     let destination = out("restore");
-    check(
+    if check(
         "maintenance::restore",
+        false,
+        Accepts,
         maintenance::restore(source, &destination).map(drop),
-    );
-    assert_absent("maintenance::restore", &destination);
+    ) {
+        assert_absent("maintenance::restore", &destination);
+    }
     let destination = out("restore-key");
-    check(
+    if check(
         "maintenance::restore_with_key",
+        true,
+        Accepts,
         maintenance::restore_with_key(source, &destination, &key).map(drop),
-    );
-    assert_absent("maintenance::restore_with_key", &destination);
+    ) {
+        assert_absent("maintenance::restore_with_key", &destination);
+    }
     let destination = out("compact");
-    check(
+    if check(
         "maintenance::compact",
+        false,
+        Accepts,
         maintenance::compact(source, &destination).map(drop),
-    );
-    assert_absent("maintenance::compact", &destination);
+    ) {
+        assert_absent("maintenance::compact", &destination);
+    }
     let destination = out("compact-at");
-    check(
+    if check(
         "maintenance::compact_at",
+        false,
+        Accepts,
         maintenance::compact_at(source, &destination, T0_MS).map(drop),
-    );
-    assert_absent("maintenance::compact_at", &destination);
+    ) {
+        assert_absent("maintenance::compact_at", &destination);
+    }
     let destination = out("compact-key");
-    check(
+    if check(
         "maintenance::compact_with_key",
+        true,
+        Accepts,
         maintenance::compact_with_key(source, &destination, &key).map(drop),
-    );
-    assert_absent("maintenance::compact_with_key", &destination);
+    ) {
+        assert_absent("maintenance::compact_with_key", &destination);
+    }
     let destination = out("upgrade");
-    check(
+    if check(
         "maintenance::upgrade",
+        false,
+        Upgrade,
         maintenance::upgrade(source, &destination).map(drop),
-    );
-    assert_absent("maintenance::upgrade", &destination);
+    ) {
+        assert_absent("maintenance::upgrade", &destination);
+    }
     let workdir = scratch.join(format!("{}-drill", fixture.name));
     fs::create_dir_all(&workdir).unwrap();
     check(
         "maintenance::drill",
+        false,
+        Accepts,
         maintenance::drill(source, &workdir).map(drop),
     );
     assert_eq!(
@@ -456,15 +563,21 @@ fn probe_all(fixture: &Fixture, scratch: &Path, follower_base: &Path) -> usize {
         "drill must leave no scratch output"
     );
     for (label, source_key) in [("None", None), ("key", Some(&key))] {
+        let keyed = source_key.is_some();
         let destination = out(&format!("reencrypt-{label}"));
-        check(
+        if check(
             &format!("maintenance::reencrypt(src {label})"),
+            keyed,
+            Accepts,
             maintenance::reencrypt(source, source_key, &destination, Some(&key)).map(drop),
-        );
-        assert_absent("maintenance::reencrypt", &destination);
+        ) {
+            assert_absent("maintenance::reencrypt", &destination);
+        }
         let destination = out(&format!("restore-to-{label}"));
-        check(
+        if check(
             &format!("maintenance::restore_to(src {label})"),
+            keyed,
+            Accepts,
             maintenance::restore_to(
                 None,
                 source,
@@ -473,14 +586,19 @@ fn probe_all(fixture: &Fixture, scratch: &Path, follower_base: &Path) -> usize {
                 source_key,
             )
             .map(drop),
-        );
-        assert_absent("maintenance::restore_to", &destination);
+        ) {
+            assert_absent("maintenance::restore_to", &destination);
+        }
         check(
             &format!("maintenance::export_log_segment({label})"),
+            keyed,
+            Accepts,
             maintenance::export_log_segment(source, source_key, 0, 1 << 20).map(drop),
         );
         check(
             &format!("changes::read_log_changes({label})"),
+            keyed,
+            Feed,
             read_log_changes(
                 source,
                 source_key,
@@ -494,6 +612,8 @@ fn probe_all(fixture: &Fixture, scratch: &Path, follower_base: &Path) -> usize {
         );
         check(
             &format!("ReplicaFollower::open({label})"),
+            keyed,
+            Accepts,
             ReplicaFollower::open(source, source_key).map(drop),
         );
     }
@@ -503,17 +623,20 @@ fn probe_all(fixture: &Fixture, scratch: &Path, follower_base: &Path) -> usize {
         lineage: u64::from_le_bytes(fixture.bytes[16..24].try_into().unwrap()),
         header: fixture.bytes[..32].to_vec(),
         base_sequence: 0,
-        last_sequence: 2,
-        head_sequence: 2,
+        last_sequence: fixture.commits,
+        head_sequence: fixture.commits,
         frames: fixture.bytes[32..].to_vec(),
     };
     for (label, segment_key) in [("None", None), ("key", Some(&key))] {
         let destination = out(&format!("follower-{label}"));
-        check(
+        if check(
             &format!("ReplicaFollower::create({label})"),
+            segment_key.is_some(),
+            Accepts,
             ReplicaFollower::create(&destination, &segment, segment_key).map(drop),
-        );
-        assert_absent("ReplicaFollower::create", &destination);
+        ) {
+            assert_absent("ReplicaFollower::create", &destination);
+        }
     }
 
     // A healthy vector-only follower must refuse to tail a graph file.
@@ -523,6 +646,8 @@ fn probe_all(fixture: &Fixture, scratch: &Path, follower_base: &Path) -> usize {
     let mut follower = ReplicaFollower::open(&follower_path, None).unwrap();
     check(
         "ReplicaFollower::sync_from_log",
+        false,
+        Diverged,
         follower.sync_from_log(source, 1 << 20).map(drop),
     );
     drop(follower);
@@ -590,6 +715,10 @@ fn control_fixtures_are_otherwise_valid_and_op12_is_unused() {
     }
 }
 
+/// REQ-055 probe: 35 calls per fixture. Default builds expect
+/// `UnsupportedFeature(4)` from every call with no output left behind; graph
+/// builds expect the per-call EPIC-006 outcome named in `probe_all`. The
+/// source stays byte-identical in both builds.
 #[test]
 fn every_library_entry_point_rejects_graph_flagged_files() {
     let dir = tempdir().unwrap();
@@ -599,14 +728,20 @@ fn every_library_entry_point_rejects_graph_flagged_files() {
     fs::write(&follower_base, control_plain()).unwrap();
 
     let mut fixtures = Vec::new();
-    for (name, bytes) in [
-        ("plain", graph_plain()),
-        ("timestamps", graph_timestamps()),
-        ("encrypted", graph_encrypted(dir.path())),
+    for (name, bytes, encrypted, commits) in [
+        ("plain", graph_plain(), false, 2),
+        ("timestamps", graph_timestamps(), false, 2),
+        ("encrypted", graph_encrypted(dir.path()), true, 1),
     ] {
         let path = dir.path().join(format!("graph-{name}.vlite"));
         fs::write(&path, &bytes).unwrap();
-        fixtures.push(Fixture { name, path, bytes });
+        fixtures.push(Fixture {
+            name,
+            path,
+            bytes,
+            encrypted,
+            commits,
+        });
     }
 
     let mut total = 0;
@@ -616,7 +751,7 @@ fn every_library_entry_point_rejects_graph_flagged_files() {
         assert_eq!(
             fs::read(&fixture.path).unwrap(),
             original,
-            "{}: a rejecting entry point modified the source file",
+            "{}: an entry point modified the source file",
             fixture.name
         );
     }

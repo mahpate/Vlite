@@ -19,15 +19,16 @@ pub(crate) const FLAG_ENCRYPTED: u16 = 1;
 pub(crate) const FLAG_TIMESTAMPS: u16 = 2;
 pub(crate) const KNOWN_FLAGS: u16 = FLAG_ENCRYPTED | FLAG_TIMESTAMPS;
 /// Header flag (v5, DO-001): the file stores named property graphs in op-12
-/// frames. Only the graph-aware open and tail-repair paths of builds with the
-/// `graph` feature accept it; every other reader keeps rejecting it with
+/// frames. Every reader of a build with the `graph` feature accepts it
+/// (paths that cannot serve graph files, such as change feeds and `upgrade`,
+/// reject them explicitly); builds without the feature reject it with
 /// `UnsupportedFeature(FLAG_GRAPH)`.
 #[cfg(feature = "graph")]
 pub(crate) const FLAG_GRAPH: u16 = crate::property_graph::engine::codec::FLAG_GRAPH;
 /// Graph frame operation (DO-003), valid only in files carrying `FLAG_GRAPH`.
 #[cfg(feature = "graph")]
 const OP_GRAPH: u8 = crate::property_graph::engine::codec::OP_GRAPH;
-/// Header flags a graph-aware reader accepts in addition to `KNOWN_FLAGS`.
+/// Header flags this build accepts in addition to `KNOWN_FLAGS`.
 #[cfg(feature = "graph")]
 const GRAPH_READER_FLAGS: u16 = FLAG_GRAPH;
 #[cfg(not(feature = "graph"))]
@@ -310,8 +311,7 @@ pub(crate) struct Loaded {
     /// Per-commit wall-clock milliseconds `(sequence, timestamp)`, ascending,
     /// for files created with commit timestamps.
     pub commit_times: Vec<(u64, u64)>,
-    /// Replayed named graphs; `Some` exactly when the header has `FLAG_GRAPH`
-    /// (only graph-aware loads accept such files).
+    /// Replayed named graphs; `Some` exactly when the header has `FLAG_GRAPH`.
     #[cfg(feature = "graph")]
     pub graph: Option<crate::property_graph::engine::GraphState>,
 }
@@ -1090,17 +1090,6 @@ pub(crate) fn read_log_header_with<R: Read + Seek>(
     key: Option<&EncryptionKey>,
     known: Option<&Cipher>,
 ) -> Result<LogHeader> {
-    read_header(file, key, known, false)
-}
-
-/// `allow_graph` additionally accepts `FLAG_GRAPH` in builds with the `graph`
-/// feature; graph-unaware callers pass `false` and reject graph files.
-fn read_header<R: Read + Seek>(
-    file: &mut R,
-    key: Option<&EncryptionKey>,
-    known: Option<&Cipher>,
-    allow_graph: bool,
-) -> Result<LogHeader> {
     let length = file.seek(SeekFrom::End(0))?;
     file.seek(SeekFrom::Start(0))?;
     if length < HEADER_SIZE {
@@ -1122,11 +1111,7 @@ fn read_header<R: Read + Seek>(
     let (lineage, collection_floor) = if version >= V4 {
         if version >= V5 {
             flags = u16_at(&bytes, 26);
-            let known_flags = if allow_graph {
-                KNOWN_FLAGS | GRAPH_READER_FLAGS
-            } else {
-                KNOWN_FLAGS
-            };
+            let known_flags = KNOWN_FLAGS | GRAPH_READER_FLAGS;
             if flags & !known_flags != 0 {
                 return Err(Error::UnsupportedFeature(flags & !known_flags));
             }
@@ -1262,30 +1247,13 @@ pub(crate) fn load<R: Read + Seek>(file: &mut R) -> Result<Loaded> {
     load_with(file, None)
 }
 
-/// Graph-unaware full replay: graph-enabled files are `UnsupportedFeature`.
+/// Full replay. With the `graph` feature it also accepts graph-enabled files
+/// and replays their op-12 frames into `Loaded::graph`.
 pub(crate) fn load_with<R: Read + Seek>(
     file: &mut R,
     key: Option<&EncryptionKey>,
 ) -> Result<Loaded> {
-    load_inner(file, key, false)
-}
-
-/// Full replay for `Database` open and tail repair. With the `graph` feature
-/// it also accepts graph-enabled files and replays their op-12 frames;
-/// without it, it is exactly `load_with`.
-pub(crate) fn load_database<R: Read + Seek>(
-    file: &mut R,
-    key: Option<&EncryptionKey>,
-) -> Result<Loaded> {
-    load_inner(file, key, cfg!(feature = "graph"))
-}
-
-fn load_inner<R: Read + Seek>(
-    file: &mut R,
-    key: Option<&EncryptionKey>,
-    allow_graph: bool,
-) -> Result<Loaded> {
-    let header = read_header(file, key, None, allow_graph)?;
+    let header = read_log_header(file, key)?;
     let length = header.length;
     let LogHeader {
         version,
@@ -1388,7 +1356,8 @@ fn load_inner<R: Read + Seek>(
             5..=7 => version >= V4,
             8 => version >= V5,
             9 | 10 => version >= V5,
-            // Only graph-aware loads let FLAG_GRAPH through, and only on v5.
+            // FLAG_GRAPH only passes the header check in graph builds, and
+            // only on v5.
             #[cfg(feature = "graph")]
             OP_GRAPH => version >= V5 && flags & FLAG_GRAPH != 0,
             _ => false,
@@ -1504,7 +1473,7 @@ fn load_inner<R: Read + Seek>(
             }
             count * 4 + payload_len
         } else {
-            // Op 12 in graph-aware loads; its prefix was validated above.
+            // Op 12 in graph builds; its prefix was validated above.
             payload_len
         };
         let frame_len = (PREFIX_SIZE + body_len + seal + FOOTER_SIZE) as u64;

@@ -192,6 +192,9 @@ fn status_code(error: &ApiError) -> tonic::Code {
         // The write may have committed: never safe to retry blindly.
         (503, "commit_indeterminate") => Code::Unknown,
         (400..=499, _) => Code::InvalidArgument,
+        // LEG-020: change feeds on graph-enabled files.
+        #[cfg(feature = "graph")]
+        (501, _) => Code::Unimplemented,
         _ => Code::Internal,
     }
 }
@@ -1598,6 +1601,8 @@ impl VLite for Adapter {
             false,
             false,
             |service, _, _, request| async move {
+                #[cfg(feature = "graph")]
+                service.reject_graph_feed()?;
                 let cursor = if request.cursor.is_empty() {
                     crate::changes::FeedCursor::beginning()
                 } else {
@@ -1648,6 +1653,9 @@ impl VLite for Adapter {
                 false,
                 false,
                 |_service, _, request_id, request| async move {
+                    // Fails the call itself, so no stream ever opens.
+                    #[cfg(feature = "graph")]
+                    _service.reject_graph_feed()?;
                     let cursor = if request.cursor.is_empty() {
                         crate::changes::FeedCursor::beginning()
                     } else {
@@ -2184,4 +2192,32 @@ fn request_collection<T: 'static>(request: &T) -> String {
     field!(proto::ReserveImportRequest, collection);
     field!(proto::ExportVectorsRequest, collection);
     String::new()
+}
+
+/// LEG-017 (TEST-015): graph errors keep explicit gRPC codes and the stable
+/// REST code in the trailer.
+#[cfg(all(test, feature = "graph"))]
+mod graph_errors {
+    use super::*;
+
+    #[test]
+    fn every_graph_error_maps_to_failed_precondition_invalid_argument_or_unimplemented() {
+        for (error, http, code) in crate::server::graph_errors::table() {
+            let expected = match http.as_u16() {
+                409 => tonic::Code::FailedPrecondition,
+                422 => tonic::Code::InvalidArgument,
+                501 => tonic::Code::Unimplemented,
+                other => panic!("{code}: unexpected HTTP {other}"),
+            };
+            let status = status(ApiError::from(error), "graph-errors");
+            assert_eq!(status.code(), expected, "{code}");
+            assert_eq!(
+                status
+                    .metadata()
+                    .get(ERROR_CODE_TRAILER)
+                    .and_then(|value| value.to_str().ok()),
+                Some(code)
+            );
+        }
+    }
 }

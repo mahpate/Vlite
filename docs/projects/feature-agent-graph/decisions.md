@@ -430,3 +430,141 @@ allocator bytes, not resident set size. The counters are process-wide, so every
 window runs on the main thread. The example compiles its own copy of the engine
 source through `#[path]`; the extra CI test time is recorded in the PRD (v1.2.14
 "Wiring").
+
+## EPIC-006 maintenance, recovery, change feeds and replicas (v1.2.15, on `main` after `8eb5d7a`; pending review)
+
+These are engineering decisions made autonomously under the user's delegation. No gate is approved. The new code is `src/property_graph/maintain.rs` and `frame::compacted_bodies`; the cfg-gated changes are in `src/format.rs`, `src/maintenance.rs`, `src/logops.rs`, `src/changes.rs`, `src/replica.rs`, `src/lib.rs` and `src/bin/vlite-maintain.rs`.
+
+- **One loader.** `format.rs` no longer has a separate graph-rejecting reader. `load`, `load_with` and `read_log_header(_with)` accept `FLAG_GRAPH` in graph builds, so every caller now either carries graph state or rejects explicitly; none drops it (entry-point table below). The header reader refuses any flag outside `KNOWN_FLAGS | FLAG_GRAPH`, so `loaded.flags & !KNOWN_FLAGS` is 0 or `FLAG_GRAPH` in graph builds and always 0 in default builds. `compact*` and `reencrypt` derive the graph bit from that mask.
+- **Compaction.** `compact*`, `enable_graph` and `strip_graph` all write through `maintenance::write_v5`, which now takes the extra header flags. With `FLAG_GRAPH` it writes the graph state after the vector records and import markers as op-12 frames planned by `frame::compacted_bodies`. For each graph in ID order the frames hold `CreateGraph`, then every node, edge and attachment, then `GraphHighWater` with the graph's node and edge high-water marks. Bodies are split under `MAX_BATCH_ENTRIES` and `MAX_BATCH_BYTES`. Graph, node and edge IDs are kept, and the high-water entry stops a deleted highest node or edge ID from being reused after compact and reopen. As for vector files, compaction drops commit timestamps and restarts sequences, so revisions and `graph_sequence` restart. TEST-008 therefore compares compacted state without revisions; the other operations compare it with revisions.
+- **Copy-outs.** `enable_graph` and `strip_graph` are compactions published through the existing staged, verified `publish_with`, and the source is never modified.
+  - `enable_graph` refuses v1–v3 sources ("run `maintenance::upgrade` first") and sources that are already graph-enabled, both with the new `GraphInvalidOptions(&'static str)`.
+  - `strip_graph` checks `confirm_graph_data_loss` before opening anything (`GraphInvalidOptions`). It returns the existing `GraphsNotEnabled` for a vector-only source. It reports the removed graph, node, edge and attachment counts and keeps the attached records.
+  - For AC-015 "opens in C-1", the test asserts that the output header carries no `FLAG_GRAPH`. Every loader rejects op 12 under such a header, so the output is a plain vector v5 file. No C-1 binary is run in the suite.
+- **Graph counts and checks.** `inspect_graph` and `verify_graph` wrap the unchanged `Inspection` and `Verification` and add `graph_enabled` and `GraphCounts`. They also check the graph invariants and that every attached record is live without expiry (INV-008, INV-009); a violation is `Corrupt` at offset 0. `verify_graph` keeps `verify`'s refusal of an incomplete tail. `verify` now shares `verify_loaded` with it.
+- **Other maintenance (LEG-011).**
+  - `backup*` copies bytes.
+  - `restore*` keeps the source header flags.
+  - `inspect`, `inspect_detail` and `verify*` accept graph files with unchanged result types.
+  - `drill` also compares the restored graph state with the source and fails with a drill error if they differ.
+- **`reencrypt` and `restore_to`.** `reencrypt` keeps every header flag except encryption and reseals op-12 frames like any other frame. `restore_to` copies the source header and cuts at whole commits, so op-12 frames are kept or dropped with their commit.
+- **Upgrade (LEG-010).** In graph builds `upgrade` returns `GraphUnsupportedOperation` before anything is published. The error text names `maintenance::enable_graph` and `maintenance::strip_graph`.
+- **Change feeds (LEG-013, REQ-053).**
+  - `changes::read_log_changes` returns `GraphChangeFeedUnsupported` right after the header is read.
+  - `Database::feed_cursor` and `changes_after` return it before they touch anything.
+  - Vector-only files keep their feeds.
+- **Key errors come first.** The header reader checks the key before the graph checks, so the key error a vector-only file gets wins. `upgrade` takes no key, so an encrypted graph file gets `EncryptionKeyRequired`. A key mismatch on `read_log_changes` gets the key error, not the feed error.
+- **Replicas (LEG-014, REQ-054).** Carry-through, not rejection.
+  - In graph builds, a follower opens, creates, applies, syncs and promotes graph files and replays op-12 frames; a torn graph frame is trimmed by the existing tail repair.
+  - Builds without `graph` still reject at the header with `UnsupportedFeature(4)` before any tail repair.
+  - A vector-only follower in a graph build refuses a graph primary's segment with `ReplicaDiverged("segment header differs from follower")` and is unchanged, because the segment header differs from its own.
+  - **`src/replica.rs` change.** PRD FILE-014 allows a cfg change to `src/replica.rs` only if TEST-008 shows a gap, and it did:
+    - `replica_followers_replay_graph_frames` first failed with `UnsupportedFeature(4)`, because `ReplicaFollower::open` still rejected graph-enabled files.
+    - `Database::replica_extend` in `src/lib.rs` rebuilt the follower from the replayed log without its graph state, so graph state was lost silently.
+    - The fix removes the `open` rejection and assigns the replayed graph state in `replica_extend`.
+  - The REST and gRPC `replication_export` routes therefore need no graph rejection.
+- **CLI.** In graph builds `vlite-maintain` adds `enable-graph SOURCE DESTINATION` and `strip-graph SOURCE DESTINATION --confirm-graph-data-loss`. Like the existing commands, they take no key, so they work only on unencrypted files. The usage text is assembled with a macro: the default build's text is byte-identical, and graph builds append the two commands.
+- **Changes to existing tests.** EPIC-006 deliberately reverses two EPIC-002 assertions in graph builds:
+  - `tests/graph_storage.rs`: `graph_unaware_paths_keep_rejecting_graph_files` asserted `UnsupportedFeature(4)` from maintenance, feeds, replicas and log export. It is replaced by `maintenance_replicas_and_feeds_handle_graph_files_explicitly`, which asserts the EPIC-006 behaviour on the same file. Its unused `assert_graph_rejected` helper is removed.
+  - `tests/graph_compat.rs`: `probe_all` keeps its 35 calls per fixture and the byte-identical source check. Default-build assertions are unchanged (REQ-055 and TEST-002 for graph-unaware builds); graph builds assert each call's EPIC-006 outcome.
+- **Red/green evidence.**
+  - TEST-008 (`tests/graph_maintenance.rs`) was written first. It did not compile until the public functions existed, and it then failed on five behaviours:
+    - replica `open` returned `UnsupportedFeature(4)`;
+    - `upgrade` was not rejected;
+    - `reencrypt` returned `Corrupt { offset: 811 }` because the flag was dropped;
+    - compaction output flags were 0 instead of 4, in the library and in the CLI.
+  - TEST-004 (`tests/graph_recovery.rs`) passed on its first run because it was written after the loader change. It characterises crash and fault behaviour; it did not drive the change.
+- **Verification (Windows, `--locked`, parent `8eb5d7a`; the PRD v1.2.15 changelog has the full run, including the all-features and default workspace totals).**
+  - `cargo fmt --all -- --check` is clean.
+  - The CI graph test step (`--features graph --lib --test graph_storage --test graph_compat --test graph_integrity --test graph_traversal --test graph_maintenance --test graph_recovery`) passes:
+
+    | Suite | Passed | Ignored |
+    |---|---|---|
+    | lib | 179 | 2 |
+    | graph_storage | 109 | 0 |
+    | graph_compat | 6 | 0 |
+    | graph_integrity | 13 | 0 |
+    | graph_traversal | 6 | 0 |
+    | graph_maintenance | 10 | 0 |
+    | graph_recovery | 4 | 0 |
+
+  - Default build:
+
+    | Suite | Passed | Ignored |
+    |---|---|---|
+    | graph_regression | 3 | 0 |
+    | graph_compat | 5 | 0 |
+    | lib | 68 | 2 |
+
+  - These existing suites pass in both builds: maintenance 12, change_feed 6, replica 5, pitr 6, encryption 10, format_v4 6, format_v5 3, smoke_cli 3, compatibility 7, reliability 3 plus 1 ignored, read_only 6 and database 17. graph_regression (3) also passes in the graph build.
+  - `cargo clippy --locked --workspace --all-targets -- -D warnings` passes by default, with `--features graph` and with `--all-features`, including `graph_bench` and `graph_memory`.
+  - `scripts/api_surface.py check` passes with 159 items. With `--features graph` it passes with 200 baseline items and 41 additions allowed under `vlite::property_graph::`. Eight of those are new in EPIC-006: `enable_graph`, `inspect_graph`, `strip_graph`, `verify_graph`, `GraphCounts`, `GraphInspection`, `GraphVerification` and `StripGraphReport`. No addition falls outside that prefix.
+  - The checker reads rustdoc `all.html`, which lists neither enum variants nor re-exports. It therefore cannot see the three new cfg-gated `Error` variants or the planned `vlite::maintenance::` re-exports of the eight items (REQ-003, REQ-004, REQ-051). In rustdoc these re-exports appear only as re-export lines on the `maintenance` page.
+  - The default `vlite-maintain` prints exactly the usage text of the previous source and exits 1, including for `enable-graph` and `strip-graph`.
+
+## EPIC-007 server error surfaces (v1.2.15, on `main` after `8eb5d7a`; pending review)
+
+These are engineering decisions made autonomously under the user's delegation. No gate is approved. Scope: ITEM-027..ITEM-030, LEG-017, LEG-019, LEG-020 (REQ-053, REQ-055). Every server, gRPC and webhook surface that sees a graph-enabled file fails explicitly. Nothing reaches the generic 500, and nothing skips silently. Graph-off builds are unchanged: every edit is `#[cfg(feature = "graph")]`.
+
+### Error mapping (`From<Error> for ApiError`, `src/server.rs`)
+
+| Class | `Error` variants | REST status | gRPC code | Stable code (REST `code`, gRPC `vlite-error-code`) |
+|---|---|---|---|---|
+| State conflict | `GraphsNotEnabled`, `GraphExists`, `GraphNotFound`, `GraphNotEmpty`, `TooManyGraphs`, `GraphKeyExists`, `GraphKeyConflict`, `GraphNodeNotFound`, `GraphEdgeNotFound`, `GraphNodeHasEdges`, `GraphAttachmentConflict`, `GraphAttachmentNotFound`, `GraphRecordNotAttachable`, `GraphAttachedRecord`, `GraphAttachedRecordExpiry`, `GraphCursorStale`, `GraphUnsupportedOperation` | 409 | `FailedPrecondition` | snake_case of the variant name |
+| Invalid input | `GraphsRequireV5`, `InvalidGraphName`, `GraphLimitExceedsCeiling`, `GraphInvalidOptions` | 422 | `InvalidArgument` | snake_case of the variant name |
+| Unsupported surface | `GraphChangeFeedUnsupported` | 501 | `Unimplemented` | `graph_change_feed_unsupported` |
+
+- The gRPC code is derived from the REST status by the existing translation in `src/server/grpc.rs` (`(409, _) => FailedPrecondition`, `(400..=499, _) => InvalidArgument`, and the new `(501, _) => Unimplemented`), so REST and gRPC cannot drift.
+- Rule: a reference to a missing graph entity is a state conflict (409), not 404, because the request is well formed and the resource it names is the graph state. Before v1.2.15 the PRD's LEG-017 row listed "409/400/422/501"; no variant maps to 400, because every graph validation error names an invalid value in a well-formed request, which the server already reports as 422 (`InvalidCollectionName`, `InvalidCollectionSettings` and `InvalidQuery` are the existing examples). The row now says 409/422/501.
+- `graph_code()` is the single source of the stable codes. Its `_ => "internal_error"` arm is unreachable for graph variants and is guarded by the `graph_errors::table()` unit test, which lists every variant, its status and its code. The table is completed by hand: a new graph variant must be added to it, as its doc comment says.
+- Open question for review: `GraphInvalidOptions` is 422 because it means a bad argument (for example `strip_graph` without `confirm_graph_data_loss`). `enable_graph` also returns it for an unsuitable source file, which could be read as 409. The server cannot reach either call (maintenance runs offline on closed files), so the status is defensive. It is unchanged unless the reviewer asks otherwise.
+
+### Change feed surfaces (REQ-053, LEG-019, LEG-020)
+
+- `Service` caches `graph_enabled` once at construction (`Database::is_graph_enabled()`). The flag is a file property that cannot change while a process holds the file (`enable_graph` and `strip_graph` write new files), so no per-request locking is needed.
+- `Service::reject_graph_feed()` returns `GraphChangeFeedUnsupported` (501). It is called first in `GET /v1/changes` and in the gRPC `Changes` and `WatchChanges` handlers, before argument validation, so the answer does not depend on the request. The gRPC handlers still authenticate first.
+- Webhooks: `POST /v1/admin/webhooks` is rejected before validation and stores nothing. The dispatcher never starts a worker on a graph-enabled file. Subscriptions already stored in `webhooks.json` for a graph-enabled file fail startup with `GraphChangeFeedUnsupported`, before any audit, credential, scheduler or webhook state is written (`reject_graph_subscriptions`). An empty or missing store is accepted, and so is a missing admin directory.
+- Replica export (`replication_export` over REST and gRPC) needs no rejection. LEG-014 chose follower carry-through, so graph segments are valid payloads for a graph-feature follower, and a follower without the feature rejects them at the header (`UnsupportedFeature`).
+- The server serves the vector APIs on graph-enabled files in graph builds. Graph-specific server, MCP and SDK surfaces remain later work (EPIC-011 and later).
+
+### Evidence
+
+- `tests/graph_server_surfaces.rs` (TEST-015, `#![cfg(all(feature = "server", feature = "graph"))]`) runs each case on a vector-only file, an empty graph-enabled file and a populated graph-enabled file in the same build:
+  - `leg017_attached_record_writes_fail_explicitly_and_others_match_vector_only`: expiring or deleting (single, batch, import) an attached record is an explicit 409; unattached records keep the vector-only results.
+  - `leg020_rest_change_feed_is_rejected_on_graph_files`: `/v1/changes` is 501 `graph_change_feed_unsupported`; vector-only files keep the feed.
+  - `leg019_webhook_registration_is_rejected_on_graph_files_without_side_effects`: nothing stored, no worker started.
+  - `leg019_startup_with_configured_webhooks_fails_on_graph_files_without_side_effects`: startup fails with `GraphChangeFeedUnsupported` and the admin directory still holds only `webhooks.json`; an empty store is accepted and still starts no worker.
+  - `grpc::leg017_leg020_grpc_rejects_feeds_before_streaming_and_maps_attached_records` (feature `grpc`): `Changes` and `WatchChanges` answer `UNIMPLEMENTED` before any stream opens and before cursor or limit parsing, after authentication; attached-record writes are `FAILED_PRECONDITION`. Each carries the `vlite-error-code` trailer.
+- Unit tests: `server::graph_errors` (the every-variant status and code table) and the gRPC status translation in `src/server/grpc.rs`.
+- The file has no `[[test]]` entry and is gated at file level, so it compiles to an empty test binary in every build without `server` and `graph`. CI runs it in two places: the `--all-features` workspace run, and a dedicated step `--features server,graph`, which also proves that the cfg gaps `--all-features` hides (no `grpc` or `mcp`) compile and pass.
+
+## ITEM-018 TEST-005 matrix and reference model (v1.2.15, on `main` after `8eb5d7a`; pending review)
+
+These are engineering decisions made autonomously under the user's delegation. No gate is approved. ITEM-018 was left In Progress in v1.2.9 with two gaps: the TEST-005 rows LEG-009..LEG-016 and LEG-018, which needed the EPIC-006 and EPIC-007 surfaces, and a file-backed random model that did not reach 10,000 steps per seed.
+
+- **Matrix shape.** `tests/graph_integrity.rs` now has 13 tests: the four v1.2.9 tests for LEG-001..LEG-007 (LEG-008, dropping a collection, cannot reach an attached record) and nine new ones. Each new test runs its operation on the three file states (vector-only v5, graph-enabled without graph data, graph-enabled with nodes, edges and attachments) in the `default` collection and in a named one. Where the operation writes a new file, the test compares the source bytes and its inspection before and after.
+
+  | LEG | Test | What it shows |
+  |---|---|---|
+  | LEG-009 | `compaction_copies_graph_state_flag_and_id_high_water` | `compact*` keeps `FLAG_GRAPH`, the graph state and the node and edge high-water marks; a deleted highest ID is not reused after compact and reopen |
+  | LEG-009 | `compaction_expiry_omits_expired_records_but_never_attached_ones` | expired records are dropped as before; attached records cannot carry an expiry (LEG-004), so none is dropped |
+  | LEG-010 | `upgrade_refuses_graph_files_and_still_upgrades_vector_files` | `GraphUnsupportedOperation` and nothing published for graph files; vector files upgrade unchanged |
+  | LEG-011 | `inspection_verification_backup_restore_and_drill_accept_graph_files` | `inspect*`, `verify*`, `backup*`, `restore*` and `drill` accept graph files and keep the graph state |
+  | LEG-012 | `reencryption_and_point_in_time_restore_carry_graph_frames` | `reencrypt` and `restore_to` keep op-12 frames and the flag |
+  | LEG-013 | `change_feeds_refuse_graph_files_and_write_nothing` | `read_log_changes`, `feed_cursor` and `changes_after` return `GraphChangeFeedUnsupported` and write nothing |
+  | LEG-014 | `replicas_bootstrap_apply_sync_and_promote_graph_files` | followers bootstrap, apply, sync and promote graph files with equal state; a vector-only follower refuses a graph segment and is unchanged |
+  | LEG-015 | `ann_indexes_snapshots_and_disk_ann_ignore_graph_state` | HNSW, ANN snapshots and disk ANN behave as on vector-only files |
+  | LEG-016 | `query_language_has_no_graph_syntax_and_unchanged_results` | six graph-shaped statements fail to parse; vector query results are unchanged (REG-005 pins the parse goldens) |
+
+- **Findings that differ from the plan's wording.** None is a product defect.
+  - Node IDs start at 0, not 1.
+  - Commit counts: on the `default` collection, the vector-only setup makes 2 commits and the graph setups 4; on the named collection they make 3 and 5 (the collection creation is a commit).
+  - `upgrade` of a v4 source writes v4, as before; the LEG-010 vector case asserts the existing behavior.
+  - In the LEG-014 matrix the vector-only follower is a separate file with its own lineage, so its refusal comes from the lineage check ("segment is from another lineage"). The EPIC-006 test above reaches the header check instead. Both are `ReplicaDiverged`, and the follower is unchanged in both.
+  - ANN snapshots report `Loaded` on graph files, as on vector files.
+  - The background HNSW rebuild in `src/rebuild.rs` has no separate graph case; it reads only vector records.
+  - LEG-011 and LEG-012 run on plain files. The encrypted and timestamped variants are in TEST-008 (`tests/graph_maintenance.rs`) and TEST-004 (`tests/graph_recovery.rs`).
+- **LEG-018 (graph-unaware builds).** Two pieces of evidence, because `--workspace --all-features` links `vlite-c` with `graph`:
+  - `tests/graph_compat.rs` in the default build: every graph-unaware entry point returns `UnsupportedFeature(4)` on graph fixtures and leaves the source bytes unchanged.
+  - `scripts/graph_compat_check.py run` builds a revision without `graph` from a clean `git archive` and checks the Rust probe, the C ABI through Python and the Node addon against graph-enabled files. On the candidate tree of this change (an unpublished commit object with the same tree, because the script archives commits, not the working tree), 123 entry-point probes matched: 117 `UnsupportedFeature(4)` and 6 `ReplicaDiverged` (the follower `apply` calls).
+- **Reference model.** `random_batches_are_atomic_and_replay_identically` in `src/property_graph/tests.rs` now runs 4 seeds × 10,000 steps, each on its own file, mixing graph batches with vector puts and deletes and reopening every 500 steps. Each failed step leaves the file length and the graph state unchanged, the invariants hold after every step, and every reopen reproduces the live state including `graph_sequence`. The seeds run in parallel threads because every commit is synced. The engine-level model (20 seeds × 10,000 mutations) is unchanged.
