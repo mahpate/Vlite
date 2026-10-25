@@ -30,7 +30,7 @@ class Page(HTMLParser):
             self.ids.add(attrs["id"])
         if tag == "section" and attrs.get("id"):
             self.sections.append(attrs["id"])
-        for key in ("href", "src"):
+        for key in ("href", "src", "data-tour", "data-poster"):
             if attrs.get(key):
                 self.links.append(attrs[key])
 
@@ -47,7 +47,17 @@ def check(root):
     }
     errors = []
     for path, page in pages.items():
+        if path == root / "dashboard.html":
+            if page.sections != ["screenshots", "start", "workflows"]:
+                errors.append("dashboard.html: expected tours, setup, then workflows")
         if path == root / "index.html":
+            dashboard = pages.get(root / "dashboard.html")
+            if dashboard:
+                normalize = lambda link: link.removeprefix("./")
+                if [normalize(link) for link in page.primary_links] != [
+                    normalize(link) for link in dashboard.primary_links
+                ]:
+                    errors.append("index.html: primary links must match the dashboard navigation")
             for required in ("quickstart", "dashboard-preview", "products", "features", "data-safety"):
                 if required not in page.sections:
                     errors.append(f"index.html: missing landing section {required}")

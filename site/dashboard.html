@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="assets/style.css">
   <script src="assets/site.js"></script>
 </head>
-<body>
+<body class="dashboard-product">
 <header class="nav">
   <div class="wrap">
     <a class="brand" href="./"><img src="assets/logo.svg" alt="">VLite</a>
@@ -43,36 +43,9 @@
       <p>This is the dashboard product and setup page, not a hosted database or public live console. Run your own instance using the instructions below.</p>
       <div class="cta">
         <a class="btn primary" href="#start">Run the dashboard</a>
-        <a class="btn" href="#screenshots">See screenshots</a>
+        <a class="btn" href="#screenshots">Explore dashboard tours</a>
         <a class="btn" href="docs/CONSOLE.html">Dashboard guide</a>
         <a class="btn" href="docs/CONSOLE-ADMIN.html">Administration guide</a>
-      </div>
-    </div>
-  </section>
-  <section>
-    <div class="wrap">
-      <div class="section-head">
-        <h2>From records to operations</h2>
-        <p>Version 0.4.1 builds include these dashboard updates; older v0.3.0 images do not include every feature.
-          Check <a href="https://github.com/mahpate/Vlite/releases/tag/v0.4.1">release publication</a> before selecting images.</p>
-      </div>
-      <div class="grid cols-2">
-        <div class="card">
-          <h3>Focused collection workflows</h3>
-          <p>Six workspaces with Records, Write, Search, Index and Settings collection tabs. Use keyboard navigation or the mobile drawer without losing in-page drafts.</p>
-        </div>
-        <div class="card">
-          <h3>Readable record inspection</h3>
-          <p>Separate Payload, Metadata, Vector and Raw JSON panels, bounded previews, typed metadata editing and explicit mutation confirmations.</p>
-        </div>
-        <div class="card">
-          <h3>Search and ingestion</h3>
-          <p>Exact and ANN search, typed filters, validated JSON writes, bounded import/export and copy-as-code. Failed search refreshes retain prior results with an explicit error.</p>
-        </div>
-        <div class="card">
-          <h3>Metrics and live logs</h3>
-          <p>Request/search rates, latency percentiles, route tables, sparklines and filtered JSONL log exports. Global metrics/log views require a bootstrap admin token. Logs are a bounded, memory-only ring, not a durable archive.</p>
-        </div>
       </div>
     </div>
   </section>
@@ -80,33 +53,48 @@
     <div class="wrap">
       <div class="section-head">
         <div class="kicker">Inside the dashboard</div>
-        <h2>A closer look at the workspace</h2>
-        <p>Development captures of the dashboard included in v0.4.1, using five synthetic demonstration records in an isolated database.
-          Metrics and timings reflect this small demo session, not a performance benchmark. Select an image to view it at full size.</p>
+        <h2>See the dashboard in action</h2>
+        <p>Three short animated PNG tours, captured from the official v0.4.1 container with five synthetic records in an isolated database.
+          Each tour advances through real workspace captures once. These are representative workflows, not a live console or an exhaustive demonstration of every control.
+          Metrics and timings are demo activity, not benchmarks.</p>
+        <p>Nothing plays automatically. Select Play to load an animation, or open its still image for a closer look.
+          Reduced-motion preferences keep the tours static.</p>
       </div>
-      <div class="dashboard-gallery">
-        <figure>
-          <a href="assets/dashboard/collections.png" aria-label="View full-size collection workspace screenshot">
-            <img src="assets/dashboard/collections.png" alt="VLite Collections workspace with record browsing, typed title and category metadata, and a selected-record inspector." width="1600" height="1400" loading="lazy" decoding="async">
+      <div class="dashboard-tours">
+        <figure class="dashboard-tour">
+          <a href="assets/dashboard/records-tour-poster.png" aria-label="Open full-size records tour still image">
+            <img id="records-tour" src="assets/dashboard/records-tour-poster.png" alt="Collections workspace with five synthetic records; the tour also shows Payload, Metadata, Vector, Raw JSON, Write, Index and Settings views." width="1440" height="1100" loading="lazy" decoding="async">
           </a>
-          <figcaption><strong>Collections and records.</strong> Browse typed metadata and inspect a selected record without leaving the collection workflow.</figcaption>
+          <figcaption><h3>1. Collections and records</h3><p>Browse records, inspect metadata and vectors, then explore the write editor, index controls and collection settings. Editor and settings frames show the controls; they do not demonstrate mutations.</p></figcaption>
+          <button class="btn" type="button" data-tour="assets/dashboard/records-tour.png" data-poster="assets/dashboard/records-tour-poster.png" data-duration="17600" aria-controls="records-tour" aria-label="Play collections and records tour" aria-pressed="false" hidden>Play tour &middot; 18 seconds</button>
+          <span class="tour-status" role="status"></span>
         </figure>
-        <figure>
-          <a href="assets/dashboard/search.png" aria-label="View full-size search playground screenshot">
-            <img src="assets/dashboard/search.png" alt="VLite Search playground showing an exact vector query, three nearest neighbors ordered by distance, and a readable payload inspector." width="1600" height="1400" loading="lazy" decoding="async">
+        <figure class="dashboard-tour">
+          <a href="assets/dashboard/search-tour-poster.png" aria-label="Open full-size search tour still image">
+            <img id="search-tour" src="assets/dashboard/search-tour-poster.png" alt="Search playground with a real vector query and five nearest neighbors; the tour shows result inspection and approximate search." width="1440" height="1100" loading="lazy" decoding="async">
           </a>
-          <figcaption><strong>Search and inspection.</strong> Enter a query, review distances and open payload, metadata, vector or raw JSON views.</figcaption>
+          <figcaption><h3>2. Search and inspection</h3><p>Run an exact query, inspect a returned record, then run approximate search against the same tiny dataset. Bring your own vectors; the dashboard does not generate embeddings.</p></figcaption>
+          <button class="btn" type="button" data-tour="assets/dashboard/search-tour.png" data-poster="assets/dashboard/search-tour-poster.png" data-duration="6600" aria-controls="search-tour" aria-label="Play search and inspection tour" aria-pressed="false" hidden>Play tour &middot; 7 seconds</button>
+          <span class="tour-status" role="status"></span>
         </figure>
-        <figure>
-          <a href="assets/dashboard/observability.png" aria-label="View full-size observability screenshot">
-            <img src="assets/dashboard/observability.png" alt="VLite Observability workspace showing live request and search metrics, latency cards, sparklines and route counters for the demo server." width="1600" height="1400" loading="lazy" decoding="async">
+        <figure class="dashboard-tour">
+          <a href="assets/dashboard/operations-tour-poster.png" aria-label="Open full-size operations tour still image">
+            <img id="operations-tour" src="assets/dashboard/operations-tour-poster.png" alt="Database overview with connection and storage statistics; the tour visits Observability, Administration and Developer Console." width="1440" height="1100" loading="lazy" decoding="async">
           </a>
-          <figcaption><strong>Server observability.</strong> Monitor request activity, latency and route counters from the same interface. The live log tail is further down this workspace.</figcaption>
+          <figcaption><h3>3. Database operations</h3><p>Move between Overview, Observability, Administration and Developer Console. Review server activity and discover maintenance and request-inspection controls without executing destructive operations.</p></figcaption>
+          <button class="btn" type="button" data-tour="assets/dashboard/operations-tour.png" data-poster="assets/dashboard/operations-tour-poster.png" data-duration="8800" aria-controls="operations-tour" aria-label="Play database operations tour" aria-pressed="false" hidden>Play tour &middot; 9 seconds</button>
+          <span class="tour-status" role="status"></span>
         </figure>
       </div>
+      <details class="dashboard-stills"><summary>More full-size screenshots</summary>
+        <p><a href="assets/dashboard/collections.png">Collection browsing and record inspection</a> &middot;
+          <a href="assets/dashboard/search.png">Search results and payload inspection</a> &middot;
+          <a href="assets/dashboard/observability.png">Metrics and route counters</a></p>
+        <p>Earlier development captures of the dashboard included in v0.4.1, also using five synthetic records.</p>
+      </details>
     </div>
   </section>
-  <section id="start" class="alt">
+  <section id="start">
     <div class="wrap">
       <div class="section-head"><h2>Run locally from source</h2></div>
       <p>Clone the repository and follow the <a href="docs/INSTALL.html">installation guide</a>.
@@ -122,6 +110,26 @@
         Tokens stay in page memory and are cleared on reload or Disconnect.
         Keep the default loopback bindings; use the documented
         <a href="docs/DOCKER-OPERATIONS.html">HTTPS deployment</a> before remote access.</p>
+    </div>
+  </section>
+  <section id="workflows" class="alt">
+    <div class="wrap">
+      <div class="section-head">
+        <h2>From records to operations</h2>
+        <p>These workspaces are included in v0.4.1; older v0.3.0 images do not include every feature.
+          Check the <a href="https://github.com/mahpate/Vlite/releases/tag/v0.4.1">release publication</a> before selecting images.</p>
+      </div>
+      <div class="grid cols-2">
+        <div class="card"><h3>Collections and record editing</h3>
+          <p>Six workspaces with Records, Write, Search, Index and Settings collection tabs. Inspect Payload, Metadata, Vector and Raw JSON views, edit typed metadata and review explicit mutation confirmations.</p></div>
+        <div class="card"><h3>Search and ingestion</h3>
+          <p>Exact and ANN search, typed filters, validated JSON writes, bounded import/export and copy-as-code. Failed search refreshes retain prior results with an explicit error.</p></div>
+        <div class="card"><h3>Metrics and live logs</h3>
+          <p>Request/search rates, latency percentiles, route tables, sparklines and filtered JSONL log exports. Global metrics/log views require a bootstrap admin token. Logs are a bounded, memory-only ring, not a durable archive.</p></div>
+        <div class="card"><h3>Administration and developer tools</h3>
+          <p>Inspect health and credentials, review maintenance operations and inspect API requests. Follow the <a href="docs/CONSOLE-ADMIN.html">administration guide</a> for permissions, backups and operational safeguards.</p></div>
+      </div>
+      <h3>Know the boundaries</h3>
       <p>The dashboard does not generate embeddings. Writes replace records and require confirmation.
         Stopping a browser wait does not cancel server work or retry it. For offline workflows, use the
         <a href="docs/TOOLS.html">VLite CLI tools</a>; stop the server before opening its file with an exclusive-lock tool.</p>
