@@ -47,14 +47,59 @@
       <p class="lead">Reproducible performance numbers for VLite's embedded engine, measured in-process
         against zvec, Chroma, LanceDB and FAISS, plus a separate server tier with Qdrant and pgvector.</p>
       <div class="cta">
-        <a class="btn primary" href="#results">Results</a>
+        <a class="btn primary" href="#current-source">Latest source measurements</a>
+        <a class="btn" href="#results">Multi-engine results</a>
         <a class="btn" href="#reproduce">Reproduce</a>
         <a class="btn" href="./#features">VLite features</a>
       </div>
     </div>
   </section>
 
-  <section id="summary" class="alt">
+  <section id="current-source" class="alt">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="kicker">Measured October 25, 2026 UTC</div>
+        <h2>Latest source: vector regression and optimization priorities</h2>
+        <p>The first attempt was contended and is excluded. These replacement measurements began
+          after the graph session confirmed its agents and benchmark were paused.
+          This was a coordinated shared-host window, not dedicated hardware.</p>
+        <p>Five repetitions per workload compare the v0.4.1 tag with committed source <code>059650e</code>,
+          default and graph-enabled. This source is not a new release. Uncommitted work was excluded.
+          WSL2 x86_64, Xeon Platinum 8370C, Rust release builds; 4,096 synthetic vectors &times; 128 dimensions,
+          100 queries, squared L2, k=10, HNSW m=16 and construction/search ef=100.</p>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Build</th><th>Exact p50</th><th>ANN p50 / p95</th><th>Recall@10</th><th>Index build</th><th>Ingest</th><th>Reopen</th></tr></thead>
+        <tbody>
+          <tr><td>v0.4.1 tag</td><td>0.914 ms</td><td>0.649 / 0.743 ms</td><td>0.941</td><td>3,787 ms</td><td>56,985 vectors/s</td><td>35.681 ms</td></tr>
+          <tr><td>059650e, default</td><td>0.918 ms</td><td>0.635 / 0.735 ms</td><td>0.941</td><td>3,747 ms</td><td>55,956 vectors/s</td><td>37.920 ms</td></tr>
+          <tr><td>059650e, graph enabled</td><td>0.934 ms</td><td>0.635 / 0.725 ms</td><td>0.941</td><td>3,763 ms</td><td>56,649 vectors/s</td><td>36.747 ms</td></tr>
+        </tbody>
+      </table></div>
+      <p>Static values are medians of trial-level statistics. Whole-child peak RSS was about 11.84 MiB in each variant,
+        including dataset and oracle. Graph-enabled here means vector-path overhead only, not graph traversal.
+        Small differences do not establish equivalence, a speedup or a regression.</p>
+      <div class="grid cols-2">
+        <div class="card"><h3>First priority: mixed-write tail latency</h3>
+          <p>With 16 durable replacements per query, lazy rebuilds push median trial ANN p99 to
+            3,753 / 3,745 / 3,749 ms for the tag / default / graph builds.
+            All mixed trials rebuild at queries 17, 34, 51, 68 and 85.
+            Measure background maintenance together with availability, not latency alone.</p></div>
+        <div class="card"><h3>Second priority: quality before speed</h3>
+          <p>Static recall is 0.941, below a 0.99 target; mixed recall is 0.954.
+            Exact IDs and distances match the independent oracle.
+            Sweep ef and profile the roughly 3.75–3.79-second construction cost before claiming an ANN improvement.</p></div>
+      </div>
+      <p class="muted">Thirty fresh children, one seed/metric, sequential queries, warm filesystem and no new cross-engine measurements.
+        Pre-child WSL CPU was median 0.094%, maximum 3.778%; Windows-host activity was not continuously measured.
+        Historical comparison results below remain unchanged.
+        <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/results/vector-revisions-4096-128d-wsl-quiet.json">Raw replacement samples and hashes</a>
+        &middot; <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/RESULTS.md">Full findings and limitations</a>
+        &middot; <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/README.md">Reproduction</a></p>
+    </div>
+  </section>
+
+  <section id="summary">
     <div class="wrap">
       <div class="section-head">
         <div class="kicker">Summary</div>

@@ -19,6 +19,64 @@ number on a small synthetic workload.
 
 ## Native VLite benchmark
 
+### Paired source-revision regression, October 25, 2026 UTC
+
+The [five-repetition revision campaign](results/vector-revisions-4096-128d-wsl-quiet.json)
+compares the official v0.4.1 tag (`37645fb`) with committed source `059650e`,
+both default and opt-in `graph` builds. The package version remains 0.4.1;
+the source revision is **not a new released version**. Uncommitted engine/server
+work was excluded by building isolated `git archive` exports.
+
+Each variant runs five fresh children for each of two workloads: 4,096 uniform
+SplitMix64 vectors x 128 dimensions, 100 independent queries, squared L2,
+k=10, seed 42, HNSW m=16 / construction ef=100 / search ef=100, durable
+100-record ingest batches, and either zero or 16 replacements per ANN query.
+Each child closes/reopens the database, verifies the count, performs one
+untimed warmup per query mode, checks exact IDs/distances against an independent
+full-sort oracle and independently checks mixed-query results. Exact timing
+always precedes ANN; in mixed children the exact baseline is the initial state,
+not a second measurement of the post-mutation state.
+
+The [first attempt](results/vector-revisions-4096-128d-wsl.json) is explicitly
+archived as contended and is excluded from the reference tables. After overlapping
+work was reported, the graph session explicitly confirmed at 18:47 PDT that both
+coder agents were paused and its measurement campaign was stopped. The replacement
+began at 01:49:13 UTC, using the same prebuilt binaries; the session was notified
+when it finished. This coordinated window is still shared hardware, not isolation.
+
+All binaries were built first with the same Rust 1.99.1 release toolchain.
+Variant order rotates, and static/mixed order alternates. There were no detected
+Windows or WSL cargo/rustc processes immediately before collection. Two-second
+pre-child WSL CPU samples had median 0.094%, range 0.031–3.778%; these readings do
+not rule out Windows-host contention. The host is shared and unpinned:
+WSL2 / Linux x86_64, Intel Xeon Platinum 8370C, 16 logical CPUs. Durability uses
+the default sync-before-ack behavior on the WSL filesystem; no power-loss,
+cold-machine, network or native-Windows measurement is implied.
+
+Reproduce after exporting the two commits into separate source directories:
+
+```sh
+git archive v0.4.1 | tar -x -C /path/to/release
+git archive 059650e | tar -x -C /path/to/current
+git rev-parse v0.4.1 > /path/to/release/source-commit.txt
+git rev-parse 059650e > /path/to/current/source-commit.txt
+# In each export, use the same toolchain and separate target directories:
+cargo build --locked --release --bin vlite-bench --target-dir /path/to/target
+# For the third binary, build current with --features graph and a third target.
+python benchmarks/revision_campaign.py \
+  --variant release-0.4.1 /path/to/release /path/to/release-target/release/vlite-bench default \
+  --variant main-default /path/to/current /path/to/current-target/release/vlite-bench default \
+  --variant main-graph /path/to/current /path/to/graph-target/release/vlite-bench graph \
+  --output new-vector-revisions.json
+```
+
+The Linux runner requires `/proc`, Python 3 and `rustc` (the recorded run used
+`/root/.cargo/bin/rustc`). It creates its output exclusively, persists every
+completed child and records failures instead of overwriting historical reports.
+Do not build, test or run other benchmarks during timing. The graph-enabled
+variant measures **vector-path overhead**, not graph traversal or graph-store
+capacity; the separate graph reference campaign answers those questions.
+
 ### Mixed-load maintenance regression
 
 `examples/maintenance_mixed_load.rs` is a seeded correctness workload with

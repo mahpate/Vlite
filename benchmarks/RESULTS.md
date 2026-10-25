@@ -5,6 +5,67 @@ See [methodology and reproduction](README.md) before interpreting the numbers.
 
 No zvec, Milvus, Weaviate, FAISS or other unmeasured engine results are inferred.
 
+## Current-source vector regression, October 25, 2026 UTC
+
+The first attempt was contended and is retained separately, not used below.
+These replacement results were collected after the graph session explicitly
+confirmed both coder agents paused and its other benchmark stopped. The window
+began at 01:49:13 UTC; the same prebuilt binaries were used. This remains shared,
+unpinned hardware, not a dedicated benchmark host.
+
+[Raw report: all 30 replacement children](results/vector-revisions-4096-128d-wsl-quiet.json).
+Five repetitions per variant/workload, 4,096 x 128D synthetic vectors, 100
+queries, squared L2, k=10, m=16, construction/search ef=100. Release binaries
+use identical Rust 1.99.1 settings on WSL2 x86_64 / Xeon Platinum 8370C.
+`059650e` is committed development source, **not a new release**; the baseline
+is the v0.4.1 tag `37645fb`. Dirty engine/server changes were not built.
+See [full methodology and reproduction](README.md#paired-source-revision-regression-october-25-2026-utc).
+
+Static workloads, medians of trial-level measurements:
+
+| Build | Exact p50 (ms) | ANN p50 / p95 (ms) | Recall@10 | Index build (ms) | Ingest (vectors/s) | Reopen (ms) | Whole-child peak RSS (MiB) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| v0.4.1 tag, default | 0.914 | 0.649 / 0.743 | 0.941 | 3,787 | 56,985 | 35.681 | 11.824 |
+| `059650e`, default | 0.918 | 0.635 / 0.735 | 0.941 | 3,747 | 55,956 | 37.920 | 11.840 |
+| `059650e`, graph enabled | 0.934 | 0.635 / 0.725 | 0.941 | 3,763 | 56,649 | 36.747 | 11.836 |
+
+Mixed workloads commit 16 replacements before each ANN query. The write column
+is the pooled median of all 500 durable 16-record batch samples per variant.
+ANN p99 includes synchronous rebuilds; writes are timed separately.
+
+| Build | ANN p50 / p95 (ms) | ANN p99 (ms) | Recall@10 | Durable batch p50 (ms) |
+|---|---:|---:|---:|---:|
+| v0.4.1 tag, default | 0.773 / 1.089 | 3,753 | 0.954 | 1.290 |
+| `059650e`, default | 0.785 / 1.119 | 3,745 | 0.954 | 1.315 |
+| `059650e`, graph enabled | 0.790 / 1.038 | 3,749 | 0.954 | 1.318 |
+
+**Interpretation and optimization priorities:**
+
+- **No material speedup or regression established.** Source ANN medians are
+  about 2% lower than the tag while other metrics vary. Five repetitions on a
+  shared host do not establish equivalence or a production gain.
+  No graph nodes or edges were stored.
+- **Recall is below a 0.99 quality target.** Every static trial returns aggregate
+  recall 0.941 and every mixed trial 0.954; exact oracle agreement is 1.0.
+  An ef/recall sweep on realistic embeddings should precede selecting a faster
+  ANN configuration. Equal configurations retain equal recall across builds.
+- **Lazy rebuilds dominate mixed-query tails.** Every mixed child rebuilds at
+  queries 17, 34, 51, 68 and 85. Investigate ready-only/background maintenance
+  with availability and rebuild-publication lag reported together; do not hide
+  failed/rejected queries to improve latency. Construction itself costs about
+  3.75–3.79 seconds, so profile construction before tuning the sub-millisecond query.
+- **Reopen and durability are separate budgets.** Reopen is approximately
+  36–38 ms for the static file, while a durable 16-record replacement batch is
+  about 1.29–1.32 ms in mixed runs. Use replay/codec and sync component profiles
+  before changing either path. Do not weaken commit acknowledgments for speed.
+
+The small uniform dataset, one seed/metric, warm filesystem, single sequential
+reader, exact-before-ANN order and shared WSL host limit generalization. RSS
+includes dataset, oracle and all phases, not marginal index memory. Pre-child
+WSL CPU was median 0.094%, maximum 3.778%; Windows-host load was not continuously
+measured. These results **supplement**, not replace, older multi-engine and
+real-embedding tables below. No new zvec/Qdrant/FAISS ranking is claimed.
+
 ## Release 0.2.0 real-embedding regression
 
 [Final-source Windows campaign](results/release02-glove-windows.json) measures
