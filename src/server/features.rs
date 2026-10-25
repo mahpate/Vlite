@@ -678,7 +678,16 @@ async fn search_disk_ann(
         .run_read(move |db| {
             let cid = open(db, &role, &target)?;
             let path = dir.join(format!("disk-ann-{cid}.dann"));
-            let index = crate::DiskAnnIndex::open(path, crate::DiskAnnOptions::default())?;
+            let index = match crate::DiskAnnIndex::open(path, crate::DiskAnnOptions::default()) {
+                Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(ApiError::new(
+                        StatusCode::CONFLICT,
+                        "disk_ann_not_built",
+                        "no disk ANN sidecar exists for this collection; build it first",
+                    ));
+                }
+                other => other?,
+            };
             db.search_disk_ann(&index, &request.vector, request.k, request.ef_search)
                 .map_err(ApiError::from)
         })

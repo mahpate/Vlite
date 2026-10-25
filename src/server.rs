@@ -1379,6 +1379,36 @@ impl From<Error> for ApiError {
                 "invalid_input",
                 error.to_string(),
             ),
+            // Change-feed, PITR and disk-index failures are caused by the
+            // request or by the file's state, never by the server; the codes
+            // match the C, Python and Node bindings.
+            Error::InvalidCursor(_) => Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_cursor",
+                error.to_string(),
+            ),
+            Error::InvalidRestoreTarget(_) => Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_restore_target",
+                error.to_string(),
+            ),
+            Error::CursorCompacted { .. } => {
+                Self::new(StatusCode::CONFLICT, "cursor_compacted", error.to_string())
+            }
+            Error::CursorAhead { .. } => {
+                Self::new(StatusCode::CONFLICT, "cursor_ahead", error.to_string())
+            }
+            Error::TimestampsUnavailable => Self::new(
+                StatusCode::CONFLICT,
+                "timestamps_unavailable",
+                error.to_string(),
+            ),
+            Error::StaleIndex => Self::new(StatusCode::CONFLICT, "stale_index", error.to_string()),
+            Error::SidecarUnavailable(_) => Self::new(
+                StatusCode::CONFLICT,
+                "sidecar_unavailable",
+                error.to_string(),
+            ),
             Error::CommitIndeterminate(_) => {
                 logs::stderr(
                     "error",

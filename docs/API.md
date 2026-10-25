@@ -47,8 +47,12 @@ contents are replaced as one atomic record-vector operation.
 `GET /v1/changes?cursor=<token>&limit=1000` returns committed events, a durable
 `next_cursor`, the observed head and `has_more`. The initial request without a
 cursor starts at the beginning of retained history. Commits are never split;
-`limit` is an approximate maximum. Cursor compaction errors require a full
-consumer resync. The change feed and replication export need a format V4 or
+`limit` is an approximate maximum. Cursor problems are client errors, never
+HTTP 500: a damaged token answers 422 `invalid_cursor`; a token taken before a
+compaction, restore or upgrade answers 409 `cursor_compacted` and the consumer
+must resync from a fresh snapshot; a cursor (or replication `after_sequence`)
+past the head of the log answers 409 `cursor_ahead`. The change feed and
+replication export need a format V4 or
 newer file: on a V1–V3 file both routes answer HTTP 409 `requires_format_v4`
 (`features.change_feed` in `GET /v1/capabilities` tells which). The server
 never upgrades a file automatically.
@@ -58,12 +62,17 @@ whole-commit, checksummed log segment as base64. This is a shipping primitive,
 not a network follower service; callers must deliver the segment to
 `ReplicaFollower` out of band. `POST /v1/admin/restores` creates a new copy from
 an existing admin backup. Optional `sequence` or `timestamp_ms` selects a PITR
-target. A restore never replaces the active database; select it for the next
+target. A `sequence` beyond the end of the backup's log answers 422
+`invalid_restore_target`; `timestamp_ms` on a file created without commit
+timestamps answers 409 `timestamps_unavailable` (restore by `sequence`
+instead). A restore never replaces the active database; select it for the next
 startup through the existing admin selection route.
 
 `POST /v1/collections/{collection}/index/disk-ann` builds the collection's
 rebuildable sidecar under `VLITE_ADMIN_DIR`; `POST .../search/disk-ann` requires
-a fresh sidecar. Disk ANN sidecars are unavailable for encrypted databases.
+a fresh sidecar: with none built it answers 409 `disk_ann_not_built`, and after
+any later commit 409 `stale_index` (build it again). Disk ANN sidecars are
+unavailable for encrypted databases (409 `sidecar_unavailable`).
 
 `GET /v1/database` reports `is_encrypted` and a decimal-string
 `encryption_key_id`; secret key material is never returned. The server accepts

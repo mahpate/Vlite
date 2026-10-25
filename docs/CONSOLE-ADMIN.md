@@ -91,7 +91,10 @@ Configuration flags are not permission grants; the server enforces both.
 - **Webhooks / PITR:** list/create/delete subscriptions and inspect delivery
   status; restore a selected sequence or timestamp into a new copy. Webhook
   secrets are not redisplayed. Webhooks and backup-based recovery require an
-  admin directory. PITR creation does not select the copy for restart.
+  admin directory. PITR creation does not select the copy for restart. A
+  sequence beyond the backup's log is rejected with 422
+  `invalid_restore_target`, and a timestamp on a file created without commit
+  timestamps with 409 `timestamps_unavailable`; restore by sequence instead.
 - **TLS certificates:** after an operator changes the host's certificate/key
   and optional client CA files, validate and reload all registered file-backed
   native TLS identities. All candidates validate before swapping; bad files
@@ -105,7 +108,9 @@ Configuration flags are not permission grants; the server enforces both.
   `read` over `*`, when the server advertises the route. Downloaded segments
   contain database data. Applying them needs an external replica workflow. A
   format v1–v3 file answers 409 `requires_format_v4`; upgrading remains an
-  explicit offline operator step.
+  explicit offline operator step. An `after_sequence` beyond the end of the log
+  answers 409 `cursor_ahead`; start again from the replica's last applied
+  sequence or from 0.
 
 Mutations retain confirmation dialogs and serialized, generation-checked
 requests; there are no automatic mutation retries or simulated successes.

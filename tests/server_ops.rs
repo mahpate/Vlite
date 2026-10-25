@@ -13,7 +13,9 @@ use serde_json::{Value, json};
 use std::{path::Path, time::Duration};
 use tower::ServiceExt;
 use vlite::{
-    Database, FormatVersion,
+    CreateOptions, Database, EncryptionKey, FormatVersion,
+    changes::FeedCursor,
+    maintenance,
     server::{BearerToken, ServerOptions, Service, configured_admin_router},
 };
 
@@ -510,6 +512,143 @@ async fn change_feed_routes_report_requires_format_v4_on_old_files() {
         None,
     )
     .await;
+    service.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn change_feed_cursor_failures_are_client_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("feed.vlite");
+    let mut db = v4(&path);
+    for id in 1..=5u64 {
+        db.put(id, &[1.0, id as f32], b"").unwrap();
+    }
+    let (service, app) = start(db, options(&dir.path().join("admin")));
+    let page = admin(&app, "GET", "/v1/changes", None).await;
+    let cursor = page["next_cursor"].as_str().unwrap().to_owned();
+    let head: u64 = page["head"].as_str().unwrap().parse().unwrap();
+
+    let (status, error) = call(&app, Some(ADMIN), "GET", "/v1/changes?cursor=garbage", None).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(error["error"]["code"], "invalid_cursor");
+
+    let mut ahead = FeedCursor::from_token(&cursor).unwrap();
+    ahead.sequence += 1000;
+    for uri in [
+        format!("/v1/changes?cursor={}", ahead.to_token()),
+        format!(
+            "/v1/admin/replication/export?after_sequence={}&max_bytes=4096",
+            head + 1000
+        ),
+    ] {
+        let (status, error) = call(&app, Some(ADMIN), "GET", &uri, None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{uri}: {error}");
+        assert_eq!(error["error"]["code"], "cursor_ahead", "{uri}");
+    }
+    service.close().await.unwrap();
+
+    // Compaction starts a new lineage, so the old cursor can no longer be honoured.
+    let compacted = dir.path().join("compacted.vlite");
+    maintenance::compact(&path, &compacted).unwrap();
+    let (service, app) = start(
+        Database::open(&compacted).unwrap(),
+        options(&dir.path().join("admin-compacted")),
+    );
+    let uri = format!("/v1/changes?cursor={cursor}");
+    let (status, error) = call(&app, Some(ADMIN), "GET", &uri, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert_eq!(error["error"]["code"], "cursor_compacted");
+    service.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn restore_targets_the_log_cannot_serve_are_client_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = v4(&dir.path().join("db.vlite"));
+    db.put(1, &[1.0, 0.0], b"").unwrap();
+    db.put(2, &[0.0, 1.0], b"").unwrap();
+    let (service, app) = start(db, options(&dir.path().join("admin")));
+    let backup = admin(&app, "POST", "/v1/admin/backups", None).await["name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let restore = |target: Value| {
+        let mut body = json!({"backup": backup});
+        body.as_object_mut()
+            .unwrap()
+            .extend(target.as_object().unwrap().clone());
+        call(&app, Some(ADMIN), "POST", "/v1/admin/restores", Some(body))
+    };
+    let (status, error) = restore(json!({"sequence": 9999})).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(error["error"]["code"], "invalid_restore_target");
+    // This file was created without commit timestamps.
+    let (status, error) = restore(json!({"timestamp_ms": 5})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert_eq!(error["error"]["code"], "timestamps_unavailable");
+    // A revision inside the log still restores.
+    let (status, restored) = restore(json!({"sequence": 1})).await;
+    assert_eq!(status, StatusCode::CREATED, "{restored}");
+    assert_eq!(restored["inspection"]["live_records"], 1);
+    service.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn disk_index_failures_are_client_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = v4(&dir.path().join("db.vlite"));
+    for id in 1..=3u64 {
+        db.put(id, &[1.0, id as f32], b"").unwrap();
+    }
+    let (service, app) = start(db, options(&dir.path().join("admin")));
+    let search = json!({"vector": [1.0, 1.0], "k": 1, "ef_search": 16});
+    let probe = "/v1/collections/default/search/disk-ann";
+    let (status, error) = call(&app, Some(ADMIN), "POST", probe, Some(search.clone())).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert_eq!(error["error"]["code"], "disk_ann_not_built");
+    admin(
+        &app,
+        "POST",
+        "/v1/collections/default/index/disk-ann",
+        Some(json!({})),
+    )
+    .await;
+    let fresh = admin(&app, "POST", probe, Some(search.clone())).await;
+    assert_eq!(fresh["hits"].as_array().unwrap().len(), 1, "{fresh}");
+    // Any commit after the build leaves the sidecar describing an older state.
+    admin(
+        &app,
+        "PUT",
+        "/v1/collections/default/vectors/9",
+        Some(json!({"vector": [1.0, 9.0]})),
+    )
+    .await;
+    let (status, error) = call(&app, Some(ADMIN), "POST", probe, Some(search)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert_eq!(error["error"]["code"], "stale_index");
+    service.close().await.unwrap();
+
+    // Encrypted databases never get plaintext sidecars.
+    let encrypted = Database::create_with_options(
+        dir.path().join("encrypted.vlite"),
+        2,
+        CreateOptions {
+            encryption: Some(EncryptionKey::from_bytes([1; 32])),
+            ..CreateOptions::default()
+        },
+    )
+    .unwrap();
+    let (service, app) = start(encrypted, options(&dir.path().join("admin-encrypted")));
+    let (status, error) = call(
+        &app,
+        Some(ADMIN),
+        "POST",
+        "/v1/collections/default/index/disk-ann",
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert_eq!(error["error"]["code"], "sidecar_unavailable");
     service.close().await.unwrap();
 }
 
