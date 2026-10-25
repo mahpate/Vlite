@@ -4,30 +4,26 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>VLite | Single-file vector database, embedded or self-hosted</title>
-  <meta name="description" content="VLite is a single-file vector database written in Rust. Embed it in Rust, Python, Node.js or C, or run it as a REST/gRPC service with a web dashboard.">
+  <meta name="description" content="VLite is a single-file vector database written in Rust. Embed vector search in your application or run a self-hosted REST/gRPC service with a web dashboard.">
   <meta property="og:title" content="VLite | Single-file vector database">
-  <meta property="og:description" content="Durable single-file vector storage with exact and HNSW search, typed filters, REST, gRPC and a web dashboard.">
+  <meta property="og:description" content="Vector search in one durable file. Embedded or self-hosted, with exact and HNSW search, typed filters and a dashboard.">
   <meta property="og:type" content="website">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
   <script src="assets/site.js"></script>
 </head>
-<body>
+<body class="landing">
+<a class="landing-skip" href="#main-content">Skip to content</a>
 <header class="nav">
   <div class="wrap">
     <a class="brand" href="./"><img src="assets/logo.svg" alt="">VLite</a>
     <nav class="nav-links" aria-label="Primary">
       <a href="#features">Features</a>
-      <a href="#products">Products</a>
       <a href="#quickstart">Quickstart</a>
-      <a href="api.html">API</a>
       <a href="dashboard.html">Dashboard</a>
       <a href="docs/TOOLS.html">CLI</a>
-      <a href="architecture.html">Architecture</a>
       <a href="compare.html">Benchmarks</a>
       <a href="docs/">Docs</a>
-      <a href="about.html">About</a>
-      <a href="asendme.html">ASENDME</a>
     </nav>
     <div class="nav-actions">
       <button class="icon-btn" id="theme-toggle" aria-label="Toggle dark mode">
@@ -39,312 +35,17 @@
     </div>
   </div>
 </header>
-
-<main>
+<main id="main-content">
   <section class="hero">
     <div class="wrap">
-      <span class="eyebrow">v0.4.1 · MIT licensed · written in Rust</span>
+      <span class="eyebrow">v0.4.1 &middot; MIT licensed &middot; written in Rust</span>
       <h1>Vector search in <span class="grad">one durable file</span>.</h1>
-      <p class="lead">VLite is a single-file vector database. Embed it directly in Rust, Python, Node.js or C,
-        or run it as a REST and gRPC service with a built-in web dashboard. No external database required.</p>
+      <p class="lead">A single-file vector database. Embed retrieval in your application without a separate database service, or self-host the same engine behind REST and gRPC.</p>
       <div class="cta">
         <a class="btn primary" href="#quickstart">Get started</a>
-        <a class="btn" href="#features">Explore features</a>
-        <a class="btn" href="https://github.com/mahpate/Vlite/releases/latest">Download v0.4.1</a>
+        <a class="btn" href="dashboard.html">View dashboard</a>
       </div>
-      <div class="install">
-        <span class="prompt">$</span>
-        <code id="hero-install">export VLITE_AUTH_TOKEN=$(openssl rand -hex 32); docker run --rm -p 127.0.0.1:8080:8080 -e VLITE_AUTH_TOKEN ghcr.io/mahpate/vlite-api:v0.4.1</code>
-        <button class="copy" data-copy="hero-install">Copy</button>
-      </div>
-    </div>
-  </section>
-
-  <section class="stats-strip">
-    <div class="wrap">
-      <div class="stats">
-        <div class="stat"><b>1 file</b><span>portable, versioned format</span></div>
-        <div class="stat"><b>fsync</b><span>before every acknowledged write</span></div>
-        <div class="stat"><b>REST + gRPC</b><span>plus a web dashboard</span></div>
-        <div class="stat"><b>5 SDKs</b><span>Rust · Python · Node · C · WASM</span></div>
-      </div>
-    </div>
-  </section>
-
-  <section id="features">
-    <div class="wrap">
-      <div class="section-head">
-        <div class="kicker">Features</div>
-        <h2>A complete vector database in one file</h2>
-        <p>Storage, retrieval, security and operations, all in one Rust engine.
-          Advanced features are opt-in, so existing files keep working unchanged.</p>
-      </div>
-
-      <div class="tour">
-        <div class="tour-text">
-          <div class="label">Storage</div>
-          <h3>Durable by design, honest about failure</h3>
-          <p>Every write is a checksummed log frame, synchronized to disk before it is acknowledged.
-            Batches of up to 4,096 operations commit atomically.</p>
-          <ul class="list">
-            <li>Corruption fails closed; an incomplete trailing write is reported, never silently dropped.</li>
-            <li>Indexes are derived from the log, so they can always be rebuilt.</li>
-            <li>Offline <code>verify</code>, <code>compact</code>, <code>backup</code> and format <code>upgrade</code> tools.</li>
-          </ul>
-          <a class="more" href="docs/REFERENCE.html">Storage reference →</a>
-        </div>
-        <div class="tour-visual">
-<pre class="code"><span class="c-c"># offline maintenance on a stopped database</span>
-vlite-maintain verify  documents.vlite
-vlite-maintain upgrade documents.vlite documents-v5.vlite
-vlite-maintain verify  documents-v5.vlite
-<span class="c-c"># the source is never modified</span></pre>
-        </div>
-      </div>
-
-      <div class="tour reverse">
-        <div class="tour-text">
-          <div class="label">Retrieval</div>
-          <h3>From exact search to hybrid pipelines</h3>
-          <p>Start with exact nearest neighbours, then add HNSW, typed filters and hybrid ranking as you grow.</p>
-          <ul class="list">
-            <li>Dense, named and sparse vectors; L2, cosine and inner-product metrics.</li>
-            <li>BM25 lexical + vector hybrid search with weighted reciprocal-rank fusion.</li>
-            <li>Grouped search, recommendations from positive/negative examples, facets and geo ranking.</li>
-            <li>A bounded read-only query language, plus pluggable embedders, rerankers and MMR.</li>
-          </ul>
-          <a class="more" href="https://github.com/mahpate/Vlite/blob/main/docs/VECTORS.md">Vectors &amp; retrieval →</a>
-        </div>
-        <div class="tour-visual">
-          <div class="chips big"><span class="chip">Exact k-NN</span><span class="chip">HNSW</span><span class="chip">Typed filters</span><span class="chip">Named vectors</span><span class="chip">Sparse vectors</span><span class="chip">BM25 hybrid</span><span class="chip">Grouped search</span><span class="chip">Recommend</span><span class="chip">Facets &amp; stats</span><span class="chip">Geo</span><span class="chip">Query language</span><span class="chip">MMR</span><span class="chip">Rerankers</span></div>
-        </div>
-      </div>
-
-      <div class="tour">
-        <div class="tour-text">
-          <div class="label">Indexes &amp; acceleration</div>
-          <h3>Fast search without giving up correctness</h3>
-          <p>Approximate search is always optional and rebuildable; exact search remains available for verification.</p>
-          <ul class="list">
-            <li>HNSW with background rebuilds, persisted snapshots and filter-aware traversal.</li>
-            <li>Scalar u8 quantization and a disk-ANN sidecar for larger collections.</li>
-            <li>Opt-in GPU exact search through wgpu, and metadata indexes for filtered queries.</li>
-          </ul>
-          <a class="more" href="https://github.com/mahpate/Vlite/blob/main/docs/ANN-SNAPSHOTS.md">Index snapshots →</a>
-        </div>
-        <div class="tour-visual">
-          <dl class="spec">
-            <dt>Exact</dt><dd>Always available, ground truth</dd>
-            <dt>HNSW</dt><dd>Background builds, snapshots</dd>
-            <dt>Quantized</dt><dd>Scalar u8 index memory</dd>
-            <dt>Disk ANN</dt><dd>Sidecar for larger data</dd>
-            <dt>GPU</dt><dd>Exact L2 via wgpu (opt-in)</dd>
-          </dl>
-        </div>
-      </div>
-
-      <div class="tour reverse">
-        <div class="tour-text">
-          <div class="label">Data lifecycle</div>
-          <h3>Collections, expiry and model upgrades</h3>
-          <p>Organize data the way your application thinks about it, and evolve embeddings safely.</p>
-          <ul class="list">
-            <li>Named collections with their own dimensions, settings and indexes.</li>
-            <li>Record TTL, metadata-only updates and conditional revisions.</li>
-            <li>Model-version history and resumable re-embedding with an atomic switch.</li>
-            <li>Resumable imports with durable checkpoints.</li>
-          </ul>
-          <a class="more" href="https://github.com/mahpate/Vlite/blob/main/docs/CAPABILITIES.md">Collections &amp; capabilities →</a>
-        </div>
-        <div class="tour-visual">
-          <dl class="spec">
-            <dt>Collections</dt><dd>Independent dimensions &amp; indexes</dd>
-            <dt>TTL</dt><dd>Absolute expiry per record</dd>
-            <dt>Metadata</dt><dd>Typed values, GeoPoints</dd>
-            <dt>Re-embedding</dt><dd>Stage, resume, switch atomically</dd>
-          </dl>
-        </div>
-      </div>
-
-      <div class="tour">
-        <div class="tour-text">
-          <div class="label">Recovery &amp; replication</div>
-          <h3>Rewind, stream and replicate</h3>
-          <p>The commit log is a first-class asset: restore from it, subscribe to it, and ship it.</p>
-          <ul class="list">
-            <li>Point-in-time restore to a sequence or timestamp, into a new validated file.</li>
-            <li>A durable change feed, with gRPC watching and signed HMAC webhooks.</li>
-            <li>Read replicas through log shipping, with promotion.</li>
-          </ul>
-          <a class="more" href="https://github.com/mahpate/Vlite/blob/main/docs/STORAGE-FEATURES.md">Storage features →</a>
-        </div>
-        <div class="tour-visual">
-          <div class="flow">
-            <span class="node">Commit log</span><span class="arrow">→</span>
-            <span class="node">Change feed</span><span class="arrow">→</span>
-            <span class="node">Webhooks</span>
-          </div>
-          <div class="flow">
-            <span class="node">Commit log</span><span class="arrow">→</span>
-            <span class="node">Log shipping</span><span class="arrow">→</span>
-            <span class="node">Read replica</span>
-          </div>
-          <div class="flow">
-            <span class="node">Backup + log</span><span class="arrow">→</span>
-            <span class="node">PITR</span><span class="arrow">→</span>
-            <span class="node">New file</span>
-          </div>
-        </div>
-      </div>
-
-      <div class="tour reverse">
-        <div class="tour-text">
-          <div class="label">Security</div>
-          <h3>Secure defaults for self-hosting</h3>
-          <p>The server refuses unauthenticated remote access and keeps secrets out of logs and traces.</p>
-          <ul class="list">
-            <li>Encryption at rest with ChaCha20-Poly1305 and Argon2id passphrases.</li>
-            <li>Scoped credentials, read-only tokens, rate limits, vector quotas and tenants.</li>
-            <li>HTTPS and gRPC TLS with rustls, optional gRPC mTLS, and non-root containers.</li>
-          </ul>
-          <a class="more" href="https://github.com/mahpate/Vlite/blob/main/docs/SECURITY.md">Security guide →</a>
-        </div>
-        <div class="tour-visual">
-          <div class="chips big"><span class="chip">Encryption at rest</span><span class="chip">Scoped credentials</span><span class="chip">Read-only tokens</span><span class="chip">Rate limits</span><span class="chip">Quotas</span><span class="chip">Tenants</span><span class="chip">TLS / mTLS</span><span class="chip">Audit log</span><span class="chip">Non-root images</span></div>
-        </div>
-      </div>
-
-      <div class="tour">
-        <div class="tour-text">
-          <div class="label">Operations</div>
-          <h3>Observable and easy to run</h3>
-          <p>Operate VLite like any modern service, from a laptop to a container platform.</p>
-          <ul class="list">
-            <li>REST with OpenAPI, and gRPC with streaming import, export and watch.</li>
-            <li><a href="api.html#py-open">Shared-lock read-only snapshots</a> across processes, concurrent server reads and native parallel exact scans.</li>
-            <li>Prometheus metrics, a structured in-memory log tail, route latency cards and optional OpenTelemetry.</li>
-            <li>Focused dashboard workspaces, collection tabs, a responsive navigation drawer and a payload/metadata/vector inspector.</li>
-            <li>Light/dark/system themes, collection review, validated batched JSON writes, copy-as-code and explicit search-refresh feedback.</li>
-            <li>Scheduled backups with retention and restore drills; multi-arch container images.</li>
-          </ul>
-          <a class="more" href="https://github.com/mahpate/Vlite/blob/main/docs/DOCKER-OPERATIONS.md">Operations guide →</a>
-          <p>Dashboard improvements are included in v0.4.1 builds, not older v0.3.0 images.
-            See the <a href="https://github.com/mahpate/Vlite/blob/main/docs/CONSOLE.md">console guide</a> for workflows and safety limits.</p>
-        </div>
-        <div class="tour-visual">
-          <dl class="spec">
-            <dt>REST</dt><dd>OpenAPI, HTTPS</dd>
-            <dt>gRPC</dt><dd>Streaming, TLS, mTLS</dd>
-            <dt>Metrics</dt><dd>Requests, failures, streams</dd>
-            <dt>Backups</dt><dd>Scheduled, retained, drilled</dd>
-            <dt>Images</dt><dd>linux/amd64, linux/arm64</dd>
-          </dl>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <section id="products" class="alt">
-    <div class="wrap">
-      <div class="section-head">
-        <div class="kicker">Products</div>
-        <h2>One engine across every retrieval workflow</h2>
-        <p>Embed VLite in your application, run it as a service, or browse it in the console &mdash; the same single-file format everywhere, with no data migration.</p>
-      </div>
-      <div class="product-panel">
-        <div class="pp-hero">
-          <div class="pp-eyebrow"><span class="pp-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg></span>Embedded engine</div>
-          <h3>VLite</h3>
-          <p>Dense, sparse, full-text and hybrid retrieval in one durable <code>.vlite</code> file &mdash; in-process or behind REST and gRPC.</p>
-          <div class="chips"><span class="chip">Private</span><span class="chip">Open source</span><span class="chip">MIT</span></div>
-          <a class="more" href="#features">Explore VLite →</a>
-        </div>
-
-        <div class="pp-rows">
-          <div class="pp-row pp-sdk">
-            <div class="pp-row-title"><span class="pp-icon">{ }</span>SDK &amp; APIs</div>
-            <div class="pp-langs">
-              <a href="api.html#py-nativelibrary">Python</a>
-              <a href="api.html#node">Node.js</a>
-              <a href="api.html#rust">Rust</a>
-              <a href="https://github.com/mahpate/Vlite/blob/main/bindings/README.md">C ABI</a>
-              <a href="https://github.com/mahpate/Vlite/blob/main/bindings/README.md">WASM</a>
-              <a href="api.html#rest">REST</a>
-              <a href="api.html#grpc">gRPC</a>
-            </div>
-          </div>
-
-          <div class="pp-row">
-            <div class="pp-row-title"><span class="pp-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></span>Search &amp; indexes</div>
-            <div class="pp-groups">
-              <div class="wide"><div class="pp-label">Retrieval</div><div class="chips"><span class="chip">Dense vectors</span><span class="chip">Sparse vectors</span><span class="chip">Full-text &middot; BM25</span><span class="chip">Hybrid retrieval</span><span class="chip">Grouped search</span><span class="chip">Typed filters</span><span class="chip">Geo radius</span><span class="chip">Recommend</span><span class="chip">MMR rerank</span></div></div>
-              <div><div class="pp-label">Index types</div><div class="chips"><span class="chip">Exact (flat)</span><span class="chip">Parallel exact scans</span><span class="chip">HNSW</span><span class="chip">Disk ANN</span><span class="chip">Metadata indexes</span></div></div>
-              <div><div class="pp-label">Quantization</div><div class="chips"><span class="chip">FP32</span><span class="chip">Scalar U8 + rerank</span></div></div>
-            </div>
-          </div>
-
-          <div class="pp-row">
-            <div class="pp-row-title"><span class="pp-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg></span>Runtime &amp; platform</div>
-            <div class="pp-groups">
-              <div><div class="pp-label">Infrastructure</div><div class="chips"><span class="chip">Single append-only file</span><span class="chip">Checksummed frames</span><span class="chip">Shared read-only opens</span><span class="chip">Concurrent server reads</span><span class="chip">Encryption at rest</span><span class="chip">Point-in-time restore</span><span class="chip">GPU exact (wgpu)</span></div></div>
-              <div><div class="pp-label">Runtimes</div><div class="chips"><span class="chip">Linux x86_64</span><span class="chip">Linux arm64</span><span class="chip">macOS arm64</span><span class="chip">Windows</span><span class="chip">Docker</span></div></div>
-            </div>
-          </div>
-        </div>
-
-        <div class="pp-side">
-          <a class="pp-perf" href="compare.html">
-            <div class="pp-side-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 14l4-4M3.3 17a9 9 0 1 1 17.4 0"/></svg>Performance <span class="arrow">↗</span></div>
-            <p class="muted">Clustered 20k &times; 128 &middot; HNSW ef=100 &middot; 16 vCPU WSL &middot; sequential queries</p>
-            <div class="pp-stats">
-              <div><strong>1.0</strong><span>recall@10</span></div>
-              <div><strong>2,154</strong><span>QPS</span></div>
-              <div><strong>0.454 ms</strong><span>p50</span></div>
-            </div>
-          </a>
-          <div class="pp-tools">
-            <div class="pp-side-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 2 9 5-9 5-9-5 9-5zM3 12l9 5 9-5M3 17l9 5 9-5"/></svg>Tools &amp; agents</div>
-            <a class="pp-tool" href="dashboard.html"><strong>VLite Dashboard</strong><span>Studio workflows, observability, metrics &amp; logs</span></a>
-            <a class="pp-tool" href="docs/TOOLS.html"><strong>VLite CLI tools</strong><span>Shell, maintenance, import, tuning &amp; ANN comparison</span></a>
-            <a class="pp-tool" href="docs/MCP.html"><strong>vlite-mcp</strong><span>Stdio MCP tools; read-only by default</span></a>
-            <a class="pp-tool" href="docs/AGENT-SKILLS.html"><strong>Agent Skills</strong><span>RAG, MCP, operations &amp; index tuning</span></a>
-          </div>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <section id="capabilities">
-    <div class="wrap">
-      <div class="section-head">
-        <div class="kicker">At a glance</div>
-        <h2>Every capability in one place</h2>
-        <p>Opt-in file formats unlock advanced features while older files keep working unchanged.</p>
-      </div>
-      <div class="grid cols-2">
-        <div class="card">
-          <h3>Search &amp; retrieval</h3>
-          <div class="chip-group"><div class="label">Retrieval</div>
-            <div class="chips"><span class="chip">Dense vectors</span><span class="chip">Named vectors</span><span class="chip">Sparse vectors</span><span class="chip">BM25 hybrid</span><span class="chip">Grouped search</span><span class="chip">Recommendations</span><span class="chip">Facets</span><span class="chip">Geo ranking</span><span class="chip">Query language</span></div></div>
-          <div class="chip-group"><div class="label">Metrics</div>
-            <div class="chips"><span class="chip">Squared L2</span><span class="chip">Cosine</span><span class="chip">Inner product (exact)</span></div></div>
-        </div>
-        <div class="card">
-          <h3>Indexes</h3>
-          <div class="chip-group"><div class="label">Index types</div>
-            <div class="chips"><span class="chip">Exact (flat)</span><span class="chip">Parallel exact scans</span><span class="chip">HNSW</span><span class="chip">Disk ANN sidecar</span><span class="chip">Metadata indexes</span><span class="chip">GPU exact (opt-in)</span></div></div>
-          <div class="chip-group"><div class="label">Quantization &amp; maintenance</div>
-            <div class="chips"><span class="chip">Scalar u8</span><span class="chip">HNSW snapshots</span><span class="chip">Background rebuilds</span><span class="chip">Filter-aware ANN</span></div></div>
-        </div>
-        <div class="card">
-          <h3>Durability &amp; data safety</h3>
-          <div class="chips"><span class="chip">Single file</span><span class="chip">fsync before ack</span><span class="chip">Atomic batches (4,096 ops)</span><span class="chip">Checksums</span><span class="chip">Fail-closed corruption</span><span class="chip">Encryption at rest</span><span class="chip">Point-in-time restore</span><span class="chip">Change feed</span><span class="chip">Backup &amp; compaction</span><span class="chip">Read replicas</span></div>
-        </div>
-        <div class="card">
-          <h3>Runtime &amp; platforms</h3>
-          <div class="chips"><span class="chip">Windows</span><span class="chip">Linux x86_64</span><span class="chip">Linux arm64</span><span class="chip">macOS arm64</span><span class="chip">Non-root containers</span><span class="chip">TLS</span><span class="chip">Shared read-only handles</span><span class="chip">Concurrent server reads</span><span class="chip">Metrics &amp; live logs</span><span class="chip">MCP server</span><span class="chip">Agent skills</span><span class="chip">Prometheus-style metrics</span><span class="chip">OpenTelemetry (opt-in)</span><span class="chip">Go / .NET / JS / Python clients</span></div>
-        </div>
-      </div>
+      <p class="note"><a href="https://github.com/mahpate/Vlite/releases/tag/v0.4.1">Download v0.4.1</a> &middot; <a href="docs/INSTALL.html">Packages &amp; platform requirements</a></p>
     </div>
   </section>
 
@@ -352,8 +53,8 @@ vlite-maintain verify  documents-v5.vlite
     <div class="wrap">
       <div class="section-head">
         <div class="kicker">Quickstart</div>
-        <h2>Running in under a minute</h2>
-        <p>Install the Python <a href="https://pypi.org/project/vlite-embedded/">PyPI package</a>, a Node release tarball or a container image, then create a file and search it.</p>
+        <h2>Create a file. Store vectors. Search.</h2>
+        <p>Start in-process with Python, Node.js or Rust, or run the API and dashboard yourself.</p>
       </div>
       <div class="tabs">
         <div class="tablist" role="tablist" aria-label="Quickstart language">
@@ -363,19 +64,20 @@ vlite-maintain verify  documents-v5.vlite
           <button role="tab" id="t-docker" aria-controls="p-docker" aria-selected="false" tabindex="-1">Docker + dashboard</button>
           <button role="tab" id="t-devbox" aria-controls="p-devbox" aria-selected="false" tabindex="-1">Windows devbox</button>
         </div>
-        <div class="tabpanel" role="tabpanel" id="p-py" aria-labelledby="t-py">
-<button class="copy" data-copy="c-py">Copy</button>
-<pre class="code" id="c-py"><span class="c-c"># python -m pip install vlite-embedded  (PyPI 0.4.1; Python 3.11+)</span>
+        <div class="tabpanel" role="tabpanel" id="p-py" aria-labelledby="t-py" tabindex="0">
+<button class="copy" data-copy="c-py" aria-label="Copy Python example">Copy</button>
+<pre class="code" id="c-py"><span class="c-c"># Python 3.11+; run in a fresh directory</span>
+<span class="c-c"># python -m pip install vlite-embedded==0.4.1</span>
 <span class="c-k">from</span> vlite_embedded <span class="c-k">import</span> NativeLibrary
 
 native = NativeLibrary()
 <span class="c-k">with</span> native.create(<span class="c-s">"documents.vlite"</span>, dimensions=<span class="c-n">3</span>) <span class="c-k">as</span> db:
-    db.put(<span class="c-s">"10"</span>, [<span class="c-n">1</span>, <span class="c-n">0</span>, <span class="c-n">0</span>], metadata={<span class="c-s">"lang"</span>: {<span class="c-s">"type"</span>: <span class="c-s">"string"</span>, <span class="c-s">"value"</span>: <span class="c-s">"en"</span>}})
+    db.put(<span class="c-s">"10"</span>, [<span class="c-n">1</span>, <span class="c-n">0</span>, <span class="c-n">0</span>])
     print(db.search([<span class="c-n">0.9</span>, <span class="c-n">0.1</span>, <span class="c-n">0</span>], <span class="c-n">5</span>))</pre>
         </div>
         <div class="tabpanel" role="tabpanel" id="p-node" aria-labelledby="t-node" hidden>
 <button class="copy" data-copy="c-node">Copy</button>
-<pre class="code" id="c-node"><span class="c-c">// npm install ./vlite-embedded-0.4.1-&lt;platform&gt;.tgz  (from the v0.4.1 release)</span>
+<pre class="code" id="c-node"><span class="c-c">// npm install ./vlite-embedded-0.4.1-&lt;platform&gt;.tgz (release tarball)</span>
 <span class="c-k">import</span> { NativeLibrary } <span class="c-k">from</span> <span class="c-s">"@vlite/embedded"</span>;
 
 <span class="c-k">const</span> native = <span class="c-k">new</span> NativeLibrary();
@@ -395,7 +97,6 @@ native = NativeLibrary()
 <span class="c-k">fn</span> main() -&gt; vlite::Result&lt;()&gt; {
     <span class="c-k">let mut</span> db = Database::create(<span class="c-s">"vectors.vlite"</span>, <span class="c-n">3</span>)?;
     db.put(<span class="c-n">10</span>, &amp;[<span class="c-n">1.0</span>, <span class="c-n">0.0</span>, <span class="c-n">0.0</span>], <span class="c-s">b"document A"</span>)?;
-    db.put(<span class="c-n">20</span>, &amp;[<span class="c-n">0.0</span>, <span class="c-n">1.0</span>, <span class="c-n">0.0</span>], <span class="c-s">b"document B"</span>)?;
     <span class="c-k">let</span> hits = db.search(&amp;[<span class="c-n">0.9</span>, <span class="c-n">0.1</span>, <span class="c-n">0.0</span>], <span class="c-n">5</span>)?;
     assert_eq!(hits[<span class="c-n">0</span>].id, <span class="c-n">10</span>);
     db.close()
@@ -403,7 +104,7 @@ native = NativeLibrary()
         </div>
         <div class="tabpanel" role="tabpanel" id="p-docker" aria-labelledby="t-docker" hidden>
 <button class="copy" data-copy="c-docker">Copy</button>
-<pre class="code" id="c-docker"><span class="c-c"># Linux or WSL, from a checkout of the repository</span>
+<pre class="code" id="c-docker"><span class="c-c"># Linux or WSL; Docker required</span>
 git clone https://github.com/mahpate/Vlite &amp;&amp; cd Vlite
 mkdir -m 700 -p .secrets &amp;&amp; head -c 32 /dev/urandom | base64 | tr -d '=+/\n' &gt; .secrets/api-token
 chmod 644 .secrets/api-token
@@ -415,46 +116,73 @@ cat .secrets/api-token   <span class="c-c"># paste into the dashboard connection
 <button class="copy" data-copy="c-devbox">Copy</button>
 <pre class="code" id="c-devbox"><span class="c-c"># PowerShell on Windows with Docker inside WSL</span>
 git clone https://github.com/mahpate/Vlite; cd Vlite
-.\scripts\devbox.ps1          <span class="c-c"># pulls v0.4.1 images, starts API + dashboard</span>
+.\scripts\devbox.ps1          <span class="c-c"># pulls v0.4.1 API + dashboard images</span>
 .\scripts\devbox.ps1 -Token   <span class="c-c"># copies the API token to the clipboard</span>
 <span class="c-c"># Dashboard: http://localhost:8082   API: http://localhost:18085</span></pre>
         </div>
       </div>
+      <p class="note landing-note">Supply your own embeddings; these examples use three-dimensional sample vectors. See <a href="api.html">API examples</a> and the <a href="docs/INSTALL.html">installation guide</a> for package and platform details.</p>
     </div>
   </section>
 
-  <section>
+  <section id="dashboard-preview">
     <div class="wrap">
       <div class="section-head">
-        <div class="kicker">Why a single file</div>
-        <h2>Simple to ship, copy, back up and reason about</h2>
+        <div class="kicker">Inside the product</div>
+        <h2>Your data, in view</h2>
+        <p>Browse collections, inspect records and run searches in your own VLite dashboard.</p>
       </div>
-      <div class="grid cols-4">
-        <div class="card"><h3>Durable by default</h3><p>Every acknowledged write is a checksummed commit synchronized to disk before returning.</p></div>
-        <div class="card"><h3>Honest recovery</h3><p>Corruption fails closed. Incomplete trailing writes need explicit repair; committed data is never silently dropped.</p></div>
-        <div class="card"><h3>Rebuildable indexes</h3><p>HNSW and metadata indexes derive from the log, so a damaged index never costs you data.</p></div>
-        <div class="card"><h3>Portable</h3><p>One versioned binary format across Windows, Linux and macOS, and every language binding.</p></div>
+      <figure class="landing-shot">
+        <a href="dashboard.html#screenshots"><img src="assets/dashboard/collections.png" alt="VLite dashboard showing a collection, typed metadata and a selected-record inspector." width="1600" height="1400" loading="lazy" decoding="async"></a>
+        <figcaption>Actual development capture of the dashboard shipped in v0.4.1, with synthetic demonstration records. Not a hosted console or a performance benchmark. <a href="dashboard.html">Screenshots &amp; setup &#8594;</a></figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section id="products" class="alt">
+    <div class="wrap">
+      <div class="section-head"><div class="kicker">How to run VLite</div><h2>Embedded or self-hosted</h2><p>Two deployment paths, the same Rust storage engine.</p></div>
+      <div class="grid cols-2">
+        <article class="card"><div class="label">Embedded</div><h3>In your application's process</h3><p>Use Rust, Python, Node.js or C bindings for local-first applications and private retrieval without a separate database service.</p><a class="more" href="#quickstart">Start with an embedded example &#8594;</a></article>
+        <article class="card"><div class="label">Self-hosted</div><h3>Behind REST and gRPC</h3><p>Give your clients an authenticated API, with a dashboard, scoped credentials and server observability. You operate the service.</p><a class="more" href="docs/DOCKER-OPERATIONS.html">Deployment guide &#8594;</a></article>
       </div>
-      <p class="callout" style="margin-top:28px">VLite keeps the live dataset in memory and replays the log on open, with one owner per file.
-        Size deployments for the full dataset. See the <a href="docs/REFERENCE.html">technical reference</a> for exact contracts and limits.</p>
+      <p class="note landing-note">Language bindings: Rust, Python, Node.js and C; a separate WASM surface is also available. API coverage and platform support vary by package. <a href="docs/INSTALL.html">Check the installation matrix</a>.</p>
+    </div>
+  </section>
+
+  <section id="features">
+    <div class="wrap">
+      <div class="section-head"><div class="kicker">Features</div><h2>Start simple. Go deeper when needed.</h2><p>Core retrieval and storage, with opt-in features for more demanding workflows. Follow each guide for build, format and configuration requirements.</p></div>
+      <div class="grid cols-3" id="capabilities">
+        <article class="card"><div class="label">Storage</div><h3>Durable, explicit commits</h3><p>Checksummed frames and synchronization before successful writes. Single-collection atomic batches support up to 4,096 operations.</p><a class="more" href="docs/REFERENCE.html">Storage contract &#8594;</a></article>
+        <article class="card"><div class="label">Retrieval</div><h3>Exact to hybrid search</h3><p>Dense and sparse vectors, typed filters, BM25 hybrid ranking, grouped search and recommendations.</p><a class="more" href="docs/VECTORS.html">Retrieval guide &#8594;</a></article>
+        <article class="card"><div class="label">Indexes</div><h3>Rebuildable acceleration</h3><p>Optional HNSW and snapshots, scalar u8 quantization, metadata indexes, disk-ANN sidecars and opt-in GPU exact L2.</p><a class="more" href="docs/ANN-SNAPSHOTS.html">Index lifecycle &#8594;</a></article>
+        <article class="card"><div class="label">Data lifecycle</div><h3>Collections to recovery</h3><p>Collections, expiry, resumable re-embedding and imports. Point-in-time restore, change feeds and log-shipped read replicas.</p><a class="more" href="docs/STORAGE-FEATURES.html">Storage features &#8594;</a></article>
+        <article class="card"><div class="label">Security</div><h3>Control access to your data</h3><p>Opt-in encryption at rest, scoped credentials, quotas and TLS configuration. Verify deployment settings before remote access.</p><a class="more" href="docs/SECURITY.html">Security guide &#8594;</a></article>
+        <article class="card"><div class="label">Operations</div><h3>Inspect and maintain</h3><p>Metrics, optional tracing, backups and maintenance tools. The live log tail is bounded and memory-only, not a durable audit archive.</p><a class="more" href="docs/DOCKER-OPERATIONS.html">Operations guide &#8594;</a></article>
+      </div>
+    </div>
+  </section>
+
+  <section id="data-safety" class="alt">
+    <div class="wrap">
+      <div class="section-head"><div class="kicker">Know the boundaries</div><h2>Data safety you can reason about</h2><p>Corruption fails closed. Incomplete trailing writes require explicit repair; committed data is never silently discarded. Search indexes remain rebuildable from stored records.</p></div>
+      <p class="callout">VLite keeps the live dataset in memory and replays the log on open. A file supports one exclusive owner or multiple shared read-only owners. Size deployments for the full dataset. Optional indexes and maintenance can use sidecars. Filesystem and directory-entry durability have platform-specific limitations; process-crash tests are not physical power-loss qualification.</p>
+      <nav class="landing-evidence" aria-label="Technical evidence"><a href="architecture.html">Architecture &#8594;</a><a href="docs/REFERENCE.html">Data-safety contracts &#8594;</a><a href="compare.html">Benchmarks &amp; methodology &#8594;</a><a href="docs/RELEASE-0.4.1.html">Release notes &#8594;</a></nav>
+      <p class="note landing-note">Benchmark comparisons retain their original versions and measurement provenance. Historical results are not presented as freshly rerun v0.4.1 measurements.</p>
+    </div>
+  </section>
+  <section>
+    <div class="wrap">
+      <div class="section-head"><h2>Build your first search.</h2><p>Start with a local file, then choose the retrieval and deployment options your application needs.</p></div>
+      <div class="cta"><a class="btn primary" href="#quickstart">Get started</a><a class="btn" href="docs/">Read the docs</a></div>
     </div>
   </section>
 </main>
-
 <footer>
   <div class="wrap">
-    <span>© VLite contributors · MIT License</span>
-    <nav>
-      <a href="https://github.com/mahpate/Vlite">GitHub</a>
-      <a href="https://github.com/mahpate/Vlite/releases">Releases</a>
-      <a href="api.html">API</a>
-      <a href="dashboard.html">Dashboard</a>
-      <a href="docs/TOOLS.html">CLI</a>
-      <a href="architecture.html">Architecture</a>
-      <a href="compare.html">Benchmarks</a>
-      <a href="about.html">About</a>
-      <a href="asendme.html">ASENDME</a>
-    </nav>
+    <span>&copy; VLite contributors &middot; MIT License</span>
+    <nav aria-label="Footer"><a href="https://github.com/mahpate/Vlite">GitHub</a><a href="https://github.com/mahpate/Vlite/releases">Releases</a><a href="api.html">API</a><a href="dashboard.html">Dashboard</a><a href="docs/TOOLS.html">CLI</a><a href="architecture.html">Architecture</a><a href="compare.html">Benchmarks</a><a href="about.html">About</a><a href="asendme.html">ASENDME</a></nav>
   </div>
 </footer>
 </body>

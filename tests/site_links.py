@@ -14,6 +14,7 @@ class Page(HTMLParser):
         self.primary_links = []
         self.in_primary = False
         self.text = []
+        self.sections = []
         self.feed(text)
 
     def handle_data(self, data):
@@ -27,6 +28,8 @@ class Page(HTMLParser):
             self.primary_links.append(attrs["href"])
         if "id" in attrs:
             self.ids.add(attrs["id"])
+        if tag == "section" and attrs.get("id"):
+            self.sections.append(attrs["id"])
         for key in ("href", "src"):
             if attrs.get(key):
                 self.links.append(attrs[key])
@@ -44,6 +47,16 @@ def check(root):
     }
     errors = []
     for path, page in pages.items():
+        if path == root / "index.html":
+            for required in ("quickstart", "dashboard-preview", "products", "features", "data-safety"):
+                if required not in page.sections:
+                    errors.append(f"index.html: missing landing section {required}")
+            if all(name in page.sections for name in ("quickstart", "features")):
+                if page.sections.index("quickstart") > page.sections.index("features"):
+                    errors.append("index.html: quickstart must precede the feature inventory")
+            for anchor in ("products", "features", "capabilities", "quickstart"):
+                if anchor not in page.ids:
+                    errors.append(f"index.html: missing legacy anchor {anchor}")
         if path.parent == root:
             visible = " ".join(" ".join(page.text).lower().split())
             for stale in (

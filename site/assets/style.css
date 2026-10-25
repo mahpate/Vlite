@@ -50,6 +50,23 @@ a:hover { text-decoration: underline; }
 code, pre { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .wrap { max-width: var(--max); margin: 0 auto; padding: 0 24px; }
 
+.landing [id] { scroll-margin-top: 120px; }
+.landing .hero { padding-bottom: 48px; }
+.landing .hero .note { margin-top: 22px; }
+.landing-note { max-width: 900px; margin: 24px auto 0; text-align: center; }
+.landing-shot { max-width: 1000px; margin: auto; }
+.landing-shot img { display: block; width: 100%; height: auto; border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
+.landing-shot figcaption { margin-top: 16px; color: var(--muted); font-size: 13px; }
+.landing-evidence { display: flex; flex-wrap: wrap; justify-content: center; gap: 16px 32px; margin-top: 28px; font-size: 14px; font-weight: 600; }
+.landing a:focus-visible, .landing button:focus-visible, .landing [tabindex]:focus-visible { outline: 3px solid var(--accent); outline-offset: 4px; }
+.landing-skip { position: fixed; top: -100px; left: 16px; padding: 12px 18px; background: var(--bg); border: 1px solid var(--accent); z-index: 100; }
+.landing-skip:focus { top: 12px; }
+.landing .tabs { min-width: 0; }
+.landing .c-c { color: #94a3b8; }
+.landing pre.code { padding-top: 46px; }
+.landing .nav-links { gap: 18px; }
+@media (prefers-reduced-motion: reduce) { html:has(.landing) { scroll-behavior: auto; } }
+
 /* nav */
 .nav {
   position: sticky; top: 0; z-index: 50;
