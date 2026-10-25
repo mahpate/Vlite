@@ -156,7 +156,9 @@ def capture(output):
                 locator = page.locator(selector)
                 locator.evaluate("""element => {
                     const section = element.closest("main > section");
-                    if (section && section.hidden) window.VLiteNavigation.reveal(section.id);
+                    const panel = element.closest("[data-admin-view]");
+                    if (panel && panel.id !== "admin-credential-form") window.VLiteNavigation.reveal(panel.id);
+                    else if (section && section.hidden) window.VLiteNavigation.reveal(section.id);
                     for (let parent = element.parentElement; parent; parent = parent.parentElement) {
                         if (parent.tagName === "DETAILS") parent.open = true;
                     }
@@ -165,6 +167,7 @@ def capture(output):
 
             def save(filename, focus=None):
                 expect(page.locator("#connection-badge")).to_have_text("Connected")
+                expect(page.locator('[data-loading="true"]')).to_have_count(0)
                 if focus:
                     page.locator(focus).scroll_into_view_if_needed()
                 else:
@@ -250,6 +253,7 @@ def capture(output):
                 api("/v1/database")
             page.locator("#obs-refresh").click()
             expect(page.locator("#obs-routes tr")).not_to_have_count(0)
+            expect(page.locator("#obs-rps")).not_to_have_text("\u2014")
             save("current-observability.png")
             show("#feed-load").click()
             expect(page.locator("#feed-result")).not_to_have_text("")
@@ -257,10 +261,10 @@ def capture(output):
             nav.get_by_role("link", name="Administration", exact=True).click()
             page.locator("#refresh-health").click()
             expect(page.locator("#health-result")).to_contain_text("observed_at")
+            save("current-administration.png")
             show("#list-backups").click()
             expect(page.locator("#backup-name option")).to_have_count(1)
-            save("current-administration.png")
-            save("current-backups.png", "#backup-result")
+            save("current-backups.png")
             show("#cred-list").click()
             expect(page.locator("#cred-result")).to_contain_text("credential slots used")
             save("current-credentials.png", "#cred-create")
@@ -275,7 +279,7 @@ def capture(output):
             save("current-tenants.png")
             show("#auto-maintenance-read").click()
             expect(page.locator("#auto-maintenance-result")).to_contain_text("config")
-            save("current-automation.png", "#auto-maintenance")
+            save("current-automation.png")
             show("#webhook-list").click()
             expect(page.locator("#webhook-result")).to_contain_text("items")
             save("current-webhooks.png", "#webhook-result")
