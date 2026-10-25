@@ -50,7 +50,7 @@ def check(screenshots=None):
             page.locator("#connection button[type=submit]").click()
             expect(page.locator("#connection-badge")).to_have_text("Connected")
             for selector in (".sidebar nav a[aria-current]", ".sidebar nav a:not([aria-current])",
-                             "#workspace-description", ".stat-grid span", "#connection-badge", "#status",
+                             "#workspace-description", ".stat-grid span", "#connection-badge", "#identity-badge", "#status",
                              ".connection-panel h3"):
                 value = page.locator(selector).first.evaluate(CONTRAST)
                 assert value >= 4.5, (theme, selector, value)

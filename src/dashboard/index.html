@@ -32,7 +32,7 @@
   <div class="sidebar-note"><strong>One file. Your vectors.</strong><p>Bring your own embeddings. Named collections require format v4 and server support.</p></div>
 </aside>
 <div class="workspace">
-<header class="topbar"><div><span class="eyebrow">WORKSPACE / DATABASE</span><h1 id="workspace-title">Overview</h1><p id="workspace-description">Your database at a glance.</p></div><div class="topbar-actions"><div class="badges"><span id="collection-badge" class="badge">Collection: default</span><span id="connection-badge" class="badge">Disconnected</span></div>
+<header class="topbar"><div><span class="eyebrow">WORKSPACE / DATABASE</span><h1 id="workspace-title">Overview</h1><p id="workspace-description">Your database at a glance.</p></div><div class="topbar-actions"><div class="badges"><span id="collection-badge" class="badge">Collection: default</span><span id="connection-badge" class="badge">Disconnected</span><span id="identity-badge" class="badge" data-identity="none" title="Which token this dashboard is using">Not signed in</span></div>
 <details class="appearance-settings"><summary>Appearance and preferences</summary><div class="preferences" role="group" aria-label="Appearance and preferences">
   <label>Theme <select id="theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
   <label>Density <select id="density"><option value="comfortable">Comfortable</option><option value="compact">Compact</option></select></label>
@@ -55,7 +55,8 @@
   <section id="database" class="wide">
     <div class="section-heading"><div><span class="eyebrow">DATABASE SNAPSHOT</span><h2>Connection</h2></div><span class="badge">Single-file database</span></div>
     <div class="connection-panel">
-    <div><h3>Your database, connected</h3><p>Connect to load records, run searches and inspect server health.</p></div>
+    <div><h3>Your database, connected</h3><p>Connect to load records, run searches and inspect server health.</p>
+      <p class="identity-summary"><strong id="identity-name">Not signed in</strong><span id="identity-detail">Connect with a token to see which identity and permissions this dashboard is using.</span></p></div>
     <form id="connection">
       <label>Bearer token <input id="token" type="password" autocomplete="off" spellcheck="false" aria-describedby="token-hint"></label>
       <details class="token-help"><summary>Where do I get a token?</summary>
@@ -561,14 +562,24 @@
   </section>
   <section id="tenants" class="wide">
     <span class="eyebrow">TENANT ADMINISTRATION</span><h2>Tenant namespaces and quotas</h2>
-    <p>Create a namespace, then issue a scoped credential bound to its tenant ID in <a href="#credentials">Scoped credentials</a>. To create its first collection, use collections <code>*</code> and grant the <code>collections</code> operation. This is namespace isolation, not a separate database process. There is no tenant rename or quota-update endpoint.</p>
+    <p>Create a namespace, then issue a scoped API key bound to its tenant ID in <a href="#credentials">Scoped credentials</a>. To create its first collection, use collections <code>*</code> and grant the <code>collections</code> operation. This is namespace isolation, not a separate database process. Tenants sign in only with API keys; there are no tenant usernames or passwords.</p>
     <p id="tenant-note" data-admin-availability="tenants">Connect with a bootstrap admin credential. Tenants require admin authentication and a private VLITE_ADMIN_DIR.</p>
     <button id="tenant-list" type="button" data-admin data-feature="tenants">List active tenants</button>
+    <h3>Create a tenant</h3>
     <label>Tenant name (required, 1..64 UTF-8 bytes; no control characters)<input id="tenant-name" maxlength="64" required></label>
     <label>Tenant aggregate vector limit (0..9007199254740991; blank = unlimited)<input id="tenant-max-vectors" inputmode="numeric" placeholder="Unlimited"></label>
     <p>Zero prevents vector growth. This limit covers all collections in the tenant. Larger u64 limits require a direct API client.</p>
     <button id="tenant-create" type="button" data-admin data-feature="tenants">Create tenant</button>
-    <label>Tenant ID to delete (32 hexadecimal characters; copy from the list)<input id="tenant-id" maxlength="32" pattern="[0-9a-fA-F]{32}" spellcheck="false"></label>
+    <h3>Manage an existing tenant</h3>
+    <label>Tenant ID to manage (32 hexadecimal characters; copy from the list)<input id="tenant-id" maxlength="32" pattern="[0-9a-fA-F]{32}" spellcheck="false"></label>
+    <button id="tenant-usage" type="button" class="secondary" data-admin data-feature="tenants tenant_lifecycle">Show usage and API keys</button>
+    <label>New name (blank keeps the current name)<input id="tenant-new-name" maxlength="64"></label>
+    <label>Vector limit<select id="tenant-limit-mode"><option value="keep">Keep the current limit</option><option value="set">Set a new limit</option><option value="unlimited">Remove the limit (unlimited)</option></select></label>
+    <label>New vector limit (0..9007199254740991; used only with "Set a new limit")<input id="tenant-new-limit" inputmode="numeric" placeholder="For example 100000"></label>
+    <button id="tenant-save-settings" type="button" data-admin data-feature="tenants tenant_lifecycle">Save name and limit</button>
+    <p>Suspend blocks every API key bound to the tenant (REST and gRPC) and prevents new keys for it, without deleting data. Resume restores its unexpired, unrevoked keys.</p>
+    <button id="tenant-suspend" type="button" class="danger" data-admin data-feature="tenants tenant_lifecycle">Suspend tenant</button>
+    <button id="tenant-resume" type="button" class="secondary" data-admin data-feature="tenants tenant_lifecycle">Resume tenant</button>
     <p>Delete only an empty tenant: drop its collections first. Deleting disables its bound credentials; it does not delete database records for you.</p>
     <button id="tenant-delete" type="button" class="danger" data-admin data-feature="tenants">Delete empty tenant</button>
     <pre id="tenant-result" aria-live="polite"></pre>

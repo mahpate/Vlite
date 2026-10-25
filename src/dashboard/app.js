@@ -108,6 +108,13 @@
   function connectionState() {
     $("connection-badge").textContent = connected ? "Connected" : "Disconnected";
     $("connection-badge").dataset.connected = String(connected);
+    const who = window.VLiteAdminTools?.utils?.identity?.(capabilities, connected)
+      ?? { kind: connected ? "unknown" : "none", text: connected ? "Signed in" : "Not signed in", detail: "" };
+    $("identity-badge").textContent = who.text;
+    $("identity-badge").title = who.detail ? `${who.text}. ${who.detail}` : who.text;
+    $("identity-badge").dataset.identity = who.kind;
+    $("identity-name").textContent = who.text;
+    $("identity-detail").textContent = who.detail;
   }
   function staleSnapshot() {
     for (const id of ["stat-records", "stat-bytes"]) $(id).textContent = "--";

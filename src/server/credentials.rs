@@ -78,6 +78,8 @@ fn op_names(mask: u16) -> Vec<&'static str> {
 /// An authenticated scoped principal. Contains no secret.
 pub(super) struct Grant {
     pub id: String,
+    /// Display name chosen at issue time; not a secret and not unique.
+    pub name: String,
     pub tenant_id: Option<String>,
     pub requests_per_second: Option<u32>,
     pub max_vectors: Option<u64>,
@@ -326,6 +328,7 @@ impl Store {
         }
         Ok(Arc::new(Grant {
             id: entry.id.clone(),
+            name: entry.name.clone(),
             tenant_id: entry.tenant_id.clone(),
             requests_per_second: entry.requests_per_second,
             max_vectors: entry.max_vectors,
@@ -340,6 +343,21 @@ impl Store {
             lineage: u64::from_str_radix(&entry.lineage, 16).map_err(|_| unauthorized())?,
             expires: entry.expires_unix_ms,
         }))
+    }
+
+    /// Credential states bound to one tenant: `[active, expired, revoked]`.
+    pub(super) fn tenant_states(&self, tenant: &str, now: u64) -> Result<[u64; 3], ApiError> {
+        let mut counts = [0u64; 3];
+        for entry in self.entries.lock().map_err(internal)?.iter() {
+            if entry.tenant_id.as_deref() == Some(tenant) {
+                counts[match entry.state(now) {
+                    "active" => 0,
+                    "expired" => 1,
+                    _ => 2,
+                }] += 1;
+            }
+        }
+        Ok(counts)
     }
 
     /// Writes a temp file, fsyncs it, atomically replaces the store and
@@ -522,7 +540,18 @@ async fn create(
             .tenants
             .as_ref()
             .ok_or_else(forbidden_scope)?
-            .get(id)?;
+            .get(id)
+            .map_err(|error| {
+                if error.code == "tenant_suspended" {
+                    ApiError::new(
+                        StatusCode::CONFLICT,
+                        "tenant_suspended",
+                        "tenant is suspended; resume it before issuing credentials",
+                    )
+                } else {
+                    error
+                }
+            })?;
     }
     if input.expires_unix_ms <= now || input.expires_unix_ms > now + MAX_LIFETIME_MS {
         return Err(unprocessable(

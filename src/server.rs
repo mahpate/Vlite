@@ -3354,7 +3354,7 @@ fn enforce_quota(
         .map(|(id, _)| id)
         .filter(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()));
     let tenant = match (tenant_id, &service.admin.tenants) {
-        (Some(id), Some(store)) if store.known(id)? => Some(store.get(id)?),
+        (Some(id), Some(store)) => store.quota(id)?,
         _ => None,
     };
     if grant.is_none_or(|g| g.max_vectors.is_none() && g.max_vectors_per_collection.is_none())

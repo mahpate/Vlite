@@ -42,6 +42,17 @@ The example above shows legacy flags only. Current responses additionally report
 `"scoped"`; scoped responses include effective collections, operations and expiry.
 `routes` includes the complete supported
 data/admin route templates. Feature booleans reflect configuration where relevant.
+
+`identity` describes the presented token for display only (authorization still
+comes from `role` and `scope`). `kind` is `open` (no admin token configured),
+`super_admin` (bootstrap admin token), `read_only` or `scoped`; `label` is a
+plain-language summary such as `API key "ci" (<id>) · tenant "Acme"`. Scoped
+identities also report `credential_id`, `credential_name`, `tenant_id` and
+`tenant_name`. Secrets are never included. Labels contain operator-chosen names,
+so render them as text, not HTML. The dashboard shows this as the **Signed in
+as …** badge in the top bar and under **Connection**. Identity is REST-only;
+gRPC callers use REST capabilities to discover it. Older servers omit
+`identity`; the dashboard then falls back to the role.
 Clients should check API version and features rather than infer support from the
 package version. Existing data endpoints are unchanged, except search and index
 build now additionally accept optional `config`. `filtered_ann: true` means
@@ -74,10 +85,19 @@ Configuration flags are not permission grants; the server enforces both.
   names are local to the tenant. Create a wildcard `*` credential with the
   `collections` operation when that tenant needs to create its first collection.
   Secrets appear once, remain in memory, and clear on disconnect.
-- **Tenants:** list active tenants, create a named tenant with an optional
-  aggregate vector quota, and delete an empty tenant. Tenant state requires
-  admin authentication and `VLITE_ADMIN_DIR`. Delete its collections first;
-  deletion blocks bound credentials. There is no rename or quota-edit endpoint.
+- **Tenants:** list active tenants with their state, collection and vector
+  counts; create a named tenant with an optional aggregate vector quota; and
+  manage an existing tenant by ID. **Show usage and API keys** lists its
+  collections, vector usage against the limit and active/expired/revoked API
+  key counts. **Save name and limit** renames it and/or sets, keeps or removes
+  its vector limit (a lower limit keeps existing vectors but refuses new ones).
+  **Suspend** immediately blocks every API key bound to the tenant over REST and
+  gRPC and refuses new keys for it, without deleting data; **Resume** restores
+  its unexpired, unrevoked keys. Delete an empty tenant after dropping its
+  collections; deletion blocks bound credentials. Tenant state requires admin
+  authentication and `VLITE_ADMIN_DIR`; servers older than this release keep
+  only List, Create and Delete, and the other buttons explain why. Tenants
+  authenticate only with API keys; there are no tenant usernames or passwords.
 - **Backup / restore:** list/create snapshots, verify or drill a selected backup,
   stage a restored copy, and select that copy for the next operator-managed
   restart. Scheduled backup settings are read/merged/updated separately; a

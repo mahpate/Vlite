@@ -223,7 +223,11 @@ persistence. Rotation supports bounded grace; revocation persists. Grants bind
 file lineage and collection identity: switching to a restored/compacted file
 or recreating a collection fails closed rather than inheriting old grants.
 Credential administration stays bootstrap-admin-only. Scoped diagnostics and
-collection listing cannot reveal other collections.
+collection listing cannot reveal other collections. Capabilities also report a
+display-only `identity` (`open`, `super_admin`, `read_only` or `scoped`, with
+the API key and tenant names) and `features.tenant_lifecycle` when tenant
+usage, settings and suspend/resume routes are available; see
+[SECURITY.md](SECURITY.md#tenants).
 
 Credential administration can return `credentials_commit_indeterminate` (503)
 if replacement succeeded but its directory synchronization failed. The change

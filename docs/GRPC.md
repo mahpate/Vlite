@@ -33,6 +33,9 @@ CA roots without restarting; invalid files leave all old configurations active.
 Existing TLS sessions are unchanged. See [SECURITY.md](SECURITY.md) for tenant
 namespace isolation, persisted credential rate/vector limits, and optional OTLP
 tracing. Rate/quota errors use `RESOURCE_EXHAUSTED` with `retry-after: 1`.
+API keys bound to a suspended tenant get `PERMISSION_DENIED` with
+`vlite-error-code: tenant_suspended`; tenant lifecycle administration and the
+signed-in `identity` are REST-only.
 
 ## Scope
 

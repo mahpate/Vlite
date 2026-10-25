@@ -10,6 +10,7 @@ function element(id, tagName = "BUTTON") {
     click() { return Promise.all(listeners.map((fn) => fn())); } };
 }
 const ids = ["tenant-list", "tenant-name", "tenant-max-vectors", "tenant-create", "tenant-id", "tenant-delete", "tenant-result",
+  "tenant-usage", "tenant-new-name", "tenant-limit-mode", "tenant-new-limit", "tenant-save-settings", "tenant-suspend", "tenant-resume",
   "tls-reload", "tls-result", "replication-after", "replication-max-bytes", "replication-export", "replication-download", "replication-result"];
 const elements = Object.fromEntries(ids.map((id) => [id, element(id, id.endsWith("-result") ? "PRE" : "BUTTON")]));
 const downloads = [];
@@ -25,7 +26,7 @@ const sandbox = {
 vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync("src/dashboard/admin-tools.js", "utf8"), sandbox);
 const { init, utils } = sandbox.window.VLiteAdminTools;
-const { tenantName, maxVectors, tenantId, tenantRequest, tenantPath, tenantList, exportPath, exportSegment, exportFilename, availability, explain } = utils;
+const { tenantName, maxVectors, tenantId, tenantRequest, tenantPath, tenantList, tenantSettings, tenantUsage, identity, exportPath, exportSegment, exportFilename, availability, explain } = utils;
 
 // Validators mirror the server's byte/control rules.
 assert.equal(tenantName("a"), "a");
@@ -52,6 +53,54 @@ assert.equal(listed.count, 2);
 assert.equal(listed.tenants[0].max_vectors, "unlimited");
 assert.match(listed.tenants[1].max_vectors, /exceeds browser integer precision/);
 assert.throws(() => tenantList({}));
+// Lifecycle fields appear only when a newer server reports them.
+const rich = tenantList({ items: [{ id: hex, name: "a", max_vectors: 5, state: "suspended", suspended_unix_ms: 0, collections: 2, vectors: 7 }] }).tenants[0];
+assert.deepEqual({ ...rich }, { id: hex, name: "a", max_vectors: "5", state: "suspended (API keys blocked)", suspended_since: "1970-01-01T00:00:00.000Z", collections: 2, vectors: 7 });
+assert.equal("state" in listed.tenants[0], false);
+
+// Settings: blank name keeps it; limit choice must match the limit field.
+assert.deepEqual({ ...tenantSettings("Renamed", "keep", "") }, { name: "Renamed" });
+assert.deepEqual({ ...tenantSettings("", "set", " 0 ") }, { max_vectors: 0 });
+assert.deepEqual({ ...tenantSettings("", "unlimited", "") }, { max_vectors: null });
+assert.deepEqual({ ...tenantSettings("n", "set", "10") }, { name: "n", max_vectors: 10 });
+for (const [name, mode, limit, pattern] of [["", "keep", "", /Nothing to change/], ["", "set", "", /Enter the new vector limit/],
+  ["", "keep", "5", /not "Set a new limit"/], ["", "unlimited", "5", /not "Set a new limit"/], ["", "set", "9007199254740992", /cannot be sent exactly/],
+  ["bad\nname", "keep", "", /control characters/], ["", "bogus", "", /Unknown vector limit/]])
+  assert.throws(() => tenantSettings(name, mode, limit), pattern, `${name}/${mode}/${limit}`);
+
+const usage = tenantUsage({ tenant: { id: hex, name: "a", max_vectors: 10, state: "active" }, collections: [{ name: "docs", physical_name: `t${hex}__docs`, vectors: 12 }],
+  vectors: 12, max_vectors: 10, remaining_vectors: 0, over_quota: true, credentials: { active: 1, expired: 2, revoked: 3 } });
+assert.equal(usage.vectors, 12);
+assert.equal(usage.vector_limit, "10");
+assert.equal(usage.remaining_vectors, 0);
+assert.match(usage.over_limit, /^yes: new vectors are refused/);
+assert.deepEqual({ ...usage.collections[0] }, { name: "docs", stored_as: `t${hex}__docs`, vectors: 12 });
+assert.deepEqual({ ...usage.api_keys }, { active: 1, expired: 2, revoked: 3 });
+const unlimited = tenantUsage({ tenant: { id: hex, name: "a", max_vectors: null }, collections: [], vectors: 0, max_vectors: null, remaining_vectors: null, over_quota: false, credentials: { active: 0, expired: 0, revoked: 0 } });
+assert.equal(unlimited.remaining_vectors, "unlimited");
+assert.equal(unlimited.over_limit, "no");
+assert.throws(() => tenantUsage({ tenant: null, collections: [] }));
+
+// Identity: display-only text from capabilities, with a fallback for older servers.
+assert.deepEqual({ ...identity(null, false) }, { kind: "none", text: "Not signed in", detail: identity(null, false).detail });
+assert.equal(identity({ role: "admin" }, false).text, "Not signed in");
+const su = identity({ role: "admin", identity: { kind: "super_admin", label: "Super admin (bootstrap admin token)" } });
+assert.equal(su.kind, "super_admin");
+assert.equal(su.text, "Signed in as Super admin (bootstrap admin token)");
+assert.match(su.detail, /manage tenants, API keys/);
+const open = identity({ role: "admin", identity: { kind: "open", label: "Open access (no admin token configured; every caller is admin)" } });
+assert.equal(open.text, "Open access (no admin token configured; every caller is admin)");
+assert.match(open.detail, /Configure an admin token/);
+const scoped = identity({ role: "scoped", scope: { operations: ["read", "search"], collections: ["docs"], tenant_id: hex },
+  identity: { kind: "scoped", label: `API key "ci" (k1) · tenant "Acme"`, credential_id: "k1", credential_name: "ci", tenant_id: hex, tenant_name: "Acme" } });
+assert.equal(scoped.text, `Signed in as API key "ci" (k1) · tenant "Acme"`);
+assert.equal(scoped.detail, `Can read, search on collections docs inside tenant "Acme" (${hex}). Cannot administer the server.`);
+assert.match(identity({ role: "scoped", scope: { operations: ["write"], collections: ["*"] } }).detail, /^Can write on all collections\. Cannot/);
+const legacy = identity({ role: "read_only" });
+assert.equal(legacy.kind, "read_only");
+assert.match(legacy.text, /Read-only token \(this server does not report identity details\)/);
+assert.match(identity({ role: "admin", identity: { label: "" } }).text, /Admin token \(this server/);
+assert.match(identity({ role: "mystery" }).text, /Role "mystery"/);
 
 assert.equal(exportPath("", ""), "/v1/admin/replication/export");
 assert.equal(exportPath("18446744073709551615", "16777216"), "/v1/admin/replication/export?after_sequence=18446744073709551615&max_bytes=16777216");
@@ -83,6 +132,15 @@ assert.equal(ro.replication.allowed, true);
 assert.equal(availability({ role: "scoped", features: { tenants: true }, routes, scope: { operations: ["read"], collections: ["*"] } }).replication.allowed, true);
 assert.equal(availability({ role: "scoped", features: { tenants: true }, routes, scope: { operations: ["read"], collections: ["docs"] } }).replication.allowed, false);
 assert.equal(availability({ role: "scoped", features: { tenants: true }, routes, scope: { operations: ["read"], collections: ["*"] } }).tenants.allowed, false);
+// Lifecycle needs tenants plus a server that advertises the lifecycle feature or routes.
+assert.match(availability(adminCaps).lifecycle.reason, /cannot show tenant usage/);
+assert.equal(availability({ ...adminCaps, features: { ...adminCaps.features, tenant_lifecycle: true } }).lifecycle.allowed, true);
+assert.equal(availability({ ...adminCaps, routes: ["/v1/admin/tenants/{id}/usage"] }).lifecycle.allowed, true);
+assert.match(ro.lifecycle.reason, /bootstrap admin/);
+assert.match(disabled.lifecycle.reason, /VLITE_ADMIN_DIR/);
+assert.match(availability(null, false).lifecycle.reason, /Connect/);
+assert.match(explain(Object.assign(new Error("HTTP 403"), { code: "tenant_suspended", status: 403 })), /Resume the tenant first/);
+assert.match(explain(Object.assign(new Error("HTTP 403"), { code: "tenant_unavailable", status: 403 })), /was deleted/);
 assert.match(explain(Object.assign(new Error("HTTP 409: tenant_not_empty: x"), { code: "tenant_not_empty", status: 409 })), /Drop those collections first/);
 assert.match(explain(Object.assign(new Error("HTTP 422"), { code: "tls_reload_failed" })), /previous certificates remain active/);
 
@@ -167,6 +225,62 @@ const reset = () => { for (const e of Object.values(elements)) { e.listeners.len
   await elements["tenant-delete"].click();
   assert.match(elements["tenant-result"].textContent, /"deleted": true/);
 
+  // Lifecycle: older servers get an explanation and no request.
+  let lifecycleCount = ctx.calls.length;
+  elements["tenant-id"].value = hex;
+  await elements["tenant-usage"].click();
+  assert.equal(ctx.calls.length, lifecycleCount);
+  assert.match(elements["tenant-result"].textContent, /cannot show tenant usage/);
+  ctx.caps = { ...adminCaps, features: { ...adminCaps.features, tenant_lifecycle: true } };
+  const lower = hex.toLowerCase();
+  ctx.responses.push({ tenant: { id: lower, name: "acme", max_vectors: 10, state: "active" }, collections: [], vectors: 3, max_vectors: 10, remaining_vectors: 7, over_quota: false, credentials: { active: 1, expired: 0, revoked: 0 } });
+  await elements["tenant-usage"].click();
+  assert.deepEqual([ctx.calls.at(-1).method, ctx.calls.at(-1).path, ctx.calls.at(-1).body], ["GET", `/v1/admin/tenants/${lower}/usage`, undefined]);
+  assert.match(elements["tenant-result"].textContent, /"remaining_vectors": 7/);
+  assert.match(elements["tenant-result"].textContent, /"active": 1/);
+
+  // Settings: invalid choices send nothing; a confirmed save sends PUT and clears the form.
+  lifecycleCount = ctx.calls.length;
+  await elements["tenant-save-settings"].click();
+  assert.match(elements["tenant-result"].textContent, /Nothing to change/);
+  elements["tenant-new-limit"].value = "50";
+  elements["tenant-limit-mode"].value = "keep";
+  await elements["tenant-save-settings"].click();
+  assert.match(elements["tenant-result"].textContent, /not "Set a new limit"/);
+  assert.equal(ctx.calls.length, lifecycleCount);
+  elements["tenant-new-name"].value = "Acme Prod";
+  elements["tenant-limit-mode"].value = "set";
+  ctx.answer = false;
+  await elements["tenant-save-settings"].click();
+  assert.equal(ctx.calls.length, lifecycleCount);
+  assert.match(ctx.confirms.at(-1), /rename it to "Acme Prod" and set its vector limit to 50/);
+  ctx.answer = true;
+  ctx.responses.push({ tenant: { id: lower, name: "Acme Prod", max_vectors: 50, state: "active" } });
+  await elements["tenant-save-settings"].click();
+  assert.deepEqual([ctx.calls.at(-1).method, ctx.calls.at(-1).path, { ...ctx.calls.at(-1).body }], ["PUT", `/v1/admin/tenants/${lower}/settings`, { name: "Acme Prod", max_vectors: 50 }]);
+  assert.match(elements["tenant-result"].textContent, /"name": "Acme Prod"/);
+  assert.deepEqual([elements["tenant-new-name"].value, elements["tenant-limit-mode"].value, elements["tenant-new-limit"].value], ["", "keep", ""]);
+  elements["tenant-limit-mode"].value = "unlimited";
+  ctx.responses.push({ tenant: { id: lower, name: "Acme Prod", max_vectors: null, state: "active" } });
+  await elements["tenant-save-settings"].click();
+  assert.deepEqual({ ...ctx.calls.at(-1).body }, { max_vectors: null });
+  assert.match(ctx.confirms.at(-1), /remove its vector limit/);
+
+  // Suspend and resume are confirmed, body-less POSTs; server errors are explained.
+  ctx.responses.push({ tenant: { id: lower, name: "Acme Prod", max_vectors: null, state: "suspended", suspended_unix_ms: 1000 } });
+  await elements["tenant-suspend"].click();
+  assert.deepEqual([ctx.calls.at(-1).method, ctx.calls.at(-1).path, ctx.calls.at(-1).body], ["POST", `/v1/admin/tenants/${lower}/suspend`, undefined]);
+  assert.match(ctx.confirms.at(-1), /Every API key bound to it is refused/);
+  assert.match(elements["tenant-result"].textContent, /suspended \(API keys blocked\)/);
+  ctx.responses.push({ tenant: { id: lower, name: "Acme Prod", max_vectors: null, state: "active" } });
+  await elements["tenant-resume"].click();
+  assert.deepEqual([ctx.calls.at(-1).method, ctx.calls.at(-1).path], ["POST", `/v1/admin/tenants/${lower}/resume`]);
+  assert.match(elements["tenant-result"].textContent, /"state": "active"/);
+  ctx.responses.push(Object.assign(new Error("HTTP 404: tenant_not_found"), { status: 404, code: "tenant_not_found" }));
+  await elements["tenant-resume"].click();
+  assert.match(elements["tenant-result"].textContent, /No live tenant has this ID/);
+  ctx.caps = adminCaps;
+
   // TLS reload uses the body-less POST schema.
   ctx.responses.push({ reloaded: 2 });
   await elements["tls-reload"].click();
@@ -226,6 +340,7 @@ const reset = () => { for (const e of Object.values(elements)) { e.listeners.len
   assert.equal(elements["replication-result"].textContent, "");
   await elements["tenant-list"].click();
   await elements["tls-reload"].click();
+  await elements["tenant-suspend"].click();
   assert.equal(ctx.calls.length, count);
   ctx.caps = { role: "admin", features: { tenants: false, tls_reload: false, native_tls: true }, routes: [] };
   tools.capabilities(ctx.caps);

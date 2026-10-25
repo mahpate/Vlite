@@ -94,6 +94,11 @@ for supported capabilities, optional build features and requirements.
 - **Deployment:** authenticated REST, OpenAPI, JSON metrics, redacted request
   logs, non-root Docker images, optional [gRPC](docs/GRPC.md), and an optional
   HTTPS reverse proxy.
+- **Tenants and API keys:** the bootstrap admin token acts as super admin and
+  can create, rename, re-limit, suspend, resume and delete
+  [tenants](docs/SECURITY.md#tenants), inspect per-tenant usage, and issue
+  scoped API keys bound to a tenant. Tenants sign in with API keys only (no
+  usernames or passwords); the dashboard shows who is signed in.
 - **Concurrent reads:** Rust `Database::open_read_only` (including encrypted opens),
   Python `open(path, read_only=True)` and Node `open(path, {readOnly: true})` share
   OS locks across processes. Readers exclude writers and see open-time snapshots;

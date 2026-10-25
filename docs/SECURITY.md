@@ -62,8 +62,8 @@ admin/read-only roles, except that tenant aggregate quotas are enforced on
 privileged writes into tenant collections too. REST replies with 429 and
 `Retry-After: 1`, using `rate_limited` or `quota_exceeded`. gRPC uses
 `RESOURCE_EXHAUSTED`, the same stable code and `retry-after: 1` metadata.
-Quota failures require deleting records or issuing a higher-limit credential;
-waiting alone does not resolve them. JSON/Prometheus metrics include
+Quota failures require deleting records, raising a tenant limit or issuing a
+higher-limit credential; waiting alone does not resolve them. JSON/Prometheus metrics include
 `rate_limited_total` and `quota_exceeded_total`.
 
 Put, batch and import-chunk projections run under the database owner lock before
@@ -81,11 +81,36 @@ Tenants require bootstrap admin authentication and `VLITE_ADMIN_DIR`:
 
 * `POST /v1/admin/tenants` with `{"name":"Acme","max_vectors":10000}` creates
   a tenant and returns `tenant.id`; `max_vectors` is optional (unlimited).
-* `GET /v1/admin/tenants` returns active tenants. Display names are not IDs and
-  need not be unique.
+* `GET /v1/admin/tenants` returns active tenants with `state`
+  (`active`/`suspended`), `collections` and `vectors`. Display names are not IDs
+  and need not be unique.
+* `GET /v1/admin/tenants/{id}/usage` reports each tenant collection with its
+  physical name and vector count, total `vectors`, `max_vectors`,
+  `remaining_vectors` (`null` when unlimited, saturating at 0), `over_quota`
+  (usage above a lowered limit) and bound API key counts
+  (`active`/`expired`/`revoked`).
+* `PUT /v1/admin/tenants/{id}/settings` with `{"name":"Acme EU"}`,
+  `{"max_vectors":50000}`, `{"max_vectors":null}` (unlimited) or both renames
+  and/or changes the aggregate limit. Unknown fields or an empty body return 422.
+  Lowering a limit below usage keeps existing vectors and refuses new ones.
+* `POST /v1/admin/tenants/{id}/suspend` and `.../resume` are idempotent. While
+  suspended, every API key bound to the tenant gets 403 `tenant_suspended` on
+  REST and `PERMISSION_DENIED` with the same code on gRPC, and new keys for the
+  tenant are refused with 409 `tenant_suspended`. Data is kept; the bootstrap
+  admin can still read, write (within the tenant quota) and drop its
+  collections. Resume restores unexpired, unrevoked keys. Suspension persists
+  in `tenants.json` across restarts; servers older than this release refuse to
+  start on a store that contains a suspended tenant, so resume tenants before
+  downgrading.
 * `DELETE /v1/admin/tenants/{id}` requires every tenant collection to be dropped
   first (409 `tenant_not_empty` otherwise). Deletion tombstones the immutable ID
-  and immediately makes every bound credential fail closed. IDs are never reused.
+  and immediately makes every bound credential fail closed (403
+  `tenant_unavailable`). IDs are never reused. Unknown or deleted IDs return 404
+  `tenant_not_found` on the lifecycle routes.
+
+Tenants authenticate only with bearer API keys bound to the tenant ID. VLite has
+no username/password accounts; the bootstrap admin token acts as the super admin.
+Every tenant mutation (create, update, suspend, resume, delete) is audited.
 
 Issue a scoped credential with `tenant_id` and either tenant-local collection
 names or `["*"]`. The wildcard grants only that tenant's namespace, not global

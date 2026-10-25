@@ -127,12 +127,18 @@ test("admin integration shares transport and exposes all module controls", () =>
   assert.match(server, /\| "\/dashboard\/admin-tools\.js"/);
   for (const id of [
     "tenant-list", "tenant-name", "tenant-max-vectors", "tenant-create", "tenant-id", "tenant-delete", "tenant-result",
+    "tenant-usage", "tenant-new-name", "tenant-limit-mode", "tenant-new-limit", "tenant-save-settings", "tenant-suspend", "tenant-resume",
+    "identity-badge", "identity-name", "identity-detail",
     "tls-reload", "tls-result", "replication-after", "replication-max-bytes", "replication-export", "replication-download", "replication-result",
     "cred-tenant", "cred-rpm", "cred-max-vectors", "cred-max-vectors-per-collection"
   ]) assert.match(html, new RegExp(`id="${id}"`));
   for (const id of ["tenant-list", "tenant-create", "tenant-delete"]) {
     assert.match(html, new RegExp(`id="${id}"[^>]*data-admin[^>]*data-feature="tenants"`));
   }
+  for (const id of ["tenant-usage", "tenant-save-settings", "tenant-suspend", "tenant-resume"]) {
+    assert.match(html, new RegExp(`id="${id}"[^>]*data-admin[^>]*data-feature="tenants tenant_lifecycle"`));
+  }
+  assert.doesNotMatch(html, /no tenant rename or quota-update endpoint/);
   assert.match(html, /id="tls-reload"[^>]*data-admin[^>]*data-feature="tls_reload"/);
   assert.match(html, /Requests per second \(1\.\.1000000/);
   assert.match(html, /data-admin-availability="scoped_credentials"/);

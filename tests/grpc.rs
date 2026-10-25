@@ -1602,6 +1602,30 @@ async fn tenant_namespace_and_resource_exhausted_are_shared_with_rest() {
         .await
         .unwrap_err();
     assert_eq!(error.code(), Code::NotFound);
+    rest_ok(
+        &h.app,
+        "POST",
+        &format!("/v1/admin/tenants/{tenant_id}/suspend"),
+        None,
+    )
+    .await;
+    let error = h
+        .client
+        .list_collections(req(Some(token), proto::ListCollectionsRequest {}))
+        .await
+        .unwrap_err();
+    assert_error(&error, Code::PermissionDenied, "tenant_suspended");
+    rest_ok(
+        &h.app,
+        "POST",
+        &format!("/v1/admin/tenants/{tenant_id}/resume"),
+        None,
+    )
+    .await;
+    h.client
+        .list_collections(req(Some(token), proto::ListCollectionsRequest {}))
+        .await
+        .unwrap();
     let rate = rest_ok(
         &h.app,
         "POST",

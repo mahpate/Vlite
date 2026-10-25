@@ -1,9 +1,11 @@
 "use strict";
-// Bootstrap-admin lifecycle tools: tenants, TLS reload and replication log export.
+// Bootstrap-admin lifecycle tools: tenants (create, usage, settings, suspend/resume, delete),
+// TLS reload, replication log export, and the display-only signed-in identity summary.
 // Pure validators are exported for Node tests; init(ctx) only registers listeners.
 (() => {
   const U64_MAX = 18446744073709551615n;
   const EXPORT_ROUTE = "/v1/admin/replication/export";
+  const LIFECYCLE_ROUTE = "/v1/admin/tenants/{id}/usage";
   const EXPORT_MAX_BYTES = 16777216;
   const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
   const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
@@ -47,9 +49,69 @@
   const tenantPath = (value) => `/v1/admin/tenants/${tenantId(value)}`;
   const limitText = (limit) => limit === null || limit === undefined ? "unlimited"
     : Number.isSafeInteger(limit) ? String(limit) : `about ${limit} (exceeds browser integer precision; inspect via the REST API)`;
+  const count = (n) => Number.isSafeInteger(n) ? n : n === undefined || n === null ? "unknown" : `about ${n} (exceeds browser integer precision)`;
+  const STATES = { active: "active", suspended: "suspended (API keys blocked)" };
+  // Older servers omit state/counts; those fields are shown only when reported.
+  function tenantView(item) {
+    const view = { id: item?.id, name: item?.name, max_vectors: limitText(item?.max_vectors) };
+    if (typeof item?.state === "string") view.state = STATES[item.state] ?? item.state;
+    if (Number.isSafeInteger(item?.suspended_unix_ms)) view.suspended_since = new Date(item.suspended_unix_ms).toISOString();
+    if (Number.isSafeInteger(item?.collections)) view.collections = item.collections;
+    if (item?.vectors !== undefined) view.vectors = count(item.vectors);
+    return view;
+  }
   function tenantList(value) {
     if (!object(value) || !Array.isArray(value.items)) throw new Error("Unexpected tenant list response");
-    return { count: value.items.length, tenants: value.items.map((item) => ({ id: item?.id, name: item?.name, max_vectors: limitText(item?.max_vectors) })) };
+    return { count: value.items.length, tenants: value.items.map(tenantView) };
+  }
+  // Settings body: blank name keeps the current name; mode keep|set|unlimited controls the limit.
+  function tenantSettings(name, mode, limit) {
+    const body = {};
+    if (typeof name === "string" && name !== "") body.name = tenantName(name);
+    if (mode === "set") {
+      const value = maxVectors(limit);
+      if (value === null) throw new Error("Enter the new vector limit, or choose \"Remove the limit\"; no request sent");
+      body.max_vectors = value;
+    } else if (mode === "unlimited" || mode === "keep" || mode === undefined || mode === "") {
+      if (typeof limit === "string" && limit.trim() !== "") throw new Error("A new limit is filled in, but the limit choice is not \"Set a new limit\". Choose it or clear the field; no request sent");
+      if (mode === "unlimited") body.max_vectors = null;
+    } else throw new Error("Unknown vector limit choice; no request sent");
+    if (Object.keys(body).length === 0) throw new Error("Nothing to change: enter a new name and/or choose a new vector limit; no request sent");
+    return body;
+  }
+  function tenantUsage(value) {
+    if (!object(value) || !object(value.tenant) || !Array.isArray(value.collections)) throw new Error("Unexpected tenant usage response");
+    const credentials = object(value.credentials) ? value.credentials : {};
+    return {
+      tenant: tenantView(value.tenant),
+      vectors: count(value.vectors),
+      vector_limit: limitText(value.max_vectors),
+      remaining_vectors: value.max_vectors === null || value.max_vectors === undefined ? "unlimited" : count(value.remaining_vectors),
+      over_limit: value.over_quota === true ? "yes: new vectors are refused until usage drops below the limit or the limit is raised" : "no",
+      collections: value.collections.map((item) => ({ name: item?.name, stored_as: item?.physical_name, vectors: count(item?.vectors) })),
+      api_keys: { active: credentials.active ?? 0, expired: credentials.expired ?? 0, revoked: credentials.revoked ?? 0 },
+    };
+  }
+  // Display-only summary of the connected credential. Authorization stays server-side.
+  function identity(caps, connected = true) {
+    if (!connected || !object(caps)) return { kind: "none", text: "Not signed in", detail: "Connect with a token to see which identity and permissions this dashboard is using." };
+    const reported = object(caps.identity) && typeof caps.identity.label === "string" && caps.identity.label !== "" ? caps.identity : null;
+    const kind = reported && typeof reported.kind === "string" ? reported.kind
+      : ({ admin: "super_admin", read_only: "read_only", scoped: "scoped" })[caps.role] ?? "unknown";
+    const label = reported?.label ?? ({ super_admin: "Admin token", read_only: "Read-only token", scoped: "Scoped API key" })[kind] ?? `Role "${caps.role ?? "unknown"}"`;
+    const scope = object(caps.scope) ? caps.scope : {};
+    const list = (value) => Array.isArray(value) ? value.map(String) : [];
+    const collections = list(scope.collections);
+    const where = collections.includes("*") ? "all collections" : collections.length ? `collections ${collections.join(", ")}` : "no collections";
+    const tenant = reported?.tenant_id ?? scope.tenant_id;
+    const details = {
+      open: "No admin token is configured, so anyone who can reach this server has full administrator access. Configure an admin token before sharing it.",
+      super_admin: "Full administrator: can manage tenants, API keys, backups and server settings.",
+      read_only: "Can read and search every collection. Cannot change data or administer the server.",
+      scoped: `Can ${list(scope.operations).join(", ") || "do nothing"} on ${where}${tenant ? ` inside tenant ${reported?.tenant_name ? `"${reported.tenant_name}" ` : ""}(${tenant})` : ""}. Cannot administer the server.`,
+    };
+    const suffix = reported ? "" : " (this server does not report identity details)";
+    return { kind, text: kind === "open" ? label : `Signed in as ${label}${suffix}`, detail: details[kind] ?? "Permissions are decided by the server for this token." };
   }
 
   function exportPath(after, maxBytes) {
@@ -89,11 +151,15 @@
     const features = object(caps?.features) ? caps.features : {};
     const routes = Array.isArray(caps?.routes) ? caps.routes : [];
     const offline = { allowed: false, reason: "Connect to a server first." };
-    if (!connected || !object(caps)) return { tenants: offline, tls: offline, replication: offline };
+    if (!connected || !object(caps)) return { tenants: offline, lifecycle: offline, tls: offline, replication: offline };
     const admin = role === "admin";
     const notAdmin = (what) => `${what} requires the bootstrap admin token (current role: ${role ?? "unknown"}). Read-only and scoped credentials cannot use it.`;
     const tenants = !admin ? { allowed: false, reason: notAdmin("Tenant management") }
       : features.tenants !== true ? { allowed: false, reason: "Tenants are disabled on this server: they require admin token authentication plus an admin directory (VLITE_ADMIN_DIR) at startup." }
+      : { allowed: true, reason: "" };
+    const lifecycle = !tenants.allowed ? tenants
+      : features.tenant_lifecycle !== true && !routes.includes(LIFECYCLE_ROUTE)
+        ? { allowed: false, reason: "This server version cannot show tenant usage, rename tenants, change limits, or suspend/resume tenants. Upgrade the server to use these controls; List, Create and Delete still work." }
       : { allowed: true, reason: "" };
     const tls = !admin ? { allowed: false, reason: notAdmin("TLS reload") }
       : features.tls_reload !== true ? { allowed: false, reason: features.native_tls === true
@@ -105,13 +171,15 @@
     const replication = !routes.includes(EXPORT_ROUTE) ? { allowed: false, reason: "This server does not expose replication log export." }
       : !readAll ? { allowed: false, reason: `Replication export requires admin, read-only, or a scoped credential with read on all collections ("*") (current role: ${role ?? "unknown"}).` }
       : { allowed: true, reason: "" };
-    return { tenants, tls, replication };
+    return { tenants, lifecycle, tls, replication };
   }
 
   const HINTS = {
     tenants_disabled: "Tenants are disabled: configure admin token authentication and VLITE_ADMIN_DIR, then restart.",
     tenant_not_found: "No live tenant has this ID (it may already be deleted). List tenants to refresh.",
     tenant_not_empty: "The tenant still owns collections (named t<tenant-id>__*). Drop those collections first with a credential scoped to the tenant or as admin, then delete again.",
+    tenant_suspended: "This tenant is suspended: its API keys are refused and new keys cannot be issued for it. Resume the tenant first.",
+    tenant_unavailable: "This tenant was deleted, so its API keys no longer work.",
     tenants_commit_indeterminate: "The change is in effect but its durability was not confirmed. List tenants before retrying; do not repeat blindly.",
     tls_disabled: "No file-backed TLS listener is configured; nothing was reloaded.",
     tls_reload_failed: "The TLS files on the server are invalid or unreadable. Nothing changed: the previous certificates remain active. Fix the files on the server host and retry.",
@@ -128,9 +196,11 @@
   function init(ctx) {
     const $ = (id) => document.getElementById(id);
     const controls = ["tenant-list", "tenant-name", "tenant-max-vectors", "tenant-create", "tenant-id", "tenant-delete", "tenant-result",
+      "tenant-usage", "tenant-new-name", "tenant-limit-mode", "tenant-new-limit", "tenant-save-settings", "tenant-suspend", "tenant-resume",
       "tls-reload", "tls-result", "replication-after", "replication-max-bytes", "replication-export", "replication-download", "replication-result"];
     for (const name of controls) if (!$(name)) throw new Error(`admin markup is missing control #${name}`);
     const OUTPUTS = { tenants: "tenant-result", tls: "tls-result", replication: "replication-result" };
+    const TARGETS = { ...OUTPUTS, lifecycle: "tenant-result" };
     let epoch = 0;
     let segment = null;
     let gates = availability(null, false);
@@ -138,14 +208,14 @@
     const current = (mark) => mark === epoch && ctx.connected();
     const need = (area) => {
       gates = availability(ctx.capabilities(), ctx.connected());
-      if (!gates[area].allowed) { show(OUTPUTS[area], gates[area].reason); throw new Error(gates[area].reason); }
+      if (!gates[area].allowed) { show(TARGETS[area], gates[area].reason); throw new Error(gates[area].reason); }
     };
     // Every action captures the epoch; disconnect/reconnect bumps it so late results are dropped.
     const on = (name, area, action) => $(name).addEventListener("click", () => ctx.run(async () => {
       const mark = epoch;
       try { await action(mark); }
       catch (error) {
-        if (!error?.stale && current(mark)) show(OUTPUTS[area], explain(error));
+        if (!error?.stale && current(mark)) show(TARGETS[area], explain(error));
         throw error;
       }
     }));
@@ -171,6 +241,46 @@
       if (!current(mark)) return;
       const result = await ctx.api("DELETE", `/v1/admin/tenants/${value}`, undefined, { data: false });
       if (current(mark)) show("tenant-result", { tenant_id: value, ...(object(result) ? result : { result }) });
+    });
+    // Lifecycle actions all target the tenant ID field and render the tenant the server returns.
+    const lifecycle = async (mark, method, id, suffix, body, note) => {
+      const value = await ctx.api(method, `/v1/admin/tenants/${id}/${suffix}`, body, { data: false });
+      if (current(mark)) show("tenant-result", { tenant: object(value?.tenant) ? tenantView(value.tenant) : value, note });
+      return current(mark);
+    };
+    on("tenant-usage", "lifecycle", async (mark) => {
+      need("lifecycle");
+      const id = tenantId($("tenant-id").value);
+      const value = await ctx.api("GET", `/v1/admin/tenants/${id}/usage`, undefined, { data: false });
+      if (current(mark)) show("tenant-result", tenantUsage(value));
+    });
+    on("tenant-save-settings", "lifecycle", async (mark) => {
+      need("lifecycle");
+      const id = tenantId($("tenant-id").value);
+      const body = tenantSettings($("tenant-new-name").value, $("tenant-limit-mode").value, $("tenant-new-limit").value);
+      const changes = [
+        body.name !== undefined ? `rename it to "${body.name}"` : "",
+        !("max_vectors" in body) ? "" : body.max_vectors === null ? "remove its vector limit" : `set its vector limit to ${body.max_vectors}`,
+      ].filter(Boolean).join(" and ");
+      if (!await ctx.confirm(`Update tenant ${id}: ${changes}? A limit below current usage keeps existing vectors but refuses new ones. The change is durable and audited.`)) return;
+      if (!current(mark)) return;
+      if (await lifecycle(mark, "PUT", id, "settings", body, "Saved. API keys bound to this tenant use the new limit immediately.")) {
+        $("tenant-new-name").value = ""; $("tenant-limit-mode").value = "keep"; $("tenant-new-limit").value = "";
+      }
+    });
+    on("tenant-suspend", "lifecycle", async (mark) => {
+      need("lifecycle");
+      const id = tenantId($("tenant-id").value);
+      if (!await ctx.confirm(`Suspend tenant ${id}? Every API key bound to it is refused immediately (REST and gRPC) and no new keys can be issued for it. Its data is kept and the bootstrap admin can still read or clean it up. Resume undoes this.`)) return;
+      if (!current(mark)) return;
+      await lifecycle(mark, "POST", id, "suspend", undefined, "Suspended. Its API keys now receive tenant_suspended until you resume it.");
+    });
+    on("tenant-resume", "lifecycle", async (mark) => {
+      need("lifecycle");
+      const id = tenantId($("tenant-id").value);
+      if (!await ctx.confirm(`Resume tenant ${id}? Its unexpired, unrevoked API keys work again immediately.`)) return;
+      if (!current(mark)) return;
+      await lifecycle(mark, "POST", id, "resume", undefined, "Active. Its unexpired, unrevoked API keys work again.");
     });
     on("tls-reload", "tls", async (mark) => {
       need("tls");
@@ -226,7 +336,7 @@
     };
   }
 
-  const api = { init, utils: { tenantName, maxVectors, tenantId, tenantRequest, tenantPath, tenantList, exportPath, exportSegment, exportFilename, availability, explain, utf8Length } };
+  const api = { init, utils: { tenantName, maxVectors, tenantId, tenantRequest, tenantPath, tenantList, tenantView, tenantSettings, tenantUsage, identity, exportPath, exportSegment, exportFilename, availability, explain, utf8Length } };
   if (typeof window !== "undefined") window.VLiteAdminTools = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })();

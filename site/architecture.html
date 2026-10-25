@@ -476,7 +476,9 @@ flowchart LR
 </pre></details>
     </figure>
     <p>Tenants are policy namespaces in the same file, not separate files or cryptographic domains. Physical collection
-      names are <code>t&lt;32-hex-id&gt;__&lt;name&gt;</code>, with up to 1,024 lifetime tenant IDs.</p>
+      names are <code>t&lt;32-hex-id&gt;__&lt;name&gt;</code>, with up to 1,024 lifetime tenant IDs. Tenants sign in
+      only with API keys bound to their ID; a super admin can suspend a tenant to block all of its keys without
+      deleting data.</p>
 
     <h2 id="cdc">CDC, point-in-time restore &amp; replicas</h2>
     <p>Because the file is a sequenced log, change data capture, restore and replication all read the same frames.</p>

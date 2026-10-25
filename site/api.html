@@ -454,10 +454,12 @@ curl -s -X POST localhost:8080/v1/search \
         <tr><td><span class="verb get">GET</span></td><td><code>/metrics</code></td><td>JSON or Prometheus metrics</td></tr>
         <tr><td><span class="verb get">GET</span></td><td><code>/v1/admin/logs</code></td><td>Bounded entries, next_seq, dropped, capacity. Filters: since (sequence), level, q, limit (1–1000, default 200).</td></tr>
         <tr><td><span class="verb get">GET</span></td><td><code>/v1/admin/metrics/summary</code></td><td>Uptime, request/search counters, per-route latency percentiles, database and log-buffer state. Recent 1024 observations per route.</td></tr>
-        <tr><td><span class="verb get">GET</span></td><td><code>/v1/capabilities</code></td><td>Version, role and compatibility</td></tr>
+        <tr><td><span class="verb get">GET</span></td><td><code>/v1/capabilities</code></td><td>Version, role, signed-in identity (super admin, read-only or API key and tenant) and compatibility</td></tr>
         <tr><td><span class="verb get">GET</span> <span class="verb post">POST</span></td><td><code>/v1/admin/backups</code> &middot; <code>/v1/admin/restores</code></td><td>Online backups and validated restores</td></tr>
         <tr><td><span class="verb get">GET</span> <span class="verb post">POST</span></td><td><code>/v1/admin/credentials</code></td><td>Scoped, expiring credentials with rotation and revocation</td></tr>
         <tr><td><span class="verb get">GET</span> <span class="verb post">POST</span></td><td><code>/v1/admin/tenants</code> &middot; <code>/v1/admin/webhooks</code></td><td>Tenants and signed change-feed webhooks</td></tr>
+        <tr><td><span class="verb get">GET</span> <span class="verb put">PUT</span></td><td><code>/v1/admin/tenants/{id}/usage</code> &middot; <code>/v1/admin/tenants/{id}/settings</code></td><td>Tenant usage and API key counts; rename or change its vector limit</td></tr>
+        <tr><td><span class="verb post">POST</span></td><td><code>/v1/admin/tenants/{id}/{suspend|resume}</code></td><td>Block or restore every API key bound to a tenant without deleting data</td></tr>
         <tr><td><span class="verb get">GET</span></td><td><code>/dashboard</code></td><td>Built-in web console</td></tr>
       </tbody>
     </table>

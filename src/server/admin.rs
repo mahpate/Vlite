@@ -323,6 +323,7 @@ async fn capabilities(
     Extension(role): Extension<Role>,
 ) -> Result<Json<Value>, ApiError> {
     let auth = s.admin.auth.lock().map_err(internal)?;
+    let open = auth.admin.is_none();
     let v4 = s.format_version >= 4;
     let backups = s.admin.directory.is_some();
     let scoped = s.admin.credentials.is_some();
@@ -358,6 +359,7 @@ async fn capabilities(
         "/v1/admin/backups/schedule/run","/v1/admin/backups/{name}/verify","/v1/admin/backups/{name}/drill",
         "/v1/admin/diagnostics/slow-queries","/v1/admin/logs","/v1/admin/metrics/summary","/v1/admin/credentials","/v1/admin/credentials/{id}/rotate",
         "/v1/admin/credentials/{id}/revoke","/v1/admin/audit/persistent"]});
+    drop(auth);
     let features = value["features"]
         .as_object_mut()
         .expect("capability features object");
@@ -374,6 +376,7 @@ async fn capabilities(
         ("sparse_vectors", s.format_version >= 5),
         ("webhooks", s.admin.directory.is_some()),
         ("disk_ann", s.admin.directory.is_some()),
+        ("tenant_lifecycle", s.admin.tenants.is_some()),
     ] {
         features.insert(name.to_owned(), json!(enabled));
     }
@@ -401,6 +404,10 @@ async fn capabilities(
             "/v1/collections/{collection}/query",
             "/v1/collections/{collection}/index/disk-ann",
             "/v1/collections/{collection}/search/disk-ann",
+            "/v1/admin/tenants/{id}/usage",
+            "/v1/admin/tenants/{id}/settings",
+            "/v1/admin/tenants/{id}/suspend",
+            "/v1/admin/tenants/{id}/resume",
         ]
         .into_iter()
         .map(|route| json!(route)),
@@ -408,7 +415,35 @@ async fn capabilities(
     if let Role::Scoped(grant) = &role {
         value["scope"] = grant.json();
     }
+    value["identity"] = identity(&s, &role, open);
     Ok(Json(value))
+}
+/// Who the presented token is, for display only. Authorization still comes
+/// from `role` and `scope`; labels never contain secrets.
+fn identity(s: &Service, role: &Role, open: bool) -> Value {
+    match role {
+        Role::Admin if open => json!({"kind":"open",
+            "label":"Open access (no admin token configured; every caller is admin)"}),
+        Role::Admin => json!({"kind":"super_admin","label":"Super admin (bootstrap admin token)"}),
+        Role::ReadOnly => json!({"kind":"read_only","label":"Read-only token"}),
+        Role::Scoped(grant) => {
+            let tenant_name = grant.tenant_id.as_ref().and_then(|id| {
+                s.admin
+                    .tenants
+                    .as_ref()
+                    .and_then(|tenants| tenants.name(id))
+            });
+            let mut label = format!("API key \"{}\" ({})", grant.name, grant.id);
+            if let Some(id) = &grant.tenant_id {
+                label.push_str(&format!(
+                    " · tenant \"{}\"",
+                    tenant_name.as_deref().unwrap_or(id)
+                ));
+            }
+            json!({"kind":"scoped","label":label,"credential_id":grant.id,
+                "credential_name":grant.name,"tenant_id":grant.tenant_id,"tenant_name":tenant_name})
+        }
+    }
 }
 fn token_status(a: &Auth) -> Value {
     json!({"generation":a.generation,"admin_file_configured":a.admin_file.is_some(),
