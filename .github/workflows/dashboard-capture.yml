@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   capture:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
@@ -19,7 +19,7 @@ jobs:
       - name: Build the matching backend on this isolated runner
         run: |
           cargo build --locked --features server --bin vlite-server
-          printf '%s\n' 'FROM debian:bookworm-slim' 'COPY target/debug/vlite-server /usr/local/bin/vlite-server' 'ENTRYPOINT ["/usr/local/bin/vlite-server"]' | docker build -t vlite-capture:source -f - .
+          printf '%s\n' 'FROM ubuntu:24.04' 'COPY target/debug/vlite-server /usr/local/bin/vlite-server' 'ENTRYPOINT ["/usr/local/bin/vlite-server"]' | docker build -t vlite-capture:source -f - .
       - run: python -m pip install -r tests/requirements-dashboard.txt
       - run: python -m playwright install --with-deps chromium
       - run: python scripts/capture_connected_dashboard.py captures
