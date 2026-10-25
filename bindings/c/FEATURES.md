@@ -154,10 +154,14 @@ and mismatched bulk dimensions/counts are rejected as `invalid_input` before
 mutation. A null float pointer is permitted only for count zero. JSON options
 are independently limited to 8 MiB and vectors to 2097152 float32 values (8 MiB).
 
-Search accepts an existing `{"op":"search",...}` JSON request with `vector`
-omitted and inserts the borrowed vector into the existing execution path.
-Supplying both a JSON vector and a typed vector is an error. Exact, auto and
-hybrid engine validation and option/response rules are unchanged.
+Search accepts an existing `{"op":"search",...}` or
+`{"op":"search_approximate_ready",...}` JSON request with `vector` omitted and
+inserts the borrowed vector into the existing execution path. Supplying both a
+JSON vector and a typed vector is an error. Exact, auto, hybrid and ready-only
+approximate engine validation and option/response rules are unchanged; a JSON
+`search_approximate_ready` request without `vector` remains `invalid_input`.
+Libraries built before ready-only typed search reject that request as
+`invalid_input`.
 
 Bulk options have this shape (no `op` or vector fields):
 

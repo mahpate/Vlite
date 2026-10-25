@@ -78,10 +78,14 @@ pub unsafe extern "C" fn vlite_search_f32(
         let mut request: Request =
             serde_json::from_slice(bytes).map_err(|error| ("invalid_input", error.to_string()))?;
         match &mut request {
-            Request::Search { vector, .. } if vector.is_none() => *vector = Some(values.to_vec()),
+            Request::Search { vector, .. } | Request::SearchApproximateReady { vector, .. }
+                if vector.is_none() =>
+            {
+                *vector = Some(values.to_vec())
+            }
             _ => {
                 return Err(invalid(
-                    "typed search requires op search with vector omitted",
+                    "typed search requires op search or search_approximate_ready with vector omitted",
                 ));
             }
         }
@@ -266,6 +270,72 @@ mod tests {
                 ))["error"]["code"],
                 "invalid_handle"
             );
+        }
+    }
+
+    #[test]
+    fn typed_approximate_ready_search_matches_json() {
+        let create = br#"{"op":"features","request":{"op":"create","dimensions":2}}"#;
+        let created = unsafe { envelope(vlite_execute(0, create.as_ptr(), create.len())) };
+        let handle: u64 = created["result"]["handle"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let bulk = br#"{"dimensions":2,"operations":[{"id":"1"},{"id":"2"},{"id":"3"}]}"#;
+        let values = [1.0, 0.0, 0.0, 1.0, 0.5, 0.5];
+        let typed = br#"{"op":"search_approximate_ready","k":2,"ef_search":10}"#;
+        let json = br#"{"op":"search_approximate_ready","vector":[1,0],"k":2,"ef_search":10}"#;
+        let both = br#"{"op":"search_approximate_ready","vector":[1,0],"k":2,"ef_search":10}"#;
+        let missing = br#"{"op":"search_approximate_ready","k":2,"ef_search":10}"#;
+        let build = br#"{"op":"build_index"}"#;
+        unsafe {
+            assert_eq!(
+                envelope(vlite_batch_put_f32(
+                    handle,
+                    bulk.as_ptr(),
+                    bulk.len(),
+                    values.as_ptr(),
+                    6
+                ))["ok"],
+                true
+            );
+            assert_eq!(
+                envelope(vlite_execute(handle, build.as_ptr(), build.len()))["ok"],
+                true
+            );
+            let expected = envelope(vlite_execute(handle, json.as_ptr(), json.len()));
+            assert_eq!(expected["result"]["hits"][0]["id"], "1");
+            let actual = envelope(vlite_search_f32(
+                handle,
+                typed.as_ptr(),
+                typed.len(),
+                values.as_ptr(),
+                2,
+            ));
+            assert_eq!(actual, expected);
+            for (input, pointer, count) in [
+                (&both[..], values.as_ptr(), 2),
+                (&typed[..], values.as_ptr(), 1),
+                (&missing[..], std::ptr::null(), 0),
+            ] {
+                assert_eq!(
+                    envelope(vlite_search_f32(
+                        handle,
+                        input.as_ptr(),
+                        input.len(),
+                        pointer,
+                        count
+                    ))["error"]["code"],
+                    "invalid_input"
+                );
+            }
+            assert_eq!(
+                envelope(vlite_execute(handle, missing.as_ptr(), missing.len()))["error"]["code"],
+                "invalid_input"
+            );
+            let close = br#"{"op":"close"}"#;
+            vlite_execute(handle, close.as_ptr(), close.len());
         }
     }
 }

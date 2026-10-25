@@ -44,6 +44,13 @@ class TypedVectors(unittest.TestCase):
         self.db.build_index()
         self.assertEqual(self.db.search_f32(array("f", [1, 0]), 2, mode="auto", explain=True),
                          self.db.search_auto([1, 0], 2, explain=True))
+        for options in ({}, {"ef_search": 10, "metric": "squared_l2"}):
+            self.assertEqual(self.db.search_f32(array("f", [1, 0]), 2, mode="approximate_ready",
+                                                require_native=True, **options),
+                             self.db.search_approximate_ready([1, 0], 2, **options))
+        for options in ({"filter": [{"field": "label", "op": "eq", "value": "a"}]}, {"explain": True}):
+            with self.assertRaises(ValueError):
+                self.db.search_f32(array("f", [1, 0]), 2, mode="approximate_ready", **options)
         self.db.create_collection("other", 2)
         self.db.batch_put_f32([{"id": "9"}], array("f", [3, 4]), 2, collection="other")
         self.assertEqual(self.db.search_f32(array("f", [3, 4]), 1, collection="other")[0]["id"], "9")
@@ -61,10 +68,13 @@ class TypedVectors(unittest.TestCase):
         for value in (b"12345678", array("d", [1, 0]), (foreign * 2)(1, 0),
                       memoryview(array("f", [1, 2, 3, 4]))[::2],
                       array("f", [float("nan"), 0]), array("f", [float("inf"), 0]),
+                      array("f", [float("-inf"), 0]), array("f", [float("inf"), float("-inf")]),
                       array("f", [0]) * 2097153):
             with self.assertRaises(ValueError):
                 self.db.search_f32(value, 1)
         for dims, rows, values in [(0, [], []), (True, [], []), (2, [{"id": "1"}], [1]),
+                                   (2, [{"id": "1"}], [float("nan"), 0]),
+                                   (2, [{"id": "1"}], [3.4e38, float("-inf")]),
                                    (2, [{"id": "1", "vector": []}], [1, 0]),
                                    (2, [{"id": "1"}] * 4097, [0] * 8194)]:
             with self.assertRaises(ValueError):
@@ -80,6 +90,9 @@ class TypedVectors(unittest.TestCase):
                 self.db.search_f32(array("f", [1]), 1)
         self.db.batch_put_f32([{"id": "1"}], array("f", [1, 0]), 2)
         self.assertEqual(self.db.search_f32(array("f", [1, 0]), 1)[0]["id"], "1")
+        self.db.create_collection("large", 2)
+        self.db.batch_put_f32([{"id": "1"}], array("f", [3.4e38, 3.4e38]), 2, collection="large")
+        self.assertEqual(self.db.get("1", collection="large")["vector"][0], array("f", [3.4e38])[0])
 
     def test_snapshot_and_response_free_on_decode_failure(self):
         source = array("f", [1, 0])
@@ -113,6 +126,9 @@ class TypedVectors(unittest.TestCase):
         with old.create_in_memory(2) as db:
             db.batch_put_f32([{"id": "1"}], array("f", [1, 0]), 2)
             self.assertEqual(db.search_f32(array("f", [1, 0]), 1), db.search([1, 0], 1))
+            db.build_index()
+            self.assertEqual(db.search_f32(array("f", [1, 0]), 1, mode="approximate_ready"),
+                             db.search_approximate_ready([1, 0], 1))
             for action in (lambda: db.search_f32(array("f", [1, 0]), 1, require_native=True),
                            lambda: db.batch_put_f32([], array("f"), 2, require_native=True)):
                 with self.assertRaises(EmbeddedError) as caught:

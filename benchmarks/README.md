@@ -469,9 +469,13 @@ It reports ingest, index build (`build_index()` / `optimize()`), per-query
 p50/p95/p99, sequential QPS, tie-aware recall@k against a float64 oracle,
 resident-memory growth, on-disk footprint and reopen-plus-first-query time.
 VLite fsyncs each batch as an atomic commit and keeps HNSW in memory, so its
-ANN reopen includes a full index rebuild; zvec persists its index. The VLite
-Python binding sends JSON through a C ABI, which adds wrapper overhead that a
-Rust caller would not pay. Published results and caveats are on the
+ANN reopen includes a full index rebuild; zvec persists its index. When the
+installed VLite library exports the float32 entry points, the harness ingests
+with `batch_put_f32` and searches with `search_f32` (`approximate_ready` for
+ANN), recording `vector_transport: "float32"`; otherwise it sends each vector as
+JSON through the C ABI (`"json"`), which adds wrapper overhead that a Rust caller
+would not pay. Results committed before this field existed used JSON. Published
+results and caveats are on the
 [comparison page](https://mahpate.github.io/Vlite/compare.html).
 
 For other engines, pin the package and index parameters, use the same

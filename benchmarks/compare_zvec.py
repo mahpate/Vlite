@@ -73,20 +73,36 @@ class VLiteEngine:
         self.mode = mode
         self.path = Path(workdir) / "bench.vlite"
         self.library = NativeLibrary()
+        # Float32 buffers skip per-component JSON; older wheels fall back to JSON lists.
+        self.typed = getattr(self.library, "supports_float32", False)
+        self.transport = "float32" if self.typed else "json"
         self.db = self.library.create(self.path, dimensions)
 
     def ingest(self, vectors):
         size = batch_size(vectors.shape[1])
         for start in range(0, len(vectors), size):
-            self.db.batch([{"op": "put", "id": str(start + i), "vector": row}
-                           for i, row in enumerate(vectors[start:start + size].tolist())])
+            rows = vectors[start:start + size]
+            if self.typed:
+                self.db.batch_put_f32([{"id": str(start + i)} for i in range(len(rows))],
+                                      np.ascontiguousarray(rows, dtype=np.float32),
+                                      vectors.shape[1], require_native=True)
+            else:
+                self.db.batch([{"op": "put", "id": str(start + i), "vector": row}
+                               for i, row in enumerate(rows.tolist())])
 
     def build(self):
         if self.mode == "ann":
             self.db.build_index()
 
     def search(self, query, k, ef):
-        if self.mode == "exact":
+        if self.typed:
+            vector = np.asarray(query, dtype=np.float32)
+            if self.mode == "exact":
+                hits = self.db.search_f32(vector, k, require_native=True)
+            else:
+                hits = self.db.search_f32(vector, k, mode="approximate_ready", ef_search=ef,
+                                          require_native=True)
+        elif self.mode == "exact":
             hits = self.db.search(query, k)
         else:
             hits = self.db.search_approximate_ready(query, k, ef_search=ef)
@@ -171,7 +187,8 @@ def run_child(args):
     try:
         baseline_rss = current_rss()
         engine = ENGINES[args.engine](workdir, vectors.shape[1], args.mode)
-        result = {"engine": args.engine, "mode": args.mode, "version": engine.version}
+        result = {"engine": args.engine, "mode": args.mode, "version": engine.version,
+                  "vector_transport": getattr(engine, "transport", "python_list")}
         start = time.perf_counter_ns()
         engine.ingest(vectors)
         result["ingest_s"] = (time.perf_counter_ns() - start) / 1e9

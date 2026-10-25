@@ -27,7 +27,8 @@ VLITE_API char *vlite_execute(uint64_t handle, const uint8_t *input, size_t leng
    vectors is borrowed, aligned native-endian IEEE float32, immutable until return.
    count is the number of floats (not bytes), at most 2097152; all must be finite.
    NULL vectors is allowed only for count=0. JSON options are 1..8388608 bytes.
-   Search: existing {"op":"search",...} request with vector omitted.
+   Search: existing {"op":"search",...} or {"op":"search_approximate_ready",...}
+   request with vector omitted.
    Bulk: {"dimensions":D,"operations":[{"id":"1",...},...],"collection":...};
    put fields are id, payload_base64 and metadata; vectors are row-major.
    D>0, rows<=4096, count=rows*D. Uses the existing atomic batch/sync contract.

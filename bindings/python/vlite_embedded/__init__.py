@@ -25,7 +25,8 @@ def _float32_snapshot(vectors):
     if count > 2097152:
         raise ValueError("vector buffer exceeds 2097152 float32 values")
     snapshot = (ctypes.c_float * count).from_buffer_copy(view)
-    if any(not math.isfinite(value) for value in snapshot):
+    # A float64 sum of float32 values cannot overflow, so it is finite iff every value is.
+    if not math.isfinite(sum(memoryview(snapshot).cast("B").cast("f"))):
         raise ValueError("vector values must be finite")
     return snapshot
 
@@ -255,9 +256,20 @@ class Database:
                    ef_search: int | None = None, quantization: str | None = None,
                    rerank_multiplier: int | None = None, require_native: bool = False) -> list[dict] | dict:
         """Search a contiguous float32 buffer. Exact returns hits (or explained result);
-        auto returns the same dict as search_auto. Old libraries fall back to JSON."""
+        auto returns the same dict as search_auto; approximate_ready returns the same
+        hits as search_approximate_ready. Old libraries fall back to JSON."""
+        if mode == "approximate_ready":
+            if filter is not None or explain:
+                raise ValueError("approximate_ready does not accept filter or explain")
+            return self._execute_float32("vlite_search_f32",
+                                         {"op": "search_approximate_ready", "k": k,
+                                          "ef_search": 100 if ef_search is None else ef_search,
+                                          **_given(metric=metric, collection=collection,
+                                                   quantization=quantization,
+                                                   rerank_multiplier=rerank_multiplier)},
+                                         vector, require_native)["hits"]
         if mode not in ("exact", "auto"):
-            raise ValueError("mode must be exact or auto")
+            raise ValueError("mode must be exact, auto or approximate_ready")
         result = self._execute_float32("vlite_search_f32",
                                       {"op": "search", "mode": mode, "k": k, "explain": explain,
                                        "filter": [] if filter is None else filter,

@@ -131,7 +131,8 @@ enum Request {
         rerank_multiplier: Option<u8>,
     },
     SearchApproximateReady {
-        vector: Vec<f32>,
+        #[serde(default)]
+        vector: Option<Vec<f32>>,
         k: usize,
         ef_search: usize,
         #[serde(default)]
@@ -1013,6 +1014,8 @@ fn execute(handle: u64, request: Request) -> Result<Value> {
             quantization,
             rerank_multiplier,
         } => {
+            let vector =
+                vector.ok_or_else(|| invalid("search_approximate_ready requires vector"))?;
             let view = db
                 .collection(collection_name(&collection))
                 .map_err(failure)?;

@@ -179,11 +179,16 @@ semantics; they are not individually acknowledged writes.
 
 `search_f32` exact mode has the same options/return shape as `search`; auto mode
 returns the `search_auto` dictionary and accepts `ef_search`, `quantization` and
-`rerank_multiplier`. Filters, metrics, named collections, explain output and
+`rerank_multiplier`. `mode="approximate_ready"` returns the same hits as
+`search_approximate_ready` (default `ef_search=100`; `filter` and `explain` are
+rejected); a native library built before this mode reports `invalid_input`.
+Filters, metrics, named collections, explain output and
 errors use the existing engine path. Unsupported option combinations are still
 errors. The Python wrapper owns a validated snapshot during the call because
 ctypes releases the GIL. This is a copy-reducing path, **not zero-copy**. The
 existing per-handle Python lock and global native owner lock remain in place.
+Finite validation sums the snapshot in C (a float64 sum of float32 values is
+finite exactly when every value is), rather than testing each value in Python.
 
 With this wrapper and a native ABI-1 library lacking the optional symbols,
 `native.supports_float32` is false and the new methods fall back to JSON using

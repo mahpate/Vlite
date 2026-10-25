@@ -239,8 +239,10 @@ class VLiteEmbedded(VLiteEngine):
 
     def __init__(self, workdir, dimensions, mode, args):
         super().__init__(workdir, dimensions, mode)
-        self.params = "search() brute force" if mode == "exact" else \
-            f"build_index() default HnswConfig M={HNSW_M} ef_construction={HNSW_EF_CONSTRUCTION}; search_approximate_ready ef_search"
+        self.params = ("search_f32() brute force" if self.typed else "search() brute force") if mode == "exact" else \
+            f"build_index() default HnswConfig M={HNSW_M} ef_construction={HNSW_EF_CONSTRUCTION}; " + \
+            ("search_f32(mode=approximate_ready) ef_search" if self.typed else "search_approximate_ready ef_search")
+        self.params += f"; {self.transport} vector transport"
 
 
 class ZvecEmbedded(ZvecEngine):
