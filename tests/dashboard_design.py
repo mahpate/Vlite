@@ -40,6 +40,12 @@ def check(screenshots=None):
             page.on("pageerror", lambda error: errors.append(str(error)))
             page.goto(MOCK_ORIGIN + "/dashboard")
             page.locator("#tour-dismiss").click()
+            page.locator(".token-help summary").focus()
+            page.keyboard.press("Enter")
+            expect(page.locator("#token-hint")).to_be_visible()
+            expect(page.locator(".token-help")).to_contain_text("VLITE_TOKEN_FILE")
+            expect(page.locator(".token-help")).to_contain_text("without the Bearer prefix")
+            page.locator(".token-help summary").press("Enter")
             page.locator("#token").fill("admin-" + "t" * 32)
             page.locator("#connection button[type=submit]").click()
             expect(page.locator("#connection-badge")).to_have_text("Connected")
@@ -56,6 +62,13 @@ def check(screenshots=None):
                                        ("requests", "requests")):
                     page.evaluate("target => window.VLiteNavigation.reveal(target)", route)
                     expect(page.locator(f"#{section}")).to_be_visible()
+                    preferences = page.locator(".topbar .appearance-settings")
+                    expect(preferences.locator("summary")).to_be_visible()
+                    preferences.evaluate("element => element.open = true")
+                    expect(preferences.locator("#theme")).to_be_visible()
+                    assert page.locator("#theme").bounding_box()["height"] >= 44
+                    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), (theme, route, width, "preferences")
+                    preferences.evaluate("element => element.open = false")
                     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), (theme, route, width)
                     for button in page.locator(f"#{section} button:visible").all():
                         assert button.bounding_box()["height"] >= 44, (theme, route, button.inner_text())
@@ -65,6 +78,15 @@ def check(screenshots=None):
                         page.screenshot(path=str(screenshots / f"studio-{route}-{theme}-{width}.png"))
             page.set_viewport_size({"width": 1440, "height": 1050})
             page.evaluate("window.VLiteNavigation.reveal('database')")
+            page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)")
+            assert abs(page.locator(".topbar").bounding_box()["y"]) <= 1
+            preferences = page.locator(".appearance-settings")
+            preferences.locator("summary").focus()
+            page.keyboard.press("Enter")
+            expect(page.locator("#theme")).to_be_visible()
+            page.locator("#theme").select_option("dark" if theme == "light" else "light")
+            expect(page.locator("html")).to_have_attribute("data-theme", "dark" if theme == "light" else "light")
+            preferences.locator("summary").press("Enter")
             for title, target in (("Server compatibility", "#compatibility"),
                                   ("Database details and metrics (JSON)", "#overview")):
                 details = page.locator(target).locator("..")

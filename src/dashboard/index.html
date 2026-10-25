@@ -31,15 +31,15 @@
   <div class="sidebar-note"><strong>One file. Your vectors.</strong><p>Bring your own embeddings. Named collections require format v4 and server support.</p></div>
 </aside>
 <div class="workspace">
-<header class="topbar"><div><span class="eyebrow">WORKSPACE / DATABASE</span><h1 id="workspace-title">Overview</h1><p id="workspace-description">Your database at a glance.</p></div><div class="badges"><span id="collection-badge" class="badge">Collection: default</span><span id="connection-badge" class="badge">Disconnected</span></div></header>
-<a class="skip-link" href="#database">Skip to database controls</a>
-<details class="appearance-settings"><summary>Appearance and preferences</summary><div class="preferences">
+<header class="topbar"><div><span class="eyebrow">WORKSPACE / DATABASE</span><h1 id="workspace-title">Overview</h1><p id="workspace-description">Your database at a glance.</p></div><div class="topbar-actions"><div class="badges"><span id="collection-badge" class="badge">Collection: default</span><span id="connection-badge" class="badge">Disconnected</span></div>
+<details class="appearance-settings"><summary>Appearance and preferences</summary><div class="preferences" role="group" aria-label="Appearance and preferences">
   <label>Theme <select id="theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
   <label>Density <select id="density"><option value="comfortable">Comfortable</option><option value="compact">Compact</option></select></label>
   <label><input id="remember-preferences" type="checkbox"> Remember appearance only</label>
   <button id="tour-start" type="button" class="secondary">Quick tour</button>
   <button id="cancel-request" type="button" class="secondary" disabled>Stop waiting</button>
-</div></details>
+</div></details></div></header>
+<a class="skip-link" href="#database">Skip to database controls</a>
 <p id="status" class="status-bar" role="status" aria-live="polite">Disconnected</p>
 <p id="error-help" role="status"></p>
 <aside id="studio-tour" class="studio-tour" aria-labelledby="tour-title" hidden>
@@ -56,7 +56,17 @@
     <div class="connection-panel">
     <div><h3>Your database, connected</h3><p>Connect to load records, run searches and inspect server health.</p></div>
     <form id="connection">
-      <label>Bearer token <input id="token" type="password" autocomplete="off" spellcheck="false"></label>
+      <label>Bearer token <input id="token" type="password" autocomplete="off" spellcheck="false" aria-describedby="token-hint"></label>
+      <details class="token-help"><summary>Where do I get a token?</summary>
+        <p id="token-hint">Use an existing token from the server owner. Paste only the token value, without the <code>Bearer</code> prefix.</p>
+        <ul>
+          <li><strong>Local Docker Compose:</strong> from the checkout that started this server, read <code>.secrets/api-token</code> (or the file set by <code>VLITE_TOKEN_FILE</code>). In PowerShell: <code>Get-Content .secrets\api-token -Raw</code>.</li>
+          <li><strong>Windows devbox script:</strong> run <code>.\scripts\devbox.ps1 -Token</code> to copy that devbox's token to your clipboard.</li>
+          <li><strong>Direct server:</strong> use the value configured through <code>--token-file</code>, <code>VLITE_AUTH_TOKEN_FILE</code> or <code>VLITE_AUTH_TOKEN</code>.</li>
+          <li><strong>Shared server:</strong> ask your administrator for a scoped or read-only credential with the permissions you need.</li>
+        </ul>
+        <p>Tokens are secrets. Do not share them in screenshots or logs. The dashboard cannot retrieve an administrator token for you.</p>
+      </details>
       <p class="connection-hint">Kept in memory only; reload or Disconnect clears it. Use HTTPS beyond loopback.</p>
       <button type="submit">Connect / refresh</button><button id="disconnect" type="button">Disconnect</button>
     </form>

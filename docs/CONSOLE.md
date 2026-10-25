@@ -23,6 +23,23 @@ The usual Create → Write → Query path is: review/create an empty collection 
 Settings, select it as active, write with the record editor or JSON documents,
 then query from Search.
 
+### Find your bearer token
+
+Open **Where do I get a token?** beside the connection field. Paste the token
+value only, without the `Bearer` prefix.
+
+- **Docker Compose:** read `.secrets/api-token` in the checkout that launched the
+  server, or the file selected by `VLITE_TOKEN_FILE`. PowerShell:
+  `Get-Content .secrets\api-token -Raw`.
+- **Windows devbox script:** `.\scripts\devbox.ps1 -Token` copies that devbox's
+  token to your clipboard.
+- **Direct server:** use the value configured through `--token-file`,
+  `VLITE_AUTH_TOKEN_FILE` or `VLITE_AUTH_TOKEN`.
+- **Shared server:** request a scoped or read-only credential from its administrator.
+
+Treat tokens as secrets; do not include them in screenshots or logs. The dashboard
+cannot retrieve an administrator token.
+
 ## Studio workflow improvements
 
 The current source refreshes the studio with a theme-aware sidebar, vector
@@ -36,7 +53,8 @@ VLite provides a create → write → query quick start, theme-aware presentatio
 onboarding and SDK-code generation. It uses its own REST schema, decimal u64
 IDs and typed metadata.
 
-- **Appearance:** Light, Dark or System, with live system-theme changes. The
+- **Appearance:** Open **Appearance and preferences** in the sticky top bar
+  from any workspace. Choose Light, Dark or System, with live system-theme changes. The
   existing density selector remains. Appearance persistence is opt-in: check
   **Remember appearance only** to save it in `vlite-appearance`.
   Storage-disabled browsers still apply changes. Neither records nor tokens are
