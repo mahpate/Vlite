@@ -1,8 +1,9 @@
-"""Capture the current dashboard's public, disconnected UI without credentials.
+"""Capture disconnected UI for diagnostics, not the public guided tour.
 
-Usage: python scripts/capture_dashboard_screenshots.py [dashboard-url]
+Usage: python scripts/capture_dashboard_screenshots.py <output-directory> [dashboard-url]
 Requires the existing tests/requirements-dashboard.txt browser tooling.
 Start the current dashboard container first. No API requests or writes are allowed.
+For website images, use the hosted dashboard-capture.yml connected workflow.
 """
 
 from pathlib import Path
@@ -11,8 +12,10 @@ import sys
 from playwright.sync_api import expect, sync_playwright
 
 
-def capture(base):
-    output = Path(__file__).resolve().parents[1] / "site" / "assets" / "dashboard"
+def capture(output, base):
+    website = Path(__file__).resolve().parents[1] / "site"
+    if output == website or website in output.parents:
+        raise ValueError("Disconnected diagnostics must not replace connected website screenshots")
     output.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as p:
         browser = p.chromium.launch()
@@ -63,4 +66,6 @@ def capture(base):
 
 
 if __name__ == "__main__":
-    capture(sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8081")
+    if len(sys.argv) not in (2, 3):
+        raise SystemExit(__doc__)
+    capture(Path(sys.argv[1]).resolve(), sys.argv[2] if len(sys.argv) > 2 else "http://127.0.0.1:8081")

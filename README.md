@@ -427,8 +427,8 @@ The Python REST client is published as
 ## Browser dashboard
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="site/assets/dashboard/current-overview-dark.png">
-  <img src="site/assets/dashboard/current-overview-light.png" alt="Current VLite dashboard overview with modern navigation, a connection panel and sticky-header preferences; disconnected, with no database loaded." width="1440" height="1100">
+  <source media="(prefers-color-scheme: dark)" srcset="site/assets/dashboard/current-overview-dark.png?v=connected">
+  <img src="site/assets/dashboard/current-overview-light.png?v=connected" alt="Connected VLite dashboard with sample records, database snapshot cards and index readiness." width="1440" height="1100">
 </picture>
 
 Overview with sticky-header preferences and connection help. See

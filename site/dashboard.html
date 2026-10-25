@@ -7,7 +7,7 @@
   <meta name="description" content="Run the VLite Dashboard locally: collection workspaces, vector search, record inspection, metrics and live logs.">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
-  <script src="assets/site.js?v=current-tour-3"></script>
+  <script src="assets/site.js?v=connected-tour-1"></script>
 </head>
 <body class="dashboard-product">
 <header class="nav">
@@ -50,39 +50,21 @@
     <div class="wrap">
       <div class="section-head">
         <div class="kicker">Inside the dashboard</div>
-        <h2>Your workspace, at a glance</h2>
-        <p>Browse your data, manage connections and make the workspace your own.</p>
+        <h2>One tour. Every workspace.</h2>
+        <p>Follow a connected example database through collections, records, search, monitoring and administration.</p>
       </div>
       <figure class="dashboard-tour dashboard-guided-tour" data-guided-tour>
-        <a href="assets/dashboard/current-overview-light.png" data-tour-full>
-          <img id="dashboard-guided-tour" src="assets/dashboard/current-overview-light.png" alt="VLite overview with connection controls and database snapshot cards." width="1440" height="1100" decoding="async">
+        <a href="assets/dashboard/current-overview-light.png?v=connected" data-tour-full>
+          <img id="dashboard-guided-tour" src="assets/dashboard/current-overview-light.png?v=connected" alt="Connected VLite overview showing sample records and database status." width="1440" height="1100" decoding="async">
         </a>
-        <figcaption><h3>Take a quick look around</h3><p data-tour-caption>Overview: connect to your database and see its status.</p></figcaption>
+        <figcaption><h3>From your first connection to daily operations</h3><p data-tour-caption>Overview: see a connected database, record count and index readiness.</p><p>Sample data in a real API-backed workspace. Pause to inspect a view or jump to a workflow.</p></figcaption>
         <div class="tour-controls" hidden>
           <button class="btn" type="button" data-tour-toggle aria-controls="dashboard-guided-tour" aria-pressed="false">Play tour</button>
           <button class="btn" type="button" data-tour-next aria-controls="dashboard-guided-tour">Next view</button>
-          <span data-tour-position>1 / 4</span>
+          <label>Choose a step <select data-tour-step aria-controls="dashboard-guided-tour"></select></label>
+          <span data-tour-position>1 / 26</span>
         </div>
       </figure>
-      <div class="dashboard-tours">
-        <figure class="dashboard-tour">
-          <a href="assets/dashboard/current-overview-light.png">
-            <picture>
-              <source media="(prefers-color-scheme: dark)" srcset="assets/dashboard/current-overview-dark.png">
-              <img src="assets/dashboard/current-overview-light.png" data-light="assets/dashboard/current-overview-light.png" data-dark="assets/dashboard/current-overview-dark.png" alt="Current VLite overview with modern sidebar, connection panel, snapshot cards and sticky top-bar preferences; disconnected, with no database loaded." width="1440" height="1100" loading="lazy" decoding="async">
-            </picture>
-          </a>
-          <figcaption><h3>A clearer workspace</h3><p>Six focused views, light and dark themes, and appearance controls that stay within reach.</p><p><a href="assets/dashboard/current-overview-light.png">Light screenshot</a> &middot; <a href="assets/dashboard/current-overview-dark.png">Dark screenshot</a></p></figcaption>
-        </figure>
-        <figure class="dashboard-tour">
-          <a href="assets/dashboard/current-token-help.png"><img src="assets/dashboard/current-token-help.png" alt="Expanded Where do I get a token help beside the empty connection field, with Docker, devbox and administrator instructions." width="1440" height="1100" loading="lazy" decoding="async"></a>
-          <figcaption><h3>Connect without guesswork</h3><p>Token instructions are beside the field, with guidance for local and shared servers.</p></figcaption>
-        </figure>
-        <figure class="dashboard-tour">
-          <a href="assets/dashboard/current-preferences.png"><img src="assets/dashboard/current-preferences.png" alt="Dark dashboard with Appearance and preferences expanded from the sticky top-right header." width="1440" height="1100" loading="lazy" decoding="async"></a>
-          <figcaption><h3>Your preferences, always nearby</h3><p>Choose theme and density from the sticky header in any workspace.</p></figcaption>
-        </figure>
-      </div>
     </div>
   </section>
   <section id="start">

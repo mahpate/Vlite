@@ -6,6 +6,8 @@ Requires tests/requirements-dashboard.txt.
 
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+import hashlib
+import json
 from pathlib import Path
 import sys
 from threading import Thread
@@ -22,10 +24,32 @@ def check(root):
     html = (root / "dashboard.html").read_text(encoding="utf-8")
     assert "Earlier release tours" not in html
     assert "records-tour" not in html and "search-tour" not in html
-    frames = ("current-overview-light.png", "current-token-help.png",
-              "current-overview-dark.png", "current-preferences.png")
+    frames = (
+        "current-overview-light.png", "current-token-help.png", "current-collections.png",
+        "current-records.png", "current-payload.png", "current-metadata.png",
+        "current-vector.png", "current-write.png", "current-index.png",
+        "current-search.png", "current-hybrid.png", "current-retrieval.png",
+        "current-explore.png", "current-import.png", "current-observability.png", "current-feed.png",
+        "current-administration.png", "current-backups.png", "current-credentials.png",
+        "current-tenants.png", "current-automation.png", "current-webhooks.png",
+        "current-tls.png", "current-replication.png", "current-developer.png",
+        "current-preferences.png",
+    )
+    assets = root / "assets" / "dashboard"
+    manifest = json.loads((assets / "connected-captures.json").read_text())
+    assert manifest["connected"] and manifest["record_count"] >= 8
+    assert manifest["format_version"] >= 5
+    assert {capture["workspace"] for capture in manifest["captures"]} == {
+        "Overview", "Collections", "Search", "Observability", "Administration", "Developer Console",
+    }
+    source = Path(__file__).resolve().parents[1] / "src" / "dashboard"
+    for filename, checksum in manifest["source_assets"].items():
+        assert hashlib.sha256((source / filename).read_text(encoding="utf-8").encode()).hexdigest() == checksum, (
+            f"Recapture the connected tour after changing dashboard asset {filename}")
+    captures = {capture["file"]: capture for capture in manifest["captures"]}
     for frame in frames:
-        assert (root / "assets" / "dashboard" / frame).is_file()
+        assert hashlib.sha256((assets / frame).read_bytes()).hexdigest() == captures[frame]["sha256"]
+    assert len({captures[frame]["sha256"] for frame in frames}) == len(frames)
     server = ThreadingHTTPServer(("127.0.0.1", 0), partial(QuietHandler, directory=str(root)))
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -44,7 +68,7 @@ def check(root):
                 toggle = page.locator("[data-tour-toggle]")
                 image.scroll_into_view_if_needed()
                 expect(toggle).to_have_text("Pause tour")
-                expect(image).to_have_attribute("src", "assets/dashboard/" + frames[1], timeout=5000)
+                expect(image).to_have_attribute("src", "assets/dashboard/" + frames[1] + "?v=connected", timeout=5000)
                 toggle.click()
                 expect(toggle).to_have_text("Play tour")
                 paused = image.get_attribute("src")
@@ -52,10 +76,24 @@ def check(root):
                 expect(image).to_have_attribute("src", paused)
                 page.locator("[data-tour-next]").click()
                 assert image.get_attribute("src") != paused
+                expect(page.locator("[data-tour-step] option")).to_have_count(len(frames))
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+                if width == 1440:
+                    assert page.locator("[data-guided-tour]").count() == 1
+                    assert page.locator(".dashboard-tours").count() == 0
+                    for number, frame in enumerate(frames):
+                        page.locator("[data-tour-step]").select_option(str(number))
+                        expect(toggle).to_have_text("Play tour")
+                        expect(image).to_have_attribute("src", "assets/dashboard/" + frame + "?v=connected")
+                        page.wait_for_function("img => img.complete && img.naturalWidth === 1440",
+                                               arg=image.element_handle())
+                        expect(page.locator("[data-tour-position]")).to_have_text(f"{number + 1} / {len(frames)}")
+                        assert page.locator("[data-tour-full]").get_attribute("href").endswith(frame + "?v=connected")
                 page.goto(base + "/docs/CONSOLE.html")
                 for screenshot in page.locator(".docs-main img").all():
                     screenshot.scroll_into_view_if_needed()
+                    page.wait_for_function("img => img.complete && img.naturalWidth > 0",
+                                           arg=screenshot.element_handle())
                     screenshot.evaluate("img => img.decode()")
                     assert screenshot.evaluate("img => img.naturalWidth === 1440")
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
@@ -87,7 +125,7 @@ def check(root):
             static = fallback.new_page()
             static.goto(base + "/dashboard.html")
             expect(static.locator("#dashboard-guided-tour")).to_have_attribute(
-                "src", "assets/dashboard/" + frames[0])
+                "src", "assets/dashboard/" + frames[0] + "?v=connected")
             expect(static.locator(".tour-controls")).to_be_hidden()
             fallback.close()
             context.close()
@@ -96,7 +134,7 @@ def check(root):
         server.shutdown()
         server.server_close()
         thread.join()
-    print("Current screenshot tour: autoplay, pause, next, motion, offscreen, no-JS and guide images passed.")
+    print("Connected 26-step tour: six workspaces, unique verified captures, autoplay, step selection, pause, motion, offscreen, no-JS and guide images passed.")
 
 
 if __name__ == "__main__":

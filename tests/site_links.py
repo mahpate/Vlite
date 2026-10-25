@@ -70,7 +70,7 @@ def check(root):
             if page.sections != ["screenshots", "start", "workflows"]:
                 errors.append("dashboard.html: expected tours, setup, then workflows")
             for name in ("current-overview-light.png",):
-                if f"assets/dashboard/{name}" not in page.links:
+                if f"assets/dashboard/{name}" not in [urlsplit(link).path for link in page.links]:
                     errors.append(f"dashboard.html: missing latest screenshot {name}")
             if "Earlier release tours" in " ".join(page.text):
                 errors.append("dashboard.html: remove historical dashboard tours")
@@ -101,7 +101,7 @@ def check(root):
                     errors.append(f"index.html: missing {mode} deployment diagram")
             if "deployment-options" not in page.ids:
                 errors.append("index.html: missing deployment-options anchor")
-            if "assets/dashboard/current-overview-light.png" not in page.links:
+            if "assets/dashboard/current-overview-light.png" not in [urlsplit(link).path for link in page.links]:
                 errors.append("index.html: dashboard preview must show the current interface")
             dashboard = pages.get(root / "dashboard.html")
             if dashboard:

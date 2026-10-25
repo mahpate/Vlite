@@ -18,15 +18,27 @@ and Raw JSON tabs. Navigation reveals the selected view and any containing
 advanced panel. The Developer Console remains the dedicated `#requests` view
 for the request inspector, REST playground and read-only scenarios; its
 inspector shows the latest request only.
+Administration groups health/tokens, scoped credentials/audit, tenants,
+backup/restore, automation, webhooks/PITR, TLS certificates and replication
+export into focused views. Each view explains the required role and server
+configuration. See the [administration walkthrough](CONSOLE-ADMIN.md#dashboard-administration-walkthrough)
+for the available actions and host-only setup steps.
 The usual Create → Write → Query path is: review/create an empty collection in
 Settings, select it as active, write with the record editor or JSON documents,
 then query from Search.
 
 ## A look around
 
+The [dashboard tour](https://mahpate.github.io/Vlite/dashboard.html#screenshots)
+follows one connected sample database through all six workspaces: collections
+and settings, record browsing/inspection, writing, HNSW indexes, exact/hybrid
+search, live metrics/logs, administration/backups and the developer console.
+Pause playback or choose a step to inspect a workflow. Screenshots use
+synthetic records from a real isolated API server, not an empty disconnected UI.
+
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="../site/assets/dashboard/current-overview-dark.png">
-  <img src="../site/assets/dashboard/current-overview-light.png" data-light="../site/assets/dashboard/current-overview-light.png" data-dark="../site/assets/dashboard/current-overview-dark.png" alt="Dashboard overview with navigation, connection controls and database snapshot cards." width="1440" height="1100">
+  <source media="(prefers-color-scheme: dark)" srcset="../site/assets/dashboard/current-overview-dark.png?v=connected">
+  <img src="../site/assets/dashboard/current-overview-light.png?v=connected" data-light="../site/assets/dashboard/current-overview-light.png?v=connected" data-dark="../site/assets/dashboard/current-overview-dark.png?v=connected" alt="Connected dashboard with sample records, navigation and database snapshot cards." width="1440" height="1100">
 </picture>
 
 Use the sidebar to switch workspaces. The top bar keeps your active collection,
@@ -49,13 +61,13 @@ value only, without the `Bearer` prefix.
 Treat tokens as secrets; do not include them in screenshots or logs. The dashboard
 cannot retrieve an administrator token.
 
-![Connection help with instructions for finding a bearer token](../site/assets/dashboard/current-token-help.png)
+![Connection help with instructions for finding a bearer token](../site/assets/dashboard/current-token-help.png?v=connected)
 
 ### Set your appearance
 
 Open **Appearance and preferences** in the top bar to choose your theme and spacing.
 
-![Appearance controls in the dashboard top bar](../site/assets/dashboard/current-preferences.png)
+![Appearance controls in the dashboard top bar](../site/assets/dashboard/current-preferences.png?v=connected)
 
 ## Studio workflow improvements
 

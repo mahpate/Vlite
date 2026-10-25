@@ -4,6 +4,8 @@
 .tour-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
 .tour-controls[hidden] { display: none; }
 .tour-controls button { min-height: 44px; }
+.tour-controls label { display: grid; gap: 4px; min-width: 0; max-width: 100%; }
+.tour-controls select { min-height: 44px; max-width: 100%; padding: 8px; font: inherit; color: var(--text); background: var(--card); border: 1px solid var(--border); border-radius: 8px; }
 .docs-main img { display: block; max-width: 100%; height: auto; border: 1px solid var(--border); border-radius: 12px; }
 .feature-catalog section { padding: 0 0 36px; scroll-margin-top: 100px; }
 .feature-catalog th:first-child, .feature-catalog td:first-child { width: 30%; }

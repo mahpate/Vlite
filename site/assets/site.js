@@ -64,9 +64,31 @@
     const motion = window.matchMedia("(prefers-reduced-motion: reduce)");
     document.querySelectorAll("[data-guided-tour]").forEach((figure) => {
       const frames = [
-        ["current-overview-light.png", "Overview: connect to your database and see its status."],
+        ["current-overview-light.png", "Overview: see a connected database, record count and index readiness."],
         ["current-token-help.png", "Connection help: find the token for your server."],
-        ["current-overview-dark.png", "Dark theme: choose the appearance that suits you."],
+        ["current-collections.png", "Collections: organize vector spaces and choose their search settings."],
+        ["current-records.png", "Browse: explore stored records and their typed metadata."],
+        ["current-payload.png", "Payload: open a record and read its stored content."],
+        ["current-metadata.png", "Metadata: inspect the fields used for filtering and grouping."],
+        ["current-vector.png", "Vectors: inspect the numeric embedding behind a record."],
+        ["current-write.png", "Write: prepare records, review validation and explicitly confirm changes."],
+        ["current-index.png", "Indexes: inspect HNSW readiness and manage rebuilds."],
+        ["current-search.png", "Search: run a vector query and compare ranked neighbors."],
+        ["current-hybrid.png", "Hybrid search: combine vector similarity with text matches."],
+        ["current-retrieval.png", "Advanced retrieval: recommend neighbors and count metadata facets."],
+        ["current-explore.png", "Explore: compare records and inspect a sampled vector projection."],
+        ["current-import.png", "Import and export: validate a sample file before committing records."],
+        ["current-observability.png", "Observability: inspect real request metrics, routes and server logs."],
+        ["current-feed.png", "Change feed: inspect committed events and page through their history."],
+        ["current-administration.png", "Administration: inspect server health and manage operational controls."],
+        ["current-backups.png", "Backups: inspect a consistent snapshot and available restore controls."],
+        ["current-credentials.png", "Credentials: issue limited access, rotate secrets and inspect audit history."],
+        ["current-tenants.png", "Tenants: create isolated namespaces and set their vector limits."],
+        ["current-automation.png", "Automation: inspect and configure scheduled index maintenance."],
+        ["current-webhooks.png", "Webhooks: manage change notifications and inspect delivery status."],
+        ["current-tls.png", "TLS certificates: reload configured files; this HTTP demo explains why reload is unavailable."],
+        ["current-replication.png", "Replication: export a bounded log segment for a separately managed replica."],
+        ["current-developer.png", "Developer Console: explore requests, responses and API examples."],
         ["current-preferences.png", "Preferences: change theme and spacing from the top bar."],
       ];
       const image = figure.querySelector("img");
@@ -75,17 +97,25 @@
       const toggle = figure.querySelector("[data-tour-toggle]");
       const next = figure.querySelector("[data-tour-next]");
       const position = figure.querySelector("[data-tour-position]");
+      const step = figure.querySelector("[data-tour-step]");
+      frames.forEach((frame, number) => {
+        const option = document.createElement("option");
+        option.value = String(number);
+        option.textContent = `${number + 1}. ${frame[1].split(":")[0]}`;
+        step.append(option);
+      });
       let index = 0;
       let enabled = !motion.matches;
       let visible = false;
       let timer;
       let failed = false;
       const show = () => {
-        image.src = `assets/dashboard/${frames[index][0]}`;
+        image.src = `assets/dashboard/${frames[index][0]}?v=connected`;
         image.alt = frames[index][1];
         link.href = image.src;
         caption.textContent = frames[index][1];
         position.textContent = `${index + 1} / ${frames.length}`;
+        step.value = String(index);
       };
       const update = () => {
         clearTimeout(timer);
@@ -114,6 +144,13 @@
         enabled = false;
         failed = false;
         index = (index + 1) % frames.length;
+        show();
+        update();
+      });
+      step.addEventListener("change", () => {
+        enabled = false;
+        failed = false;
+        index = Number(step.value);
         show();
         update();
       });
