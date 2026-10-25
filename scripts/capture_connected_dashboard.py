@@ -24,7 +24,7 @@ import uuid
 from playwright.sync_api import expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
-IMAGE = "ghcr.io/mahpate/vlite-api:v0.4.1"
+IMAGE = os.environ.get("VLITE_CAPTURE_IMAGE", "ghcr.io/mahpate/vlite-api:v0.4.1")
 
 
 def docker(*args, **kwargs):

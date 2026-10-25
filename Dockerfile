@@ -48,6 +48,7 @@ RUN sed -i \
     -e 's|href="/dashboard/style.css"|href="/style.css"|' \
     -e 's|src="/dashboard/app.js"|src="/app.js"|' \
     -e 's|src="/dashboard/console-tools.js"|src="/console-tools.js"|' \
+    -e 's|src="/dashboard/admin-tools.js"|src="/admin-tools.js"|' \
     -e 's|src="/dashboard/observability.js"|src="/observability.js"|' \
     -e 's|src="/dashboard/navigation.js"|src="/navigation.js"|' \
     /usr/share/nginx/html/index.html
