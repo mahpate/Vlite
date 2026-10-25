@@ -41,7 +41,7 @@ def capture(output):
            "--mount", "type=tmpfs,target=/admin,tmpfs-mode=1777",
            "-e", "VLITE_AUTH_TOKEN", "-e", "VLITE_ADMIN_DIR=/admin",
            "-p", "127.0.0.1::8080", "--entrypoint", "vlite-server",
-           IMAGE, "/data/demo.vlite", "--create-if-missing", "3", "--create-format", "4",
+           IMAGE, "/data/demo.vlite", "--create-if-missing", "3", "--create-format", "5",
            "--bind", "0.0.0.0:8080", "--allow-remote", env=env)
     server = None
     try:
@@ -66,6 +66,12 @@ def capture(output):
                 if time.monotonic() > deadline:
                     raise
                 time.sleep(.5)
+        capabilities = api("/v1/capabilities")
+        required = ("recommendations", "facets", "change_feed", "tenants",
+                    "scoped_credentials", "auto_maintenance", "backup_restore", "webhooks")
+        unavailable = [feature for feature in required if not capabilities["features"].get(feature)]
+        if unavailable:
+            raise RuntimeError(f"Capture database lacks required capabilities: {unavailable}")
         titles = (
             "Getting started with VLite", "Vector search for support articles",
             "Hybrid search with typed metadata", "Choosing an HNSW index",
@@ -255,6 +261,32 @@ def capture(output):
             expect(page.locator("#backup-name option")).to_have_count(1)
             save("current-administration.png")
             save("current-backups.png", "#backup-result")
+            show("#cred-list").click()
+            expect(page.locator("#cred-result")).to_contain_text("credential slots used")
+            save("current-credentials.png", "#cred-create")
+            show("#tenant-name").fill("Demo workspace")
+            page.locator("#tenant-max-vectors").fill("1000")
+            page.locator("#tenant-create").click()
+            expect(page.locator("#confirmation-text")).to_contain_text('Create tenant "Demo workspace"')
+            page.locator("#confirmation button[value=confirm]").click()
+            expect(page.locator("#tenant-result")).to_contain_text("created")
+            page.locator("#tenant-list").click()
+            expect(page.locator("#tenant-result")).to_contain_text("Demo workspace")
+            save("current-tenants.png")
+            show("#auto-maintenance-read").click()
+            expect(page.locator("#auto-maintenance-result")).to_contain_text("config")
+            save("current-automation.png", "#auto-maintenance")
+            show("#webhook-list").click()
+            expect(page.locator("#webhook-result")).to_contain_text("items")
+            save("current-webhooks.png", "#webhook-result")
+            show("#tls-result")
+            expect(page.locator("#tls-result")).to_contain_text("file-backed TLS")
+            save("current-tls.png")
+            show("#replication-max-bytes").fill("1048576")
+            page.locator("#replication-export").click()
+            expect(page.locator("#replication-download")).to_be_enabled()
+            expect(page.locator("#replication-result")).to_contain_text("head_sequence")
+            save("current-replication.png")
             nav.get_by_role("link", name="Developer Console", exact=True).click()
             page.locator("#send-request").click()
             expect(page.locator("#inspector")).to_contain_text("/v1/database")
@@ -273,6 +305,7 @@ def capture(output):
         manifest = {
             "data": "Synthetic demo records in an isolated disposable database",
             "record_count": len(titles), "connected": True, "backend_image": IMAGE,
+            "format_version": capabilities["format_version"],
             "source_assets": {file.name: hashlib.sha256(file.read_bytes()).hexdigest()
                               for file in (ROOT / "src" / "dashboard").iterdir() if file.is_file()},
             "captures": captures,
