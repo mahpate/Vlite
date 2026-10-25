@@ -37,7 +37,6 @@
       <div class="kicker">VLite Dashboard</div>
       <h1>Your database, in focus</h1>
       <p class="lead">Browse records, run searches and monitor your own VLite server.</p>
-      <p>Self-hosted dashboard; this page is not a live console.</p>
       <div class="cta">
         <a class="btn primary" href="#start">Run the dashboard</a>
         <a class="btn" href="#screenshots">See the latest interface</a>
@@ -50,9 +49,8 @@
     <div class="wrap">
       <div class="section-head">
         <div class="kicker">Inside the dashboard</div>
-        <h2>The latest dashboard</h2>
-        <p>Actual current-source UI, captured October 24, 2026. Disconnected views: no credentials or database data.</p>
-        <p>This visual refresh is available when built from source, not in the published release images.</p>
+        <h2>Your workspace, at a glance</h2>
+        <p>Browse your data, manage connections and make the workspace your own.</p>
       </div>
       <div class="dashboard-tours">
         <figure class="dashboard-tour">
@@ -74,7 +72,7 @@
         </figure>
       </div>
       <details class="dashboard-stills"><summary>Earlier release tours</summary>
-        <p>Real published-release captures with five synthetic records. They show the previous visual design, not the current-source screenshots above. Demo metrics are not benchmarks.</p>
+        <p>Previous interface with sample records.</p>
         <p>Select Play for one pass, or open a still image. No autoplay, including with reduced motion.</p>
       <div class="dashboard-tours">
         <figure class="dashboard-tour">
@@ -106,7 +104,6 @@
         <p><a href="assets/dashboard/collections.png">Collection browsing and record inspection</a> &middot;
           <a href="assets/dashboard/search.png">Search results and payload inspection</a> &middot;
           <a href="assets/dashboard/observability.png">Metrics and route counters</a></p>
-        <p>Earlier development captures of the dashboard included in v0.4.1, also using five synthetic records.</p>
       </details>
       </details>
     </div>
@@ -118,6 +115,7 @@
         From its root, with Docker running, prepare the API configuration and private token using the
         <a href="https://github.com/mahpate/Vlite#quick-start-docker-rest-service">Docker REST quickstart</a>.
         Then build both services from the current checkout:</p>
+      <p>The interface shown above requires a source build.</p>
       <pre class="code"><code>docker compose --profile dashboard up --build -d api dashboard</code></pre>
       <p>Open <code>http://localhost:8081</code> for the standalone UI, or
         <code>http://localhost:18084/dashboard</code> for the embedded UI.
@@ -133,8 +131,7 @@
     <div class="wrap">
       <div class="section-head">
         <h2>From records to operations</h2>
-        <p>These workspaces are included in v0.4.1.
-          Check the <a href="https://github.com/mahpate/Vlite/releases/tag/v0.4.1">release publication</a> before selecting images.</p>
+        <p>Explore records, run queries and manage your database in six focused workspaces.</p>
       </div>
       <div class="grid cols-2">
         <div class="card"><h3>Collections and record editing</h3>

@@ -42,7 +42,7 @@ with Python 3.11+:
 python -m pip install vlite-embedded
 ```
 
-PyPI 0.4.1 includes bundled wheels for Windows x64, macOS arm64 and Linux
+PyPI includes bundled wheels for Windows x64, macOS arm64 and Linux
 x86_64/glibc 2.28+. `NativeLibrary()` loads the bundled native library.
 
 For contributors or source-only APIs, build a platform-specific wheel from the
@@ -63,11 +63,8 @@ releases are uploaded to PyPI as `vlite-embedded` by
 [published package](https://pypi.org/project/vlite-embedded/) and
 [maintainer publication details](../docs/INSTALL.md#pypi-publication-details-for-maintainers).
 
-Version 0.4.1 includes
-`NativeLibrary.open(..., read_only=True)` and typed float32 inputs.
-Check [release assets](https://github.com/mahpate/Vlite/releases/tag/v0.4.1)
-and the actual PyPI version; registry uploads follow release verification.
-Use source-build instructions when the required package is not yet available.
+Use `NativeLibrary.open(..., read_only=True)` for shared reads and typed
+float32 inputs to reduce JSON conversion.
 
 For installation without a checkout or Rust toolchain, use the
 [versioned release packages and installation guide](../docs/INSTALL.md).
@@ -233,7 +230,7 @@ Approximate-ready search supports squared L2 (default) and cosine and requires
 an explicit matching-metric build after reopen/overflow or metric change.
 Python uses `db.build_index(metric="cosine")` and
 `db.search_approximate_ready(query, k, metric="cosine")`.
-Inner product is exact-only. Use matching 0.4.1 native libraries and wrappers
+Inner product is exact-only. Use matching native libraries and wrappers
 for cosine ANN.
 Omitting the default metric keeps old native requests compatible.
 Ready-only never silently builds or falls back. REST metrics and lazy ANN are

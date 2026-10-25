@@ -40,14 +40,14 @@
 <main id="main-content">
   <section class="hero">
     <div class="wrap">
-      <span class="eyebrow">v0.4.1 &middot; MIT licensed &middot; written in Rust</span>
+      <span class="eyebrow">MIT licensed &middot; written in Rust</span>
       <h1>Vector search in <span class="grad">one durable file</span>.</h1>
       <p class="lead">Embed vector search in your app, or self-host it behind REST and gRPC.</p>
       <div class="cta">
         <a class="btn primary" href="#quickstart">Get started</a>
         <a class="btn" href="dashboard.html">View dashboard</a>
       </div>
-      <p class="note"><a href="https://github.com/mahpate/Vlite/releases/tag/v0.4.1">Download v0.4.1</a> &middot; <a href="docs/INSTALL.html">Packages &amp; platform requirements</a></p>
+      <p class="note"><a href="https://github.com/mahpate/Vlite/releases">Downloads</a> &middot; <a href="docs/INSTALL.html">Packages &amp; platform requirements</a></p>
     </div>
   </section>
 
@@ -118,7 +118,7 @@ cat .secrets/api-token   <span class="c-c"># paste into the dashboard connection
 <button class="copy" data-copy="c-devbox">Copy</button>
 <pre class="code" id="c-devbox"><span class="c-c"># PowerShell on Windows with Docker inside WSL</span>
 git clone https://github.com/mahpate/Vlite; cd Vlite
-.\scripts\devbox.ps1          <span class="c-c"># pulls v0.4.1 API + dashboard images</span>
+.\scripts\devbox.ps1          <span class="c-c"># starts the API and dashboard</span>
 .\scripts\devbox.ps1 -Token   <span class="c-c"># copies the API token to the clipboard</span>
 <span class="c-c"># Dashboard: http://localhost:8082   API: http://localhost:18085</span></pre>
         </div>
@@ -136,7 +136,7 @@ git clone https://github.com/mahpate/Vlite; cd Vlite
       </div>
       <figure class="landing-shot">
         <a href="dashboard.html#screenshots"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/dashboard/current-overview-dark.png"><img src="assets/dashboard/current-overview-light.png" data-light="assets/dashboard/current-overview-light.png" data-dark="assets/dashboard/current-overview-dark.png" alt="Current VLite dashboard overview with a modern sidebar, connection panel and top-bar appearance menu; disconnected, with no database loaded." width="1440" height="1100" loading="lazy" decoding="async"></picture></a>
-        <figcaption>Actual current-source UI, captured October 24, 2026, disconnected. Build from source for this visual refresh; published release images retain the previous design. <a href="dashboard.html">Screenshots &amp; setup &#8594;</a></figcaption>
+        <figcaption>Your connections, records and searches in one workspace. <a href="dashboard.html">Screenshots &amp; source-build setup &#8594;</a></figcaption>
       </figure>
     </div>
   </section>
@@ -211,7 +211,6 @@ git clone https://github.com/mahpate/Vlite; cd Vlite
       <div class="section-head"><div class="kicker">Know the boundaries</div><h2>Data safety you can reason about</h2><p>Corruption fails closed. Incomplete trailing writes require explicit repair; committed data is never silently discarded. Search indexes remain rebuildable from stored records.</p></div>
       <p class="callout">VLite keeps the live dataset in memory and replays the log on open. A file supports one exclusive owner or multiple shared read-only owners. Size deployments for the full dataset. Optional indexes and maintenance can use sidecars. Filesystem and directory-entry durability have platform-specific limitations; process-crash tests are not physical power-loss qualification.</p>
       <nav class="landing-evidence" aria-label="Technical evidence"><a href="architecture.html">Architecture &#8594;</a><a href="docs/REFERENCE.html">Data-safety contracts &#8594;</a><a href="compare.html">Benchmarks &amp; methodology &#8594;</a><a href="docs/RELEASE-0.4.1.html">Release notes &#8594;</a></nav>
-      <p class="note landing-note">Benchmark comparisons retain their original versions and measurement provenance. Historical results are not presented as freshly rerun v0.4.1 measurements.</p>
     </div>
   </section>
   <section>

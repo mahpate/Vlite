@@ -80,15 +80,9 @@
     <p class="kicker">API Reference</p>
     <h1 id="overview">VLite API Reference</h1>
     <p class="lead">Embed with Python, Node.js, Rust or C. Connect remotely through REST or gRPC. Same engine, same storage contract.</p>
-    <p class="callout"><strong>Version note:</strong> This reference follows the current repository source.
-      Install the published Python packages with <code>python -m pip install vlite-embedded</code> or
-      <code>python -m pip install vlite-client</code> from
-      <a href="https://pypi.org/project/vlite-embedded/">PyPI</a> /
-      <a href="https://pypi.org/project/vlite-client/">PyPI</a>.
-      Version 0.4.1 includes Python <code>read_only=True</code>, typed float32 inputs
-      and the MCP/observability updates.
-      Check <a href="https://github.com/mahpate/Vlite/releases/tag/v0.4.1">release assets</a>
-      and registry availability separately.</p>
+    <p class="callout"><strong>Install:</strong> <code>python -m pip install vlite-embedded</code>
+      for embedded Python, or <code>python -m pip install vlite-client</code> for REST.
+      See <a href="docs/INSTALL.html">installation and platform requirements</a>.</p>
 
     <div class="grid cols-3 docs-cards">
       <a class="card" href="#py-nativelibrary"><span class="label">Embedded</span><h3>Python</h3><p class="muted"><code>vlite_embedded</code> wheel &middot; synchronous, thread-safe handle</p></a>
@@ -110,7 +104,7 @@
 
     <!-- ============ PYTHON ============ -->
     <h2 id="py-nativelibrary">Python &middot; <code>NativeLibrary</code></h2>
-    <p>Install the published <a href="https://pypi.org/project/vlite-embedded/"><code>vlite-embedded</code> package</a> with <code>python -m pip install vlite-embedded</code> (Python 3.11+). PyPI 0.4.1 has wheels for Windows x64, macOS arm64 and Linux x86_64/glibc 2.28+. <code>NativeLibrary</code> loads the bundled native library and opens databases. One instance per process; do not use it after <code>fork()</code>.</p>
+    <p>Install <a href="https://pypi.org/project/vlite-embedded/"><code>vlite-embedded</code></a> with <code>python -m pip install vlite-embedded</code> (Python 3.11+). Wheels support Windows x64, macOS arm64 and Linux x86_64/glibc 2.28+. <code>NativeLibrary</code> loads the bundled native library and opens databases. One instance per process; do not use it after <code>fork()</code>.</p>
 <pre class="code sig">from vlite_embedded import NativeLibrary, EmbeddedError
 
 class NativeLibrary(path: str | os.PathLike | None = None)</pre>

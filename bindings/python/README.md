@@ -13,9 +13,7 @@ For application use, install the published
 python -m pip install vlite-embedded
 ```
 
-The current published version is 0.4.1, with wheels for Windows x64, macOS
-arm64 and Linux x86_64/glibc 2.28+. The read-only and typed float32 APIs below
-are included in the 0.4.1 wheel.
+Wheels support Windows x64, macOS arm64 and Linux x86_64/glibc 2.28+.
 
 `native.create(path, dims)` creates format 3; `native.create(path, dims,
 format=4)` enables named collections (`create_collection`, `list_collections`,
@@ -36,10 +34,8 @@ for builds, installation, examples, ABI ownership and limits.
 Licensed under MIT.
 
 
-## Since 0.4.1: read-only multi-process access
+## Read-only multi-process access
 
-This feature is included in the published 0.4.1 package.
-Check the release and PyPI publication status before installing.
 `native.open(path, read_only=True)`
 opens an existing database with a shared OS lock. Multiple read-only handles may
 coexist, including in different processes. `get` and `search` work normally;
@@ -189,7 +185,6 @@ errors. The Python wrapper owns a validated snapshot during the call because
 ctypes releases the GIL. This is a copy-reducing path, **not zero-copy**. The
 existing per-handle Python lock and global native owner lock remain in place.
 
-The published 0.4.1 wheels include these native symbols and Python methods.
 With this wrapper and a native ABI-1 library lacking the optional symbols,
 `native.supports_float32` is false and the new methods fall back to JSON using
 the buffer's exact float32 values. Set `require_native=True` on either method to

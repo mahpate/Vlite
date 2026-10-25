@@ -1,24 +1,15 @@
-# Install a versioned VLite release
-
-The 0.4.1 release packages the newer read-only, typed-input, dashboard and
-observability APIs described below as source additions relative to 0.3.0.
-Use [0.4.1 upgrade guidance](RELEASE-0.4.1.md) and its matching GitHub assets.
-PyPI uploads follow the verified release workflow separately; check the
-registry version before assuming an upload has completed.
+# Install VLite
 
 Python packages are published on PyPI: [vlite-embedded](https://pypi.org/project/vlite-embedded/)
 for in-process use and [vlite-client](https://pypi.org/project/vlite-client/)
-for the REST API. Both packages are published as version 0.4.1. Install them
+for the REST API. Install them
 directly with pip; no repository clone or Rust toolchain is needed. Other
 prebuilt release assets are available from
 [GitHub releases](https://github.com/mahpate/Vlite/releases). npm packages are
 not published.
 
-Version 0.4.1 builds include Python `read_only=True`, typed float32 inputs and
-the newer MCP/observability work. These are absent from 0.3.0 packages.
-Check the exact installed version and
-[release publication status](https://github.com/mahpate/Vlite/actions/workflows/release.yml);
-`main` can still contain later unreleased APIs.
+See [upgrade and rollback guidance](RELEASE-0.4.1.md) before upgrading an
+existing deployment.
 
 ## Verify before installing
 
@@ -53,7 +44,7 @@ Requires Python 3.11+. The recommended end-user installation is:
 python -m pip install vlite-embedded
 ```
 
-PyPI 0.4.1 provides Windows x64, macOS arm64 and Linux x86_64/glibc 2.28+
+PyPI provides Windows x64, macOS arm64 and Linux x86_64/glibc 2.28+
 wheels. For supported platforms, pip selects the matching wheel and
 `NativeLibrary()` loads its bundled native library. If you need a release asset
 instead, choose a `vlite_embedded-*.whl` matching your OS and architecture and
@@ -87,7 +78,7 @@ with NativeLibrary().create("example.vlite", dimensions=3) as db:
 
 The wheel includes the native library. No Rust compiler or server is required.
 
-Version v0.1.2+ supports cosine ANN with an explicit matching index:
+For cosine ANN, build an index with a matching metric:
 
 ```python
 with NativeLibrary().open("example.vlite") as db:
@@ -162,9 +153,9 @@ need shared access. The live dataset must fit in RAM. Back up before upgrading;
 v0.1.x releases do not claim that a 1.0 stability contract
 or physical power-loss certification has been achieved.
 
-## Additional 0.4.1 packages
+## Additional packages
 
-See [0.4.1 upgrade and rollback guidance](RELEASE-0.4.1.md) before selecting a
+See [upgrade and rollback guidance](RELEASE-0.4.1.md) before selecting a
 new binary or database format. The native archives also ship the offline shell,
 import, tuning and quality tools. Go/.NET clients, the Helm chart and WASM
 wrapper sources are included in desktop/x64 archives; see the
@@ -180,7 +171,7 @@ and NuGet packages are not prebuilt release assets.
 release (or manually with an existing tag). It downloads that release's wheels,
 verifies them against `SHA256SUMS`, skips the bare `linux_x86_64` wheel (PyPI
 only accepts `manylinux` Linux tags), and uploads with PyPI trusted publishing
-(OIDC; no API token is stored). The 0.4.1 distributions are published at
+(OIDC; no API token is stored). The distributions are published at
 [vlite-embedded](https://pypi.org/project/vlite-embedded/) and
 [vlite-client](https://pypi.org/project/vlite-client/). End users should use
 the pip commands above.

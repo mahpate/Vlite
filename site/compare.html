@@ -41,9 +41,9 @@
     <div class="wrap">
       <span class="eyebrow">Measured, not quoted</span>
       <h1>VLite <span class="grad">benchmarks</span></h1>
-      <p class="lead">Measured latency, recall and optimization priorities. Historical results are labeled separately.</p>
+      <p class="lead">Compare search latency, recall, build time and storage.</p>
       <div class="cta">
-        <a class="btn primary" href="#current-source">Latest source measurements</a>
+        <a class="btn primary" href="#current-source">Vector search results</a>
         <a class="btn" href="#historical-results">Historical multi-engine results</a>
         <a class="btn" href="#reproduce">Reproduce</a>
         <a class="btn" href="./#features">VLite features</a>
@@ -54,24 +54,27 @@
   <section id="current-source" class="alt">
     <div class="wrap">
       <div class="section-head">
-        <div class="kicker">Measured October 25, 2026 UTC</div>
-        <h2>Latest source: vector regression and optimization priorities</h2>
-        <p>The first attempt was contended and is excluded. These replacement measurements began
-          after the graph session confirmed its agents and benchmark were paused.
-          This was a coordinated shared-host window, not dedicated hardware.</p>
-        <p>Five repetitions per workload compare the v0.4.1 tag with committed source <code>059650e</code>,
-          default and graph-enabled. This source is not a new release. Uncommitted work was excluded.
-          WSL2 x86_64, Xeon Platinum 8370C, Rust release builds; 4,096 synthetic vectors &times; 128 dimensions,
-          100 queries, squared L2, k=10, HNSW m=16 and construction/search ef=100.</p>
+        <div class="kicker">Vector search</div>
+        <h2>Latency, recall and build time</h2>
+        <p>4,096 vectors &times; 128 dimensions, 100 queries and five trials per workload.
+        Shared WSL2 host; squared L2, k=10, HNSW m=16 and construction/search ef=100.</p>
       </div>
       <div class="table-wrap"><table>
         <thead><tr><th>Build</th><th>Exact p50</th><th>ANN p50 / p95</th><th>Recall@10</th><th>Index build</th><th>Ingest</th><th>Reopen</th></tr></thead>
         <tbody>
-          <tr><td>v0.4.1 tag</td><td>0.914 ms</td><td>0.649 / 0.743 ms</td><td>0.941</td><td>3,787 ms</td><td>56,985 vectors/s</td><td>35.681 ms</td></tr>
-          <tr><td>059650e, default</td><td>0.918 ms</td><td>0.635 / 0.735 ms</td><td>0.941</td><td>3,747 ms</td><td>55,956 vectors/s</td><td>37.920 ms</td></tr>
-          <tr><td>059650e, graph enabled</td><td>0.934 ms</td><td>0.635 / 0.725 ms</td><td>0.941</td><td>3,763 ms</td><td>56,649 vectors/s</td><td>36.747 ms</td></tr>
+          <tr><td>Release baseline</td><td>0.914 ms</td><td>0.649 / 0.743 ms</td><td>0.941</td><td>3,787 ms</td><td>56,985 vectors/s</td><td>35.681 ms</td></tr>
+          <tr><td>Source, default</td><td>0.918 ms</td><td>0.635 / 0.735 ms</td><td>0.941</td><td>3,747 ms</td><td>55,956 vectors/s</td><td>37.920 ms</td></tr>
+          <tr><td>Source, graph enabled</td><td>0.934 ms</td><td>0.635 / 0.725 ms</td><td>0.941</td><td>3,763 ms</td><td>56,649 vectors/s</td><td>36.747 ms</td></tr>
         </tbody>
       </table></div>
+      <details class="benchmark-archive"><summary>Builds and measurement details</summary>
+        <p>Release baseline: tag <code>v0.4.1</code>. Source variants: commit <code>059650e</code>,
+          with default features and with graph enabled. Measured on October 25, 2026 UTC,
+          using Rust release builds on WSL2 x86_64 and a Xeon Platinum 8370C.
+          These are fixed historical builds, not rolling measurements of the latest checkout.</p>
+        <p>A contended first attempt was excluded. Replacement runs used a coordinated
+          shared-host window with other builds and benchmarks paused, not dedicated hardware.</p>
+      </details>
       <p>Static values are medians of trial-level statistics. Whole-child peak RSS was about 11.84 MiB in each variant,
         including dataset and oracle. Graph-enabled here means vector-path overhead only, not graph traversal.
         Small differences do not establish equivalence, a speedup or a regression.</p>
@@ -96,14 +99,13 @@
   </section>
 
   <details id="historical-results" class="benchmark-archive">
-    <summary class="wrap">Historical multi-engine archive &middot; not current-release measurements</summary>
+    <summary class="wrap">Historical multi-engine results</summary>
   <section id="summary">
     <div class="wrap">
       <div class="section-head">
         <div class="kicker">Historical summary &middot; archived builds</div>
         <h2>What the earlier measurements showed</h2>
-        <p>These findings apply to the archived builds and workloads below, not the current-source
-          campaign above. Old version labels are retained because those binaries produced these numbers.</p>
+        <p>Archived builds and workloads; exact configurations are linked with the results.</p>
       </div>
       <div class="grid cols-2">
         <div class="card">
@@ -131,8 +133,7 @@
       <div class="section-head"><div class="kicker">Historical multi-engine benchmark &middot; archived builds</div>
         <h2>Earlier embedded and server tiers</h2>
         <p>WSL2, 16 vCPU Intel Xeon Platinum 8370C. Medians of 3 trials at 20k × 128 and 2 at 100k × 768.
-          These are archived baseline builds, not measurements of v0.4.1 or source revision 059650e.
-          No newer cross-engine campaign has been completed.</p>
+          Exact build identities and configurations are in the linked raw results.</p>
       </div>
       <p>Seeded float32 Gaussian clusters (64 clusters, σ = 0.35, seed 42), squared L2, 200 top-10 queries;
         recall against a tie-aware float64 oracle. HNSW M=16, ef_construction=100, ef_search=100 where exposed;
@@ -215,9 +216,9 @@
 
   <section id="concurrent-readers" class="alt">
     <div class="wrap">
-      <h2>Earlier concurrency development measurements</h2>
-      <p>VLite 0.4.1 includes shared-lock read-only embedded handles, concurrent server read routes and parallel exact scans.
-        Throughput before vs after with 1&ndash;16 concurrent search clients:</p>
+      <h2>Concurrent reads</h2>
+      <p>Shared-lock readers and parallel exact scans, measured with
+        1&ndash;16 concurrent search clients:</p>
       <div class="table-wrap"><table><thead><tr><th>Search</th><th>Concurrent readers</th><th>QPS before</th><th>QPS after</th><th>p50 / p95 / p99 ms before</th><th>p50 / p95 / p99 ms after</th></tr></thead><tbody><tr><td>Exact</td><td>1</td><td>483</td><td><strong>788</strong></td><td>2.00 / 2.51 / 3.21</td><td>1.25 / 1.41 / 1.65</td></tr><tr><td>Exact</td><td>4</td><td>636</td><td><strong>1,529</strong></td><td>6.11 / 7.21 / 8.52</td><td>2.62 / 3.22 / 3.52</td></tr><tr><td>Exact</td><td>8</td><td>634</td><td><strong>1,927</strong></td><td>12.27 / 14.16 / 18.30</td><td>4.22 / 5.95 / 6.89</td></tr><tr><td>Exact</td><td>16</td><td>629</td><td><strong>2,155</strong></td><td>24.77 / 29.44 / 35.89</td><td>7.58 / 11.37 / 12.77</td></tr><tr><td>HNSW</td><td>1</td><td>1,528</td><td><strong>1,560</strong></td><td>0.64 / 0.78 / 0.97</td><td>0.62 / 0.76 / 0.97</td></tr><tr><td>HNSW</td><td>4</td><td>3,521</td><td><strong>4,038</strong></td><td>1.13 / 1.30 / 1.67</td><td>0.95 / 1.37 / 1.65</td></tr><tr><td>HNSW</td><td>8</td><td>3,491</td><td><strong>4,310</strong></td><td>2.26 / 2.54 / 3.75</td><td>1.77 / 2.92 / 3.59</td></tr><tr><td>HNSW</td><td>16</td><td>3,447</td><td><strong>4,648</strong></td><td>4.58 / 5.16 / 8.38</td><td>3.22 / 6.18 / 7.80</td></tr></tbody></table></div>
       <p>Single-reader exact search on 100k &times; 768: p50 <strong>44.8 ms &rarr; 10.2 ms</strong> (22 &rarr; 98 QPS) from the parallel exact scan.</p>
       <p class="muted">vlite-server REST, 20k &times; 128 clustered dataset, k=10, keep-alive client threads, zero errors. Before = previous release build (exclusive mutex); after = shared read lock + parallel exact scan.
@@ -228,23 +229,17 @@
 
   <section id="current-source-performance">
     <div class="wrap">
-      <h2>Earlier optimization measurements &middot; included in v0.4.1</h2>
-      <p>These features are available in the
-        <a href="https://github.com/mahpate/Vlite/releases/tag/v0.4.1">official v0.4.1 release</a>
-        and matching Python packages. The development measurements below were
-        collected before release; they are not fresh v0.4.1 benchmark runs.
-        Historical cross-engine results above remain archived separately, with exact build provenance in their raw reports.</p>
+      <h2>Optimization measurements</h2>
+      <p>Development measurements of vector reuse, snapshot decoding and typed inputs.</p>
       <p>HNSW neighbor selection now reuses borrowed accepted vectors; ANN snapshot
         hashing batches identical bytes and numeric decoding avoids an intermediate
         byte-vector allocation. Optional C/Python float32 inputs reduce vector JSON
         conversion while retaining existing JSON methods and durable batch commits.</p>
       <p>Bounded Windows development measurements found lower selection, snapshot
         save/load and typed-input overhead. These were shared-host measurements,
-        not isolated end-to-end speedup evidence, and do not update the release
-        comparisons above. A distance-loop unroll was rejected after inconsistent
-        timings. Published Python 0.4.1 wheels include the buffer methods.</p>
+        not isolated end-to-end speedup evidence.</p>
       <p><a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/README.md#current-source-performance-work-october-23-2026">Workloads, raw samples, reproduction and remaining bottlenecks</a></p>
-      <h3>Released concurrency and binding capabilities</h3>
+      <details class="benchmark-archive"><summary>Concurrency and memory trade-offs</summary>
       <p>Opt-in durable group commit coalesces bounded concurrent record writes
         while retaining separate recovery frames and sync-before-acknowledgement.
         It is disabled by default and can reduce sequential throughput.
@@ -253,8 +248,7 @@
       <p>The Node.js embedded binding adds opt-in Float32Array search, atomic bulk
         puts and bounded multi-query calls. Inputs are privately copied, not
         zero-copy, and multi-query calls do not promise a shared snapshot across
-        other owners. These capabilities are included in 0.4.1 packages,
-        but do not revise the historical cross-engine results above.
+        other owners.
         See <a href="docs/CONSOLE-ADMIN.html#opt-in-durable-group-commit">group-commit
         configuration and limitations</a> and the
         <a href="https://github.com/mahpate/Vlite/blob/main/bindings/node/README.md">Node.js guide</a>.</p>
@@ -269,28 +263,17 @@
         have costs. These Windows shared-host measurements do not establish a
         universal throughput or tail-latency improvement.</p>
       <h3>Workload-selectable read policy</h3>
-      <p>VLite 0.4.1 also supports <code>--lock-held-reads</code> for workloads
-        where immutable-generation copying is a worse trade-off than holding
-        the owner read lock during exact scans. Snapshot reads remain the default.
-        Compare correctness and reader/writer tail latency on your own workload;
-        this operational control is not a claim of a new benchmark speedup.</p>
-      <p>New global diagnostics report snapshot capture retention, grouped-write
-        admission, queue waits and shared-sync outcomes. Coordinator regression
-        tests cover subprocess interruption, short writes, failed syncs,
-        overload and disconnected callers; they are not physical power-loss
-        qualification. See the
-        <a href="docs/CONSOLE-ADMIN.html">operational metrics and recovery guide</a>.</p>
-      <p>Background rebuild status exposes its stage without publishing a graph.
-        Scheduled retries can use opt-in bounded per-collection backoff after
-        catch-up overflow or supersession. A seeded mixed-load regression
-        exercises exact and ready-ANN queries, TTL/metadata/payload writes and
-        background maintenance, recording raw latency samples without flaky
-        speed thresholds or silent exact fallback.</p>
+      <p><code>--lock-held-reads</code> avoids snapshot copying by keeping exact scans
+        under the read lock. Snapshot reads are the default; compare reader and writer
+        tail latency for your workload.</p>
+      <p>See the <a href="docs/CONSOLE-ADMIN.html">operations guide</a> for
+        diagnostics, recovery and background-rebuild controls.</p>
+      </details>
     </div>
   </section>
   <section id="hnsw-traversal">
     <div class="wrap">
-      <h2>Earlier HNSW traversal measurement &middot; released in v0.4.1</h2>
+      <h2>HNSW traversal measurements</h2>
       <p>A bounded visited-node bitmap replaces per-node hashing during graph
         construction and search on graphs up to 8,388,608 nodes. Each traversal
         owns one bit per node, rounded up to 64-bit words (at most 1 MiB);
@@ -321,7 +304,7 @@
       </div>
       <div class="table-wrap">
         <table class="matrix">
-          <thead><tr><th>Capability</th><th>VLite 0.4.1</th><th>zvec 0.8.0 / ecosystem</th></tr></thead>
+          <thead><tr><th>Capability</th><th>VLite</th><th>zvec / ecosystem</th></tr></thead>
           <tbody>
             <tr class="group"><td colspan="3">Storage &amp; durability</td></tr>
             <tr><td>Deployment model</td><td>Single <code>.vlite</code> file (+ optional sidecars)</td><td>Collection directory</td></tr>
@@ -364,11 +347,11 @@
     <div class="wrap">
       <div class="section-head">
         <div class="kicker">Methodology</div>
-        <h2>Reproduce the latest source campaign</h2>
+        <h2>Reproduce these results</h2>
         <p>Use isolated exports of the exact measured commits, the same Rust release toolchain,
           separate build directories and a coordinated measurement window.
           The <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/README.md#paired-source-revision-regression-october-25-2026-utc">step-by-step source campaign instructions</a>
-          cover building the v0.4.1 baseline and both source variants. Run the
+          cover building the baseline and both source variants. Run the
           <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/revision_campaign.py">revision campaign runner</a>
           only after all builds finish. It retains five repetitions and raw samples per workload.</p>
       </div>

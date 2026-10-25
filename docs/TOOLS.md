@@ -1,6 +1,6 @@
 # Offline command-line tools
 
-VLite 0.4.1 includes tools for working directly with database files, without a
+Work directly with database files, without a
 REST or gRPC server.
 
 ## Choose a tool
