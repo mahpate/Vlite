@@ -394,7 +394,7 @@ fn neighbors_op(request: &Neighbors) -> Result<QueryOp> {
     })
 }
 
-fn traverse_op(request: &Traverse) -> Result<QueryOp> {
+pub(super) fn traverse_op(request: &Traverse) -> Result<QueryOp> {
     Ok(QueryOp::Traverse {
         start: request.start.iter().map(node_selector).collect(),
         direction: request.direction,
@@ -653,14 +653,14 @@ fn stats(stats: engine::QueryStats) -> GraphReadStats {
 
 /// Monotonic milliseconds for the read deadline (PD-008).
 #[cfg(not(target_arch = "wasm32"))]
-fn clock() -> impl Fn() -> u64 {
+pub(super) fn clock() -> impl Fn() -> u64 {
     let start = std::time::Instant::now();
     move || u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// The host-set clock; the engine tolerates a clock that goes backwards.
 #[cfg(target_arch = "wasm32")]
-fn clock() -> impl Fn() -> u64 {
+pub(super) fn clock() -> impl Fn() -> u64 {
     crate::current_time_ms
 }
 
@@ -675,16 +675,16 @@ impl GraphRef<'_> {
         op: QueryOp,
         options: &ReadOptions<'_>,
         explain: bool,
+        clock: &dyn Fn() -> u64,
     ) -> Result<engine::QueryResult> {
         let query = engine::GraphQuery {
             op,
             projection: projection(&options.projection),
             explain,
         };
-        let clock = clock();
         let context = ExecutionContext {
             view_sequence: self.view_sequence,
-            clock: &clock,
+            clock,
             cancel: options.cancel,
         };
         engine::execute(self.graph, &query, &options.limits, &context).map_err(graph_error)
@@ -696,7 +696,17 @@ impl GraphRef<'_> {
         options: &ReadOptions<'_>,
         pick: fn(GraphOutput) -> Option<T>,
     ) -> Result<GraphRead<T>> {
-        let result = self.execute(op, options, false)?;
+        self.read_with_clock(op, options, pick, &clock())
+    }
+
+    fn read_with_clock<T>(
+        &self,
+        op: QueryOp,
+        options: &ReadOptions<'_>,
+        pick: fn(GraphOutput) -> Option<T>,
+        clock: &dyn Fn() -> u64,
+    ) -> Result<GraphRead<T>> {
+        let result = self.execute(op, options, false, clock)?;
         let output = pick(output(result.output)).expect("the executor answers in the query's kind");
         Ok(GraphRead {
             output,
@@ -723,7 +733,7 @@ impl GraphRef<'_> {
     /// examining any node or edge (REQ-028, AC-024).
     pub fn explain(&self, query: &GraphQuery, options: &ReadOptions<'_>) -> Result<Explanation> {
         options.limits.validate().map_err(graph_error)?;
-        let result = self.execute(query_op(query)?, options, true)?;
+        let result = self.execute(query_op(query)?, options, true, &clock())?;
         let engine::QueryOutput::Explain(explanation) = result.output else {
             unreachable!("explain requests return an explanation")
         };
@@ -812,6 +822,21 @@ impl GraphRef<'_> {
             GraphOutput::Traversal(traversal) => Some(traversal),
             _ => None,
         })
+    }
+
+    /// [`GraphRef::traverse`] with `clock` driving the deadline; limits are
+    /// validated by the caller.
+    pub(super) fn traverse_with_clock(
+        &self,
+        request: &Traverse,
+        options: &ReadOptions<'_>,
+        clock: &dyn Fn() -> u64,
+    ) -> Result<GraphRead<Traversal>> {
+        let pick: fn(GraphOutput) -> Option<Traversal> = |output| match output {
+            GraphOutput::Traversal(traversal) => Some(traversal),
+            _ => None,
+        };
+        self.read_with_clock(traverse_op(request)?, options, pick, clock)
     }
 
     /// See [`ShortestPath`].

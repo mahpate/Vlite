@@ -55,6 +55,7 @@ mod convert;
 pub(crate) mod frame;
 mod maintain;
 mod read;
+mod retrieve;
 
 pub use engine::schema::{
     GraphSchema, LabelDefinition, Multiplicity, ObservedEndpoint, ObservedLabel, ObservedProperty,
@@ -70,6 +71,10 @@ pub use read::{
     GraphRead, GraphReadStats, IndexChoice, Neighborhood, Neighbors, NodeFilter, NodeSelector,
     NodeView, PathOutcome, PropertyProjection, ReadOptions, ShortestPath, Traversal, Traverse,
     TraversedNode, TruncationReason,
+};
+pub use retrieve::{
+    Evidence, EvidenceSpec, Expansion, Pivot, PivotHit, Retrieval, Retrieve, RetrieveStats,
+    UnmappedPivots,
 };
 
 #[cfg(test)]
@@ -107,6 +112,7 @@ impl GraphInfo {
 /// It borrows the database, so every read through it observes the same
 /// committed state, identified by [`GraphRef::view_sequence`].
 pub struct GraphRef<'db> {
+    db: &'db Database,
     graph: &'db Graph,
     /// The database's commit sequence when the handle was obtained; for a
     /// read-only database, the open-time sequence.
@@ -582,6 +588,7 @@ impl Database {
         engine::model::validate_graph_name(name).map_err(graph_error)?;
         let graph = state.graph_by_name(name).ok_or(Error::GraphNotFound)?;
         Ok(GraphRef {
+            db: self,
             graph,
             view_sequence: self.sequence,
         })

@@ -481,6 +481,10 @@ pub enum Error {
         element: String,
         property: Option<String>,
     },
+    /// A hybrid-retrieve pivot would exact-scan a collection above its
+    /// live-record bound (PD-016); use a ready ANN leg or a text-only pivot.
+    #[cfg(feature = "graph")]
+    GraphPivotTooExpensive,
 }
 
 impl fmt::Display for Error {
@@ -765,6 +769,11 @@ impl fmt::Display for Error {
                 element,
                 property: None,
             } => write!(f, "graph schema rule {rule} violated by {element}"),
+            #[cfg(feature = "graph")]
+            Self::GraphPivotTooExpensive => write!(
+                f,
+                "pivot would exact-scan a collection above max_exact_scan_records; use a ready ANN index or a text-only pivot"
+            ),
         }
     }
 }
