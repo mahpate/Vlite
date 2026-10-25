@@ -37,6 +37,7 @@
   let connectionGeneration = 0;
   let operationGeneration = null;
   let tools = null;
+  let adminTools = null;
   let lastSearch = null;
   let browseItems = [];
   // Active collection context. Every record/search/index route is derived from it at
@@ -73,6 +74,29 @@
         && (!element.dataset.feature || element.dataset.feature.split(" ").every(feature));
       if (!allowed) element.disabled = true;
       element.dataset.interactionGate = allowed ? "allowed" : "blocked";
+      if (element.hasAttribute("data-admin")) {
+        element.title = !connected ? "Connect to check administration access."
+          : capabilities?.role !== "admin" ? "Requires the bootstrap admin credential; scoped and read-only credentials cannot administer the server."
+            : element.dataset.feature && !element.dataset.feature.split(" ").every(feature) ? "Unavailable on this server or configuration. See the availability note in this view." : "";
+      }
+    });
+    const requirements = {
+      tokens_reload: "Configure token files on the server; environment-only tokens require a server restart.",
+      backup_restore: "Configure a private VLITE_ADMIN_DIR on the server.",
+      backup_schedule: "Configure a private VLITE_ADMIN_DIR on the server.",
+      auto_maintenance: "Use a server that reports automatic maintenance support.",
+      scoped_credentials: "Configure admin authentication and a private VLITE_ADMIN_DIR; collection-bound credentials require database format v4 or newer.",
+      persistent_audit: "Configure admin authentication and a private VLITE_ADMIN_DIR.",
+      webhooks: "Configure a private VLITE_ADMIN_DIR on the server.",
+      tenants: "Configure admin authentication and a private VLITE_ADMIN_DIR.",
+      tls_reload: "Configure a file-backed native TLS listener. Plaintext and reverse-proxy TLS cannot be reloaded here."
+    };
+    document.querySelectorAll("[data-admin-availability]").forEach(element => {
+      const name = element.dataset.adminAvailability;
+      element.textContent = !connected || !capabilities ? "Disconnected. Connect in Overview to check this workflow's permissions and server configuration."
+        : capabilities.role !== "admin" ? `Unavailable for role "${capabilities.role}". Reconnect with the bootstrap admin credential; a scoped credential cannot grant administration access.`
+          : feature(name) ? "Available to the connected bootstrap admin. Review the instructions before confirming changes."
+            : `Unavailable on this server/configuration. ${requirements[name] || "Use a server version that reports this capability."}`;
     });
   }
   function collectionState() {
@@ -179,9 +203,13 @@
     window.VLiteObservabilityConnection?.request.invalidate();
     capabilities = null;
     tools?.clear();
+    adminTools?.disconnect();
     $("token").value = "";
     clearData();
     status("Disconnected; token and displayed results cleared");
+    tools?.gate();
+    adminTools?.gate?.();
+    applyRoleGates();
   }
   // Only the currently serialized workflow may intentionally advance its context.
   // Disconnect does not adopt the new generation, so its old workflow stays invalid.
@@ -255,6 +283,7 @@
       document.querySelectorAll('[data-interaction-gate="blocked"]').forEach((element) => { element.disabled = false; });
       modeChanged();
       tools?.gate();
+      adminTools?.gate?.();
       applyRoleGates();
     }
   }
@@ -320,6 +349,7 @@
         connectionState();
         clearData();
         tools?.clear();
+        adminTools?.disconnect();
         show("inspector", { request, status: response.status, response: redact(value) });
         $("token").value = "";
         clearBrowse();
@@ -618,6 +648,7 @@
       const previous = collection;
       clearData();
       tools?.clear();
+      adminTools?.disconnect();
       connected = true;
       capabilities = null;
       const reported = await api("GET", "/v1/capabilities");
@@ -652,6 +683,7 @@
       if (can("read")) await refreshIndex(true);
       show("compatibility", capabilities);
       tools.connected(capabilities);
+      adminTools?.capabilities(capabilities);
       $("mode").querySelector('option[value="approximate"]').disabled = !can("search_build");
       $("mode").querySelector('option[value="auto"]').disabled = !feature("search_auto");
       $("mode").querySelector('option[value="hybrid"]').disabled = !feature("search_hybrid");
@@ -884,7 +916,7 @@
     }
   }));
   try {
-  tools = window.VLiteTools.init({
+  const toolsContext = {
     api, run, status, confirm: confirmOperation, inspect: inspectRecord, search, indexConfig, disconnect,
     dimensions: () => dimensions, busy: () => busy, connected: () => connected,
     capabilities: () => capabilities, lastSearch: () => lastSearch,
@@ -909,10 +941,13 @@
       return listed;
     },
     applySettings: (info) => { if (info.name === collection) applySettings(info); },
-  });
+  };
+  tools = window.VLiteTools.init(toolsContext);
+  adminTools = window.VLiteAdminTools.init(toolsContext);
   } catch (error) {
     // Fail closed with an explicit message instead of a later null dereference.
     tools = null;
+    adminTools = null;
     status(`Console tools failed to initialize (${error.message}); reload the page. Connecting is disabled.`, true);
   }
   // A read-only bridge shares the in-memory connection without exposing its token.
@@ -954,4 +989,7 @@
     })(),
   };
   window.addEventListener("pagehide", disconnect);
+  tools?.gate();
+  adminTools?.gate?.();
+  applyRoleGates();
 })();

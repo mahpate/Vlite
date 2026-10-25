@@ -45,7 +45,9 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: "22"
-      - run: node tests/console_tools.test.cjs
+      - run: |
+          node --test tests/console_tools.test.cjs tests/admin_tools.test.cjs tests/navigation.test.cjs tests/dashboard_interactions.test.cjs
+          python tests/admin_route_coverage.py
       - run: python -m unittest discover -s clients/python -p test_client.py
       - run: python -m pip wheel --no-deps --wheel-dir dist ./clients/python
       - name: Verify installed REST Python wheel

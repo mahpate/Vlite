@@ -349,6 +349,16 @@
     return match ? `${match[1]}${"\u2022".repeat(12)} (${match[2].length}-character secret hidden)` : `${"\u2022".repeat(12)} (${token.length}-character secret hidden)`;
   }
   const OPERATIONS = ["read", "search", "search_build", "write", "import", "index", "collections", "diagnostics", "backup"];
+  function optionalLimit(value, min, max, label) {
+    if (value === undefined || (typeof value === "string" && !value.trim())) return undefined;
+    const source = typeof value === "string" ? value.trim() : value;
+    if (source === null || source === "null") return null;
+    if ((typeof source !== "number" && typeof source !== "string") ||
+        (typeof source === "string" && !/^(0|[1-9][0-9]*)$/.test(source))) throw new Error(`${label} must be a decimal integer or null (no limit)`);
+    const number = Number(source);
+    if (!Number.isSafeInteger(number) || number < min || number > max) throw new Error(`${label} must be ${min}..${max}, or null (no limit); larger integers cannot be represented exactly by this dashboard`);
+    return number;
+  }
   function credentialRequest(input, now = Date.now()) {
     const collections = input.collections.trim() === "*" ? ["*"] : input.collections.split(",").map((value) => value.trim()).filter(Boolean);
     if (!collections.length || collections.length > 64) throw new Error("Scope 1..64 collections, or * for all");
@@ -361,6 +371,22 @@
     const body = { collections, operations, expires_unix_ms: now + days * 86400000 };
     if (typeof input.name !== "string" || input.name.length < 1 || input.name.length > 64 || !/^[\x20-\x7e]+$/.test(input.name)) throw new Error("Credential name is required: 1..64 printable ASCII characters");
     body.name = input.name;
+    if (input.tenant_id !== undefined && input.tenant_id !== "") {
+      const tenant = typeof input.tenant_id === "string" ? input.tenant_id.trim() : input.tenant_id;
+      if (tenant === null || tenant === "null") body.tenant_id = null;
+      else if (tenant !== "") {
+        if (typeof tenant !== "string" || !/^[a-fA-F0-9]{32}$/.test(tenant)) throw new Error("Tenant must be an existing 32-character hexadecimal tenant ID, or blank for no tenant");
+        body.tenant_id = tenant;
+      }
+    }
+    for (const [key, min, max, label] of [
+      ["requests_per_second", 1, 1000000, "Requests per second"],
+      ["max_vectors", 0, Number.MAX_SAFE_INTEGER, "Total vector quota"],
+      ["max_vectors_per_collection", 0, Number.MAX_SAFE_INTEGER, "Per-collection vector quota"],
+    ]) {
+      const value = optionalLimit(input[key], min, max, label);
+      if (value !== undefined) body[key] = value;
+    }
     return body;
   }
   function graceSeconds(value) {
@@ -534,6 +560,7 @@
     const events = input.events.split(",").map((v) => v.trim()).filter(Boolean);
     if (!events.length || new Set(events).size !== events.length || events.some((v) => !["put", "delete", "metadata_update", "collection_created", "collection_dropped", "settings_updated", "vectors_updated"].includes(v))) throw new Error("Select unique supported webhook events");
     const collections = input.collections.split(",").map((v) => v.trim()).filter(Boolean);
+    if (collections.length > 64) throw new Error("Webhook filters accept at most 64 collections");
     collections.forEach(collectionName);
     if (new Set(collections).size !== collections.length) throw new Error("Duplicate webhook collection");
     return { url: url.href, events, secret: input.secret, ...(collections.length ? { collections } : {}) };
@@ -639,17 +666,20 @@
       return loadFeed(nextCursor);
     });
     $("feed-cursor").addEventListener("input", () => { nextCursor = null; hasMore = false; $("feed-next").disabled = true; });
-    const admin = () => { if (ctx.capabilities()?.role !== "admin") throw new Error("HTTP 403: bootstrap admin required"); };
+    const admin = (feature) => {
+      if (ctx.capabilities()?.role !== "admin") throw new Error("HTTP 403: bootstrap admin required");
+      if (feature && !ctx.feature(feature)) throw new Error(`Server feature ${feature} is not enabled; inspect compatibility/configuration`);
+    };
     const webhookId = () => {
       const value = $("webhook-id").value.trim();
       if (!/^[a-f0-9]{24}$/.test(value)) throw new Error("Expected a 24-character hexadecimal subscription ID");
       return value;
     };
-    const list = async () => { admin(); display("webhook-result", await ctx.api("GET", "/v1/admin/webhooks")); };
+    const list = async () => { admin("webhooks"); display("webhook-result", await ctx.api("GET", "/v1/admin/webhooks")); };
     on("webhook-list", list);
-    on("webhook-status", async () => { admin(); display("webhook-result", await ctx.api("GET", `/v1/admin/webhooks/${webhookId()}`)); });
+    on("webhook-status", async () => { admin("webhooks"); display("webhook-result", await ctx.api("GET", `/v1/admin/webhooks/${webhookId()}`)); });
     on("webhook-create", async () => {
-      admin();
+      admin("webhooks");
       let body;
       try {
         body = webhookRequest({ url: $("webhook-url").value, collections: $("webhook-collections").value, events: $("webhook-events").value, secret: $("webhook-secret").value });
@@ -658,14 +688,14 @@
       } finally { $("webhook-secret").value = ""; if (body) body.secret = ""; }
     });
     on("webhook-delete", async () => {
-      admin(); const value = webhookId();
+      admin("webhooks"); const value = webhookId();
       if (await ctx.confirm(`Delete webhook subscription ${value}? Delivery to this subscription stops.`)) {
         await ctx.api("DELETE", `/v1/admin/webhooks/${value}`, undefined, { data: false });
         await list();
       }
     });
     on("pitr-run", async () => {
-      admin(); const body = pitrRequest($("pitr-backup").value.trim(), $("pitr-kind").value, $("pitr-target").value.trim());
+      admin("backup_restore"); const body = pitrRequest($("pitr-backup").value.trim(), $("pitr-kind").value, $("pitr-target").value.trim());
       if (await ctx.confirm(`Restore backup ${body.backup} at ${$("pitr-kind").value} ${$("pitr-target").value} into a new copy? The live database is unchanged; no startup selection is made.`)) display("pitr-result", await ctx.api("POST", "/v1/admin/restores", body, { data: false }));
     });
     const results = ["group-result", "named-result", "geo-result", "recommend-result", "facets-result", "stats-result", "language-result", "disk-result"];
@@ -1204,7 +1234,7 @@
       }
       text("backup-result", result);
     }
-    on("list-backups", async () => { admin(); await listBackups(); });
+    on("list-backups", async () => { admin("backup_restore"); await listBackups(); });
     on("create-backup", async () => {
       admin("backup_restore");
       if (!await ctx.confirm("Create a consistent full database snapshot in the configured admin directory? This consumes disk and blocks the owner during copying.")) return;
@@ -1465,7 +1495,10 @@
       admin("backup_verify_drill");
       const backup = $("backup-name").value;
       if (!backup) throw new Error("List snapshots and select a generated backup first");
-      if (verb === "drill" && !await ctx.confirm(`Run a restore drill for ${backup}? It writes a temporary scratch copy in the admin directory (disk and I/O), validates and queries it, then deletes it. The active database is not touched.`)) return;
+      const confirmation = verb === "drill"
+        ? `Run a restore drill for ${backup}? It writes a temporary scratch copy in the admin directory (disk and I/O), validates and queries it, then deletes it. The active database is not touched.`
+        : `Verify ${backup}? This reads and validates the full snapshot and updates its verification manifest in the admin directory. The active database is not touched.`;
+      if (!await ctx.confirm(confirmation)) return;
       try {
         text("backup-result", await ctx.api("POST", `/v1/admin/backups/${backup}/${verb}`, {}, { data: false }));
       } catch (error) {
@@ -1501,7 +1534,10 @@
             actions.append(button);
           }
         }
-        return [item.id, item.name, item.collections.join(", "), item.operations.join(", "), state, when(item.expires_unix_ms), actions];
+        const scope = [item.collections.join(", "), item.tenant_id ? `tenant ${item.tenant_id}` : "no tenant",
+          `rate ${item.requests_per_second ?? "unlimited"} requests/s`,
+          `vectors ${item.max_vectors ?? "unlimited"} total / ${item.max_vectors_per_collection ?? "unlimited"} per collection`].join("; ");
+        return [item.id, item.name, scope, item.operations.join(", "), state, when(item.expires_unix_ms), actions];
       }));
     }
     async function listCredentials() {
@@ -1527,10 +1563,12 @@
       if (verb === "rotate") {
         const grace = graceSeconds($("cred-grace").value);
         if (!await ctx.confirm(`Rotate credential ${item.id}? A new secret with the same scope is shown once. The old secret ${grace ? `keeps working for ${grace} seconds, then stops` : "stops working immediately"}.`)) return;
+        showSecret(null);
         const result = await credentialMutation(() => ctx.api("POST", `/v1/admin/credentials/${item.id}/rotate`, { grace_seconds: grace }, { sensitive: true, data: false }), `Rotate ${item.id}`);
         showSecret(result.token, result.credential);
       } else {
         if (!await ctx.confirm(`Revoke credential ${item.id}${item.name ? ` (${item.name})` : ""}? Requests using it are refused from now on. This cannot be undone.`)) return;
+        showSecret(null);
         await credentialMutation(() => ctx.api("POST", `/v1/admin/credentials/${item.id}/revoke`, {}, { data: false }), `Revoke ${item.id}`);
       }
       await listCredentials();
@@ -1538,8 +1576,13 @@
     on("cred-create", async () => {
       admin("scoped_credentials");
       const body = credentialRequest({ name: $("cred-name").value.trim(), collections: $("cred-collections").value,
-        operations: [...document.querySelectorAll('input[name="cred-op"]:checked')].map((input) => input.value), days: $("cred-days").value });
-      if (!await ctx.confirm(`Create a credential for collections [${body.collections.join(", ")}] with operations [${body.operations.join(", ")}], expiring ${when(body.expires_unix_ms)}? The secret is shown once.`)) return;
+        operations: [...document.querySelectorAll('input[name="cred-op"]:checked')].map((input) => input.value), days: $("cred-days").value,
+        tenant_id: $("cred-tenant")?.value, requests_per_second: $("cred-rpm")?.value,
+        max_vectors: $("cred-max-vectors")?.value, max_vectors_per_collection: $("cred-max-vectors-per-collection")?.value });
+      if (body.tenant_id != null) admin("tenants");
+      if ("requests_per_second" in body) admin("credential_rate_limits");
+      if ("max_vectors" in body || "max_vectors_per_collection" in body) admin("credential_vector_quotas");
+      if (!await ctx.confirm(`Create a credential for collections [${body.collections.join(", ")}] with operations [${body.operations.join(", ")}], expiring ${when(body.expires_unix_ms)}? Tenant: ${body.tenant_id ?? "none"}; rate: ${body.requests_per_second ?? "unlimited"} requests/s; vectors: ${body.max_vectors ?? "unlimited"} total / ${body.max_vectors_per_collection ?? "unlimited"} per collection. The secret is shown once.`)) return;
       showSecret(null);
       const result = await credentialMutation(() => ctx.api("POST", "/v1/admin/credentials", body, { sensitive: true, data: false }), "Create");
       showSecret(result.token, result.credential);
@@ -1605,6 +1648,7 @@
         for (const name of ["import-result", "sample-analysis", "record-comparison", "search-comparison", "scenario-result", "health-result", "code-examples", "payload-preview", "vector-slice-result", "vector-summary", "compatibility", "rebuild-result", "maintenance-result", "maintenance-scope", "token-result", "audit-result", "backup-result",
           "collection-result", "quality-result", "job-result", "job-invalid", "auto-maintenance-result", "backup-schedule-result", "slow-summary", "prometheus-result", "cred-result", "persistent-audit-result"]) text(name, "");
         for (const name of ["batch-ids", "request-body", "scenario", "filter-value", "import-file", "scenario-file", "job-file", "job-id", "new-collection-name", "drop-collection-name", "cred-name"]) $(name).value = "";
+        for (const name of ["cred-tenant", "cred-rpm", "cred-max-vectors", "cred-max-vectors-per-collection"]) if ($(name)) $(name).value = "";
         $("batch-metadata").value = "{}"; $("collection-settings").value = "{}"; $("new-collection-settings").value = "{}";
         for (const name of ["collections-table", "index-memory-table", "slow-table", "cred-table"]) $(name).querySelector("tbody").replaceChildren();
         progress(0, 1);

@@ -24,8 +24,9 @@ Read-only credentials permit authenticated GET/HEAD outside admin routes and
 non-building searches, including exact, approximate_ready, auto and hybrid
 where supported. Lazy approximate can build a graph and is therefore forbidden
 with HTTP 403. Scoped credentials additionally restrict collections and
-operations; lazy search requires both search and search_build. All `/v1/admin/`
-routes require the bootstrap admin credential. These rules are enforced by the server,
+operations; lazy search requires both search and search_build. `/v1/admin/`
+routes require the bootstrap admin credential, except the read-only replication
+export endpoint, which permits database-wide read access. These rules are enforced by the server,
 not by console controls. Authentication failure returns 401. Existing requests
 already admitted before token rotation/revocation may complete.
 
@@ -49,6 +50,71 @@ traversal, up to k eligible hits, no exact fallback); without it, send nonempty
 filters only in exact mode. Collections and hybrid/import workflows require
 explicit v4 creation or an offline copy-out upgrade; enabling the console does
 not migrate any file.
+
+## Dashboard administration walkthrough
+
+Open **Administration** in the sidebar after connecting in **Overview**.
+The top tabs and focused sub-tabs retain the old `#operations`, `#credentials`
+and `#webhooks` links. A direct legacy link still shows the full original view.
+Controls stay visible when unavailable: each workflow explains whether to reconnect
+with the bootstrap admin credential or configure a missing server capability.
+Configuration flags are not permission grants; the server enforces both.
+
+- **Health / tokens:** refresh health, inspect token sources, reload configured
+  token files, revoke the read-only token, and read the bounded recent request
+  audit. Token files must be changed on the host first. Rotation may require
+  reconnecting. Environment secrets require restart.
+- **Scoped credentials / audit:** create, list, rotate with a grace interval, and
+  revoke expiring collection/operation-scoped credentials; read persistent audit.
+  Optional fields bind an existing 32-hex tenant ID, requests **per second**
+  (`1..1000000`), an aggregate vector limit, and a per-collection vector limit.
+  Blank means no additional limit; vector limits accept zero (no growth).
+  Dashboard numeric quotas are limited to `0..9007199254740991` for exact
+  JavaScript representation; the API accepts u64 values. Tenant-bound collection
+  names are local to the tenant. Create a wildcard `*` credential with the
+  `collections` operation when that tenant needs to create its first collection.
+  Secrets appear once, remain in memory, and clear on disconnect.
+- **Tenants:** list active tenants, create a named tenant with an optional
+  aggregate vector quota, and delete an empty tenant. Tenant state requires
+  admin authentication and `VLITE_ADMIN_DIR`. Delete its collections first;
+  deletion blocks bound credentials. There is no rename or quota-edit endpoint.
+- **Backup / restore:** list/create snapshots, verify or drill a selected backup,
+  stage a restored copy, and select that copy for the next operator-managed
+  restart. Scheduled backup settings are read/merged/updated separately; a
+  manual scheduled cycle is also available. Read the current policy before
+  editing its JSON. Runtime scheduling changes do not rewrite environment
+  configuration. No restore action silently replaces the live file.
+- **Automation:** read and update the automatic index maintenance policy or run
+  one tick. The existing JSON policy exposes advanced settings; changes are
+  memory-only. Per-collection build, rebuild, polling/publication, cancellation,
+  quality and manual maintenance remain in **Collections → Index**.
+- **Webhooks / PITR:** list/create/delete subscriptions and inspect delivery
+  status; restore a selected sequence or timestamp into a new copy. Webhook
+  secrets are not redisplayed. Webhooks and backup-based recovery require an
+  admin directory. PITR creation does not select the copy for restart.
+- **TLS certificates:** after an operator changes the host's certificate/key
+  and optional client CA files, validate and reload all registered file-backed
+  native TLS identities. All candidates validate before swapping; bad files
+  preserve existing identities. New handshakes see the update; existing
+  sessions do not. This does not upload files, enable a plaintext listener,
+  configure ports, or manage reverse-proxy certificates.
+- **Replication export:** export and download a bounded log segment after a
+  decimal u64 commit sequence. The default budget is 1 MiB (`1..16777216`
+  bytes). Success advances the input to `last_sequence`. This read-only workflow
+  also supports read-only credentials and scoped credentials with database-wide
+  `read` over `*`, when the server advertises the route. Downloaded segments
+  contain database data. Applying them needs an external replica workflow.
+
+Mutations retain confirmation dialogs and serialized, generation-checked
+requests; there are no automatic mutation retries or simulated successes.
+Disconnect and authentication failure clear admin results and pending downloads.
+The tenant/TLS/replication module shares the console's existing transport,
+confirmation, inspector and access context rather than storing a second token.
+Older or unconfigured servers may not expose a workflow even if the tab is
+present. Enabling TLS, editing secret files, restarting, offline file-format
+upgrades, configuring OTLP, and changing startup-only settings remain operator
+tasks, not dashboard forms. Database encryption is reported in Overview; keys
+are not uploaded or changed by these admin controls.
 
 ## ANN maintenance observations and retry backoff
 

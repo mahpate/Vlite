@@ -17,7 +17,7 @@
     },
     administration: {
       title: "Administration", description: "Operations, access and recovery. Writes require confirmation.",
-      tabs: [["operations", "Operations"], ["credentials", "Scoped credentials"], ["webhooks", "Webhooks / PITR"]]
+      tabs: [["operations", "Health / tokens"], ["credentials", "Scoped credentials / audit"], ["tenants", "Tenants"], ["admin-backups", "Backup / restore"], ["admin-auto-maintenance", "Automation"], ["webhooks", "Webhooks / PITR"], ["transport-security", "TLS certificates"], ["replication", "Replication export"]]
     },
     developer: {
       title: "Developer Console", description: "Inspect requests and review data workflows.",
@@ -26,6 +26,12 @@
   };
   const collectionSearch = [["collection-search", "Playground"], ["collection-retrieval", "Advanced retrieval"], ["collection-explore", "Explore / compare"]];
   const collectionWrite = [["editor", "Record editor"], ["write-json", "JSON documents"]];
+  const adminTabs = {
+    operations: [["operations", "All operations"], ["admin-health", "Health"], ["admin-token-management", "Tokens / recent audit"]],
+    credentials: [["credentials", "Credentials"], ["admin-persistent-audit", "Persistent audit"]],
+    "admin-backups": [["admin-backups", "Snapshots / restore"], ["admin-backup-schedule", "Scheduled backups"]],
+    webhooks: [["webhooks", "All recovery integrations"], ["admin-webhooks", "Subscriptions"], ["admin-pitr", "Point-in-time restore"]]
+  };
   const routes = {
     database: ["overview", "database"],
     browse: ["collections", "browse"],
@@ -45,6 +51,17 @@
     operations: ["administration", "operations"],
     credentials: ["administration", "credentials"],
     webhooks: ["administration", "webhooks"],
+    tenants: ["administration", "tenants"],
+    replication: ["administration", "replication"],
+    "transport-security": ["administration", "transport-security"],
+    "admin-health": ["administration", "operations", "operations"],
+    "admin-token-management": ["administration", "operations", "operations"],
+    "admin-backups": ["administration", "operations", "admin-backups"],
+    "admin-backup-schedule": ["administration", "operations", "admin-backups"],
+    "admin-auto-maintenance": ["administration", "operations", "admin-auto-maintenance"],
+    "admin-persistent-audit": ["administration", "credentials", "credentials"],
+    "admin-webhooks": ["administration", "webhooks", "webhooks"],
+    "admin-pitr": ["administration", "webhooks", "webhooks"],
     requests: ["developer", "requests"],
     "data-tools": ["developer", "data-tools"],
     "resumable-import": ["developer", "resumable-import"]
@@ -90,7 +107,7 @@
   let renderedHash = null;
 
   function openDetails(target) {
-    for (let parent = target && target.parentElement; parent; parent = parent.parentElement) {
+    for (let parent = target; parent; parent = parent.parentElement) {
       if (parent.tagName === "DETAILS") parent.open = true;
     }
   }
@@ -161,8 +178,11 @@
     document.getElementById("workspace-title").textContent = workspace.title;
     document.getElementById("workspace-description").textContent = workspace.description;
     renderTabs(tabs, workspace.tabs, route.tab, `${workspace.title} views`);
-    const secondary = route.workspace === "collections" ? route.tab === "editor" ? collectionWrite : route.tab === "collection-search" ? collectionSearch : [] : [];
-    renderTabs(subtabs, secondary, route.id, "Collection tools");
+    const secondary = route.workspace === "collections" ? route.tab === "editor" ? collectionWrite : route.tab === "collection-search" ? collectionSearch : [] : route.workspace === "administration" ? adminTabs[route.tab] || [] : [];
+    renderTabs(subtabs, secondary, route.id, route.workspace === "administration" ? "Administration tools" : "Collection tools");
+    document.querySelectorAll("[data-admin-view]").forEach(panel => {
+      panel.hidden = route.workspace === "administration" && route.id.startsWith("admin-") && panel.closest("main > section")?.id === route.section && panel.id !== route.id;
+    });
     const visible = document.getElementById(route.section);
     visible.setAttribute("role", "tabpanel");
     const selectedLink = (secondary.length ? subtabs : tabs).querySelector('[aria-selected="true"]');
@@ -199,7 +219,9 @@
     const target = document.getElementById(id);
     if (!target && !Object.prototype.hasOwnProperty.call(routes, id)) return null;
     const containing = target && target.closest("main > section");
-    if (containing && current && containing.id === current.section) {
+    if (containing && current && containing.id === current.section
+      && (!Object.prototype.hasOwnProperty.call(routes, id) || current.id === id)
+      && !target.closest("[data-admin-view]")?.hidden) {
       openDetails(target);
       const panel = target.closest("#record-inspector > [role='tabpanel']");
       if (panel) inspectorTab(panel.id.replace("record-inspector-", ""));

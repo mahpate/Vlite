@@ -91,6 +91,13 @@ def capture(output):
             def log_message(self, *_):
                 pass
 
+            def translate_path(self, path):
+                if path == "/dashboard":
+                    path = "/"
+                elif path.startswith("/dashboard/"):
+                    path = path[len("/dashboard"):]
+                return super().translate_path(path)
+
             def proxy(self):
                 path = self.path.removeprefix("/api")
                 body = self.rfile.read(int(self.headers.get("Content-Length", 0))) or None
@@ -130,7 +137,8 @@ def capture(output):
                                     device_scale_factor=1, reduced_motion="reduce")
             errors = []
             page.on("pageerror", lambda error: errors.append(str(error)))
-            page.goto(f"http://127.0.0.1:{server.server_port}/")
+            page.goto(f"http://127.0.0.1:{server.server_port}/dashboard/")
+            expect(page.locator("#tour-dismiss")).to_be_visible()
             page.locator("#tour-dismiss").click()
             page.locator("#token").fill(token)
             page.locator("#connection button[type=submit]").click()

@@ -61,9 +61,14 @@ function dashboard(fetch = async () => { throw new Error("Unexpected request"); 
     createElement: (tag) => new Element("", tag.toUpperCase()),
   };
   let context;
+  let adminContext;
   const tools = { gate() {}, clear() {}, loaded() {} };
+  const adminTools = { gate() {}, disconnect() {}, capabilities() {} };
   const window = {
     addEventListener() {},
+    VLiteAdminTools: {
+      init(value) { adminContext = value; return adminTools; },
+    },
     VLiteTools: {
       utils: {
         collectionPath: (name, suffix) => name === "default" ? `/v1${suffix}` : `/v1/collections/${name}${suffix}`,
@@ -99,7 +104,7 @@ function dashboard(fetch = async () => { throw new Error("Unexpected request"); 
   get("hnsw-m").value = "16"; get("hnsw-ef").value = "100"; get("hnsw-seed").value = "42";
   get("k").value = "10"; get("query").value = "[1,0]"; get("filter").value = "[]";
   window.testDashboard.setConnection();
-  return { ...window.testDashboard, context, tools, window, document, get, controls, Element };
+  return { ...window.testDashboard, context, adminContext, tools, adminTools, window, document, get, controls, Element };
 }
 
 const response = (value, status = 200) => ({
@@ -111,6 +116,12 @@ const deferred = () => {
   const promise = new Promise((done) => { resolve = done; });
   return { promise, resolve };
 };
+
+test("both dashboard modules initialize with the same transport context", () => {
+  const ui = dashboard();
+  assert.equal(ui.adminContext, ui.context);
+  assert.doesNotMatch(ui.get("status").textContent, /failed to initialize/);
+});
 
 test("payload previews decode UTF-8 safely, bound text and explicitly identify binary data", () => {
   const ui = dashboard();

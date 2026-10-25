@@ -7,6 +7,7 @@
   <title>VLite dashboard</title>
   <link rel="stylesheet" href="/dashboard/style.css">
   <script src="/dashboard/console-tools.js" defer></script>
+  <script src="/dashboard/admin-tools.js" defer></script>
   <script src="/dashboard/navigation.js" defer></script>
   <script src="/dashboard/app.js" defer></script>
   <script src="/dashboard/observability.js" defer></script>
@@ -269,7 +270,8 @@
   </section>
   <section id="webhooks" class="wide">
     <h2>Webhooks and point-in-time restore</h2><p>Bootstrap admin only. Requires a private VLITE_ADMIN_DIR. Webhooks deliver at least once; consumers must deduplicate. New subscriptions start at the shared dispatcher position, not historical replay.</p>
-    <div class="tool-group"><h3>Webhook subscriptions and delivery status</h3>
+    <p data-admin-availability="webhooks">Connect with a bootstrap admin credential to check webhook availability.</p>
+    <div id="admin-webhooks" class="tool-group" data-admin-view><h3>Webhook subscriptions and delivery status</h3>
       <button id="webhook-list" type="button" data-admin data-feature="webhooks">Refresh subscriptions</button>
       <pre id="webhook-result" aria-live="polite"></pre>
       <label>Destination HTTP(S) URL<input id="webhook-url" type="url" autocomplete="off"></label>
@@ -281,7 +283,8 @@
       <button id="webhook-status" type="button" data-admin data-feature="webhooks">Delivery status / last error</button>
       <button id="webhook-delete" type="button" class="danger" data-admin data-feature="webhooks">Delete subscription</button>
     </div>
-    <div class="tool-group"><h3>PITR restore into a new copy</h3>
+    <div id="admin-pitr" class="tool-group" data-admin-view><h3>PITR restore into a new copy</h3>
+      <p data-admin-availability="backup_restore">Connect to check backup and restore availability.</p>
       <label>Existing generated backup name<input id="pitr-backup" maxlength="96"></label>
       <label>Target<select id="pitr-kind"><option value="sequence">Commit sequence</option><option value="timestamp_ms">Unix timestamp (milliseconds)</option></select></label>
       <label>Target value (nonnegative safe integer)<input id="pitr-target" inputmode="numeric"></label>
@@ -448,12 +451,16 @@
   </section>
   <section id="operations" class="wide">
     <span class="eyebrow">SERVER OPERATIONS</span><h2>Health and administration</h2>
+    <p>Start with a health check. Use the Administration tabs for access, tenant namespaces, backup recovery, automated maintenance and TLS. Mutations ask for confirmation; the dashboard never restarts the server or edits its host files.</p>
+    <div id="admin-health" data-admin-view>
     <button id="refresh-health" type="button">Refresh health snapshot</button>
     <label><input id="auto-health" type="checkbox"> Refresh every 10 seconds while this page is visible</label>
     <pre id="health-result"></pre>
+    </div>
     <div id="admin-controls">
       <p id="admin-note">Connect to discover server administration features. These operations require an admin credential.</p>
-      <details class="operation-view" open><summary>Credentials and audit</summary>
+      <details id="admin-token-management" class="operation-view" data-admin-view open><summary>Bootstrap tokens and recent audit</summary>
+      <p data-admin-availability="tokens_reload">Connect to check configured token-file reload support.</p>
       <button id="token-status" data-admin type="button" class="secondary">Inspect credential sources</button>
       <button id="token-reload" data-admin data-write type="button">Reload configured token files</button>
       <button id="token-revoke" data-admin data-write type="button" class="danger">Revoke read-only credential</button>
@@ -463,7 +470,9 @@
       <p>Last 256 process-local requests only; not a durable compliance log. No credentials or record contents.</p>
       <pre id="audit-result"></pre>
       </details>
-      <details class="operation-view"><summary>Backup and staged restore</summary>
+      <details id="admin-backups" class="operation-view" data-admin-view><summary>Backup and staged restore</summary>
+      <p data-admin-availability="backup_restore">Connect to check backup and restore support.</p>
+      <p><strong>Recovery order:</strong> list or create a backup, select it below, verify or drill it, then stage a restored copy. Select that copy only when ready for an operator-managed restart.</p>
       <button id="list-backups" data-admin type="button" class="secondary">List snapshots</button>
       <button id="create-backup" data-admin data-write type="button">Create consistent backup</button>
       <label>Backup to restore<select id="backup-name"></select></label>
@@ -476,7 +485,8 @@
       <p>Verify checks the backup file's integrity (CRC) and records the result in its manifest. A drill restores it to a scratch file, opens and validates it, compares collections/counts with the manifest, runs a self-match query, then deletes the scratch file; the active database and restart selection are never touched.</p>
       <pre id="backup-result"></pre>
       </details>
-      <details class="operation-view"><summary>Scheduled backups</summary>
+      <details id="admin-backup-schedule" class="operation-view" data-admin-view><summary>Scheduled backups</summary>
+      <p data-admin-availability="backup_schedule">Connect to check backup scheduling support.</p>
       <p>Off by default. Runtime changes are memory-only: the server's environment configuration applies again after restart. Retention is a separate opt-in: when enabled it deletes generated backups ranked beyond retain_last (and, if retain_days is set, older than it), but never the newest verified backup, restored copies, drill scratch files or the next-startup selection.</p>
       <button id="backup-schedule-read" data-admin data-feature="backup_schedule" type="button" class="secondary">Read backup schedule</button>
       <label>Backup schedule changes (JSON; fields are merged, omitted fields keep their current value; Read first)<textarea id="backup-schedule" rows="6">{"enabled":false}</textarea></label>
@@ -484,7 +494,8 @@
       <button id="backup-schedule-run" data-admin data-feature="backup_schedule" type="button" class="secondary">Run one scheduled cycle now</button>
       <pre id="backup-schedule-result"></pre>
       </details>
-      <details class="operation-view"><summary>Automatic index maintenance</summary>
+      <details id="admin-auto-maintenance" class="operation-view" data-admin-view><summary>Automatic index maintenance</summary>
+      <p data-admin-availability="auto_maintenance">Connect to check automatic maintenance support.</p>
       <p>Off by default and memory-only (resets to the environment configuration on restart). When enabled, each tick takes at most one action for one collection (round-robin), starts at most one background rebuild, skips and counts busy ticks, and never runs a synchronous build. Thresholds use the collection maintenance policy in Index plus the stale ratio and optional low-recall trigger here.</p>
       <button id="auto-maintenance-read" data-admin data-feature="auto_maintenance" type="button" class="secondary">Read automatic maintenance</button>
       <label>Automatic maintenance changes (JSON; merged: enabled, interval_secs 10..3600, stale_ratio, rebuild_on_low_recall, min_recall, quality_samples 1..32)<textarea id="auto-maintenance" rows="5">{"enabled":false}</textarea></label>
@@ -505,8 +516,10 @@
   </section>
   <section id="credentials" class="wide">
     <span class="eyebrow">ACCESS CONTROL</span><h2>Scoped credentials</h2>
+    <div id="admin-credential-form" data-admin-view>
     <p>Bootstrap admin only. A scoped credential is limited to named collections (bound to those collections' identities; a dropped and recreated collection or another database fails closed) and selected operations, and always expires. The secret is returned once: it is shown masked here, kept only in this page's memory, never placed in the request inspector, history, exports or browser storage, and cleared on Disconnect.</p>
-    <label>Name (required, 1..64 characters)<input id="cred-name" maxlength="64" required></label>
+    <p data-admin-availability="scoped_credentials">Connect to check scoped credential support.</p>
+    <label>Name (required, 1..64 UTF-8 bytes)<input id="cred-name" maxlength="64" required></label>
     <label>Collections (comma-separated, or * for all)<input id="cred-collections" value="default" spellcheck="false"></label>
     <fieldset id="cred-operations"><legend>Operations</legend>
       <label><input type="checkbox" name="cred-op" value="read" checked> read</label>
@@ -520,6 +533,14 @@
       <label><input type="checkbox" name="cred-op" value="backup"> backup</label>
     </fieldset>
     <label>Expires in days (1..365)<input id="cred-days" type="number" min="1" max="365" value="30"></label>
+    <fieldset><legend>Optional tenant and usage limits</legend>
+      <p>Leave blank for no additional limit. Use Tenants to create or look up a tenant ID first. Tenant credentials use collection names within that tenant, not the internal namespace prefix.</p>
+      <label>Existing tenant ID (32 hexadecimal characters; blank = no tenant)<input id="cred-tenant" maxlength="32" pattern="[0-9a-fA-F]{32}" spellcheck="false"></label>
+      <label>Requests per second (1..1000000; blank = unlimited)<input id="cred-rpm" type="number" min="1" max="1000000" step="1" placeholder="Unlimited"></label>
+      <label>Credential aggregate vector limit (0..9007199254740991; blank = unlimited)<input id="cred-max-vectors" type="number" min="0" max="9007199254740991" step="1" placeholder="Unlimited"></label>
+      <label>Per-collection vector limit (0..9007199254740991; blank = unlimited)<input id="cred-max-vectors-per-collection" type="number" min="0" max="9007199254740991" step="1" placeholder="Unlimited"></label>
+      <p>Zero vectors permits no vector growth. The dashboard accepts only exact JavaScript safe integers; larger u64 quotas must be configured through the API.</p>
+    </fieldset>
     <button id="cred-create" data-admin data-feature="scoped_credentials" type="button">Create scoped credential</button>
     <div class="secret-box" aria-live="polite">
       <p id="cred-secret">No new secret.</p>
@@ -530,10 +551,45 @@
     <label>Rotation grace for the old secret (0..86400 seconds)<input id="cred-grace" type="number" min="0" max="86400" value="3600"></label>
     <div class="table-scroll"><table id="cred-table"><caption>Credentials (secrets are never listed)</caption><thead><tr><th>ID</th><th>Name</th><th>Collections</th><th>Operations</th><th>Status</th><th>Expires</th><th>Actions</th></tr></thead><tbody></tbody></table></div>
     <pre id="cred-result"></pre>
-    <h3>Persistent audit</h3>
+    </div>
+    <div id="admin-persistent-audit" data-admin-view><h3>Persistent audit</h3>
+    <p data-admin-availability="persistent_audit">Connect to check persistent audit support.</p>
     <label>Entries (1..1000)<input id="audit-limit" type="number" min="1" max="1000" value="100"></label>
     <button id="persistent-audit" data-admin data-feature="persistent_audit" type="button" class="secondary">Read persistent audit</button>
     <pre id="persistent-audit-result"></pre>
+    </div>
+  </section>
+  <section id="tenants" class="wide">
+    <span class="eyebrow">TENANT ADMINISTRATION</span><h2>Tenant namespaces and quotas</h2>
+    <p>Create a namespace, then issue a scoped credential bound to its tenant ID in <a href="#credentials">Scoped credentials</a>. To create its first collection, use collections <code>*</code> and grant the <code>collections</code> operation. This is namespace isolation, not a separate database process. There is no tenant rename or quota-update endpoint.</p>
+    <p id="tenant-note" data-admin-availability="tenants">Connect with a bootstrap admin credential. Tenants require admin authentication and a private VLITE_ADMIN_DIR.</p>
+    <button id="tenant-list" type="button" data-admin data-feature="tenants">List active tenants</button>
+    <label>Tenant name (required, 1..64 UTF-8 bytes; no control characters)<input id="tenant-name" maxlength="64" required></label>
+    <label>Tenant aggregate vector limit (0..9007199254740991; blank = unlimited)<input id="tenant-max-vectors" inputmode="numeric" placeholder="Unlimited"></label>
+    <p>Zero prevents vector growth. This limit covers all collections in the tenant. Larger u64 limits require a direct API client.</p>
+    <button id="tenant-create" type="button" data-admin data-feature="tenants">Create tenant</button>
+    <label>Tenant ID to delete (32 hexadecimal characters; copy from the list)<input id="tenant-id" maxlength="32" pattern="[0-9a-fA-F]{32}" spellcheck="false"></label>
+    <p>Delete only an empty tenant: drop its collections first. Deleting disables its bound credentials; it does not delete database records for you.</p>
+    <button id="tenant-delete" type="button" class="danger" data-admin data-feature="tenants">Delete empty tenant</button>
+    <pre id="tenant-result" aria-live="polite"></pre>
+  </section>
+  <section id="transport-security" class="wide">
+    <span class="eyebrow">TRANSPORT SECURITY</span><h2>Reload TLS certificates</h2>
+    <p id="tls-note" data-admin-availability="tls_reload">Connect with a bootstrap admin credential. Reload requires a configured file-backed native TLS listener.</p>
+    <ol><li>An operator replaces the configured certificate, private key and optional client CA files on the server.</li><li>Reload below validates all configured identities before swapping any of them.</li><li>New TLS handshakes use the updated files; existing sessions keep their original configuration.</li></ol>
+    <p>This action does not upload certificates, enable TLS on a plaintext listener, change listener settings or manage a reverse proxy. Invalid files leave the previous identities active.</p>
+    <button id="tls-reload" type="button" data-admin data-feature="tls_reload">Validate files and reload TLS</button>
+    <pre id="tls-result" aria-live="polite"></pre>
+  </section>
+  <section id="replication" class="wide">
+    <span class="eyebrow">REPLICATION</span><h2>Export a replication log segment</h2>
+    <p id="replication-note">Read-only export, not an automatic replica service. Requires this server's export route and database-wide read access: admin, read-only, or a scoped credential with read over all collections. Output contains database records; handle the download as sensitive data.</p>
+    <label>After commit sequence (unsigned 64-bit decimal; blank starts at 0)<input id="replication-after" inputmode="numeric" spellcheck="false" placeholder="0"></label>
+    <label>Maximum segment budget in bytes (1..16777216; blank = 1048576)<input id="replication-max-bytes" type="number" min="1" max="16777216" step="1" placeholder="1048576"></label>
+    <p>Export one segment, then download it. Successful exports advance the sequence field to the last returned sequence for the next request. Importing or applying a segment requires an external replica workflow; this dashboard never applies it to the live database.</p>
+    <button id="replication-export" type="button">Export next log segment</button>
+    <button id="replication-download" type="button" class="secondary" disabled>Download exported segment</button>
+    <pre id="replication-result" aria-live="polite"></pre>
   </section>
   <section id="observability" class="wide" aria-labelledby="obs-title">
     <div class="section-heading"><div><span class="eyebrow">SERVER PULSE</span><h2 id="obs-title">Observability</h2></div><span class="badge">Metrics · Logs · Activity</span></div>

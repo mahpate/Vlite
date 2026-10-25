@@ -88,6 +88,36 @@ assert.deepEqual(u.credentialRequest({ collections: "docs, default", operations:
 assert.deepEqual(u.credentialRequest({ collections: "*", operations: ["backup"], days: 1, name: "ops" }, now).collections, ["*"]);
 for (const bad of [{ days: 0 }, { days: 366 }, { operations: [] }, { operations: ["admin"] }, { collections: "" }, { collections: "Bad" }, { collections: "a,a" }, { name: "x".repeat(65) }, { name: "" }])
   assert.throws(() => u.credentialRequest({ collections: "docs", operations: ["read"], days: 30, name: "ci", ...bad }, now));
+const credentialDraft = { collections: "docs", operations: ["read"], days: 30, name: "ci" };
+const tenant = "0123456789abcdef0123456789abcdef";
+assert.deepEqual(u.credentialRequest({ ...credentialDraft, tenant_id: ` ${tenant} `, requests_per_second: "1000000",
+  max_vectors: "0", max_vectors_per_collection: "9007199254740991" }, now), {
+  collections: ["docs"], operations: ["read"], expires_unix_ms: now + 30 * 86400000, name: "ci", tenant_id: tenant,
+  requests_per_second: 1000000, max_vectors: 0, max_vectors_per_collection: Number.MAX_SAFE_INTEGER,
+});
+for (const blank of [undefined, "", "  "]) {
+  assert.deepEqual(u.credentialRequest({ ...credentialDraft, tenant_id: blank, requests_per_second: blank,
+    max_vectors: blank, max_vectors_per_collection: blank }, now), u.credentialRequest(credentialDraft, now));
+}
+for (const empty of [null, "null", " null "]) {
+  const result = u.credentialRequest({ ...credentialDraft, tenant_id: empty, requests_per_second: empty,
+    max_vectors: empty, max_vectors_per_collection: empty }, now);
+  for (const key of ["tenant_id", "requests_per_second", "max_vectors", "max_vectors_per_collection"]) assert.equal(result[key], null);
+}
+assert.equal(u.credentialRequest({ ...credentialDraft, requests_per_second: 1, max_vectors: 0, max_vectors_per_collection: 1 }, now).max_vectors, 0);
+for (const bad of ["not-a-tenant", "a".repeat(31), "g".repeat(32), true, 0, {}, []])
+  assert.throws(() => u.credentialRequest({ ...credentialDraft, tenant_id: bad }, now));
+for (const key of ["requests_per_second", "max_vectors", "max_vectors_per_collection"]) {
+  for (const bad of [-1, 1.5, NaN, Infinity, true, false, {}, [], "01", "1.0", "1e3", "0x10", "-0",
+    "1,000", "undefined", Number.MAX_SAFE_INTEGER + 1, "9007199254740992", "18446744073709551615"]) {
+    assert.throws(() => u.credentialRequest({ ...credentialDraft, [key]: bad }, now), `${key}: ${String(bad)}`);
+  }
+}
+for (const bad of [0, "0", 1000001, "4294967295"])
+  assert.throws(() => u.credentialRequest({ ...credentialDraft, requests_per_second: bad }, now));
+const boundedCredential = u.credentialRequest({ ...credentialDraft, max_vectors: "9007199254740991" }, now);
+assert.equal(JSON.parse(JSON.stringify(boundedCredential)).max_vectors, Number.MAX_SAFE_INTEGER);
+assert.ok(!("requests_per_minute" in boundedCredential), "The server accepts requests_per_second, not requests_per_minute");
 assert.equal(u.graceSeconds("86400"), 86400);
 assert.throws(() => u.graceSeconds(-1));
 // Import parsing and deterministic chunking.
@@ -166,6 +196,9 @@ const hook = { url: "https://example.test/hook", secret: "random-signing-secret"
 assert.deepEqual(u.webhookRequest(hook), { url: hook.url, secret: hook.secret, collections: ["docs", "default"], events: ["put", "metadata_update"] });
 assert.equal(u.webhookRequest({ ...hook, collections: "" }).collections, undefined);
 for (const bad of [{ url: "javascript:alert(1)" }, { url: "https://user:pass@example.test" }, { url: "https://example.test/#secret" }, { secret: "short" }, { secret: "x".repeat(257) }, { events: "put,put" }, { events: "expire" }, { events: "" }, { collections: "../docs" }, { collections: "docs,docs" }]) assert.throws(() => u.webhookRequest({ ...hook, ...bad }));
+assert.equal(u.webhookRequest({ ...hook, collections: Array.from({ length: 64 }, (_, n) => `c${n}`).join(",") }).collections.length, 64);
+assert.throws(() => u.webhookRequest({ ...hook, collections: Array.from({ length: 65 }, (_, n) => `c${n}`).join(",") }));
+assert.throws(() => u.webhookRequest({ ...hook, secret: "😀".repeat(65) }), "Signing secret limit is UTF-8 bytes");
 assert.ok(!JSON.stringify(u.redact(u.webhookRequest(hook))).includes(hook.secret));
 assert.deepEqual(u.pitrRequest("vlite-backup-1.vlite", "sequence", "42"), { backup: "vlite-backup-1.vlite", sequence: 42 });
 assert.deepEqual(u.pitrRequest("vlite-backup-1.vlite", "timestamp_ms", "0"), { backup: "vlite-backup-1.vlite", timestamp_ms: 0 });
@@ -179,3 +212,102 @@ assert.deepEqual(u.savedQueryV2(ranked, 2, "docs"), ranked);
 assert.throws(() => u.savedQueryV2({ ...ranked, query: { ...ranked.query, rerank: { ...ranked.query.rerank, secret: "x" } } }, 2, "docs"));
 assert.throws(() => u.savedQueryV2({ ...ranked, query: { ...ranked.query, mode: "hybrid" } }, 2, "docs"));
 console.log("PASS V5 console helpers: TTL, exact/MMR reranking, sparse pairs, webhook validation/redaction, PITR safe integers, feed cursor encoding and read-only route classification");
+
+// Exercise real registered admin handlers without a server, browser, timers or network.
+async function adminHandlerChecks() {
+  class Element {
+    constructor() { this.value = ""; this.textContent = ""; this.children = []; this.dataset = {}; this.listeners = {}; this.selectors = new Map(); }
+    addEventListener(name, action) { this.listeners[name] = action; }
+    append(...children) { this.children.push(...children); }
+    replaceChildren(...children) { this.children = children; }
+    querySelector(selector) {
+      if (!this.selectors.has(selector)) this.selectors.set(selector, new Element());
+      return this.selectors.get(selector);
+    }
+  }
+  const elements = new Map([...fs.readFileSync("src/dashboard/index.html", "utf8").matchAll(/\bid="([^"]+)"/g)]
+    .map((match) => [match[1], new Element()]));
+  const document = { getElementById: (name) => elements.get(name) ?? null, documentElement: new Element(),
+    querySelectorAll: (selector) => selector === 'input[name="cred-op"]:checked' ? [{ value: "read" }] : [],
+    createElement: () => new Element() };
+  const featureNames = ["scoped_credentials", "tenants", "credential_rate_limits", "credential_vector_quotas", "backup_restore", "backup_verify_drill", "webhooks"];
+  const caps = { role: "admin", features: Object.fromEntries(featureNames.map((name) => [name, true])) };
+  const requests = [], confirmations = [];
+  let confirmed = true, failure = null, copied = null;
+  const ctx = {
+    capabilities: () => caps, feature: (name) => caps.features[name] === true, run: (action) => action(),
+    confirm: async (message) => { confirmations.push(message); return confirmed; }, status() {},
+    api: async (method, path, body, options) => {
+      requests.push({ method, path, body, options });
+      if (failure) throw failure;
+      if (method === "GET" && path === "/v1/admin/credentials") return { items: [], capacity: 64 };
+      return { token: tokenValue, credential: { id: "abcdefghijk2", name: "ci" } };
+    },
+  };
+  const sandbox = { window: { addEventListener() {}, matchMedia: () => ({ addEventListener() {}, removeEventListener() {} }) },
+    document, Node: Element, TextEncoder, URL, URLSearchParams, setInterval: () => 1, clearInterval() {},
+    localStorage: { getItem: (key) => key === "vlite-studio-tour" ? "dismissed" : null },
+    navigator: { clipboard: { writeText: async (value) => { copied = value; } } } };
+  vm.runInNewContext(fs.readFileSync("src/dashboard/console-tools.js", "utf8"), sandbox);
+  const tools = sandbox.window.VLiteTools.init(ctx);
+  const field = (name, value) => { elements.get(name).value = value; };
+  const click = (name) => elements.get(name).listeners.click();
+  function draft() {
+    field("cred-name", "ci"); field("cred-collections", "docs"); field("cred-days", "30");
+    for (const name of ["cred-tenant", "cred-rpm", "cred-max-vectors", "cred-max-vectors-per-collection"]) field(name, "");
+  }
+  draft();
+  await click("cred-create");
+  assert.equal(requests[0].options.sensitive, true);
+  assert.equal(requests[0].options.data, false);
+  for (const key of ["tenant_id", "requests_per_second", "max_vectors", "max_vectors_per_collection"])
+    assert.ok(!(key in requests[0].body), `${key} blank input must not be sent`);
+  assert.ok(!elements.get("cred-secret").textContent.includes(tokenValue));
+  await click("cred-copy");
+  assert.equal(copied, tokenValue);
+  await click("cred-clear");
+  await assert.rejects(click("cred-copy"), /No secret/);
+  requests.length = 0;
+  draft(); field("cred-tenant", tenant); field("cred-rpm", "12"); field("cred-max-vectors", "0"); field("cred-max-vectors-per-collection", "9");
+  await click("cred-create");
+  assert.equal(requests[0].body.tenant_id, tenant);
+  assert.equal(requests[0].body.requests_per_second, 12);
+  assert.equal(requests[0].body.max_vectors, 0);
+  assert.equal(requests[0].body.max_vectors_per_collection, 9);
+  assert.match(confirmations.at(-1), /rate: 12 requests\/s; vectors: 0 total \/ 9 per collection/);
+  for (const [input, feature, value] of [["cred-tenant", "tenants", tenant], ["cred-rpm", "credential_rate_limits", "1"],
+    ["cred-max-vectors", "credential_vector_quotas", "0"], ["cred-max-vectors-per-collection", "credential_vector_quotas", "0"]]) {
+    requests.length = 0; draft(); field(input, value); caps.features[feature] = false;
+    await assert.rejects(click("cred-create"), /Server feature/);
+    assert.equal(requests.length, 0);
+    caps.features[feature] = true;
+  }
+  requests.length = 0; draft(); confirmed = false;
+  await click("cred-create");
+  assert.equal(requests.length, 0, "Cancelled credential creation must not make a request");
+  confirmed = true;
+  caps.role = "read_only";
+  await assert.rejects(click("cred-create"), /admin credential/);
+  caps.role = "admin";
+  caps.features.webhooks = false;
+  await assert.rejects(click("webhook-list"), /Server feature webhooks/);
+  caps.features.backup_restore = false;
+  await assert.rejects(click("pitr-run"), /Server feature backup_restore/);
+  await assert.rejects(click("list-backups"), /Server feature backup_restore/);
+  caps.features.backup_restore = true;
+  field("backup-name", "backup-1.vlite"); confirmed = false;
+  await click("backup-verify");
+  assert.match(confirmations.at(-1), /verification manifest/);
+  assert.equal(requests.length, 0, "Cancelled backup verification must not make a request");
+  confirmed = true; draft();
+  failure = Object.assign(new Error("Durability is not confirmed"), { code: "credentials_commit_indeterminate" });
+  await assert.rejects(click("cred-create"), /Durability/);
+  assert.match(elements.get("cred-result").textContent, /change IS in effect/);
+  await assert.rejects(click("cred-copy"), /No secret/);
+  failure = null;
+  tools.clear();
+  for (const name of ["cred-tenant", "cred-rpm", "cred-max-vectors", "cred-max-vectors-per-collection"])
+    assert.equal(elements.get(name).value, "");
+  console.log("PASS admin handlers: blank/zero credential scopes and limits, capability/role gates, confirmations, secret clearing, indeterminate durability");
+}
+adminHandlerChecks().catch((error) => { console.error(error); process.exitCode = 1; });
