@@ -780,6 +780,7 @@ def exercise_epic015_real(page, base, token):
         control(page, "#list-backups").click()
         expect(control(page, "#backup-name option")).not_to_have_count(0)
         control(page, "#backup-verify").click()
+        confirm(page, "Verify backup-")
         expect(control(page, "#backup-result")).to_contain_text('"verified": true')
     if features.get("slow_query_log"):
         control(page, "#slow-queries").click()

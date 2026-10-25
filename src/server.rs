@@ -1354,7 +1354,9 @@ impl From<Error> for ApiError {
                 "default_collection_immutable",
                 error.to_string(),
             ),
-            Error::CollectionsRequireUpgrade | Error::ImportsRequireUpgrade => Self::new(
+            Error::CollectionsRequireUpgrade
+            | Error::ImportsRequireUpgrade
+            | Error::ChangeFeedRequiresUpgrade => Self::new(
                 StatusCode::CONFLICT,
                 "requires_format_v4",
                 error.to_string(),

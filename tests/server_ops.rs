@@ -481,6 +481,39 @@ async fn scopes_fail_closed_on_recreated_collections_and_switched_databases() {
 }
 
 #[tokio::test]
+async fn change_feed_routes_report_requires_format_v4_on_old_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let (service, app) = start(
+        Database::create(dir.path().join("v3.vlite"), 2).unwrap(),
+        options(&dir.path().join("admin3")),
+    );
+    let caps = admin(&app, "GET", "/v1/capabilities", None).await;
+    assert_eq!(caps["features"]["change_feed"], false);
+    for uri in ["/v1/changes", "/v1/admin/replication/export?max_bytes=4096"] {
+        let (status, error) = call(&app, Some(ADMIN), "GET", uri, None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{uri}: {error}");
+        assert_eq!(error["error"]["code"], "requires_format_v4", "{uri}");
+    }
+    service.close().await.unwrap();
+    // A format-v4 file serves both routes.
+    let (service, app) = start(
+        v4(&dir.path().join("v4.vlite")),
+        options(&dir.path().join("admin4")),
+    );
+    let caps = admin(&app, "GET", "/v1/capabilities", None).await;
+    assert_eq!(caps["features"]["change_feed"], true);
+    admin(&app, "GET", "/v1/changes", None).await;
+    admin(
+        &app,
+        "GET",
+        "/v1/admin/replication/export?max_bytes=4096",
+        None,
+    )
+    .await;
+    service.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn credentials_require_admin_token_directory_and_v4() {
     let dir = tempfile::tempdir().unwrap();
     // No admin directory.

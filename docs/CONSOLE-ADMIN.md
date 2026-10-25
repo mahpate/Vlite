@@ -103,7 +103,9 @@ Configuration flags are not permission grants; the server enforces both.
   bytes). Success advances the input to `last_sequence`. This read-only workflow
   also supports read-only credentials and scoped credentials with database-wide
   `read` over `*`, when the server advertises the route. Downloaded segments
-  contain database data. Applying them needs an external replica workflow.
+  contain database data. Applying them needs an external replica workflow. A
+  format v1–v3 file answers 409 `requires_format_v4`; upgrading remains an
+  explicit offline operator step.
 
 Mutations retain confirmation dialogs and serialized, generation-checked
 requests; there are no automatic mutation retries or simulated successes.

@@ -48,7 +48,10 @@ contents are replaced as one atomic record-vector operation.
 `next_cursor`, the observed head and `has_more`. The initial request without a
 cursor starts at the beginning of retained history. Commits are never split;
 `limit` is an approximate maximum. Cursor compaction errors require a full
-consumer resync.
+consumer resync. The change feed and replication export need a format V4 or
+newer file: on a V1–V3 file both routes answer HTTP 409 `requires_format_v4`
+(`features.change_feed` in `GET /v1/capabilities` tells which). The server
+never upgrades a file automatically.
 
 `GET /v1/admin/replication/export?after_sequence=0&max_bytes=1048576` exports a
 whole-commit, checksummed log segment as base64. This is a shipping primitive,
