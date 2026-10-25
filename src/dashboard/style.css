@@ -185,6 +185,7 @@ main > section:focus { outline: 2px solid var(--studio-accent); }
   .workspace { padding: 76px max(16px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
   .topbar { align-items: flex-start; flex-direction: column; gap: 12px; padding-top: 64px; margin-top: -76px; }
   .topbar-actions { justify-content: flex-start; gap: 8px; }
+  #identity-badge { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
   h1 { font-size: 23px; }
   section { padding: 18px; }
   .record-inspector { padding: 12px; }
