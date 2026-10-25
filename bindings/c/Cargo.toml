@@ -9,6 +9,10 @@ description = "Versioned C ABI for the VLite embedded database"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Source-only property-graph commands; not enabled in packaged libraries.
+graph = ["vlite/graph"]
+
 [dependencies]
 vlite = { path = "../..", features = ["json"] }
 serde = { version = "1", features = ["derive"] }

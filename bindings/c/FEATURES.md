@@ -142,6 +142,57 @@ key IDs are non-secret. Passphrases use engine Argon2id defaults and stored KDF
 parameters. Losing keys loses data. In-memory databases are durable only after
 the host saves `to_bytes()` output.
 
+## Property graph (source-only `graph` feature)
+
+`{"op":"capabilities"}` (any handle, no other fields) returns `{"graph": bool}`.
+Graph commands are carried as `{"op":"graph","request":{"op":..., ...}}` and are
+compiled only with `cargo build -p vlite-ffi --features graph`; the feature is
+not default and packaged/released libraries do not include it. Without it every
+graph request returns `unsupported` (libraries predating this envelope return
+`invalid_input` for the unknown `graph` op). The JSON mirrors the source-only
+`vlite-graph-cli`: node/edge/record IDs, revisions and sequences are decimal
+strings (JSON integers are also accepted on input), unknown fields are rejected,
+and node/edge selectors are `{"id":"…"}` or `{"key":"…"}`.
+
+| `op` | Handle | Fields → result |
+|---|---|---|
+| `create` | 0 | `path`, `dimensions`, optional `options` (as feature `create`: `format`, `credentials`, `commit_timestamps`) → `{handle}`; creates a NEW V5 graph-enabled file, never converts |
+| `is_graph_enabled` | db | → `{graph_enabled}` |
+| `list_graphs` | db | → `{graphs:[{name,node_count,edge_count}]}` |
+| `create_graph` / `drop_graph` | db | `graph` → `{graph:{…}}` / `{dropped}`; drop requires an empty graph |
+| `batch` | db | `graph`, `ops` → `{graph, revision, outcomes}`; one atomic commit |
+| `get_node` / `get_edge` | db | `graph`, `node` / `edge` |
+| `find_nodes` | db | `graph`, optional `label`, `conditions`, `limit`, `cursor` |
+| `neighbors` | db | `graph`, `node`, optional `direction` (`out`/`in`/`both`), `types`, `edge_conditions`, `limit`, `cursor` |
+| `traverse` | db | `graph`, `start` (selectors), optional `direction`, `types`, `expand_filter`, `return_filter` (`{labels, conditions}`), `edge_filter`, `include_paths` |
+| `shortest_path` | db | `graph`, `source`, `destination`, optional `direction`, `types` |
+| `explain` | db | `query` (one read request above, with its `op`) → `{graph, explain:{query, limits, projection, indexes}}` |
+
+Every read also accepts `limits` (`max_hops`, `max_visited_nodes`,
+`max_edges_examined`, `max_edges_per_node`, `deadline_ms`, `max_output_nodes`,
+`max_output_edges`, `max_output_paths`; unset fields use engine defaults, values
+above the ceilings fail) and `projection` (`"all"`, `"none"`, `{"only":[…]}`).
+Reads return `graph`, `view_sequence`, `complete`, `truncation`, `stats` and a
+lowercase-hex `cursor` (or null) plus `node`, `edge`, `nodes`, `edges`, `paths`
+or `shortest_path` (`outcome`: `found`, `no_path_within_hops`, `exhausted`).
+Batch `ops` are `create_node`, `upsert_node`, `patch_node`, `delete_node`,
+`create_edge`, `patch_edge`, `delete_edge`, `attach`, `detach`, `put_vector`
+(`collection`, `id`, `vector`, optional `payload_base64`, `metadata`) and
+`delete_vector`; `expected` is `"any"`, `"absent"` or `{"revision":"…"}`.
+
+Graph errors use the REST names: `graphs_not_enabled`, `graphs_require_v5`,
+`invalid_graph_name`, `graph_exists`, `graph_not_found`, `graph_not_empty`,
+`too_many_graphs`, `graph_key_exists`, `graph_key_conflict`,
+`graph_node_not_found`, `graph_edge_not_found`, `graph_node_has_edges`,
+`graph_attachment_conflict`, `graph_attachment_not_found`,
+`graph_record_not_attachable`, `graph_attached_record`,
+`graph_attached_record_expiry`, `graph_limit_exceeds_ceiling`,
+`graph_cursor_stale`, `graph_change_feed_unsupported`,
+`graph_unsupported_operation` and `graph_invalid_options`. Other failures keep
+the existing codes (`read_only`, `locked`, `invalid_input`, …); responses over
+8 MiB return `response_too_large`. A library without the feature opening a
+graph-enabled file keeps the existing `invalid_input` rejection.
+
 ## Optional float32 input entry points
 
 `vlite_search_f32` and `vlite_batch_put_f32` are additive, optional ABI-1 exports

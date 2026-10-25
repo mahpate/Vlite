@@ -1,7 +1,23 @@
 //! C ABI: owned UTF-8 JSON responses, opaque numeric handles, no network runtime.
 
 mod features;
+#[cfg(feature = "graph")]
+mod graph;
 mod typed;
+
+/// Builds without the `graph` feature parse the `graph` envelope and reject
+/// every graph request with this stable error.
+#[cfg(not(feature = "graph"))]
+mod graph {
+    use super::{Result, State, Value};
+
+    pub(super) fn execute(_: &mut State, _: u64, _: Value) -> Result<Value> {
+        Err((
+            "unsupported",
+            "graph operations require a library built with the graph feature".into(),
+        ))
+    }
+}
 
 use base64::{Engine, prelude::BASE64_STANDARD};
 use serde::Deserialize;
@@ -39,6 +55,13 @@ enum Request {
     Features {
         request: features::Request,
     },
+    /// Property-graph operations (`graph.rs`); `unsupported` without the
+    /// `graph` feature.
+    Graph {
+        request: Value,
+    },
+    /// Optional capabilities compiled into this library.
+    Capabilities {},
     Create {
         path: String,
         dimensions: usize,
@@ -718,6 +741,20 @@ fn execute(handle: u64, request: Request) -> Result<Value> {
         return Ok(result);
     }
     match request {
+        Request::Capabilities {} => return Ok(json!({"graph": cfg!(feature = "graph")})),
+        Request::Graph { request } => {
+            let result = graph::execute(&mut state, handle, request)?;
+            if result.to_string().len() > 8 * 1024 * 1024 - 1024 {
+                return Err((
+                    "response_too_large",
+                    "Graph response exceeds 8 MiB; lower the limits or page with a cursor".into(),
+                ));
+            }
+            return Ok(result);
+        }
+        _ => {}
+    }
+    match request {
         Request::Create { .. } | Request::Open { .. } => {
             if handle != 0 {
                 return Err(invalid("create/open requires handle 0"));
@@ -1228,7 +1265,9 @@ fn execute(handle: u64, request: Request) -> Result<Value> {
         Request::Create { .. }
         | Request::Open { .. }
         | Request::Close {}
-        | Request::Features { .. } => unreachable!(),
+        | Request::Features { .. }
+        | Request::Graph { .. }
+        | Request::Capabilities {} => unreachable!(),
     }
 }
 
@@ -1325,6 +1364,37 @@ mod tests {
             vlite_response_free(response);
             vlite_response_free(std::ptr::null_mut());
         }
+    }
+
+    #[cfg(not(feature = "graph"))]
+    #[test]
+    fn builds_without_graph_reject_graph_requests_and_graph_files() {
+        assert_eq!(
+            call(0, b"{\"op\":\"capabilities\"}")["result"],
+            json!({"graph": false})
+        );
+        for request in [
+            json!({"op":"create","path":"never.vlite","dimensions":2}),
+            json!({"op":"list_graphs"}),
+            json!({"op":"anything","extra":1}),
+        ] {
+            let response = call(
+                0,
+                json!({"op":"graph","request":request})
+                    .to_string()
+                    .as_bytes(),
+            );
+            assert_eq!(response["error"]["code"], "unsupported", "{response}");
+        }
+        assert!(!std::path::Path::new("never.vlite").exists());
+        assert_eq!(
+            call(0, b"{\"op\":\"graph\"}")["error"]["code"],
+            "invalid_input"
+        );
+        assert_eq!(
+            call(0, b"{\"op\":\"capabilities\",\"x\":1}")["error"]["code"],
+            "invalid_input"
+        );
     }
 
     #[test]

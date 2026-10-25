@@ -53,6 +53,12 @@ jobs:
       - run: python tests/embedded_e2e.py target/debug/${{ runner.os == 'Windows' && 'vlite_ffi.dll' || runner.os == 'macOS' && 'libvlite_ffi.dylib' || 'libvlite_ffi.so' }}
       - name: Verify typed float32 embedded inputs and legacy fallback
         run: python bindings/python/test_typed_vectors.py
+      - name: Default vlite-ffi rejects graph commands as unsupported (ITEM-046)
+        run: python bindings/python/test_graph.py
+        env:
+          VLITE_TEST_EXPECT_GRAPH: "0"
+      - name: Source-only vlite-ffi graph commands (ITEM-045)
+        run: cargo test --locked -p vlite-ffi --features graph --target-dir target/graph-ffi
       - run: python benchmarks/embedded.py --library target/debug/${{ runner.os == 'Windows' && 'vlite_ffi.dll' || runner.os == 'macOS' && 'libvlite_ffi.dylib' || 'libvlite_ffi.so' }} --records 12 --dimensions 3 --trials 1 --read-passes 2 --output embedded-smoke.json
       - run: python tests/benchmark_comparison.py
       - run: python tests/native_campaign.py

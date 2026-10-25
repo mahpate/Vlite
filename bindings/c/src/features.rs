@@ -250,6 +250,25 @@ pub(super) struct Options {
     #[serde(default)]
     flush_interval_ms: Option<u64>,
 }
+/// Validated create options and the requested durability mode.
+pub(super) fn create_options(options: Options) -> Result<(CreateOptions, vlite::Durability)> {
+    let format = match options.format {
+        None => None,
+        Some(3) => Some(FormatVersion::V3),
+        Some(4) => Some(FormatVersion::V4),
+        Some(5) => Some(FormatVersion::V5),
+        _ => return Err(invalid("format must be 3, 4 or 5")),
+    };
+    let durability = durability(options.flush_interval_ms)?;
+    Ok((
+        CreateOptions {
+            format,
+            encryption: options.credentials.key()?,
+            commit_timestamps: options.commit_timestamps,
+        },
+        durability,
+    ))
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Version {
@@ -303,7 +322,7 @@ fn fusion_options(fusion: Option<Fusion>) -> FusionOptions {
     }
     options
 }
-fn insert(state: &mut State, handle: u64, db: Database) -> Result<Value> {
+pub(super) fn insert(state: &mut State, handle: u64, db: Database) -> Result<Value> {
     if handle != 0 {
         return Err(invalid("create/open requires handle 0"));
     }
@@ -333,19 +352,7 @@ pub(super) fn execute(state: &mut State, handle: u64, request: Request) -> Resul
             dimensions,
             options,
         } => {
-            let format = match options.format {
-                None => None,
-                Some(3) => Some(FormatVersion::V3),
-                Some(4) => Some(FormatVersion::V4),
-                Some(5) => Some(FormatVersion::V5),
-                _ => return Err(invalid("format must be 3, 4 or 5")),
-            };
-            let durability = durability(options.flush_interval_ms)?;
-            let options = CreateOptions {
-                format,
-                encryption: options.credentials.key()?,
-                commit_timestamps: options.commit_timestamps,
-            };
+            let (options, durability) = create_options(options)?;
             let db = match path {
                 Some(path) => Database::create_with_options(path, dimensions, options),
                 None => Database::create_in_memory(dimensions, options),

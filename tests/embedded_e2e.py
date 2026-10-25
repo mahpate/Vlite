@@ -106,8 +106,37 @@ with NativeLibrary(sys.argv[1]).open(sys.argv[2]) as db:
         fails("corrupt", lambda: native.open(path))
         assert path.read_bytes() == damaged
         v4_surface(native, Path(directory))
+        graph_surface(native, Path(directory))
     print("PASS C ABI and embedded Python: persistence, locks, Unicode, CRUD, atomicity, metadata, search, threads, "
           "corruption, v4 collections, revisions, planned/hybrid/quantized search and resumable imports")
+
+
+def graph_surface(native, directory):
+    """Opt-in graph commands with a `--features graph` library; stable rejection otherwise."""
+    path = directory / "graph.vlite"
+    if not native.supports_graph:
+        fails("unsupported", lambda: native.create_with_graph(path, 2))
+        assert not path.exists()
+        with native.create(directory / "no-graph.vlite", 2) as db:
+            fails("unsupported", db.list_graphs)
+            fails("unsupported", lambda: db.graph_get_node("g", "a"))
+        print("PASS graph: library built without the graph feature rejects graph commands as unsupported")
+        return
+    with native.create_with_graph(path, 2) as db:
+        db.create_graph("g")
+        db.put("1", [1, 0])
+        written = db.graph_write_batch("g", [
+            {"op": "create_node", "key": "a"}, {"op": "create_node", "key": "b"},
+            {"op": "create_edge", "source": "a", "relationship": "LINKS", "destination": "b"},
+            {"op": "attach", "node": "b", "collection": "default", "record": "1"}])
+        assert len(written["outcomes"]) == 4
+        fails("graph_node_not_found", lambda: db.graph_write_batch("g", [
+            {"op": "create_edge", "source": "a", "relationship": "LINKS", "destination": "zz"}]))
+    with native.open(path, read_only=True) as db:
+        assert db.list_graphs() == [{"name": "g", "node_count": 2, "edge_count": 1}]
+        assert [node["key"] for node in db.graph_neighbors("g", "a")["nodes"]] == ["b"]
+        assert db.graph_shortest_path("g", "a", "b")["shortest_path"]["outcome"] == "found"
+    print("PASS graph: create, atomic batch, attach, reopen and read-only queries")
 
 
 def v4_surface(native, directory):

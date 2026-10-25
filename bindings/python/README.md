@@ -172,6 +172,39 @@ The direct feature suite defaults to `target/debug` and accepts
 `VLITE_TEST_LIBRARY` to validate an exact alternate/bundled library. It creates
 and cleans its test files below the binding directory.
 
+## Opt-in property graph (source builds only)
+
+Graph methods need a library built with the non-default `graph` feature; wheels
+and released libraries do not include it. `native.supports_graph` (or
+`native.capabilities()`) reports availability; without it every graph method
+raises `EmbeddedError(code="unsupported")`.
+
+```python
+native = NativeLibrary("target/graph-ffi/debug/vlite_ffi.dll")
+with native.create_with_graph("agent.vlite", 3) as db:   # new V5 graph file
+    db.create_graph("memory")
+    db.graph_write_batch("memory", [
+        {"op": "create_node", "key": "ada", "labels": ["Person"]},
+        {"op": "create_node", "key": "acme", "labels": ["Org"]},
+        {"op": "create_edge", "source": "ada", "relationship": "WORKS_AT", "destination": "acme"},
+    ])
+    db.graph_neighbors("memory", "ada", direction="out")["nodes"]
+    db.graph_shortest_path("memory", "ada", "acme")["shortest_path"]["outcome"]
+```
+
+Methods: `create_with_graph`, `is_graph_enabled`, `list_graphs`, `create_graph`,
+`drop_graph`, `graph_write_batch`, `graph_get_node`, `graph_get_edge`,
+`graph_find_nodes`, `graph_neighbors`, `graph_traverse`, `graph_shortest_path`
+and `graph_explain`. Selectors are a key string, an integer ID or an explicit
+`{"id": "…"}`/`{"key": "…"}`; IDs and revisions are returned as decimal strings.
+Read results and error codes follow `bindings/c/FEATURES.md` ("Property graph").
+
+```text
+cargo build -p vlite-ffi --features graph --target-dir target/graph-ffi
+VLITE_TEST_LIBRARY=target/graph-ffi/debug/vlite_ffi.dll VLITE_TEST_EXPECT_GRAPH=1 python bindings/python/test_graph.py
+VLITE_TEST_EXPECT_GRAPH=0 python bindings/python/test_graph.py   # default library: unsupported
+```
+
 ## Optional contiguous float32 search and bulk puts
 
 Source builds provide opt-in `search_f32` and `batch_put_f32` methods. Existing

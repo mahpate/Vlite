@@ -106,6 +106,33 @@ class NativeLibrary:
     def _feature(self, operation: str, **fields):
         return self._execute(0, {"op": "features", "request": {"op": operation, **fields}})
 
+    def capabilities(self) -> dict:
+        """Optional capabilities compiled into the library, e.g. ``{"graph": False}``."""
+        try:
+            return self._execute(0, {"op": "capabilities"})
+        except EmbeddedError as error:
+            if error.code == "invalid_input":  # Libraries older than the capabilities op.
+                return {"graph": False}
+            raise
+
+    @property
+    def supports_graph(self) -> bool:
+        """Whether the library was built with the source-only ``graph`` feature."""
+        return bool(self.capabilities().get("graph"))
+
+    def create_with_graph(self, path: str | os.PathLike[str], dimensions: int, *, format: int | None = None,
+                          key: bytes | None = None, passphrase: str | None = None,
+                          commit_timestamps: bool = False,
+                          flush_interval_ms: int | None = None) -> "Database":
+        """Create a NEW graph-enabled (V5) file without overwrite; never converts an existing file.
+        Raises ``unsupported`` unless the library was built with the ``graph`` feature.
+        ``flush_interval_ms`` opts into periodic (lazy) durability, as for ``create``."""
+        options = {"credentials": _credentials(key, passphrase), "commit_timestamps": commit_timestamps,
+                   **_given(format=format, flush_interval_ms=flush_interval_ms)}
+        result = _graph_call(lambda request: self._execute(0, {"op": "graph", "request": request}),
+                             {"op": "create", "path": str(Path(path)), "dimensions": dimensions, "options": options})
+        return Database(self, int(result["handle"]))
+
     def _create_feature(self, path, dimensions, format, key, passphrase, commit_timestamps,
                         flush_interval_ms=None):
         options = {"credentials": _credentials(key, passphrase), "commit_timestamps": commit_timestamps,
@@ -507,10 +534,96 @@ class Database:
     def to_bytes(self) -> bytes:
         return base64.b64decode(self._feature("to_bytes")["bytes_base64"], validate=True)
 
+    # Property graph (source-only ``graph`` feature). Nodes and edges are selected by key
+    # (str), ID (int or {"id": "decimal"}) or {"key": ...}; IDs and revisions come back as
+    # decimal strings. Libraries without the feature raise EmbeddedError("unsupported").
+
+    def _graph(self, operation: str, **fields):
+        return _graph_call(lambda request: self._execute("graph", request=request), {"op": operation, **fields})
+
+    def is_graph_enabled(self) -> bool:
+        return self._graph("is_graph_enabled")["graph_enabled"]
+
+    def list_graphs(self) -> list[dict]:
+        return self._graph("list_graphs")["graphs"]
+
+    def create_graph(self, name: str) -> dict:
+        return self._graph("create_graph", graph=name)["graph"]
+
+    def drop_graph(self, name: str) -> None:
+        """Drop an empty graph."""
+        self._graph("drop_graph", graph=name)
+
+    def graph_write_batch(self, graph: str, ops: list[dict]) -> dict:
+        """Apply graph and vector ops atomically: ``{"op": "create_node", "key": ...}`` etc."""
+        return self._graph("batch", graph=graph, ops=ops)
+
+    def graph_get_node(self, graph: str, node, *, limits: dict | None = None, projection=None) -> dict:
+        return self._graph("get_node", graph=graph, node=_graph_ref(node), **_given(limits=limits, projection=projection))
+
+    def graph_get_edge(self, graph: str, edge, *, limits: dict | None = None, projection=None) -> dict:
+        return self._graph("get_edge", graph=graph, edge=_graph_ref(edge), **_given(limits=limits, projection=projection))
+
+    def graph_find_nodes(self, graph: str, *, label: str | None = None, conditions: list[dict] | None = None,
+                         limit: int | None = None, cursor: str | None = None, limits: dict | None = None,
+                         projection=None) -> dict:
+        return self._graph("find_nodes", graph=graph, **_given(label=label, conditions=conditions, limit=limit,
+                                                                cursor=cursor, limits=limits, projection=projection))
+
+    def graph_neighbors(self, graph: str, node, *, direction: str | None = None, types: list[str] | None = None,
+                        edge_conditions: list[dict] | None = None, limit: int | None = None, cursor: str | None = None,
+                        limits: dict | None = None, projection=None) -> dict:
+        return self._graph("neighbors", graph=graph, node=_graph_ref(node),
+                           **_given(direction=direction, types=types, edge_conditions=edge_conditions, limit=limit,
+                                    cursor=cursor, limits=limits, projection=projection))
+
+    def graph_traverse(self, graph: str, start: list, *, direction: str | None = None, types: list[str] | None = None,
+                       expand_filter: dict | None = None, return_filter: dict | None = None,
+                       edge_filter: list[dict] | None = None, include_paths: bool = False,
+                       limits: dict | None = None, projection=None) -> dict:
+        return self._graph("traverse", graph=graph, start=[_graph_ref(node) for node in start],
+                           include_paths=include_paths,
+                           **_given(direction=direction, types=types, expand_filter=expand_filter,
+                                    return_filter=return_filter, edge_filter=edge_filter, limits=limits,
+                                    projection=projection))
+
+    def graph_shortest_path(self, graph: str, source, destination, *, direction: str | None = None,
+                            types: list[str] | None = None, limits: dict | None = None, projection=None) -> dict:
+        return self._graph("shortest_path", graph=graph, source=_graph_ref(source),
+                           destination=_graph_ref(destination),
+                           **_given(direction=direction, types=types, limits=limits, projection=projection))
+
+    def graph_explain(self, query: dict) -> dict:
+        """Plan a read request (``{"op": "neighbors", "graph": ..., ...}``) without running it."""
+        return self._graph("explain", query=query)["explain"]
+
 
 def _given(**fields) -> dict:
     """Drop omitted options so the native layer applies the collection's declared defaults."""
     return {name: value for name, value in fields.items() if value is not None}
+
+
+def _graph_call(run, request: dict):
+    """Run one graph request; libraries predating the graph op report it as unsupported."""
+    try:
+        return run(request)
+    except EmbeddedError as error:
+        if error.code == "invalid_input" and "unknown variant `graph`" in str(error):
+            raise EmbeddedError("unsupported", "Native library predates graph operations") from None
+        raise
+
+
+def _graph_ref(value) -> dict:
+    """Node/edge selector: str key, int ID, or an explicit {"id": ...}/{"key": ...} object."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, bool):
+        raise TypeError("graph selector must be a key string, an integer ID, or a selector dict")
+    if isinstance(value, int):
+        return {"id": str(value)}
+    if isinstance(value, str):
+        return {"key": value}
+    raise TypeError("graph selector must be a key string, an integer ID, or a selector dict")
 
 
 def _bytes_base64(data: bytes) -> str:
