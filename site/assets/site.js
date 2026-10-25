@@ -76,7 +76,6 @@
       });
       button.addEventListener("click", () => {
         if (playing) { stop(); return; }
-        if (motion.matches) return;
         tours.forEach((tour) => tour.stop());
         playing = true;
         button.textContent = "Stop tour";
@@ -84,15 +83,15 @@
         button.setAttribute("aria-pressed", "true");
         status.textContent = "Loading tour...";
         image.src = button.dataset.tour;
+        image.scrollIntoView({ block: "start", behavior: "instant" });
       });
       const updateMotion = () => {
-        stop(motion.matches ? "Static preview: reduced motion is enabled." : "");
-        button.disabled = motion.matches;
+        stop(motion.matches ? "Reduced motion is enabled. Play explicitly to watch this tour once." : "");
       };
       updateMotion();
       button.hidden = false;
       motion.addEventListener("change", updateMotion);
-      return { stop, image };
+      return { stop, figure: button.parentElement };
     });
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) tours.forEach((tour) => tour.stop());
@@ -100,10 +99,10 @@
     if ("IntersectionObserver" in window) {
       const observer = new IntersectionObserver((entries) => {
         entries.filter((entry) => !entry.isIntersecting).forEach((entry) => {
-          tours.find((tour) => tour.image === entry.target)?.stop();
+          tours.find((tour) => tour.figure === entry.target)?.stop();
         });
       });
-      tours.forEach((tour) => observer.observe(tour.image));
+      tours.forEach((tour) => observer.observe(tour.figure));
     }
   });
 })();

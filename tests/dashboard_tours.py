@@ -107,8 +107,15 @@ def check(root, screenshots=None):
             first.click()
             page.emulate_media(reduced_motion="reduce")
             for button in page.locator("[data-tour]").all():
-                expect(button).to_be_disabled()
+                expect(button).to_be_enabled()
                 expect(button).to_have_attribute("aria-pressed", "false")
+            first.click()
+            expect(first).to_have_attribute("aria-pressed", "true")
+            expect(first.locator("..").locator(".tour-status")).to_contain_text("Playing once")
+            before = page.screenshot()
+            page.wait_for_timeout(2600)
+            assert page.screenshot() != before, "Explicit play must change visible image frames, including reduced motion"
+            first.click()
             page.emulate_media(reduced_motion="no-preference")
             first.click()
             expect(first.locator("..").locator(".tour-status")).to_contain_text("Playing once")
