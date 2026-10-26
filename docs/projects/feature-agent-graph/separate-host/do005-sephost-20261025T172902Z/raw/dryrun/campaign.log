@@ -1,0 +1,16 @@
+[2026-10-25T17:41:47.374+00:00] survey codetest: 20s mean 8.80% worst 21.87% quiet=True samples>10%=22.5% probes quiet 3/4; top: SenseCE.exe 4.44%, GlobalSecureAccessClient.exe 1.15%, System 0.56%, vmmemWSL 0.40%, svchost.exe 0.34%
+[2026-10-25T17:44:01.328+00:00] survey explore-1: 120s mean 11.89% worst 26.93% quiet=False samples>10%=56.2% probes quiet 9/24; top: SenseCE.exe 4.44%, svchost.exe 1.42%, GlobalSecureAccessClient.exe 1.09%, WmiPrvSE.exe 1.00%, System 0.55%
+[2026-10-25T17:55:45.262+00:00] survey explore-2: 599s mean 12.03% worst 63.25% quiet=False samples>10%=48.7% probes quiet 52/119; top: SenseCE.exe 4.43%, svchost.exe 1.21%, GlobalSecureAccessClient.exe 1.11%, WmiPrvSE.exe 0.63%, MsMpEng.exe 0.59%
+[2026-10-25T18:00:38.609+00:00] campaign start tag=dryrun workloads=['exact_small', 'filtered_exact', 'hnsw_small', 'exact_100k_384'] reps=1 gate_tries=0 existing_records=0 pid=8104 monitor_sha256=c520e0b759c16d6c
+[2026-10-25T18:00:44.521+00:00] rep 1 exact_small        cur  attempt 1/15: accepted elapsed      0.03s background mean 8.53% max 0.00% 
+[2026-10-25T18:00:49.597+00:00] rep 1 exact_small        hist attempt 1/15: rejected elapsed      0.03s background mean 20.02% max 0.00% contaminated: background CPU mean 20.02% (limit 10%), worst sample 0.00% (limit 50%)
+[2026-10-25T18:00:54.661+00:00] rep 1 exact_small        hist attempt 2/15: rejected elapsed      0.03s background mean 18.19% max 0.00% contaminated: background CPU mean 18.19% (limit 10%), worst sample 0.00% (limit 50%)
+[2026-10-25T18:00:59.729+00:00] rep 1 exact_small        hist attempt 3/15: accepted elapsed      0.03s background mean 6.22% max 0.00% 
+[2026-10-25T18:01:09.813+00:00] rep 1 filtered_exact     hist attempt 1/15: accepted elapsed      0.04s background mean 2.43% max 0.00% 
+[2026-10-25T18:01:14.891+00:00] rep 1 filtered_exact     cur  attempt 1/15: accepted elapsed      0.04s background mean 7.47% max 0.00% 
+[2026-10-25T18:01:19.978+00:00] rep 1 hnsw_small         cur  attempt 1/15: accepted elapsed      0.05s background mean 7.99% max 0.00% 
+[2026-10-25T18:01:25.068+00:00] rep 1 hnsw_small         hist attempt 1/15: accepted elapsed      0.05s background mean 7.83% max 0.00% 
+[2026-10-25T18:01:34.021+00:00] rep 1 exact_100k_384     hist attempt 1/8: accepted elapsed      3.91s background mean 5.95% max 13.17% 
+[2026-10-25T18:01:41.064+00:00] rep 1 exact_100k_384     cur  attempt 1/8: rejected elapsed      2.00s background mean 14.77% max 21.10% contaminated: background CPU mean 14.77% (limit 10%), worst sample 21.10% (limit 50%)
+[2026-10-25T18:01:48.049+00:00] rep 1 exact_100k_384     cur  attempt 2/8: accepted elapsed      1.95s background mean 3.97% max 6.40% 
+[2026-10-25T18:01:48.050+00:00] campaign loop finished; per workload {'exact_small': {'accepted_slots': 2, 'exhausted_slots': 0}, 'filtered_exact': {'accepted_slots': 2, 'exhausted_slots': 0}, 'hnsw_small': {'accepted_slots': 2, 'exhausted_slots': 0}, 'exact_100k_384': {'accepted_slots': 2, 'exhausted_slots': 0}}

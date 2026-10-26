@@ -1,0 +1,408 @@
+{
+  "hist": {
+    "label": "hist",
+    "sha": "81ff901c54d674d1ad519dd4fa722e937db46c4b",
+    "fetch": {
+      "command": [
+        "Q:\\vlite-campaign\\toolchain\\cargo\\bin\\cargo.exe",
+        "fetch",
+        "--locked",
+        "--verbose"
+      ],
+      "cwd": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\src\\hist",
+      "returncode": 0,
+      "started_utc": "2026-10-25T17:38:18.680+00:00",
+      "elapsed_seconds": 44.023,
+      "stdout_log": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\evidence\\logs\\cargo-fetch-hist.out.log",
+      "stderr_log": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\evidence\\logs\\cargo-fetch-hist.err.log"
+    },
+    "builds": [
+      {
+        "command": [
+          "Q:\\vlite-campaign\\toolchain\\cargo\\bin\\cargo.exe",
+          "build",
+          "--locked",
+          "--offline",
+          "--release",
+          "-v",
+          "--message-format=json-render-diagnostics",
+          "--bin",
+          "vlite-bench",
+          "--target-dir",
+          "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\target\\hist"
+        ],
+        "cwd": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\src\\hist",
+        "returncode": 0,
+        "started_utc": "2026-10-25T17:39:02.704+00:00",
+        "elapsed_seconds": 21.643,
+        "stdout_log": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\evidence\\logs\\cargo-build-hist-vlite-bench.out.log",
+        "stderr_log": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\evidence\\logs\\cargo-build-hist-vlite-bench.err.log",
+        "what": "vlite-bench",
+        "compiled_units": 45,
+        "local_units": [
+          {
+            "package_id": "path+file:///Q:/vlite-campaign/do005-sephost-20261025T172902Z/src/hist#vlite@0.3.0",
+            "target": "build-script-build",
+            "kind": [
+              "custom-build"
+            ],
+            "features": [
+              "default"
+            ],
+            "profile": {
+              "opt_level": "0",
+              "debuginfo": 0,
+              "debug_assertions": false,
+              "overflow_checks": false,
+              "test": false
+            },
+            "fresh": false
+          },
+          {
+            "package_id": "path+file:///Q:/vlite-campaign/do005-sephost-20261025T172902Z/src/hist#vlite@0.3.0",
+            "target": "vlite",
+            "kind": [
+              "lib"
+            ],
+            "features": [
+              "default"
+            ],
+            "profile": {
+              "opt_level": "3",
+              "debuginfo": 0,
+              "debug_assertions": false,
+              "overflow_checks": false,
+              "test": false
+            },
+            "fresh": false
+          },
+          {
+            "package_id": "path+file:///Q:/vlite-campaign/do005-sephost-20261025T172902Z/src/hist#vlite@0.3.0",
+            "target": "vlite-bench",
+            "kind": [
+              "bin"
+            ],
+            "features": [
+              "default"
+            ],
+            "profile": {
+              "opt_level": "3",
+              "debuginfo": 0,
+              "debug_assertions": false,
+              "overflow_checks": false,
+              "test": false
+            },
+            "fresh": false
+          }
+        ],
+        "graph_feature_enabled_anywhere": false,
+        "graph_crate_compiled": false,
+        "local_features_union": [
+          "default"
+        ]
+      },
+      {
+        "command": [
+          "Q:\\vlite-campaign\\toolchain\\cargo\\bin\\cargo.exe",
+          "build",
+          "--locked",
+          "--offline",
+          "--release",
+          "-v",
+          "--message-format=json-render-diagnostics",
+          "-p",
+          "vlite-ffi",
+          "--target-dir",
+          "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\target\\hist"
+        ],
+        "cwd": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\src\\hist",
+        "returncode": 0,
+        "started_utc": "2026-10-25T17:39:24.348+00:00",
+        "elapsed_seconds": 35.019,
+        "stdout_log": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\evidence\\logs\\cargo-build-hist-vlite-ffi.out.log",
+        "stderr_log": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\evidence\\logs\\cargo-build-hist-vlite-ffi.err.log",
+        "what": "vlite-ffi",
+        "compiled_units": 63,
+        "local_units": [
+          {
+            "package_id": "path+file:///Q:/vlite-campaign/do005-sephost-20261025T172902Z/src/hist#vlite@0.3.0",
+            "target": "build-script-build",
+            "kind": [
+              "custom-build"
+            ],
+            "features": [
+              "default",
+              "json"
+            ],
+            "profile": {
+              "opt_level": "0",
+              "debuginfo": 0,
+              "debug_assertions": false,
+              "overflow_checks": false,
+              "test": false
+            },
+            "fresh": false
+          },
+          {
+            "package_id": "path+file:///Q:/vlite-campaign/do005-sephost-20261025T172902Z/src/hist#vlite@0.3.0",
+            "target": "vlite",
+            "kind": [
+              "lib"
+            ],
+            "features": [
+              "default",
+              "json"
+            ],
+            "profile": {
+              "opt_level": "3",
+              "debuginfo": 0,
+              "debug_assertions": false,
+              "overflow_checks": false,
+              "test": false
+            },
+            "fresh": false
+          },
+          {
+            "package_id": "path+file:///Q:/vlite-campaign/do005-sephost-20261025T172902Z/src/hist/bindings/c#vlite-ffi@0.3.0",
+            "target": "vlite_ffi",
+            "kind": [
+              "cdylib",
+              "rlib"
+            ],
+            "features": [],
+            "profile": {
+              "opt_level": "3",
+              "debuginfo": 0,
+              "debug_assertions": false,
+              "overflow_checks": false,
+              "test": false
+            },
+            "fresh": false
+          }
+        ],
+        "graph_feature_enabled_anywhere": false,
+        "graph_crate_compiled": false,
+        "local_features_union": [
+          "default",
+          "json"
+        ]
+      }
+    ],
+    "binaries": {
+      "vlite-bench": {
+        "path": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\target\\hist\\release\\vlite-bench.exe",
+        "bytes": 1146368,
+        "sha256": "2ed6b33838cabd92465547937b6468c8868b3a215d07ce01c55b94f4347bf7ea"
+      },
+      "vlite-ffi": {
+        "path": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\target\\hist\\release\\vlite_ffi.dll",
+        "bytes": 2830336,
+        "sha256": "6dfeb7c75731c71f7ccdeb09c1045ec78e6a1efdf0d3b26f2d2a09f2d7d1c08d"
+      }
+    },
+    "target_dir": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\target\\hist"
+  },
+  "cur": {
+    "label": "cur",
+    "sha": "c024dcea72f1479e2114254e6d6388dcb5657315",
+    "fetch": {
+      "command": [
+        "Q:\\vlite-campaign\\toolchain\\cargo\\bin\\cargo.exe",
+        "fetch",
+        "--locked",
+        "--verbose"
+      ],
+      "cwd": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\src\\cur",
+      "returncode": 0,
+      "started_utc": "2026-10-25T17:39:59.375+00:00",
+      "elapsed_seconds": 0.505,
+      "stdout_log": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\evidence\\logs\\cargo-fetch-cur.out.log",
+      "stderr_log": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\evidence\\logs\\cargo-fetch-cur.err.log"
+    },
+    "builds": [
+      {
+        "command": [
+          "Q:\\vlite-campaign\\toolchain\\cargo\\bin\\cargo.exe",
+          "build",
+          "--locked",
+          "--offline",
+          "--release",
+          "-v",
+          "--message-format=json-render-diagnostics",
+          "--bin",
+          "vlite-bench",
+          "--target-dir",
+          "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\target\\cur"
+        ],
+        "cwd": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\src\\cur",
+        "returncode": 0,
+        "started_utc": "2026-10-25T17:39:59.881+00:00",
+        "elapsed_seconds": 19.65,
+        "stdout_log": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\evidence\\logs\\cargo-build-cur-vlite-bench.out.log",
+        "stderr_log": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\evidence\\logs\\cargo-build-cur-vlite-bench.err.log",
+        "what": "vlite-bench",
+        "compiled_units": 45,
+        "local_units": [
+          {
+            "package_id": "path+file:///Q:/vlite-campaign/do005-sephost-20261025T172902Z/src/cur#vlite@0.4.1",
+            "target": "build-script-build",
+            "kind": [
+              "custom-build"
+            ],
+            "features": [
+              "default"
+            ],
+            "profile": {
+              "opt_level": "0",
+              "debuginfo": 0,
+              "debug_assertions": false,
+              "overflow_checks": false,
+              "test": false
+            },
+            "fresh": false
+          },
+          {
+            "package_id": "path+file:///Q:/vlite-campaign/do005-sephost-20261025T172902Z/src/cur#vlite@0.4.1",
+            "target": "vlite",
+            "kind": [
+              "lib"
+            ],
+            "features": [
+              "default"
+            ],
+            "profile": {
+              "opt_level": "3",
+              "debuginfo": 0,
+              "debug_assertions": false,
+              "overflow_checks": false,
+              "test": false
+            },
+            "fresh": false
+          },
+          {
+            "package_id": "path+file:///Q:/vlite-campaign/do005-sephost-20261025T172902Z/src/cur#vlite@0.4.1",
+            "target": "vlite-bench",
+            "kind": [
+              "bin"
+            ],
+            "features": [
+              "default"
+            ],
+            "profile": {
+              "opt_level": "3",
+              "debuginfo": 0,
+              "debug_assertions": false,
+              "overflow_checks": false,
+              "test": false
+            },
+            "fresh": false
+          }
+        ],
+        "graph_feature_enabled_anywhere": false,
+        "graph_crate_compiled": false,
+        "local_features_union": [
+          "default"
+        ]
+      },
+      {
+        "command": [
+          "Q:\\vlite-campaign\\toolchain\\cargo\\bin\\cargo.exe",
+          "build",
+          "--locked",
+          "--offline",
+          "--release",
+          "-v",
+          "--message-format=json-render-diagnostics",
+          "-p",
+          "vlite-ffi",
+          "--target-dir",
+          "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\target\\cur"
+        ],
+        "cwd": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\src\\cur",
+        "returncode": 0,
+        "started_utc": "2026-10-25T17:40:19.532+00:00",
+        "elapsed_seconds": 31.791,
+        "stdout_log": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\evidence\\logs\\cargo-build-cur-vlite-ffi.out.log",
+        "stderr_log": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\evidence\\logs\\cargo-build-cur-vlite-ffi.err.log",
+        "what": "vlite-ffi",
+        "compiled_units": 63,
+        "local_units": [
+          {
+            "package_id": "path+file:///Q:/vlite-campaign/do005-sephost-20261025T172902Z/src/cur#vlite@0.4.1",
+            "target": "build-script-build",
+            "kind": [
+              "custom-build"
+            ],
+            "features": [
+              "default",
+              "json"
+            ],
+            "profile": {
+              "opt_level": "0",
+              "debuginfo": 0,
+              "debug_assertions": false,
+              "overflow_checks": false,
+              "test": false
+            },
+            "fresh": false
+          },
+          {
+            "package_id": "path+file:///Q:/vlite-campaign/do005-sephost-20261025T172902Z/src/cur#vlite@0.4.1",
+            "target": "vlite",
+            "kind": [
+              "lib"
+            ],
+            "features": [
+              "default",
+              "json"
+            ],
+            "profile": {
+              "opt_level": "3",
+              "debuginfo": 0,
+              "debug_assertions": false,
+              "overflow_checks": false,
+              "test": false
+            },
+            "fresh": false
+          },
+          {
+            "package_id": "path+file:///Q:/vlite-campaign/do005-sephost-20261025T172902Z/src/cur/bindings/c#vlite-ffi@0.4.1",
+            "target": "vlite_ffi",
+            "kind": [
+              "cdylib",
+              "rlib"
+            ],
+            "features": [],
+            "profile": {
+              "opt_level": "3",
+              "debuginfo": 0,
+              "debug_assertions": false,
+              "overflow_checks": false,
+              "test": false
+            },
+            "fresh": false
+          }
+        ],
+        "graph_feature_enabled_anywhere": false,
+        "graph_crate_compiled": false,
+        "local_features_union": [
+          "default",
+          "json"
+        ]
+      }
+    ],
+    "binaries": {
+      "vlite-bench": {
+        "path": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\target\\cur\\release\\vlite-bench.exe",
+        "bytes": 1131008,
+        "sha256": "aad2c49f1893ebbd53873ccebfca333f19b848158a1fcdf32b49cd553d10c2a5"
+      },
+      "vlite-ffi": {
+        "path": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\target\\cur\\release\\vlite_ffi.dll",
+        "bytes": 2876928,
+        "sha256": "5db93ad44a7f53d99f7bfb44ef626b50ef378cdcda162f0e2e73d8b9840f42a1"
+      }
+    },
+    "target_dir": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\target\\cur"
+  }
+}

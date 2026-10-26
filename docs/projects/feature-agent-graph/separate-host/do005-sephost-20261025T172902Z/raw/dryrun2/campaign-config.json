@@ -1,0 +1,91 @@
+{
+  "started_utc": "2026-10-25T18:04:23.690+00:00",
+  "tag": "dryrun2",
+  "workloads": [
+    "exact_small",
+    "exact_100k_384"
+  ],
+  "repetitions": 1,
+  "gate_tries": 3,
+  "gate_survey_seconds": 20.0,
+  "gate_pause_seconds": 60,
+  "attempt_caps": {
+    "exact_small": 15,
+    "filtered_exact": 15,
+    "hnsw_small": 15,
+    "exact_100k_384": 8,
+    "filtered_100k_384": 8,
+    "hnsw_100k_384": 3
+  },
+  "abandon_after_exhausted_without_accepted": 2,
+  "abandon_after_exhausted_any": 4,
+  "max_consecutive_refusals": 3,
+  "preflight_wait_budget_seconds": 900,
+  "preflight_retry_pause_seconds": 45,
+  "cpu_policy": {
+    "MAX_BACKGROUND_MEAN": 0.1,
+    "MAX_BACKGROUND_SAMPLE": 0.5,
+    "SAMPLE_SECONDS": 0.5,
+    "IDLE_SECONDS": 5,
+    "PROBE_ATTEMPTS": 12
+  },
+  "monitor_sha256": "c520e0b759c16d6ce741ee91a0ff71120acb011c970b534ec49e62462d83ee5e",
+  "environment_variables_removed": [],
+  "benchmark_environment": {
+    "VLITE_BENCH_DIR": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\work\\db",
+    "TEMP": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\work\\tmp",
+    "TMP": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\work\\tmp"
+  },
+  "binaries": {
+    "hist": {
+      "path": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\target\\hist\\release\\vlite-bench.exe",
+      "sha256": "2ed6b33838cabd92465547937b6468c8868b3a215d07ce01c55b94f4347bf7ea"
+    },
+    "cur": {
+      "path": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\target\\cur\\release\\vlite-bench.exe",
+      "sha256": "aad2c49f1893ebbd53873ccebfca333f19b848158a1fcdf32b49cd553d10c2a5"
+    }
+  },
+  "workload_args": {
+    "exact_small": [
+      "64",
+      "8",
+      "8",
+      "16",
+      "5",
+      "42"
+    ],
+    "exact_100k_384": [
+      "100000",
+      "384",
+      "10",
+      "1000",
+      "10",
+      "42"
+    ]
+  },
+  "python": "3.15.0 (tags/v3.15.0:d220409, Oct  9 2026, 11:55:56) [MSC v.1951 64 bit (AMD64)]",
+  "runner_pid": 42176,
+  "schedule": [
+    [
+      1,
+      "exact_small",
+      "cur"
+    ],
+    [
+      1,
+      "exact_small",
+      "hist"
+    ],
+    [
+      1,
+      "exact_100k_384",
+      "hist"
+    ],
+    [
+      1,
+      "exact_100k_384",
+      "cur"
+    ]
+  ]
+}

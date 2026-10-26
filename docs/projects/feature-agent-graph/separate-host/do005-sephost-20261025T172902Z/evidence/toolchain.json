@@ -1,0 +1,81 @@
+{
+  "rustup_toolchain": "1.99.1-x86_64-pc-windows-msvc",
+  "rustc_vV": {
+    "command": [
+      "Q:\\vlite-campaign\\toolchain\\cargo\\bin\\rustc.exe",
+      "-vV"
+    ],
+    "returncode": 0,
+    "stdout": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-pc-windows-msvc\nrelease: 1.99.1\nLLVM version: 23.1.1",
+    "stderr": ""
+  },
+  "cargo_vV": {
+    "command": [
+      "Q:\\vlite-campaign\\toolchain\\cargo\\bin\\cargo.exe",
+      "-vV"
+    ],
+    "returncode": 0,
+    "stdout": "cargo 1.99.1 (5f94df478 2026-08-27)\nrelease: 1.99.1\ncommit-hash: 5f94df4789f005f9a352888e8355ffc645b7ed0e\ncommit-date: 2026-08-27\nhost: x86_64-pc-windows-msvc\nlibgit2: 1.9.6 (sys:0.21.0 vendored)\nlibcurl: 8.21.0-DEV (sys:0.4.90+curl-8.21.0 vendored ssl:Schannel)\nos: Windows 10.0.26300 (Windows 11 Enterprise) [64-bit]",
+    "stderr": ""
+  },
+  "rustup_show": {
+    "command": [
+      "Q:\\vlite-campaign\\toolchain\\cargo\\bin\\rustup.exe",
+      "show"
+    ],
+    "returncode": 0,
+    "stdout": "Default host: x86_64-pc-windows-msvc\nrustup home:  Q:\\vlite-campaign\\toolchain\\rustup\n\ninstalled toolchains\n--------------------\n1.99.1-x86_64-pc-windows-msvc (active, default)\n\nactive toolchain\n----------------\nname: 1.99.1-x86_64-pc-windows-msvc\nactive because: overridden by environment variable RUSTUP_TOOLCHAIN\ninstalled targets:\n  x86_64-pc-windows-msvc",
+    "stderr": ""
+  },
+  "rustc_path": {
+    "command": [
+      "Q:\\vlite-campaign\\toolchain\\cargo\\bin\\rustup.exe",
+      "which",
+      "rustc"
+    ],
+    "returncode": 0,
+    "stdout": "Q:\\vlite-campaign\\toolchain\\rustup\\toolchains\\1.99.1-x86_64-pc-windows-msvc\\bin\\rustc.exe",
+    "stderr": ""
+  },
+  "python": {
+    "executable": "Q:\\vlite-campaign\\toolchain\\python\\python.exe",
+    "version": "3.15.0 (tags/v3.15.0:d220409, Oct  9 2026, 11:55:56) [MSC v.1951 64 bit (AMD64)]",
+    "implementation": "cpython"
+  },
+  "rustup_init_sha256": "00f139da614dced87d3c3d4121c43eebdac3c1bf8a5ee86b9d80dfd71c8d70fd",
+  "python_installer_sha256": "67d9a63eb145a34aa939f02eadbf8c57f21fcdd6decb901ccac578d2d1f01d6f",
+  "rustc_exe_sha256": "ba03e3ba03a73d9fef19ab3659140f94b43615ec1d587fe9befc9aed3bd5aa72",
+  "cargo_exe_sha256": "aa5b8980be3681899fde765ba47e2ed361463ae9dd8ee7cd1963c18d23743a0f",
+  "inherited_rust_environment_removed": [],
+  "cargo_environment_overrides": {
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_NET_OFFLINE": "true (all builds after restore)",
+    "CARGO_HOME": "Q:\\vlite-campaign\\toolchain\\cargo",
+    "RUSTUP_HOME": "Q:\\vlite-campaign\\toolchain\\rustup"
+  },
+  "linker_probe": {
+    "returncode": 0,
+    "first_link_arg_line": "\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\18\\\\Enterprise\\\\VC\\\\Tools\\\\MSVC\\\\14.51.36231\\\\bin\\\\HostX64\\\\x64\\\\link.exe\" \"/NOLOGO\" \"Q:\\\\vlite-campaign\\\\do005-sephost-20261025T172902Z\\\\work\\\\linker-probe\\\\rustcYBP4y5\\\\symbols.o\" \"Q:\\\\vlite-campaign\\\\do005-sephost-20261025T172902Z\\\\work\\\\linker-probe\\\\probe.probe.7cc48b8033570ecf-cgu.0.rcgu.o\" \"Q:\\\\vlite-campaign\\\\do005-sephost-20261025T172902Z\\\\work\\\\linker-probe\\\\probe.5yp177nwbcyib6bl0ucjicqzm.rcgu.o\" \"Q:\\\\vlite-campaign\\\\toolchain\\\\rustup\\\\toolchains\\\\1.99.1-x86_64-pc-windows-msvc\\\\lib\\\\rustlib\\\\x86_64-pc-windows-msvc\\\\lib\\\\libstd-3854312d46c",
+    "linker_path": "C:\\\\Program Files\\\\Microsoft Visual Studio\\\\18\\\\Enterprise\\\\VC\\\\Tools\\\\MSVC\\\\14.51.36231\\\\bin\\\\HostX64\\\\x64\\\\link.exe",
+    "banner": [
+      "Microsoft (R) Incremental Linker Version 14.51.36260.0",
+      "Copyright (C) Microsoft Corporation.  All rights reserved.",
+      ""
+    ],
+    "sha256": "a8c42e25c91ca2453e1110540ac08f0fc12d7539454a11b9af8baeecb469837d"
+  },
+  "vswhere": {
+    "command": [
+      "C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe",
+      "-all",
+      "-products",
+      "*",
+      "-format",
+      "json",
+      "-utf8"
+    ],
+    "returncode": 0,
+    "stdout": "[\r\n  {\r\n    \"instanceId\": \"2379a374\",\r\n    \"installDate\": \"2026-01-15T18:38:39Z\",\r\n    \"installationName\": \"VisualStudio/18.10.4+12306.391\",\r\n    \"installationPath\": \"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\18\\\\Enterprise\",\r\n    \"installationVersion\": \"18.10.12306.391\",\r\n    \"productId\": \"Microsoft.VisualStudio.Product.Enterprise\",\r\n    \"productPath\": \"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\18\\\\Enterprise\\\\Common7\\\\IDE\\\\devenv.exe\",\r\n    \"state\": 4294967295,\r\n    \"isComplete\": true,\r\n    \"isLaunchable\": true,\r\n    \"isPrerelease\": false,\r\n    \"isRebootRequired\": false,\r\n    \"displayName\": \"Visual Studio Enterprise 2026\",\r\n    \"description\": \"Built for scale, security, and speed \u2013 the IDE for complex, high-impact development.\",\r\n    \"channelId\": \"VisualStudio.18.Release\",\r\n    \"channelUri\": \"https://aka.ms/vs/18/stable/channel\",\r\n    \"enginePath\": \"C:\\\\Program Files (x86)\\\\Microsoft Visual Studio\\\\Installer\\\\resources\\\\app\\\\ServiceHub\\\\Services\\\\Microsoft.VisualStudio.Setup.Service\",\r\n    \"expirationDate\": \"2027-04-04T17:00:00+00:00\",\r\n    \"installedChannelId\": \"VisualStudio.18.Release\",\r\n    \"installedChannelUri\": \"https://aka.ms/vs/18/stable/channel\",\r\n    \"releaseNotes\": \"https://docs.microsoft.com/en-us/visualstudio/releases/18/release-notes-v18.10#18.10.4\",\r\n    \"resolvedInstallationPath\": \"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\18\\\\Enterprise\",\r\n    \"thirdPartyNotices\": \"https://go.microsoft.com/fwlink/?LinkId=661480\",\r\n    \"updateDate\": \"2026-10-15T22:41:21.3579625Z\",\r\n    \"catalog\": {\r\n      \"buildBranch\": \"oobstable\",\r\n      \"buildVersion\": \"18.10.12306.391\",\r\n      \"featureReleaseMonth\": \"09\",\r\n      \"featureReleaseYear\": \"2026\",\r\n      \"id\": \"VisualStudio/18.10.4+12306.391\",\r\n      \"includeBuildVersionInDisplayVersion\": \"False\",\r\n      \"localBuild\": \"build-lab\",\r\n      \"manifestName\": \"VisualStudio\",\r\n      \"manifestType\": \"installer\",\r\n      \"productDisplayVersion\": \"18.10.4\",\r\n      \"productLine\": \"Dev18\",\r\n      \"productLineVersion\": \"18\",\r\n      \"productMilestone\": \"RTW\",\r\n      \"productMilestoneIsPreRelease\": \"False\",\r\n      \"productName\": \"Visual Studio\",\r\n      \"productPatchVersion\": \"4\",\r\n      \"productPreReleaseMilestoneSuffix\": \"1.0\",\r\n      \"productRelease\": \"RTW\",\r\n      \"productSemanticVersion\": \"18.10.4+12306.391\",\r\n      \"requiredEngineVersion\": \"4.10.30.62513\"\r\n    },\r\n    \"properties\": {\r\n      \"appLocalWPF\": \"false\",\r\n      \"campaignId\": \"\",\r\n      \"channelManifestId\": \"VisualStudio.18.Release/18.10.4+12306.391\",\r\n      \"includeRecommended\": \"1\",\r\n      \"nickname\": \"\",\r\n      \"setupEngineFilePath\": \"C:\\\\Program Files (x86)\\\\Microsoft Visual Studio\\\\Installer\\\\setup.exe\"\r\n    }\r\n  },\r\n  {\r\n    \"instanceId\": \"80d6fcc5\",\r\n    \"installDate\": \"2026-02-13T19:05:59Z\",\r\n    \"installationName\": \"VisualStudio/17.14.42+37806.7\",\r\n    \"installationPath\": \"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Enterprise\",\r\n    \"installationVersion\": \"17.14.37806.7\",\r\n    \"productId\": \"Microsoft.VisualStudio.Product.Enterprise\",\r\n    \"productPath\": \"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Enterprise\\\\Common7\\\\IDE\\\\devenv.exe\",\r\n    \"state\": 4294967295,\r\n    \"isComplete\": true,\r\n    \"isLaunchable\": true,\r\n    \"isPrerelease\": false,\r\n    \"isRebootRequired\": false,\r\n    \"displayName\": \"Visual Studio Enterprise 2022\",\r\n    \"description\": \"Scalable, end-to-end solution for teams of any size\",\r\n    \"channelId\": \"VisualStudio.17.Release\",\r\n    \"channelUri\": \"https://aka.ms/vs/17/release/channel\",\r\n    \"enginePath\": \"C:\\\\Program Files (x86)\\\\Microsoft Visual Studio\\\\Installer\\\\resources\\\\app\\\\ServiceHub\\\\Services\\\\Microsoft.VisualStudio.Setup.Service\",\r\n    \"installedChannelId\": \"VisualStudio.17.Release\",\r\n    \"installedChannelUri\": \"https://aka.ms/vs/17/release/channel\",\r\n    \"releaseNotes\": \"https://docs.microsoft.com/en-us/visualstudio/releases/2022/release-notes-v17.14#17.14.42\",\r\n    \"resolvedInstallationPath\": \"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Enterprise\",\r\n    \"thirdPartyNotices\": \"https://go.microsoft.com/fwlink/?LinkId=661288\",\r\n    \"updateDate\": \"2026-10-15T22:37:52.6646036Z\",\r\n    \"catalog\": {\r\n      \"buildBranch\": \"d17.14\",\r\n      \"buildVersion\": \"17.14.37806.7\",\r\n      \"id\": \"VisualStudio/17.14.42+37806.7\",\r\n      \"localBuild\": \"build-lab\",\r\n      \"manifestName\": \"VisualStudio\",\r\n      \"manifestType\": \"installer\",\r\n      \"productDisplayVersion\": \"17.14.42\",\r\n      \"productLine\": \"Dev17\",\r\n      \"productLineVersion\": \"2022\",\r\n      \"productMilestone\": \"RTW\",\r\n      \"productMilestoneIsPreRelease\": \"False\",\r\n      \"productName\": \"Visual Studio\",\r\n      \"productPatchVersion\": \"42\",\r\n      \"productPreReleaseMilestoneSuffix\": \"1.0\",\r\n      \"productSemanticVersion\": \"17.14.42+37806.7\",\r\n      \"requiredEngineVersion\": \"3.14.2094.42856\"\r\n    },\r\n    \"properties\": {\r\n      \"appLocalWPF\": \"false\",\r\n      \"campaignId\": \"\",\r\n      \"channelManifestId\": \"VisualStudio.17.Release/17.14.42+37806.7\",\r\n      \"includeRecommended\": \"1\",\r\n      \"nickname\": \"\",\r\n      \"setupEngineFilePath\": \"C:\\\\Program Files (x86)\\\\Microsoft Visual Studio\\\\Installer\\\\setup.exe\"\r\n    }\r\n  }\r\n]",
+    "stderr": ""
+  }
+}

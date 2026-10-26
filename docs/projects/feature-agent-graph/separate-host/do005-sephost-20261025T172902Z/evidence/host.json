@@ -1,0 +1,314 @@
+{
+  "computer_system": {
+    "Name": "[REDACTED-HOSTNAME]",
+    "Manufacturer": "Microsoft Corporation",
+    "Model": "Virtual Machine",
+    "SystemType": "x64-based PC",
+    "HypervisorPresent": true,
+    "NumberOfProcessors": 1,
+    "NumberOfLogicalProcessors": 16,
+    "TotalPhysicalMemory": 68714033152,
+    "Domain": "WORKGROUP",
+    "PartOfDomain": false
+  },
+  "bios": {
+    "Manufacturer": "Microsoft Corporation",
+    "SMBIOSBIOSVersion": "Hyper-V UEFI Release v4.1",
+    "Version": "VRTUAL - 1",
+    "ReleaseDate": "/Date(1776816000000)/",
+    "SerialNumber": "[REDACTED-BIOS-SERIAL]"
+  },
+  "product": {
+    "Name": "Virtual Machine",
+    "Vendor": "Microsoft Corporation",
+    "Version": "Hyper-V UEFI Release v4.1",
+    "IdentifyingNumber": "[REDACTED-BIOS-SERIAL]",
+    "UUID": "[REDACTED-MACHINE-UUID]"
+  },
+  "os": {
+    "Caption": "Microsoft Windows 11 Enterprise",
+    "Version": "10.0.26300",
+    "BuildNumber": "26300",
+    "OSArchitecture": "64-bit",
+    "InstallDate": "/Date(1770749976000)/",
+    "LastBootUpTime": "/Date(1792222570500)/",
+    "FreePhysicalMemory": 35230736,
+    "TotalVisibleMemorySize": 67103548
+  },
+  "current_version": {
+    "ProductName": "Windows 10 Enterprise",
+    "DisplayVersion": "26H2",
+    "CurrentBuild": "26300",
+    "UBR": 9711,
+    "BuildLabEx": "26100.1.amd64fre.ge_release.240331-1435",
+    "EditionID": "Enterprise"
+  },
+  "cpu": {
+    "Name": "AMD EPYC 9V74 80-Core Processor                ",
+    "Manufacturer": "AuthenticAMD",
+    "Description": "AMD64 Family 25 Model 17 Stepping 1",
+    "NumberOfCores": 8,
+    "NumberOfLogicalProcessors": 16,
+    "MaxClockSpeed": 2596,
+    "CurrentClockSpeed": 2596,
+    "L2CacheSize": 8192,
+    "L3CacheSize": 32768,
+    "ProcessorId": "0000000000000000",
+    "Architecture": 9,
+    "Family": 107,
+    "Revision": 4353
+  },
+  "physical_memory": [
+    {
+      "Capacity": 1073741824,
+      "Speed": null,
+      "Manufacturer": "Microsoft Corporation",
+      "PartNumber": "None"
+    },
+    {
+      "Capacity": 63350767616,
+      "Speed": null,
+      "Manufacturer": "Microsoft Corporation",
+      "PartNumber": "None"
+    },
+    {
+      "Capacity": 4294967296,
+      "Speed": null,
+      "Manufacturer": "Microsoft Corporation",
+      "PartNumber": "None"
+    }
+  ],
+  "volume": {
+    "DriveLetter": "Q",
+    "FileSystem": "ReFS",
+    "FileSystemLabel": "DevDrive",
+    "DriveType": "Fixed",
+    "HealthStatus": "Healthy",
+    "Size": 1648126590976,
+    "SizeRemaining": 1369714028544,
+    "AllocationUnitSize": 4096
+  },
+  "logical_disk": {
+    "DeviceID": "Q:",
+    "FileSystem": "ReFS",
+    "Size": 1648126590976,
+    "FreeSpace": 1369714028544,
+    "VolumeName": "DevDrive",
+    "DriveType": 3
+  },
+  "partition": {
+    "DiskNumber": 0,
+    "PartitionNumber": 5,
+    "DriveLetter": "Q",
+    "Size": 1648193682944,
+    "Type": "Basic",
+    "GptType": "{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}",
+    "IsBoot": false,
+    "IsSystem": false
+  },
+  "disk": {
+    "Number": 0,
+    "FriendlyName": "Msft Virtual Disk",
+    "Model": "Virtual Disk    ",
+    "Manufacturer": "Msft    ",
+    "BusType": "SAS",
+    "PartitionStyle": "GPT",
+    "Size": 2199023255552,
+    "LogicalSectorSize": 512,
+    "PhysicalSectorSize": 4096,
+    "HealthStatus": "Healthy",
+    "OperationalStatus": "Online",
+    "FirmwareVersion": "1.0 "
+  },
+  "physical_disks": {
+    "DeviceId": "0",
+    "FriendlyName": "Msft Virtual Disk",
+    "MediaType": "Unspecified",
+    "BusType": "SAS",
+    "Size": 2199023255552,
+    "LogicalSectorSize": 512,
+    "PhysicalSectorSize": 4096,
+    "SpindleSpeed": 0,
+    "HealthStatus": "Healthy"
+  },
+  "devdrive_query": "Failed to open the volume.\nError 5: Access is denied.",
+  "diskfree": "Total free bytes        : 1,369,716,912,128 ( 1.2 TB)\nTotal bytes             : 1,648,126,590,976 ( 1.5 TB)\nTotal quota free bytes  : 1,369,716,912,128 ( 1.2 TB)\nTotal metadata bytes    :    11,494,326,272 (10.7 GB)",
+  "defender_status": {
+    "AMServiceEnabled": true,
+    "AntispywareEnabled": true,
+    "AntivirusEnabled": true,
+    "RealTimeProtectionEnabled": true,
+    "BehaviorMonitorEnabled": true,
+    "OnAccessProtectionEnabled": true,
+    "IoavProtectionEnabled": true,
+    "NISEnabled": true,
+    "AMProductVersion": "4.18.26100.4",
+    "AMEngineVersion": "1.1.26100.4",
+    "AntivirusSignatureVersion": "1.461.199.0",
+    "AntivirusSignatureLastUpdated": "/Date(1792920621000)/",
+    "QuickScanEndTime": "/Date(1792903141401)/",
+    "FullScanEndTime": null,
+    "IsTamperProtected": true,
+    "AMRunningMode": "Normal"
+  },
+  "defender_preference": {
+    "DisableRealtimeMonitoring": false,
+    "PerformanceModeStatus": 1,
+    "ScanScheduleDay": 6,
+    "ScanScheduleQuickScanTime": {
+      "Ticks": 72000000000,
+      "Days": 0,
+      "Hours": 2,
+      "Milliseconds": 0,
+      "Minutes": 0,
+      "Seconds": 0,
+      "TotalDays": 0.08333333333333333,
+      "TotalHours": 2,
+      "TotalMilliseconds": 7200000,
+      "TotalMinutes": 120,
+      "TotalSeconds": 7200
+    },
+    "ScanAvgCPULoadFactor": 20,
+    "DisableCpuThrottleOnIdleScans": true,
+    "EnableLowCpuPriority": true,
+    "ExclusionPath": [
+      "N/A: Must be an administrator to view exclusions"
+    ],
+    "ExclusionProcess": [
+      "N/A: Must be an administrator to view exclusions"
+    ],
+    "ExclusionExtension": [
+      "N/A: Must be an administrator to view exclusions"
+    ]
+  },
+  "power_scheme": "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+  "timezone": {
+    "Id": "Pacific Standard Time",
+    "DisplayName": "(UTC-08:00) Pacific Time (US & Canada)",
+    "BaseUtcOffset": {
+      "Ticks": -288000000000,
+      "Days": 0,
+      "Hours": -8,
+      "Milliseconds": 0,
+      "Minutes": 0,
+      "Seconds": 0,
+      "TotalDays": -0.3333333333333333,
+      "TotalHours": -8,
+      "TotalMilliseconds": -28800000,
+      "TotalMinutes": -480,
+      "TotalSeconds": -28800
+    }
+  },
+  "machine_guid": "(redacted; hashed in machine_guid_sha256)",
+  "wsl_list": "  NAME            STATE           VERSION\n\n* Ubuntu          Stopped         2\n\n  Ubuntu-24.04    Running         2\n\n",
+  "logged_on_sessions": " USERNAME              SESSIONNAME        ID  STATE   IDLE TIME  LOGON TIME\n>mahpate               rdp-sxs26073...     2  Active          6  10/17/2026 8:10 PM",
+  "selected_running_services": [
+    {
+      "Name": "BITS",
+      "DisplayName": "Background Intelligent Transfer Service",
+      "StartType": 2
+    },
+    {
+      "Name": "HvHost",
+      "DisplayName": "HV Host Service",
+      "StartType": 3
+    },
+    {
+      "Name": "Sense",
+      "DisplayName": "Windows Defender Advanced Threat Protection Service",
+      "StartType": 2
+    },
+    {
+      "Name": "SysMain",
+      "DisplayName": "SysMain",
+      "StartType": 2
+    },
+    {
+      "Name": "UsoSvc",
+      "DisplayName": "Update Orchestrator Service",
+      "StartType": 2
+    },
+    {
+      "Name": "vmcompute",
+      "DisplayName": "Hyper-V Host Compute Service",
+      "StartType": 3
+    },
+    {
+      "Name": "WdNisSvc",
+      "DisplayName": "Microsoft Defender Antivirus Network Inspection Service",
+      "StartType": 3
+    },
+    {
+      "Name": "WinDefend",
+      "DisplayName": "Microsoft Defender Antivirus Service",
+      "StartType": 2
+    },
+    {
+      "Name": "WSearch",
+      "DisplayName": "Windows Search",
+      "StartType": 2
+    },
+    {
+      "Name": "WSLService",
+      "DisplayName": "WSL Service",
+      "StartType": 2
+    },
+    {
+      "Name": "wuauserv",
+      "DisplayName": "Windows Update",
+      "StartType": 3
+    }
+  ],
+  "hotfixes": [
+    {
+      "HotFixID": "KB5121794",
+      "InstalledOn": {
+        "value": "/Date(1792220400000)/",
+        "DateTime": "Saturday, October 17, 2026 12:00:00 AM"
+      }
+    },
+    {
+      "HotFixID": "KB5127648",
+      "InstalledOn": {
+        "value": "/Date(1792220400000)/",
+        "DateTime": "Saturday, October 17, 2026 12:00:00 AM"
+      }
+    },
+    {
+      "HotFixID": "KB5127694",
+      "InstalledOn": {
+        "value": "/Date(1792220400000)/",
+        "DateTime": "Saturday, October 17, 2026 12:00:00 AM"
+      }
+    },
+    {
+      "HotFixID": "KB5127647",
+      "InstalledOn": {
+        "value": "/Date(1792047600000)/",
+        "DateTime": "Thursday, October 15, 2026 12:00:00 AM"
+      }
+    },
+    {
+      "HotFixID": "KB5123607",
+      "InstalledOn": {
+        "value": "/Date(1786604400000)/",
+        "DateTime": "Thursday, August 13, 2026 12:00:00 AM"
+      }
+    }
+  ],
+  "machine_guid_sha256": "1a75ac27be0b4dd0847d02a190a4b4b1edf5749e727291dac6d46dbc3d61b001",
+  "captured_utc": "2026-10-25T17:38:04.197+00:00",
+  "python_memory_status": {
+    "ram_bytes": 68714033152,
+    "available_bytes": 36233547776,
+    "pagefile_total_bytes": 78914580480,
+    "pagefile_available_bytes": 44610375680
+  },
+  "python_platform": {
+    "platform": "Windows-11-10.0.26300-SP0",
+    "machine": "AMD64",
+    "processor": "AMD64 Family 25 Model 17 Stepping 1, AuthenticAMD",
+    "os_cpu_count": 16,
+    "node": "[REDACTED-HOSTNAME]"
+  }
+}

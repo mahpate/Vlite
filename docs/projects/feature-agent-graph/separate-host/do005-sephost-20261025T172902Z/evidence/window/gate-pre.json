@@ -1,0 +1,29 @@
+{
+  "name": "pre",
+  "tries_allowed": 6,
+  "survey_seconds": 180,
+  "pause_seconds": 60,
+  "policy": {
+    "max_mean": 0.1,
+    "max_sample": 0.5
+  },
+  "attempts": [
+    {
+      "survey_file": "survey-pre-1.json",
+      "started_utc": "2026-10-25T18:23:02.830+00:00",
+      "seconds": 180.11867930041626,
+      "mean_background_cpu_fraction": 0.09640453660854635,
+      "max_background_cpu_fraction": 0.9982197747782847,
+      "quiet": false
+    },
+    {
+      "survey_file": "survey-pre-2.json",
+      "started_utc": "2026-10-25T18:27:03.192+00:00",
+      "seconds": 180.11413060047198,
+      "mean_background_cpu_fraction": 0.05027736598072483,
+      "max_background_cpu_fraction": 0.3377103552550295,
+      "quiet": true
+    }
+  ],
+  "passed": true
+}

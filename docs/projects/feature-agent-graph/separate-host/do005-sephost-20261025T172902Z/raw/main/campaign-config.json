@@ -1,0 +1,419 @@
+{
+  "started_utc": "2026-10-25T18:23:02.043+00:00",
+  "tag": "main",
+  "workloads": [
+    "exact_small",
+    "filtered_exact",
+    "hnsw_small",
+    "exact_100k_384",
+    "filtered_100k_384",
+    "hnsw_100k_384"
+  ],
+  "repetitions": 5,
+  "gate_tries": 6,
+  "gate_survey_seconds": 180,
+  "gate_pause_seconds": 60,
+  "attempt_caps": {
+    "exact_small": 15,
+    "filtered_exact": 15,
+    "hnsw_small": 15,
+    "exact_100k_384": 8,
+    "filtered_100k_384": 8,
+    "hnsw_100k_384": 3
+  },
+  "abandon_after_exhausted_without_accepted": 2,
+  "abandon_after_exhausted_any": 4,
+  "max_consecutive_refusals": 3,
+  "preflight_wait_budget_seconds": 900,
+  "preflight_retry_pause_seconds": 45,
+  "cpu_policy": {
+    "MAX_BACKGROUND_MEAN": 0.1,
+    "MAX_BACKGROUND_SAMPLE": 0.5,
+    "SAMPLE_SECONDS": 0.5,
+    "IDLE_SECONDS": 5,
+    "PROBE_ATTEMPTS": 12
+  },
+  "monitor_sha256": "c520e0b759c16d6ce741ee91a0ff71120acb011c970b534ec49e62462d83ee5e",
+  "environment_variables_removed": [],
+  "benchmark_environment": {
+    "VLITE_BENCH_DIR": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\work\\db",
+    "TEMP": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\work\\tmp",
+    "TMP": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\work\\tmp"
+  },
+  "binaries": {
+    "hist": {
+      "path": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\target\\hist\\release\\vlite-bench.exe",
+      "sha256": "2ed6b33838cabd92465547937b6468c8868b3a215d07ce01c55b94f4347bf7ea"
+    },
+    "cur": {
+      "path": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\target\\cur\\release\\vlite-bench.exe",
+      "sha256": "aad2c49f1893ebbd53873ccebfca333f19b848158a1fcdf32b49cd553d10c2a5"
+    }
+  },
+  "workload_args": {
+    "exact_small": [
+      "64",
+      "8",
+      "8",
+      "16",
+      "5",
+      "42"
+    ],
+    "filtered_exact": [
+      "--filter-every",
+      "10",
+      "1024",
+      "8",
+      "10",
+      "64",
+      "10",
+      "42"
+    ],
+    "hnsw_small": [
+      "--ann",
+      "16",
+      "100",
+      "100",
+      "256",
+      "8",
+      "10",
+      "64",
+      "5",
+      "42"
+    ],
+    "exact_100k_384": [
+      "100000",
+      "384",
+      "10",
+      "1000",
+      "10",
+      "42"
+    ],
+    "filtered_100k_384": [
+      "--filter-every",
+      "10",
+      "100000",
+      "384",
+      "10",
+      "1000",
+      "10",
+      "42"
+    ],
+    "hnsw_100k_384": [
+      "--ann",
+      "16",
+      "200",
+      "64",
+      "100000",
+      "384",
+      "10",
+      "1000",
+      "10",
+      "42"
+    ]
+  },
+  "python": "3.15.0 (tags/v3.15.0:d220409, Oct  9 2026, 11:55:56) [MSC v.1951 64 bit (AMD64)]",
+  "runner_pid": 11580,
+  "schedule": [
+    [
+      1,
+      "exact_small",
+      "cur"
+    ],
+    [
+      1,
+      "exact_small",
+      "hist"
+    ],
+    [
+      1,
+      "filtered_exact",
+      "hist"
+    ],
+    [
+      1,
+      "filtered_exact",
+      "cur"
+    ],
+    [
+      1,
+      "hnsw_small",
+      "cur"
+    ],
+    [
+      1,
+      "hnsw_small",
+      "hist"
+    ],
+    [
+      1,
+      "exact_100k_384",
+      "hist"
+    ],
+    [
+      1,
+      "exact_100k_384",
+      "cur"
+    ],
+    [
+      1,
+      "filtered_100k_384",
+      "cur"
+    ],
+    [
+      1,
+      "filtered_100k_384",
+      "hist"
+    ],
+    [
+      1,
+      "hnsw_100k_384",
+      "hist"
+    ],
+    [
+      1,
+      "hnsw_100k_384",
+      "cur"
+    ],
+    [
+      2,
+      "exact_small",
+      "hist"
+    ],
+    [
+      2,
+      "exact_small",
+      "cur"
+    ],
+    [
+      2,
+      "filtered_exact",
+      "cur"
+    ],
+    [
+      2,
+      "filtered_exact",
+      "hist"
+    ],
+    [
+      2,
+      "hnsw_small",
+      "hist"
+    ],
+    [
+      2,
+      "hnsw_small",
+      "cur"
+    ],
+    [
+      2,
+      "exact_100k_384",
+      "cur"
+    ],
+    [
+      2,
+      "exact_100k_384",
+      "hist"
+    ],
+    [
+      2,
+      "filtered_100k_384",
+      "hist"
+    ],
+    [
+      2,
+      "filtered_100k_384",
+      "cur"
+    ],
+    [
+      2,
+      "hnsw_100k_384",
+      "cur"
+    ],
+    [
+      2,
+      "hnsw_100k_384",
+      "hist"
+    ],
+    [
+      3,
+      "exact_small",
+      "cur"
+    ],
+    [
+      3,
+      "exact_small",
+      "hist"
+    ],
+    [
+      3,
+      "filtered_exact",
+      "hist"
+    ],
+    [
+      3,
+      "filtered_exact",
+      "cur"
+    ],
+    [
+      3,
+      "hnsw_small",
+      "cur"
+    ],
+    [
+      3,
+      "hnsw_small",
+      "hist"
+    ],
+    [
+      3,
+      "exact_100k_384",
+      "hist"
+    ],
+    [
+      3,
+      "exact_100k_384",
+      "cur"
+    ],
+    [
+      3,
+      "filtered_100k_384",
+      "cur"
+    ],
+    [
+      3,
+      "filtered_100k_384",
+      "hist"
+    ],
+    [
+      3,
+      "hnsw_100k_384",
+      "hist"
+    ],
+    [
+      3,
+      "hnsw_100k_384",
+      "cur"
+    ],
+    [
+      4,
+      "exact_small",
+      "hist"
+    ],
+    [
+      4,
+      "exact_small",
+      "cur"
+    ],
+    [
+      4,
+      "filtered_exact",
+      "cur"
+    ],
+    [
+      4,
+      "filtered_exact",
+      "hist"
+    ],
+    [
+      4,
+      "hnsw_small",
+      "hist"
+    ],
+    [
+      4,
+      "hnsw_small",
+      "cur"
+    ],
+    [
+      4,
+      "exact_100k_384",
+      "cur"
+    ],
+    [
+      4,
+      "exact_100k_384",
+      "hist"
+    ],
+    [
+      4,
+      "filtered_100k_384",
+      "hist"
+    ],
+    [
+      4,
+      "filtered_100k_384",
+      "cur"
+    ],
+    [
+      4,
+      "hnsw_100k_384",
+      "cur"
+    ],
+    [
+      4,
+      "hnsw_100k_384",
+      "hist"
+    ],
+    [
+      5,
+      "exact_small",
+      "cur"
+    ],
+    [
+      5,
+      "exact_small",
+      "hist"
+    ],
+    [
+      5,
+      "filtered_exact",
+      "hist"
+    ],
+    [
+      5,
+      "filtered_exact",
+      "cur"
+    ],
+    [
+      5,
+      "hnsw_small",
+      "cur"
+    ],
+    [
+      5,
+      "hnsw_small",
+      "hist"
+    ],
+    [
+      5,
+      "exact_100k_384",
+      "hist"
+    ],
+    [
+      5,
+      "exact_100k_384",
+      "cur"
+    ],
+    [
+      5,
+      "filtered_100k_384",
+      "cur"
+    ],
+    [
+      5,
+      "filtered_100k_384",
+      "hist"
+    ],
+    [
+      5,
+      "hnsw_100k_384",
+      "hist"
+    ],
+    [
+      5,
+      "hnsw_100k_384",
+      "cur"
+    ]
+  ]
+}

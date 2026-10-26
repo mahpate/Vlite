@@ -1,0 +1,14 @@
+{
+  "runner_modules": {
+    "do005_campaign.py": "21af22cf2fdf72691ff8acf5d30562d7ad17063e196f860383f45fcfbfc15770",
+    "do005_common.py": "c2b41a1e2c5f5404fbeba142b9b49d9c655a88865a197b11ad36896b8d2fe2c3",
+    "do005_prepare.py": "e4ffff047e2714d74585d0c197bba1ae8e8c88d9943e09be6fb5cdeca8be2d47"
+  },
+  "pinned_current_scripts": {
+    "scripts/graph_reference.py": "c520e0b759c16d6ce741ee91a0ff71120acb011c970b534ec49e62462d83ee5e",
+    "scripts/graph_baseline.py": "5fd4944ef31063b82dfe81a8f2a4ae1476a4ec79c8593caff5925de04e7c12c4",
+    "scripts/graph_compat_check.py": "e59ef77debc77e00f3033757e0def3eceed4dd952c25161b7a52a79f27efbe55",
+    "tests/measure_benchmark.py": "e49afae2cb22d1181f0fa5801f8e4937cc25c9e8e968ff88220c37724c2f0541"
+  },
+  "python_executable_sha256": "727b92dc55e1ac0f17a48cbd20557427fdb8d9f50731de0355c4fd4c08d2f473"
+}

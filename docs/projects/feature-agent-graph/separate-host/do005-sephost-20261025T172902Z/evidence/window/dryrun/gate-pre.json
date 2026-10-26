@@ -1,0 +1,21 @@
+{
+  "name": "pre",
+  "tries_allowed": 3,
+  "survey_seconds": 20.0,
+  "pause_seconds": 60,
+  "policy": {
+    "max_mean": 0.1,
+    "max_sample": 0.5
+  },
+  "attempts": [
+    {
+      "survey_file": "survey-pre-1.json",
+      "started_utc": "2026-10-25T18:04:24.465+00:00",
+      "seconds": 20.010651700315066,
+      "mean_background_cpu_fraction": 0.06881100853793383,
+      "max_background_cpu_fraction": 0.22260936847283247,
+      "quiet": true
+    }
+  ],
+  "passed": true
+}

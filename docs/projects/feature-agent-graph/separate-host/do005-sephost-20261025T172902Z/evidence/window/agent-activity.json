@@ -1,0 +1,2292 @@
+{
+ "schema": "agent-activity/2",
+ "recorded_utc": "2026-10-26T01:06:36.830+00:00",
+ "source": "the agent session's own event log (tool.execution_start/complete, external_tool.requested/completed, system.notification, assistant.turn_start and assistant.message events); only tool names, timestamps and a short note were copied",
+ "source_file": "C:\\Users\\mahpate\\.copilot\\session-state\\7d6b23a0-e3e5-4941-8e92-56286ce55f36\\events.jsonl",
+ "source_bytes_used": 11241967,
+ "source_prefix_sha256": "87656001347a16b267a668974d7e3146adf4ce06d71948c59c7ab17c74144715",
+ "builder": {
+  "path": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\evidence\\window\\build_agent_activity.py",
+  "sha256": "ca421d4eaf9ccb476b9bff0f44294465f0c2f21377d3d7db57638c1c52a9a8b3"
+ },
+ "window": {
+  "from_utc": "2026-10-25T18:22:00.000+00:00",
+  "to_utc": "2026-10-26T01:02:10.000+00:00"
+ },
+ "semantics": {
+  "kind": "process = the tool starts an operating-system process (PowerShell, ripgrep); in_process = it runs inside the CLI process (file views and edits, SQL, waiting on a shell)",
+  "span": "interval = the process runs between start_utc and end_utc (synchronous commands); instants = only the start and end are treated as activity (calls that wait, and asynchronous launches)",
+  "exit_utc": "exit of an asynchronous shell, only where the runtime delivered a completion notification",
+  "model_turns": "from the start of a model request to the end of its last streamed message, per turn; includes network latency"
+ },
+ "counts": {
+  "calls": 205,
+  "by_tool": {
+   "powershell": 56,
+   "view": 55,
+   "edit": 48,
+   "grep": 20,
+   "read_powershell": 16,
+   "create": 4,
+   "get_sessions_status": 2,
+   "sql": 2,
+   "stop_powershell": 1,
+   "session_store_sql": 1
+  },
+  "by_kind": {
+   "process": 77,
+   "in_process": 128
+  },
+  "by_span": {
+   "interval": 48,
+   "instants": 157
+  },
+  "calls_without_completion_event": 0,
+  "model_turns": 148
+ },
+ "limitations": [
+  "Only tool-call boundaries and model-response intervals are recorded; the CPU used by the agent runtime, the desktop app (rendering, streaming) and the model client is not attributed to calls.",
+  "The process/in-process split is assumed from the tool name: powershell, grep, glob and stop_powershell are taken to start operating-system processes, all other tools to run inside the CLI process.",
+  "Asynchronous shells have an exit instant only where a completion notification exists.",
+  "Timestamps come from the CLI's event log on the same host clock as the monitor.",
+  "Activity of the user, other applications and other app sessions is not recorded here."
+ ],
+ "calls": [
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T18:21:34.757+00:00",
+   "end_utc": "2026-10-25T18:22:06.197+00:00",
+   "note": "Re-run runner self-test on final code [sync]",
+   "span": "interval"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T18:22:10.081+00:00",
+   "end_utc": "2026-10-25T18:22:11.313+00:00",
+   "note": "Regenerate runner hashes evidence [sync]",
+   "span": "interval"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T18:22:18.538+00:00",
+   "end_utc": "2026-10-25T18:22:18.598+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T18:22:18.560+00:00",
+   "end_utc": "2026-10-25T18:22:20.812+00:00",
+   "note": "Syntax check report and check for stray processes [sync]",
+   "span": "interval"
+  },
+  {
+   "tool": "get_sessions_status",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T18:22:27.970+00:00",
+   "end_utc": "2026-10-25T18:22:28.000+00:00",
+   "note": "",
+   "span": "instants"
+  },
+  {
+   "tool": "get_sessions_status",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T18:22:27.986+00:00",
+   "end_utc": "2026-10-25T18:22:27.990+00:00",
+   "note": "app tool",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T18:22:33.520+00:00",
+   "end_utc": "2026-10-25T18:22:34.562+00:00",
+   "note": "Get current UTC timestamp [sync]",
+   "span": "interval"
+  },
+  {
+   "tool": "create",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T18:22:40.853+00:00",
+   "end_utc": "2026-10-25T18:22:40.884+00:00",
+   "note": "sessions-pre.json",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T18:22:51.988+00:00",
+   "end_utc": "2026-10-25T18:22:53.300+00:00",
+   "note": "Check runner CLI defaults and clean-start conditions [sync]",
+   "span": "interval"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T18:23:00.822+00:00",
+   "end_utc": "2026-10-25T18:23:01.395+00:00",
+   "note": "Run the full DO-005 graph-off campaign [async]",
+   "span": "instants",
+   "exit_utc": "2026-10-26T01:02:07.564+00:00"
+  },
+  {
+   "tool": "read_powershell",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T18:23:03.464+00:00",
+   "end_utc": "2026-10-25T18:24:03.521+00:00",
+   "note": "shellId=campaign delay=60",
+   "span": "instants"
+  },
+  {
+   "tool": "read_powershell",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T18:24:08.312+00:00",
+   "end_utc": "2026-10-25T18:27:48.639+00:00",
+   "note": "shellId=campaign delay=300",
+   "span": "instants"
+  },
+  {
+   "tool": "read_powershell",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T18:27:52.673+00:00",
+   "end_utc": "2026-10-25T18:27:57.724+00:00",
+   "note": "shellId=campaign delay=5",
+   "span": "instants"
+  },
+  {
+   "tool": "read_powershell",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T18:33:03.260+00:00",
+   "end_utc": "2026-10-25T18:33:06.346+00:00",
+   "note": "shellId=campaign delay=3",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T18:33:03.279+00:00",
+   "end_utc": "2026-10-25T18:33:04.671+00:00",
+   "note": "Check campaign log and progress [sync]",
+   "span": "interval"
+  },
+  {
+   "tool": "read_powershell",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T18:33:59.790+00:00",
+   "end_utc": "2026-10-25T18:43:59.840+00:00",
+   "note": "shellId=campaign delay=600",
+   "span": "instants"
+  },
+  {
+   "tool": "read_powershell",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T18:44:03.325+00:00",
+   "end_utc": "2026-10-25T18:54:03.382+00:00",
+   "note": "shellId=campaign delay=600",
+   "span": "instants"
+  },
+  {
+   "tool": "read_powershell",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T18:54:37.820+00:00",
+   "end_utc": "2026-10-25T18:54:37.873+00:00",
+   "note": "shellId=campaign delay=1200",
+   "span": "instants"
+  },
+  {
+   "tool": "read_powershell",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T18:54:40.866+00:00",
+   "end_utc": "2026-10-25T19:04:40.915+00:00",
+   "note": "shellId=campaign delay=600",
+   "span": "instants"
+  },
+  {
+   "tool": "read_powershell",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T19:04:49.023+00:00",
+   "end_utc": "2026-10-25T19:14:49.081+00:00",
+   "note": "shellId=campaign delay=600",
+   "span": "instants"
+  },
+  {
+   "tool": "grep",
+   "kind": "process",
+   "start_utc": "2026-10-25T19:15:18.111+00:00",
+   "end_utc": "2026-10-25T19:15:18.270+00:00",
+   "note": "",
+   "span": "interval"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T19:15:21.705+00:00",
+   "end_utc": "2026-10-25T19:15:21.747+00:00",
+   "note": "do005_campaign.py",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T19:16:08.880+00:00",
+   "end_utc": "2026-10-25T19:25:30.014+00:00",
+   "note": "Wait ~9 min, then tail campaign log [sync]",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T19:25:38.016+00:00",
+   "end_utc": "2026-10-25T19:25:39.268+00:00",
+   "note": "Check current time and recent campaign log [sync]",
+   "span": "interval"
+  },
+  {
+   "tool": "grep",
+   "kind": "process",
+   "start_utc": "2026-10-25T19:25:45.278+00:00",
+   "end_utc": "2026-10-25T19:25:45.426+00:00",
+   "note": "",
+   "span": "interval"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T19:26:20.611+00:00",
+   "end_utc": "2026-10-25T19:35:21.686+00:00",
+   "note": "Wait ~9 min then tail campaign log [sync]",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T19:35:28.974+00:00",
+   "end_utc": "2026-10-25T19:44:50.067+00:00",
+   "note": "Wait ~9 min then tail campaign log [sync]",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T19:45:12.449+00:00",
+   "end_utc": "2026-10-25T19:54:53.657+00:00",
+   "note": "Wait ~10 min then tail campaign log [sync]",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T19:55:06.342+00:00",
+   "end_utc": "2026-10-25T20:04:57.436+00:00",
+   "note": "Wait ~10 min then tail campaign log [sync]",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T20:05:01.956+00:00",
+   "end_utc": "2026-10-25T21:27:00.925+00:00",
+   "note": "Wait ~10 min then tail campaign log [sync]",
+   "span": "instants"
+  },
+  {
+   "tool": "read_powershell",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T21:27:10.720+00:00",
+   "end_utc": "2026-10-25T21:27:41.308+00:00",
+   "note": "shellId=78 delay=20",
+   "span": "instants"
+  },
+  {
+   "tool": "read_powershell",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T21:27:45.804+00:00",
+   "end_utc": "2026-10-25T21:27:45.933+00:00",
+   "note": "shellId=78 delay=45",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T21:27:55.960+00:00",
+   "end_utc": "2026-10-25T21:27:59.539+00:00",
+   "note": "Check campaign state, boot time, and power events [sync]",
+   "span": "interval"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T21:28:36.665+00:00",
+   "end_utc": "2026-10-25T21:28:37.500+00:00",
+   "note": "Query Hyper-V, time, and power event logs [sync]",
+   "span": "interval"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T21:28:42.179+00:00",
+   "end_utc": "2026-10-25T21:28:46.520+00:00",
+   "note": "Query Hyper-V, time, and power event logs [sync]",
+   "span": "interval"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T21:29:50.492+00:00",
+   "end_utc": "2026-10-25T21:29:51.387+00:00",
+   "note": "Check user sessions, bench progress, power state [sync]",
+   "span": "interval"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T21:30:19.334+00:00",
+   "end_utc": "2026-10-25T21:30:20.111+00:00",
+   "note": "Read power plan hibernate timers [sync]",
+   "span": "interval"
+  },
+  {
+   "tool": "grep",
+   "kind": "process",
+   "start_utc": "2026-10-25T21:30:40.164+00:00",
+   "end_utc": "2026-10-25T21:30:40.530+00:00",
+   "note": "",
+   "span": "interval"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T21:30:44.234+00:00",
+   "end_utc": "2026-10-25T21:30:44.278+00:00",
+   "note": "do005_campaign.py",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T21:30:55.546+00:00",
+   "end_utc": "2026-10-25T21:30:56.211+00:00",
+   "note": "Wait for in-flight attempt to be logged [sync]",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T21:31:03.105+00:00",
+   "end_utc": "2026-10-25T21:33:03.785+00:00",
+   "note": "Wait for new campaign log line [sync]",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T21:33:41.237+00:00",
+   "end_utc": "2026-10-25T21:33:47.078+00:00",
+   "note": "Query RDP session and power events [sync]",
+   "span": "interval"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T21:34:07.783+00:00",
+   "end_utc": "2026-10-25T21:34:08.886+00:00",
+   "note": "Inspect the freeze-affected run record [sync]",
+   "span": "interval"
+  },
+  {
+   "tool": "create",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T21:34:47.057+00:00",
+   "end_utc": "2026-10-25T21:34:47.110+00:00",
+   "note": "incident-vm-freeze.json",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T21:35:02.864+00:00",
+   "end_utc": "2026-10-25T21:35:03.572+00:00",
+   "note": "Calibrate time-continuity tolerances on records [sync]",
+   "span": "interval"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T21:35:22.673+00:00",
+   "end_utc": "2026-10-25T21:35:22.754+00:00",
+   "note": "incident-vm-freeze.json",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T21:35:22.692+00:00",
+   "end_utc": "2026-10-25T21:35:22.797+00:00",
+   "note": "incident-vm-freeze.json",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T21:35:22.710+00:00",
+   "end_utc": "2026-10-25T21:35:22.837+00:00",
+   "note": "incident-vm-freeze.json",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T21:35:31.089+00:00",
+   "end_utc": "2026-10-25T21:38:21.898+00:00",
+   "note": "Wait 7 min, tail log, check user session [sync]",
+   "span": "instants"
+  },
+  {
+   "tool": "grep",
+   "kind": "process",
+   "start_utc": "2026-10-25T21:38:33.473+00:00",
+   "end_utc": "2026-10-25T21:38:33.702+00:00",
+   "note": "",
+   "span": "interval"
+  },
+  {
+   "tool": "grep",
+   "kind": "process",
+   "start_utc": "2026-10-25T21:38:33.494+00:00",
+   "end_utc": "2026-10-25T21:38:33.734+00:00",
+   "note": "",
+   "span": "interval"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T21:38:33.519+00:00",
+   "end_utc": "2026-10-25T21:38:33.566+00:00",
+   "note": "campaign.log",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T21:39:08.468+00:00",
+   "end_utc": "2026-10-25T21:43:39.050+00:00",
+   "note": "Wait ~4.5 min then tail campaign log [sync]",
+   "span": "instants"
+  },
+  {
+   "tool": "read_powershell",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T21:43:39.365+00:00",
+   "end_utc": "2026-10-25T21:43:39.374+00:00",
+   "note": "shellId=89 delay=0",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T21:43:46.694+00:00",
+   "end_utc": "2026-10-25T21:50:07.296+00:00",
+   "note": "Wait ~6 min then tail campaign log [sync]",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T21:50:19.913+00:00",
+   "end_utc": "2026-10-25T21:58:20.505+00:00",
+   "note": "Wait 8 min then tail campaign log [sync]",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T21:58:24.790+00:00",
+   "end_utc": "2026-10-25T22:05:05.445+00:00",
+   "note": "Wait ~7 min then tail campaign log [sync]",
+   "span": "instants"
+  },
+  {
+   "tool": "grep",
+   "kind": "process",
+   "start_utc": "2026-10-25T22:05:09.924+00:00",
+   "end_utc": "2026-10-25T22:05:10.088+00:00",
+   "note": "",
+   "span": "interval"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T22:05:35.047+00:00",
+   "end_utc": "2026-10-25T22:15:20.869+00:00",
+   "note": "Wait ~10 min then tail campaign log [sync]",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T22:15:34.050+00:00",
+   "end_utc": "2026-10-25T22:15:34.940+00:00",
+   "note": "Summarize top CPU contributors for HNSW runs [sync]",
+   "span": "interval"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T22:15:39.385+00:00",
+   "end_utc": "2026-10-25T22:15:40.102+00:00",
+   "note": "Show contributor field names and top processes [sync]",
+   "span": "interval"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T22:16:06.421+00:00",
+   "end_utc": "2026-10-25T22:25:53.975+00:00",
+   "note": "Wait ~10 min then tail campaign log [sync]",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:26:00.695+00:00",
+   "end_utc": "2026-10-25T22:26:00.783+00:00",
+   "note": "campaign.log",
+   "span": "instants"
+  },
+  {
+   "tool": "grep",
+   "kind": "process",
+   "start_utc": "2026-10-25T22:26:00.714+00:00",
+   "end_utc": "2026-10-25T22:26:00.908+00:00",
+   "note": "",
+   "span": "interval"
+  },
+  {
+   "tool": "grep",
+   "kind": "process",
+   "start_utc": "2026-10-25T22:26:00.729+00:00",
+   "end_utc": "2026-10-25T22:26:00.936+00:00",
+   "note": "",
+   "span": "interval"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T22:26:10.077+00:00",
+   "end_utc": "2026-10-25T22:26:11.103+00:00",
+   "note": "Check time, bench process, session, log tail [sync]",
+   "span": "interval"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T22:26:26.052+00:00",
+   "end_utc": "2026-10-25T22:35:26.691+00:00",
+   "note": "Wait ~9 min then tail campaign log [sync]",
+   "span": "instants"
+  },
+  {
+   "tool": "read_powershell",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:35:27.156+00:00",
+   "end_utc": "2026-10-25T22:35:27.165+00:00",
+   "note": "shellId=97 delay=0",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T22:36:03.064+00:00",
+   "end_utc": "2026-10-25T22:41:33.788+00:00",
+   "note": "Wait ~5.5 min then tail campaign log [sync]",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T22:41:41.043+00:00",
+   "end_utc": "2026-10-25T22:51:31.690+00:00",
+   "note": "Wait ~10 min then tail campaign log [sync]",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T22:51:37.854+00:00",
+   "end_utc": "2026-10-25T22:56:08.441+00:00",
+   "note": "Wait ~4.5 min then tail campaign log [sync]",
+   "span": "instants"
+  },
+  {
+   "tool": "grep",
+   "kind": "process",
+   "start_utc": "2026-10-25T22:56:18.807+00:00",
+   "end_utc": "2026-10-25T22:56:19.003+00:00",
+   "note": "",
+   "span": "interval"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:56:21.643+00:00",
+   "end_utc": "2026-10-25T22:56:21.700+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:56:21.660+00:00",
+   "end_utc": "2026-10-25T22:56:21.732+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:56:25.463+00:00",
+   "end_utc": "2026-10-25T22:56:25.507+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "grep",
+   "kind": "process",
+   "start_utc": "2026-10-25T22:56:42.251+00:00",
+   "end_utc": "2026-10-25T22:56:42.343+00:00",
+   "note": "",
+   "span": "interval"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:56:51.264+00:00",
+   "end_utc": "2026-10-25T22:56:51.307+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:56:55.060+00:00",
+   "end_utc": "2026-10-25T22:56:55.114+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:57:21.965+00:00",
+   "end_utc": "2026-10-25T22:57:22.006+00:00",
+   "note": "incident-vm-freeze.json",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:57:49.361+00:00",
+   "end_utc": "2026-10-25T22:57:49.419+00:00",
+   "note": "do005_campaign.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:57:49.379+00:00",
+   "end_utc": "2026-10-25T22:57:49.446+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:57:59.479+00:00",
+   "end_utc": "2026-10-25T22:57:59.519+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:58:12.351+00:00",
+   "end_utc": "2026-10-25T22:58:12.449+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:58:12.368+00:00",
+   "end_utc": "2026-10-25T22:58:12.480+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:58:12.384+00:00",
+   "end_utc": "2026-10-25T22:58:12.511+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:58:21.134+00:00",
+   "end_utc": "2026-10-25T22:58:21.210+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:58:21.150+00:00",
+   "end_utc": "2026-10-25T22:58:21.248+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:58:21.165+00:00",
+   "end_utc": "2026-10-25T22:58:21.280+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:58:27.636+00:00",
+   "end_utc": "2026-10-25T22:58:27.680+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "grep",
+   "kind": "process",
+   "start_utc": "2026-10-25T22:58:30.720+00:00",
+   "end_utc": "2026-10-25T22:58:30.807+00:00",
+   "note": "",
+   "span": "interval"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:58:34.328+00:00",
+   "end_utc": "2026-10-25T22:58:34.380+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:58:42.093+00:00",
+   "end_utc": "2026-10-25T22:58:42.183+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:58:42.113+00:00",
+   "end_utc": "2026-10-25T22:58:42.213+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:58:42.131+00:00",
+   "end_utc": "2026-10-25T22:58:42.241+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:58:52.851+00:00",
+   "end_utc": "2026-10-25T22:58:52.948+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:58:52.867+00:00",
+   "end_utc": "2026-10-25T22:58:52.982+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:58:52.881+00:00",
+   "end_utc": "2026-10-25T22:58:53.013+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:58:52.895+00:00",
+   "end_utc": "2026-10-25T22:58:53.045+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:58:57.238+00:00",
+   "end_utc": "2026-10-25T22:58:57.274+00:00",
+   "note": "campaign.log",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:58:59.376+00:00",
+   "end_utc": "2026-10-25T22:58:59.413+00:00",
+   "note": "campaign.log",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:59:07.310+00:00",
+   "end_utc": "2026-10-25T22:59:07.359+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:59:17.755+00:00",
+   "end_utc": "2026-10-25T22:59:17.800+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:59:35.412+00:00",
+   "end_utc": "2026-10-25T22:59:35.498+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:59:35.432+00:00",
+   "end_utc": "2026-10-25T22:59:35.532+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:59:35.449+00:00",
+   "end_utc": "2026-10-25T22:59:35.564+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T22:59:42.801+00:00",
+   "end_utc": "2026-10-25T22:59:42.849+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "grep",
+   "kind": "process",
+   "start_utc": "2026-10-25T22:59:56.884+00:00",
+   "end_utc": "2026-10-25T22:59:57.022+00:00",
+   "note": "",
+   "span": "interval"
+  },
+  {
+   "tool": "grep",
+   "kind": "process",
+   "start_utc": "2026-10-25T23:00:00.748+00:00",
+   "end_utc": "2026-10-25T23:00:00.867+00:00",
+   "note": "",
+   "span": "interval"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:00:08.108+00:00",
+   "end_utc": "2026-10-25T23:00:08.155+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:00:22.428+00:00",
+   "end_utc": "2026-10-25T23:00:22.505+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:00:22.445+00:00",
+   "end_utc": "2026-10-25T23:00:22.534+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:00:22.459+00:00",
+   "end_utc": "2026-10-25T23:00:22.561+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:00:28.048+00:00",
+   "end_utc": "2026-10-25T23:00:28.083+00:00",
+   "note": "campaign.log",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T23:00:32.124+00:00",
+   "end_utc": "2026-10-25T23:02:32.803+00:00",
+   "note": "Wait 2 min then tail campaign log [sync]",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T23:02:37.112+00:00",
+   "end_utc": "2026-10-25T23:07:22.908+00:00",
+   "note": "Wait ~5 min then tail campaign log [sync]",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T23:07:39.024+00:00",
+   "end_utc": "2026-10-25T23:07:39.708+00:00",
+   "note": "Syntax-check the report generator only [sync]",
+   "span": "interval"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T23:07:44.887+00:00",
+   "end_utc": "2026-10-25T23:17:35.496+00:00",
+   "note": "Wait ~10 min then tail campaign log [sync]",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T23:17:40.844+00:00",
+   "end_utc": "2026-10-25T23:20:51.535+00:00",
+   "note": "Wait ~3 min then tail campaign log [sync]",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T23:21:13.597+00:00",
+   "end_utc": "2026-10-25T23:25:44.193+00:00",
+   "note": "Wait ~4.5 min then tail campaign log [sync]",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T23:25:50.311+00:00",
+   "end_utc": "2026-10-25T23:25:50.967+00:00",
+   "note": "Locate >30% background samples in HNSW runs [sync]",
+   "span": "interval"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T23:25:56.527+00:00",
+   "end_utc": "2026-10-25T23:25:57.222+00:00",
+   "note": "Locate >30% background samples in HNSW runs [sync]",
+   "span": "interval"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T23:26:05.041+00:00",
+   "end_utc": "2026-10-25T23:26:05.759+00:00",
+   "note": "Summarise >40% background samples per HNSW attempt [sync]",
+   "span": "interval"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:26:49.186+00:00",
+   "end_utc": "2026-10-25T23:26:49.255+00:00",
+   "note": "do005_campaign.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:26:49.215+00:00",
+   "end_utc": "2026-10-25T23:26:49.285+00:00",
+   "note": "do005_campaign.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:26:54.592+00:00",
+   "end_utc": "2026-10-25T23:26:54.638+00:00",
+   "note": "do005_campaign.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:26:57.715+00:00",
+   "end_utc": "2026-10-25T23:26:57.763+00:00",
+   "note": "do005_campaign.py",
+   "span": "instants"
+  },
+  {
+   "tool": "grep",
+   "kind": "process",
+   "start_utc": "2026-10-25T23:26:57.728+00:00",
+   "end_utc": "2026-10-25T23:26:57.886+00:00",
+   "note": "",
+   "span": "interval"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:26:59.828+00:00",
+   "end_utc": "2026-10-25T23:26:59.870+00:00",
+   "note": "do005_campaign.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:27:20.932+00:00",
+   "end_utc": "2026-10-25T23:27:20.981+00:00",
+   "note": "do005_campaign.py",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T23:27:25.224+00:00",
+   "end_utc": "2026-10-25T23:27:25.883+00:00",
+   "note": "Check campaign process and log tail [sync]",
+   "span": "interval"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T23:27:29.381+00:00",
+   "end_utc": "2026-10-25T23:30:26.202+00:00",
+   "note": "Wait for rep 4 hist HNSW attempt [sync]",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T23:30:31.460+00:00",
+   "end_utc": "2026-10-25T23:30:32.145+00:00",
+   "note": "Check current time, process, log tail [sync]",
+   "span": "interval"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T23:30:31.478+00:00",
+   "end_utc": "2026-10-25T23:30:32.216+00:00",
+   "note": "Summarise slot progress read-only [sync]",
+   "span": "interval"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T23:31:30.396+00:00",
+   "end_utc": "2026-10-25T23:31:30.476+00:00",
+   "note": "Wait for rep 4 hist HNSW result [async]",
+   "span": "instants"
+  },
+  {
+   "tool": "read_powershell",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:37:31.329+00:00",
+   "end_utc": "2026-10-25T23:37:31.336+00:00",
+   "note": "shellId=113 delay=0",
+   "span": "instants"
+  },
+  {
+   "tool": "stop_powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T23:38:43.954+00:00",
+   "end_utc": "2026-10-25T23:38:44.115+00:00",
+   "note": "shellId=poll-r4hist",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T23:38:43.973+00:00",
+   "end_utc": "2026-10-25T23:38:44.183+00:00",
+   "note": "Wait for rep 4 cur HNSW attempt 2 result [async]",
+   "span": "instants",
+   "exit_utc": "2026-10-25T23:52:35.617+00:00"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:38:43.989+00:00",
+   "end_utc": "2026-10-25T23:38:44.067+00:00",
+   "note": "incident-vm-freeze.json",
+   "span": "instants"
+  },
+  {
+   "tool": "grep",
+   "kind": "process",
+   "start_utc": "2026-10-25T23:38:44.008+00:00",
+   "end_utc": "2026-10-25T23:38:44.148+00:00",
+   "note": "",
+   "span": "interval"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:38:48.892+00:00",
+   "end_utc": "2026-10-25T23:38:48.953+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:38:48.910+00:00",
+   "end_utc": "2026-10-25T23:38:48.988+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:39:01.841+00:00",
+   "end_utc": "2026-10-25T23:39:01.890+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:39:11.763+00:00",
+   "end_utc": "2026-10-25T23:39:11.807+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:39:26.946+00:00",
+   "end_utc": "2026-10-25T23:39:27.051+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:39:26.963+00:00",
+   "end_utc": "2026-10-25T23:39:27.083+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:39:26.981+00:00",
+   "end_utc": "2026-10-25T23:39:27.119+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T23:39:26.998+00:00",
+   "end_utc": "2026-10-25T23:39:27.716+00:00",
+   "note": "Check incident file timestamps [sync]",
+   "span": "interval"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:39:54.463+00:00",
+   "end_utc": "2026-10-25T23:39:54.513+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "grep",
+   "kind": "process",
+   "start_utc": "2026-10-25T23:40:03.383+00:00",
+   "end_utc": "2026-10-25T23:40:03.540+00:00",
+   "note": "",
+   "span": "interval"
+  },
+  {
+   "tool": "grep",
+   "kind": "process",
+   "start_utc": "2026-10-25T23:40:03.400+00:00",
+   "end_utc": "2026-10-25T23:40:03.502+00:00",
+   "note": "",
+   "span": "interval"
+  },
+  {
+   "tool": "grep",
+   "kind": "process",
+   "start_utc": "2026-10-25T23:40:08.617+00:00",
+   "end_utc": "2026-10-25T23:40:08.705+00:00",
+   "note": "",
+   "span": "interval"
+  },
+  {
+   "tool": "grep",
+   "kind": "process",
+   "start_utc": "2026-10-25T23:40:20.221+00:00",
+   "end_utc": "2026-10-25T23:40:20.360+00:00",
+   "note": "",
+   "span": "interval"
+  },
+  {
+   "tool": "grep",
+   "kind": "process",
+   "start_utc": "2026-10-25T23:40:20.238+00:00",
+   "end_utc": "2026-10-25T23:40:20.331+00:00",
+   "note": "",
+   "span": "interval"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:40:53.985+00:00",
+   "end_utc": "2026-10-25T23:40:54.141+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:40:54.005+00:00",
+   "end_utc": "2026-10-25T23:40:54.172+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:40:54.026+00:00",
+   "end_utc": "2026-10-25T23:40:54.207+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:40:54.049+00:00",
+   "end_utc": "2026-10-25T23:40:54.252+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:40:54.066+00:00",
+   "end_utc": "2026-10-25T23:40:54.293+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:40:54.083+00:00",
+   "end_utc": "2026-10-25T23:40:54.329+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:40:59.556+00:00",
+   "end_utc": "2026-10-25T23:40:59.631+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T23:40:59.573+00:00",
+   "end_utc": "2026-10-25T23:41:00.256+00:00",
+   "note": "Syntax-check report generator, log tail [sync]",
+   "span": "interval"
+  },
+  {
+   "tool": "powershell",
+   "kind": "process",
+   "start_utc": "2026-10-25T23:41:25.964+00:00",
+   "end_utc": "2026-10-25T23:41:26.610+00:00",
+   "note": "Inspect last record's burst offsets (read-only) [sync]",
+   "span": "interval"
+  },
+  {
+   "tool": "create",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:42:55.455+00:00",
+   "end_utc": "2026-10-25T23:42:55.498+00:00",
+   "note": "operator-activity-notes.md",
+   "span": "instants"
+  },
+  {
+   "tool": "read_powershell",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:52:35.635+00:00",
+   "end_utc": "2026-10-25T23:52:35.642+00:00",
+   "note": "shellId=poll-r4cur-a2 delay=0",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:54:19.296+00:00",
+   "end_utc": "2026-10-25T23:54:19.370+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:54:19.316+00:00",
+   "end_utc": "2026-10-25T23:54:19.410+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:54:24.455+00:00",
+   "end_utc": "2026-10-25T23:54:24.529+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:54:24.480+00:00",
+   "end_utc": "2026-10-25T23:54:24.573+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:54:29.221+00:00",
+   "end_utc": "2026-10-25T23:54:29.295+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:54:29.244+00:00",
+   "end_utc": "2026-10-25T23:54:29.331+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:55:14.250+00:00",
+   "end_utc": "2026-10-25T23:55:14.313+00:00",
+   "note": "7d6b23a0-e3e5-4941-8e92-56286ce55f36",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:55:14.268+00:00",
+   "end_utc": "2026-10-25T23:55:14.344+00:00",
+   "note": "do005_campaign.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:57:53.009+00:00",
+   "end_utc": "2026-10-25T23:57:53.098+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:57:53.026+00:00",
+   "end_utc": "2026-10-25T23:57:53.135+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:57:53.041+00:00",
+   "end_utc": "2026-10-25T23:57:53.174+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:58:08.881+00:00",
+   "end_utc": "2026-10-25T23:58:08.929+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:58:21.149+00:00",
+   "end_utc": "2026-10-25T23:58:21.296+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:58:21.170+00:00",
+   "end_utc": "2026-10-25T23:58:21.334+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:58:21.187+00:00",
+   "end_utc": "2026-10-25T23:58:21.377+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:58:21.203+00:00",
+   "end_utc": "2026-10-25T23:58:21.414+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:58:21.222+00:00",
+   "end_utc": "2026-10-25T23:58:21.458+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:58:49.024+00:00",
+   "end_utc": "2026-10-25T23:58:49.104+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:58:49.048+00:00",
+   "end_utc": "2026-10-25T23:58:49.145+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:58:54.401+00:00",
+   "end_utc": "2026-10-25T23:58:54.442+00:00",
+   "note": "do005-sephost-20261025T172902Z",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:59:30.401+00:00",
+   "end_utc": "2026-10-25T23:59:30.447+00:00",
+   "note": "do005_campaign.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:59:42.673+00:00",
+   "end_utc": "2026-10-25T23:59:42.741+00:00",
+   "note": "campaign.log",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:59:42.693+00:00",
+   "end_utc": "2026-10-25T23:59:42.784+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:59:47.849+00:00",
+   "end_utc": "2026-10-25T23:59:47.903+00:00",
+   "note": "campaign.log",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-25T23:59:59.240+00:00",
+   "end_utc": "2026-10-25T23:59:59.286+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-26T00:00:09.690+00:00",
+   "end_utc": "2026-10-26T00:00:09.739+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-26T00:00:12.645+00:00",
+   "end_utc": "2026-10-26T00:00:12.695+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-26T00:00:18.441+00:00",
+   "end_utc": "2026-10-26T00:00:18.496+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-26T00:00:21.642+00:00",
+   "end_utc": "2026-10-26T00:00:21.693+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-26T00:00:27.340+00:00",
+   "end_utc": "2026-10-26T00:00:27.391+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-26T00:00:32.824+00:00",
+   "end_utc": "2026-10-26T00:00:32.875+00:00",
+   "note": "do005_report.py",
+   "span": "instants"
+  },
+  {
+   "tool": "sql",
+   "kind": "in_process",
+   "start_utc": "2026-10-26T00:00:49.304+00:00",
+   "end_utc": "2026-10-26T00:00:49.366+00:00",
+   "note": "Current UTC time",
+   "span": "instants"
+  },
+  {
+   "tool": "session_store_sql",
+   "kind": "in_process",
+   "start_utc": "2026-10-26T00:01:05.824+00:00",
+   "end_utc": "2026-10-26T00:01:06.901+00:00",
+   "note": "Probe tool execution records",
+   "span": "instants"
+  },
+  {
+   "tool": "create",
+   "kind": "in_process",
+   "start_utc": "2026-10-26T00:02:52.907+00:00",
+   "end_utc": "2026-10-26T00:02:52.976+00:00",
+   "note": "crosscheck.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-26T00:02:59.476+00:00",
+   "end_utc": "2026-10-26T00:02:59.629+00:00",
+   "note": "crosscheck.py",
+   "span": "instants"
+  },
+  {
+   "tool": "edit",
+   "kind": "in_process",
+   "start_utc": "2026-10-26T00:02:59.498+00:00",
+   "end_utc": "2026-10-26T00:02:59.667+00:00",
+   "note": "crosscheck.py",
+   "span": "instants"
+  },
+  {
+   "tool": "sql",
+   "kind": "in_process",
+   "start_utc": "2026-10-26T00:02:59.520+00:00",
+   "end_utc": "2026-10-26T00:02:59.581+00:00",
+   "note": "Current UTC time",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-26T00:03:02.916+00:00",
+   "end_utc": "2026-10-26T00:03:02.969+00:00",
+   "note": "campaign.log",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-26T00:03:26.514+00:00",
+   "end_utc": "2026-10-26T00:03:26.587+00:00",
+   "note": "events.jsonl",
+   "span": "instants"
+  },
+  {
+   "tool": "view",
+   "kind": "in_process",
+   "start_utc": "2026-10-26T00:03:32.062+00:00",
+   "end_utc": "2026-10-26T00:03:32.126+00:00",
+   "note": "events.jsonl",
+   "span": "instants"
+  },
+  {
+   "tool": "read_powershell",
+   "kind": "in_process",
+   "start_utc": "2026-10-26T01:02:07.580+00:00",
+   "end_utc": "2026-10-26T01:02:07.587+00:00",
+   "note": "shellId=campaign delay=0",
+   "span": "instants"
+  }
+ ],
+ "model_turns": [
+  {
+   "start_utc": "2026-10-25T18:22:06.409+00:00",
+   "end_utc": "2026-10-25T18:22:10.049+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T18:22:11.575+00:00",
+   "end_utc": "2026-10-25T18:22:18.509+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T18:22:21.036+00:00",
+   "end_utc": "2026-10-25T18:22:27.932+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T18:22:28.226+00:00",
+   "end_utc": "2026-10-25T18:22:33.487+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T18:22:34.761+00:00",
+   "end_utc": "2026-10-25T18:22:40.830+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T18:22:41.155+00:00",
+   "end_utc": "2026-10-25T18:22:51.954+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T18:22:53.560+00:00",
+   "end_utc": "2026-10-25T18:23:00.782+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T18:23:01.691+00:00",
+   "end_utc": "2026-10-25T18:23:03.436+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T18:24:03.774+00:00",
+   "end_utc": "2026-10-25T18:24:08.272+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T18:27:48.860+00:00",
+   "end_utc": "2026-10-25T18:27:52.644+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T18:27:57.960+00:00",
+   "end_utc": "2026-10-25T18:28:05.900+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T18:32:57.076+00:00",
+   "end_utc": "2026-10-25T18:33:03.208+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T18:33:06.591+00:00",
+   "end_utc": "2026-10-25T18:33:59.766+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T18:44:00.073+00:00",
+   "end_utc": "2026-10-25T18:44:03.293+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T18:54:03.635+00:00",
+   "end_utc": "2026-10-25T18:54:37.789+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T18:54:38.111+00:00",
+   "end_utc": "2026-10-25T18:54:40.844+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T19:04:41.163+00:00",
+   "end_utc": "2026-10-25T19:04:48.993+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T19:14:49.315+00:00",
+   "end_utc": "2026-10-25T19:15:18.075+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T19:15:18.501+00:00",
+   "end_utc": "2026-10-25T19:15:21.673+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T19:15:21.954+00:00",
+   "end_utc": "2026-10-25T19:16:08.844+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T19:25:30.244+00:00",
+   "end_utc": "2026-10-25T19:25:37.983+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T19:25:39.504+00:00",
+   "end_utc": "2026-10-25T19:25:45.245+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T19:25:45.612+00:00",
+   "end_utc": "2026-10-25T19:26:20.573+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T19:35:21.898+00:00",
+   "end_utc": "2026-10-25T19:35:28.936+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T19:44:50.323+00:00",
+   "end_utc": "2026-10-25T19:45:12.417+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T19:54:53.848+00:00",
+   "end_utc": "2026-10-25T19:55:06.304+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T20:04:57.652+00:00",
+   "end_utc": "2026-10-25T20:05:01.927+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T21:27:05.086+00:00",
+   "end_utc": "2026-10-25T21:27:10.600+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T21:27:41.692+00:00",
+   "end_utc": "2026-10-25T21:27:45.561+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T21:27:46.487+00:00",
+   "end_utc": "2026-10-25T21:27:55.891+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T21:27:59.816+00:00",
+   "end_utc": "2026-10-25T21:28:36.633+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T21:28:37.755+00:00",
+   "end_utc": "2026-10-25T21:28:42.133+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T21:28:46.774+00:00",
+   "end_utc": "2026-10-25T21:29:50.458+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T21:29:51.645+00:00",
+   "end_utc": "2026-10-25T21:30:19.304+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T21:30:20.348+00:00",
+   "end_utc": "2026-10-25T21:30:40.117+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T21:30:40.776+00:00",
+   "end_utc": "2026-10-25T21:30:44.207+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T21:30:44.512+00:00",
+   "end_utc": "2026-10-25T21:30:55.512+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T21:30:56.470+00:00",
+   "end_utc": "2026-10-25T21:31:03.072+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T21:33:04.056+00:00",
+   "end_utc": "2026-10-25T21:33:41.203+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T21:33:47.316+00:00",
+   "end_utc": "2026-10-25T21:34:07.745+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T21:34:09.117+00:00",
+   "end_utc": "2026-10-25T21:34:47.026+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T21:34:47.384+00:00",
+   "end_utc": "2026-10-25T21:35:02.828+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T21:35:03.799+00:00",
+   "end_utc": "2026-10-25T21:35:22.644+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T21:35:23.132+00:00",
+   "end_utc": "2026-10-25T21:35:31.054+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T21:38:22.122+00:00",
+   "end_utc": "2026-10-25T21:38:33.441+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T21:38:33.973+00:00",
+   "end_utc": "2026-10-25T21:39:08.434+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T21:43:39.309+00:00",
+   "end_utc": "2026-10-25T21:43:46.648+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T21:50:07.523+00:00",
+   "end_utc": "2026-10-25T21:50:19.872+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T21:58:20.778+00:00",
+   "end_utc": "2026-10-25T21:58:24.759+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:05:05.692+00:00",
+   "end_utc": "2026-10-25T22:05:09.894+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:05:10.320+00:00",
+   "end_utc": "2026-10-25T22:05:35.017+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:15:21.137+00:00",
+   "end_utc": "2026-10-25T22:15:34.021+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:15:35.170+00:00",
+   "end_utc": "2026-10-25T22:15:39.352+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:15:40.304+00:00",
+   "end_utc": "2026-10-25T22:16:06.392+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:25:54.187+00:00",
+   "end_utc": "2026-10-25T22:26:00.664+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:26:01.229+00:00",
+   "end_utc": "2026-10-25T22:26:10.042+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:26:11.326+00:00",
+   "end_utc": "2026-10-25T22:26:26.016+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:35:26.943+00:00",
+   "end_utc": "2026-10-25T22:36:03.028+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:41:34.009+00:00",
+   "end_utc": "2026-10-25T22:41:41.004+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:51:31.944+00:00",
+   "end_utc": "2026-10-25T22:51:37.823+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:56:08.682+00:00",
+   "end_utc": "2026-10-25T22:56:18.775+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:56:19.266+00:00",
+   "end_utc": "2026-10-25T22:56:21.621+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:56:21.977+00:00",
+   "end_utc": "2026-10-25T22:56:25.423+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:56:25.771+00:00",
+   "end_utc": "2026-10-25T22:56:42.214+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:56:42.621+00:00",
+   "end_utc": "2026-10-25T22:56:51.232+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:56:51.591+00:00",
+   "end_utc": "2026-10-25T22:56:55.024+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:56:55.485+00:00",
+   "end_utc": "2026-10-25T22:57:21.929+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:57:22.249+00:00",
+   "end_utc": "2026-10-25T22:57:49.318+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:57:49.702+00:00",
+   "end_utc": "2026-10-25T22:57:59.434+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:57:59.754+00:00",
+   "end_utc": "2026-10-25T22:58:12.316+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:58:12.804+00:00",
+   "end_utc": "2026-10-25T22:58:21.105+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:58:21.565+00:00",
+   "end_utc": "2026-10-25T22:58:27.606+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:58:27.949+00:00",
+   "end_utc": "2026-10-25T22:58:30.678+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:58:31.043+00:00",
+   "end_utc": "2026-10-25T22:58:34.290+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:58:34.707+00:00",
+   "end_utc": "2026-10-25T22:58:42.051+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:58:42.510+00:00",
+   "end_utc": "2026-10-25T22:58:52.816+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:58:53.337+00:00",
+   "end_utc": "2026-10-25T22:58:57.208+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:58:57.540+00:00",
+   "end_utc": "2026-10-25T22:58:59.354+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:58:59.647+00:00",
+   "end_utc": "2026-10-25T22:59:07.279+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:59:07.646+00:00",
+   "end_utc": "2026-10-25T22:59:17.724+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:59:18.088+00:00",
+   "end_utc": "2026-10-25T22:59:35.380+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:59:35.856+00:00",
+   "end_utc": "2026-10-25T22:59:42.765+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:59:43.122+00:00",
+   "end_utc": "2026-10-25T22:59:56.853+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T22:59:57.255+00:00",
+   "end_utc": "2026-10-25T23:00:00.717+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:00:01.108+00:00",
+   "end_utc": "2026-10-25T23:00:08.073+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:00:08.455+00:00",
+   "end_utc": "2026-10-25T23:00:22.395+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:00:22.831+00:00",
+   "end_utc": "2026-10-25T23:00:28.016+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:00:28.322+00:00",
+   "end_utc": "2026-10-25T23:00:32.090+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:02:33.104+00:00",
+   "end_utc": "2026-10-25T23:02:37.075+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:07:23.147+00:00",
+   "end_utc": "2026-10-25T23:07:38.990+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:07:39.969+00:00",
+   "end_utc": "2026-10-25T23:07:44.857+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:17:35.766+00:00",
+   "end_utc": "2026-10-25T23:17:40.821+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:20:51.780+00:00",
+   "end_utc": "2026-10-25T23:21:13.567+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:25:44.457+00:00",
+   "end_utc": "2026-10-25T23:25:50.282+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:25:51.209+00:00",
+   "end_utc": "2026-10-25T23:25:56.493+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:25:57.454+00:00",
+   "end_utc": "2026-10-25T23:26:05.010+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:26:06.015+00:00",
+   "end_utc": "2026-10-25T23:26:49.143+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:26:49.511+00:00",
+   "end_utc": "2026-10-25T23:26:54.558+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:26:54.975+00:00",
+   "end_utc": "2026-10-25T23:26:57.690+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:26:58.107+00:00",
+   "end_utc": "2026-10-25T23:26:59.803+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:27:00.099+00:00",
+   "end_utc": "2026-10-25T23:27:20.902+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:27:21.242+00:00",
+   "end_utc": "2026-10-25T23:27:25.192+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:27:26.130+00:00",
+   "end_utc": "2026-10-25T23:27:29.350+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:30:26.453+00:00",
+   "end_utc": "2026-10-25T23:30:31.430+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:30:32.454+00:00",
+   "end_utc": "2026-10-25T23:31:30.357+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:31:30.730+00:00",
+   "end_utc": "2026-10-25T23:31:32.137+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:37:31.394+00:00",
+   "end_utc": "2026-10-25T23:38:43.919+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:38:44.464+00:00",
+   "end_utc": "2026-10-25T23:38:48.859+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:38:49.230+00:00",
+   "end_utc": "2026-10-25T23:39:01.802+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:39:02.153+00:00",
+   "end_utc": "2026-10-25T23:39:11.729+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:39:12.061+00:00",
+   "end_utc": "2026-10-25T23:39:26.907+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:39:27.941+00:00",
+   "end_utc": "2026-10-25T23:39:54.415+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:39:54.799+00:00",
+   "end_utc": "2026-10-25T23:40:03.354+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:40:03.821+00:00",
+   "end_utc": "2026-10-25T23:40:08.574+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:40:08.954+00:00",
+   "end_utc": "2026-10-25T23:40:20.186+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:40:20.602+00:00",
+   "end_utc": "2026-10-25T23:40:53.950+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:40:54.610+00:00",
+   "end_utc": "2026-10-25T23:40:59.516+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:41:00.500+00:00",
+   "end_utc": "2026-10-25T23:41:25.926+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:41:26.835+00:00",
+   "end_utc": "2026-10-25T23:42:55.423+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:42:55.782+00:00",
+   "end_utc": "2026-10-25T23:42:59.324+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:52:35.698+00:00",
+   "end_utc": "2026-10-25T23:54:19.251+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:54:19.707+00:00",
+   "end_utc": "2026-10-25T23:54:24.414+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:54:24.867+00:00",
+   "end_utc": "2026-10-25T23:54:29.171+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:54:29.603+00:00",
+   "end_utc": "2026-10-25T23:55:14.213+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:55:14.572+00:00",
+   "end_utc": "2026-10-25T23:57:52.973+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:57:53.504+00:00",
+   "end_utc": "2026-10-25T23:58:08.848+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:58:09.230+00:00",
+   "end_utc": "2026-10-25T23:58:21.120+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:58:21.717+00:00",
+   "end_utc": "2026-10-25T23:58:48.982+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:58:49.479+00:00",
+   "end_utc": "2026-10-25T23:58:54.368+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:58:54.717+00:00",
+   "end_utc": "2026-10-25T23:59:30.367+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:59:30.728+00:00",
+   "end_utc": "2026-10-25T23:59:42.640+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:59:43.034+00:00",
+   "end_utc": "2026-10-25T23:59:47.817+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:59:48.170+00:00",
+   "end_utc": "2026-10-25T23:59:59.201+00:00"
+  },
+  {
+   "start_utc": "2026-10-25T23:59:59.559+00:00",
+   "end_utc": "2026-10-26T00:00:09.653+00:00"
+  },
+  {
+   "start_utc": "2026-10-26T00:00:10.041+00:00",
+   "end_utc": "2026-10-26T00:00:12.608+00:00"
+  },
+  {
+   "start_utc": "2026-10-26T00:00:12.948+00:00",
+   "end_utc": "2026-10-26T00:00:18.398+00:00"
+  },
+  {
+   "start_utc": "2026-10-26T00:00:18.820+00:00",
+   "end_utc": "2026-10-26T00:00:21.608+00:00"
+  },
+  {
+   "start_utc": "2026-10-26T00:00:21.957+00:00",
+   "end_utc": "2026-10-26T00:00:27.296+00:00"
+  },
+  {
+   "start_utc": "2026-10-26T00:00:27.685+00:00",
+   "end_utc": "2026-10-26T00:00:32.783+00:00"
+  },
+  {
+   "start_utc": "2026-10-26T00:00:33.151+00:00",
+   "end_utc": "2026-10-26T00:00:49.264+00:00"
+  },
+  {
+   "start_utc": "2026-10-26T00:00:49.720+00:00",
+   "end_utc": "2026-10-26T00:01:05.788+00:00"
+  },
+  {
+   "start_utc": "2026-10-26T00:01:07.140+00:00",
+   "end_utc": "2026-10-26T00:02:52.857+00:00"
+  },
+  {
+   "start_utc": "2026-10-26T00:02:53.432+00:00",
+   "end_utc": "2026-10-26T00:02:59.440+00:00"
+  },
+  {
+   "start_utc": "2026-10-26T00:03:00.016+00:00",
+   "end_utc": "2026-10-26T00:03:02.882+00:00"
+  },
+  {
+   "start_utc": "2026-10-26T00:03:03.205+00:00",
+   "end_utc": "2026-10-26T00:03:26.485+00:00"
+  },
+  {
+   "start_utc": "2026-10-26T00:03:26.857+00:00",
+   "end_utc": "2026-10-26T00:03:32.011+00:00"
+  },
+  {
+   "start_utc": "2026-10-26T00:03:32.424+00:00",
+   "end_utc": "2026-10-26T00:04:12.202+00:00"
+  },
+  {
+   "start_utc": "2026-10-26T01:02:07.645+00:00",
+   "end_utc": "2026-10-26T01:02:14.189+00:00"
+  }
+ ]
+}

@@ -1,0 +1,8 @@
+{
+  "cpu_is_xeon_8370c": false,
+  "logical_cpus_16": true,
+  "ram_bytes_equal_reference": false,
+  "os_version_10.0.26300": true,
+  "volume_Q_ReFS": true,
+  "disk_msft_virtual_sas": true
+}

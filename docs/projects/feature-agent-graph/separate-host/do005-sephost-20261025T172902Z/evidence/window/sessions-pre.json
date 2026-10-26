@@ -1,0 +1,19 @@
+{
+  "taken_utc": "2026-10-25T18:22:34+00:00",
+  "source": "get_sessions_status of the GitHub Copilot app, called immediately before the pre-window gate; the snapshot is taken a few seconds before taken_utc",
+  "this_session": {
+    "id": "7d6b23a0-e3e5-4941-8e92-56286ce55f36",
+    "name": "Alwasy checkout new repo on q drive of t",
+    "role": "runs the campaign; it only waits on the campaign process (long, sparse polls) while measurements run"
+  },
+  "other_sessions_total": 5,
+  "other_sessions_busy": 0,
+  "other_sessions": [
+    {"id": "ceea2a2c-ade4-4ba0-8342-884789220c4b", "name": "[REDACTED other session name 1]", "status": "idle", "is_running": false},
+    {"id": "5d91cbed-5f8e-47bc-8125-7458223ae50f", "name": "[REDACTED other session name 2]", "status": "idle", "is_running": false},
+    {"id": "42a98dbb-a780-4467-ba4c-a1839e96409e", "name": "[REDACTED other session name 3]", "status": "idle", "is_running": false},
+    {"id": "1e9ccfb7-bdcb-4064-b049-7950d2683ed6", "name": "[REDACTED other session name 4]", "status": "idle", "is_running": false},
+    {"id": "1b480411-7f8a-4f48-8982-b08a90054e7f", "name": "[REDACTED other session name 5]", "status": "idle", "is_running": false}
+  ],
+  "note": "all other app sessions idle, none awaiting input or plan approval. The app itself, other desktop applications and the user's own activity cannot be controlled and are counted as background CPU by the monitor"
+}

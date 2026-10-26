@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "title": "Guest freeze (whole-machine pause) during rep 2 hnsw_100k_384 hist attempt 1",
+  "recorded_utc": "2026-10-25T21:36:00Z",
+  "how_detected": "A sparse Start-Sleep poll scheduled for 590 s at about 20:05Z printed 21:27:35Z when it returned (about 82 minutes later); the campaign log had no new line since 20:04:47Z; the in-flight vlite-bench process held 502 s of CPU time at 21:27:56Z although it had started at 20:04:57Z.",
+  "affected_record": {
+    "tag": "main",
+    "repetition": 2,
+    "workload": "hnsw_100k_384",
+    "label": "hist",
+    "attempt": 1,
+    "started_utc": "2026-10-25T20:04:47.246Z",
+    "finished_utc": "2026-10-25T21:32:49.567Z",
+    "elapsed_seconds_recorded": 5272.25,
+    "typical_elapsed_seconds_for_this_workload": "759-802",
+    "monitor_samples": 1584,
+    "longest_monitor_sample_seconds": 4464.955,
+    "longest_sample_system_cpu_seconds": 13.90625,
+    "longest_sample_benchmark_cpu_seconds": 0.015625,
+    "highest_background_samples_after_resume": "10.25, 10.23 and 8.70 background CPU-seconds in about 0.55 s each (116.2%, 113.7% and 99.6% of 16 logical CPUs); two other post-resume samples lasted 2.39 s and 0.87 s with 31.3 and 12.0 system CPU-seconds",
+    "monitor_verdict": "rejected: mean 2.24% (diluted by the 4,465 s sample), worst sample 116.22% (limit 50%)",
+    "campaign_effect": "counts as attempt 1 of 3 for the rep 2 hist hnsw_100k_384 slot"
+  },
+  "guest_timeline_utc": {
+    "last_ordinary_guest_events": [
+      {"utc": "2026-10-25T20:09:55.589Z", "source": "AppModel-Runtime/Admin", "id": 39, "note": "periodic LpacSenseNdr AppContainer create (5 min cadence)"},
+      {"utc": "2026-10-25T20:11:33.886Z", "source": "Time-Service/Operational", "id": 261, "note": "W32time set system time; previous time equal to new time; system tick count 736521406"},
+      {"utc": "2026-10-25T20:12:10.996Z", "source": "Time-Service/Operational", "id": 266, "note": "resynchronize notification, reason 2; system tick count 736558515"}
+    ],
+    "estimated_freeze_start_utc": "about 2026-10-25T20:12:25Z (first resumed monitor sample spans 4,464.955 s and ends with the first post-resume events at 21:26:50Z)",
+    "first_post_resume_events": [
+      {"utc": "2026-10-25T21:26:50.103Z", "source": "Hyper-V-Guest-Drivers/Admin", "id": 102, "note": "dynamic memory driver negotiated protocol version 2.0"},
+      {"utc": "2026-10-25T21:26:50.503Z", "source": "Kernel-Boot/Operational", "id": 82, "note": "SipaInsertTcgLog trace point"},
+      {"utc": "2026-10-25T21:26:58.757Z", "source": "Time-Service/Operational", "id": 266, "note": "resynchronize notification, reason 1; system tick count 741046265"},
+      {"utc": "2026-10-25T21:26:59.869Z", "source": "AppModel-Runtime/Admin", "id": 210, "note": "desktop app container created for MSTeams (interactive session apps starting)"},
+      {"utc": "2026-10-25T21:27:12.831Z", "source": "Time-Service/Operational", "id": 264, "note": "NTP client receiving time data from time.windows.com"}
+    ],
+    "tick_count_delta_ms": 4487750,
+    "wall_clock_delta_between_the_two_time_service_events_s": 4487.761,
+    "frozen_interval_minutes_about": 74.4
+  },
+  "findings": [
+    "The guest did not execute for about 74 minutes in the middle of the measured run; the monitor's own clock (perf_counter) and GetTickCount64 both advanced across the gap, so wall-clock elapsed time and every in-process Instant timer that spans the gap are inflated.",
+    "The guest event logs contain no Kernel-Power, Power-Troubleshooter, Kernel-General or Terminal Services entries for the previous six hours, so the mechanism is not recorded inside the guest. The last event before and the first events after the gap are consistent with a platform-level pause or hibernate followed by a resume (dynamic-memory driver renegotiation and Kernel-Boot trace points at the resume instant). The host name prefix CPC- is consistent with a managed cloud PC, but that is an inference, not a recorded fact.",
+    "The LastBootUpTime is unchanged (2026-10-17T07:36:10.5Z), so this was not a reboot.",
+    "The active power plan is High performance with Hibernate after = 0 (never) on AC and DC; Hibernate and Fast Startup are the only available sleep states. An in-guest idle timer is therefore not the cause.",
+    "At 2026-10-25T21:29:50Z quser showed the interactive session mahpate (rdp-sxs..., logon 2026-10-17 8:10 PM local) in state Active with zero idle time; the interactive user was present after the resume. Teams and Office host processes were started in that session at 21:26:59Z and 21:28:22Z.",
+    "The unchanged CPU policy rejected this attempt only because of the post-resume burst (peak 116.22%); its mean (2.24%) was diluted to far below the 10% limit by the single 4,465 s sample. A freeze that ended quietly would not have been rejected by the policy, so the report adds a stalled-sample check to every run.",
+    "Wall-clock span minus (preflight wait + monitor elapsed) was at most 0.05 s for all 47 records, including this one, so a wall-clock versus perf_counter comparison cannot detect such a freeze; sample length can. Across the other 46 records the longest monitor sample was 2.04 s (rep 2 hnsw_100k_384 cur attempt 2, itself rejected) and every other sample was at most 0.54 s."
+  ],
+  "handling": [
+    "The attempt stays in runs.jsonl as rejected and is excluded from all statistics; it counts toward the 3-attempt cap of its slot like any other rejected attempt.",
+    "No threshold was changed. The campaign continues with the unchanged frozen runner; the runner is not modified.",
+    "The report generator (which is not part of the frozen runner) applies one additional quality rule to every run, in both directions: an accepted run is quarantined when any monitor sample lasted longer than 5 s (10 times the 0.5 s nominal). A quarantined run is listed with its reason and excluded from statistics; this makes the check stricter, never looser, than the original policy."
+  ]
+}

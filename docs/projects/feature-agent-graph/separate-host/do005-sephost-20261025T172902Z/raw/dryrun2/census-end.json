@@ -1,0 +1,30 @@
+{
+  "taken_utc": "2026-10-25T18:06:18.914+00:00",
+  "process_count": 423,
+  "own_pid": 42176,
+  "watched_processes": {
+    "CcmExec.exe": 1,
+    "MoUsoCoreWorker.exe": 1,
+    "OneDrive.exe": 1,
+    "SearchHost.exe": 1,
+    "SearchIndexer.exe": 1,
+    "TiWorker.exe": 1,
+    "TrustedInstaller.exe": 1,
+    "copilot-language-server.exe": 1,
+    "copilot-runtime.exe": 3,
+    "copilot.exe": 1,
+    "copilotapp.exe": 9,
+    "copilotapphost.exe": 1,
+    "devenv.exe": 1,
+    "git.exe": 5,
+    "msedge.exe": 15,
+    "node.exe": 6,
+    "python.exe": 15,
+    "vmmemWSL": 1,
+    "wsl.exe": 2,
+    "wslhost.exe": 3,
+    "wslservice.exe": 1
+  },
+  "distinct_images": 143,
+  "blocking_processes": {}
+}

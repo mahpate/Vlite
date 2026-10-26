@@ -1,0 +1,42 @@
+{
+  "pinned_utc": "2026-10-25T17:37:09.436+00:00",
+  "historical": {
+    "requested": "81ff901",
+    "sha": "81ff901c54d674d1ad519dd4fa722e937db46c4b",
+    "subject": "Restore feature comparisons and comparative benchmarks",
+    "tree": "da11989ef426f7f41835616300670e7b60928b9a",
+    "committer_date": "2026-10-23T15:27:09-07:00"
+  },
+  "current": {
+    "requested": "origin/main",
+    "sha": "c024dcea72f1479e2114254e6d6388dcb5657315",
+    "subject": "FOLLOWUP-001: add source-only opt-in graph CLI",
+    "tree": "96a35ceb7fa211dc78c6839ceb2a20fe49940b8a",
+    "committer_date": "2026-10-25T10:28:36-07:00"
+  },
+  "git_ls_remote_origin_main": "c024dcea72f1479e2114254e6d6388dcb5657315",
+  "git_fetch": {
+    "command": [
+      "git",
+      "-C",
+      "Q:\\vlite",
+      "fetch",
+      "origin",
+      "main"
+    ],
+    "returncode": 0,
+    "stdout": "",
+    "stderr": "From https://github.com/mahpate/Vlite\n * branch            main       -> FETCH_HEAD"
+  },
+  "clone": "Q:\\vlite",
+  "clone_origin": "https://github.com/mahpate/Vlite.git",
+  "git_version": "git version 2.56.0.windows.2",
+  "superseded_earlier_fetch": {
+    "sha": "41cb396b0bc5a4ee6383924ddff4fb14ab1ff7ba",
+    "note": "origin/main as first fetched when the campaign directory was created; the remote advanced to the pinned head before any archive or build existed, so the pin was taken again. Nothing was measured at the superseded revision."
+  },
+  "ancestor_check": {
+    "historical_is_ancestor_of_current": true,
+    "commits_between": 43
+  }
+}

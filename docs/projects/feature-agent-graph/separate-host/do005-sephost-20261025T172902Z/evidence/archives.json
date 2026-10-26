@@ -1,0 +1,80 @@
+{
+  "hist": {
+    "label": "hist",
+    "sha": "81ff901c54d674d1ad519dd4fa722e937db46c4b",
+    "tree": "da11989ef426f7f41835616300670e7b60928b9a",
+    "directory": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\src\\hist",
+    "tar": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\src\\hist-81ff901c54d6.tar",
+    "tar_bytes": 7833600,
+    "tar_sha256": "0d37e63881eb3f56d2279267775c465b77454a0c9ad62f2e5ee4122da0f3b48f",
+    "embedded_commit_id": "81ff901c54d674d1ad519dd4fa722e937db46c4b",
+    "files": 344,
+    "git_blob_sha1_verified_files": 344,
+    "archive_command": [
+      "git",
+      "-c",
+      "core.autocrlf=false",
+      "-c",
+      "core.eol=lf",
+      "archive",
+      "--format=tar",
+      "-o",
+      "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\src\\hist-81ff901c54d6.tar",
+      "81ff901c54d674d1ad519dd4fa722e937db46c4b"
+    ],
+    "source_rollup_sha256": "380d0472d8edac3860eeb754d809832e8392759149e5e0600ef85fbf371f65ab",
+    "manifest": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\evidence\\source-manifest-hist.json",
+    "manifest_sha256": "75457908583fc501e997a381b3aa52654059f6bbbf80acc6ff58b10d4c451798",
+    "longest_extracted_path_chars": 119,
+    "has_dot_git": false,
+    "key_files_sha256": {
+      "Cargo.toml": "9ae2ffee4d87866c9a58a9c6c2b79a7e01c73d4b6ad4a8a3db94743911ee926d",
+      "Cargo.lock": "8e03d1f89bbb36bfbaee198d3059be0c314f2c6bd820b562aa85ac754c55a62b",
+      "src/bin/vlite-bench.rs": "1df0ed1fb42c5325db738bc9830ed19ca7b37ed13c9e6ff593152428900c1921",
+      "scripts/graph_baseline.py": null,
+      "scripts/graph_reference.py": null,
+      "scripts/graph_compat_check.py": null,
+      "tests/measure_benchmark.py": "e49afae2cb22d1181f0fa5801f8e4937cc25c9e8e968ff88220c37724c2f0541",
+      "tests/graph_build_boundary.py": null
+    }
+  },
+  "cur": {
+    "label": "cur",
+    "sha": "c024dcea72f1479e2114254e6d6388dcb5657315",
+    "tree": "96a35ceb7fa211dc78c6839ceb2a20fe49940b8a",
+    "directory": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\src\\cur",
+    "tar": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\src\\cur-c024dcea72f1.tar",
+    "tar_bytes": 19435520,
+    "tar_sha256": "72a394b41374900373c84b11229e263ee31a48bde5b2404a40a747fbcd26c13c",
+    "embedded_commit_id": "c024dcea72f1479e2114254e6d6388dcb5657315",
+    "files": 556,
+    "git_blob_sha1_verified_files": 556,
+    "archive_command": [
+      "git",
+      "-c",
+      "core.autocrlf=false",
+      "-c",
+      "core.eol=lf",
+      "archive",
+      "--format=tar",
+      "-o",
+      "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\src\\cur-c024dcea72f1.tar",
+      "c024dcea72f1479e2114254e6d6388dcb5657315"
+    ],
+    "source_rollup_sha256": "1f6de2a7e78a135a45ae27e2799ad08479a26da03a39b4942d09908d55688c0d",
+    "manifest": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\evidence\\source-manifest-cur.json",
+    "manifest_sha256": "97af23c6ef3e822034aecf52bf8ce785c1d64bad3610be1d19b412962ef0504e",
+    "longest_extracted_path_chars": 132,
+    "has_dot_git": false,
+    "key_files_sha256": {
+      "Cargo.toml": "c9790c6850a6d3c14b4fd988ee36b5a8ab428f770e65582d8a9638aa155f0aa5",
+      "Cargo.lock": "1113081bed08d6e7618250fb3d2ffb4cbda19a741e41081fa2e377e5dd725369",
+      "src/bin/vlite-bench.rs": "1df0ed1fb42c5325db738bc9830ed19ca7b37ed13c9e6ff593152428900c1921",
+      "scripts/graph_baseline.py": "5fd4944ef31063b82dfe81a8f2a4ae1476a4ec79c8593caff5925de04e7c12c4",
+      "scripts/graph_reference.py": "c520e0b759c16d6ce741ee91a0ff71120acb011c970b534ec49e62462d83ee5e",
+      "scripts/graph_compat_check.py": "e59ef77debc77e00f3033757e0def3eceed4dd952c25161b7a52a79f27efbe55",
+      "tests/measure_benchmark.py": "e49afae2cb22d1181f0fa5801f8e4937cc25c9e8e968ff88220c37724c2f0541",
+      "tests/graph_build_boundary.py": "c5f323147826161ed57362b2c93925f8d17a7dffb2d0ad6bdda67e81031a16ee"
+    }
+  }
+}

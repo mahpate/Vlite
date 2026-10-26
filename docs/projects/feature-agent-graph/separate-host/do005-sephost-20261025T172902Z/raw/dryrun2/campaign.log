@@ -1,0 +1,17 @@
+[2026-10-25T18:04:23.689+00:00] campaign start tag=dryrun2 workloads=['exact_small', 'exact_100k_384'] reps=1 gate_tries=3 gate_survey_seconds=20 existing_records=0 pid=42176 monitor_sha256=c520e0b759c16d6c
+[2026-10-25T18:04:44.514+00:00] survey pre-1: 20s mean 6.88% worst 22.26% quiet=True samples>10%=27.5% probes quiet 3/4; top: GlobalSecureAccessClient.exe 1.16%, msedgewebview2.exe 0.85%, MsMpEng.exe 0.74%, System 0.54%, svchost.exe 0.51%
+[2026-10-25T18:04:44.515+00:00] pre-window gate passed; starting measurements
+[2026-10-25T18:04:54.590+00:00] rep 1 exact_small        cur  attempt 1/15: rejected elapsed      0.03s background mean 12.14% max 0.00% contaminated: background CPU mean 12.14% (limit 10%), worst sample 0.00% (limit 50%)
+[2026-10-25T18:04:59.657+00:00] rep 1 exact_small        cur  attempt 2/15: rejected elapsed      0.03s background mean 10.59% max 0.00% contaminated: background CPU mean 10.59% (limit 10%), worst sample 0.00% (limit 50%)
+[2026-10-25T18:05:04.727+00:00] rep 1 exact_small        cur  attempt 3/15: rejected elapsed      0.03s background mean 10.70% max 0.00% contaminated: background CPU mean 10.70% (limit 10%), worst sample 0.00% (limit 50%)
+[2026-10-25T18:05:09.805+00:00] rep 1 exact_small        cur  attempt 4/15: rejected elapsed      0.03s background mean 25.59% max 0.00% contaminated: background CPU mean 25.59% (limit 10%), worst sample 0.00% (limit 50%)
+[2026-10-25T18:05:14.872+00:00] rep 1 exact_small        cur  attempt 5/15: rejected elapsed      0.03s background mean 12.97% max 0.00% contaminated: background CPU mean 12.97% (limit 10%), worst sample 0.00% (limit 50%)
+[2026-10-25T18:05:19.947+00:00] rep 1 exact_small        cur  attempt 6/15: rejected elapsed      0.04s background mean 27.82% max 0.00% contaminated: background CPU mean 27.82% (limit 10%), worst sample 0.00% (limit 50%)
+[2026-10-25T18:05:25.015+00:00] rep 1 exact_small        cur  attempt 7/15: accepted elapsed      0.03s background mean 3.47% max 0.00% 
+[2026-10-25T18:05:30.084+00:00] rep 1 exact_small        hist attempt 1/15: rejected elapsed      0.03s background mean 12.38% max 0.00% contaminated: background CPU mean 12.38% (limit 10%), worst sample 0.00% (limit 50%)
+[2026-10-25T18:05:35.149+00:00] rep 1 exact_small        hist attempt 2/15: accepted elapsed      0.03s background mean 7.19% max 0.00% 
+[2026-10-25T18:05:44.058+00:00] rep 1 exact_100k_384     hist attempt 1/8: accepted elapsed      3.87s background mean 4.72% max 8.55% 
+[2026-10-25T18:05:51.100+00:00] rep 1 exact_100k_384     cur  attempt 1/8: rejected elapsed      2.00s background mean 13.51% max 15.46% contaminated: background CPU mean 13.51% (limit 10%), worst sample 15.46% (limit 50%)
+[2026-10-25T18:05:58.110+00:00] rep 1 exact_100k_384     cur  attempt 2/8: accepted elapsed      1.97s background mean 5.30% max 5.84% 
+[2026-10-25T18:05:58.112+00:00] campaign loop finished; per workload {'exact_small': {'accepted_slots': 2, 'exhausted_slots': 0}, 'exact_100k_384': {'accepted_slots': 2, 'exhausted_slots': 0}}
+[2026-10-25T18:06:18.163+00:00] survey post: 20s mean 5.17% worst 17.36% quiet=True samples>10%=15.0% probes quiet 4/4; top: msedgewebview2.exe 1.07%, GlobalSecureAccessClient.exe 0.74%, System 0.55%, vmmemWSL 0.39%, MsMpEng.exe 0.33%

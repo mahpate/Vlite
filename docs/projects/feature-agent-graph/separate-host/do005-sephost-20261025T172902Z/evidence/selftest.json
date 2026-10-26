@@ -1,0 +1,453 @@
+{
+  "started_utc": "2026-10-25T18:21:35.920+00:00",
+  "wiring": {
+    "graph_baseline_measure_imports_cpu_monitor": false,
+    "measure_benchmark_samples_cpu": false,
+    "measure_benchmark_records_peak_working_set_only": true,
+    "campaign_runs_benchmarks_only_through_monitor_run_process": true,
+    "monitor_module": "Q:\\vlite-campaign\\do005-sephost-20261025T172902Z\\src\\cur\\scripts\\graph_reference.py",
+    "monitor_sha256": "c520e0b759c16d6ce741ee91a0ff71120acb011c970b534ec49e62462d83ee5e",
+    "policy_constants": {
+      "MAX_BACKGROUND_MEAN": 0.1,
+      "MAX_BACKGROUND_SAMPLE": 0.5,
+      "SAMPLE_SECONDS": 0.5,
+      "IDLE_SECONDS": 5,
+      "PROBE_ATTEMPTS": 12
+    },
+    "monitor_main_identity_gate_not_used": "the pinned main() requires the Xeon 8370C reference machine and refuses elsewhere; its functions are reused instead"
+  },
+  "logical_cpus": 16,
+  "policy_unit_tests": {
+    "mean_just_below_limit": {
+      "mean": 0.099,
+      "peak": 0.099,
+      "quiet": true,
+      "expected_quiet": true,
+      "ok": true
+    },
+    "mean_just_above_limit": {
+      "mean": 0.101,
+      "peak": 0.101,
+      "quiet": false,
+      "expected_quiet": false,
+      "ok": true
+    },
+    "sample_just_below_limit": {
+      "mean": 0.059975609756097566,
+      "peak": 0.499,
+      "quiet": true,
+      "expected_quiet": true,
+      "ok": true
+    },
+    "sample_just_above_limit_with_low_mean": {
+      "mean": 0.060024390243902444,
+      "peak": 0.501,
+      "quiet": false,
+      "expected_quiet": false,
+      "ok": true
+    },
+    "sample_shorter_than_0.1s_is_not_counted_for_peak": {
+      "mean": 0.05236907730673317,
+      "peak": 0.05,
+      "quiet": true,
+      "expected_quiet": true,
+      "ok": true
+    },
+    "sample_of_0.1s_is_counted_for_peak": {
+      "mean": 0.054228855721393035,
+      "peak": 0.9,
+      "quiet": false,
+      "expected_quiet": false,
+      "ok": true
+    },
+    "ok": true
+  },
+  "contamination": {
+    "control_attempts": [
+      {
+        "sleeper_seconds": 8,
+        "spinner_processes": 0,
+        "spinner_seconds": 0.0,
+        "spinner_start_delay_seconds": 0.0,
+        "elapsed_seconds": 8.053677199990489,
+        "mean": 0.06936095950265839,
+        "peak": 0.1928242106513378,
+        "quiet": true,
+        "recomputed": {
+          "mean": 0.06936095950265839,
+          "peak": 0.1928242106513378,
+          "quiet": true,
+          "samples": 16,
+          "samples_counted_for_peak": 16,
+          "peak_check_vacuous": false,
+          "elapsed_seconds": 8.053431699983776
+        },
+        "recomputation_agrees": true,
+        "samples": [
+          {
+            "elapsed_seconds": 0.5214593999553472,
+            "system_cpu_seconds": 0.8125,
+            "benchmark_cpu_seconds": 0.03125,
+            "background_cpu_seconds": 0.78125
+          },
+          {
+            "elapsed_seconds": 0.5090375000145286,
+            "system_cpu_seconds": 0.28125,
+            "benchmark_cpu_seconds": 0.0,
+            "background_cpu_seconds": 0.28125
+          },
+          {
+            "elapsed_seconds": 0.5005671000108123,
+            "system_cpu_seconds": 0.34375,
+            "benchmark_cpu_seconds": 0.0,
+            "background_cpu_seconds": 0.34375
+          },
+          {
+            "elapsed_seconds": 0.5147056999849156,
+            "system_cpu_seconds": 0.328125,
+            "benchmark_cpu_seconds": 0.0,
+            "background_cpu_seconds": 0.328125
+          },
+          {
+            "elapsed_seconds": 0.5124081999529153,
+            "system_cpu_seconds": 0.265625,
+            "benchmark_cpu_seconds": 0.0,
+            "background_cpu_seconds": 0.265625
+          },
+          {
+            "elapsed_seconds": 0.5070914999814704,
+            "system_cpu_seconds": 0.171875,
+            "benchmark_cpu_seconds": 0.0,
+            "background_cpu_seconds": 0.171875
+          },
+          {
+            "elapsed_seconds": 0.5015751000028104,
+            "system_cpu_seconds": 0.453125,
+            "benchmark_cpu_seconds": 0.0,
+            "background_cpu_seconds": 0.453125
+          },
+          {
+            "elapsed_seconds": 0.5143414000049233,
+            "system_cpu_seconds": 0.234375,
+            "benchmark_cpu_seconds": 0.0,
+            "background_cpu_seconds": 0.234375
+          },
+          {
+            "elapsed_seconds": 0.5131693000439554,
+            "system_cpu_seconds": 0.28125,
+            "benchmark_cpu_seconds": 0.0,
+            "background_cpu_seconds": 0.28125
+          },
+          {
+            "elapsed_seconds": 0.5022438999731094,
+            "system_cpu_seconds": 0.3125,
+            "benchmark_cpu_seconds": 0.0,
+            "background_cpu_seconds": 0.3125
+          },
+          {
+            "elapsed_seconds": 0.503084999974817,
+            "system_cpu_seconds": 0.4375,
+            "benchmark_cpu_seconds": 0.0,
+            "background_cpu_seconds": 0.4375
+          },
+          {
+            "elapsed_seconds": 0.5128131000092253,
+            "system_cpu_seconds": 0.453125,
+            "benchmark_cpu_seconds": 0.0,
+            "background_cpu_seconds": 0.453125
+          },
+          {
+            "elapsed_seconds": 0.5155493000056595,
+            "system_cpu_seconds": 1.09375,
+            "benchmark_cpu_seconds": 0.0,
+            "background_cpu_seconds": 1.09375
+          },
+          {
+            "elapsed_seconds": 0.5026279999874532,
+            "system_cpu_seconds": 1.140625,
+            "benchmark_cpu_seconds": 0.0,
+            "background_cpu_seconds": 1.140625
+          },
+          {
+            "elapsed_seconds": 0.5013877000892535,
+            "system_cpu_seconds": 1.546875,
+            "benchmark_cpu_seconds": 0.0,
+            "background_cpu_seconds": 1.546875
+          },
+          {
+            "elapsed_seconds": 0.4213694999925792,
+            "system_cpu_seconds": 0.8125,
+            "benchmark_cpu_seconds": 0.0,
+            "background_cpu_seconds": 0.8125
+          }
+        ]
+      }
+    ],
+    "acceptance_demonstrated": true,
+    "mean_violation": {
+      "sleeper_seconds": 4,
+      "spinner_processes": 4,
+      "spinner_seconds": 4.0,
+      "spinner_start_delay_seconds": 0.0,
+      "elapsed_seconds": 4.063596799969673,
+      "mean": 0.294414713187307,
+      "peak": 0.3346785459311324,
+      "quiet": false,
+      "recomputed": {
+        "mean": 0.294414713187307,
+        "peak": 0.3346785459311324,
+        "quiet": false,
+        "samples": 8,
+        "samples_counted_for_peak": 8,
+        "peak_check_vacuous": false,
+        "elapsed_seconds": 4.063278799992986
+      },
+      "recomputation_agrees": true,
+      "samples": [
+        {
+          "elapsed_seconds": 0.5222570999758318,
+          "system_cpu_seconds": 2.546875,
+          "benchmark_cpu_seconds": 0.03125,
+          "background_cpu_seconds": 2.515625
+        },
+        {
+          "elapsed_seconds": 0.5006855999818072,
+          "system_cpu_seconds": 2.421875,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 2.421875
+        },
+        {
+          "elapsed_seconds": 0.51647040003445,
+          "system_cpu_seconds": 2.765625,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 2.765625
+        },
+        {
+          "elapsed_seconds": 0.5003736999351531,
+          "system_cpu_seconds": 2.25,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 2.25
+        },
+        {
+          "elapsed_seconds": 0.5095647000707686,
+          "system_cpu_seconds": 2.3125,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 2.3125
+        },
+        {
+          "elapsed_seconds": 0.5070515999104828,
+          "system_cpu_seconds": 2.359375,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 2.359375
+        },
+        {
+          "elapsed_seconds": 0.5001826999941841,
+          "system_cpu_seconds": 2.1875,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 2.1875
+        },
+        {
+          "elapsed_seconds": 0.5066930000903085,
+          "system_cpu_seconds": 2.34375,
+          "benchmark_cpu_seconds": 0.015625,
+          "background_cpu_seconds": 2.328125
+        }
+      ]
+    },
+    "peak_violation": {
+      "sleeper_seconds": 14,
+      "spinner_processes": 9,
+      "spinner_seconds": 1.2,
+      "spinner_start_delay_seconds": 4.0,
+      "elapsed_seconds": 14.054486899985932,
+      "mean": 0.1484199366970848,
+      "peak": 0.8332791206279834,
+      "quiet": false,
+      "recomputed": {
+        "mean": 0.1484199366970848,
+        "peak": 0.8332791206279834,
+        "quiet": false,
+        "samples": 28,
+        "samples_counted_for_peak": 28,
+        "peak_check_vacuous": false,
+        "elapsed_seconds": 14.054294499917887
+      },
+      "recomputation_agrees": true,
+      "samples": [
+        {
+          "elapsed_seconds": 0.5207218999275938,
+          "system_cpu_seconds": 1.796875,
+          "benchmark_cpu_seconds": 0.046875,
+          "background_cpu_seconds": 1.75
+        },
+        {
+          "elapsed_seconds": 0.5058322000550106,
+          "system_cpu_seconds": 1.0,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 1.0
+        },
+        {
+          "elapsed_seconds": 0.5011444999836385,
+          "system_cpu_seconds": 0.5,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 0.5
+        },
+        {
+          "elapsed_seconds": 0.5108913000440225,
+          "system_cpu_seconds": 0.3125,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 0.3125
+        },
+        {
+          "elapsed_seconds": 0.5151045999955386,
+          "system_cpu_seconds": 0.359375,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 0.359375
+        },
+        {
+          "elapsed_seconds": 0.5081430999562144,
+          "system_cpu_seconds": 0.1875,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 0.1875
+        },
+        {
+          "elapsed_seconds": 0.5002047000452876,
+          "system_cpu_seconds": 0.265625,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 0.265625
+        },
+        {
+          "elapsed_seconds": 0.5131832999177277,
+          "system_cpu_seconds": 0.734375,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 0.734375
+        },
+        {
+          "elapsed_seconds": 0.5191744000185281,
+          "system_cpu_seconds": 6.921875,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 6.921875
+        },
+        {
+          "elapsed_seconds": 0.5496995000867173,
+          "system_cpu_seconds": 6.0625,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 6.0625
+        },
+        {
+          "elapsed_seconds": 0.5129823999013752,
+          "system_cpu_seconds": 2.953125,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 2.953125
+        },
+        {
+          "elapsed_seconds": 0.5037660000380129,
+          "system_cpu_seconds": 0.890625,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 0.890625
+        },
+        {
+          "elapsed_seconds": 0.5023575000232086,
+          "system_cpu_seconds": 0.28125,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 0.28125
+        },
+        {
+          "elapsed_seconds": 0.5136541000101715,
+          "system_cpu_seconds": 0.78125,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 0.78125
+        },
+        {
+          "elapsed_seconds": 0.5027216000016779,
+          "system_cpu_seconds": 0.75,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 0.75
+        },
+        {
+          "elapsed_seconds": 0.5003940999740735,
+          "system_cpu_seconds": 0.78125,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 0.78125
+        },
+        {
+          "elapsed_seconds": 0.5137697999598458,
+          "system_cpu_seconds": 0.65625,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 0.65625
+        },
+        {
+          "elapsed_seconds": 0.5017941000405699,
+          "system_cpu_seconds": 0.296875,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 0.296875
+        },
+        {
+          "elapsed_seconds": 0.5139811999397352,
+          "system_cpu_seconds": 2.15625,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 2.15625
+        },
+        {
+          "elapsed_seconds": 0.5138012000825256,
+          "system_cpu_seconds": 1.46875,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 1.46875
+        },
+        {
+          "elapsed_seconds": 0.5042604999616742,
+          "system_cpu_seconds": 1.125,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 1.125
+        },
+        {
+          "elapsed_seconds": 0.5171015000669286,
+          "system_cpu_seconds": 1.0625,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 1.0625
+        },
+        {
+          "elapsed_seconds": 0.5115741998888552,
+          "system_cpu_seconds": 0.359375,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 0.359375
+        },
+        {
+          "elapsed_seconds": 0.5143622000468895,
+          "system_cpu_seconds": 0.484375,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 0.484375
+        },
+        {
+          "elapsed_seconds": 0.5060054999776185,
+          "system_cpu_seconds": 0.21875,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 0.21875
+        },
+        {
+          "elapsed_seconds": 0.500822399975732,
+          "system_cpu_seconds": 0.46875,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 0.46875
+        },
+        {
+          "elapsed_seconds": 0.5091773000312969,
+          "system_cpu_seconds": 0.453125,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 0.453125
+        },
+        {
+          "elapsed_seconds": 0.2676693999674171,
+          "system_cpu_seconds": 0.09375,
+          "benchmark_cpu_seconds": 0.0,
+          "background_cpu_seconds": 0.09375
+        }
+      ],
+      "peak_rule_triggered": true,
+      "note": "9 busy processes (about 56 % of 16 CPUs) for 1.2 s inside a 14 s run; on a host whose own floor is near the mean limit the mean rule may also trigger, so the peak-only boundary is proven by the synthetic unit tests"
+    },
+    "ok": true
+  },
+  "ok": true,
+  "finished_utc": "2026-10-25T18:22:06.118+00:00"
+}

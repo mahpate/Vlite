@@ -1,0 +1,22 @@
+[2026-10-25T17:59:58.514+00:00] selftest unit mean_just_below_limit: mean 9.90% peak 9.90% quiet=True expected=True ok=True
+[2026-10-25T17:59:58.515+00:00] selftest unit mean_just_above_limit: mean 10.10% peak 10.10% quiet=False expected=False ok=True
+[2026-10-25T17:59:58.516+00:00] selftest unit sample_just_below_limit: mean 6.00% peak 49.90% quiet=True expected=True ok=True
+[2026-10-25T17:59:58.516+00:00] selftest unit sample_just_above_limit_with_low_mean: mean 6.00% peak 50.10% quiet=False expected=False ok=True
+[2026-10-25T17:59:58.517+00:00] selftest unit sample_shorter_than_0.1s_is_not_counted_for_peak: mean 5.24% peak 5.00% quiet=True expected=True ok=True
+[2026-10-25T17:59:58.517+00:00] selftest unit sample_of_0.1s_is_counted_for_peak: mean 5.42% peak 90.00% quiet=False expected=False ok=True
+[2026-10-25T18:00:28.710+00:00] selftest control try 1: mean 7.65% peak 18.76% quiet=True
+[2026-10-25T18:00:28.711+00:00] selftest mean_violation: mean 31.92% peak 42.62% quiet=False (expected False)
+[2026-10-25T18:00:28.712+00:00] selftest peak_violation: mean 12.31% peak 74.49% quiet=False (expected False)
+[2026-10-25T18:00:28.712+00:00] selftest acceptance_demonstrated=True
+[2026-10-25T18:00:28.714+00:00] selftest ok=True
+[2026-10-25T18:21:35.920+00:00] selftest unit mean_just_below_limit: mean 9.90% peak 9.90% quiet=True expected=True ok=True
+[2026-10-25T18:21:35.921+00:00] selftest unit mean_just_above_limit: mean 10.10% peak 10.10% quiet=False expected=False ok=True
+[2026-10-25T18:21:35.922+00:00] selftest unit sample_just_below_limit: mean 6.00% peak 49.90% quiet=True expected=True ok=True
+[2026-10-25T18:21:35.922+00:00] selftest unit sample_just_above_limit_with_low_mean: mean 6.00% peak 50.10% quiet=False expected=False ok=True
+[2026-10-25T18:21:35.922+00:00] selftest unit sample_shorter_than_0.1s_is_not_counted_for_peak: mean 5.24% peak 5.00% quiet=True expected=True ok=True
+[2026-10-25T18:21:35.923+00:00] selftest unit sample_of_0.1s_is_counted_for_peak: mean 5.42% peak 90.00% quiet=False expected=False ok=True
+[2026-10-25T18:22:06.116+00:00] selftest control try 1: mean 6.94% peak 19.28% quiet=True
+[2026-10-25T18:22:06.117+00:00] selftest mean_violation: mean 29.44% peak 33.47% quiet=False (expected False)
+[2026-10-25T18:22:06.117+00:00] selftest peak_violation: mean 14.84% peak 83.33% quiet=False (expected False)
+[2026-10-25T18:22:06.117+00:00] selftest acceptance_demonstrated=True
+[2026-10-25T18:22:06.119+00:00] selftest ok=True
