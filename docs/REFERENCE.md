@@ -481,7 +481,8 @@ writes nothing. Limits are **4,096 operations** and **16 MiB of encoded body
 bytes** (16 bytes per operation plus put vectors and payloads); larger batches
 return `BatchTooLarge`.
 
-One `sync_all()` acknowledges the whole batch before memory changes. Reopen
+The batch is one frame: under `Durability::Full` one `sync_all()` acknowledges
+the whole batch before memory changes (periodic mode syncs it later). Reopen
 validates the whole frame before replaying it, so a batch is never partly
 visible: an interrupted frame makes open fail closed, and explicit tail repair
 discards the whole frame (see [durability](#commits-recovery-and-durability)).

@@ -18,8 +18,9 @@ file, so there is no separate database service to operate.
 
 ## Highlights
 
-- **One durable file.** Each write is a checksummed commit, synced before it is
-  acknowledged. Corruption fails closed and recovery is explicit.
+- **One durable file.** Each write is a checksummed commit, synced within 60 s
+  by default or before acknowledgment with full durability. Corruption fails
+  closed and recovery is explicit.
 - **Exact and approximate search.** Exact search with squared L2, cosine or
   inner product. HNSW for L2 and cosine. Typed metadata filters apply first.
 - **Atomic batches.** Write or delete up to 4,096 records in one commit.

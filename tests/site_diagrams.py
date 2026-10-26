@@ -91,7 +91,7 @@ def check(site, screenshots=None):
                                 assert image.evaluate("img => img.currentSrc").endswith(f"-{theme}.svg")
                                 assert image.evaluate("img => img.naturalWidth > 0 && img.alt.length > 30")
                         else:
-                            assert page.locator(".feature-catalog section[id]").count() == 10
+                            assert page.locator(".feature-catalog section[id]").count() == 11
                             assert page.locator("table caption").count() == 8
                             assert page.locator('nav[aria-label="Primary"] a[aria-current="page"]').inner_text() == "Features"
                             page.locator('.docs-sidebar a[href="#security"]').click()
@@ -99,10 +99,9 @@ def check(site, screenshots=None):
                             assert page.locator("#security h2").inner_text() == "Security and access control"
                             page.locator('.docs-sidebar a[href="#graph"]').click()
                             page.wait_for_function("location.hash === '#graph'")
-                            assert page.locator(".feature-experimental #graph").inner_text() == "Property graphs"
-                            assert page.locator(".feature-experimental .kicker").text_content() == "Experimental capabilities"
-                            assert page.locator(".feature-experimental").evaluate(
-                                "e => e.compareDocumentPosition(document.getElementById('requirements')) & Node.DOCUMENT_POSITION_PRECEDING")
+                            assert page.locator("#graph h2").inner_text() == "Property graphs"
+                            assert page.locator("#graph").evaluate(
+                                "e => e.compareDocumentPosition(document.getElementById('requirements')) & Node.DOCUMENT_POSITION_FOLLOWING")
                         if screenshots and width in (1440, 390):
                             screenshots.mkdir(parents=True, exist_ok=True)
                             page.screenshot(path=str(screenshots / f"{Path(path).stem}-{theme}-{width}.png"))

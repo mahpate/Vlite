@@ -25,7 +25,7 @@ DIAGRAMS = [
      {"storage": "F", "search": "A D M"}),
     ("formats", "Explicit file-format progression from base logs to collections, then expiry and extended vectors.",
      {"storage": "V3 V4 V5"}),
-    ("commit", "Commit sequence: validate, encode, append, synchronize, publish indexes and acknowledge; failed writes roll back or return an error.", {}),
+    ("commit", "Commit sequence: validate, encode, append, synchronize (at once under full durability, else within 60 seconds), publish indexes and acknowledge; failed writes roll back or return an error.", {}),
     ("recovery", "Recovery validates locking, headers and committed frames; corruption and incomplete tails return distinct errors; tail repair is explicit.",
      {"storage": "O AP TR RDY", "operations": "L H N", "search": "R", "error": "EL EC ET"}),
     ("concurrency", "A server owns an exclusive file lock; shared reader processes are an alternative mode, not concurrent with that writer.",

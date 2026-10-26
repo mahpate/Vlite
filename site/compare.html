@@ -166,7 +166,7 @@
           10.2 MiB at 20k × 128 embedded and 295.3 MiB at 100k × 768. It is not smallest in every exact-mode row
           (LanceDB exact uses 9.8 MiB at 20k). FAISS is an in-memory index library, with no durability or persisted footprint here.</p></div>
       </div>
-      <p class="muted">Defaults are not durability-equivalent: VLite fsyncs every acknowledged batch; pgvector uses synchronous WAL commits;
+      <p class="muted">Defaults are not durability-equivalent: VLite was measured with full durability (an fsync per acknowledged batch); pgvector uses synchronous WAL commits;
         zvec/LanceDB per-write fsync was not verified; Chroma/Qdrant persistence is asynchronous. Ingest is not a fair durability ranking.
         LanceDB uses one-partition IVF_HNSW_SQ, not plain HNSW; Chroma has no exact mode. Synthetic data, wrapper overhead,
         shared-host contention and just 2 large-data trials limit generalization. Embedded and server tiers must not be ranked together.

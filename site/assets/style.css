@@ -13,9 +13,6 @@
 .feature-catalog .table-scroll { overflow-x: auto; }
 .feature-catalog tbody tr:last-child th { border-bottom: 0; }
 .feature-catalog caption { text-align: left; color: var(--muted); padding: 8px 0; }
-.feature-catalog .feature-experimental { margin-top: 56px; padding-top: 18px; border-top: 2px dashed color-mix(in srgb, var(--accent) 45%, var(--border)); }
-.feature-catalog .feature-experimental .kicker { margin: 0; }
-.feature-catalog .feature-experimental h2 { margin-top: 6px; padding-top: 0; border-top: 0; scroll-margin-top: 145px; }
 .docs-layout.feature-layout { grid-template-columns: 230px minmax(0, 1fr); max-width: var(--max); }
 @media (max-width: 800px) { .docs-layout.feature-layout { grid-template-columns: minmax(0, 1fr); } }
 

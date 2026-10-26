@@ -75,14 +75,16 @@ from compare_zvec import (  # noqa: E402
 )
 
 DURABILITY = {
-    "vlite": "Each batch is one atomic commit fsynced before acknowledgment (default).",
+    "vlite": "Each batch is one atomic commit fsynced before acknowledgment (Durability::Full, the default "
+             "before v0.5.1; v0.5.1+ defaults to periodic sync every 60 s).",
     "zvec": "Defaults; the harness calls flush() before close. Per-insert fsync was not verified.",
     "chroma": "Defaults: SQLite-backed write-ahead log; HNSW segment files are persisted "
               "asynchronously in batches (sync_threshold). Not fsync per add().",
     "lancedb": "Defaults: each add() writes data files and commits a new table version (manifest). "
                "Per-commit fsync was not verified.",
     "faiss": "In-memory library baseline: no persistence, no durability, no reopen.",
-    "vlite-server": "Every successful write (each /v1/batches request) is synced before 204 (default).",
+    "vlite-server": "Every successful write (each /v1/batches request) is synced before 204 (--durability full, "
+                    "the default before v0.5.1; v0.5.1+ defaults to periodic sync every 60 s).",
     "qdrant": "Defaults: WAL appended per request (wait=true waits for apply); WAL and segments are "
               "flushed periodically (flush_interval_sec=5), not fsynced per request.",
     "qdrant-grpc": "Same server defaults as qdrant (gRPC transport only differs).",

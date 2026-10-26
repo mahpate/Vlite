@@ -77,7 +77,7 @@ def check(root):
                 errors.append("dashboard.html: remove historical dashboard tours")
         if path == root / "features.html":
             expected = [
-                "storage", "search", "indexes", "vectors", "interfaces",
+                "storage", "search", "indexes", "vectors", "graph", "interfaces",
                 "security", "operations", "dashboard", "tools", "requirements",
             ]
             if page.sections != expected:

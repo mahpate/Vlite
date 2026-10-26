@@ -144,7 +144,7 @@ flowchart LR
       <tbody>
         <tr><td>1 &middot; encrypted</td><td>Frame bodies are sealed with ChaCha20-Poly1305, and an encryption descriptor follows the header.</td></tr>
         <tr><td>2 &middot; timestamps</td><td>Each commit is preceded by a time-anchor frame (op 11), so a restore can target a point in time.</td></tr>
-        <tr><td>4 &middot; graph</td><td>The file holds property graphs. Experimental; graph builds only.</td></tr>
+        <tr><td>4 &middot; graph</td><td>The file holds property graphs. Opt-in per file.</td></tr>
       </tbody>
     </table>
     <p>Only v5 files have flags. Unknown bits fail with <code>UnsupportedFeature</code> rather than being ignored, so an older binary never misreads a newer file.</p>
@@ -234,7 +234,7 @@ flowchart LR
         <tr><td>3</td><td>Typed metadata; the default for new files</td></tr>
         <tr><td>4</td><td>Lineage, collections, settings and import checkpoints; enables the change feed</td></tr>
         <tr><td>5</td><td>Flags, encryption, commit timestamps, expiry, metadata-only updates, geo metadata, named and sparse vectors</td></tr>
-        <tr><td>5 + graph</td><td>Property graphs (experimental)</td></tr>
+        <tr><td>5 + graph</td><td>Property graphs (opt-in)</td></tr>
       </tbody>
     </table>
     <ul class="list">
@@ -242,11 +242,11 @@ flowchart LR
       <li><code>vlite-maintain upgrade</code> rewrites a v1&ndash;v4 file as v4 with a new lineage. A v5 file stays v5; upgrade never produces v5.</li>
       <li>Compaction writes v3 for v1&ndash;v3 files and otherwise keeps the version.</li>
       <li>Graph files are created with <code>create_with_graph</code> or <code>vlite-graph-cli init</code>. <code>vlite-maintain enable-graph</code> copies a v4 or v5 file into a new graph-enabled v5 file, and <code>strip-graph</code> copies it back to plain v5 and drops every graph.</li>
-      <li>Older releases and builds without the <code>graph</code> feature refuse graph files with <code>UnsupportedFeature</code>, and <code>upgrade</code> refuses them too.</li>
+      <li>Older releases refuse graph files with <code>UnsupportedFeature</code>, and <code>upgrade</code> refuses them too.</li>
       <li>Backup, restore, verify, compaction, re-encryption and replicas keep graph state.</li>
     </ul>
 
-    <h2 id="graph-frames">Graph frames <span class="badge">Experimental</span></h2>
+    <h2 id="graph-frames">Graph frames</h2>
     <p>Graph-enabled files store property graphs in op 12 frames. Each frame changes one graph and commits as one unit, together with any vector writes it carries. Graph indexes are rebuilt when the file opens; there is no graph sidecar.</p>
     <div class="bytemap small" role="img" aria-label="Graph frame body: byte 0 version, always 1; byte 1 reserved; bytes 2 to 3 graph ID, below 64; then the entries, as many as the prefix count.">
       <div class="bm-row">
@@ -312,9 +312,9 @@ flowchart LR
     </table>
 
     <h2 id="write-path">Write path</h2>
-    <p>A write returns only after its frame is synced to stable storage. Indexes change only after that, so readers never see uncommitted data. A batch of up to 4,096 operations commits as one unit.</p>
+    <p>A write returns after its frame reaches the OS; a flusher syncs it within 60 s, or full durability syncs first. Indexes change only after that, so readers never see uncommitted data. A batch of up to 4,096 operations commits as one unit.</p>
     <figure class="diagram" data-diagram="commit">
-      <picture><source srcset="assets/diagrams/commit-dark.svg" media="(prefers-color-scheme: dark)"><img src="assets/diagrams/commit-light.svg" data-light="assets/diagrams/commit-light.svg" data-dark="assets/diagrams/commit-dark.svg" alt="Commit sequence: validate, encode, append, synchronize, publish indexes and acknowledge; failed writes roll back or return an error." loading="lazy"></picture>
+      <picture><source srcset="assets/diagrams/commit-dark.svg" media="(prefers-color-scheme: dark)"><img src="assets/diagrams/commit-light.svg" data-light="assets/diagrams/commit-light.svg" data-dark="assets/diagrams/commit-dark.svg" alt="Commit sequence: validate, encode, append, synchronize (at once under full durability, else within 60 seconds), publish indexes and acknowledge; failed writes roll back or return an error." loading="lazy"></picture>
       <a class="diagram-full" href="assets/diagrams/commit-light.svg" data-light="assets/diagrams/commit-light.svg" data-dark="assets/diagrams/commit-dark.svg">Open full-size diagram</a>
       <details class="diagram-source"><summary>Text diagram</summary>
 <pre class="mermaid">
@@ -330,14 +330,17 @@ sequenceDiagram
   DB->>Enc: encode frame (prefix, body, footer CRC)
   Enc-->>DB: bytes (sealed if encrypted)
   DB->>F: append at end of file
-  DB->>F: sync_all()
+  opt Durability::Full
+    DB->>F: sync_all()
+  end
   alt append or fsync failed
     DB->>F: truncate to previous length + sync
     DB-->>App: error (state unchanged)
   else committed
     DB->>Idx: apply mutation, update HNSW / metadata / BM25
-    DB-->>App: Ok (durable)
+    DB-->>App: Ok
   end
+  Note over DB,F: Periodic (default): a flusher syncs within 60 s
 </pre></details>
     </figure>
 
@@ -589,11 +592,11 @@ sequenceDiagram
     <h2 id="limitations">Limitations</h2>
     <ul class="list">
       <li>One writer per file. VLite is not a multi-writer database.</li>
-      <li>Each commit waits for an fsync. Batch small writes, or enable server group commit.</li>
+      <li>Periodic sync can lose 60 s on OS crash; full fsyncs each commit, so batch writes.</li>
       <li>Opening a file replays the log, so open time and memory grow with data. Compaction reclaims space.</li>
       <li>HNSW and ScalarU8 are approximate. Inner product always searches exactly.</li>
       <li>Tenants are logical only. Webhooks are at-least-once, and streaming exports are not point-in-time snapshots.</li>
-      <li>Graph support is experimental. Graph files turn off change feeds and webhooks.</li>
+      <li>Graphs are opt-in per file. Graph files turn off change feeds and webhooks.</li>
     </ul>
     <p>More detail: <a href="docs/REFERENCE.html">Reference</a> &middot; <a href="docs/STORAGE-FEATURES.html">Storage features</a> &middot; <a href="docs/SECURITY.html">Security</a></p>
   </main>

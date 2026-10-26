@@ -166,7 +166,7 @@ db.close()?;</pre>
     <ul class="list">
       <li>Record IDs are unsigned 64-bit integers. SDKs and JSON pass them as decimal strings.</li>
       <li>Lower distance means nearer, for every metric.</li>
-      <li>A write is durable when the call returns. Batches are all-or-nothing.</li>
+      <li>A write survives a process crash when the call returns; by default it is synced within 60 s, or before returning with full durability. Batches are all-or-nothing.</li>
       <li>Metadata values are typed. A filter is an AND of up to 64 conditions.</li>
       <li>Errors carry a stable, machine-readable code.</li>
     </ul>
@@ -239,7 +239,7 @@ db.close()?;</pre>
       </tbody>
     </table>
     <h3 id="sdk-records">Records</h3>
-    <p>A write is durable when the call returns, unless the handle was opened with a flush interval. A batch is atomic and applies to one collection.</p>
+    <p>A write is written when the call returns and synced within the flush interval (60 s by default), or before returning with <code>durability: "full"</code>. A batch is atomic and applies to one collection.</p>
     <table class="api-table cols-2">
       <thead><tr><th>Signature</th><th>Description</th></tr></thead>
       <tbody>
@@ -357,7 +357,7 @@ searchManyF32(vectors: Float32Array[], k: number, options?: Scope &amp; { filter
       </tbody>
     </table>
     <h3 id="sdk-graph">Property graph</h3>
-    <p>The property graph is experimental. It needs a file from <code>create_with_graph</code> and a library built with the <code>graph</code> feature, which release builds include. Otherwise these methods fail with <code>unsupported</code>. Select a node or edge by key, or with <code>{"key": "alice"}</code> or <code>{"id": "42"}</code>.</p>
+    <p>The property graph is built into every library. It needs a file from <code>create_with_graph</code>; on other files these methods fail with <code>unsupported</code>. Select a node or edge by key, or with <code>{"key": "alice"}</code> or <code>{"id": "42"}</code>.</p>
     <table class="api-table cols-2">
       <thead><tr><th>Signature</th><th>Description</th></tr></thead>
       <tbody>
@@ -410,7 +410,7 @@ searchManyF32(vectors: Float32Array[], k: number, options?: Scope &amp; { filter
         <tr><td><code class="sig" data-api="rust:Database::is_read_only">fn is_read_only(&amp;self) <span class="nw">-&gt;</span> bool</code></td><td>Whether this handle came from <code>open_read_only</code>.</td></tr>
         <tr><td><code class="sig" data-api="rust:Database::discard_incomplete_tail">fn discard_incomplete_tail(path: impl AsRef&lt;Path&gt;) <span class="nw">-&gt;</span> Result&lt;RepairReport&gt;</code></td><td>Destructively discards only a structurally incomplete trailing frame.</td></tr>
         <tr><td><code class="sig" data-api="rust:Database::discard_incomplete_tail_encrypted">fn discard_incomplete_tail_encrypted(path: impl AsRef&lt;Path&gt;, key: &amp;EncryptionKey) <span class="nw">-&gt;</span> Result&lt;RepairReport&gt;</code></td><td><code>discard_incomplete_tail</code> for an encrypted file.</td></tr>
-        <tr><td><code class="sig" data-api="rust:Database::close">fn close(mut self) <span class="nw">-&gt;</span> Result&lt;()&gt;</code></td><td>Consumes the handle and releases its OS lock. Under <code>Durability::Full</code> commits are already synced; under <code>Periodic</code> this stops the flusher and syncs every acknowledged commit first, returning <code>CommitIndeterminate</code> if that final sync fails.</td></tr>
+        <tr><td><code class="sig" data-api="rust:Database::close">fn close(mut self) <span class="nw">-&gt;</span> Result&lt;()&gt;</code></td><td>Consumes the handle and releases its OS lock. Under <code>Durability::Full</code> commits are already synced; under <code>Periodic</code> (the default) this stops the flusher and syncs every acknowledged commit first, returning <code>CommitIndeterminate</code> if that final sync fails.</td></tr>
         <tr class="group"><td colspan="2">Properties and durability</td></tr>
         <tr><td><code class="sig" data-api="rust:Database::dimensions">fn dimensions(&amp;self) <span class="nw">-&gt;</span> usize</code></td><td>Dimensions of the <code>default</code> collection.</td></tr>
         <tr><td><code class="sig" data-api="rust:Database::format_version">fn format_version(&amp;self) <span class="nw">-&gt;</span> u32</code></td><td>The file format version: 3, 4 or 5.</td></tr>
@@ -418,8 +418,8 @@ searchManyF32(vectors: Float32Array[], k: number, options?: Scope &amp; { filter
         <tr><td><code class="sig" data-api="rust:Database::len">fn len(&amp;self) <span class="nw">-&gt;</span> usize</code></td><td>Live records in the <code>default</code> collection.</td></tr>
         <tr><td><code class="sig" data-api="rust:Database::is_empty">fn is_empty(&amp;self) <span class="nw">-&gt;</span> bool</code></td><td>True when the <code>default</code> collection has no live records.</td></tr>
         <tr><td><code class="sig" data-api="rust:Database::is_poisoned">fn is_poisoned(&amp;self) <span class="nw">-&gt;</span> bool</code></td><td>Whether this handle refuses all further operations (a failed commit or a failed periodic sync). Close and reopen.</td></tr>
-        <tr><td><code class="sig" data-api="rust:Database::durability">fn durability(&amp;self) <span class="nw">-&gt;</span> Durability</code></td><td>The handle's current durability mode (<code>Full</code> unless changed).</td></tr>
-        <tr><td><code class="sig" data-api="rust:Database::set_durability">fn set_durability(&amp;mut self, durability: Durability) <span class="nw">-&gt;</span> Result&lt;()&gt;</code></td><td>Selects when commits reach stable storage for this open handle; the setting is not persisted and every open starts in <code>Durability::Full</code>.</td></tr>
+        <tr><td><code class="sig" data-api="rust:Database::durability">fn durability(&amp;self) <span class="nw">-&gt;</span> Durability</code></td><td>The handle's current durability mode: <code>Durability::default()</code> (<code>Periodic</code>, 60 s) for files unless changed, <code>None</code> for in-memory handles.</td></tr>
+        <tr><td><code class="sig" data-api="rust:Database::set_durability">fn set_durability(&amp;mut self, durability: Durability) <span class="nw">-&gt;</span> Result&lt;()&gt;</code></td><td>Selects when commits reach stable storage for this open handle; the setting is not persisted and every file open starts in <code>Durability::default()</code> (<code>Periodic</code>, 60 s). <code>Full</code> syncs every commit; <code>None</code> is the fixed mode of in-memory handles and is rejected for files.</td></tr>
         <tr><td><code class="sig" data-api="rust:Database::with_durability">fn with_durability(mut self, durability: Durability) <span class="nw">-&gt;</span> Result&lt;Self&gt;</code></td><td>Consuming builder form of <code>set_durability</code>, for example <code>Database::open(path)?.with_durability(Durability::periodic(interval)?)?</code>.</td></tr>
         <tr><td><code class="sig" data-api="rust:Database::sync">fn sync(&amp;self) <span class="nw">-&gt;</span> Result&lt;()&gt;</code></td><td>Forces every acknowledged commit to stable storage now. A no-op under <code>Durability::Full</code> (each commit is already synced) and for read-only or in-memory handles. A sync failure returns <code>CommitIndeterminate</code> and poisons the handle.</td></tr>
         <tr><td><code class="sig" data-api="rust:Database::unsynced_commits">fn unsynced_commits(&amp;self) <span class="nw">-&gt;</span> u64</code></td><td>Acknowledged commits not yet covered by a completed sync (always 0 under <code>Durability::Full</code>).</td></tr>
@@ -847,7 +847,7 @@ searchManyF32(vectors: Float32Array[], k: number, options?: Scope &amp; { filter
       </tbody>
     </table>
     <h3 id="rust-graph">Property graph</h3>
-    <p>The experimental property graph, behind the <code>graph</code> feature. <code>Database::graph</code> returns a read view and <code>graph_mut</code> a write handle.</p>
+    <p>The property graph, opt-in per file. <code>Database::graph</code> returns a read view and <code>graph_mut</code> a write handle.</p>
     <h4 id="rust-graphref">GraphRef <span class="api-kind">struct</span></h4>
     <p><code class="api-path">vlite::property_graph::GraphRef</code> Read handle to one live named graph, from <code>Database::graph</code>.</p>
     <table class="api-table cols-2">
@@ -1136,7 +1136,7 @@ searchManyF32(vectors: Float32Array[], k: number, options?: Scope &amp; { filter
       </tbody>
     </table>
     <h3 id="c-graph">Graph requests</h3>
-    <p>Graph support is experimental. Send these inside <code>{"op": "graph", "request": {...}}</code> on a graph-enabled file. Node and edge IDs, revisions and sequences are decimal strings.</p>
+    <p>Send these inside <code>{"op": "graph", "request": {...}}</code> on a graph-enabled file. Node and edge IDs, revisions and sequences are decimal strings.</p>
     <table class="api-table cols-2">
       <thead><tr><th>Request</th><th>Description</th></tr></thead>
       <tbody>

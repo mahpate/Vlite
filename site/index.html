@@ -98,7 +98,7 @@
         <div class="tabpanel" role="tabpanel" id="p-py" aria-labelledby="t-py" tabindex="0">
 <button class="copy" data-copy="c-py" aria-label="Copy Python example">Copy</button>
 <pre class="code" id="c-py"><span class="c-c"># Python 3.11+; run in a fresh directory</span>
-<span class="c-c"># python -m pip install vlite-embedded==0.5.0</span>
+<span class="c-c"># python -m pip install vlite-embedded==0.5.1</span>
 <span class="c-k">from</span> vlite_embedded <span class="c-k">import</span> NativeLibrary
 
 native = NativeLibrary()
@@ -108,7 +108,7 @@ native = NativeLibrary()
         </div>
         <div class="tabpanel" role="tabpanel" id="p-node" aria-labelledby="t-node" hidden>
 <button class="copy" data-copy="c-node">Copy</button>
-<pre class="code" id="c-node"><span class="c-c">// npm install ./vlite-embedded-0.5.0-&lt;platform&gt;.tgz (release tarball)</span>
+<pre class="code" id="c-node"><span class="c-c">// npm install ./vlite-embedded-0.5.1-&lt;platform&gt;.tgz (release tarball)</span>
 <span class="c-k">import</span> { NativeLibrary } <span class="c-k">from</span> <span class="c-s">"@vlite/embedded"</span>;
 
 <span class="c-k">const</span> native = <span class="c-k">new</span> NativeLibrary();
@@ -122,7 +122,7 @@ native = NativeLibrary()
         </div>
         <div class="tabpanel" role="tabpanel" id="p-rust" aria-labelledby="t-rust" hidden>
 <button class="copy" data-copy="c-rust">Copy</button>
-<pre class="code" id="c-rust"><span class="c-c">// Cargo.toml: vlite = { git = "https://github.com/mahpate/Vlite", tag = "v0.5.0" }</span>
+<pre class="code" id="c-rust"><span class="c-c">// Cargo.toml: vlite = { git = "https://github.com/mahpate/Vlite", tag = "v0.5.1" }</span>
 <span class="c-k">use</span> vlite::Database;
 
 <span class="c-k">fn</span> main() -&gt; vlite::Result&lt;()&gt; {
@@ -188,7 +188,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\devbox.ps1 -Token
           <div class="product-map-row product-connect"><h3><span class="product-symbol" aria-hidden="true">{ }</span> SDKs &amp; APIs</h3><div class="product-chips"><a href="#quickstart">Rust</a><a href="#quickstart">Python</a><a href="#quickstart">Node.js</a><a href="https://github.com/mahpate/Vlite/blob/main/clients/README.md#go">Go</a><a href="https://github.com/mahpate/Vlite/blob/main/clients/README.md#net">.NET</a><a href="docs/INSTALL.html">C ABI</a><a href="api.html">REST</a><a href="docs/GRPC.html">gRPC</a></div></div>
           <div class="product-map-row product-retrieve"><h3><span class="product-symbol" aria-hidden="true">&#8981;</span> Search &amp; indexes</h3><div class="product-chips"><span>Exact search</span><span>Dense &amp; sparse</span><span>BM25 hybrid</span><span>Typed filters</span><span>HNSW</span><span>Scalar u8</span></div></div>
           <div class="product-map-row product-store"><h3><span class="product-symbol" aria-hidden="true">&#9636;</span> Runtime &amp; storage</h3><div class="product-chips"><span>Embedded</span><a href="docs/DOCKER-OPERATIONS.html">Docker</a><span>Collections</span><span>Atomic batches</span><a href="docs/INSTALL.html">Linux</a><a href="docs/INSTALL.html">macOS</a><a href="docs/INSTALL.html">Windows</a></div></div>
-          <div class="product-map-row product-graph"><h3><span class="product-symbol" aria-hidden="true">&#9741;</span> Property graphs <span class="badge">Experimental</span></h3><div class="product-chips"><span>Nodes &amp; typed edges</span><span>Vector attachments</span><span>Traversal &amp; paths</span><span>Graph retrieval</span><a href="docs/GRAPH.html">Graph guide</a></div></div>
+          <div class="product-map-row product-graph"><h3><span class="product-symbol" aria-hidden="true">&#9741;</span> Property graphs <span class="badge">Opt-in</span></h3><div class="product-chips"><span>Nodes &amp; typed edges</span><span>Vector attachments</span><span>Traversal &amp; paths</span><span>Graph retrieval</span><a href="docs/GRAPH.html">Graph guide</a></div></div>
         </div>
         <aside class="product-map-tools" aria-label="Tools and agents">
           <h3>Tools &amp; agents</h3>

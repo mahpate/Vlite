@@ -573,7 +573,7 @@ python benchmarks/compare_engines.py --summary benchmarks/results/engines-*.json
 
 | Engine | Default durability per acknowledged write |
 |---|---|
-| VLite (embedded and server) | Each batch is one atomic commit, fsynced before acknowledgment |
+| VLite (embedded and server) | Each batch is one atomic commit, fsynced before acknowledgment (`Durability::Full`, the default before v0.5.1 and in the published runs; v0.5.1 defaults to periodic sync every 60 s) |
 | zvec | Defaults; harness calls `flush()` before close; per-insert fsync not verified |
 | Chroma | SQLite WAL; HNSW segment files persisted asynchronously in batches |
 | LanceDB | Each `add` commits a new table version; per-commit fsync not verified |
@@ -682,7 +682,7 @@ of the persistent databases.
   (embedded) or ~1.5 s (container start). Opt-in HNSW snapshots (see
   [Persisted ANN restart measurement](#persisted-ann-restart-measurement)) are
   not used here.
-- **Ingest.** VLite fsyncs every batch; Qdrant and Chroma do not, pgvector
+- **Ingest.** VLite (full durability, as measured) fsyncs every batch; Qdrant and Chroma do not, pgvector
   fsyncs WAL per commit but uses binary `COPY`. Qdrant REST ingest equals VLite
   REST; gRPC halves it (JSON encoding cost on both REST rows).
 - **Footprint.** VLite has the smallest disk and memory growth of the
