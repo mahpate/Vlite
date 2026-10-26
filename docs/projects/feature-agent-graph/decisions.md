@@ -902,7 +902,11 @@ GATE-008 is not approved; the artifact pins exclude `graph` and `mcp-proxy`.
 
 Owner request: "tenant specific or user specific knobs for graph access".
 Supersedes [Signed-in user graph access](#signed-in-user-graph-access-owner-decision-2026-10-25).
-Source-only, opt-in `graph` builds. **Needs the GATE-007 re-review.**
+Source-only, opt-in `graph` builds. **GATE-007 re-review passed
+(2026-10-25):** a code-reading security review of `0d1469a..be98a80` (wave 2
+routes, retrieve redaction, the MCP proxy, account grants, tenant scoping,
+the Dashboard explorer and query text) found no exploitable issue. It did
+not cover resource limits beyond `GraphLimits::CEILING`.
 
 - **Tenant-owned graphs.** Graph names are qualified like collections: a
   tenanted principal (signed-in user with `tenant_id` or tenant `vlk_` key)
