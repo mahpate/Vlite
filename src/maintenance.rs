@@ -360,24 +360,29 @@ fn compact_inner(
 ///
 /// IDs, vector bits, payloads and metadata are preserved in the `default`
 /// collection; the output gets a new lineage. The source is never modified and
-/// the destination must not exist. A v4 source is compacted as by `compact`.
-/// Graph-enabled sources are refused with
-/// `GraphUnsupportedOperation` (LEG-010).
+/// the destination must not exist. A v4 source is compacted as by `compact`;
+/// a graph-enabled source (always v5) is copied like a plain v5 source and
+/// keeps `FLAG_GRAPH`, its graph state and its node/edge high-water marks.
 pub fn upgrade(
     source_path: impl AsRef<Path>,
     destination: impl AsRef<Path>,
 ) -> Result<CompactionReport> {
     let mut file = source(source_path.as_ref())?;
     let loaded = format::load(&mut file)?;
-    if loaded.graph.is_some() {
-        return Err(Error::GraphUnsupportedOperation);
-    }
     require_complete(&loaded)?;
     let source = inspection(&loaded);
+    let graph_flags = loaded.flags & !format::KNOWN_FLAGS;
     let lineage = format::new_lineage()?;
     let output = publish(destination.as_ref(), |output| {
         if loaded.version >= format::V5 {
-            write_v5(output, &loaded, lineage, crate::current_time_ms(), None, 0)
+            write_v5(
+                output,
+                &loaded,
+                lineage,
+                crate::current_time_ms(),
+                None,
+                graph_flags,
+            )
         } else {
             write_v4(output, &loaded, lineage)
         }

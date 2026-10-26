@@ -11,7 +11,7 @@
 use std::fs;
 
 use tempfile::tempdir;
-use vlite::changes::{FeedCursor, read_log_changes};
+use vlite::changes::{ChangeKind, FeedCursor, read_log_changes};
 use vlite::maintenance;
 use vlite::property_graph::GraphInfo;
 use vlite::{
@@ -1217,9 +1217,9 @@ fn incomplete_graph_tail_is_rejected_then_explicitly_repaired() {
     assert_eq!(db.list_graphs().unwrap()[0].node_count, 0);
 }
 
-/// EPIC-006: the formerly graph-unaware paths carry graph files (LEG-009,
-/// LEG-011, LEG-014, LEG-022, LEG-023) or reject them explicitly (LEG-010,
-/// LEG-013), and the source never changes. TEST-008
+/// EPIC-006: the formerly graph-unaware paths carry graph files (LEG-009..011,
+/// LEG-013, LEG-014, LEG-022, LEG-023; upgrade and feeds since v0.6.0), and
+/// the source never changes. TEST-008
 /// (`tests\graph_maintenance.rs`) covers each path in depth.
 #[test]
 fn maintenance_replicas_and_feeds_handle_graph_files_explicitly() {
@@ -1241,33 +1241,30 @@ fn maintenance_replicas_and_feeds_handle_graph_files_explicitly() {
     let compacted = Database::open(out("compact")).unwrap();
     assert_eq!(compacted.list_graphs().unwrap()[0].name, "g");
     drop(compacted);
-    assert!(matches!(
-        maintenance::upgrade(&path, out("upgrade")),
-        Err(Error::GraphUnsupportedOperation)
-    ));
-    assert!(!out("upgrade").exists());
+    maintenance::upgrade(&path, out("upgrade")).unwrap();
+    assert_eq!(header_flags(&fs::read(out("upgrade")).unwrap()), FLAG_GRAPH);
     let segment = maintenance::export_log_segment(&path, None, 0, 1 << 20).unwrap();
     assert_eq!([segment.header.as_slice(), &segment.frames].concat(), bytes);
     let start = FeedCursor {
         lineage: 0,
         sequence: 0,
     };
-    assert!(matches!(
-        read_log_changes(&path, None, &start, 16),
-        Err(Error::GraphChangeFeedUnsupported)
-    ));
+    let logged = read_log_changes(&path, None, &start, 16).unwrap();
+    assert!(
+        logged
+            .changes
+            .iter()
+            .any(|c| matches!(&c.kind, ChangeKind::GraphCreated { graph } if graph == "g"))
+    );
     drop(ReplicaFollower::open(&path, None).unwrap());
 
     let db = Database::open(&path).unwrap();
     assert_eq!(db.export_log(0, 1 << 20).unwrap(), segment);
-    assert!(matches!(
-        db.feed_cursor(),
-        Err(Error::GraphChangeFeedUnsupported)
-    ));
-    assert!(matches!(
-        db.changes_after(&start, 16),
-        Err(Error::GraphChangeFeedUnsupported)
-    ));
+    assert_eq!(db.feed_cursor().unwrap().sequence, 2);
+    assert_eq!(
+        db.changes_after(&start, 16).unwrap().changes,
+        logged.changes
+    );
     drop(db);
 
     // A follower discards a torn graph frame like any torn frame (LEG-022).

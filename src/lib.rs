@@ -442,11 +442,12 @@ pub enum Error {
     },
     /// The graph changed after the page cursor was issued; restart the read.
     GraphCursorStale,
-    /// Change feeds do not cover graph-enabled files (REQ-053).
+    /// Change feeds did not cover graph-enabled files in v0.5.x (REQ-053).
+    /// Kept for API compatibility; no longer returned since v0.6.0.
     GraphChangeFeedUnsupported,
-    /// The maintenance operation does not accept graph-enabled files
-    /// (LEG-010: `maintenance::upgrade`); use `maintenance::strip_graph` or
-    /// `maintenance::enable_graph` instead.
+    /// The maintenance operation does not accept graph-enabled files. Kept
+    /// for API compatibility: `maintenance::upgrade` returned it in v0.5.x
+    /// and accepts graph files since v0.6.0.
     GraphUnsupportedOperation,
     /// Invalid graph maintenance options, such as `strip_graph` without
     /// `confirm_graph_data_loss` or `enable_graph` on an unsuitable source.
@@ -2088,9 +2089,6 @@ impl Database {
     /// Cursor positioned at the current head: `changes_after` returns only
     /// commits made after this call. Needs format v4 or newer.
     pub fn feed_cursor(&self) -> Result<changes::FeedCursor> {
-        if self.graph.is_some() {
-            return Err(Error::GraphChangeFeedUnsupported);
-        }
         Ok(changes::FeedCursor {
             lineage: self.lineage.ok_or(Error::ChangeFeedRequiresUpgrade)?,
             sequence: self.sequence,
@@ -2106,9 +2104,6 @@ impl Database {
         cursor: &changes::FeedCursor,
         max_events: usize,
     ) -> Result<changes::ChangeBatch> {
-        if self.graph.is_some() {
-            return Err(Error::GraphChangeFeedUnsupported);
-        }
         self.lineage.ok_or(Error::ChangeFeedRequiresUpgrade)?;
         // Periodic durability: never publish commits a crash could lose.
         self.sync()?;

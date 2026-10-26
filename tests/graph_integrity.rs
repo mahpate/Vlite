@@ -573,8 +573,9 @@ fn compaction_expiry_omits_expired_records_but_never_attached_ones() {
 }
 
 #[test]
-fn upgrade_refuses_graph_files_and_still_upgrades_vector_files() {
-    // LEG-010
+fn upgrade_copies_graph_and_vector_files() {
+    // LEG-010 (v0.6.0): graph files are already the latest format, so
+    // `upgrade` is a validated copy that carries every graph frame.
     let dir = tempdir().unwrap();
     for collection in COLLECTIONS {
         for state in STATES {
@@ -588,23 +589,21 @@ fn upgrade_refuses_graph_files_and_still_upgrades_vector_files() {
             );
             let before = fingerprint(&src, None);
             let dst = src.with_extension("upgraded.vlite");
-            match maintenance::upgrade(&src, &dst) {
-                Err(Error::GraphUnsupportedOperation) if state.graph() => {
-                    assert!(!dst.exists(), "{label}");
-                }
-                Ok(report) if !state.graph() => {
-                    assert_eq!(report.source, before.1, "{label}");
-                    assert_eq!(report.output, inspect(&dst, None), "{label}");
-                    assert_eq!(report.output.format_version, 5, "{label}");
-                    assert_graph(&dst, None, state, [0; 4]);
-                    assert_eq!(
-                        snapshot(&dst, None).without_revisions(),
-                        snapshot(&src, None).without_revisions(),
-                        "{label}"
-                    );
-                }
-                other => panic!("{label}: {other:?}"),
-            }
+            let report = maintenance::upgrade(&src, &dst).unwrap();
+            assert_eq!(report.source, before.1, "{label}");
+            assert_eq!(report.output, inspect(&dst, None), "{label}");
+            assert_eq!(report.output.format_version, 5, "{label}");
+            let counts = if state.graph() {
+                state.counts()
+            } else {
+                [0; 4]
+            };
+            assert_graph(&dst, None, state, counts);
+            assert_eq!(
+                snapshot(&dst, None).without_revisions(),
+                snapshot(&src, None).without_revisions(),
+                "{label}"
+            );
             assert_eq!(fingerprint(&src, None), before, "{label}");
         }
     }
@@ -833,10 +832,10 @@ fn reencryption_and_point_in_time_restore_carry_graph_frames() {
 }
 
 #[test]
-fn change_feeds_refuse_graph_files_and_write_nothing() {
-    // LEG-013
+fn change_feeds_report_graph_files_and_write_nothing() {
+    // LEG-013 (v0.6.0): graph files report their graph commits through every
+    // feed reader; reading never writes.
     let dir = tempdir().unwrap();
-    let unsupported = |error: &Error| matches!(error, Error::GraphChangeFeedUnsupported);
     for collection in COLLECTIONS {
         for state in STATES {
             let label = format!("{collection} {state:?}");
@@ -844,75 +843,60 @@ fn change_feeds_refuse_graph_files_and_write_nothing() {
                 .path()
                 .join(format!("feed-{collection}-{state:?}.vlite"));
             let mut db = setup(&path, state, collection);
-            if state.graph() {
-                let committed = live_bytes(&db);
-                assert!(unsupported(&db.feed_cursor().unwrap_err()), "{label}");
-                let error = db.changes_after(&FeedCursor::beginning(), 100).unwrap_err();
-                assert!(unsupported(&error), "{label}: {error:?}");
-                assert_eq!(live_bytes(&db), committed, "{label}");
-                db.close().unwrap();
-                let before = fingerprint(&path, None);
-                let lineage = maintenance::inspect_detail(&path).unwrap().lineage.unwrap();
-                let cursors = [
-                    FeedCursor::beginning(),
-                    FeedCursor {
-                        lineage,
-                        sequence: 0,
-                    },
-                    FeedCursor {
-                        lineage,
-                        sequence: before.1.commits,
-                    },
-                ];
-                for cursor in cursors {
-                    let error = read_log_changes(&path, None, &cursor, 100).unwrap_err();
-                    assert!(unsupported(&error), "{label} {cursor:?}: {error:?}");
-                }
-                let db = Database::open(&path).unwrap();
-                for cursor in cursors {
-                    let error = db.changes_after(&cursor, 100).unwrap_err();
-                    assert!(unsupported(&error), "{label} {cursor:?}: {error:?}");
-                }
-                db.close().unwrap();
-                assert_eq!(fingerprint(&path, None), before, "{label}");
-            } else {
-                let all = db.changes_after(&FeedCursor::beginning(), 100).unwrap();
-                let cursor = db.feed_cursor().unwrap();
-                assert_eq!(
-                    (all.changes.len() as u64, all.head, all.next),
-                    (cursor.sequence, cursor.sequence, cursor),
-                    "{label}"
-                );
-                db.collection_mut(collection)
-                    .unwrap()
-                    .put(3, &[3.0, 1.0], b"three")
-                    .unwrap();
-                let next = db.changes_after(&cursor, 100).unwrap();
-                assert!(
+            let committed = live_bytes(&db);
+            let all = db.changes_after(&FeedCursor::beginning(), 1000).unwrap();
+            let cursor = db.feed_cursor().unwrap();
+            assert_eq!(live_bytes(&db), committed, "{label}");
+            assert_eq!((all.head, all.next), (cursor.sequence, cursor), "{label}");
+            assert!(!all.has_more, "{label}");
+            assert_eq!(
+                all.changes.last().map(|c| c.sequence),
+                Some(cursor.sequence),
+                "{label}"
+            );
+            let graph_events = all
+                .changes
+                .iter()
+                .filter(|c| {
                     matches!(
-                        next.changes[..],
-                        [Change {
-                            kind: ChangeKind::Put { id: 3, .. },
-                            ..
-                        }]
-                    ),
-                    "{label}: {:?}",
-                    next.changes
-                );
-                db.close().unwrap();
-                let before = fingerprint(&path, None);
-                let logged = read_log_changes(&path, None, &FeedCursor::beginning(), 100).unwrap();
-                assert_eq!(
-                    logged.changes,
-                    [all.changes, next.changes].concat(),
-                    "{label}"
-                );
-                assert_eq!(fingerprint(&path, None), before, "{label}");
+                        c.kind,
+                        ChangeKind::GraphCreated { .. } | ChangeKind::GraphBatch { .. }
+                    )
+                })
+                .count();
+            assert_eq!(graph_events > 0, state.graph(), "{label}");
+            if !state.graph() {
+                assert_eq!(all.changes.len() as u64, cursor.sequence, "{label}");
             }
+            db.collection_mut(collection)
+                .unwrap()
+                .put(3, &[3.0, 1.0], b"three")
+                .unwrap();
+            let next = db.changes_after(&cursor, 100).unwrap();
+            assert!(
+                matches!(
+                    next.changes[..],
+                    [Change {
+                        kind: ChangeKind::Put { id: 3, .. },
+                        ..
+                    }]
+                ),
+                "{label}: {:?}",
+                next.changes
+            );
+            db.close().unwrap();
+            let before = fingerprint(&path, None);
+            let expected = [all.changes, next.changes].concat();
+            let logged = read_log_changes(&path, None, &FeedCursor::beginning(), 1000).unwrap();
+            assert_eq!(logged.changes, expected, "{label}");
+            let db = Database::open(&path).unwrap();
+            let reopened = db.changes_after(&FeedCursor::beginning(), 1000).unwrap();
+            assert_eq!(reopened.changes, expected, "{label}");
+            db.close().unwrap();
+            assert_eq!(fingerprint(&path, None), before, "{label}");
         }
     }
 }
-
 /// One more commit on `collection` (record `id`) and, on graph files, one
 /// more on graph "g" (node `n{id}`).
 fn grow(db: &mut Database, state: Setup, collection: &str, id: u64) {

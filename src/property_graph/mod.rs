@@ -21,9 +21,11 @@
 //! graph state; compaction keeps graph IDs and records each graph's
 //! high-water marks so node and edge IDs are never reused. [`enable_graph`]
 //! and [`strip_graph`] (also re-exported from `maintenance`) convert files by
-//! staged copy-out, [`inspect_graph`] and [`verify_graph`] add graph counts,
-//! and `maintenance::upgrade` and change feeds refuse graph files with
-//! `GraphUnsupportedOperation` and `GraphChangeFeedUnsupported`.
+//! staged copy-out, and [`inspect_graph`] and [`verify_graph`] add graph
+//! counts. Since v0.6.0 `maintenance::upgrade` copies graph files like any
+//! latest-format file, and change feeds report graph commits as
+//! `ChangeKind::GraphCreated`, `GraphDropped` and `GraphBatch` events
+//! (see [`crate::changes::GraphChange`]).
 //!
 //! Schemas (EPIC-008): [`GraphMut::put_schema`] declares optional label and
 //! relationship rules ([`GraphSchema`]) that every later write must satisfy
@@ -52,6 +54,7 @@ pub(crate) mod engine;
 // by tests.
 #[allow(dead_code)]
 mod convert;
+pub(crate) mod feed;
 pub(crate) mod frame;
 mod maintain;
 mod read;

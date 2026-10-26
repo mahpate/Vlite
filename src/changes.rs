@@ -4,7 +4,9 @@
 //! of durable commits. Cursors are `(lineage, sequence)` pairs: a compaction,
 //! restore, upgrade or re-encryption starts a new lineage, after which older
 //! cursors fail with `Error::CursorCompacted` rather than silently skipping
-//! history. Feeds need a lineage (format v4 or newer).
+//! history. Feeds need a lineage (format v4 or newer). Graph-enabled files
+//! report graph commits as `GraphCreated`, `GraphDropped` and `GraphBatch`
+//! events next to vector events (v0.6.0).
 
 use crate::crypto::EncryptionKey;
 use crate::format::{self, LogHeader, OP_TIME_ANCHOR};
@@ -105,7 +107,11 @@ impl FeedCursor {
 }
 
 /// What happened in one committed operation.
+///
+/// Non-exhaustive since v0.6.0, when graph events were added: matches need a
+/// wildcard arm so later event kinds do not break consumers.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum ChangeKind {
     /// A record was inserted or replaced. `expires_at_ms` is set for records
     /// written with a time to live; expiry itself is not logged, consumers
@@ -134,6 +140,93 @@ pub enum ChangeKind {
     },
     /// Named/sparse vector data of the collection was replaced.
     VectorsUpdated,
+    /// A graph was created (graph-enabled files). Graph events have an empty
+    /// `Change::collection`; the graph name is here.
+    GraphCreated {
+        graph: String,
+    },
+    /// A graph was dropped.
+    GraphDropped {
+        graph: String,
+    },
+    /// The node, edge, attachment and schema changes of one graph commit, in
+    /// log order. `revision` is the commit sequence, which is also the new
+    /// revision of every node and edge written here. A commit that mixes
+    /// graph and vector operations yields several events sharing `sequence`:
+    /// vector operations are `Put`/`Delete` events at their position and the
+    /// graph operations between them form one `GraphBatch` each.
+    GraphBatch {
+        graph: String,
+        revision: u64,
+        operations: Vec<GraphChange>,
+    },
+}
+
+/// One graph operation inside a [`ChangeKind::GraphBatch`]. IDs are the
+/// engine's node and edge IDs; keys are resolved from the log.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum GraphChange {
+    /// A node was created (`created`) or its labels and properties replaced.
+    NodeUpserted {
+        id: u64,
+        key: String,
+        labels: Vec<String>,
+        properties: Metadata,
+        created: bool,
+    },
+    NodePatched {
+        id: u64,
+        key: String,
+        add_labels: Vec<String>,
+        remove_labels: Vec<String>,
+        set: Metadata,
+        unset: Vec<String>,
+    },
+    NodeDeleted {
+        id: u64,
+        key: String,
+    },
+    /// An edge was created (`created`) or its properties replaced.
+    EdgeUpserted {
+        id: u64,
+        key: Option<String>,
+        source: u64,
+        source_key: String,
+        relationship: String,
+        destination: u64,
+        destination_key: String,
+        properties: Metadata,
+        created: bool,
+    },
+    EdgePatched {
+        id: u64,
+        key: Option<String>,
+        set: Metadata,
+        unset: Vec<String>,
+    },
+    EdgeDeleted {
+        id: u64,
+        key: Option<String>,
+    },
+    /// A node was attached to a record of `collection`.
+    Attached {
+        node: u64,
+        node_key: String,
+        collection: String,
+        record: u64,
+    },
+    /// A node was detached from `record` of `collection`.
+    Detached {
+        node: u64,
+        node_key: String,
+        collection: String,
+        record: u64,
+    },
+    /// The declared schema was replaced (an empty schema removes it).
+    SchemaUpdated {
+        schema: crate::property_graph::GraphSchema,
+    },
 }
 
 /// One event. A batch commit produces several events sharing `sequence`,
@@ -167,11 +260,6 @@ pub(crate) fn read_changes<R: Read + Seek>(
     max_events: usize,
 ) -> Result<ChangeBatch> {
     let header = format::read_log_header_with(file, key, known)?;
-    // REQ-053: graph-enabled files have no change feed in this release; the
-    // explicit error replaces any silent omission of graph frames.
-    if header.flags & format::FLAG_GRAPH != 0 {
-        return Err(Error::GraphChangeFeedUnsupported);
-    }
     let lineage = header.lineage.ok_or(Error::ChangeFeedRequiresUpgrade)?;
     if cursor.lineage != 0 && cursor.lineage != lineage {
         return Err(Error::CursorCompacted {
@@ -206,6 +294,7 @@ fn scan<R: Read + Seek>(
     let mut next = after;
     let mut anchor_ms: Option<u64> = None;
     let mut has_more = false;
+    let mut graphs = crate::property_graph::feed::FeedGraphs::default();
     while let Some(frame) = format::next_frame(file, header, offset)? {
         offset += frame.disk.len() as u64;
         if frame.operation == OP_TIME_ANCHOR {
@@ -357,6 +446,9 @@ fn scan<R: Read + Seek>(
                     .map(|entry| entry.0.clone())
                     .unwrap_or_default();
                 events.push((name, ChangeKind::SettingsUpdated { settings }));
+            }
+            crate::property_graph::engine::codec::OP_GRAPH => {
+                events = graphs.frame(frame.sequence, frame.count, body, offset, &collections)?;
             }
             _ => return Err(corrupt()),
         }

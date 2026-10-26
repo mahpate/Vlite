@@ -18,7 +18,7 @@ use std::process::{Command, Output};
 
 use graph_support::*;
 use tempfile::tempdir;
-use vlite::changes::{FeedCursor, read_log_changes};
+use vlite::changes::{ChangeKind, FeedCursor, read_log_changes};
 use vlite::maintenance::{self, RestoreTarget};
 use vlite::{Database, EncryptionKey, Error, FormatVersion, Metadata, ReplicaFollower};
 
@@ -445,7 +445,9 @@ fn inspect_graph_and_verify_graph_report_graph_counts() {
 }
 
 #[test]
-fn upgrade_and_change_feeds_reject_graph_files_explicitly() {
+fn upgrade_and_change_feeds_accept_graph_files() {
+    // v0.6.0: graph files upgrade (a validated copy) and report their graph
+    // commits through every feed reader; nothing is written to the source.
     let dir = tempdir().unwrap();
     let start = FeedCursor {
         lineage: 0,
@@ -455,38 +457,40 @@ fn upgrade_and_change_feeds_reject_graph_files_explicitly() {
         let key = kind.key();
         let path = graph_file(dir.path(), "graph", kind);
         let original = fs::read(&path).unwrap();
-        let output = dir.path().join(format!("upgraded-{kind:?}.vlite"));
         if key.is_none() {
-            assert!(matches!(
-                maintenance::upgrade(&path, &output),
-                Err(Error::GraphUnsupportedOperation)
-            ));
-            assert!(!output.exists());
+            let output = dir.path().join(format!("upgraded-{kind:?}.vlite"));
+            maintenance::upgrade(&path, &output).unwrap();
+            assert_eq!(header_flags(&output), FLAG_GRAPH);
+            maintenance::verify_graph(&output, None).unwrap();
         }
-        assert!(matches!(
-            read_log_changes(&path, key.as_ref(), &start, 16),
-            Err(Error::GraphChangeFeedUnsupported)
-        ));
+        let logged = read_log_changes(&path, key.as_ref(), &start, 1000).unwrap();
         let db = open(&path, key.as_ref());
-        assert!(matches!(
-            db.feed_cursor(),
-            Err(Error::GraphChangeFeedUnsupported)
-        ));
-        assert!(matches!(
-            db.changes_after(&start, 16),
-            Err(Error::GraphChangeFeedUnsupported)
-        ));
+        let cursor = db.feed_cursor().unwrap();
+        let live = db.changes_after(&start, 1000).unwrap();
+        assert_eq!(live.changes, logged.changes);
+        assert_eq!(live.next, cursor);
+        assert!(
+            live.changes
+                .iter()
+                .any(|c| matches!(c.kind, ChangeKind::GraphBatch { .. }))
+        );
+        assert!(db.changes_after(&cursor, 16).unwrap().changes.is_empty());
         drop(db);
         assert_eq!(fs::read(&path).unwrap(), original);
     }
-    // Vector-only files keep their feeds in graph builds.
+    // Vector-only files keep their feeds unchanged.
     let vector = vector_file(dir.path(), "vector", Kind::Plain);
     let db = open(&vector, None);
     let cursor = db.feed_cursor().unwrap();
-    assert!(db.changes_after(&start, 16).unwrap().changes.len() > 1);
+    let all = db.changes_after(&start, 16).unwrap();
+    assert!(all.changes.len() > 1);
+    assert!(
+        all.changes
+            .iter()
+            .all(|c| !matches!(c.kind, ChangeKind::GraphBatch { .. }))
+    );
     assert!(db.changes_after(&cursor, 16).unwrap().changes.is_empty());
 }
-
 #[test]
 fn replica_followers_replay_graph_frames() {
     let dir = tempdir().unwrap();
@@ -668,6 +672,8 @@ fn maintain_cli_enables_and_strips_graphs() {
     assert_eq!(header_flags(&compacted), FLAG_GRAPH);
     let upgraded = dir.path().join("upgraded.vlite");
     let result = maintain(&["upgrade".as_ref(), graph.as_os_str(), upgraded.as_os_str()]);
-    assert!(!result.status.success());
-    assert!(!upgraded.exists());
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(header_flags(&upgraded), FLAG_GRAPH);
+    let result = maintain(&["verify".as_ref(), upgraded.as_os_str()]);
+    assert!(result.status.success(), "{result:?}");
 }

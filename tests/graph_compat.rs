@@ -6,8 +6,8 @@
 //! valid header CRC and one op-12 frame encoded with the DO-003 draft
 //! layout), and that op 12 is not accepted by the current replay allow-list.
 //! In `--features graph` builds the same calls follow the EPIC-006 contract
-//! instead (graph-aware maintenance, replicas and log export; `upgrade` and
-//! change feeds reject explicitly), and every source stays byte-identical.
+//! instead (graph-aware maintenance, replicas, log export, `upgrade` and change
+//! feeds, v0.6.0), and every source stays byte-identical.
 //! The release-tag half (C-4) and the C ABI/Python/Node entry points are run by
 //! `scripts\graph_compat_check.py` against isolated `git archive` builds.
 //!
@@ -307,12 +307,9 @@ fn committed_fixture(name: &str) -> Vec<u8> {
 /// call's key matches the file (EPIC-006).
 #[derive(Clone, Copy, Debug)]
 enum GraphBuild {
-    /// Graph-aware: LEG-009, LEG-011, LEG-012, LEG-014, LEG-021..023.
+    /// Graph-aware: LEG-009..014, LEG-021..023 (`upgrade` and change feeds
+    /// since v0.6.0).
     Accepts,
-    /// LEG-010: `Error::GraphUnsupportedOperation`.
-    Upgrade,
-    /// LEG-013: `Error::GraphChangeFeedUnsupported`.
-    Feed,
     /// A vector-only follower refuses a graph primary's segment header with
     /// `Error::ReplicaDiverged` (LEG-014).
     Diverged,
@@ -340,8 +337,6 @@ fn assert_outcome(
         }
         (_, _, result) => match (graph, result) {
             (GraphBuild::Accepts, Ok(()))
-            | (GraphBuild::Upgrade, Err(Error::GraphUnsupportedOperation))
-            | (GraphBuild::Feed, Err(Error::GraphChangeFeedUnsupported))
             | (GraphBuild::Diverged, Err(Error::ReplicaDiverged(_))) => {}
             (graph, result) => panic!("{entry_point}: expected {graph:?}, got {result:?}"),
         },
@@ -370,7 +365,7 @@ struct Fixture {
 /// Runs every REQ-055 library entry point against one graph-flagged file.
 /// Returns the number of entry-point invocations asserted.
 fn probe_all(fixture: &Fixture, scratch: &Path, follower_base: &Path) -> usize {
-    use GraphBuild::{Accepts, Diverged, Feed, Upgrade};
+    use GraphBuild::{Accepts, Diverged};
     let source = fixture.path.as_path();
     let key = key();
     let out = |name: &str| scratch.join(format!("{}-{name}.vlite", fixture.name));
@@ -525,7 +520,7 @@ fn probe_all(fixture: &Fixture, scratch: &Path, follower_base: &Path) -> usize {
     if check(
         "maintenance::upgrade",
         false,
-        Upgrade,
+        Accepts,
         maintenance::upgrade(source, &destination).map(drop),
     ) {
         assert_absent("maintenance::upgrade", &destination);
@@ -579,7 +574,7 @@ fn probe_all(fixture: &Fixture, scratch: &Path, follower_base: &Path) -> usize {
         check(
             &format!("changes::read_log_changes({label})"),
             keyed,
-            Feed,
+            Accepts,
             read_log_changes(
                 source,
                 source_key,
