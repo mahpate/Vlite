@@ -9,12 +9,21 @@ COPY tests ./tests
 COPY examples ./examples
 COPY bindings/c ./bindings/c
 COPY crates ./crates
-# Release publishing sets VLITE_IMAGE_TESTS=0 for emulated cross-builds; the
-# same suite has already passed natively on each published architecture.
+# Release image publishing sets VLITE_IMAGE_TESTS=0 because the same suite has
+# already passed natively on each published architecture, and
+# VLITE_IMAGE_BINS=shipped to build only the binaries the runtime and api
+# images copy (same features, no vlite-ffi). The default "all" builds every
+# binary plus the graph-enabled C library.
 ARG VLITE_IMAGE_TESTS=1
+ARG VLITE_IMAGE_BINS=all
 RUN if [ "$VLITE_IMAGE_TESTS" = "1" ]; then cargo test --locked --workspace --all-targets --all-features; fi \
-    && cargo build --locked --release --bins --features http-embedder,otel,tools,import-formats,json,mcp,server,grpc,gpu,graph,mcp-proxy \
-    && cargo build --locked --release -p vlite-ffi --features graph
+    && case "$VLITE_IMAGE_BINS" in \
+         all) shipped="" ;; \
+         shipped) shipped="--bin vlite-smoke --bin vlite-maintain --bin vlite-bench --bin vlite-server" ;; \
+         *) echo "VLITE_IMAGE_BINS must be all or shipped" >&2; exit 1 ;; \
+       esac \
+    && cargo build --locked --release ${shipped:---bins} --features http-embedder,otel,tools,import-formats,json,mcp,server,grpc,gpu,graph,mcp-proxy \
+    && if [ "$VLITE_IMAGE_BINS" = "all" ]; then cargo build --locked --release -p vlite-ffi --features graph; fi
 
 FROM build AS test
 CMD ["cargo", "test", "--locked", "--workspace", "--all-targets", "--all-features"]

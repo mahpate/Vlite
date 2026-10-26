@@ -277,8 +277,11 @@ backup and restore details.
 
 ## Release and image verification
 
-The release workflow builds and tests the runtime, API, and dashboard targets
-for `linux/amd64` and `linux/arm64`. It loads the standalone dashboard image
+The release workflow builds and tests the runtime, API, and dashboard targets.
+Tagged releases build each of `linux/amd64` and `linux/arm64` on a native
+runner (no emulation), push the per-platform images by digest, and then tag
+multi-platform manifest lists. Published images compile only the binaries
+they ship. The workflow loads the standalone dashboard image
 for the browser E2E run, publishes version tags only from matching `vX.Y.Z`
 Git tags, checks the published multi-platform manifests, and runs REST, HTTPS,
 and browser verification against the published digests. Workflow

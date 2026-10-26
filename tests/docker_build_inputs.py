@@ -59,6 +59,22 @@ class DockerInputs(unittest.TestCase):
                         self.assertTrue((ROOT / path).is_file())
                         self.assertTrue(any(path == source or path.startswith(source + "/") for source in copied))
 
+    def test_release_images_build_only_the_shipped_binaries(self):
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("ARG VLITE_IMAGE_BINS=all\n", dockerfile.replace("\r\n", "\n"))
+        copied = re.findall(r"COPY --from=build /app/target/release/(\S+) ", dockerfile)
+        shipped = re.search(r'shipped\) shipped="([^"]*)"', dockerfile)
+        self.assertIsNotNone(shipped)
+        self.assertEqual(re.findall(r"--bin (\S+)", shipped.group(1)), copied)
+        self.assertIn("${shipped:---bins}", dockerfile)
+        release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertNotIn("setup-qemu-action", release)
+        # Native per-architecture builds push by digest; image-publish merges them.
+        self.assertIn("runner: ubuntu-24.04-arm", release)
+        self.assertEqual(release.count("push-by-digest=true,name-canonical=true,push=true"), 3)
+        self.assertEqual(release.count("VLITE_IMAGE_BINS=shipped"), 2)
+        self.assertIn("docker buildx imagetools create", release)
+
 
 if __name__ == "__main__":
     unittest.main()
