@@ -1,5 +1,5 @@
 {
-  "description": "Deterministic agent task fixtures for the vlite-mcp graph tools (feature-agent-graph REQ-038, AC-018). Scripted tool calls with expected outputs; no LLM. tests/graph_mcp.rs creates a new graph-enabled file per task, runs the named seed through a --writable vlite-mcp session, then runs `steps` in one session opened --writable when `writable` is true and --read-only otherwise. `expect` maps JSON pointers into structuredContent to exact values, `expect_len` maps pointers to array lengths, and `expect_error` is the error code prefix of a failed call (isError true).",
+  "description": "Deterministic agent task fixtures for the vlite-mcp graph tools (feature-agent-graph REQ-038, AC-018). Scripted tool calls with expected outputs; no LLM. tests/graph_mcp.rs creates a new graph-enabled file per task (one `default` record 1 at [0, 0], never attached), runs the named seed (or each seed of a list, in order) through a --writable vlite-mcp session, then runs `steps` in one session opened --writable when `writable` is true and --read-only otherwise. `expect` maps JSON pointers into structuredContent to exact values, `expect_len` maps pointers to array lengths, and `expect_error` is the error code prefix of a failed call (isError true).",
   "seeds": {
     "services": [
       {"tool": "vlite_graph_create", "arguments": {"graph": "services"}},
@@ -14,9 +14,81 @@
         {"op": "create_edge", "key": "api-cache", "source": "api", "relationship": "CALLS", "destination": "cache"},
         {"op": "create_edge", "key": "cache-db", "source": "cache", "relationship": "DEPENDS_ON", "destination": "db"}
       ]}}
+    ],
+    "services_schema": [
+      {"tool": "vlite_graph_put_schema", "arguments": {"graph": "services", "schema": {
+        "labels": {
+          "Service": {"description": "A deployable service", "properties": {"tier": {"type": "string", "required": true, "index": "exact"}}},
+          "Database": {},
+          "Team": {"description": "Declared before any team is recorded"}
+        },
+        "relationships": {
+          "CALLS": {"endpoints": [{"source": "Service", "destination": "Service"}]},
+          "DEPENDS_ON": {"endpoints": [{"source": "Service", "destination": "Database"}]},
+          "OWNS": {"endpoints": [{"source": "Team", "destination": "Service"}], "multiplicity": "unique_triple"}
+        }
+      }}}
+    ],
+    "documents": [
+      {"tool": "vlite_graph_create", "arguments": {"graph": "docs"}},
+      {"tool": "vlite_graph_write", "arguments": {"graph": "docs", "ops": [
+        {"op": "put_vector", "collection": "default", "id": "10", "vector": [1.0, 0.0], "payload": "Alice owns the payments runbook"},
+        {"op": "put_vector", "collection": "default", "id": "11", "vector": [0.0, 1.0], "payload": "Globex memo"},
+        {"op": "create_node", "key": "doc:runbook", "labels": ["Document"]},
+        {"op": "create_node", "key": "doc:memo", "labels": ["Document"]},
+        {"op": "create_node", "key": "person:alice", "labels": ["Person"], "properties": {"name": {"type": "string", "value": "Alice"}}},
+        {"op": "create_node", "key": "team:payments", "labels": ["Team"]},
+        {"op": "create_edge", "key": "runbook-alice", "source": "doc:runbook", "relationship": "MENTIONS", "destination": "person:alice"},
+        {"op": "create_edge", "key": "alice-payments", "source": "person:alice", "relationship": "MEMBER_OF", "destination": "team:payments"},
+        {"op": "attach", "node": "doc:runbook", "collection": "default", "record": "10"},
+        {"op": "attach", "node": "doc:memo", "collection": "default", "record": "11"}
+      ]}}
     ]
   },
   "tasks": [
+    {
+      "id": "uc001-hybrid-retrieval",
+      "use_case": "UC-001",
+      "goal": "Answer a question by vector search over documents, then expand to the entities they mention and return compact evidence (AC-029).",
+      "seed": "documents",
+      "writable": false,
+      "steps": [
+        {"tool": "vlite_graph_retrieve", "arguments": {"graph": "docs",
+                                                       "pivot": {"collection": "default", "vector": [1.0, 0.0], "k": 3},
+                                                       "expansion": {"types": ["MENTIONS", "MEMBER_OF"]},
+                                                       "evidence": {"collections": ["default"], "max_excerpt_bytes": 12}},
+         "expect": {"/graph": "docs", "/complete": true, "/truncation": [],
+                    "/pivots/0/record_id": "10", "/pivots/0/node_key": "doc:runbook", "/pivots/0/distance": 0.0, "/pivots/0/vector_rank": 1,
+                    "/pivots/1/record_id": "11", "/pivots/1/node_key": "doc:memo",
+                    "/unmapped_pivots": {"count": 1, "record_ids": ["1"]},
+                    "/nodes/0/depth": 0, "/nodes/0/node/key": "doc:runbook",
+                    "/nodes/2/depth": 1, "/nodes/2/node/key": "person:alice",
+                    "/nodes/3/depth": 2, "/nodes/3/node/key": "team:payments",
+                    "/evidence/0/record_id": "10", "/evidence/0/node_id": "0", "/evidence/0/payload_bytes": 31,
+                    "/evidence/0/payload_excerpt": "Alice owns t", "/evidence/0/excerpt_truncated": true,
+                    "/evidence/1/payload_excerpt": "Globex memo", "/evidence/1/excerpt_truncated": false,
+                    "/stats/pivots_mapped": 2, "/stats/evidence_items": 2},
+         "expect_len": {"/pivots": 2, "/nodes": 4, "/edges": 2, "/evidence": 2, "/paths": 0}},
+        {"tool": "vlite_graph_retrieve", "arguments": {"graph": "docs",
+                                                       "pivot": {"collection": "default", "vector": [1.0, 0.0], "k": 1},
+                                                       "expansion": {"types": ["MENTIONS"], "include_paths": true},
+                                                       "projection": "none"},
+         "expect": {"/complete": true, "/pivots/0/node_key": "doc:runbook", "/nodes/1/node/key": "person:alice",
+                    "/nodes/1/node/properties": {}, "/unmapped_pivots/count": 0},
+         "expect_len": {"/nodes": 2, "/edges": 1, "/paths": 1, "/evidence": 0}},
+        {"tool": "vlite_graph_retrieve", "arguments": {"graph": "docs",
+                                                       "pivot": {"collection": "default", "vector": [1.0, 0.0], "k": 3},
+                                                       "evidence": {"collections": ["default"], "max_items": 1}},
+         "expect": {"/complete": false, "/truncation": ["output_limit"], "/evidence/0/record_id": "10"},
+         "expect_len": {"/evidence": 1}},
+        {"tool": "vlite_graph_retrieve", "arguments": {"graph": "docs", "pivot": {"collection": "default", "vector": [1.0, 0.0], "k": 101}},
+         "expect_error": "graph_limit_exceeds_ceiling"},
+        {"tool": "vlite_graph_retrieve", "arguments": {"graph": "docs", "pivot": {"collection": "default"}},
+         "expect_error": "invalid_input"},
+        {"tool": "vlite_graph_retrieve", "arguments": {"graph": "docs", "pivot": {"collection": "default", "vector": [1.0, 0.0]}, "evidence": {"collections": ["default"], "extra": 1}},
+         "expect_error": "invalid_request"}
+      ]
+    },
     {
       "id": "uc002-agent-memory",
       "use_case": "UC-002",
@@ -100,27 +172,53 @@
     {
       "id": "uc004-discover-before-querying",
       "use_case": "UC-004",
-      "goal": "Discover graphs, labels and relationship types before querying. Declared-schema tools (EPIC-008) extend this task when they land.",
-      "seed": "services",
+      "goal": "Discover graphs, the declared and observed schema, labels and relationship types before querying, then query with the discovered vocabulary.",
+      "seed": ["services", "services_schema"],
       "writable": false,
       "steps": [
         {"tool": "vlite_info", "arguments": {},
          "expect": {"/graph_enabled": true, "/read_only": true, "/graphs": [{"name": "services", "node_count": 5, "edge_count": 4}]}},
         {"tool": "vlite_graph_list", "arguments": {},
          "expect": {"/graphs": [{"name": "services", "node_count": 5, "edge_count": 4}]}},
+        {"tool": "vlite_graph_schema", "arguments": {"graph": "services"},
+         "expect": {"/graph": "services",
+                    "/declared/labels/Service": {"description": "A deployable service", "properties": {"tier": {"type": "string", "required": true, "unique": false, "index": "exact"}}},
+                    "/declared/relationships/OWNS/multiplicity": "unique_triple",
+                    "/declared/relationships/CALLS/endpoints": [{"source": "Service", "destination": "Service"}],
+                    "/observed/complete": true, "/observed/entities_scanned": 9,
+                    "/observed/labels/0": {"name": "Database", "origin": "both", "count": 1, "properties": []},
+                    "/observed/labels/1/name": "Service", "/observed/labels/1/count": 4,
+                    "/observed/labels/1/properties": [{"name": "tier", "origin": "both", "count": 4, "types": ["string"]}],
+                    "/observed/labels/2": {"name": "Team", "origin": "declared", "count": 0, "properties": []},
+                    "/observed/relationships/0/name": "CALLS", "/observed/relationships/0/origin": "both", "/observed/relationships/0/count": 2,
+                    "/observed/relationships/2/name": "OWNS", "/observed/relationships/2/origin": "declared"},
+         "expect_len": {"/observed/labels": 3, "/observed/relationships": 3}},
+        {"tool": "vlite_graph_schema", "arguments": {"graph": "services", "budget": 2},
+         "expect": {"/observed/complete": false, "/observed/entities_scanned": 2}},
         {"tool": "vlite_graph_find_nodes", "arguments": {"graph": "services", "label": "Service", "projection": "none"},
          "expect": {"/complete": true, "/cursor": null, "/nodes/0/key": "api", "/nodes/3/key": "billing"},
          "expect_len": {"/nodes": 4}},
         {"tool": "vlite_graph_find_nodes", "arguments": {"graph": "services", "label": "Service",
                                                           "conditions": [{"op": "eq", "field": "tier", "value": {"type": "string", "value": "core"}}],
                                                           "projection": {"only": ["tier"]}},
-         "expect": {"/nodes/0/key": "auth", "/nodes/1/key": "cache", "/nodes/1/properties": {"tier": {"type": "string", "value": "core"}}},
+         "expect": {"/nodes/0/key": "auth", "/nodes/1/key": "cache", "/nodes/1/properties": {"tier": {"type": "string", "value": "core"}},
+                    "/stats/indexes": ["property_exact_index"]},
          "expect_len": {"/nodes": 2}},
+        {"tool": "vlite_graph_query", "arguments": {"graph": "services", "query": "MATCH (s:Service) WHERE s.tier = $tier RETURN s LIMIT 10",
+                                                    "params": {"tier": {"type": "string", "value": "core"}}},
+         "expect": {"/complete": true, "/nodes/0/key": "auth", "/nodes/1/key": "cache"},
+         "expect_len": {"/nodes": 2}},
+        {"tool": "vlite_graph_query", "arguments": {"graph": "services", "query": "MATCH (a KEY \"api\")-[:CALLS*1..2]->(b) RETURN b LIMIT 10", "explain": true},
+         "expect": {"/explain/query/operation": "traverse", "/explain/limits/max_output_nodes": 10}},
+        {"tool": "vlite_graph_query", "arguments": {"graph": "services", "query": "MATCH (s) DELETE s"},
+         "expect_error": "graph_query_unsupported"},
         {"tool": "vlite_graph_neighbors", "arguments": {"graph": "services", "node": {"key": "db"}, "direction": "in", "projection": "none"},
          "expect": {"/complete": true, "/edges/0/relationship": "DEPENDS_ON", "/edges/1/relationship": "DEPENDS_ON"},
          "expect_len": {"/edges": 2, "/nodes": 2}},
         {"tool": "vlite_graph_find_nodes", "arguments": {"graph": "services", "label": "Service", "explain": true},
          "expect": {"/explain/query/operation": "find-nodes", "/explain/indexes": ["label_index_scan"]}},
+        {"tool": "vlite_graph_put_schema", "arguments": {"graph": "services", "schema": {}},
+         "expect_error": "read_only"},
         {"tool": "vlite_graph_get", "arguments": {"graph": "missing", "node": {"key": "api"}},
          "expect_error": "graph_not_found"}
       ]

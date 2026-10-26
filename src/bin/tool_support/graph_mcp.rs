@@ -3,25 +3,35 @@
 //! Listed and callable only when the opened file is graph-enabled; on
 //! vector-only files `tools/list`, `vlite_info` and calls behave exactly as in
 //! builds without `graph`. Read tools never write. Write tools exist only
-//! with `--writable`. Inputs bind typed JSON fields (no free-text query) and
-//! reuse the `vlite-graph-cli` request JSON; outputs reuse its compact
-//! encoding (u64 IDs as decimal strings, `complete`/`truncation`/`stats` on
-//! every read, no vectors). Errors are `"<code>: <message>"` with the stable
-//! graph error codes.
+//! with `--writable`. Inputs bind typed JSON fields and reuse the
+//! `vlite-graph-cli` request JSON; `vlite_graph_query` is the one free-text
+//! tool and only accepts the read-only query text of EPIC-015, which
+//! translates to exactly one typed read. Outputs reuse the compact encoding
+//! (u64 IDs as decimal strings, `complete`/`truncation`/`stats` on every
+//! read, no vectors) shared with the REST graph routes. Errors are
+//! `"<code>: <message>"` with the stable graph error codes.
 
+use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use vlite::Database;
-use vlite::property_graph::{GraphLimits, GraphOp, ReadOptions};
-
-use crate::graph_json::{
-    self, Batch, Empty, Named, batch_output, error_code, explanation, info, read_output,
-    read_request,
+use vlite::property_graph::{
+    EvidenceSpec, GraphLimits, GraphOp, GraphTextError, Pivot, ReadOptions, parse_graph_query,
 };
 
+use crate::graph_json::{
+    self, Batch, Empty, Named, QueryTextIn, SchemaIn, SchemaQueryIn, batch_output, error_code,
+    explanation, info, parse_value, put_schema_output, read_output, read_request, retrieval_output,
+    retrieve_request, schema_output, split_graph, text_error,
+};
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PutSchemaIn {
+    graph: String,
+    schema: SchemaIn,
+}
+
 /// Read tools and the `vlite-graph-cli` query command each one runs.
-/// EPIC-008 schema tools (`vlite_graph_schema`, `vlite_graph_label_schema`,
-/// `vlite_graph_relationship_schema`) belong in this list and in
-/// [`read_tool_definitions`].
 const QUERY_TOOLS: &[(&str, &str)] = &[
     ("vlite_graph_find_nodes", "find-nodes"),
     ("vlite_graph_neighbors", "neighbors"),
@@ -30,10 +40,17 @@ const QUERY_TOOLS: &[(&str, &str)] = &[
 ];
 const LIST_TOOL: &str = "vlite_graph_list";
 const GET_TOOL: &str = "vlite_graph_get";
+/// Wave-2 read tools: declared + observed schema (AC-018), hybrid retrieve
+/// (ITEM-038) and read-only query text (ITEM-052).
+const SCHEMA_TOOL: &str = "vlite_graph_schema";
+const RETRIEVE_TOOL: &str = "vlite_graph_retrieve";
+const TEXT_TOOL: &str = "vlite_graph_query";
+const PUT_SCHEMA_TOOL: &str = "vlite_graph_put_schema";
 const WRITE_TOOLS: &[&str] = &[
     "vlite_graph_create",
     "vlite_graph_drop",
     "vlite_graph_write",
+    PUT_SCHEMA_TOOL,
 ];
 
 fn failure(error: &vlite::Error) -> String {
@@ -47,6 +64,9 @@ fn invalid(message: impl std::fmt::Display) -> String {
 fn is_graph_tool(name: &str) -> bool {
     name == LIST_TOOL
         || name == GET_TOOL
+        || name == SCHEMA_TOOL
+        || name == RETRIEVE_TOOL
+        || name == TEXT_TOOL
         || QUERY_TOOLS.iter().any(|(tool, _)| *tool == name)
         || WRITE_TOOLS.contains(&name)
 }
@@ -139,6 +159,64 @@ fn run(db: &mut Database, read_only: bool, name: &str, args: &Value) -> Result<V
                 .write_batch(&ops)
                 .map_err(|error| failure(&error))?;
             batch_output(&request.graph, &result)
+        }
+        PUT_SCHEMA_TOOL => {
+            let request: PutSchemaIn = graph_json::parse(&text).map_err(invalid)?;
+            let revision = db
+                .graph_mut(&request.graph)
+                .map_err(|error| failure(&error))?
+                .put_schema(&request.schema.into_schema())
+                .map_err(|error| failure(&error))?;
+            Ok(put_schema_output(&request.graph, revision))
+        }
+        SCHEMA_TOOL => {
+            let (graph, body) = split_graph(args).map_err(invalid)?;
+            let request: SchemaQueryIn = parse_value(body).map_err(invalid)?;
+            let found = db.graph(&graph).map_err(|error| failure(&error))?;
+            let observed = found
+                .observed_schema(request.budget)
+                .map_err(|error| failure(&error))?;
+            Ok(schema_output(&graph, &found.schema(), &observed))
+        }
+        RETRIEVE_TOOL => {
+            let (graph, body) = split_graph(args).map_err(invalid)?;
+            let request = retrieve_request(body).map_err(invalid)?;
+            let options = ReadOptions {
+                limits: request.limits,
+                projection: request.projection,
+                cancel: None,
+            };
+            let retrieval = db
+                .graph(&graph)
+                .map_err(|error| failure(&error))?
+                .retrieve(&request.retrieve, &options)
+                .map_err(|error| failure(&error))?;
+            let evidence: Vec<_> = retrieval.evidence.iter().collect();
+            Ok(retrieval_output(&graph, &retrieval, &evidence))
+        }
+        TEXT_TOOL => {
+            let (graph, body) = split_graph(args).map_err(invalid)?;
+            let request: QueryTextIn = parse_value(body).map_err(invalid)?;
+            let text_failure = |error: GraphTextError| {
+                let (code, message) = text_error(&error);
+                format!("{code}: {message}")
+            };
+            // Text errors are reported before the graph is looked up.
+            parse_graph_query(&request.query, &request.params)
+                .map_err(|error| text_failure(GraphTextError::Query(error)))?;
+            let limits = request.limits.resolve();
+            let found = db.graph(&graph).map_err(|error| failure(&error))?;
+            if request.explain {
+                let plan = found
+                    .explain_text(&request.query, &request.params, &limits)
+                    .map_err(text_failure)?;
+                explanation(&graph, &plan)
+            } else {
+                let read = found
+                    .query_text(&request.query, &request.params, &limits)
+                    .map_err(text_failure)?;
+                read_output(&graph, &read)
+            }
         }
         _ => query(db, name, object),
     }
@@ -353,7 +431,118 @@ fn read_tool_definitions() -> Vec<Value> {
             &["graph", "source", "destination"],
             hints(),
         ),
+        tool(
+            SCHEMA_TOOL,
+            "Declared schema (labels, relationship types, endpoints, typed properties, indexes) plus the observed summary with counts and origin declared/observed/both. Call before writing or querying unfamiliar graphs.",
+            json!({
+                "graph": graph_schema(),
+                "budget": {"type":"integer","minimum":1,"maximum":1_000_000,"default":100_000,"description":"Entities (nodes then edges) the observed summary scans; observed.complete is false when it stops early."},
+            }),
+            &["graph"],
+            hints(),
+        ),
+        tool(
+            RETRIEVE_TOOL,
+            "Hybrid retrieval: one vector and/or BM25 text pivot search over a collection, pivot records mapped to attached nodes, bounded expansion, and evidence records attached to returned nodes (metadata and payload excerpts; never vectors). Check complete, truncation and unmapped_pivots.",
+            with(
+                common_retrieve_properties(),
+                json!({
+                    "pivot": object(json!({
+                        "collection": {"type":"string","description":"Collection searched for pivot records."},
+                        "vector": {"type":"array","items":{"type":"number"},"minItems":1},
+                        "text": {"type":"string","description":"BM25 text leg; with vector both legs are fused (RRF)."},
+                        "k": {"type":"integer","minimum":1,"maximum":Pivot::MAX_K,"default":Pivot::DEFAULT_K},
+                        "filter": crate::filter_schema(),
+                        "metric": {"type":"string","enum":["squared_l2","cosine","inner_product"],"default":"squared_l2"},
+                        "max_exact_scan_records": {"type":"integer","minimum":1,"maximum":Pivot::MAX_EXACT_SCAN_RECORDS,"default":Pivot::DEFAULT_MAX_EXACT_SCAN_RECORDS,"description":"Larger collections fail graph_pivot_too_expensive."},
+                        "candidates": {"type":"integer","minimum":1},
+                        "rrf_k": {"type":"integer","minimum":1,"default":60},
+                        "vector_weight": {"type":"number","minimum":0,"default":1.0},
+                        "text_weight": {"type":"number","minimum":0,"default":1.0},
+                    }), &["collection"]),
+                    "expansion": object(json!({
+                        "direction": direction(),
+                        "types": types(),
+                        "expand_filter": filter_schema(),
+                        "return_filter": filter_schema(),
+                        "edge_filter": crate::filter_schema(),
+                        "include_paths": {"type":"boolean","default":false},
+                    }), &[]),
+                    "evidence": object(json!({
+                        "collections": {"type":"array","items":{"type":"string"},"maxItems":64,"description":"Collections whose attached records are returned as evidence; omitted returns none."},
+                        "fields": projection_schema(),
+                        "max_excerpt_bytes": {"type":"integer","minimum":0,"maximum":EvidenceSpec::MAX_EXCERPT_BYTES,"default":EvidenceSpec::DEFAULT_EXCERPT_BYTES},
+                        "max_items": {"type":"integer","minimum":0,"maximum":EvidenceSpec::MAX_ITEMS,"default":EvidenceSpec::DEFAULT_ITEMS},
+                    }), &[]),
+                }),
+            ),
+            &["graph", "pivot"],
+            hints(),
+        ),
+        tool(
+            TEXT_TOOL,
+            "Run one read-only graph query text (MATCH ... RETURN ... LIMIT; see GRAPH-QUERY.md) that translates to exactly one typed read; values bind as typed $params. Same output as the typed tool it maps to.",
+            json!({
+                "graph": graph_schema(),
+                "query": {"type":"string","minLength":1,"maxLength":4096},
+                "params": properties_schema(),
+                "limits": common_read_properties()["limits"].clone(),
+                "explain": common_read_properties()["explain"].clone(),
+            }),
+            &["graph", "query"],
+            hints(),
+        ),
     ]
+}
+
+/// `graph`, `limits` and `projection` of the read tools (no `explain`).
+fn common_retrieve_properties() -> Map<String, Value> {
+    let mut properties = common_read_properties();
+    properties.remove("explain");
+    properties
+}
+
+fn projection_schema() -> Value {
+    json!({"oneOf":[{"type":"string","enum":["all","none"]},object(json!({"only":{"type":"array","items":{"type":"string"}}}), &["only"])],"default":"all","description":"Which properties to return."})
+}
+
+/// The declared schema shape `vlite_graph_schema` returns as `declared`.
+fn declared_schema_schema() -> Value {
+    let property = object(
+        json!({
+            "type": {"type":"string","enum":["string","integer","float","boolean","geopoint"]},
+            "required": {"type":"boolean","default":false},
+            "unique": {"type":"boolean","default":false},
+            "index": {"type":["string","null"],"enum":["exact","range",null],"description":"Exact postings for eq, range postings for numeric ranges."},
+        }),
+        &["type"],
+    );
+    let properties = json!({"type":"object","additionalProperties":property});
+    let description = json!({"type":"string","maxLength":1024});
+    let label = object(
+        json!({"description":description,"properties":properties}),
+        &[],
+    );
+    let relationship = object(
+        json!({
+            "description": description,
+            "endpoints": {"type":"array","maxItems":64,"items":object(json!({"source":{"type":"string"},"destination":{"type":"string"}}), &["source","destination"])},
+            "multiplicity": {"type":"string","enum":["multi","unique_triple"],"default":"multi","description":"unique_triple allows ensure_edge."},
+            "properties": properties,
+        }),
+        &[],
+    );
+    let mut schema = object(
+        json!({
+            "labels": {"type":"object","additionalProperties":label,"maxProperties":256},
+            "relationships": {"type":"object","additionalProperties":relationship,"maxProperties":256},
+        }),
+        &[],
+    );
+    schema["description"] = json!(
+        "Replaces the whole declared schema; {} removes it. Existing data must conform (graph_schema_violation)."
+    );
+    schema
 }
 
 fn op_schemas() -> Vec<Value> {
@@ -426,6 +615,16 @@ fn op_schemas() -> Vec<Value> {
             json!({"collection":{"type":"string"},"id":u64_schema()}),
             &["collection", "id"],
         ),
+        op(
+            "ensure_edge",
+            json!({"source":{"type":"string"},"relationship":{"type":"string","pattern":"^[A-Za-z0-9_]{1,63}$","description":"Must be declared multiplicity unique_triple."},"destination":{"type":"string"},"properties":properties_schema()}),
+            &["source", "relationship", "destination"],
+        ),
+        op(
+            "put_schema",
+            json!({"schema":declared_schema_schema()}),
+            &["schema"],
+        ),
     ]
 }
 
@@ -448,10 +647,17 @@ fn write_tool_definitions() -> Vec<Value> {
         ),
         tool(
             "vlite_graph_write",
-            "Apply node, edge, attachment and vector operations atomically in one commit, in order; nothing is written on error.",
+            "Apply node, edge, ensure_edge, schema, attachment and vector operations atomically in one commit, in order; nothing is written on error.",
             json!({"graph":graph_schema(),"ops":{"type":"array","items":{"oneOf":op_schemas()},"maxItems":4096}}),
             &["graph", "ops"],
             annotations(false, true, false),
+        ),
+        tool(
+            PUT_SCHEMA_TOOL,
+            "Replace the graph's declared schema (labels, relationship types, endpoints, typed properties, unique/indexed properties) in one commit; existing data must conform or nothing changes (graph_schema_violation).",
+            json!({"graph":graph_schema(),"schema":declared_schema_schema()}),
+            &["graph", "schema"],
+            annotations(false, true, true),
         ),
     ]
 }

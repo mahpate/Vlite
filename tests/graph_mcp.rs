@@ -22,11 +22,15 @@ const READ_TOOLS: &[&str] = &[
     "vlite_graph_neighbors",
     "vlite_graph_traverse",
     "vlite_graph_shortest_path",
+    "vlite_graph_schema",
+    "vlite_graph_retrieve",
+    "vlite_graph_query",
 ];
 const WRITE_TOOLS: &[&str] = &[
     "vlite_graph_create",
     "vlite_graph_drop",
     "vlite_graph_write",
+    "vlite_graph_put_schema",
 ];
 
 fn fixture_text(name: &str) -> String {
@@ -314,7 +318,7 @@ fn read_only_sessions_reject_writes_and_validate_requests() {
             ),
         ],
     );
-    for (index, tool) in WRITE_TOOLS.iter().enumerate() {
+    for (index, tool) in WRITE_TOOLS.iter().take(3).enumerate() {
         assert_eq!(
             error(&responses[index]),
             format!("read_only: database is read-only; {tool} is unavailable")
@@ -470,19 +474,26 @@ fn agent_tasks_fixture_runs_deterministically() {
         .iter()
         .map(|task| task["use_case"].as_str().unwrap())
         .collect();
-    assert_eq!(use_cases, ["UC-002", "UC-003", "UC-004"]);
+    assert_eq!(use_cases, ["UC-001", "UC-002", "UC-003", "UC-004"]);
     for task in tasks {
         let id = task["id"].as_str().unwrap();
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("agent.vlite");
         graph_fixture(&path);
-        if let Some(seed) = task["seed"].as_str() {
-            let seed = &fixture["seeds"][seed];
-            for (index, response) in run(&path, true, &script(seed)).iter().enumerate() {
-                assert_eq!(
-                    response["result"]["isError"], false,
-                    "{id} seed {index}: {response}"
-                );
+        if !task["seed"].is_null() {
+            let names: Vec<&Value> = match &task["seed"] {
+                Value::Array(names) => names.iter().collect(),
+                name => vec![name],
+            };
+            for name in names {
+                let seed = &fixture["seeds"][name.as_str().unwrap()];
+                assert!(seed.is_array(), "{id}: unknown seed {name}");
+                for (index, response) in run(&path, true, &script(seed)).iter().enumerate() {
+                    assert_eq!(
+                        response["result"]["isError"], false,
+                        "{id} seed {name} {index}: {response}"
+                    );
+                }
             }
         }
         let writable = task["writable"].as_bool().unwrap();
@@ -523,8 +534,10 @@ fn agent_tasks_fixture_runs_deterministically() {
 fn mask_elapsed(value: &mut Value) {
     match value {
         Value::Object(map) => {
-            if map.contains_key("elapsed_ms") {
-                map.insert("elapsed_ms".into(), json!(0));
+            for field in ["elapsed_ms", "pivot_ms", "expand_ms"] {
+                if map.contains_key(field) {
+                    map.insert(field.into(), json!(0));
+                }
             }
             if let Some(Value::String(text)) = map.get("text")
                 && let Ok(mut inner) = serde_json::from_str::<Value>(text)
@@ -539,4 +552,174 @@ fn mask_elapsed(value: &mut Value) {
         Value::Array(items) => items.iter_mut().for_each(mask_elapsed),
         _ => {}
     }
+}
+
+/// ITEM-052: each query text returns exactly what the typed tool it
+/// translates to returns (output and plan), on the same data.
+#[test]
+fn query_text_matches_the_typed_tools() {
+    let fixture: Value = serde_json::from_str(&fixture_text("graph_agent/tasks.json")).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("equivalence.vlite");
+    graph_fixture(&path);
+    for response in run(&path, true, &script(&fixture["seeds"]["services"])) {
+        ok(&response);
+    }
+    let core = json!({"tier": {"type": "string", "value": "core"}});
+    let pairs = [
+        (
+            json!({"query": "MATCH (n KEY \"api\") RETURN n"}),
+            "vlite_graph_get",
+            json!({"node": {"key": "api"}}),
+        ),
+        (
+            json!({"query": "MATCH ()-[r KEY \"api-auth\"]-() RETURN r"}),
+            "vlite_graph_get",
+            json!({"edge": {"key": "api-auth"}}),
+        ),
+        (
+            json!({"query": "MATCH (n:Service) WHERE n.tier = $tier RETURN n LIMIT 10", "params": core}),
+            "vlite_graph_find_nodes",
+            json!({"label": "Service", "conditions": [{"op": "eq", "field": "tier", "value": {"type": "string", "value": "core"}}], "limit": 10}),
+        ),
+        (
+            json!({"query": "MATCH (a KEY \"db\")<-[r:DEPENDS_ON]-(b) RETURN r, b"}),
+            "vlite_graph_neighbors",
+            json!({"node": {"key": "db"}, "direction": "in", "types": ["DEPENDS_ON"]}),
+        ),
+        (
+            json!({"query": "MATCH p = (a KEY \"api\")-[:CALLS|DEPENDS_ON*1..2]->(b:Database) RETURN b, p"}),
+            "vlite_graph_traverse",
+            json!({"start": [{"key": "api"}], "types": ["CALLS", "DEPENDS_ON"], "return_filter": {"labels": ["Database"]}, "include_paths": true, "limits": {"max_hops": 2}}),
+        ),
+        (
+            json!({"query": "MATCH p = SHORTEST PATH (a KEY \"api\")-[*1..2]->(b KEY \"db\") RETURN p"}),
+            "vlite_graph_shortest_path",
+            json!({"source": {"key": "api"}, "destination": {"key": "db"}, "limits": {"max_hops": 2}}),
+        ),
+    ];
+    let mut requests = Vec::new();
+    for (text, tool, typed) in &pairs {
+        for explain in [false, true] {
+            let mut text = text.clone();
+            text["graph"] = json!("services");
+            text["explain"] = json!(explain);
+            let mut typed = typed.clone();
+            typed["graph"] = json!("services");
+            typed["explain"] = json!(explain);
+            requests.push(call("vlite_graph_query", text));
+            requests.push(call(tool, typed));
+        }
+    }
+    let mut responses = run(&path, false, &requests);
+    responses.iter_mut().for_each(mask_elapsed);
+    for (index, pair) in responses.chunks(2).enumerate() {
+        let (text, typed) = (ok(&pair[0]), ok(&pair[1]));
+        assert_eq!(text, typed, "pair {} explain={}", index / 2, index % 2 == 1);
+        assert_eq!(text["graph"], "services");
+    }
+    // The non-explain outputs are real results, not empty reads.
+    assert_eq!(ok(&responses[0])["node"]["key"], "api");
+    assert_eq!(ok(&responses[8])["nodes"].as_array().unwrap().len(), 2);
+    assert_eq!(ok(&responses[20])["shortest_path"]["outcome"], "found");
+}
+
+/// AC-018: schema writes through `vlite_graph_put_schema` and the batch
+/// `put_schema` / `ensure_edge` ops.
+#[test]
+fn writable_sessions_declare_schemas_and_ensure_edges() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph.vlite");
+    graph_fixture(&path);
+    let owns = json!({"labels": {"Team": {}, "Service": {}},
+                      "relationships": {"OWNS": {"endpoints": [{"source": "Team", "destination": "Service"}], "multiplicity": "unique_triple"}}});
+    let responses = run(
+        &path,
+        true,
+        &[
+            call("vlite_graph_create", json!({"graph": "kb"})),
+            call(
+                "vlite_graph_write",
+                json!({"graph": "kb", "ops": [
+                    {"op": "create_node", "key": "t", "labels": ["Team"]},
+                    {"op": "create_node", "key": "s", "labels": ["Service"]}
+                ]}),
+            ),
+            call(
+                "vlite_graph_write",
+                json!({"graph": "kb", "ops": [
+                    {"op": "ensure_edge", "source": "t", "relationship": "OWNS", "destination": "s"}
+                ]}),
+            ),
+            call(
+                "vlite_graph_put_schema",
+                json!({"graph": "kb", "schema": owns}),
+            ),
+            call(
+                "vlite_graph_write",
+                json!({"graph": "kb", "ops": [
+                    {"op": "ensure_edge", "source": "t", "relationship": "OWNS", "destination": "s"},
+                    {"op": "ensure_edge", "source": "t", "relationship": "OWNS", "destination": "s"}
+                ]}),
+            ),
+            call(
+                "vlite_graph_write",
+                json!({"graph": "kb", "ops": [{"op": "put_schema", "schema": {"labels": {"Team": {"properties": {"name": {"type": "string", "required": true}}}}}}]}),
+            ),
+            call(
+                "vlite_graph_write",
+                json!({"graph": "kb", "ops": [{"op": "put_schema", "schema": {}}]}),
+            ),
+            call(
+                "vlite_graph_put_schema",
+                json!({"graph": "kb", "schema": {"labels": {"Team": {"properties": {"name": {"type": "text"}}}}}}),
+            ),
+            call(
+                "vlite_graph_put_schema",
+                json!({"graph": "missing", "schema": {}}),
+            ),
+            call("vlite_graph_schema", json!({"graph": "kb"})),
+        ],
+    );
+    ok(&responses[0]);
+    ok(&responses[1]);
+    // Index as if the graph creation step were absent.
+    let responses = &responses[1..];
+    assert!(
+        error(&responses[1]).starts_with("invalid_input: ")
+            && error(&responses[1]).contains("UniqueTriple"),
+        "ensure_edge needs a unique_triple declaration: {}",
+        error(&responses[1])
+    );
+    let revision = ok(&responses[2]);
+    assert_eq!(revision["graph"], "kb");
+    assert!(
+        revision["revision"]
+            .as_str()
+            .unwrap()
+            .parse::<u64>()
+            .is_ok()
+    );
+    let ensured = ok(&responses[3]);
+    assert_eq!(ensured["outcomes"][0]["edge"]["created"], true);
+    assert_eq!(ensured["outcomes"][1]["edge"]["created"], false);
+    assert_eq!(
+        ensured["outcomes"][0]["edge"]["id"],
+        ensured["outcomes"][1]["edge"]["id"]
+    );
+    assert!(
+        error(&responses[4]).starts_with("graph_schema_violation: "),
+        "{}",
+        error(&responses[4])
+    );
+    assert_eq!(ok(&responses[5])["outcomes"], json!(["schema"]));
+    assert!(error(&responses[6]).starts_with("invalid_request: "));
+    assert!(error(&responses[7]).starts_with("graph_not_found: "));
+    let schema = ok(&responses[8]);
+    assert_eq!(
+        schema["declared"],
+        json!({"labels": {}, "relationships": {}})
+    );
+    assert_eq!(schema["observed"]["relationships"][0]["name"], "OWNS");
+    assert_eq!(schema["observed"]["relationships"][0]["count"], 1);
 }

@@ -4,16 +4,23 @@
 //! revisions and sequences are decimal strings on output and accepted as
 //! strings or JSON numbers on input, so u64 values never lose precision.
 
+use std::collections::BTreeMap;
+
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value, json};
+use vlite::hybrid::{FusionOptions, VectorLeg};
 use vlite::property_graph::{
-    Direction, EdgeRef, EdgeView, Explanation, FindNodes, GraphBatchResult, GraphInfo, GraphLimits,
-    GraphOp, GraphOpOutcome, GraphOutput, GraphPath, GraphQuery, GraphRead, GraphReadStats,
-    GraphWrite, IndexChoice, Neighbors, NodeFilter, NodePatch, NodeSelector, NodeView, PathOutcome,
-    PropertyProjection, ShortestPath, Traverse, TruncationReason,
+    Direction, EdgeRef, EdgeView, EvidenceSpec, Expansion, Explanation, FindNodes,
+    GraphBatchResult, GraphInfo, GraphLimits, GraphOp, GraphOpOutcome, GraphOutput, GraphPath,
+    GraphQuery, GraphQueryErrorKind, GraphRead, GraphReadStats, GraphSchema, GraphTextError,
+    GraphWrite, IndexChoice, LabelDefinition, Multiplicity, Neighbors, NodeFilter, NodePatch,
+    NodeSelector, NodeView, ObservedProperty, ObservedSchema, PathOutcome, Pivot,
+    PropertyDefinition, PropertyIndexKind, PropertyProjection, PropertyType,
+    RelationshipDefinition, Retrieval, Retrieve, SchemaOrigin, ShortestPath, Traverse,
+    TruncationReason,
 };
-use vlite::{Condition, Error, Expected, Metadata, MetadataValue, Mutation};
+use vlite::{Condition, DistanceMetric, Error, Expected, Metadata, MetadataValue, Mutation};
 
 /// Stable codes: graph variants use the REST/gRPC names (`server::graph_code`).
 pub(crate) fn error_code(error: &Error) -> &'static str {
@@ -286,6 +293,18 @@ pub(crate) enum OpIn {
         #[serde(deserialize_with = "de_u64")]
         id: u64,
     },
+    /// `GraphOp::EnsureEdge`: the type must be declared `unique_triple`.
+    EnsureEdge {
+        source: String,
+        relationship: String,
+        destination: String,
+        #[serde(default, deserialize_with = "de_properties")]
+        properties: Metadata,
+    },
+    /// `GraphOp::PutSchema`: replaces the declared schema.
+    PutSchema {
+        schema: SchemaIn,
+    },
 }
 
 impl From<OpIn> for GraphOp {
@@ -395,6 +414,20 @@ impl From<OpIn> for GraphOp {
             OpIn::DeleteVector { collection, id } => GraphOp::Vector {
                 collection,
                 mutation: Mutation::Delete { id },
+            },
+            OpIn::EnsureEdge {
+                source,
+                relationship,
+                destination,
+                properties,
+            } => GraphOp::EnsureEdge {
+                source,
+                relationship,
+                destination,
+                properties,
+            },
+            OpIn::PutSchema { schema } => GraphOp::PutSchema {
+                schema: schema.into_schema(),
             },
         }
     }
@@ -668,12 +701,18 @@ pub(crate) fn read_request(command: &str, text: &str) -> Result<ReadRequest, Str
         graph,
         query,
         limits: limits.resolve(),
-        projection: match projection {
+        projection: projection.into(),
+    })
+}
+
+impl From<ProjectionIn> for PropertyProjection {
+    fn from(projection: ProjectionIn) -> Self {
+        match projection {
             ProjectionIn::All => PropertyProjection::All,
             ProjectionIn::None => PropertyProjection::None,
             ProjectionIn::Only(fields) => PropertyProjection::Only(fields),
-        },
-    })
+        }
+    }
 }
 
 // Output JSON: u64 IDs, revisions and sequences as decimal strings; counts
@@ -1006,6 +1045,7 @@ pub(crate) fn batch_output(graph: &str, result: &GraphBatchResult) -> Result<Val
                     "detached": {"node": node.to_string(), "record": record.to_string()}
                 }),
                 GraphOpOutcome::Vector => json!("vector"),
+                GraphOpOutcome::Schema => json!("schema"),
                 _ => return Err(String::from("unsupported batch outcome")),
             })
         })
@@ -1015,4 +1055,641 @@ pub(crate) fn batch_output(graph: &str, result: &GraphBatchResult) -> Result<Val
         "revision": result.revision.map(|revision| revision.to_string()),
         "outcomes": outcomes,
     }))
+}
+
+// Agent surfaces (wave 2): declared/observed schema, hybrid retrieve and
+// graph query text. MCP and REST share these encodings; MCP requests add the
+// `graph` field that REST takes from the path.
+
+/// Removes the `graph` field from MCP arguments, leaving the REST body.
+pub(crate) fn split_graph(args: &Value) -> Result<(String, Value), String> {
+    let mut object = args
+        .as_object()
+        .cloned()
+        .ok_or("arguments must be a JSON object")?;
+    let graph = match object.remove("graph") {
+        Some(Value::String(graph)) => graph,
+        Some(_) => return Err("graph must be a string".into()),
+        None => return Err("missing field `graph`".into()),
+    };
+    Ok((graph, Value::Object(object)))
+}
+
+/// Parses a body object that is a JSON value already.
+pub(crate) fn parse_value<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, String> {
+    serde_json::from_value(value).map_err(|error| error.to_string())
+}
+
+/// An object whose repeated keys are rejected instead of keeping the last.
+fn de_unique_map<'de, D, T>(deserializer: D) -> Result<BTreeMap<String, T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct Unique<T>(std::marker::PhantomData<T>);
+    impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for Unique<T> {
+        type Value = BTreeMap<String, T>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("an object")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut out = BTreeMap::new();
+            while let Some((key, value)) = map.next_entry::<String, T>()? {
+                if out.contains_key(&key) {
+                    return Err(serde::de::Error::custom(format!("duplicate key {key:?}")));
+                }
+                out.insert(key, value);
+            }
+            Ok(out)
+        }
+    }
+    deserializer.deserialize_map(Unique(std::marker::PhantomData))
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PropertyTypeIn {
+    String,
+    Integer,
+    Float,
+    Boolean,
+    Geopoint,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum IndexIn {
+    Exact,
+    Range,
+}
+
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MultiplicityIn {
+    #[default]
+    Multi,
+    UniqueTriple,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PropertyIn {
+    #[serde(rename = "type")]
+    value_type: PropertyTypeIn,
+    #[serde(default)]
+    required: bool,
+    #[serde(default)]
+    unique: bool,
+    #[serde(default)]
+    index: Option<IndexIn>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LabelIn {
+    #[serde(default)]
+    description: String,
+    #[serde(default, deserialize_with = "de_unique_map")]
+    properties: BTreeMap<String, PropertyIn>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EndpointIn {
+    source: String,
+    destination: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RelationshipIn {
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    endpoints: Vec<EndpointIn>,
+    #[serde(default)]
+    multiplicity: MultiplicityIn,
+    #[serde(default, deserialize_with = "de_unique_map")]
+    properties: BTreeMap<String, PropertyIn>,
+}
+
+/// A declared schema (REQ-030); `{}` declares nothing (removes the schema).
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SchemaIn {
+    #[serde(default, deserialize_with = "de_unique_map")]
+    labels: BTreeMap<String, LabelIn>,
+    #[serde(default, deserialize_with = "de_unique_map")]
+    relationships: BTreeMap<String, RelationshipIn>,
+}
+
+fn property_definition(property: PropertyIn) -> PropertyDefinition {
+    let mut definition = PropertyDefinition::new(match property.value_type {
+        PropertyTypeIn::String => PropertyType::String,
+        PropertyTypeIn::Integer => PropertyType::Integer,
+        PropertyTypeIn::Float => PropertyType::Float,
+        PropertyTypeIn::Boolean => PropertyType::Boolean,
+        PropertyTypeIn::Geopoint => PropertyType::GeoPoint,
+    });
+    if property.required {
+        definition = definition.required();
+    }
+    if property.unique {
+        definition = definition.unique();
+    }
+    match property.index {
+        Some(IndexIn::Exact) => definition.index(PropertyIndexKind::Exact),
+        Some(IndexIn::Range) => definition.index(PropertyIndexKind::Range),
+        None => definition,
+    }
+}
+
+impl SchemaIn {
+    /// The library schema; `GraphSchema::validate` runs on write.
+    pub(crate) fn into_schema(self) -> GraphSchema {
+        let mut schema = GraphSchema::default();
+        for (name, label) in self.labels {
+            let mut definition = LabelDefinition::new(label.description);
+            for (property, declared) in label.properties {
+                definition = definition.property(property, property_definition(declared));
+            }
+            schema = schema.label(name, definition);
+        }
+        for (name, relationship) in self.relationships {
+            let mut definition = RelationshipDefinition::new(relationship.description)
+                .multiplicity(match relationship.multiplicity {
+                    MultiplicityIn::Multi => Multiplicity::Multi,
+                    MultiplicityIn::UniqueTriple => Multiplicity::UniqueTriple,
+                });
+            for endpoint in relationship.endpoints {
+                definition = definition.endpoint(endpoint.source, endpoint.destination);
+            }
+            for (property, declared) in relationship.properties {
+                definition = definition.property(property, property_definition(declared));
+            }
+            schema = schema.relationship(name, definition);
+        }
+        schema
+    }
+}
+
+/// `vlite_graph_schema` / `GET .../schema` options.
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SchemaQueryIn {
+    #[serde(default, deserialize_with = "de_optional_u64")]
+    pub(crate) budget: Option<u64>,
+}
+
+fn de_optional_u64<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u64>, D::Error> {
+    Option::<Value>::deserialize(deserializer)?
+        .map(|value| parse_u64(&value).map_err(D::Error::custom))
+        .transpose()
+}
+
+pub(crate) fn property_type(value_type: PropertyType) -> &'static str {
+    match value_type {
+        PropertyType::String => "string",
+        PropertyType::Integer => "integer",
+        PropertyType::Float => "float",
+        PropertyType::Boolean => "boolean",
+        PropertyType::GeoPoint => "geopoint",
+    }
+}
+
+fn property_definitions(properties: &BTreeMap<String, PropertyDefinition>) -> Value {
+    properties
+        .iter()
+        .map(|(name, definition)| {
+            let index = definition.index.map(|kind| match kind {
+                PropertyIndexKind::Exact => "exact",
+                PropertyIndexKind::Range => "range",
+            });
+            (
+                name.clone(),
+                json!({
+                    "type": property_type(definition.value_type),
+                    "required": definition.required,
+                    "unique": definition.unique,
+                    "index": index,
+                }),
+            )
+        })
+        .collect::<Map<String, Value>>()
+        .into()
+}
+
+/// The declared schema in the `SchemaIn` shape (round-trips).
+pub(crate) fn declared_schema(schema: &GraphSchema) -> Value {
+    let labels: Map<String, Value> = schema
+        .labels
+        .iter()
+        .map(|(name, label)| {
+            (
+                name.clone(),
+                json!({
+                    "description": label.description,
+                    "properties": property_definitions(&label.properties),
+                }),
+            )
+        })
+        .collect();
+    let relationships: Map<String, Value> = schema
+        .relationships
+        .iter()
+        .map(|(name, relationship)| {
+            let endpoints: Value = relationship
+                .endpoints
+                .iter()
+                .map(|(source, destination)| json!({"source": source, "destination": destination}))
+                .collect();
+            let multiplicity = match relationship.multiplicity {
+                Multiplicity::Multi => "multi",
+                Multiplicity::UniqueTriple => "unique_triple",
+            };
+            (
+                name.clone(),
+                json!({
+                    "description": relationship.description,
+                    "endpoints": endpoints,
+                    "multiplicity": multiplicity,
+                    "properties": property_definitions(&relationship.properties),
+                }),
+            )
+        })
+        .collect();
+    json!({"labels": labels, "relationships": relationships})
+}
+
+fn origin(origin: SchemaOrigin) -> &'static str {
+    match origin {
+        SchemaOrigin::Declared => "declared",
+        SchemaOrigin::Observed => "observed",
+        SchemaOrigin::Both => "both",
+    }
+}
+
+fn observed_properties(properties: &[ObservedProperty]) -> Value {
+    properties
+        .iter()
+        .map(|property| {
+            json!({
+                "name": property.name,
+                "origin": origin(property.origin),
+                "count": property.count,
+                "types": property.types.iter().copied().map(property_type).collect::<Vec<_>>(),
+            })
+        })
+        .collect()
+}
+
+/// The observed summary: labels, relationship types, endpoint pairs and
+/// property types with counts, merged with the declared schema.
+pub(crate) fn observed_schema(observed: &ObservedSchema) -> Value {
+    let labels: Value = observed
+        .labels
+        .iter()
+        .map(|label| {
+            json!({
+                "name": label.name,
+                "origin": origin(label.origin),
+                "count": label.count,
+                "properties": observed_properties(&label.properties),
+            })
+        })
+        .collect();
+    let relationships: Value = observed
+        .relationships
+        .iter()
+        .map(|relationship| {
+            let endpoints: Value = relationship
+                .endpoints
+                .iter()
+                .map(|endpoint| {
+                    json!({
+                        "source": endpoint.source,
+                        "destination": endpoint.destination,
+                        "origin": origin(endpoint.origin),
+                        "count": endpoint.count,
+                    })
+                })
+                .collect();
+            json!({
+                "name": relationship.name,
+                "origin": origin(relationship.origin),
+                "count": relationship.count,
+                "endpoints": endpoints,
+                "properties": observed_properties(&relationship.properties),
+            })
+        })
+        .collect();
+    json!({
+        "complete": observed.complete,
+        "entities_scanned": observed.entities_scanned,
+        "labels": labels,
+        "relationships": relationships,
+    })
+}
+
+pub(crate) fn schema_output(
+    graph: &str,
+    declared: &GraphSchema,
+    observed: &ObservedSchema,
+) -> Value {
+    json!({
+        "graph": graph,
+        "declared": declared_schema(declared),
+        "observed": observed_schema(observed),
+    })
+}
+
+pub(crate) fn put_schema_output(graph: &str, revision: u64) -> Value {
+    json!({"graph": graph, "revision": revision.to_string()})
+}
+
+// Hybrid retrieve (REQ-040..REQ-042).
+
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MetricIn {
+    #[default]
+    SquaredL2,
+    Cosine,
+    InnerProduct,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PivotIn {
+    collection: String,
+    #[serde(default)]
+    vector: Option<Vec<f32>>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    k: Option<usize>,
+    #[serde(default)]
+    filter: Vec<Condition>,
+    #[serde(default)]
+    metric: MetricIn,
+    #[serde(default, deserialize_with = "de_optional_u64")]
+    max_exact_scan_records: Option<u64>,
+    #[serde(default)]
+    candidates: Option<usize>,
+    #[serde(default)]
+    rrf_k: Option<u32>,
+    #[serde(default)]
+    vector_weight: Option<f64>,
+    #[serde(default)]
+    text_weight: Option<f64>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExpansionIn {
+    #[serde(default)]
+    direction: DirectionIn,
+    #[serde(default)]
+    types: Option<Vec<String>>,
+    #[serde(default)]
+    expand_filter: FilterIn,
+    #[serde(default)]
+    return_filter: FilterIn,
+    #[serde(default)]
+    edge_filter: Vec<Condition>,
+    #[serde(default)]
+    include_paths: bool,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EvidenceIn {
+    #[serde(default)]
+    collections: Vec<String>,
+    #[serde(default)]
+    fields: ProjectionIn,
+    #[serde(default)]
+    max_excerpt_bytes: Option<usize>,
+    #[serde(default, deserialize_with = "de_optional_u64")]
+    max_items: Option<u64>,
+}
+
+/// The retrieve body (MCP adds `graph`).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RetrieveIn {
+    pivot: PivotIn,
+    #[serde(default)]
+    expansion: ExpansionIn,
+    #[serde(default)]
+    evidence: EvidenceIn,
+    #[serde(default)]
+    limits: LimitsIn,
+    #[serde(default)]
+    projection: ProjectionIn,
+}
+
+pub(crate) struct RetrieveRequest {
+    pub(crate) retrieve: Retrieve,
+    pub(crate) limits: GraphLimits,
+    pub(crate) projection: PropertyProjection,
+}
+
+impl From<RetrieveIn> for RetrieveRequest {
+    fn from(input: RetrieveIn) -> Self {
+        let pivot_in = input.pivot;
+        let mut pivot = Pivot::new(&pivot_in.collection, pivot_in.k.unwrap_or(Pivot::DEFAULT_K));
+        pivot.vector = pivot_in.vector;
+        pivot.text = pivot_in.text;
+        pivot.filter = pivot_in.filter;
+        pivot.metric = match pivot_in.metric {
+            MetricIn::SquaredL2 => DistanceMetric::SquaredL2,
+            MetricIn::Cosine => DistanceMetric::Cosine,
+            MetricIn::InnerProduct => DistanceMetric::InnerProduct,
+        };
+        pivot.vector_leg = VectorLeg::Exact;
+        let defaults = FusionOptions::default();
+        pivot.fusion = FusionOptions {
+            candidates: pivot_in.candidates,
+            rrf_k: pivot_in.rrf_k.unwrap_or(defaults.rrf_k),
+            vector_weight: pivot_in.vector_weight.unwrap_or(defaults.vector_weight),
+            text_weight: pivot_in.text_weight.unwrap_or(defaults.text_weight),
+        };
+        if let Some(records) = pivot_in.max_exact_scan_records {
+            pivot.max_exact_scan_records = records;
+        }
+        let expansion = Expansion {
+            direction: input.expansion.direction.into(),
+            types: input.expansion.types,
+            expand_filter: input.expansion.expand_filter.into(),
+            return_filter: input.expansion.return_filter.into(),
+            edge_filter: input.expansion.edge_filter,
+            include_paths: input.expansion.include_paths,
+        };
+        let evidence = EvidenceSpec {
+            collections: input.evidence.collections,
+            fields: input.evidence.fields.into(),
+            max_excerpt_bytes: input
+                .evidence
+                .max_excerpt_bytes
+                .unwrap_or(EvidenceSpec::DEFAULT_EXCERPT_BYTES),
+            max_items: input
+                .evidence
+                .max_items
+                .unwrap_or(EvidenceSpec::DEFAULT_ITEMS),
+        };
+        RetrieveRequest {
+            retrieve: Retrieve {
+                pivot,
+                expansion,
+                evidence,
+            },
+            limits: input.limits.resolve(),
+            projection: input.projection.into(),
+        }
+    }
+}
+
+pub(crate) fn retrieve_request(body: Value) -> Result<RetrieveRequest, String> {
+    parse_value::<RetrieveIn>(body).map(Into::into)
+}
+
+const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+pub(crate) fn base64(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let triple = chunk.iter().enumerate().fold(0u32, |acc, (at, byte)| {
+            acc | u32::from(*byte) << (16 - 8 * at)
+        });
+        for at in 0..4 {
+            if at <= chunk.len() {
+                out.push(char::from(BASE64[(triple >> (18 - 6 * at)) as usize & 63]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// UTF-8 excerpts are text (a character cut by the excerpt bound is
+/// dropped); other payloads are base64.
+fn excerpt(bytes: &[u8], truncated: bool) -> (Value, Value) {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => (json!(text), Value::Null),
+        Err(error) if truncated && error.error_len().is_none() => {
+            let text = std::str::from_utf8(&bytes[..error.valid_up_to()]).unwrap_or_default();
+            (json!(text), Value::Null)
+        }
+        Err(_) => (Value::Null, json!(base64(bytes))),
+    }
+}
+
+pub(crate) fn evidence(item: &vlite::property_graph::Evidence) -> Value {
+    let (text, binary) = excerpt(&item.payload_excerpt, item.excerpt_truncated);
+    json!({
+        "collection": item.collection,
+        "record_id": item.record_id.to_string(),
+        "revision": item.revision.to_string(),
+        "view_sequence": item.view_sequence.to_string(),
+        "node_id": item.node_id.to_string(),
+        "metadata": metadata(&item.metadata),
+        "payload_excerpt": text,
+        "payload_excerpt_base64": binary,
+        "payload_bytes": item.payload_bytes,
+        "excerpt_truncated": item.excerpt_truncated,
+    })
+}
+
+/// Compact retrieval: pivots, expanded nodes/edges/paths and evidence; never
+/// vectors. `evidence` lists the items to return (REST drops redacted ones).
+pub(crate) fn retrieval_output(
+    graph: &str,
+    retrieval: &Retrieval,
+    evidence_items: &[&vlite::property_graph::Evidence],
+) -> Value {
+    let pivots: Value = retrieval
+        .pivots
+        .iter()
+        .map(|hit| {
+            json!({
+                "record_id": hit.record_id.to_string(),
+                "node_id": hit.node_id.to_string(),
+                "node_key": hit.node_key,
+                "score": hit.score,
+                "distance": hit.distance,
+                "bm25": hit.bm25,
+                "vector_rank": hit.vector_rank,
+                "text_rank": hit.text_rank,
+            })
+        })
+        .collect();
+    let visited: Value = retrieval
+        .nodes
+        .iter()
+        .map(|item| json!({"depth": item.depth, "node": node(&item.node)}))
+        .collect();
+    let stats = &retrieval.stats;
+    json!({
+        "graph": graph,
+        "view_sequence": retrieval.view_sequence.to_string(),
+        "complete": retrieval.complete,
+        "truncation": truncation(&retrieval.truncation),
+        "pivots": pivots,
+        "unmapped_pivots": {
+            "count": retrieval.unmapped_pivots.count,
+            "record_ids": ids(&retrieval.unmapped_pivots.record_ids),
+        },
+        "nodes": visited,
+        "edges": edges(&retrieval.edges),
+        "paths": retrieval.paths.iter().map(path).collect::<Value>(),
+        "evidence": evidence_items.iter().map(|item| evidence(item)).collect::<Value>(),
+        "stats": {
+            "pivot_ms": stats.pivot_ms,
+            "expand_ms": stats.expand_ms,
+            "pivot_candidates": stats.pivot_candidates,
+            "pivots_mapped": stats.pivots_mapped,
+            "pivots_rejected": stats.pivots_rejected,
+            "evidence_items": evidence_items.len(),
+            "records_scanned": stats.search.records_scanned,
+            "distance_evaluations": stats.search.distance_evaluations,
+            "expansion": self::stats(&stats.expansion),
+        },
+    })
+}
+
+// Graph query text (EPIC-015).
+
+/// The query-text body (MCP adds `graph`).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct QueryTextIn {
+    pub(crate) query: String,
+    #[serde(default, deserialize_with = "de_properties")]
+    pub(crate) params: Metadata,
+    #[serde(default)]
+    pub(crate) limits: LimitsIn,
+    #[serde(default)]
+    pub(crate) explain: bool,
+}
+
+/// Stable code and message of a query-text failure.
+pub(crate) fn text_error(error: &GraphTextError) -> (&'static str, String) {
+    match error {
+        GraphTextError::Query(error) => (
+            match error.kind {
+                GraphQueryErrorKind::Syntax => "graph_query_syntax",
+                GraphQueryErrorKind::Unsupported => "graph_query_unsupported",
+                GraphQueryErrorKind::Parameter => "graph_query_parameter",
+                GraphQueryErrorKind::Limit => "graph_query_limit",
+            },
+            error.to_string(),
+        ),
+        GraphTextError::Read(error) => (error_code(error), error.to_string()),
+        _ => ("database_error", String::from("unknown graph query error")),
+    }
 }

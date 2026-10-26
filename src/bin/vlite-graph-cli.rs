@@ -12,6 +12,8 @@
 //! record IDs, revisions and sequences are printed as decimal strings and
 //! accepted as strings or JSON numbers, so u64 values never lose precision.
 
+// The agent-surface encodings (schema, retrieve) are used by vlite-mcp only.
+#[allow(dead_code)]
 #[path = "tool_support/graph_json.rs"]
 mod graph_json;
 
