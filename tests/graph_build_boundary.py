@@ -12,7 +12,7 @@ CRATE = ROOT / "crates" / "vlite-graph"
 ENGINE = ROOT / "src" / "property_graph" / "engine"
 HARNESS = '#[path = "../../../src/property_graph/engine/mod.rs"]'
 # Features withheld from distributed artifacts until a release gate approves them.
-UNSHIPPED_FEATURES = {"graph"}
+UNSHIPPED_FEATURES = {"graph", "mcp-proxy"}
 # Artifact-producing `cargo build --release --bins` commands in each file.
 ARTIFACT_BUILDS = {"Dockerfile": 1, ".github/workflows/release.yml": 2}
 
@@ -53,6 +53,10 @@ class GraphBuildBoundary(unittest.TestCase):
         # and is never on by default.
         self.assertEqual(root["features"]["graph"], [])
         self.assertNotIn("graph", root["features"]["default"])
+        # `mcp-proxy` (ITEM-043) layers the graph tools over a remote server;
+        # it is never on by default and stays out of artifact pins above.
+        self.assertIn("graph", root["features"]["mcp-proxy"])
+        self.assertNotIn("mcp-proxy", root["features"]["default"])
         for features in ((), ("--all-features",)):
             with self.subTest(features=features):
                 tree = cargo_tree("-p", "vlite", "-e", "normal", *features)

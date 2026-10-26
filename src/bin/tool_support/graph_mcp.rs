@@ -61,7 +61,7 @@ fn invalid(message: impl std::fmt::Display) -> String {
     format!("invalid_request: {message}")
 }
 
-fn is_graph_tool(name: &str) -> bool {
+pub(crate) fn is_graph_tool(name: &str) -> bool {
     name == LIST_TOOL
         || name == GET_TOOL
         || name == SCHEMA_TOOL
@@ -95,11 +95,44 @@ pub(crate) fn tool_definitions(db: &Database, read_only: bool) -> Vec<Value> {
     if !db.is_graph_enabled() {
         return Vec::new();
     }
+    definitions(read_only)
+}
+
+/// The graph tool list of a graph-enabled database (local or proxied).
+pub(crate) fn definitions(read_only: bool) -> Vec<Value> {
     let mut tools = read_tool_definitions();
     if !read_only {
         tools.extend(write_tool_definitions());
     }
     tools
+}
+
+/// The error a read-only session reports for a write tool.
+pub(crate) fn read_only_error(name: &str) -> Option<String> {
+    WRITE_TOOLS
+        .contains(&name)
+        .then(|| format!("read_only: database is read-only; {name} is unavailable"))
+}
+
+/// The `vlite-graph-cli` read command of a typed read tool; `None` for other
+/// tools.
+pub(crate) fn typed_read(
+    name: &str,
+    args: &Map<String, Value>,
+) -> Option<Result<&'static str, String>> {
+    if name == GET_TOOL {
+        return Some(
+            match (args.contains_key("node"), args.contains_key("edge")) {
+                (true, false) => Ok("get-node"),
+                (false, true) => Ok("get-edge"),
+                _ => Err(invalid("provide exactly one of node or edge")),
+            },
+        );
+    }
+    QUERY_TOOLS
+        .iter()
+        .find(|(tool, _)| *tool == name)
+        .map(|(_, command)| Ok(*command))
 }
 
 /// Runs a graph tool; `None` when `name` is not one or the file is not
@@ -120,10 +153,8 @@ fn run(db: &mut Database, read_only: bool, name: &str, args: &Value) -> Result<V
     let Some(object) = args.as_object() else {
         return Err(invalid("tool arguments must be a JSON object"));
     };
-    if WRITE_TOOLS.contains(&name) && read_only {
-        return Err(format!(
-            "read_only: database is read-only; {name} is unavailable"
-        ));
+    if read_only && let Some(error) = read_only_error(name) {
+        return Err(error);
     }
     let text = args.to_string();
     match name {
@@ -230,19 +261,8 @@ fn query(db: &Database, name: &str, args: &Map<String, Value>) -> Result<Value, 
             .as_bool()
             .ok_or_else(|| invalid("explain must be a boolean"))?,
     };
-    let command = if name == GET_TOOL {
-        match (args.contains_key("node"), args.contains_key("edge")) {
-            (true, false) => "get-node",
-            (false, true) => "get-edge",
-            _ => return Err(invalid("provide exactly one of node or edge")),
-        }
-    } else {
-        QUERY_TOOLS
-            .iter()
-            .find(|(tool, _)| *tool == name)
-            .map(|(_, command)| *command)
-            .ok_or_else(|| format!("unknown tool: {name}"))?
-    };
+    let command =
+        typed_read(name, &args).unwrap_or_else(|| Err(format!("unknown tool: {name}")))?;
     let request = read_request(command, &Value::Object(args).to_string()).map_err(invalid)?;
     let graph = db.graph(&request.graph).map_err(|error| failure(&error))?;
     let options = ReadOptions {

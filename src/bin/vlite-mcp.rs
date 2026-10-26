@@ -4,6 +4,9 @@ mod graph_json;
 #[cfg(feature = "graph")]
 #[path = "tool_support/graph_mcp.rs"]
 mod graph_mcp;
+#[cfg(feature = "mcp-proxy")]
+#[path = "tool_support/graph_proxy.rs"]
+mod graph_proxy;
 
 use std::{
     collections::BTreeMap,
@@ -20,7 +23,9 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_PROTOCOL_VERSION: &str = "2025-06-18";
 const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 const HELP: &str = "vlite-mcp --db PATH [--read-only | --writable] [--encryption-key-file PATH]\n\
+       vlite-mcp --server URL [--token-env VAR] [--read-only | --writable]   (mcp-proxy builds)\n\
 Read-only is the default. VLITE_ENCRYPTION_KEY or VLITE_ENCRYPTION_KEY_HEX may supply an encryption key.\n\
+--server forwards the graph tools to a running vlite-server instead of opening a file; the bearer token is read from the environment variable named by --token-env.\n\
 MCP JSON-RPC messages are newline-delimited on stdin/stdout; diagnostics go to stderr.\n";
 
 type ToolResult = Result<Value, String>;
@@ -29,6 +34,16 @@ struct Config {
     path: PathBuf,
     read_only: bool,
     encryption_key: Option<EncryptionKey>,
+    /// `--server` proxy mode (ITEM-043): no file is opened.
+    #[cfg(feature = "mcp-proxy")]
+    remote: Option<graph_proxy::Remote>,
+}
+
+/// Where tool calls run: an opened file, or a server in proxy mode.
+enum Backend {
+    Local(Box<Database>),
+    #[cfg(feature = "mcp-proxy")]
+    Proxy(graph_proxy::Remote),
 }
 
 fn decode_hex_key(text: &str) -> Result<[u8; 32], Box<dyn Error>> {
@@ -49,12 +64,29 @@ fn config() -> Result<Option<Config>, Box<dyn Error>> {
     let mut read_only = true;
     let mut saw_mode = false;
     let mut key_file = None;
+    let mut server: Option<String> = None;
+    let mut token_env: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" | "-h" => {
                 print!("{HELP}");
                 return Ok(None);
+            }
+            "--server" => {
+                if server.is_some() {
+                    return Err("duplicate --server option".into());
+                }
+                server = Some(args.next().ok_or("--server requires a URL")?);
+            }
+            "--token-env" => {
+                if token_env.is_some() {
+                    return Err("duplicate --token-env option".into());
+                }
+                token_env = Some(
+                    args.next()
+                        .ok_or("--token-env requires an environment variable name")?,
+                );
             }
             "--db" => {
                 if db_path.is_some() {
@@ -86,6 +118,15 @@ fn config() -> Result<Option<Config>, Box<dyn Error>> {
             }
             _ => return Err(format!("unknown option {arg}; use --help").into()),
         }
+    }
+    if let Some(url) = server {
+        if db_path.is_some() || key_file.is_some() {
+            return Err("--server cannot be combined with --db or an encryption key file".into());
+        }
+        return proxy_config(&url, token_env, read_only).map(Some);
+    }
+    if token_env.is_some() {
+        return Err("--token-env requires --server".into());
     }
     let path = db_path.ok_or("missing --db PATH; use --help")?;
     let env_key = std::env::var_os("VLITE_ENCRYPTION_KEY");
@@ -126,7 +167,41 @@ fn config() -> Result<Option<Config>, Box<dyn Error>> {
         path,
         read_only,
         encryption_key,
+        #[cfg(feature = "mcp-proxy")]
+        remote: None,
     }))
+}
+
+/// Proxy mode: the token's value is never printed, only the variable name.
+#[cfg(feature = "mcp-proxy")]
+fn proxy_config(
+    url: &str,
+    token_env: Option<String>,
+    read_only: bool,
+) -> Result<Config, Box<dyn Error>> {
+    let token = match token_env {
+        None => None,
+        Some(name) => match std::env::var(&name) {
+            Ok(token) if !token.is_empty() => Some(token),
+            _ => {
+                return Err(format!(
+                    "environment variable {name} (--token-env) is unset, empty or not UTF-8"
+                )
+                .into());
+            }
+        },
+    };
+    Ok(Config {
+        path: PathBuf::new(),
+        read_only,
+        encryption_key: None,
+        remote: Some(graph_proxy::Remote::new(url, token)?),
+    })
+}
+
+#[cfg(not(feature = "mcp-proxy"))]
+fn proxy_config(_: &str, _: Option<String>, _: bool) -> Result<Config, Box<dyn Error>> {
+    Err("--server needs vlite-mcp built with the mcp-proxy feature".into())
 }
 
 fn open_database(config: &Config) -> vlite::Result<Database> {
@@ -610,7 +685,7 @@ fn tool_result(result: ToolResult) -> Value {
     }
 }
 
-fn dispatch(db: &mut Database, config: &Config, message: Value) -> Option<Value> {
+fn dispatch(backend: &mut Backend, config: &Config, message: Value) -> Option<Value> {
     let Some(object) = message.as_object() else {
         return Some(protocol_error(Value::Null, -32600, "Invalid Request"));
     };
@@ -646,19 +721,39 @@ fn dispatch(db: &mut Database, config: &Config, message: Value) -> Option<Value>
             } else {
                 DEFAULT_PROTOCOL_VERSION
             };
+            let instructions = match backend {
+                Backend::Local(_) => {
+                    "VLite vector database tools. Read-only is the default; write tools are exposed only with --writable."
+                }
+                #[cfg(feature = "mcp-proxy")]
+                Backend::Proxy(_) => {
+                    "VLite property-graph tools forwarded to a vlite-server; the server authorizes every call. Read-only is the default; write tools are exposed only with --writable."
+                }
+            };
             Some(
-                json!({"protocolVersion":negotiated,"capabilities":{"tools":{}},"serverInfo":{"name":"vlite-mcp","version":VERSION},"instructions":"VLite vector database tools. Read-only is the default; write tools are exposed only with --writable."}),
+                json!({"protocolVersion":negotiated,"capabilities":{"tools":{}},"serverInfo":{"name":"vlite-mcp","version":VERSION},"instructions":instructions}),
             )
         }
         "notifications/initialized" | "notifications/cancelled" | "notifications/progress" => None,
         "ping" => Some(json!({})),
-        "tools/list" => {
-            #[allow(unused_mut)]
-            let mut tools = tool_definitions(config.read_only);
-            #[cfg(feature = "graph")]
-            tools.extend(graph_mcp::tool_definitions(db, config.read_only));
-            Some(json!({"tools":tools}))
-        }
+        "tools/list" => match backend {
+            Backend::Local(db) => {
+                #[allow(unused_mut)]
+                let mut tools = tool_definitions(config.read_only);
+                #[cfg(feature = "graph")]
+                tools.extend(graph_mcp::tool_definitions(db, config.read_only));
+                #[cfg(not(feature = "graph"))]
+                let _ = db;
+                Some(json!({"tools":tools}))
+            }
+            #[cfg(feature = "mcp-proxy")]
+            Backend::Proxy(remote) => match remote.tool_definitions(config.read_only) {
+                Ok(tools) => Some(json!({"tools":tools})),
+                Err(message) => {
+                    return has_id.then(|| protocol_error(response_id, -32603, &message));
+                }
+            },
+        },
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str);
             let args = params
@@ -666,13 +761,15 @@ fn dispatch(db: &mut Database, config: &Config, message: Value) -> Option<Value>
                 .cloned()
                 .unwrap_or_else(|| json!({}));
             match (name, args.as_object()) {
-                (Some(name), Some(_)) => Some(tool_result(tool_call(
-                    db,
-                    &config.path,
-                    config.read_only,
-                    name,
-                    &args,
-                ))),
+                (Some(name), Some(_)) => Some(tool_result(match backend {
+                    Backend::Local(db) => {
+                        tool_call(db, &config.path, config.read_only, name, &args)
+                    }
+                    #[cfg(feature = "mcp-proxy")]
+                    Backend::Proxy(remote) => remote
+                        .call(config.read_only, name, &args)
+                        .unwrap_or_else(|| Err(format!("unknown tool: {name}"))),
+                })),
                 _ => {
                     return Some(protocol_error(
                         response_id,
@@ -696,11 +793,19 @@ fn dispatch(db: &mut Database, config: &Config, message: Value) -> Option<Value>
     Some(json!({"jsonrpc":"2.0","id":response_id,"result":result.unwrap_or(Value::Null)}))
 }
 
+fn open_backend(config: &mut Config) -> Result<Backend, Box<dyn Error>> {
+    #[cfg(feature = "mcp-proxy")]
+    if let Some(remote) = config.remote.take() {
+        return Ok(Backend::Proxy(remote));
+    }
+    Ok(Backend::Local(Box::new(open_database(config)?)))
+}
+
 fn run() -> Result<(), Box<dyn Error>> {
-    let Some(config) = config()? else {
+    let Some(mut config) = config()? else {
         return Ok(());
     };
-    let mut db = open_database(&config)?;
+    let mut backend = open_backend(&mut config)?;
     let stdin = io::stdin();
     let mut stdout = io::BufWriter::new(io::stdout().lock());
     for line in stdin.lock().lines() {
@@ -709,7 +814,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             continue;
         }
         let response = match serde_json::from_str::<Value>(&line) {
-            Ok(message) => dispatch(&mut db, &config, message),
+            Ok(message) => dispatch(&mut backend, &config, message),
             Err(_) => Some(protocol_error(Value::Null, -32700, "Parse error")),
         };
         if let Some(response) = response {
@@ -718,7 +823,11 @@ fn run() -> Result<(), Box<dyn Error>> {
             stdout.flush()?;
         }
     }
-    db.close()?;
+    match backend {
+        Backend::Local(db) => db.close()?,
+        #[cfg(feature = "mcp-proxy")]
+        Backend::Proxy(_) => {}
+    }
     Ok(())
 }
 

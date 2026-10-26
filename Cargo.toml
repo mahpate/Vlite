@@ -33,6 +33,9 @@ gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 # Property-graph storage (EPIC-003, unreleased): never in `default` or in the
 # pinned artifact feature lists until the release gate approves it.
 graph = []
+# ITEM-043: `vlite-mcp --server URL` forwards the graph tools to a running
+# vlite-server (unreleased, source-only like `graph`, which it implies).
+mcp-proxy = ["mcp", "graph", "dep:reqwest"]
 
 [dependencies]
 wgpu = { version = "30.0.1", optional = true, default-features = false, features = ["wgsl", "dx12", "metal", "vulkan"] }
@@ -129,6 +132,11 @@ required-features = ["server", "mcp"]
 [[test]]
 name = "graph_mcp"
 required-features = ["mcp", "graph"]
+
+# ITEM-043: vlite-mcp proxy mode against a served vlite-server.
+[[test]]
+name = "graph_mcp_proxy"
+required-features = ["mcp-proxy", "server"]
 
 # FOLLOWUP-001: source-only graph command line. `graph` keeps it out of every
 # distributed artifact (their pinned feature lists exclude `graph`).

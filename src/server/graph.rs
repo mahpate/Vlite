@@ -1448,6 +1448,8 @@ fn indexes(choices: &[IndexChoice]) -> Result<Value, ApiError> {
                 IndexChoice::EdgeKeyIndex => json!("edge_key_index"),
                 IndexChoice::LabelIndexScan => json!("label_index_scan"),
                 IndexChoice::FullNodeScan => json!("full_node_scan"),
+                IndexChoice::PropertyExactIndex => json!("property_exact_index"),
+                IndexChoice::PropertyRangeIndex => json!("property_range_index"),
                 IndexChoice::AdjacencyRangeScan {
                     direction: scan,
                     typed,

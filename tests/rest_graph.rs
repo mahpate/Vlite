@@ -815,6 +815,24 @@ async fn schema_retrieve_and_query_text_routes() {
         "{body}"
     );
     assert_eq!(body["observed"]["labels"][0]["origin"], "both", "{body}");
+    // Declared property indexes appear in read stats.
+    let (status, body) = call(
+        app,
+        Some(ADMIN),
+        "POST",
+        "/v1/graphs/g/nodes/find",
+        Some(
+            json!({"label": "Doc", "conditions": [{"field": "rank", "op": "range",
+            "min": {"type": "integer", "value": "2"}}], "limit": 10}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["stats"]["indexes"],
+        json!(["property_range_index"]),
+        "{body}"
+    );
     let ensure = json!({"ops": [{"op": "ensure_edge", "source": "n1",
         "relationship": "LINKS", "destination": "n2"}]});
     for _ in 0..2 {
