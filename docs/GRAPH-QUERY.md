@@ -152,5 +152,5 @@ invalid value. The CLI codes are `graph_query_<kind>`.
 The query text was added at the repository owner's direction on 2026-10-25.
 That direction skipped the EPIC-014 LLM evaluation (GATE-005 experiments were
 not run). It is experimental and source-only, like the rest of the `graph`
-feature. An MCP tool for it (`vlite_graph_query`, ITEM-052) is not part of
-this change.
+feature. MCP exposes it as the read-only `vlite_graph_query` tool (ITEM-052),
+and REST as `POST /v1/graphs/{graph}/query`.

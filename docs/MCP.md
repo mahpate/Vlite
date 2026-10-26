@@ -180,6 +180,23 @@ Read tools (always listed on graph-enabled files):
 - `vlite_graph_shortest_path` — `graph`, `source`, `destination`,
   `direction?`, `types?`. `outcome` is `found`, `no_path_within_hops` (fully
   explored) or `exhausted` (limits hit; absence is unknown).
+- `vlite_graph_schema` — `graph`, `budget?` (default 100000 entities). Returns
+  the `declared` schema (labels, relationship types, endpoints, typed
+  properties, indexes) and an `observed` summary with counts and `origin`
+  (`declared`, `observed` or `both`); `observed.complete` is false when the
+  budget stopped the scan. Call it before writing or querying an unfamiliar graph.
+- `vlite_graph_retrieve` — `graph`, `pivot` (`collection` plus `vector` and/or
+  `text`, `k?`, `filter?`, `metric?`), `expansion?` (`direction`, `types`,
+  `expand_filter`, `return_filter`, `edge_filter`, `include_paths`),
+  `evidence?` (`collections`, `fields`, `max_excerpt_bytes`, `max_items`),
+  `limits?`, `projection?`. Pivot records map to attached nodes, the graph is
+  expanded within the limits, and records attached to returned nodes come back
+  as evidence (metadata and payload excerpts, never vectors). Check
+  `complete`, `truncation` and `unmapped_pivots`.
+- `vlite_graph_query` — `graph`, `query` (the read-only text of
+  [GRAPH-QUERY.md](GRAPH-QUERY.md)), `params?` (typed `$name` values),
+  `limits?`, `explain?`. Each text maps to exactly one typed read and returns
+  that tool's output; rejected text fails `graph_query_*` before any graph access.
 
 Every query tool also accepts `projection?` (`"all"`, `"none"` or
 `{"only": [...]}`), `limits?` and `explain?`. With `explain: true` the tool
@@ -194,9 +211,15 @@ Write tools (listed only with `--writable`):
 
 - `vlite_graph_create` / `vlite_graph_drop` — `graph`. Drop fails
   `graph_not_empty` while the graph has nodes.
+- `vlite_graph_put_schema` — `graph`, `schema`. Replaces the declared schema in
+  one commit; data that does not conform fails `graph_schema_violation` and
+  nothing changes.
 - `vlite_graph_write` — `graph` and `ops` (at most 4096): `create_node`,
-  `upsert_node`, `patch_node`, `delete_node`, `create_edge`, `patch_edge`,
-  `delete_edge`, `attach`, `detach`, `put_vector`, `delete_vector`. The batch
+  `upsert_node`, `patch_node`, `delete_node`, `create_edge`, `ensure_edge`,
+  `patch_edge`, `delete_edge`, `attach`, `detach`, `put_vector`,
+  `delete_vector`, `put_schema`. `ensure_edge` creates an edge only if the
+  same (source, type, destination) is absent and needs a relationship declared
+  `multiplicity: "unique_triple"`. The batch
   commits atomically in order; on error nothing is written. `expected`
   (`"any"`, `"absent"` or `{"revision": "<u64>"}`) makes an op conditional
   (`precondition_failed`). Reusing an edge `key` for a different edge fails
@@ -210,6 +233,28 @@ reports `complete`, `truncation`, `stats` and `cursor`. Treat a result with
 `read_only: ...`, `graph_not_found: ...` or `graph_limit_exceeds_ceiling: ...`.
 A read-only instance sees the graph as of the moment it opened the file; a
 writable instance holds the file's exclusive lock like any other writer.
+
+### Server proxy mode (source-only `mcp-proxy` builds)
+
+```sh
+cargo install --locked --path . --features mcp-proxy --bin vlite-mcp
+VLITE_TOKEN=... vlite-mcp --server https://vlite.example:8080 --token-env VLITE_TOKEN
+```
+
+With `--server URL`, `vlite-mcp` opens no file. It forwards the graph tools to
+a `vlite-server` built with `graph`, through the REST graph routes, so several
+agents can share one database. Only graph tools are proxied; vector tools are
+not listed. `tools/list` probes `GET /v1/graphs` and lists graph tools only
+when the server reports a graph-enabled database. The server's credential
+decides what each call may do (role, graph scope, and collection read access
+for retrieve evidence). Retrieve output adds `redacted` (`count` and
+`collections`) for evidence the token could not read. `--writable` is still
+needed before write tools are listed or called. The bearer token is read from
+the environment variable named by `--token-env`. It is never taken from the
+command line, logged, or echoed in errors. `--server` cannot be combined with
+`--db` or key options. `https://` URLs use rustls. Redirects are not followed.
+Server errors keep their `<code>: <message>` form; an unreachable server returns
+`server_unavailable: ...`.
 
 ## Access and locking
 

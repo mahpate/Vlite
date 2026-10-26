@@ -29,11 +29,20 @@ files. See `docs/MCP.md` for arguments, limits and error codes.
 - `vlite_graph_neighbors`: one node's edges and adjacent nodes.
 - `vlite_graph_traverse`: bounded multi-hop expansion; check `complete`.
 - `vlite_graph_shortest_path`: `found`, `no_path_within_hops` or `exhausted`.
-- `vlite_graph_create`, `vlite_graph_drop`, `vlite_graph_write`: **writable
-  mode only**; `vlite_graph_write` applies an atomic batch of operations.
+- `vlite_graph_schema`: declared schema plus an observed, budgeted summary.
+- `vlite_graph_retrieve`: vector/text pivot, bounded expansion and compact
+  evidence records; check `complete` and `unmapped_pivots`.
+- `vlite_graph_query`: one read-only `MATCH ... RETURN` text mapped to a typed read.
+- `vlite_graph_create`, `vlite_graph_drop`, `vlite_graph_put_schema`,
+  `vlite_graph_write`: **writable mode only**; `vlite_graph_write` applies an
+  atomic batch of operations (including `ensure_edge` and `put_schema`).
+
+`mcp-proxy` builds also accept `--server URL --token-env VAR`: graph tools
+are forwarded to a `vlite-server`, which authorizes each call; vector tools
+are not proxied.
 
 Every graph query accepts `limits` (rejected above their ceilings), `projection`
-and `explain`.
+and `explain` (retrieve has no `explain`).
 
 ## Host launch shape
 
