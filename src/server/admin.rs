@@ -408,6 +408,12 @@ async fn capabilities(
     let auth = s.admin.auth.lock().map_err(internal)?;
     let open = auth.admin.is_none();
     let v4 = s.format_version >= 4;
+    // LEG-019/REQ-053: graph-enabled files reject change-feed consumers
+    // (`/v1/changes`, webhooks), so never advertise them there.
+    #[cfg(feature = "graph")]
+    let feed = !s.graph_enabled;
+    #[cfg(not(feature = "graph"))]
+    let feed = true;
     let backups = s.admin.directory.is_some();
     let scoped = s.admin.credentials.is_some();
     let audit_log = s.admin.audit_log.is_some();
@@ -447,7 +453,7 @@ async fn capabilities(
         .as_object_mut()
         .expect("capability features object");
     for (name, enabled) in [
-        ("change_feed", v4),
+        ("change_feed", v4 && feed),
         ("record_expiry", s.format_version >= 5),
         ("metadata_updates", s.format_version >= 5),
         ("grouped_search", s.format_version >= 5),
@@ -457,7 +463,7 @@ async fn capabilities(
         ("geo_search", s.format_version >= 5),
         ("named_vectors", s.format_version >= 5),
         ("sparse_vectors", s.format_version >= 5),
-        ("webhooks", s.admin.directory.is_some()),
+        ("webhooks", s.admin.directory.is_some() && feed),
         ("disk_ann", s.admin.directory.is_some()),
         ("tenant_lifecycle", s.admin.tenants.is_some()),
         ("accounts", s.admin.users.is_some()),

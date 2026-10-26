@@ -330,6 +330,19 @@ async fn leg019_webhook_registration_is_rejected_on_graph_files_without_side_eff
             service,
             app,
         } = fixture(setup, true);
+        // The capability document must not advertise what the file rejects.
+        let caps = call(&app, Some(ADMIN), "GET", "/v1/capabilities", None).await;
+        assert_eq!(caps.0, StatusCode::OK, "{}", caps.1);
+        assert_eq!(
+            caps.1["features"]["change_feed"],
+            json!(!setup.graph()),
+            "{setup:?}"
+        );
+        assert_eq!(
+            caps.1["features"]["webhooks"],
+            json!(!setup.graph()),
+            "{setup:?}"
+        );
         let created = call(
             &app,
             Some(ADMIN),

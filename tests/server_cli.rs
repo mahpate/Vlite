@@ -192,7 +192,13 @@ fn periodic_acknowledged_writes_survive_abrupt_process_termination() {
 
 impl Server {
     fn request(&self, method: &str, path: &str, body: Value) -> (u16, Value) {
-        let body = body.to_string();
+        // No body for Null: a server that answers a GET without reading an
+        // unexpected body may reset the connection on close (seen on macOS).
+        let body = if body.is_null() {
+            String::new()
+        } else {
+            body.to_string()
+        };
         let mut stream = TcpStream::connect(&self.address).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(120)))
