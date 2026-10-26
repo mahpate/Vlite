@@ -83,8 +83,9 @@ INVENTORY = {
 }
 
 # Routes compiled only with the source-only `graph` feature (src/server/graph.rs).
-# Dashboard graph support is the pending FOLLOWUP-002, so they have no control yet.
-GRAPH_ONLY = {("GET", "/v1/admin/graph/stats")}
+# graph.js builds its own controls inside <section id="graph">, so the control id is
+# checked in the script that creates it rather than in index.html.
+GRAPH_ONLY = {("GET", "/v1/admin/graph/stats"): ("graph.js", "graph-stats")}
 
 
 def main():
@@ -98,8 +99,13 @@ def main():
     )
     if graph_source.exists():
         graph_routes = set(admin_routes(graph_source.read_text(encoding="utf-8")))
-        assert graph_routes == GRAPH_ONLY, f"Graph admin route drift: {graph_routes ^ GRAPH_ONLY}"
+        assert graph_routes == set(GRAPH_ONLY), f"Graph admin route drift: {graph_routes ^ set(GRAPH_ONLY)}"
     dashboard = ROOT / "src" / "dashboard"
+    for (method, route), (script, control) in GRAPH_ONLY.items():
+        source = (dashboard / script).read_text(encoding="utf-8")
+        assert f'id: "{control}"' in source, f"{method} {route}: missing UI #{control} in {script}"
+        assert f'$("{control}")' in source, f"{method} {route}: missing handler #{control}"
+        assert route.split("{", 1)[0] in source, f"{method} {route}: missing request path in {script}"
     markup = (dashboard / "index.html").read_text(encoding="utf-8")
     scripts = {name: (dashboard / name).read_text(encoding="utf-8") for name, _ in INVENTORY.values()}
     for (method, route), (script, control) in INVENTORY.items():

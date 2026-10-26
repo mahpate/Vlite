@@ -122,3 +122,38 @@ async fn public_dashboard_assets_are_hardened_but_do_not_exempt_data_routes() {
     assert_eq!(response.status(), 401);
     service.close().await.unwrap();
 }
+
+/// The graph explorer assets are public, hardened and served in every server
+/// build; graph.js hides its own controls when the graph routes are absent.
+#[tokio::test]
+async fn graph_dashboard_assets_are_public_and_hardened() {
+    let directory = tempfile::tempdir().unwrap();
+    let service = Service::new(Database::create(directory.path().join("graph.vlite"), 3).unwrap());
+    let token = "secret_0123456789_ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let app = authenticated_router(service.clone(), BearerToken::new(token).unwrap());
+    for (uri, content_type, marker) in [
+        ("/dashboard/graph.js", "text/javascript", "VLiteGraphTools"),
+        ("/dashboard/graph.css", "text/css", "#graph"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "{uri}");
+        let headers = response.headers();
+        assert!(
+            headers["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with(content_type)
+        );
+        assert_eq!(headers["cache-control"], "no-store");
+        assert_eq!(headers["x-content-type-options"], "nosniff");
+        let csp = headers["content-security-policy"].to_str().unwrap();
+        assert!(csp.contains("frame-ancestors 'none'") && csp.contains("connect-src 'self'"));
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(std::str::from_utf8(&bytes).unwrap().contains(marker));
+    }
+    service.close().await.unwrap();
+}

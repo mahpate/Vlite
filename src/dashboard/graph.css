@@ -1,0 +1,21 @@
+/* Property graph explorer (graph.js). Scoped to #graph; uses the dashboard --studio-* tokens. */
+#graph .graph-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 16px; }
+#graph .graph-equality { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 2fr); gap: 0 16px; }
+#graph .graph-limits { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 0 16px; }
+#graph .graph-limits label { margin: 8px 0; font-family: ui-monospace, Consolas, monospace; font-weight: 500; }
+#graph textarea { min-height: 60px; resize: vertical; }
+#graph .graph-figure { margin: 16px 0 0; border: 1px solid var(--studio-border); border-radius: 12px; background: var(--studio-subtle); padding: 8px; }
+#graph .graph-figure figcaption { color: var(--studio-muted); font-size: 12px; padding: 4px 8px; }
+#graph #graph-view { display: block; width: 100%; height: auto; max-height: 420px; }
+#graph #graph-view .graph-edge line { stroke: var(--studio-muted); stroke-width: 1.5; }
+#graph #graph-view .graph-edge text { fill: var(--studio-muted); font-size: 11px; }
+#graph #graph-view .graph-arrow { fill: var(--studio-muted); }
+#graph #graph-view .graph-node circle { fill: var(--studio-accent-soft); stroke: var(--studio-accent); stroke-width: 2; }
+#graph #graph-view .graph-node text { fill: var(--studio-text); font-size: 12px; }
+#graph #graph-table td:nth-child(2), #graph #graph-table td:nth-child(3) { font-variant-numeric: tabular-nums; }
+#graph #graph-explain-table th[scope="row"] { width: 9rem; text-transform: none; letter-spacing: 0; font-size: 12px; }
+#graph #graph-explain-table td, #graph #graph-paths td { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+#graph #graph-note { color: var(--studio-muted); }
+@media (max-width: 720px) {
+  #graph .graph-equality { grid-template-columns: minmax(0, 1fr); }
+}

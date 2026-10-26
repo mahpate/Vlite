@@ -147,6 +147,24 @@ invalid value. The CLI codes are `graph_query_<kind>`.
 - **Exclusions.** There is no sorting, aggregation, OR, negation or write. Those
   stay with the typed API or the application.
 
+## Dashboard graph explorer
+
+The Dashboard's read-only **Graphs** workspace (FOLLOWUP-002,
+`src/dashboard/graph.js`) uses the typed REST routes, not the query text. It
+appears only when `/v1/graphs` answers. A server without the `graph` feature
+or a file without graphs (409 `graphs_not_enabled`) hides it. Credentials
+without `graph_read` or a graph binding see a "no graph access" notice instead.
+
+It lists graphs, gets a node or edge by ID or key, finds nodes by label and an
+equality or JSON conditions, pages neighbors with direction and relationship
+filters, and runs bounded traversals and shortest paths. Results show
+completeness, truncation, budgets and indexes, a table, and a small SVG
+node-link view. **Explain plan** shows the normalized query and effective
+limits. Blank limits use server defaults. Values above the ceiling show the
+REST error code, for example `graph_limit_exceeds_ceiling`. Admin sessions can
+load `GET /v1/admin/graph/stats`. Writes stay with REST, the CLI or MCP.
+Signed-in editor and viewer accounts have no graph grant yet.
+
 ## Status
 
 The query text was added at the repository owner's direction on 2026-10-25.
