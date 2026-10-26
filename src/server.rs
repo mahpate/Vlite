@@ -47,6 +47,7 @@ mod ops;
 pub mod telemetry;
 mod tenants;
 pub mod tls;
+mod users;
 mod webhooks;
 pub use admin::{ServerOptions, configured_admin_router, read_token_file, selected_database};
 
@@ -536,6 +537,7 @@ fn configured_routes(service: Service) -> Router {
     admin::routes()
         .merge(tls::routes())
         .merge(tenants::routes())
+        .merge(users::routes())
         .merge(webhooks::routes())
         .merge(collections::routes())
         .merge(ops::routes())
@@ -733,6 +735,8 @@ fn permission(method: &Method, route: &str) -> Need {
         || route.starts_with("/v1/collections/{collection}/index/hnsw");
     match (method.as_str(), route) {
         ("GET" | "HEAD", "/v1/capabilities" | "/ready" | "/openapi.json") => Need::Any,
+        ("GET" | "HEAD", "/v1/auth/session")
+        | ("POST", "/v1/auth/logout" | "/v1/auth/password") => Need::Any,
         ("GET" | "HEAD", "/metrics" | "/v1/admin/diagnostics/slow-queries") => {
             Need::Op(Op::Diagnostics, Reach::Filtered)
         }
@@ -847,7 +851,8 @@ fn authorize(
             || route == "/v1/collections/{collection}/query"
             || route == "/v1/collections/{collection}/embed"
             || route == "/v1/collections/{collection}/search/disk-ann");
-    let read_only_allowed = !path.starts_with("/v1/admin/") && (read || search);
+    let read_only_allowed =
+        path.starts_with("/v1/auth/") || (!path.starts_with("/v1/admin/") && (read || search));
     // Legacy routes address `default` (ID 0); their handlers may not resolve
     // a collection, so the binding is checked here as well.
     let legacy = !route.contains("{collection}") && !route.starts_with("/v1/imports");
@@ -957,12 +962,27 @@ async fn observe(
             | "/dashboard/admin-tools.js"
             | "/dashboard/observability.js"
             | "/dashboard/navigation.js"
+            | "/v1/auth/config"
+            | "/v1/auth/login"
     );
-    let authentication = authenticate(&service, request.headers());
+    // A session cookie is used only when no Authorization header is present.
+    let (authentication, principal) = match users::resolve(
+        &service,
+        request.method(),
+        request.uri().path(),
+        request.headers(),
+    ) {
+        Some(Ok(signed_in)) => (Ok(Some(signed_in.role)), Some(signed_in.principal)),
+        Some(Err(error)) => (Err(error), None),
+        None => (authenticate(&service, request.headers()), None),
+    };
     let role = authentication.as_ref().ok().cloned().flatten();
     request
         .extensions_mut()
         .insert(RequestId(request_id.clone()));
+    if let Some(principal) = principal {
+        request.extensions_mut().insert(principal);
+    }
     let mut response = if public {
         if let Some(role) = role.clone() {
             request.extensions_mut().insert(role);
@@ -970,7 +990,18 @@ async fn observe(
         next.run(request).await
     } else {
         match &authentication {
-            Err(error) => error.clone().into_response(),
+            Err(error) => {
+                let mut response = error.clone().into_response();
+                if error.code == "session_expired" {
+                    for cookie in users::clear_cookies() {
+                        response.headers_mut().append(
+                            header::SET_COOKIE,
+                            axum::http::HeaderValue::from_static(cookie),
+                        );
+                    }
+                }
+                response
+            }
             Ok(None) => ApiError::new(
                 StatusCode::UNAUTHORIZED,
                 "unauthorized",

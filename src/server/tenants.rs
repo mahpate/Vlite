@@ -202,6 +202,12 @@ async fn list(State(service): State<Service>) -> Result<Json<Value>, ApiError> {
         .filter(|t| !t.deleted)
         .cloned()
         .collect();
+    let users = service
+        .admin
+        .users
+        .as_ref()
+        .map(|users| users.count_by_tenant())
+        .unwrap_or_default();
     let items = service
         .run_read(move |db| {
             Ok(tenants
@@ -211,6 +217,7 @@ async fn list(State(service): State<Service>) -> Result<Json<Value>, ApiError> {
                     let mut view = tenant.view();
                     view["collections"] = json!(collections.len());
                     view["vectors"] = json!(collections.iter().map(|c| c.2).sum::<u64>());
+                    view["users"] = json!(users.get(&tenant.id).copied().unwrap_or(0));
                     view
                 })
                 .collect::<Vec<_>>())
@@ -268,7 +275,7 @@ async fn delete(
 ) -> Result<Json<Value>, ApiError> {
     let store = store(&service)?;
     let service_clone = service.clone();
-    service
+    let users_removed = service
         .run(move |db| {
             let mut next = store.tenants.lock().map_err(internal)?.clone();
             let tenant = next
@@ -286,16 +293,26 @@ async fn delete(
                     "drop tenant collections before deleting the tenant",
                 ));
             }
+            // Accounts go first: if this fails the tenant stays and a retry finishes.
+            let users_removed = match (&service_clone.admin.users, &service_clone.admin.audit_log)
+            {
+                (Some(users), Some(log)) => users.remove_tenant(log, &id)?,
+                _ => 0,
+            };
             tenant.deleted = true;
             tenant.suspended_unix_ms = None;
             if let Some(log) = &service_clone.admin.audit_log {
-                log.append(json!({"event":"tenant_deleted", "tenant_id":id}), true)
-                    .map_err(internal)?;
+                log.append(
+                    json!({"event":"tenant_deleted", "tenant_id":id, "users_removed":users_removed}),
+                    true,
+                )
+                .map_err(internal)?;
             }
-            store.commit(&next)
+            store.commit(&next)?;
+            Ok(users_removed)
         })
         .await?;
-    Ok(Json(json!({"deleted":true})))
+    Ok(Json(json!({"deleted":true, "users_removed":users_removed})))
 }
 
 /// Applies `change` to one live tenant under the exclusive database lock,
@@ -360,7 +377,7 @@ async fn usage_report(
 }
 
 /// Explicit `null` deserializes as `Some(None)`; an omitted field stays `None`.
-fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+pub(super) fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de>,

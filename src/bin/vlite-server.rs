@@ -15,7 +15,7 @@ use vlite::{
     },
 };
 
-const USAGE: &str = "usage: vlite-server <database-path> [--create-if-missing <dimensions> [--create-format 3|4|5]] [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--lock-held-reads] [--group-commit [--group-commit-requests <1..16>] [--group-commit-bytes <1024..268435456>] [--group-commit-delay-ms <0..100>]] [--encryption-key-file <path> | VLITE_ENCRYPTION_KEY | VLITE_ENCRYPTION_KEY_HEX] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS; [--log-buffer <n>] (default 2000, maximum 100000)";
+const USAGE: &str = "usage: vlite-server <database-path> [--create-if-missing <dimensions> [--create-format 3|4|5]] [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--lock-held-reads] [--group-commit [--group-commit-requests <1..16>] [--group-commit-bytes <1024..268435456>] [--group-commit-delay-ms <0..100>]] [--encryption-key-file <path> | VLITE_ENCRYPTION_KEY | VLITE_ENCRYPTION_KEY_HEX] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS; dashboard sign-in (needs VLITE_ADMIN_DIR and an admin token): VLITE_TRUSTED_PROXY=1 behind a proxy that sets X-Forwarded-Proto/For, VLITE_SESSION_IDLE_MINUTES (default 30), VLITE_SESSION_MAX_HOURS (default 8), optional first super admin: VLITE_ADMIN_USERNAME with VLITE_ADMIN_PASSWORD_FILE; [--log-buffer <n>] (default 2000, maximum 100000)";
 
 struct Config {
     lock_held_reads: bool,
@@ -41,6 +41,42 @@ struct Config {
     admin_directory: Option<PathBuf>,
     log_buffer_capacity: usize,
     schedule: Schedule,
+    accounts: AccountSettings,
+}
+
+/// Dashboard sign-in settings from the environment.
+#[derive(Default)]
+struct AccountSettings {
+    trusted_proxy: bool,
+    session_idle: Option<Duration>,
+    session_lifetime: Option<Duration>,
+    admin_username: Option<String>,
+    admin_password_file: Option<PathBuf>,
+}
+
+fn env_flag(name: &str) -> Result<bool, Box<dyn Error>> {
+    match std::env::var(name).as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("0" | "false") => Ok(false),
+        Ok("1" | "true") => Ok(true),
+        _ => Err(format!("{name} must be 0, 1, true or false").into()),
+    }
+}
+
+fn account_settings() -> Result<AccountSettings, Box<dyn Error>> {
+    let admin_username = match std::env::var("VLITE_ADMIN_USERNAME") {
+        Err(std::env::VarError::NotPresent) => None,
+        Ok(name) => Some(name),
+        Err(_) => return Err("VLITE_ADMIN_USERNAME must be valid UTF-8".into()),
+    };
+    Ok(AccountSettings {
+        trusted_proxy: env_flag("VLITE_TRUSTED_PROXY")?,
+        session_idle: env_number::<u64>("VLITE_SESSION_IDLE_MINUTES")?
+            .map(|minutes| Duration::from_secs(minutes.saturating_mul(60))),
+        session_lifetime: env_number::<u64>("VLITE_SESSION_MAX_HOURS")?
+            .map(|hours| Duration::from_secs(hours.saturating_mul(3600))),
+        admin_username,
+        admin_password_file: std::env::var_os("VLITE_ADMIN_PASSWORD_FILE").map(PathBuf::from),
+    })
 }
 
 /// Off-by-default operational settings from the environment.
@@ -104,6 +140,13 @@ fn options(config: &Config, database_path: Option<PathBuf>) -> ServerOptions {
         slow_query_threshold: s.slow_query_threshold,
         log_buffer_capacity: Some(config.log_buffer_capacity),
         database_path,
+        https: config.rest_tls.is_some(),
+        loopback_only: config.bind.ip().is_loopback(),
+        trusted_proxy: config.accounts.trusted_proxy,
+        session_idle: config.accounts.session_idle,
+        session_lifetime: config.accounts.session_lifetime,
+        admin_username: config.accounts.admin_username.clone(),
+        admin_password_file: config.accounts.admin_password_file.clone(),
     }
 }
 
@@ -397,6 +440,7 @@ fn config() -> Result<Config, Box<dyn Error>> {
         admin_directory: std::env::var_os("VLITE_ADMIN_DIR").map(PathBuf::from),
         log_buffer_capacity,
         schedule: schedule()?,
+        accounts: account_settings()?,
     };
     // Validate every option before creating or opening a database.
     options(&config, None).validate()?;

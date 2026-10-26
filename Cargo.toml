@@ -162,3 +162,10 @@ required-features = ["graph"]
 [[example]]
 name = "graph_memory"
 required-features = ["graph"]
+
+# Password hashing is deliberately expensive; keep it fast in debug test runs.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

@@ -45,6 +45,8 @@ pub(super) struct AdminState {
     pub tenants: Option<Arc<super::tenants::Store>>,
     /// Persistent JSON-lines audit log in the admin directory.
     pub audit_log: Option<Arc<super::audit::Log>>,
+    /// Dashboard accounts; requires an admin token and admin directory.
+    pub users: Option<Arc<super::users::Accounts>>,
 }
 impl AdminState {
     pub fn record(&self, event: Value) {
@@ -88,6 +90,21 @@ pub struct ServerOptions {
     pub log_buffer_capacity: Option<usize>,
     /// Active database path, protected from retention.
     pub database_path: Option<PathBuf>,
+    /// The REST listener terminates TLS, so session cookies are `Secure`.
+    pub https: bool,
+    /// The REST listener binds only to loopback; plain-HTTP sign-in stays local.
+    pub loopback_only: bool,
+    /// A reverse proxy sets `X-Forwarded-Proto`/`X-Forwarded-For`. Allows
+    /// password sign-in behind it and enables per-address throttling.
+    pub trusted_proxy: bool,
+    /// Dashboard session idle timeout (default 30 minutes; 1 minute..24 hours).
+    pub session_idle: Option<Duration>,
+    /// Dashboard session lifetime (default 8 hours; 1 hour..30 days).
+    pub session_lifetime: Option<Duration>,
+    /// Creates this super admin at startup when no super admin exists.
+    pub admin_username: Option<String>,
+    /// File with that super admin's password; read once and never logged.
+    pub admin_password_file: Option<PathBuf>,
 }
 
 impl ServerOptions {
@@ -162,6 +179,43 @@ impl ServerOptions {
                 "slow query threshold must be 1ms..3600s",
             ));
         }
+        if self
+            .session_idle
+            .is_some_and(|d| !(60..=86_400).contains(&d.as_secs()))
+        {
+            return Err(std::io::Error::other(
+                "session idle timeout must be 60..86400 seconds",
+            ));
+        }
+        if self
+            .session_lifetime
+            .is_some_and(|d| !(3600..=2_592_000).contains(&d.as_secs()))
+        {
+            return Err(std::io::Error::other(
+                "session lifetime must be 3600..2592000 seconds",
+            ));
+        }
+        if self.session_idle.unwrap_or(super::users::DEFAULT_IDLE)
+            > self
+                .session_lifetime
+                .unwrap_or(super::users::DEFAULT_LIFETIME)
+        {
+            return Err(std::io::Error::other(
+                "session idle timeout cannot exceed the session lifetime",
+            ));
+        }
+        if self.admin_username.is_some() != self.admin_password_file.is_some() {
+            return Err(std::io::Error::other(
+                "the bootstrap admin username and password file must be set together",
+            ));
+        }
+        if self.admin_username.is_some()
+            && (self.admin_token.is_none() || self.admin_directory.is_none())
+        {
+            return Err(std::io::Error::other(
+                "a bootstrap admin account requires an admin token and an admin directory",
+            ));
+        }
         Ok(())
     }
 }
@@ -203,6 +257,33 @@ pub fn configured_admin_router(
         (Some(directory), Some(_)) => Some(Arc::new(super::tenants::Store::load(directory)?)),
         _ => None,
     };
+    // Accounts share the scoped-credential precondition: without an admin
+    // token there is nothing to sign in to.
+    let users = match (&directory, &options.admin_token) {
+        (Some(directory), Some(_)) => {
+            let accounts = super::users::Accounts::load(
+                directory,
+                &super::users::Settings {
+                    idle: options.session_idle.unwrap_or(super::users::DEFAULT_IDLE),
+                    lifetime: options
+                        .session_lifetime
+                        .unwrap_or(super::users::DEFAULT_LIFETIME),
+                    https: options.https,
+                    loopback_only: options.loopback_only,
+                    trusted_proxy: options.trusted_proxy,
+                },
+            )?;
+            if let (Some(username), Some(file), Some(log)) = (
+                &options.admin_username,
+                &options.admin_password_file,
+                audit_log.as_deref(),
+            ) {
+                accounts.seed(log, username, file)?;
+            }
+            Some(Arc::new(accounts))
+        }
+        _ => None,
+    };
     if let Some(threshold) = options.slow_query_threshold {
         service.metrics.slow_threshold_ns.store(
             threshold.as_nanos().min(u64::MAX as u128) as u64,
@@ -238,6 +319,7 @@ pub fn configured_admin_router(
         credentials,
         tenants,
         audit_log,
+        users,
         ..AdminState::default()
     });
     service
@@ -321,6 +403,7 @@ pub(super) fn routes() -> Router<Service> {
 async fn capabilities(
     State(s): State<Service>,
     Extension(role): Extension<Role>,
+    principal: Option<Extension<super::users::Principal>>,
 ) -> Result<Json<Value>, ApiError> {
     let auth = s.admin.auth.lock().map_err(internal)?;
     let open = auth.admin.is_none();
@@ -377,6 +460,8 @@ async fn capabilities(
         ("webhooks", s.admin.directory.is_some()),
         ("disk_ann", s.admin.directory.is_some()),
         ("tenant_lifecycle", s.admin.tenants.is_some()),
+        ("accounts", s.admin.users.is_some()),
+        ("password_login", s.admin.users.is_some()),
     ] {
         features.insert(name.to_owned(), json!(enabled));
     }
@@ -408,6 +493,14 @@ async fn capabilities(
             "/v1/admin/tenants/{id}/settings",
             "/v1/admin/tenants/{id}/suspend",
             "/v1/admin/tenants/{id}/resume",
+            "/v1/auth/config",
+            "/v1/auth/login",
+            "/v1/auth/session",
+            "/v1/auth/logout",
+            "/v1/auth/password",
+            "/v1/admin/users",
+            "/v1/admin/users/{id}",
+            "/v1/admin/users/{id}/password",
         ]
         .into_iter()
         .map(|route| json!(route)),
@@ -415,24 +508,39 @@ async fn capabilities(
     if let Role::Scoped(grant) = &role {
         value["scope"] = grant.json();
     }
-    value["identity"] = identity(&s, &role, open);
+    value["identity"] = identity(&s, &role, open, principal.as_ref().map(|p| &p.0));
     Ok(Json(value))
 }
 /// Who the presented token is, for display only. Authorization still comes
 /// from `role` and `scope`; labels never contain secrets.
-fn identity(s: &Service, role: &Role, open: bool) -> Value {
+fn identity(s: &Service, role: &Role, open: bool, user: Option<&super::users::Principal>) -> Value {
+    let tenant_name = |id: &Option<String>| {
+        id.as_ref().and_then(|id| {
+            s.admin
+                .tenants
+                .as_ref()
+                .and_then(|tenants| tenants.name(id))
+        })
+    };
+    if let Some(user) = user {
+        let tenant = tenant_name(&user.tenant_id);
+        let mut label = user.username.clone();
+        if let Some(id) = &user.tenant_id {
+            label.push_str(&format!(" · {}", tenant.as_deref().unwrap_or(id)));
+        }
+        label.push_str(&format!(" · {}", user.role.label()));
+        return json!({"kind":"user","label":label,"user_id":user.user_id,
+            "username":user.username,"account_role":user.role.name(),
+            "tenant_id":user.tenant_id,"tenant_name":tenant,
+            "must_change_password":user.must_change_password});
+    }
     match role {
         Role::Admin if open => json!({"kind":"open",
             "label":"Open access (no admin token configured; every caller is admin)"}),
         Role::Admin => json!({"kind":"super_admin","label":"Super admin (bootstrap admin token)"}),
         Role::ReadOnly => json!({"kind":"read_only","label":"Read-only token"}),
         Role::Scoped(grant) => {
-            let tenant_name = grant.tenant_id.as_ref().and_then(|id| {
-                s.admin
-                    .tenants
-                    .as_ref()
-                    .and_then(|tenants| tenants.name(id))
-            });
+            let tenant_name = tenant_name(&grant.tenant_id);
             let mut label = format!("API key \"{}\" ({})", grant.name, grant.id);
             if let Some(id) = &grant.tenant_id {
                 label.push_str(&format!(
@@ -1099,7 +1207,7 @@ mod tests {
         );
         poison(&service.admin.auth);
         assert_eq!(
-            capabilities(State(service.clone()), Extension(Role::Admin))
+            capabilities(State(service.clone()), Extension(Role::Admin), None)
                 .await
                 .unwrap_err()
                 .status,

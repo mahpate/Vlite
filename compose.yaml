@@ -32,6 +32,8 @@ services:
     environment:
       - VLITE_AUTH_TOKEN_FILE=/run/secrets/api_token
       - VLITE_ADMIN_DIR=/admin
+      # Requests reach the API through the dashboard proxy (or loopback on the host).
+      - VLITE_TRUSTED_PROXY=1
       - VLITE_READ_ONLY_TOKEN
       - VLITE_READ_ONLY_TOKEN_FILE
     secrets:

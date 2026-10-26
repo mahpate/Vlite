@@ -92,6 +92,30 @@ pub(super) struct Grant {
 }
 
 impl Grant {
+    /// The grant behind a signed-in editor or viewer: every collection the
+    /// tenant (if any) owns, limited to `ops`, valid until the session ends.
+    pub(super) fn for_user(
+        id: String,
+        name: String,
+        tenant_id: Option<String>,
+        ops: &[Op],
+        lineage: u64,
+        expires: u64,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            tenant_id,
+            requests_per_second: None,
+            max_vectors: None,
+            max_vectors_per_collection: None,
+            all: true,
+            collections: Vec::new(),
+            ops: ops.iter().fold(0, |mask, op| mask | bit(*op)),
+            lineage,
+            expires,
+        }
+    }
     pub(super) fn qualify(&self, name: &str) -> String {
         self.tenant_id
             .as_ref()
