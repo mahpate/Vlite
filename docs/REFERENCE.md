@@ -1059,9 +1059,10 @@ cooperative on some platforms and do not stop hostile software.
 
 Each `put`, successful `delete` or nonempty `write_batch` appends one
 checksummed frame with a commit footer and calls `File::sync_all()`. Memory
-changes, and the call succeeds, only after the sync succeeds; there is no
-relaxed durability mode. Open validates every header, length, sequence number,
-checksum and footer before exposing any vector.
+changes, and the call succeeds, only after the sync succeeds. This default
+`Durability::Full` mode can be relaxed per handle; see
+[periodic durability](#periodic-lazy-durability). Open validates every header,
+length, sequence number, checksum and footer before exposing any vector.
 
 | Situation | Behavior |
 |---|---|
@@ -1104,6 +1105,39 @@ external modification. `create` syncs the file but not its parent directory,
 so keeping a new file name across power loss needs platform-specific handling
 by the caller. Tests simulate interrupted writes and process exits, not
 physical power loss.
+
+## Periodic (lazy) durability
+
+`Durability::Periodic { interval }` (1 ms–60 s) is an opt-in, per-handle trade
+of crash durability for write throughput. Every commit, vector or graph, is
+still written in full to the OS before success, but `sync_all()` moves to a
+background flusher that runs at most once per interval.
+
+```rust
+use vlite::{Database, Durability};
+let mut db = Database::open("vectors.vlite")?
+    .with_durability(Durability::periodic_ms(100)?)?;
+db.put(1, &[0.0; 3], b"payload")?;
+db.sync()?; // explicit durable point
+db.close()?; // final sync, reports failure
+# Ok::<(), vlite::Error>(())
+```
+
+- A process crash loses nothing acknowledged. An **OS crash or power loss can
+  lose acknowledged commits from about the last interval**; only a suffix is
+  lost, never the synced prefix.
+- `sync()` forces durability and `unsynced_commits()` counts pending commits.
+  `close()` syncs and reports errors; a failed sync poisons the handle.
+- The mode is not persisted: each open starts as `Full`. Read-only and
+  in-memory handles start no flusher. Change-feed reads, segment export and ANN
+  sidecar saves sync first.
+- Server: `--durability periodic --flush-interval-ms N`. C ABI and Python:
+  `flush_interval_ms` on open/create plus `sync`.
+
+After an OS crash, missing whole frames open normally; a partial final frame
+returns `IncompleteTail` (explicit tail repair); a zero-filled suffix returns
+`Corrupt { offset, .. }` at the first unsynced frame, so back up and truncate
+to `offset` or restore. Repair never does this automatically.
 
 ## Opt-in file format v4
 

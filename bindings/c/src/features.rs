@@ -19,6 +19,8 @@ pub(super) enum Request {
         credentials: Credentials,
         #[serde(default)]
         read_only: bool,
+        #[serde(default)]
+        flush_interval_ms: Option<u64>,
     },
     OpenFromBytes {
         bytes_base64: String,
@@ -244,6 +246,9 @@ pub(super) struct Options {
     credentials: Credentials,
     #[serde(default)]
     commit_timestamps: bool,
+    /// Opt-in `Durability::Periodic` flush interval (1..=60000 ms).
+    #[serde(default)]
+    flush_interval_ms: Option<u64>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -335,6 +340,7 @@ pub(super) fn execute(state: &mut State, handle: u64, request: Request) -> Resul
                 Some(5) => Some(FormatVersion::V5),
                 _ => return Err(invalid("format must be 3, 4 or 5")),
             };
+            let durability = durability(options.flush_interval_ms)?;
             let options = CreateOptions {
                 format,
                 encryption: options.credentials.key()?,
@@ -344,6 +350,7 @@ pub(super) fn execute(state: &mut State, handle: u64, request: Request) -> Resul
                 Some(path) => Database::create_with_options(path, dimensions, options),
                 None => Database::create_in_memory(dimensions, options),
             }
+            .and_then(|db| db.with_durability(durability))
             .map_err(failure)?;
             return insert(state, handle, db);
         }
@@ -351,7 +358,9 @@ pub(super) fn execute(state: &mut State, handle: u64, request: Request) -> Resul
             path,
             credentials,
             read_only,
+            flush_interval_ms,
         } => {
+            let durability = durability(flush_interval_ms)?;
             let key = credentials.key()?;
             let db = match (key, read_only) {
                 (Some(key), false) => Database::open_encrypted(path, &key),
@@ -359,6 +368,7 @@ pub(super) fn execute(state: &mut State, handle: u64, request: Request) -> Resul
                 (None, false) => Database::open(path),
                 (None, true) => Database::open_read_only(path),
             }
+            .and_then(|db| db.with_durability(durability))
             .map_err(failure)?;
             return insert(state, handle, db);
         }

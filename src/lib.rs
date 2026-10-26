@@ -7,6 +7,8 @@ pub mod changes;
 mod collection;
 mod crypto;
 pub mod disk_ann;
+mod durability;
+pub use durability::{Durability, MAX_FLUSH_INTERVAL, MIN_FLUSH_INTERVAL};
 #[cfg(feature = "gpu")]
 pub mod gpu;
 mod storage;
@@ -361,6 +363,8 @@ pub enum Error {
     /// A key was supplied but the file is not encrypted.
     NotEncrypted,
     InvalidEncryptionOptions(&'static str),
+    /// Rejected `Durability` setting (for example an out-of-range interval).
+    InvalidDurability(&'static str),
     /// The header declares optional features this build does not understand.
     UnsupportedFeature(u16),
     /// A derived sidecar cannot be written for this database (for example an
@@ -620,6 +624,7 @@ impl fmt::Display for Error {
             Self::InvalidEncryptionOptions(reason) => {
                 write!(f, "invalid encryption options: {reason}")
             }
+            Self::InvalidDurability(reason) => write!(f, "invalid durability: {reason}"),
             Self::UnsupportedFeature(flags) => write!(
                 f,
                 "database header declares unsupported feature flags {flags:#06x}"
@@ -879,6 +884,10 @@ impl Expected {
 /// an explicitly saved, fully revalidated ANN snapshot sidecar (see
 /// save_ann_snapshot). No lock sidecar exists.
 pub struct Database {
+    /// Background flusher for `Durability::Periodic`. Declared first so it
+    /// stops and performs its final sync before `file` unlocks on drop.
+    flusher: Option<durability::Flusher>,
+    durability: Durability,
     file: LockedFile,
     version: u32,
     lineage: Option<u64>,
@@ -982,6 +991,8 @@ impl LockedFile {
     }
 
     fn sync_all(&self) -> io::Result<()> {
+        #[cfg(test)]
+        tests::SYNCS.with(|syncs| syncs.set(syncs.get() + 1));
         match &self.0 {
             Backing::Disk(file) => file.sync_all(),
             Backing::Memory(_) => Ok(()),
@@ -1010,12 +1021,15 @@ impl LockedFile {
         }
     }
 
-    #[cfg(test)]
     fn try_clone(&self) -> io::Result<File> {
         match &self.0 {
             Backing::Disk(file) => file.try_clone(),
             Backing::Memory(_) => Err(io::Error::other("in-memory storage")),
         }
+    }
+
+    fn is_memory(&self) -> bool {
+        matches!(self.0, Backing::Memory(_))
     }
 
     fn memory_bytes(&self) -> Option<Vec<u8>> {
@@ -1257,6 +1271,8 @@ impl Database {
         };
         let file = make(&header)?;
         Ok(Self {
+            flusher: None,
+            durability: Durability::Full,
             file,
             version,
             lineage,
@@ -1343,6 +1359,8 @@ impl Database {
         }
         let imports = import::Registry::from_markers(&loaded.imports);
         Ok(Self {
+            flusher: None,
+            durability: Durability::Full,
             file,
             version: loaded.version,
             lineage: loaded.lineage,
@@ -1445,10 +1463,85 @@ impl Database {
     }
 
     fn ensure_healthy(&self) -> Result<()> {
-        if self.poisoned {
+        if self.poisoned
+            || self
+                .flusher
+                .as_ref()
+                .is_some_and(durability::Flusher::failed)
+        {
             return Err(Error::Poisoned);
         }
         Ok(())
+    }
+
+    /// Whether this handle refuses all further operations (a failed commit
+    /// or a failed periodic sync). Close and reopen.
+    pub fn is_poisoned(&self) -> bool {
+        self.ensure_healthy().is_err()
+    }
+
+    /// The handle's current durability mode (`Full` unless changed).
+    pub fn durability(&self) -> Durability {
+        self.durability
+    }
+
+    /// Selects when commits reach stable storage for this open handle; the
+    /// setting is not persisted and every open starts in `Durability::Full`.
+    ///
+    /// `Periodic` acknowledges a commit once its frame is written to the file
+    /// (the OS page cache, which survives a process crash) and syncs from a
+    /// background thread at most once per interval, so an OS crash or power
+    /// loss may lose a suffix of acknowledged commits. Switching away from
+    /// `Periodic` (or `close`) first syncs everything written. A failed
+    /// periodic sync poisons the handle. Read-only and in-memory handles
+    /// accept the setting but never write, so it has no effect on them.
+    pub fn set_durability(&mut self, durability: Durability) -> Result<()> {
+        durability.validate()?;
+        self.ensure_healthy()?;
+        if let Some(flusher) = self.flusher.take()
+            && let Err(error) = flusher.shutdown()
+        {
+            self.poisoned = true;
+            return Err(Error::CommitIndeterminate(error));
+        }
+        if let Durability::Periodic { interval } = durability
+            && !self.read_only
+            && !self.file.is_memory()
+        {
+            self.flusher = Some(durability::Flusher::start(
+                self.file.try_clone()?,
+                interval,
+            )?);
+        }
+        self.durability = durability;
+        Ok(())
+    }
+
+    /// Consuming builder form of `set_durability`, for example
+    /// `Database::open(path)?.with_durability(Durability::periodic(interval)?)?`.
+    pub fn with_durability(mut self, durability: Durability) -> Result<Self> {
+        self.set_durability(durability)?;
+        Ok(self)
+    }
+
+    /// Forces every acknowledged commit to stable storage now. A no-op under
+    /// `Durability::Full` (each commit is already synced) and for read-only
+    /// or in-memory handles. A sync failure returns `CommitIndeterminate`
+    /// and poisons the handle.
+    pub fn sync(&self) -> Result<()> {
+        self.ensure_healthy()?;
+        match &self.flusher {
+            Some(flusher) => flusher.sync_now().map_err(Error::CommitIndeterminate),
+            None => Ok(()),
+        }
+    }
+
+    /// Acknowledged commits not yet covered by a completed sync (always 0
+    /// under `Durability::Full`).
+    pub fn unsynced_commits(&self) -> u64 {
+        self.flusher
+            .as_ref()
+            .map_or(0, durability::Flusher::pending)
     }
 
     fn next_sequence(&self) -> Result<u64> {
@@ -1848,8 +1941,12 @@ impl Database {
     }
 
     fn commit_frame(&mut self, sequence: u64, frame: &[u8]) -> Result<()> {
-        if self.group_active {
-            self.commit_frame_with_sync(sequence, frame, |_| Ok(()))
+        if self.group_active || self.flusher.is_some() {
+            self.commit_frame_with_sync(sequence, frame, |_| Ok(()))?;
+            if let Some(flusher) = &self.flusher {
+                flusher.mark_written();
+            }
+            Ok(())
         } else {
             self.commit_frame_with_sync(sequence, frame, LockedFile::sync_all)
         }
@@ -1898,7 +1995,9 @@ impl Database {
             }
         };
         self.ensure_healthy()?;
+        // Periodic durability: the flusher (or `sync`) covers group frames.
         if self.sequence != sequence
+            && self.flusher.is_none()
             && let Err(error) = sync(&self.file)
         {
             self.poisoned = true;
@@ -1999,6 +2098,8 @@ impl Database {
             return Err(Error::GraphChangeFeedUnsupported);
         }
         self.lineage.ok_or(Error::ChangeFeedRequiresUpgrade)?;
+        // Periodic durability: never publish commits a crash could lose.
+        self.sync()?;
         let mut file = &self.file;
         changes::read_changes(&mut file, None, self.cipher.as_ref(), cursor, max_events)
     }
@@ -2007,6 +2108,8 @@ impl Database {
     /// (see `ReplicaFollower`). `max_bytes` bounds the segment softly: whole
     /// commits are included until it is reached.
     pub fn export_log(&self, after_sequence: u64, max_bytes: usize) -> Result<LogSegment> {
+        // Periodic durability: a replica must never get ahead of the primary.
+        self.sync()?;
         let mut file = &self.file;
         logops::read_segment(
             &mut file,
@@ -2922,14 +3025,25 @@ impl Database {
         ))
     }
 
-    /// Consumes the handle and releases its OS lock. Commits are already synced.
+    /// Consumes the handle and releases its OS lock. Under
+    /// `Durability::Full` commits are already synced; under `Periodic` this
+    /// stops the flusher and syncs every acknowledged commit first, returning
+    /// `CommitIndeterminate` if that final sync fails.
     ///
-    /// Dropping the handle is also safe: there is no buffered uncommitted state.
+    /// Dropping the handle is also safe: there is no buffered uncommitted
+    /// state, and a periodic handle performs the same final sync on drop
+    /// (but cannot report its failure).
     pub fn close(mut self) -> Result<()> {
         self.ensure_healthy()?;
         if let Some((_, mut job)) = self.rebuild.take() {
             job.stop(HnswRebuildStatus::Cancelled);
             job.finish()?;
+        }
+        if let Some(flusher) = self.flusher.take()
+            && let Err(error) = flusher.shutdown()
+        {
+            self.poisoned = true;
+            return Err(Error::CommitIndeterminate(error));
         }
         self.file.unlock()?;
         Ok(())
@@ -2963,6 +3077,7 @@ impl Database {
                 "ANN snapshots hold plaintext vectors and are not written for encrypted databases; rebuild indexes after open",
             ));
         }
+        self.sync()?;
         ann_snapshot::save(self, path.as_ref())
     }
 
@@ -3195,6 +3310,195 @@ fn append_and_sync<W: Write + Seek>(
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    thread_local! {
+        /// `LockedFile::sync_all` calls made on this thread.
+        pub(super) static SYNCS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    fn syncs() -> u64 {
+        SYNCS.with(Cell::get)
+    }
+
+    fn periodic(ms: u64) -> Durability {
+        Durability::periodic_ms(ms).unwrap()
+    }
+
+    fn wait_until(mut done: impl FnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if done() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        done()
+    }
+
+    #[test]
+    fn full_durability_is_the_default_and_syncs_every_commit() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut db = Database::create(directory.path().join("full.vlite"), 1).unwrap();
+        assert_eq!(db.durability(), Durability::Full);
+        let before = syncs();
+        for id in 0..5 {
+            db.put(id, &[id as f32], b"").unwrap();
+        }
+        db.write_batch(&[Mutation::Delete { id: 0 }]).unwrap();
+        assert_eq!(syncs() - before, 6);
+        assert_eq!(db.unsynced_commits(), 0);
+        db.sync().unwrap();
+        db.close().unwrap();
+    }
+
+    #[test]
+    fn periodic_durability_skips_commit_syncs_and_flushes_within_the_interval() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("periodic.vlite");
+        let mut db = Database::create(&path, 1)
+            .unwrap()
+            .with_durability(periodic(20))
+            .unwrap();
+        assert_eq!(db.durability(), periodic(20));
+        let before = syncs();
+        for id in 0..50 {
+            db.put(id, &[id as f32], b"").unwrap();
+        }
+        db.write_batch(&[Mutation::Delete { id: 0 }]).unwrap();
+        assert_eq!(syncs(), before, "periodic commits must not sync inline");
+        assert!(wait_until(|| db.unsynced_commits() == 0));
+        assert!(db.flusher.as_ref().unwrap().flusher_syncs() >= 1);
+        // An idle flusher does not sync again.
+        let flushed = db.flusher.as_ref().unwrap().flusher_syncs();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(db.flusher.as_ref().unwrap().flusher_syncs(), flushed);
+        db.close().unwrap();
+        assert_eq!(Database::open(&path).unwrap().len(), 49);
+    }
+
+    #[test]
+    fn explicit_sync_close_drop_and_switching_back_flush_periodic_commits() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sync.vlite");
+        let mut db = Database::create(&path, 1).unwrap();
+        db.set_durability(periodic(60_000)).unwrap();
+        db.put(1, &[1.0], b"").unwrap();
+        db.put(2, &[2.0], b"").unwrap();
+        assert_eq!(db.unsynced_commits(), 2);
+        db.sync().unwrap();
+        assert_eq!(db.unsynced_commits(), 0);
+        db.sync().unwrap();
+        assert_eq!(db.flusher.as_ref().unwrap().flusher_syncs(), 0);
+
+        db.put(3, &[3.0], b"").unwrap();
+        assert_eq!(db.unsynced_commits(), 1);
+        db.set_durability(Durability::Full).unwrap();
+        assert!(db.flusher.is_none());
+        assert_eq!(db.unsynced_commits(), 0);
+        let before = syncs();
+        db.put(4, &[4.0], b"").unwrap();
+        assert_eq!(syncs() - before, 1);
+
+        db.set_durability(periodic(60_000)).unwrap();
+        db.put(5, &[5.0], b"").unwrap();
+        db.close().unwrap();
+        let mut db = Database::open(&path).unwrap();
+        assert_eq!(db.len(), 5);
+        assert_eq!(db.durability(), Durability::Full, "the mode is per handle");
+        db.set_durability(periodic(60_000)).unwrap();
+        db.put(6, &[6.0], b"").unwrap();
+        drop(db);
+        assert_eq!(Database::open(&path).unwrap().len(), 6);
+    }
+
+    #[test]
+    fn failed_periodic_sync_poisons_the_handle() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("poison.vlite");
+        let mut db = Database::create(&path, 1).unwrap();
+        db.set_durability(periodic(5)).unwrap();
+        db.put(1, &[1.0], b"").unwrap();
+        db.sync().unwrap();
+        db.flusher.as_ref().unwrap().inject_sync_failure();
+        db.put(2, &[2.0], b"").unwrap();
+        assert!(wait_until(|| db.is_poisoned()), "the flusher must poison");
+        assert!(matches!(db.put(3, &[3.0], b""), Err(Error::Poisoned)));
+        assert!(matches!(db.sync(), Err(Error::Poisoned)));
+        assert!(matches!(db.get(1), Err(Error::Poisoned) | Ok(_)));
+        assert!(matches!(db.close(), Err(Error::Poisoned)));
+
+        // Explicit sync reports the failure itself and poisons too.
+        let mut db = Database::open(&path).unwrap();
+        db.set_durability(periodic(60_000)).unwrap();
+        db.put(4, &[4.0], b"").unwrap();
+        db.flusher.as_ref().unwrap().inject_sync_failure();
+        assert!(matches!(db.sync(), Err(Error::CommitIndeterminate(_))));
+        assert!(db.is_poisoned());
+        assert!(matches!(
+            db.set_durability(Durability::Full),
+            Err(Error::Poisoned)
+        ));
+    }
+
+    #[test]
+    fn periodic_durability_covers_durable_groups_and_validates_intervals() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("group.vlite");
+        let mut db = Database::create(&path, 1).unwrap();
+        for invalid in [
+            std::time::Duration::ZERO,
+            std::time::Duration::from_micros(999),
+            MAX_FLUSH_INTERVAL + std::time::Duration::from_millis(1),
+        ] {
+            assert!(matches!(
+                Durability::periodic(invalid),
+                Err(Error::InvalidDurability(_))
+            ));
+            assert!(matches!(
+                db.set_durability(Durability::Periodic { interval: invalid }),
+                Err(Error::InvalidDurability(_))
+            ));
+        }
+        assert!(Durability::periodic(MIN_FLUSH_INTERVAL).is_ok());
+        assert!(Durability::periodic(MAX_FLUSH_INTERVAL).is_ok());
+        assert_eq!(db.durability(), Durability::Full);
+
+        db.set_durability(periodic(60_000)).unwrap();
+        let before = syncs();
+        db.durable_group(|db| {
+            db.put(1, &[1.0], b"")?;
+            db.put(2, &[2.0], b"")
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(syncs(), before);
+        assert_eq!(db.unsynced_commits(), 2);
+        db.close().unwrap();
+        assert_eq!(Database::open(&path).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn periodic_durability_is_inert_for_read_only_and_memory_handles() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("ro.vlite");
+        Database::create(&path, 1)
+            .unwrap()
+            .put(1, &[1.0], b"")
+            .unwrap();
+        let mut db = Database::open_read_only(&path).unwrap();
+        db.set_durability(periodic(10)).unwrap();
+        assert!(db.flusher.is_none());
+        assert_eq!(db.durability(), periodic(10));
+        db.sync().unwrap();
+        db.close().unwrap();
+
+        let mut db = Database::create_in_memory(1, CreateOptions::default()).unwrap();
+        db.set_durability(periodic(10)).unwrap();
+        assert!(db.flusher.is_none());
+        db.put(1, &[1.0], b"").unwrap();
+        db.sync().unwrap();
+        assert_eq!(db.unsynced_commits(), 0);
+    }
 
     #[test]
     fn traversal_kernel_tracks_exact_metric_and_falls_back_outside_f32_range() {

@@ -53,6 +53,26 @@ parallel reads, use multiple spawned processes, each loading its own
 `NativeLibrary` and opening `read_only=True`; do not reuse inherited handles after
 fork. Explicitly close handles, for example with `with native.open(...) as db:`.
 
+## Opt-in periodic durability
+
+By default every write is synced to disk before it returns. For higher write
+throughput, pass `flush_interval_ms=` (1–60000) to `native.create(...)` or
+`native.open(...)`:
+
+```python
+with native.open("vectors.vlite", flush_interval_ms=100) as db:
+    db.put("1", [0.0, 1.0])
+    db.sync()  # optional explicit durable point
+```
+
+Writes reach the OS immediately and a background flusher syncs at most every
+interval; `close` performs a final sync. A process crash loses nothing
+acknowledged, but **an OS crash or power loss can lose acknowledged writes from
+roughly the last interval**. A failed sync poisons the handle. Invalid intervals
+raise `EmbeddedError` with code `"invalid_durability"`. The setting is per handle
+and not stored in the file. See
+[periodic durability](https://github.com/mahpate/Vlite/blob/main/docs/REFERENCE.md#periodic-lazy-durability).
+
 ## V5 embedded feature API
 
 These bindings use ctypes, not PyO3/maturin. The wheel bundles the same ABI-1

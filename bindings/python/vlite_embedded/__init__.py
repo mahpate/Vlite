@@ -86,11 +86,19 @@ class NativeLibrary:
 
     def create(self, path: str | os.PathLike[str], dimensions: int, *, format: int | None = None,
                key: bytes | None = None, passphrase: str | None = None,
-               commit_timestamps: bool = False) -> "Database":
-        """Create without overwrite. Default format is 3; 5 enables all new surfaces."""
+               commit_timestamps: bool = False, flush_interval_ms: int | None = None) -> "Database":
+        """Create without overwrite. Default format is 3; 5 enables all new surfaces.
+
+        `flush_interval_ms` (1..60000) opts this handle into periodic durability:
+        commits are written but synced in the background at most that often, so an
+        OS crash or power loss may lose recently acknowledged commits (a process
+        crash does not). Call `Database.sync()` to force durability.
+        """
         if format == 5 or key is not None or passphrase is not None or commit_timestamps:
-            return self._create_feature(str(Path(path)), dimensions, format, key, passphrase, commit_timestamps)
-        request = {"op": "create", "path": str(Path(path)), "dimensions": dimensions}
+            return self._create_feature(str(Path(path)), dimensions, format, key, passphrase, commit_timestamps,
+                                        flush_interval_ms)
+        request = {"op": "create", "path": str(Path(path)), "dimensions": dimensions,
+                   **_given(flush_interval_ms=flush_interval_ms)}
         if format is not None:
             request["format"] = format
         return Database(self, int(self._execute(0, request)["handle"]))
@@ -98,9 +106,10 @@ class NativeLibrary:
     def _feature(self, operation: str, **fields):
         return self._execute(0, {"op": "features", "request": {"op": operation, **fields}})
 
-    def _create_feature(self, path, dimensions, format, key, passphrase, commit_timestamps):
+    def _create_feature(self, path, dimensions, format, key, passphrase, commit_timestamps,
+                        flush_interval_ms=None):
         options = {"credentials": _credentials(key, passphrase), "commit_timestamps": commit_timestamps,
-                   **_given(format=format)}
+                   **_given(format=format, flush_interval_ms=flush_interval_ms)}
         result = self._feature("create", path=path, dimensions=dimensions, options=options)
         return Database(self, int(result["handle"]))
 
@@ -110,7 +119,8 @@ class NativeLibrary:
         return self._create_feature(None, dimensions, format, key, passphrase, commit_timestamps)
 
     def open(self, path: str | os.PathLike[str], *, key: bytes | None = None,
-             passphrase: str | None = None, read_only: bool = False) -> "Database":
+             passphrase: str | None = None, read_only: bool = False,
+             flush_interval_ms: int | None = None) -> "Database":
         """Open an existing file. ``read_only=True`` takes a shared OS lock so any
         number of processes can read the same file concurrently; mutations raise
         ``EmbeddedError`` with code ``read_only`` and writers get ``locked``.
@@ -118,15 +128,18 @@ class NativeLibrary:
         C ABI calls are serialized within one process. For parallel reads, spawn
         multiple processes, each opening its own ``read_only=True`` handle.
         Key/passphrase credentials also work with read-only opens.
+        `flush_interval_ms` selects periodic durability as in `create`.
         """
         if key is None and passphrase is None:
             request = {"op": "open", "path": str(Path(path))}
             if read_only:
                 request["read_only"] = True
+            request.update(_given(flush_interval_ms=flush_interval_ms))
             result = self._execute(0, request)
         else:
             result = self._feature("open", path=str(Path(path)), credentials=_credentials(key, passphrase),
-                                   **({"read_only": True} if read_only else {}))
+                                   **({"read_only": True} if read_only else {}),
+                                   **_given(flush_interval_ms=flush_interval_ms))
         return Database(self, int(result["handle"]))
 
     def open_from_bytes(self, data: bytes, *, key: bytes | None = None,
@@ -177,6 +190,11 @@ class Database:
 
     def info(self) -> dict:
         return self._execute("info")
+
+    def sync(self) -> None:
+        """Force acknowledged commits to stable storage (a no-op unless the handle
+        was opened with `flush_interval_ms`)."""
+        self._execute("sync")
 
     def get(self, id: str, *, collection: str | None = None) -> dict:
         """Return the record, including its current ``revision`` as a decimal string."""

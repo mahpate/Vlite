@@ -190,9 +190,10 @@ library's lifetime, and must not be shared across processes or library copies.
 
 | Request `op` | Additional fields | Successful `result` |
 |---|---|---|
-| `create` | `path`: UTF-8 string, `dimensions`: integer, optional `format` (3 default, or 4) | `{"handle":"..."}` |
-| `open` | `path`: UTF-8 string | `{"handle":"..."}` |
+| `create` | `path`: UTF-8 string, `dimensions`: integer, optional `format` (3 default, or 4), `flush_interval_ms` | `{"handle":"..."}` |
+| `open` | `path`: UTF-8 string, optional `read_only`, `flush_interval_ms` | `{"handle":"..."}` |
 | `close` | none | null; handle consumed |
+| `sync` | none | null; forces pending periodic-durability commits to storage |
 | `info` | none | dimensions, format_version, records |
 | `put` | id, vector, optional payload_base64/metadata/collection/expected_revision | null; `{"revision":"..."}` when expected_revision is given |
 | `get` | id, optional collection | id, vector, payload_base64, metadata, revision |
@@ -306,8 +307,22 @@ Engine error codes include `locked`, `not_found`, `corrupt`, `incomplete_tail`,
 `requires_format_v4`, `precondition_failed`, `import_not_found`,
 `import_conflict`, `import_limit` and the collection codes above. Python raises
 `EmbeddedError`
-with `code`. Failed opens do not mutate/repair data. Success retains the engine's
-sync-before-acknowledgment contract and its filesystem/hardware limitations.
+with `code`. Failed opens do not mutate/repair data. By default success retains
+the engine's sync-before-acknowledgment contract and its filesystem/hardware
+limitations.
+
+**Opt-in periodic durability.** `create` and `open` (and the feature
+`create`/`open` requests, inside `options` for feature `create`) accept an
+optional `"flush_interval_ms"` (1–60000). It selects
+[periodic durability](../docs/REFERENCE.md#periodic-lazy-durability): commits are
+written to the OS before success but synced by a background flusher at most
+every interval, so an OS crash or power loss can lose acknowledged writes from
+roughly the last interval (a process crash cannot). `{"op":"sync"}` forces a
+sync; `close` performs a final sync. Out-of-range values fail with
+`invalid_durability` before any file is created. A failed sync poisons the
+handle. Python exposes `flush_interval_ms=` on `create`/`open` and
+`Database.sync()`; Node.js exposure is follow-up work. The setting is per
+handle and is not stored in the file.
 There are no retries. An indeterminate commit may have succeeded; close/reopen
 and reconcile using the [recovery contract](../docs/REFERENCE.md).
 

@@ -142,7 +142,9 @@ retry as `retry_backoff` with the attempt count and remaining delay.
 `vlite-server <path> --group-commit` coalesces concurrent puts, deletes, atomic
 batches and metadata patches into one shared datafile sync. This covers REST,
 collection routes and gRPC Put, Delete, WriteBatch and UpdateMetadata. The
-default stays one durable commit per request. Set limits after the flag:
+default stays one durable commit per request; `--durability periodic` defers
+sync ([periodic durability](REFERENCE.md#periodic-lazy-durability)). Set limits
+after the flag:
 
 ```text
 --group-commit --group-commit-requests 16 --group-commit-bytes 67108864 --group-commit-delay-ms 0

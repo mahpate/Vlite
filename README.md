@@ -165,7 +165,9 @@ are on the [releases page](https://github.com/mahpate/Vlite/releases).
 - Replicas are file-shipped. There is no networked replication.
 - Deleted records use disk space until you compact to a new file.
 - Durability depends on the OS and storage honoring sync. It is not a
-  power-loss guarantee.
+  power-loss guarantee. Opt-in [periodic durability](docs/REFERENCE.md#periodic-lazy-durability)
+  (`--durability periodic`) defers sync and can lose about the last flush
+  interval on an OS crash or power loss.
 
 ## License
 

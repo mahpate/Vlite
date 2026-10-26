@@ -39,11 +39,14 @@ except `configure_vector`, which defaults to squared L2.
 ## Handle-zero operations
 
 - `create`: `dimensions`, optional `path` (null/omitted for memory), `options`:
-  `{format?:3|4|5, credentials?:{key_base64?:string,passphrase?:string}, commit_timestamps?:bool}`.
+  `{format?:3|4|5, credentials?:{key_base64?:string,passphrase?:string}, commit_timestamps?:bool, flush_interval_ms?:number}`.
   Returns `{handle}`. A raw key is exactly 32 bytes, padded base64. Key and
   passphrase are mutually exclusive. Encryption/timestamps imply V5 unless an
   incompatible explicit format is provided. Default remains V3.
-- `open`: `path`, optional `credentials`; returns `{handle}`.
+  `flush_interval_ms` (1–60000) opts in to periodic durability: an OS crash or
+  power loss can lose acknowledged writes from roughly the last interval. Use the
+  base `{"op":"sync"}` request to force a sync; see `bindings/README.md`.
+- `open`: `path`, optional `credentials`, `flush_interval_ms`; returns `{handle}`.
 - `open_from_bytes`: `bytes_base64`, optional `credentials`; returns `{handle}`.
 - `restore_to`: `log_path`, new `destination`, optional `base_backup`, exactly
   one of `sequence` / `timestamp_ms`, optional `credentials`. Returns
@@ -127,7 +130,7 @@ Engine failures retain existing codes and add `requires_format_v5`,
 `invalid_encryption_options`, `change_feed_requires_upgrade`, `invalid_cursor`,
 `cursor_ahead`, `cursor_compacted`, `timestamps_unavailable`,
 `invalid_restore_target`, `stale_index`, `sidecar_unavailable`,
-`publication_indeterminate`, and `query_parse_error`.
+`publication_indeterminate`, `query_parse_error` and `invalid_durability`.
 `response_too_large` means the result cannot cross the JSON bound; use smaller
 result sets. Never automatically retry indeterminate mutations.
 

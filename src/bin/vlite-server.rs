@@ -8,18 +8,20 @@ use std::{
 use serde_json::json;
 use tokio::net::TcpListener;
 use vlite::{
-    AnnSnapshotLoad, Database, FormatVersion,
+    AnnSnapshotLoad, Database, Durability, FormatVersion,
     server::{
         BearerToken, GroupCommitConfig, ServerOptions, Service, configured_admin_router,
         read_token_file, selected_database,
     },
 };
 
-const USAGE: &str = "usage: vlite-server <database-path> [--create-if-missing <dimensions> [--create-format 3|4|5]] [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--lock-held-reads] [--group-commit [--group-commit-requests <1..16>] [--group-commit-bytes <1024..268435456>] [--group-commit-delay-ms <0..100>]] [--encryption-key-file <path> | VLITE_ENCRYPTION_KEY | VLITE_ENCRYPTION_KEY_HEX] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS; dashboard sign-in (needs VLITE_ADMIN_DIR and an admin token): VLITE_TRUSTED_PROXY=1 behind a proxy that sets X-Forwarded-Proto/For, VLITE_SESSION_IDLE_MINUTES (default 30), VLITE_SESSION_MAX_HOURS (default 8), optional first super admin: VLITE_ADMIN_USERNAME with VLITE_ADMIN_PASSWORD_FILE; [--log-buffer <n>] (default 2000, maximum 100000)";
+const USAGE: &str = "usage: vlite-server <database-path> [--create-if-missing <dimensions> [--create-format 3|4|5]] [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--lock-held-reads] [--group-commit [--group-commit-requests <1..16>] [--group-commit-bytes <1024..268435456>] [--group-commit-delay-ms <0..100>]] [--durability full|periodic [--flush-interval-ms <1..60000>]] [--encryption-key-file <path> | VLITE_ENCRYPTION_KEY | VLITE_ENCRYPTION_KEY_HEX] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS; dashboard sign-in (needs VLITE_ADMIN_DIR and an admin token): VLITE_TRUSTED_PROXY=1 behind a proxy that sets X-Forwarded-Proto/For, VLITE_SESSION_IDLE_MINUTES (default 30), VLITE_SESSION_MAX_HOURS (default 8), optional first super admin: VLITE_ADMIN_USERNAME with VLITE_ADMIN_PASSWORD_FILE; [--log-buffer <n>] (default 2000, maximum 100000)";
 
 struct Config {
     lock_held_reads: bool,
     group_commit: Option<GroupCommitConfig>,
+    /// Per-open commit durability (Full unless --durability periodic).
+    durability: Durability,
     otlp_endpoint: Option<String>,
     path: PathBuf,
     dimensions: Option<usize>,
@@ -186,6 +188,8 @@ fn config() -> Result<Config, Box<dyn Error>> {
     let mut seen_log_buffer = false;
     let mut group_commit = None;
     let mut lock_held_reads = false;
+    let mut periodic: Option<bool> = None;
+    let mut flush_interval_ms: Option<u64> = None;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--lock-held-reads") if !lock_held_reads => lock_held_reads = true,
@@ -208,6 +212,16 @@ fn config() -> Result<Config, Box<dyn Error>> {
                     }
                     _ => unreachable!(),
                 }
+            }
+            Some("--durability") if periodic.is_none() => {
+                periodic = Some(match args.next().ok_or(USAGE)?.to_str() {
+                    Some("full") => false,
+                    Some("periodic") => true,
+                    _ => return Err("--durability must be full or periodic".into()),
+                });
+            }
+            Some("--flush-interval-ms") if flush_interval_ms.is_none() => {
+                flush_interval_ms = Some(args.next().ok_or(USAGE)?.to_str().ok_or(USAGE)?.parse()?);
             }
             Some("--otlp-endpoint") => {
                 otlp_endpoint = Some(args.next().ok_or(USAGE)?.to_str().ok_or(USAGE)?.to_owned());
@@ -274,6 +288,11 @@ fn config() -> Result<Config, Box<dyn Error>> {
             "--otlp-endpoint / OTEL_EXPORTER_OTLP_ENDPOINT requires the otel feature".into(),
         );
     }
+    let durability = match (periodic, flush_interval_ms) {
+        (Some(true), interval) => Durability::periodic_ms(interval.unwrap_or(100))?,
+        (_, Some(_)) => return Err("--flush-interval-ms requires --durability periodic".into()),
+        _ => Durability::Full,
+    };
     if format.is_some() && dimensions.is_none() {
         return Err("--create-format requires --create-if-missing".into());
     }
@@ -418,6 +437,7 @@ fn config() -> Result<Config, Box<dyn Error>> {
     let config = Config {
         lock_held_reads,
         group_commit,
+        durability,
         otlp_endpoint,
         path: path.into(),
         dimensions,
@@ -496,6 +516,7 @@ fn open(config: &Config) -> vlite::Result<(Database, PathBuf)> {
             actual: db.dimensions(),
         });
     }
+    let db = db.with_durability(config.durability)?;
     Ok((db, path.to_path_buf()))
 }
 

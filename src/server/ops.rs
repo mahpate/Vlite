@@ -803,6 +803,8 @@ pub(super) fn snapshot(
     directory: &FilePath,
 ) -> Result<(String, tempfile::NamedTempFile), ApiError> {
     db.ensure_healthy()?;
+    // Periodic durability: a backup never holds commits the primary could lose.
+    db.sync()?;
     let name = admin::name("backup-");
     let mut staged = tempfile::NamedTempFile::new_in(directory).map_err(internal)?;
     let position = db.file.0.stream_position().map_err(internal)?;

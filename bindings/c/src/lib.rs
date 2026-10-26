@@ -45,14 +45,22 @@ enum Request {
         /// 3 (default) or 4. Only v4 supports named collections and imports.
         #[serde(default)]
         format: Option<u32>,
+        /// Opt-in `Durability::Periodic` flush interval (1..=60000 ms).
+        #[serde(default)]
+        flush_interval_ms: Option<u64>,
     },
     Open {
         path: String,
         /// Shared-lock read-only handle (`Database::open_read_only`).
         #[serde(default)]
         read_only: bool,
+        /// Opt-in `Durability::Periodic` flush interval (1..=60000 ms).
+        #[serde(default)]
+        flush_interval_ms: Option<u64>,
     },
     Close {},
+    /// Forces acknowledged commits to stable storage (`Database::sync`).
+    Sync {},
     Info {},
     Get {
         id: String,
@@ -371,6 +379,7 @@ fn failure(error: vlite::Error) -> Failure {
         vlite::Error::EncryptionKeyMismatch { .. } => "encryption_key_mismatch",
         vlite::Error::NotEncrypted => "not_encrypted",
         vlite::Error::InvalidEncryptionOptions(_) => "invalid_encryption_options",
+        vlite::Error::InvalidDurability(_) => "invalid_durability",
         vlite::Error::ExpiryRequiresUpgrade => "requires_format_v5",
         vlite::Error::ChangeFeedRequiresUpgrade => "change_feed_requires_upgrade",
         vlite::Error::CursorCompacted { .. } => "cursor_compacted",
@@ -384,6 +393,13 @@ fn failure(error: vlite::Error) -> Failure {
         _ => "invalid_input",
     };
     (code, error.to_string())
+}
+
+/// `Durability` for an optional `flush_interval_ms` request field.
+fn durability(flush_interval_ms: Option<u64>) -> Result<vlite::Durability> {
+    flush_interval_ms.map_or(Ok(vlite::Durability::Full), |ms| {
+        vlite::Durability::periodic_ms(ms).map_err(failure)
+    })
 }
 
 fn invalid(message: &str) -> Failure {
@@ -715,17 +731,30 @@ fn execute(handle: u64, request: Request) -> Result<Value> {
                     path,
                     dimensions,
                     format,
-                } => match format {
-                    None | Some(3) => Database::create(path, dimensions),
-                    Some(4) => Database::create_with_format(path, dimensions, FormatVersion::V4),
-                    Some(_) => return Err(invalid("format must be 3 or 4")),
-                },
-                Request::Open { path, read_only } => {
+                    flush_interval_ms,
+                } => {
+                    let durability = durability(flush_interval_ms)?;
+                    match format {
+                        None | Some(3) => Database::create(path, dimensions),
+                        Some(4) => {
+                            Database::create_with_format(path, dimensions, FormatVersion::V4)
+                        }
+                        Some(_) => return Err(invalid("format must be 3 or 4")),
+                    }
+                    .and_then(|db| db.with_durability(durability))
+                }
+                Request::Open {
+                    path,
+                    read_only,
+                    flush_interval_ms,
+                } => {
+                    let durability = durability(flush_interval_ms)?;
                     if read_only {
                         Database::open_read_only(path)
                     } else {
                         Database::open(path)
                     }
+                    .and_then(|db| db.with_durability(durability))
                 }
                 _ => unreachable!(),
             }
@@ -749,6 +778,10 @@ fn execute(handle: u64, request: Request) -> Result<Value> {
         .get_mut(&handle)
         .ok_or_else(|| ("invalid_handle", "Unknown or closed handle".into()))?;
     match request {
+        Request::Sync {} => {
+            db.sync().map_err(failure)?;
+            Ok(Value::Null)
+        }
         Request::Info {} => {
             db.get(0).map_err(failure)?;
             Ok(
@@ -1356,6 +1389,58 @@ mod tests {
             .unwrap()
             .parse()
             .unwrap()
+    }
+
+    #[test]
+    fn periodic_durability_is_opt_in_validated_and_syncable() {
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let path = directory.path().join("periodic.vlite");
+        let feature = |value| json!({"op":"features","request":value});
+        for (index, bad) in [json!(0), json!(60_001)].into_iter().enumerate() {
+            let missing = directory.path().join(format!("bad-{index}.vlite"));
+            assert_eq!(
+                code(
+                    0,
+                    json!({"op":"create","path":missing,"dimensions":2,"flush_interval_ms":bad})
+                ),
+                "invalid_durability"
+            );
+            assert_eq!(
+                code(
+                    0,
+                    feature(json!({"op":"create","path":missing,"dimensions":2,
+                        "options":{"flush_interval_ms":bad}}))
+                ),
+                "invalid_durability"
+            );
+            assert!(!missing.exists());
+        }
+        let db: u64 = ok(
+            0,
+            json!({"op":"create","path":path,"dimensions":2,"flush_interval_ms":60_000}),
+        )["handle"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        ok(db, json!({"op":"put","id":"1","vector":[1,0]}));
+        assert_eq!(ok(db, json!({"op":"sync"})), Value::Null);
+        ok(db, json!({"op":"put","id":"2","vector":[0,1]}));
+        ok(db, json!({"op":"close"}));
+        let db: u64 = ok(
+            0,
+            feature(json!({"op":"open","path":path,"flush_interval_ms":5})),
+        )["handle"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(ok(db, json!({"op":"info"}))["records"], 2);
+        ok(db, json!({"op":"sync"}));
+        ok(db, json!({"op":"close"}));
+        let db = open(&path);
+        ok(db, json!({"op":"sync"}));
+        ok(db, json!({"op":"close"}));
     }
 
     #[test]

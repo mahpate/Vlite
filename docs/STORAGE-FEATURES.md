@@ -224,6 +224,18 @@ sequences, checksums, encryption and commit timestamps work as usual.
 - **CLI.** `vlite-graph-cli` runs these reads and write batches with JSON; see
   [Graph operations](TOOLS.md#graph-operations-experimental-source-only).
 
+## Periodic (lazy) durability
+
+Every commit is synced before acknowledgement by default. A handle can opt in
+to `Durability::Periodic { interval }` (1 ms–60 s), which writes commits to the
+OS immediately and syncs them from a background flusher, for vector and graph
+writes alike. A process crash loses nothing acknowledged; an **OS crash or
+power loss can lose about the last interval**. Use `sync()` for an explicit
+durable point; `close()` syncs and a failed sync poisons the handle. The mode is
+not persisted. Server: `--durability periodic --flush-interval-ms N`; C ABI and
+Python: `flush_interval_ms` plus `sync`. See
+[periodic durability](REFERENCE.md#periodic-lazy-durability) for reopen cases.
+
 ## Limitations
 
 - A passphrase is only as strong as its entropy; tune `KdfParams` for your

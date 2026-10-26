@@ -83,7 +83,7 @@ async fn snapshot(service: Service, role: admin::Role) -> Result<Value, ApiError
     let group_stats = service.group_commit.as_ref().map(|group| group.stats());
     service
         .run_read(move |db| {
-            let healthy = !db.poisoned;
+            let healthy = !db.is_poisoned();
             let collections = if healthy {
                 collection_metrics(db, &role)
             } else {

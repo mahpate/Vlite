@@ -129,6 +129,67 @@ fn grouped_acknowledged_writes_survive_abrupt_process_termination() {
     }
 }
 
+#[test]
+fn periodic_durability_flags_are_validated_before_file_creation() {
+    let directory = tempfile::tempdir_in(".").unwrap();
+    let path = directory.path().join("durability-invalid.vlite");
+    for (args, expected) in [
+        (vec!["--durability", "lazy"], "full or periodic"),
+        (
+            vec!["--flush-interval-ms", "100"],
+            "requires --durability periodic",
+        ),
+        (
+            vec!["--durability", "full", "--flush-interval-ms", "100"],
+            "requires --durability periodic",
+        ),
+        (
+            vec!["--durability", "periodic", "--flush-interval-ms", "0"],
+            "flush interval",
+        ),
+        (
+            vec!["--durability", "periodic", "--flush-interval-ms", "60001"],
+            "flush interval",
+        ),
+        (
+            vec!["--durability", "full", "--durability", "full"],
+            "usage:",
+        ),
+    ] {
+        let error = fails(&path, &args);
+        assert!(error.contains(expected), "{args:?}: {error}");
+        assert!(!path.exists());
+    }
+}
+
+#[test]
+fn periodic_acknowledged_writes_survive_abrupt_process_termination() {
+    let directory = tempfile::tempdir_in(".").unwrap();
+    let path = directory.path().join("periodic-crash.vlite");
+    // A 60 s interval means no background sync happens before the kill: the
+    // acknowledged frames survive a process crash from the OS page cache.
+    let server = Server::start_with_options(
+        &path,
+        false,
+        &["--durability", "periodic", "--flush-interval-ms", "60000"],
+    );
+    for id in 0..8 {
+        let (status, _) = server.request(
+            "PUT",
+            &format!("/v1/vectors/{id}"),
+            json!({"vector":[id,1]}),
+        );
+        assert_eq!(status, 204);
+    }
+    drop(server);
+    let server = Server::start(&path);
+    for id in 0..8 {
+        let (status, record) = server.request("GET", &format!("/v1/vectors/{id}"), Value::Null);
+        assert_eq!(status, 200);
+        assert_eq!(record["vector"], json!([id as f64, 1.0]));
+    }
+}
+
 impl Server {
     fn request(&self, method: &str, path: &str, body: Value) -> (u16, Value) {
         let body = body.to_string();
