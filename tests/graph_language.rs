@@ -483,10 +483,13 @@ fn query_text_returns_exactly_what_the_typed_query_returns() {
                 options.limits,
                 "{text}"
             );
-            let expected = graph.query(&typed, &options).unwrap();
-            let actual = graph
+            let mut expected = graph.query(&typed, &options).unwrap();
+            let mut actual = graph
                 .query_text(&text, &bound, &GraphLimits::default())
                 .unwrap_or_else(|error| panic!("{text}: {error}"));
+            // Wall-clock time differs between the two runs.
+            expected.stats.elapsed_ms = 0;
+            actual.stats.elapsed_ms = 0;
             assert_eq!(actual, expected, "{text}");
             kinds[match actual.output {
                 GraphOutput::Nodes(_) => 0,
