@@ -4,10 +4,11 @@ Contracts, limits and durability rules for the engine and the REST service.
 Commands run from the repository root. For installation, start with the
 [README](../README.md).
 
-VLite is an experimental embedded vector database in Rust with its own
-single-file storage engine. Legacy files hold one fixed-dimension vector
+VLite is an experimental embedded vector and graph database in Rust with its
+own single-file storage engine. Legacy files hold one fixed-dimension vector
 space; opt-in v4 files add named collections, and v5 adds record expiry and
-GeoPoint metadata. Every format stores opaque payloads, commits single and
+GeoPoint metadata. Graph-enabled v5 files also store
+[property graphs](GRAPH.md). Every format stores opaque payloads, commits single and
 atomic batch writes durably and supports exact search. Optional in-memory HNSW
 adds approximate search without changing the file, and an
 [ANN snapshot](ANN-SNAPSHOTS.md) can keep the graph across restarts. Optional

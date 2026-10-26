@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>VLite | Single-file vector database, embedded or self-hosted</title>
-  <meta name="description" content="VLite is a single-file vector database written in Rust. Embed vector search in your application or run a self-hosted REST/gRPC service with a web dashboard.">
-  <meta property="og:title" content="VLite | Single-file vector database">
-  <meta property="og:description" content="Vector search in one durable file. Embedded or self-hosted, with exact and HNSW search, typed filters and a dashboard.">
+  <title>VLite | Single-file vector and graph database, embedded or self-hosted</title>
+  <meta name="description" content="VLite is a single-file vector and graph database written in Rust. Embed it in your application, or run a self-hosted server with REST, gRPC and a web dashboard.">
+  <meta property="og:title" content="VLite | Single-file vector and graph database">
+  <meta property="og:description" content="Vectors and graphs in one durable file. Embedded or self-hosted, with exact and HNSW search, typed filters, property graphs and a dashboard.">
   <meta property="og:type" content="website">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
@@ -43,8 +43,8 @@
     <div class="wrap">
       <div class="hero-copy">
         <span class="eyebrow">MIT licensed &middot; written in Rust</span>
-        <h1>Vector search in <span class="grad">one durable file</span>.</h1>
-        <p class="lead">Embed vector search in your app, or self-host it behind REST and gRPC.</p>
+        <h1>Vectors and graphs in <span class="grad">one durable file</span>.</h1>
+        <p class="lead">Embed vector search and graph queries in your app, or self-host them behind an API.</p>
         <div class="cta">
           <a class="btn primary" href="#quickstart">Get started</a>
           <a class="btn" href="dashboard.html">View dashboard</a>
@@ -52,7 +52,7 @@
         <p class="note"><a href="https://github.com/mahpate/Vlite/releases">Downloads</a> &middot; <a href="docs/INSTALL.html">Packages &amp; platform requirements</a></p>
       </div>
       <div class="hero-art">
-        <svg class="file-map" viewBox="0 0 480 420" role="img" aria-label="Illustration: one VLite database file, vectors.vlite, holds collections, dense and sparse vectors, typed metadata, payloads and an optional property graph.">
+        <svg class="file-map" viewBox="0 0 480 420" role="img" aria-label="Illustration: one VLite database file, data.vlite, holds collections, dense and sparse vectors, typed metadata, payloads and property graphs.">
           <defs><radialGradient id="fm-halo"><stop offset="0" class="fm-halo-in"/><stop offset="1" class="fm-halo-out"/></radialGradient></defs>
           <rect class="fm-card" x="1" y="1" width="478" height="418" rx="20"/>
           <circle class="fm-dot" cx="26" cy="26" r="5"/><circle class="fm-dot" cx="44" cy="26" r="5"/><circle class="fm-dot" cx="62" cy="26" r="5"/>
@@ -71,8 +71,8 @@
           <g class="fm-node fm-sparse"><rect x="306" y="120" width="156" height="32" rx="16"/><circle class="fm-pip-glow" cx="324" cy="136" r="8"/><circle class="fm-pip" cx="324" cy="136" r="4.5"/><text x="338" y="140.5">Sparse vectors</text></g>
           <g class="fm-node fm-meta"><rect x="18" y="272" width="156" height="32" rx="16"/><circle class="fm-pip-glow" cx="36" cy="288" r="8"/><circle class="fm-pip" cx="36" cy="288" r="4.5"/><text x="50" y="292.5">Typed metadata</text></g>
           <g class="fm-node fm-payload"><rect x="306" y="272" width="108" height="32" rx="16"/><circle class="fm-pip-glow" cx="324" cy="288" r="8"/><circle class="fm-pip" cx="324" cy="288" r="4.5"/><text x="338" y="292.5">Payloads</text></g>
-          <g class="fm-node fm-graph fm-optional"><rect x="162" y="320" width="156" height="32" rx="16"/><circle class="fm-pip-glow" cx="180" cy="336" r="8"/><circle class="fm-pip" cx="180" cy="336" r="4.5"/><text x="194" y="340.5">Property graph</text></g>
-          <g class="fm-core"><rect x="160" y="186" width="160" height="52" rx="14"/><text class="fm-name" x="240" y="209" text-anchor="middle">vectors.vlite</text><text class="fm-sub" x="240" y="227" text-anchor="middle">one durable file</text></g>
+          <g class="fm-node fm-graph"><rect x="158" y="320" width="164" height="32" rx="16"/><circle class="fm-pip-glow" cx="176" cy="336" r="8"/><circle class="fm-pip" cx="176" cy="336" r="4.5"/><text x="190" y="340.5">Property graphs</text></g>
+          <g class="fm-core"><rect x="160" y="186" width="160" height="52" rx="14"/><text class="fm-name" x="240" y="209" text-anchor="middle">data.vlite</text><text class="fm-sub" x="240" y="227" text-anchor="middle">one durable file</text></g>
           <path class="fm-rule" d="M1 372H479"/>
           <text class="fm-foot" x="240" y="399" text-anchor="middle">checksummed &middot; synced writes &middot; rebuildable indexes</text>
         </svg>
@@ -155,7 +155,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\devbox.ps1 -Token
 <span class="c-c"># Dashboard: http://127.0.0.1:8082   API: http://127.0.0.1:18085</span></pre>
         </div>
       </div>
-      <p class="note landing-note">Bring your own embeddings. See the <a href="api.html">API examples</a> and <a href="docs/INSTALL.html">installation guide</a>.</p>
+      <p class="note landing-note">Bring your own embeddings. See the <a href="architecture.html#terms">key terms</a>, <a href="api.html">API examples</a> and <a href="docs/INSTALL.html">installation guide</a>.</p>
     </div>
   </section>
 
@@ -164,7 +164,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\devbox.ps1 -Token
       <div class="section-head">
         <div class="kicker">Dashboard</div>
         <h2>Your data, in view</h2>
-        <p>Browse records, run searches and manage access from your browser.</p>
+        <p>Browse records, run searches, explore graphs and manage access from your browser.</p>
       </div>
       <figure class="landing-shot">
         <a href="dashboard.html#screenshots"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/dashboard/current-overview-dark.png?v=connected"><img src="assets/dashboard/current-overview-light.png?v=connected" data-light="assets/dashboard/current-overview-light.png?v=connected" data-dark="assets/dashboard/current-overview-dark.png?v=connected" alt="Connected VLite dashboard with sample records, database snapshot cards and index readiness." width="1440" height="1100" loading="lazy" decoding="async"></picture></a>
@@ -179,9 +179,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\devbox.ps1 -Token
       <div class="product-map" aria-label="VLite product and capability overview">
         <div class="product-map-intro">
           <img src="assets/logo.svg" alt="" width="44" height="44">
-          <div class="label">Single-file vector database</div>
+          <div class="label">Single-file vector and graph database</div>
           <h3>VLite</h3>
-          <p>Dense, sparse and hybrid search with durable commits.</p>
+          <p>Vector search and property graphs with durable commits.</p>
           <a class="more" href="architecture.html">Explore the engine &#8594;</a>
         </div>
         <div class="product-map-core">
@@ -220,8 +220,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\devbox.ps1 -Token
       <div class="section-head"><div class="kicker">Features</div><h2>Start simple. Go deeper when needed.</h2><p><a href="features.html">See all features</a></p></div>
       <div class="grid cols-3" id="capabilities">
         <article class="card"><div class="card-top"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg></span><div class="label">Storage</div></div><h3>Durable, explicit commits</h3><p>Checksummed, synced writes. Atomic batches of up to 4,096 operations.</p><a class="more" href="docs/REFERENCE.html">Storage contract &#8594;</a></article>
-        <article class="card"><div class="card-top"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg></span><div class="label">Retrieval</div></div><h3>Exact to hybrid search</h3><p>Dense and sparse vectors, typed filters and BM25 hybrid ranking.</p><a class="more" href="docs/VECTORS.html">Retrieval guide &#8594;</a></article>
-        <article class="card"><div class="card-top"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><path d="M7 6h10M6 8l5 8.5M18 8l-5 8.5"/></svg></span><div class="label">Indexes</div></div><h3>Rebuildable acceleration</h3><p>HNSW with snapshots, u8 quantization and metadata indexes.</p><a class="more" href="docs/ANN-SNAPSHOTS.html">Index lifecycle &#8594;</a></article>
+        <article class="card"><div class="card-top"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg></span><div class="label">Retrieval</div></div><h3>Exact to hybrid search</h3><p>Dense and sparse vectors, HNSW, typed filters and BM25 hybrid ranking.</p><a class="more" href="docs/VECTORS.html">Retrieval guide &#8594;</a></article>
+        <article class="card"><div class="card-top"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><path d="M7 6h10M6 8l5 8.5M18 8l-5 8.5"/></svg></span><div class="label">Graphs</div></div><h3>Connected data</h3><p>Nodes and typed edges linked to your records, with traversal.</p><a class="more" href="docs/GRAPH.html">Graph guide &#8594;</a></article>
         <article class="card"><div class="card-top"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 0 1-14 5.3M4 12a8 8 0 0 1 14-5.3"/><path d="M18 3v4h-4M6 21v-4h4"/></svg></span><div class="label">Data lifecycle</div></div><h3>Collections to recovery</h3><p>Collections, expiry, resumable imports, point-in-time restore and change feeds.</p><a class="more" href="docs/STORAGE-FEATURES.html">Storage features &#8594;</a></article>
         <article class="card"><div class="card-top"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v6c0 4.4 3 7.6 7 9 4-1.4 7-4.6 7-9V6z"/><path d="m9 12 2 2 4-4"/></svg></span><div class="label">Security</div></div><h3>Control access</h3><p>Dashboard accounts with roles, scoped API keys, quotas, TLS and encryption at rest.</p><a class="more" href="docs/SECURITY.html">Security guide &#8594;</a></article>
         <article class="card"><div class="card-top"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg></span><div class="label">Operations</div></div><h3>Inspect and maintain</h3><p>Metrics, optional tracing, backups and a live log tail.</p><a class="more" href="docs/DOCKER-OPERATIONS.html">Operations guide &#8594;</a></article>
@@ -234,7 +234,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\devbox.ps1 -Token
       <div class="glow-panel">
         <div class="section-head"><div class="kicker">Know the boundaries</div><h2>Data safety you can reason about</h2><p>Corruption fails closed. Committed data is never silently discarded. Indexes rebuild from stored records.</p></div>
         <p class="callout">Limits: the live dataset is held in memory, so size machines for it. A file has one writer or several read-only readers. Durability depends on your filesystem.</p>
-        <nav class="landing-evidence" aria-label="Technical evidence"><a href="architecture.html">Architecture &#8594;</a><a href="docs/REFERENCE.html">Data-safety contracts &#8594;</a><a href="compare.html">Benchmarks &#8594;</a><a href="docs/RELEASE-0.5.0.html">Release notes &#8594;</a></nav>
+        <nav class="landing-evidence" aria-label="Technical evidence"><a href="architecture.html">Architecture &#8594;</a><a href="docs/REFERENCE.html">Data-safety contracts &#8594;</a><a href="compare.html">Benchmarks &#8594;</a><a href="docs/RELEASE-0.5.1.html">Release notes &#8594;</a></nav>
       </div>
     </div>
   </section>

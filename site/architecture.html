@@ -39,6 +39,7 @@
   <aside class="docs-sidebar" aria-label="Architecture sections">
     <div class="docs-group">
       <h4>On this page</h4>
+      <a href="#terms">Key terms</a>
       <a href="#layers">Layers</a>
       <a href="#file-contract">One file</a>
       <a href="#header">File header</a>
@@ -64,7 +65,19 @@
   <main class="docs-main arch">
     <p class="kicker">Architecture</p>
     <h1 id="overview">How VLite works</h1>
-    <p class="lead">One Rust engine writes one authoritative file. Every index is a rebuildable cache. Embed the engine or run it as a server.</p>
+    <p class="lead">One Rust engine writes vectors and graphs to one authoritative file. Every index is a rebuildable cache. Embed the engine or run it as a server.</p>
+    <h2 id="terms">Key terms</h2>
+    <table class="param-table terms-table">
+      <thead><tr><th>Term</th><th>What it means in VLite</th></tr></thead>
+      <tbody>
+        <tr><td>Database</td><td>One <code>.vlite</code> file with your records, collections and graphs. Embed it, or serve it with <code>vlite-server</code>, one file per server.</td></tr>
+        <tr><td>Collection</td><td>A named set of records, like a table, with its own vector size and settings. Every database has <code>default</code>; named collections need <a href="#versions">format v4 or newer</a>.</td></tr>
+        <tr><td>Graph</td><td>A named property graph in the same file: nodes, typed edges and links to records. Available in graph-enabled files.</td></tr>
+        <tr><td>Tenant</td><td>A private space for one team or customer in the same file. Its users and API keys see only its collections and graphs.</td></tr>
+        <tr><td>User</td><td>A person who signs in to the dashboard as super admin, editor or viewer. Apps use API keys.</td></tr>
+      </tbody>
+    </table>
+    <p class="muted">Tenants and users exist only on a server; their settings live in its admin directory.</p>
     <div class="diagram-legend" aria-label="Diagram color key">
       <span class="interface">Interfaces</span><span class="search">Search &amp; indexes</span>
       <span class="storage">Storage</span><span class="operations">Operations &amp; decisions</span>
@@ -80,7 +93,7 @@
 <pre class="mermaid">
 flowchart TB
   SDK["SDKs and APIs&lt;br/&gt;Rust · Python · Node.js · C · WASM&lt;br/&gt;REST · gRPC · console · MCP"]
-  DB["Database core&lt;br/&gt;collections · records · metadata&lt;br/&gt;vectors · queries · change feed"]
+  DB["Database core&lt;br/&gt;collections · records · metadata&lt;br/&gt;vectors · graphs · queries · change feed"]
   IDX["Search and indexes · rebuildable&lt;br/&gt;HNSW · ScalarU8 · metadata&lt;br/&gt;BM25 · hybrid RRF · Disk ANN"]
   STORE["Storage and format&lt;br/&gt;checksummed frames · optional encryption&lt;br/&gt;file / memory backend"]
   FILE[("data.vlite&lt;br/&gt;authoritative committed records")]

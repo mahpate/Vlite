@@ -1,9 +1,10 @@
 # VLite
 
-VLite is a single-file vector database. Embed it in your application with Rust,
-Python, Node.js or C, or run it as a self-hosted server with REST, gRPC and a
-browser dashboard. Vectors, payloads and typed metadata live in one durable
-file, so there is no separate database service to operate.
+VLite is a single-file vector and graph database. Embed it in your
+application with Rust, Python, Node.js or C, or run it as a self-hosted server
+with REST, gRPC and a browser dashboard. Vectors, payloads, typed metadata and
+property graphs live in one durable file, so there is no separate database
+service to operate.
 
 **Website:** [mahpate.github.io/Vlite](https://mahpate.github.io/Vlite/) ·
 [Features](https://mahpate.github.io/Vlite/features.html) ·
@@ -23,6 +24,8 @@ file, so there is no separate database service to operate.
   closed and recovery is explicit.
 - **Exact and approximate search.** Exact search with squared L2, cosine or
   inner product. HNSW for L2 and cosine. Typed metadata filters apply first.
+- **Property graphs.** Built in; opt-in per file: nodes, typed edges and
+  links to vector records, with bounded traversal and graph retrieval.
 - **Atomic batches.** Write or delete up to 4,096 records in one commit.
 - **Advanced retrieval.** Opt-in collections, record expiry, named and sparse
   vectors, hybrid search, facets, geo filters and recommendations.
@@ -32,10 +35,21 @@ file, so there is no separate database service to operate.
   graphs, with user accounts, roles and tenants.
 - **Storage options.** Encryption at rest, point-in-time restore, a change
   feed, file-shipped read replicas and a disk-based ANN index.
-- **Property graphs.** Built in; opt-in per file: nodes, typed edges and
-  links to vector records, with bounded traversal and graph retrieval.
 - **Tools.** Interactive shell, validated imports, offline maintenance, index
   tuning, a graph CLI, an MCP server and agent skills.
+
+## Key terms
+
+| Term | What it means in VLite |
+|---|---|
+| Database | One `.vlite` file with your records, collections and graphs. Embed it, or serve it with `vlite-server`, one file per server. |
+| Collection | A named set of records, like a table, with its own vector size and settings. Every database has `default`. Named collections need format v4 or newer; create server files with `--create-format 4` or `5`. |
+| Graph | A named property graph in the same file: nodes, typed edges and links to records. Available in graph-enabled files. |
+| Tenant | A private space for one team or customer in the same file. Its users and API keys see only its collections and graphs. |
+| User | A person who signs in to the dashboard as super admin, editor or viewer. Apps use API keys. |
+
+Tenants and users exist only on a server; their settings live in its admin
+directory.
 
 ## Quick start
 
