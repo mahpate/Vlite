@@ -130,6 +130,9 @@ jobs:
         run: |
           node --test tests/console_tools.test.cjs tests/admin_tools.test.cjs tests/navigation.test.cjs tests/dashboard_interactions.test.cjs tests/dashboard_graph.test.cjs
           python tests/admin_route_coverage.py
+      - name: Verify the website API reference documents every public API item
+        if: matrix.os == 'ubuntu-latest'
+        run: python tests/api_reference.py
       - uses: dtolnay/rust-toolchain@stable
       - run: python -m unittest discover -s clients/python -p test_client.py
       - run: python -m pip wheel --no-deps --wheel-dir client-dist ./clients/python

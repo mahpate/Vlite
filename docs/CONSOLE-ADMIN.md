@@ -61,9 +61,9 @@ The server, not the console, enforces access:
 Super admins work in **Administration**. Its **Users & access** tab holds:
 
 - **Users:** create, update or delete super admin, editor and viewer accounts.
-  Editors and viewers see one tenant or all collections; graph builds give
-  them every graph (viewers read-only). Temporary passwords must be changed
-  at next sign-in.
+  Editors and viewers see one tenant's collections and graphs, or all of them
+  (viewers read graphs only); **Graphs** and **Graph access** narrow graph use.
+  Temporary passwords must be changed at next sign-in.
 - **Tenants:** list tenants with their state, collection and vector counts, and
   create one with an optional vector limit. **Show usage and API keys** lists
   its collections, usage and key counts. **Save name and limit** renames it or
@@ -71,8 +71,8 @@ Super admins work in **Administration**. Its **Users & access** tab holds:
   **Suspend** blocks the tenant's API keys over REST and gRPC, refuses new keys,
   blocks its users' sign-in and ends their sessions; data stays. **Resume**
   restores sign-in and unexpired, unrevoked keys. **Delete** needs the tenant's
-  collections dropped first; it blocks bound keys and removes the tenant's user
-  accounts.
+  collections and graphs dropped first; it blocks bound keys and removes the
+  tenant's user accounts.
 - **API keys:** create, list, rotate with a grace period and revoke keys scoped
   to collections and operations; read the persistent audit. Optional fields
   bind a tenant ID and set requests per second (`1..1000000`), an aggregate and

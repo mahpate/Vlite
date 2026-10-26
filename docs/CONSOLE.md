@@ -45,11 +45,9 @@ What you can do depends on your role:
 | Editor | Read, search, write, import, index and manage collections. |
 | Viewer | Read and search. |
 
-Editors and viewers see either one tenant's collections or all collections.
-In source builds with the experimental `graph` feature, viewers also read
-every graph and editors read and write every graph, whatever their tenant.
-Graphs are shared, not per tenant; vectors attached through a graph still
-need a collection your tenant owns.
+Editors and viewers see either one tenant's collections and graphs, or all
+of them. Viewers read graphs and editors also write them; a super admin can
+narrow graph access per account.
 
 ### Use an access token
 
@@ -193,8 +191,8 @@ Super admins use **Administration → Users & access**, with tabs for
 - **Rename or change limits:** use **Save name and limit**.
 - **Suspend a tenant:** this blocks its sign-ins and API keys and ends its
   sessions. Its data stays. **Resume** restores access.
-- **Delete a tenant:** drop its collections first. Deleting also removes its
-  user accounts.
+- **Delete a tenant:** drop its collections and graphs first. Deleting also
+  removes its user accounts.
 - **Issue an API key:** in **API keys**, pick collections, operations and an
   expiry of 1–365 days. The secret appears once.
 

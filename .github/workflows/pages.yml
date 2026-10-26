@@ -14,6 +14,7 @@ on:
       - "tests/requirements-dashboard.txt"
       - "tests/release_docs.py"
       - "tests/content_budget.py"
+      - "tests/api_reference.py"
       - "README.md"
       - "bindings/**/README.md"
       - "clients/**/README.md"
@@ -57,6 +58,7 @@ jobs:
           python tests/release_docs.py
           python tests/agent_docs.py
           python tests/content_budget.py
+          python tests/api_reference.py
       - name: Check diagrams and dashboard tour
         run: |
           python -m pip install -r tests/requirements-dashboard.txt

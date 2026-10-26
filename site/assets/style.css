@@ -10,7 +10,12 @@
 .feature-catalog section { padding: 0 0 36px; scroll-margin-top: 100px; }
 .feature-catalog th:first-child, .feature-catalog td:first-child { width: 30%; }
 .feature-catalog td { vertical-align: top; overflow-wrap: anywhere; }
+.feature-catalog .table-scroll { overflow-x: auto; }
+.feature-catalog tbody tr:last-child th { border-bottom: 0; }
 .feature-catalog caption { text-align: left; color: var(--muted); padding: 8px 0; }
+.feature-catalog .feature-experimental { margin-top: 56px; padding-top: 18px; border-top: 2px dashed color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.feature-catalog .feature-experimental .kicker { margin: 0; }
+.feature-catalog .feature-experimental h2 { margin-top: 6px; padding-top: 0; border-top: 0; scroll-margin-top: 145px; }
 .docs-layout.feature-layout { grid-template-columns: 230px minmax(0, 1fr); max-width: var(--max); }
 @media (max-width: 800px) { .docs-layout.feature-layout { grid-template-columns: minmax(0, 1fr); } }
 
@@ -94,6 +99,8 @@ code, pre { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, 
 .product-map-row { --lane: var(--diagram-interface); position: relative; padding: 20px; border: 1px solid color-mix(in srgb, var(--lane) 45%, var(--border)); border-radius: 12px; background: linear-gradient(120deg, color-mix(in srgb, var(--lane) 8%, var(--card)), var(--card)); }
 .product-retrieve { --lane: var(--diagram-search); }
 .product-store { --lane: var(--diagram-storage); }
+.product-graph { --lane: #db2777; }
+.product-map-row h3 .badge { display: inline-block; margin-left: 6px; padding: 1px 8px; font-size: 11px; vertical-align: 2px; white-space: nowrap; }
 .product-map-row + .product-map-row::before { content: ""; position: absolute; height: 24px; width: 2px; top: -25px; left: 36px; background: linear-gradient(var(--accent), var(--lane)); }
 .product-symbol { display: inline-flex; justify-content: center; align-items: center; width: 32px; height: 32px; margin-right: 8px; border-radius: 9px; color: var(--text); background: color-mix(in srgb, var(--lane) 16%, var(--card)); border: 1px solid color-mix(in srgb, var(--lane) 45%, var(--border)); font-family: ui-monospace, monospace; }
 .product-map-row .product-chips > * { background: color-mix(in srgb, var(--lane) 12%, var(--card)); border-color: color-mix(in srgb, var(--lane) 35%, var(--border)); color: var(--text); }
@@ -413,6 +420,41 @@ table.param-table td:first-child { white-space: nowrap; }
 .verb { display: inline-block; min-width: 54px; text-align: center; font: 700 .7rem/1 ui-monospace, monospace; padding: 4px 6px; border-radius: 6px; color: #fff; }
 .verb.get { background: #0ea5e9; } .verb.post { background: #10b981; } .verb.put { background: #f59e0b; }
 .verb.patch { background: #8b5cf6; } .verb.delete { background: #ef4444; }
+/* API reference (site/api.html) */
+.api-ref table.api-table { margin: 12px 0 28px; font-size: .9rem; table-layout: fixed; }
+.api-ref table.api-table th, .api-ref table.api-table td { padding: 9px 12px; }
+.api-ref table.api-table td { overflow-wrap: anywhere; }
+.api-ref table.api-table.cols-2 th:first-child { width: 46%; }
+.api-ref table.api-table.cols-3 th:first-child { width: 36%; }
+.api-ref table.api-table.cols-3 th:last-child { width: 10.5rem; }
+.api-ref code.sig { display: block; font-size: .8rem; line-height: 1.5; white-space: pre-wrap; color: var(--text); }
+.api-ref code.sig + code.sig { margin-top: 6px; }
+.api-ref code.sig .nw { white-space: nowrap; }
+.api-ref .verb + code.sig { display: inline; margin-left: 4px; }
+.api-ref code.sig[data-lang]::before { content: attr(data-lang); display: inline-block; min-width: 4.8em; margin-right: 6px; font: 600 .62rem/1.6 Inter, system-ui, sans-serif; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.api-ref tr.api-class td { background: color-mix(in srgb, var(--accent) 7%, var(--card)); }
+.api-ref tr.api-class code.sig { font-weight: 600; color: var(--accent); }
+.api-ref :is(p, li, td) > code:not(.sig):not(.api-path) { background: var(--chip); color: var(--chip-text); padding: 1px 5px; border-radius: 5px; font-size: .86em; }
+.api-ref .api-kind { margin-left: 6px; padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; font: 600 .7rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); vertical-align: middle; }
+.api-ref .api-path { display: block; margin-bottom: 4px; font-size: .82rem; color: var(--muted); }
+.api-ref .api-jump { font-size: .9rem; line-height: 1.9; color: var(--muted); }
+.api-ref ul.api-access { list-style: none; padding: 0; }
+.api-ref ul.api-access li { margin: 6px 0; }
+.api-ref .badge { display: inline-block; margin-left: 4px; padding: 1px 8px; font-size: 11px; line-height: 1.5; white-space: nowrap; vertical-align: 1px; }
+.api-ref ul.api-access .badge, .api-ref td > .badge:first-child { margin-left: 0; }
+.api-ref .badge.public { color: var(--good); border-color: color-mix(in srgb, var(--good) 45%, transparent); }
+.api-ref .badge.any { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.api-ref .badge.admin { color: #b45309; border-color: color-mix(in srgb, #b45309 45%, transparent); }
+:root[data-theme="dark"] .api-ref .badge.admin { color: #fbbf24; border-color: color-mix(in srgb, #fbbf24 45%, transparent); }
+.api-ref .badge.only { color: var(--chip-text); background: var(--chip); border-color: transparent; }
+@media (max-width: 640px) {
+  .api-ref table.api-table, .api-ref table.api-table tbody, .api-ref table.api-table tr, .api-ref table.api-table td { display: block; width: auto; }
+  .api-ref table.api-table thead { display: none; }
+  .api-ref table.api-table tr { padding: 8px 0; border-bottom: 1px solid var(--border); }
+  .api-ref table.api-table td { padding: 3px 4px; border-bottom: 0; }
+  .api-ref table.api-table tr.group td { padding: 8px; }
+  .api-ref table.param-table td:first-child { white-space: normal; overflow-wrap: anywhere; }
+}
 @media (max-width: 1100px) { .docs-layout { grid-template-columns: 210px minmax(0, 1fr); } .docs-toc { display: none; } }
 @media (max-width: 800px) { .docs-layout { grid-template-columns: minmax(0, 1fr); padding: 20px 16px; } .docs-sidebar { position: static; max-height: none; display: flex; flex-wrap: wrap; gap: 4px 16px; } .docs-group { min-width: 140px; } }
 

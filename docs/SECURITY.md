@@ -21,9 +21,9 @@ gRPC, the SDKs and MCP are unchanged.
 Editors and viewers are bound to one tenant, and see only its collections, or
 to all collections.
 
-In source builds with the experimental `graph` feature, signed-in viewers
-also get `graph_read` and editors `graph_read` and `graph_write`, narrowed per
-account by `graphs` and `graph_access`
+With the experimental `graph` feature (release builds include it), signed-in
+viewers also get `graph_read` and editors `graph_read` and `graph_write`,
+narrowed per account by `graphs` and `graph_access`
 ([graph scoping](GRAPH.md#surfaces)). Graphs are
 tenant-owned: tenanted accounts and tenant API keys reach only
 `t<tenant_id>__*` graphs, under tenant-local names. Vector isolation is kept: graph batches

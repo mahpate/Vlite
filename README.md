@@ -27,12 +27,14 @@ file, so there is no separate database service to operate.
   vectors, hybrid search, facets, geo filters and recommendations.
 - **Server.** Authenticated REST with OpenAPI, optional gRPC and TLS,
   Prometheus metrics, non-root Docker images and a Helm chart.
-- **Dashboard.** Browse, search, write, import, index and monitor, with user
-  accounts, roles and tenants.
+- **Dashboard.** Browse, search, write, import, index, monitor and query
+  graphs, with user accounts, roles and tenants.
 - **Storage options.** Encryption at rest, point-in-time restore, a change
   feed, file-shipped read replicas and a disk-based ANN index.
+- **Property graphs (experimental).** Opt-in per file: nodes, typed edges and
+  links to vector records, with bounded traversal and graph retrieval.
 - **Tools.** Interactive shell, validated imports, offline maintenance, index
-  tuning, an MCP server and agent skills.
+  tuning, a graph CLI, an MCP server and agent skills.
 
 ## Quick start
 
@@ -132,7 +134,7 @@ Sign-in requires protected mode. See the [dashboard guide](docs/CONSOLE.md) and
 - **LangChain and LlamaIndex:** [adapters](clients/README.md#langchain-and-llamaindex-integrations)
 - **Any language:** [REST API](docs/API.md), [OpenAPI](src/openapi.json) or [gRPC](docs/GRPC.md)
 - **AI agents:** [MCP server](docs/MCP.md) and [agent skills](docs/AGENT-SKILLS.md)
-- **Command line:** [shell, import, maintenance and tuning tools](docs/TOOLS.md)
+- **Command line:** [shell, import, maintenance, tuning and graph tools](docs/TOOLS.md)
 - **Kubernetes:** [Helm chart](deploy/helm/vlite/README.md)
 
 Prebuilt packages: [PyPI](docs/INSTALL.md#pypi) and [release assets](docs/INSTALL.md).

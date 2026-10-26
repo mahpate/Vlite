@@ -10,6 +10,11 @@ Measures:
   are excluded. asendme.html is intentionally not budgeted.
 - words: whitespace-separated tokens in the Markdown source.
 
+api.html is the complete API reference, so it has no word budget;
+tests/api_reference.py checks instead that it documents every public API item
+and nothing stale. features.html is the full feature catalogue, so its budget
+covers every capability; keep each row to one or two sentences.
+
 Collapsed and hidden content is excluded on purpose: architecture.html keeps
 the Mermaid sources of its diagrams in collapsed blocks (build_site_diagrams.py
 reads them), compare.html keeps archived benchmark tables collapsed, and
@@ -33,8 +38,7 @@ BUDGETS = [
     ("README.md", "lines", 250),
     ("site/compare.html", "visible words", 900),
     ("site/architecture.html", "visible words", 800),
-    ("site/features.html", "visible words", 700),
-    ("site/api.html", "visible words", 600),
+    ("site/features.html", "visible words", 2800),
     ("site/index.html", "visible words", 500),
     ("site/dashboard.html", "visible words", 400),
     ("site/about.html", "visible words", 250),
