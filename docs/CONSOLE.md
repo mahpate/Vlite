@@ -157,6 +157,16 @@ credentials.
 
 ![Search workspace with a vector query and ranked neighbors](../site/assets/dashboard/current-search.png?v=connected)
 
+## Explore graphs
+
+**Graph** is a read-only explorer for experimental, opt-in
+[property graphs](GRAPH.md) in a graph-enabled file. Choose a graph and an
+operation, such as a traversal, then **Run query** or **Explain plan**. Results
+list nodes, edges and paths and draw up to 40 nodes. Change graphs with the
+REST API, `vlite-graph-cli` or MCP.
+
+![Graph traversal drawn as a node-link view](../site/assets/dashboard/current-graph.png?v=connected)
+
 ## Build an index
 
 **Collections → Index** shows HNSW readiness, memory and a sampled recall

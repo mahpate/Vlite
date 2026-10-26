@@ -29,7 +29,7 @@ def check(root):
         "current-payload.png", "current-metadata.png", "current-vector.png",
         "current-write.png", "current-import.png", "current-index.png", "current-collections.png",
         "current-search.png", "current-hybrid.png", "current-retrieval.png", "current-explore.png",
-        "current-observability.png", "current-feed.png", "current-administration.png",
+        "current-graph.png", "current-observability.png", "current-feed.png", "current-administration.png",
         "current-users.png", "current-credentials.png", "current-tenants.png",
         "current-backups.png", "current-replication.png", "current-automation.png",
         "current-webhooks.png", "current-tls.png", "current-developer.png",
@@ -40,7 +40,7 @@ def check(root):
     assert manifest["connected"] and manifest["record_count"] >= 8
     assert manifest["format_version"] >= 5
     assert {capture["workspace"] for capture in manifest["captures"]} == {
-        "Sign in", "Overview", "Collections", "Search", "Observability", "Administration", "Developer Console",
+        "Sign in", "Overview", "Collections", "Search", "Graph", "Observability", "Administration", "Developer Console",
     }
     source = Path(__file__).resolve().parents[1] / "src" / "dashboard"
     for filename, checksum in manifest["source_assets"].items():
@@ -134,7 +134,7 @@ def check(root):
         server.shutdown()
         server.server_close()
         thread.join()
-    print("Connected 27-step tour: sign-in screen, six workspaces, unique verified captures, autoplay, step selection, pause, motion, offscreen, no-JS and guide images passed.")
+    print("Connected 28-step tour: sign-in screen, seven workspaces, unique verified captures, autoplay, step selection, pause, motion, offscreen, no-JS and guide images passed.")
 
 
 if __name__ == "__main__":

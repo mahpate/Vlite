@@ -78,6 +78,7 @@
         ["current-hybrid.png", "Hybrid search: combine vector similarity with text matches."],
         ["current-retrieval.png", "Advanced retrieval: recommend neighbors and count metadata facets."],
         ["current-explore.png", "Analyze & compare: compare records and inspect a sampled vector projection."],
+        ["current-graph.png", "Graph (experimental): traverse a property graph and see the linked nodes and edges it returns."],
         ["current-observability.png", "Observability: inspect real request metrics, routes and server logs."],
         ["current-feed.png", "Change feed: inspect committed events and page through their history."],
         ["current-administration.png", "Administration: inspect server health and manage operational controls."],

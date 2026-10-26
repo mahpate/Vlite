@@ -1,7 +1,9 @@
-"""Capture current-source dashboard workflows against an isolated real API.
+"""Capture current-source dashboard workflows against isolated real APIs.
 
 Run on a disposable Linux Docker host with tests/requirements-dashboard.txt.
 Only synthetic demo records are written; no existing server or volume is used.
+The Graph view comes from a second, graph-enabled database with the same records,
+because graph-enabled files have no change feed or webhooks.
 """
 
 import base64
@@ -24,125 +26,194 @@ import uuid
 from playwright.sync_api import expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
-IMAGE = os.environ.get("VLITE_CAPTURE_IMAGE", "ghcr.io/mahpate/vlite-api:v0.4.1")
+IMAGE = os.environ.get("VLITE_CAPTURE_IMAGE", "ghcr.io/mahpate/vlite-api:v0.5.0")
+ARTICLES = (
+    ("getting-started", "Getting started with VLite"), ("vector-search", "Vector search for support articles"),
+    ("hybrid-search", "Hybrid search with typed metadata"), ("hnsw-index", "Choosing an HNSW index"),
+    ("backups", "Keeping database backups"), ("monitoring", "Monitoring API health"),
+    ("python-client", "Connecting Python applications"), ("credentials", "Managing scoped credentials"),
+)
+# Reading order between the articles; a traversal from getting-started reaches all of them in two hops.
+LINKS = (
+    ("getting-started", "NEXT", "vector-search"), ("getting-started", "NEXT", "python-client"),
+    ("getting-started", "NEXT", "backups"), ("vector-search", "NEXT", "hybrid-search"),
+    ("vector-search", "NEXT", "hnsw-index"), ("python-client", "NEXT", "credentials"),
+    ("backups", "SEE_ALSO", "monitoring"),
+)
+# vlite-server creates only plain files: a private server creates an empty one, then
+# vlite-maintain copies the closed file into a graph-enabled one for the real server.
+GRAPH_BOOTSTRAP = """set -eu
+env -u VLITE_ADMIN_DIR -u VLITE_TRUSTED_PROXY vlite-server /data/seed.vlite --create-if-missing 3 --create-format 5 --bind 127.0.0.1:8081 >/data/seed.log 2>&1 &
+seed=$!
+tries=0
+until grep -q '^LISTENING ' /data/seed.log; do
+  tries=$((tries + 1))
+  if [ "$tries" -gt 300 ] || ! kill -0 "$seed" 2>/dev/null; then cat /data/seed.log >&2; exit 1; fi
+  sleep 0.2
+done
+kill -TERM "$seed"
+if ! wait "$seed"; then cat /data/seed.log >&2; exit 1; fi
+vlite-maintain enable-graph /data/seed.vlite /data/demo.vlite
+rm -f /data/seed.*
+exec vlite-server /data/demo.vlite --bind 0.0.0.0:8080 --allow-remote
+"""
 
 
 def docker(*args, **kwargs):
     return subprocess.check_output(["docker", *args], text=True, **kwargs).strip()
 
 
-def capture(output):
-    output.mkdir(parents=True, exist_ok=True)
-    token = secrets.token_urlsafe(32)
-    name = "vlite-connected-tour-" + uuid.uuid4().hex[:10]
-    env = {**os.environ, "VLITE_AUTH_TOKEN": token}
+def start(name, token, graph=False):
+    """Run a disposable server on empty tmpfs volumes."""
+    if graph:
+        command = ("--entrypoint", "sh", IMAGE, "-c", GRAPH_BOOTSTRAP)
+    else:
+        command = ("--entrypoint", "vlite-server", IMAGE, "/data/demo.vlite", "--create-if-missing", "3",
+                   "--create-format", "5", "--bind", "0.0.0.0:8080", "--allow-remote")
     # VLITE_TRUSTED_PROXY lets the sign-in screen offer passwords, as it does behind an HTTPS proxy.
     docker("run", "-d", "--name", name,
            "--mount", "type=tmpfs,target=/data,tmpfs-mode=1777",
            "--mount", "type=tmpfs,target=/admin,tmpfs-mode=1777",
            "-e", "VLITE_AUTH_TOKEN", "-e", "VLITE_ADMIN_DIR=/admin", "-e", "VLITE_TRUSTED_PROXY=1",
-           "-p", "127.0.0.1::8080", "--entrypoint", "vlite-server",
-           IMAGE, "/data/demo.vlite", "--create-if-missing", "3", "--create-format", "5",
-           "--bind", "0.0.0.0:8080", "--allow-remote", env=env)
-    server = None
-    try:
-        port = docker("port", name, "8080/tcp").rsplit(":", 1)[1]
-        backend = "http://127.0.0.1:" + port
+           "-p", "127.0.0.1::8080", *command, env={**os.environ, "VLITE_AUTH_TOKEN": token})
 
-        def api(path, body=None, method=None):
+
+def connect(name, token):
+    """Wait for the server's health route; return its address and an authenticated JSON helper."""
+    backend = "http://127.0.0.1:" + docker("port", name, "8080/tcp").rsplit(":", 1)[1]
+
+    def api(path, body=None, method=None):
+        request = urllib.request.Request(
+            backend + path, data=json.dumps(body).encode() if body is not None else None,
+            method=method, headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=15) as response:
+            if response.status == 204:
+                return None
+            return json.load(response)
+
+    deadline = time.monotonic() + 60
+    while True:
+        try:
+            api("/health")
+            return backend, api
+        except (OSError, urllib.error.URLError):
+            if time.monotonic() > deadline:
+                subprocess.run(["docker", "logs", name], check=False)
+                raise
+            time.sleep(.5)
+
+
+def seed(api):
+    """Write the synthetic articles and the extra collections that both databases show."""
+    for i, (_, title) in enumerate(ARTICLES, 101):
+        api(f"/v1/vectors/{i}", {
+            "vector": [round(1 - (i - 101) * .08, 2), round((i - 101) * .12, 2), .1],
+            "payload_base64": base64.b64encode((title + "\nA sample article in the VLite knowledge base.").encode()).decode(),
+            "metadata": {"title": {"type": "string", "value": title},
+                         "category": {"type": "string", "value": "guides" if i < 105 else "operations"}},
+        }, "PUT")
+    settings = api("/v1/collections/default")["settings"]
+    settings["text_fields"] = ["title"]
+    api("/v1/collections/default/settings", settings, "PUT")
+    api("/v1/collections", {"name": "support", "dimensions": 3}, "POST")
+    api("/v1/collections", {"name": "products", "dimensions": 3}, "POST")
+
+
+def seed_graph(api):
+    """Link the articles in an `articles` graph whose nodes are attached to their records."""
+    api("/v1/graphs", {"graph": "articles"}, "POST")
+    ops = []
+    for i, (key, title) in enumerate(ARTICLES, 101):
+        ops.append({"op": "create_node", "key": key, "labels": ["Guide" if i < 105 else "Operations"],
+                    "properties": {"title": {"type": "string", "value": title}}})
+        ops.append({"op": "attach", "node": key, "collection": "default", "record": str(i)})
+    ops += [{"op": "create_edge", "source": source, "relationship": relationship, "destination": destination}
+            for source, relationship, destination in LINKS]
+    api("/v1/graphs/articles/batch", {"ops": ops}, "POST")
+    if [graph["name"] for graph in api("/v1/graphs")["graphs"]] != ["articles"]:
+        raise RuntimeError("Capture database does not list the articles graph")
+
+
+def dashboard_server(backend):
+    """Serve the current dashboard source and proxy API routes to one backend."""
+
+    class Handler(SimpleHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def translate_path(self, path):
+            if path == "/dashboard":
+                path = "/"
+            elif path.startswith("/dashboard/"):
+                path = path[len("/dashboard"):]
+            return super().translate_path(path)
+
+        def proxy(self):
+            path = self.path.removeprefix("/api")
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0))) or None
             request = urllib.request.Request(
-                backend + path, data=json.dumps(body).encode() if body is not None else None,
-                method=method, headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
-            with urllib.request.urlopen(request, timeout=15) as response:
-                if response.status == 204:
-                    return None
-                return json.load(response)
-
-        deadline = time.monotonic() + 60
-        while True:
+                backend + path, data=body, method=self.command,
+                headers={key: self.headers[key] for key in ("Authorization", "Content-Type") if key in self.headers})
             try:
-                api("/health")
-                break
-            except (OSError, urllib.error.URLError):
-                if time.monotonic() > deadline:
-                    raise
-                time.sleep(.5)
+                response = urllib.request.urlopen(request, timeout=20)
+            except urllib.error.HTTPError as error:
+                response = error
+            with response:
+                data = response.read()
+                self.send_response(response.status)
+                for key in ("Content-Type", "ETag", "X-Request-Id"):
+                    if response.headers.get(key):
+                        self.send_header(key, response.headers[key])
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+        def do_GET(self):
+            if self.path.startswith(("/api/", "/v1/", "/health", "/ready", "/metrics")):
+                self.proxy()
+            else:
+                super().do_GET()
+
+        do_POST = proxy
+        do_PUT = proxy
+        do_DELETE = proxy
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), partial(Handler, directory=str(ROOT / "src" / "dashboard")))
+    Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def capture(output):
+    output.mkdir(parents=True, exist_ok=True)
+    token = secrets.token_urlsafe(32)
+    names = ["vlite-connected-tour-" + uuid.uuid4().hex[:10] for _ in range(2)]
+    servers = []
+    try:
+        start(names[0], token)
+        # Graph-enabled files reject the change feed and webhooks, so the Graph view comes from a
+        # second disposable database with the same articles and a small graph linking them.
+        start(names[1], token, graph=True)
+        backend, api = connect(names[0], token)
+        graph_backend, graph_api = connect(names[1], token)
         capabilities = api("/v1/capabilities")
         required = ("recommendations", "facets", "change_feed", "tenants",
                     "scoped_credentials", "auto_maintenance", "backup_restore", "webhooks")
         unavailable = [feature for feature in required if not capabilities["features"].get(feature)]
         if unavailable:
             raise RuntimeError(f"Capture database lacks required capabilities: {unavailable}")
-        titles = (
-            "Getting started with VLite", "Vector search for support articles",
-            "Hybrid search with typed metadata", "Choosing an HNSW index",
-            "Keeping database backups", "Monitoring API health",
-            "Connecting Python applications", "Managing scoped credentials",
-        )
-        for i, title in enumerate(titles, 101):
-            api(f"/v1/vectors/{i}", {
-                "vector": [round(1 - (i - 101) * .08, 2), round((i - 101) * .12, 2), .1],
-                "payload_base64": base64.b64encode((title + "\nA sample article in the VLite knowledge base.").encode()).decode(),
-                "metadata": {"title": {"type": "string", "value": title},
-                             "category": {"type": "string", "value": "guides" if i < 105 else "operations"}},
-            }, "PUT")
-        settings = api("/v1/collections/default")["settings"]
-        settings["text_fields"] = ["title"]
-        api("/v1/collections/default/settings", settings, "PUT")
-        api("/v1/collections", {"name": "support", "dimensions": 3}, "POST")
-        api("/v1/collections", {"name": "products", "dimensions": 3}, "POST")
+        seed(api)
         api("/v1/index/hnsw", {}, "POST")
         api("/v1/admin/backups", {}, "POST")
+        seed(graph_api)
+        seed_graph(graph_api)
         # Sample accounts with random, unsaved passwords; the browser signs in with the token.
         accounts = (("maya", "super_admin"), ("alex", "editor"), ("sam", "viewer"))
-        for username, role in accounts:
-            api("/v1/admin/users", {"username": username, "password": secrets.token_urlsafe(24), "role": role}, "POST")
-        if not api("/v1/auth/config")["password_login"]:
-            raise RuntimeError("Capture server does not offer password sign-in")
-
-        class Handler(SimpleHTTPRequestHandler):
-            def log_message(self, *_):
-                pass
-
-            def translate_path(self, path):
-                if path == "/dashboard":
-                    path = "/"
-                elif path.startswith("/dashboard/"):
-                    path = path[len("/dashboard"):]
-                return super().translate_path(path)
-
-            def proxy(self):
-                path = self.path.removeprefix("/api")
-                body = self.rfile.read(int(self.headers.get("Content-Length", 0))) or None
-                request = urllib.request.Request(
-                    backend + path, data=body, method=self.command,
-                    headers={key: self.headers[key] for key in ("Authorization", "Content-Type") if key in self.headers})
-                try:
-                    response = urllib.request.urlopen(request, timeout=20)
-                except urllib.error.HTTPError as error:
-                    response = error
-                with response:
-                    data = response.read()
-                    self.send_response(response.status)
-                    for key in ("Content-Type", "ETag", "X-Request-Id"):
-                        if response.headers.get(key):
-                            self.send_header(key, response.headers[key])
-                    self.send_header("Content-Length", str(len(data)))
-                    self.end_headers()
-                    self.wfile.write(data)
-
-            def do_GET(self):
-                if self.path.startswith(("/api/", "/v1/", "/health", "/ready", "/metrics")):
-                    self.proxy()
-                else:
-                    super().do_GET()
-
-            do_POST = proxy
-            do_PUT = proxy
-            do_DELETE = proxy
-
-        server = ThreadingHTTPServer(("127.0.0.1", 0), partial(Handler, directory=str(ROOT / "src" / "dashboard")))
-        Thread(target=server.serve_forever, daemon=True).start()
+        for call in (api, graph_api):
+            for username, role in accounts:
+                call("/v1/admin/users", {"username": username, "password": secrets.token_urlsafe(24), "role": role}, "POST")
+            if not call("/v1/auth/config")["password_login"]:
+                raise RuntimeError("Capture server does not offer password sign-in")
+        servers += [dashboard_server(backend), dashboard_server(graph_backend)]
         captures = []
         with sync_playwright() as p:
             browser = p.chromium.launch()
@@ -150,7 +221,7 @@ def capture(output):
                                     device_scale_factor=1, reduced_motion="reduce")
             errors = []
             page.on("pageerror", lambda error: errors.append(str(error)))
-            page.goto(f"http://127.0.0.1:{server.server_port}/dashboard/")
+            page.goto(f"http://127.0.0.1:{servers[0].server_port}/dashboard/")
             nav = page.get_by_role("navigation", name="Dashboard navigation")
             menu = page.locator("#user-menu > summary")
 
@@ -185,21 +256,24 @@ def capture(output):
                 page.locator("#theme").select_option(value)
                 menu.click()
 
+            def sign_in():
+                page.locator("#token-sign-in > summary").click()
+                page.locator("#token").fill(token)
+                page.get_by_role("button", name="Sign in with token", exact=True).click()
+                expect(page.locator("#connection-badge")).to_have_text("Connected")
+                expect(page.locator("#stat-records")).to_have_text(str(len(ARTICLES)))
+                page.locator("#tour-dismiss").click()
+                theme("light")
+
             expect(page.locator("#sign-in")).to_be_visible()
             expect(page.locator("#app-shell")).to_be_hidden()
             expect(page.locator("#token")).to_be_hidden()
             save("current-sign-in.png", workspace="Sign in")
-            page.locator("#token-sign-in > summary").click()
-            page.locator("#token").fill(token)
-            page.get_by_role("button", name="Sign in with token", exact=True).click()
-            expect(page.locator("#connection-badge")).to_have_text("Connected")
-            expect(page.locator("#stat-records")).to_have_text(str(len(titles)))
-            page.locator("#tour-dismiss").click()
-            theme("light")
+            sign_in()
             save("current-overview-light.png")
             nav.get_by_role("link", name="Collections", exact=True).click()
             page.locator("#browse-form button[type=submit]").click()
-            expect(page.locator("#vectors tbody tr")).to_have_count(len(titles))
+            expect(page.locator("#vectors tbody tr")).to_have_count(len(ARTICLES))
             save("current-records.png")
             page.locator("#vectors tbody button").first.click()
             expect(page.locator("#record-inspector-payload")).to_contain_text("Getting started")
@@ -228,7 +302,7 @@ def capture(output):
             nav.get_by_role("link", name="Search", exact=True).click()
             page.locator("#query").fill("[0.9, 0.1, 0]")
             page.locator("#search-form button[type=submit]").click()
-            expect(page.locator("#hits tbody tr")).to_have_count(len(titles))
+            expect(page.locator("#hits tbody tr")).to_have_count(len(ARTICLES))
             save("current-search.png", "#search-summary")
             page.locator("#mode").select_option("hybrid")
             show("#search-text").fill("vector search")
@@ -315,13 +389,36 @@ def capture(output):
             save("current-overview-dark.png")
             menu.click()
             save("current-preferences.png")
+            assert token not in page.locator("body").inner_text()
+            # The graph database is another origin, so the dashboard starts signed out with fresh preferences.
+            page.goto(f"http://127.0.0.1:{servers[1].server_port}/dashboard/")
+            expect(page.locator("#sign-in")).to_be_visible()
+            sign_in()
+            nav.get_by_role("link", name="Graph", exact=True).click()
+            expect(page.locator("#graph-controls")).to_be_visible()
+            expect(page.locator("#graph-name")).to_have_value("articles")
+            page.locator("#graph-operation").select_option("traverse")
+            page.locator("#graph-start").fill(ARTICLES[0][0])
+            page.locator("#graph-run").click()
+            expect(page.locator("#graph-summary")).to_have_text(re.compile(r"^Complete"))
+            expect(page.locator("#graph-view .graph-node")).to_have_count(len(ARTICLES))
+            expect(page.locator("#graph-view .graph-edge")).to_have_count(len(LINKS))
+            # The query form is taller than the window: frame its Run query row, just below the sticky
+            # top bar, above the result and its node-link view.
+            page.locator("#graph .graph-actions").evaluate("""element => window.scrollBy(0,
+                element.getBoundingClientRect().top - document.querySelector(".topbar").getBoundingClientRect().bottom - 16)""")
+            expect(page.locator("#graph-run")).to_be_in_viewport()
+            expect(page.locator("#graph-view")).to_be_in_viewport(ratio=1)
+            save("current-graph.png", "#graph-summary")
             assert not errors, errors
             assert token not in page.locator("body").inner_text()
             browser.close()
         assert len({item["sha256"] for item in captures}) == len(captures)
         manifest = {
-            "data": "Synthetic demo records in an isolated disposable database",
-            "record_count": len(titles), "connected": True, "backend_image": IMAGE,
+            "data": "Synthetic demo records in isolated disposable databases",
+            "graph_data": ("The Graph view uses a second, graph-enabled database with the same records, "
+                           "because graph-enabled files have no change feed or webhooks"),
+            "record_count": len(ARTICLES), "connected": True, "backend_image": IMAGE,
             "format_version": capabilities["format_version"],
             # Text-mode hashes match tests/dashboard_tours.py on any checkout line ending.
             "source_assets": {file.name: hashlib.sha256(file.read_text(encoding="utf-8").encode()).hexdigest()
@@ -329,12 +426,13 @@ def capture(output):
             "captures": captures,
         }
         (output / "connected-captures.json").write_text(json.dumps(manifest, indent=2) + "\n")
-        print(f"Captured {len(captures)} distinct connected views: the sign-in screen and every workspace except Graph.")
+        print(f"Captured {len(captures)} distinct connected views: the sign-in screen and all seven workspaces.")
     finally:
-        if server:
+        for server in servers:
             server.shutdown()
             server.server_close()
-        docker("rm", "-f", name)
+        subprocess.run(["docker", "rm", "-f", *names], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 if __name__ == "__main__":

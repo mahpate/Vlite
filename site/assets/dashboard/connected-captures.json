@@ -1,8 +1,9 @@
 {
-  "data": "Synthetic demo records in an isolated disposable database",
+  "data": "Synthetic demo records in isolated disposable databases",
+  "graph_data": "The Graph view uses a second, graph-enabled database with the same records, because graph-enabled files have no change feed or webhooks",
   "record_count": 8,
   "connected": true,
-  "backend_image": "vlite-capture:source",
+  "backend_image": "ghcr.io/mahpate/vlite-api:v0.5.0",
   "format_version": 5,
   "source_assets": {
     "admin-tools.js": "e46d3ab6267dcab8dacec1128debc2a0433e61b6c0519dd2d0a34453eee2f52a",
@@ -64,12 +65,12 @@
     {
       "file": "current-search.png",
       "workspace": "Search",
-      "sha256": "cc332f316520efebf09ea0857c46a4498af160ec0cdc07f11e786fc52f10fa1e"
+      "sha256": "b571b128e9c6483ba308b65ffcc6ae12a4760c6d8e8dad5bf2b2c0d661aa7cae"
     },
     {
       "file": "current-hybrid.png",
       "workspace": "Search",
-      "sha256": "5bcf14f63879abd1aea63224028cfa12bd305a90ba1918b085d4e140f22af063"
+      "sha256": "af1fd97dbfbd61d9c2a8f3dfaa48dc2aa566997ea525a7e95a026c61926a26b2"
     },
     {
       "file": "current-retrieval.png",
@@ -84,32 +85,32 @@
     {
       "file": "current-import.png",
       "workspace": "Collections",
-      "sha256": "d9c9a513728dcd81d47d575c4ab20964d668844b9edf1d25ecd928d7de399802"
+      "sha256": "2c90d6af648adb63c59b7cfed655cc962f0c2f54e5266e870c62e1b44f442c40"
     },
     {
       "file": "current-observability.png",
       "workspace": "Observability",
-      "sha256": "bff65975ef90917feb1770f9781a32dcc10b04115ca412bed3b04287de8c85d0"
+      "sha256": "7fc4dccd9d711c86536debe94e05607bdb7ac102e6b770e1d716106afd4c212a"
     },
     {
       "file": "current-feed.png",
       "workspace": "Observability",
-      "sha256": "e7bdbb5f8f1aad17428c9e18dc4d86b01c66db49d9a16668d76a1e638d84a0df"
+      "sha256": "7eb6772f9cedc00b80b0b35bdac229ed80fec8f3e50905299fa4cfbc08949e56"
     },
     {
       "file": "current-administration.png",
       "workspace": "Administration",
-      "sha256": "162327e403ae8ba3428065470e9bb8fbd694091398a12ad17043ab19e6213cf9"
+      "sha256": "0c23a7a1aaada133c73a2b14c69b927b5b44d65857ef2d9ca5b1e1ab74d1edcb"
     },
     {
       "file": "current-users.png",
       "workspace": "Administration",
-      "sha256": "1a88f807112cd6b3e69840c42af421b4825694177bd3b383d0efa771667dbab8"
+      "sha256": "b89ad6ef7d34ddd29599cdd7368c19ed75b6d84215f6d69aa99ceb7d7d28ce60"
     },
     {
       "file": "current-backups.png",
       "workspace": "Administration",
-      "sha256": "0a07bbea7f223fc5f5cabe7c3607d1e70ad2e97239a57568d80bda494241670e"
+      "sha256": "6af6d34b21197fdbce5d500dc652771957ea11ac49a9e1031206d145413fc113"
     },
     {
       "file": "current-credentials.png",
@@ -119,7 +120,7 @@
     {
       "file": "current-tenants.png",
       "workspace": "Administration",
-      "sha256": "c1848487d8b5096c727bd02a9c429a14338886d99660cbf630d28d00d67036e7"
+      "sha256": "e0944e57e1562b9c79c655a5bfffab9cc68771e0ce231b9df20d04cb3e027c50"
     },
     {
       "file": "current-automation.png",
@@ -139,12 +140,12 @@
     {
       "file": "current-replication.png",
       "workspace": "Administration",
-      "sha256": "b36d268efa35995895c3d46ad821e2073294a100b4775f08cc7d191703ca2077"
+      "sha256": "3a82c089f8d1b47fbfbca6d6ba66c23384be50fcc81ffe8368508946f56ce96f"
     },
     {
       "file": "current-developer.png",
       "workspace": "Developer Console",
-      "sha256": "53fa4ab974a5da6b43d9595c3c9f91045057ce5c909f26685047f53c75c41937"
+      "sha256": "a3885ae1806cd7c21a3e4b92e80c4540285f18ee879c735a2b3917daa5cf19b4"
     },
     {
       "file": "current-overview-dark.png",
@@ -155,6 +156,11 @@
       "file": "current-preferences.png",
       "workspace": "Overview",
       "sha256": "ba67f44696110dc4d7ac3471292a9b1c4416d8ac0a0e0c7b58f39ac7f40afe7e"
+    },
+    {
+      "file": "current-graph.png",
+      "workspace": "Graph",
+      "sha256": "d88146051b20a8fa5198b7f499579a901ac700d68bdefb94afe2b98078bba6c7"
     }
   ]
 }
