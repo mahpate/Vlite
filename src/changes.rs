@@ -498,3 +498,100 @@ pub fn read_log_changes(
     let mut file = std::fs::File::open(path.as_ref())?;
     read_changes(&mut file, key, None, cursor, max_events)
 }
+
+#[cfg(feature = "json")]
+impl GraphChange {
+    /// One `graph_batch` operation in the REST/webhook/C ABI JSON shape:
+    /// `op` names it, and u64 IDs and records are decimal strings.
+    pub fn to_json(&self) -> serde_json::Value {
+        use serde_json::json;
+        match self {
+            GraphChange::NodeUpserted {
+                id,
+                key,
+                labels,
+                properties,
+                created,
+            } => json!({"op": "node_upserted", "id": id.to_string(), "key": key,
+                "labels": labels, "properties": properties, "created": created}),
+            GraphChange::NodePatched {
+                id,
+                key,
+                add_labels,
+                remove_labels,
+                set,
+                unset,
+            } => json!({"op": "node_patched", "id": id.to_string(), "key": key,
+                "add_labels": add_labels, "remove_labels": remove_labels, "set": set,
+                "unset": unset}),
+            GraphChange::NodeDeleted { id, key } => {
+                json!({"op": "node_deleted", "id": id.to_string(), "key": key})
+            }
+            GraphChange::EdgeUpserted {
+                id,
+                key,
+                source,
+                source_key,
+                relationship,
+                destination,
+                destination_key,
+                properties,
+                created,
+            } => json!({"op": "edge_upserted", "id": id.to_string(), "key": key,
+                "source": source.to_string(), "source_key": source_key,
+                "relationship": relationship, "destination": destination.to_string(),
+                "destination_key": destination_key, "properties": properties,
+                "created": created}),
+            GraphChange::EdgePatched {
+                id,
+                key,
+                set,
+                unset,
+            } => {
+                json!({"op": "edge_patched", "id": id.to_string(), "key": key, "set": set,
+                    "unset": unset})
+            }
+            GraphChange::EdgeDeleted { id, key } => {
+                json!({"op": "edge_deleted", "id": id.to_string(), "key": key})
+            }
+            GraphChange::Attached {
+                node,
+                node_key,
+                collection,
+                record,
+            } => json!({"op": "attached", "node": node.to_string(), "node_key": node_key,
+                "collection": collection, "record": record.to_string()}),
+            GraphChange::Detached {
+                node,
+                node_key,
+                collection,
+                record,
+            } => json!({"op": "detached", "node": node.to_string(), "node_key": node_key,
+                "collection": collection, "record": record.to_string()}),
+            GraphChange::SchemaUpdated { schema } => {
+                json!({"op": "schema_updated", "schema": schema.to_json()})
+            }
+        }
+    }
+}
+
+#[cfg(feature = "json")]
+impl ChangeKind {
+    /// The type-specific fields of a graph event in the REST/webhook/C ABI
+    /// JSON shape (`type`, `graph`, and for `graph_batch` the decimal-string
+    /// `revision` and `operations`); `None` for vector events.
+    pub fn graph_json(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+        Some(match self {
+            ChangeKind::GraphCreated { graph } => json!({"type": "graph_created", "graph": graph}),
+            ChangeKind::GraphDropped { graph } => json!({"type": "graph_dropped", "graph": graph}),
+            ChangeKind::GraphBatch {
+                graph,
+                revision,
+                operations,
+            } => json!({"type": "graph_batch", "graph": graph, "revision": revision.to_string(),
+                "operations": operations.iter().map(GraphChange::to_json).collect::<Vec<_>>()}),
+            _ => return None,
+        })
+    }
+}

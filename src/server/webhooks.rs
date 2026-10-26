@@ -385,7 +385,7 @@ fn event_json(change: &Change) -> Value {
         ChangeKind::CollectionDropped => json!({"type":"collection_dropped"}),
         ChangeKind::SettingsUpdated { .. } => json!({"type":"settings_updated"}),
         ChangeKind::VectorsUpdated => json!({"type":"vectors_updated"}),
-        other => super::graph::feed_event_json(other).expect("graph feed event"),
+        other => other.graph_json().expect("graph feed event"),
     };
     json!({"sequence":change.sequence.to_string(),"ordinal":change.ordinal,"collection":change.collection,"committed_at_ms":change.committed_at_ms,"change":body})
 }

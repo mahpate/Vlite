@@ -245,7 +245,19 @@ export type Change = ChangeBase & (
   | { kind: "collection_created"; dimensions: number; settings: CollectionSettings }
   | { kind: "settings_updated"; settings: CollectionSettings }
   | { kind: "collection_dropped" | "vectors_updated" }
+  | { kind: "graph_created" | "graph_dropped"; graph: string }
+  | { kind: "graph_batch"; graph: string; revision: string; operations: GraphChangeOperation[] }
 );
+/** One operation of a `graph_batch` event; IDs and records are decimal strings. */
+export type GraphChangeOperation =
+  | { op: "node_upserted"; id: string; key: string; labels: string[]; properties: Metadata; created: boolean }
+  | { op: "node_patched"; id: string; key: string; add_labels: string[]; remove_labels: string[]; set: Metadata; unset: string[] }
+  | { op: "node_deleted"; id: string; key: string }
+  | { op: "edge_upserted"; id: string; key: string | null; source: string; source_key: string; relationship: string; destination: string; destination_key: string; properties: Metadata; created: boolean }
+  | { op: "edge_patched"; id: string; key: string | null; set: Metadata; unset: string[] }
+  | { op: "edge_deleted"; id: string; key: string | null }
+  | { op: "attached" | "detached"; node: string; node_key: string; collection: string; record: string }
+  | { op: "schema_updated"; schema: object };
 export interface ChangeBatch { changes: Change[]; next: string; has_more: boolean; head: string }
 export interface RestoreReport { restored_sequence: string; source_head: string; restored_at_ms: string | null }
 export interface DiskAnnSource { lineage: string; sequence: string; collection_id: number; live_records: number }

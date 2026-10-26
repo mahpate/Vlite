@@ -1133,6 +1133,58 @@ mod tests {
     }
 
     #[test]
+    fn changes_after_reports_graph_events_in_commit_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("feed.vlite");
+        let db = handle(&ok(
+            0,
+            json!({"op": "create", "path": path, "dimensions": 2}),
+        ));
+        ok(db, json!({"op": "create_graph", "graph": "g"}));
+        let batch = ok(
+            db,
+            json!({"op": "batch", "graph": "g", "ops": [
+                {"op": "create_node", "key": "a", "labels": ["Person"]},
+                {"op": "put_vector", "collection": "default", "id": 8, "vector": [0, 1]},
+                {"op": "attach", "node": "a", "collection": "default", "record": "8"}
+            ]}),
+        );
+        let feed = call(
+            db,
+            json!({"op": "features", "request": {"op": "changes_after"}}),
+        );
+        assert_eq!(feed["ok"], true, "{feed}");
+        let changes = feed["result"]["changes"].as_array().unwrap();
+        let kinds: Vec<&str> = changes
+            .iter()
+            .map(|c| c["kind"].as_str().unwrap())
+            .collect();
+        // One commit: the graph ops around the vector put keep log order.
+        assert_eq!(
+            kinds,
+            ["graph_created", "graph_batch", "put", "graph_batch"],
+            "{feed}"
+        );
+        assert_eq!(changes[0]["graph"], "g");
+        assert_eq!(changes[0]["collection"], "");
+        assert_eq!(changes[1]["sequence"], changes[3]["sequence"]);
+        assert_eq!(changes[2]["sequence"], changes[3]["sequence"]);
+        assert_eq!(changes[3]["revision"], batch["revision"]);
+        assert_eq!(
+            changes[1]["operations"],
+            json!([{"op": "node_upserted", "id": "0", "key": "a", "labels": ["Person"],
+                    "properties": {}, "created": true}])
+        );
+        assert_eq!(
+            changes[3]["operations"],
+            json!([{"op": "attached", "node": "0", "node_key": "a", "collection": "default",
+                    "record": "8"}])
+        );
+        assert!(changes[3].get("type").is_none());
+        close(db);
+    }
+
+    #[test]
     fn graph_commands_create_write_read_explain_and_persist() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("graph.vlite");

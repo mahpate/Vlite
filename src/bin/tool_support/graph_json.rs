@@ -1251,77 +1251,12 @@ fn de_optional_u64<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<
 }
 
 pub(crate) fn property_type(value_type: PropertyType) -> &'static str {
-    match value_type {
-        PropertyType::String => "string",
-        PropertyType::Integer => "integer",
-        PropertyType::Float => "float",
-        PropertyType::Boolean => "boolean",
-        PropertyType::GeoPoint => "geopoint",
-    }
-}
-
-fn property_definitions(properties: &BTreeMap<String, PropertyDefinition>) -> Value {
-    properties
-        .iter()
-        .map(|(name, definition)| {
-            let index = definition.index.map(|kind| match kind {
-                PropertyIndexKind::Exact => "exact",
-                PropertyIndexKind::Range => "range",
-            });
-            (
-                name.clone(),
-                json!({
-                    "type": property_type(definition.value_type),
-                    "required": definition.required,
-                    "unique": definition.unique,
-                    "index": index,
-                }),
-            )
-        })
-        .collect::<Map<String, Value>>()
-        .into()
+    value_type.json_name()
 }
 
 /// The declared schema in the `SchemaIn` shape (round-trips).
 pub(crate) fn declared_schema(schema: &GraphSchema) -> Value {
-    let labels: Map<String, Value> = schema
-        .labels
-        .iter()
-        .map(|(name, label)| {
-            (
-                name.clone(),
-                json!({
-                    "description": label.description,
-                    "properties": property_definitions(&label.properties),
-                }),
-            )
-        })
-        .collect();
-    let relationships: Map<String, Value> = schema
-        .relationships
-        .iter()
-        .map(|(name, relationship)| {
-            let endpoints: Value = relationship
-                .endpoints
-                .iter()
-                .map(|(source, destination)| json!({"source": source, "destination": destination}))
-                .collect();
-            let multiplicity = match relationship.multiplicity {
-                Multiplicity::Multi => "multi",
-                Multiplicity::UniqueTriple => "unique_triple",
-            };
-            (
-                name.clone(),
-                json!({
-                    "description": relationship.description,
-                    "endpoints": endpoints,
-                    "multiplicity": multiplicity,
-                    "properties": property_definitions(&relationship.properties),
-                }),
-            )
-        })
-        .collect();
-    json!({"labels": labels, "relationships": relationships})
+    schema.to_json()
 }
 
 fn origin(origin: SchemaOrigin) -> &'static str {

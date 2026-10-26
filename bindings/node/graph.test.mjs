@@ -108,6 +108,24 @@ test("graph create, atomic write, reads, explain and read-only reopen", { skip: 
   await reader.close();
 }));
 
+test("change feed reports graph events in log order", { skip: !GRAPH && "library built without graph" }, async () => fixture(async (native, directory) => {
+  const { db, result } = await populate(native, directory);
+  await db.createGraph("empty");
+  await db.dropGraph("empty");
+  const { changes } = await db.changesAfter();
+  assert.deepEqual(changes.map(change => change.kind),
+    ["graph_created", "put", "graph_batch", "put", "graph_created", "graph_dropped"]);
+  assert.equal(changes[0].graph, "g");
+  assert.equal(changes[0].collection, "");
+  assert.equal(changes[2].revision, result.revision);
+  assert.deepEqual(changes[2].operations.map(op => op.op),
+    ["node_upserted", "node_upserted", "node_upserted", "edge_upserted", "edge_upserted", "attached"]);
+  assert.deepEqual(changes[2].operations[0].properties, person("Ada"));
+  assert.equal(changes[2].sequence, changes[3].sequence);
+  assert.equal(changes[5].graph, "empty");
+  await db.close();
+}));
+
 test("graph error codes, atomic rejection and selector validation", { skip: !GRAPH && "library built without graph" }, async () => fixture(async (native, directory) => {
   const { path, db } = await populate(native, directory);
   await assert.rejects(native.createWithGraph(path, 2), code("io_error"));

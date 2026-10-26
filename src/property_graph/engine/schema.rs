@@ -287,6 +287,94 @@ fn validate_properties(
     Ok(postings)
 }
 
+#[cfg(feature = "json")]
+impl PropertyType {
+    /// The JSON name used by every tool surface (`"string"`, `"geopoint"`, ...).
+    pub fn json_name(self) -> &'static str {
+        match self {
+            PropertyType::String => "string",
+            PropertyType::Integer => "integer",
+            PropertyType::Float => "float",
+            PropertyType::Boolean => "boolean",
+            PropertyType::GeoPoint => "geopoint",
+        }
+    }
+}
+
+#[cfg(feature = "json")]
+fn property_definitions_json(
+    properties: &BTreeMap<String, PropertyDefinition>,
+) -> serde_json::Value {
+    properties
+        .iter()
+        .map(|(name, definition)| {
+            let index = definition.index.map(|kind| match kind {
+                PropertyIndexKind::Exact => "exact",
+                PropertyIndexKind::Range => "range",
+            });
+            (
+                name.clone(),
+                serde_json::json!({
+                    "type": definition.value_type.json_name(),
+                    "required": definition.required,
+                    "unique": definition.unique,
+                    "index": index,
+                }),
+            )
+        })
+        .collect::<serde_json::Map<String, serde_json::Value>>()
+        .into()
+}
+
+#[cfg(feature = "json")]
+impl GraphSchema {
+    /// The declared schema in the `PUT /v1/graphs/{graph}/schema` request
+    /// shape (round-trips through every tool surface).
+    pub fn to_json(&self) -> serde_json::Value {
+        use serde_json::{Map, Value, json};
+        let labels: Map<String, Value> = self
+            .labels
+            .iter()
+            .map(|(name, label)| {
+                (
+                    name.clone(),
+                    json!({
+                        "description": label.description,
+                        "properties": property_definitions_json(&label.properties),
+                    }),
+                )
+            })
+            .collect();
+        let relationships: Map<String, Value> = self
+            .relationships
+            .iter()
+            .map(|(name, relationship)| {
+                let endpoints: Value = relationship
+                    .endpoints
+                    .iter()
+                    .map(|(source, destination)| {
+                        json!({"source": source, "destination": destination})
+                    })
+                    .collect();
+                let multiplicity = match relationship.multiplicity {
+                    Multiplicity::Multi => "multi",
+                    Multiplicity::UniqueTriple => "unique_triple",
+                };
+                (
+                    name.clone(),
+                    json!({
+                        "description": relationship.description,
+                        "endpoints": endpoints,
+                        "multiplicity": multiplicity,
+                        "properties": property_definitions_json(&relationship.properties),
+                    }),
+                )
+            })
+            .collect();
+        json!({"labels": labels, "relationships": relationships})
+    }
+}
+
 impl GraphSchema {
     /// Declares (or replaces) one label.
     #[must_use]

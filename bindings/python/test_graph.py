@@ -174,6 +174,36 @@ class GraphEnabled(GraphBase):
         db.close()
         self.error("invalid_handle", db.list_graphs)
 
+    def test_change_feed_reports_graph_events(self):
+        _, db, result = self.populate()
+        db.create_graph("empty")
+        db.drop_graph("empty")
+        changes = db.changes_after()["changes"]
+        self.assertEqual([change["kind"] for change in changes],
+                         ["graph_created", "put", "graph_batch", "put",
+                          "graph_created", "graph_dropped"])
+        self.assertEqual((changes[0]["graph"], changes[0]["collection"]), ("g", ""))
+        first = changes[2]
+        self.assertEqual(first["graph"], "g")
+        self.assertEqual(first["revision"], result["revision"])
+        self.assertEqual([op["op"] for op in first["operations"]],
+                         ["node_upserted"] * 3 + ["edge_upserted"] * 2 + ["attached"])
+        self.assertEqual(first["operations"][0]["properties"], person("Ada"))
+        self.assertIsNone(first["operations"][4]["key"])
+        self.assertEqual(changes[3]["id"], "8")
+        self.assertEqual(changes[2]["sequence"], changes[3]["sequence"])
+        self.assertEqual(changes[5]["graph"], "empty")
+
+    def test_encrypted_graph_feed_decrypts_with_key(self):
+        path = self.directory / "secret-feed.vlite"
+        key = bytes(range(32))
+        db = self.keep(self.native.create_with_graph(path, 2, key=key))
+        db.create_graph("g")
+        db.graph_write_batch("g", [{"op": "create_node", "key": "a"}])
+        changes = db.changes_after()["changes"]
+        self.assertEqual([change["kind"] for change in changes], ["graph_created", "graph_batch"])
+        self.assertEqual(changes[1]["operations"][0]["key"], "a")
+
     def test_encrypted_graph_file_requires_credentials(self):
         path = self.directory / "secret.vlite"
         key = bytes(range(32))

@@ -766,7 +766,7 @@ fn graph_change_out(change: crate::changes::GraphChange) -> proto::GraphChangeOp
             Op::Detached
         }
         GraphChange::SchemaUpdated { schema } => {
-            out.schema_json = graph::schema_json(&schema).to_string();
+            out.schema_json = schema.to_json().to_string();
             Op::SchemaUpdated
         }
     };
