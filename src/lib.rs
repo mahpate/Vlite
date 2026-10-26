@@ -171,6 +171,121 @@ fn metric_distance(
     }
 }
 
+/// Independent f32 accumulators for the traversal kernels below. Each lane
+/// sums a fixed residue class of dimensions and lanes are reduced in a fixed
+/// tree, with no fused multiply-add, so a scalar, SSE2 or AVX2 compilation
+/// produces bit-identical results.
+const TRAVERSAL_LANES: usize = 16;
+
+fn reduce_lanes(mut lanes: [f32; TRAVERSAL_LANES]) -> f32 {
+    let mut width = TRAVERSAL_LANES / 2;
+    while width > 0 {
+        for lane in 0..width {
+            lanes[lane] += lanes[lane + width];
+        }
+        width /= 2;
+    }
+    lanes[0]
+}
+
+#[inline(always)]
+fn squared_l2_lanes(a: &[f32], b: &[f32]) -> f32 {
+    let length = a.len().min(b.len());
+    let (a_chunks, a_rest) = a[..length].as_chunks::<TRAVERSAL_LANES>();
+    let (b_chunks, b_rest) = b[..length].as_chunks::<TRAVERSAL_LANES>();
+    let mut lanes = [0.0f32; TRAVERSAL_LANES];
+    for (a, b) in a_chunks.iter().zip(b_chunks) {
+        for lane in 0..TRAVERSAL_LANES {
+            let difference = a[lane] - b[lane];
+            lanes[lane] += difference * difference;
+        }
+    }
+    for (lane, (a, b)) in a_rest.iter().zip(b_rest).enumerate() {
+        let difference = a - b;
+        lanes[lane] += difference * difference;
+    }
+    reduce_lanes(lanes)
+}
+
+#[inline(always)]
+fn dot_lanes(a: &[f32], b: &[f32]) -> f32 {
+    let length = a.len().min(b.len());
+    let (a_chunks, a_rest) = a[..length].as_chunks::<TRAVERSAL_LANES>();
+    let (b_chunks, b_rest) = b[..length].as_chunks::<TRAVERSAL_LANES>();
+    let mut lanes = [0.0f32; TRAVERSAL_LANES];
+    for (a, b) in a_chunks.iter().zip(b_chunks) {
+        for lane in 0..TRAVERSAL_LANES {
+            lanes[lane] += a[lane] * b[lane];
+        }
+    }
+    for (lane, (a, b)) in a_rest.iter().zip(b_rest).enumerate() {
+        lanes[lane] += a * b;
+    }
+    reduce_lanes(lanes)
+}
+
+#[cfg(target_arch = "x86_64")]
+mod traversal_avx2 {
+    // Same source as the portable kernels; only the instruction width changes.
+    #[target_feature(enable = "avx2")]
+    pub(super) fn squared_l2(a: &[f32], b: &[f32]) -> f32 {
+        super::squared_l2_lanes(a, b)
+    }
+
+    #[target_feature(enable = "avx2")]
+    pub(super) fn dot(a: &[f32], b: &[f32]) -> f32 {
+        super::dot_lanes(a, b)
+    }
+
+    pub(super) fn available() -> bool {
+        static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *AVAILABLE.get_or_init(|| std::arch::is_x86_feature_detected!("avx2"))
+    }
+}
+
+fn traversal_squared_l2(a: &[f32], b: &[f32]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if traversal_avx2::available() {
+        // SAFETY: AVX2 support was detected at runtime.
+        return unsafe { traversal_avx2::squared_l2(a, b) };
+    }
+    squared_l2_lanes(a, b)
+}
+
+fn traversal_dot(a: &[f32], b: &[f32]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if traversal_avx2::available() {
+        // SAFETY: AVX2 support was detected at runtime.
+        return unsafe { traversal_avx2::dot(a, b) };
+    }
+    dot_lanes(a, b)
+}
+
+/// HNSW traversal and construction distance. Uses f32 lane accumulation,
+/// falling back to the exact `metric_distance` when the f32 sum leaves the
+/// range where it is meaningful (overflow or underflow). Search results are
+/// re-scored with `metric_distance`, so reported distances stay exact.
+fn traversal_distance(
+    a: &[f32],
+    b: &[f32],
+    metric: DistanceMetric,
+    a_norm: f64,
+    b_norm: f64,
+) -> Option<f64> {
+    let fast = match metric {
+        DistanceMetric::SquaredL2 => traversal_squared_l2(a, b),
+        DistanceMetric::Cosine if a_norm != 0.0 && b_norm != 0.0 => traversal_dot(a, b),
+        _ => return metric_distance(a, b, metric, a_norm, b_norm),
+    };
+    if !fast.is_finite() || fast.abs() < 1e-30 {
+        return metric_distance(a, b, metric, a_norm, b_norm);
+    }
+    Some(match metric {
+        DistanceMetric::SquaredL2 => f64::from(fast),
+        _ => 1.0 - (f64::from(fast) / (a_norm * b_norm)).clamp(-1.0, 1.0),
+    })
+}
+
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
@@ -3081,6 +3196,66 @@ mod tests {
     use super::*;
     use std::cell::Cell;
 
+    #[test]
+    fn traversal_kernel_tracks_exact_metric_and_falls_back_outside_f32_range() {
+        let mut state = 7u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 40) as f32 / (1u64 << 23) as f32 - 1.0
+        };
+        for length in (0..70).chain([767, 768, 1536]) {
+            let a: Vec<f32> = (0..length).map(|_| next()).collect();
+            let b: Vec<f32> = (0..length).map(|_| next()).collect();
+            let (a_norm, b_norm) = (vector_norm(&a), vector_norm(&b));
+            #[cfg(target_arch = "x86_64")]
+            if traversal_avx2::available() {
+                // SAFETY: AVX2 support was detected at runtime.
+                let (l2, dot) = unsafe {
+                    (
+                        traversal_avx2::squared_l2(&a, &b),
+                        traversal_avx2::dot(&a, &b),
+                    )
+                };
+                assert_eq!(l2.to_bits(), squared_l2_lanes(&a, &b).to_bits());
+                assert_eq!(dot.to_bits(), dot_lanes(&a, &b).to_bits());
+            }
+            for metric in [
+                DistanceMetric::SquaredL2,
+                DistanceMetric::Cosine,
+                DistanceMetric::InnerProduct,
+            ] {
+                let exact = metric_distance(&a, &b, metric, a_norm, b_norm);
+                let fast = traversal_distance(&a, &b, metric, a_norm, b_norm);
+                match (exact, fast) {
+                    (Some(exact), Some(fast)) => assert!(
+                        (exact - fast).abs() <= 1e-5 * exact.abs().max(1.0),
+                        "{metric:?} length={length}: {exact} vs {fast}"
+                    ),
+                    (exact, fast) => assert_eq!(exact, fast, "{metric:?} length={length}"),
+                }
+            }
+        }
+        for (a, b) in [
+            (vec![1e30f32, -1e30], vec![-1e30f32, 1e30]),
+            (vec![1e-20f32, 3e-20], vec![-2e-20f32, 1e-20]),
+            (vec![0.5f32; 33], vec![0.5f32; 33]),
+        ] {
+            let (a_norm, b_norm) = (vector_norm(&a), vector_norm(&b));
+            for metric in [DistanceMetric::SquaredL2, DistanceMetric::Cosine] {
+                assert_eq!(
+                    traversal_distance(&a, &b, metric, a_norm, b_norm),
+                    metric_distance(&a, &b, metric, a_norm, b_norm),
+                    "{metric:?} {a:?}"
+                );
+            }
+        }
+        assert_eq!(
+            traversal_distance(&[0.0], &[1.0], DistanceMetric::Cosine, 0.0, 1.0),
+            None
+        );
+    }
     #[test]
     fn committed_mutations_keep_graph_until_buffer_overflow_and_failed_inputs_do_not_change_it() {
         let directory = tempfile::tempdir().unwrap();

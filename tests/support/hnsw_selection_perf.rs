@@ -134,27 +134,30 @@ fn selection_matches_original_for_metrics_quantization_ties_and_limits() {
 #[test]
 fn construction_preserves_original_snapshot_bytes() {
     let records = records(3_000, 32, false);
-    // Captured from the original implementation with the same deterministic data.
+    // Pinned construction output for this deterministic data. Recaptured when the
+    // build moved to deterministic batched parallel insertion past 1024 nodes and
+    // the f32 lane-accumulated traversal kernel; the graph is identical for any
+    // rayon thread count.
     for (metric, quantization, expected) in [
         (
             DistanceMetric::SquaredL2,
             Quantization::None,
-            16929988181799570983,
+            9413403464237346147,
         ),
         (
             DistanceMetric::SquaredL2,
             Quantization::ScalarU8,
-            2198838869134152650,
+            5258105327071984384,
         ),
         (
             DistanceMetric::Cosine,
             Quantization::None,
-            8897825992413431978,
+            8502193256284779435,
         ),
         (
             DistanceMetric::Cosine,
             Quantization::ScalarU8,
-            3242429306425500422,
+            9136943033529578609,
         ),
     ] {
         let index = Index::build(

@@ -601,6 +601,14 @@ breaks ties by ID. It can miss neighbors or return fewer than
 `min(k, records)` hits. There is no recall guarantee and no automatic fallback
 to exact search, which remains the correctness baseline.
 
+Traversal and construction compare candidates with a fixed-order 16-lane f32
+kernel (scalar and AVX2 give bit-identical results) that falls back to f64 on
+f32 overflow or underflow; returned distances are re-scored with the exact f64
+distance. After the first 1,024 insertions, construction inserts deterministic
+batches of `min(inserted/8, 256)` nodes planned in parallel on native targets,
+so the graph never depends on thread count; wasm32 runs the same batches
+sequentially.
+
 ```rust
 use vlite::{Database, HnswConfig};
 
