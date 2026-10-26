@@ -243,8 +243,8 @@ resumable, revision-checked re-embedding with an atomic switch of the active
 version. Provider and reranker traits and a read-only query language are Rust
 APIs. See [VECTORS.md](VECTORS.md) for APIs, grammar, limits and examples.
 
-## Property graphs (experimental, source-only)
+## Property graphs (experimental, opt-in)
 
 The non-default `graph` build feature stores named property graphs in
-graph-enabled v5 files that older and non-graph builds refuse. It is in no
-release artifact. See [GRAPH.md](GRAPH.md).
+graph-enabled v5 files that older and non-graph builds refuse. Release
+artifacts include it since v0.5.0; other files stay vector-only. See [GRAPH.md](GRAPH.md).

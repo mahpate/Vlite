@@ -142,14 +142,14 @@ key IDs are non-secret. Passphrases use engine Argon2id defaults and stored KDF
 parameters. Losing keys loses data. In-memory databases are durable only after
 the host saves `to_bytes()` output.
 
-## Property graph (source-only `graph` feature)
+## Property graph (opt-in `graph` feature)
 
 `{"op":"capabilities"}` (any handle, no other fields) returns `{"graph": bool}`.
 Graph commands are carried as `{"op":"graph","request":{"op":..., ...}}` and are
 compiled only with `cargo build -p vlite-ffi --features graph`; the feature is
-not default and packaged/released libraries do not include it. Without it every
-graph request returns `unsupported` (libraries predating this envelope return
-`invalid_input` for the unknown `graph` op). The JSON mirrors the source-only
+not default, but release libraries, wheels and Node release tarballs enable it since
+v0.5.0. Without it every graph request returns `unsupported` (libraries predating this envelope return
+`invalid_input` for the unknown `graph` op). The JSON mirrors the
 `vlite-graph-cli`: node/edge/record IDs, revisions and sequences are decimal
 strings (JSON integers are also accepted on input), unknown fields are rejected,
 and node/edge selectors are `{"id":"…"}` or `{"key":"…"}`.

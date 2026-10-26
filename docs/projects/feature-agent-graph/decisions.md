@@ -663,7 +663,7 @@ graph-requiring binary and that `Dockerfile` and `release.yml` do not name it.
 
 **Contract.** `vlite-graph-cli --db PATH [--writable] [--explain] COMMAND [REQUEST]`,
 one JSON request object per call (`-` for stdin, capped at 64 MiB). The full
-user contract is in [`docs/TOOLS.md`](../../TOOLS.md#graph-operations-experimental-source-only).
+user contract is in [`docs/TOOLS.md`](../../TOOLS.md#graph-operations-experimental).
 
 - Reads (`graphs`, `get-node`, `get-edge`, `find-nodes`, `neighbors`,
   `traverse`, `shortest-path`) use `Database::open_read_only` and
@@ -952,3 +952,28 @@ not cover resource limits beyond `GraphLimits::CEILING`.
   `accountGraphChanges`, `accountGraphFields` and `accountGraphView`. The
   Users & access form uses them (v1.2.21): the graph fields appear only when
   graph support is detected and are never sent for super admins.
+
+## GATE-008 approval and v0.5.0 release (owner decision 2026-10-25)
+
+- **Decision.** The owner approved GATE-008 on 2026-10-25 ("Enable graph in
+  artifacts, prepare v0.5.0, and push the tag to publish"). VLite 0.5.0 ships
+  the experimental, opt-in property graph in distributed artifacts.
+- **Artifacts.** Release and Docker binary builds add `graph,mcp-proxy`. The
+  Docker, release C library, wheel and Node release tarball `vlite-ffi`
+  builds add `--features graph`. The Docker image's API server (`vlite-server`) has graph; `vlite-graph-cli`
+  is not in the image. Release archives add `vlite-mcp`, `vlite-graph-cli`, the
+  graph guides and `src/openapi_graph.json`. REG-013
+  (`tests/graph_build_boundary.py`) asserts these inclusions instead of the
+  former exclusions.
+- **Unchanged.** The Cargo `default` features and the default `vlite-ffi`
+  crate build stay graph-free (CI still checks that default bindings reject
+  graph calls). Graph remains opt-in per file; vector-only files, APIs and
+  defaults behave as before.
+- **DO-005 deferred.** At the owner's direction ("go ahead with publish the
+  release and we can update banchmark at the end") the graph-off baseline
+  refresh happens after the release. The baseline stays `81ff901`, the
+  REG-010 policy is unchanged, and the release claims no new benchmark
+  numbers. This overrides the v1.2.16 precondition that DO-005 precede a
+  GATE-008 request.
+- **Release note.** The ITEM-048 text in `docs/GRAPH.md` ships in
+  `docs/RELEASE-0.5.0.md`.

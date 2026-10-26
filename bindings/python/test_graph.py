@@ -1,4 +1,4 @@
-"""Real-library tests for the opt-in property-graph API (source-only `graph` feature).
+"""Real-library tests for the opt-in property-graph API (opt-in `graph` feature; enabled in release wheels).
 
 Graph tests run against a library built with `--features graph`; rejection tests
 run against the default library. Set VLITE_TEST_EXPECT_GRAPH=1 or 0 to assert which

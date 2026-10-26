@@ -99,7 +99,7 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --locked --workspace --all-targets --all-features
       - run: cargo check --locked --no-default-features --lib
-      - run: cargo build --locked --release --bins --features http-embedder,otel,tools,import-formats,json,mcp,server,grpc,gpu
+      - run: cargo build --locked --release --bins --features http-embedder,otel,tools,import-formats,json,mcp,server,grpc,gpu,graph,mcp-proxy
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
@@ -108,13 +108,15 @@ jobs:
         env:
           VLITE_SERVER_BIN: target/release/vlite-server${{ runner.os == 'Windows' && '.exe' || '' }}
         run: python tests/grpc_smoke.py
-      - run: cargo build --locked --release -p vlite-ffi
+      - run: cargo build --locked --release -p vlite-ffi --features graph
       - run: python tests/embedded_e2e.py target/release/${{ runner.os == 'Windows' && 'vlite_ffi.dll' || runner.os == 'macOS' && 'libvlite_ffi.dylib' || 'libvlite_ffi.so' }}
       - run: python bindings/build_wheel.py --output embedded-wheels
       - run: python tests/embedded_wheel.py embedded-wheels
       - run: npm --prefix bindings/node ci --ignore-scripts
       - run: npm --prefix bindings/node run build
       - run: npm --prefix bindings/node test
+        env:
+          VLITE_TEST_EXPECT_GRAPH: "1"
       - run: npm --prefix bindings/node run typecheck
       - run: node bindings/node/pack.mjs node-packages
       - name: Verify offline installed Node package
@@ -139,13 +141,15 @@ jobs:
               if os.name == "nt":
                   bundle.write("target/release/vlite_ffi.dll.lib", "vlite_ffi.dll.lib")
               for name in ["vlite-server", "vlite-maintain", "vlite-bench", "vlite-smoke",
-                           "vlite-shell", "vlite-import", "vlite-tune", "vlite-quality"]:
+                           "vlite-shell", "vlite-import", "vlite-tune", "vlite-quality",
+                           "vlite-mcp", "vlite-graph-cli"]:
                   bundle.write(pathlib.Path("target/release") / (name + suffix), name + suffix)
               for name in ["README.md", "LICENSE", "Cargo.toml", "Cargo.lock", "src/openapi.json",
                            "compose.yaml", "compose.tls.yaml", "deploy/Caddyfile", "deploy/dashboard.conf", "Dockerfile",
                            "docs/REFERENCE.md", "docs/INSTALL.md", "docs/CONSOLE.md",
                            "docs/CONSOLE-ADMIN.md", "docs/DOCKER-OPERATIONS.md", "docs/CAPABILITIES.md",
-                           "docs/RELEASE-0.3.0.md", "docs/RELEASE-0.2.0.md",
+                           "docs/RELEASE-0.5.0.md", "docs/RELEASE-0.3.0.md", "docs/RELEASE-0.2.0.md",
+                           "docs/GRAPH.md", "docs/GRAPH-QUERY.md", "docs/MCP.md", "src/openapi_graph.json",
                            "docs/API.md", "docs/STORAGE-FEATURES.md", "docs/VECTORS.md",
                            "docs/SECURITY.md", "docs/WEBHOOKS.md", "docs/TOOLS.md",
                            "docs/ANN-SNAPSHOTS.md", "docs/GRPC.md", "proto/vlite/v1/vlite.proto",
@@ -202,7 +206,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --locked --workspace --all-targets --all-features
-      - run: cargo build --locked --release --bins --features http-embedder,otel,tools,import-formats,json,mcp,server,grpc,gpu
+      - run: cargo build --locked --release --bins --features http-embedder,otel,tools,import-formats,json,mcp,server,grpc,gpu,graph,mcp-proxy
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
@@ -221,10 +225,11 @@ jobs:
           archive = output / "vlite-aarch64-unknown-linux-gnu.zip"
           with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
               for name in ["vlite-server", "vlite-maintain", "vlite-bench", "vlite-smoke",
-                           "vlite-shell", "vlite-import", "vlite-tune", "vlite-quality"]:
+                           "vlite-shell", "vlite-import", "vlite-tune", "vlite-quality",
+                           "vlite-mcp", "vlite-graph-cli"]:
                   bundle.write(pathlib.Path("target/release") / name, name)
               for name in ["README.md", "LICENSE", "Cargo.toml", "Cargo.lock", "src/openapi.json",
-                           "proto/vlite/v1/vlite.proto"]:
+                           "src/openapi_graph.json", "proto/vlite/v1/vlite.proto"]:
                   bundle.write(name)
               for path in sorted(pathlib.Path("docs").glob("*.md")):
                   bundle.write(path)

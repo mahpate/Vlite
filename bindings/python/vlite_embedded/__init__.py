@@ -117,7 +117,7 @@ class NativeLibrary:
 
     @property
     def supports_graph(self) -> bool:
-        """Whether the library was built with the source-only ``graph`` feature."""
+        """Whether the library was built with the opt-in ``graph`` feature (enabled in release wheels)."""
         return bool(self.capabilities().get("graph"))
 
     def create_with_graph(self, path: str | os.PathLike[str], dimensions: int, *, format: int | None = None,
@@ -534,7 +534,7 @@ class Database:
     def to_bytes(self) -> bytes:
         return base64.b64decode(self._feature("to_bytes")["bytes_base64"], validate=True)
 
-    # Property graph (source-only ``graph`` feature). Nodes and edges are selected by key
+    # Property graph (opt-in ``graph`` feature (enabled in release wheels)). Nodes and edges are selected by key
     # (str), ID (int or {"id": "decimal"}) or {"key": ...}; IDs and revisions come back as
     # decimal strings. Libraries without the feature raise EmbeddedError("unsupported").
 

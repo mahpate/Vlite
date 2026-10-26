@@ -172,15 +172,16 @@ The direct feature suite defaults to `target/debug` and accepts
 `VLITE_TEST_LIBRARY` to validate an exact alternate/bundled library. It creates
 and cleans its test files below the binding directory.
 
-## Opt-in property graph (source builds only)
+## Opt-in property graph (experimental)
 
-Graph methods need a library built with the non-default `graph` feature; wheels
-and released libraries do not include it. `native.supports_graph` (or
+Graph methods need a library built with the non-default `graph` feature; release
+wheels and libraries include it since v0.5.0. The default `vlite-ffi` source
+build does not. `native.supports_graph` (or
 `native.capabilities()`) reports availability; without it every graph method
 raises `EmbeddedError(code="unsupported")`.
 
 ```python
-native = NativeLibrary("target/graph-ffi/debug/vlite_ffi.dll")
+native = NativeLibrary()  # or the path of a graph source build
 with native.create_with_graph("agent.vlite", 3) as db:   # new V5 graph file
     db.create_graph("memory")
     db.graph_write_batch("memory", [

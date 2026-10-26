@@ -170,6 +170,6 @@ Signed-in accounts' graph access follows their role and the `graphs` and
 
 The query text was added at the repository owner's direction on 2026-10-25.
 That direction skipped the EPIC-014 LLM evaluation (GATE-005 experiments were
-not run). It is experimental and source-only, like the rest of the `graph`
+not run). It is experimental and opt-in, like the rest of the `graph`
 feature. MCP exposes it as the read-only `vlite_graph_query` tool (ITEM-052),
 and REST as `POST /v1/graphs/{graph}/query`.

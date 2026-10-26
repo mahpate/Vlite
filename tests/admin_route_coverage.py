@@ -82,7 +82,7 @@ INVENTORY = {
     ("POST", "/v1/admin/users/{id}/password"): ("admin-tools.js", "user-reset-password"),
 }
 
-# Routes compiled only with the source-only `graph` feature (src/server/graph.rs).
+# Routes compiled only with the opt-in `graph` feature (src/server/graph.rs).
 # graph.js builds its own controls inside <section id="graph"> (the Graph workspace), so the control id is
 # checked in the script that creates it rather than in index.html.
 GRAPH_ONLY = {("GET", "/v1/admin/graph/stats"): ("graph.js", "graph-stats")}

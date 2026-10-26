@@ -92,7 +92,7 @@ export class NativeLibrary {
   createInMemory(dimensions: number, options?: CreateOptions): Promise<Database>;
   /** Optional capabilities compiled into the loaded library; libraries predating the op report `{ graph: false }`. */
   capabilities(): Promise<{ graph: boolean }>;
-  /** Whether the loaded library was built with the source-only `graph` feature. */
+  /** Whether the loaded library was built with the opt-in `graph` feature (enabled in release tarballs). */
   supportsGraph(): Promise<boolean>;
   /**
    * Create a NEW graph-enabled (V5) file without overwrite; never converts an existing file.
@@ -190,7 +190,7 @@ export class Database {
   buildDiskAnn(path: string, options?: Scope & { metric?: "squared_l2" | "cosine" }): Promise<DiskAnnSource>;
   searchDiskAnn(path: string, vector: number[], k: number, options?: { efSearch?: number; cacheBytes?: number }): Promise<Hit[]>;
   toBytes(): Promise<Uint8Array>;
-  /** Property graph (source-only `graph` feature); without it every method rejects with `unsupported`. */
+  /** Property graph (opt-in `graph` feature, enabled in release tarballs); without it every method rejects with `unsupported`. */
   isGraphEnabled(): Promise<boolean>;
   listGraphs(): Promise<GraphInfo[]>;
   createGraph(name: string): Promise<GraphInfo>;

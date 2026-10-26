@@ -20,7 +20,7 @@
 #>
 [CmdletBinding(DefaultParameterSetName = 'Up')]
 param(
-    [ValidatePattern('^[a-zA-Z0-9][a-zA-Z0-9._-]*$')][string]$Version = 'v0.4.1',
+    [ValidatePattern('^[a-zA-Z0-9][a-zA-Z0-9._-]*$')][string]$Version = 'v0.5.0',
     [ValidatePattern('^[a-zA-Z0-9][a-zA-Z0-9._-]*$')]
     [string]$Distro = 'Ubuntu-24.04',
     [ValidatePattern('^/[a-zA-Z0-9/_-]+$')]

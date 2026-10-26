@@ -103,7 +103,7 @@ export class NativeLibrary {
       throw error;
     }
   }
-  /** Whether the loaded library was built with the source-only `graph` feature. */
+  /** Whether the loaded library was built with the opt-in `graph` feature (enabled in release tarballs). */
   async supportsGraph() { return Boolean((await this.capabilities()).graph); }
   /** Create a NEW graph-enabled (V5) file without overwrite; never converts an existing file. */
   async createWithGraph(path, dimensions, { format, key, passphrase, commitTimestamps = false, flushIntervalMs } = {}) {
@@ -346,7 +346,7 @@ export class Database {
   }
   async toBytes() { return Buffer.from((await this.#feature("to_bytes")).bytes_base64, "base64"); }
 
-  // Property graph (source-only `graph` feature). Nodes and edges are selected by key (string),
+  // Property graph (opt-in `graph` feature, enabled in release tarballs). Nodes and edges are selected by key (string),
   // ID (bigint, safe integer or { id: "decimal" }) or { key }; IDs and revisions come back as
   // decimal strings. Libraries without the feature reject with EmbeddedError("unsupported").
   #graph(op, fields = {}) { return graphCall(this.#call("graph", { request: { op, ...fields } })); }

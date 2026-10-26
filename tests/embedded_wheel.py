@@ -81,7 +81,13 @@ with tempfile.TemporaryDirectory() as directory:
         assert db.search_auto([1,0], 1, collection='documents')['hits'][0]['id']=='1'
     with native.open(advanced) as db:
         assert db.get('1', collection='documents')['vector']==[1,0]
-print('PASS installed native wheel: automatic loading, legacy and v4 collections, CRUD, search and reopen')
+    # Release wheels ship the opt-in graph commands (GATE-008, v0.5.0).
+    assert native.capabilities() == {'graph': True}
+    with native.create_with_graph(Path(directory) / 'graph.vlite', 2) as db:
+        assert db.is_graph_enabled()
+        assert db.create_graph('g') == {'name': 'g', 'node_count': 0, 'edge_count': 0}
+        assert db.list_graphs()[0]['name'] == 'g'
+print('PASS installed native wheel: automatic loading, legacy and v4 collections, graph, CRUD, search and reopen')
 """
         # -I excludes PYTHONPATH and cwd imports. No server or external DLL path.
         subprocess.run([str(python), "-I", "-c", code], cwd=directory, check=True, timeout=60)

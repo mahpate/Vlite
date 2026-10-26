@@ -59,7 +59,7 @@ def check(root):
                 "search-quality-and-configurationdatabase-comparison",
                 "index-tuning-advisor",
                 "mcp-server-and-agent-skills",
-                "graph-operations-experimental-source-only",
+                "graph-operations-experimental",
                 "tests",
             ]
             if page.headings != expected:
@@ -91,7 +91,7 @@ def check(root):
             ):
                 if f"docs/{guide}.html" not in page.links:
                     errors.append(f"features.html: missing feature reference {guide}")
-            if "Experimental source capabilities" not in " ".join(page.text):
+            if "Experimental capabilities" not in " ".join(page.text):
                 errors.append("features.html: separate experimental graph capabilities")
         if path == root / "index.html":
             for guide in ("docs/MCP.html", "docs/AGENT-SKILLS.html"):

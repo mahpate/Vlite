@@ -9,7 +9,7 @@ Work directly with database files, without a REST or gRPC server.
 - [Search quality](#search-quality-and-configurationdatabase-comparison): measure recall and compare databases or index configurations.
 - [Index tuning](#index-tuning-advisor): find HNSW parameters for a target recall.
 - [MCP and agent skills](#mcp-server-and-agent-skills): connect an agent to a database through a separate stdio server.
-- [Graph operations](#graph-operations-experimental-source-only): typed reads and atomic writes on graph-enabled files (experimental, source builds only).
+- [Graph operations](#graph-operations-experimental): typed reads and atomic writes on graph-enabled files (experimental).
 
 **Stop the server first.** The shell, import and tuning tools take an exclusive
 file lock, even with the shell's `--read-only` guard. MCP opens a shared-lock
@@ -191,12 +191,14 @@ These have their own guides:
 MCP opens the database file directly, not through REST. Installing a skill
 does not start the server or grant write access.
 
-## Graph operations (experimental, source-only)
+## Graph operations (experimental)
 
 `vlite-graph-cli` runs one typed property-graph operation per invocation on a
 [graph-enabled file](STORAGE-FEATURES.md#graph-enabled-files-experimental-graph-feature).
-It needs the non-default `graph` and `json` features, so it is **not** in
-release archives, the Docker image or packages. Build it from a checkout:
+It needs the non-default `graph` and `json` features. Release archives ship it
+since v0.5.0. The Docker image's API server (`vlite-server`) has graph;
+`vlite-graph-cli` is not in the image, and packages do not include the CLI.
+To build it from a checkout:
 
 ```powershell
 cargo build --locked --features graph,json --bin vlite-graph-cli

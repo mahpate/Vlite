@@ -1,4 +1,4 @@
-//! Typed graph JSON shared by the source-only graph tools (`vlite-graph-cli`
+//! Typed graph JSON shared by the opt-in graph tools (`vlite-graph-cli`
 //! and the `graph` tools of `vlite-mcp`): request parsing (every object
 //! rejects unknown fields) and output encoding. Node, edge and record IDs,
 //! revisions and sequences are decimal strings on output and accepted as

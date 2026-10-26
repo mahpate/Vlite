@@ -1,4 +1,4 @@
-//! ITEM-043 (feature-agent-graph EPIC-009/011; `mcp-proxy`, source-only):
+//! ITEM-043 (feature-agent-graph EPIC-009/011; `mcp-proxy`, opt-in):
 //! `vlite-mcp --server URL [--token-env VAR]` forwards the graph tools to a
 //! served `vlite-server` without opening any file.
 //!

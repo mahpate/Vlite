@@ -24,7 +24,7 @@ Related references:
 - [Vector extensions](VECTORS.md): named and sparse vectors, model versions,
   providers and rerankers.
 - [MCP server](MCP.md) and [agent skills](AGENT-SKILLS.md) for AI agents.
-- [Upgrade notes](RELEASE-0.4.1.md) for the current release.
+- [Upgrade notes](RELEASE-0.5.0.md) for the current release.
 
 Sections below describe legacy and default files unless marked otherwise.
 

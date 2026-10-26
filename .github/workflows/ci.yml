@@ -57,7 +57,7 @@ jobs:
         run: python bindings/python/test_graph.py
         env:
           VLITE_TEST_EXPECT_GRAPH: "0"
-      - name: Source-only vlite-ffi graph commands (ITEM-045)
+      - name: Opt-in vlite-ffi graph commands, as shipped in release libraries (ITEM-045)
         run: cargo test --locked -p vlite-ffi --features graph --target-dir target/graph-ffi
       - run: python benchmarks/embedded.py --library target/debug/${{ runner.os == 'Windows' && 'vlite_ffi.dll' || runner.os == 'macOS' && 'libvlite_ffi.dylib' || 'libvlite_ffi.so' }} --records 12 --dimensions 3 --trials 1 --read-passes 2 --output embedded-smoke.json
       - run: python tests/benchmark_comparison.py
@@ -156,15 +156,15 @@ jobs:
       - run: npm --prefix bindings/node run build
       - run: npm --prefix bindings/node test
         env:
-          VLITE_TEST_EXPECT_GRAPH: "0"
-      - name: Source-only Node graph methods against a graph-enabled vlite-ffi (ITEM-047)
+          VLITE_TEST_EXPECT_GRAPH: "1"
+      - name: Default vlite-ffi rejects Node graph methods as unsupported (ITEM-047)
         working-directory: bindings/node
         run: |
-          cargo build --locked --release -p vlite-ffi --features graph --target-dir ../../target/node-graph
+          cargo build --locked --release -p vlite-ffi --target-dir ../../target/node-default
           node --test graph.test.mjs
         env:
-          VLITE_TEST_EXPECT_GRAPH: "1"
-          VLITE_TEST_LIBRARY: ${{ github.workspace }}/target/node-graph/release/${{ runner.os == 'Windows' && 'vlite_ffi.dll' || runner.os == 'macOS' && 'libvlite_ffi.dylib' || 'libvlite_ffi.so' }}
+          VLITE_TEST_EXPECT_GRAPH: "0"
+          VLITE_TEST_LIBRARY: ${{ github.workspace }}/target/node-default/release/${{ runner.os == 'Windows' && 'vlite_ffi.dll' || runner.os == 'macOS' && 'libvlite_ffi.dylib' || 'libvlite_ffi.so' }}
       - run: npm --prefix bindings/node run typecheck
       - run: node bindings/node/pack.mjs node-packages
       - name: Verify offline installed Node package

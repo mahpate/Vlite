@@ -1,6 +1,6 @@
 [package]
 name = "vlite"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.89"
 description = "A single-file vector database with embedded bindings and an optional REST service"
@@ -30,11 +30,11 @@ grpc = [
     "dep:protox",
 ]
 gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
-# Property-graph storage (EPIC-003, unreleased): never in `default` or in the
-# pinned artifact feature lists until the release gate approves it.
+# Property-graph storage (EPIC-003, experimental): never in `default`. GATE-008
+# (approved for v0.5.0) adds it to the pinned release artifact feature lists.
 graph = []
 # ITEM-043: `vlite-mcp --server URL` forwards the graph tools to a running
-# vlite-server (unreleased, source-only like `graph`, which it implies).
+# vlite-server (experimental; implies `graph`; in release artifacts since v0.5.0).
 mcp-proxy = ["mcp", "graph", "dep:reqwest"]
 
 [dependencies]
@@ -128,7 +128,7 @@ required-features = ["mcp"]
 name = "graph_surface_parity"
 required-features = ["server", "mcp"]
 
-# EPIC-009: source-only MCP graph tools and deterministic agent task fixtures.
+# EPIC-009: opt-in MCP graph tools and deterministic agent task fixtures.
 [[test]]
 name = "graph_mcp"
 required-features = ["mcp", "graph"]
@@ -138,8 +138,8 @@ required-features = ["mcp", "graph"]
 name = "graph_mcp_proxy"
 required-features = ["mcp-proxy", "server"]
 
-# FOLLOWUP-001: source-only graph command line. `graph` keeps it out of every
-# distributed artifact (their pinned feature lists exclude `graph`).
+# FOLLOWUP-001: graph command line. Release archives ship it since v0.5.0
+# because their pinned feature lists include `graph` (GATE-008).
 [[bin]]
 name = "vlite-graph-cli"
 required-features = ["graph", "json"]

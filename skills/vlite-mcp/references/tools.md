@@ -18,7 +18,7 @@ schemas are deliberately not duplicated; they need not match REST/embedded APIs.
 - `vlite_build_index`: explicitly build when available/authorized; it may be
   expensive even when changing only in-memory state.
 
-### Experimental graph tools (source-only `graph` builds)
+### Experimental graph tools (`graph` builds)
 
 Advertised only by builds with the `graph` feature, and only for graph-enabled
 files. See `docs/MCP.md` for arguments, limits and error codes.
@@ -68,7 +68,7 @@ retrieval-only configuration. Keep stdout reserved for protocol messages.
 ## Failure handling
 
 - Missing tool: rediscover; check version/mode, embedder configuration and,
-  for graph tools, a `graph` source build and a graph-enabled file.
+  for graph tools, a `graph` build (v0.5.0+ release) and a graph-enabled file.
 - Locked: close legitimate owners or use an authorized closed backup. Do not
   bypass locks or kill unrelated processes.
 - Dimensions/model mismatch: use the correct embedding model/collection, never

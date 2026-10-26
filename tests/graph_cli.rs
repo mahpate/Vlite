@@ -1,4 +1,4 @@
-//! FOLLOWUP-001: the source-only `vlite-graph-cli` binary (`graph` + `json`).
+//! FOLLOWUP-001: the opt-in `vlite-graph-cli` binary (`graph` + `json`).
 //!
 //! Every test drives the real binary over real files and checks the
 //! machine-readable contract: one JSON object on stdout for success, one

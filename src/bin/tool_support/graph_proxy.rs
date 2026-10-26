@@ -1,5 +1,5 @@
 //! ITEM-043: `vlite-mcp --server URL` proxy mode (`mcp-proxy` feature,
-//! source-only; it implies `graph`).
+//! opt-in; it implies `graph`; enabled in release builds since v0.5.0).
 //!
 //! The proxy never opens a database file. It lists the same graph tools as a
 //! local graph-enabled session and forwards each call to the matching REST

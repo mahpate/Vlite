@@ -13,8 +13,8 @@ COPY crates ./crates
 # same suite has already passed natively on each published architecture.
 ARG VLITE_IMAGE_TESTS=1
 RUN if [ "$VLITE_IMAGE_TESTS" = "1" ]; then cargo test --locked --workspace --all-targets --all-features; fi \
-    && cargo build --locked --release --bins --features http-embedder,otel,tools,import-formats,json,mcp,server,grpc,gpu \
-    && cargo build --locked --release -p vlite-ffi
+    && cargo build --locked --release --bins --features http-embedder,otel,tools,import-formats,json,mcp,server,grpc,gpu,graph,mcp-proxy \
+    && cargo build --locked --release -p vlite-ffi --features graph
 
 FROM build AS test
 CMD ["cargo", "test", "--locked", "--workspace", "--all-targets", "--all-features"]

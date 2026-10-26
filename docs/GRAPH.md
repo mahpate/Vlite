@@ -1,21 +1,26 @@
-# Property graphs (experimental, source-only)
+# Property graphs (experimental, opt-in)
 
 VLite can store named property graphs (nodes, typed edges and attachments to
 vector records) in the same file and commit log as vectors. Graph support is
-the non-default `graph` Cargo feature. It is **not** in release binaries,
-Docker images, wheels or npm packages.
+the non-default `graph` Cargo feature. Since v0.5.0 the release binaries,
+C library, wheels and Node release tarballs are built with it (`vlite-mcp` also
+with `mcp-proxy`). The Docker image's API server (`vlite-server`) has graph;
+`vlite-graph-cli` is not in the image. It stays opt-in per file: graphs exist
+only in files created with `create_with_graph` or `vlite-graph-cli init`, or copied with
+`vlite-maintain enable-graph`; other files behave as vector-only files.
 
-## Build
+## Get it
 
-| Surface | Build from a source checkout |
-|---------|------------------------------|
-| Rust | `vlite` with `features = ["graph"]` |
-| CLI | `cargo install --locked --path . --features graph,json --bin vlite-graph-cli` |
-| MCP | `cargo install --locked --path . --features "mcp graph" --bin vlite-mcp` |
-| REST | `cargo build --locked --release --features server,graph --bin vlite-server` |
-| C, Python, Node | `cargo build --locked --release -p vlite-ffi --features graph` |
+| Surface | Release artifact | Source checkout |
+|---------|------------------|-----------------|
+| Rust | — | `vlite` with `features = ["graph"]` |
+| CLI | `vlite-graph-cli` in the release archive | `cargo install --locked --path . --features graph,json --bin vlite-graph-cli` |
+| MCP | `vlite-mcp` in the release archive | `cargo install --locked --path . --features "mcp graph mcp-proxy" --bin vlite-mcp` |
+| REST | `vlite-server` in the archive and Docker image (`vlite-graph-cli` is not in the image) | `cargo build --locked --release --features server,graph --bin vlite-server` |
+| C, Python, Node | release C library, wheels, Node release tarballs | `cargo build --locked --release -p vlite-ffi --features graph` |
 
-Builds without the feature have no graph code, routes, tools or OpenAPI entries.
+Builds without the feature (the Cargo default, the default `vlite-ffi` crate)
+have no graph code, routes, tools or OpenAPI entries.
 
 ## Compatibility and rollback
 
@@ -84,8 +89,8 @@ shortest-path search reports `exhausted`, never an uncertified "no path".
 | Surface | What it offers |
 |---------|----------------|
 | Rust | `create_with_graph`, `create_graph`/`drop_graph`/`list_graphs`, `graph_mut(name)`, `graph(name)`, `explain`, `query_text`, `retrieve` |
-| CLI | `vlite-graph-cli`; see [graph operations](TOOLS.md#graph-operations-experimental-source-only) |
-| MCP | `vlite_graph_*` tools, on a file or through a server with `--server URL` (`mcp-proxy` feature); see [MCP](MCP.md#property-graph-tools-experimental-source-only) |
+| CLI | `vlite-graph-cli`; see [graph operations](TOOLS.md#graph-operations-experimental) |
+| MCP | `vlite_graph_*` tools, on a file or through a server with `--server URL` (`mcp-proxy` feature); see [MCP](MCP.md#property-graph-tools-experimental) |
 | REST | `/v1/graphs` routes: list, create, drop, gets, find, neighbors, traverse, shortest path, explain, schema, retrieve, query, batch |
 | C ABI | `{"op":"capabilities"}` and `{"op":"graph","request":{...}}` |
 | Python | `supports_graph()`, `create_with_graph()`, `graph_*` methods |
@@ -135,7 +140,7 @@ Node yet.
 - gRPC has no graph service.
 - `vlite-graph-cli` does not open encrypted files (the library does).
 
-## Release note text for GATE-008 (draft, not approved)
+## Release note text for GATE-008 (approved for v0.5.0)
 
 > **Experimental property graphs (opt-in).** VLite can store named property
 > graphs alongside vectors in one file, with atomic mixed graph/vector writes,
@@ -145,4 +150,6 @@ Node yet.
 > by builds without graph support. Roll back with `vlite-maintain strip-graph
 > --confirm-graph-data-loss`. Change feeds and gRPC do not support graph files.
 
-This draft does not describe a shipped release.
+The owner approved this text and graph artifacts on 2026-10-25; it ships in
+[v0.5.0](RELEASE-0.5.0.md). The graph-off performance baseline refresh
+(DO-005) is deferred until after the release.

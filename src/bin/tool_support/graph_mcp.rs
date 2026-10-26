@@ -1,4 +1,4 @@
-//! Property-graph tools of `vlite-mcp` (EPIC-009; `graph` feature, source-only).
+//! Property-graph tools of `vlite-mcp` (EPIC-009; opt-in `graph` feature).
 //!
 //! Listed and callable only when the opened file is graph-enabled; on
 //! vector-only files `tools/list`, `vlite_info` and calls behave exactly as in

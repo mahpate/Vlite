@@ -1,7 +1,7 @@
 //! Opt-in property-graph operations (`graph` feature) carried by the existing
 //! owned JSON ABI as `{"op":"graph","request":{"op":...}}`.
 //!
-//! The request and response JSON mirror the source-only `vlite-graph-cli`:
+//! The request and response JSON mirror the opt-in `vlite-graph-cli`:
 //! node/edge/record IDs, revisions and sequences are decimal strings (also
 //! accepted as JSON integers), unknown fields are rejected, and graph error
 //! codes reuse the REST/gRPC names.

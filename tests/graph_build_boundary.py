@@ -1,4 +1,4 @@
-"""Keep the internal vlite-graph foundation isolated from VLite and shipped artifacts."""
+"""Keep the internal vlite-graph crate isolated and pin graph into shipped artifacts (GATE-008)."""
 from pathlib import Path
 import re
 import subprocess
@@ -11,10 +11,16 @@ CRATE = ROOT / "crates" / "vlite-graph"
 # the workspace-only crate compiles the same files through one `#[path]` module.
 ENGINE = ROOT / "src" / "property_graph" / "engine"
 HARNESS = '#[path = "../../../src/property_graph/engine/mod.rs"]'
-# Features withheld from distributed artifacts until a release gate approves them.
-UNSHIPPED_FEATURES = {"graph", "mcp-proxy"}
+# GATE-008 (approved by the owner on 2026-10-25 for v0.5.0): distributed
+# artifacts must include these opt-in features; `default` must not.
+SHIPPED_GRAPH_FEATURES = {"graph", "mcp-proxy"}
 # Artifact-producing `cargo build --release --bins` commands in each file.
 ARTIFACT_BUILDS = {"Dockerfile": 1, ".github/workflows/release.yml": 2}
+# Artifact-producing vlite-ffi builds (C library, wheels, Node packages) per file.
+FFI_BUILDS = {"Dockerfile": 1, ".github/workflows/release.yml": 1,
+              "bindings/build_wheel.py": 1, "bindings/node/build.mjs": 1}
+# Release archive recipes that must list the graph-capable command lines.
+GRAPH_BINARIES = ["vlite-graph-cli", "vlite-mcp"]
 
 
 def load_toml(path):
@@ -54,7 +60,7 @@ class GraphBuildBoundary(unittest.TestCase):
         self.assertEqual(root["features"]["graph"], [])
         self.assertNotIn("graph", root["features"]["default"])
         # `mcp-proxy` (ITEM-043) layers the graph tools over a remote server;
-        # it is never on by default and stays out of artifact pins above.
+        # it is never on by default but is pinned into artifacts (GATE-008).
         self.assertIn("graph", root["features"]["mcp-proxy"])
         self.assertNotIn("mcp-proxy", root["features"]["default"])
         for features in ((), ("--all-features",)):
@@ -99,7 +105,10 @@ class GraphBuildBoundary(unittest.TestCase):
 
     def test_artifact_builds_pin_shipped_features(self):
         features = load_toml(ROOT / "Cargo.toml")["features"]
-        expected = sorted(set(features) - {"default"} - UNSHIPPED_FEATURES)
+        self.assertTrue(SHIPPED_GRAPH_FEATURES <= set(features))
+        # Every non-default feature, including graph and mcp-proxy, is pinned.
+        expected = sorted(set(features) - {"default"})
+        self.assertTrue(SHIPPED_GRAPH_FEATURES <= set(expected))
         for name, count in ARTIFACT_BUILDS.items():
             builds = [line for line in (ROOT / name).read_text(encoding="utf-8").splitlines()
                       if "cargo build" in line and "--release" in line]
@@ -111,17 +120,40 @@ class GraphBuildBoundary(unittest.TestCase):
                     self.assertIsNotNone(match)
                     self.assertEqual(sorted(match.group(1).split(",")), expected)
 
-    def test_graph_binaries_stay_source_only(self):
-        # FOLLOWUP-001: graph command-line binaries require `graph`, so the
-        # pinned artifact builds above never compile them, and no artifact
-        # recipe copies or lists them.
+    def test_ffi_artifact_builds_enable_graph(self):
+        ffi = load_toml(ROOT / "bindings" / "c" / "Cargo.toml")["features"]
+        self.assertEqual(ffi["graph"], ["vlite/graph"])
+        # The crate default stays graph-free; only artifact recipes opt in.
+        self.assertNotIn("graph", ffi.get("default", []))
+        for name, count in FFI_BUILDS.items():
+            text = (ROOT / name).read_text(encoding="utf-8")
+            with self.subTest(file=name):
+                if name.endswith((".py", ".mjs")):
+                    builds = re.findall(r'"build", "--locked", "--release", "-p", "vlite-ffi", ([^\]]*)', text)
+                    self.assertEqual(len(builds), count)
+                    for rest in builds:
+                        self.assertIn('"--features", "graph"', rest)
+                else:
+                    builds = [line for line in text.splitlines()
+                              if "cargo build" in line and "--release" in line and "-p vlite-ffi" in line]
+                    self.assertEqual(len(builds), count)
+                    for line in builds:
+                        self.assertRegex(line, r"-p vlite-ffi --features graph\b")
+
+    def test_release_archives_ship_graph_binaries(self):
+        # FOLLOWUP-001/ITEM-043: the graph command line and the MCP server
+        # (with graph tools and `--server` proxy mode) ship in every release
+        # archive, built by the pinned `--bins` commands above.
         bins = load_toml(ROOT / "Cargo.toml")["bin"]
         graph_bins = [entry["name"] for entry in bins if "graph" in entry.get("required-features", [])]
         self.assertEqual(graph_bins, ["vlite-graph-cli"])
-        for name in graph_bins:
-            for recipe in ARTIFACT_BUILDS:
-                with self.subTest(binary=name, file=recipe):
-                    self.assertNotIn(name, (ROOT / recipe).read_text(encoding="utf-8"))
+        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        archives = re.findall(r'for name in \["vlite-server",[^\]]*\]', release)
+        self.assertEqual(len(archives), ARTIFACT_BUILDS[".github/workflows/release.yml"])
+        for archive in archives:
+            for name in GRAPH_BINARIES:
+                with self.subTest(binary=name):
+                    self.assertIn(f'"{name}"', archive)
 
 
 if __name__ == "__main__":

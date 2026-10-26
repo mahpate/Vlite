@@ -148,16 +148,16 @@ JSON-RPC 2.0, including the MCP lifecycle, `ping` and tool discovery/calls.
 Protocol messages alone are written to stdout; diagnostics are written to stderr.
 Tool failures return `isError: true` with a clear message; malformed JSON and protocol errors use JSON-RPC errors. `vlite_search` returns IDs and distances, not vectors. `vlite_get` and `vlite_list` omit vectors unless explicitly requested by `vlite_get`.
 
-## Property graph tools (experimental, source-only)
+## Property graph tools (experimental)
 
-> **Experimental.** Graph tools exist only in builds from source with the
-> `graph` feature. Released binaries, Docker images and packages do not include
-> them, and names, arguments and outputs may change before a graph release.
+> **Experimental.** Since v0.5.0 the released `vlite-mcp` is built with the
+> `graph` and `mcp-proxy` features. Names, arguments and outputs may still
+> change in later releases.
 
-Build with:
+To build the same tools from source:
 
 ```sh
-cargo install --locked --path . --features "mcp graph" --bin vlite-mcp
+cargo install --locked --path . --features "mcp graph mcp-proxy" --bin vlite-mcp
 ```
 
 The graph tools are listed and callable only when the opened file is
@@ -225,7 +225,7 @@ Write tools (listed only with `--writable`):
   (`precondition_failed`). Reusing an edge `key` for a different edge fails
   `graph_key_conflict`.
 
-Outputs are compact JSON matching the source-only `vlite-graph-cli`: u64 IDs,
+Outputs are compact JSON matching `vlite-graph-cli`: u64 IDs,
 revisions and cursors are strings, vectors are never returned, and every read
 reports `complete`, `truncation`, `stats` and `cursor`. Treat a result with
 `complete: false` as partial. Failures return `isError: true` with
@@ -234,7 +234,7 @@ reports `complete`, `truncation`, `stats` and `cursor`. Treat a result with
 A read-only instance sees the graph as of the moment it opened the file; a
 writable instance holds the file's exclusive lock like any other writer.
 
-### Server proxy mode (source-only `mcp-proxy` builds)
+### Server proxy mode (`mcp-proxy` builds, including releases)
 
 ```sh
 cargo install --locked --path . --features mcp-proxy --bin vlite-mcp

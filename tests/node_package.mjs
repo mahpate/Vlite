@@ -51,7 +51,11 @@ import assert from "node:assert/strict";
 import { NativeLibrary } from "@vlite/embedded";
 const native = new NativeLibrary();
 try {
-  assert.deepEqual(await native.capabilities(), {graph:false});
+  // Release packages ship the opt-in graph commands (GATE-008, v0.5.0).
+  assert.deepEqual(await native.capabilities(), {graph:true});
+  const graphDb = await native.createWithGraph("graph.vlite", 2);
+  assert.deepEqual(await graphDb.createGraph("g"), {name:"g",node_count:0,edge_count:0});
+  await graphDb.close();
   const db = await native.create("installed.vlite", 2);
   await db.put("18446744073709551615", [1,0], {payload: Buffer.from([0,255])});
   assert.equal((await db.get("18446744073709551615")).payload_base64,"AP8=");

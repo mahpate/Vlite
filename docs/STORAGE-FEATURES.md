@@ -173,7 +173,7 @@ natively.
 
 ## Graph-enabled files (experimental, `graph` feature)
 
-The non-default Cargo feature `graph` (not in release artifacts) stores named
+The non-default Cargo feature `graph` (in release artifacts since v0.5.0) stores named
 property graphs in the same log as vectors. `Database::create_with_graph`
 creates a v5 file with header flag `FLAG_GRAPH = 4`;
 `maintenance::enable_graph` writes a graph-enabled copy of a v4 or v5 file.
@@ -222,7 +222,7 @@ sequences, checksums, encryption and commit timestamps work as usual.
   retrieval, query text and the server, MCP and SDK surfaces are in the
   [property graph guide](GRAPH.md).
 - **CLI.** `vlite-graph-cli` runs these reads and write batches with JSON; see
-  [Graph operations](TOOLS.md#graph-operations-experimental-source-only).
+  [Graph operations](TOOLS.md#graph-operations-experimental).
 
 ## Periodic (lazy) durability
 

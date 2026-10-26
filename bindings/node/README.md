@@ -298,16 +298,17 @@ the default uses the package's platform prebuild.
 
 `npm run typecheck` also checks compile-time examples of every new method.
 
-## Opt-in property graph (source builds only)
+## Opt-in property graph (experimental)
 
 Graph methods need a native library built with the non-default `graph` feature;
-npm packages and released libraries do not include it. `native.capabilities()`
+release tarballs and libraries include it since v0.5.0. The default
+`vlite-ffi` source build does not. `native.capabilities()`
 returns `{graph}` and `native.supportsGraph()` a boolean; against a library
 without graph every graph method rejects with `EmbeddedError` code
 `unsupported`. See [docs/GRAPH.md](../../docs/GRAPH.md).
 
 ```js
-const native = new NativeLibrary({ libraryPath: "target/graph-ffi/release/vlite_ffi.dll" });
+const native = new NativeLibrary(); // or { libraryPath } for a graph source build
 const db = await native.createWithGraph("agent.vlite", 3); // new V5 graph file
 await db.createGraph("memory");
 await db.graphWriteBatch("memory", [
