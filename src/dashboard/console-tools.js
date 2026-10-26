@@ -93,7 +93,7 @@
   }
   // ---- studio ux: bounded document previews and SDK examples ----
   function jsonDocuments(source, dimensions) {
-    if (!Number.isInteger(dimensions) || dimensions < 1) throw new Error("Connect to discover collection dimensions before validating");
+    if (!Number.isInteger(dimensions) || dimensions < 1) throw new Error("Sign in to discover collection dimensions before validating");
     if (typeof source !== "string" || new TextEncoder().encode(source).length > 4 * 1024 * 1024) throw new Error("JSON documents exceed 4 MiB");
     const values = JSON.parse(source);
     if (!Array.isArray(values) || !values.length || values.length > 10000) throw new Error("Paste an array of 1..10000 documents");
@@ -798,9 +798,9 @@
       catch { throw new Error("Clipboard unavailable. Select and copy the generated code manually."); }
     });
     const steps = [
-      ["database", "Connect", "Enter your bearer token and connect. Tokens stay only in page memory."],
-      ["new-collection-name", "Choose a collection", "Select a collection, or create an empty one with its dimensions, metric and indexes; review before creating."],
-      ["write-json", "Write JSON", "Paste documents, validate dimensions and IDs, inspect the preview, then confirm batches. This tour never writes data."],
+      ["database", "Start here", "The overview shows your database at a glance, with shortcuts to common tasks. Use the sidebar to switch between Data, Server and Tools."],
+      ["new-collection-name", "Choose a collection", "Pick the active collection in the sidebar, or create an empty one with its dimensions, metric and indexes. You review it before anything is created."],
+      ["write-json", "Add records", "Paste JSON documents, check dimensions and IDs, review the preview, then confirm each batch. The tour never writes data."],
       ["search", "Search", "Paste a query vector and choose Top K. Start with exact search; use hybrid text retrieval only with configured text fields."],
       ["observability", "Observe", "Inspect health, queue pressure and latency. Observability values are live diagnostics, not a production monitoring service."],
     ];
@@ -810,7 +810,7 @@
       $("studio-tour").hidden = false;
       if (step < 0) {
         text("tour-title", "Your first VLite workflow");
-        text("tour-description", "Connect → collections → write → search → observability. A five-step orientation; no requests or writes are made by the tour.");
+        text("tour-description", "Overview → collections → add records → search → observability. Five quick steps; the tour sends no requests and writes nothing.");
         text("tour-next", "Show me"); return;
       }
       const [target, title, description] = steps[step];
@@ -971,7 +971,7 @@
       text("import-result", `${items.length}/${items.length} operations committed to collection ${owner}. Refresh the browse page.`);
     }
     function validatePreview(items) {
-      if (ctx.dimensions() === null) throw new Error("Connect before validating records");
+      if (ctx.dimensions() === null) throw new Error("Sign in before validating records");
       if (!Array.isArray(items) || !items.length || items.length > 100) throw new Error("Import requires 1..100 records");
       const result = items.map((item) => record(item, ctx.dimensions()));
       if (new Set(result.map((item) => item.id)).size !== result.length) throw new Error("Duplicate IDs in import");
@@ -982,7 +982,7 @@
       preview = [];
       text("import-result", "Preparing demo preview");
       const size = ctx.dimensions();
-      if (!size || size > 4096) throw new Error("Connect to a database with 1..4096 dimensions for the demo");
+      if (!size || size > 4096) throw new Error("The demo needs a collection with 1..4096 dimensions. Sign in and select one first.");
       preview = validatePreview([1, 2, 3].map((n) => ({ id: String(n), vector: Array.from({ length: size }, (_, j) => j === 0 ? n / 3 : j === 1 ? 1 - n / 3 : 0), metadata: { category: { type: "string", value: "demo" } } })));
       previewCollection = ctx.collection();
       text("import-result", { instructions: "Preview only. Commit replaces IDs 1,2,3 after confirmation; then browse and Find similar to saved ID.", collection: previewCollection, records: preview });
@@ -1212,11 +1212,11 @@
     });
     on("token-reload", async () => {
       admin("tokens_reload");
-      if (!await ctx.confirm("Reload only configured secret files? Invalid files leave credentials unchanged. If the admin token changes, reconnect using the new token.")) return;
+      if (!await ctx.confirm("Reload only configured secret files? Invalid files leave credentials unchanged. You are signed out afterwards; sign in again, with the new token if it changed.")) return;
       const result = await ctx.api("POST", "/v1/admin/tokens/reload", {});
       ctx.disconnect();
       text("token-result", result);
-      ctx.status("Configured credentials reloaded. Reconnect with the current admin/read-only token.");
+      ctx.status("Configured credentials reloaded. Sign in again with a current token.");
     });
     on("token-revoke", async () => {
       admin();
@@ -1652,7 +1652,7 @@
         $("batch-metadata").value = "{}"; $("collection-settings").value = "{}"; $("new-collection-settings").value = "{}";
         for (const name of ["collections-table", "index-memory-table", "slow-table", "cred-table"]) $(name).querySelector("tbody").replaceChildren();
         progress(0, 1);
-        text("collections-format", "Connect to discover collection support.");
+        text("collections-format", "Sign in to check collection support.");
         $("backup-name").replaceChildren(); $("restore-name").replaceChildren();
       },
       connected(caps) {

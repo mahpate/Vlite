@@ -235,7 +235,7 @@ test("disconnect discards a late foreground response even when fetch ignores abo
   await operation;
   assert.equal(ui.get("record").textContent, "");
   assert.equal(ui.get("inspector").textContent, "");
-  assert.match(ui.get("status").textContent, /Disconnected/);
+  assert.match(ui.get("status").textContent, /Signed out/);
 });
 
 test("disconnect invalidates pending confirmations and prevents subsequent requests", async () => {

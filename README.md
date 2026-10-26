@@ -45,10 +45,10 @@ python3 -c "import pathlib,secrets; p=pathlib.Path('.secrets'); p.mkdir(mode=0o7
 docker compose --profile api up --build -d api
 ```
 
-Open **http://127.0.0.1:18084/dashboard**. The first time, choose **Use an
-access token instead**, paste the token from `.secrets/api-token`, then create
-your super admin account in **Users → Add user**. There is no default password.
-Data persists in a Docker volume.
+Open **http://127.0.0.1:18084/dashboard**. The first time, the sign-in screen
+asks for an access token: paste the token from `.secrets/api-token`, then
+create your super admin account in **Administration → Users & access**. There
+is no default password. Data persists in a Docker volume.
 
 To serve the dashboard from its own container on port 8081, run
 `docker compose --profile dashboard up --build -d dashboard`. Stop everything

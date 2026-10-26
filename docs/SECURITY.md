@@ -41,9 +41,10 @@ as `redacted`. Tenant API keys may hold graph operations with tenant-local
   server listens on loopback only. When a TLS-terminating or local reverse
   proxy fronts the API, set `VLITE_TRUSTED_PROXY=1`; Docker Compose sets it.
   Open local mode (`--insecure-local`) has no sign-in.
-- **First super admin:** there is no default account or password. Sign in once
-  with the admin token through **Use an access token instead**, open
-  **Users → Add user** and create a super admin account. To create it at
+- **First super admin:** there is no default account or password. While no
+  account exists, the sign-in screen asks for the admin token. Sign in once
+  with it, open **Administration → Users & access** and create a super admin
+  account. To create it at
   startup instead, set `VLITE_ADMIN_USERNAME` and `VLITE_ADMIN_PASSWORD_FILE`,
   a private file of up to 4 KiB that holds only the password. The server
   creates the account only while no super admin exists and never logs the

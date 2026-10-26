@@ -36,10 +36,11 @@ def capture(output):
     token = secrets.token_urlsafe(32)
     name = "vlite-connected-tour-" + uuid.uuid4().hex[:10]
     env = {**os.environ, "VLITE_AUTH_TOKEN": token}
+    # VLITE_TRUSTED_PROXY lets the sign-in screen offer passwords, as it does behind an HTTPS proxy.
     docker("run", "-d", "--name", name,
            "--mount", "type=tmpfs,target=/data,tmpfs-mode=1777",
            "--mount", "type=tmpfs,target=/admin,tmpfs-mode=1777",
-           "-e", "VLITE_AUTH_TOKEN", "-e", "VLITE_ADMIN_DIR=/admin",
+           "-e", "VLITE_AUTH_TOKEN", "-e", "VLITE_ADMIN_DIR=/admin", "-e", "VLITE_TRUSTED_PROXY=1",
            "-p", "127.0.0.1::8080", "--entrypoint", "vlite-server",
            IMAGE, "/data/demo.vlite", "--create-if-missing", "3", "--create-format", "5",
            "--bind", "0.0.0.0:8080", "--allow-remote", env=env)
@@ -92,6 +93,12 @@ def capture(output):
         api("/v1/collections", {"name": "products", "dimensions": 3}, "POST")
         api("/v1/index/hnsw", {}, "POST")
         api("/v1/admin/backups", {}, "POST")
+        # Sample accounts with random, unsaved passwords; the browser signs in with the token.
+        accounts = (("maya", "super_admin"), ("alex", "editor"), ("sam", "viewer"))
+        for username, role in accounts:
+            api("/v1/admin/users", {"username": username, "password": secrets.token_urlsafe(24), "role": role}, "POST")
+        if not api("/v1/auth/config")["password_login"]:
+            raise RuntimeError("Capture server does not offer password sign-in")
 
         class Handler(SimpleHTTPRequestHandler):
             def log_message(self, *_):
@@ -139,34 +146,28 @@ def capture(output):
         captures = []
         with sync_playwright() as p:
             browser = p.chromium.launch()
-            page = browser.new_page(viewport={"width": 1440, "height": 1100},
+            page = browser.new_page(viewport={"width": 1440, "height": 1100}, color_scheme="light",
                                     device_scale_factor=1, reduced_motion="reduce")
             errors = []
             page.on("pageerror", lambda error: errors.append(str(error)))
             page.goto(f"http://127.0.0.1:{server.server_port}/dashboard/")
-            expect(page.locator("#tour-dismiss")).to_be_visible()
-            page.locator("#tour-dismiss").click()
-            page.locator("#token").fill(token)
-            page.locator("#connection button[type=submit]").click()
-            expect(page.locator("#connection-badge")).to_have_text("Connected")
-            expect(page.locator("#stat-records")).to_have_text(str(len(titles)))
             nav = page.get_by_role("navigation", name="Dashboard navigation")
+            menu = page.locator("#user-menu > summary")
 
             def show(selector):
                 locator = page.locator(selector)
                 locator.evaluate("""element => {
                     const section = element.closest("main > section");
-                    const panel = element.closest("[data-admin-view]");
-                    if (panel && panel.id !== "admin-credential-form") window.VLiteNavigation.reveal(panel.id);
-                    else if (section && section.hidden) window.VLiteNavigation.reveal(section.id);
+                    if (section && section.hidden) window.VLiteNavigation.reveal(section.id);
                     for (let parent = element.parentElement; parent; parent = parent.parentElement) {
                         if (parent.tagName === "DETAILS") parent.open = true;
                     }
                 }""")
                 return locator
 
-            def save(filename, focus=None):
-                expect(page.locator("#connection-badge")).to_have_text("Connected")
+            def save(filename, focus=None, workspace=None):
+                if workspace is None:
+                    expect(page.locator("#connection-badge")).to_have_text("Connected")
                 expect(page.locator('[data-loading="true"]')).to_have_count(0)
                 if focus:
                     page.locator(focus).scroll_into_view_if_needed()
@@ -174,18 +175,28 @@ def capture(output):
                     page.evaluate("window.scrollTo(0, 0)")
                 # Never expose even a masked token length or credential through a screenshot.
                 page.screenshot(path=str(output / filename), animations="disabled",
-                                mask=[page.locator("#token")], mask_color="#e4e6ef")
-                captures.append({"file": filename, "workspace": page.locator("#workspace-title").inner_text(),
+                                mask=[page.locator("#token:visible")], mask_color="#e4e6ef")
+                captures.append({"file": filename,
+                                 "workspace": workspace or page.locator("#workspace-title").inner_text(),
                                  "sha256": hashlib.sha256((output / filename).read_bytes()).hexdigest()})
 
-            preferences = page.locator(".topbar .appearance-settings")
-            preferences.locator("summary").click()
-            page.locator("#theme").select_option("light")
-            preferences.locator("summary").click()
+            def theme(value):
+                menu.click()
+                page.locator("#theme").select_option(value)
+                menu.click()
+
+            expect(page.locator("#sign-in")).to_be_visible()
+            expect(page.locator("#app-shell")).to_be_hidden()
+            expect(page.locator("#token")).to_be_hidden()
+            save("current-sign-in.png", workspace="Sign in")
+            page.locator("#token-sign-in > summary").click()
+            page.locator("#token").fill(token)
+            page.get_by_role("button", name="Sign in with token", exact=True).click()
+            expect(page.locator("#connection-badge")).to_have_text("Connected")
+            expect(page.locator("#stat-records")).to_have_text(str(len(titles)))
+            page.locator("#tour-dismiss").click()
+            theme("light")
             save("current-overview-light.png")
-            page.locator(".token-help summary").click()
-            save("current-token-help.png")
-            page.locator(".token-help summary").click()
             nav.get_by_role("link", name="Collections", exact=True).click()
             page.locator("#browse-form button[type=submit]").click()
             expect(page.locator("#vectors tbody tr")).to_have_count(len(titles))
@@ -196,7 +207,7 @@ def capture(output):
             for tab in ("Metadata", "Vector"):
                 page.get_by_role("tablist", name="Selected record views").get_by_role("tab", name=tab, exact=True).click()
                 save(f"current-{tab.lower()}.png", "#record-inspector")
-            page.get_by_role("tab", name="Write", exact=True).click()
+            page.get_by_role("tab", name="Add & edit", exact=True).click()
             show("#write-documents").fill(json.dumps([{
                 "id": "201", "vector": [.85, .15, .1],
                 "metadata": {"title": {"type": "string", "value": "A new support article"}},
@@ -209,7 +220,7 @@ def capture(output):
             show("#index-status")
             expect(page.locator("#index-status")).not_to_contain_text("not checked")
             save("current-index.png")
-            page.get_by_role("tab", name="Settings", exact=True).click()
+            page.get_by_role("tab", name="Manage", exact=True).click()
             show("#settings-load").click()
             expect(page.locator("#collection-settings")).to_have_value(re.compile("title"))
             save("current-collections.png")
@@ -262,6 +273,10 @@ def capture(output):
             page.locator("#refresh-health").click()
             expect(page.locator("#health-result")).to_contain_text("observed_at")
             save("current-administration.png")
+            show("#user-list").click()
+            for username, _ in accounts:
+                expect(page.locator("#user-result")).to_contain_text(username)
+            save("current-users.png")
             show("#list-backups").click()
             expect(page.locator("#backup-name option")).to_have_count(1)
             save("current-backups.png")
@@ -296,11 +311,9 @@ def capture(output):
             expect(page.locator("#inspector")).to_contain_text("/v1/database")
             save("current-developer.png")
             nav.get_by_role("link", name="Overview", exact=True).click()
-            preferences.locator("summary").click()
-            page.locator("#theme").select_option("dark")
-            preferences.locator("summary").click()
+            theme("dark")
             save("current-overview-dark.png")
-            preferences.locator("summary").click()
+            menu.click()
             save("current-preferences.png")
             assert not errors, errors
             assert token not in page.locator("body").inner_text()
@@ -310,12 +323,13 @@ def capture(output):
             "data": "Synthetic demo records in an isolated disposable database",
             "record_count": len(titles), "connected": True, "backend_image": IMAGE,
             "format_version": capabilities["format_version"],
-            "source_assets": {file.name: hashlib.sha256(file.read_bytes()).hexdigest()
+            # Text-mode hashes match tests/dashboard_tours.py on any checkout line ending.
+            "source_assets": {file.name: hashlib.sha256(file.read_text(encoding="utf-8").encode()).hexdigest()
                               for file in (ROOT / "src" / "dashboard").iterdir() if file.is_file()},
             "captures": captures,
         }
         (output / "connected-captures.json").write_text(json.dumps(manifest, indent=2) + "\n")
-        print(f"Captured {len(captures)} distinct connected views across all six workspaces.")
+        print(f"Captured {len(captures)} distinct connected views: the sign-in screen and all six workspaces.")
     finally:
         if server:
             server.shutdown()

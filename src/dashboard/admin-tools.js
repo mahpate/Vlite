@@ -233,7 +233,7 @@
     const role = caps?.role;
     const features = object(caps?.features) ? caps.features : {};
     const routes = Array.isArray(caps?.routes) ? caps.routes : [];
-    const offline = { allowed: false, reason: "Connect to a server first." };
+    const offline = { allowed: false, reason: "Sign in first." };
     if (!connected || !object(caps)) return { users: offline, tenants: offline, lifecycle: offline, tls: offline, replication: offline };
     const admin = role === "admin";
     const notAdmin = (what) => `${what} requires a super admin: a super-admin account or the bootstrap admin token (current role: ${role ?? "unknown"}). Editors, viewers, read-only and scoped credentials cannot use it.`;
@@ -383,7 +383,7 @@
       if (!current(mark)) return;
       remember(value?.user);
       if (value?.user?.id) $("user-id").value = value.user.id;
-      show("user-result", { added: object(value?.user) ? userView(value.user) : value, next: "They can now sign in on the Overview page." });
+      show("user-result", { added: object(value?.user) ? userView(value.user) : value, next: "They can now sign in." });
     });
     on("user-save", "users", async (mark) => {
       need("users");

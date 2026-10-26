@@ -196,12 +196,12 @@ assert.equal(availability({ ...adminCaps, features: { ...adminCaps.features, ten
 assert.equal(availability({ ...adminCaps, routes: ["/v1/admin/tenants/{id}/usage"] }).lifecycle.allowed, true);
 assert.match(ro.lifecycle.reason, /bootstrap admin/);
 assert.match(disabled.lifecycle.reason, /VLITE_ADMIN_DIR/);
-assert.match(availability(null, false).lifecycle.reason, /Connect/);
+assert.match(availability(null, false).lifecycle.reason, /Sign in first/);
 // User management needs a super admin and a server with accounts enabled.
 assert.equal(availability({ ...adminCaps, features: { ...adminCaps.features, accounts: true } }).users.allowed, true);
 assert.match(availability(adminCaps).users.reason, /VLITE_ADMIN_DIR/);
 assert.match(ro.users.reason, /requires a super admin/);
-assert.match(availability(null, false).users.reason, /Connect/);
+assert.match(availability(null, false).users.reason, /Sign in first/);
 assert.match(explain(Object.assign(new Error("HTTP 409: cannot_modify_self"), { code: "cannot_modify_self", status: 409 })), /Use Change password/);
 assert.match(explain(Object.assign(new Error("HTTP 422: weak_password"), { code: "weak_password", status: 422 })), /less predictable/);
 assert.match(explain(Object.assign(new Error("HTTP 409: username_taken"), { code: "username_taken", status: 409 })), /ignore case/);

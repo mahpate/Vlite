@@ -58,8 +58,7 @@ The server, not the console, enforces access:
 
 ## Dashboard administration walkthrough
 
-A super admin's sidebar adds **Users**, **Tenants**, **API keys** and
-**Server** to the pages everyone sees.
+Super admins work in **Administration**. Its **Users & access** tab holds:
 
 - **Users:** create, update or delete super admin, editor and viewer accounts.
   Editors and viewers see one tenant or all collections; graph builds give
@@ -82,7 +81,7 @@ A super admin's sidebar adds **Users**, **Tenants**, **API keys** and
   `*` with the `collections` operation to create collections. New secrets show
   once.
 
-**Server** holds health, monitoring and maintenance:
+**Administration** and **Observability** also hold:
 
 - **Health and tokens:** refresh health, see token sources, reload token files,
   revoke the read-only token and read the recent request audit. Change token

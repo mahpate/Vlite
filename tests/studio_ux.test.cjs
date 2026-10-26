@@ -34,7 +34,7 @@ test("Write JSON reports individual errors, rejects duplicates and never returns
 
 test("Write JSON bounds size, count, dimensionality, number precision and f32 values", () => {
   for (const source of ["null", "{}", "[]", "broken", " ".repeat(4 * 1024 * 1024 + 1), JSON.stringify(Array.from({ length: 10001 }, () => document))]) assert.throws(() => jsonDocuments(source, 2));
-  assert.throws(() => jsonDocuments("[]", null), /Connect/);
+  assert.throws(() => jsonDocuments("[]", null), /Sign in/);
   assert.equal(jsonDocuments('[{"id":"1","vector":[1e39,0]}]', 2).invalid, 1);
   assert.equal(jsonDocuments('[{"id":9007199254740993,"vector":[1,0]}]', 2).invalid, 1);
   const records = Array.from({ length: 101 }, (_, index) => ({ id: String(index), vector: [1, 0] }));

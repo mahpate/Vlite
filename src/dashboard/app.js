@@ -98,7 +98,7 @@
     };
     document.querySelectorAll("[data-admin-availability]").forEach(element => {
       const name = element.dataset.adminAvailability;
-      element.textContent = !connected || !capabilities ? "Sign in on the Overview page to use this."
+      element.textContent = !connected || !capabilities ? "Sign in to use this."
         : capabilities.role !== "admin" ? "Needs a super admin. Your current sign-in cannot administer the server."
           : feature(name) ? "Available. Review each confirmation before changing anything."
             : `Not available on this server. ${requirements[name] || "Use a server version that reports this capability."}`;
@@ -125,7 +125,10 @@
     $("identity-detail").textContent = who.detail;
     authState();
   }
-  // Shows the sign-in controls that fit this server and the current state. Access tokens always work.
+  // null until the first update, so loading the page never moves focus.
+  let gateWasOpen = null;
+  // Only the sign-in screen shows until a credential is verified, and while choosing a new password.
+  // It offers the sign-in controls that fit this server and the current state. Access tokens always work.
   function authState() {
     const passwords = authConfig?.password_login === true && authConfig.setup_required !== true;
     const signedIn = session !== null;
@@ -138,7 +141,7 @@
       ? "Your administrator gave you a temporary password. Choose your own to continue."
       : "Enter your current password, then choose a new one.";
     const hint = connected || signedIn ? ""
-      : authConfig?.setup_required === true ? "No user accounts yet. Connect with the admin token, then add people in Administration > Users."
+      : authConfig?.setup_required === true ? "No user accounts yet. Sign in with the admin token below, then add people in Administration > Users & access."
         : authConfig?.reason === "insecure_transport" ? "Password sign-in is off because the server cannot confirm this connection uses HTTPS. Use an access token."
           : "";
     $("sign-in-setup").textContent = hint;
@@ -150,9 +153,28 @@
     if (alternative) tokenForm.dataset.alternative = "true";
     else delete tokenForm.dataset.alternative;
     tokenForm.hidden = signedIn;
-    $("session-refresh").hidden = !(signedIn && connected);
+    $("session-refresh").hidden = !connected;
     $("change-password-open").hidden = !(signedIn && connected) || changing;
-    $("disconnect").textContent = signedIn ? "Sign out" : "Disconnect";
+    const gateOpen = !connected || changing;
+    $("gate-title").textContent = changing ? "Choose a new password" : "Sign in to VLite";
+    $("gate-intro").hidden = changing;
+    // Signed in, but the dashboard did not load (for example, the server was busy).
+    $("gate-retry").hidden = !signedIn || connected || changing;
+    $("gate-sign-out").hidden = !signedIn || connected;
+    $("sign-in-gate").hidden = !gateOpen;
+    $("app-shell").hidden = gateOpen;
+    if (gateOpen) $("user-menu").open = false;
+    if (gateWasOpen !== null && gateWasOpen !== gateOpen) {
+      // Deferred so a running workflow releases its temporary control lock first.
+      setTimeout(() => {
+        if ($("sign-in-gate").hidden === gateOpen) return;
+        const target = gateOpen
+          ? ["current-password", "username", "token", "gate-retry"].map($).find((element) => element && !element.closest("[hidden]"))
+          : $("workspace-title");
+        try { target?.focus({ preventScroll: true }); } catch { /* focus is best effort */ }
+      }, 0);
+    }
+    gateWasOpen = gateOpen;
   }
   // Session routes: the browser sends the cookie; the custom header blocks cross-site form posts.
   async function authRequest(method, route, body) {
@@ -217,7 +239,7 @@
   function staleSnapshot() {
     for (const id of ["stat-records", "stat-bytes"]) $(id).textContent = "--";
     $("stat-index").textContent = "Refresh needed";
-    $("snapshot-note").textContent = "Data changed. Connect / refresh updates the overview snapshot.";
+    $("snapshot-note").textContent = "Data changed. Select Refresh to update the snapshot.";
   }
   function mutationChanged() {
     staleSnapshot();
@@ -242,13 +264,13 @@
     $("status").textContent = message;
     $("status").dataset.error = String(error);
     const help = override !== undefined ? override : error ? /Your session ended/.test(message) ? "Sessions end after a period of inactivity, at sign-out, or when an administrator changes the account."
-      : /password_change_required/.test(message) ? "Choose a new password on the Overview page to continue."
-      : /401/.test(message) ? "Check the token; expired, rotated or revoked credentials require reconnecting with a current token."
+      : /password_change_required/.test(message) ? "Choose a new password to continue."
+      : /401/.test(message) ? "Sign in again with a current token. Expired, rotated or revoked tokens stop working."
       : /forbidden_scope/.test(message) ? "This scoped credential does not cover this collection or operation (or its collection/database was recreated). Ask an admin for a matching credential."
       : /403/.test(message) ? "This credential cannot perform this action. Use a write/admin credential when appropriate."
         : /precondition_failed|412/.test(message) ? "The record changed since it was loaded (or was deleted). Get it again to see the current revision, then reapply your edit."
         : /requires_format_v4/.test(message) ? "Collections and resumable imports need a format v4 file. Upgrade offline with vlite-maintain upgrade SOURCE DEST (a new file; the source is never modified) and restart the server on it."
-        : /collection_not_found/.test(message) ? "The collection no longer exists. Reconnect to refresh the collection list."
+        : /collection_not_found/.test(message) ? "The collection no longer exists. Select Refresh to update the collection list."
         : /credentials_commit_indeterminate/.test(message) ? "The credential change IS in effect but may not survive a crash; no secret was returned. Re-list credentials, then revoke or re-issue. Do not assume nothing changed."
         : /import_conflict/.test(message) ? "The server rejected this chunk as inconsistent: an earlier import reservation may still need its first chunk (the message names it), or the job's committed chunks differ. Nothing was written; commit or abort the earlier job, or refresh this job's status and select the original file and chunk size."
         : /dimension/i.test(message) ? "Use a vector with the dimension count of the selected collection."
@@ -257,6 +279,12 @@
               : /unknown|abort|timeout|Network/.test(message) ? "Stopping the browser wait does not cancel server work. Verify mutation outcomes before any manual retry."
                 : "Review the request and response inspector. Changes are never automatically retried." : "";
     $("error-help").textContent = help;
+    // The sign-in screen repeats the message while the dashboard is hidden; routine request lines read as loading progress.
+    const gateText = !error && /^[A-Z]+ \S+: HTTP \d{3}$/.test(message) ? "Loading your dashboard…" : message;
+    if ($("gate-message").textContent !== gateText) $("gate-message").textContent = gateText;
+    $("gate-message").dataset.error = String(error);
+    $("gate-help").textContent = help;
+    $("gate-help").hidden = !help;
   };
   // Dimension-matched example text for the record/query fields; "" until the selected collection's dimensions are known.
   let exampleText = "[1, 0, 0]";
@@ -299,7 +327,7 @@
     for (const id of ["stat-records", "stat-dimensions", "stat-bytes"]) $(id).textContent = "--";
     $("stat-index").textContent = "Not checked";
     $("encryption-badge").textContent = "Encryption: not checked";
-    $("snapshot-note").textContent = "Connect to view a database snapshot. Refresh after external writes.";
+    $("snapshot-note").textContent = "No snapshot loaded yet. Select Refresh to load one.";
   }
   function disconnect(options = {}) {
     // Sign out ends a password session; leaving the page (endSession: false) keeps it for a reload.
@@ -319,7 +347,7 @@
     for (const id of ["password", "current-password", "new-password", "repeat-password"]) $(id).value = "";
     clearData();
     if (endSession) signOut();
-    status(endSession ? "Disconnected; signed out and displayed results cleared" : "Disconnected; token and displayed results cleared");
+    status(endSession ? "Signed out. Displayed results were cleared." : "Signed out. The access token and displayed results were cleared.");
     tools?.gate();
     adminTools?.gate?.();
     applyRoleGates();
@@ -343,7 +371,7 @@
   }
   function passiveControl(element) {
     return Boolean(element.closest("nav, [role=tablist], #confirmation, #studio-tour, [data-record-tab], [data-workspace], [data-section]"))
-      || ["theme", "density", "remember-preferences", "tour-start", "cancel-request", "job-stop", "write-stop", "disconnect", "navigation-toggle", "navigation-backdrop", "navigation-close"].includes(element.id);
+      || ["theme", "density", "remember-preferences", "tour-start", "cancel-request", "job-stop", "write-stop", "disconnect", "gate-sign-out", "navigation-toggle", "navigation-backdrop", "navigation-close"].includes(element.id);
   }
   // Preserve each control's semantic disabled state. Inert is a temporary interaction lock,
   // not a role/feature gate; gate() may still update disabled while a workflow is running.
@@ -409,7 +437,7 @@
   // requests that never change records, sensitive (response holds a one-time secret) }.
   async function api(method, path, body, options = {}) {
     if (busy && operationGeneration !== connectionGeneration) throw staleRequest();
-    if (!connected) throw new Error("Connect before accessing the database");
+    if (!connected) throw new Error("Sign in before accessing the database");
     const generation = connectionGeneration;
     const owner = collection;
     const current = () => generation === connectionGeneration && owner === collection;
@@ -729,7 +757,7 @@
   }
   async function switchCollection(next) {
     if (next === collection) return;
-    if (!collectionItems.some((item) => item.name === next)) throw new Error("Unknown collection; reconnect to refresh the list");
+    if (!collectionItems.some((item) => item.name === next)) throw new Error("Unknown collection; select Refresh to update the list");
     const lost = pendingWork();
     if (lost.length && !await confirmOperation(`Switch from collection ${collection} to ${next}? This discards: ${lost.join("; ")}. Nothing is written to either collection; an open import job stays open on the server and can be resumed by job ID.`)) {
       status(`Still using collection ${collection}`);
@@ -800,7 +828,7 @@
       : overview.database?.is_encrypted === false ? "Encryption: off" : "Encryption: unavailable to this credential/server";
     showCollectionStats(collection === "default" && overview.database ? overview.database : info);
     $("stat-bytes").textContent = String(overview.metrics?.database_bytes ?? "Unavailable");
-    $("snapshot-note").textContent = "Snapshot from the last connection refresh. External writes may change these values.";
+    $("snapshot-note").textContent = "Snapshot from when you signed in or last refreshed. Select Refresh to see newer changes.";
     if (info) applySettings(info);
     if (can("read")) await refreshIndex(true);
     show("compatibility", capabilities);
@@ -892,6 +920,7 @@
   });
   $("change-password-open").addEventListener("click", () => {
     if (!session) return;
+    $("user-menu").open = false;
     changingPassword = true;
     authState();
     $("current-password").focus();
@@ -902,7 +931,9 @@
     authState();
   });
   $("session-refresh").addEventListener("click", () => run(connect));
+  $("gate-retry").addEventListener("click", () => run(connect));
   $("disconnect").addEventListener("click", () => disconnect());
+  $("gate-sign-out").addEventListener("click", () => disconnect());
   // Reuses a password session cookie on load and when the page returns from the back/forward cache.
   async function restoreSession() {
     try {
@@ -930,7 +961,7 @@
     status("Stopped waiting in this browser; server work was not cancelled. Verify any mutation outcome before retrying.", true);
   });
   $("example-record").addEventListener("click", () => run(async () => {
-    if (!connected || dimensions === null) throw new Error("Connect before filling a dimension-matched example");
+    if (!connected || dimensions === null) throw new Error("Sign in before filling a dimension-matched example");
     if (dimensions > 4096) throw new Error("Example generation is limited to 4096 dimensions; enter your vector manually");
     const example = Array(dimensions).fill(0);
     example[0] = 1;
@@ -1177,7 +1208,7 @@
     // Fail closed with an explicit message instead of a later null dereference.
     tools = null;
     adminTools = null;
-    status(`Console tools failed to initialize (${error.message}); reload the page. Connecting is disabled.`, true);
+    status(`Console tools failed to initialize (${error.message}); reload the page. Signing in is disabled.`, true);
   }
   // A read-only bridge shares the in-memory connection without exposing its token.
   window.VLiteObservabilityConnection = {
@@ -1186,7 +1217,7 @@
       let generation = 0;
       const controllers = new Set();
       async function request(route, options = {}) {
-        if (!connected) throw new Error("Connect before accessing the database");
+        if (!connected) throw new Error("Sign in before accessing the database");
         const endpoint = route.split("?")[0];
         if (!["/metrics", "/v1/admin/metrics/summary", "/v1/admin/logs", "/v1/admin/diagnostics/slow-queries", "/v1/admin/audit"].includes(endpoint)) throw new Error("Unsupported observability endpoint");
         // Independent reads never replace the foreground cancel handle or request inspector.

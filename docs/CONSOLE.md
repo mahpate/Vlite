@@ -14,12 +14,15 @@ walks through every workspace with sample data.
 
 ## Sign in
 
-Sign in with your username and password. A session cookie keeps you signed in.
+The dashboard opens on a sign-in screen and shows the rest after you sign in.
+Use your username and password; a session cookie keeps you signed in.
 
-- **First account:** a new server has no accounts and no default password. A
-  super admin chooses **Use an access token instead**, signs in with the admin
-  token, then opens **Users → Add user** and creates their own super admin
-  account first.
+![Sign-in screen with username and password fields and the access token option](../site/assets/dashboard/current-sign-in.png?v=connected)
+
+- **First account:** a new server has no accounts and no default password, so
+  the sign-in screen asks for the admin token. Sign in with it, open
+  **Administration → Users & access** and create your own super admin account
+  first.
 - **Temporary password:** a password set by an admin must be changed at first
   sign-in. Passwords are 15–128 characters.
 - **Forgot your password:** ask a super admin to reset it.
@@ -52,7 +55,7 @@ need a collection your tenant owns.
 
 The admin token is for automation and recovery. Choose **Use an access token
 instead** and paste the value only, without the `Bearer` prefix. **Where do I
-get a token?** beside the field explains where to find it:
+get a token?** below the field explains where to find it:
 
 - **Docker Compose:** `.secrets/api-token` in the checkout that started the
   server. PowerShell: `Get-Content .secrets\api-token -Raw`.
@@ -62,32 +65,41 @@ get a token?** beside the field explains where to find it:
 
 Treat tokens as secrets. Keep them out of screenshots and logs.
 
-![Connection help with instructions for finding a bearer token](../site/assets/dashboard/current-token-help.png?v=connected)
-
 ## Find your way around
 
-Everyone sees **Overview**, **Collections**, **Search** and the **Developer
-Console** in the sidebar. Super admins also see **Tenants**, **Users**, **API
-keys** and **Server**. On a narrow screen, open the sidebar from the menu
-button. The top bar shows the active collection, who you are signed in as and
-**Appearance and preferences**. **Quick tour** reopens the first-visit
-orientation.
+The sidebar groups six workspaces. Tabs inside each workspace hold its views:
 
-Pick Light, Dark or System and a density under **Appearance and preferences**.
-**Remember appearance only** saves just those choices in the browser.
+| Group | Workspace | Inside |
+|---|---|---|
+| | **Overview** | Database size, health and shortcuts |
+| Data | **Collections** | Records, Add & edit, Import & export, Index, Manage |
+| Data | **Search** | Vector search, Advanced retrieval, Analyze & compare |
+| Server | **Observability** | Live monitor, Diagnostics, Change feed |
+| Server | **Administration** | Health, Users & access, Backup & recovery, Server settings |
+| Tools | **Developer Console** | Requests and responses this dashboard sends |
 
-![Appearance controls in the dashboard top bar](../site/assets/dashboard/current-preferences.png?v=connected)
+Some tabs split into tools, such as **Users & access → API keys**. Everyone
+sees every workspace; a control your role cannot use is disabled and says why.
+On a narrow screen, open the sidebar from the **Menu** button.
+
+The top bar shows the active collection and the account menu. Open the account
+menu to see who you are signed in as, change your password, pick a Light, Dark
+or System theme and a density, reopen the **Quick tour** or **Sign out**.
+**Remember theme and density on this device** saves just those choices in the
+browser.
+
+![Account menu with the signed-in identity, appearance controls and sign out](../site/assets/dashboard/current-preferences.png?v=connected)
 
 ## Create a collection and add records
 
-1. **Create.** In **Collections → Settings**, enter a name, dimensions, a
+1. **Create.** In **Collections → Manage**, enter a name, dimensions, a
    metric and optional metadata indexes, such as
    `[{"field":"category","kind":"eq"}]` (kinds: `eq`, `range`, `eq_range`).
    **Review collection** shows the request before you confirm.
 2. **Select.** Choose the collection in the sidebar picker. Every browse,
    write, search and index action uses the active collection. Switching lists
    any unsaved work it will discard and asks first.
-3. **Write.** Use the record editor for one record, or **Write JSON** for up
+3. **Write.** In **Add & edit**, use **One record**, or **Bulk JSON** for up
    to 10,000 documents (4 MiB):
 
    ```json
@@ -98,14 +110,15 @@ Pick Light, Dark or System and a density under **Appearance and preferences**.
    Writes go in atomic batches of 20, but the whole upload is not atomic: if a
    batch fails, earlier batches stay. An upsert replaces the vector, payload,
    metadata and expiry.
-4. **Import.** Load a JSON or CSV file of up to 100 records, or use
-   **resumable import** for large JSON, NDJSON or CSV files. Each chunk commits
-   atomically, and **Resume** continues from the last committed chunk.
+4. **Import.** In **Import & export**, load a JSON or CSV file of up to 100
+   records, or use **Large file import** for big JSON, NDJSON or CSV files.
+   Each chunk commits atomically, and **Resume** continues from the last
+   committed chunk.
 
 Creating collections needs a format v4 file. The dashboard never upgrades a
 file; that is an offline operator step. You can drop only an empty collection.
 
-![Write workspace with validated records awaiting confirmation](../site/assets/dashboard/current-write.png?v=connected)
+![Add & edit view with validated records awaiting confirmation](../site/assets/dashboard/current-write.png?v=connected)
 
 ## Browse and edit records
 
@@ -134,9 +147,9 @@ The filter builder joins equality and numeric range conditions with AND.
 | Hybrid | Fuses vector results with text matches. Higher scores are better. |
 
 Distances are lower-is-better. **Explain** shows the chosen plan. **Compare**
-runs exact and ready approximate search side by side. **Explore** samples up
-to 32 records for duplicates and metadata types, plots them in 2-D and compares
-two records. **Advanced retrieval**
+runs exact and ready approximate search side by side. **Analyze & compare**
+samples up to 32 records for duplicates and metadata types, plots them in 2-D
+and compares two records. **Advanced retrieval**
 adds reranking, grouping, geo radius, named and sparse vectors, recommend,
 facets and the [query language](VECTORS.md). Save a query to a file and load it
 later. **Copy as code** turns the form into curl, Python or JavaScript with
@@ -154,21 +167,24 @@ they wait for the next rebuild.
 
 ## Monitor the server
 
-Super admins open **Server** for health, request rates, errors, latency, a
-per-route table and a live log tail with level and text filters and JSONL
-export. The server keeps the log in memory only, so it clears on restart. The
-change feed lists committed events across the database and needs read access
-to all collections.
+Super admins open **Observability → Live monitor** for request rates, errors,
+latency, a per-route table and a live log tail with level and text filters and
+JSONL export. The server keeps the log in memory only, so it clears on
+restart. **Diagnostics** lists slow queries. **Change feed** lists committed
+events across the database and needs read access to all collections. Server
+health is under **Administration → Health**.
 
 The **Developer Console** holds the request inspector, a REST playground and
 read-only test scenarios.
 
 ## Administer users and tenants
 
-Super admins use **Users**, **Tenants** and **API keys**.
+Super admins use **Administration → Users & access**, with tabs for
+**Users**, **API keys**, **Tenants**, **Admin tokens** and the **Audit log**.
 
-- **Add a user:** in **Users → Add user**, choose a role, bind an editor or
-  viewer to a tenant or to all collections, and set a temporary password.
+- **Add a user:** in **Users**, choose a role, bind an editor or viewer to a
+  tenant or to all collections, set a temporary password and select
+  **Add user**.
 - **Reset a password:** set a new temporary password. The user must change it
   at next sign-in.
 - **Create a tenant:** in **Tenants**, enter a name and an optional vector

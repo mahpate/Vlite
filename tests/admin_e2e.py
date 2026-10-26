@@ -8,7 +8,8 @@ import time
 
 from playwright.sync_api import expect, sync_playwright
 
-from dashboard_e2e import MOCK_ORIGIN, FakeApi, confirm, control, mocked_page, visible_state
+from dashboard_e2e import (MOCK_ORIGIN, FakeApi, confirm, control, expect_signed_out, mocked_page,
+                           sign_in_with_token, sign_out, visible_state)
 
 
 TENANT = "a" * 32
@@ -200,42 +201,73 @@ def token_form_open(page):
     return page.locator("#token-sign-in").evaluate("details => details.open")
 
 
+def open_user_menu(page):
+    """Opens the account menu from its button in the top bar."""
+    menu = page.locator("#user-menu")
+    if not menu.evaluate("details => details.open"):
+        menu.locator("summary").click()
+    expect(menu.locator(".user-menu-panel")).to_be_visible()
+
+
+def close_user_menu(page):
+    page.locator("#user-menu summary").press("Escape")
+    expect(page.locator("#user-menu .user-menu-panel")).to_be_hidden()
+    expect(page.locator("#user-menu summary")).to_be_focused()
+
+
+def expect_gate_message(page, text):
+    """The sign-in screen repeats the status line while the dashboard is hidden."""
+    expect(page.locator("#gate-message")).to_have_text(text)
+    expect(page.locator("#gate-message")).to_be_visible()
+
+
 def exercise_password(browser):
     fake = PasswordApi()
     context, page, errors = session_page(browser, fake)
-    expect(control(page, "#sign-in")).to_be_visible()
+    expect_signed_out(page)
+    expect(page.locator("#sign-in")).to_be_visible()
     expect(page.locator("#token-sign-in > summary")).to_be_visible()
     assert token_form_open(page) is False, "With password sign-in available, the token form starts collapsed"
-    expect(control(page, "#sign-in-setup")).to_be_hidden()
-    expect(control(page, "#identity-badge")).to_have_text("Not signed in")
-    expect(control(page, "#disconnect")).to_have_text("Disconnect")
+    expect(page.locator("#sign-in-setup")).to_be_hidden()
+    expect(page.locator("#gate-retry")).to_be_hidden()
+    expect(page.locator("#gate-sign-out")).to_be_hidden()
+    expect(page.locator("#identity-badge")).to_have_text("Not signed in")
     fake.throttled = True
     sign_in(page, "ann", FIRST)
     expect(control(page, "#status")).to_have_text("Too many sign-in attempts. Try again in 30 seconds.")
+    expect_gate_message(page, "Too many sign-in attempts. Try again in 30 seconds.")
     expect(control(page, "#error-help")).to_have_text("")
+    expect(page.locator("#gate-help")).to_be_hidden()
     expect(control(page, "#password")).to_have_value("")
     fake.throttled = False
     sign_in(page, "ann", "not the right password")
     expect(control(page, "#status")).to_have_text("Wrong username or password.")
+    expect_gate_message(page, "Wrong username or password.")
+    expect(page.locator("#app-shell")).to_be_hidden()
     login = calls(fake, "/v1/auth/login", "POST")[-1]
     assert login["body"] == {"username": "ann", "password": "not the right password"}, login["body"]
     assert login["headers"].get("x-vlite-request") == "1" and "authorization" not in login["headers"], login["headers"]
 
-    # A temporary password signs in but only allows choosing a new one.
+    # A temporary password signs in but only allows choosing a new one; the dashboard stays hidden.
     sign_in(page, "ann", FIRST)
     expect(control(page, "#status")).to_have_text("Signed in as ann. Choose a new password to continue.")
-    expect(control(page, "#connection-badge")).to_have_text("Password change needed")
-    expect(control(page, "#identity-badge")).to_have_text("Signed in as ann")
+    expect(page.get_by_role("heading", name="Choose a new password", exact=True)).to_be_visible()
+    expect(page.locator("#gate-intro")).to_be_hidden()
+    expect(page.locator("#app-shell")).to_be_hidden()
+    expect(page.locator("#connection-badge")).to_have_text("Password change needed")
+    expect(page.locator("#identity-badge")).to_have_text("Signed in as ann")
     expect(control(page, "#change-password")).to_be_visible()
     expect(control(page, "#change-password-reason")).to_contain_text("temporary password")
     expect(control(page, "#change-password-cancel")).to_be_hidden()
     expect(control(page, "#current-password")).to_be_focused()
     expect(control(page, "#sign-in")).to_be_hidden()
     expect(page.locator("#token-sign-in")).to_be_hidden()
-    expect(control(page, "#disconnect")).to_have_text("Sign out")
+    expect(page.locator("#gate-sign-out")).to_be_visible()
+    expect(page.locator("#gate-retry")).to_be_hidden()
     assert not calls(fake, "/v1/capabilities", "GET"), "A temporary password must not load data"
     change_password(page, FIRST, SECOND, SECOND + "!")
     expect(control(page, "#status")).to_have_text("The new passwords do not match. Nothing changed.")
+    expect_gate_message(page, "The new passwords do not match. Nothing changed.")
     expect(control(page, "#new-password")).to_have_value("")
     assert not calls(fake, "/v1/auth/password", "POST")
     change_password(page, "wrong current password", SECOND, SECOND)
@@ -244,21 +276,33 @@ def exercise_password(browser):
     change_password(page, FIRST, SECOND, SECOND)
     expect(control(page, "#status")).to_have_text("Password changed. Signed in as ann; overview refreshed")
     assert calls(fake, "/v1/auth/password", "POST")[-1]["body"] == {"current_password": FIRST, "new_password": SECOND}
-    expect(control(page, "#connection-badge")).to_have_text("Connected")
-    expect(control(page, "#identity-badge")).to_have_text("Signed in as ann · Super admin")
-    expect(control(page, "#identity-detail")).to_contain_text("can manage users")
-    expect(control(page, "#change-password")).to_be_hidden()
-    expect(control(page, "#session-refresh")).to_be_visible()
+    expect(page.locator("#sign-in-gate")).to_be_hidden()
+    expect(page.locator("#app-shell")).to_be_visible()
+    expect(page.locator("#connection-badge")).to_have_text("Connected")
+    expect(page.locator("#identity-badge")).to_have_text("Signed in as ann · Super admin")
+    expect(page.locator("#identity-detail")).to_contain_text("can manage users")
+    expect(page.locator("#change-password")).to_be_hidden()
+    expect(page.locator("#session-refresh")).to_be_visible()
     data = [item for item in fake.log if not item["path"].startswith("/v1/auth/")]
     assert data and all("authorization" not in item["headers"] and item["headers"].get("x-vlite-request") == "1"
                         for item in data), "Password sessions use the cookie plus the X-VLite-Request header"
     assert SECOND not in visible_state(page) and FIRST not in visible_state(page), "Passwords must not stay on the page"
-    control(page, "#change-password-open").click()
-    expect(control(page, "#change-password-reason")).to_have_text("Enter your current password, then choose a new one.")
-    expect(control(page, "#current-password")).to_be_focused()
-    control(page, "#change-password-cancel").click()
-    expect(control(page, "#change-password")).to_be_hidden()
-    expect(control(page, "#change-password-open")).to_be_visible()
+    # Changing a password by choice opens the same screen, which can be cancelled.
+    open_user_menu(page)
+    expect(page.locator("#identity-name")).to_have_text("Signed in as ann · Super admin")
+    page.locator("#change-password-open").click()
+    expect(page.get_by_role("heading", name="Choose a new password", exact=True)).to_be_visible()
+    expect(page.locator("#app-shell")).to_be_hidden()
+    expect(page.locator("#change-password-reason")).to_have_text("Enter your current password, then choose a new one.")
+    expect(page.locator("#current-password")).to_be_focused()
+    expect(page.locator("#gate-sign-out")).to_be_hidden()
+    page.locator("#change-password-cancel").click()
+    expect(page.locator("#change-password")).to_be_hidden()
+    expect(page.locator("#app-shell")).to_be_visible()
+    expect(page.locator("#workspace-title")).to_be_focused()
+    open_user_menu(page)
+    expect(page.locator("#change-password-open")).to_be_visible()
+    close_user_menu(page)
 
     # A super-admin account manages other accounts but not its own.
     control(page, "#user-list").click()
@@ -310,8 +354,11 @@ def exercise_password(browser):
     control(page, "#session-refresh").click()
     expect(control(page, "#status")).to_have_text("Your session ended. Sign in again.")
     expect(control(page, "#error-help")).to_contain_text("Sessions end after a period of inactivity")
-    expect(control(page, "#sign-in")).to_be_visible()
-    expect(control(page, "#disconnect")).to_have_text("Disconnect")
+    expect_signed_out(page)
+    expect_gate_message(page, "Your session ended. Sign in again.")
+    expect(page.locator("#gate-help")).to_contain_text("Sessions end after a period of inactivity")
+    expect(page.locator("#sign-in")).to_be_visible()
+    expect(page.locator("#username")).to_be_focused()
     sign_in(page, "ann", SECOND)
     expect(control(page, "#status")).to_have_text("Signed in as ann; overview refreshed")
     for width in (900, 390, 320):
@@ -323,38 +370,44 @@ def exercise_password(browser):
     control(page, "#user-list").click()
     expect(control(page, "#user-result")).to_contain_text('"count": 1')
     page.evaluate("window.VLiteNavigation.reveal('database')")
-    control(page, "#disconnect").click()
-    expect(control(page, "#status")).to_have_text("Disconnected; signed out and displayed results cleared")
-    expect(control(page, "#user-result")).to_have_text("")
-    expect(control(page, "#sign-in")).to_be_visible()
+    sign_out(page)
+    expect(page.locator("#status")).to_have_text("Signed out. Displayed results were cleared.")
+    expect_gate_message(page, "Signed out. Displayed results were cleared.")
+    expect(page.locator("#user-result")).to_have_text("")
+    expect(page.locator("#sign-in")).to_be_visible()
     deadline = time.monotonic() + 10
     while not calls(fake, "/v1/auth/logout", "POST") and time.monotonic() < deadline:
         page.wait_for_timeout(50)
     assert calls(fake, "/v1/auth/logout", "POST") and not fake.active, "Sign out must end the server session"
 
     # Access tokens remain available as the alternative.
-    control(page, "#token").fill("admin-" + "t" * 32)
-    control(page, "#connection").get_by_role("button", name="Connect / refresh").click()
-    expect(control(page, "#status")).to_have_text("Connected; overview refreshed")
-    expect(control(page, "#identity-badge")).to_have_text("Signed in as Super admin (bootstrap admin token)")
-    expect(control(page, "#sign-in")).to_be_hidden()
-    control(page, "#disconnect").click()
-    expect(control(page, "#status")).to_have_text("Disconnected; token and displayed results cleared")
+    assert token_form_open(page) is False, "After signing out, the token form is a collapsed alternative again"
+    sign_in_with_token(page, "admin-" + "t" * 32)
+    expect(page.locator("#identity-badge")).to_have_text("Signed in as Super admin (bootstrap admin token)")
+    expect(page.locator("#sign-in")).to_be_hidden()
+    open_user_menu(page)
+    expect(page.locator("#change-password-open")).to_be_hidden()
+    close_user_menu(page)
+    sign_out(page)
+    expect(page.locator("#status")).to_have_text("Signed out. The access token and displayed results were cleared.")
     assert token_form_open(page) is False
     assert not errors, errors
     context.close()
 
-    hints = (({"setup_required": True}, "No user accounts yet. Connect with the admin token, then add people in Administration > Users."),
+    hints = (({"setup_required": True},
+              "No user accounts yet. Sign in with the admin token below, then add people in Administration > Users & access."),
              ({"password_login": False, "reason": "insecure_transport"},
               "Password sign-in is off because the server cannot confirm this connection uses HTTPS. Use an access token."))
     for config, hint in hints:
         fake = PasswordApi(config)
         context, page, errors = session_page(browser, fake)
+        expect_signed_out(page)
         expect(control(page, "#sign-in-setup")).to_have_text(hint)
         expect(control(page, "#sign-in-setup")).to_be_visible()
         expect(control(page, "#sign-in")).to_be_hidden()
         expect(page.locator("#token-sign-in > summary")).to_be_hidden()
         assert token_form_open(page) is True
+        expect(page.get_by_role("button", name="Sign in with token", exact=True)).to_be_visible()
         assert not errors, errors
         context.close()
 
@@ -362,9 +415,9 @@ def exercise_password(browser):
 def exercise(browser):
     fake = AdminApi()
     context, page, errors = mocked_page(browser, fake)
-    expect(control(page, "#identity-badge")).to_have_text("Signed in as Super admin (bootstrap admin token)")
-    expect(control(page, "#identity-badge")).to_have_attribute("data-identity", "super_admin")
-    expect(control(page, "#identity-detail")).to_contain_text("Full administrator")
+    expect(page.locator("#identity-badge")).to_have_text("Signed in as Super admin (bootstrap admin token)")
+    expect(page.locator("#identity-badge")).to_have_attribute("data-identity", "super_admin")
+    expect(page.locator("#identity-detail")).to_contain_text("Full administrator")
     assert not calls(fake, "/v1/admin/tenants", "GET"), "Admin actions must not run on connection"
     for name in USER_CONTROLS:
         expect(control(page, "#" + name)).to_be_disabled()
@@ -456,12 +509,13 @@ def exercise(browser):
             page.evaluate("id => window.VLiteNavigation.reveal(id)", section)
             assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), (width, section)
     page.evaluate("window.VLiteNavigation.reveal('database')")
-    control(page, "#disconnect").click()
-    expect(control(page, "#tenant-result")).to_have_text("")
-    expect(control(page, "#user-result")).to_have_text("")
-    expect(control(page, "#tls-result")).to_have_text("")
-    expect(control(page, "#replication-result")).to_have_text("")
-    expect(control(page, "#replication-download")).to_be_disabled()
+    sign_out(page)
+    expect(page.locator("#status")).to_have_text("Signed out. The access token and displayed results were cleared.")
+    expect(page.locator("#tenant-result")).to_have_text("")
+    expect(page.locator("#user-result")).to_have_text("")
+    expect(page.locator("#tls-result")).to_have_text("")
+    expect(page.locator("#replication-result")).to_have_text("")
+    expect(page.locator("#replication-download")).to_be_disabled()
     assert not errors, errors
     context.close()
 
@@ -479,11 +533,11 @@ def exercise(browser):
         expect(control(page, "#tenant-result")).to_contain_text("bootstrap admin")
         expect(control(page, "#user-result")).to_contain_text("User management requires a super admin")
         if role == "scoped":
-            expect(control(page, "#identity-badge")).to_have_text('Signed in as API key "ci" (' + "c" * 32 + ') · tenant "Support"')
-            expect(control(page, "#identity-detail")).to_contain_text(f'inside tenant "Support" ({TENANT})')
+            expect(page.locator("#identity-badge")).to_have_text('Signed in as API key "ci" (' + "c" * 32 + ') · tenant "Support"')
+            expect(page.locator("#identity-detail")).to_contain_text(f'inside tenant "Support" ({TENANT})')
         else:
-            expect(control(page, "#identity-badge")).to_contain_text("(this server does not report identity details)")
-            expect(control(page, "#identity-badge")).to_have_attribute("data-identity", "read_only")
+            expect(page.locator("#identity-badge")).to_contain_text("(this server does not report identity details)")
+            expect(page.locator("#identity-badge")).to_have_attribute("data-identity", "read_only")
         assert not errors, errors
         context.close()
     fake = AdminApi()
@@ -517,8 +571,8 @@ if __name__ == "__main__":
         finally:
             browser.close()
     print("PASS browser admin flows: identity badge, confirmations/cancel, tenant CRUD/usage/settings/"
-          "suspend/resume/errors, TLS reload/errors, replication download/paging, disconnect clearing, "
+          "suspend/resume/errors, TLS reload/errors, replication download/paging, sign-out clearing, "
           "role/configuration/older-server gates and mobile navigation.")
-    print("PASS password sign-in: errors and throttling, forced first password change, cookie-mode headers, "
-          "user add/save/reset/delete with self-protection, reload restore, ended session, sign-out, token "
-          "fallback and setup/HTTPS hints.")
+    print("PASS password sign-in: sign-in screen, errors and throttling, forced first password change, cookie-mode "
+          "headers, user add/save/reset/delete with self-protection, reload restore, ended session, account-menu "
+          "password change and sign-out, token fallback and setup/HTTPS hints.")

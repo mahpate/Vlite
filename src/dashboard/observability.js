@@ -134,7 +134,7 @@
   const connected = () => connection()?.connected();
   const message = (id, value) => { $(id).textContent = value; };
   const number = (value, digits = 1) => finite(value) === null ? "—" : Number(value).toLocaleString(undefined, { maximumFractionDigits: digits });
-  const failure = (error) => error.status === 401 || error.status === 403 ? "Admin token needed. Connect with a bootstrap admin token to view this data." : error.status === 404 ? "Endpoint not available on this server version." : error.message?.includes("Connect before") ? "Connect to a server first." : "Network or server error. Check the connection and refresh to retry.";
+  const failure = (error) => error.status === 401 || error.status === 403 ? "Super admin needed. Sign in as a super admin or with the admin token to view this data." : error.status === 404 ? "Endpoint not available on this server version." : error.message?.includes("Sign in before") ? "Sign in first." : "Network or server error. Check the connection and refresh to retry.";
   async function get(path, text = false) { return connection().request(path, { text }); }
   const make = (tag, text, className) => {
     const element = document.createElement(tag);
@@ -273,7 +273,7 @@
     for (const value of section.querySelectorAll(".obs-card-value")) value.textContent = "—";
     for (const svg of section.querySelectorAll(".obs-spark")) svg.replaceChildren();
     for (const id of ["obs-routes", "obs-log-view", "obs-targets", "obs-slow-rows", "obs-audit-rows"]) $(id).replaceChildren();
-    for (const id of ["obs-metrics-status", "obs-logs-status", "obs-slow-status", "obs-audit-status"]) message(id, "Connect with an admin token to view server observability.");
+    for (const id of ["obs-metrics-status", "obs-logs-status", "obs-slow-status", "obs-audit-status"]) message(id, "Sign in as a super admin to view server observability.");
     message("obs-log-count", "No log entries buffered.");
     schedule();
   }

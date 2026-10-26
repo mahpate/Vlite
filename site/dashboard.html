@@ -53,7 +53,7 @@
       <div class="section-head">
         <div class="kicker">Inside the dashboard</div>
         <h2>One tour. Every workspace.</h2>
-        <p>Follow a connected example database through collections, records, search, monitoring and administration.</p>
+        <p>Follow a connected example database from sign-in through collections, records, search, monitoring and administration.</p>
       </div>
       <figure class="dashboard-tour dashboard-guided-tour" data-guided-tour>
         <a href="assets/dashboard/current-overview-light.png?v=connected" data-tour-full>
@@ -64,7 +64,7 @@
           <button class="btn" type="button" data-tour-toggle aria-controls="dashboard-guided-tour" aria-pressed="false">Play tour</button>
           <button class="btn" type="button" data-tour-next aria-controls="dashboard-guided-tour">Next view</button>
           <label>Choose a step <select data-tour-step aria-controls="dashboard-guided-tour"></select></label>
-          <span data-tour-position>1 / 26</span>
+          <span data-tour-position>1 / 27</span>
         </div>
       </figure>
     </div>
@@ -81,17 +81,18 @@
         <code>http://127.0.0.1:18084/dashboard</code>. Both listen on loopback only.
         Put <a href="docs/SECURITY.html#native-rest-tls-and-grpc-mutual-tls">HTTPS</a> in front before allowing remote access.</p>
       <h3>First sign-in</h3>
-      <p>A new server has no accounts and no default password. Choose <strong>Use an access token instead</strong>
-        and paste the token from <code>.secrets/api-token</code>. Then create your super admin account under
-        <strong>Users &rarr; Add user</strong> and sign in with it from then on.</p>
+      <p>The dashboard opens on a sign-in screen. A new server has no accounts and no default password, so it asks
+        for an access token: paste the token from <code>.secrets/api-token</code>. Then create your super admin account under
+        <strong>Administration &rarr; Users &amp; access</strong> and sign in with your username and password from then on.</p>
     </div>
   </section>
   <section id="workflows" class="alt">
     <div class="wrap">
       <div class="section-head">
         <h2>What you can do</h2>
-        <p>Everyone sees Overview, Collections, Search and the Developer Console.
-          Super admins also see Tenants, Users, API keys and Server.</p>
+        <p>The sidebar groups six workspaces: Overview; Collections and Search under Data;
+          Observability and Administration under Server; and the Developer Console under Tools.
+          Tabs inside each workspace hold its views. Controls your role cannot use explain why.</p>
       </div>
       <div class="grid cols-2">
         <div class="card"><h3>Collections and records</h3>
@@ -99,10 +100,10 @@
         <div class="card"><h3>Search and indexes</h3>
           <p>Run exact, approximate and hybrid searches with typed filters. Build HNSW indexes and copy any query as code.</p></div>
         <div class="card"><h3>Users and tenants</h3>
-          <p>Super admins add users and tenants and issue API keys. Editors read, search and write; viewers read and search.
+          <p>Super admins add users and tenants and issue API keys in Administration. Editors read, search and write; viewers read and search.
             Each account sees one tenant or all collections.</p></div>
-        <div class="card"><h3>Server</h3>
-          <p>Super admins check health, metrics and live logs, and run backups and maintenance.</p></div>
+        <div class="card"><h3>Monitoring and administration</h3>
+          <p>Super admins watch metrics and live logs in Observability, and run health checks, backups and maintenance in Administration.</p></div>
       </div>
       <h3>Limits</h3>
       <p>The dashboard does not generate embeddings. Writes replace records and require confirmation.

@@ -108,7 +108,7 @@ test("read-only connection bridge reuses bearer auth without touching foreground
   context.fetch = async () => ({ ok: false, status: 403 });
   await assert.rejects(bridge.request("/v1/admin/logs"), (error) => error.status === 403);
   context.connected = false;
-  await assert.rejects(bridge.request("/metrics"), /Connect before/);
+  await assert.rejects(bridge.request("/metrics"), /Sign in before/);
   assert.equal(bridge.token, undefined);
   // A password session sends the same-origin cookie and the request header, never an Authorization header.
   const sessionCalls = [];

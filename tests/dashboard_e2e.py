@@ -36,6 +36,41 @@ def role(page, role_name, **kwargs):
     return page.get_by_role(role_name, **kwargs)
 
 
+CONNECTED = "Connected; overview refreshed"
+
+
+def expect_signed_out(page):
+    """Only the sign-in screen shows; the dashboard stays hidden until a credential is verified."""
+    expect(page.locator("#sign-in-gate")).to_be_visible()
+    expect(page.get_by_role("heading", name="Sign in to VLite", exact=True)).to_be_visible()
+    expect(page.locator("#app-shell")).to_be_hidden()
+
+
+def sign_in_with_token(page, token, expected=CONNECTED):
+    """Signs in from the sign-in screen with an access token (the token form may be a collapsed alternative)."""
+    expect(page.locator("#sign-in-gate")).to_be_visible()
+    control(page, "#token").fill(token)
+    page.get_by_role("button", name="Sign in with token", exact=True).click()
+    if expected is not None:
+        expect(page.locator("#status")).to_have_text(expected)
+
+
+def refresh_dashboard(page, expected=CONNECTED):
+    """Reloads the database snapshot with the current sign-in."""
+    page.locator("#session-refresh").click()
+    if expected is not None:
+        expect(page.locator("#status")).to_have_text(expected)
+
+
+def sign_out(page):
+    """Signs out from the account menu; only the sign-in screen remains."""
+    menu = page.locator("#user-menu")
+    if not menu.evaluate("element => element.open"):
+        menu.locator("summary").click()
+    menu.get_by_role("button", name="Sign out", exact=True).click()
+    expect_signed_out(page)
+
+
 def assert_no_stored_credentials(page, token):
     stored = page.evaluate("""() => ({
         local: Object.fromEntries(Object.entries(localStorage)),
@@ -68,8 +103,10 @@ def ready(page, base):
     raise RuntimeError("Dashboard API did not become ready within 120 seconds") from last_error
 
 
-def exercise_layout(page, url):
+def exercise_layout(page, url, token):
     page.goto(url)
+    expect_signed_out(page)
+    sign_in_with_token(page, token)
     expect(page.locator("main > section:visible")).to_have_count(1)
     expect(page.locator("#database")).to_be_visible()
     expect(page.locator("#search")).to_be_hidden()
@@ -80,7 +117,7 @@ def exercise_layout(page, url):
     for width in [1280, 768, 390]:
         page.set_viewport_size({"width": width, "height": 844})
         page.evaluate("window.scrollTo(0, 0)")
-        toggle = page.get_by_role("button", name="☰ Menu", exact=True)
+        toggle = page.get_by_role("button", name="Menu", exact=True)
         if width == 390:
             expect(nav).to_be_hidden()
             toggle.click()
@@ -116,7 +153,7 @@ def exercise_layout(page, url):
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
         if width == 390:
             expect(toggle).to_have_attribute("aria-expanded", "false")
-            expect(page.get_by_role("heading", name="Health and administration", exact=True)).to_be_focused()
+            expect(page.get_by_role("heading", name="Server health", exact=True)).to_be_focused()
             toggle.click()
         nav.get_by_role("link", name="Overview", exact=True).click()
         expect(page).to_have_url(url + "#database")
@@ -130,7 +167,7 @@ def exercise_layout(page, url):
     nav.get_by_role("link", name="Search", exact=True).click()
     page.locator("#query").fill("[0.25,0.5,0.75]")
     nav.get_by_role("link", name="Collections", exact=True).click()
-    page.get_by_role("tab", name="Write", exact=True).click()
+    page.get_by_role("tab", name="Add & edit", exact=True).click()
     page.locator("#metadata").fill('{"draft":{"type":"string","value":"not saved"}}')
     nav.get_by_role("link", name="Overview", exact=True).click()
     page.go_back()
@@ -142,19 +179,21 @@ def exercise_layout(page, url):
     expect(page.locator("#query")).to_have_value("[0.25,0.5,0.75]")
     nav.get_by_role("link", name="Collections", exact=True).click()
     tabs = page.get_by_role("tablist", name="Collections views")
-    tabs.get_by_role("tab", name="Records / Browse", exact=True).focus()
+    tabs.get_by_role("tab", name="Records", exact=True).focus()
     page.keyboard.press("ArrowRight")
-    expect(tabs.get_by_role("tab", name="Write", exact=True)).to_be_focused()
-    expect(tabs.get_by_role("tab", name="Write", exact=True)).to_have_attribute("aria-selected", "true")
+    expect(tabs.get_by_role("tab", name="Add & edit", exact=True)).to_be_focused()
+    expect(tabs.get_by_role("tab", name="Add & edit", exact=True)).to_have_attribute("aria-selected", "true")
     expect(page.locator("#editor")).to_be_visible()
     page.keyboard.press("End")
-    expect(tabs.get_by_role("tab", name="Settings", exact=True)).to_be_focused()
+    expect(tabs.get_by_role("tab", name="Manage", exact=True)).to_be_focused()
     expect(page.locator("#collections")).to_be_visible()
     page.keyboard.press("Home")
-    expect(tabs.get_by_role("tab", name="Records / Browse", exact=True)).to_be_focused()
+    expect(tabs.get_by_role("tab", name="Records", exact=True)).to_be_focused()
     expect(page.locator("#browse")).to_be_visible()
     expect(page.locator("main > section:visible")).to_have_count(1)
+    # Reloading clears the in-memory token: the sign-in screen returns.
     page.goto(url)
+    expect_signed_out(page)
 
 
 def exercise_observability(page, vectors):
@@ -178,14 +217,14 @@ def exercise(page, base, token):
     assert assets.get(base + "/dashboard/observability.js") == 200, assets
     assert assets.get(base + "/dashboard/style.css") == 200, assets
     assert not errors, errors
-    expect(role(page, "heading", name="Connection", exact=True)).to_be_visible()
-    expect(control(page, "#status")).to_have_text("Disconnected")
+    expect_signed_out(page)
     control(page, "#token").fill("x" * 32)
-    role(page, "button", name="Connect / refresh").click()
+    role(page, "button", name="Sign in with token").click()
     expect(control(page, "#status")).to_contain_text("HTTP 401")
-    control(page, "#token").fill(token)
-    role(page, "button", name="Connect / refresh").click()
-    expect(control(page, "#status")).to_have_text("Connected; overview refreshed")
+    # A rejected credential keeps the dashboard hidden and explains the failure on the sign-in screen.
+    expect(page.locator("#gate-message")).to_contain_text("HTTP 401")
+    expect(page.locator("#app-shell")).to_be_hidden()
+    sign_in_with_token(page, token)
     expect(control(page, "#token")).to_have_value("")
     expect(control(page, "#overview")).to_contain_text('"dimensions": 3')
     expect(control(page, "#connection-badge")).to_have_text("Connected")
@@ -202,8 +241,7 @@ def exercise(page, base, token):
     role(page, "button", name="First page / refresh", exact=True).click()
     expect(control(page, "#browse-status")).to_contain_text("0 records")
     expect(control(page, "#next-page")).to_be_disabled()
-    role(page, "button", name="Connect / refresh").click()
-    expect(control(page, "#status")).to_have_text("Connected; overview refreshed")
+    refresh_dashboard(page)
     control(page, "#id").fill("18446744073709551615")
     control(page, "#record-vector").fill("[1,0,0]")
     control(page, "#payload").fill("AP8=")
@@ -312,7 +350,7 @@ def exercise(page, base, token):
     role(page, "button", name="Refresh index status", exact=True).click()
     expect(control(page, "#index-status")).to_contain_text("Ready; metric squared_l2; buffer 2/256")
     assert_no_stored_credentials(page, token)
-    role(page, "button", name="Disconnect", exact=True).click()
+    sign_out(page)
     expect(control(page, "#overview")).to_have_text("")
     expect(control(page, "#inspector")).to_have_text("")
     expect(control(page, "#metadata")).to_have_value("{}")
@@ -321,9 +359,9 @@ def exercise(page, base, token):
     expect(control(page, "#connection-badge")).to_have_text("Disconnected")
     expect(control(page, "#stat-dimensions")).to_have_text("--")
     page.reload()
-    expect(control(page, "#status")).to_have_text("Disconnected")
-    role(page, "button", name="Get", exact=True).click()
-    expect(control(page, "#status")).to_contain_text("Connect before")
+    # Nothing is reachable without signing in again: the token lived in memory only.
+    expect_signed_out(page)
+    expect(page.get_by_role("button", name="Get", exact=True)).to_have_count(0)
     assert not errors, errors
     # Responsive smoke check.
     page.set_viewport_size({"width": 390, "height": 844})
@@ -337,14 +375,13 @@ def exercise_separate_app(page, base, token, expected_index="Ready;"):
     page.on("request", lambda request: api_requests.append(request.url) if "/api/" in request.url else None)
     page.goto(base + "/")
     assert page.request.get(base + "/observability.js").status == 200
-    expect(role(page, "heading", name="Connection", exact=True)).to_be_visible()
+    expect_signed_out(page)
     expect(control(page, "#status")).to_have_text("Disconnected")
     control(page, "#token").fill("x" * 32)
-    role(page, "button", name="Connect / refresh").click()
+    role(page, "button", name="Sign in with token").click()
     expect(control(page, "#status")).to_contain_text("HTTP 401")
-    control(page, "#token").fill(token)
-    role(page, "button", name="Connect / refresh").click()
-    expect(control(page, "#status")).to_have_text("Connected; overview refreshed")
+    expect(page.locator("#app-shell")).to_be_hidden()
+    sign_in_with_token(page, token)
     expect(control(page, "#overview")).to_contain_text('"dimensions": 3')
     expect(control(page, "#stat-records")).to_have_text("2")
     expect(control(page, "#stat-dimensions")).to_have_text("3")
@@ -367,16 +404,14 @@ def exercise_separate_app(page, base, token, expected_index="Ready;"):
     # Newer servers route default-collection search through /v1/collections/default so its stored settings apply.
     assert any(url.endswith(("/api/v1/search", "/api/v1/collections/default/search")) for url in api_requests), api_requests
     assert_no_stored_credentials(page, token)
-    role(page, "button", name="Disconnect", exact=True).click()
+    sign_out(page)
     expect(control(page, "#overview")).to_have_text("")
     assert not errors, errors
 
 
 def exercise_console_tools(page, base, token):
     page.goto(base + "/")
-    control(page, "#token").fill(token)
-    role(page, "button", name="Connect / refresh").click()
-    expect(control(page, "#status")).to_have_text("Connected; overview refreshed")
+    sign_in_with_token(page, token)
     expect(control(page, "#compatibility")).to_contain_text("version")
     expect(control(page, "#remember-preferences")).not_to_be_checked()
     control(page, "#tour-start").click()
@@ -564,8 +599,7 @@ def exercise_console_tools(page, base, token):
     assert len(held) == 1
     held[0].abort()
     page.unroute("**/api/v1/vectors/999")
-    role(page, "button", name="Connect / refresh", exact=True).click()
-    expect(control(page, "#status")).to_have_text("Connected; overview refreshed")
+    refresh_dashboard(page)
     role(page, "button", name="First page / refresh", exact=True).click()
     expect(control(page, "#vectors tbody tr")).to_have_count(2)
     page.route("**/api/v1/vectors/999", lambda route: route.fulfill(
@@ -578,7 +612,7 @@ def exercise_console_tools(page, base, token):
     expect(control(page, "#stat-records")).to_have_text("--")
     expect(control(page, "#vectors tbody tr")).to_have_count(0)
     page.unroute("**/api/v1/vectors/999")
-    role(page, "button", name="Disconnect", exact=True).click()
+    sign_out(page)
     expect(control(page, "#sample-analysis")).to_have_text("")
     expect(control(page, "#code-examples")).to_have_text("")
     page.set_viewport_size({"width": 390, "height": 844})
@@ -588,9 +622,7 @@ def exercise_console_tools(page, base, token):
 
 def exercise_operations(page, base, token, read_token):
     page.goto(base + "/")
-    control(page, "#token").fill(token)
-    role(page, "button", name="Connect / refresh").click()
-    expect(control(page, "#status")).to_have_text("Connected; overview refreshed")
+    sign_in_with_token(page, token)
     role(page, "button", name="Inspect credential sources", exact=True).click()
     expect(control(page, "#token-result")).to_contain_text('"read_only_configured": true')
     role(page, "button", name="Read sanitized audit trail", exact=True).click()
@@ -634,10 +666,8 @@ def exercise_operations(page, base, token, read_token):
     role(page, "button", name="Select restored copy for restart", exact=True).click()
     role(page, "button", name="Confirm", exact=True).click()
     expect(control(page, "#backup-result")).to_contain_text('"restart_required": true')
-    role(page, "button", name="Disconnect", exact=True).click()
-    control(page, "#token").fill(read_token)
-    role(page, "button", name="Connect / refresh").click()
-    expect(control(page, "#status")).to_have_text("Connected; overview refreshed")
+    sign_out(page)
+    sign_in_with_token(page, read_token)
     expect(control(page, "#compatibility")).to_contain_text('"role": "read_only"')
     expect(control(page, "#delete-vector")).to_be_disabled()
     expect(control(page, "#import-commit")).to_be_disabled()
@@ -655,10 +685,8 @@ def exercise_operations(page, base, token, read_token):
     assert page.request.put(base + "/api/v1/vectors/500", headers=headers, data={"vector": [1, 0, 0]}).status == 403
     assert page.request.get(base + "/api/v1/admin/audit", headers=headers).status == 403
     assert page.request.post(base + "/api/v1/search", headers=headers, data={"vector": [1, 0, 0], "k": 1, "mode": "approximate"}).status == 403
-    role(page, "button", name="Disconnect", exact=True).click()
-    control(page, "#token").fill(token)
-    role(page, "button", name="Connect / refresh").click()
-    expect(control(page, "#status")).to_have_text("Connected; overview refreshed")
+    sign_out(page)
+    sign_in_with_token(page, token)
     role(page, "button", name="Revoke read-only credential", exact=True).click()
     role(page, "button", name="Confirm", exact=True).click()
     expect(control(page, "#token-result")).to_contain_text('"read_only_configured": false')
@@ -667,6 +695,9 @@ def exercise_operations(page, base, token, read_token):
     role(page, "button", name="Confirm", exact=True).click()
     expect(control(page, "#status")).to_contain_text("Configured credentials reloaded")
     expect(control(page, "#connection-badge")).to_have_text("Disconnected")
+    # The reload ends the console's sign-in: only the sign-in screen remains, with the reason shown.
+    expect_signed_out(page)
+    expect(page.locator("#gate-message")).to_contain_text("Sign in again with a current token")
     assert page.request.get(base + "/api/v1/database", headers=headers).status == 200
 
 
@@ -681,9 +712,7 @@ def exercise_epic015_real(page, base, token):
     page.goto(base + "/")
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
-    control(page, "#token").fill(token)
-    role(page, "button", name="Connect / refresh").click()
-    expect(control(page, "#status")).to_have_text("Connected; overview refreshed")
+    sign_in_with_token(page, token)
     if not features.get("collections"):
         # Format v3 file: no invented surfaces; creation stays disabled and nothing is upgraded.
         expect(control(page, "#collection-create")).to_be_disabled()
@@ -791,7 +820,7 @@ def exercise_epic015_real(page, base, token):
     # The default collection was never written by the e2e_docs work.
     after = page.request.get(base + "/api/v1/database", headers=headers).json()
     assert after.get("records") == before.get("records"), (before, after)
-    role(page, "button", name="Disconnect", exact=True).click()
+    sign_out(page)
     assert not VLK_TOKEN.search(visible_state(page))
     assert not errors, errors
     print(f"PASS EPIC-015 real API: format_version={caps.get('format_version')}; collection create/switch/isolated write, import job, hybrid/auto, collection-route maintenance, one-time credential create/revoke, schedulers, verify, diagnostics")
@@ -1020,9 +1049,7 @@ def mocked_page(browser, fake):
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.on("console", lambda message: errors.append(message.text) if message.type == "error" and "Failed to load resource" not in message.text else None)
     page.goto(MOCK_ORIGIN + "/dashboard")
-    control(page, "#token").fill("admin-" + "t" * 32)
-    role(page, "button", name="Connect / refresh").click()
-    expect(control(page, "#status")).to_have_text("Connected; overview refreshed")
+    sign_in_with_token(page, "admin-" + "t" * 32)
     return context, page, errors
 
 
@@ -1050,10 +1077,8 @@ def exercise_navigation_mocked(browser):
     fake = FakeApi()
     context, page, errors = mocked_page(browser, fake)
     try:
-        exercise_layout(page, MOCK_ORIGIN + "/dashboard")
-        page.locator("#token").fill("admin-" + "t" * 32)
-        page.get_by_role("button", name="Connect / refresh").click()
-        expect(page.locator("#status")).to_have_text("Connected; overview refreshed")
+        exercise_layout(page, MOCK_ORIGIN + "/dashboard", "admin-" + "t" * 32)
+        sign_in_with_token(page, "admin-" + "t" * 32)
         # A missing locator still reaches the normal Playwright assertion, while
         # navigating to a secret-bearing section never unhides the secret field.
         expect(control(page, "#does-not-exist")).to_have_count(0)
@@ -1251,8 +1276,8 @@ def exercise_collections_mocked(browser):
     expect(control(page, "#collection-badge")).to_have_text("Collection: default")
     expect(control(page, "#record-vector")).to_have_value("[1,0,0]")
     expect(control(page, "#query")).to_have_value("[1,0,0]")
-    # Disconnect clears collection-bound state.
-    role(page, "button", name="Disconnect", exact=True).click()
+    # Signing out clears collection-bound state.
+    sign_out(page)
     expect(control(page, "#collection-badge")).to_have_text("Collection: default")
     assert page.evaluate("Object.keys(localStorage).filter((key) => key !== 'vlite-appearance').length") == 0
     assert not errors, errors
@@ -1553,7 +1578,7 @@ def exercise_features_mocked(browser):
     expect(control(page, "#pitr-result")).to_contain_text("vlite-restored-1.vlite")
     assert fake.log[-1]["body"] == {"backup": "vlite-backup-1.vlite", "sequence": 42}
     assert not any(item["path"].endswith("/select") for item in fake.log)
-    control(page, "#disconnect").click()
+    sign_out(page)
     for name in ["group-result", "named-result", "geo-result", "recommend-result", "facets-result", "stats-result", "language-result", "disk-result", "feed-result", "webhook-result", "pitr-result"]:
         expect(control(page, "#" + name)).to_have_text("")
     assert not errors, errors
@@ -1633,11 +1658,11 @@ def main():
                     page.set_default_timeout(30000)
                     base = "http://127.0.0.1:" + port
                     ready(page, base)
-                    exercise_layout(page, base + "/dashboard")
+                    exercise_layout(page, base + "/dashboard", token)
                     exercise(page, base, token)
                     ui_base = "http://127.0.0.1:" + ui_port
                     ready(page, ui_base + "/api")
-                    exercise_layout(page, ui_base + "/")
+                    exercise_layout(page, ui_base + "/", token)
                     exercise_separate_app(page, ui_base, token)
                     docker("restart", name)
                     # Docker may reassign an ephemeral host port across restart.
@@ -1645,14 +1670,12 @@ def main():
                     base = "http://127.0.0.1:" + port
                     ready(page, base)
                     page.goto(base + "/dashboard")
-                    control(page, "#token").fill(token)
-                    role(page, "button", name="Connect / refresh").click()
-                    expect(control(page, "#status")).to_have_text("Connected; overview refreshed")
+                    sign_in_with_token(page, token)
                     expect(control(page, "#index-status")).to_contain_text("Not ready")
                     control(page, "#id").fill("2")
                     role(page, "button", name="Get", exact=True).click()
                     expect(control(page, "#record")).to_contain_text('"payload_base64": "AP8="')
-                    role(page, "button", name="Disconnect", exact=True).click()
+                    sign_out(page)
                     # Fresh page has no bearer credential; every API still fails closed.
                     assert page.request.get(base + "/v1/database").status == 401
                     ready(page, ui_base + "/api")

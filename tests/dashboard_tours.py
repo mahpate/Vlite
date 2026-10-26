@@ -25,14 +25,14 @@ def check(root):
     assert "Earlier release tours" not in html
     assert "records-tour" not in html and "search-tour" not in html
     frames = (
-        "current-overview-light.png", "current-token-help.png", "current-collections.png",
-        "current-records.png", "current-payload.png", "current-metadata.png",
-        "current-vector.png", "current-write.png", "current-index.png",
-        "current-search.png", "current-hybrid.png", "current-retrieval.png",
-        "current-explore.png", "current-import.png", "current-observability.png", "current-feed.png",
-        "current-administration.png", "current-backups.png", "current-credentials.png",
-        "current-tenants.png", "current-automation.png", "current-webhooks.png",
-        "current-tls.png", "current-replication.png", "current-developer.png",
+        "current-overview-light.png", "current-sign-in.png", "current-records.png",
+        "current-payload.png", "current-metadata.png", "current-vector.png",
+        "current-write.png", "current-import.png", "current-index.png", "current-collections.png",
+        "current-search.png", "current-hybrid.png", "current-retrieval.png", "current-explore.png",
+        "current-observability.png", "current-feed.png", "current-administration.png",
+        "current-users.png", "current-credentials.png", "current-tenants.png",
+        "current-backups.png", "current-replication.png", "current-automation.png",
+        "current-webhooks.png", "current-tls.png", "current-developer.png",
         "current-preferences.png",
     )
     assets = root / "assets" / "dashboard"
@@ -40,7 +40,7 @@ def check(root):
     assert manifest["connected"] and manifest["record_count"] >= 8
     assert manifest["format_version"] >= 5
     assert {capture["workspace"] for capture in manifest["captures"]} == {
-        "Overview", "Collections", "Search", "Observability", "Administration", "Developer Console",
+        "Sign in", "Overview", "Collections", "Search", "Observability", "Administration", "Developer Console",
     }
     source = Path(__file__).resolve().parents[1] / "src" / "dashboard"
     for filename, checksum in manifest["source_assets"].items():
@@ -134,7 +134,7 @@ def check(root):
         server.shutdown()
         server.server_close()
         thread.join()
-    print("Connected 26-step tour: six workspaces, unique verified captures, autoplay, step selection, pause, motion, offscreen, no-JS and guide images passed.")
+    print("Connected 27-step tour: sign-in screen, six workspaces, unique verified captures, autoplay, step selection, pause, motion, offscreen, no-JS and guide images passed.")
 
 
 if __name__ == "__main__":

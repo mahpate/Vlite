@@ -13,35 +13,94 @@
   <script src="/dashboard/observability.js" defer></script>
 </head>
 <body>
-<button id="navigation-toggle" class="navigation-toggle secondary" type="button" aria-controls="dashboard-sidebar" aria-expanded="false">☰ Menu</button>
+<div id="sign-in-gate" class="sign-in-gate" role="main" aria-labelledby="gate-title">
+  <div class="gate-card">
+    <div class="gate-brand"><svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="gate-logo" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#22d3ee"/><stop offset="1" stop-color="#6366f1"/></linearGradient></defs><rect x="4" y="4" width="56" height="56" rx="14" fill="url(#gate-logo)"/><path d="M18 20 L32 46 L46 20" fill="none" stroke="#fff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="46" cy="20" r="4" fill="#fff"/><circle cx="18" cy="20" r="4" fill="#fff"/></svg><span>VLite<small>Database studio</small></span></div>
+    <h1 id="gate-title" tabindex="-1">Sign in to VLite</h1>
+    <p id="gate-intro">Sign in to browse, search and manage your VLite database.</p>
+    <p id="gate-message" class="gate-message" role="status" aria-live="polite"></p>
+    <p id="gate-help" class="gate-help" hidden></p>
+    <form id="sign-in" hidden>
+      <label>Username<input id="username" autocomplete="username" maxlength="64" spellcheck="false" autocapitalize="none" required></label>
+      <label>Password<input id="password" type="password" autocomplete="current-password" maxlength="128" required></label>
+      <button type="submit">Sign in</button>
+      <p class="connection-hint">Forgot your password? Ask your administrator.</p>
+    </form>
+    <form id="change-password" hidden>
+      <p id="change-password-reason">Your administrator asked you to choose a new password before you continue.</p>
+      <label>Current password<input id="current-password" type="password" autocomplete="current-password" maxlength="128" required></label>
+      <label>New password (15 to 128 characters)<input id="new-password" type="password" autocomplete="new-password" minlength="15" maxlength="128" required></label>
+      <label>Repeat the new password<input id="repeat-password" type="password" autocomplete="new-password" minlength="15" maxlength="128" required></label>
+      <p class="connection-hint">A few unrelated words make a strong password. Leave out your username.</p>
+      <button type="submit">Change password</button><button id="change-password-cancel" type="button" class="secondary">Cancel</button>
+    </form>
+    <p id="sign-in-setup" class="connection-hint" hidden>No user accounts yet. Sign in with the admin token below, then add people in Administration &gt; Users &amp; access.</p>
+    <details id="token-sign-in" class="token-sign-in" open><summary>Use an access token instead</summary>
+    <form id="connection">
+      <label>Access token <input id="token" type="password" autocomplete="off" spellcheck="false" aria-describedby="token-hint"></label>
+      <details class="token-help"><summary>Where do I get a token?</summary>
+        <p id="token-hint">Use an existing token from the server owner. Paste only the token value, without the <code>Bearer</code> prefix.</p>
+        <ul>
+          <li><strong>Local Docker Compose:</strong> from the checkout that started this server, read <code>.secrets/api-token</code> (or the file set by <code>VLITE_TOKEN_FILE</code>). In PowerShell: <code>Get-Content .secrets\api-token -Raw</code>.</li>
+          <li><strong>Windows devbox script:</strong> run <code>.\scripts\devbox.ps1 -Token</code> to copy that devbox's token to your clipboard.</li>
+          <li><strong>Direct server:</strong> use the value configured through <code>--token-file</code>, <code>VLITE_AUTH_TOKEN_FILE</code> or <code>VLITE_AUTH_TOKEN</code>.</li>
+          <li><strong>Shared server:</strong> ask your administrator for a scoped or read-only credential with the permissions you need.</li>
+        </ul>
+        <p>Tokens are secrets. Do not share them in screenshots or logs. The dashboard cannot retrieve an administrator token for you.</p>
+      </details>
+      <p class="connection-hint">Kept in memory only; reloading the page or signing out clears it. Use HTTPS beyond loopback.</p>
+      <button type="submit">Sign in with token</button>
+    </form>
+    </details>
+    <div class="gate-actions"><button id="gate-retry" type="button" hidden>Try again</button><button id="gate-sign-out" type="button" class="secondary" hidden>Sign out</button></div>
+    <p class="gate-footer">Passwords, tokens and database contents are never stored in browser storage.</p>
+  </div>
+</div>
+<div id="app-shell" class="app-shell" hidden>
+<a class="skip-link" href="#workspace-content">Skip to main content</a>
+<button id="navigation-toggle" class="navigation-toggle secondary" type="button" aria-controls="dashboard-sidebar" aria-expanded="false"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>Menu</button>
 <button id="navigation-backdrop" class="navigation-backdrop" type="button" aria-label="Close navigation" hidden></button>
 <aside id="dashboard-sidebar" class="sidebar" aria-label="Workspace navigation">
   <button id="navigation-close" class="navigation-close secondary" type="button" aria-label="Close navigation">Close menu</button>
   <a class="brand" href="#database"><svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="studio-logo" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#22d3ee"/><stop offset="1" stop-color="#6366f1"/></linearGradient></defs><rect x="4" y="4" width="56" height="56" rx="14" fill="url(#studio-logo)"/><path d="M18 20 L32 46 L46 20" fill="none" stroke="#fff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="46" cy="20" r="4" fill="#fff"/><circle cx="18" cy="20" r="4" fill="#fff"/></svg><span>VLite<small>Database studio</small></span></a>
-  <div class="nav-caption">Workspace</div>
   <nav aria-label="Dashboard navigation">
     <a href="#database" data-workspace="overview" aria-current="page"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></svg>Overview</a>
+    <div class="nav-caption">Data</div>
     <a href="#browse" data-workspace="collections"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v7c0 4 16 4 16 0V5M4 12v7c0 4 16 4 16 0v-7"/></svg>Collections</a>
     <a href="#search" data-workspace="search"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="7"/><path d="m16 16 5 5"/></svg>Search</a>
+    <div class="nav-caption">Server</div>
     <a href="#observability" data-workspace="observability"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>Observability</a>
     <a href="#operations" data-workspace="administration"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6z"/><path d="m8 12 3 3 5-6"/></svg>Administration</a>
+    <div class="nav-caption">Tools</div>
     <a href="#requests" data-workspace="developer"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="3"/><path d="m6 9 3 3-3 3m7 0h5"/></svg>Developer Console</a>
   </nav>
   <label class="collection-picker">Active collection<select id="collection" disabled><option value="default">default</option></select></label>
   <p id="collection-note" class="collection-note">Browse, write and search within this collection.</p>
-  <div class="sidebar-note"><strong>One file. Your vectors.</strong><p>Bring your own embeddings. Named collections require format v4 and server support.</p></div>
 </aside>
 <div class="workspace">
-<header class="topbar"><div><span class="eyebrow">WORKSPACE / DATABASE</span><h1 id="workspace-title">Overview</h1><p id="workspace-description">Your database at a glance.</p></div><div class="topbar-actions"><div class="badges"><span id="collection-badge" class="badge">Collection: default</span><span id="connection-badge" class="badge">Disconnected</span><span id="identity-badge" class="badge" data-identity="none" title="Which token this dashboard is using">Not signed in</span></div>
-<details class="appearance-settings"><summary>Appearance and preferences</summary><div class="preferences" role="group" aria-label="Appearance and preferences">
-  <label>Theme <select id="theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
-  <label>Density <select id="density"><option value="comfortable">Comfortable</option><option value="compact">Compact</option></select></label>
-  <label><input id="remember-preferences" type="checkbox"> Remember appearance only</label>
-  <button id="tour-start" type="button" class="secondary">Quick tour</button>
-  <button id="cancel-request" type="button" class="secondary" disabled>Stop waiting</button>
-</div></details></div></header>
-<a class="skip-link" href="#database">Skip to database controls</a>
-<p id="status" class="status-bar" role="status" aria-live="polite">Disconnected</p>
+<header class="topbar">
+  <div class="topbar-title"><h1 id="workspace-title" tabindex="-1">Overview</h1><p id="workspace-description">Your database at a glance: size, health and shortcuts.</p></div>
+  <div class="topbar-actions">
+    <span id="collection-badge" class="badge">Collection: default</span>
+    <span id="connection-badge" class="badge">Disconnected</span>
+    <button id="session-refresh" type="button" class="secondary" title="Reload the database snapshot and server status" hidden>Refresh</button>
+    <details id="user-menu" class="user-menu">
+      <summary><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7"/></svg><span class="visually-hidden">Account and preferences: </span><span id="identity-badge" class="badge" data-identity="none" title="Who you are signed in as">Not signed in</span></summary>
+      <div class="user-menu-panel" role="group" aria-label="Account and preferences">
+        <p class="identity-summary"><strong id="identity-name">Not signed in</strong><span id="identity-detail">Sign in to see who you are and what you can do.</span></p>
+        <button id="change-password-open" type="button" class="secondary" hidden>Change password</button>
+        <div class="preferences" role="group" aria-label="Appearance">
+          <label>Theme <select id="theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
+          <label>Density <select id="density"><option value="comfortable">Comfortable</option><option value="compact">Compact</option></select></label>
+          <label><input id="remember-preferences" type="checkbox"> Remember theme and density on this device</label>
+        </div>
+        <button id="tour-start" type="button" class="secondary">Quick tour</button>
+        <button id="disconnect" type="button">Sign out</button>
+      </div>
+    </details>
+  </div>
+</header>
+<div class="status-row"><p id="status" class="status-bar" role="status" aria-live="polite">Disconnected</p><button id="cancel-request" type="button" class="secondary" disabled>Stop waiting</button></div>
 <p id="error-help" role="status"></p>
 <aside id="studio-tour" class="studio-tour" aria-labelledby="tour-title" hidden>
   <strong id="tour-title">Your first VLite workflow</strong>
@@ -53,101 +112,34 @@
 <div id="workspace-subtabs" class="workspace-subtabs" role="tablist" aria-label="Collection tools" hidden></div>
 <main id="workspace-content">
   <section id="database" class="wide">
-    <div class="section-heading"><div><span class="eyebrow">DATABASE SNAPSHOT</span><h2>Connection</h2></div><span class="badge">Single-file database</span></div>
-    <div class="connection-panel">
-    <div><h3>Your database, connected</h3><p>Sign in to load records, run searches and check server health.</p>
-      <p class="identity-summary"><strong id="identity-name">Not signed in</strong><span id="identity-detail">Sign in to see who you are and what you can do.</span></p></div>
-    <div class="sign-in-options">
-    <form id="sign-in" hidden>
-      <label>Username<input id="username" autocomplete="username" maxlength="64" spellcheck="false" autocapitalize="none" required></label>
-      <label>Password<input id="password" type="password" autocomplete="current-password" maxlength="128" required></label>
-      <button type="submit">Sign in</button>
-      <p class="connection-hint">Forgot your password? Ask your administrator.</p>
-    </form>
-    <form id="change-password" hidden>
-      <h3>Choose a new password</h3>
-      <p id="change-password-reason">Your administrator asked you to choose a new password before you continue.</p>
-      <label>Current password<input id="current-password" type="password" autocomplete="current-password" maxlength="128" required></label>
-      <label>New password (15 to 128 characters)<input id="new-password" type="password" autocomplete="new-password" minlength="15" maxlength="128" required></label>
-      <label>Repeat the new password<input id="repeat-password" type="password" autocomplete="new-password" minlength="15" maxlength="128" required></label>
-      <p class="connection-hint">A few unrelated words make a strong password. Leave out your username.</p>
-      <button type="submit">Change password</button><button id="change-password-cancel" type="button" class="secondary">Cancel</button>
-    </form>
-    <p id="sign-in-setup" class="connection-hint" hidden>No user accounts yet. Connect with the admin token, then add people in Administration &gt; Users.</p>
-    <details id="token-sign-in" class="token-sign-in" open><summary>Use an access token instead</summary>
-    <form id="connection">
-      <label>Bearer token <input id="token" type="password" autocomplete="off" spellcheck="false" aria-describedby="token-hint"></label>
-      <details class="token-help"><summary>Where do I get a token?</summary>
-        <p id="token-hint">Use an existing token from the server owner. Paste only the token value, without the <code>Bearer</code> prefix.</p>
-        <ul>
-          <li><strong>Local Docker Compose:</strong> from the checkout that started this server, read <code>.secrets/api-token</code> (or the file set by <code>VLITE_TOKEN_FILE</code>). In PowerShell: <code>Get-Content .secrets\api-token -Raw</code>.</li>
-          <li><strong>Windows devbox script:</strong> run <code>.\scripts\devbox.ps1 -Token</code> to copy that devbox's token to your clipboard.</li>
-          <li><strong>Direct server:</strong> use the value configured through <code>--token-file</code>, <code>VLITE_AUTH_TOKEN_FILE</code> or <code>VLITE_AUTH_TOKEN</code>.</li>
-          <li><strong>Shared server:</strong> ask your administrator for a scoped or read-only credential with the permissions you need.</li>
-        </ul>
-        <p>Tokens are secrets. Do not share them in screenshots or logs. The dashboard cannot retrieve an administrator token for you.</p>
-      </details>
-      <p class="connection-hint">Kept in memory only; reload or Disconnect clears it. Use HTTPS beyond loopback.</p>
-      <button type="submit">Connect / refresh</button>
-    </form>
-    </details>
-    <div class="session-actions">
-      <button id="session-refresh" type="button" class="secondary" hidden>Refresh</button>
-      <button id="change-password-open" type="button" class="secondary" hidden>Change password</button>
-      <button id="disconnect" type="button">Disconnect</button>
-    </div>
-    </div>
-    </div>
+    <div class="section-heading"><h2>Database snapshot</h2><span id="encryption-badge" class="badge">Encryption: not checked</span></div>
     <div class="stat-grid" aria-label="Database snapshot">
       <div><span>Committed vectors</span><strong id="stat-records">--</strong></div>
       <div><span>Dimensions</span><strong id="stat-dimensions">--</strong></div>
       <div><span>Database size (bytes)</span><strong id="stat-bytes">--</strong></div>
       <div><span>HNSW index</span><strong id="stat-index">Not checked</strong></div>
     </div>
-    <p id="snapshot-note">Connect to view a database snapshot. Refresh after external writes.</p>
-    <span id="encryption-badge" class="badge">Encryption: not checked</span>
+    <p id="snapshot-note">No snapshot loaded yet. Select Refresh to load one.</p>
+    <h3>Quick actions</h3>
+    <div class="action-grid">
+      <a class="action-card" href="#browse"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></svg><strong>Browse records</strong><span>Page through and inspect stored records.</span></a>
+      <a class="action-card" href="#editor"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg><strong>Add or edit a record</strong><span>Write one record with its vector, payload and metadata.</span></a>
+      <a class="action-card" href="#search"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="7"/><path d="m16 16 5 5"/></svg><strong>Run a search</strong><span>Find the nearest records to a query vector.</span></a>
+      <a class="action-card" href="#data-tools"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3m0 0L7 8m5-5 5 5"/><path d="M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/></svg><strong>Import data</strong><span>Load a demo, a JSON file or a large resumable import.</span></a>
+      <a class="action-card" href="#observability"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><strong>Monitor the server</strong><span>Watch live metrics, logs and recent activity.</span></a>
+      <a class="action-card" href="#operations"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6z"/><path d="m8 12 3 3 5-6"/></svg><strong>Manage the server</strong><span>Check health and manage users, backups and settings.</span></a>
+    </div>
     <details class="operation-view"><summary>Server compatibility</summary><pre id="compatibility" aria-label="Server compatibility"></pre></details>
     <details class="operation-view"><summary>Database details and metrics (JSON)</summary><pre id="overview" aria-label="Database overview"></pre></details>
   </section>
-  <section id="collections" class="wide">
-    <span class="eyebrow">COLLECTIONS</span><h2>Collections and settings</h2>
-    <p>Select the active collection in the sidebar. Switching discards collection-bound drafts and results after confirmation; nothing is written. Every write names its collection in the confirmation.</p>
-    <p id="collections-format" role="status">Connect to discover collection support.</p>
-    <button id="collections-refresh" data-extended type="button" class="secondary">Refresh collection list</button>
-    <div class="table-scroll"><table id="collections-table"><caption>Collections visible to this credential</caption><thead><tr><th>Name</th><th>Dimensions</th><th>Live records</th><th>Metric</th><th>Quantization</th><th>Settings</th></tr></thead><tbody></tbody></table></div>
-    <details class="operation-view"><summary>Create an empty collection</summary>
-      <label>Name (lowercase; a-z, 0-9, _ and -)<input id="new-collection-name" maxlength="63" spellcheck="false"></label>
-      <label>Dimensions (1..65536)<input id="new-collection-dimensions" type="number" min="1" max="65536" value="3"></label>
-      <p>Step 1: define the collection. Step 2: review the complete request, then create. No data is written during review.</p>
-      <label>Distance metric<select id="new-collection-metric"><option value="">Use advanced settings / server default</option><option value="squared_l2">Squared L2</option><option value="cosine">Cosine</option><option value="inner_product">Inner product (exact search)</option></select></label>
-      <label>Metadata indexes (optional JSON; blank uses advanced settings)<textarea id="new-collection-indexes" rows="3" placeholder='[{"field":"category","kind":"eq"}]'></textarea></label>
-      <p>Index kinds: eq, range, eq_range. At most 16 unique fields. Explicit metric / index declarations override the corresponding advanced settings.</p>
-      <label>Initial settings (optional JSON; omitted fields use server defaults)<textarea id="new-collection-settings" rows="3">{}</textarea></label>
-      <button id="collection-review" type="button" class="secondary">Review collection (step 2)</button>
-      <pre id="collection-create-summary" aria-live="polite"></pre>
-      <button id="collection-create" data-feature="collections" data-op="collections" type="button">Create empty collection</button>
-    </details>
-    <details class="operation-view"><summary>Drop an empty collection</summary>
-      <p>The server refuses to drop a collection that still holds records, and never drops <code>default</code>. Type the exact name to confirm.</p>
-      <label>Collection to drop<input id="drop-collection-name" maxlength="63" spellcheck="false"></label>
-      <button id="collection-drop" data-feature="collections" data-op="collections" type="button" class="danger">Drop empty collection</button>
-    </details>
-    <details class="operation-view" open><summary>Settings of the active collection</summary>
-      <p>Partial update: omitted fields keep their current values. Metric, HNSW, quantization and rerank are the defaults for collection routes; metadata indexes and text fields drive auto planning and hybrid BM25. On a format v3 file, <code>default</code> settings apply in memory only until restart.</p>
-      <button id="settings-load" data-extended type="button" class="secondary">Load current settings</button>
-      <label>Settings JSON<textarea id="collection-settings" rows="8">{}</textarea></label>
-      <button id="settings-save" data-extended data-op="collections" type="button">Apply settings to active collection</button>
-      <pre id="collection-result" role="status"></pre>
-    </details>
-  </section>
   <section id="browse">
-    <span class="eyebrow">02 / EXPLORE</span><h2>Browse vectors</h2>
+    <h2>Browse records</h2>
     <p>Live pages in numeric ID order, not a snapshot. Each page contains IDs and typed metadata only; select an ID to load its vector and payload.</p>
     <form id="browse-form">
       <label>Page size <input id="page-size" type="number" min="1" max="100" value="25" required></label>
       <button type="submit">First page / refresh</button><button id="next-page" type="button" disabled>Next page</button>
     </form>
-    <p id="browse-status" role="status">Connect, then refresh to load records.</p>
+    <p id="browse-status" role="status">Sign in, then refresh to load records.</p>
     <details class="advanced-settings"><summary>Columns and page sorting</summary>
     <label>Additional metadata columns (select multiple)<select id="browse-columns" multiple size="4" aria-describedby="browse-sort-note"></select></label>
     <label>Sort loaded page<select id="browse-sort"><option value="">ID</option></select></label>
@@ -176,8 +168,8 @@
     <button id="batch-delete" data-write type="button" class="danger">Delete selected</button>
   </section>
   <section id="editor">
-    <span class="eyebrow">03 / EDIT</span><h2>Vector editor</h2>
-    <p>Enter an ID or select it from Browse vectors. Put replaces vector, payload and all metadata.</p>
+    <h2>Add or edit one record</h2>
+    <p>Enter an ID or select it in Records. Put replaces vector, payload and all metadata.</p>
     <button id="example-record" class="secondary" type="button">Fill example</button>
     <button id="find-similar" class="secondary" type="button">Find similar to saved ID</button>
     <p>Fills a dimension-matched vector and sample metadata without writing. Choose an ID, then Put / replace to save.</p>
@@ -208,7 +200,7 @@
     <h3>Safe payload preview</h3><p>UTF-8 / JSON text only. HTML is never rendered.</p><pre id="payload-preview"></pre>
   </section>
   <section id="write-json" class="wide">
-    <span class="eyebrow">WRITE / PREVIEW / COMMIT</span><h2>Write JSON documents</h2>
+    <h2>Add records in bulk (JSON)</h2>
     <p>Paste 1..10000 documents (up to 4 MiB). IDs must be quoted decimal u64 strings. Metadata uses VLite typed values; payload is standard base64 (payload or payload_base64). Existing IDs are replaced, including payload and metadata. TTL is cleared. Preview never writes.</p>
     <label>Documents (JSON array)<textarea id="write-documents" rows="8" spellcheck="false" placeholder='[{"id":"1","vector":[1,0,0],"metadata":{"category":{"type":"string","value":"demo"}}}]'></textarea></label>
     <button id="write-validate" type="button" class="secondary">Validate / preview</button>
@@ -225,8 +217,166 @@
     <button id="studio-code-copy" type="button" class="secondary">Copy code</button>
     <pre id="studio-code" tabindex="0" aria-label="Generated code"></pre>
   </section>
+  <section id="data-tools" class="wide">
+    <h2>Import, export and demo data</h2>
+    <p>Imports are limited to 100 records / 4 MiB, committed in atomic batches of 20. An entire import is not atomic. Existing IDs are replaced only after confirmation. No automatic retries.</p>
+    <ol><li>Use a test database, not production.</li><li>Preview a demo or import file.</li><li>Confirm the writes, browse the records, then search.</li></ol>
+    <button id="demo-preview" type="button">Prepare 3 demo vectors</button>
+    <label>JSON array or CSV file<input id="import-file" type="file" accept=".json,.csv,application/json,text/csv"></label>
+    <p>Each record: id (string), vector (JSON array), optional payload_base64 and metadata (typed object). CSV headers: id,vector,payload_base64,metadata; quote JSON cells.</p>
+    <button id="import-preview" type="button">Validate / preview import</button><button id="import-commit" data-write type="button">Commit previewed records</button>
+    <pre id="import-result" role="status"></pre>
+    <button id="export-page-json" type="button" class="secondary">Export current page JSON</button>
+    <button id="export-page-csv" type="button" class="secondary">Export current page CSV</button>
+    <p>Page exports include full records (up to 100), fetched individually; not a point-in-time database backup. For consistent backups, use Administration &gt; Backup &amp; recovery.</p>
+  </section>
+  <section id="resumable-import" class="wide">
+    <h2>Large file import (resumable)</h2>
+    <p>Splits a JSON array, NDJSON/JSONL or CSV file into numbered chunks for the active collection. Each chunk commits atomically and exactly once; the whole import is not atomic. Committed chunks are kept if you stop, abort or close the page. Nothing is retried automatically: after an unknown outcome, Resume reads the durable job status first and replays only the last committed chunk to prove it is the same file.</p>
+    <label>Import file<input id="job-file" type="file" accept=".json,.ndjson,.jsonl,.csv,application/json,text/csv"></label>
+    <label>Rows per chunk (1..4096)<input id="job-chunk-size" type="number" min="1" max="4096" value="500"></label>
+    <label>Invalid rows<select id="job-policy"><option value="reject_chunk">Reject the whole chunk</option><option value="skip_invalid">Skip invalid rows and report them</option></select></label>
+    <button id="job-prepare" type="button" class="secondary">Validate / split file</button>
+    <button id="job-start" data-feature="imports" data-op="import" type="button">Start new import job</button>
+    <label>Job ID (decimal; to resume or inspect)<input id="job-id" inputmode="numeric" spellcheck="false"></label>
+    <button id="job-status" data-feature="imports" type="button" class="secondary">Read job status</button>
+    <button id="job-resume" data-feature="imports" data-op="import" type="button">Resume from durable checkpoint</button>
+    <button id="job-stop" type="button" class="secondary">Stop after current chunk</button>
+    <button id="job-finish" data-feature="imports" data-op="import" type="button">Finish job</button>
+    <button id="job-abort" data-feature="imports" data-op="import" type="button" class="danger">Abort job</button>
+    <progress id="job-progress" max="1" value="0" aria-label="Import progress"></progress>
+    <pre id="job-result" role="status"></pre>
+    <h3>Invalid rows report</h3><pre id="job-invalid"></pre>
+  </section>
+  <section id="index" class="wide">
+    <h2>Index maintenance</h2>
+    <p id="index-status" role="status">Index readiness not checked</p>
+    <button id="refresh-index" type="button">Refresh index status</button>
+    <p>Builds HNSW for the active collection from its committed records, with the metric, HNSW settings and (when supported) quantization selected in the Search playground. Blocks the single owner; schedule outside latency-sensitive traffic. Reopen/overflow loses readiness.</p>
+    <button id="build-index" type="button">Build HNSW</button>
+    <p id="build-result" role="status"></p>
+    <div class="tool-group"><h3>HNSW configuration and background maintenance</h3>
+      <p>m trades graph connectivity for memory; ef_construction trades build effort for quality. Use the same configuration for building and ready-only search. A seed makes builds reproducible for fixed data. Snapshot limits do not cap total process memory.</p>
+      <label>m (2..64)<input id="hnsw-m" type="number" min="2" max="64" value="16"></label>
+      <label>ef_construction (m..4096)<input id="hnsw-ef" type="number" min="2" max="4096" value="100"></label>
+      <label>Seed (decimal u64)<input id="hnsw-seed" value="42"></label>
+      <label>Maximum snapshot records<input id="hnsw-max-records" type="number" min="1" max="1000000" value="100000"></label>
+      <label>Maximum snapshot vector bytes<input id="hnsw-max-bytes" type="number" min="1" max="268435456" value="134217728"></label>
+      <button id="start-rebuild" data-op="index" type="button">Start background rebuild</button>
+      <button id="status-rebuild" type="button" class="secondary">Observe rebuild status</button>
+      <button id="poll-rebuild" data-op="index" type="button">Poll / publish rebuild</button>
+      <button id="cancel-rebuild" data-op="index" type="button" class="danger">Cancel background rebuild</button>
+      <pre id="rebuild-result"></pre>
+      <label>Maintenance policy JSON<textarea id="maintenance-policy" rows="7">{"config":{"m":16,"ef_construction":100,"seed":"42"},"metric":"squared_l2","limits":{"max_records":100000,"max_snapshot_vector_bytes":134217728},"rebuild_at_buffered_ids":128,"rebuild_at_buffer_vector_bytes":4194304}</textarea></label>
+      <p id="maintenance-scope" role="status">Sign in to see which collection maintenance applies to.</p>
+      <button id="read-maintenance" type="button" class="secondary">Read maintenance policy</button>
+      <button id="save-maintenance" data-admin data-write type="button">Replace maintenance policy</button>
+      <button id="tick-maintenance" data-op="index" type="button">Run maintenance tick</button>
+      <p>Policy is process-local and resets on restart. A tick explicitly polls/publishes or starts a matching job for the active collection; the optional automatic scheduler (Administration &gt; Server settings) is off by default. Observe does not publish. Cancellation is cooperative.</p>
+      <pre id="maintenance-result"></pre>
+    </div>
+    <div class="tool-group"><h3>Index memory and measured quality (active collection)</h3>
+      <p>Memory shows the byte counts of the listed index components only, not total process memory. Quality samples live records, compares the ready index against exact search for those queries and reports recall@k; it does not build or change the index.</p>
+      <button id="index-memory" data-extended type="button" class="secondary">Show index components</button>
+      <div class="table-scroll"><table id="index-memory-table"><caption>Index component byte counts (not total process memory)</caption><thead><tr><th>Component</th><th>Bytes</th></tr></thead><tbody></tbody></table></div>
+      <label>Sample queries (1..32)<input id="quality-samples" type="number" min="1" max="32" value="8"></label>
+      <label>Quality k (1..100)<input id="quality-k" type="number" min="1" max="100" value="10"></label>
+      <label>Distance evaluation budget<input id="quality-budget" type="number" min="1" max="1000000000" value="10000000"></label>
+      <button id="quality-run" data-extended data-op="index" type="button">Measure recall@k</button>
+      <pre id="quality-result" role="status"></pre>
+    </div>
+  </section>
+  <section id="collections" class="wide">
+    <h2>Manage collections</h2>
+    <p>Select the active collection in the sidebar. Switching discards collection-bound drafts and results after confirmation; nothing is written. Every write names its collection in the confirmation.</p>
+    <p id="collections-format" role="status">Sign in to check collection support.</p>
+    <button id="collections-refresh" data-extended type="button" class="secondary">Refresh collection list</button>
+    <div class="table-scroll"><table id="collections-table"><caption>Collections visible to this credential</caption><thead><tr><th>Name</th><th>Dimensions</th><th>Live records</th><th>Metric</th><th>Quantization</th><th>Settings</th></tr></thead><tbody></tbody></table></div>
+    <details class="operation-view"><summary>Create an empty collection</summary>
+      <label>Name (lowercase; a-z, 0-9, _ and -)<input id="new-collection-name" maxlength="63" spellcheck="false"></label>
+      <label>Dimensions (1..65536)<input id="new-collection-dimensions" type="number" min="1" max="65536" value="3"></label>
+      <p>Step 1: define the collection. Step 2: review the complete request, then create. No data is written during review.</p>
+      <label>Distance metric<select id="new-collection-metric"><option value="">Use advanced settings / server default</option><option value="squared_l2">Squared L2</option><option value="cosine">Cosine</option><option value="inner_product">Inner product (exact search)</option></select></label>
+      <label>Metadata indexes (optional JSON; blank uses advanced settings)<textarea id="new-collection-indexes" rows="3" placeholder='[{"field":"category","kind":"eq"}]'></textarea></label>
+      <p>Index kinds: eq, range, eq_range. At most 16 unique fields. Explicit metric / index declarations override the corresponding advanced settings.</p>
+      <label>Initial settings (optional JSON; omitted fields use server defaults)<textarea id="new-collection-settings" rows="3">{}</textarea></label>
+      <button id="collection-review" type="button" class="secondary">Review collection (step 2)</button>
+      <pre id="collection-create-summary" aria-live="polite"></pre>
+      <button id="collection-create" data-feature="collections" data-op="collections" type="button">Create empty collection</button>
+    </details>
+    <details class="operation-view"><summary>Drop an empty collection</summary>
+      <p>The server refuses to drop a collection that still holds records, and never drops <code>default</code>. Type the exact name to confirm.</p>
+      <label>Collection to drop<input id="drop-collection-name" maxlength="63" spellcheck="false"></label>
+      <button id="collection-drop" data-feature="collections" data-op="collections" type="button" class="danger">Drop empty collection</button>
+    </details>
+    <details class="operation-view" open><summary>Settings of the active collection</summary>
+      <p>Partial update: omitted fields keep their current values. Metric, HNSW, quantization and rerank are the defaults for collection routes; metadata indexes and text fields drive auto planning and hybrid BM25. On a format v3 file, <code>default</code> settings apply in memory only until restart.</p>
+      <button id="settings-load" data-extended type="button" class="secondary">Load current settings</button>
+      <label>Settings JSON<textarea id="collection-settings" rows="8">{}</textarea></label>
+      <button id="settings-save" data-extended data-op="collections" type="button">Apply settings to active collection</button>
+      <pre id="collection-result" role="status"></pre>
+    </details>
+  </section>
+  <section id="search" class="wide">
+    <h2>Vector search</h2>
+    <p>Use a saved vector as a query or enter your own. Select a result ID to inspect its full record.</p>
+    <button id="use-record-query" class="secondary" type="button">Use editor vector as query</button>
+    <div class="search-layout"><div>
+    <form id="search-form">
+      <label>Query vector (JSON array; optional for text-only hybrid) <textarea id="query" rows="3">[1, 0, 0]</textarea></label>
+      <label>k <input id="k" type="number" value="10" min="0" max="10000" required></label>
+      <label>Mode <select id="mode"><option value="exact">Exact</option><option value="approximate">Approximate (may build synchronously)</option><option value="approximate_ready">Approximate ready-only (409 if unavailable)</option><option value="auto" disabled>Auto (server planner; never builds)</option><option value="hybrid" disabled>Hybrid text + vector (score; higher is better)</option></select></label>
+      <p id="mode-help" role="status">Exact: scans every matching record. Distances; lower is better.</p>
+      <details class="advanced-settings"><summary>Index, hybrid and reranking options</summary>
+      <label>Search ef (ANN only) <input id="ef" type="number" value="100" min="1" max="100000" disabled></label>
+      <label>Metric (search and index build) <select id="metric"><option value="squared_l2">Squared L2</option><option value="cosine">Cosine distance</option><option value="inner_product">Negative inner product (exact only)</option></select></label>
+      <label>Quantization (ANN search and build) <select id="quantization" disabled><option value="none">None (full f32 vectors)</option><option value="scalar_u8">Scalar u8 (smaller graph scoring, then f32 rerank)</option></select></label>
+      <label>Rerank multiplier (1..16) <input id="rerank-multiplier" type="number" min="1" max="16" value="4" disabled></label>
+      <fieldset class="hybrid-fields"><legend>Hybrid (BM25 over declared text fields + vector, fused by weighted RRF)</legend>
+        <label>Query text <input id="search-text" maxlength="1024" disabled></label>
+        <label>Vector leg <select id="vector-leg" disabled><option value="exact">Exact</option><option value="approximate_ready">Ready ANN</option></select></label>
+        <label>RRF k <input id="rrf-k" type="number" min="1" max="10000" value="60" disabled></label>
+        <label>Vector weight <input id="vector-weight" type="number" min="0" max="1000" step="0.1" value="1" disabled></label>
+        <label>Text weight <input id="text-weight" type="number" min="0" max="1000" step="0.1" value="1" disabled></label>
+        <label>Candidates per leg <input id="fusion-candidates" type="number" min="1" max="10000" value="100" disabled></label>
+      </fieldset>
+      <label><input id="explain" type="checkbox" disabled> Explain (return plan and work counters)</label>
+      <label>Candidate reranking (vector modes only)<select id="rerank-mode"><option value="">None</option><option value="exact">Exact f32</option><option value="mmr">MMR diversity</option></select></label>
+      <label>Rerank candidates (at least k, at most 1000)<input id="rerank-candidates" type="number" min="1" max="1000" value="50"></label>
+      <label>MMR lambda (0 diversity .. 1 relevance)<input id="mmr-lambda" type="number" min="0" max="1" step="0.05" value="0.5"></label>
+      </details>
+      <label>Metadata filter (JSON AND array) <textarea id="filter" rows="4">[]</textarea></label>
+      <p>Example: [{"op":"eq","field":"category","value":{"type":"string","value":"docs"}}]. The same conditions work in exact and filter-aware ANN search. ANN can return fewer than k matches and has no exact fallback. Selective filters may traverse many graph nodes; ef is not a visit/time limit.</p>
+      <button type="submit" data-op="search">Search</button>
+    </form>
+    </div><div class="search-results"><h3>Nearest neighbors</h3><p id="search-summary" role="status">Run a search to compare vectors. Lower distance is better.</p>
+    <div class="table-scroll"><table id="hits"><caption>Search results (lower distance is better)</caption><thead><tr><th>ID</th><th>Distance</th></tr></thead><tbody></tbody></table></div>
+    <div id="search-inspector-slot"></div>
+    <h3>Plan and work counters (Explain)</h3><pre id="search-plan" aria-label="Search plan"></pre>
+    </div></div>
+    <div class="tool-group"><h3>Build a metadata filter</h3>
+      <label>Field<input id="filter-field" value="category"></label>
+      <label>Operator<select id="filter-op"><option value="eq">Equals</option><option value="min">At least (numeric)</option><option value="max">At most (numeric)</option></select></label>
+      <label>Type<select id="filter-type"><option value="string">String</option><option value="integer">Integer</option><option value="float">Float</option><option value="boolean">Boolean</option></select></label>
+      <label>Value<input id="filter-value" value="demo"></label>
+      <button id="filter-add" type="button">Add AND condition</button><button id="filter-clear" class="secondary" type="button">Clear filter</button>
+    </div>
+    <p>Squared L2 is sum of squared component differences; cosine is 1 minus cosine similarity; inner product is the negative dot product. Lower is better. These are distances, not confidence percentages.</p>
+    <button id="compare-search" type="button">Compare exact / ready ANN</button>
+    <pre id="search-comparison"></pre>
+    <button id="export-hits" type="button" class="secondary">Export results JSON</button>
+    <div class="tool-group">
+      <h3>Saved query workspace</h3>
+      <p>Download a named query including its vector, filter and index settings. Files may contain private data, but never include the connected token. Loading only fills the form; Search replays it explicitly.</p>
+      <label>Query name<input id="query-name" value="my-query" maxlength="100"></label>
+      <button id="query-save" type="button" class="secondary">Download query</button>
+      <label>Load saved query<input id="query-file" type="file" accept=".json,application/json"></label>
+      <button id="query-load" type="button" class="secondary">Load query into form</button>
+      <p id="query-workspace-status" role="status"></p>
+    </div>
+  </section>
   <section id="retrieval" class="wide">
-    <span class="eyebrow">RETRIEVAL</span><h2>Advanced retrieval</h2>
+    <h2>Advanced retrieval</h2>
     <p>Uses the active collection. Grouped and geo search use the playground vector, metric and metadata filter. Named and dense+sparse search use the vector below (independent dimensions); they do not accept metadata filters or reranking. Results are JSON, rendered as text.</p>
     <div class="tool-group"><h3>Group by metadata</h3>
       <label>Group by field<input id="group-field" value="category" maxlength="256"></label>
@@ -286,168 +436,8 @@
       <pre id="disk-result" aria-live="polite"></pre>
     </div>
   </section>
-  <section id="change-feed" class="wide">
-    <h2>Change feed</h2><p>Database-wide committed events, not filtered to the active collection. Scoped credentials need read over all collections. Pages retain whole commits; limits are approximate. Compacted cursors require a full consumer resync. Expiry emits no event.</p>
-    <label>Opaque cursor (blank starts retained history)<textarea id="feed-cursor" rows="2"></textarea></label>
-    <label>Page limit<input id="feed-limit" type="number" min="1" max="10000" value="100"></label>
-    <button id="feed-load" type="button" data-feature="change_feed" data-feed>Load page</button>
-    <button id="feed-next" type="button" data-feature="change_feed" data-feed>Next page</button>
-    <p id="feed-status" role="status"></p><pre id="feed-result" aria-live="polite"></pre>
-  </section>
-  <section id="webhooks" class="wide">
-    <h2>Webhooks and point-in-time restore</h2><p>Bootstrap admin only. Requires a private VLITE_ADMIN_DIR. Webhooks deliver at least once; consumers must deduplicate. New subscriptions start at the shared dispatcher position, not historical replay.</p>
-    <p data-admin-availability="webhooks">Connect with a bootstrap admin credential to check webhook availability.</p>
-    <div id="admin-webhooks" class="tool-group" data-admin-view><h3>Webhook subscriptions and delivery status</h3>
-      <button id="webhook-list" type="button" data-admin data-feature="webhooks">Refresh subscriptions</button>
-      <pre id="webhook-result" aria-live="polite"></pre>
-      <label>Destination HTTP(S) URL<input id="webhook-url" type="url" autocomplete="off"></label>
-      <label>Collections (comma-separated; blank means all)<input id="webhook-collections"></label>
-      <label>Events (comma-separated)<input id="webhook-events" value="put,delete,metadata_update"></label>
-      <label>Signing secret (16..256 bytes; never returned or displayed)<input id="webhook-secret" type="password" autocomplete="new-password"></label>
-      <button id="webhook-create" type="button" data-admin data-feature="webhooks">Create subscription</button>
-      <label>Subscription ID (24 hex characters)<input id="webhook-id" maxlength="24"></label>
-      <button id="webhook-status" type="button" data-admin data-feature="webhooks">Delivery status / last error</button>
-      <button id="webhook-delete" type="button" class="danger" data-admin data-feature="webhooks">Delete subscription</button>
-    </div>
-    <div id="admin-pitr" class="tool-group" data-admin-view><h3>PITR restore into a new copy</h3>
-      <p data-admin-availability="backup_restore">Connect to check backup and restore availability.</p>
-      <label>Existing generated backup name<input id="pitr-backup" maxlength="96"></label>
-      <label>Target<select id="pitr-kind"><option value="sequence">Commit sequence</option><option value="timestamp_ms">Unix timestamp (milliseconds)</option></select></label>
-      <label>Target value (nonnegative safe integer)<input id="pitr-target" inputmode="numeric"></label>
-      <p>Creates a new restored copy; never replaces or selects the live database. Use the existing restore-selection controls for the next startup.</p>
-      <button id="pitr-run" type="button" data-admin data-feature="backup_restore">Create PITR copy</button>
-      <pre id="pitr-result" aria-live="polite"></pre>
-    </div>
-  </section>
-  <section id="search" class="wide">
-    <span class="eyebrow">04 / TEST SIMILARITY</span><h2>Search playground</h2>
-    <p>Use a saved vector as a query or enter your own. Select a result ID to inspect its full record.</p>
-    <button id="use-record-query" class="secondary" type="button">Use editor vector as query</button>
-    <div class="search-layout"><div>
-    <form id="search-form">
-      <label>Query vector (JSON array; optional for text-only hybrid) <textarea id="query" rows="3">[1, 0, 0]</textarea></label>
-      <label>k <input id="k" type="number" value="10" min="0" max="10000" required></label>
-      <label>Mode <select id="mode"><option value="exact">Exact</option><option value="approximate">Approximate (may build synchronously)</option><option value="approximate_ready">Approximate ready-only (409 if unavailable)</option><option value="auto" disabled>Auto (server planner; never builds)</option><option value="hybrid" disabled>Hybrid text + vector (score; higher is better)</option></select></label>
-      <p id="mode-help" role="status">Exact: scans every matching record. Distances; lower is better.</p>
-      <details class="advanced-settings"><summary>Index, hybrid and reranking options</summary>
-      <label>Search ef (ANN only) <input id="ef" type="number" value="100" min="1" max="100000" disabled></label>
-      <label>Metric (search and index build) <select id="metric"><option value="squared_l2">Squared L2</option><option value="cosine">Cosine distance</option><option value="inner_product">Negative inner product (exact only)</option></select></label>
-      <label>Quantization (ANN search and build) <select id="quantization" disabled><option value="none">None (full f32 vectors)</option><option value="scalar_u8">Scalar u8 (smaller graph scoring, then f32 rerank)</option></select></label>
-      <label>Rerank multiplier (1..16) <input id="rerank-multiplier" type="number" min="1" max="16" value="4" disabled></label>
-      <fieldset class="hybrid-fields"><legend>Hybrid (BM25 over declared text fields + vector, fused by weighted RRF)</legend>
-        <label>Query text <input id="search-text" maxlength="1024" disabled></label>
-        <label>Vector leg <select id="vector-leg" disabled><option value="exact">Exact</option><option value="approximate_ready">Ready ANN</option></select></label>
-        <label>RRF k <input id="rrf-k" type="number" min="1" max="10000" value="60" disabled></label>
-        <label>Vector weight <input id="vector-weight" type="number" min="0" max="1000" step="0.1" value="1" disabled></label>
-        <label>Text weight <input id="text-weight" type="number" min="0" max="1000" step="0.1" value="1" disabled></label>
-        <label>Candidates per leg <input id="fusion-candidates" type="number" min="1" max="10000" value="100" disabled></label>
-      </fieldset>
-      <label><input id="explain" type="checkbox" disabled> Explain (return plan and work counters)</label>
-      <label>Candidate reranking (vector modes only)<select id="rerank-mode"><option value="">None</option><option value="exact">Exact f32</option><option value="mmr">MMR diversity</option></select></label>
-      <label>Rerank candidates (at least k, at most 1000)<input id="rerank-candidates" type="number" min="1" max="1000" value="50"></label>
-      <label>MMR lambda (0 diversity .. 1 relevance)<input id="mmr-lambda" type="number" min="0" max="1" step="0.05" value="0.5"></label>
-      </details>
-      <label>Metadata filter (JSON AND array) <textarea id="filter" rows="4">[]</textarea></label>
-      <p>Example: [{"op":"eq","field":"category","value":{"type":"string","value":"docs"}}]. The same conditions work in exact and filter-aware ANN search. ANN can return fewer than k matches and has no exact fallback. Selective filters may traverse many graph nodes; ef is not a visit/time limit.</p>
-      <button type="submit" data-op="search">Search</button>
-    </form>
-    </div><div class="search-results"><h3>Nearest neighbors</h3><p id="search-summary" role="status">Run a search to compare vectors. Lower distance is better.</p>
-    <div class="table-scroll"><table id="hits"><caption>Search results (lower distance is better)</caption><thead><tr><th>ID</th><th>Distance</th></tr></thead><tbody></tbody></table></div>
-    <div id="search-inspector-slot"></div>
-    <h3>Plan and work counters (Explain)</h3><pre id="search-plan" aria-label="Search plan"></pre>
-    </div></div>
-    <div class="tool-group"><h3>Build a metadata filter</h3>
-      <label>Field<input id="filter-field" value="category"></label>
-      <label>Operator<select id="filter-op"><option value="eq">Equals</option><option value="min">At least (numeric)</option><option value="max">At most (numeric)</option></select></label>
-      <label>Type<select id="filter-type"><option value="string">String</option><option value="integer">Integer</option><option value="float">Float</option><option value="boolean">Boolean</option></select></label>
-      <label>Value<input id="filter-value" value="demo"></label>
-      <button id="filter-add" type="button">Add AND condition</button><button id="filter-clear" class="secondary" type="button">Clear filter</button>
-    </div>
-    <p>Squared L2 is sum of squared component differences; cosine is 1 minus cosine similarity; inner product is the negative dot product. Lower is better. These are distances, not confidence percentages.</p>
-    <button id="compare-search" type="button">Compare exact / ready ANN</button>
-    <pre id="search-comparison"></pre>
-    <button id="export-hits" type="button" class="secondary">Export results JSON</button>
-    <div class="tool-group">
-      <h3>Saved query workspace</h3>
-      <p>Download a named query including its vector, filter and index settings. Files may contain private data, but never include the connected token. Loading only fills the form; Search replays it explicitly.</p>
-      <label>Query name<input id="query-name" value="my-query" maxlength="100"></label>
-      <button id="query-save" type="button" class="secondary">Download query</button>
-      <label>Load saved query<input id="query-file" type="file" accept=".json,application/json"></label>
-      <button id="query-load" type="button" class="secondary">Load query into form</button>
-      <p id="query-workspace-status" role="status"></p>
-    </div>
-  </section>
-  <section id="index" class="wide">
-    <span class="eyebrow">05 / PERFORMANCE</span><h2>Index maintenance</h2>
-    <p id="index-status" role="status">Index readiness not checked</p>
-    <button id="refresh-index" type="button">Refresh index status</button>
-    <p>Builds HNSW for the active collection from its committed records, with the metric, HNSW settings and (when supported) quantization selected in the Search playground. Blocks the single owner; schedule outside latency-sensitive traffic. Reopen/overflow loses readiness.</p>
-    <button id="build-index" type="button">Build HNSW</button>
-    <p id="build-result" role="status"></p>
-    <div class="tool-group"><h3>HNSW configuration and background maintenance</h3>
-      <p>m trades graph connectivity for memory; ef_construction trades build effort for quality. Use the same configuration for building and ready-only search. A seed makes builds reproducible for fixed data. Snapshot limits do not cap total process memory.</p>
-      <label>m (2..64)<input id="hnsw-m" type="number" min="2" max="64" value="16"></label>
-      <label>ef_construction (m..4096)<input id="hnsw-ef" type="number" min="2" max="4096" value="100"></label>
-      <label>Seed (decimal u64)<input id="hnsw-seed" value="42"></label>
-      <label>Maximum snapshot records<input id="hnsw-max-records" type="number" min="1" max="1000000" value="100000"></label>
-      <label>Maximum snapshot vector bytes<input id="hnsw-max-bytes" type="number" min="1" max="268435456" value="134217728"></label>
-      <button id="start-rebuild" data-op="index" type="button">Start background rebuild</button>
-      <button id="status-rebuild" type="button" class="secondary">Observe rebuild status</button>
-      <button id="poll-rebuild" data-op="index" type="button">Poll / publish rebuild</button>
-      <button id="cancel-rebuild" data-op="index" type="button" class="danger">Cancel background rebuild</button>
-      <pre id="rebuild-result"></pre>
-      <label>Maintenance policy JSON<textarea id="maintenance-policy" rows="7">{"config":{"m":16,"ef_construction":100,"seed":"42"},"metric":"squared_l2","limits":{"max_records":100000,"max_snapshot_vector_bytes":134217728},"rebuild_at_buffered_ids":128,"rebuild_at_buffer_vector_bytes":4194304}</textarea></label>
-      <p id="maintenance-scope" role="status">Connect to see which collection maintenance applies to.</p>
-      <button id="read-maintenance" type="button" class="secondary">Read maintenance policy</button>
-      <button id="save-maintenance" data-admin data-write type="button">Replace maintenance policy</button>
-      <button id="tick-maintenance" data-op="index" type="button">Run maintenance tick</button>
-      <p>Policy is process-local and resets on restart. A tick explicitly polls/publishes or starts a matching job for the active collection; the optional automatic scheduler (Operations) is off by default. Observe does not publish. Cancellation is cooperative.</p>
-      <pre id="maintenance-result"></pre>
-    </div>
-    <div class="tool-group"><h3>Index memory and measured quality (active collection)</h3>
-      <p>Memory shows the byte counts of the listed index components only, not total process memory. Quality samples live records, compares the ready index against exact search for those queries and reports recall@k; it does not build or change the index.</p>
-      <button id="index-memory" data-extended type="button" class="secondary">Show index components</button>
-      <div class="table-scroll"><table id="index-memory-table"><caption>Index component byte counts (not total process memory)</caption><thead><tr><th>Component</th><th>Bytes</th></tr></thead><tbody></tbody></table></div>
-      <label>Sample queries (1..32)<input id="quality-samples" type="number" min="1" max="32" value="8"></label>
-      <label>Quality k (1..100)<input id="quality-k" type="number" min="1" max="100" value="10"></label>
-      <label>Distance evaluation budget<input id="quality-budget" type="number" min="1" max="1000000000" value="10000000"></label>
-      <button id="quality-run" data-extended data-op="index" type="button">Measure recall@k</button>
-      <pre id="quality-result" role="status"></pre>
-    </div>
-  </section>
-  <section id="data-tools" class="wide">
-    <span class="eyebrow">DATA WORKFLOWS</span><h2>Import, export and guided demo</h2>
-    <p>Imports are limited to 100 records / 4 MiB, committed in atomic batches of 20. An entire import is not atomic. Existing IDs are replaced only after confirmation. No automatic retries.</p>
-    <ol><li>Connect to a test database.</li><li>Preview a demo or import file.</li><li>Confirm the writes, browse the records, then search.</li></ol>
-    <button id="demo-preview" type="button">Prepare 3 demo vectors</button>
-    <label>JSON array or CSV file<input id="import-file" type="file" accept=".json,.csv,application/json,text/csv"></label>
-    <p>Each record: id (string), vector (JSON array), optional payload_base64 and metadata (typed object). CSV headers: id,vector,payload_base64,metadata; quote JSON cells.</p>
-    <button id="import-preview" type="button">Validate / preview import</button><button id="import-commit" data-write type="button">Commit previewed records</button>
-    <pre id="import-result" role="status"></pre>
-    <button id="export-page-json" type="button" class="secondary">Export current page JSON</button>
-    <button id="export-page-csv" type="button" class="secondary">Export current page CSV</button>
-    <p>Page exports include full records (up to 100), fetched individually; not a point-in-time database backup. Use Operations for consistent backups.</p>
-  </section>
-  <section id="resumable-import" class="wide">
-    <span class="eyebrow">LARGE IMPORTS</span><h2>Resumable import</h2>
-    <p>Splits a JSON array, NDJSON/JSONL or CSV file into numbered chunks for the active collection. Each chunk commits atomically and exactly once; the whole import is not atomic. Committed chunks are kept if you stop, abort or close the page. Nothing is retried automatically: after an unknown outcome, Resume reads the durable job status first and replays only the last committed chunk to prove it is the same file.</p>
-    <label>Import file<input id="job-file" type="file" accept=".json,.ndjson,.jsonl,.csv,application/json,text/csv"></label>
-    <label>Rows per chunk (1..4096)<input id="job-chunk-size" type="number" min="1" max="4096" value="500"></label>
-    <label>Invalid rows<select id="job-policy"><option value="reject_chunk">Reject the whole chunk</option><option value="skip_invalid">Skip invalid rows and report them</option></select></label>
-    <button id="job-prepare" type="button" class="secondary">Validate / split file</button>
-    <button id="job-start" data-feature="imports" data-op="import" type="button">Start new import job</button>
-    <label>Job ID (decimal; to resume or inspect)<input id="job-id" inputmode="numeric" spellcheck="false"></label>
-    <button id="job-status" data-feature="imports" type="button" class="secondary">Read job status</button>
-    <button id="job-resume" data-feature="imports" data-op="import" type="button">Resume from durable checkpoint</button>
-    <button id="job-stop" type="button" class="secondary">Stop after current chunk</button>
-    <button id="job-finish" data-feature="imports" data-op="import" type="button">Finish job</button>
-    <button id="job-abort" data-feature="imports" data-op="import" type="button" class="danger">Abort job</button>
-    <progress id="job-progress" max="1" value="0" aria-label="Import progress"></progress>
-    <pre id="job-result" role="status"></pre>
-    <h3>Invalid rows report</h3><pre id="job-invalid"></pre>
-  </section>
   <section id="explore" class="wide">
-    <span class="eyebrow">BOUNDED EXPLORATION</span><h2>Record comparison and data quality</h2>
+    <h2>Record comparison and data quality</h2>
     <label>Other saved ID<input id="compare-id" value="2"></label>
     <button id="compare-records" type="button">Compare with editor ID</button>
     <pre id="record-comparison"></pre>
@@ -456,83 +446,48 @@
     <pre id="sample-analysis"></pre>
     <div id="projection" role="group" aria-label="PCA sample projection"></div>
   </section>
-  <section id="requests" class="wide">
-    <span class="eyebrow">06 / DEBUG</span><h2>Request inspector</h2>
-    <p>Latest request only. Authorization is never displayed. Latency includes browser/network/response parsing, not isolated engine time. No automatic retries.</p>
-    <pre id="inspector" aria-label="Request inspector"></pre>
-    <h3>REST playground</h3>
-    <label>Method<select id="request-method"><option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option></select></label>
-    <label>Supported API path<input id="request-path" value="/v1/database"></label>
-    <label>JSON request body<textarea id="request-body" rows="4">{}</textarea></label>
-    <button id="send-request" type="button">Send request</button>
-    <button id="request-examples" type="button" class="secondary">Generate redacted examples</button>
-    <pre id="code-examples"></pre>
-    <h3>Reproducible read-only scenarios</h3>
-    <p>Definitions never contain credentials. Run only against a dedicated test database. Supported steps: get a record (expected ID), or search (expected hit IDs in order).</p>
-    <label>Scenario JSON<textarea id="scenario" rows="5">{"name":"self-match","steps":[{"path":"/v1/search","body":{"vector":[1,0,0],"k":1,"mode":"exact","metric":"squared_l2"},"expected_ids":["1"]}]}</textarea></label>
-    <button id="run-scenario" type="button">Run scenario</button>
-    <button id="save-scenario" type="button" class="secondary">Download scenario</button>
-    <label>Load scenario file<input id="scenario-file" type="file" accept=".json,application/json"></label>
-    <pre id="scenario-result"></pre>
-  </section>
-  <section id="operations" class="wide">
-    <span class="eyebrow">SERVER OPERATIONS</span><h2>Health and administration</h2>
-    <p>Start with a health check. Use the Administration tabs for access, tenant namespaces, backup recovery, automated maintenance and TLS. Mutations ask for confirmation; the dashboard never restarts the server or edits its host files.</p>
-    <div id="admin-health" data-admin-view>
-    <button id="refresh-health" type="button">Refresh health snapshot</button>
-    <label><input id="auto-health" type="checkbox"> Refresh every 10 seconds while this page is visible</label>
-    <pre id="health-result"></pre>
+  <section id="observability" class="wide" aria-labelledby="obs-title">
+    <div class="section-heading"><h2 id="obs-title">Live monitor</h2><span class="badge">Metrics · Logs · Activity</span></div>
+    <p>Monitor this server without leaving the console. Uses the current connection and token; bootstrap admin access is required for logs and audit. Monitoring pauses when this section is off screen or the browser tab is hidden.</p>
+    <div class="obs-toolbar">
+      <label>Refresh interval<select id="obs-interval"><option value="2000">2 seconds</option><option value="5000" selected>5 seconds</option><option value="15000">15 seconds</option><option value="0">Off (manual refresh)</option></select></label>
+      <button id="obs-pause" type="button" class="secondary" aria-pressed="false">Pause monitoring</button>
+      <button id="obs-refresh" type="button">Refresh now</button>
     </div>
-    <div id="admin-controls">
-      <p id="admin-note">Connect to discover server administration features. These operations require an admin credential.</p>
-      <details id="admin-token-management" class="operation-view" data-admin-view open><summary>Bootstrap tokens and recent audit</summary>
-      <p data-admin-availability="tokens_reload">Connect to check configured token-file reload support.</p>
-      <button id="token-status" data-admin type="button" class="secondary">Inspect credential sources</button>
-      <button id="token-reload" data-admin data-write type="button">Reload configured token files</button>
-      <button id="token-revoke" data-admin data-write type="button" class="danger">Revoke read-only credential</button>
-      <p>Change configured secret files offline first. Reload validates both before swapping. Admin token rotation requires reconnecting with the new token. Environment tokens require restart. Revocation is in-memory; empty its configured file to persist it.</p>
-      <pre id="token-result"></pre>
-      <button id="read-audit" data-admin type="button" class="secondary">Read sanitized audit trail</button>
-      <p>Last 256 process-local requests only; not a durable compliance log. No credentials or record contents.</p>
-      <pre id="audit-result"></pre>
-      </details>
-      <details id="admin-backups" class="operation-view" data-admin-view><summary>Backup and staged restore</summary>
-      <p data-admin-availability="backup_restore">Connect to check backup and restore support.</p>
-      <p><strong>Recovery order:</strong> list or create a backup, select it below, verify or drill it, then stage a restored copy. Select that copy only when ready for an operator-managed restart.</p>
-      <button id="list-backups" data-admin type="button" class="secondary">List snapshots</button>
-      <button id="create-backup" data-admin data-write type="button">Create consistent backup</button>
-      <label>Backup to restore<select id="backup-name"></select></label>
-      <button id="stage-restore" data-admin data-write type="button">Validate / stage restored copy</button>
-      <label>Restored copy for next startup<select id="restore-name"></select></label>
-      <button id="select-restore" data-admin data-write type="button" class="danger">Select restored copy for restart</button>
-      <p>Copies can block the owner and consume disk. Restore never replaces the live file. Selection takes effect only after an operator restarts the API with the same admin directory. Original data remains untouched; the selection persists. Do not remove the selected copy.</p>
-      <button id="backup-verify" data-admin data-feature="backup_verify_drill" type="button" class="secondary">Verify selected backup</button>
-      <button id="backup-drill" data-admin data-feature="backup_verify_drill" type="button">Run restore drill on selected backup</button>
-      <p>Verify checks the backup file's integrity (CRC) and records the result in its manifest. A drill restores it to a scratch file, opens and validates it, compares collections/counts with the manifest, runs a self-match query, then deletes the scratch file; the active database and restart selection are never touched.</p>
-      <pre id="backup-result"></pre>
-      </details>
-      <details id="admin-backup-schedule" class="operation-view" data-admin-view><summary>Scheduled backups</summary>
-      <p data-admin-availability="backup_schedule">Connect to check backup scheduling support.</p>
-      <p>Off by default. Runtime changes are memory-only: the server's environment configuration applies again after restart. Retention is a separate opt-in: when enabled it deletes generated backups ranked beyond retain_last (and, if retain_days is set, older than it), but never the newest verified backup, restored copies, drill scratch files or the next-startup selection.</p>
-      <button id="backup-schedule-read" data-admin data-feature="backup_schedule" type="button" class="secondary">Read backup schedule</button>
-      <label>Backup schedule changes (JSON; fields are merged, omitted fields keep their current value; Read first)<textarea id="backup-schedule" rows="6">{"enabled":false}</textarea></label>
-      <button id="backup-schedule-save" data-admin data-feature="backup_schedule" type="button">Update backup schedule</button>
-      <button id="backup-schedule-run" data-admin data-feature="backup_schedule" type="button" class="secondary">Run one scheduled cycle now</button>
-      <pre id="backup-schedule-result"></pre>
-      </details>
-      <details id="admin-auto-maintenance" class="operation-view" data-admin-view><summary>Automatic index maintenance</summary>
-      <p data-admin-availability="auto_maintenance">Connect to check automatic maintenance support.</p>
-      <p>Off by default and memory-only (resets to the environment configuration on restart). When enabled, each tick takes at most one action for one collection (round-robin), starts at most one background rebuild, skips and counts busy ticks, and never runs a synchronous build. Thresholds use the collection maintenance policy in Index plus the stale ratio and optional low-recall trigger here.</p>
-      <button id="auto-maintenance-read" data-admin data-feature="auto_maintenance" type="button" class="secondary">Read automatic maintenance</button>
-      <label>Automatic maintenance changes (JSON; merged: enabled, interval_secs 10..3600, stale_ratio, rebuild_on_low_recall, min_recall, quality_samples 1..32)<textarea id="auto-maintenance" rows="5">{"enabled":false}</textarea></label>
-      <button id="auto-maintenance-save" data-admin data-feature="auto_maintenance" type="button">Update automatic maintenance</button>
-      <button id="auto-maintenance-tick" data-admin data-feature="auto_maintenance" type="button" class="secondary">Run one automatic tick now</button>
-      <pre id="auto-maintenance-result"></pre>
-      </details>
+    <p id="obs-metrics-status" role="status">Sign in as a super admin to view metrics.</p>
+    <div class="stat-grid obs-metrics" aria-label="Server metrics">
+      <div><span>Request rate</span><strong class="obs-card-value" id="obs-rps">—</strong><svg id="obs-spark-rps" class="obs-spark" viewBox="0 0 120 34" aria-hidden="true"></svg></div>
+      <div><span>Error rate</span><strong class="obs-card-value" id="obs-errors">—</strong><svg id="obs-spark-errors" class="obs-spark" viewBox="0 0 120 34" aria-hidden="true"></svg></div>
+      <div><span>Request p50</span><strong class="obs-card-value" id="obs-p50">—</strong><svg id="obs-spark-p50" class="obs-spark" viewBox="0 0 120 34" aria-hidden="true"></svg></div>
+      <div><span>Request p95</span><strong class="obs-card-value" id="obs-p95">—</strong><svg id="obs-spark-p95" class="obs-spark" viewBox="0 0 120 34" aria-hidden="true"></svg></div>
+      <div><span>Search QPS</span><strong class="obs-card-value" id="obs-search-qps">—</strong><svg id="obs-spark-search-qps" class="obs-spark" viewBox="0 0 120 34" aria-hidden="true"></svg></div>
+      <div><span>Search p95 / mean</span><strong class="obs-card-value" id="obs-search-latency">—</strong><svg id="obs-spark-search-latency" class="obs-spark" viewBox="0 0 120 34" aria-hidden="true"></svg></div>
+      <div><span>Vectors</span><strong class="obs-card-value" id="obs-vectors">—</strong><svg id="obs-spark-vectors" class="obs-spark" viewBox="0 0 120 34" aria-hidden="true"></svg></div>
+      <div><span>Collections</span><strong class="obs-card-value" id="obs-collections">—</strong><svg id="obs-spark-collections" class="obs-spark" viewBox="0 0 120 34" aria-hidden="true"></svg></div>
+      <div><span>In-flight requests</span><strong class="obs-card-value" id="obs-in-flight">—</strong><svg id="obs-spark-in-flight" class="obs-spark" viewBox="0 0 120 34" aria-hidden="true"></svg></div>
+    </div>
+    <div class="obs-panel"><h3>Requests by route</h3>
+      <div class="table-scroll"><table><caption>Cumulative request counts and latency in milliseconds. Select a column button to sort.</caption><thead><tr><th scope="col">Route</th><th scope="col" data-obs-sort="count" aria-sort="descending"><button type="button" class="secondary">Count</button></th><th scope="col" data-obs-sort="errors" aria-sort="none"><button type="button" class="secondary">Errors</button></th><th scope="col">p50 ms</th><th scope="col" data-obs-sort="p95_ms" aria-sort="none"><button type="button" class="secondary">p95 ms</button></th><th scope="col">p99 ms</th></tr></thead><tbody id="obs-routes"></tbody></table></div>
+    </div>
+    <div class="obs-panel">
+      <h3>Live server logs</h3><p id="obs-logs-status" role="status">Sign in as a super admin to follow server logs.</p>
+      <div class="obs-toolbar">
+        <label>Minimum level<select id="obs-level"><option value="trace">Trace</option><option value="debug">Debug</option><option value="info" selected>Info</option><option value="warn">Warn</option><option value="error">Error</option></select></label>
+        <label class="obs-search">Search logs<input id="obs-log-search" type="search" maxlength="256" placeholder="Message, target, or fields" autocomplete="off"></label>
+        <label><input id="obs-auto-scroll" type="checkbox" checked> Auto-scroll</label>
+      </div>
+      <div class="obs-toolbar"><button id="obs-tail-pause" class="secondary" type="button" aria-pressed="false">Pause tail</button><button id="obs-download" class="secondary" type="button">Download filtered logs as JSONL</button><button id="obs-clear" class="secondary" type="button">Clear view</button></div>
+      <div id="obs-targets" class="obs-targets" role="group" aria-label="Filter by log target"></div>
+      <p id="obs-log-count" aria-live="polite" aria-atomic="true">No log entries buffered.</p>
+      <div id="obs-log-view" class="obs-log-view" role="region" aria-label="Server log entries; expand a row to inspect fields" tabindex="0"></div>
+    </div>
+    <div class="obs-diagnostics">
+      <div class="obs-panel"><h3>Slow queries</h3><p id="obs-slow-status" role="status">Waiting for diagnostics.</p><div class="table-scroll"><table><caption>Recent slow queries (newest first)</caption><thead><tr><th scope="col">Time</th><th scope="col">Route</th><th scope="col">Collection</th><th scope="col">Duration ms</th><th scope="col">Plan / fields</th></tr></thead><tbody id="obs-slow-rows"></tbody></table></div></div>
+      <div class="obs-panel"><h3>Recent audit</h3><p id="obs-audit-status" role="status">Waiting for audit entries.</p><div class="table-scroll"><table><caption>Recent admin activity (newest first)</caption><thead><tr><th scope="col">Time</th><th scope="col">Event</th><th scope="col">Resource</th><th scope="col">Fields</th></tr></thead><tbody id="obs-audit-rows"></tbody></table></div></div>
     </div>
   </section>
   <section id="diagnostics" class="wide">
-    <span class="eyebrow">DIAGNOSTICS</span><h2>Slow queries and metrics</h2>
+    <h2>Slow queries and metrics</h2>
     <p>Slow searches are kept in a bounded in-memory ring (newest first); entries contain plans and counters, never vectors, payloads, metadata values or credentials.</p>
     <button id="slow-queries" data-feature="slow_query_log" data-op="diagnostics" type="button">Read slow query log</button>
     <p id="slow-summary" role="status"></p>
@@ -540,11 +495,50 @@
     <button id="prometheus" data-feature="prometheus_metrics" type="button" class="secondary">Read Prometheus metrics text</button>
     <pre id="prometheus-result"></pre>
   </section>
+  <section id="change-feed" class="wide">
+    <h2>Change feed</h2><p>Database-wide committed events, not filtered to the active collection. Scoped credentials need read over all collections. Pages retain whole commits; limits are approximate. Compacted cursors require a full consumer resync. Expiry emits no event.</p>
+    <label>Opaque cursor (blank starts retained history)<textarea id="feed-cursor" rows="2"></textarea></label>
+    <label>Page limit<input id="feed-limit" type="number" min="1" max="10000" value="100"></label>
+    <button id="feed-load" type="button" data-feature="change_feed" data-feed>Load page</button>
+    <button id="feed-next" type="button" data-feature="change_feed" data-feed>Next page</button>
+    <p id="feed-status" role="status"></p><pre id="feed-result" aria-live="polite"></pre>
+  </section>
+  <section id="operations" class="wide">
+    <h2>Server health</h2>
+    <p>Check that the server is healthy. Use the tabs above for people and access, backup and recovery, and server settings. Changes always ask for confirmation; the dashboard never restarts the server or edits its files.</p>
+    <div id="admin-health">
+    <button id="refresh-health" type="button">Refresh health snapshot</button>
+    <label><input id="auto-health" type="checkbox"> Refresh every 10 seconds while this page is visible</label>
+    <pre id="health-result"></pre>
+    </div>
+    <div class="tool-group"><h3>What this server supports</h3>
+      <p id="admin-note">Sign in to see which server administration features are available. These operations require a super admin.</p>
+    </div>
+  </section>
+  <section id="users" class="wide">
+    <h2>Users</h2>
+    <p>People sign in to this dashboard with a username and password. Super admins manage everything. Editors can change data and viewers can only read and search, either everywhere or inside one tenant.</p>
+    <p id="user-note" data-admin-availability="accounts">Sign in as a super admin, or with the admin token, to manage users.</p>
+    <button id="user-list" type="button" data-admin data-feature="accounts">List users</button>
+    <h3>Add or change a user</h3>
+    <label>User ID (leave blank to add someone; copy it from the list to change a user)<input id="user-id" maxlength="32" spellcheck="false" autocomplete="off"></label>
+    <label>Username (3 to 64 characters: letters, digits, dot, dash, underscore or @)<input id="user-username" maxlength="64" spellcheck="false" autocapitalize="none" autocomplete="off"></label>
+    <label>Role<select id="user-role"><option value="viewer">Viewer: read and search</option><option value="editor">Editor: read, search and change data</option><option value="super_admin">Super admin: manage everything</option></select></label>
+    <label>Tenant ID (editors and viewers only; blank allows every collection)<input id="user-tenant" maxlength="32" spellcheck="false" autocomplete="off"></label>
+    <label>Password (15 to 128 characters; needed to add a user or set a new password)<input id="user-password" type="password" maxlength="128" autocomplete="new-password"></label>
+    <label><input id="user-must-change" type="checkbox" checked> Ask for a new password at the next sign-in</label>
+    <label><input id="user-disabled" type="checkbox"> Account disabled (cannot sign in)</label>
+    <button id="user-create" type="button" data-admin data-feature="accounts">Add user</button>
+    <button id="user-save" type="button" class="secondary" data-admin data-feature="accounts">Save changes</button>
+    <button id="user-reset-password" type="button" class="secondary" data-admin data-feature="accounts">Set new password</button>
+    <button id="user-delete" type="button" class="danger" data-admin data-feature="accounts">Delete user</button>
+    <pre id="user-result" aria-live="polite"></pre>
+  </section>
   <section id="credentials" class="wide">
-    <span class="eyebrow">ACCESS CONTROL</span><h2>Scoped credentials</h2>
-    <div id="admin-credential-form" data-admin-view>
-    <p>Bootstrap admin only. A scoped credential is limited to named collections (bound to those collections' identities; a dropped and recreated collection or another database fails closed) and selected operations, and always expires. The secret is returned once: it is shown masked here, kept only in this page's memory, never placed in the request inspector, history, exports or browser storage, and cleared on Disconnect.</p>
-    <p data-admin-availability="scoped_credentials">Connect to check scoped credential support.</p>
+    <h2>API keys (scoped credentials)</h2>
+    <div id="admin-credential-form">
+    <p>Bootstrap admin only. A scoped credential is limited to named collections (bound to those collections' identities; a dropped and recreated collection or another database fails closed) and selected operations, and always expires. The secret is returned once: it is shown masked here, kept only in this page's memory, never placed in the request inspector, history, exports or browser storage, and cleared when you sign out.</p>
+    <p data-admin-availability="scoped_credentials">Sign in to check scoped credential support.</p>
     <label>Name (required, 1..64 UTF-8 bytes)<input id="cred-name" maxlength="64" required></label>
     <label>Collections (comma-separated, or * for all)<input id="cred-collections" value="default" spellcheck="false"></label>
     <fieldset id="cred-operations"><legend>Operations</legend>
@@ -578,17 +572,11 @@
     <div class="table-scroll"><table id="cred-table"><caption>Credentials (secrets are never listed)</caption><thead><tr><th>ID</th><th>Name</th><th>Collections</th><th>Operations</th><th>Status</th><th>Expires</th><th>Actions</th></tr></thead><tbody></tbody></table></div>
     <pre id="cred-result"></pre>
     </div>
-    <div id="admin-persistent-audit" data-admin-view><h3>Persistent audit</h3>
-    <p data-admin-availability="persistent_audit">Connect to check persistent audit support.</p>
-    <label>Entries (1..1000)<input id="audit-limit" type="number" min="1" max="1000" value="100"></label>
-    <button id="persistent-audit" data-admin data-feature="persistent_audit" type="button" class="secondary">Read persistent audit</button>
-    <pre id="persistent-audit-result"></pre>
-    </div>
   </section>
   <section id="tenants" class="wide">
-    <span class="eyebrow">TENANT ADMINISTRATION</span><h2>Tenant namespaces and quotas</h2>
-    <p>Create a namespace, then give people access: add editor or viewer accounts for it in <a href="#users">Users</a>, or issue a scoped API key bound to its tenant ID in <a href="#credentials">Scoped credentials</a>. To create its first collection, use collections <code>*</code> and grant the <code>collections</code> operation. This is namespace isolation, not a separate database process.</p>
-    <p id="tenant-note" data-admin-availability="tenants">Connect with a bootstrap admin credential. Tenants require admin authentication and a private VLITE_ADMIN_DIR.</p>
+    <h2>Tenants</h2>
+    <p>Create a namespace, then give people access: add editor or viewer accounts for it in <a href="#users">Users</a>, or issue a scoped API key bound to its tenant ID in <a href="#credentials">API keys</a>. To create its first collection, use collections <code>*</code> and grant the <code>collections</code> operation. This is namespace isolation, not a separate database process.</p>
+    <p id="tenant-note" data-admin-availability="tenants">Sign in as a super admin. Tenants require admin authentication and a private VLITE_ADMIN_DIR.</p>
     <button id="tenant-list" type="button" data-admin data-feature="tenants">List active tenants</button>
     <h3>Create a tenant</h3>
     <label>Tenant name (required, 1..64 UTF-8 bytes; no control characters)<input id="tenant-name" maxlength="64" required></label>
@@ -609,35 +597,64 @@
     <button id="tenant-delete" type="button" class="danger" data-admin data-feature="tenants">Delete empty tenant</button>
     <pre id="tenant-result" aria-live="polite"></pre>
   </section>
-  <section id="users" class="wide">
-    <span class="eyebrow">USER ACCOUNTS</span><h2>Users</h2>
-    <p>People sign in to this dashboard with a username and password. Super admins manage everything. Editors can change data and viewers can only read and search, either everywhere or inside one tenant.</p>
-    <p id="user-note" data-admin-availability="accounts">Sign in as a super admin, or connect with the admin token, to manage users.</p>
-    <button id="user-list" type="button" data-admin data-feature="accounts">List users</button>
-    <h3>Add or change a user</h3>
-    <label>User ID (leave blank to add someone; copy it from the list to change a user)<input id="user-id" maxlength="32" spellcheck="false" autocomplete="off"></label>
-    <label>Username (3 to 64 characters: letters, digits, dot, dash, underscore or @)<input id="user-username" maxlength="64" spellcheck="false" autocapitalize="none" autocomplete="off"></label>
-    <label>Role<select id="user-role"><option value="viewer">Viewer: read and search</option><option value="editor">Editor: read, search and change data</option><option value="super_admin">Super admin: manage everything</option></select></label>
-    <label>Tenant ID (editors and viewers only; blank allows every collection)<input id="user-tenant" maxlength="32" spellcheck="false" autocomplete="off"></label>
-    <label>Password (15 to 128 characters; needed to add a user or set a new password)<input id="user-password" type="password" maxlength="128" autocomplete="new-password"></label>
-    <label><input id="user-must-change" type="checkbox" checked> Ask for a new password at the next sign-in</label>
-    <label><input id="user-disabled" type="checkbox"> Account disabled (cannot sign in)</label>
-    <button id="user-create" type="button" data-admin data-feature="accounts">Add user</button>
-    <button id="user-save" type="button" class="secondary" data-admin data-feature="accounts">Save changes</button>
-    <button id="user-reset-password" type="button" class="secondary" data-admin data-feature="accounts">Set new password</button>
-    <button id="user-delete" type="button" class="danger" data-admin data-feature="accounts">Delete user</button>
-    <pre id="user-result" aria-live="polite"></pre>
+  <section id="admin-token-management" class="wide">
+    <h2>Admin tokens and recent activity</h2>
+    <p data-admin-availability="tokens_reload">Sign in to check configured token-file reload support.</p>
+    <button id="token-status" data-admin type="button" class="secondary">Inspect credential sources</button>
+    <button id="token-reload" data-admin data-write type="button">Reload configured token files</button>
+    <button id="token-revoke" data-admin data-write type="button" class="danger">Revoke read-only credential</button>
+    <p>Change configured secret files offline first. Reload validates both before swapping. After rotating the admin token, sign in again with the new token. Environment tokens require restart. Revocation is in-memory; empty its configured file to persist it.</p>
+    <pre id="token-result"></pre>
+    <button id="read-audit" data-admin type="button" class="secondary">Read sanitized audit trail</button>
+    <p>Last 256 process-local requests only; not a durable compliance log. No credentials or record contents.</p>
+    <pre id="audit-result"></pre>
   </section>
-  <section id="transport-security" class="wide">
-    <span class="eyebrow">TRANSPORT SECURITY</span><h2>Reload TLS certificates</h2>
-    <p id="tls-note" data-admin-availability="tls_reload">Connect with a bootstrap admin credential. Reload requires a configured file-backed native TLS listener.</p>
-    <ol><li>An operator replaces the configured certificate, private key and optional client CA files on the server.</li><li>Reload below validates all configured identities before swapping any of them.</li><li>New TLS handshakes use the updated files; existing sessions keep their original configuration.</li></ol>
-    <p>This action does not upload certificates, enable TLS on a plaintext listener, change listener settings or manage a reverse proxy. Invalid files leave the previous identities active.</p>
-    <button id="tls-reload" type="button" data-admin data-feature="tls_reload">Validate files and reload TLS</button>
-    <pre id="tls-result" aria-live="polite"></pre>
+  <section id="admin-persistent-audit" class="wide">
+    <h2>Audit log</h2>
+    <p>The durable audit trail, kept in the server's private admin directory. The Admin tokens tab shows only the last 256 requests held in memory.</p>
+    <p data-admin-availability="persistent_audit">Sign in to check persistent audit support.</p>
+    <label>Entries (1..1000)<input id="audit-limit" type="number" min="1" max="1000" value="100"></label>
+    <button id="persistent-audit" data-admin data-feature="persistent_audit" type="button" class="secondary">Read persistent audit</button>
+    <pre id="persistent-audit-result"></pre>
+  </section>
+  <section id="admin-backups" class="wide">
+    <h2>Backups and restore</h2>
+    <p data-admin-availability="backup_restore">Sign in to check backup and restore support.</p>
+    <p><strong>Recovery order:</strong> list or create a backup, select it below, verify or drill it, then stage a restored copy. Select that copy only when ready for an operator-managed restart.</p>
+    <button id="list-backups" data-admin type="button" class="secondary">List snapshots</button>
+    <button id="create-backup" data-admin data-write type="button">Create consistent backup</button>
+    <label>Backup to restore<select id="backup-name"></select></label>
+    <button id="stage-restore" data-admin data-write type="button">Validate / stage restored copy</button>
+    <label>Restored copy for next startup<select id="restore-name"></select></label>
+    <button id="select-restore" data-admin data-write type="button" class="danger">Select restored copy for restart</button>
+    <p>Copies can block the owner and consume disk. Restore never replaces the live file. Selection takes effect only after an operator restarts the API with the same admin directory. Original data remains untouched; the selection persists. Do not remove the selected copy.</p>
+    <button id="backup-verify" data-admin data-feature="backup_verify_drill" type="button" class="secondary">Verify selected backup</button>
+    <button id="backup-drill" data-admin data-feature="backup_verify_drill" type="button">Run restore drill on selected backup</button>
+    <p>Verify checks the backup file's integrity (CRC) and records the result in its manifest. A drill restores it to a scratch file, opens and validates it, compares collections/counts with the manifest, runs a self-match query, then deletes the scratch file; the active database and restart selection are never touched.</p>
+    <pre id="backup-result"></pre>
+  </section>
+  <section id="admin-backup-schedule" class="wide">
+    <h2>Scheduled backups</h2>
+    <p data-admin-availability="backup_schedule">Sign in to check backup scheduling support.</p>
+    <p>Off by default. Runtime changes are memory-only: the server's environment configuration applies again after restart. Retention is a separate opt-in: when enabled it deletes generated backups ranked beyond retain_last (and, if retain_days is set, older than it), but never the newest verified backup, restored copies, drill scratch files or the next-startup selection.</p>
+    <button id="backup-schedule-read" data-admin data-feature="backup_schedule" type="button" class="secondary">Read backup schedule</button>
+    <label>Backup schedule changes (JSON; fields are merged, omitted fields keep their current value; Read first)<textarea id="backup-schedule" rows="6">{"enabled":false}</textarea></label>
+    <button id="backup-schedule-save" data-admin data-feature="backup_schedule" type="button">Update backup schedule</button>
+    <button id="backup-schedule-run" data-admin data-feature="backup_schedule" type="button" class="secondary">Run one scheduled cycle now</button>
+    <pre id="backup-schedule-result"></pre>
+  </section>
+  <section id="admin-pitr" class="wide">
+    <h2>Point-in-time restore</h2>
+    <p data-admin-availability="backup_restore">Sign in to check backup and restore availability.</p>
+    <label>Existing generated backup name<input id="pitr-backup" maxlength="96"></label>
+    <label>Target<select id="pitr-kind"><option value="sequence">Commit sequence</option><option value="timestamp_ms">Unix timestamp (milliseconds)</option></select></label>
+    <label>Target value (nonnegative safe integer)<input id="pitr-target" inputmode="numeric"></label>
+    <p>Creates a new restored copy; never replaces or selects the live database. To use a copy at the next server start, select it in Backups.</p>
+    <button id="pitr-run" type="button" data-admin data-feature="backup_restore">Create PITR copy</button>
+    <pre id="pitr-result" aria-live="polite"></pre>
   </section>
   <section id="replication" class="wide">
-    <span class="eyebrow">REPLICATION</span><h2>Export a replication log segment</h2>
+    <h2>Export a replication log segment</h2>
     <p id="replication-note">Read-only export, not an automatic replica service. Requires this server's export route and database-wide read access: admin, read-only, or a scoped credential with read over all collections. Output contains database records; handle the download as sensitive data.</p>
     <label>After commit sequence (unsigned 64-bit decimal; blank starts at 0)<input id="replication-after" inputmode="numeric" spellcheck="false" placeholder="0"></label>
     <label>Maximum segment budget in bytes (1..16777216; blank = 1048576)<input id="replication-max-bytes" type="number" min="1" max="16777216" step="1" placeholder="1048576"></label>
@@ -646,54 +663,68 @@
     <button id="replication-download" type="button" class="secondary" disabled>Download exported segment</button>
     <pre id="replication-result" aria-live="polite"></pre>
   </section>
-  <section id="observability" class="wide" aria-labelledby="obs-title">
-    <div class="section-heading"><div><span class="eyebrow">SERVER PULSE</span><h2 id="obs-title">Observability</h2></div><span class="badge">Metrics · Logs · Activity</span></div>
-    <p>Monitor this server without leaving the console. Uses the current connection and token; bootstrap admin access is required for logs and audit. Monitoring pauses when this section is off screen or the browser tab is hidden.</p>
-    <div class="obs-toolbar">
-      <label>Refresh interval<select id="obs-interval"><option value="2000">2 seconds</option><option value="5000" selected>5 seconds</option><option value="15000">15 seconds</option><option value="0">Off (manual refresh)</option></select></label>
-      <button id="obs-pause" type="button" class="secondary" aria-pressed="false">Pause monitoring</button>
-      <button id="obs-refresh" type="button">Refresh now</button>
-    </div>
-    <p id="obs-metrics-status" role="status">Connect with an admin token to view metrics.</p>
-    <div class="stat-grid obs-metrics" aria-label="Server metrics">
-      <div><span>Request rate</span><strong class="obs-card-value" id="obs-rps">—</strong><svg id="obs-spark-rps" class="obs-spark" viewBox="0 0 120 34" aria-hidden="true"></svg></div>
-      <div><span>Error rate</span><strong class="obs-card-value" id="obs-errors">—</strong><svg id="obs-spark-errors" class="obs-spark" viewBox="0 0 120 34" aria-hidden="true"></svg></div>
-      <div><span>Request p50</span><strong class="obs-card-value" id="obs-p50">—</strong><svg id="obs-spark-p50" class="obs-spark" viewBox="0 0 120 34" aria-hidden="true"></svg></div>
-      <div><span>Request p95</span><strong class="obs-card-value" id="obs-p95">—</strong><svg id="obs-spark-p95" class="obs-spark" viewBox="0 0 120 34" aria-hidden="true"></svg></div>
-      <div><span>Search QPS</span><strong class="obs-card-value" id="obs-search-qps">—</strong><svg id="obs-spark-search-qps" class="obs-spark" viewBox="0 0 120 34" aria-hidden="true"></svg></div>
-      <div><span>Search p95 / mean</span><strong class="obs-card-value" id="obs-search-latency">—</strong><svg id="obs-spark-search-latency" class="obs-spark" viewBox="0 0 120 34" aria-hidden="true"></svg></div>
-      <div><span>Vectors</span><strong class="obs-card-value" id="obs-vectors">—</strong><svg id="obs-spark-vectors" class="obs-spark" viewBox="0 0 120 34" aria-hidden="true"></svg></div>
-      <div><span>Collections</span><strong class="obs-card-value" id="obs-collections">—</strong><svg id="obs-spark-collections" class="obs-spark" viewBox="0 0 120 34" aria-hidden="true"></svg></div>
-      <div><span>In-flight requests</span><strong class="obs-card-value" id="obs-in-flight">—</strong><svg id="obs-spark-in-flight" class="obs-spark" viewBox="0 0 120 34" aria-hidden="true"></svg></div>
-    </div>
-    <div class="obs-panel"><h3>Requests by route</h3>
-      <div class="table-scroll"><table><caption>Cumulative request counts and latency in milliseconds. Select a column button to sort.</caption><thead><tr><th scope="col">Route</th><th scope="col" data-obs-sort="count" aria-sort="descending"><button type="button" class="secondary">Count</button></th><th scope="col" data-obs-sort="errors" aria-sort="none"><button type="button" class="secondary">Errors</button></th><th scope="col">p50 ms</th><th scope="col" data-obs-sort="p95_ms" aria-sort="none"><button type="button" class="secondary">p95 ms</button></th><th scope="col">p99 ms</th></tr></thead><tbody id="obs-routes"></tbody></table></div>
-    </div>
-    <div class="obs-panel">
-      <h3>Live server logs</h3><p id="obs-logs-status" role="status">Connect with an admin token to tail server logs.</p>
-      <div class="obs-toolbar">
-        <label>Minimum level<select id="obs-level"><option value="trace">Trace</option><option value="debug">Debug</option><option value="info" selected>Info</option><option value="warn">Warn</option><option value="error">Error</option></select></label>
-        <label class="obs-search">Search logs<input id="obs-log-search" type="search" maxlength="256" placeholder="Message, target, or fields" autocomplete="off"></label>
-        <label><input id="obs-auto-scroll" type="checkbox" checked> Auto-scroll</label>
-      </div>
-      <div class="obs-toolbar"><button id="obs-tail-pause" class="secondary" type="button" aria-pressed="false">Pause tail</button><button id="obs-download" class="secondary" type="button">Download filtered logs as JSONL</button><button id="obs-clear" class="secondary" type="button">Clear view</button></div>
-      <div id="obs-targets" class="obs-targets" role="group" aria-label="Filter by log target"></div>
-      <p id="obs-log-count" aria-live="polite" aria-atomic="true">No log entries buffered.</p>
-      <div id="obs-log-view" class="obs-log-view" role="region" aria-label="Server log entries; expand a row to inspect fields" tabindex="0"></div>
-    </div>
-    <div class="obs-diagnostics">
-      <div class="obs-panel"><h3>Slow queries</h3><p id="obs-slow-status" role="status">Waiting for diagnostics.</p><div class="table-scroll"><table><caption>Recent slow queries (newest first)</caption><thead><tr><th scope="col">Time</th><th scope="col">Route</th><th scope="col">Collection</th><th scope="col">Duration ms</th><th scope="col">Plan / fields</th></tr></thead><tbody id="obs-slow-rows"></tbody></table></div></div>
-      <div class="obs-panel"><h3>Recent audit</h3><p id="obs-audit-status" role="status">Waiting for audit entries.</p><div class="table-scroll"><table><caption>Recent admin activity (newest first)</caption><thead><tr><th scope="col">Time</th><th scope="col">Event</th><th scope="col">Resource</th><th scope="col">Fields</th></tr></thead><tbody id="obs-audit-rows"></tbody></table></div></div>
+  <section id="admin-auto-maintenance" class="wide">
+    <h2>Automatic index maintenance</h2>
+    <p data-admin-availability="auto_maintenance">Sign in to check automatic maintenance support.</p>
+    <p>Off by default and memory-only (resets to the environment configuration on restart). When enabled, each tick takes at most one action for one collection (round-robin), starts at most one background rebuild, skips and counts busy ticks, and never runs a synchronous build. Thresholds use the collection maintenance policy in Index plus the stale ratio and optional low-recall trigger here.</p>
+    <button id="auto-maintenance-read" data-admin data-feature="auto_maintenance" type="button" class="secondary">Read automatic maintenance</button>
+    <label>Automatic maintenance changes (JSON; merged: enabled, interval_secs 10..3600, stale_ratio, rebuild_on_low_recall, min_recall, quality_samples 1..32)<textarea id="auto-maintenance" rows="5">{"enabled":false}</textarea></label>
+    <button id="auto-maintenance-save" data-admin data-feature="auto_maintenance" type="button">Update automatic maintenance</button>
+    <button id="auto-maintenance-tick" data-admin data-feature="auto_maintenance" type="button" class="secondary">Run one automatic tick now</button>
+    <pre id="auto-maintenance-result"></pre>
+  </section>
+  <section id="webhooks" class="wide">
+    <h2>Webhooks</h2><p>Bootstrap admin only. Requires a private VLITE_ADMIN_DIR. Webhooks deliver at least once; consumers must deduplicate. New subscriptions start at the shared dispatcher position, not historical replay.</p>
+    <p data-admin-availability="webhooks">Sign in as a super admin to check webhook availability.</p>
+    <div id="admin-webhooks" class="tool-group"><h3>Webhook subscriptions and delivery status</h3>
+      <button id="webhook-list" type="button" data-admin data-feature="webhooks">Refresh subscriptions</button>
+      <pre id="webhook-result" aria-live="polite"></pre>
+      <label>Destination HTTP(S) URL<input id="webhook-url" type="url" autocomplete="off"></label>
+      <label>Collections (comma-separated; blank means all)<input id="webhook-collections"></label>
+      <label>Events (comma-separated)<input id="webhook-events" value="put,delete,metadata_update"></label>
+      <label>Signing secret (16..256 bytes; never returned or displayed)<input id="webhook-secret" type="password" autocomplete="new-password"></label>
+      <button id="webhook-create" type="button" data-admin data-feature="webhooks">Create subscription</button>
+      <label>Subscription ID (24 hex characters)<input id="webhook-id" maxlength="24"></label>
+      <button id="webhook-status" type="button" data-admin data-feature="webhooks">Delivery status / last error</button>
+      <button id="webhook-delete" type="button" class="danger" data-admin data-feature="webhooks">Delete subscription</button>
     </div>
   </section>
+  <section id="transport-security" class="wide">
+    <h2>Reload TLS certificates</h2>
+    <p id="tls-note" data-admin-availability="tls_reload">Sign in as a super admin. Reload requires a configured file-backed native TLS listener.</p>
+    <ol><li>An operator replaces the configured certificate, private key and optional client CA files on the server.</li><li>Reload below validates all configured identities before swapping any of them.</li><li>New TLS handshakes use the updated files; existing sessions keep their original configuration.</li></ol>
+    <p>This action does not upload certificates, enable TLS on a plaintext listener, change listener settings or manage a reverse proxy. Invalid files leave the previous identities active.</p>
+    <button id="tls-reload" type="button" data-admin data-feature="tls_reload">Validate files and reload TLS</button>
+    <pre id="tls-result" aria-live="polite"></pre>
+  </section>
+  <section id="requests" class="wide">
+    <h2>Request inspector</h2>
+    <p>Latest request only. Authorization is never displayed. Latency includes browser/network/response parsing, not isolated engine time. No automatic retries.</p>
+    <pre id="inspector" aria-label="Request inspector"></pre>
+    <h3>REST playground</h3>
+    <label>Method<select id="request-method"><option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option></select></label>
+    <label>Supported API path<input id="request-path" value="/v1/database"></label>
+    <label>JSON request body<textarea id="request-body" rows="4">{}</textarea></label>
+    <button id="send-request" type="button">Send request</button>
+    <button id="request-examples" type="button" class="secondary">Generate redacted examples</button>
+    <pre id="code-examples"></pre>
+    <h3>Reproducible read-only scenarios</h3>
+    <p>Definitions never contain credentials. Run only against a dedicated test database. Supported steps: get a record (expected ID), or search (expected hit IDs in order).</p>
+    <label>Scenario JSON<textarea id="scenario" rows="5">{"name":"self-match","steps":[{"path":"/v1/search","body":{"vector":[1,0,0],"k":1,"mode":"exact","metric":"squared_l2"},"expected_ids":["1"]}]}</textarea></label>
+    <button id="run-scenario" type="button">Run scenario</button>
+    <button id="save-scenario" type="button" class="secondary">Download scenario</button>
+    <label>Load scenario file<input id="scenario-file" type="file" accept=".json,application/json"></label>
+    <pre id="scenario-result"></pre>
+  </section>
 </main>
+<footer>Experimental VLite console &middot; Passwords, tokens and database contents are never stored in browser storage. No undo or automatic retries.</footer>
+</div>
+</div>
 <dialog id="confirmation">
   <form method="dialog">
     <h2>Confirm operation</h2><p id="confirmation-text"></p>
     <button value="cancel">Cancel</button><button value="confirm">Confirm</button>
   </form>
 </dialog>
-<footer>Experimental VLite console &middot; Passwords, tokens and database contents are never stored in browser storage. No undo or automatic retries.</footer>
-</div>
 </body>
 </html>

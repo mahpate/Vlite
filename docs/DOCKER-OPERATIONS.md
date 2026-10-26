@@ -96,14 +96,15 @@ already. Neither setup installs Rust or builds images.
 
 ### First sign-in
 
-The dashboard asks for a username and password. A new deployment has no
-accounts and no default password:
+The dashboard opens on a sign-in screen. A new deployment has no accounts and
+no default password, so the screen asks for an access token:
 
-1. Choose **Use an access token instead** and paste the API token, without a
-   `Bearer` prefix.
-2. Open **Users → Add user** and create your super admin account.
-3. Sign in with that account from then on. Keep the token for automation and
-   recovery.
+1. Paste the API token, without a `Bearer` prefix, and select **Sign in with
+   token**.
+2. Open **Administration → Users & access** and create your super admin
+   account.
+3. Sign in with your username and password from then on. Keep the token for
+   automation and recovery.
 
 Compose sets `VLITE_TRUSTED_PROXY=1` because a local reverse proxy fronts the
 API. Keep the published ports on loopback, or put HTTPS in front of them. See
