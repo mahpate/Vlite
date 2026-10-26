@@ -950,4 +950,5 @@ not cover resource limits beyond `GraphLimits::CEILING`.
   `tests/dashboard_graph.test.cjs`.
 - **Dashboard.** `src/dashboard/graph.js` exports `accountGraphRequest`,
   `accountGraphChanges`, `accountGraphFields` and `accountGraphView`. The
-  user form lives in redesign-owned files; wiring it is a pending hook.
+  Users & access form uses them (v1.2.21): the graph fields appear only when
+  graph support is detected and are never sent for super admins.

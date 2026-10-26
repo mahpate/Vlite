@@ -125,17 +125,21 @@
     if (!/^[0-9a-fA-F]{32}$/.test(text)) throw new Error("User ID must be the 32-character ID shown by List users; no request sent");
     return text.toLowerCase();
   }
-  function userRequest(fields) {
+  // Account graph knobs exist only on graph builds; graph.js supplies the validators.
+  const graphUtils = (tools) => tools ?? (typeof window !== "undefined" ? window.VLiteGraphTools?.utils : undefined);
+  function userRequest(fields, tools) {
     const role = userRole(fields?.role);
     const body = { username: username(fields?.username), password: password(fields?.password), role };
     const tenant = userTenant(fields?.tenant, role);
     if (tenant !== null) body.tenant_id = tenant;
     body.must_change_password = fields?.mustChange !== false;
     body.disabled = fields?.disabled === true;
+    const graph = graphUtils(tools);
+    if (object(fields?.graph) && graph && role !== "super_admin") Object.assign(body, graph.accountGraphRequest(fields.graph, role, tenant !== null));
     return body;
   }
   // Only fields that differ from the listed account are sent; an empty username keeps it.
-  function userChanges(current, fields) {
+  function userChanges(current, fields, tools) {
     if (!object(current)) throw new Error("List users first, then enter the user's ID to load it; no request sent");
     const body = {};
     const name = typeof fields?.username === "string" && fields.username.trim() !== "" ? username(fields.username) : current.username;
@@ -146,24 +150,33 @@
     if (tenant !== (current.tenant_id ?? null)) body.tenant_id = tenant;
     if (typeof fields?.disabled === "boolean" && fields.disabled !== current.disabled) body.disabled = fields.disabled;
     if (typeof fields?.mustChange === "boolean" && fields.mustChange !== current.must_change_password) body.must_change_password = fields.mustChange;
+    const graph = graphUtils(tools);
+    if (object(fields?.graph) && graph) {
+      // A super admin always has every graph, so only resets of earlier knobs are sent.
+      const knobs = role === "super_admin" ? { graphs: "", access: "" } : fields.graph;
+      Object.assign(body, graph.accountGraphChanges(current, knobs, role, tenant !== null));
+    }
     if (Object.keys(body).length === 0) throw new Error("Nothing to change: edit a field first; no request sent");
     return body;
   }
   const tenantLabel = (item) => item?.tenant_id ? `${item.tenant_name ? `"${item.tenant_name}" ` : ""}(${item.tenant_id})` : null;
-  function userView(item) {
+  const hasGraphKnobs = (item) => object(item) && Object.hasOwn(item, "graph_access");
+  function userView(item, tools) {
     const view = {
       id: item?.id, username: item?.username, role: ROLES[item?.role] ?? item?.role_label ?? item?.role,
       access: item?.role === "super_admin" ? "whole server" : tenantLabel(item) ? `tenant ${tenantLabel(item)}` : "all collections",
       status: item?.disabled === true ? "disabled (cannot sign in)" : "active",
       must_change_password: item?.must_change_password === true ? "yes, at next sign-in" : "no",
     };
+    const graph = graphUtils(tools);
+    if (hasGraphKnobs(item) && graph) view.graphs = graph.accountGraphView(item);
     if (Number.isSafeInteger(item?.active_sessions)) view.signed_in_sessions = item.active_sessions;
     if (item && "last_login_unix_ms" in item) view.last_sign_in = Number.isSafeInteger(item.last_login_unix_ms) ? new Date(item.last_login_unix_ms).toISOString() : "none since the server started";
     return view;
   }
-  function userList(value) {
+  function userList(value, tools) {
     if (!object(value) || !Array.isArray(value.items)) throw new Error("Unexpected user list response");
-    return { count: value.items.length, ...(Number.isSafeInteger(value.capacity) ? { limit: value.capacity } : {}), users: value.items.map(userView) };
+    return { count: value.items.length, ...(Number.isSafeInteger(value.capacity) ? { limit: value.capacity } : {}), users: value.items.map((item) => userView(item, tools)) };
   }
   // Display-only summary of the connected credential. Authorization stays server-side.
   function identity(caps, connected = true) {
@@ -273,7 +286,7 @@
     password_change_required: "Choose a new password first (top of Overview).",
     tenants_disabled: "Tenants are disabled: configure admin token authentication and VLITE_ADMIN_DIR, then restart.",
     tenant_not_found: "No live tenant has this ID (it may already be deleted). List tenants to refresh.",
-    tenant_not_empty: "The tenant still owns collections (named t<tenant-id>__*). Drop those collections first with a credential scoped to the tenant or as admin, then delete again.",
+    tenant_not_empty: "The tenant still owns collections (named t<tenant-id>__*) or, on graph builds, graphs with that prefix. Drop those collections and graphs first with a credential scoped to the tenant or as admin, then delete again.",
     tenant_suspended: "This tenant is suspended: its API keys are refused and new keys cannot be issued for it. Resume the tenant first.",
     tenant_unavailable: "This tenant was deleted, so its API keys no longer work.",
     tenants_commit_indeterminate: "The change is in effect but its durability was not confirmed. List tenants before retrying; do not repeat blindly.",
@@ -337,15 +350,37 @@
     on("tenant-delete", "tenants", async (mark) => {
       need("tenants");
       const value = tenantId($("tenant-id").value);
-      if (!await ctx.confirm(`Delete tenant ${value}? The server refuses (HTTP 409 tenant_not_empty) while any collection named t${value}__* exists; drop those collections first. API keys scoped to this tenant stop working and its user accounts are removed. The dashboard cannot undo the deletion.`)) return;
+      if (!await ctx.confirm(`Delete tenant ${value}? The server refuses (HTTP 409 tenant_not_empty) while any collection or graph named t${value}__* exists; drop those first. API keys scoped to this tenant stop working and its user accounts are removed. The dashboard cannot undo the deletion.`)) return;
       if (!current(mark)) return;
       const result = await ctx.api("DELETE", `/v1/admin/tenants/${value}`, undefined, { data: false });
       if (current(mark)) show("tenant-result", { tenant_id: value, ...(object(result) ? result : { result }) });
     });
     // Users: the form edits one account at a time. Entering a listed ID loads its fields.
+    // Graph fields appear once graph.js reports a graph build or listed accounts carry graph knobs.
+    let graphAccounts = false;
+    const graphInputs = ["user-graphs", "user-graph-access"].map((id) => $(id)).filter(Boolean);
+    const graphForm = () => {
+      const superAdmin = $("user-role").value === "super_admin";
+      for (const input of graphInputs) {
+        const label = input.closest?.("label");
+        if (label) label.hidden = !graphAccounts;
+        input.disabled = superAdmin;
+        if (superAdmin) input.value = "";
+      }
+    };
+    const graphSupport = (supported) => { graphAccounts = supported && graphUtils() !== undefined && graphInputs.length === 2; graphForm(); };
+    if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+      window.addEventListener("vlite:graph-status", (event) => {
+        const status = event?.detail?.status;
+        if (["available", "disabled", "denied"].includes(status)) graphSupport(true);
+        else if (status === "absent") graphSupport(false);
+      });
+    }
+    $("user-role").addEventListener?.("change", graphForm);
     const userFields = () => ({
       username: $("user-username").value, password: $("user-password").value, role: $("user-role").value,
       tenant: $("user-tenant").value, mustChange: $("user-must-change").checked === true, disabled: $("user-disabled").checked === true,
+      ...(graphAccounts ? { graph: { graphs: $("user-graphs").value, access: $("user-graph-access").value } } : {}),
     });
     const remember = (user) => { if (object(user) && typeof user.id === "string") known.set(user.id, user); };
     const fill = (user) => {
@@ -355,6 +390,12 @@
       $("user-must-change").checked = user.must_change_password === true;
       $("user-disabled").checked = user.disabled === true;
       $("user-password").value = "";
+      if (graphAccounts) {
+        const knobs = graphUtils().accountGraphFields(user);
+        $("user-graphs").value = knobs.graphs;
+        $("user-graph-access").value = knobs.access;
+      }
+      graphForm();
     };
     const named = (id) => known.has(id) ? `"${known.get(id).username}" (${id})` : id;
     $("user-id").addEventListener("input", () => {
@@ -370,13 +411,15 @@
       const view = userList(value);
       known = new Map();
       for (const item of value.items) remember(item);
+      if (value.items.some(hasGraphKnobs)) graphSupport(true);
       show("user-result", { ...view, next: "Enter a user's ID above to load and change it." });
     });
     on("user-create", "users", async (mark) => {
       need("users");
       const body = userRequest(userFields());
       const where = body.role === "super_admin" ? "the whole server" : body.tenant_id ? `tenant ${body.tenant_id}` : "every collection";
-      if (!await ctx.confirm(`Add ${ROLES[body.role].toLowerCase()} "${body.username}" with access to ${where}?${body.must_change_password ? " They must choose a new password at their first sign-in." : ""}${body.disabled ? " The account starts disabled." : ""} Share the password with them privately.`)) return;
+      const graphs = graphAccounts && body.role !== "super_admin" ? ` Graphs: ${graphUtils().accountGraphView(body)}.` : "";
+      if (!await ctx.confirm(`Add ${ROLES[body.role].toLowerCase()} "${body.username}" with access to ${where}?${graphs}${body.must_change_password ? " They must choose a new password at their first sign-in." : ""}${body.disabled ? " The account starts disabled." : ""} Share the password with them privately.`)) return;
       if (!current(mark)) return;
       $("user-password").value = "";
       const value = await ctx.api("POST", "/v1/admin/users", body, { data: false });
@@ -389,8 +432,10 @@
       need("users");
       const id = userId($("user-id").value);
       const body = userChanges(known.get(id), userFields());
-      const LABELS = { username: "username", role: "role", tenant_id: "tenant", disabled: "account disabled", must_change_password: "new password at next sign-in" };
-      const describe = (key, value) => key === "role" ? ROLES[value] : key === "tenant_id" ? value ?? "none (all collections)" : typeof value === "boolean" ? value ? "yes" : "no" : value;
+      const LABELS = { username: "username", role: "role", tenant_id: "tenant", disabled: "account disabled", must_change_password: "new password at next sign-in", graphs: "graphs", graph_access: "graph access" };
+      const describe = (key, value) => key === "role" ? ROLES[value] : key === "tenant_id" ? value ?? "none (all collections)"
+        : key === "graphs" ? value === null ? "role default" : value.length === 0 ? "none" : value.join(", ")
+        : key === "graph_access" ? value ?? "role default" : typeof value === "boolean" ? value ? "yes" : "no" : value;
       const changes = Object.entries(body).map(([key, value]) => `${LABELS[key]} → ${describe(key, value)}`).join("; ");
       if (!await ctx.confirm(`Update ${named(id)}: ${changes}? Their open sessions end and they sign in again.`)) return;
       if (!current(mark)) return;
@@ -498,6 +543,7 @@
       epoch++;
       segment = null;
       known = new Map();
+      graphSupport(false);
       for (const id of Object.values(OUTPUTS)) show(id, "");
     }
     return {

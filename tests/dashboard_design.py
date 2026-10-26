@@ -66,7 +66,7 @@ def check(screenshots=None):
                              "#workspace-description", ".stat-grid span", "#connection-badge", "#identity-badge", "#status"):
                 value = page.locator(selector).first.evaluate(CONTRAST)
                 assert value >= 4.5, (theme, selector, value)
-            assert page.locator(".sidebar nav svg[aria-hidden=true]").count() == 6
+            assert page.locator(".sidebar nav svg[aria-hidden=true]").count() == 7
             for width, height in ((1440, 1050), (1024, 900), (768, 900), (390, 844), (320, 740), (844, 390)):
                 page.set_viewport_size({"width": width, "height": height})
                 for route, section in (("database", "database"), ("browse", "browse"), ("search", "search"),
@@ -115,7 +115,7 @@ def check(screenshots=None):
             assert not errors, errors
             context.close()
         browser.close()
-    print("Checked modern dashboard: sign-in screen, six workspaces, account menu, both themes, text contrast, touch targets, narrow/landscape layouts and keyboard disclosures.")
+    print("Checked modern dashboard: sign-in screen, seven workspaces, account menu, both themes, text contrast, touch targets, narrow/landscape layouts and keyboard disclosures.")
 
 
 if __name__ == "__main__":

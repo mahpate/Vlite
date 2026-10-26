@@ -149,11 +149,11 @@ invalid value. The CLI codes are `graph_query_<kind>`.
 
 ## Dashboard graph explorer
 
-The Dashboard's read-only **Graphs** workspace (FOLLOWUP-002,
-`src/dashboard/graph.js`) uses the typed REST routes, not the query text. It
-appears only when `/v1/graphs` answers. A server without the `graph` feature
-or a file without graphs (409 `graphs_not_enabled`) hides it. Credentials
-without `graph_read` or a graph binding see a "no graph access" notice instead.
+The Dashboard's read-only **Graph** workspace (Data → Graph, FOLLOWUP-002,
+`src/dashboard/graph.js`) uses the typed REST routes, not the query text. A
+server without the `graph` feature or a file without graphs (409
+`graphs_not_enabled`) shows an explanation instead of the explorer. Credentials
+without `graph_read` or a graph binding see a "no graph access" notice.
 
 It lists graphs, gets a node or edge by ID or key, finds nodes by label and an
 equality or JSON conditions, pages neighbors with direction and relationship
@@ -163,9 +163,8 @@ node-link view. **Explain plan** shows the normalized query and effective
 limits. Blank limits use server defaults. Values above the ceiling show the
 REST error code, for example `graph_limit_exceeds_ceiling`. Admin sessions can
 load `GET /v1/admin/graph/stats`. Writes stay with REST, the CLI or MCP.
-Signed-in viewers and editors read every graph (see SECURITY.md). The module
-is served as `/dashboard/graph.js` but is not yet linked from the Dashboard
-navigation; that wiring follows the Dashboard redesign.
+Signed-in accounts' graph access follows their role and the `graphs` and
+`graph_access` fields in Administration → Users & access (see SECURITY.md).
 
 ## Status
 

@@ -46,11 +46,13 @@ USER root
 RUN sed -i \
     -e 's|name="vlite-api-base" content=""|name="vlite-api-base" content="/api"|' \
     -e 's|href="/dashboard/style.css"|href="/style.css"|' \
+    -e 's|href="/dashboard/graph.css"|href="/graph.css"|' \
     -e 's|src="/dashboard/app.js"|src="/app.js"|' \
     -e 's|src="/dashboard/console-tools.js"|src="/console-tools.js"|' \
     -e 's|src="/dashboard/admin-tools.js"|src="/admin-tools.js"|' \
     -e 's|src="/dashboard/observability.js"|src="/observability.js"|' \
     -e 's|src="/dashboard/navigation.js"|src="/navigation.js"|' \
+    -e 's|src="/dashboard/graph.js"|src="/graph.js"|' \
     /usr/share/nginx/html/index.html
 USER 101
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \

@@ -340,6 +340,7 @@
     connectionState();
     activeRequest?.abort();
     window.VLiteObservabilityConnection?.request.invalidate();
+    window.VLiteGraphConnection?.invalidate();
     capabilities = null;
     tools?.clear();
     adminTools?.disconnect();
@@ -351,6 +352,12 @@
     tools?.gate();
     adminTools?.gate?.();
     applyRoleGates();
+    connectionChanged();
+  }
+  // The graph explorer re-checks access whenever the connection starts or ends.
+  function connectionChanged() {
+    if (typeof CustomEvent !== "function" || typeof window.dispatchEvent !== "function") return;
+    window.dispatchEvent(new CustomEvent("vlite:connection", { detail: { connected } }));
   }
   // Only the currently serialized workflow may intentionally advance its context.
   // Disconnect does not adopt the new generation, so its old workflow stays invalid.
@@ -358,6 +365,7 @@
     connectionGeneration++;
     operationGeneration = connectionGeneration;
     window.VLiteObservabilityConnection?.request.invalidate();
+    window.VLiteGraphConnection?.invalidate();
   }
   function confirmOperation(message) {
     $("confirmation-text").textContent = message;
@@ -486,6 +494,7 @@
       if (response.status === 401) {
         connectionGeneration++;
         window.VLiteObservabilityConnection?.request.invalidate();
+        window.VLiteGraphConnection?.invalidate();
         token = "";
         session = null;
         changingPassword = false;
@@ -498,6 +507,7 @@
         $("token").value = "";
         clearBrowse();
         $("index-status").textContent = "Index readiness not checked";
+        connectionChanged();
       }
       const detail = value?.error;
       const failure = new Error(redact(`HTTP ${response.status}: ${detail?.code || "request_failed"}: ${detail?.message || "See inspector"}`));
@@ -842,6 +852,7 @@
     modeChanged();
     connectionState();
     status(session ? `Signed in as ${session.username}; overview refreshed` : "Connected; overview refreshed");
+    connectionChanged();
   }
   $("connection").addEventListener("submit", (event) => {
     event.preventDefault();
@@ -1248,6 +1259,47 @@
       return request;
     })(),
   };
+  // Read-only graph explorer bridge (graph.js): same credential and API base, never the token itself.
+  window.VLiteGraphConnection = (() => {
+    let generation = 0;
+    const controllers = new Set();
+    const failure = (status, code, message) => ({ status, value: { error: { code, message } } });
+    const allowed = (method, endpoint) => (/^\/v1\/graphs(\/[^?#]*)?$/.test(endpoint) && (method === "GET" || method === "POST"))
+      || (method === "GET" && ["/v1/admin/graph/stats", "/v1/capabilities", "/openapi.json"].includes(endpoint));
+    async function request(method, path, body) {
+      const verb = String(method || "GET").toUpperCase();
+      const route = String(path || "");
+      if (!allowed(verb, route.split("?")[0])) return failure(0, "unsupported_route", "Unsupported graph explorer request");
+      if (!connected) return failure(401, "unauthorized", "Sign in before using graphs");
+      const controller = new AbortController();
+      const snapshot = generation;
+      const credential = token;
+      controllers.add(controller);
+      const timeout = setTimeout(() => controller.abort(), 30000);
+      try {
+        const headers = credential ? { Authorization: `Bearer ${credential}` } : { "X-VLite-Request": "1" };
+        if (body !== undefined) headers["Content-Type"] = "application/json";
+        const response = await fetch(`${apiBase}${route}`, {
+          method: verb, signal: controller.signal, cache: "no-store", credentials: credential ? "omit" : "same-origin", redirect: "error",
+          headers, body: body === undefined ? undefined : JSON.stringify(body),
+        });
+        const raw = await response.text();
+        let value = null;
+        try { value = raw ? JSON.parse(raw) : null; } catch { value = raw; }
+        if (snapshot !== generation) return failure(0, "connection_changed", "Connection changed; response discarded");
+        return { status: response.status, value };
+      } catch (error) {
+        return failure(0, controller.signal.aborted ? "aborted" : "network_error", error?.message || "Request failed");
+      } finally { clearTimeout(timeout); controllers.delete(controller); }
+    }
+    return {
+      request,
+      invalidate: () => {
+        generation++;
+        controllers.forEach((controller) => controller.abort());
+      },
+    };
+  })();
   window.addEventListener("pagehide", () => disconnect({ endSession: false }));
   window.addEventListener("pageshow", (event) => { if (event.persisted) restoreSession(); });
   tools?.gate();

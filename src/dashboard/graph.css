@@ -16,6 +16,12 @@
 #graph #graph-explain-table th[scope="row"] { width: 9rem; text-transform: none; letter-spacing: 0; font-size: 12px; }
 #graph #graph-explain-table td, #graph #graph-paths td { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
 #graph #graph-note { color: var(--studio-muted); }
+/* Linux fonts run wider: keep every child shrinkable and wrap long names instead of widening the page. */
+#graph, #graph > *, #graph .tool-group, #graph .section-heading > *, #graph .graph-actions > *, #graph label, #graph select, #graph input, #graph textarea { min-width: 0; max-width: 100%; }
+#graph h2, #graph h3, #graph p, #graph label, #graph figcaption, #graph td, #graph th, #graph .stat-grid span { overflow-wrap: anywhere; }
+#graph .section-heading { flex-wrap: wrap; }
+#graph pre { max-width: 100%; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+#graph .table-scroll { max-width: 100%; }
 @media (max-width: 720px) {
   #graph .graph-equality { grid-template-columns: minmax(0, 1fr); }
 }

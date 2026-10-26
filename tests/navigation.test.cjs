@@ -15,6 +15,7 @@ const layout = {
   "data-tools": ["collections", "data-tools"], "resumable-import": ["collections", "data-tools"],
   index: ["collections", "index"], collections: ["collections", "collections"],
   search: ["search", "search"], retrieval: ["search", "retrieval"], explore: ["search", "explore"],
+  graph: ["graph", "graph"],
   observability: ["observability", "observability"], diagnostics: ["observability", "diagnostics"],
   "change-feed": ["observability", "change-feed"],
   operations: ["administration", "operations"],
@@ -172,6 +173,12 @@ test("revealing a view or control shows its section under grouped tabs", () => {
   assert.deepEqual(visible(), ["operations"]);
   assert.equal(elements.get("workspace-subtabs").hidden, true);
 
+  reveal("graph");
+  assert.deepEqual(visible(), ["graph"]);
+  assert.deepEqual(current(), ["graph"]);
+  assert.equal(elements.get("workspace-title").textContent, "Graph");
+  assert.equal(elements.get("workspace-tabs").hidden, true);
+
   reveal("requests");
   assert.deepEqual(visible(), ["requests"]);
   assert.deepEqual(current(), ["developer"]);
@@ -200,7 +207,7 @@ test("admin integration shares transport and exposes all module controls", () =>
     "sign-in", "username", "password", "change-password", "current-password", "new-password", "repeat-password",
     "change-password-cancel", "change-password-open", "session-refresh", "token-sign-in", "sign-in-setup",
     "sign-in-gate", "gate-title", "gate-intro", "gate-message", "gate-help", "gate-retry", "gate-sign-out", "user-menu",
-    "user-note", "user-list", "user-id", "user-username", "user-role", "user-tenant", "user-password", "user-must-change",
+    "user-note", "user-list", "user-id", "user-username", "user-role", "user-tenant", "user-graphs", "user-graph-access", "user-password", "user-must-change",
     "user-disabled", "user-create", "user-save", "user-reset-password", "user-delete", "user-result"
   ]) assert.match(html, new RegExp(`id="${id}"`));
   for (const id of ["user-list", "user-create", "user-save", "user-reset-password", "user-delete"]) {
@@ -250,7 +257,7 @@ test("sign-in gate comes first and the grouped shell stays hidden until sign-in"
   assert.match(html, /id="token-sign-in" class="token-sign-in" open>/);
   assert.match(html, /<a class="skip-link" href="#workspace-content">/);
   assert.match(html, /<main id="workspace-content">/);
-  assert.equal((html.match(/data-workspace="/g) || []).length, 6);
+  assert.equal((html.match(/data-workspace="/g) || []).length, 7);
   assert.deepEqual(Array.from(html.matchAll(/class="nav-caption">([^<]+)</g), match => match[1]), ["Data", "Server", "Tools"]);
   assert.match(html, /id="navigation-toggle"[^>]*aria-expanded="false"/);
   assert.equal((html.match(/class="action-card" href="#/g) || []).length, 6);

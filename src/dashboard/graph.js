@@ -1,8 +1,8 @@
 "use strict";
 // Read-only property graph explorer (FOLLOWUP-002). Self-initialising against
 // <section id="graph">; does nothing when the section is absent. Graph controls stay hidden
-// (and the a[data-workspace="graph"] link is hidden) unless GET /v1/graphs answers 200, or 403
-// on a graph-enabled build, which shows a "no graph access" notice instead.
+// unless GET /v1/graphs answers 200; the section otherwise explains why (no graph build, graphs
+// not enabled, or no graph access). Each check dispatches "vlite:graph-status" {status}.
 // Requests use window.VLiteGraphConnection.request(method, path, body) -> {status, value} when
 // the dashboard provides it (token sessions), otherwise a same-origin cookie request.
 // Pure helpers are exported for Node tests.
@@ -22,7 +22,6 @@
   const DIRECTIONS = ["out", "in", "both"];
   const VALUE_TYPES = ["string", "integer", "float", "boolean"];
   const STATS_ROUTE = "/v1/admin/graph/stats";
-  const VISIBLE = new Set(["available", "denied", "error"]);
   const SVG_NS = "http://www.w3.org/2000/svg";
 
   const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -503,7 +502,7 @@
     const section = doc.getElementById("graph");
     if (!section || section.dataset.graphReady) return null;
     section.dataset.graphReady = "true";
-    if (!doc.querySelector('link[href="/dashboard/graph.css"]') && doc.head) {
+    if (!doc.querySelector('link[href$="graph.css"]') && doc.head) {
       doc.head.append(h(doc, "link", { rel: "stylesheet", href: "/dashboard/graph.css" }));
     }
     if (!section.hasAttribute("aria-labelledby")) section.setAttribute("aria-labelledby", "graph-title");
@@ -524,10 +523,9 @@
       return cookieRequest(win, method, path, payload);
     };
 
-    const navLink = () => doc.querySelector('a[data-workspace="graph"]');
     const NOTES = {
       available: "Graphs are enabled. Reads are bounded by server limits; each result says whether it is complete.",
-      denied: "No graph access. This session can reach the server but its credential has no graph_read permission or graph binding. Signed-in editor and viewer accounts cannot use graphs yet; connect with the admin or read-only token, or an API key granted graph_read for a graph.",
+      denied: "No graph access. This session can reach the server but its credential has no graph_read permission or graph binding. A super admin can grant signed-in accounts graph access under Administration, Users & access; otherwise connect with the admin or read-only token, or an API key granted graph_read for a graph.",
       disabled: "This database file has no property graphs enabled (graphs_not_enabled).",
       absent: "This server was built without property graph support.",
       "signed-out": "Connect or sign in to check graph access.",
@@ -536,12 +534,11 @@
 
     const apply = (status, detail) => {
       state.status = status;
-      const visible = VISIBLE.has(status);
-      const link = navLink();
-      if (link) link.hidden = !visible;
       $("graph-controls").hidden = status !== "available";
       $("graph-note").textContent = status === "error" ? `Graph check failed: ${detail}` : NOTES[status] || "";
       if (status !== "available") $("graph-admin").hidden = true;
+      // The user form offers account graph fields only on graph builds.
+      if (typeof win.CustomEvent === "function") win.dispatchEvent(new win.CustomEvent("vlite:graph-status", { detail: { status } }));
     };
 
     const fillGraphs = (graphs) => {

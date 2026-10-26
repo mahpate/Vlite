@@ -12,6 +12,7 @@
       title: "Search", description: "Find similar records with your own query vectors. VLite does not create embeddings.",
       tabs: [["search", "Vector search"], ["retrieval", "Advanced retrieval"], ["explore", "Analyze & compare"]]
     },
+    graph: { title: "Graph", description: "Read-only explorer for this file's property graphs, bounded by server limits.", tabs: [] },
     observability: {
       title: "Observability", description: "Live server activity, diagnostics and the change feed.",
       tabs: [["observability", "Live monitor"], ["diagnostics", "Diagnostics"], ["change-feed", "Change feed"]]
@@ -36,7 +37,7 @@
     "admin-health": "operations", "admin-credential-form": "credentials", "admin-webhooks": "webhooks"
   };
   // Each route is [workspace, section, tab]; every section has exactly one route.
-  const routes = { database: ["overview", "database", "database"], requests: ["developer", "requests", "requests"] };
+  const routes = { database: ["overview", "database", "database"], graph: ["graph", "graph", "graph"], requests: ["developer", "requests", "requests"] };
   for (const [workspace, { tabs }] of Object.entries(workspaces)) {
     for (const [tab] of tabs) {
       for (const [section] of viewTools[tab] || [[tab]]) routes[section] = [workspace, section, tab];

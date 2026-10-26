@@ -83,7 +83,7 @@ INVENTORY = {
 }
 
 # Routes compiled only with the source-only `graph` feature (src/server/graph.rs).
-# graph.js builds its own controls inside <section id="graph">, so the control id is
+# graph.js builds its own controls inside <section id="graph"> (the Graph workspace), so the control id is
 # checked in the script that creates it rather than in index.html.
 GRAPH_ONLY = {("GET", "/v1/admin/graph/stats"): ("graph.js", "graph-stats")}
 
@@ -101,12 +101,13 @@ def main():
         graph_routes = set(admin_routes(graph_source.read_text(encoding="utf-8")))
         assert graph_routes == set(GRAPH_ONLY), f"Graph admin route drift: {graph_routes ^ set(GRAPH_ONLY)}"
     dashboard = ROOT / "src" / "dashboard"
+    markup = (dashboard / "index.html").read_text(encoding="utf-8")
+    assert '<section id="graph"' in markup and 'src="/dashboard/graph.js"' in markup, "Graph workspace is not wired into index.html"
     for (method, route), (script, control) in GRAPH_ONLY.items():
         source = (dashboard / script).read_text(encoding="utf-8")
         assert f'id: "{control}"' in source, f"{method} {route}: missing UI #{control} in {script}"
         assert f'$("{control}")' in source, f"{method} {route}: missing handler #{control}"
         assert route.split("{", 1)[0] in source, f"{method} {route}: missing request path in {script}"
-    markup = (dashboard / "index.html").read_text(encoding="utf-8")
     scripts = {name: (dashboard / name).read_text(encoding="utf-8") for name, _ in INVENTORY.values()}
     for (method, route), (script, control) in INVENTORY.items():
         assert f'id="{control}"' in markup, f"{method} {route}: missing UI #{control}"

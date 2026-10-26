@@ -112,7 +112,7 @@ def exercise_layout(page, url, token):
     expect(page.locator("#search")).to_be_hidden()
     nav = page.get_by_role("navigation", name="Dashboard navigation")
     expect(nav.get_by_role("link")).to_have_text([
-        "Overview", "Collections", "Search", "Observability", "Administration", "Developer Console",
+        "Overview", "Collections", "Search", "Graph", "Observability", "Administration", "Developer Console",
     ])
     for width in [1280, 768, 390]:
         page.set_viewport_size({"width": width, "height": 844})
@@ -216,6 +216,8 @@ def exercise(page, base, token):
     assert assets.get(base + "/dashboard/navigation.js") == 200, assets
     assert assets.get(base + "/dashboard/observability.js") == 200, assets
     assert assets.get(base + "/dashboard/style.css") == 200, assets
+    assert assets.get(base + "/dashboard/graph.js") == 200, assets
+    assert assets.get(base + "/dashboard/graph.css") == 200, assets
     assert not errors, errors
     expect_signed_out(page)
     control(page, "#token").fill("x" * 32)
@@ -375,6 +377,8 @@ def exercise_separate_app(page, base, token, expected_index="Ready;"):
     page.on("request", lambda request: api_requests.append(request.url) if "/api/" in request.url else None)
     page.goto(base + "/")
     assert page.request.get(base + "/observability.js").status == 200
+    assert page.request.get(base + "/graph.js").status == 200
+    assert page.request.get(base + "/graph.css").status == 200
     expect_signed_out(page)
     expect(control(page, "#status")).to_have_text("Disconnected")
     control(page, "#token").fill("x" * 32)

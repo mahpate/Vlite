@@ -160,6 +160,31 @@ const users = userList({ items: [account], capacity: 1024 });
 assert.deepEqual([users.count, users.limit, users.users[0].role, users.users[0].access], [1, 1024, "Editor", "all collections"]);
 assert.throws(() => userList({}), /Unexpected user list/);
 
+// Account graph knobs: sent only when the form supplies them (graph builds), never for super admins.
+const graphUtils = require("../src/dashboard/graph.js").utils;
+const graphFields = (graphs, access) => ({ graph: { graphs, access } });
+assert.deepEqual({ ...userRequest({ username: "Ann", password: strong, role: "editor", tenant: "", ...graphFields("people, docs", "read") }, graphUtils) },
+  { username: "ann", password: strong, role: "editor", must_change_password: true, disabled: false, graphs: ["people", "docs"], graph_access: "read" });
+assert.deepEqual({ ...userRequest({ username: "Ann", password: strong, role: "viewer", tenant: "", ...graphFields("", "") }, graphUtils) },
+  { username: "ann", password: strong, role: "viewer", must_change_password: true, disabled: false });
+assert.deepEqual({ ...userRequest({ username: "root1", password: strong, role: "super_admin", tenant: "", ...graphFields("people", "read") }, graphUtils) },
+  { username: "root1", password: strong, role: "super_admin", must_change_password: true, disabled: false });
+assert.deepEqual({ ...userRequest({ username: "Ann", password: strong, role: "editor", tenant: "", ...graphFields("people", "") }) },
+  { username: "ann", password: strong, role: "editor", must_change_password: true, disabled: false });
+assert.throws(() => userRequest({ username: "Ann", password: strong, role: "viewer", tenant: "", ...graphFields("", "write") }, graphUtils), /Viewers cannot write graphs/);
+assert.throws(() => userRequest({ username: "Ann", password: strong, role: "editor", tenant: hex, ...graphFields("x".repeat(29), "") }, graphUtils), /1 to 28/);
+const graphAccount = { ...account, graphs: ["people"], graph_access: "read" };
+assert.deepEqual({ ...userChanges(graphAccount, { ...same, username: "bob", ...graphFields("people", "read") }, graphUtils) }, { username: "bob" });
+assert.throws(() => userChanges(graphAccount, { ...same, ...graphFields("people", "read") }, graphUtils), /Nothing to change/);
+assert.deepEqual({ ...userChanges(graphAccount, { ...same, ...graphFields("[]", "") }, graphUtils) }, { graphs: [], graph_access: null });
+assert.deepEqual({ ...userChanges(graphAccount, { ...same, role: "super_admin", ...graphFields("people", "read") }, graphUtils) },
+  { role: "super_admin", graphs: null, graph_access: null });
+assert.deepEqual({ ...userChanges(account, { ...same, role: "super_admin", ...graphFields("", "") }, graphUtils) }, { role: "super_admin" });
+assert.equal(userView(graphAccount, graphUtils).graphs, "read: people");
+assert.equal(userView({ ...account, graphs: null, graph_access: null }, graphUtils).graphs, "read and write: every graph");
+assert.equal("graphs" in userView(account, graphUtils), false);
+assert.equal(userList({ items: [graphAccount] }, graphUtils).users[0].graphs, "read: people");
+
 assert.equal(exportPath("", ""), "/v1/admin/replication/export");
 assert.equal(exportPath("18446744073709551615", "16777216"), "/v1/admin/replication/export?after_sequence=18446744073709551615&max_bytes=16777216");
 for (const [after, max] of [["01", ""], ["18446744073709551616", ""], ["-1", ""], ["1&x=1", ""], ["", "0"], ["", "16777217"], ["", "1.5"]])
@@ -207,7 +232,7 @@ assert.match(explain(Object.assign(new Error("HTTP 422: weak_password"), { code:
 assert.match(explain(Object.assign(new Error("HTTP 409: username_taken"), { code: "username_taken", status: 409 })), /ignore case/);
 assert.match(explain(Object.assign(new Error("HTTP 403"), { code: "tenant_suspended", status: 403 })), /Resume the tenant first/);
 assert.match(explain(Object.assign(new Error("HTTP 403"), { code: "tenant_unavailable", status: 403 })), /was deleted/);
-assert.match(explain(Object.assign(new Error("HTTP 409: tenant_not_empty: x"), { code: "tenant_not_empty", status: 409 })), /Drop those collections first/);
+assert.match(explain(Object.assign(new Error("HTTP 409: tenant_not_empty: x"), { code: "tenant_not_empty", status: 409 })), /Drop those collections and graphs first/);
 assert.match(explain(Object.assign(new Error("HTTP 422"), { code: "tls_reload_failed" })), /previous certificates remain active/);
 
 // Init wiring with a fake ctx following app.js semantics.
@@ -286,7 +311,7 @@ const reset = () => { for (const e of Object.values(elements)) { e.listeners.len
   await elements["tenant-delete"].click();
   assert.equal(ctx.calls.at(-1).method, "DELETE");
   assert.equal(ctx.calls.at(-1).path, `/v1/admin/tenants/${hex.toLowerCase()}`);
-  assert.match(elements["tenant-result"].textContent, /Drop those collections first/);
+  assert.match(elements["tenant-result"].textContent, /Drop those collections and graphs first/);
   ctx.responses.push({ deleted: true });
   await elements["tenant-delete"].click();
   assert.match(elements["tenant-result"].textContent, /"deleted": true/);

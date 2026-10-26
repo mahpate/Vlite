@@ -6,11 +6,13 @@
   <meta name="vlite-api-base" content="">
   <title>VLite dashboard</title>
   <link rel="stylesheet" href="/dashboard/style.css">
+  <link rel="stylesheet" href="/dashboard/graph.css">
   <script src="/dashboard/console-tools.js" defer></script>
   <script src="/dashboard/admin-tools.js" defer></script>
   <script src="/dashboard/navigation.js" defer></script>
   <script src="/dashboard/app.js" defer></script>
   <script src="/dashboard/observability.js" defer></script>
+  <script src="/dashboard/graph.js" defer></script>
 </head>
 <body>
 <div id="sign-in-gate" class="sign-in-gate" role="main" aria-labelledby="gate-title">
@@ -68,6 +70,7 @@
     <div class="nav-caption">Data</div>
     <a href="#browse" data-workspace="collections"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v7c0 4 16 4 16 0V5M4 12v7c0 4 16 4 16 0v-7"/></svg>Collections</a>
     <a href="#search" data-workspace="search"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="7"/><path d="m16 16 5 5"/></svg>Search</a>
+    <a href="#graph" data-workspace="graph"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="6" r="2.5"/><circle cx="19" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M7.5 6h9M6.3 8.2l4.4 7.6M17.7 8.2l-4.4 7.6"/></svg>Graph</a>
     <div class="nav-caption">Server</div>
     <a href="#observability" data-workspace="observability"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>Observability</a>
     <a href="#operations" data-workspace="administration"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6z"/><path d="m8 12 3 3 5-6"/></svg>Administration</a>
@@ -446,6 +449,7 @@
     <pre id="sample-analysis"></pre>
     <div id="projection" role="group" aria-label="PCA sample projection"></div>
   </section>
+  <section id="graph" class="wide"></section>
   <section id="observability" class="wide" aria-labelledby="obs-title">
     <div class="section-heading"><h2 id="obs-title">Live monitor</h2><span class="badge">Metrics · Logs · Activity</span></div>
     <p>Monitor this server without leaving the console. Uses the current connection and token; bootstrap admin access is required for logs and audit. Monitoring pauses when this section is off screen or the browser tab is hidden.</p>
@@ -525,6 +529,8 @@
     <label>Username (3 to 64 characters: letters, digits, dot, dash, underscore or @)<input id="user-username" maxlength="64" spellcheck="false" autocapitalize="none" autocomplete="off"></label>
     <label>Role<select id="user-role"><option value="viewer">Viewer: read and search</option><option value="editor">Editor: read, search and change data</option><option value="super_admin">Super admin: manage everything</option></select></label>
     <label>Tenant ID (editors and viewers only; blank allows every collection)<input id="user-tenant" maxlength="32" spellcheck="false" autocomplete="off"></label>
+    <label data-graph-account hidden>Graphs (comma-separated names, [] for none, * for all; blank uses the role default)<input id="user-graphs" maxlength="2048" spellcheck="false" autocapitalize="none" autocomplete="off"></label>
+    <label data-graph-account hidden>Graph access<select id="user-graph-access"><option value="">Role default</option><option value="none">None</option><option value="read">Read</option><option value="write">Read and write (editors only)</option></select></label>
     <label>Password (15 to 128 characters; needed to add a user or set a new password)<input id="user-password" type="password" maxlength="128" autocomplete="new-password"></label>
     <label><input id="user-must-change" type="checkbox" checked> Ask for a new password at the next sign-in</label>
     <label><input id="user-disabled" type="checkbox"> Account disabled (cannot sign in)</label>
@@ -593,7 +599,7 @@
     <p>Suspend blocks every API key bound to the tenant (REST and gRPC) and prevents new keys for it, without deleting data. Resume restores its unexpired, unrevoked keys.</p>
     <button id="tenant-suspend" type="button" class="danger" data-admin data-feature="tenants tenant_lifecycle">Suspend tenant</button>
     <button id="tenant-resume" type="button" class="secondary" data-admin data-feature="tenants tenant_lifecycle">Resume tenant</button>
-    <p>Delete only an empty tenant: drop its collections first. Deleting disables its bound API keys and removes its user accounts; it does not delete database records for you.</p>
+    <p>Delete only an empty tenant: drop its collections and graphs first. Deleting disables its bound API keys and removes its user accounts; it does not delete database records for you.</p>
     <button id="tenant-delete" type="button" class="danger" data-admin data-feature="tenants">Delete empty tenant</button>
     <pre id="tenant-result" aria-live="polite"></pre>
   </section>
