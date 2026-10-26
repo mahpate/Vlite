@@ -28,7 +28,10 @@ tenant's users can see and change graph structure (nodes, edges, properties)
 that other tenants' users created. Vector isolation is kept: graph batches
 that attach, detach, write or delete vectors, and `delete_node` on a node
 with attachments, need `write` on a collection the account's tenant owns,
-named by its stored name `t<tenant_id>__<name>`. API keys are unchanged:
+named by its stored name `t<tenant_id>__<name>`. Retrieve
+(`POST /v1/graphs/{graph}/retrieve`) needs `read` on the pivot collection by
+the same rule, and evidence from any other collection is dropped and counted
+as `redacted`. API keys are unchanged:
 tenant keys cannot hold graph operations. Per-tenant and per-user graph
 scoping is a planned follow-up.
 

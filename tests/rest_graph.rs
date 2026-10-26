@@ -1911,6 +1911,79 @@ async fn tenanted_editors_write_any_graph_but_only_their_own_vectors() {
     assert_eq!(status, StatusCode::OK, "{body}");
 }
 
+/// Retrieve returns vector records, so tenanted accounts are held to the same
+/// exact-name collection check as batches: another tenant's (or an
+/// untenanted) pivot is refused, and such evidence is redacted, not returned.
+#[tokio::test]
+async fn tenanted_accounts_retrieve_only_their_own_evidence() {
+    let (_directory, app) = account_fixture().await;
+    let app = &app;
+    let acme = tenant(app, "acme").await;
+    let beta = tenant(app, "beta").await;
+    let alice = sign_in(app, "alice", "editor", Some(&acme)).await;
+    let tess = sign_in(app, "tess", "viewer", Some(&acme)).await;
+    let bob = sign_in(app, "bob", "editor", Some(&beta)).await;
+    let mine = tenant_collection(app, &alice, &acme).await;
+    let theirs = tenant_collection(app, &bob, &beta).await;
+    let ops = json!({"ops": [
+        {"op": "create_node", "key": "a1"},
+        {"op": "attach", "node": "a1", "collection": mine, "record": "1"},
+        {"op": "create_node", "key": "b1"},
+        {"op": "attach", "node": "b1", "collection": theirs, "record": "1"},
+        {"op": "create_edge", "source": "a1", "relationship": "R", "destination": "b1"},
+        {"op": "create_edge", "source": "a1", "relationship": "R", "destination": "n4"},
+    ]});
+    let (status, body) = call(app, Some(ADMIN), "POST", "/v1/graphs/g/batch", Some(ops)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let request = |pivot: &str| {
+        json!({
+            "pivot": {"collection": pivot, "vector": [1.0, 0.0], "k": 1},
+            "expansion": {"direction": "out"},
+            "evidence": {"collections": [mine, theirs, "default"]},
+            "limits": {"max_hops": 1},
+        })
+    };
+    let uri = "/v1/graphs/g/retrieve";
+    let (status, full) = call(app, Some(ADMIN), "POST", uri, Some(request(&mine))).await;
+    assert_eq!(status, StatusCode::OK, "{full}");
+    let collections = |body: &Value| -> Vec<String> {
+        body["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["collection"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let all = collections(&full);
+    for name in [&mine, &theirs, &"default".to_owned()] {
+        assert!(all.contains(name), "admin sees {name}: {full}");
+    }
+
+    for session in [&alice, &tess] {
+        let (status, body) = browser(app, session, "POST", uri, Some(request(&mine))).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(collections(&body).iter().all(|c| *c == mine), "{body}");
+        assert!(!collections(&body).is_empty(), "{body}");
+        let mut foreign = vec!["default".to_owned(), theirs.clone()];
+        foreign.sort();
+        assert_eq!(body["redacted"]["collections"], json!(foreign), "{body}");
+        assert_eq!(
+            body["redacted"]["count"].as_u64().unwrap() as usize,
+            all.len() - collections(&body).len(),
+            "{body}"
+        );
+        for field in ["pivots", "nodes", "edges", "paths"] {
+            assert_eq!(body[field], full[field], "{field}");
+        }
+        // Another tenant's, an untenanted and an unqualified pivot.
+        for pivot in [theirs.as_str(), "default", "docs"] {
+            let (status, body) = browser(app, session, "POST", uri, Some(request(pivot))).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{pivot}: {body}");
+            assert_eq!(code(&body), "forbidden_scope", "{pivot}");
+        }
+    }
+}
+
 /// API credentials are unchanged: a tenant credential cannot hold graph
 /// scope, and a tenant credential never reaches graph routes.
 #[tokio::test]

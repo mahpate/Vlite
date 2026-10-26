@@ -45,7 +45,9 @@
 //! credential additionally needs the `read` operation and a collection
 //! binding for the pivot collection (403 otherwise), and evidence from each
 //! requested evidence collection it may not read is dropped and reported as
-//! `redacted: {count, collections}` instead of failing the request. Admin and
+//! `redacted: {count, collections}` instead of failing the request. Pivot and
+//! evidence names are checked exactly as stored, like batch collections, so
+//! a tenanted account reads only collections its tenant owns. Admin and
 //! read-only tokens see every collection (`redacted.count` is 0).
 //!
 //! Reads run under one database read guard, writes under the write guard;
@@ -532,13 +534,15 @@ async fn put_schema(
 }
 
 /// Scoped credentials read vector records only through `read` and a
-/// collection binding; `open` also rejects names outside the binding.
+/// collection binding. The name is checked exactly as the request (pivot)
+/// or the graph (evidence) spells it, as in `authorize_records`: tenant
+/// qualification here would check a different collection than the one read.
 fn records_readable(db: &Database, role: &admin::Role, collection: &str) -> Result<(), ApiError> {
     match role {
         admin::Role::Scoped(grant) if !grant.allows(credentials::Op::Read) => {
             Err(forbidden_scope())
         }
-        admin::Role::Scoped(_) => open(db, role, &Target::Named(collection.to_owned())).map(|_| ()),
+        admin::Role::Scoped(grant) => cover(db, grant, collection),
         _ => Ok(()),
     }
 }
