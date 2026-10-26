@@ -293,6 +293,20 @@ async fn delete(
                     "drop tenant collections before deleting the tenant",
                 ));
             }
+            // Tenant graphs block deletion like tenant collections.
+            #[cfg(feature = "graph")]
+            if service_clone.graph_enabled
+                && db
+                    .list_graphs()?
+                    .iter()
+                    .any(|g| g.name.starts_with(&format!("t{id}__")))
+            {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    "tenant_not_empty",
+                    "drop tenant graphs before deleting the tenant",
+                ));
+            }
             // Accounts go first: if this fails the tenant stays and a retry finishes.
             let users_removed = match (&service_clone.admin.users, &service_clone.admin.audit_log)
             {

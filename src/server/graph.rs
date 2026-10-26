@@ -31,13 +31,18 @@
 //!    collection, checked under the write guard before the batch runs, and
 //!    live vector quotas apply as on the vector write routes. Collection
 //!    names in a batch (and stored attachments) are checked exactly as
-//!    stored, never tenant-qualified, because graphs are shared.
+//!    stored, never tenant-qualified: an attachment names a collection, not
+//!    a graph, so qualifying it would check a different collection.
 //!
-//! Signed-in Dashboard accounts (owner decision 2026-10-25): viewers hold
-//! `graph_read` and editors `graph_read` + `graph_write`, bound to every
-//! graph (`["*"]`) whatever the account's tenant; `Grant::graph_allowed`
-//! exempts only these session grants, so tenant API credentials still reach
-//! no graph. Vector records stay tenant-isolated by the collection check.
+//! Tenant and user graph scoping (v1.2.20, supersedes the 2026-10-25 interim
+//! rule): graph names are tenant-qualified like collections. A tenanted
+//! principal (signed-in account or tenant API credential) addresses `g` and
+//! reaches the stored graph `t{tenant}__g`; listings and responses show the
+//! unqualified name, and its `graphs` binding names graphs inside the tenant
+//! (`["*"]` is every graph the tenant owns). Untenanted principals and the
+//! admin / read-only tokens see stored names. Signed-in viewers hold
+//! `graph_read` and editors `graph_read` + `graph_write`, narrowed by the
+//! account's optional `graph_access` and `graphs` knobs (see `users.rs`).
 //!
 //! Structural reads (nodes, edges, paths, properties, schema, text queries)
 //! never return vector record data. `POST /v1/graphs/{graph}/retrieve`
@@ -282,11 +287,14 @@ fn untruncated<T>(_: &T) -> &[TruncationReason] {
 
 // Scope and request plumbing.
 
-/// Name binding check, before any lookup (no existence probing).
-fn scope(role: &admin::Role, graph: &str) -> Result<(), ApiError> {
+/// Name binding check, before any lookup (no existence probing). Returns
+/// the stored name: a tenanted principal's `g` is the graph `t{tenant}__g`,
+/// as for collections. Responses keep the name the caller used.
+fn scope(role: &admin::Role, graph: &str) -> Result<String, ApiError> {
+    let stored = tenants::qualify(role, graph);
     match role {
-        admin::Role::Scoped(grant) if !grant.graph_allowed(graph) => Err(forbidden_scope()),
-        _ => Ok(()),
+        admin::Role::Scoped(grant) if !grant.graph_allowed(&stored) => Err(forbidden_scope()),
+        _ => Ok(stored),
     }
 }
 
@@ -338,8 +346,11 @@ async fn list(
     let graphs = guarded_read(&service, |db| Ok(db.list_graphs()?), untruncated).await?;
     let graphs: Value = graphs
         .iter()
-        .filter(|graph| scope(&role, &graph.name).is_ok())
-        .map(info)
+        .filter(|graph| match &role {
+            admin::Role::Scoped(grant) => grant.graph_allowed(&graph.name),
+            _ => true,
+        })
+        .map(|graph| info(&role, graph))
         .collect();
     Ok(Json(json!({"graphs": graphs})))
 }
@@ -356,10 +367,13 @@ async fn create(
     input: Result<Bytes, BytesRejection>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let Named { graph } = parse(input)?;
-    scope(&role, &graph)?;
+    let name = scope(&role, &graph)?;
     enabled(&service)?;
-    let created = guarded_write(&service, move |db| Ok(db.create_graph(&graph)?)).await?;
-    Ok((StatusCode::CREATED, Json(json!({"graph": info(&created)}))))
+    let created = guarded_write(&service, move |db| Ok(db.create_graph(&name)?)).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({"graph": info(&role, &created)})),
+    ))
 }
 
 async fn info_route(
@@ -368,15 +382,10 @@ async fn info_route(
     graph: Result<Path<String>, PathRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let graph = graph_path(graph)?;
-    scope(&role, &graph)?;
+    let name = scope(&role, &graph)?;
     enabled(&service)?;
-    let found = guarded_read(
-        &service,
-        move |db| Ok(db.graph(&graph)?.info()),
-        untruncated,
-    )
-    .await?;
-    Ok(Json(json!({"graph": info(&found)})))
+    let found = guarded_read(&service, move |db| Ok(db.graph(&name)?.info()), untruncated).await?;
+    Ok(Json(json!({"graph": info(&role, &found)})))
 }
 
 async fn drop_route(
@@ -385,9 +394,8 @@ async fn drop_route(
     graph: Result<Path<String>, PathRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let graph = graph_path(graph)?;
-    scope(&role, &graph)?;
+    let name = scope(&role, &graph)?;
     enabled(&service)?;
-    let name = graph.clone();
     guarded_write(&service, move |db| Ok(db.drop_graph(&name)?)).await?;
     Ok(Json(json!({"dropped": graph})))
 }
@@ -399,10 +407,10 @@ fn query_route(kind: Kind) -> MethodRouter<Service> {
               graph: Result<Path<String>, PathRejection>,
               input: Result<Bytes, BytesRejection>| async move {
             let graph = graph_path(graph)?;
-            scope(&role, &graph)?;
+            let name = scope(&role, &graph)?;
             enabled(&service)?;
             let request = read_request(kind, parse(input)?)?;
-            run_query(&service, graph, request).await
+            run_query(&service, graph, name, request).await
         },
     )
 }
@@ -410,9 +418,9 @@ fn query_route(kind: Kind) -> MethodRouter<Service> {
 async fn run_query(
     service: &Service,
     graph: String,
+    name: String,
     request: ReadRequest,
 ) -> Result<Json<Value>, ApiError> {
-    let name = graph.clone();
     let read = guarded_read(
         service,
         move |db| {
@@ -436,7 +444,7 @@ async fn explain(
     input: Result<Bytes, BytesRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let graph = graph_path(graph)?;
-    scope(&role, &graph)?;
+    let stored = scope(&role, &graph)?;
     enabled(&service)?;
     let mut body: Map<String, Value> = parse(input)?;
     let operation = body.remove("operation");
@@ -451,7 +459,7 @@ async fn explain(
             )
         })?;
     let request = read_request(kind, Value::Object(body))?;
-    let name = graph.clone();
+    let name = stored;
     let explained = guarded_read(
         &service,
         move |db| {
@@ -482,7 +490,7 @@ async fn schema(
     params: Result<Query<SchemaParams>, QueryRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let graph = graph_path(graph)?;
-    scope(&role, &graph)?;
+    let stored = scope(&role, &graph)?;
     enabled(&service)?;
     let Query(params) = params.map_err(|error| {
         ApiError::new(StatusCode::BAD_REQUEST, "invalid_query", error.body_text())
@@ -492,7 +500,7 @@ async fn schema(
         .map(|budget| graph_json::parse_u64(&Value::String(budget)))
         .transpose()
         .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, "invalid_query", error))?;
-    let name = graph.clone();
+    let name = stored;
     let (declared, observed) = guarded_read(
         &service,
         move |db| {
@@ -522,10 +530,10 @@ async fn put_schema(
     input: Result<Bytes, BytesRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let graph = graph_path(graph)?;
-    scope(&role, &graph)?;
+    let stored = scope(&role, &graph)?;
     enabled(&service)?;
     let SchemaBody { schema } = parse(input)?;
-    let name = graph.clone();
+    let name = stored;
     let revision = guarded_write(&service, move |db| {
         Ok(db.graph_mut(&name)?.put_schema(&schema.into_schema())?)
     })
@@ -557,11 +565,12 @@ async fn retrieve(
     input: Result<Bytes, BytesRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let graph = graph_path(graph)?;
-    scope(&role, &graph)?;
+    let stored = scope(&role, &graph)?;
     enabled(&service)?;
     let request = graph_json::retrieve_request(parse(input)?)
         .map_err(|error| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_json", error))?;
-    let name = graph.clone();
+    let name = stored;
+    let display = graph.clone();
     let (output, _) = guarded_read(
         &service,
         move |db| {
@@ -591,7 +600,7 @@ async fn retrieve(
                     *redacted.entry(collection).or_default() += 1;
                 }
             }
-            let mut output = graph_json::retrieval_output(&name, &retrieval, &evidence);
+            let mut output = graph_json::retrieval_output(&display, &retrieval, &evidence);
             output["redacted"] = json!({
                 "count": redacted.values().sum::<u64>(),
                 "collections": redacted.keys().collect::<Vec<_>>(),
@@ -612,14 +621,14 @@ async fn query_text(
     input: Result<Bytes, BytesRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let graph = graph_path(graph)?;
-    scope(&role, &graph)?;
+    let stored = scope(&role, &graph)?;
     enabled(&service)?;
     let request: graph_json::QueryTextIn = parse(input)?;
     // Text errors are reported before the graph is looked up.
     crate::property_graph::parse_graph_query(&request.query, &request.params)
         .map_err(|error| text_error(GraphTextError::Query(error)))?;
     let limits = request.limits.resolve();
-    let name = graph.clone();
+    let name = stored;
     if request.explain {
         let plan = guarded_read(
             &service,
@@ -674,7 +683,7 @@ async fn batch(
     input: Result<Bytes, BytesRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let graph = graph_path(graph)?;
-    scope(&role, &graph)?;
+    let stored = scope(&role, &graph)?;
     enabled(&service)?;
     let BatchIn { ops } = parse(input)?;
     if ops.len() > MAX_BATCH_OPS {
@@ -683,7 +692,7 @@ async fn batch(
         )));
     }
     let ops: Vec<GraphOp> = ops.into_iter().map(Into::into).collect();
-    let name = graph.clone();
+    let name = stored;
     let owner = service.clone();
     let result = guarded_write(&service, move |db| {
         authorize_records(&owner, db, &role, &name, &ops)?;
@@ -1670,8 +1679,9 @@ fn read_output(graph: &str, read: &GraphRead<GraphOutput>) -> Result<Value, ApiE
     Ok(Value::Object(out))
 }
 
-fn info(info: &GraphInfo) -> Value {
-    json!({"name": info.name, "node_count": info.node_count, "edge_count": info.edge_count})
+fn info(role: &admin::Role, info: &GraphInfo) -> Value {
+    json!({"name": tenants::unqualify(role, &info.name), "node_count": info.node_count,
+        "edge_count": info.edge_count})
 }
 
 fn write(write: &GraphWrite) -> Value {
