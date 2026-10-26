@@ -854,6 +854,28 @@ impl Database {
             .is_some_and(|state| state.attachment_owner(collection, record).is_some())
     }
 
+    /// Names of the collections with a record attached to the live node `key`
+    /// of `graph`; empty when the graph or node does not exist. REST uses it
+    /// to authorize `DeleteNode`, which removes those attachments.
+    #[cfg(feature = "server")]
+    pub(crate) fn node_attachment_collections(&self, graph: &str, key: &str) -> Vec<String> {
+        let Some(graph) = self
+            .graph
+            .as_ref()
+            .and_then(|state| state.graph_by_name(graph))
+        else {
+            return Vec::new();
+        };
+        let Some(node) = graph.node_by_key(key) else {
+            return Vec::new();
+        };
+        graph
+            .attachments(node.id)
+            .filter_map(|(collection, _)| self.collections.get(&collection))
+            .map(|collection| collection.name.clone())
+            .collect()
+    }
+
     /// H-4 (LEG-002, LEG-007): refuses a batch or import chunk that deletes
     /// an attached record.
     pub(crate) fn ensure_no_attached_delete(

@@ -62,6 +62,7 @@ pub(crate) fn error_code(error: &Error) -> &'static str {
         Error::GraphUnsupportedOperation => "graph_unsupported_operation",
         Error::GraphInvalidOptions(_) => "graph_invalid_options",
         Error::GraphSchemaViolation { .. } => "graph_schema_violation",
+        Error::GraphPivotTooExpensive => "graph_pivot_too_expensive",
         _ => "database_error",
     }
 }

@@ -714,6 +714,78 @@ async fn batches_touching_vectors_need_collection_write_scope_and_quota() {
     assert_eq!(code(&body), "not_found");
 }
 
+/// GATE-007: `delete_node` removes the node's attachments, so a scoped
+/// credential needs collection `write` for every attached collection.
+#[tokio::test]
+async fn deleting_an_attached_node_needs_collection_write_scope() {
+    let f = fixture(true).await;
+    let app = &f.app;
+    let graph_only = credential(
+        app,
+        json!({"collections": ["default"], "operations": ["graph_write"], "graphs": ["g"]}),
+    )
+    .await;
+    let read_only = credential(
+        app,
+        json!({"collections": ["*"], "operations": ["graph_write", "read"], "graphs": ["g"]}),
+    )
+    .await;
+    let writer = credential(
+        app,
+        json!({"collections": ["default"], "operations": ["graph_write", "write"],
+            "graphs": ["g"]}),
+    )
+    .await;
+    // n4 has a record of "default" attached and no incident edges.
+    let delete = json!({"ops": [{"op": "delete_node", "key": "n4"}]});
+    for token in [&graph_only, &read_only] {
+        let (status, body) = call(
+            app,
+            Some(token),
+            "POST",
+            "/v1/graphs/g/batch",
+            Some(delete.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(code(&body), "forbidden_scope");
+    }
+    let (status, body) = call(
+        app,
+        Some(ADMIN),
+        "POST",
+        "/v1/graphs/g/nodes/get",
+        Some(json!({"node": {"key": "n4"}})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body["node"].is_null(), "refused delete wrote: {body}");
+    // A node without attachments needs no collection scope.
+    for ops in [
+        json!([{"op": "create_node", "key": "z"}]),
+        json!([{"op": "delete_node", "key": "z"}]),
+    ] {
+        let (status, body) = call(
+            app,
+            Some(&graph_only),
+            "POST",
+            "/v1/graphs/g/batch",
+            Some(json!({"ops": ops})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let (status, body) = call(
+        app,
+        Some(&writer),
+        "POST",
+        "/v1/graphs/g/batch",
+        Some(delete),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
 #[tokio::test]
 async fn limits_bodies_and_malformed_input_are_explicit() {
     let f = fixture(true).await;

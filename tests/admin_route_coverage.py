@@ -82,14 +82,23 @@ INVENTORY = {
     ("POST", "/v1/admin/users/{id}/password"): ("admin-tools.js", "user-reset-password"),
 }
 
+# Routes compiled only with the source-only `graph` feature (src/server/graph.rs).
+# Dashboard graph support is the pending FOLLOWUP-002, so they have no control yet.
+GRAPH_ONLY = {("GET", "/v1/admin/graph/stats")}
+
 
 def main():
+    graph_source = ROOT / "src" / "server" / "graph.rs"
     sources = [ROOT / "src" / "server.rs", *sorted((ROOT / "src" / "server").glob("*.rs"))]
+    sources = [path for path in sources if path != graph_source]
     registered = {route for path in sources for route in admin_routes(path.read_text(encoding="utf-8"))}
     assert registered == set(INVENTORY), (
         f"Admin route inventory drift: missing controls={registered - set(INVENTORY)}; "
         f"removed server routes={set(INVENTORY) - registered}"
     )
+    if graph_source.exists():
+        graph_routes = set(admin_routes(graph_source.read_text(encoding="utf-8")))
+        assert graph_routes == GRAPH_ONLY, f"Graph admin route drift: {graph_routes ^ GRAPH_ONLY}"
     dashboard = ROOT / "src" / "dashboard"
     markup = (dashboard / "index.html").read_text(encoding="utf-8")
     scripts = {name: (dashboard / name).read_text(encoding="utf-8") for name, _ in INVENTORY.values()}

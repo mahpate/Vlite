@@ -79,6 +79,8 @@ fn graph_failure(error: vlite::Error) -> Failure {
         E::GraphChangeFeedUnsupported => "graph_change_feed_unsupported",
         E::GraphUnsupportedOperation => "graph_unsupported_operation",
         E::GraphInvalidOptions(_) => "graph_invalid_options",
+        E::GraphSchemaViolation { .. } => "graph_schema_violation",
+        E::GraphPivotTooExpensive => "graph_pivot_too_expensive",
         _ => return failure(error),
     };
     (code, error.to_string())

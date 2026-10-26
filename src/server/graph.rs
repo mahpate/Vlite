@@ -460,7 +460,7 @@ async fn batch(
     let name = graph.clone();
     let owner = service.clone();
     let result = guarded_write(&service, move |db| {
-        authorize_records(&owner, db, &role, &ops)?;
+        authorize_records(&owner, db, &role, &name, &ops)?;
         Ok(db.graph_mut(&name)?.write_batch(&ops)?)
     })
     .await?;
@@ -468,18 +468,23 @@ async fn batch(
 }
 
 /// Record-touching operations need `write` plus a binding covering each
-/// collection, and vector mutations are held to live quotas. Runs under the
-/// write guard, so the checks see the state the batch commits against.
+/// collection, and vector mutations are held to live quotas. `delete_node`
+/// removes the node's attachments, so it is held to the same rule for every
+/// collection attached to it. Runs under the write guard, so the checks see
+/// the state the batch commits against.
 fn authorize_records(
     service: &Service,
     db: &Database,
     role: &admin::Role,
+    graph: &str,
     ops: &[GraphOp],
 ) -> Result<(), ApiError> {
     let mut mutations: BTreeMap<&str, Vec<Mutation>> = BTreeMap::new();
     for op in ops {
-        let collection = match op {
-            GraphOp::Attach { collection, .. } | GraphOp::Detach { collection, .. } => collection,
+        let collections = match op {
+            GraphOp::Attach { collection, .. } | GraphOp::Detach { collection, .. } => {
+                vec![collection.clone()]
+            }
             GraphOp::Vector {
                 collection,
                 mutation,
@@ -488,15 +493,23 @@ fn authorize_records(
                     .entry(collection)
                     .or_default()
                     .push(mutation.clone());
-                collection
+                vec![collection.clone()]
+            }
+            GraphOp::DeleteNode { key, .. } if matches!(role, admin::Role::Scoped(_)) => {
+                db.node_attachment_collections(graph, key)
             }
             _ => continue,
         };
         if let admin::Role::Scoped(grant) = role {
+            if collections.is_empty() {
+                continue;
+            }
             if !grant.allows(credentials::Op::Write) {
                 return Err(forbidden_scope());
             }
-            open(db, role, &Target::Named(collection.clone()))?;
+            for collection in collections {
+                open(db, role, &Target::Named(collection))?;
+            }
         }
     }
     for (collection, mutations) in mutations {

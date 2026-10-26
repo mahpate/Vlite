@@ -2237,7 +2237,7 @@
             }
           },
           "409": {
-            "description": "graphs_not_enabled or a graph conflict (graph_key_exists, graph_node_not_found, graph_attachment_conflict, ...)",
+            "description": "graphs_not_enabled or a graph conflict (graph_key_exists, graph_node_not_found, graph_attachment_conflict, graph_schema_violation, ...)",
             "content": {
               "application/json": {
                 "schema": {

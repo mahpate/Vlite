@@ -1437,6 +1437,13 @@ impl From<Error> for ApiError {
                 "invalid_input",
                 error.to_string(),
             ),
+            // Same code as the C ABI; durability is server configuration, so
+            // this is not reachable from a request today.
+            Error::InvalidDurability(_) => Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_durability",
+                error.to_string(),
+            ),
             // Change-feed, PITR and disk-index failures are caused by the
             // request or by the file's state, never by the server; the codes
             // match the C, Python and Node bindings.
@@ -1512,7 +1519,8 @@ impl From<Error> for ApiError {
             Error::GraphsRequireV5
             | Error::InvalidGraphName
             | Error::GraphLimitExceedsCeiling { .. }
-            | Error::GraphInvalidOptions(_) => Self::new(
+            | Error::GraphInvalidOptions(_)
+            | Error::GraphPivotTooExpensive => Self::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 graph_code(&error),
                 error.to_string(),
@@ -1556,6 +1564,7 @@ fn graph_code(error: &Error) -> &'static str {
         Error::GraphUnsupportedOperation => "graph_unsupported_operation",
         Error::GraphInvalidOptions(_) => "graph_invalid_options",
         Error::GraphSchemaViolation { .. } => "graph_schema_violation",
+        Error::GraphPivotTooExpensive => "graph_pivot_too_expensive",
         _ => "internal_error",
     }
 }
@@ -3727,6 +3736,11 @@ mod graph_errors {
                 },
                 CONFLICT,
                 "graph_schema_violation",
+            ),
+            (
+                Error::GraphPivotTooExpensive,
+                INVALID,
+                "graph_pivot_too_expensive",
             ),
         ]
     }
