@@ -1015,3 +1015,186 @@ async fn editor_and_viewer_accounts_need_a_v4_database() {
     drop(app);
     service.close().await.unwrap();
 }
+
+/// Graph knobs: `graphs` (absent = role default, `[]` = none, or names) and
+/// `graph_access` (`none` | `read` | `write`, capped by role).
+#[cfg(feature = "graph")]
+#[tokio::test]
+async fn graph_knobs_are_validated_and_reported() {
+    let dir = tempfile::tempdir_in(".").unwrap();
+    let service = v4(dir.path());
+    let app = configured_admin_router(service.clone(), options(dir.path())).unwrap();
+    let acme = create_tenant(&app, "acme").await;
+    let base = |username: &str, role: &str| {
+        json!({"username": username, "password": PASSWORD, "role": role,
+            "must_change_password": false})
+    };
+    let mut input = base("eddie", "editor");
+    input["graphs"] = json!(["g"]);
+    input["graph_access"] = json!("read");
+    let reply = admin(&app, "POST", "/v1/admin/users", input).await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    assert_eq!(reply.body["user"]["graphs"], json!(["g"]));
+    assert_eq!(reply.body["user"]["graph_access"], "read");
+    let eddie = reply.body["user"]["id"].as_str().unwrap().to_owned();
+
+    let long = "a".repeat(29);
+    let bad = [
+        ("viewer", None, json!({"graph_access": "write"})),
+        ("super_admin", None, json!({"graph_access": "read"})),
+        ("super_admin", None, json!({"graphs": []})),
+        ("editor", None, json!({"graphs": ["G"]})),
+        ("editor", None, json!({"graphs": ["*", "g"]})),
+        ("editor", None, json!({"graph_access": "admin"})),
+        (
+            "editor",
+            None,
+            json!({"graphs": (0..65).map(|i| format!("g{i}")).collect::<Vec<_>>()}),
+        ),
+        ("editor", Some(&acme), json!({ "graphs": [long.clone()] })),
+    ];
+    for (index, (role, tenant, knobs)) in bad.into_iter().enumerate() {
+        let mut input = base(&format!("bad{index}"), role);
+        input["tenant_id"] = json!(tenant);
+        for (key, value) in knobs.as_object().unwrap() {
+            input[key] = value.clone();
+        }
+        let reply = admin(&app, "POST", "/v1/admin/users", input.clone()).await;
+        assert_eq!(
+            reply.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{input}: {}",
+            reply.body
+        );
+    }
+    // Untenanted names have the whole 63-byte budget; `[]` means no access.
+    let mut input = base("ulla", "viewer");
+    input["graphs"] = json!([long]);
+    create_user(&app, input).await;
+    let mut input = base("vera", "viewer");
+    input["graphs"] = json!([]);
+    input["tenant_id"] = json!(acme);
+    let vera = create_user(&app, input).await;
+
+    let path = format!("/v1/admin/users/{vera}");
+    let reply = admin(&app, "PUT", &path, json!({"graph_access": "write"})).await;
+    assert_eq!(
+        reply.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        reply.body
+    );
+    let reply = admin(&app, "PUT", &path, json!({})).await;
+    assert_eq!(
+        reply.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        reply.body
+    );
+    assert!(
+        reply.body.to_string().contains("graph_access"),
+        "{}",
+        reply.body
+    );
+
+    // A signed-in editor's knob change ends its sessions.
+    let session = login(&app, "eddie", PASSWORD).await.session();
+    let me = browser(&app, &session, "GET", "/v1/auth/session", Value::Null).await;
+    assert_eq!(me.status, StatusCode::OK, "{}", me.body);
+    assert_eq!(me.body["user"]["graphs"], json!(["g"]), "{}", me.body);
+    assert_eq!(me.body["user"]["graph_access"], "read", "{}", me.body);
+    let caps = browser(&app, &session, "GET", "/v1/capabilities", Value::Null).await;
+    assert_eq!(caps.body["scope"]["graphs"], json!(["g"]), "{}", caps.body);
+    let operations = caps.body["scope"]["operations"].as_array().unwrap();
+    assert!(operations.contains(&json!("graph_read")), "{}", caps.body);
+    assert!(!operations.contains(&json!("graph_write")), "{}", caps.body);
+
+    let path = format!("/v1/admin/users/{eddie}");
+    let reply = admin(&app, "PUT", &path, json!({"graph_access": "write"})).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.body["changed"], json!(["graph_access"]));
+    let stale = browser(&app, &session, "GET", "/v1/auth/session", Value::Null).await;
+    assert_eq!(stale.status, StatusCode::UNAUTHORIZED, "{}", stale.body);
+    // A writer cannot be demoted to viewer while keeping write...
+    let reply = admin(&app, "PUT", &path, json!({"role": "viewer"})).await;
+    assert_eq!(
+        reply.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        reply.body
+    );
+    // ...unless the same request lowers the knob; `null` resets to default.
+    let input = json!({"role": "viewer", "graph_access": "read", "graphs": null});
+    let reply = admin(&app, "PUT", &path, input).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(
+        reply.body["changed"],
+        json!(["role", "graphs", "graph_access"])
+    );
+    assert_eq!(reply.body["user"]["graphs"], Value::Null);
+    let list = admin(&app, "GET", "/v1/admin/users", Value::Null).await;
+    let listed = list.body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|user| user["id"] == eddie)
+        .unwrap();
+    assert_eq!(listed["graph_access"], "read", "{listed}");
+    assert_eq!(listed["role"], "viewer", "{listed}");
+    let audit = std::fs::read_to_string(dir.path().join("admin").join("audit.jsonl")).unwrap();
+    assert!(audit.contains("\"graph_access\":\"read\""), "{audit}");
+    drop(app);
+    service.close().await.unwrap();
+}
+
+/// Account files written before the graph knobs load unchanged. A stored
+/// knob needs a graph build; other builds refuse the file rather than
+/// silently dropping a restriction.
+#[tokio::test]
+async fn account_files_without_graph_knobs_still_load() {
+    let dir = tempfile::tempdir_in(".").unwrap();
+    let path = dir.path().join("data.vlite");
+    let service = v4(dir.path());
+    let app = configured_admin_router(service.clone(), options(dir.path())).unwrap();
+    create_user(
+        &app,
+        json!({"username":"eddie","password":PASSWORD,"role":"editor","must_change_password":false}),
+    )
+    .await;
+    drop(app);
+    service.close().await.unwrap();
+    let file = dir.path().join("admin").join("users.json");
+    let stored = std::fs::read_to_string(&file).unwrap();
+    assert!(!stored.contains("graph"), "{stored}");
+
+    let service = Service::new(Database::open(&path).unwrap());
+    let app = configured_admin_router(service.clone(), options(dir.path())).unwrap();
+    let session = login(&app, "eddie", PASSWORD).await;
+    assert_eq!(session.status, StatusCode::OK, "{}", session.body);
+    drop(app);
+    service.close().await.unwrap();
+
+    let mut users: Value = serde_json::from_str(&stored).unwrap();
+    users["users"][0]["graph_access"] = json!("read");
+    std::fs::write(&file, users.to_string()).unwrap();
+    let service = Service::new(Database::open(&path).unwrap());
+    let loaded = configured_admin_router(service.clone(), options(dir.path()));
+    if cfg!(feature = "graph") {
+        let app = loaded.unwrap();
+        let list = admin(&app, "GET", "/v1/admin/users", Value::Null).await;
+        assert_eq!(
+            list.body["items"][0]["graph_access"], "read",
+            "{}",
+            list.body
+        );
+        assert_eq!(
+            list.body["items"][0]["graphs"],
+            Value::Null,
+            "{}",
+            list.body
+        );
+    } else {
+        assert!(loaded.is_err());
+    }
+    service.close().await.unwrap();
+}
