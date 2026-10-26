@@ -14,6 +14,13 @@ SPEC = importlib.util.spec_from_file_location(
 )
 PROBE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PROBE)
+# Before Python 3.12, WindowsPath overrides is_mount() to raise NotImplementedError,
+# so patching the base Path class has no effect there; patch the concrete class instead.
+CONCRETE_PATH = type(Path())
+
+
+def mounted(value):
+    return patch.object(CONCRETE_PATH, "is_mount", return_value=value)
 
 
 class StorageProbeTests(unittest.TestCase):
@@ -30,7 +37,7 @@ class StorageProbeTests(unittest.TestCase):
                     raise AssertionError(result.code)
 
     def test_missing_mount_fails_before_writing(self):
-        with tempfile.TemporaryDirectory() as directory, patch.object(Path, "is_mount", return_value=False):
+        with tempfile.TemporaryDirectory() as directory, mounted(False):
             # fcntl is Linux-only, so make its import available on Windows too.
             with patch.dict("sys.modules", {"fcntl": unittest.mock.MagicMock()}):
                 with self.assertRaisesRegex(RuntimeError, "not a mounted volume"):
@@ -39,13 +46,13 @@ class StorageProbeTests(unittest.TestCase):
 
     @unittest.skipUnless(__import__("sys").platform.startswith("linux"), "Linux filesystem primitives")
     def test_real_primitives_and_cleanup(self):
-        with tempfile.TemporaryDirectory() as directory, patch.object(Path, "is_mount", return_value=True):
+        with tempfile.TemporaryDirectory() as directory, mounted(True):
             PROBE.probe(directory)
             self.assertEqual(list(Path(directory).iterdir()), [])
 
     @unittest.skipUnless(__import__("sys").platform.startswith("linux"), "Linux filesystem primitives")
     def test_sync_failure_is_not_ignored(self):
-        with tempfile.TemporaryDirectory() as directory, patch.object(Path, "is_mount", return_value=True):
+        with tempfile.TemporaryDirectory() as directory, mounted(True):
             with patch.object(PROBE.os, "fsync", side_effect=OSError("sync unsupported")):
                 with self.assertRaisesRegex(OSError, "sync unsupported"):
                     PROBE.probe(directory)
@@ -63,7 +70,7 @@ class StorageProbeTests(unittest.TestCase):
                 raise OSError("directory sync unsupported")
             real_sync(fd)
 
-        with tempfile.TemporaryDirectory() as directory, patch.object(Path, "is_mount", return_value=True):
+        with tempfile.TemporaryDirectory() as directory, mounted(True):
             with patch.object(PROBE.os, "fsync", side_effect=sync):
                 with self.assertRaisesRegex(OSError, "directory sync unsupported"):
                     PROBE.probe(directory)
@@ -72,7 +79,7 @@ class StorageProbeTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux filesystem primitives")
     def test_smb_access_denied_only_accepted_during_contention(self):
         self.always_denied = False
-        with tempfile.TemporaryDirectory() as directory, patch.object(Path, "is_mount", return_value=True):
+        with tempfile.TemporaryDirectory() as directory, mounted(True):
             with patch.object(PROBE.subprocess, "run", side_effect=self.run_child_with_lock_result):
                 PROBE.probe(directory)
             self.assertEqual(list(Path(directory).iterdir()), [])
@@ -80,7 +87,7 @@ class StorageProbeTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux filesystem primitives")
     def test_unconditionally_denied_lock_fails(self):
         self.always_denied = True
-        with tempfile.TemporaryDirectory() as directory, patch.object(Path, "is_mount", return_value=True):
+        with tempfile.TemporaryDirectory() as directory, mounted(True):
             with patch.object(PROBE.subprocess, "run", side_effect=self.run_child_with_lock_result):
                 with self.assertRaises(PermissionError):
                     PROBE.probe(directory)
