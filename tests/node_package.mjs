@@ -51,6 +51,7 @@ import assert from "node:assert/strict";
 import { NativeLibrary } from "@vlite/embedded";
 const native = new NativeLibrary();
 try {
+  assert.deepEqual(await native.capabilities(), {graph:false});
   const db = await native.create("installed.vlite", 2);
   await db.put("18446744073709551615", [1,0], {payload: Buffer.from([0,255])});
   assert.equal((await db.get("18446744073709551615")).payload_base64,"AP8=");

@@ -18,7 +18,7 @@ REPO = "https://github.com/mahpate/Vlite"
 GROUPS = [
     ("Getting started", ["INSTALL", "REFERENCE"]),
     ("Interfaces", ["API", "GRPC", "CAPABILITIES", "VECTORS"]),
-    ("Storage & indexes", ["STORAGE-FEATURES", "ANN-SNAPSHOTS"]),
+    ("Storage & indexes", ["STORAGE-FEATURES", "ANN-SNAPSHOTS", "GRAPH", "GRAPH-QUERY"]),
     ("Operations", ["DOCKER-OPERATIONS", "SECURITY", "WEBHOOKS", "TOOLS"]),
     ("Agents", ["MCP", "AGENT-SKILLS"]),
     ("Console", ["CONSOLE", "CONSOLE-ADMIN"]),

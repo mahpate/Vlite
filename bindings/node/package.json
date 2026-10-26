@@ -10,7 +10,7 @@
   "files": ["index.js", "index.d.ts", "worker.js", "prebuilds", "LICENSE", "README.md"],
   "scripts": {
     "build": "node build.mjs",
-    "test": "node --test test.mjs features.test.mjs f32.test.mjs",
+    "test": "node --test test.mjs features.test.mjs f32.test.mjs graph.test.mjs",
     "typecheck": "tsc --noEmit --strict --module nodenext --target es2022 example.ts",
     "install": "node -e \"\""
   },

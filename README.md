@@ -154,6 +154,7 @@ Prebuilt packages: [PyPI](docs/INSTALL.md#pypi) and [release assets](docs/INSTAL
 | Command-line tools and tests | [TOOLS](docs/TOOLS.md) |
 | gRPC, MCP and agent skills | [GRPC](docs/GRPC.md), [MCP](docs/MCP.md), [AGENT-SKILLS](docs/AGENT-SKILLS.md) |
 | Webhooks | [WEBHOOKS](docs/WEBHOOKS.md) |
+| Property graphs (experimental, source-only) | [GRAPH](docs/GRAPH.md) |
 | Benchmarks | [Methodology](benchmarks/README.md), [results](benchmarks/RESULTS.md) |
 | Upgrade notes | [Release notes](docs/RELEASE-0.4.1.md) |
 

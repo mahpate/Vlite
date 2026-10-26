@@ -10,7 +10,8 @@ function execute(handle, request) {
   const parsed = JSON.parse(request);
   const op = parsed.op;
   const featureOp = op === "features" ? parsed.request.op : undefined;
-  if (op === "create" || op === "open" || ["create", "open", "open_from_bytes"].includes(featureOp)) {
+  const graphCreate = op === "graph" && parsed.request.op === "create";
+  if (op === "create" || op === "open" || graphCreate || ["create", "open", "open_from_bytes"].includes(featureOp)) {
     handles.add(response.result.handle);
   }
   if (op === "close") handles.delete(handle);

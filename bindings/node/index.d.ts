@@ -90,6 +90,15 @@ export class NativeLibrary {
    */
   open(path: string, options?: Credentials & { readOnly?: boolean }): Promise<Database>;
   createInMemory(dimensions: number, options?: CreateOptions): Promise<Database>;
+  /** Optional capabilities compiled into the loaded library; libraries predating the op report `{ graph: false }`. */
+  capabilities(): Promise<{ graph: boolean }>;
+  /** Whether the loaded library was built with the source-only `graph` feature. */
+  supportsGraph(): Promise<boolean>;
+  /**
+   * Create a NEW graph-enabled (V5) file without overwrite; never converts an existing file.
+   * Rejects with `unsupported` unless the loaded library was built with the `graph` feature.
+   */
+  createWithGraph(path: string, dimensions: number, options?: CreateOptions & { flushIntervalMs?: number }): Promise<Database>;
   openFromBytes(data: Uint8Array, options?: Credentials): Promise<Database>;
   /** Closed/copied log; new destination. Exactly one of sequence/timestampMs is required. */
   restoreTo(logPath: string, destination: string, options: Credentials & {
@@ -181,6 +190,31 @@ export class Database {
   buildDiskAnn(path: string, options?: Scope & { metric?: "squared_l2" | "cosine" }): Promise<DiskAnnSource>;
   searchDiskAnn(path: string, vector: number[], k: number, options?: { efSearch?: number; cacheBytes?: number }): Promise<Hit[]>;
   toBytes(): Promise<Uint8Array>;
+  /** Property graph (source-only `graph` feature); without it every method rejects with `unsupported`. */
+  isGraphEnabled(): Promise<boolean>;
+  listGraphs(): Promise<GraphInfo[]>;
+  createGraph(name: string): Promise<GraphInfo>;
+  /** Drop an empty graph. */
+  dropGraph(name: string): Promise<void>;
+  /** Applies graph and vector ops atomically; nothing is written on error. */
+  graphWriteBatch(graph: string, ops: GraphOp[]): Promise<GraphBatchResult>;
+  graphGetNode(graph: string, node: GraphSelector, options?: GraphReadOptions): Promise<GraphReadResult & { node: GraphNode | null }>;
+  graphGetEdge(graph: string, edge: GraphSelector, options?: GraphReadOptions): Promise<GraphReadResult & { edge: GraphEdge | null }>;
+  graphFindNodes(graph: string, options?: GraphReadOptions & {
+    label?: string; conditions?: Condition[]; limit?: number; cursor?: string;
+  }): Promise<GraphReadResult & { nodes: GraphNode[] }>;
+  graphNeighbors(graph: string, node: GraphSelector, options?: GraphReadOptions & {
+    direction?: GraphDirection; types?: string[]; edgeConditions?: Condition[]; limit?: number; cursor?: string;
+  }): Promise<GraphReadResult & { edges: GraphEdge[]; nodes: GraphNode[] }>;
+  graphTraverse(graph: string, start: GraphSelector[], options?: GraphReadOptions & {
+    direction?: GraphDirection; types?: string[]; expandFilter?: GraphNodeFilter; returnFilter?: GraphNodeFilter;
+    edgeFilter?: Condition[]; includePaths?: boolean;
+  }): Promise<GraphReadResult & { nodes: { depth: number; node: GraphNode }[]; edges: GraphEdge[]; paths: GraphPath[] }>;
+  graphShortestPath(graph: string, source: GraphSelector, destination: GraphSelector, options?: GraphReadOptions & {
+    direction?: GraphDirection; types?: string[];
+  }): Promise<GraphReadResult & { shortest_path: GraphPathOutcome }>;
+  /** Plans one read request in native form (`{ op: "neighbors", graph, node: { key }, ... }`) without running it. */
+  graphExplain(query: Record<string, unknown> & { op: string; graph: string }): Promise<GraphExplanation>;
 
 }
 export interface Credentials { key?: Uint8Array; passphrase?: string }
@@ -209,3 +243,55 @@ export type Change = ChangeBase & (
 export interface ChangeBatch { changes: Change[]; next: string; has_more: boolean; head: string }
 export interface RestoreReport { restored_sequence: string; source_head: string; restored_at_ms: string | null }
 export interface DiskAnnSource { lineage: string; sequence: string; collection_id: number; live_records: number }
+/** Graph selectors: a key string, a non-negative integer ID, or an explicit `{ id }`/`{ key }` object. */
+export type GraphSelector = string | number | bigint | { id: string | number } | { key: string };
+export type GraphDirection = "out" | "in" | "both";
+/** `"any"` (default), `"absent"`, or `{ revision: "decimal" }`. */
+export type GraphExpected = "any" | "absent" | { revision: string | number };
+export type GraphProjection = "all" | "none" | { only: string[] };
+/** Omitted fields keep the engine defaults; values above the host ceiling reject with `graph_limit_exceeds_ceiling`. */
+export interface GraphLimits {
+  maxHops?: number; maxVisitedNodes?: number; maxEdgesExamined?: number; maxEdgesPerNode?: number; deadlineMs?: number;
+  maxOutputNodes?: number; maxOutputEdges?: number; maxOutputPaths?: number;
+}
+export interface GraphReadOptions { limits?: GraphLimits; projection?: GraphProjection }
+export interface GraphNodeFilter { labels?: string[]; conditions?: Condition[] }
+export interface GraphInfo { name: string; node_count: number; edge_count: number }
+/** Native snake_case batch ops; record IDs and revisions are decimal strings (or JSON integers). */
+export type GraphOp =
+  | { op: "create_node"; key: string; labels?: string[]; properties?: Metadata }
+  | { op: "upsert_node"; key: string; labels?: string[]; properties?: Metadata; expected?: GraphExpected }
+  | { op: "patch_node"; key: string; add_labels?: string[]; remove_labels?: string[]; set?: Metadata; unset?: string[]; expected?: GraphExpected }
+  | { op: "delete_node"; key: string; expected?: GraphExpected }
+  | { op: "create_edge"; key?: string; source: string; relationship: string; destination: string; properties?: Metadata }
+  | { op: "patch_edge"; edge: { id: string | number } | { key: string }; set?: Metadata; unset?: string[]; expected?: GraphExpected }
+  | { op: "delete_edge"; edge: { id: string | number } | { key: string }; expected?: GraphExpected }
+  | { op: "attach"; node: string; collection: string; record: string | number }
+  | { op: "detach"; node: string; collection: string }
+  | { op: "put_vector"; collection: string; id: string | number; vector: number[]; payload_base64?: string; metadata?: Metadata }
+  | { op: "delete_vector"; collection: string; id: string | number };
+export interface GraphWrite { id: string; created: boolean; revision: string }
+export type GraphOpOutcome =
+  | { node: GraphWrite } | { edge: GraphWrite } | { node_deleted: { id: string } } | { edge_deleted: { id: string } }
+  | { attached: { node: string } } | { detached: { node: string; record: string } } | "vector";
+export interface GraphBatchResult { graph: string; revision: string | null; outcomes: GraphOpOutcome[] }
+export interface GraphNode { id: string; key: string; labels: string[]; properties: Metadata; revision: string }
+export interface GraphEdge {
+  id: string; key: string | null; relationship: string; source: string; source_key: string;
+  target: string; target_key: string; properties: Metadata; revision: string;
+}
+export interface GraphPath { nodes: string[]; edges: string[] }
+export type GraphTruncation = "visited_limit" | "edge_limit" | "output_limit" | "deadline" | "cancelled"
+  | { degree_limit: { node_ids: string[] } };
+/** Every read runs on one snapshot identified by `view_sequence`; page with `cursor` (lowercase hex). */
+export interface GraphReadResult {
+  graph: string; view_sequence: string; complete: boolean; truncation: GraphTruncation[];
+  stats: Record<string, unknown>; cursor: string | null;
+}
+export type GraphPathOutcome =
+  | { outcome: "found"; path: GraphPath; nodes: GraphNode[]; edges: GraphEdge[] }
+  | { outcome: "no_path_within_hops" }
+  | { outcome: "exhausted"; truncation: GraphTruncation[] };
+export interface GraphExplanation {
+  query: Record<string, unknown>; limits: Record<string, number>; projection: GraphProjection; indexes: unknown[];
+}

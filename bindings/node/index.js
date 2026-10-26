@@ -94,6 +94,24 @@ export class NativeLibrary {
     return new Database(this, result.handle);
   }
   createInMemory(dimensions, options = {}) { return this.#createFeature(null, dimensions, options); }
+  /** Optional capabilities compiled into the loaded library, e.g. `{ graph: false }`. */
+  async capabilities() {
+    try { return await this._request("0", { op: "capabilities" }); }
+    catch (error) {
+      // Libraries older than the capabilities op reject it as an unknown variant.
+      if (error instanceof EmbeddedError && error.code === "invalid_input") return { graph: false };
+      throw error;
+    }
+  }
+  /** Whether the loaded library was built with the source-only `graph` feature. */
+  async supportsGraph() { return Boolean((await this.capabilities()).graph); }
+  /** Create a NEW graph-enabled (V5) file without overwrite; never converts an existing file. */
+  async createWithGraph(path, dimensions, { format, key, passphrase, commitTimestamps = false, flushIntervalMs } = {}) {
+    const options = { credentials: credentials(key, passphrase), commit_timestamps: commitTimestamps,
+      ...optional("format", format), ...optional("flush_interval_ms", flushIntervalMs) };
+    const result = await graphCall(this._request("0", { op: "graph", request: { op: "create", path, dimensions, options } }));
+    return new Database(this, result.handle);
+  }
   /** Open a snapshot; readOnly shares file locks, rejects mutations, and excludes writers. */
   async open(path, { key, passphrase, readOnly = false } = {}) {
     const flag = readOnly ? { read_only: true } : {};
@@ -328,6 +346,46 @@ export class Database {
   }
   async toBytes() { return Buffer.from((await this.#feature("to_bytes")).bytes_base64, "base64"); }
 
+  // Property graph (source-only `graph` feature). Nodes and edges are selected by key (string),
+  // ID (bigint, safe integer or { id: "decimal" }) or { key }; IDs and revisions come back as
+  // decimal strings. Libraries without the feature reject with EmbeddedError("unsupported").
+  #graph(op, fields = {}) { return graphCall(this.#call("graph", { request: { op, ...fields } })); }
+  async isGraphEnabled() { return (await this.#graph("is_graph_enabled")).graph_enabled; }
+  async listGraphs() { return (await this.#graph("list_graphs")).graphs; }
+  async createGraph(name) { return (await this.#graph("create_graph", { graph: name })).graph; }
+  /** Drop an empty graph. */
+  async dropGraph(name) { await this.#graph("drop_graph", { graph: name }); }
+  /** Apply graph and vector ops atomically: `{ op: "create_node", key, ... }` etc. */
+  async graphWriteBatch(graph, ops) { return this.#graph("batch", { graph, ops }); }
+  async graphGetNode(graph, node, { limits, projection } = {}) {
+    return this.#graph("get_node", { graph, node: graphRef(node), ...readFields({ limits, projection }) });
+  }
+  async graphGetEdge(graph, edge, { limits, projection } = {}) {
+    return this.#graph("get_edge", { graph, edge: graphRef(edge), ...readFields({ limits, projection }) });
+  }
+  async graphFindNodes(graph, { label, conditions, limit, cursor, limits, projection } = {}) {
+    return this.#graph("find_nodes", { graph, ...optional("label", label), ...optional("conditions", conditions),
+      ...optional("limit", limit), ...optional("cursor", cursor), ...readFields({ limits, projection }) });
+  }
+  async graphNeighbors(graph, node, { direction, types, edgeConditions, limit, cursor, limits, projection } = {}) {
+    return this.#graph("neighbors", { graph, node: graphRef(node), ...optional("direction", direction),
+      ...optional("types", types), ...optional("edge_conditions", edgeConditions), ...optional("limit", limit),
+      ...optional("cursor", cursor), ...readFields({ limits, projection }) });
+  }
+  async graphTraverse(graph, start, { direction, types, expandFilter, returnFilter, edgeFilter, includePaths = false,
+    limits, projection } = {}) {
+    if (!Array.isArray(start)) throw new TypeError("start must be an array of node selectors");
+    return this.#graph("traverse", { graph, start: start.map(graphRef), include_paths: includePaths,
+      ...optional("direction", direction), ...optional("types", types), ...optional("expand_filter", expandFilter),
+      ...optional("return_filter", returnFilter), ...optional("edge_filter", edgeFilter), ...readFields({ limits, projection }) });
+  }
+  async graphShortestPath(graph, source, destination, { direction, types, limits, projection } = {}) {
+    return this.#graph("shortest_path", { graph, source: graphRef(source), destination: graphRef(destination),
+      ...optional("direction", direction), ...optional("types", types), ...readFields({ limits, projection }) });
+  }
+  /** Plan a read request (`{ op: "neighbors", graph, ... }`, native snake_case) without running it. */
+  async graphExplain(query) { return (await this.#graph("explain", { query })).explain; }
+
 }
 
 // Omitted options are not sent, so the native side applies the collection's declared defaults.
@@ -362,6 +420,26 @@ function snake(value) {
   if (value === null || typeof value !== "object") return value;
   return Object.fromEntries(Object.entries(value).map(([key, item]) =>
     [key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`), snake(item)]));
+}
+
+// Libraries that predate the graph op reject the envelope as an unknown variant.
+function graphCall(promise) {
+  return promise.catch((error) => {
+    if (error instanceof EmbeddedError && error.code === "invalid_input" && error.message.includes("unknown variant `graph`")) {
+      throw new EmbeddedError("unsupported", "Native library predates graph operations");
+    }
+    throw error;
+  });
+}
+function graphRef(value) {
+  if (typeof value === "string") return { key: value };
+  if (typeof value === "bigint" && value >= 0n) return { id: value.toString() };
+  if (Number.isSafeInteger(value) && value >= 0) return { id: String(value) };
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) return value;
+  throw new TypeError("graph selector must be a key string, a non-negative integer ID, or a selector object");
+}
+function readFields({ limits, projection }) {
+  return { ...optional("limits", snake(limits)), ...optional("projection", projection) };
 }
 
 function bytesBase64(data) {

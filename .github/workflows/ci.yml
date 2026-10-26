@@ -155,6 +155,16 @@ jobs:
       - run: npm --prefix bindings/node ci --ignore-scripts
       - run: npm --prefix bindings/node run build
       - run: npm --prefix bindings/node test
+        env:
+          VLITE_TEST_EXPECT_GRAPH: "0"
+      - name: Source-only Node graph methods against a graph-enabled vlite-ffi (ITEM-047)
+        working-directory: bindings/node
+        run: |
+          cargo build --locked --release -p vlite-ffi --features graph --target-dir ../../target/node-graph
+          node --test graph.test.mjs
+        env:
+          VLITE_TEST_EXPECT_GRAPH: "1"
+          VLITE_TEST_LIBRARY: ${{ github.workspace }}/target/node-graph/release/${{ runner.os == 'Windows' && 'vlite_ffi.dll' || runner.os == 'macOS' && 'libvlite_ffi.dylib' || 'libvlite_ffi.so' }}
       - run: npm --prefix bindings/node run typecheck
       - run: node bindings/node/pack.mjs node-packages
       - name: Verify offline installed Node package

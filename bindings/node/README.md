@@ -297,3 +297,40 @@ cross-process read-only locking. Set `VLITE_TEST_LIBRARY` when running
 the default uses the package's platform prebuild.
 
 `npm run typecheck` also checks compile-time examples of every new method.
+
+## Opt-in property graph (source builds only)
+
+Graph methods need a native library built with the non-default `graph` feature;
+npm packages and released libraries do not include it. `native.capabilities()`
+returns `{graph}` and `native.supportsGraph()` a boolean; against a library
+without graph every graph method rejects with `EmbeddedError` code
+`unsupported`. See [docs/GRAPH.md](../../docs/GRAPH.md).
+
+```js
+const native = new NativeLibrary({ libraryPath: "target/graph-ffi/release/vlite_ffi.dll" });
+const db = await native.createWithGraph("agent.vlite", 3); // new V5 graph file
+await db.createGraph("memory");
+await db.graphWriteBatch("memory", [
+  { op: "create_node", key: "ada", labels: ["Person"] },
+  { op: "create_node", key: "acme", labels: ["Company"] },
+  { op: "create_edge", source: "ada", relationship: "WORKS_AT", destination: "acme" },
+]);
+console.log((await db.graphNeighbors("memory", "ada", { direction: "out" })).nodes);
+console.log((await db.graphShortestPath("memory", "ada", "acme")).shortest_path.outcome);
+await db.close();
+```
+
+Methods: `createWithGraph`, `isGraphEnabled`, `listGraphs`, `createGraph`,
+`dropGraph`, `graphWriteBatch`, `graphGetNode`, `graphGetEdge`,
+`graphFindNodes`, `graphNeighbors`, `graphTraverse`, `graphShortestPath` and
+`graphExplain`. Selectors are a key string, a non-negative safe integer or
+bigint ID, or an explicit `{key}`/`{id}` object. Option names are camelCase
+(`limits: {maxHops}`, `edgeConditions`, `includePaths`); write operations and
+results keep native snake_case. Results and error codes follow
+`bindings/c/FEATURES.md` ("Property graph").
+
+```sh
+cargo build --release -p vlite-ffi --features graph --target-dir target/graph-ffi
+VLITE_TEST_LIBRARY=target/graph-ffi/release/vlite_ffi.dll VLITE_TEST_EXPECT_GRAPH=1 node --test bindings/node/graph.test.mjs
+VLITE_TEST_EXPECT_GRAPH=0 node --test bindings/node/graph.test.mjs   # default library: unsupported
+```

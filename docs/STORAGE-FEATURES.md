@@ -218,9 +218,9 @@ sequences, checksums, encryption and commit timestamps work as usual.
   `GraphUnsupportedOperation` and change feeds return
   `GraphChangeFeedUnsupported`. The server answers `/v1/changes` with 501
   (gRPC `UNIMPLEMENTED`), refuses webhook subscriptions, and maps other graph
-  errors to 409 (state conflicts) or 422 (invalid input). Schema or property
-  indexes, hybrid graph retrieval, and graph APIs in the server, MCP and SDKs
-  do not exist yet.
+  errors to 409 (state conflicts) or 422 (invalid input). Schemas, hybrid
+  retrieval, query text and the server, MCP and SDK surfaces are in the
+  [property graph guide](GRAPH.md).
 - **CLI.** `vlite-graph-cli` runs these reads and write batches with JSON; see
   [Graph operations](TOOLS.md#graph-operations-experimental-source-only).
 
