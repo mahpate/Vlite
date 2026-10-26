@@ -13,6 +13,12 @@ It does not have a separate database. Compose keeps database files in `api-data`
 and administrative state in `api-admin-data`; you manage access, HTTPS, backups
 and upgrades.
 
+For a managed Azure host with a stable HTTPS endpoint, see the
+[experimental Container Apps deployment](../deploy/azure-container-apps/README.md).
+It reuses ASENDME's resource group/storage account with a separate VLite share,
+blocks startup on failed storage primitive checks, and stops old replicas before
+updates. Azure Files crash durability and cross-host locking remain unqualified.
+
 See the [deployment diagrams](https://mahpate.github.io/Vlite/#deployment-options)
 for embedded and self-hosted layouts.
 

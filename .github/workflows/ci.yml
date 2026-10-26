@@ -72,6 +72,12 @@ jobs:
         run: python tests/ann_restart_campaign.py
       - name: Verify container code-generation and workspace inputs
         run: python tests/docker_build_inputs.py
+      - name: Verify Azure Container Apps mount probe
+        run: python tests/azure_container_apps.py
+      - name: Verify Azure Container Apps deployment guards
+        if: matrix.os == 'windows-latest' && matrix.toolchain == 'stable'
+        shell: pwsh
+        run: .\deploy\azure-container-apps\test.ps1
       - name: Verify vlite-graph dependency boundary and artifact feature pins
         run: python tests/graph_build_boundary.py
       - name: Verify graph reference measurement runner

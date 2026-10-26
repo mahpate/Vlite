@@ -59,6 +59,9 @@ dashboard at http://127.0.0.1:8082. On Ubuntu, `sudo sh scripts/docker-dashboard
 installs Docker and starts the published images. See
 [Docker operations](docs/DOCKER-OPERATIONS.md#first-deployment).
 
+Azure Container Apps: [experimental deployment](deploy/azure-container-apps/README.md)
+with a separate Azure Files share in ASENDME's existing storage account.
+
 ### Embedded Rust
 
 Requires Rust 1.89 or later. Run the example from a checkout:
