@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Architecture | VLite</title>
-  <meta name="description" content="In-depth VLite architecture: single-file log format, commit and recovery protocol, locking, HNSW/quantized ANN, hybrid search, encryption, CDC and the REST/gRPC server.">
+  <meta name="description" content="In-depth VLite architecture: the single-file format (header, frames, opcodes, format versions, graph frames and sidecar files), commit and recovery, locking, HNSW/quantized ANN, hybrid search, encryption, CDC and the REST/gRPC server.">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
   <script src="assets/site.js"></script>
@@ -41,6 +41,11 @@
       <h4>On this page</h4>
       <a href="#layers">Layers</a>
       <a href="#file-contract">One file</a>
+      <a href="#header">File header</a>
+      <a href="#frames">Frames</a>
+      <a href="#versions">Format versions</a>
+      <a href="#graph-frames">Graph frames</a>
+      <a href="#sidecars">Sidecar files</a>
       <a href="#write-path">Write path</a>
       <a href="#recovery">Recovery</a>
       <a href="#locking">Concurrency</a>
@@ -104,7 +109,114 @@ flowchart LR
   A -. "load if identity matches" .-> M
 </pre></details>
     </figure>
-    <p>Features that need new on-disk structures use a newer file format. VLite never upgrades a file silently; you upgrade it by compacting.</p>
+    <p>Inside, the file is a fixed header followed by frames. Each commit appends one frame, and all integers are little-endian.</p>
+    <div class="bytemap" role="img" aria-label="File layout: a 32-byte header, then a 64-byte encryption descriptor in encrypted files only, then one frame per commit, from commit 1 to commit n.">
+      <div class="bm-row">
+        <span class="bm-cell c-magic" style="--w:4">32 B<b>header</b><i>always</i></span>
+        <span class="bm-cell c-flag" style="--w:4">64 B<b>descriptor</b><i>if encrypted</i></span>
+        <span class="bm-cell c-body" style="--w:5">frame<b>commit 1</b><i>prefix &middot; body &middot; footer</i></span>
+        <span class="bm-cell c-body" style="--w:5">frame<b>commit 2</b><i>appended</i></span>
+        <span class="bm-cell c-body" style="--w:5">&hellip;<b>commit n</b><i>end of file</i></span>
+      </div>
+    </div>
+
+    <h2 id="header">File header</h2>
+    <p>Every file starts with a 32-byte header. Its CRC32 covers bytes 0&ndash;27 and is checked on every open.</p>
+    <div class="bytemap" role="img" aria-label="Header bytes: 0 to 7 magic, VLITEDB and a zero byte; 8 to 11 version, u32; 12 to 15 dimensions, u32; 16 to 23 lineage, u64, v4 and later; 24 to 25 collection-ID floor, u16, v4 and later; 26 to 27 flags, u16, v5; 28 to 31 CRC32 of bytes 0 to 27.">
+      <div class="bm-row">
+        <span class="bm-cell c-magic" style="--w:8">0&ndash;7<b>magic</b><i>VLITEDB\0</i></span>
+        <span class="bm-cell c-ver" style="--w:4">8&ndash;11<b>version</b><i>u32</i></span>
+        <span class="bm-cell c-dim" style="--w:4">12&ndash;15<b>dimensions</b><i>u32</i></span>
+        <span class="bm-cell c-lin" style="--w:8">16&ndash;23<b>lineage</b><i>u64 &middot; v4+</i></span>
+        <span class="bm-cell c-col" style="--w:3">24&ndash;25<b>ID floor</b><i>u16 &middot; v4+</i></span>
+        <span class="bm-cell c-flag" style="--w:3">26&ndash;27<b>flags</b><i>u16 &middot; v5</i></span>
+        <span class="bm-cell c-crc" style="--w:4">28&ndash;31<b>CRC32</b><i>of 0&ndash;27</i></span>
+      </div>
+    </div>
+    <ul class="list">
+      <li><b>Dimensions</b> belong to the <code>default</code> collection. Other collections record theirs when they are created.</li>
+      <li><b>Lineage</b> is a random, nonzero file identity. ANN snapshots, Disk ANN files, change-feed cursors and scoped credentials are bound to it. Compaction, upgrade and restore give the new file a new lineage.</li>
+      <li><b>ID floor</b> carries the highest collection ID already used, so a dropped collection's ID is never reused, even after compaction.</li>
+      <li>Bytes 16&ndash;27 are zero in v1&ndash;v3 files.</li>
+    </ul>
+    <table class="param-table">
+      <thead><tr><th>Flag</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td>1 &middot; encrypted</td><td>Frame bodies are sealed with ChaCha20-Poly1305, and an encryption descriptor follows the header.</td></tr>
+        <tr><td>2 &middot; timestamps</td><td>Each commit is preceded by a time-anchor frame (op 11), so a restore can target a point in time.</td></tr>
+        <tr><td>4 &middot; graph</td><td>The file holds property graphs. Experimental; graph builds only.</td></tr>
+      </tbody>
+    </table>
+    <p>Only v5 files have flags. Unknown bits fail with <code>UnsupportedFeature</code> rather than being ignored, so an older binary never misreads a newer file.</p>
+    <p class="muted">Encryption descriptor (64 bytes, readable, encrypted files only):</p>
+    <div class="bytemap small" role="img" aria-label="Encryption descriptor bytes: 0 to 3 VENC; 4 key derivation, 0 for a raw key or 1 for Argon2id; 5 to 7 zero; 8 to 15 key ID; 16 to 31 salt; 32 to 47 key check; 48 to 59 Argon2id memory, iterations and parallelism; 60 to 63 CRC32 of bytes 0 to 59.">
+      <div class="bm-row">
+        <span class="bm-cell c-magic" style="--w:4">0&ndash;3<b>VENC</b></span>
+        <span class="bm-cell c-ver" style="--w:2">4<b>KDF</b></span>
+        <span class="bm-cell c-col" style="--w:2">5&ndash;7<b>0</b></span>
+        <span class="bm-cell c-lin" style="--w:6">8&ndash;15<b>key ID</b></span>
+        <span class="bm-cell c-body" style="--w:7">16&ndash;31<b>salt</b></span>
+        <span class="bm-cell c-dim" style="--w:7">32&ndash;47<b>key check</b></span>
+        <span class="bm-cell c-flag" style="--w:7">48&ndash;59<b>Argon2id cost</b></span>
+        <span class="bm-cell c-crc" style="--w:4">60&ndash;63<b>CRC32</b></span>
+      </div>
+    </div>
+    <p>KDF 0 is a raw 32-byte key. KDF 1 derives the key from a passphrase with Argon2id, using the stored cost. The key ID is a short fingerprint of the key, and the key check confirms the key before anything is decrypted. A wrong key returns <code>EncryptionKeyMismatch</code> with the expected key ID, never a corruption error.</p>
+
+    <h2 id="frames">Frames</h2>
+    <p>A frame is a 36-byte prefix, a body and a 16-byte footer. The footer is the commit marker: a frame without a valid footer is never treated as committed.</p>
+    <div class="bytemap" role="img" aria-label="Frame layout: a 36-byte prefix; a 12-byte nonce in encrypted files; the body, up to 256 MiB; a 16-byte authentication tag in encrypted files; a 16-byte footer holding VCMT, a CRC32 and the sequence.">
+      <div class="bm-row">
+        <span class="bm-cell c-magic" style="--w:5">36 B<b>prefix</b><i>VREC &middot; CRC32</i></span>
+        <span class="bm-cell c-flag" style="--w:3">12 B<b>nonce</b><i>if encrypted</i></span>
+        <span class="bm-cell c-body" style="--w:10">&le; 256 MiB<b>body</b><i>depends on the op</i></span>
+        <span class="bm-cell c-flag" style="--w:3">16 B<b>tag</b><i>if encrypted</i></span>
+        <span class="bm-cell c-crc" style="--w:5">16 B<b>footer</b><i>VCMT &middot; CRC32 &middot; seq</i></span>
+      </div>
+    </div>
+    <p class="muted">Prefix (36 bytes):</p>
+    <div class="bytemap small" role="img" aria-label="Prefix bytes: 0 to 3 VREC; 4 op; 5 to 6 collection; 7 zero; 8 to 15 sequence, u64; 16 to 23 id, u64; 24 to 27 count, u32; 28 to 31 length, u32; 32 to 35 CRC32 of bytes 0 to 31.">
+      <div class="bm-row">
+        <span class="bm-cell c-magic" style="--w:4">0&ndash;3<b>VREC</b></span>
+        <span class="bm-cell c-ver" style="--w:2">4<b>op</b></span>
+        <span class="bm-cell c-col" style="--w:4">5&ndash;6<b>collection</b></span>
+        <span class="bm-cell c-col" style="--w:1">7<b>0</b></span>
+        <span class="bm-cell c-lin" style="--w:6">8&ndash;15<b>sequence</b><i>u64</i></span>
+        <span class="bm-cell c-dim" style="--w:6">16&ndash;23<b>id</b><i>u64</i></span>
+        <span class="bm-cell c-ver" style="--w:4">24&ndash;27<b>count</b><i>u32</i></span>
+        <span class="bm-cell c-body" style="--w:4">28&ndash;31<b>length</b><i>u32</i></span>
+        <span class="bm-cell c-crc" style="--w:4">32&ndash;35<b>CRC32</b><i>of 0&ndash;31</i></span>
+      </div>
+    </div>
+    <ul class="list">
+      <li><b>sequence</b> rises by exactly one per commit; a time anchor shares the sequence of the commit it precedes. A gap is reported as corruption.</li>
+      <li><b>collection</b> is the target collection of record, batch and vector frames in v4+ files. It is 0 in older files and in collection, anchor and graph frames.</li>
+      <li><b>id</b> is the record ID for record ops, the collection ID for collection ops, and 0 otherwise.</li>
+      <li><b>count</b> is the vector dimensions for puts and the number of entries for batch and graph frames.</li>
+      <li><b>length</b> is the plaintext body length; for op 1 it is the payload length.</li>
+    </ul>
+    <p>CRC32 checks cover the header, each prefix (bytes 0&ndash;31) and each footer, which covers every earlier byte of its frame. The footer repeats the sequence, so a frame copied from elsewhere fails. In encrypted files the prefix and footer stay readable, so recovery still works, and the prefix is authenticated together with the body.</p>
+    <table class="param-table">
+      <thead><tr><th>Op</th><th>Since</th><th>Body</th></tr></thead>
+      <tbody>
+        <tr><td>1 &middot; put</td><td>v1</td><td>Vector, then payload</td></tr>
+        <tr><td>2 &middot; delete</td><td>v1</td><td>Empty</td></tr>
+        <tr><td>3 &middot; batch</td><td>v2</td><td>1&ndash;4,096 entries for one collection, up to 16 MiB</td></tr>
+        <tr><td>4 &middot; put</td><td>v3</td><td>Vector, payload and metadata (see <a href="#records">Records</a>)</td></tr>
+        <tr><td>5 &middot; create collection</td><td>v4</td><td>Name (up to 63 bytes), dimensions and settings</td></tr>
+        <tr><td>6 &middot; drop collection</td><td>v4</td><td>Empty</td></tr>
+        <tr><td>7 &middot; settings</td><td>v4</td><td>Collection settings, up to 16 KiB</td></tr>
+        <tr><td>8 &middot; metadata update</td><td>v5</td><td>New metadata only; the vector is not rewritten</td></tr>
+        <tr><td>9 &middot; put with expiry</td><td>v5</td><td>9-byte expiry, then an op 4 body</td></tr>
+        <tr><td>10 &middot; named vectors</td><td>v5</td><td>Replaces the collection's named and sparse vectors, up to 16 MiB</td></tr>
+        <tr><td>11 &middot; time anchor</td><td>v5</td><td>Commit time in milliseconds (timestamps flag)</td></tr>
+        <tr><td>12 &middot; graph</td><td>v5</td><td>Graph changes (graph flag; see <a href="#graph-frames">Graph frames</a>)</td></tr>
+      </tbody>
+    </table>
+    <p>A batch entry has a 16-byte header (op, ID and length) and holds a put or a delete. From v4, the last entry may be an import checkpoint, which commits an import job's progress together with its records.</p>
+
+    <h2 id="versions">Format versions</h2>
+    <p>Features that need new on-disk structures use a newer format version. Files are never converted silently: using such a feature on an older file returns an error such as <code>MetadataRequiresUpgrade</code> or <code>CollectionsRequireUpgrade</code>, and the file is left unchanged.</p>
     <figure class="diagram" data-diagram="formats">
       <picture><source srcset="assets/diagrams/formats-dark.svg" media="(prefers-color-scheme: dark)"><img src="assets/diagrams/formats-light.svg" data-light="assets/diagrams/formats-light.svg" data-dark="assets/diagrams/formats-dark.svg" alt="Explicit file-format progression from base logs to collections, then expiry and extended vectors." loading="lazy"></picture>
       <a class="diagram-full" href="assets/diagrams/formats-light.svg" data-light="assets/diagrams/formats-light.svg" data-dark="assets/diagrams/formats-dark.svg">Open full-size diagram</a>
@@ -114,6 +226,90 @@ flowchart LR
   V3["V1–V3&lt;br/&gt;base log · default for create"] --> V4["V4&lt;br/&gt;lineage · collections · import checkpoints"] --> V5["V5&lt;br/&gt;expiry · geo metadata · named/sparse vectors"]
 </pre></details>
     </figure>
+    <table class="param-table">
+      <thead><tr><th>Version</th><th>Adds</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>Put and delete frames; written only by older releases</td></tr>
+        <tr><td>2</td><td>Atomic batches; written only by older releases</td></tr>
+        <tr><td>3</td><td>Typed metadata; the default for new files</td></tr>
+        <tr><td>4</td><td>Lineage, collections, settings and import checkpoints; enables the change feed</td></tr>
+        <tr><td>5</td><td>Flags, encryption, commit timestamps, expiry, metadata-only updates, geo metadata, named and sparse vectors</td></tr>
+        <tr><td>5 + graph</td><td>Property graphs (experimental)</td></tr>
+      </tbody>
+    </table>
+    <ul class="list">
+      <li>To create a v4 or v5 file, use <code>create_with_format</code>, or <code>create_with_options</code> for encryption and commit timestamps. The server takes <code>--create-format 4</code> or <code>5</code> with <code>--create-if-missing</code>, and creates v5 when it is given an encryption key.</li>
+      <li><code>vlite-maintain upgrade</code> rewrites a v1&ndash;v4 file as v4 with a new lineage. A v5 file stays v5; upgrade never produces v5.</li>
+      <li>Compaction writes v3 for v1&ndash;v3 files and otherwise keeps the version.</li>
+      <li>Graph files are created with <code>create_with_graph</code> or <code>vlite-graph-cli init</code>. <code>vlite-maintain enable-graph</code> copies a v4 or v5 file into a new graph-enabled v5 file, and <code>strip-graph</code> copies it back to plain v5 and drops every graph.</li>
+      <li>Older releases and builds without the <code>graph</code> feature refuse graph files with <code>UnsupportedFeature</code>, and <code>upgrade</code> refuses them too.</li>
+      <li>Backup, restore, verify, compaction, re-encryption and replicas keep graph state.</li>
+    </ul>
+
+    <h2 id="graph-frames">Graph frames <span class="badge">Experimental</span></h2>
+    <p>Graph-enabled files store property graphs in op 12 frames. Each frame changes one graph and commits as one unit, together with any vector writes it carries. Graph indexes are rebuilt when the file opens; there is no graph sidecar.</p>
+    <div class="bytemap small" role="img" aria-label="Graph frame body: byte 0 version, always 1; byte 1 reserved; bytes 2 to 3 graph ID, below 64; then the entries, as many as the prefix count.">
+      <div class="bm-row">
+        <span class="bm-cell c-ver" style="--w:3">0<b>version</b><i>1</i></span>
+        <span class="bm-cell c-col" style="--w:3">1<b>reserved</b></span>
+        <span class="bm-cell c-lin" style="--w:4">2&ndash;3<b>graph ID</b><i>&lt; 64</i></span>
+        <span class="bm-cell c-body" style="--w:14">4&hellip;<b>entries</b><i>prefix count</i></span>
+      </div>
+    </div>
+    <p class="muted">Each entry:</p>
+    <div class="bytemap small" role="img" aria-label="Graph entry: byte 0 tag; byte 1 flags, always 0; bytes 2 to 3 reserved; bytes 4 to 7 payload length, u32; then the payload.">
+      <div class="bm-row">
+        <span class="bm-cell c-ver" style="--w:3">0<b>tag</b></span>
+        <span class="bm-cell c-flag" style="--w:3">1<b>flags</b><i>0</i></span>
+        <span class="bm-cell c-col" style="--w:3">2&ndash;3<b>reserved</b></span>
+        <span class="bm-cell c-body" style="--w:4">4&ndash;7<b>length</b><i>u32</i></span>
+        <span class="bm-cell c-dim" style="--w:11">8&hellip;<b>payload</b></span>
+      </div>
+    </div>
+    <table class="param-table">
+      <thead><tr><th>Tag</th><th>Entry</th></tr></thead>
+      <tbody>
+        <tr><td>1, 2</td><td>Create a graph; drop an empty graph</td></tr>
+        <tr><td>3</td><td>Raise the next node and edge IDs</td></tr>
+        <tr><td>4&ndash;6</td><td>Put, patch or delete a node</td></tr>
+        <tr><td>7&ndash;9</td><td>Put, patch or delete an edge</td></tr>
+        <tr><td>10, 11</td><td>Attach a node to a vector record; detach it</td></tr>
+        <tr><td>12</td><td>Put the graph schema</td></tr>
+        <tr><td>64</td><td>Vector write: a collection ID, then a batch entry</td></tr>
+      </tbody>
+    </table>
+    <ul class="list">
+      <li>Up to 64 graphs per file, with names up to 63 bytes. Each frame holds up to 4,096 entries and 16 MiB.</li>
+      <li>Node and edge keys are up to 256 bytes, a node has up to 8 labels, and properties hold up to 64 fields and 64 KiB.</li>
+      <li>A vector record attached to a node cannot be deleted or given an expiry.</li>
+      <li>Change feeds and webhooks are off for graph files.</li>
+    </ul>
+
+    <h2 id="sidecars">Sidecar files</h2>
+    <p>Only the database file holds data. Every other file can be rebuilt, reissued or recreated.</p>
+    <table class="param-table">
+      <thead><tr><th>File</th><th>Holds</th><th>If lost or stale</th></tr></thead>
+      <tbody>
+        <tr><td><code>data.vlite</code></td><td>Every committed record, collection and graph</td><td>This is your data; back it up</td></tr>
+        <tr><td><code>data.vlite.ann</code></td><td>HNSW snapshot (<code>VLITEANN</code>, SHA-256 trailer, up to 4 GiB), bound to the lineage, sequence and per-collection digests</td><td>Any commit makes it stale; the index is rebuilt instead</td></tr>
+        <tr><td><code>data.vlite.dann</code></td><td>Disk ANN (<code>VLDANN01</code>, 128-byte header, 8 MiB default cache), bound to the lineage and revision it was built from</td><td>Stale or damaged copies are refused; build it again</td></tr>
+      </tbody>
+    </table>
+    <p>Snapshots are written to a staging file, synced and renamed into place. Encrypted databases refuse both ANN files, because they would hold plaintext vectors. The server keeps Disk ANN files in its admin directory as <code>disk-ann-&lt;collection id&gt;.dann</code>.</p>
+    <p class="muted">Server admin directory (<code>VLITE_ADMIN_DIR</code>):</p>
+    <table class="param-table">
+      <thead><tr><th>File</th><th>Holds</th><th>If lost</th></tr></thead>
+      <tbody>
+        <tr><td><code>users.json</code></td><td>Accounts and Argon2id password hashes; sessions stay in memory</td><td>Recreate the accounts</td></tr>
+        <tr><td><code>credentials.json</code></td><td>API credentials, stored as SHA-256 hashes of their secrets</td><td>Reissue the tokens</td></tr>
+        <tr><td><code>tenants.json</code></td><td>Tenant registry</td><td>Tenant mappings are lost; records remain</td></tr>
+        <tr><td><code>webhooks.json</code></td><td>Webhook subscriptions and delivery stats</td><td>Register the endpoints again</td></tr>
+        <tr><td><code>webhooks.cursor</code></td><td>Webhook delivery position</td><td>Delivery restarts at the newest change; changes in between are skipped</td></tr>
+        <tr><td><code>audit.jsonl</code></td><td>Audit log, rotated to <code>audit.1.jsonl</code> at 16 MiB</td><td>Audit history only</td></tr>
+        <tr><td><code>next-startup</code></td><td>Which restored copy to open at the next start</td><td>The server opens its configured database path</td></tr>
+        <tr><td><code>backup-*.vlite</code><br><code>restore-*.vlite</code></td><td>Backups (each with a <code>.manifest.json</code>) and restored copies made through the API or dashboard</td><td>Only those copies</td></tr>
+      </tbody>
+    </table>
 
     <h2 id="write-path">Write path</h2>
     <p>A write returns only after its frame is synced to stable storage. Indexes change only after that, so readers never see uncommitted data. A batch of up to 4,096 operations commits as one unit.</p>
@@ -215,6 +411,16 @@ flowchart LR
   V --> QC["ScalarU8 codes"]
 </pre></details>
     </figure>
+    <p class="muted">On disk (op 4 body):</p>
+    <div class="bytemap small" role="img" aria-label="Record body: the vector, dimensions times 4 bytes of f32; a 4-byte payload length; the payload, up to 1 MiB; then typed metadata, up to 64 KiB.">
+      <div class="bm-row">
+        <span class="bm-cell c-dim" style="--w:10">dims &times; 4 B<b>vector</b><i>f32</i></span>
+        <span class="bm-cell c-ver" style="--w:3">4 B<b>payload len</b><i>u32</i></span>
+        <span class="bm-cell c-body" style="--w:7">&le; 1 MiB<b>payload</b></span>
+        <span class="bm-cell c-lin" style="--w:6">&le; 64 KiB<b>metadata</b><i>typed</i></span>
+      </div>
+    </div>
+    <p>Vectors are always stored as full-precision f32, even when an index uses ScalarU8. Metadata is a field count, then fields sorted by name, each with a type tag: 1 string, 2 integer, 3 float, 4 boolean or 5 geo point (v5). Op 9 puts a 9-byte expiry (a flag and a time in milliseconds) before the same body, and op 8 replaces only the metadata.</p>
 
     <h2 id="planner">Query planner</h2>
     <p>A search uses HNSW only when a ready index matches its metric and settings. Otherwise it scans exactly. Lower distance is always nearer, and ties resolve deterministically.</p>
@@ -366,12 +572,16 @@ sequenceDiagram
       <tbody>
         <tr><td>Dimensions</td><td>65,536</td></tr>
         <tr><td>Payload</td><td>1 MiB</td></tr>
+        <tr><td>Metadata</td><td>64 fields, 64 KiB</td></tr>
         <tr><td>Batch</td><td>4,096 operations, 16 MiB</td></tr>
-        <tr><td>Collections</td><td>64</td></tr>
+        <tr><td>Frame body</td><td>256 MiB</td></tr>
+        <tr><td>Collections</td><td>64; names up to 63 bytes</td></tr>
+        <tr><td>Collection settings</td><td>16 KiB</td></tr>
         <tr><td>Metadata indexes</td><td>16</td></tr>
         <tr><td>Text fields</td><td>8</td></tr>
         <tr><td>Filter conditions</td><td>64</td></tr>
         <tr><td>Hybrid results</td><td>1,000</td></tr>
+        <tr><td>Graphs</td><td>64 per file; 4,096 entries and 16 MiB per frame</td></tr>
         <tr><td>Tenants</td><td>1,024 over the server's lifetime</td></tr>
       </tbody>
     </table>
@@ -383,6 +593,7 @@ sequenceDiagram
       <li>Opening a file replays the log, so open time and memory grow with data. Compaction reclaims space.</li>
       <li>HNSW and ScalarU8 are approximate. Inner product always searches exactly.</li>
       <li>Tenants are logical only. Webhooks are at-least-once, and streaming exports are not point-in-time snapshots.</li>
+      <li>Graph support is experimental. Graph files turn off change feeds and webhooks.</li>
     </ul>
     <p>More detail: <a href="docs/REFERENCE.html">Reference</a> &middot; <a href="docs/STORAGE-FEATURES.html">Storage features</a> &middot; <a href="docs/SECURITY.html">Security</a></p>
   </main>

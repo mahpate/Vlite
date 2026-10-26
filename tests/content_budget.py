@@ -14,6 +14,9 @@ api.html is the complete API reference, so it has no word budget;
 tests/api_reference.py checks instead that it documents every public API item
 and nothing stale. features.html is the full feature catalogue, so its budget
 covers every capability; keep each row to one or two sentences.
+architecture.html also carries the on-disk format reference (file header,
+frames, opcodes, format versions, graph frames and sidecar files), so its
+budget is larger; keep the remaining sections brief.
 
 Collapsed and hidden content is excluded on purpose: architecture.html keeps
 the Mermaid sources of its diagrams in collapsed blocks (build_site_diagrams.py
@@ -37,7 +40,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BUDGETS = [
     ("README.md", "lines", 250),
     ("site/compare.html", "visible words", 900),
-    ("site/architecture.html", "visible words", 800),
+    ("site/architecture.html", "visible words", 2300),
     ("site/features.html", "visible words", 2800),
     ("site/index.html", "visible words", 500),
     ("site/dashboard.html", "visible words", 400),

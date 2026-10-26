@@ -620,6 +620,8 @@ table.param-table td:first-child { white-space: nowrap; }
 .arch .diagram pre.mermaid { background: none; margin: 0; padding: 0; color: var(--text); text-align: center; white-space: pre; }
 .arch .diagram svg { max-width: 100%; height: auto; }
 .arch figcaption { margin-top: 10px; font-size: .88rem; color: var(--muted); text-align: center; }
+/* Keep words whole in the format tables: narrow screens scroll the table instead of splitting words. */
+.arch table.param-table :is(th, td) { overflow-wrap: break-word; }
 .bytemap { margin: 14px 0 20px; overflow-x: auto; }
 .bm-row { display: flex; min-width: 620px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
 .bm-cell { flex: var(--w) 1 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; padding: 10px 4px; font: 500 .72rem/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); border-right: 1px solid var(--border); text-align: center; }
