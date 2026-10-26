@@ -1012,6 +1012,10 @@ mod tests {
         ) {
             return;
         }
+        // Warm up: one-time lazy runtime allocations (seen on macOS stable)
+        // stay live forever and must not count as graph state; a real leak
+        // recurs on the measured build below.
+        drop(keyed_state());
         let before = ALLOCATOR.usage();
         let empty = release(GraphState::new(), before);
         assert!(empty.monotonic);
