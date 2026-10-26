@@ -600,6 +600,9 @@ fn change_out(change: crate::changes::Change) -> proto::ChangeEvent {
         metadata: HashMap::new(),
         dimensions: None,
         settings_json: String::new(),
+        graph: String::new(),
+        revision: None,
+        graph_operations: Vec::new(),
     };
     match change.kind {
         ChangeKind::Put {
@@ -637,8 +640,138 @@ fn change_out(change: crate::changes::Change) -> proto::ChangeEvent {
             event.settings_json = collections::settings_json(&settings).to_string();
         }
         ChangeKind::VectorsUpdated => event.kind = proto::ChangeKind::VectorsUpdated as i32,
+        ChangeKind::GraphCreated { graph } => {
+            event.kind = proto::ChangeKind::GraphCreated as i32;
+            event.graph = graph;
+        }
+        ChangeKind::GraphDropped { graph } => {
+            event.kind = proto::ChangeKind::GraphDropped as i32;
+            event.graph = graph;
+        }
+        ChangeKind::GraphBatch {
+            graph,
+            revision,
+            operations,
+        } => {
+            event.kind = proto::ChangeKind::GraphBatch as i32;
+            event.graph = graph;
+            event.revision = Some(revision);
+            event.graph_operations = operations.into_iter().map(graph_change_out).collect();
+        }
     }
     event
+}
+
+fn graph_change_out(change: crate::changes::GraphChange) -> proto::GraphChangeOperation {
+    use crate::changes::GraphChange;
+    use proto::GraphChangeOp as Op;
+    let mut out = proto::GraphChangeOperation::default();
+    let op = match change {
+        GraphChange::NodeUpserted {
+            id,
+            key,
+            labels,
+            properties,
+            created,
+        } => {
+            out.id = Some(id);
+            out.key = Some(key);
+            out.labels = labels;
+            out.properties = metadata_out(properties);
+            out.created = created;
+            Op::NodeUpserted
+        }
+        GraphChange::NodePatched {
+            id,
+            key,
+            add_labels,
+            remove_labels,
+            set,
+            unset,
+        } => {
+            out.id = Some(id);
+            out.key = Some(key);
+            out.labels = add_labels;
+            out.remove_labels = remove_labels;
+            out.properties = metadata_out(set);
+            out.unset = unset;
+            Op::NodePatched
+        }
+        GraphChange::NodeDeleted { id, key } => {
+            out.id = Some(id);
+            out.key = Some(key);
+            Op::NodeDeleted
+        }
+        GraphChange::EdgeUpserted {
+            id,
+            key,
+            source,
+            source_key,
+            relationship,
+            destination,
+            destination_key,
+            properties,
+            created,
+        } => {
+            out.id = Some(id);
+            out.key = key;
+            out.source = Some(source);
+            out.source_key = source_key;
+            out.relationship = relationship;
+            out.destination = Some(destination);
+            out.destination_key = destination_key;
+            out.properties = metadata_out(properties);
+            out.created = created;
+            Op::EdgeUpserted
+        }
+        GraphChange::EdgePatched {
+            id,
+            key,
+            set,
+            unset,
+        } => {
+            out.id = Some(id);
+            out.key = key;
+            out.properties = metadata_out(set);
+            out.unset = unset;
+            Op::EdgePatched
+        }
+        GraphChange::EdgeDeleted { id, key } => {
+            out.id = Some(id);
+            out.key = key;
+            Op::EdgeDeleted
+        }
+        GraphChange::Attached {
+            node,
+            node_key,
+            collection,
+            record,
+        } => {
+            out.node = Some(node);
+            out.node_key = node_key;
+            out.collection = collection;
+            out.record = Some(record);
+            Op::Attached
+        }
+        GraphChange::Detached {
+            node,
+            node_key,
+            collection,
+            record,
+        } => {
+            out.node = Some(node);
+            out.node_key = node_key;
+            out.collection = collection;
+            out.record = Some(record);
+            Op::Detached
+        }
+        GraphChange::SchemaUpdated { schema } => {
+            out.schema_json = graph::schema_json(&schema).to_string();
+            Op::SchemaUpdated
+        }
+    };
+    out.op = op as i32;
+    out
 }
 
 async fn poll_changes(
@@ -1600,7 +1733,6 @@ impl VLite for Adapter {
             false,
             false,
             |service, _, _, request| async move {
-                service.reject_graph_feed()?;
                 let cursor = if request.cursor.is_empty() {
                     crate::changes::FeedCursor::beginning()
                 } else {
@@ -1651,8 +1783,6 @@ impl VLite for Adapter {
                 false,
                 false,
                 |_service, _, request_id, request| async move {
-                    // Fails the call itself, so no stream ever opens.
-                    _service.reject_graph_feed()?;
                     let cursor = if request.cursor.is_empty() {
                         crate::changes::FeedCursor::beginning()
                     } else {

@@ -17,6 +17,10 @@ struct Subscription {
     url: String,
     collections: Option<Vec<String>>,
     events: Vec<String>,
+    /// Optional graph-name filter for graph events (v0.6.0). Absent in
+    /// stores written by older servers, so it defaults to None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    graphs: Option<Vec<String>>,
     secret: String,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -82,11 +86,6 @@ impl Dispatcher {
             .map_err(|_| std::io::Error::other("webhook lock poisoned"))? =
             FeedCursor::load(cursor_path)
                 .map_err(|e| std::io::Error::other(format!("invalid webhook cursor: {e}")))?;
-        // LEG-019: the worker consumes the change feed, which graph-enabled
-        // files reject; never start one that would skip it silently.
-        if service.graph_enabled {
-            return reject_graph_subscriptions(&service, Some(&directory));
-        }
         let this = self.clone();
         let stop = self.stopping.clone();
         let worker = thread::Builder::new()
@@ -127,29 +126,6 @@ fn disabled() -> ApiError {
         "webhooks require VLITE_ADMIN_DIR",
     )
 }
-/// LEG-019 startup check, run before anything is written to the admin
-/// directory: subscriptions stored in `webhooks.json` on a graph-enabled
-/// file fail startup with `GraphChangeFeedUnsupported` (REQ-053). No-op for
-/// vector-only files and without an admin directory.
-pub(super) fn reject_graph_subscriptions(
-    service: &Service,
-    directory: Option<&std::path::Path>,
-) -> std::io::Result<()> {
-    let Some(directory) = directory.filter(|_| service.graph_enabled) else {
-        return Ok(());
-    };
-    let stored = match std::fs::read(directory.join("webhooks.json")) {
-        Ok(bytes) => serde_json::from_slice::<Persisted>(&bytes)
-            .map_err(|e| std::io::Error::other(format!("invalid webhook store: {e}")))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    if stored.subscriptions.is_empty() {
-        Ok(())
-    } else {
-        Err(std::io::Error::other(Error::GraphChangeFeedUnsupported))
-    }
-}
 fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
@@ -183,6 +159,8 @@ struct Create {
     url: String,
     collections: Option<Vec<String>>,
     events: Vec<String>,
+    #[serde(default)]
+    graphs: Option<Vec<String>>,
     secret: String,
 }
 fn validate(input: &Create) -> Result<(), ApiError> {
@@ -202,19 +180,11 @@ fn validate(input: &Create) -> Result<(), ApiError> {
         return Err(unprocessable("webhook secret must be 16..256 UTF-8 bytes"));
     }
     if input.events.is_empty()
-        || input.events.len() > 8
-        || input.events.iter().any(|e| {
-            !matches!(
-                e.as_str(),
-                "put"
-                    | "delete"
-                    | "metadata_update"
-                    | "collection_created"
-                    | "collection_dropped"
-                    | "settings_updated"
-                    | "vectors_updated"
-            )
-        })
+        || input.events.len() > EVENT_KINDS.len()
+        || input
+            .events
+            .iter()
+            .any(|e| !EVENT_KINDS.contains(&e.as_str()))
     {
         return Err(unprocessable(
             "events must be a nonempty list of supported change kinds",
@@ -229,17 +199,41 @@ fn validate(input: &Create) -> Result<(), ApiError> {
             "collection filters must contain at most 64 valid names",
         ));
     }
+    if input.graphs.as_ref().is_some_and(|gs| {
+        gs.len() > 64
+            || gs.iter().any(|g| {
+                g.is_empty()
+                    || g.len() > crate::property_graph::engine::limits::MAX_GRAPH_NAME_BYTES
+            })
+    }) {
+        return Err(unprocessable(
+            "graph filters must contain at most 64 valid names",
+        ));
+    }
     Ok(())
 }
+/// Every event kind a subscription may select. Graph kinds are opt-in:
+/// subscriptions that list only vector kinds keep receiving exactly the
+/// vector events they received before v0.6.0.
+const EVENT_KINDS: [&str; 10] = [
+    "put",
+    "delete",
+    "metadata_update",
+    "collection_created",
+    "collection_dropped",
+    "settings_updated",
+    "vectors_updated",
+    "graph_created",
+    "graph_dropped",
+    "graph_batch",
+];
 fn public_subscription(s: &Subscription, d: &Delivery) -> Value {
-    json!({"id":s.id,"url":s.url,"collections":s.collections,"events":s.events,"attempts":d.attempts,"last_success_ms":d.last_success_ms,"last_error":d.last_error})
+    json!({"id":s.id,"url":s.url,"collections":s.collections,"events":s.events,"graphs":s.graphs,"attempts":d.attempts,"last_success_ms":d.last_success_ms,"last_error":d.last_error})
 }
 async fn create(
     State(service): State<Service>,
     input: Result<Json<Create>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    // LEG-019: rejected before validation; nothing is stored.
-    service.reject_graph_feed()?;
     let input = body(input)?;
     validate(&input)?;
     if service
@@ -259,6 +253,7 @@ async fn create(
         url: input.url,
         collections: input.collections,
         events: input.events,
+        graphs: input.graphs,
         secret: input.secret,
     };
     let d = service.webhooks.clone();
@@ -351,7 +346,25 @@ fn kind_name(change: &Change) -> &'static str {
         ChangeKind::CollectionDropped => "collection_dropped",
         ChangeKind::SettingsUpdated { .. } => "settings_updated",
         ChangeKind::VectorsUpdated => "vectors_updated",
+        ChangeKind::GraphCreated { .. } => "graph_created",
+        ChangeKind::GraphDropped { .. } => "graph_dropped",
+        ChangeKind::GraphBatch { .. } => "graph_batch",
     }
+}
+/// Vector events match the collections filter, graph events the graphs
+/// filter; an absent filter matches everything of that family.
+fn selects(sub: &Subscription, change: &Change) -> bool {
+    sub.events.iter().any(|kind| kind == kind_name(change))
+        && match super::graph::feed_graph(&change.kind) {
+            Some(graph) => sub
+                .graphs
+                .as_ref()
+                .is_none_or(|names| names.iter().any(|n| n == graph)),
+            None => sub
+                .collections
+                .as_ref()
+                .is_none_or(|names| names.contains(&change.collection)),
+        }
 }
 fn event_json(change: &Change) -> Value {
     let body = match &change.kind {
@@ -372,6 +385,7 @@ fn event_json(change: &Change) -> Value {
         ChangeKind::CollectionDropped => json!({"type":"collection_dropped"}),
         ChangeKind::SettingsUpdated { .. } => json!({"type":"settings_updated"}),
         ChangeKind::VectorsUpdated => json!({"type":"vectors_updated"}),
+        other => super::graph::feed_event_json(other).expect("graph feed event"),
     };
     json!({"sequence":change.sequence.to_string(),"ordinal":change.ordinal,"collection":change.collection,"committed_at_ms":change.committed_at_ms,"change":body})
 }
@@ -450,13 +464,7 @@ fn run_dispatcher(dispatcher: Arc<Dispatcher>, service: Service, stopping: Arc<A
             let selected = batch
                 .changes
                 .iter()
-                .filter(|change| {
-                    sub.events.iter().any(|kind| kind == kind_name(change))
-                        && sub
-                            .collections
-                            .as_ref()
-                            .is_none_or(|names| names.contains(&change.collection))
-                })
+                .filter(|change| selects(&sub, change))
                 .map(event_json)
                 .collect::<Vec<_>>();
             if selected.is_empty() {

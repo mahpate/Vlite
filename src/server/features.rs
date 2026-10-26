@@ -80,6 +80,7 @@ fn change_json(change: Change) -> Value {
         ChangeKind::CollectionDropped => json!({"type":"collection_dropped"}),
         ChangeKind::SettingsUpdated { .. } => json!({"type":"settings_updated"}),
         ChangeKind::VectorsUpdated => json!({"type":"vectors_updated"}),
+        ref other => graph::feed_event_json(other).expect("graph feed event"),
     };
     json!({"sequence":change.sequence.to_string(),"ordinal":change.ordinal,"collection":change.collection,"committed_at_ms":change.committed_at_ms,"change":kind})
 }
@@ -96,7 +97,6 @@ async fn changes(
     Extension(role): Extension<admin::Role>,
     query: Result<Query<ChangeQuery>, QueryRejection>,
 ) -> Result<Json<Value>, ApiError> {
-    service.reject_graph_feed()?;
     let Query(query) = query
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "invalid_query", e.body_text()))?;
     let cursor = query
@@ -114,7 +114,11 @@ async fn changes(
                 Some(cursor) => cursor,
                 None => FeedCursor::beginning(),
             };
-            db.changes_after(&cursor, limit).map_err(ApiError::from)
+            let mut batch = db.changes_after(&cursor, limit).map_err(ApiError::from)?;
+            batch.changes.retain(|change| {
+                graph::feed_graph(&change.kind).is_none_or(|name| graph::feed_visible(&role, name))
+            });
+            Ok::<_, ApiError>(batch)
         })
         .await?;
     Ok(Json(

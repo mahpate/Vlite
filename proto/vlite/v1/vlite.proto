@@ -463,6 +463,47 @@ enum ChangeKind {
   CHANGE_KIND_COLLECTION_DROPPED = 5;
   CHANGE_KIND_SETTINGS_UPDATED = 6;
   CHANGE_KIND_VECTORS_UPDATED = 7;
+  // Graph-enabled files (v0.6.0). Graph events have an empty `collection`
+  // and set `graph`; a batch also sets `revision` and `graph_operations`.
+  CHANGE_KIND_GRAPH_CREATED = 8;
+  CHANGE_KIND_GRAPH_DROPPED = 9;
+  CHANGE_KIND_GRAPH_BATCH = 10;
+}
+enum GraphChangeOp {
+  GRAPH_CHANGE_OP_UNSPECIFIED = 0;
+  GRAPH_CHANGE_OP_NODE_UPSERTED = 1;
+  GRAPH_CHANGE_OP_NODE_PATCHED = 2;
+  GRAPH_CHANGE_OP_NODE_DELETED = 3;
+  GRAPH_CHANGE_OP_EDGE_UPSERTED = 4;
+  GRAPH_CHANGE_OP_EDGE_PATCHED = 5;
+  GRAPH_CHANGE_OP_EDGE_DELETED = 6;
+  GRAPH_CHANGE_OP_ATTACHED = 7;
+  GRAPH_CHANGE_OP_DETACHED = 8;
+  GRAPH_CHANGE_OP_SCHEMA_UPDATED = 9;
+}
+// One operation of a CHANGE_KIND_GRAPH_BATCH event. Fields not used by `op`
+// are empty. `id`/`key` name the node or edge; attach/detach use `node`,
+// `node_key`, `collection` and `record`.
+message GraphChangeOperation {
+  GraphChangeOp op = 1;
+  optional uint64 id = 2;
+  optional string key = 3;
+  repeated string labels = 4;
+  repeated string remove_labels = 5;
+  map<string, MetadataValue> properties = 6;
+  repeated string unset = 7;
+  bool created = 8;
+  optional uint64 source = 9;
+  string source_key = 10;
+  string relationship = 11;
+  optional uint64 destination = 12;
+  string destination_key = 13;
+  optional uint64 node = 14;
+  string node_key = 15;
+  string collection = 16;
+  optional uint64 record = 17;
+  // Declared schema JSON (the REST `PUT /v1/graphs/{graph}/schema` shape).
+  string schema_json = 18;
 }
 message ChangeEvent {
   uint64 sequence = 1;
@@ -477,6 +518,9 @@ message ChangeEvent {
   map<string, MetadataValue> metadata = 10;
   optional uint32 dimensions = 11;
   string settings_json = 12;
+  string graph = 13;
+  optional uint64 revision = 14;
+  repeated GraphChangeOperation graph_operations = 15;
 }
 message ChangesResponse {
   string cursor = 1;

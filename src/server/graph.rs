@@ -78,6 +78,126 @@ mod graph_json;
 
 /// Read request bodies are small queries; batches keep `MAX_JSON_BYTES`.
 const MAX_READ_BODY: usize = 1024 * 1024;
+
+// Change-feed graph events (v0.6.0), shared by `GET /v1/changes`, gRPC
+// `Changes`/`WatchChanges` and webhook deliveries.
+
+/// Whether `role` may see feed events of the stored graph `graph`: a scoped
+/// credential needs `graph_read` and a `graphs` binding covering the graph
+/// (collection scope never implies graph scope). Other events of the same
+/// commit are unaffected, and the cursor still advances past hidden events.
+pub(super) fn feed_visible(role: &admin::Role, graph: &str) -> bool {
+    match role {
+        admin::Role::Scoped(grant) => {
+            grant.allows(credentials::Op::GraphRead) && grant.graph_allowed(graph)
+        }
+        _ => true,
+    }
+}
+
+/// The graph a feed event belongs to; `None` for vector events.
+pub(super) fn feed_graph(kind: &crate::changes::ChangeKind) -> Option<&str> {
+    use crate::changes::ChangeKind;
+    match kind {
+        ChangeKind::GraphCreated { graph }
+        | ChangeKind::GraphDropped { graph }
+        | ChangeKind::GraphBatch { graph, .. } => Some(graph),
+        _ => None,
+    }
+}
+
+/// A declared schema in the `PUT /v1/graphs/{graph}/schema` request shape.
+pub(super) fn schema_json(schema: &crate::property_graph::GraphSchema) -> Value {
+    graph_json::declared_schema(schema)
+}
+
+/// One `GraphBatch` operation: `op` names it, u64 IDs are decimal strings.
+pub(super) fn feed_operation_json(operation: &crate::changes::GraphChange) -> Value {
+    use crate::changes::GraphChange;
+    match operation {
+        GraphChange::NodeUpserted {
+            id,
+            key,
+            labels,
+            properties,
+            created,
+        } => json!({"op": "node_upserted", "id": id.to_string(), "key": key,
+            "labels": labels, "properties": properties, "created": created}),
+        GraphChange::NodePatched {
+            id,
+            key,
+            add_labels,
+            remove_labels,
+            set,
+            unset,
+        } => json!({"op": "node_patched", "id": id.to_string(), "key": key,
+            "add_labels": add_labels, "remove_labels": remove_labels, "set": set,
+            "unset": unset}),
+        GraphChange::NodeDeleted { id, key } => {
+            json!({"op": "node_deleted", "id": id.to_string(), "key": key})
+        }
+        GraphChange::EdgeUpserted {
+            id,
+            key,
+            source,
+            source_key,
+            relationship,
+            destination,
+            destination_key,
+            properties,
+            created,
+        } => json!({"op": "edge_upserted", "id": id.to_string(), "key": key,
+            "source": source.to_string(), "source_key": source_key,
+            "relationship": relationship, "destination": destination.to_string(),
+            "destination_key": destination_key, "properties": properties,
+            "created": created}),
+        GraphChange::EdgePatched {
+            id,
+            key,
+            set,
+            unset,
+        } => {
+            json!({"op": "edge_patched", "id": id.to_string(), "key": key, "set": set,
+                "unset": unset})
+        }
+        GraphChange::EdgeDeleted { id, key } => {
+            json!({"op": "edge_deleted", "id": id.to_string(), "key": key})
+        }
+        GraphChange::Attached {
+            node,
+            node_key,
+            collection,
+            record,
+        } => json!({"op": "attached", "node": node.to_string(), "node_key": node_key,
+            "collection": collection, "record": record.to_string()}),
+        GraphChange::Detached {
+            node,
+            node_key,
+            collection,
+            record,
+        } => json!({"op": "detached", "node": node.to_string(), "node_key": node_key,
+            "collection": collection, "record": record.to_string()}),
+        GraphChange::SchemaUpdated { schema } => {
+            json!({"op": "schema_updated", "schema": schema_json(schema)})
+        }
+    }
+}
+
+/// The `change` object of a graph feed event; `None` for vector events.
+pub(super) fn feed_event_json(kind: &crate::changes::ChangeKind) -> Option<Value> {
+    use crate::changes::ChangeKind;
+    Some(match kind {
+        ChangeKind::GraphCreated { graph } => json!({"type": "graph_created", "graph": graph}),
+        ChangeKind::GraphDropped { graph } => json!({"type": "graph_dropped", "graph": graph}),
+        ChangeKind::GraphBatch {
+            graph,
+            revision,
+            operations,
+        } => json!({"type": "graph_batch", "graph": graph, "revision": revision.to_string(),
+            "operations": operations.iter().map(feed_operation_json).collect::<Vec<_>>()}),
+        _ => return None,
+    })
+}
 /// The library's batch frame limit, checked before any lock is taken.
 const MAX_BATCH_OPS: usize = 4096;
 /// Hold-time samples kept per guard (the most recent ones).

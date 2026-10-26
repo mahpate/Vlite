@@ -384,16 +384,6 @@ impl Service {
         .map_err(internal)?
     }
 
-    /// LEG-019/LEG-020: change-feed consumers (REST `/v1/changes`, gRPC
-    /// `Changes`/`WatchChanges`, webhooks) reject graph-enabled files
-    /// explicitly (REQ-053) before parsing input or opening a stream.
-    fn reject_graph_feed(&self) -> Result<(), ApiError> {
-        if self.graph_enabled {
-            return Err(Error::GraphChangeFeedUnsupported.into());
-        }
-        Ok(())
-    }
-
     /// Call after HTTP graceful shutdown. Stops and joins the maintenance and
     /// backup scheduler, waits for any disconnected writer, then closes.
     pub async fn close(&self) -> crate::Result<()> {
