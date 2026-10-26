@@ -85,8 +85,8 @@ shortest-path search reports `exhausted`, never an uncertified "no path".
 |---------|----------------|
 | Rust | `create_with_graph`, `create_graph`/`drop_graph`/`list_graphs`, `graph_mut(name)`, `graph(name)`, `explain`, `query_text`, `retrieve` |
 | CLI | `vlite-graph-cli`; see [graph operations](TOOLS.md#graph-operations-experimental-source-only) |
-| MCP | `vlite_graph_*` tools; see [MCP](MCP.md#property-graph-tools-experimental-source-only) |
-| REST | `/v1/graphs` routes: list, create, drop, gets, find, neighbors, traverse, shortest path, explain, batch |
+| MCP | `vlite_graph_*` tools, on a file or through a server with `--server URL` (`mcp-proxy` feature); see [MCP](MCP.md#property-graph-tools-experimental-source-only) |
+| REST | `/v1/graphs` routes: list, create, drop, gets, find, neighbors, traverse, shortest path, explain, schema, retrieve, query, batch |
 | C ABI | `{"op":"capabilities"}` and `{"op":"graph","request":{...}}` |
 | Python | `supports_graph()`, `create_with_graph()`, `graph_*` methods |
 | Node | `supportsGraph()`, `createWithGraph()`, `graph*` methods ([guide](../bindings/node/README.md)) |
@@ -98,7 +98,10 @@ access: `super_admin` and `editor` can read and write, `viewer` can read. This
 covers every graph regardless of tenant; tenant- and user-specific graph
 scoping is planned. Collection scope never implies graph scope, and tenant
 `vlk_` credentials cannot hold graph scope. Batches that write vectors also
-need write scope on each collection.
+need write scope on each collection. Retrieve needs `read` on the pivot
+collection; evidence from collections the caller cannot read is left out and
+counted in `redacted`. Collections are named as stored, so tenant users reach
+only their tenant's `t<tenant_id>__<name>` collections.
 
 **Embedded.** Python and Node enable graph methods only when the loaded native
 library reports `{"graph": true}`; otherwise every graph method fails with
@@ -111,7 +114,6 @@ Node yet.
   refuse graph files (`graph_change_feed_unsupported`).
 - gRPC has no graph service.
 - `vlite-graph-cli` does not open encrypted files (the library does).
-- REST and MCP do not expose schema, retrieval or query text yet.
 
 ## Release note text for GATE-008 (draft, not approved)
 

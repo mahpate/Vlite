@@ -163,7 +163,9 @@ node-link view. **Explain plan** shows the normalized query and effective
 limits. Blank limits use server defaults. Values above the ceiling show the
 REST error code, for example `graph_limit_exceeds_ceiling`. Admin sessions can
 load `GET /v1/admin/graph/stats`. Writes stay with REST, the CLI or MCP.
-Signed-in editor and viewer accounts have no graph grant yet.
+Signed-in viewers and editors read every graph (see SECURITY.md). The module
+is served as `/dashboard/graph.js` but is not yet linked from the Dashboard
+navigation; that wiring follows the Dashboard redesign.
 
 ## Status
 

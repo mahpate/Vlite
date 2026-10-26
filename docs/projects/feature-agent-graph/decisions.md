@@ -861,3 +861,37 @@ separately (outside this PRD).
 - Entry points: `GraphRef::query_text`/`explain_text`, `parse_graph_query` and
   `vlite-graph-cli query`. The grammar is in `docs/GRAPH-QUERY.md`. The MCP
   tool (ITEM-052) is pending.
+
+## Graph wave 2 (v1.2.19, 2026-10-25; source-only, not distributed)
+
+Wave 2 adds the MCP schema, retrieve and query tools (ITEM-038, ITEM-052), the
+matching REST routes, the MCP proxy (ITEM-043), the Node graph API and
+`docs/GRAPH.md` (EPIC-013), and the Dashboard explorer files (FOLLOWUP-002).
+GATE-008 is not approved; the artifact pins exclude `graph` and `mcp-proxy`.
+
+- **Proxy dependency.** `mcp-proxy` reuses the existing optional `reqwest`
+  dependency (blocking client, rustls); no new crate is added.
+- **Proxy scope.** `vlite-mcp --server URL` proxies the graph tools only. It
+  never opens a file, lists graph tools only when `GET /v1/graphs` answers
+  200, reads its token from `--token-env` and never logs it, and refuses
+  write tools in read-only sessions before contacting the server. Vector
+  tools stay local-file only.
+- **Dashboard.** `src/dashboard/graph.js` is a read-only explorer over the
+  typed REST routes, hidden without graph support or on vector-only files,
+  with an admin graph-stats panel. Writes stay with REST, the CLI and MCP.
+  The navigation hooks wait for the Dashboard redesign; CI already runs
+  `tests/dashboard_graph.test.cjs`.
+- **Retrieve redaction.** Retrieve returns vector record data, so a scoped
+  caller needs `read` on the pivot collection (403 otherwise), and evidence
+  from any collection it cannot read is dropped and counted in
+  `redacted: {count, collections}`. Pivot and evidence names are checked by
+  their exact stored name, like batch collections (`cover`). The first
+  version qualified them with the caller's tenant, so a tenanted account's
+  check missed the collection actually read and could return another
+  tenant's or untenanted evidence. That is fixed and covered by
+  `tenanted_accounts_retrieve_only_their_own_evidence`. Schema and query
+  text return graph structure only. The proxy goes through these routes.
+- **Status.** Signed-in account graph access stands by owner decision; the
+  GATE-007 re-review of wave 2 and the account grants is pending. DO-005 is
+  deferred by the owner until after the UI work. Remaining: EPIC-014
+  (skipped by owner), GATE-008 and tenant- or user-scoped graphs (future).

@@ -37,7 +37,7 @@ jobs:
           python-version: "3.12"
       - name: Check dashboard helpers
         run: |
-          node --test tests/console_tools.test.cjs tests/navigation.test.cjs tests/dashboard_interactions.test.cjs tests/admin_tools.test.cjs
+          node --test tests/console_tools.test.cjs tests/navigation.test.cjs tests/dashboard_interactions.test.cjs tests/admin_tools.test.cjs tests/dashboard_graph.test.cjs
           python tests/admin_route_coverage.py
       - run: python -m pip install -r tests/requirements-dashboard.txt
       - run: python -m playwright install --with-deps chromium
