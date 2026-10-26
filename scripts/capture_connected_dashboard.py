@@ -329,7 +329,7 @@ def capture(output):
             "captures": captures,
         }
         (output / "connected-captures.json").write_text(json.dumps(manifest, indent=2) + "\n")
-        print(f"Captured {len(captures)} distinct connected views: the sign-in screen and all six workspaces.")
+        print(f"Captured {len(captures)} distinct connected views: the sign-in screen and every workspace except Graph.")
     finally:
         if server:
             server.shutdown()

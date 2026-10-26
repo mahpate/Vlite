@@ -67,13 +67,14 @@ Treat tokens as secrets. Keep them out of screenshots and logs.
 
 ## Find your way around
 
-The sidebar groups six workspaces. Tabs inside each workspace hold its views:
+The sidebar groups seven workspaces. Tabs inside each workspace hold its views:
 
 | Group | Workspace | Inside |
 |---|---|---|
 | | **Overview** | Database size, health and shortcuts |
 | Data | **Collections** | Records, Add & edit, Import & export, Index, Manage |
 | Data | **Search** | Vector search, Advanced retrieval, Analyze & compare |
+| Data | **Graph** | Read-only graph queries and a node-link view, when graphs are enabled |
 | Server | **Observability** | Live monitor, Diagnostics, Change feed |
 | Server | **Administration** | Health, Users & access, Backup & recovery, Server settings |
 | Tools | **Developer Console** | Requests and responses this dashboard sends |
