@@ -773,7 +773,8 @@ separately (outside this PRD).
   read routes. `vlk_` credentials need `graph_read` or `graph_write` plus a
   `graphs` binding of `["*"]` or 1–64 graph names. Collection scope never
   implies graph access, and graph scope never implies collection access.
-  Tenant credentials cannot hold graph operations.
+  Tenant credentials cannot hold graph operations. Signed-in accounts are
+  covered in the 2026-10-25 section below.
 - **Order.** Authentication and authorization come first; vector-only files
   then answer 409 `graphs_not_enabled`.
 - **Collections.** Batches with vector or attachment operations also need
@@ -794,6 +795,41 @@ separately (outside this PRD).
   attachment case above, which is fixed and covered by
   `deleting_an_attached_node_needs_collection_write_scope`. Proxy credential
   handling is reviewed with ITEM-043 in wave 2.
+
+### Signed-in user graph access (owner decision 2026-10-25)
+
+- **Decision.** The owner chose, after being told graphs are not per tenant,
+  to give signed-in Dashboard accounts graph access: super admins keep full
+  access (they are the admin role); editors get `graph_read` and
+  `graph_write`, viewers `graph_read`, all bound to `["*"]` and regardless of
+  the account's tenant.
+- **Mechanism.** `AccountRole::ops` adds the graph operations in graph builds
+  only. `Grant::for_user` binds `["*"]` when a graph operation is present and
+  sets a private `account` flag that no API credential sets;
+  `Grant::graph_allowed` exempts only that flag from the tenant denial.
+  `vlk_` credentials are unchanged: tenant keys still cannot hold graph scope
+  and are denied every graph.
+- **Trade-off.** Graphs are shared, so a tenanted account sees and can change
+  graph structure (nodes, edges, properties, graph create and drop of empty
+  graphs) created by other tenants' accounts. Graph names, node keys and
+  property values are therefore visible across tenants.
+- **Kept vector isolation.** Batch operations that attach, detach, put or
+  delete vectors, and `delete_node` on a node with attachments, still need
+  `write` and a collection the grant covers. The check now uses the stored
+  collection name exactly (`cover` in `src/server/graph.rs`) instead of the
+  tenant-qualifying `open`: qualifying a graph op's name for the check while
+  the batch wrote the unqualified name would have authorized one collection
+  and touched another. Tenanted accounts name their collections
+  `t<tenant_id>__<name>`. Wave-1 graph reads return no record data; any
+  retrieve or evidence route (wave 2) must filter by collection coverage.
+- **Tests.** `signed_in_accounts_get_graph_access_by_role`,
+  `tenanted_editors_write_any_graph_but_only_their_own_vectors` and
+  `tenant_credentials_still_get_no_graph_scope` in `tests/rest_graph.rs`, and
+  `only_signed_in_accounts_keep_graph_scope_when_tenanted` in
+  `src/server/credentials.rs`.
+- **Follow-up.** This changes the GATE-007-reviewed surface and needs a
+  follow-up security review. Per-tenant or per-user graph scoping (graph
+  ownership or bindings on accounts) is a planned follow-up.
 
 ### EPIC-012 C ABI and Python
 

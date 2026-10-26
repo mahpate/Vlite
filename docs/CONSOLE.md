@@ -43,6 +43,10 @@ What you can do depends on your role:
 | Viewer | Read and search. |
 
 Editors and viewers see either one tenant's collections or all collections.
+In source builds with the experimental `graph` feature, viewers also read
+every graph and editors read and write every graph, whatever their tenant.
+Graphs are shared, not per tenant; vectors attached through a graph still
+need a collection your tenant owns.
 
 ### Use an access token
 

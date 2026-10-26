@@ -2127,7 +2127,7 @@
       "post": {
         "operationId": "GraphBatch",
         "summary": "Apply one atomic graph batch",
-        "description": "Requires the admin token or graph_write on this graph. attach, detach, put_vector and delete_vector additionally require the write operation and a collection binding covering each named collection; live-vector quotas apply. Runs under the database write guard as one durable frame; nothing is written on error.",
+        "description": "Requires the admin token or graph_write on this graph. attach, detach, put_vector and delete_vector additionally require the write operation and a collection binding covering each named collection, and delete_node does the same for every collection attached to the node. Collection names are matched exactly as stored, never tenant-qualified: a tenanted signed-in account names its own collections t<tenant_id>__<name>. Live-vector quotas apply. Runs under the database write guard as one durable frame; nothing is written on error.",
         "requestBody": {
           "required": true,
           "content": {

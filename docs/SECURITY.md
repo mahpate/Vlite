@@ -21,6 +21,17 @@ gRPC, the SDKs and MCP are unchanged.
 Editors and viewers are bound to one tenant, and see only its collections, or
 to all collections.
 
+In source builds with the experimental `graph` feature, signed-in viewers
+also get `graph_read` and editors `graph_read` and `graph_write` on every
+graph, including tenanted accounts. Graphs are not tenant-scoped, so a
+tenant's users can see and change graph structure (nodes, edges, properties)
+that other tenants' users created. Vector isolation is kept: graph batches
+that attach, detach, write or delete vectors, and `delete_node` on a node
+with attachments, need `write` on a collection the account's tenant owns,
+named by its stored name `t<tenant_id>__<name>`. API keys are unchanged:
+tenant keys cannot hold graph operations. Per-tenant and per-user graph
+scoping is a planned follow-up.
+
 - **Requirements:** password sign-in needs protected mode, meaning an admin
   token and the admin directory. Editor and viewer accounts also need a
   format v4 or newer database. Sign-in is accepted only over HTTPS or when the

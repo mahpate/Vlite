@@ -76,22 +76,43 @@ impl AccountRole {
         }
     }
 
+    /// Graph operations apply to every graph, whatever the tenant (owner
+    /// decision 2026-10-25; `Grant::for_user`).
     fn ops(self) -> &'static [Op] {
         match self {
             Self::SuperAdmin => &[],
-            Self::Editor => &[
-                Op::Read,
-                Op::Search,
-                Op::SearchBuild,
-                Op::Write,
-                Op::Import,
-                Op::Index,
-                Op::Collections,
-            ],
-            Self::Viewer => &[Op::Read, Op::Search],
+            Self::Editor => EDITOR_OPS,
+            Self::Viewer => VIEWER_OPS,
         }
     }
 }
+
+#[cfg(not(feature = "graph"))]
+const EDITOR_OPS: &[Op] = &[
+    Op::Read,
+    Op::Search,
+    Op::SearchBuild,
+    Op::Write,
+    Op::Import,
+    Op::Index,
+    Op::Collections,
+];
+#[cfg(feature = "graph")]
+const EDITOR_OPS: &[Op] = &[
+    Op::Read,
+    Op::Search,
+    Op::SearchBuild,
+    Op::Write,
+    Op::Import,
+    Op::Index,
+    Op::Collections,
+    Op::GraphRead,
+    Op::GraphWrite,
+];
+#[cfg(not(feature = "graph"))]
+const VIEWER_OPS: &[Op] = &[Op::Read, Op::Search];
+#[cfg(feature = "graph")]
+const VIEWER_OPS: &[Op] = &[Op::Read, Op::Search, Op::GraphRead];
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

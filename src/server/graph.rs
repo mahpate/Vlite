@@ -28,7 +28,15 @@
 //!    records (`attach`, `detach`, `put_vector`, `delete_vector`) also need
 //!    the `write` operation and a collection binding covering every such
 //!    collection, checked under the write guard before the batch runs, and
-//!    live vector quotas apply as on the vector write routes.
+//!    live vector quotas apply as on the vector write routes. Collection
+//!    names in a batch (and stored attachments) are checked exactly as
+//!    stored, never tenant-qualified, because graphs are shared.
+//!
+//! Signed-in Dashboard accounts (owner decision 2026-10-25): viewers hold
+//! `graph_read` and editors `graph_read` + `graph_write`, bound to every
+//! graph (`["*"]`) whatever the account's tenant; `Grant::graph_allowed`
+//! exempts only these session grants, so tenant API credentials still reach
+//! no graph. Vector records stay tenant-isolated by the collection check.
 //!
 //! Wave-1 read outputs carry graph structure only (nodes, edges, paths,
 //! properties) and never vector record data, so REQ-043 per-hop evidence
@@ -508,7 +516,7 @@ fn authorize_records(
                 return Err(forbidden_scope());
             }
             for collection in collections {
-                open(db, role, &Target::Named(collection))?;
+                cover(db, grant, &collection)?;
             }
         }
     }
@@ -519,6 +527,23 @@ fn authorize_records(
         }
     }
     Ok(())
+}
+
+/// The collection binding check of `open`, on the name exactly as the batch
+/// (or a stored attachment) spells it. Graphs are shared across tenants, so
+/// names are never tenant-qualified here: a tenanted account must name its
+/// collection by its stored name (`t<tenant_id>__<name>`) and is refused any
+/// collection its tenant does not own.
+fn cover(db: &Database, grant: &credentials::Grant, name: &str) -> Result<(), ApiError> {
+    if !grant.names(name) {
+        return Err(forbidden_scope());
+    }
+    let collection = db.resolve(name)?;
+    if grant.covers(db.lineage(), collection, name) {
+        Ok(())
+    } else {
+        Err(forbidden_scope())
+    }
 }
 
 // Request JSON (the `vlite-graph-cli` contract without the `graph` field).

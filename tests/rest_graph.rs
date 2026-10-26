@@ -1214,3 +1214,361 @@ async fn rest_reads_match_the_graph_cli_on_the_same_file() {
         explained
     );
 }
+
+// Signed-in Dashboard accounts (owner decision 2026-10-25): viewers read
+// every graph, editors and super admins read and write every graph, whatever
+// the account's tenant. Batches touching vector records still need a
+// collection the account's tenant owns, named by its stored name.
+
+const PASSWORD: &str = "correct-horse-battery-staple";
+
+async fn browser(
+    app: &Router,
+    session: &str,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::COOKIE, format!("vlite_session={session}"))
+        .header("sec-fetch-site", "same-origin")
+        .header("x-vlite-request", "1")
+        .header(header::CONTENT_TYPE, "application/json");
+    if body.is_none() {
+        request = request.header(header::CONTENT_LENGTH, "0");
+    }
+    let body = body.map_or_else(Body::empty, |value| Body::from(value.to_string()));
+    let response = app
+        .clone()
+        .oneshot(request.body(body).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    assert_ne!(status, StatusCode::INTERNAL_SERVER_ERROR, "{uri}: {value}");
+    (status, value)
+}
+
+async fn account_fixture() -> (tempfile::TempDir, Router) {
+    let directory = tempdir().unwrap();
+    std::fs::create_dir(directory.path().join("admin")).unwrap();
+    let service = Service::new(database(&directory.path().join("graph.vlite"), true));
+    let options = ServerOptions {
+        loopback_only: true,
+        ..options(directory.path())
+    };
+    let app = configured_admin_router(service, options).unwrap();
+    let (status, body) = call(
+        &app,
+        Some(ADMIN),
+        "POST",
+        "/v1/graphs",
+        Some(json!({"graph": "g"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let ops = json!({"ops": [
+        {"op": "create_node", "key": "n1"},
+        {"op": "create_node", "key": "n4"},
+        {"op": "attach", "node": "n4", "collection": "default", "record": "4"},
+    ]});
+    let (status, body) = call(&app, Some(ADMIN), "POST", "/v1/graphs/g/batch", Some(ops)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    (directory, app)
+}
+
+async fn tenant(app: &Router, name: &str) -> String {
+    let (status, body) = call(
+        app,
+        Some(ADMIN),
+        "POST",
+        "/v1/admin/tenants",
+        Some(json!({ "name": name })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    body["tenant"]["id"].as_str().unwrap().to_owned()
+}
+
+/// Creates an account and returns a signed-in session token.
+async fn sign_in(app: &Router, username: &str, role: &str, tenant: Option<&str>) -> String {
+    let (status, body) = call(
+        app,
+        Some(ADMIN),
+        "POST",
+        "/v1/admin/users",
+        Some(
+            json!({"username": username, "password": PASSWORD, "role": role,
+            "tenant_id": tenant, "must_change_password": false}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/login")
+                .header("sec-fetch-site", "same-origin")
+                .header("x-vlite-request", "1")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"username": username, "password": PASSWORD}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap();
+    let (pair, _) = cookie.split_once(';').unwrap();
+    pair.split_once('=').unwrap().1.to_owned()
+}
+
+/// A tenanted editor's collection holding record 1; returns its stored name.
+async fn tenant_collection(app: &Router, session: &str, tenant: &str) -> String {
+    let (status, body) = browser(
+        app,
+        session,
+        "POST",
+        "/v1/collections",
+        Some(json!({"name": "docs", "dimensions": 2})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, body) = browser(
+        app,
+        session,
+        "PUT",
+        "/v1/collections/docs/vectors/1",
+        Some(json!({"vector": [1.0, 0.0]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    format!("t{tenant}__docs")
+}
+
+#[tokio::test]
+async fn signed_in_accounts_get_graph_access_by_role() {
+    let (_directory, app) = account_fixture().await;
+    let app = &app;
+    let acme = tenant(app, "acme").await;
+    let viewer = sign_in(app, "vera", "viewer", None).await;
+    let tenant_viewer = sign_in(app, "tess", "viewer", Some(&acme)).await;
+    let editor = sign_in(app, "eddie", "editor", None).await;
+    let root = sign_in(app, "root", "super_admin", None).await;
+
+    let write = json!({"ops": [{"op": "create_node", "key": "w"}]});
+    for session in [&viewer, &tenant_viewer] {
+        let (status, body) = browser(app, session, "GET", "/v1/graphs", None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["graphs"][0]["name"], "g", "{body}");
+        let (status, body) = browser(app, session, "GET", "/v1/graphs/g", None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let get = json!({"node": {"key": "n4"}});
+        let (status, body) =
+            browser(app, session, "POST", "/v1/graphs/g/nodes/get", Some(get)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(!body["node"].is_null(), "{body}");
+        for (method, uri, input) in [
+            ("POST", "/v1/graphs/g/batch", Some(write.clone())),
+            ("POST", "/v1/graphs", Some(json!({"graph": "h"}))),
+            ("DELETE", "/v1/graphs/g", None),
+        ] {
+            let (status, body) = browser(app, session, method, uri, input).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri}: {body}");
+            assert_eq!(code(&body), "forbidden_scope");
+        }
+        // The Dashboard session reports the graph scope.
+        let (_, caps) = browser(app, session, "GET", "/v1/capabilities", None).await;
+        assert_eq!(caps["scope"]["graphs"], json!(["*"]), "{caps}");
+        let operations = caps["scope"]["operations"].as_array().unwrap();
+        assert!(operations.contains(&json!("graph_read")), "{caps}");
+        assert!(!operations.contains(&json!("graph_write")), "{caps}");
+    }
+
+    let (_, caps) = browser(app, &editor, "GET", "/v1/capabilities", None).await;
+    let operations = caps["scope"]["operations"].as_array().unwrap();
+    assert!(operations.contains(&json!("graph_read")), "{caps}");
+    assert!(operations.contains(&json!("graph_write")), "{caps}");
+    // An untenanted editor covers every untenanted collection, so it may
+    // attach to "default"; super admins can do everything.
+    for (session, graph, record) in [(&editor, "h", "1"), (&root, "k", "2")] {
+        let (status, body) = browser(
+            app,
+            session,
+            "POST",
+            "/v1/graphs",
+            Some(json!({ "graph": graph })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let ops = json!({"ops": [
+            {"op": "create_node", "key": "a"},
+            {"op": "attach", "node": "a", "collection": "default", "record": record},
+            {"op": "create_edge", "source": "a", "relationship": "R", "destination": "a"},
+        ]});
+        let uri = format!("/v1/graphs/{graph}/batch");
+        let (status, body) = browser(app, session, "POST", &uri, Some(ops)).await;
+        assert_eq!(status, StatusCode::OK, "{graph}: {body}");
+        let ops = json!({"ops": [{"op": "upsert_node", "key": "n1"}]});
+        let (status, body) = browser(app, session, "POST", "/v1/graphs/g/batch", Some(ops)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // A graph must be empty before it is dropped.
+        let empty = json!({"graph": format!("{graph}-empty")});
+        let (status, body) = browser(app, session, "POST", "/v1/graphs", Some(empty)).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let uri = format!("/v1/graphs/{graph}-empty");
+        let (status, body) = browser(app, session, "DELETE", &uri, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+}
+
+#[tokio::test]
+async fn tenanted_editors_write_any_graph_but_only_their_own_vectors() {
+    let (_directory, app) = account_fixture().await;
+    let app = &app;
+    let acme = tenant(app, "acme").await;
+    let beta = tenant(app, "beta").await;
+    let alice = sign_in(app, "alice", "editor", Some(&acme)).await;
+    let bob = sign_in(app, "bob", "editor", Some(&beta)).await;
+    let mine = tenant_collection(app, &alice, &acme).await;
+    let theirs = tenant_collection(app, &bob, &beta).await;
+    let batch = |session: &str, ops: Value| {
+        let session = session.to_owned();
+        async move {
+            browser(
+                app,
+                &session,
+                "POST",
+                "/v1/graphs/g/batch",
+                Some(json!({ "ops": ops })),
+            )
+            .await
+        }
+    };
+
+    // Graph structure in any graph, including one created by another account.
+    let (status, body) = batch(
+        &alice,
+        json!([
+            {"op": "create_node", "key": "a1"},
+            {"op": "create_edge", "source": "a1", "relationship": "R", "destination": "n1"},
+        ]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = browser(
+        app,
+        &alice,
+        "POST",
+        "/v1/graphs",
+        Some(json!({"graph": "acme-g"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // Vector records stay tenant-isolated: another tenant's collection, an
+    // untenanted collection and an unqualified name are all refused, for
+    // attach, detach and vector mutations alike.
+    for collection in [theirs.as_str(), "default", "docs"] {
+        for op in [
+            json!({"op": "attach", "node": "a1", "collection": collection, "record": "1"}),
+            json!({"op": "detach", "node": "n4", "collection": collection}),
+            json!({"op": "put_vector", "collection": collection, "id": "9", "vector": [9.0, 1.0]}),
+            json!({"op": "delete_vector", "collection": collection, "id": "1"}),
+        ] {
+            let (status, body) = batch(&alice, json!([op.clone()])).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{op}: {body}");
+            assert_eq!(code(&body), "forbidden_scope", "{op}");
+        }
+    }
+    // Its own collection, by stored name, works.
+    let (status, body) = batch(
+        &alice,
+        json!([{"op": "attach", "node": "a1", "collection": mine, "record": "1"}]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = batch(
+        &bob,
+        json!([
+            {"op": "create_node", "key": "b1"},
+            {"op": "attach", "node": "b1", "collection": theirs, "record": "1"},
+        ]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // delete_node drops attachments, so foreign attachments refuse it.
+    for (session, key) in [(&alice, "n4"), (&alice, "b1"), (&bob, "a1"), (&bob, "n4")] {
+        let (status, body) = batch(session, json!([{"op": "delete_node", "key": key}])).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{key}: {body}");
+        assert_eq!(code(&body), "forbidden_scope");
+        let (status, body) = call(
+            app,
+            Some(ADMIN),
+            "POST",
+            "/v1/graphs/g/nodes/get",
+            Some(json!({"node": {"key": key}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(!body["node"].is_null(), "refused delete wrote: {body}");
+    }
+    // Its own attachments do not block delete_node.
+    let (status, body) = batch(
+        &alice,
+        json!([
+            {"op": "detach", "node": "a1", "collection": mine},
+            {"op": "create_node", "key": "a2"},
+            {"op": "attach", "node": "a2", "collection": mine, "record": "1"},
+        ]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = batch(&alice, json!([{"op": "delete_node", "key": "a2"}])).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// API credentials are unchanged: a tenant credential cannot hold graph
+/// scope, and a tenant credential never reaches graph routes.
+#[tokio::test]
+async fn tenant_credentials_still_get_no_graph_scope() {
+    let (_directory, app) = account_fixture().await;
+    let app = &app;
+    let acme = tenant(app, "acme").await;
+    let mut request = json!({"name": "agent", "collections": ["*"],
+        "operations": ["graph_read", "graph_write"], "graphs": ["*"], "tenant_id": acme,
+        "expires_unix_ms": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 3_600_000});
+    let (status, body) = call(
+        app,
+        Some(ADMIN),
+        "POST",
+        "/v1/admin/credentials",
+        Some(request.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    request["operations"] = json!(["read", "write"]);
+    request.as_object_mut().unwrap().remove("graphs");
+    let (status, body) = call(
+        app,
+        Some(ADMIN),
+        "POST",
+        "/v1/admin/credentials",
+        Some(request),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let token = body["token"].as_str().unwrap();
+    for (method, uri) in [("GET", "/v1/graphs/g"), ("POST", "/v1/graphs/g/batch")] {
+        let (status, body) = call(app, Some(token), method, uri, Some(json!({"ops": []}))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{uri}: {body}");
+    }
+}

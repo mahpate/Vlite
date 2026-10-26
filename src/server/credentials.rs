@@ -117,11 +117,18 @@ pub(super) struct Grant {
     /// Empty when the credential has no graph operation.
     #[cfg(feature = "graph")]
     pub graphs: Vec<String>,
+    /// Set only by `for_user`: a signed-in Dashboard account keeps its graph
+    /// scope even when tenanted (owner decision 2026-10-25). API credentials
+    /// never set it, so tenant credentials still reach no graph.
+    #[cfg(feature = "graph")]
+    account: bool,
 }
 
 impl Grant {
     /// The grant behind a signed-in editor or viewer: every collection the
     /// tenant (if any) owns, limited to `ops`, valid until the session ends.
+    /// Graph operations in `ops` cover every graph; vector records reached
+    /// through graph batches still need a collection the tenant owns.
     pub(super) fn for_user(
         id: String,
         name: String,
@@ -130,6 +137,7 @@ impl Grant {
         lineage: u64,
         expires: u64,
     ) -> Self {
+        let ops = ops.iter().fold(0, |mask, op| mask | bit(*op));
         Self {
             id,
             name,
@@ -139,11 +147,17 @@ impl Grant {
             max_vectors_per_collection: None,
             all: true,
             collections: Vec::new(),
-            ops: ops.iter().fold(0, |mask, op| mask | bit(*op)),
+            ops,
             lineage,
             expires,
             #[cfg(feature = "graph")]
-            graphs: Vec::new(),
+            graphs: if ops & (bit(Op::GraphRead) | bit(Op::GraphWrite)) == 0 {
+                Vec::new()
+            } else {
+                vec!["*".to_owned()]
+            },
+            #[cfg(feature = "graph")]
+            account: true,
         }
     }
     pub(super) fn qualify(&self, name: &str) -> String {
@@ -179,10 +193,13 @@ impl Grant {
 
     /// Graph name binding. Names, not IDs: a dropped graph's name may be
     /// recreated and is then covered again (graphs hold no vector data of
-    /// their own; attachments are authorized per collection).
+    /// their own; attachments are authorized per collection). Graphs are not
+    /// tenant-scoped, so a tenant API credential is denied every graph; only
+    /// signed-in accounts (`account`) are exempt.
     #[cfg(feature = "graph")]
     pub(super) fn graph_allowed(&self, name: &str) -> bool {
-        self.tenant_id.is_none() && self.graphs.iter().any(|g| g == "*" || g == name)
+        (self.tenant_id.is_none() || self.account)
+            && self.graphs.iter().any(|g| g == "*" || g == name)
     }
 
     pub(super) fn json(&self) -> Value {
@@ -491,6 +508,8 @@ impl Store {
             expires: entry.expires_unix_ms,
             #[cfg(feature = "graph")]
             graphs: entry.graphs.clone().unwrap_or_default(),
+            #[cfg(feature = "graph")]
+            account: false,
         }))
     }
 
@@ -1022,6 +1041,48 @@ pub(super) mod tests {
                 .len(),
             2
         );
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn only_signed_in_accounts_keep_graph_scope_when_tenanted() {
+        let tenant = Some("ab".repeat(16));
+        let user = |tenant: Option<String>, ops: &[Op]| {
+            Grant::for_user("user:1".into(), "u".into(), tenant, ops, 1, u64::MAX)
+        };
+        let viewer = user(tenant.clone(), &[Op::Read, Op::GraphRead]);
+        assert!(viewer.graph_allowed("any") && viewer.allows(Op::GraphRead));
+        assert!(!viewer.allows(Op::GraphWrite));
+        assert_eq!(viewer.json()["graphs"], json!(["*"]));
+        let no_graph = user(None, &[Op::Read]);
+        assert!(!no_graph.graph_allowed("any"));
+        assert!(no_graph.json().get("graphs").is_none());
+        // A stored credential with a tenant is denied even with a binding.
+        let secret = "s".repeat(43);
+        let hash: String = Sha256::digest(secret.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let stored = |id: &str, tenant: Option<String>| {
+            let mut stored = entry(id);
+            stored.tenant_id = tenant;
+            stored.operations = vec!["graph_read".to_owned()];
+            stored.graphs = Some(vec!["*".to_owned()]);
+            stored.secret_sha256 = hash.clone();
+            stored
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::load(dir.path()).unwrap();
+        *store.entries.lock().unwrap() =
+            vec![stored("aaaaaaaaaaaa", tenant), stored("bbbbbbbbbbbb", None)];
+        let grant = |id: &str| {
+            store
+                .authenticate(&format!("{TOKEN_PREFIX}{id}_{secret}"), 1)
+                .unwrap()
+        };
+        let tenanted = grant("aaaaaaaaaaaa");
+        assert!(tenanted.allows(Op::GraphRead) && !tenanted.graph_allowed("any"));
+        assert!(grant("bbbbbbbbbbbb").graph_allowed("any"));
     }
 
     #[test]

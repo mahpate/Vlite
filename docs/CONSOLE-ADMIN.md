@@ -61,10 +61,10 @@ The server, not the console, enforces access:
 A super admin's sidebar adds **Users**, **Tenants**, **API keys** and
 **Server** to the pages everyone sees.
 
-- **Users:** create dashboard accounts as super admin, editor or viewer, and
-  bind editors and viewers to one tenant or to all collections. Update or
-  delete accounts, or set a temporary password that the user must change at
-  next sign-in.
+- **Users:** create, update or delete super admin, editor and viewer accounts.
+  Editors and viewers see one tenant or all collections; graph builds give
+  them every graph (viewers read-only). Temporary passwords must be changed
+  at next sign-in.
 - **Tenants:** list tenants with their state, collection and vector counts, and
   create one with an optional vector limit. **Show usage and API keys** lists
   its collections, usage and key counts. **Save name and limit** renames it or
