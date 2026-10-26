@@ -829,6 +829,9 @@ impl Model {
                     true,
                 )
             }
+            GraphMutation::PutSchema(_) | GraphMutation::EnsureEdge { .. } => {
+                unreachable!("the model generates no schema mutations")
+            }
         })
     }
 

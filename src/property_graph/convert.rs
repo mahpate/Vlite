@@ -171,9 +171,18 @@ pub(crate) fn graph_error(error: GraphError) -> Error {
             ceiling,
         },
         GraphError::CursorStale => Error::GraphCursorStale,
-        GraphError::InvalidCursor(reason) | GraphError::InvalidQuery(reason) => {
-            Error::InvalidQuery(reason)
-        }
+        GraphError::InvalidCursor(reason)
+        | GraphError::InvalidQuery(reason)
+        | GraphError::InvalidSchema(reason) => Error::InvalidQuery(reason),
+        GraphError::SchemaViolation {
+            rule,
+            element,
+            property,
+        } => Error::GraphSchemaViolation {
+            rule,
+            element,
+            property,
+        },
         // A key/ID mismatch only arises from malformed bodies, never from
         // planned mutations.
         GraphError::NodeKeyMismatch(_) => Error::InvalidQuery("graph node key mismatch"),

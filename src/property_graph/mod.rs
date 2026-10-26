@@ -24,6 +24,16 @@
 //! staged copy-out, [`inspect_graph`] and [`verify_graph`] add graph counts,
 //! and `maintenance::upgrade` and change feeds refuse graph files with
 //! `GraphUnsupportedOperation` and `GraphChangeFeedUnsupported`.
+//!
+//! Schemas (EPIC-008): [`GraphMut::put_schema`] declares optional label and
+//! relationship rules ([`GraphSchema`]) that every later write must satisfy
+//! (`GraphSchemaViolation`); graphs without a schema behave as before.
+//! Declared exact and range property indexes serve `find_nodes`
+//! ([`IndexChoice::PropertyExactIndex`], [`IndexChoice::PropertyRangeIndex`])
+//! with the same results as a scan, [`GraphMut::ensure_edge`] writes
+//! `UniqueTriple` relationships idempotently, and
+//! [`GraphRef::observed_schema`] summarizes declared and observed shapes
+//! within a scan budget.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -46,6 +56,11 @@ pub(crate) mod frame;
 mod maintain;
 mod read;
 
+pub use engine::schema::{
+    GraphSchema, LabelDefinition, Multiplicity, ObservedEndpoint, ObservedLabel, ObservedProperty,
+    ObservedRelationship, ObservedSchema, PropertyDefinition, PropertyIndexKind, PropertyType,
+    RelationshipDefinition, SchemaOrigin,
+};
 pub use maintain::{
     GraphCounts, GraphInspection, GraphVerification, StripGraphReport, enable_graph, inspect_graph,
     strip_graph, verify_graph,
@@ -62,7 +77,7 @@ mod tests;
 
 use convert::{graph_error, precondition, properties_from_metadata};
 use engine::codec::{BODY_HEADER_BYTES, ENTRY_HEADER_BYTES};
-use engine::limits::{MAX_BATCH_BYTES, MAX_BATCH_ENTRIES};
+use engine::limits::{DEFAULT_OBSERVED_SCHEMA_BUDGET, MAX_BATCH_BYTES, MAX_BATCH_ENTRIES};
 use engine::{
     EdgeId, EdgeSelector, Graph, GraphBody, GraphEntry, GraphId, GraphMutation, GraphState,
     MutationOutcome,
@@ -105,6 +120,21 @@ impl GraphRef<'_> {
 
     pub fn info(&self) -> GraphInfo {
         GraphInfo::of(self.graph)
+    }
+
+    /// The declared schema (REQ-030); empty when none was declared.
+    pub fn schema(&self) -> GraphSchema {
+        self.graph.schema().clone()
+    }
+
+    /// Declared and observed labels, relationship types, endpoints and
+    /// properties (REQ-032). At most `budget` nodes and edges are scanned
+    /// (PD-011: default 100,000, ceiling 1,000,000); `complete` is false
+    /// when the budget stopped the scan.
+    pub fn observed_schema(&self, budget: Option<u64>) -> Result<ObservedSchema> {
+        self.graph
+            .observed_schema(budget.unwrap_or(DEFAULT_OBSERVED_SCHEMA_BUDGET))
+            .map_err(graph_error)
     }
 }
 
@@ -205,6 +235,22 @@ pub enum GraphOp {
         collection: String,
         mutation: Mutation,
     },
+    /// Replaces the graph's declared schema (REQ-030); an empty schema
+    /// removes it. Existing data must conform (`GraphSchemaViolation`).
+    PutSchema {
+        schema: GraphSchema,
+    },
+    /// Creates the `relationship` edge from `source` to `destination`
+    /// unless one exists (REQ-034). The type must be declared
+    /// [`Multiplicity::UniqueTriple`] (`InvalidQuery` otherwise). An
+    /// existing edge with bit-identical properties is returned with
+    /// `created = false`; different properties are `GraphKeyConflict`.
+    EnsureEdge {
+        source: String,
+        relationship: String,
+        destination: String,
+        properties: Metadata,
+    },
 }
 
 /// A node or edge written by a batch.
@@ -227,11 +273,22 @@ pub struct GraphWrite {
 pub enum GraphOpOutcome {
     Node(GraphWrite),
     Edge(GraphWrite),
-    NodeDeleted { id: u64 },
-    EdgeDeleted { id: u64 },
-    Attached { node: u64 },
-    Detached { node: u64, record: u64 },
+    NodeDeleted {
+        id: u64,
+    },
+    EdgeDeleted {
+        id: u64,
+    },
+    Attached {
+        node: u64,
+    },
+    Detached {
+        node: u64,
+        record: u64,
+    },
     Vector,
+    /// The declared schema was replaced.
+    Schema,
 }
 
 /// The result of an atomic graph batch.
@@ -395,6 +452,30 @@ impl GraphMut<'_> {
             GraphOpOutcome::Detached { record, .. } => Ok(record),
             _ => unreachable!("detach reports the detached record"),
         }
+    }
+
+    /// Replaces the declared schema (see [`GraphOp::PutSchema`]); returns
+    /// the commit revision.
+    pub fn put_schema(&mut self, schema: &GraphSchema) -> Result<u64> {
+        self.revision(GraphOp::PutSchema {
+            schema: schema.clone(),
+        })
+    }
+
+    /// Creates the edge unless it exists (see [`GraphOp::EnsureEdge`]).
+    pub fn ensure_edge(
+        &mut self,
+        source: &str,
+        relationship: &str,
+        destination: &str,
+        properties: &Metadata,
+    ) -> Result<GraphWrite> {
+        self.written(GraphOp::EnsureEdge {
+            source: source.into(),
+            relationship: relationship.into(),
+            destination: destination.into(),
+            properties: properties.clone(),
+        })
     }
 }
 
@@ -627,6 +708,18 @@ impl Database {
                 self.validate_batch(collection, std::slice::from_ref(mutation))?;
                 return Ok(Planned::Vector(collection, mutation.clone()));
             }
+            GraphOp::PutSchema { schema } => GraphMutation::PutSchema(schema.clone()),
+            GraphOp::EnsureEdge {
+                source,
+                relationship,
+                destination,
+                properties,
+            } => GraphMutation::EnsureEdge {
+                source: source.clone(),
+                relationship: relationship.clone(),
+                destination: destination.clone(),
+                properties: properties_from_metadata(properties)?,
+            },
         };
         Ok(Planned::Graph(mutation))
     }
@@ -725,6 +818,7 @@ impl Database {
                             node: node.0,
                             record,
                         },
+                        MutationOutcome::Schema => GraphOpOutcome::Schema,
                     }
                 }
             };

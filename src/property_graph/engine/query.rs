@@ -19,9 +19,11 @@ use super::model::{
     validate_edge_key, validate_label, validate_node_key, validate_relationship_type,
 };
 use super::mutate::EdgeSelector;
+use super::schema;
 use super::state::Graph;
 use super::traverse::{self, Shortest, TraversePlan};
 use std::collections::{BTreeSet, HashSet};
+use std::ops::Bound::{Excluded, Unbounded};
 
 /// Names a node by internal ID or by key.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -189,6 +191,12 @@ pub enum IndexChoice {
     EdgeKeyIndex,
     LabelIndexScan,
     FullNodeScan,
+    /// A declared exact (or unique) property index on the requested label,
+    /// probed by an `Eq` condition (REQ-033).
+    PropertyExactIndex,
+    /// A declared range property index on the requested label, probed by a
+    /// `Range` condition (REQ-033).
+    PropertyRangeIndex,
     /// Range scans of the (relationship type, edge ID) adjacency, one per
     /// requested type when `typed`.
     AdjacencyRangeScan {
@@ -406,6 +414,8 @@ enum Plan<'q> {
     FindNodes {
         label: Option<&'q str>,
         conditions: &'q [PropertyCondition],
+        /// The condition probing a declared property index, if any.
+        index: Option<&'q PropertyCondition>,
         page: Page,
     },
     Neighbors {
@@ -640,13 +650,19 @@ fn prepare<'q>(
                 size,
                 cursor.as_deref(),
             )?;
-            let index = match label {
-                Some(_) => IndexChoice::LabelIndexScan,
-                None => IndexChoice::FullNodeScan,
+            let probe = label
+                .as_deref()
+                .and_then(|label| schema::usable_index(graph.schema(), label, conditions));
+            let index = match (label, probe) {
+                (_, Some(PropertyCondition::Range { .. })) => IndexChoice::PropertyRangeIndex,
+                (_, Some(_)) => IndexChoice::PropertyExactIndex,
+                (Some(_), None) => IndexChoice::LabelIndexScan,
+                (None, None) => IndexChoice::FullNodeScan,
             };
             let plan = Plan::FindNodes {
                 label: label.as_deref(),
                 conditions,
+                index: probe,
                 page,
             };
             (plan, vec![index])
@@ -929,8 +945,9 @@ fn run(
         Plan::FindNodes {
             label,
             conditions,
+            index,
             page,
-        } => find_nodes(exec, *label, conditions, page)?,
+        } => find_nodes(exec, *label, conditions, *index, page)?,
         Plan::Neighbors {
             node,
             direction,
@@ -985,11 +1002,15 @@ fn run(
 }
 
 /// Scans candidates in node ID order. `max_edges_examined` bounds the nodes
-/// scanned (PD-006); a full page stops while candidates remain.
+/// scanned (PD-006); a full page stops while candidates remain. With a
+/// declared property index the candidates are its postings above the page
+/// position, still re-checked against every condition, so results equal a
+/// label scan.
 fn find_nodes(
     exec: &mut Exec<'_, '_>,
     label: Option<&str>,
     conditions: &[PropertyCondition],
+    index: Option<&PropertyCondition>,
     page: &Page,
 ) -> Result<(QueryOutput, Option<Vec<u8>>), GraphError> {
     let graph = exec.graph;
@@ -997,13 +1018,33 @@ fn find_nodes(
         Position::Node(id) => Some(id),
         _ => None,
     };
-    let candidates: Box<dyn Iterator<Item = &GraphNode> + '_> = match label {
-        Some(label) => Box::new(
+    let lower = last.map_or(Unbounded, Excluded);
+    let candidates: Box<dyn Iterator<Item = &GraphNode> + '_> = match (label, index) {
+        (Some(label), Some(PropertyCondition::Eq { field, value })) => Box::new(
+            graph
+                .property_index(label, field)
+                .and_then(|postings| postings.equal(value))
+                .into_iter()
+                .flat_map(move |ids| ids.range((lower, Unbounded)))
+                .filter_map(|id| graph.node(*id)),
+        ),
+        (Some(label), Some(PropertyCondition::Range { field, min, max })) => {
+            let ids = graph
+                .property_index(label, field)
+                .map(|postings| postings.range(min.as_ref(), max.as_ref()))
+                .unwrap_or_default();
+            Box::new(
+                ids.into_iter()
+                    .filter(move |id| last.is_none_or(|last| *id > last))
+                    .filter_map(|id| graph.node(id)),
+            )
+        }
+        (Some(label), _) => Box::new(
             graph
                 .label_scan(label, last)
                 .filter_map(|id| graph.node(id)),
         ),
-        None => Box::new(graph.node_scan(last)),
+        (None, _) => Box::new(graph.node_scan(last)),
     };
     let mut nodes = Vec::new();
     let mut stopped = false;

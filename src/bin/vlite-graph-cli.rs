@@ -154,6 +154,7 @@ fn error_code(error: &Error) -> &'static str {
         Error::GraphChangeFeedUnsupported => "graph_change_feed_unsupported",
         Error::GraphUnsupportedOperation => "graph_unsupported_operation",
         Error::GraphInvalidOptions(_) => "graph_invalid_options",
+        Error::GraphSchemaViolation { .. } => "graph_schema_violation",
         _ => "database_error",
     }
 }
@@ -947,6 +948,8 @@ fn indexes(choices: &[IndexChoice]) -> Value {
             IndexChoice::EdgeKeyIndex => json!("edge_key_index"),
             IndexChoice::LabelIndexScan => json!("label_index_scan"),
             IndexChoice::FullNodeScan => json!("full_node_scan"),
+            IndexChoice::PropertyExactIndex => json!("property_exact_index"),
+            IndexChoice::PropertyRangeIndex => json!("property_range_index"),
             IndexChoice::AdjacencyRangeScan {
                 direction: scan,
                 typed,

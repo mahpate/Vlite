@@ -278,6 +278,12 @@ pub enum IndexChoice {
     EdgeKeyIndex,
     LabelIndexScan,
     FullNodeScan,
+    /// A declared exact (or unique) property index on the requested label,
+    /// probed by an `Eq` condition.
+    PropertyExactIndex,
+    /// A declared range property index on the requested label, probed by a
+    /// `Range` condition.
+    PropertyRangeIndex,
     /// Range scans of the (relationship type, edge ID) adjacency, one per
     /// requested type when `typed`.
     AdjacencyRangeScan {
@@ -577,6 +583,8 @@ fn index(choice: engine::IndexChoice) -> IndexChoice {
         engine::IndexChoice::EdgeKeyIndex => IndexChoice::EdgeKeyIndex,
         engine::IndexChoice::LabelIndexScan => IndexChoice::LabelIndexScan,
         engine::IndexChoice::FullNodeScan => IndexChoice::FullNodeScan,
+        engine::IndexChoice::PropertyExactIndex => IndexChoice::PropertyExactIndex,
+        engine::IndexChoice::PropertyRangeIndex => IndexChoice::PropertyRangeIndex,
         engine::IndexChoice::AdjacencyRangeScan { direction, typed } => {
             IndexChoice::AdjacencyRangeScan { direction, typed }
         }

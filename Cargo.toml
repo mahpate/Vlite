@@ -148,6 +148,10 @@ name = "graph_traversal"
 required-features = ["graph"]
 
 [[test]]
+name = "graph_schema"
+required-features = ["graph"]
+
+[[test]]
 name = "graph_maintenance"
 required-features = ["graph"]
 

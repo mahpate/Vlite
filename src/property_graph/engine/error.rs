@@ -12,7 +12,7 @@ use std::fmt;
 pub enum GraphError {
     /// The bytes violate the DO-003 body or entry layout.
     Corrupt(&'static str),
-    /// An entry tag outside the closed set (tag 12 is reserved for P2 schema).
+    /// An entry tag outside the closed set.
     UnknownEntryTag(u8),
     /// A batch has no entries, more than `MAX_BATCH_ENTRIES` entries or more
     /// than `MAX_BATCH_BYTES` encoded bytes.
@@ -98,6 +98,18 @@ pub enum GraphError {
     /// A read query is structurally invalid (for example an empty type set
     /// or a zero page size).
     InvalidQuery(&'static str),
+    /// A declared schema breaks a structural rule (names, sizes, index
+    /// kinds); nothing depends on graph data.
+    InvalidSchema(&'static str),
+    /// REQ-030, FM-013: a write breaks a declared rule. `rule` is one of
+    /// `type`, `required`, `unique`, `endpoints` or `unique_triple`;
+    /// `element` is the label or relationship type and `property` the
+    /// property, if the rule concerns one.
+    SchemaViolation {
+        rule: &'static str,
+        element: String,
+        property: Option<String>,
+    },
 }
 
 impl fmt::Display for GraphError {
@@ -176,6 +188,20 @@ impl fmt::Display for GraphError {
             Self::CursorStale => write!(f, "the graph changed after the cursor was issued"),
             Self::InvalidCursor(reason) => write!(f, "invalid graph cursor: {reason}"),
             Self::InvalidQuery(reason) => write!(f, "invalid graph query: {reason}"),
+            Self::InvalidSchema(reason) => write!(f, "invalid graph schema: {reason}"),
+            Self::SchemaViolation {
+                rule,
+                element,
+                property: Some(property),
+            } => write!(
+                f,
+                "graph schema rule {rule} violated by {element}.{property}"
+            ),
+            Self::SchemaViolation {
+                rule,
+                element,
+                property: None,
+            } => write!(f, "graph schema rule {rule} violated by {element}"),
         }
     }
 }

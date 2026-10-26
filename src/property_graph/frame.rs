@@ -129,7 +129,8 @@ pub(crate) fn replay(
 }
 
 /// Writes `state` as the op-12 bodies of a compacted file (REQ-052): per
-/// graph in ID order (IDs kept), `CreateGraph`, every node, every edge and
+/// graph in ID order (IDs kept), `CreateGraph`, the declared schema if any,
+/// every node, every edge and
 /// every attachment, then a `GraphHighWater` entry with the graph's next node
 /// and edge IDs so deleted IDs are never reused. Bodies stay within the batch
 /// entry and byte limits; `emit` receives each body's entry count and bytes.
@@ -174,12 +175,16 @@ pub(crate) fn compacted_bodies(
             next_node_id: graph.next_node_id(),
             next_edge_id: graph.next_edge_id(),
         };
+        let schema = (!graph.schema().is_empty()).then(|| GraphEntry::PutSchema {
+            schema: graph.schema().clone(),
+        });
         let mut body = GraphBody {
             graph_id,
             entries: Vec::new(),
         };
         let mut used = BODY_HEADER_BYTES;
         let entries = std::iter::once(create)
+            .chain(schema)
             .chain(nodes)
             .chain(edges)
             .chain(attachments)

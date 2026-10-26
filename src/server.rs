@@ -1477,7 +1477,8 @@ impl From<Error> for ApiError {
             | Error::GraphAttachedRecord
             | Error::GraphAttachedRecordExpiry
             | Error::GraphCursorStale
-            | Error::GraphUnsupportedOperation => {
+            | Error::GraphUnsupportedOperation
+            | Error::GraphSchemaViolation { .. } => {
                 Self::new(StatusCode::CONFLICT, graph_code(&error), error.to_string())
             }
             #[cfg(feature = "graph")]
@@ -1527,6 +1528,7 @@ fn graph_code(error: &Error) -> &'static str {
         Error::GraphChangeFeedUnsupported => "graph_change_feed_unsupported",
         Error::GraphUnsupportedOperation => "graph_unsupported_operation",
         Error::GraphInvalidOptions(_) => "graph_invalid_options",
+        Error::GraphSchemaViolation { .. } => "graph_schema_violation",
         _ => "internal_error",
     }
 }
@@ -3689,6 +3691,15 @@ mod graph_errors {
                 Error::GraphInvalidOptions("confirm_graph_data_loss is required"),
                 INVALID,
                 "graph_invalid_options",
+            ),
+            (
+                Error::GraphSchemaViolation {
+                    rule: "required",
+                    element: "Person".into(),
+                    property: Some("name".into()),
+                },
+                CONFLICT,
+                "graph_schema_violation",
             ),
         ]
     }

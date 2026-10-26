@@ -682,7 +682,7 @@ fn malformed_graph_frames_fail_the_whole_open() {
         at,
         invalid_body,
     );
-    for tag in [0u8, 12, 13, 63, 65, 255] {
+    for tag in [0u8, 13, 63, 65, 255] {
         let mut tagged = valid.clone();
         tagged[4] = tag;
         assert_corrupt(

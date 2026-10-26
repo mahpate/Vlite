@@ -22,6 +22,7 @@ use super::model::{
     validate_labels, validate_node_key, validate_relationship_type,
 };
 use super::properties;
+use super::schema::{self, GraphSchema};
 use std::collections::BTreeSet;
 
 /// DO-001: V5 header flag marking a graph-enabled file.
@@ -35,8 +36,8 @@ pub const BODY_HEADER_BYTES: usize = 4;
 /// Bytes of the entry envelope before the payload.
 pub const ENTRY_HEADER_BYTES: usize = 8;
 
-/// Entry tags (closed set). Tag 12 is reserved for the P2 schema entry and is
-/// rejected until its layout exists.
+/// Entry tags (closed set). Tag 12 carries a declared schema (EPIC-008; layout
+/// in [`super::schema`]).
 pub mod tag {
     pub const CREATE_GRAPH: u8 = 1;
     pub const DROP_GRAPH: u8 = 2;
@@ -49,7 +50,7 @@ pub mod tag {
     pub const DELETE_EDGE: u8 = 9;
     pub const ATTACH: u8 = 10;
     pub const DETACH: u8 = 11;
-    pub const PUT_SCHEMA_RESERVED: u8 = 12;
+    pub const PUT_SCHEMA: u8 = 12;
     pub const VECTOR_MUTATION: u8 = 64;
 }
 
@@ -111,6 +112,10 @@ pub enum GraphEntry {
         node_id: NodeId,
         collection: u16,
     },
+    /// Replaces the graph's declared schema; an empty schema removes it.
+    PutSchema {
+        schema: GraphSchema,
+    },
     /// One `encode_batch_entries` entry for `collection`, carried verbatim.
     /// Only its envelope is checked here; the adapter validates its content.
     VectorMutation {
@@ -134,6 +139,7 @@ impl GraphEntry {
             Self::DeleteEdge { .. } => tag::DELETE_EDGE,
             Self::Attach { .. } => tag::ATTACH,
             Self::Detach { .. } => tag::DETACH,
+            Self::PutSchema { .. } => tag::PUT_SCHEMA,
             Self::VectorMutation { .. } => tag::VECTOR_MUTATION,
         }
     }
@@ -197,6 +203,7 @@ impl GraphEntry {
                 properties::validate(properties).map(drop)
             }
             Self::PatchEdge { set, unset, .. } => validate_patch(set, unset),
+            Self::PutSchema { schema } => schema.validate(),
             Self::VectorMutation { entry, .. } => validate_vector_entry(entry),
         }
     }
@@ -378,6 +385,7 @@ fn encode_payload(entry: &GraphEntry, bytes: &mut Vec<u8>) {
             bytes.extend_from_slice(&collection.to_le_bytes());
             bytes.extend_from_slice(&[0, 0]);
         }
+        GraphEntry::PutSchema { schema } => schema.encode_into(bytes),
         GraphEntry::VectorMutation { collection, entry } => {
             bytes.extend_from_slice(&collection.to_le_bytes());
             bytes.extend_from_slice(&[0, 0]);
@@ -442,6 +450,7 @@ fn payload_len(entry: &GraphEntry) -> Result<usize, GraphError> {
         }
         GraphEntry::Attach { .. } => 20,
         GraphEntry::Detach { .. } => 12,
+        GraphEntry::PutSchema { schema } => schema.encoded_len(),
         GraphEntry::VectorMutation { entry, .. } => entry
             .len()
             .checked_add(4)
@@ -655,6 +664,9 @@ fn decode_payload(tag: u8, payload: &[u8]) -> Result<GraphEntry, GraphError> {
                 collection,
             }
         }
+        tag::PUT_SCHEMA => GraphEntry::PutSchema {
+            schema: schema::decode(r.take(r.bytes.len())?)?,
+        },
         tag::VECTOR_MUTATION => {
             let collection = r.u16()?;
             r.reserved_u16()?;
@@ -1074,15 +1086,20 @@ mod tests {
     }
 
     #[test]
-    fn unknown_and_reserved_tags_are_rejected() {
-        for tag in (0..=255u8).filter(|t| !matches!(t, 1..=11 | 64)) {
+    fn unknown_tags_are_rejected() {
+        for tag in (0..=255u8).filter(|t| !matches!(t, 1..=12 | 64)) {
             assert_eq!(
                 decode_one(&raw(tag, &[])),
                 Err(GraphError::UnknownEntryTag(tag)),
                 "tag {tag}"
             );
         }
-        assert_eq!(tag::PUT_SCHEMA_RESERVED, 12);
+        assert_eq!(tag::PUT_SCHEMA, 12);
+        // An empty tag-12 payload is truncated, not an unknown tag.
+        assert!(matches!(
+            decode_one(&raw(tag::PUT_SCHEMA, &[])),
+            Err(GraphError::Corrupt(_))
+        ));
     }
 
     #[test]

@@ -19,6 +19,7 @@ use super::model::{
     EdgeId, GraphEdge, GraphId, NodeId, Precondition, Properties, PropertyValue, validate_edge_key,
     validate_node_key,
 };
+use super::schema::{GraphSchema, Multiplicity};
 use super::state::{Graph, GraphState, Undo};
 use std::collections::BTreeSet;
 
@@ -89,6 +90,18 @@ pub enum GraphMutation {
         node: String,
         collection: u16,
     },
+    /// Replaces the graph's declared schema; existing data must conform.
+    PutSchema(GraphSchema),
+    /// Creates the `relationship` edge between two nodes unless one exists.
+    /// The type must be declared `UniqueTriple`; an existing edge with
+    /// identical properties is returned (`created = false`) and one with
+    /// different properties fails `EdgeKeyConflict`.
+    EnsureEdge {
+        source: String,
+        relationship: String,
+        destination: String,
+        properties: Properties,
+    },
 }
 
 /// The result of one planned mutation.
@@ -111,6 +124,8 @@ pub enum MutationOutcome {
         node: NodeId,
         record: u64,
     },
+    /// The declared schema was replaced.
+    Schema,
 }
 
 /// Checks a precondition against a current revision.
@@ -389,6 +404,73 @@ impl Planner<'_> {
                     return Ok(MutationOutcome::Edge { id, created: true });
                 }
                 unreachable!("entry is a PutEdge")
+            }
+            GraphMutation::PutSchema(schema) => {
+                self.push(GraphEntry::PutSchema {
+                    schema: schema.clone(),
+                })?;
+                Ok(MutationOutcome::Schema)
+            }
+            GraphMutation::EnsureEdge {
+                source,
+                relationship,
+                destination,
+                properties,
+            } => {
+                let id = EdgeId(self.graph().next_edge_id());
+                let mut entry = GraphEntry::PutEdge {
+                    edge_id: id,
+                    source: NodeId(0),
+                    destination: NodeId(0),
+                    relationship: relationship.clone(),
+                    key: None,
+                    properties: properties.clone(),
+                };
+                entry.validate()?;
+                validate_node_key(source)?;
+                validate_node_key(destination)?;
+                let unique = self
+                    .graph()
+                    .schema()
+                    .relationships
+                    .get(relationship)
+                    .is_some_and(|rule| rule.multiplicity == Multiplicity::UniqueTriple);
+                if !unique {
+                    return Err(GraphError::InvalidSchema(
+                        "ensure_edge requires a declared UniqueTriple relationship type",
+                    ));
+                }
+                let source = self.node_id(source)?;
+                let destination = self.node_id(destination)?;
+                let graph = self.graph();
+                if let Some(existing) = graph
+                    .edges_between(source, relationship, destination)
+                    .next()
+                    .and_then(|id| graph.edge(id))
+                {
+                    return if same_properties(&existing.properties, properties) {
+                        Ok(MutationOutcome::Edge {
+                            id: existing.id,
+                            created: false,
+                        })
+                    } else {
+                        Err(GraphError::EdgeKeyConflict(format!(
+                            "{}-{relationship}->{}",
+                            source.0, destination.0
+                        )))
+                    };
+                }
+                if let GraphEntry::PutEdge {
+                    source: s,
+                    destination: d,
+                    ..
+                } = &mut entry
+                {
+                    *s = source;
+                    *d = destination;
+                }
+                self.push(entry)?;
+                Ok(MutationOutcome::Edge { id, created: true })
             }
             GraphMutation::PatchEdge {
                 edge,

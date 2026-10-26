@@ -471,6 +471,16 @@ pub enum Error {
     /// `confirm_graph_data_loss` or `enable_graph` on an unsuitable source.
     #[cfg(feature = "graph")]
     GraphInvalidOptions(&'static str),
+    /// A graph write breaks the graph's declared schema (REQ-030): `rule` is
+    /// `type`, `required`, `unique`, `endpoints` or `unique_triple`,
+    /// `element` the label or relationship type and `property` the property
+    /// concerned, if any. Nothing was written.
+    #[cfg(feature = "graph")]
+    GraphSchemaViolation {
+        rule: &'static str,
+        element: String,
+        property: Option<String>,
+    },
 }
 
 impl fmt::Display for Error {
@@ -740,6 +750,21 @@ impl fmt::Display for Error {
             ),
             #[cfg(feature = "graph")]
             Self::GraphInvalidOptions(reason) => write!(f, "invalid graph options: {reason}"),
+            #[cfg(feature = "graph")]
+            Self::GraphSchemaViolation {
+                rule,
+                element,
+                property: Some(property),
+            } => write!(
+                f,
+                "graph schema rule {rule} violated by {element}.{property}"
+            ),
+            #[cfg(feature = "graph")]
+            Self::GraphSchemaViolation {
+                rule,
+                element,
+                property: None,
+            } => write!(f, "graph schema rule {rule} violated by {element}"),
         }
     }
 }

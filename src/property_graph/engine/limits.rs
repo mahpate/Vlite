@@ -41,6 +41,23 @@ pub const MAX_CONDITIONS: usize = 64;
 pub const CHECK_INTERVAL: u64 = 64;
 /// At most this many node IDs are listed by one `DegreeLimit` reason.
 pub const MAX_DEGREE_LIMIT_NODE_IDS: usize = 64;
+/// REQ-030: declared labels per schema.
+pub const MAX_SCHEMA_LABELS: usize = 256;
+/// REQ-030: declared relationship types per schema.
+pub const MAX_SCHEMA_RELATIONSHIPS: usize = 256;
+/// REQ-030: declared properties per label or relationship type.
+pub const MAX_SCHEMA_PROPERTIES: usize = MAX_PROPERTY_FIELDS;
+/// REQ-030: allowed (source label, destination label) pairs per type.
+pub const MAX_SCHEMA_ENDPOINTS: usize = 64;
+/// REQ-030: description length in UTF-8 bytes.
+pub const MAX_SCHEMA_DESCRIPTION_BYTES: usize = 1_024;
+/// REQ-033: label properties with postings (unique or indexed) per schema.
+pub const MAX_INDEXED_PROPERTIES: usize = 32;
+/// PD-011: entities (nodes, then edges) the observed schema summary scans
+/// by default.
+pub const DEFAULT_OBSERVED_SCHEMA_BUDGET: u64 = 100_000;
+/// PD-011: ceiling of the observed schema summary budget.
+pub const MAX_OBSERVED_SCHEMA_BUDGET: u64 = 1_000_000;
 
 /// REQ-024: limits of one read (PD-004..PD-009).
 ///

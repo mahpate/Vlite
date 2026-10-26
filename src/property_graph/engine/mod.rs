@@ -19,8 +19,7 @@
 //!   encryption, locking and commits remain in `vlite`.
 //!
 //! Implemented here: the graph data model ([`model`]), the strict bounded
-//! graph-entry codec for the closed entry tags ([`codec`], tag 12 reserved for
-//! P2 schemas is rejected), the property encoding ([`properties`],
+//! graph-entry codec for the closed entry tags ([`codec`]), the property encoding ([`properties`],
 //! byte-identical to VLite metadata), limits and errors, and the in-memory
 //! named-graph state with atomic batch application and invariant checks
 //! ([`GraphState`]), and key-addressed mutation planning ([`Planner`]). Attachment record checks against vector collections live
@@ -32,8 +31,12 @@
 //! ([`GraphLimits`]), deterministic ordering, truncation reporting, opaque
 //! page cursors and property conditions with VLite metadata filter semantics.
 //! The clock, cancellation flag and view sequence are passed per call in an
-//! [`ExecutionContext`]. Not implemented: declared indexes and hybrid
-//! retrieval.
+//! [`ExecutionContext`]. Not implemented: hybrid retrieval.
+//!
+//! Schemas (EPIC-008): optional declared label and relationship rules
+//! enforced on every write, declared exact/range property indexes used by
+//! `find_nodes`, `ensure_edge` for unique triples, and a budgeted observed
+//! schema summary ([`schema`]).
 //!
 //! Memory diagnostics (ITEM-021): [`GraphState::release_components`] drops a
 //! state one owned component at a time so an allocation-counting benchmark
@@ -51,6 +54,7 @@ pub mod model;
 mod mutate;
 pub mod properties;
 mod query;
+pub mod schema;
 mod state;
 #[cfg(test)]
 mod testkit;
@@ -70,5 +74,10 @@ pub use query::{
     EdgeView, Explanation, GraphPath, GraphQuery, IndexChoice, NodeSelector, NodeView, PathOutcome,
     PropertyProjection, QueryOp, QueryOutput, QueryResult, QueryStats, TraversedNode,
     TruncationReason, execute,
+};
+pub use schema::{
+    GraphSchema, LabelDefinition, Multiplicity, ObservedEndpoint, ObservedLabel, ObservedProperty,
+    ObservedRelationship, ObservedSchema, PropertyDefinition, PropertyIndexKind, PropertyType,
+    RelationshipDefinition, SchemaOrigin,
 };
 pub use state::{Adjacency, Graph, GraphState, MemoryComponent};

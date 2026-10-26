@@ -13,6 +13,7 @@ use super::error::GraphError;
 use super::limits::{MAX_GRAPHS, MAX_LABELS};
 use super::model::{Direction, EdgeId, GraphEdge, GraphId, GraphNode, NodeId, Properties};
 use super::properties;
+use super::schema::{self, GraphSchema, PropertyIndex};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, btree_set};
 use std::iter::Peekable;
@@ -36,6 +37,10 @@ pub struct Graph {
     out_edges: BTreeMap<NodeId, BTreeSet<(String, EdgeId)>>,
     in_edges: BTreeMap<NodeId, BTreeSet<(String, EdgeId)>>,
     labels: BTreeMap<String, BTreeSet<NodeId>>,
+    /// Declared schema (EPIC-008); empty when none was declared.
+    schema: GraphSchema,
+    /// Derived declared property indexes, keyed by (label, property).
+    property_indexes: BTreeMap<(String, String), PropertyIndex>,
 }
 
 fn remove_from<K: Ord, V: Ord>(map: &mut BTreeMap<K, BTreeSet<V>>, key: K, value: &V) {
@@ -63,6 +68,8 @@ impl Graph {
             out_edges: BTreeMap::new(),
             in_edges: BTreeMap::new(),
             labels: BTreeMap::new(),
+            schema: GraphSchema::default(),
+            property_indexes: BTreeMap::new(),
         }
     }
 
@@ -176,11 +183,49 @@ impl Graph {
             .map(|(c, r)| (*c, *r))
     }
 
+    /// The declared schema; empty when none was declared.
+    pub fn schema(&self) -> &GraphSchema {
+        &self.schema
+    }
+    /// The declared index on `label`.`field`, if any.
+    pub(super) fn property_index(&self, label: &str, field: &str) -> Option<&PropertyIndex> {
+        self.property_indexes
+            .get(&(label.to_owned(), field.to_owned()))
+    }
+    /// IDs of `relationship` edges from `source` to `destination`, ascending.
+    pub fn edges_between<'a>(
+        &'a self,
+        source: NodeId,
+        relationship: &str,
+        destination: NodeId,
+    ) -> impl Iterator<Item = EdgeId> + 'a {
+        let range =
+            (relationship.to_owned(), EdgeId(0))..=(relationship.to_owned(), EdgeId(u64::MAX));
+        self.out_edges
+            .get(&source)
+            .into_iter()
+            .flat_map(move |set| set.range(range.clone()))
+            .map(|(_, id)| *id)
+            .filter(move |id| {
+                self.edges
+                    .get(id)
+                    .is_some_and(|edge| edge.destination == destination)
+            })
+    }
+
+    fn rebuild_property_indexes(&mut self) {
+        self.property_indexes.clear();
+        for node in self.nodes.values() {
+            schema::index_node(&self.schema, &mut self.property_indexes, node, true);
+        }
+    }
+
     fn incident_edges(&self, node: NodeId) -> usize {
         self.edges_of(node, Direction::Both).len()
     }
 
     fn insert_node(&mut self, node: GraphNode) {
+        schema::index_node(&self.schema, &mut self.property_indexes, &node, true);
         self.node_keys.insert(node.key.clone(), node.id);
         for label in &node.labels {
             self.labels
@@ -197,6 +242,7 @@ impl Graph {
         for label in &node.labels {
             remove_from(&mut self.labels, label.clone(), &id);
         }
+        schema::index_node(&self.schema, &mut self.property_indexes, &node, false);
         Some(node)
     }
 
@@ -233,6 +279,7 @@ impl Graph {
         graph.next_node_id = self.next_node_id;
         graph.next_edge_id = self.next_edge_id;
         graph.attachments = self.attachments.clone();
+        graph.schema = self.schema.clone();
         self.nodes
             .values()
             .cloned()
@@ -371,6 +418,7 @@ pub(super) enum Undo {
         collection: u16,
         record: u64,
     },
+    Schema(Box<GraphSchema>),
 }
 
 /// All named graphs of one graph-enabled file.
@@ -522,6 +570,27 @@ impl GraphState {
         sequence: u64,
         entry: &GraphEntry,
     ) -> Result<Option<Undo>, GraphError> {
+        let undo = self.apply_entry_unchecked(graph_id, sequence, entry)?;
+        // REQ-030: a graph with a declared schema accepts only conforming
+        // writes; graphs without one behave exactly as before.
+        if let Some(graph) = self.graphs.get(&graph_id)
+            && !graph.schema.is_empty()
+            && let Err(error) = schema::check_entry(graph, entry)
+        {
+            if let Some(undo) = undo {
+                self.rollback(graph_id, vec![undo]);
+            }
+            return Err(error);
+        }
+        Ok(undo)
+    }
+
+    fn apply_entry_unchecked(
+        &mut self,
+        graph_id: GraphId,
+        sequence: u64,
+        entry: &GraphEntry,
+    ) -> Result<Option<Undo>, GraphError> {
         match entry {
             GraphEntry::CreateGraph { name } => {
                 if graph_id.0 >= MAX_GRAPHS || self.graphs.contains_key(&graph_id) {
@@ -552,6 +621,11 @@ impl GraphState {
             .ok_or(GraphError::GraphNotFound(graph_id))?;
         let undo = match entry {
             GraphEntry::CreateGraph { .. } | GraphEntry::VectorMutation { .. } => unreachable!(),
+            GraphEntry::PutSchema { schema } => {
+                let old = std::mem::replace(&mut graph.schema, schema.clone());
+                graph.rebuild_property_indexes();
+                Undo::Schema(Box::new(old))
+            }
             GraphEntry::DropGraph => {
                 if !graph.nodes.is_empty() || !graph.edges.is_empty() {
                     return Err(GraphError::GraphNotEmpty(graph_id));
@@ -852,6 +926,10 @@ impl GraphState {
                 self.attachment_owners
                     .insert((collection, record), (graph_id, node));
             }
+            Undo::Schema(schema) => {
+                graph.schema = *schema;
+                graph.rebuild_property_indexes();
+            }
         }
     }
 
@@ -948,7 +1026,7 @@ pub enum MemoryComponent {
     /// The table of live graphs, whose entries hold each graph's inline
     /// fields (counters and the container headers of the components below).
     GraphTable,
-    /// One graph's name.
+    /// One graph's name and declared schema.
     GraphName,
     /// Authoritative node records, including each node's key, labels and
     /// properties.
@@ -966,7 +1044,7 @@ pub enum MemoryComponent {
     OutAdjacency,
     /// Incoming `(relationship type, edge ID)` sets per destination node.
     InAdjacency,
-    /// Label → node IDs index.
+    /// Label → node IDs index and declared property indexes.
     LabelIndex,
 }
 
@@ -986,8 +1064,11 @@ impl Graph {
             out_edges,
             in_edges,
             labels,
+            schema,
+            property_indexes,
         } = self;
         drop(name);
+        drop(schema);
         released(MemoryComponent::GraphName);
         drop(nodes);
         released(MemoryComponent::NodeRecords);
@@ -1004,6 +1085,7 @@ impl Graph {
         drop(in_edges);
         released(MemoryComponent::InAdjacency);
         drop(labels);
+        drop(property_indexes);
         released(MemoryComponent::LabelIndex);
     }
 }
