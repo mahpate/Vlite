@@ -198,6 +198,12 @@ pub(super) enum Request {
         #[serde(default = "cache_default")]
         cache_bytes: usize,
     },
+    SaveAnnSnapshot {
+        path: String,
+    },
+    LoadAnnSnapshot {
+        path: String,
+    },
 }
 fn feed_limit() -> usize {
     1000
@@ -819,6 +825,18 @@ pub(super) fn execute(state: &mut State, handle: u64, request: Request) -> Resul
                     .map_err(failure)?,
             ))
         }
+        Request::SaveAnnSnapshot { path } => {
+            let report = db.save_ann_snapshot(path).map_err(failure)?;
+            Ok(json!({"indexes":report.indexes,"bytes":report.bytes}))
+        }
+        Request::LoadAnnSnapshot { path } => {
+            let outcome = db.load_ann_snapshot(path).map_err(failure)?;
+            let indexes = match outcome {
+                vlite::AnnSnapshotLoad::Loaded { indexes } => indexes,
+                _ => 0,
+            };
+            Ok(json!({"status":outcome.code(),"indexes":indexes}))
+        }
         Request::Create { .. }
         | Request::Open { .. }
         | Request::OpenFromBytes { .. }
@@ -904,5 +922,68 @@ mod tests {
             .0,
             "invalid_handle"
         );
+    }
+    #[test]
+    fn ann_snapshot_round_trips_through_reopen_and_rejects_stale_state() {
+        let call = |handle: u64, value: Value| {
+            super::super::execute(handle, serde_json::from_value(value).unwrap())
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snap.vlite");
+        let sidecar = directory.path().join("snap.vlite.ann");
+        let handle = |result: Value| result["handle"].as_str().unwrap().parse::<u64>().unwrap();
+        let db = handle(call(0, json!({"op":"create","path":path,"dimensions":2})).unwrap());
+        let rows: Vec<Value> = (0..20)
+            .map(|id| json!({"op":"put","id":id.to_string(),"vector":[id as f32, 1.0]}))
+            .collect();
+        call(db, json!({"op":"batch","operations":rows})).unwrap();
+        call(db, json!({"op":"build_index"})).unwrap();
+        let feature = |request: Value| json!({"op":"features","request":request});
+        let saved = call(
+            db,
+            feature(json!({"op":"save_ann_snapshot","path":sidecar})),
+        )
+        .unwrap();
+        assert_eq!(saved["indexes"], 1);
+        assert!(saved["bytes"].as_u64().unwrap() > 0);
+        call(db, json!({"op":"close"})).unwrap();
+
+        let db = handle(call(0, json!({"op":"open","path":path})).unwrap());
+        let missing = directory.path().join("absent.ann");
+        assert_eq!(
+            call(
+                db,
+                feature(json!({"op":"load_ann_snapshot","path":missing}))
+            )
+            .unwrap(),
+            json!({"status":"missing","indexes":0})
+        );
+        assert_eq!(
+            call(
+                db,
+                feature(json!({"op":"load_ann_snapshot","path":sidecar}))
+            )
+            .unwrap(),
+            json!({"status":"loaded","indexes":1})
+        );
+        let hits = call(
+            db,
+            json!({"op":"search_approximate_ready","vector":[3.0,1.0],"k":1,"ef_search":10}),
+        )
+        .unwrap();
+        assert_eq!(hits["hits"][0]["id"], "3");
+        call(
+            db,
+            json!({"op":"batch","operations":[{"op":"put","id":"99","vector":[0.5,0.5]}]}),
+        )
+        .unwrap();
+        let stale = call(
+            db,
+            feature(json!({"op":"load_ann_snapshot","path":sidecar})),
+        )
+        .unwrap();
+        assert_ne!(stale["status"], "loaded");
+        assert_eq!(stale["indexes"], 0);
+        call(db, json!({"op":"close"})).unwrap();
     }
 }

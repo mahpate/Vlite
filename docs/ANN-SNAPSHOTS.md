@@ -10,6 +10,19 @@ graceful listener shutdown. Without that flag, the server neither reads nor
 writes this sidecar. Keep adequate graceful-stop time and free disk space;
 large snapshots can take time to validate and write.
 
+Embedded callers opt in explicitly. Rust uses
+`Database::save_ann_snapshot(path)` and `Database::load_ann_snapshot(path)`
+with `Database::ann_snapshot_path(datafile)` (`<datafile>.ann`) as the
+conventional path. The C ABI exposes the same pair as `features` operations
+`save_ann_snapshot` (`path`; returns `{indexes,bytes}`) and `load_ann_snapshot`
+(`path`; returns `{status,indexes}`), and the Python package as
+`Database.save_ann_snapshot(path)` / `Database.load_ann_snapshot(path)`. A
+`status` other than `loaded` (`missing` or a rejection code such as a stale
+identity after later commits) installs nothing; call `build_index` as before.
+Encrypted databases refuse to save. `benchmarks/compare_zvec.py
+--vlite-ann-snapshot` measures this path: it saves after the build and loads on
+reopen instead of rebuilding.
+
 The cache identity includes the database format, lineage, committed sequence
 and offset, collection identity and live-vector/revision digests. It also
 carries a versioned format and integrity checksum. A stale, corrupt,

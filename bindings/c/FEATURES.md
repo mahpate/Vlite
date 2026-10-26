@@ -81,6 +81,8 @@ Use ordinary `close` on any returned database handle.
 | `encryption_info` | none | `{is_encrypted,key_id}` |
 | `build_disk_ann` | `path`, optional `collection`, `metric` | `{lineage,sequence,collection_id,live_records}` |
 | `search_disk_ann` | `path`, `vector`, `k`, optional `ef_search` (100), `cache_bytes` (8 MiB) | hits |
+| `save_ann_snapshot` | `path` | `{indexes,bytes}`; refused for encrypted databases |
+| `load_ann_snapshot` | `path` | `{status,indexes}`; `status` is `loaded`, `missing` or a rejection code, and only `loaded` installs indexes |
 | `to_bytes` | none | `{bytes_base64}` (memory databases only) |
 
 `put_with_expiry` and `update_metadata` require V5. Expiry is absolute Unix

@@ -470,6 +470,22 @@ class Database:
                         cache_bytes: int = 8 * 1024 * 1024) -> list[dict]:
         return self._feature("search_disk_ann", path=str(Path(path)), vector=vector, k=k, ef_search=ef_search, cache_bytes=cache_bytes)
 
+    def save_ann_snapshot(self, path: str | os.PathLike[str]) -> dict:
+        """Opt-in: atomically write all in-memory HNSW indexes to a sidecar (conventionally ``<datafile>.ann``).
+
+        Returns ``{"indexes", "bytes"}``. Refused for encrypted databases. The sidecar holds plaintext vectors.
+        """
+        return self._feature("save_ann_snapshot", path=str(Path(path)))
+
+    def load_ann_snapshot(self, path: str | os.PathLike[str]) -> dict:
+        """Install HNSW indexes from a sidecar written by ``save_ann_snapshot`` instead of rebuilding.
+
+        Returns ``{"status", "indexes"}``; ``status`` is ``"loaded"``, ``"missing"`` or a rejection code
+        (for example a stale sidecar after later commits). Anything but ``"loaded"`` leaves state unchanged,
+        so callers fall back to ``build_index``.
+        """
+        return self._feature("load_ann_snapshot", path=str(Path(path)))
+
     def to_bytes(self) -> bytes:
         return base64.b64decode(self._feature("to_bytes")["bytes_base64"], validate=True)
 

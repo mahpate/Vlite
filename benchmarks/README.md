@@ -468,8 +468,13 @@ python benchmarks/compare_zvec.py --records 100000 --dimensions 768 --trials 2 \
 It reports ingest, index build (`build_index()` / `optimize()`), per-query
 p50/p95/p99, sequential QPS, tie-aware recall@k against a float64 oracle,
 resident-memory growth, on-disk footprint and reopen-plus-first-query time.
-VLite fsyncs each batch as an atomic commit and keeps HNSW in memory, so its
-ANN reopen includes a full index rebuild; zvec persists its index. When the
+VLite fsyncs each batch as an atomic commit and keeps HNSW in memory, so by
+default its ANN reopen includes a full index rebuild; zvec persists its index.
+`--vlite-ann-snapshot` (off by default) opts VLite into its
+[ANN snapshot](../docs/ANN-SNAPSHOTS.md) sidecar: the child saves it after the
+search phase (reported separately as `ann_snapshot_save_s`; the sidecar counts
+in the footprint) and on reopen loads and validates it instead of rebuilding,
+falling back to a rebuild unless `ann_snapshot_load_status` is `loaded`. When the
 installed VLite library exports the float32 entry points, the harness ingests
 with `batch_put_f32` and searches with `search_f32` (`approximate_ready` for
 ANN), recording `vector_transport: "float32"`; otherwise it sends each vector as

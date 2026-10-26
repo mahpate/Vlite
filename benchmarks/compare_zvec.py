@@ -67,11 +67,14 @@ def dist_version(name):
 class VLiteEngine:
     """Each batch is a durable atomic commit (fsync before acknowledgment)."""
 
-    def __init__(self, workdir, dimensions, mode):
+    def __init__(self, workdir, dimensions, mode, ann_snapshot=False):
         from vlite_embedded import NativeLibrary
+        self.ann_snapshot = ann_snapshot and mode == "ann"
+        self.ann_snapshot_status = None
         self.version = dist_version("vlite-embedded") or dist_version("vlite_embedded")
         self.mode = mode
         self.path = Path(workdir) / "bench.vlite"
+        self.sidecar = Path(workdir) / "bench.vlite.ann"
         self.library = NativeLibrary()
         # Float32 buffers skip per-component JSON; older wheels fall back to JSON lists.
         self.typed = getattr(self.library, "supports_float32", False)
@@ -114,10 +117,21 @@ class VLiteEngine:
     def reopen(self):
         self.db = self.library.open(self.path)
 
+    def persist_index(self):
+        """Opt-in (--vlite-ann-snapshot): write the HNSW sidecar after the build."""
+        if self.ann_snapshot:
+            self.db.save_ann_snapshot(self.sidecar)
+
     def first_query_after_reopen(self, query, k, ef):
-        # The HNSW graph is in memory only (snapshots are opt-in), so ANN mode
-        # rebuilds here; the measured time includes log replay and rebuild.
-        self.build()
+        # The HNSW graph is in memory only. By default ANN mode rebuilds here, so
+        # the measured time includes log replay and rebuild. With the opt-in
+        # snapshot it loads the validated sidecar and rebuilds only on rejection.
+        if self.ann_snapshot:
+            self.ann_snapshot_status = self.db.load_ann_snapshot(self.sidecar)["status"]
+            if self.ann_snapshot_status != "loaded":
+                self.build()
+        else:
+            self.build()
         return self.search(query, k, ef)
 
     def footprint(self):
@@ -186,7 +200,8 @@ def run_child(args):
     workdir = tempfile.mkdtemp(prefix=f"bench-{args.engine}-")
     try:
         baseline_rss = current_rss()
-        engine = ENGINES[args.engine](workdir, vectors.shape[1], args.mode)
+        options = {"ann_snapshot": True} if args.engine == "vlite" and args.vlite_ann_snapshot else {}
+        engine = ENGINES[args.engine](workdir, vectors.shape[1], args.mode, **options)
         result = {"engine": args.engine, "mode": args.mode, "version": engine.version,
                   "vector_transport": getattr(engine, "transport", "python_list")}
         start = time.perf_counter_ns()
@@ -205,12 +220,18 @@ def run_child(args):
             samples.append(time.perf_counter_ns() - begin)
             ids.append(found)
         result.update(summary(samples), samples_ns=samples, ids=ids)
+        if getattr(engine, "ann_snapshot", False):
+            start = time.perf_counter_ns()
+            engine.persist_index()
+            result["ann_snapshot_save_s"] = (time.perf_counter_ns() - start) / 1e9
         engine.close()
         result["footprint_bytes"] = engine.footprint()
         start = time.perf_counter_ns()
         engine.reopen()
         engine.first_query_after_reopen(query_lists[0], args.k, args.ef)
         result["reopen_first_query_s"] = (time.perf_counter_ns() - start) / 1e9
+        if getattr(engine, "ann_snapshot", False):
+            result["ann_snapshot_load_status"] = engine.ann_snapshot_status
         engine.close()
         result["peak_rss_bytes"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
         print(json.dumps(result))
@@ -256,6 +277,10 @@ def main():
     parser.add_argument("--spread", type=float, default=0.35, help="cluster standard deviation")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--vlite-ann-snapshot", action="store_true",
+                        help="opt-in: VLite ANN saves an HNSW sidecar after the build (timed separately as "
+                             "ann_snapshot_save_s, counted in the footprint) and loads it on reopen instead of "
+                             "rebuilding; off by default")
     args = parser.parse_args()
     if args.child:
         return run_child(args)
@@ -290,6 +315,8 @@ def main():
                     command = [sys.executable, __file__, "--child", "--engine", engine, "--mode", mode,
                                "--data", str(data_path), "--k", str(args.k), "--ef", str(args.ef),
                                "--warmup", str(args.warmup)]
+                    if args.vlite_ann_snapshot:
+                        command.append("--vlite-ann-snapshot")
                     completed = subprocess.run(command, capture_output=True, text=True)
                     if completed.returncode != 0:
                         raise SystemExit(f"{engine}/{mode} child failed:\n{completed.stderr}")

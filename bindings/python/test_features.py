@@ -224,6 +224,23 @@ print('shared reader ok')
         secret = self.keep(self.native.create_in_memory(2, key=bytes(32)))
         self.error("sidecar_unavailable", lambda: secret.build_disk_ann(self.directory / "secret.dann"))
 
+    def test_ann_snapshot_skips_rebuild_after_reopen(self):
+        path = self.directory / "ann.vlite"
+        sidecar = self.directory / "ann.vlite.ann"
+        db = self.native.create(path, 2)
+        db.batch([{"op": "put", "id": str(i), "vector": [i, 1]} for i in range(20)])
+        db.build_index()
+        self.assertEqual(db.save_ann_snapshot(sidecar)["indexes"], 1)
+        db.close()
+        db = self.keep(self.native.open(path))
+        self.assertEqual(db.load_ann_snapshot(self.directory / "absent.ann"), {"status": "missing", "indexes": 0})
+        self.assertEqual(db.load_ann_snapshot(sidecar), {"status": "loaded", "indexes": 1})
+        self.assertEqual(db.search_approximate_ready([3, 1], 1, ef_search=10)[0]["id"], "3")
+        db.put("99", [0.5, 0.5])
+        self.assertNotEqual(db.load_ann_snapshot(sidecar)["status"], "loaded")
+        secret = self.keep(self.native.create_in_memory(2, key=bytes(32)))
+        self.error("sidecar_unavailable", lambda: secret.save_ann_snapshot(self.directory / "secret.ann"))
+
     def test_feature_boundaries_and_filtered_retrieval(self):
         db = self.memory()
         db.put("1", [1, 0], metadata=metadata("a"))

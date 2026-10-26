@@ -119,6 +119,11 @@ Additional methods (all accept `collection=` where meaningful):
   ef_search=100,cache_bytes=...)`. Each search opens/closes its own bounded cache;
   every database mutation makes the sidecar stale. Disk ANN does not filter
   expiry/metadata, and encrypted databases refuse plaintext sidecars.
+- Opt-in HNSW persistence: `save_ann_snapshot(path)` after `build_index()`, and
+  `load_ann_snapshot(path)` after reopening (conventionally `<datafile>.ann`).
+  Load returns `{"status","indexes"}`; any status but `"loaded"` (missing, or
+  stale after later commits) changes nothing, so call `build_index()` instead.
+  See [ANN snapshots](../../docs/ANN-SNAPSHOTS.md).
 
 IDs/revisions are decimal strings. Absolute input timestamps also accept Python
 integers (serialized losslessly as decimal strings). Feed timestamps/head,
