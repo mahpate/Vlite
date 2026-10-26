@@ -2289,6 +2289,824 @@
         }
       }
     },
+    "/v1/graphs/{graph}/schema": {
+      "parameters": [
+        {
+          "name": "graph",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "GraphSchemaGet",
+        "summary": "Declared schema plus the observed one (bounded scan)",
+        "description": "Requires the admin token, the read-only token, or a scoped credential with graph_read whose graphs binding names this graph (or is [\"*\"]). Collection scope never implies graph scope. Runs under one database read guard. The observed schema scans at most budget entities (default 100000, at most 1000000); complete is false when the scan stopped early.",
+        "parameters": [
+          {
+            "name": "budget",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Declared and observed schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "graph": {
+                      "type": "string"
+                    },
+                    "declared": {
+                      "type": "object",
+                      "properties": {
+                        "labels": {
+                          "type": "object"
+                        },
+                        "relationships": {
+                          "type": "object"
+                        }
+                      },
+                      "required": [
+                        "labels",
+                        "relationships"
+                      ]
+                    },
+                    "observed": {
+                      "type": "object",
+                      "properties": {
+                        "complete": {
+                          "type": "boolean"
+                        },
+                        "entities_scanned": {
+                          "type": "integer"
+                        },
+                        "labels": {
+                          "type": "array",
+                          "items": {
+                            "type": "object"
+                          }
+                        },
+                        "relationships": {
+                          "type": "array",
+                          "items": {
+                            "type": "object"
+                          }
+                        }
+                      },
+                      "required": [
+                        "complete",
+                        "entities_scanned",
+                        "labels",
+                        "relationships"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "graph",
+                    "declared",
+                    "observed"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_path or invalid_query (unknown parameter, bad budget)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "forbidden_scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "graphs_not_enabled or graph_not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "graph_limit_exceeds_ceiling (budget above 1000000)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "busy or unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "GraphSchemaPut",
+        "summary": "Replace the declared schema",
+        "description": "Requires the admin token or a scoped credential with graph_write whose graphs binding names this graph (or is [\"*\"]); the read-only token gets read_only. Runs under the database write guard. An empty schema ({}) removes the declaration. Existing data must satisfy the new schema; the change is one graph revision.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "labels": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "object",
+                          "properties": {
+                            "description": {
+                              "type": "string"
+                            },
+                            "properties": {
+                              "type": "object",
+                              "additionalProperties": {
+                                "type": "object",
+                                "properties": {
+                                  "type": {
+                                    "enum": [
+                                      "string",
+                                      "integer",
+                                      "float",
+                                      "boolean",
+                                      "geopoint"
+                                    ]
+                                  },
+                                  "required": {
+                                    "type": "boolean"
+                                  },
+                                  "unique": {
+                                    "type": "boolean"
+                                  },
+                                  "index": {
+                                    "enum": [
+                                      "exact",
+                                      "range"
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "type"
+                                ],
+                                "additionalProperties": false
+                              }
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      },
+                      "relationships": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "object",
+                          "properties": {
+                            "description": {
+                              "type": "string"
+                            },
+                            "endpoints": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "source": {
+                                    "type": "string"
+                                  },
+                                  "destination": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "source",
+                                  "destination"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "multiplicity": {
+                              "enum": [
+                                "multi",
+                                "unique_triple"
+                              ]
+                            },
+                            "properties": {
+                              "type": "object"
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "schema"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "graph": {
+                      "type": "string"
+                    },
+                    "revision": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "graph",
+                    "revision"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed JSON (invalid_json) or path (invalid_path)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "forbidden_scope or read_only",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "graphs_not_enabled, graph_not_found, or graph_schema_violation (existing data violates the schema)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body above the server JSON limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "invalid_json (unknown field, duplicate key) or invalid_input (inconsistent schema)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "busy or unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/graphs/{graph}/retrieve": {
+      "parameters": [
+        {
+          "name": "graph",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "GraphRetrieve",
+        "summary": "Hybrid retrieve: vector/text pivots, bounded expansion, record evidence",
+        "description": "Requires the admin token, the read-only token, or a scoped credential with graph_read whose graphs binding names this graph (or is [\"*\"]). Collection scope never implies graph scope. Runs under one database read guard. Retrieve returns vector record data, so a scoped credential also needs the read operation and a collection binding covering the pivot collection (forbidden_scope otherwise). Evidence from collections the credential may not read is dropped and counted in redacted (per-hop evidence authorization); the admin and read-only tokens see every collection. Outputs never contain vectors.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "pivot": {
+                    "type": "object",
+                    "properties": {
+                      "collection": {
+                        "type": "string"
+                      },
+                      "vector": {
+                        "type": "array",
+                        "items": {
+                          "type": "number"
+                        }
+                      },
+                      "text": {
+                        "type": "string"
+                      },
+                      "k": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100
+                      },
+                      "filter": {
+                        "type": "array",
+                        "items": {
+                          "type": "object"
+                        }
+                      },
+                      "metric": {
+                        "enum": [
+                          "squared_l2",
+                          "cosine",
+                          "inner_product"
+                        ]
+                      },
+                      "max_exact_scan_records": {
+                        "type": "string"
+                      },
+                      "candidates": {
+                        "type": "integer"
+                      },
+                      "rrf_k": {
+                        "type": "integer"
+                      },
+                      "vector_weight": {
+                        "type": "number"
+                      },
+                      "text_weight": {
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "collection"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "expansion": {
+                    "type": "object",
+                    "properties": {
+                      "direction": {
+                        "enum": [
+                          "out",
+                          "in",
+                          "both"
+                        ]
+                      },
+                      "types": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "expand_filter": {
+                        "type": "object"
+                      },
+                      "return_filter": {
+                        "type": "object"
+                      },
+                      "edge_filter": {
+                        "type": "array",
+                        "items": {
+                          "type": "object"
+                        }
+                      },
+                      "include_paths": {
+                        "type": "boolean"
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "evidence": {
+                    "type": "object",
+                    "properties": {
+                      "collections": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        },
+                        "maxItems": 64
+                      },
+                      "fields": {
+                        "type": "object"
+                      },
+                      "max_excerpt_bytes": {
+                        "type": "integer",
+                        "maximum": 4096
+                      },
+                      "max_items": {
+                        "type": "integer",
+                        "maximum": 1000
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "limits": {
+                    "type": "object"
+                  },
+                  "projection": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "pivot"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Pivots, expanded nodes/edges/paths and evidence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "graph": {
+                      "type": "string"
+                    },
+                    "view_sequence": {
+                      "type": "string"
+                    },
+                    "complete": {
+                      "type": "boolean"
+                    },
+                    "truncation": {
+                      "type": "array"
+                    },
+                    "pivots": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "unmapped_pivots": {
+                      "type": "object"
+                    },
+                    "nodes": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "edges": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "paths": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "evidence": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "redacted": {
+                      "type": "object",
+                      "properties": {
+                        "count": {
+                          "type": "integer"
+                        },
+                        "collections": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "required": [
+                        "count",
+                        "collections"
+                      ]
+                    },
+                    "stats": {
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "graph",
+                    "view_sequence",
+                    "complete",
+                    "truncation",
+                    "pivots",
+                    "unmapped_pivots",
+                    "nodes",
+                    "edges",
+                    "paths",
+                    "evidence",
+                    "redacted",
+                    "stats"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed JSON (invalid_json) or path (invalid_path)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "forbidden_scope: credential lacks graph_read, the graph is outside its graphs binding, or it may not read the pivot collection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "graphs_not_enabled (vector-only file), graph_not_found or another graph conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Read request body above 1 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "invalid_json (unknown field, bad ID), invalid_input (no vector or text, bad dimensions), graph_pivot_too_expensive, graph_limit_exceeds_ceiling",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "busy or unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/graphs/{graph}/query": {
+      "parameters": [
+        {
+          "name": "graph",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "GraphQueryText",
+        "summary": "Run (or explain) a read-only graph query text",
+        "description": "Requires the admin token, the read-only token, or a scoped credential with graph_read whose graphs binding names this graph (or is [\"*\"]). Collection scope never implies graph scope. Runs under one database read guard. The text (docs/GRAPH-QUERY.md) maps to exactly one typed read; the answer is the typed route's answer, or the explain route's answer with explain: true.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "query": {
+                    "type": "string",
+                    "maxLength": 16384
+                  },
+                  "params": {
+                    "type": "object"
+                  },
+                  "limits": {
+                    "type": "object"
+                  },
+                  "explain": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "query"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The typed read's output, or its explanation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed JSON (invalid_json) or path (invalid_path)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "forbidden_scope: credential lacks graph_read or the graph is outside its graphs binding",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "graphs_not_enabled (vector-only file), graph_not_found or another graph conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Read request body above 1 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "graph_query_syntax, graph_query_unsupported, graph_query_parameter, graph_query_limit, invalid_json or graph_limit_exceeds_ceiling",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "busy or unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/admin/graph/stats": {
       "get": {
         "operationId": "GraphGuardStats",

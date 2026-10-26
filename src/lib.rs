@@ -71,6 +71,9 @@ pub use stats::{PlanStrategy, QueryPlan, SearchStats};
 pub mod maintenance;
 #[cfg(feature = "server")]
 pub mod server;
+// Lets the REST graph routes share the tools' `vlite::` graph JSON module.
+#[cfg(all(feature = "server", feature = "graph"))]
+extern crate self as vlite;
 
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fmt;

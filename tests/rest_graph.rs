@@ -83,10 +83,29 @@ fn routes() -> Vec<(&'static str, &'static str, Option<Value>, bool)> {
             Some(json!({"operation": "traverse", "start": [{"key": "n1"}]})),
             true,
         ),
+        ("GET", "/v1/graphs/g/schema", None, true),
+        (
+            "POST",
+            "/v1/graphs/g/retrieve",
+            Some(json!({"pivot": {"collection": "default", "vector": [1.0, 1.0], "k": 2}})),
+            true,
+        ),
+        (
+            "POST",
+            "/v1/graphs/g/query",
+            Some(json!({"query": "MATCH (n:Doc) RETURN n LIMIT 2"})),
+            true,
+        ),
         (
             "POST",
             "/v1/graphs/g/batch",
             Some(json!({"ops": [{"op": "upsert_node", "key": "n9"}]})),
+            false,
+        ),
+        (
+            "PUT",
+            "/v1/graphs/g/schema",
+            Some(json!({"schema": {}})),
             false,
         ),
         ("POST", "/v1/graphs", Some(json!({"graph": "h"})), false),
@@ -479,9 +498,11 @@ async fn authorization_matrix_per_role_operation_and_graph_binding() {
         json!({"collections": ["*"], "operations": ["read", "search", "write", "collections"]}),
     )
     .await;
+    // Retrieve returns vector records, so readers also hold collection `read`
+    // (see `retrieve_needs_collection_read_and_redacts_evidence`).
     let reader_g = credential(
         app,
-        json!({"collections": ["*"], "operations": ["graph_read"], "graphs": ["g"]}),
+        json!({"collections": ["*"], "operations": ["graph_read", "read"], "graphs": ["g"]}),
     )
     .await;
     let writer_g = credential(
@@ -522,7 +543,7 @@ async fn authorization_matrix_per_role_operation_and_graph_binding() {
         }
         // graph_write without graph_read: writes on "g" only.
         let (status, response) = call(app, Some(&writer_g), method, uri, body.clone()).await;
-        if uri == "/v1/graphs/g/batch" {
+        if uri == "/v1/graphs/g/batch" || (method == "PUT" && uri == "/v1/graphs/g/schema") {
             assert_eq!(status, StatusCode::OK, "writer {method} {uri}: {response}");
         } else {
             assert_eq!(
@@ -586,6 +607,343 @@ async fn authorization_matrix_per_role_operation_and_graph_binding() {
     let items = body["items"].as_array().unwrap();
     assert!(items.iter().any(|item| item["graphs"] == json!(["g"])));
     assert!(items.iter().any(|item| item["graphs"].is_null()));
+}
+
+/// ITEM-041 / REQ-043: retrieve returns vector records, so a scoped caller
+/// needs collection `read` on the pivot collection (403 otherwise), and
+/// evidence from collections outside its binding is dropped and counted.
+#[tokio::test]
+async fn retrieve_needs_collection_read_and_redacts_evidence() {
+    let f = fixture(true).await;
+    let app = &f.app;
+    let (status, body) = call(
+        app,
+        Some(ADMIN),
+        "POST",
+        "/v1/collections",
+        Some(json!({"name": "secret", "dimensions": 2})),
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    let (status, body) = call(
+        app,
+        Some(ADMIN),
+        "POST",
+        "/v1/graphs/g/batch",
+        Some(json!({"ops": [
+            {"op": "put_vector", "collection": "secret", "id": "1", "vector": [1.0, 1.0],
+                "payload": "classified"},
+            {"op": "attach", "node": "n2", "collection": "secret", "record": "1"},
+        ]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let request = json!({
+        "pivot": {"collection": "default", "vector": [1.0, 1.0], "k": 1},
+        "expansion": {"direction": "out"},
+        "evidence": {"collections": ["default", "secret"]},
+        "limits": {"max_hops": 2},
+    });
+    let retrieve = |token: String| {
+        let request = request.clone();
+        async move {
+            call(
+                app,
+                Some(&token),
+                "POST",
+                "/v1/graphs/g/retrieve",
+                Some(request),
+            )
+            .await
+        }
+    };
+    let (status, full) = retrieve(ADMIN.to_owned()).await;
+    assert_eq!(status, StatusCode::OK, "{full}");
+    assert_eq!(full["pivots"][0]["node_key"], "n1", "{full}");
+    let keys: Vec<&str> = full["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["node"]["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(keys, ["n1", "n2", "n3"], "{full}");
+    let secret: Vec<&Value> = full["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["collection"] == "secret")
+        .collect();
+    assert_eq!(secret.len(), 1, "{full}");
+    assert_eq!(secret[0]["payload_excerpt"], "classified");
+    assert_eq!(full["redacted"], json!({"count": 0, "collections": []}));
+    assert!(
+        !full.to_string().contains("\"vector\""),
+        "no vectors: {full}"
+    );
+    let (status, read_only) = retrieve(READ_ONLY.to_owned()).await;
+    assert_eq!(status, StatusCode::OK);
+    let mask = |mut value: Value| {
+        value["stats"]["pivot_ms"] = json!(0);
+        value["stats"]["expand_ms"] = json!(0);
+        value["stats"]["expansion"]["elapsed_ms"] = json!(0);
+        value
+    };
+    assert_eq!(mask(read_only), mask(full.clone()));
+
+    // Bound to "default" only: the secret evidence is redacted, the graph
+    // structure is not.
+    let default_reader = credential(
+        app,
+        json!({"collections": ["default"], "operations": ["graph_read", "read"],
+            "graphs": ["g"]}),
+    )
+    .await;
+    let (status, redacted) = retrieve(default_reader).await;
+    assert_eq!(status, StatusCode::OK, "{redacted}");
+    assert_eq!(
+        redacted["redacted"],
+        json!({"count": 1, "collections": ["secret"]})
+    );
+    assert!(!redacted.to_string().contains("classified"), "{redacted}");
+    let evidence = redacted["evidence"].as_array().unwrap();
+    assert_eq!(
+        evidence.len(),
+        full["evidence"].as_array().unwrap().len() - 1
+    );
+    assert!(evidence.iter().all(|item| item["collection"] == "default"));
+    assert_eq!(redacted["stats"]["evidence_items"], evidence.len());
+    for field in ["pivots", "nodes", "edges", "paths", "complete"] {
+        assert_eq!(redacted[field], full[field], "{field}");
+    }
+
+    // graph_read alone (no collection `read`) and a binding without the
+    // pivot collection are refused; graph-only routes still answer.
+    let graph_only = credential(
+        app,
+        json!({"collections": ["*"], "operations": ["graph_read"], "graphs": ["g"]}),
+    )
+    .await;
+    let secret_reader = credential(
+        app,
+        json!({"collections": ["secret"], "operations": ["graph_read", "read"],
+            "graphs": ["g"]}),
+    )
+    .await;
+    for token in [&graph_only, &secret_reader] {
+        let (status, body) = retrieve(token.clone()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(code(&body), "forbidden_scope");
+        let (status, body) = call(
+            app,
+            Some(token),
+            "POST",
+            "/v1/graphs/g/query",
+            Some(json!({"query": "MATCH (n KEY \"n1\") RETURN n"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+}
+
+/// AC-018 / ITEM-052 over REST: schema discovery and declaration, the query
+/// text, and their errors.
+#[tokio::test]
+async fn schema_retrieve_and_query_text_routes() {
+    let f = fixture(true).await;
+    let app = &f.app;
+    let (status, body) = call(app, Some(ADMIN), "GET", "/v1/graphs/g/schema", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["graph"], "g");
+    assert_eq!(body["declared"], json!({"labels": {}, "relationships": {}}));
+    assert_eq!(body["observed"]["complete"], true);
+    assert_eq!(body["observed"]["labels"][0]["name"], "Doc");
+    assert_eq!(body["observed"]["labels"][0]["count"], 4);
+    assert_eq!(body["observed"]["relationships"][0]["name"], "LINKS");
+    let (status, body) = call(
+        app,
+        Some(ADMIN),
+        "GET",
+        "/v1/graphs/g/schema?budget=1",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["observed"]["complete"], false, "{body}");
+    for uri in [
+        "/v1/graphs/g/schema?budget=x",
+        "/v1/graphs/g/schema?other=1",
+    ] {
+        let (status, body) = call(app, Some(ADMIN), "GET", uri, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
+        assert_eq!(code(&body), "invalid_query");
+    }
+
+    // Declaring a schema the data violates is refused; a matching one is
+    // stored and enables ensure_edge.
+    let schema = json!({
+        "labels": {"Doc": {"description": "A document", "properties": {
+            "rank": {"type": "integer", "required": true, "index": "range"}}}},
+        "relationships": {"LINKS": {"description": "Doc links",
+            "endpoints": [{"source": "Doc", "destination": "Doc"}],
+            "multiplicity": "unique_triple"}},
+    });
+    let mut bad = schema.clone();
+    bad["labels"]["Doc"]["properties"]["title"] = json!({"type": "string", "required": true});
+    let (status, body) = call(
+        app,
+        Some(ADMIN),
+        "PUT",
+        "/v1/graphs/g/schema",
+        Some(json!({"schema": bad})),
+    )
+    .await;
+    assert!(status.is_client_error(), "{body}");
+    let (status, body) = call(
+        app,
+        Some(ADMIN),
+        "PUT",
+        "/v1/graphs/g/schema",
+        Some(json!({"schema": schema})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["graph"], "g");
+    assert!(body["revision"].is_string(), "{body}");
+    let (_, body) = call(app, Some(ADMIN), "GET", "/v1/graphs/g/schema", None).await;
+    assert_eq!(
+        body["declared"]["labels"]["Doc"]["properties"]["rank"]["index"], "range",
+        "{body}"
+    );
+    assert_eq!(body["observed"]["labels"][0]["origin"], "both", "{body}");
+    let ensure = json!({"ops": [{"op": "ensure_edge", "source": "n1",
+        "relationship": "LINKS", "destination": "n2"}]});
+    for _ in 0..2 {
+        let (status, body) = call(
+            app,
+            Some(ADMIN),
+            "POST",
+            "/v1/graphs/g/batch",
+            Some(ensure.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let (_, body) = call(app, Some(ADMIN), "GET", "/v1/graphs/g", None).await;
+    assert_eq!(body["graph"]["edge_count"], 2, "ensure_edge is idempotent");
+    let (status, body) = call(
+        app,
+        Some(ADMIN),
+        "POST",
+        "/v1/graphs/g/batch",
+        Some(json!({"ops": [{"op": "put_schema", "schema": {}}]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["outcomes"], json!(["schema"]));
+
+    // Query text equals the typed route; explain equals typed explain.
+    let pairs = [
+        (
+            json!({"query": "MATCH (n:Doc) WHERE n.rank >= $min RETURN n LIMIT 10",
+                "params": {"min": {"type": "integer", "value": "2"}}}),
+            "/v1/graphs/g/nodes/find",
+            json!({"label": "Doc", "conditions": [{"field": "rank", "op": "range",
+                "min": {"type": "integer", "value": "2"}}], "limit": 10}),
+        ),
+        (
+            json!({"query": "MATCH p = (a KEY \"n1\")-[:LINKS*1..2]->(b) RETURN b, p"}),
+            "/v1/graphs/g/traverse",
+            json!({"start": [{"key": "n1"}], "types": ["LINKS"], "include_paths": true,
+                "limits": {"max_hops": 2}}),
+        ),
+    ];
+    for (text, typed_uri, typed) in pairs {
+        let (status, by_text) = call(
+            app,
+            Some(READ_ONLY),
+            "POST",
+            "/v1/graphs/g/query",
+            Some(text.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{text}: {by_text}");
+        let (status, by_type) = call(app, Some(READ_ONLY), "POST", typed_uri, Some(typed)).await;
+        assert_eq!(status, StatusCode::OK, "{by_type}");
+        let mask = |mut value: Value| {
+            value["stats"]["elapsed_ms"] = json!(0);
+            value
+        };
+        assert_eq!(mask(by_text), mask(by_type), "{text}");
+        let mut explain = text.clone();
+        explain["explain"] = json!(true);
+        let (status, plan) = call(
+            app,
+            Some(READ_ONLY),
+            "POST",
+            "/v1/graphs/g/query",
+            Some(explain),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{plan}");
+        assert!(plan["explain"]["query"].is_object(), "{plan}");
+    }
+    let errors = [
+        (
+            "/v1/graphs/g/query",
+            json!({"query": "MATCH (n) DELETE n"}),
+            "graph_query_unsupported",
+        ),
+        (
+            "/v1/graphs/g/query",
+            json!({"query": "MATCH (n KEY $k) RETURN n"}),
+            "graph_query_parameter",
+        ),
+        (
+            "/v1/graphs/g/query",
+            json!({"query": "MATCH (n RETURN n"}),
+            "graph_query_syntax",
+        ),
+        (
+            "/v1/graphs/g/query",
+            json!({"query": "MATCH (n) RETURN n", "graph": "g"}),
+            "invalid_json",
+        ),
+        (
+            "/v1/graphs/g/retrieve",
+            json!({"pivot": {"collection": "default", "vector": [1.0, 1.0], "k": 101}}),
+            "graph_limit_exceeds_ceiling",
+        ),
+        (
+            "/v1/graphs/g/retrieve",
+            json!({"pivot": {"collection": "default"}}),
+            "invalid_input",
+        ),
+        (
+            "/v1/graphs/g/retrieve",
+            json!({"pivot": {"collection": "default", "vector": [1.0, 1.0]}, "extra": 1}),
+            "invalid_json",
+        ),
+    ];
+    for (uri, body, expected) in errors {
+        let (status, response) = call(app, Some(ADMIN), "POST", uri, Some(body.clone())).await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{body}: {response}"
+        );
+        assert_eq!(code(&response), expected, "{body}: {response}");
+    }
+    // Query text errors come before the graph lookup; graph errors after.
+    let (status, body) = call(
+        app,
+        Some(ADMIN),
+        "POST",
+        "/v1/graphs/missing/query",
+        Some(json!({"query": "MATCH (n:Doc) RETURN n"})),
+    )
+    .await;
+    assert!(status.is_client_error(), "{body}");
+    assert_eq!(code(&body), "graph_not_found");
 }
 
 #[tokio::test]

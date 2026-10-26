@@ -13,8 +13,9 @@
 //! then authorized in two steps:
 //!
 //! 1. Route level (`permission` → `route_op`): reads (list, info, get node /
-//!    edge, find nodes, neighbors, traverse, shortest path, explain) need
-//!    `graph_read`; graph creation, drop and batch writes need `graph_write`.
+//!    edge, find nodes, neighbors, traverse, shortest path, explain, schema,
+//!    retrieve, text query) need `graph_read`; graph creation, drop, schema
+//!    replacement and batch writes need `graph_write`.
 //!    The admin token may do everything. The read-only token may use the
 //!    read routes only (`read_only` otherwise). A scoped credential needs the
 //!    operation in its `operations` and the database lineage it was issued
@@ -38,10 +39,14 @@
 //! exempts only these session grants, so tenant API credentials still reach
 //! no graph. Vector records stay tenant-isolated by the collection check.
 //!
-//! Wave-1 read outputs carry graph structure only (nodes, edges, paths,
-//! properties) and never vector record data, so REQ-043 per-hop evidence
-//! redaction has nothing to redact here; the `redacted` counts belong to the
-//! wave-2 retrieve route that returns attached records.
+//! Structural reads (nodes, edges, paths, properties, schema, text queries)
+//! never return vector record data. `POST /v1/graphs/{graph}/retrieve`
+//! (ITEM-041 / REQ-043 per-hop evidence authorization) does: a scoped
+//! credential additionally needs the `read` operation and a collection
+//! binding for the pivot collection (403 otherwise), and evidence from each
+//! requested evidence collection it may not read is dropped and reported as
+//! `redacted: {count, collections}` instead of failing the request. Admin and
+//! read-only tokens see every collection (`redacted.count` is 0).
 //!
 //! Reads run under one database read guard, writes under the write guard;
 //! the time each guard is held is recorded (`GET /v1/admin/graph/stats`,
@@ -50,14 +55,19 @@ use super::*;
 use crate::property_graph::{
     Direction, EdgeRef, EdgeView, Explanation, FindNodes, GraphBatchResult, GraphInfo, GraphLimits,
     GraphOp, GraphOpOutcome, GraphOutput, GraphPath, GraphQuery, GraphRead, GraphReadStats,
-    GraphWrite, IndexChoice, Neighbors, NodeFilter, NodePatch, NodeSelector, NodeView, PathOutcome,
-    PropertyProjection, ReadOptions, ShortestPath, Traverse, TruncationReason,
+    GraphTextError, GraphWrite, IndexChoice, Neighbors, NodeFilter, NodePatch, NodeSelector,
+    NodeView, PathOutcome, PropertyProjection, ReadOptions, ShortestPath, Traverse,
+    TruncationReason,
 };
 use crate::{Condition, Metadata, MetadataValue};
 use axum::{body::Bytes, extract::rejection::BytesRejection, routing::MethodRouter};
 use serde::{Deserializer, de::Error as _};
 use serde_json::Map;
 use std::time::Duration;
+
+#[allow(dead_code, unused_imports, unreachable_patterns)]
+#[path = "../bin/tool_support/graph_json.rs"]
+mod graph_json;
 
 /// Read request bodies are small queries; batches keep `MAX_JSON_BYTES`.
 const MAX_READ_BODY: usize = 1024 * 1024;
@@ -93,6 +103,9 @@ const QUERIES: [(&str, &str, Kind); 6] = [
     ),
 ];
 const EXPLAIN: &str = "/v1/graphs/{graph}/explain";
+const SCHEMA: &str = "/v1/graphs/{graph}/schema";
+const RETRIEVE: &str = "/v1/graphs/{graph}/retrieve";
+const QUERY_TEXT: &str = "/v1/graphs/{graph}/query";
 
 /// The credential operation a graph route needs; `None` for other routes.
 pub(super) fn route_op(method: &Method, route: &str) -> Option<credentials::Op> {
@@ -100,21 +113,30 @@ pub(super) fn route_op(method: &Method, route: &str) -> Option<credentials::Op> 
         return Some(credentials::Op::GraphRead);
     }
     match (method.as_str(), route) {
-        ("GET" | "HEAD", "/v1/graphs" | "/v1/graphs/{graph}") => Some(credentials::Op::GraphRead),
-        ("POST", "/v1/graphs" | "/v1/graphs/{graph}/batch") | ("DELETE", "/v1/graphs/{graph}") => {
-            Some(credentials::Op::GraphWrite)
+        ("GET" | "HEAD", "/v1/graphs" | "/v1/graphs/{graph}" | SCHEMA) => {
+            Some(credentials::Op::GraphRead)
         }
+        ("POST", "/v1/graphs" | "/v1/graphs/{graph}/batch")
+        | ("DELETE", "/v1/graphs/{graph}")
+        | ("PUT", SCHEMA) => Some(credentials::Op::GraphWrite),
         _ => None,
     }
 }
 
 /// POST graph routes that only read (allowed for the read-only token).
 pub(super) fn read_post(method: &Method, route: &str) -> bool {
-    method == Method::POST && (route == EXPLAIN || QUERIES.iter().any(|(r, _, _)| *r == route))
+    method == Method::POST
+        && (route == EXPLAIN
+            || route == RETRIEVE
+            || route == QUERY_TEXT
+            || QUERIES.iter().any(|(r, _, _)| *r == route))
 }
 
 pub(super) fn routes() -> Router<Service> {
-    let mut reads = Router::new().route(EXPLAIN, post(explain));
+    let mut reads = Router::new()
+        .route(EXPLAIN, post(explain))
+        .route(RETRIEVE, post(retrieve))
+        .route(QUERY_TEXT, post(query_text));
     for (route, _, kind) in QUERIES {
         reads = reads.route(route, query_route(kind));
     }
@@ -122,6 +144,7 @@ pub(super) fn routes() -> Router<Service> {
         .route("/v1/graphs", get(list).post(create))
         .route("/v1/graphs/{graph}", get(info_route).delete(drop_route))
         .route("/v1/graphs/{graph}/batch", post(batch))
+        .route(SCHEMA, get(schema).put(put_schema))
         .route("/v1/admin/graph/stats", get(guard_stats))
         .merge(reads.layer(DefaultBodyLimit::max(MAX_READ_BODY)))
 }
@@ -445,6 +468,197 @@ async fn explain(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct SchemaParams {
+    budget: Option<String>,
+}
+
+/// Declared schema plus the observed one (bounded scan, `budget` entities).
+async fn schema(
+    State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
+    graph: Result<Path<String>, PathRejection>,
+    params: Result<Query<SchemaParams>, QueryRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let graph = graph_path(graph)?;
+    scope(&role, &graph)?;
+    enabled(&service)?;
+    let Query(params) = params.map_err(|error| {
+        ApiError::new(StatusCode::BAD_REQUEST, "invalid_query", error.body_text())
+    })?;
+    let budget = params
+        .budget
+        .map(|budget| graph_json::parse_u64(&Value::String(budget)))
+        .transpose()
+        .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, "invalid_query", error))?;
+    let name = graph.clone();
+    let (declared, observed) = guarded_read(
+        &service,
+        move |db| {
+            let found = db.graph(&name)?;
+            Ok((found.schema(), found.observed_schema(budget)?))
+        },
+        untruncated,
+    )
+    .await?;
+    Ok(Json(graph_json::schema_output(
+        &graph, &declared, &observed,
+    )))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SchemaBody {
+    schema: graph_json::SchemaIn,
+}
+
+/// Replaces the declared schema (`{}` removes it); existing data is
+/// validated against it under the write guard.
+async fn put_schema(
+    State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
+    graph: Result<Path<String>, PathRejection>,
+    input: Result<Bytes, BytesRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let graph = graph_path(graph)?;
+    scope(&role, &graph)?;
+    enabled(&service)?;
+    let SchemaBody { schema } = parse(input)?;
+    let name = graph.clone();
+    let revision = guarded_write(&service, move |db| {
+        Ok(db.graph_mut(&name)?.put_schema(&schema.into_schema())?)
+    })
+    .await?;
+    Ok(Json(graph_json::put_schema_output(&graph, revision)))
+}
+
+/// Scoped credentials read vector records only through `read` and a
+/// collection binding; `open` also rejects names outside the binding.
+fn records_readable(db: &Database, role: &admin::Role, collection: &str) -> Result<(), ApiError> {
+    match role {
+        admin::Role::Scoped(grant) if !grant.allows(credentials::Op::Read) => {
+            Err(forbidden_scope())
+        }
+        admin::Role::Scoped(_) => open(db, role, &Target::Named(collection.to_owned())).map(|_| ()),
+        _ => Ok(()),
+    }
+}
+
+/// Hybrid retrieve (ITEM-041): the pivot collection must be readable by the
+/// caller (403 otherwise), and evidence from collections the caller may not
+/// read is dropped and counted in `redacted` (REQ-043).
+async fn retrieve(
+    State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
+    graph: Result<Path<String>, PathRejection>,
+    input: Result<Bytes, BytesRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let graph = graph_path(graph)?;
+    scope(&role, &graph)?;
+    enabled(&service)?;
+    let request = graph_json::retrieve_request(parse(input)?)
+        .map_err(|error| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_json", error))?;
+    let name = graph.clone();
+    let (output, _) = guarded_read(
+        &service,
+        move |db| {
+            records_readable(db, &role, &request.retrieve.pivot.collection)?;
+            let options = ReadOptions {
+                limits: request.limits,
+                projection: request.projection,
+                cancel: None,
+            };
+            let retrieval = db.graph(&name)?.retrieve(&request.retrieve, &options)?;
+            let mut readable: BTreeMap<&str, bool> = BTreeMap::new();
+            let mut redacted: BTreeMap<&str, u64> = BTreeMap::new();
+            let mut evidence = Vec::with_capacity(retrieval.evidence.len());
+            for item in &retrieval.evidence {
+                let collection = item.collection.as_str();
+                let allowed = *readable.entry(collection).or_insert_with(|| {
+                    // Only scope failures redact; e.g. a dropped collection
+                    // still has its (already read) evidence returned.
+                    !matches!(
+                        records_readable(db, &role, collection),
+                        Err(error) if error.code == "forbidden_scope"
+                    )
+                });
+                if allowed {
+                    evidence.push(item);
+                } else {
+                    *redacted.entry(collection).or_default() += 1;
+                }
+            }
+            let mut output = graph_json::retrieval_output(&name, &retrieval, &evidence);
+            output["redacted"] = json!({
+                "count": redacted.values().sum::<u64>(),
+                "collections": redacted.keys().collect::<Vec<_>>(),
+            });
+            Ok((output, retrieval.truncation))
+        },
+        |(_, truncation): &(Value, Vec<TruncationReason>)| truncation,
+    )
+    .await?;
+    Ok(Json(output))
+}
+
+/// Graph query text (EPIC-015): the same operations as the typed routes.
+async fn query_text(
+    State(service): State<Service>,
+    Extension(role): Extension<admin::Role>,
+    graph: Result<Path<String>, PathRejection>,
+    input: Result<Bytes, BytesRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let graph = graph_path(graph)?;
+    scope(&role, &graph)?;
+    enabled(&service)?;
+    let request: graph_json::QueryTextIn = parse(input)?;
+    // Text errors are reported before the graph is looked up.
+    crate::property_graph::parse_graph_query(&request.query, &request.params)
+        .map_err(|error| text_error(GraphTextError::Query(error)))?;
+    let limits = request.limits.resolve();
+    let name = graph.clone();
+    if request.explain {
+        let plan = guarded_read(
+            &service,
+            move |db| {
+                db.graph(&name)?
+                    .explain_text(&request.query, &request.params, &limits)
+                    .map_err(text_error)
+            },
+            untruncated,
+        )
+        .await?;
+        explanation(&graph, &plan).map(Json)
+    } else {
+        let read = guarded_read(
+            &service,
+            move |db| {
+                db.graph(&name)?
+                    .query_text(&request.query, &request.params, &limits)
+                    .map_err(text_error)
+            },
+            |read: &GraphRead<GraphOutput>| &read.truncation,
+        )
+        .await?;
+        read_output(&graph, &read).map(Json)
+    }
+}
+
+/// Query-text failures are 422 with their `graph_query_*` code; read errors
+/// map as on the typed routes.
+fn text_error(error: GraphTextError) -> ApiError {
+    match error {
+        GraphTextError::Query(_) => {
+            let (code, message) = graph_json::text_error(&error);
+            ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, code, message)
+        }
+        GraphTextError::Read(error) => error.into(),
+        #[allow(unreachable_patterns)]
+        _ => internal("unsupported graph query error"),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BatchIn {
     ops: Vec<OpIn>,
 }
@@ -741,6 +955,18 @@ enum OpIn {
         #[serde(deserialize_with = "de_u64")]
         id: u64,
     },
+    /// `GraphOp::EnsureEdge`: the type must be declared `unique_triple`.
+    EnsureEdge {
+        source: String,
+        relationship: String,
+        destination: String,
+        #[serde(default, deserialize_with = "de_properties")]
+        properties: Metadata,
+    },
+    /// `GraphOp::PutSchema`: replaces the declared schema.
+    PutSchema {
+        schema: graph_json::SchemaIn,
+    },
 }
 
 impl From<OpIn> for GraphOp {
@@ -850,6 +1076,20 @@ impl From<OpIn> for GraphOp {
             OpIn::DeleteVector { collection, id } => GraphOp::Vector {
                 collection,
                 mutation: Mutation::Delete { id },
+            },
+            OpIn::EnsureEdge {
+                source,
+                relationship,
+                destination,
+                properties,
+            } => GraphOp::EnsureEdge {
+                source,
+                relationship,
+                destination,
+                properties,
+            },
+            OpIn::PutSchema { schema } => GraphOp::PutSchema {
+                schema: schema.into_schema(),
             },
         }
     }
@@ -1457,6 +1697,7 @@ fn batch_output(graph: &str, result: &GraphBatchResult) -> Result<Value, ApiErro
                     "detached": {"node": node.to_string(), "record": record.to_string()}
                 }),
                 GraphOpOutcome::Vector => json!("vector"),
+                GraphOpOutcome::Schema => json!("schema"),
                 #[allow(unreachable_patterns)]
                 _ => return Err(internal("unsupported batch outcome")),
             })
@@ -1547,5 +1788,17 @@ mod tests {
         ));
         assert!(route_op(&Method::GET, "/v1/admin/graph/stats").is_none());
         assert!(route_op(&Method::PUT, "/v1/graphs/{graph}/batch").is_none());
+        for route in [RETRIEVE, QUERY_TEXT] {
+            assert!(read_post(&Method::POST, route));
+        }
+        assert!(matches!(
+            route_op(&Method::GET, SCHEMA),
+            Some(Op::GraphRead)
+        ));
+        assert!(matches!(
+            route_op(&Method::PUT, SCHEMA),
+            Some(Op::GraphWrite)
+        ));
+        assert!(!read_post(&Method::PUT, SCHEMA));
     }
 }
