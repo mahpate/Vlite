@@ -55,8 +55,26 @@
   <section id="database" class="wide">
     <div class="section-heading"><div><span class="eyebrow">DATABASE SNAPSHOT</span><h2>Connection</h2></div><span class="badge">Single-file database</span></div>
     <div class="connection-panel">
-    <div><h3>Your database, connected</h3><p>Connect to load records, run searches and inspect server health.</p>
-      <p class="identity-summary"><strong id="identity-name">Not signed in</strong><span id="identity-detail">Connect with a token to see which identity and permissions this dashboard is using.</span></p></div>
+    <div><h3>Your database, connected</h3><p>Sign in to load records, run searches and check server health.</p>
+      <p class="identity-summary"><strong id="identity-name">Not signed in</strong><span id="identity-detail">Sign in to see who you are and what you can do.</span></p></div>
+    <div class="sign-in-options">
+    <form id="sign-in" hidden>
+      <label>Username<input id="username" autocomplete="username" maxlength="64" spellcheck="false" autocapitalize="none" required></label>
+      <label>Password<input id="password" type="password" autocomplete="current-password" maxlength="128" required></label>
+      <button type="submit">Sign in</button>
+      <p class="connection-hint">Forgot your password? Ask your administrator.</p>
+    </form>
+    <form id="change-password" hidden>
+      <h3>Choose a new password</h3>
+      <p id="change-password-reason">Your administrator asked you to choose a new password before you continue.</p>
+      <label>Current password<input id="current-password" type="password" autocomplete="current-password" maxlength="128" required></label>
+      <label>New password (15 to 128 characters)<input id="new-password" type="password" autocomplete="new-password" minlength="15" maxlength="128" required></label>
+      <label>Repeat the new password<input id="repeat-password" type="password" autocomplete="new-password" minlength="15" maxlength="128" required></label>
+      <p class="connection-hint">A few unrelated words make a strong password. Leave out your username.</p>
+      <button type="submit">Change password</button><button id="change-password-cancel" type="button" class="secondary">Cancel</button>
+    </form>
+    <p id="sign-in-setup" class="connection-hint" hidden>No user accounts yet. Connect with the admin token, then add people in Administration &gt; Users.</p>
+    <details id="token-sign-in" class="token-sign-in" open><summary>Use an access token instead</summary>
     <form id="connection">
       <label>Bearer token <input id="token" type="password" autocomplete="off" spellcheck="false" aria-describedby="token-hint"></label>
       <details class="token-help"><summary>Where do I get a token?</summary>
@@ -70,8 +88,15 @@
         <p>Tokens are secrets. Do not share them in screenshots or logs. The dashboard cannot retrieve an administrator token for you.</p>
       </details>
       <p class="connection-hint">Kept in memory only; reload or Disconnect clears it. Use HTTPS beyond loopback.</p>
-      <button type="submit">Connect / refresh</button><button id="disconnect" type="button">Disconnect</button>
+      <button type="submit">Connect / refresh</button>
     </form>
+    </details>
+    <div class="session-actions">
+      <button id="session-refresh" type="button" class="secondary" hidden>Refresh</button>
+      <button id="change-password-open" type="button" class="secondary" hidden>Change password</button>
+      <button id="disconnect" type="button">Disconnect</button>
+    </div>
+    </div>
     </div>
     <div class="stat-grid" aria-label="Database snapshot">
       <div><span>Committed vectors</span><strong id="stat-records">--</strong></div>
@@ -562,7 +587,7 @@
   </section>
   <section id="tenants" class="wide">
     <span class="eyebrow">TENANT ADMINISTRATION</span><h2>Tenant namespaces and quotas</h2>
-    <p>Create a namespace, then issue a scoped API key bound to its tenant ID in <a href="#credentials">Scoped credentials</a>. To create its first collection, use collections <code>*</code> and grant the <code>collections</code> operation. This is namespace isolation, not a separate database process. Tenants sign in only with API keys; there are no tenant usernames or passwords.</p>
+    <p>Create a namespace, then give people access: add editor or viewer accounts for it in <a href="#users">Users</a>, or issue a scoped API key bound to its tenant ID in <a href="#credentials">Scoped credentials</a>. To create its first collection, use collections <code>*</code> and grant the <code>collections</code> operation. This is namespace isolation, not a separate database process.</p>
     <p id="tenant-note" data-admin-availability="tenants">Connect with a bootstrap admin credential. Tenants require admin authentication and a private VLITE_ADMIN_DIR.</p>
     <button id="tenant-list" type="button" data-admin data-feature="tenants">List active tenants</button>
     <h3>Create a tenant</h3>
@@ -580,9 +605,28 @@
     <p>Suspend blocks every API key bound to the tenant (REST and gRPC) and prevents new keys for it, without deleting data. Resume restores its unexpired, unrevoked keys.</p>
     <button id="tenant-suspend" type="button" class="danger" data-admin data-feature="tenants tenant_lifecycle">Suspend tenant</button>
     <button id="tenant-resume" type="button" class="secondary" data-admin data-feature="tenants tenant_lifecycle">Resume tenant</button>
-    <p>Delete only an empty tenant: drop its collections first. Deleting disables its bound credentials; it does not delete database records for you.</p>
+    <p>Delete only an empty tenant: drop its collections first. Deleting disables its bound API keys and removes its user accounts; it does not delete database records for you.</p>
     <button id="tenant-delete" type="button" class="danger" data-admin data-feature="tenants">Delete empty tenant</button>
     <pre id="tenant-result" aria-live="polite"></pre>
+  </section>
+  <section id="users" class="wide">
+    <span class="eyebrow">USER ACCOUNTS</span><h2>Users</h2>
+    <p>People sign in to this dashboard with a username and password. Super admins manage everything. Editors can change data and viewers can only read and search, either everywhere or inside one tenant.</p>
+    <p id="user-note" data-admin-availability="accounts">Sign in as a super admin, or connect with the admin token, to manage users.</p>
+    <button id="user-list" type="button" data-admin data-feature="accounts">List users</button>
+    <h3>Add or change a user</h3>
+    <label>User ID (leave blank to add someone; copy it from the list to change a user)<input id="user-id" maxlength="32" spellcheck="false" autocomplete="off"></label>
+    <label>Username (3 to 64 characters: letters, digits, dot, dash, underscore or @)<input id="user-username" maxlength="64" spellcheck="false" autocapitalize="none" autocomplete="off"></label>
+    <label>Role<select id="user-role"><option value="viewer">Viewer: read and search</option><option value="editor">Editor: read, search and change data</option><option value="super_admin">Super admin: manage everything</option></select></label>
+    <label>Tenant ID (editors and viewers only; blank allows every collection)<input id="user-tenant" maxlength="32" spellcheck="false" autocomplete="off"></label>
+    <label>Password (15 to 128 characters; needed to add a user or set a new password)<input id="user-password" type="password" maxlength="128" autocomplete="new-password"></label>
+    <label><input id="user-must-change" type="checkbox" checked> Ask for a new password at the next sign-in</label>
+    <label><input id="user-disabled" type="checkbox"> Account disabled (cannot sign in)</label>
+    <button id="user-create" type="button" data-admin data-feature="accounts">Add user</button>
+    <button id="user-save" type="button" class="secondary" data-admin data-feature="accounts">Save changes</button>
+    <button id="user-reset-password" type="button" class="secondary" data-admin data-feature="accounts">Set new password</button>
+    <button id="user-delete" type="button" class="danger" data-admin data-feature="accounts">Delete user</button>
+    <pre id="user-result" aria-live="polite"></pre>
   </section>
   <section id="transport-security" class="wide">
     <span class="eyebrow">TRANSPORT SECURITY</span><h2>Reload TLS certificates</h2>
@@ -649,7 +693,7 @@
     <button value="cancel">Cancel</button><button value="confirm">Confirm</button>
   </form>
 </dialog>
-<footer>Experimental VLite console &middot; Tokens and database contents are not stored in browser storage. No undo or automatic retries.</footer>
+<footer>Experimental VLite console &middot; Passwords, tokens and database contents are never stored in browser storage. No undo or automatic retries.</footer>
 </div>
 </body>
 </html>

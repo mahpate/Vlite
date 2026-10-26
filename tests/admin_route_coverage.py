@@ -75,6 +75,11 @@ INVENTORY = {
     ("POST", "/v1/admin/tenants/{id}/resume"): ("admin-tools.js", "tenant-resume"),
     ("POST", "/v1/admin/tls/reload"): ("admin-tools.js", "tls-reload"),
     ("GET", "/v1/admin/replication/export"): ("admin-tools.js", "replication-export"),
+    ("GET", "/v1/admin/users"): ("admin-tools.js", "user-list"),
+    ("POST", "/v1/admin/users"): ("admin-tools.js", "user-create"),
+    ("PUT", "/v1/admin/users/{id}"): ("admin-tools.js", "user-save"),
+    ("DELETE", "/v1/admin/users/{id}"): ("admin-tools.js", "user-delete"),
+    ("POST", "/v1/admin/users/{id}/password"): ("admin-tools.js", "user-reset-password"),
 }
 
 

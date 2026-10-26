@@ -12,7 +12,7 @@ test("every legacy section hash selects its containing workspace", () => {
     database: "overview", collections: "collections", browse: "collections", editor: "collections",
     "write-json": "collections", index: "collections", search: "search", retrieval: "search",
     explore: "search", operations: "administration", credentials: "administration", webhooks: "administration",
-    tenants: "administration", "transport-security": "administration", replication: "administration",
+    tenants: "administration", users: "administration", "transport-security": "administration", replication: "administration",
     observability: "observability", diagnostics: "observability", "change-feed": "observability",
     requests: "developer", "data-tools": "developer", "resumable-import": "developer"
   };
@@ -130,8 +130,18 @@ test("admin integration shares transport and exposes all module controls", () =>
     "tenant-usage", "tenant-new-name", "tenant-limit-mode", "tenant-new-limit", "tenant-save-settings", "tenant-suspend", "tenant-resume",
     "identity-badge", "identity-name", "identity-detail",
     "tls-reload", "tls-result", "replication-after", "replication-max-bytes", "replication-export", "replication-download", "replication-result",
-    "cred-tenant", "cred-rpm", "cred-max-vectors", "cred-max-vectors-per-collection"
+    "cred-tenant", "cred-rpm", "cred-max-vectors", "cred-max-vectors-per-collection",
+    "sign-in", "username", "password", "change-password", "current-password", "new-password", "repeat-password",
+    "change-password-cancel", "change-password-open", "session-refresh", "token-sign-in", "sign-in-setup",
+    "user-note", "user-list", "user-id", "user-username", "user-role", "user-tenant", "user-password", "user-must-change",
+    "user-disabled", "user-create", "user-save", "user-reset-password", "user-delete", "user-result"
   ]) assert.match(html, new RegExp(`id="${id}"`));
+  for (const id of ["user-list", "user-create", "user-save", "user-reset-password", "user-delete"]) {
+    assert.match(html, new RegExp(`id="${id}"[^>]*data-admin[^>]*data-feature="accounts"`));
+  }
+  assert.match(html, /id="user-note" data-admin-availability="accounts"/);
+  assert.match(html, /id="password" type="password" autocomplete="current-password"/);
+  assert.match(html, /id="sign-in" hidden/);
   for (const id of ["tenant-list", "tenant-create", "tenant-delete"]) {
     assert.match(html, new RegExp(`id="${id}"[^>]*data-admin[^>]*data-feature="tenants"`));
   }

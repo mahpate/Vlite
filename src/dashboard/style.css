@@ -81,6 +81,15 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .connection-panel label { margin-top: 0; }
 .connection-panel form { min-width: 0; }
 .connection-panel .connection-hint { margin: 12px 0; font-size: 12px; }
+.sign-in-options { display: grid; gap: 12px; min-width: 0; align-content: start; }
+.sign-in-options form h3 { margin-bottom: 4px; }
+.sign-in-options form > p:not(.connection-hint) { margin-bottom: 12px; }
+.sign-in-options label { margin-bottom: 12px; }
+.token-sign-in > summary { display: flex; align-items: center; min-height: 44px; color: var(--studio-accent); }
+.token-sign-in > summary::before { content: "+"; margin-right: 8px; }
+.token-sign-in[open] > summary::before { content: "-"; }
+.token-sign-in:not([data-alternative]) > summary { display: none; }
+.session-actions { display: flex; flex-wrap: wrap; align-items: center; }
 .token-help { margin: 12px 0; font-size: 13px; }
 .token-help summary { display: flex; align-items: center; min-height: 44px; color: var(--studio-accent); }
 .token-help summary::before { content: "+"; margin-right: 8px; }

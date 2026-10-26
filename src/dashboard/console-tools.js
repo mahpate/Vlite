@@ -333,7 +333,7 @@
     if (mode === "hybrid") return { column: "score", label: "Hybrid RRF score (higher is better)", better: "higher" };
     return { column: "distance", label: `${metric ?? "squared_l2"} distance (lower is better)`, better: "lower" };
   }
-  const SECRET_KEY = /^(?:token|secret|authorization|password|api_key|bearer)$|_token$|_secret$/i;
+  const SECRET_KEY = /^(?:token|secret|authorization|password|api_key|bearer)$|_token$|_secret$|_password$/i;
   const SECRET_TEXT = /vlk_[a-z2-7]{12}_[A-Za-z0-9_-]{20,}/g;
   // Deep copy for display/export surfaces: removes credential-looking fields and scoped tokens.
   function redact(value, depth = 0) {

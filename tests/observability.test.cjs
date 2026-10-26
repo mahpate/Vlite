@@ -89,7 +89,7 @@ test("read-only connection bridge reuses bearer auth without touching foreground
   const vm = require("node:vm");
   const source = fs.readFileSync("src/dashboard/app.js", "utf8");
   const start = source.indexOf("  window.VLiteObservabilityConnection = {");
-  const end = source.indexOf('  window.addEventListener("pagehide", disconnect);', start);
+  const end = source.indexOf('  window.addEventListener("pagehide",', start);
   assert.ok(start >= 0 && end > start);
   const calls = [];
   const context = { window: {}, connected: true, token: "test-bearer", apiBase: "", AbortController, setTimeout, clearTimeout,
@@ -110,4 +110,13 @@ test("read-only connection bridge reuses bearer auth without touching foreground
   context.connected = false;
   await assert.rejects(bridge.request("/metrics"), /Connect before/);
   assert.equal(bridge.token, undefined);
+  // A password session sends the same-origin cookie and the request header, never an Authorization header.
+  const sessionCalls = [];
+  context.connected = true;
+  context.token = "";
+  context.fetch = async (url, options) => { sessionCalls.push(options); return { ok: true, json: async () => ({ ok: true }) }; };
+  await bridge.request("/v1/admin/audit?limit=5");
+  assert.equal(sessionCalls[0].credentials, "same-origin");
+  assert.equal(sessionCalls[0].headers["X-VLite-Request"], "1");
+  assert.equal(sessionCalls[0].headers.Authorization, undefined);
 });

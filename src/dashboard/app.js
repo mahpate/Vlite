@@ -27,6 +27,10 @@
   const $ = (id) => document.getElementById(id);
   const apiBase = document.querySelector('meta[name="vlite-api-base"]')?.content || "";
   let token = "";
+  // Password sign-in keeps its session in an HttpOnly cookie; this page only knows who is signed in.
+  let session = null; // { username, mustChange } while a password session is active
+  let authConfig = null; // GET /v1/auth/config; null for servers without password sign-in
+  let changingPassword = false;
   let connected = false;
   let busy = false;
   let nextAfter = null;
@@ -75,9 +79,9 @@
       if (!allowed) element.disabled = true;
       element.dataset.interactionGate = allowed ? "allowed" : "blocked";
       if (element.hasAttribute("data-admin")) {
-        element.title = !connected ? "Connect to check administration access."
-          : capabilities?.role !== "admin" ? "Requires the bootstrap admin credential; scoped and read-only credentials cannot administer the server."
-            : element.dataset.feature && !element.dataset.feature.split(" ").every(feature) ? "Unavailable on this server or configuration. See the availability note in this view." : "";
+        element.title = !connected ? "Sign in to check administration access."
+          : capabilities?.role !== "admin" ? "Needs a super admin: a super-admin account or the bootstrap admin token."
+            : element.dataset.feature && !element.dataset.feature.split(" ").every(feature) ? "Not available on this server. See the note in this view." : "";
       }
     });
     const requirements = {
@@ -89,14 +93,15 @@
       persistent_audit: "Configure admin authentication and a private VLITE_ADMIN_DIR.",
       webhooks: "Configure a private VLITE_ADMIN_DIR on the server.",
       tenants: "Configure admin authentication and a private VLITE_ADMIN_DIR.",
+      accounts: "Configure admin authentication and a private VLITE_ADMIN_DIR.",
       tls_reload: "Configure a file-backed native TLS listener. Plaintext and reverse-proxy TLS cannot be reloaded here."
     };
     document.querySelectorAll("[data-admin-availability]").forEach(element => {
       const name = element.dataset.adminAvailability;
-      element.textContent = !connected || !capabilities ? "Disconnected. Connect in Overview to check this workflow's permissions and server configuration."
-        : capabilities.role !== "admin" ? `Unavailable for role "${capabilities.role}". Reconnect with the bootstrap admin credential; a scoped credential cannot grant administration access.`
-          : feature(name) ? "Available to the connected bootstrap admin. Review the instructions before confirming changes."
-            : `Unavailable on this server/configuration. ${requirements[name] || "Use a server version that reports this capability."}`;
+      element.textContent = !connected || !capabilities ? "Sign in on the Overview page to use this."
+        : capabilities.role !== "admin" ? "Needs a super admin. Your current sign-in cannot administer the server."
+          : feature(name) ? "Available. Review each confirmation before changing anything."
+            : `Not available on this server. ${requirements[name] || "Use a server version that reports this capability."}`;
     });
   }
   function collectionState() {
@@ -106,15 +111,108 @@
       : `Collection "${collection}" (/v1/collections/${collection}/...). Every browse, edit, search, import and index action applies only to this collection.`;
   }
   function connectionState() {
-    $("connection-badge").textContent = connected ? "Connected" : "Disconnected";
+    // Signed in with a temporary password: only the password change is allowed.
+    const pending = !connected && session?.mustChange === true;
+    $("connection-badge").textContent = connected ? "Connected" : pending ? "Password change needed" : "Disconnected";
     $("connection-badge").dataset.connected = String(connected);
-    const who = window.VLiteAdminTools?.utils?.identity?.(capabilities, connected)
-      ?? { kind: connected ? "unknown" : "none", text: connected ? "Signed in" : "Not signed in", detail: "" };
+    const who = pending ? { kind: "user", text: `Signed in as ${session.username}`, detail: "Choose a new password to continue." }
+      : window.VLiteAdminTools?.utils?.identity?.(capabilities, connected)
+        ?? { kind: connected ? "unknown" : "none", text: connected ? "Signed in" : "Not signed in", detail: "" };
     $("identity-badge").textContent = who.text;
     $("identity-badge").title = who.detail ? `${who.text}. ${who.detail}` : who.text;
     $("identity-badge").dataset.identity = who.kind;
     $("identity-name").textContent = who.text;
     $("identity-detail").textContent = who.detail;
+    authState();
+  }
+  // Shows the sign-in controls that fit this server and the current state. Access tokens always work.
+  function authState() {
+    const passwords = authConfig?.password_login === true && authConfig.setup_required !== true;
+    const signedIn = session !== null;
+    const forced = session?.mustChange === true;
+    const changing = signedIn && (forced || changingPassword);
+    $("sign-in").hidden = connected || signedIn || !passwords;
+    $("change-password").hidden = !changing;
+    $("change-password-cancel").hidden = forced;
+    $("change-password-reason").textContent = forced
+      ? "Your administrator gave you a temporary password. Choose your own to continue."
+      : "Enter your current password, then choose a new one.";
+    const hint = connected || signedIn ? ""
+      : authConfig?.setup_required === true ? "No user accounts yet. Connect with the admin token, then add people in Administration > Users."
+        : authConfig?.reason === "insecure_transport" ? "Password sign-in is off because the server cannot confirm this connection uses HTTPS. Use an access token."
+          : "";
+    $("sign-in-setup").textContent = hint;
+    $("sign-in-setup").hidden = !hint;
+    // With password sign-in available, the token form becomes a collapsed alternative.
+    const tokenForm = $("token-sign-in");
+    const alternative = passwords && !connected;
+    if (alternative !== (tokenForm.dataset.alternative === "true")) tokenForm.open = !alternative;
+    if (alternative) tokenForm.dataset.alternative = "true";
+    else delete tokenForm.dataset.alternative;
+    tokenForm.hidden = signedIn;
+    $("session-refresh").hidden = !(signedIn && connected);
+    $("change-password-open").hidden = !(signedIn && connected) || changing;
+    $("disconnect").textContent = signedIn ? "Sign out" : "Disconnect";
+  }
+  // Session routes: the browser sends the cookie; the custom header blocks cross-site form posts.
+  async function authRequest(method, route, body) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      const response = await fetch(`${apiBase}${route}`, {
+        method, signal: controller.signal, cache: "no-store", credentials: "same-origin", redirect: "error",
+        headers: { "X-VLite-Request": "1", ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+      const text = await response.text();
+      let value = null;
+      try { value = text ? JSON.parse(text) : null; } catch { value = null; }
+      return { ok: response.ok, status: response.status, value, retryAfter: response.headers.get("retry-after") };
+    } finally { clearTimeout(timeout); }
+  }
+  // Ends the password session on the server; the response clears the HttpOnly cookie.
+  function signOut(quiet = false) {
+    authRequest("POST", "/v1/auth/logout").then((result) => {
+      if (!result.ok && result.status !== 401) throw new Error(`HTTP ${result.status}`);
+    }).catch(() => {
+      if (!quiet) status("Sign-out did not reach the server. The session ends on its own after a period of inactivity.", true);
+    });
+  }
+  const retryText = (result) => {
+    const seconds = Number(result.retryAfter);
+    return Number.isFinite(seconds) && seconds > 0 ? `Try again in ${Math.ceil(seconds)} seconds.` : "Try again in a few minutes.";
+  };
+  // Sign-in and password messages are complete on their own; these requests never reach the inspector.
+  const authError = (message) => Object.assign(new Error(message), { help: "" });
+  function signInError(result) {
+    const code = result.value?.error?.code;
+    return {
+      invalid_credentials: "Wrong username or password.",
+      account_disabled: "This account is disabled. Ask your administrator.",
+      tenant_suspended: "Your tenant is suspended. Ask your administrator.",
+      insecure_transport: "Password sign-in needs HTTPS. Use an access token instead.",
+      too_many_attempts: `Too many sign-in attempts. ${retryText(result)}`,
+      busy: "The server is busy. Try again in a moment.",
+      accounts_disabled: "Password sign-in is turned off on this server. Use an access token.",
+      accounts_require_upgrade: "This account needs a newer database file. Ask your administrator.",
+      csrf_rejected: "Reload the page and try again.",
+    }[code] ?? `Sign-in failed (HTTP ${result.status}${code ? `: ${code}` : ""}).`;
+  }
+  function passwordError(result) {
+    const error = result.value?.error;
+    const known = {
+      wrong_password: "Your current password is not correct. Nothing changed.",
+      password_unchanged: "Choose a password that differs from your current one.",
+      too_many_attempts: `Too many attempts. ${retryText(result)}`,
+      busy: "The server is busy. Try again in a moment.",
+      not_signed_in: "Sign in with your username and password first.",
+      account_changed: "Your account changed meanwhile. Sign in again.",
+    }[error?.code];
+    if (known) return known;
+    if (["weak_password", "invalid_input"].includes(error?.code) && typeof error.message === "string" && error.message) {
+      return `${error.message[0].toUpperCase()}${error.message.slice(1)}.`;
+    }
+    return `Password change failed (HTTP ${result.status}${error?.code ? `: ${error.code}` : ""}).`;
   }
   function staleSnapshot() {
     for (const id of ["stat-records", "stat-bytes"]) $(id).textContent = "--";
@@ -140,10 +238,12 @@
     $("next-page").disabled = true;
   }
   const show = (id, value) => { $(id).textContent = JSON.stringify(value, null, 2); };
-  const status = (message, error = false) => {
+  const status = (message, error = false, override = undefined) => {
     $("status").textContent = message;
     $("status").dataset.error = String(error);
-    const help = error ? /401/.test(message) ? "Check the token; expired, rotated or revoked credentials require reconnecting with a current token."
+    const help = override !== undefined ? override : error ? /Your session ended/.test(message) ? "Sessions end after a period of inactivity, at sign-out, or when an administrator changes the account."
+      : /password_change_required/.test(message) ? "Choose a new password on the Overview page to continue."
+      : /401/.test(message) ? "Check the token; expired, rotated or revoked credentials require reconnecting with a current token."
       : /forbidden_scope/.test(message) ? "This scoped credential does not cover this collection or operation (or its collection/database was recreated). Ask an admin for a matching credential."
       : /403/.test(message) ? "This credential cannot perform this action. Use a write/admin credential when appropriate."
         : /precondition_failed|412/.test(message) ? "The record changed since it was loaded (or was deleted). Get it again to see the current revision, then reapply your edit."
@@ -201,10 +301,14 @@
     $("encryption-badge").textContent = "Encryption: not checked";
     $("snapshot-note").textContent = "Connect to view a database snapshot. Refresh after external writes.";
   }
-  function disconnect() {
+  function disconnect(options = {}) {
+    // Sign out ends a password session; leaving the page (endSession: false) keeps it for a reload.
+    const endSession = session !== null && options.endSession !== false;
     connectionGeneration++;
     token = "";
     connected = false;
+    session = null;
+    changingPassword = false;
     connectionState();
     activeRequest?.abort();
     window.VLiteObservabilityConnection?.request.invalidate();
@@ -212,8 +316,10 @@
     tools?.clear();
     adminTools?.disconnect();
     $("token").value = "";
+    for (const id of ["password", "current-password", "new-password", "repeat-password"]) $(id).value = "";
     clearData();
-    status("Disconnected; token and displayed results cleared");
+    if (endSession) signOut();
+    status(endSession ? "Disconnected; signed out and displayed results cleared" : "Disconnected; token and displayed results cleared");
     tools?.gate();
     adminTools?.gate?.();
     applyRoleGates();
@@ -274,7 +380,7 @@
     // A running resumable import can be paused between chunks.
     $("job-stop").disabled = false;
     try { await operation(); }
-    catch (error) { if (operationGeneration === connectionGeneration && !error.stale) status(error.message, true); }
+    catch (error) { if (operationGeneration === connectionGeneration && !error.stale) status(error.message, true, error.help); }
     finally {
       busy = false;
       operationGeneration = null;
@@ -323,8 +429,8 @@
     try {
       response = await fetch(`${apiBase}${path}`, {
         signal: controller.signal,
-        method, cache: "no-store", credentials: "omit", redirect: "error",
-        headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { "Content-Type": "application/json" }), ...(options.headers || {}) },
+        method, cache: "no-store", credentials: token ? "omit" : "same-origin", redirect: "error",
+        headers: { ...(token ? { Authorization: `Bearer ${token}` } : { "X-VLite-Request": "1" }), ...(body === undefined ? {} : { "Content-Type": "application/json" }), ...(options.headers || {}) },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
       const text = await response.text();
@@ -348,10 +454,13 @@
     });
     if (!response.ok) {
       if (response.status >= 500 && changesData) mutationChanged();
+      const ended = response.status === 401 && session !== null;
       if (response.status === 401) {
         connectionGeneration++;
         window.VLiteObservabilityConnection?.request.invalidate();
         token = "";
+        session = null;
+        changingPassword = false;
         connected = false;
         connectionState();
         clearData();
@@ -367,7 +476,7 @@
       failure.status = response.status;
       failure.code = detail?.code;
       failure.body = options.sensitive ? null : value;
-      if (response.status === 401) status(failure.message, true);
+      if (response.status === 401) status(ended ? "Your session ended. Sign in again." : failure.message, true);
       throw failure;
     }
     if (changesData) {
@@ -645,63 +754,176 @@
     $("collection").value = collection; // revert until the switch is confirmed and verified
     run(() => switchCollection(next));
   });
+  // Loads capabilities and the overview with the current credential: the access token, or else the session cookie.
+  async function connect() {
+    if (!tools) throw new Error("Console tools failed to initialize; reload the page. Not connecting (fails closed).");
+    advanceWorkflowContext();
+    const previous = collection;
+    clearData();
+    tools?.clear();
+    adminTools?.disconnect();
+    connected = true;
+    capabilities = null;
+    const reported = await api("GET", "/v1/capabilities");
+    if (reported.api_version !== 1 || !["admin", "read_only", "scoped"].includes(reported.role)) {
+      disconnect();
+      throw new Error("Unsupported server API version or role; use a matching console");
+    }
+    if (!token && reported.identity?.kind === "user") {
+      session = { username: String(reported.identity.username ?? ""), mustChange: reported.identity.must_change_password === true };
+      if (session.mustChange) {
+        connected = false;
+        connectionState();
+        status(`Signed in as ${session.username}. Choose a new password to continue.`);
+        return;
+      }
+    }
+    capabilities = reported;
+    let info = null;
+    if (extended()) {
+      const listed = await api("GET", "/v1/collections");
+      if (!listed.items.length) throw new Error("This credential covers no existing collection");
+      const names = listed.items.map((item) => item.name);
+      const selected = names.includes(previous) ? previous : names.includes("default") ? "default" : names[0];
+      populateCollections(listed.items, selected);
+      collection = selected;
+      info = listed.items.find((item) => item.name === selected);
+    }
+    collectionState();
+    const overview = {};
+    if (capabilities.role !== "scoped") overview.database = await api("GET", "/v1/database");
+    if (capabilities.role !== "scoped" || can("diagnostics")) overview.metrics = await api("GET", "/metrics");
+    if (info) overview.collection = info;
+    show("overview", overview);
+    $("encryption-badge").textContent = overview.database?.is_encrypted === true
+      ? `Encrypted (key ID ${overview.database.encryption_key_id ?? "unavailable"})`
+      : overview.database?.is_encrypted === false ? "Encryption: off" : "Encryption: unavailable to this credential/server";
+    showCollectionStats(collection === "default" && overview.database ? overview.database : info);
+    $("stat-bytes").textContent = String(overview.metrics?.database_bytes ?? "Unavailable");
+    $("snapshot-note").textContent = "Snapshot from the last connection refresh. External writes may change these values.";
+    if (info) applySettings(info);
+    if (can("read")) await refreshIndex(true);
+    show("compatibility", capabilities);
+    tools.connected(capabilities);
+    adminTools?.capabilities(capabilities);
+    $("mode").querySelector('option[value="approximate"]').disabled = !can("search_build");
+    $("mode").querySelector('option[value="auto"]').disabled = !feature("search_auto");
+    $("mode").querySelector('option[value="hybrid"]').disabled = !feature("search_hybrid");
+    $("explain").disabled = !feature("search_explain");
+    if ($("mode").selectedOptions[0]?.disabled) $("mode").value = "exact";
+    modeChanged();
+    connectionState();
+    status(session ? `Signed in as ${session.username}; overview refreshed` : "Connected; overview refreshed");
+  }
   $("connection").addEventListener("submit", (event) => {
     event.preventDefault();
     run(async () => {
       if (!tools) throw new Error("Console tools failed to initialize; reload the page. Not connecting (fails closed).");
-      advanceWorkflowContext();
-      token = $("token").value || token;
+      const typed = $("token").value;
       $("token").value = "";
-      const previous = collection;
-      clearData();
-      tools?.clear();
-      adminTools?.disconnect();
-      connected = true;
-      capabilities = null;
-      const reported = await api("GET", "/v1/capabilities");
-      if (reported.api_version !== 1 || !["admin", "read_only", "scoped"].includes(reported.role)) {
-        disconnect();
-        throw new Error("Unsupported server API version or role; use a matching console");
+      // A typed token replaces this browser's password session.
+      if (typed && session) {
+        session = null;
+        changingPassword = false;
+        signOut(true);
       }
-      capabilities = reported;
-      let info = null;
-      if (extended()) {
-        const listed = await api("GET", "/v1/collections");
-        if (!listed.items.length) throw new Error("This credential covers no existing collection");
-        const names = listed.items.map((item) => item.name);
-        const selected = names.includes(previous) ? previous : names.includes("default") ? "default" : names[0];
-        populateCollections(listed.items, selected);
-        collection = selected;
-        info = listed.items.find((item) => item.name === selected);
-      }
-      collectionState();
-      const overview = {};
-      if (capabilities.role !== "scoped") overview.database = await api("GET", "/v1/database");
-      if (capabilities.role !== "scoped" || can("diagnostics")) overview.metrics = await api("GET", "/metrics");
-      if (info) overview.collection = info;
-      show("overview", overview);
-      $("encryption-badge").textContent = overview.database?.is_encrypted === true
-        ? `Encrypted (key ID ${overview.database.encryption_key_id ?? "unavailable"})`
-        : overview.database?.is_encrypted === false ? "Encryption: off" : "Encryption: unavailable to this credential/server";
-      showCollectionStats(collection === "default" && overview.database ? overview.database : info);
-      $("stat-bytes").textContent = String(overview.metrics?.database_bytes ?? "Unavailable");
-      $("snapshot-note").textContent = "Snapshot from the last connection refresh. External writes may change these values.";
-      if (info) applySettings(info);
-      if (can("read")) await refreshIndex(true);
-      show("compatibility", capabilities);
-      tools.connected(capabilities);
-      adminTools?.capabilities(capabilities);
-      $("mode").querySelector('option[value="approximate"]').disabled = !can("search_build");
-      $("mode").querySelector('option[value="auto"]').disabled = !feature("search_auto");
-      $("mode").querySelector('option[value="hybrid"]').disabled = !feature("search_hybrid");
-      $("explain").disabled = !feature("search_explain");
-      if ($("mode").selectedOptions[0]?.disabled) $("mode").value = "exact";
-      modeChanged();
-      connectionState();
-      status("Connected; overview refreshed");
+      token = typed || token;
+      await connect();
     });
   });
-  $("disconnect").addEventListener("click", disconnect);
+  $("sign-in").addEventListener("submit", (event) => {
+    event.preventDefault();
+    run(async () => {
+      if (!tools) throw new Error("Console tools failed to initialize; reload the page. Not signing in (fails closed).");
+      const username = $("username").value.trim();
+      const password = $("password").value;
+      $("password").value = "";
+      if (!username || !password) throw authError("Enter your username and password.");
+      status("Signing in…");
+      let result;
+      try { result = await authRequest("POST", "/v1/auth/login", { username, password }); }
+      catch { throw authError("Could not reach the server. Check the connection and try again."); }
+      if (!result.ok) throw authError(signInError(result));
+      token = "";
+      changingPassword = false;
+      session = { username: String(result.value?.user?.username ?? username), mustChange: result.value?.must_change_password === true };
+      if (session.mustChange) {
+        connectionState();
+        status(`Signed in as ${session.username}. Choose a new password to continue.`);
+        return;
+      }
+      await connect();
+    }).then(() => { if (!$("change-password").hidden) $("current-password").focus(); });
+  });
+  $("change-password").addEventListener("submit", (event) => {
+    event.preventDefault();
+    run(async () => {
+      const current = $("current-password").value;
+      const next = $("new-password").value;
+      const repeat = $("repeat-password").value;
+      for (const id of ["current-password", "new-password", "repeat-password"]) $(id).value = "";
+      if (!session) throw authError("Sign in with your username and password first.");
+      if (!current) throw authError("Enter your current password. Nothing changed.");
+      if (next !== repeat) throw authError("The new passwords do not match. Nothing changed.");
+      try {
+        const check = window.VLiteAdminTools?.utils?.password;
+        if (check) check(next, "New password");
+        else if ([...next].length < 15) throw new Error("New password must be at least 15 characters; no request sent");
+      } catch (error) { throw authError(error.message); }
+      let result;
+      try { result = await authRequest("POST", "/v1/auth/password", { current_password: current, new_password: next }); }
+      catch { throw authError("The server did not confirm the change. Sign in again with your new password; if that fails, use your current one."); }
+      if (result.status === 401) {
+        disconnect({ endSession: false });
+        status("Your session ended. Sign in again.", true);
+        return;
+      }
+      if (!result.ok) throw authError(passwordError(result));
+      session.mustChange = false;
+      changingPassword = false;
+      if (connected) {
+        connectionState();
+        status("Password changed. Other sessions of this account were signed out.");
+        return;
+      }
+      await connect();
+      if (connected) status(`Password changed. Signed in as ${session.username}; overview refreshed`);
+    });
+  });
+  $("change-password-open").addEventListener("click", () => {
+    if (!session) return;
+    changingPassword = true;
+    authState();
+    $("current-password").focus();
+  });
+  $("change-password-cancel").addEventListener("click", () => {
+    for (const id of ["current-password", "new-password", "repeat-password"]) $(id).value = "";
+    changingPassword = false;
+    authState();
+  });
+  $("session-refresh").addEventListener("click", () => run(connect));
+  $("disconnect").addEventListener("click", () => disconnect());
+  // Reuses a password session cookie on load and when the page returns from the back/forward cache.
+  async function restoreSession() {
+    try {
+      const config = await authRequest("GET", "/v1/auth/config");
+      if (!config.ok || typeof config.value?.password_login !== "boolean") return;
+      authConfig = config.value;
+      authState();
+      if (!authConfig.password_login || connected || busy || token) return;
+      const current = await authRequest("GET", "/v1/auth/session");
+      if (!current.ok || current.value?.method !== "password" || connected || busy || token) return;
+      session = { username: String(current.value.user?.username ?? ""), mustChange: current.value.must_change_password === true };
+      if (session.mustChange) {
+        connectionState();
+        status(`Signed in as ${session.username}. Choose a new password to continue.`);
+        return;
+      }
+      await run(connect);
+    } catch {
+      // Password sign-in stays hidden; access tokens still work.
+    }
+  }
   $("cancel-request").addEventListener("click", () => {
     if (!activeRequest) return;
     activeRequest.abort();
@@ -975,8 +1197,8 @@
         const timeout = setTimeout(() => controller.abort(), 15000);
         try {
           const response = await fetch(`${apiBase}${route}`, {
-            method: "GET", signal: controller.signal, cache: "no-store", credentials: "omit", redirect: "error",
-            headers: { Authorization: `Bearer ${credential}` },
+            method: "GET", signal: controller.signal, cache: "no-store", credentials: credential ? "omit" : "same-origin", redirect: "error",
+            headers: credential ? { Authorization: `Bearer ${credential}` } : { "X-VLite-Request": "1" },
           });
           if (!response.ok) {
             const error = new Error(`HTTP ${response.status}`);
@@ -995,8 +1217,10 @@
       return request;
     })(),
   };
-  window.addEventListener("pagehide", disconnect);
+  window.addEventListener("pagehide", () => disconnect({ endSession: false }));
+  window.addEventListener("pageshow", (event) => { if (event.persisted) restoreSession(); });
   tools?.gate();
   adminTools?.gate?.();
   applyRoleGates();
+  if (window.location) restoreSession();
 })();

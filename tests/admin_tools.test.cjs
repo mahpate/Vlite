@@ -5,13 +5,17 @@ const vm = require("node:vm");
 
 function element(id, tagName = "BUTTON") {
   const listeners = [];
-  return { id, tagName, value: "", textContent: "", disabled: false, listeners,
-    addEventListener(type, fn) { if (type === "click") listeners.push(fn); },
-    click() { return Promise.all(listeners.map((fn) => fn())); } };
+  const inputs = [];
+  return { id, tagName, value: "", textContent: "", disabled: false, checked: false, listeners, inputs,
+    addEventListener(type, fn) { if (type === "click") listeners.push(fn); else if (type === "input") inputs.push(fn); },
+    click() { return Promise.all(listeners.map((fn) => fn())); },
+    input() { inputs.forEach((fn) => fn()); } };
 }
 const ids = ["tenant-list", "tenant-name", "tenant-max-vectors", "tenant-create", "tenant-id", "tenant-delete", "tenant-result",
   "tenant-usage", "tenant-new-name", "tenant-limit-mode", "tenant-new-limit", "tenant-save-settings", "tenant-suspend", "tenant-resume",
-  "tls-reload", "tls-result", "replication-after", "replication-max-bytes", "replication-export", "replication-download", "replication-result"];
+  "tls-reload", "tls-result", "replication-after", "replication-max-bytes", "replication-export", "replication-download", "replication-result",
+  "user-list", "user-id", "user-username", "user-role", "user-tenant", "user-password", "user-must-change", "user-disabled",
+  "user-create", "user-save", "user-reset-password", "user-delete", "user-result"];
 const elements = Object.fromEntries(ids.map((id) => [id, element(id, id.endsWith("-result") ? "PRE" : "BUTTON")]));
 const downloads = [];
 const sandbox = {
@@ -26,7 +30,8 @@ const sandbox = {
 vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync("src/dashboard/admin-tools.js", "utf8"), sandbox);
 const { init, utils } = sandbox.window.VLiteAdminTools;
-const { tenantName, maxVectors, tenantId, tenantRequest, tenantPath, tenantList, tenantSettings, tenantUsage, identity, exportPath, exportSegment, exportFilename, availability, explain } = utils;
+const { tenantName, maxVectors, tenantId, tenantRequest, tenantPath, tenantList, tenantSettings, tenantUsage, identity, exportPath, exportSegment, exportFilename, availability, explain,
+  username, password, userRole, userTenant, userId, userRequest, userChanges, userView, userList } = utils;
 
 // Validators mirror the server's byte/control rules.
 assert.equal(tenantName("a"), "a");
@@ -101,6 +106,59 @@ assert.equal(legacy.kind, "read_only");
 assert.match(legacy.text, /Read-only token \(this server does not report identity details\)/);
 assert.match(identity({ role: "admin", identity: { label: "" } }).text, /Admin token \(this server/);
 assert.match(identity({ role: "mystery" }).text, /Role "mystery"/);
+// Password accounts: role-specific text, tenant placement and a pending password change.
+const lowerHex = hex.toLowerCase();
+const editor = identity({ role: "scoped", identity: { kind: "user", label: "ann (Editor)", username: "ann", account_role: "editor", tenant_id: lowerHex, tenant_name: "Acme", must_change_password: false } });
+assert.equal(editor.kind, "user");
+assert.equal(editor.text, "Signed in as ann (Editor)");
+assert.equal(editor.detail, `Can read, search and change data inside tenant "Acme" (${lowerHex}). Cannot administer the server.`);
+const boss = identity({ role: "admin", identity: { kind: "user", label: "root (Super admin)", account_role: "super_admin", must_change_password: true } });
+assert.match(boss.detail, /^Full administrator: can manage users, tenants/);
+assert.match(boss.detail, /Choose a new password to continue\.$/);
+assert.match(identity({ role: "read_only", identity: { kind: "user", label: "v", account_role: "viewer" } }).detail, /^Can read and search in every collection\. Cannot change data/);
+
+// User validators mirror the server's account rules; nothing invalid is sent.
+assert.equal(username(" Alice.Ops@x "), "alice.ops@x");
+for (const bad of ["", "ab", ".alice", "a b c", "x".repeat(65), "al\nice", 7, null]) assert.throws(() => username(bad), /Username must be/, JSON.stringify(bad));
+const strong = "correct horse battery staple";
+assert.equal(password(strong), strong);
+assert.equal(password("😀".repeat(15)), "😀".repeat(15));
+for (const [bad, pattern] of [["", /required/], [5, /required/], ["x".repeat(14), /15 to 128/], ["x".repeat(129), /15 to 128/], ["😀".repeat(129), /it has 129/],
+  [`${"x".repeat(15)}\n`, /control characters/], [`${"x".repeat(15)}\ud800`, /invalid Unicode/]])
+  assert.throws(() => password(bad), pattern, JSON.stringify(bad));
+assert.equal(userRole("editor"), "editor");
+for (const bad of ["admin", "", "toString", "__proto__", undefined]) assert.throws(() => userRole(bad), /Choose a role/, String(bad));
+assert.equal(userTenant("  ", "editor"), null);
+assert.equal(userTenant("", "super_admin"), null);
+assert.equal(userTenant(` ${hex} `, "viewer"), lowerHex);
+assert.throws(() => userTenant(hex, "super_admin"), /cannot belong to a tenant/);
+assert.throws(() => userTenant("../x", "editor"), /Tenant ID must be/);
+assert.equal(userId(` ${hex} `), lowerHex);
+for (const bad of ["", "abc", `${hex}0`, "../../v1/database".padEnd(32, "a"), null]) assert.throws(() => userId(bad), /User ID must be/, String(bad));
+assert.deepEqual({ ...userRequest({ username: "Ann", password: strong, role: "editor", tenant: hex, mustChange: true, disabled: false }) },
+  { username: "ann", password: strong, role: "editor", tenant_id: lowerHex, must_change_password: true, disabled: false });
+assert.deepEqual({ ...userRequest({ username: "root1", password: strong, role: "super_admin", tenant: "", mustChange: false, disabled: true }) },
+  { username: "root1", password: strong, role: "super_admin", must_change_password: false, disabled: true });
+assert.throws(() => userRequest({ username: "ann", password: "short", role: "viewer" }), /15 to 128/);
+assert.throws(() => userRequest(null), /Choose a role/);
+const account = { id: "a".repeat(32), username: "ann", role: "editor", tenant_id: null, disabled: false, must_change_password: true };
+const same = { username: "", role: "editor", tenant: "", disabled: false, mustChange: true };
+assert.throws(() => userChanges(undefined, same), /List users first/);
+assert.throws(() => userChanges(account, same), /Nothing to change/);
+assert.throws(() => userChanges(account, { ...same, username: "ANN" }), /Nothing to change/);
+assert.deepEqual({ ...userChanges(account, { ...same, username: "bob.smith" }) }, { username: "bob.smith" });
+assert.deepEqual({ ...userChanges(account, { ...same, role: "viewer", tenant: hex, disabled: true, mustChange: false }) },
+  { role: "viewer", tenant_id: lowerHex, disabled: true, must_change_password: false });
+assert.deepEqual({ ...userChanges({ ...account, tenant_id: lowerHex }, { ...same, role: "super_admin" }) }, { role: "super_admin", tenant_id: null });
+assert.throws(() => userChanges(account, { ...same, role: "super_admin", tenant: hex }), /cannot belong to a tenant/);
+assert.deepEqual({ ...userView({ ...account, role_label: "Editor", tenant_id: lowerHex, tenant_name: "Acme", disabled: true, created_unix_ms: 0 }) },
+  { id: "a".repeat(32), username: "ann", role: "Editor", access: `tenant "Acme" (${lowerHex})`, status: "disabled (cannot sign in)", must_change_password: "yes, at next sign-in" });
+assert.equal(userView({ id: "b", username: "root", role: "super_admin", tenant_id: null }).access, "whole server");
+assert.equal(userView({ id: "c", username: "v", role: "viewer", tenant_id: null, must_change_password: false }).must_change_password, "no");
+assert.equal(userView({ role: "auditor", role_label: "Auditor" }).role, "Auditor");
+const users = userList({ items: [account], capacity: 1024 });
+assert.deepEqual([users.count, users.limit, users.users[0].role, users.users[0].access], [1, 1024, "Editor", "all collections"]);
+assert.throws(() => userList({}), /Unexpected user list/);
 
 assert.equal(exportPath("", ""), "/v1/admin/replication/export");
 assert.equal(exportPath("18446744073709551615", "16777216"), "/v1/admin/replication/export?after_sequence=18446744073709551615&max_bytes=16777216");
@@ -139,6 +197,14 @@ assert.equal(availability({ ...adminCaps, routes: ["/v1/admin/tenants/{id}/usage
 assert.match(ro.lifecycle.reason, /bootstrap admin/);
 assert.match(disabled.lifecycle.reason, /VLITE_ADMIN_DIR/);
 assert.match(availability(null, false).lifecycle.reason, /Connect/);
+// User management needs a super admin and a server with accounts enabled.
+assert.equal(availability({ ...adminCaps, features: { ...adminCaps.features, accounts: true } }).users.allowed, true);
+assert.match(availability(adminCaps).users.reason, /VLITE_ADMIN_DIR/);
+assert.match(ro.users.reason, /requires a super admin/);
+assert.match(availability(null, false).users.reason, /Connect/);
+assert.match(explain(Object.assign(new Error("HTTP 409: cannot_modify_self"), { code: "cannot_modify_self", status: 409 })), /Use Change password/);
+assert.match(explain(Object.assign(new Error("HTTP 422: weak_password"), { code: "weak_password", status: 422 })), /less predictable/);
+assert.match(explain(Object.assign(new Error("HTTP 409: username_taken"), { code: "username_taken", status: 409 })), /ignore case/);
 assert.match(explain(Object.assign(new Error("HTTP 403"), { code: "tenant_suspended", status: 403 })), /Resume the tenant first/);
 assert.match(explain(Object.assign(new Error("HTTP 403"), { code: "tenant_unavailable", status: 403 })), /was deleted/);
 assert.match(explain(Object.assign(new Error("HTTP 409: tenant_not_empty: x"), { code: "tenant_not_empty", status: 409 })), /Drop those collections first/);
@@ -162,7 +228,7 @@ function fakeCtx() {
   };
   return ctx;
 }
-const reset = () => { for (const e of Object.values(elements)) { e.listeners.length = 0; e.value = ""; e.textContent = ""; e.disabled = false; } };
+const reset = () => { for (const e of Object.values(elements)) { e.listeners.length = 0; e.inputs.length = 0; e.value = ""; e.textContent = ""; e.disabled = false; e.checked = false; } };
 
 (async () => {
   // Missing markup fails loudly; init itself issues no requests.
@@ -281,6 +347,108 @@ const reset = () => { for (const e of Object.values(elements)) { e.listeners.len
   assert.match(elements["tenant-result"].textContent, /No live tenant has this ID/);
   ctx.caps = adminCaps;
 
+  // Users: List caches accounts; entering a listed ID loads it; Save sends only changed fields.
+  ctx.caps = { ...adminCaps, features: { ...adminCaps.features, accounts: true } };
+  tools.capabilities(ctx.caps);
+  assert.equal(elements["user-result"].textContent, "");
+  const uid = "a".repeat(32);
+  const ann = { id: uid, username: "ann", role: "editor", role_label: "Editor", tenant_id: null, tenant_name: null, disabled: false, must_change_password: true };
+  ctx.responses.push({ items: [ann], capacity: 1024 });
+  await elements["user-list"].click();
+  assert.deepEqual([ctx.calls.at(-1).method, ctx.calls.at(-1).path, ctx.calls.at(-1).body], ["GET", "/v1/admin/users", undefined]);
+  assert.match(elements["user-result"].textContent, /"count": 1/);
+  assert.match(elements["user-result"].textContent, /"access": "all collections"/);
+  elements["user-id"].value = ` ${uid.toUpperCase()} `;
+  elements["user-id"].input();
+  assert.deepEqual([elements["user-username"].value, elements["user-role"].value, elements["user-tenant"].value, elements["user-must-change"].checked, elements["user-disabled"].checked],
+    ["ann", "editor", "", true, false]);
+  assert.match(elements["user-result"].textContent, /"loaded"/);
+  let userCalls = ctx.calls.length;
+  await elements["user-save"].click();
+  assert.equal(ctx.calls.length, userCalls);
+  assert.match(elements["user-result"].textContent, /Nothing to change/);
+  elements["user-role"].value = "viewer";
+  elements["user-disabled"].checked = true;
+  ctx.answer = false;
+  await elements["user-save"].click();
+  assert.equal(ctx.calls.length, userCalls);
+  assert.equal(ctx.confirms.at(-1), `Update "ann" (${uid}): role → Viewer; account disabled → yes? Their open sessions end and they sign in again.`);
+  ctx.answer = true;
+  ctx.responses.push({ user: { ...ann, role: "viewer", role_label: "Viewer", disabled: true }, changed: ["role", "disabled"] });
+  await elements["user-save"].click();
+  assert.deepEqual([ctx.calls.at(-1).method, ctx.calls.at(-1).path, { ...ctx.calls.at(-1).body }], ["PUT", `/v1/admin/users/${uid}`, { role: "viewer", disabled: true }]);
+  assert.match(elements["user-result"].textContent, /"status": "disabled \(cannot sign in\)"/);
+  await elements["user-save"].click();
+  assert.match(elements["user-result"].textContent, /Nothing to change/);
+
+  // Create validates locally, confirms, clears the password field and fills in the new ID.
+  elements["user-id"].value = "";
+  elements["user-username"].value = "Bob";
+  elements["user-password"].value = "short";
+  elements["user-role"].value = "viewer";
+  elements["user-tenant"].value = "";
+  elements["user-must-change"].checked = true;
+  elements["user-disabled"].checked = false;
+  userCalls = ctx.calls.length;
+  await elements["user-create"].click();
+  assert.match(elements["user-result"].textContent, /15 to 128 characters/);
+  elements["user-password"].value = strong;
+  elements["user-role"].value = "super_admin";
+  elements["user-tenant"].value = hex;
+  await elements["user-create"].click();
+  assert.match(elements["user-result"].textContent, /cannot belong to a tenant/);
+  assert.equal(ctx.calls.length, userCalls);
+  elements["user-tenant"].value = "";
+  const bobId = "b".repeat(32);
+  ctx.responses.push({ user: { id: bobId, username: "bob", role: "super_admin", tenant_id: null, disabled: false, must_change_password: true } });
+  await elements["user-create"].click();
+  assert.deepEqual([ctx.calls.at(-1).method, ctx.calls.at(-1).path, { ...ctx.calls.at(-1).body }],
+    ["POST", "/v1/admin/users", { username: "bob", password: strong, role: "super_admin", must_change_password: true, disabled: false }]);
+  assert.equal(ctx.confirms.at(-1), `Add super admin "bob" with access to the whole server? They must choose a new password at their first sign-in. Share the password with them privately.`);
+  assert.equal(elements["user-password"].value, "");
+  assert.equal(elements["user-id"].value, bobId);
+  assert.match(elements["user-result"].textContent, /"added"/);
+
+  // Set new password requires a password; the request carries the must-change choice.
+  userCalls = ctx.calls.length;
+  await elements["user-reset-password"].click();
+  assert.equal(ctx.calls.length, userCalls);
+  assert.match(elements["user-result"].textContent, /New password is required/);
+  elements["user-password"].value = strong;
+  elements["user-must-change"].checked = false;
+  ctx.responses.push({ user: { id: bobId, username: "bob", role: "super_admin", tenant_id: null, disabled: false, must_change_password: false } });
+  await elements["user-reset-password"].click();
+  assert.deepEqual([ctx.calls.at(-1).method, ctx.calls.at(-1).path, { ...ctx.calls.at(-1).body }], ["POST", `/v1/admin/users/${bobId}/password`, { password: strong, must_change_password: false }]);
+  assert.equal(ctx.confirms.at(-1), `Set a new password for "bob" (${bobId})? Their open sessions end. Share the password with them privately.`);
+  assert.equal(elements["user-password"].value, "");
+
+  // Delete explains server refusals; a deleted account must be listed again before saving.
+  ctx.responses.push(Object.assign(new Error("HTTP 409: cannot_modify_self"), { status: 409, code: "cannot_modify_self" }));
+  await elements["user-delete"].click();
+  assert.deepEqual([ctx.calls.at(-1).method, ctx.calls.at(-1).path], ["DELETE", `/v1/admin/users/${bobId}`]);
+  assert.match(ctx.confirms.at(-1), /cannot undo this\.$/);
+  assert.match(elements["user-result"].textContent, /Use Change password/);
+  ctx.responses.push({ deleted: true });
+  await elements["user-delete"].click();
+  assert.match(elements["user-result"].textContent, /"deleted": true/);
+  userCalls = ctx.calls.length;
+  await elements["user-save"].click();
+  assert.equal(ctx.calls.length, userCalls);
+  assert.match(elements["user-result"].textContent, /List users first/);
+
+  // Disconnect forgets the typed password and the cached accounts.
+  elements["user-password"].value = strong;
+  tools.disconnect();
+  assert.equal(elements["user-password"].value, "");
+  assert.equal(elements["user-result"].textContent, "");
+  elements["user-id"].value = uid;
+  elements["user-username"].value = "";
+  elements["user-id"].input();
+  assert.equal(elements["user-username"].value, "");
+  ctx.caps = adminCaps;
+  tools.capabilities(adminCaps);
+  assert.match(elements["user-result"].textContent, /User accounts are disabled/);
+
   // TLS reload uses the body-less POST schema.
   ctx.responses.push({ reloaded: 2 });
   await elements["tls-reload"].click();
@@ -337,10 +505,13 @@ const reset = () => { for (const e of Object.values(elements)) { e.listeners.len
   tools.capabilities(ctx.caps);
   assert.match(elements["tenant-result"].textContent, /bootstrap admin/);
   assert.match(elements["tls-result"].textContent, /bootstrap admin/);
+  assert.match(elements["user-result"].textContent, /User management requires a super admin/);
   assert.equal(elements["replication-result"].textContent, "");
   await elements["tenant-list"].click();
   await elements["tls-reload"].click();
   await elements["tenant-suspend"].click();
+  await elements["user-list"].click();
+  await elements["user-delete"].click();
   assert.equal(ctx.calls.length, count);
   ctx.caps = { role: "admin", features: { tenants: false, tls_reload: false, native_tls: true }, routes: [] };
   tools.capabilities(ctx.caps);

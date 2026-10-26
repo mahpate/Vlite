@@ -17,7 +17,7 @@
     },
     administration: {
       title: "Administration", description: "Operations, access and recovery. Writes require confirmation.",
-      tabs: [["operations", "Health / tokens"], ["credentials", "Scoped credentials / audit"], ["tenants", "Tenants"], ["admin-backups", "Backup / restore"], ["admin-auto-maintenance", "Automation"], ["webhooks", "Webhooks / PITR"], ["transport-security", "TLS certificates"], ["replication", "Replication export"]]
+      tabs: [["operations", "Health / tokens"], ["credentials", "Scoped credentials / audit"], ["tenants", "Tenants"], ["users", "Users"], ["admin-backups", "Backup / restore"], ["admin-auto-maintenance", "Automation"], ["webhooks", "Webhooks / PITR"], ["transport-security", "TLS certificates"], ["replication", "Replication export"]]
     },
     developer: {
       title: "Developer Console", description: "Inspect requests and review data workflows.",
@@ -52,6 +52,7 @@
     credentials: ["administration", "credentials"],
     webhooks: ["administration", "webhooks"],
     tenants: ["administration", "tenants"],
+    users: ["administration", "users"],
     replication: ["administration", "replication"],
     "transport-security": ["administration", "transport-security"],
     "admin-health": ["administration", "operations", "operations"],
