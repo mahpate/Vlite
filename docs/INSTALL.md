@@ -65,17 +65,11 @@ python -m pip install ./vlite_embedded-0.4.1-py3-none-win_amd64.whl
 
 That example is for Windows x64. Linux x86_64/glibc 2.28+ should use the
 `manylinux_2_28_x86_64` wheel. Do not use a host-native `linux_x86_64` wheel
-unless its build baseline matches your runtime. macOS wheels include the
-architecture and minimum OS version in their names; use a matching wheel.
-There is no universal, musl/Alpine or general ARM support claim.
-
-The initial v0.1.0 `universal2` macOS Python wheel was withdrawn after final
-inspection found it contained only ARM64 code. Do not install cached copies.
-Use the corrected `macosx_11_0_arm64` wheel on Apple Silicon; Intel macOS
-requires a source build. The release manifest records the corrective wheel's
-packaging source commit. The macOS Node package and native archive are
-unaffected. Builds now verify the actual Mach-O architecture against the
-wheel tag.
+unless its build baseline matches your runtime. macOS wheels are arm64 only
+and include the minimum OS version in their names; Intel macOS requires a
+source build. An early `universal2` macOS wheel was withdrawn because it
+contained only ARM64 code; do not install cached copies. There is no
+universal, musl/Alpine or general ARM support claim.
 
 ```python
 from vlite_embedded import NativeLibrary
@@ -95,10 +89,9 @@ with NativeLibrary().open("example.vlite") as db:
     print(db.search_approximate_ready([1, 0, 0], 5, metric="cosine"))
 ```
 
-The default remains squared L2. Each owner keeps one in-memory graph:
-building another metric replaces it, and ready-only queries reject a mismatched
-metric without rebuilding. Reopen loses the index. Inner-product search remains
-exact-only. No file format migration is required; back up before any upgrade.
+The default is squared L2. Each owner keeps one in-memory graph: building
+another metric replaces it, and ready-only queries reject a mismatched metric
+without rebuilding. Reopen loses the index. Inner-product search is exact-only.
 
 ## Embedded Node.js / TypeScript
 
@@ -154,13 +147,13 @@ can use the [OpenAPI contract](../src/openapi.json).
 Extract the `vlite-<Rust-target>.zip` matching your platform. It contains the
 server, maintenance tools, native library, C header, documentation and MIT
 license. The Linux arm64 archive contains command-line binaries, contracts and
-documentation, not a C shared library or embedded SDK. Python and Node consumers should prefer the self-contained packages
-above rather than copying native libraries manually.
+documentation, not a C shared library or embedded SDK. Python and Node users
+should prefer the self-contained packages above to copying native libraries.
 
 One process owns a database file at a time. Use the service when applications
-need shared access. The live dataset must fit in RAM. Back up before upgrading;
-v0.1.x releases do not claim that a 1.0 stability contract
-or physical power-loss certification has been achieved.
+need shared access. The live dataset must fit in RAM. Back up before upgrading.
+VLite does not yet offer a 1.0 stability contract or physical power-loss
+certification.
 
 ## Additional packages
 

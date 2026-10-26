@@ -40,14 +40,14 @@
 <main>
   <section class="hero">
     <div class="wrap">
-      <span class="eyebrow">Measured, not quoted</span>
+      <span class="eyebrow">Benchmarks</span>
       <h1>VLite <span class="grad">benchmarks</span></h1>
-      <p class="lead">Compare search latency, recall, build time and storage.</p>
+      <p class="lead">Search latency, recall, build time and storage, measured on fixed builds with raw data.</p>
       <div class="cta">
-        <a class="btn primary" href="#current-source">Vector search results</a>
-        <a class="btn" href="#historical-results">Historical multi-engine results</a>
+        <a class="btn primary" href="#current-source">Vector search</a>
+        <a class="btn" href="#historical-results">Multi-engine results</a>
+        <a class="btn" href="#concurrent-readers">Concurrent reads</a>
         <a class="btn" href="#reproduce">Reproduce</a>
-        <a class="btn" href="./#features">VLite features</a>
       </div>
     </div>
   </section>
@@ -68,67 +68,29 @@
           <tr><td>Source, graph enabled</td><td>0.934 ms</td><td>0.635 / 0.725 ms</td><td>0.941</td><td>3,763 ms</td><td>56,649 vectors/s</td><td>36.747 ms</td></tr>
         </tbody>
       </table></div>
+      <ul class="list">
+        <li>Under mixed writes (16 durable replacements per query), lazy rebuilds push median trial ANN p99 to
+          3,753 / 3,745 / 3,749 ms for the tag / default / graph builds.</li>
+        <li>Static recall is 0.941, below a 0.99 target; mixed recall is 0.954. Exact IDs and distances match the independent oracle.</li>
+        <li>Differences between the builds are small and do not establish a speedup or a regression.</li>
+      </ul>
       <details class="benchmark-archive"><summary>Builds and measurement details</summary>
         <p>Release baseline: tag <code>v0.4.1</code>. Source variants: commit <code>059650e</code>,
-          with default features and with graph enabled. Measured on October 25, 2026 UTC,
-          using Rust release builds on WSL2 x86_64 and a Xeon Platinum 8370C.
-          These are fixed historical builds, not rolling measurements of the latest checkout.</p>
-        <p>A contended first attempt was excluded. Replacement runs used a coordinated
-          shared-host window with other builds and benchmarks paused, not dedicated hardware.</p>
+          with default features and with graph enabled (vector-path overhead only, not graph traversal).
+          Fixed builds, measured on October 25, 2026 UTC with Rust release builds on a shared WSL2 x86_64 host
+          (Xeon Platinum 8370C), not dedicated hardware. A contended first attempt was excluded.</p>
+        <p>Thirty fresh child processes, one seed and metric, sequential queries and a warm filesystem.
+          Static values are medians of trial-level statistics. Mixed trials rebuild at queries 17, 34, 51, 68 and 85.
+          Whole-child peak RSS was about 11.84 MiB in each variant, including dataset and oracle.</p>
       </details>
-      <p>Static values are medians of trial-level statistics. Whole-child peak RSS was about 11.84 MiB in each variant,
-        including dataset and oracle. Graph-enabled here means vector-path overhead only, not graph traversal.
-        Small differences do not establish equivalence, a speedup or a regression.</p>
-      <div class="grid cols-2">
-        <div class="card"><h3>First priority: mixed-write tail latency</h3>
-          <p>With 16 durable replacements per query, lazy rebuilds push median trial ANN p99 to
-            3,753 / 3,745 / 3,749 ms for the tag / default / graph builds.
-            All mixed trials rebuild at queries 17, 34, 51, 68 and 85.
-            Measure background maintenance together with availability, not latency alone.</p></div>
-        <div class="card"><h3>Second priority: quality before speed</h3>
-          <p>Static recall is 0.941, below a 0.99 target; mixed recall is 0.954.
-            Exact IDs and distances match the independent oracle.
-            Sweep ef and profile the roughly 3.75–3.79-second construction cost before claiming an ANN improvement.</p></div>
-      </div>
-      <p class="muted">Thirty fresh children, one seed/metric, sequential queries, warm filesystem and no new cross-engine measurements.
-        Pre-child WSL CPU was median 0.094%, maximum 3.778%; Windows-host activity was not continuously measured.
-        Historical comparison results below remain unchanged.
-        <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/results/vector-revisions-4096-128d-wsl-quiet.json">Raw replacement samples and hashes</a>
-        &middot; <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/RESULTS.md">Full findings and limitations</a>
+      <p class="muted"><a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/results/vector-revisions-4096-128d-wsl-quiet.json">Raw samples and hashes</a>
+        &middot; <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/RESULTS.md">Findings and limitations</a>
         &middot; <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/README.md">Reproduction</a></p>
     </div>
   </section>
 
   <details id="historical-results" class="benchmark-archive">
     <summary class="wrap">Historical multi-engine results</summary>
-  <section id="summary">
-    <div class="wrap">
-      <div class="section-head">
-        <div class="kicker">Historical summary &middot; archived builds</div>
-        <h2>What the earlier measurements showed</h2>
-        <p>Archived builds and workloads; exact configurations are linked with the results.</p>
-      </div>
-      <div class="grid cols-2">
-        <div class="card">
-          <h3>Strengths in the archived runs</h3>
-          <ul class="list">
-            <li>Smallest measured ANN database footprint in these runs, in one portable file.</li>
-            <li>Every ingest batch is a checksummed, fsync-before-ack atomic commit with fail-closed recovery.</li>
-            <li>Recall@10 is 1.0 at 20k × 128 and about 0.968 at 100k × 768; latency depends on dimensionality.</li>
-          </ul>
-        </div>
-        <div class="card">
-          <h3>Bottlenecks identified in the archived runs</h3>
-          <ul class="list">
-            <li>HNSW construction was single-threaded in the measured builds.</li>
-            <li>Reopen with ANN: the HNSW index is rebuilt in memory unless an index snapshot is enabled.</li>
-            <li>Bulk ingest throughput and the measured JSON-over-C-ABI Python path. Later releases also offer typed-input methods.</li>
-          </ul>
-        </div>
-      </div>
-    </div>
-  </section>
-
   <section id="results">
     <div class="wrap">
       <div class="section-head"><div class="kicker">Historical multi-engine benchmark &middot; archived builds</div>
@@ -140,7 +102,7 @@
         recall against a tie-aware float64 oracle. HNSW M=16, ef_construction=100, ef_search=100 where exposed;
         10 warmups, one sequential client, one query in flight. QPS is sequential queries/second, not maximum service throughput.
         Each engine/mode/trial uses a fresh process; server containers each have 4 CPUs and 4 GiB, with direct bridge-IP connections.</p>
-<h3 style="margin-top:36px">20,000 × 128 · Embedded tier</h3>
+<h3>20,000 × 128 · Embedded tier</h3>
 <p class="muted">Raw trials, versions, hashes and parameters: <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/results/engines-embedded-20k-128d-wsl.json">engines-embedded-20k-128d-wsl.json</a>.</p>
 <div class="table-wrap"><table><thead><tr><th>Mode</th><th>Engine</th><th>p50 ms</th><th>Sequential QPS</th><th>Recall@10</th><th>Ingest + build s</th><th>Build s</th><th>Disk MiB</th><th>Reopen + first query s</th></tr></thead><tbody>
 <tr><td>exact</td><td>VLite archived build</td><td>1.413</td><td>695</td><td>1.0000</td><td>1.80</td><td>0.00</td><td>10.2</td><td>0.07</td></tr>
@@ -154,7 +116,7 @@
 <tr><td>ann</td><td>LanceDB 0.40.0 (IVF_HNSW_SQ)</td><td>7.188</td><td>133</td><td>0.9485</td><td>1.12</td><td>0.93</td><td>15.4</td><td>0.03</td></tr>
 <tr><td>ann</td><td>FAISS 1.15.1 (library)</td><td>0.079</td><td>11,339</td><td>0.9995</td><td>2.52</td><td>0.00</td><td>N/A</td><td>N/A</td></tr>
 </tbody></table></div>
-<h3 style="margin-top:36px">20,000 × 128 · Server tier</h3>
+<h3>20,000 × 128 · Server tier</h3>
 <p class="muted">Raw trials, versions, hashes and parameters: <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/results/engines-server-20k-128d-wsl.json">engines-server-20k-128d-wsl.json</a>.</p>
 <div class="table-wrap"><table><thead><tr><th>Mode</th><th>Engine</th><th>p50 ms</th><th>Sequential QPS</th><th>Recall@10</th><th>Ingest + build s</th><th>Build s</th><th>Disk MiB</th><th>Reopen + first query s</th></tr></thead><tbody>
 <tr><td>exact</td><td>VLite archived server (REST)</td><td>2.061</td><td>481</td><td>1.0000</td><td>1.87</td><td>0.00</td><td>10.1</td><td>1.32</td></tr>
@@ -166,7 +128,7 @@
 <tr><td>ann</td><td>Qdrant 1.15.5 (gRPC)</td><td>1.464</td><td>681</td><td>1.0000</td><td>1.63</td><td>0.93</td><td>165.3</td><td>1.67</td></tr>
 <tr><td>ann</td><td>pgvector 0.8.1 / PG 17.8</td><td>1.016</td><td>961</td><td>1.0000</td><td>2.95</td><td>2.72</td><td>98.1</td><td>1.40</td></tr>
 </tbody></table></div>
-<h3 style="margin-top:36px">100,000 × 768 · Embedded tier</h3>
+<h3>100,000 × 768 · Embedded tier</h3>
 <p class="muted">Raw trials, versions, hashes and parameters: <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/results/engines-embedded-100k-768d-wsl.json">engines-embedded-100k-768d-wsl.json</a>.</p>
 <div class="table-wrap"><table><thead><tr><th>Mode</th><th>Engine</th><th>p50 ms</th><th>Sequential QPS</th><th>Recall@10</th><th>Ingest + build s</th><th>Build s</th><th>Disk MiB</th><th>Reopen + first query s</th></tr></thead><tbody>
 <tr><td>exact</td><td>VLite archived build</td><td>32.210</td><td>31</td><td>1.0000</td><td>50.62</td><td>0.00</td><td>295.3</td><td>1.89</td></tr>
@@ -180,7 +142,7 @@
 <tr><td>ann</td><td>LanceDB 0.40.0 (IVF_HNSW_SQ)</td><td>10.160</td><td>96</td><td>0.9055</td><td>20.27</td><td>16.58</td><td>391.8</td><td>0.30</td></tr>
 <tr><td>ann</td><td>FAISS 1.15.1 (library)</td><td>0.505</td><td>1,938</td><td>0.9550</td><td>53.18</td><td>0.00</td><td>N/A</td><td>N/A</td></tr>
 </tbody></table></div>
-<h3 style="margin-top:36px">100,000 × 768 · Server tier</h3>
+<h3>100,000 × 768 · Server tier</h3>
 <p class="muted">Raw trials, versions, hashes and parameters: <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/results/engines-server-100k-768d-wsl.json">engines-server-100k-768d-wsl.json</a>.</p>
 <div class="table-wrap"><table><thead><tr><th>Mode</th><th>Engine</th><th>p50 ms</th><th>Sequential QPS</th><th>Recall@10</th><th>Ingest + build s</th><th>Build s</th><th>Disk MiB</th><th>Reopen + first query s</th></tr></thead><tbody>
 <tr><td>exact</td><td>VLite archived server (REST)</td><td>34.022</td><td>29</td><td>1.0000</td><td>56.37</td><td>0.00</td><td>294.5</td><td>3.16</td></tr>
@@ -192,12 +154,13 @@
 <tr><td>ann</td><td>Qdrant 1.15.5 (gRPC)</td><td>2.465</td><td>405</td><td>0.9750</td><td>32.07</td><td>18.85</td><td>491.8</td><td>1.84</td></tr>
 <tr><td>ann</td><td>pgvector 0.8.1 / PG 17.8</td><td>2.797</td><td>351</td><td>0.9753</td><td>84.46</td><td>78.97</td><td>1,488.2</td><td>1.60</td></tr>
 </tbody></table></div>
-      <div class="grid cols-3" style="margin-top:28px">
+      <div class="grid cols-3">
         <div class="card"><h3>Latency depends on dimensions</h3><p>At 128d, VLite embedded HNSW is close to zvec (0.454 vs 0.438 ms).
           At 768d, VLite is about 4× slower than zvec embedded and 2–2.5× slower than Qdrant over REST in the server tier.
           Recall is comparable, not identical; LanceDB's quantized configuration has lower recall.</p></div>
         <div class="card"><h3>Build and reopen remain the gap</h3><p>At 100k × 768, VLite embedded builds in 524.57 s and
-          reopens plus first query in 518.75 s without an ANN snapshot. These runs rebuild the graph; opt-in snapshots
+          reopens plus first query in 518.75 s without an ANN snapshot. HNSW construction was single-threaded in these builds,
+          and these runs rebuild the graph; opt-in snapshots
           were not measured here. Chroma and FAISS include graph construction in ingest, so compare ingest + build.</p></div>
         <div class="card"><h3>Footprint with caveats</h3><p>VLite has the smallest measured ANN database footprint:
           10.2 MiB at 20k × 128 embedded and 295.3 MiB at 100k × 768. It is not smallest in every exact-mode row
@@ -218,81 +181,36 @@
   <section id="concurrent-readers" class="alt">
     <div class="wrap">
       <h2>Concurrent reads</h2>
-      <p>Shared-lock readers and parallel exact scans, measured with
-        1&ndash;16 concurrent search clients:</p>
+      <p>REST search throughput with 1&ndash;16 concurrent clients. Before: exclusive lock. After: shared read lock and parallel exact scan.</p>
       <div class="table-wrap"><table><thead><tr><th>Search</th><th>Concurrent readers</th><th>QPS before</th><th>QPS after</th><th>p50 / p95 / p99 ms before</th><th>p50 / p95 / p99 ms after</th></tr></thead><tbody><tr><td>Exact</td><td>1</td><td>483</td><td><strong>788</strong></td><td>2.00 / 2.51 / 3.21</td><td>1.25 / 1.41 / 1.65</td></tr><tr><td>Exact</td><td>4</td><td>636</td><td><strong>1,529</strong></td><td>6.11 / 7.21 / 8.52</td><td>2.62 / 3.22 / 3.52</td></tr><tr><td>Exact</td><td>8</td><td>634</td><td><strong>1,927</strong></td><td>12.27 / 14.16 / 18.30</td><td>4.22 / 5.95 / 6.89</td></tr><tr><td>Exact</td><td>16</td><td>629</td><td><strong>2,155</strong></td><td>24.77 / 29.44 / 35.89</td><td>7.58 / 11.37 / 12.77</td></tr><tr><td>HNSW</td><td>1</td><td>1,528</td><td><strong>1,560</strong></td><td>0.64 / 0.78 / 0.97</td><td>0.62 / 0.76 / 0.97</td></tr><tr><td>HNSW</td><td>4</td><td>3,521</td><td><strong>4,038</strong></td><td>1.13 / 1.30 / 1.67</td><td>0.95 / 1.37 / 1.65</td></tr><tr><td>HNSW</td><td>8</td><td>3,491</td><td><strong>4,310</strong></td><td>2.26 / 2.54 / 3.75</td><td>1.77 / 2.92 / 3.59</td></tr><tr><td>HNSW</td><td>16</td><td>3,447</td><td><strong>4,648</strong></td><td>4.58 / 5.16 / 8.38</td><td>3.22 / 6.18 / 7.80</td></tr></tbody></table></div>
       <p>Single-reader exact search on 100k &times; 768: p50 <strong>44.8 ms &rarr; 10.2 ms</strong> (22 &rarr; 98 QPS) from the parallel exact scan.</p>
-      <p class="muted">vlite-server REST, 20k &times; 128 clustered dataset, k=10, keep-alive client threads, zero errors. Before = previous release build (exclusive mutex); after = shared read lock + parallel exact scan.
-        Native Windows 11, Xeon Platinum 8370C (8 cores / 16 threads), CPU gated to &le;50% before each trial. Latency still rises under contention at 16 readers.
-        Raw data: <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/results/concurrent-readers-windows.json">concurrent-readers-windows.json</a>.</p>
+      <details class="benchmark-archive"><summary>Setup and limitations</summary>
+      <p class="muted">vlite-server REST, 20k &times; 128 clustered dataset, k=10, keep-alive client threads, zero errors. Before is the previous release build.
+        Native Windows 11, Xeon Platinum 8370C (8 cores / 16 threads), CPU gated to &le;50% before each trial. Latency still rises under contention at 16 readers.</p>
+      </details>
+      <p class="muted"><a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/results/concurrent-readers-windows.json">Raw data</a></p>
     </div>
   </section>
 
-  <section id="current-source-performance">
-    <div class="wrap">
-      <h2>Optimization measurements</h2>
-      <p>Development measurements of vector reuse, snapshot decoding and typed inputs.</p>
-      <p>HNSW neighbor selection now reuses borrowed accepted vectors; ANN snapshot
-        hashing batches identical bytes and numeric decoding avoids an intermediate
-        byte-vector allocation. Optional C/Python float32 inputs reduce vector JSON
-        conversion while retaining existing JSON methods and durable batch commits.</p>
-      <p>Bounded Windows development measurements found lower selection, snapshot
-        save/load and typed-input overhead. These were shared-host measurements,
-        not isolated end-to-end speedup evidence.</p>
-      <p><a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/README.md#current-source-performance-work-october-23-2026">Workloads, raw samples, reproduction and remaining bottlenecks</a></p>
-      <details class="benchmark-archive"><summary>Concurrency and memory trade-offs</summary>
-      <p>Opt-in durable group commit coalesces bounded concurrent record writes
-        while retaining separate recovery frames and sync-before-acknowledgement.
-        It is disabled by default and can reduce sequential throughput.
-        Simple exact searches use bounded immutable snapshots to scan outside
-        the owner lock; ANN, reranking and indexed filtering keep existing paths.</p>
-      <p>The Node.js embedded binding adds opt-in Float32Array search, atomic bulk
-        puts and bounded multi-query calls. Inputs are privately copied, not
-        zero-copy, and multi-query calls do not promise a shared snapshot across
-        other owners.
-        See <a href="docs/CONSOLE-ADMIN.html#opt-in-durable-group-commit">group-commit
-        configuration and limitations</a> and the
-        <a href="https://github.com/mahpate/Vlite/blob/main/bindings/node/README.md">Node.js guide</a>.</p>
-      <p>Unquantized background HNSW builds now share immutable record generations,
-        and startup reuses replay buffers with compatible table-based CRC
-        validation. The first write after a capture can still copy the ID tree;
-        retained snapshots have explicit budgets. No checkpoint or storage-format
-        change is introduced. See the
-        <a href="docs/read-snapshots.html">snapshot visibility, limits and rebuild guide</a>.</p>
-      <p class="muted">A bounded mixed-workload experiment reduced median writer
-        latency but increased reader latency; copy-on-write and reclamation still
-        have costs. These Windows shared-host measurements do not establish a
-        universal throughput or tail-latency improvement.</p>
-      <h3>Workload-selectable read policy</h3>
-      <p><code>--lock-held-reads</code> avoids snapshot copying by keeping exact scans
-        under the read lock. Snapshot reads are the default; compare reader and writer
-        tail latency for your workload.</p>
-      <p>See the <a href="docs/CONSOLE-ADMIN.html">operations guide</a> for
-        diagnostics, recovery and background-rebuild controls.</p>
-      </details>
-    </div>
-  </section>
   <section id="hnsw-traversal">
     <div class="wrap">
-      <h2>HNSW traversal measurements</h2>
-      <p>A bounded visited-node bitmap replaces per-node hashing during graph
-        construction and search on graphs up to 8,388,608 nodes. Each traversal
-        owns one bit per node, rounded up to 64-bit words (at most 1 MiB);
-        larger graphs retain a sparse hash set. This is not a bound on total
-        traversal memory. On 5,000 synthetic 128-dimensional vectors,
+      <h2>HNSW traversal</h2>
+      <p>A visited-node bitmap replaced per-node hashing in graph construction and search,
+        for graphs up to 8,388,608 nodes. On 5,000 synthetic 128-dimensional vectors,
         median rebuild time fell from <strong>5.552 s to 5.080 s</strong> (8.5%),
         and the mean duration of two 100-query batches fell from
         <strong>76.392 ms to 60.795 ms</strong> (20.4%).</p>
-      <p class="muted">Native Windows release build; squared L2, M=16,
+      <details class="benchmark-archive"><summary>Setup and limitations</summary>
+      <p class="muted">Each traversal owns one bit per node (the bitmap is at most 1 MiB);
+        larger graphs keep a sparse hash set. Native Windows release build; squared L2, M=16,
         ef_construction=100, ef_search=100, k=10. One before/after campaign
         (three rebuilds and two query batches per version) on a shared host with
-        warm caches, not per-query p50 or other latency percentiles, a universal
-        gain or a new zvec comparison. No 100k &times; 768, other-OS or
-        sparse-fallback measurements were collected. Existing cross-engine
-        results above have not been revised. Distance precision, graph-selection
-        rules, filtering and durability are unchanged.
-        <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/README.md#hnsw-visited-membership-optimization-unreleased-source">Methodology and reproduction</a> &middot;
-        <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/results/hnsw-visited-windows.json">Raw timings and limitations</a>.</p>
+        warm caches. Timings are whole rebuilds and query batches, not per-query latency
+        percentiles or a universal gain; no 100k &times; 768, other-OS or sparse-fallback
+        runs were made. Distance precision, graph-selection rules, filtering and durability are unchanged.</p>
+      </details>
+      <p class="muted"><a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/README.md#hnsw-visited-membership-optimization-released-in-041">Methodology and reproduction</a> &middot;
+        <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/results/hnsw-visited-windows.json">Raw timings</a></p>
     </div>
   </section>
 
@@ -334,8 +252,8 @@
             <tr><td>Auth</td><td class="yes">Scoped credentials, rate limits</td><td>Not applicable (embedded)</td></tr>
             <tr><td>Multi-process embedded readers</td><td class="yes"><code>open_read_only</code> shared locks; exclusive writer</td><td class="yes"><code>read_only</code> opens</td></tr>
             <tr><td>Concurrent server reads</td><td class="yes">Shared RwLock reads; exclusive writes</td><td>Not applicable (embedded)</td></tr>
-            <tr><td>Visual UI</td><td class="yes">Focused workspaces, collection tabs, responsive drawer, record inspector, JSON writes, themes, copy-as-code, bounded PCA</td><td><a href="https://github.com/zvec-ai/zvec-studio">zvec-studio</a> (separate project)</td></tr>
-            <tr><td>Metrics &amp; logs</td><td class="yes">Prometheus, metric cards, route latency, filtered live logs, JSONL export</td><td class="no">Not listed in core API comparison</td></tr>
+            <tr><td>Visual UI</td><td class="yes">Browser dashboard: search, records, vector projection, user accounts</td><td><a href="https://github.com/zvec-ai/zvec-studio">zvec-studio</a> (separate project)</td></tr>
+            <tr><td>Metrics &amp; logs</td><td class="yes">Prometheus, route latency, live logs, JSONL export</td><td class="no">Not listed in core API comparison</td></tr>
             <tr><td>Agent tooling</td><td class="yes">CLI, stdio MCP server, four agent skills</td><td class="yes">CLI, MCP, Zvec-Grep</td></tr>
             <tr><td>Platforms</td><td>Windows, Linux, macOS (x86_64/arm64)</td><td class="yes">Linux, macOS, Windows, Android, iOS</td></tr>
           </tbody>
@@ -349,46 +267,16 @@
       <div class="section-head">
         <div class="kicker">Methodology</div>
         <h2>Reproduce these results</h2>
-        <p>Use isolated exports of the exact measured commits, the same Rust release toolchain,
-          separate build directories and a coordinated measurement window.
-          The <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/README.md#paired-source-revision-regression-october-25-2026-utc">step-by-step source campaign instructions</a>
-          cover building the baseline and both source variants. Run the
-          <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/revision_campaign.py">revision campaign runner</a>
-          only after all builds finish. It retains five repetitions and raw samples per workload.</p>
+        <p>Build the exact measured commits with the same Rust release toolchain in separate directories,
+          following the <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/README.md#paired-source-revision-regression-october-25-2026-utc">campaign instructions</a>.
+          Then run the <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/revision_campaign.py">revision campaign runner</a>;
+          it keeps five repetitions and raw samples per workload. See also the
+          <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/README.md#performance-work-included-in-041-measured-october-23-2026">development measurements</a>.</p>
       </div>
-      <details class="benchmark-archive">
-        <summary>Historical zvec-only methodology &middot; archived builds</summary>
-        <p>The setup below reproduces the older comparison, not the latest source measurements.
-          Its package pin must stay at the version actually measured; changing it would require a new campaign.</p>
-      <div class="grid cols-2">
-        <div class="card">
-          <h3>Setup</h3>
-          <ul class="list">
-            <li>One seeded dataset (64 Gaussian clusters, σ = 0.35), SHA-256 recorded in the results.</li>
-            <li>Same ingest batches for both engines; VLite commits each batch durably.</li>
-            <li>HNSW <code>m = 16</code>, <code>ef_construction = 100</code>, <code>ef = 100</code> for both (zvec defaults overridden).</li>
-            <li>Every (trial, mode, engine) runs in a fresh process; engine order alternates by trial.</li>
-            <li>Recall is ID-based and tie-aware against a float64 brute-force oracle.</li>
-          </ul>
-        </div>
-        <div class="card">
-          <h3>Caveats</h3>
-          <ul class="list">
-            <li>Synthetic clustered data; real embeddings and larger collections can rank differently.</li>
-            <li>Shared WSL2 host; these baseline runs use a single sequential client, no concurrent load.</li>
-            <li>Python wrappers differ: VLite uses JSON over a C ABI, zvec uses native bindings.</li>
-            <li>Memory growth is resident memory after build minus before opening.</li>
-            <li>Durability contracts differ, so ingest times are not like-for-like.</li>
-          </ul>
-        </div>
-      </div>
-      <h3 style="margin-top:28px">Historical reproduction</h3>
-      <p>Exact measured package pins and commands remain in the
-        <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/README.md#multi-engine-comparison">archived benchmark methodology</a>.
-        Use those only to reproduce historical data, not as current installation instructions.</p>
-      <p class="muted">Raw results: <a href="results/zvec-20k-128d-wsl.json">20k × 128</a> ·
-        <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/compare_zvec.py">benchmark source</a></p>
-      </details>
+      <p class="muted">Archived comparisons: pinned packages and commands are in the
+        <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/README.md#multi-engine-comparison">archived methodology</a>;
+        use them only to reproduce historical data. Raw zvec results: <a href="results/zvec-20k-128d-wsl.json">20k × 128</a> ·
+        <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/compare_zvec.py">benchmark source</a>.</p>
     </div>
   </section>
 </main>

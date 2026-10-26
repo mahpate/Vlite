@@ -13,6 +13,7 @@ on:
       - "tests/dashboard_tours.py"
       - "tests/requirements-dashboard.txt"
       - "tests/release_docs.py"
+      - "tests/content_budget.py"
       - "README.md"
       - "bindings/**/README.md"
       - "clients/**/README.md"
@@ -55,6 +56,7 @@ jobs:
           python tests/site_links.py _site
           python tests/release_docs.py
           python tests/agent_docs.py
+          python tests/content_budget.py
       - name: Check diagrams and dashboard tour
         run: |
           python -m pip install -r tests/requirements-dashboard.txt

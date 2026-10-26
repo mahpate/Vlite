@@ -1,13 +1,34 @@
 # REST API reference
 
 The server bundles its current machine-readable contract at `/openapi.json`.
-All protected routes use the configured bearer credential and the existing deny-by-default scoped-credential policy. Collection routes retain the collection-bound authorization checks. Responses use the standard `{"error":{"code":"...","message":"..."}}` envelope.
+Protected routes take a bearer credential and apply the deny-by-default
+scoped-credential policy; the dashboard sends its session cookie instead.
+Collection routes keep their collection-bound authorization checks. Errors use
+the `{"error":{"code":"...","message":"..."}}` envelope.
+
+## Dashboard sign-in and accounts
+
+See [SECURITY.md](SECURITY.md#dashboard-sign-in-and-accounts) for roles,
+passwords and sessions.
+
+| Route | Caller | Purpose |
+|---|---|---|
+| `GET /v1/auth/config` | Public | Sign-in configuration |
+| `POST /v1/auth/login` | Public | Sign in with a username and password |
+| `GET /v1/auth/session` | Signed in | Current session |
+| `POST /v1/auth/logout` | Signed in | End the session |
+| `POST /v1/auth/password` | Signed in | Change your own password |
+| `GET /v1/admin/users` | Super admin | List accounts |
+| `POST /v1/admin/users` | Super admin | Create an account |
+| `PUT /v1/admin/users/{id}` | Super admin | Update an account |
+| `DELETE /v1/admin/users/{id}` | Super admin | Delete an account |
+| `POST /v1/admin/users/{id}/password` | Super admin | Set a temporary password |
 
 ## Record expiry and metadata
 
 `PUT /v1/vectors/{id}` and its collection-scoped equivalent accept optional
 `expires_at_ms` (absolute Unix milliseconds) or `ttl_ms`/`ttl` (relative
-milliseconds); the two forms are mutually exclusive. This is a V5 feature.
+milliseconds); the two forms are mutually exclusive and need format v5.
 Expiry is checked at read/search time and does not create a separate feed event.
 `PATCH /v1/vectors/{id}/metadata` and
 `PATCH /v1/collections/{collection}/vectors/{id}/metadata` accept

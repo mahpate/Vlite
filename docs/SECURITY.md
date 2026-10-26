@@ -1,10 +1,52 @@
 # Server security
 
-All additions described here are opt-in. Existing loopback plaintext servers,
-bootstrap admin/read-only tokens and non-tenant scoped credentials retain their
-existing behavior. Continue protecting the private `VLITE_ADMIN_DIR`: it contains
-audit history, credential hashes, tenant configuration and backups. TLS does not
-replace bearer authentication or collection/operation authorization.
+How VLite signs people in, protects transport, limits credentials, isolates
+tenants and exports traces. Protect the private `VLITE_ADMIN_DIR`: it holds
+dashboard accounts, audit history, credential hashes, tenant configuration and
+backups. TLS does not replace bearer authentication or collection and operation
+authorization.
+
+## Dashboard sign-in and accounts
+
+People sign in to the dashboard with a username and password. Apps and scripts
+keep using API keys, and the admin token stays for automation and recovery.
+gRPC, the SDKs and MCP are unchanged.
+
+| Role | Can |
+|---|---|
+| Super admin | Manage the server, tenants, users and API keys. |
+| Editor | Read, search, write, import, index and manage collections. |
+| Viewer | Read and search. |
+
+Editors and viewers are bound to one tenant, and see only its collections, or
+to all collections.
+
+- **Requirements:** password sign-in needs protected mode, meaning an admin
+  token and the admin directory. Editor and viewer accounts also need a
+  format v4 or newer database. Sign-in is accepted only over HTTPS or when the
+  server listens on loopback only. When a TLS-terminating or local reverse
+  proxy fronts the API, set `VLITE_TRUSTED_PROXY=1`; Docker Compose sets it.
+  Open local mode (`--insecure-local`) has no sign-in.
+- **First super admin:** there is no default account or password. Sign in once
+  with the admin token through **Use an access token instead**, open
+  **Users → Add user** and create a super admin account. To create it at
+  startup instead, set `VLITE_ADMIN_USERNAME` and `VLITE_ADMIN_PASSWORD_FILE`,
+  a private file of up to 4 KiB that holds only the password. The server
+  creates the account only while no super admin exists and never logs the
+  password. Remove both settings and the file afterwards.
+- **Passwords:** 15–128 characters, with no composition rules. Common or
+  obvious passwords are rejected. The server stores only Argon2id hashes. A
+  password set by an admin is temporary and must be changed at first sign-in.
+  Users who forget their password ask a super admin to reset it.
+- **Sessions:** an HttpOnly, SameSite=Strict cookie. By default a session ends
+  after 30 minutes idle or 8 hours in total; change these with
+  `VLITE_SESSION_IDLE_MINUTES` (1–1440) and `VLITE_SESSION_MAX_HOURS`
+  (1–720). A server restart signs everyone out. Repeated failures slow down sign-in for that username, with delays of
+  up to 15 minutes.
+- **Tenants:** suspending a tenant blocks its users' sign-in and ends their
+  sessions. Deleting a tenant removes its user accounts.
+
+The routes are listed in [API.md](API.md#dashboard-sign-in-and-accounts).
 
 ## Native REST TLS and gRPC mutual TLS
 
@@ -27,7 +69,7 @@ unknown issuers, missing certificates and invalid client chains are rejected at
 the TLS handshake. Clients must still send a bearer token for protected RPCs.
 REST does not require client certificates; deploy proxy mTLS if that is needed.
 
-`POST /v1/admin/tls/reload` requires the bootstrap admin role. It rereads all
+`POST /v1/admin/tls/reload` requires a super admin. It rereads all
 registered REST/gRPC identity files and gRPC client CA files, validates every
 candidate first, then publishes all replacements. Malformed/unreadable files
 return 422 `tls_reload_failed`; **all old configurations remain active**. No
@@ -77,7 +119,7 @@ each committed chunk; a request rate is charged once per RPC, not per message.
 
 ## Tenants
 
-Tenants require bootstrap admin authentication and `VLITE_ADMIN_DIR`:
+Tenant routes need a super admin and `VLITE_ADMIN_DIR`:
 
 * `POST /v1/admin/tenants` with `{"name":"Acme","max_vectors":10000}` creates
   a tenant and returns `tenant.id`; `max_vectors` is optional (unlimited).
@@ -99,18 +141,18 @@ Tenants require bootstrap admin authentication and `VLITE_ADMIN_DIR`:
   tenant are refused with 409 `tenant_suspended`. Data is kept; the bootstrap
   admin can still read, write (within the tenant quota) and drop its
   collections. Resume restores unexpired, unrevoked keys. Suspension persists
-  in `tenants.json` across restarts; servers older than this release refuse to
-  start on a store that contains a suspended tenant, so resume tenants before
-  downgrading.
+  in `tenants.json` across restarts. Older servers refuse to start on a store
+  that contains a suspended tenant, so resume tenants before downgrading.
 * `DELETE /v1/admin/tenants/{id}` requires every tenant collection to be dropped
   first (409 `tenant_not_empty` otherwise). Deletion tombstones the immutable ID
   and immediately makes every bound credential fail closed (403
   `tenant_unavailable`). IDs are never reused. Unknown or deleted IDs return 404
   `tenant_not_found` on the lifecycle routes.
 
-Tenants authenticate only with bearer API keys bound to the tenant ID. VLite has
-no username/password accounts; the bootstrap admin token acts as the super admin.
-Every tenant mutation (create, update, suspend, resume, delete) is audited.
+Apps reach a tenant with API keys bound to its ID. People use dashboard
+accounts bound to it; see
+[dashboard sign-in and accounts](#dashboard-sign-in-and-accounts). Every tenant
+mutation (create, update, suspend, resume, delete) is audited.
 
 Issue a scoped credential with `tenant_id` and either tenant-local collection
 names or `["*"]`. The wildcard grants only that tenant's namespace, not global

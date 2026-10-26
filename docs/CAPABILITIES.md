@@ -1,13 +1,12 @@
 # Collections and advanced retrieval
 
-These APIs extend the embedded engine. Existing `Database` methods continue to
-operate on the `default` collection. Existing database files are never upgraded
-automatically.
+These APIs extend the embedded engine. Plain `Database` methods use the
+`default` collection, and files are never upgraded automatically.
 
 ## File compatibility and collections
 
-`Database::create` still creates format v3. To opt into named collections and
-durable import checkpoints, create a new format v4 file:
+`Database::create` makes a v3 file. Create v4 for named collections and
+durable import checkpoints:
 
 ```rust
 use vlite::{CollectionSettings, CollectionSpec, Database, FormatVersion};
@@ -23,259 +22,223 @@ db.close()?;
 # Ok(()) }
 ```
 
-For a runnable example exercising collection creation, conditional revisions,
-indexed planning, hybrid search, quantized index memory, import replay and reopen:
+`cargo run --locked --example collections -- new-example.vlite` runs an
+end-to-end example of this page's features. It refuses an existing output
+file.
 
-```powershell
-cargo run --locked --example collections -- new-example.vlite
-```
+Each collection has its own dimensions, record IDs, settings and derived
+indexes. `default` cannot be dropped; a named collection can be dropped only
+when it is empty and has no open import job. Invalid settings and exceeded
+limits fail without creating anything.
 
-The example refuses an existing output file; it does not delete the new database.
-
-Collections have independent dimensions, record IDs, settings and derived
-indexes. Collection `default` cannot be dropped. A named collection must be
-empty and have no open import job before it can be dropped. Limits and invalid
-settings produce explicit errors; they do not create partial collections.
-
-Older binaries cannot open v4 files. Upgrade to a **new, nonexistent path**:
+Older binaries cannot open v4 files. Stop the file's owner, then upgrade to a
+**new, nonexistent path** and keep the original:
 
 ```powershell
 cargo run --bin vlite-maintain -- upgrade old.vlite new.vlite
 cargo run --bin vlite-maintain -- verify new.vlite
 ```
 
-Keep the original file. Stop its owner before offline operations. Verify and
-explicitly select the new path before starting a service; upgrading a copy does
-not switch a running service. Format-v4 restore and compaction assign a new file
-identity. Derived indexes are rebuilt, not stored in the file.
+Upgrading a copy does not switch a running service; verify the new file, then
+select it. v4 restore and compaction assign a new file identity, and derived
+indexes are rebuilt rather than stored.
 
-Within a v4 lineage, collection IDs increase and are not recycled after drop.
-Copy-out maintenance retains the allocation high-water mark. Once the ID space
-is exhausted, creating another collection fails without writing, even if fewer
-than the maximum live collections remain. A closed import retains its historical
-collection name and a dropped flag; recreating the name cannot resume the old job.
+Collection IDs are never reused within a v4 lineage, including across
+copy-out maintenance. When the ID space runs out, creating a collection fails
+without writing, even below the live-collection limit. A closed import keeps
+its collection name and a dropped flag, so recreating the name cannot resume
+it.
 
-This development change adds public error variants and marks `Error` as
-non-exhaustive. Rust callers matching every prior variant must add a wildcard
-arm; this is a source-compatibility change even though existing file formats
-remain readable. No package release is implied by the working-tree changes.
+`Error` is `#[non_exhaustive]`; match it with a wildcard arm.
 
 ## Opt-in v5 record features
 
-`Database::create` remains v3 and the collection/import format remains v4.
-Create a new file with `FormatVersion::V5` to persist absolute Unix-millisecond
-record expiries, GeoPoint metadata and metadata-only update frames. Opening an
-existing file never migrates it; formats v1-v4 retain their prior byte and
-read behavior, while older binaries reject a v5 header.
+Create a `FormatVersion::V5` file for record expiry, GeoPoint metadata and
+metadata-only updates. Opening never migrates a file, v1–v4 files behave as
+before, and older binaries reject v5.
 
-`put_with_expiry(id, vector, payload, metadata, expires_at_ms)` writes a
-versioned full-record frame. A record is expired when its expiry is less than
-or equal to the query clock. `get_at` and `search_at` accept an explicit clock
-for deterministic behavior; ordinary get/search/browse use the system clock.
-`maintenance::compact_at(source, destination, now_ms)` omits expired records
-from the new copy and preserves unexpired expiry timestamps. The source is
-never modified.
+- `put_with_expiry(id, vector, payload, metadata, expires_at_ms)` sets an
+  absolute Unix-millisecond expiry. A record is expired once the query clock
+  reaches it. `get_at` and `search_at` take an explicit clock; other reads
+  use the system clock.
+- `maintenance::compact_at(source, destination, now_ms)` leaves expired
+  records out of the new copy, keeps the other expiries and never modifies the
+  source.
+- `update_metadata(id, &metadata)` rewrites only the metadata, keeps the
+  vector, payload and expiry, and advances the revision.
+- On older formats, expiry and metadata-only operations return
+  `ExpiryRequiresUpgrade`.
+- `search_grouped` returns nearest-first groups with a per-group hit cap.
+  `recommend(&RecommendationQuery)` searches with the mean of the positive
+  examples minus the mean of the negative ones and excludes the examples.
+  `facets` and `numeric_stats` summarize metadata.
+- `MetadataValue::GeoPoint` stores bounded latitude and longitude.
+  `Condition::GeoRadius` filters by Haversine radius, and
+  `search_geo(&GeoSearchQuery)` ranks by vector or geographic distance.
 
-`update_metadata(id, &metadata)` commits only the metadata bytes; it does not
-rewrite the vector or payload and preserves expiry. It advances the record
-revision. Expiry and metadata-only operations on older formats return
-`ExpiryRequiresUpgrade`.
-
-The embedded retrieval APIs include `search_grouped` (nearest-first groups with
-a per-group hit cap), `recommend(&RecommendationQuery)` (positive vector mean
-minus negative mean, excluding example IDs), `facets` and `numeric_stats`.
-`MetadataValue::GeoPoint` stores bounded latitude/longitude values.
-`Condition::GeoRadius` applies a Haversine radius filter, and
-`search_geo(&GeoSearchQuery)` can rank by vector or geographic distance. These
-query-time operations require no derived persistent indexes.
+These query-time operations need no persistent indexes.
 
 ## Record revisions
 
 `revision(id)` returns the sequence of the record's last successful put.
-Revisions are scoped to a collection and record; different records written in
-one atomic batch can have the same revision. `Expected::Absent` and
-`Expected::Revision(revision)` provide conditional puts/deletes.
-Mismatches write nothing. Revision checks and writes use the same exclusively
-owned database handle. Do not compare a bare revision across different files,
-collections or IDs.
+Revisions are per collection and record, and records in one atomic batch can
+share a revision, so never compare bare revisions across files, collections
+or IDs. `Expected::Absent` and `Expected::Revision(revision)` make puts and
+deletes conditional; a mismatch writes nothing. The check and the write use
+the same exclusively owned handle.
 
 ## Metadata indexes and automatic planning
 
-Declare metadata indexes in `CollectionSettings::metadata_indexes` using
-`MetadataIndexSpec` and `MetadataIndexKind::{Eq, Range, EqRange}`.
-Indexes are maintained after successful commits and rebuilt on reopen or a
-settings replacement. Candidate IDs are always rechecked against the complete
-typed filter. Indexed exact results retain existing IDs, distances and ordering.
+Declare indexes in `CollectionSettings::metadata_indexes` with
+`MetadataIndexSpec` and `MetadataIndexKind::{Eq, Range, EqRange}`. They update
+after each successful commit and are rebuilt on reopen or settings
+replacement. Candidates are always rechecked against the full typed filter,
+and indexed exact results match an unindexed scan: same IDs, distances and
+order.
 
 `CollectionRef::search_auto_with_settings(query, k, conditions, ef_search)`
-returns hits, the chosen `QueryPlan` and `SearchStats`. Its strategies are
-`exact_scan`, `exact_indexed`, `ann` and `filtered_ann`. Selective indexed
-queries use exact candidate scoring; broad queries can use an already-ready ANN
-index. Missing indexes use exact search. **Auto mode never builds an ANN index**.
-Explicit exact/approximate modes keep their distinct contracts.
+returns hits, the chosen `QueryPlan` and `SearchStats`. It chooses
+`exact_scan`, `exact_indexed`, `ann` or `filtered_ann`: selective indexed
+queries score candidates exactly, broad queries can use a ready ANN index, and
+missing indexes mean exact search. **Auto mode never builds an ANN index.**
 
-Collection settings persist in v4. Settings on a legacy default collection are
-memory-only, explicitly reported by `SettingsPersistence::MemoryOnly`.
+Settings persist in v4. On a legacy default collection they are memory-only,
+reported as `SettingsPersistence::MemoryOnly`.
 
 ## Text and hybrid search
 
-Declare up to eight string metadata fields in `CollectionSettings::text_fields`.
-Opaque payload bytes are not text-indexed. Tokenization splits on nonalphanumeric
-characters and lowercases tokens; there is no stemming, phrase search or
-language-specific analyzer. Token, query and posting limits are enforced.
-If the posting limit makes the index unavailable, durable writes still succeed
-and text-dependent queries return an explicit readiness error.
+Index up to eight string metadata fields with
+`CollectionSettings::text_fields`; payloads are not indexed. Text is split on
+non-alphanumeric characters and lowercased, with no stemming, phrase search or
+language-specific analysis. Token, query and posting limits apply. If the
+posting limit disables the index, writes still succeed and text queries return
+a readiness error.
 
-`HybridQuery::new(Some(vector), text, k)` combines vector retrieval with BM25
-using weighted reciprocal rank fusion. Both legs apply the same metadata filter.
-Fusion scores are not vector distances: **higher scores are better**, with ID
-tie-breaking. Results include leg ranks, optional vector distance and BM25 score.
-`VectorLeg::ApproximateReady` never builds an index and can miss candidates;
-the default vector leg is exact. Candidate depth and weights affect retrieval.
+`HybridQuery::new(Some(vector), text, k)` fuses vector and BM25 results with
+weighted reciprocal rank fusion, applying the same metadata filter to both.
+Fusion scores are not distances: **higher is better**, and ties break by ID.
+Hits include each leg's rank, the vector distance if any, and the BM25 score.
+The default vector leg is exact; `VectorLeg::ApproximateReady` never builds an
+index and can miss candidates. Candidate depth and weights change results.
 
 ## Quantized ANN, memory and quality
 
-Use `AnnOptions { quantization: Quantization::ScalarU8, rerank_multiplier: 4 }`
-with the `*_with_options` APIs. Quantization is part of index readiness identity.
-Queries using legacy APIs request an unquantized index, so they cannot silently
-use an incompatible quantized graph. Traversal uses scalar-u8 codes; returned
-candidates are reranked with exact distances from current f32 record vectors.
-Buffered mutations and metadata eligibility still use current records.
+Pass `AnnOptions { quantization: Quantization::ScalarU8, rerank_multiplier: 4 }`
+to the `*_with_options` APIs. Traversal uses scalar-u8 codes, then reranks
+candidates with exact distances from the current f32 vectors; buffered writes
+and metadata filters also use current records. Quantization is part of the
+index identity, so legacy APIs never use a quantized graph.
 
-`ann_memory` reports graph links, code/codebook, buffer and resident-vector
-component bytes. These are **not measured process RSS**. Original f32 vectors
-remain resident, so quantization does not promise a total-memory reduction and
-can add code storage. `ann_quality` samples a ready index against exact search
-under an explicit evaluation budget, returning an explicit skip reason when
-sampling cannot run. Recall is workload-dependent, not guaranteed.
-
-Reproduce a bounded release comparison:
-
-```powershell
-cargo build --locked --release --example search_capabilities_bench
-python benchmarks\search_capabilities_campaign.py --binary target\release\examples\search_capabilities_bench.exe --output search-capabilities.json
-python tests\search_capabilities_campaign.py
-```
-
-The output must not exist. The synthetic run compares both metrics with and
-without quantization, verifies exact returned distances, records raw timings
-and component bytes, and checks indexed exact results against the unindexed
-baseline. Source/binary hashes and limitations accompany the results.
+`ann_memory` reports component bytes for graph links, codes and codebook,
+buffer and resident vectors. These are **not measured process RSS**. The f32
+vectors stay resident, so quantization can add code storage and does not
+promise lower total memory. `ann_quality` samples a ready index against exact
+search within a budget and reports a reason when it skips. Recall depends on
+the workload and is not guaranteed. The
+[benchmark guide](../benchmarks/README.md#indexed-and-quantized-search-comparison)
+reproduces a bounded comparison.
 
 ## Resumable ingestion
 
-V4 `import_chunk(job, chunk, operations, policy)` atomically commits accepted
-rows and a durable checkpoint in one synchronized frame. Replaying the latest
-chunk with the same SHA-256 identity returns `AlreadyCommitted` without writing.
-Different content, policy, a sequence gap or the wrong collection conflicts.
-New job IDs increase monotonically; `next_import_job_id` allocates the next
-candidate for the exclusively owned handle.
+On v4, `import_chunk(job, chunk, operations, policy)` atomically commits
+accepted rows and a durable checkpoint in one synchronized frame. Legacy files
+return `ImportsRequireUpgrade`.
 
-REST reservations exist only in memory until their first chunk commits. First
-chunks must follow reservation order: a later job returns `import_conflict`
-while an earlier reservation on a live collection remains uncommitted. Commit
-or abort that earlier reservation before retrying; no chunk was written.
-
-`RejectChunk` reports invalid rows and writes nothing. `SkipInvalid` commits
-valid rows and reports skipped counts; detailed errors are bounded. An
-all-skipped chunk still records its checkpoint. `finish_import` and `abort_import`
-close a job; **abort does not roll back previously committed chunks**.
-Legacy files return `ImportsRequireUpgrade`.
-
-Each chunk is bounded by the existing 4,096-operation / 16-MiB batch limits,
-including checkpoint overhead. Progress counters are full-width integers; compact
-copies preserve open-job counters and latest replay identity. Closed-job status
-retention is bounded and may be discarded by copy-out compaction; do not treat
-the job registry as a permanent ingestion audit.
-
-A failed write can leave an incomplete trailing frame and an indeterminate
-outcome. The handle fails closed. Use the existing explicit incomplete-tail
-repair workflow, reopen, inspect the checkpoint, then replay; do not assume a
-transport or synchronization error means the chunk was not committed.
+- **Replay.** Replaying the latest chunk with the same SHA-256 identity
+  returns `AlreadyCommitted` without writing. Different content or policy, a
+  sequence gap or the wrong collection is a conflict. Job IDs increase
+  monotonically; `next_import_job_id` allocates the next one.
+- **Policies.** `RejectChunk` reports invalid rows and writes nothing.
+  `SkipInvalid` commits valid rows and reports skips with bounded details; an
+  all-skipped chunk still records its checkpoint.
+- **Closing.** `finish_import` and `abort_import` close a job. **Abort does
+  not roll back committed chunks.**
+- **Bounds.** A chunk, including checkpoint overhead, must fit the
+  4,096-operation / 16 MiB batch limits. Counters are full-width integers.
+  Compaction keeps open-job counters and the latest replay identity but may
+  drop closed-job status, so the job registry is not an audit log.
+- **REST reservations** stay in memory until their first chunk commits, and
+  first chunks must follow reservation order. While an earlier reservation on
+  a live collection is uncommitted, a later job gets `import_conflict` and
+  nothing is written; commit or abort the earlier one, then retry.
+- **Failures.** A failed write can leave an incomplete trailing frame with an
+  unknown outcome, and the handle fails closed. Repair the tail, reopen,
+  inspect the checkpoint, then replay. A transport or sync error does not
+  prove the chunk was not committed.
 
 ## REST service and scoped credentials
 
-New databases can explicitly use `vlite-server ... --create-format 4` alongside
-`--create-if-missing`; the default remains v3, and opening an existing file does
-not migrate it. `GET /v1/capabilities` reports format, role and supported flags.
-Collection routes are under `/v1/collections/{name}` and never silently fall
-back to `default`. Legacy vector/search routes remain default-collection aliases
-with their existing hard defaults; collection routes use collection settings.
+`vlite-server ... --create-if-missing --create-format 4` creates a v4
+database; the default is v3, and existing files are never migrated.
+`GET /v1/capabilities` reports the format, role and supported flags.
 
-REST settings updates merge supplied fields with current settings. The embedded
-settings setter is a full replacement; do not assume these two request contracts
-are interchangeable. All u64 record IDs, seeds and revisions use decimal strings.
-Search `explain` adds work counters and, for auto mode, the selected plan.
+- Collection routes live under `/v1/collections/{name}` and never fall back
+  to `default`. Legacy vector and search routes are `default` aliases with
+  their own hard defaults; collection routes use collection settings.
+- REST settings updates merge fields; the embedded setter replaces all
+  settings.
+- u64 record IDs, seeds and revisions are decimal strings.
+- Search `explain` adds work counters and, in auto mode, the chosen plan.
+- Record GETs return a strong ETag for conditional PUT and DELETE; see
+  [conditional updates](REFERENCE.md#conditional-updates-and-deletes-optimistic-concurrency).
+- **Scoped credentials** (API keys) need super admin authentication (the
+  admin token or a super admin account), a private admin directory and v4.
+  Each needs explicit collection and operation scopes and an expiry at most
+  365 days ahead. Secrets appear only on creation or rotation; keep them out
+  of URLs, logs, query files and browser storage. Rotation allows a bounded
+  grace period, and revocation persists. Grants are bound to file lineage and
+  collection identity, so restored or compacted files and recreated
+  collections fail closed. Scoped diagnostics and listings never reveal other
+  collections.
+- Capabilities include a display-only
+  [`identity`](CONSOLE-ADMIN.md#configuration-and-roles), and
+  `features.tenant_lifecycle` when tenant management is available; see
+  [SECURITY.md](SECURITY.md#tenants).
+- `credentials_commit_indeterminate` (503) means the change is in effect in
+  memory and on disk, but its directory sync failed, so it may not survive a
+  crash; no secret is returned. Re-list credentials and revoke or reissue as
+  needed instead of retrying blindly. `credentials_unavailable` means the
+  failure came before the change.
 
-Record GET responses include a strong ETag. PUT/DELETE accept one exact strong
-`If-Match`; a mismatch returns 412 without writing. Tags bind database identity,
-collection, record ID, last-put revision and a full SHA-256 content digest.
-Unrelated writes no longer invalidate them. V4 tags survive a service restart;
-legacy tags include a process nonce and do not. Copy-out maintenance changes
-identity, so reacquire tags. A returned synchronization/transport error still
-does not prove a conditional mutation failed.
+## Automatic maintenance and backups
 
-Scoped credentials require bootstrap admin authentication, a private admin
-directory and v4. Creation requires explicit collection and operation scopes
-and a future expiry (at most 365 days). Secret tokens are returned only on
-creation/rotation; store them outside URLs, logs, query files and browser
-persistence. Rotation supports bounded grace; revocation persists. Grants bind
-file lineage and collection identity: switching to a restored/compacted file
-or recreating a collection fails closed rather than inheriting old grants.
-Credential administration stays bootstrap-admin-only. Scoped diagnostics and
-collection listing cannot reveal other collections. Capabilities also report a
-display-only `identity` (`open`, `super_admin`, `read_only` or `scoped`, with
-the API key and tenant names) and `features.tenant_lifecycle` when tenant
-usage, settings and suspend/resume routes are available; see
-[SECURITY.md](SECURITY.md#tenants).
+Both are **off by default**.
 
-Credential administration can return `credentials_commit_indeterminate` (503)
-if replacement succeeded but its directory synchronization failed. The change
-is already in effect in memory and on disk but may not survive a crash; no
-secret is returned. Re-list credentials and explicitly revoke or reissue as
-needed, rather than assuming the operation made no change or blindly retrying.
-`credentials_unavailable` instead indicates a failure before replacement.
-
-## Automatic maintenance and backup operations
-
-Automatic maintenance is **off by default**. Admin policy is available at
-`/v1/admin/maintenance/auto`; enabling it schedules bounded ticks, skips busy
-workers explicitly and uses background rebuilds rather than synchronous query
-fallback. Triggers include mutation pressure/stale graph nodes and optional
-sampled recall. Recall sampling has a work budget and can be skipped.
-
-Scheduled backups are also off by default and require a private admin directory.
-`/v1/admin/backups/schedule` exposes process-local configuration and observed
-state; runtime changes do not persist across restart. Each scheduled cycle
-creates a consistent snapshot, verifies its manifest and optionally drills a
-scratch restored copy. Neither verify nor drill replaces the active owner.
-
-**Retention deletion is separately opt-in.** It only targets generated backups
-beyond configured count/age limits, preserving the newest generated backup,
-newest verified backup, restores, active/startup-selected files and symlinks.
-Do not enable retention without a recovery policy and independent backup copy.
-Verification records file integrity; a drill additionally tests reopening and
-querying a restored copy. Neither guarantees recovery on untested hardware.
+- **Maintenance** (`/v1/admin/maintenance/auto`) runs bounded ticks, skips
+  busy workers and uses background rebuilds rather than a synchronous query
+  fallback. Triggers are mutation pressure, stale graph nodes and optional
+  sampled recall, which has a work budget and can be skipped.
+- **Scheduled backups** need a private admin directory.
+  `/v1/admin/backups/schedule` shows process-local configuration and state;
+  runtime changes are lost on restart. Each cycle takes a consistent
+  snapshot, verifies its manifest and can drill a restored scratch copy.
+  Verify proves file integrity; a drill also reopens and queries the copy.
+  Neither replaces the active database or guarantees recovery on untested
+  hardware.
+- **Retention deletion is a separate opt-in.** It removes only generated
+  backups beyond the count or age limit and always keeps the newest generated
+  backup, the newest verified backup, restores, active or startup-selected
+  files and symlinks. Enable it only with a recovery policy and an independent
+  backup copy.
 
 ## Operational diagnostics
 
-`/metrics` retains JSON metrics and adds per-collection storage, index, traversal,
-buffer, import and operational counters. `/metrics?format=prometheus` provides
-text exposition. Counters are process-local, while backup manifests and
-credential revocations are persistent. Do not interpret live gauges as a stable
-multi-request snapshot.
+- `/metrics` (JSON, or Prometheus text with `?format=prometheus`) adds
+  per-collection storage, index, traversal, buffer, import and operational
+  counters. Counters are process-local; see
+  [logs and metrics](REFERENCE.md#logs-and-metrics).
+- `/v1/admin/diagnostics/slow-queries` is a bounded log of mode, strategy,
+  work counts and duration, without vectors, text or filter values.
+- `/v1/admin/audit/persistent` holds the persistent admin audit; the bounded
+  audit ring is process-local.
 
-The bounded slow-query log at `/v1/admin/diagnostics/slow-queries` records mode,
-strategy, work counts and duration without vectors, text or filter values.
-Persistent administrative audit is exposed separately at
-`/v1/admin/audit/persistent`; the old bounded audit ring remains process-local.
-Permissions still apply to read-only diagnostics. Backend errors and skipped
-maintenance/backup work must be inspected rather than treated as success.
+Read-only diagnostics still check permissions. Inspect backend errors and
+skipped maintenance or backup work; do not treat them as success.
 
 ## Embedded vector extensions
 
-Opt-in v5 additionally supports named/multi-vector records, per-model bounded
-embedding history, sparse inverted-index dot-product search, dense/sparse RRF,
-and resumable revision-checked re-embedding with an atomic active-version switch.
-Provider and reranker traits and a parsed read-only query language are additive
-Rust APIs. See [VECTORS.md](VECTORS.md) for APIs, grammar, storage limits and examples.
+v5 also supports named and multi-vector records, bounded per-model embedding
+history, sparse inverted-index dot-product search, dense/sparse RRF, and
+resumable, revision-checked re-embedding with an atomic switch of the active
+version. Provider and reranker traits and a read-only query language are Rust
+APIs. See [VECTORS.md](VECTORS.md) for APIs, grammar, limits and examples.

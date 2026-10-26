@@ -46,9 +46,26 @@ Windows 10 build 19041+ or Windows 11, administrator approval, hardware
 virtualization and internet access are required. If installation requests a
 restart, save your work, restart and rerun the same command. Complete Ubuntu
 first-run setup if prompted. The script never restarts Windows automatically.
-No Git or Rust is needed. Open <http://127.0.0.1:8082> and paste the copied token,
-without a `Bearer` prefix. Docker Desktop users can reuse working WSL integration;
+No Git or Rust is needed. Docker Desktop users can reuse working WSL integration;
 the script does not replace an existing container runtime.
+
+Open <http://127.0.0.1:8082> and complete the [first sign-in](#first-sign-in).
+The REST API is at <http://127.0.0.1:18085>. Both listen on loopback only.
+
+| Task | Command |
+| --- | --- |
+| Show container status | `.\devbox.ps1 -Status` |
+| Stop and keep data | `.\devbox.ps1 -Down` |
+| Stop and delete the database volumes | `.\devbox.ps1 -Reset` (asks for typed confirmation) |
+| Choose ports, distribution or release | `.\devbox.ps1 -ApiPort 18090 -DashboardPort 8090 -Distro Ubuntu -Version vX.Y.Z` |
+| Set dimensions for a new data volume | `.\devbox.ps1 -Dimensions 384` |
+| Approve prerequisites without prompting | `.\devbox.ps1 -Yes` |
+
+Rerunning the script updates the deployment and keeps the token and data. WSL
+stops Docker when its last process exits, so the script keeps the distribution
+running until you sign out or reboot; rerun it afterwards. `-Dimensions` applies
+only when the data volume is first created. Automatic package installation
+supports Ubuntu 22.04 and 24.04.
 
 **First time on Ubuntu 22.04/24.04?** Install Git, clone the repository and run
 the bootstrap script:
@@ -66,8 +83,25 @@ The default directory is `~/vlite-deploy` for the user running the script
 (`/root/vlite-deploy` under sudo); the dashboard uses
 <http://127.0.0.1:8081> and API <http://127.0.0.1:18084>.
 Use `--deploy-dir /path` to choose a stable location. `--yes` approves package
-installation without prompting. Other distributions require a working Docker
-Engine/Compose installation already. Neither setup installs Rust or builds images.
+installation without prompting. `--version`, `--api-port`, `--dashboard-port`
+and `--dimensions` select the release, ports and dimensions of a new database.
+Other distributions require a working Docker Engine/Compose installation
+already. Neither setup installs Rust or builds images.
+
+### First sign-in
+
+The dashboard asks for a username and password. A new deployment has no
+accounts and no default password:
+
+1. Choose **Use an access token instead** and paste the API token, without a
+   `Bearer` prefix.
+2. Open **Users → Add user** and create your super admin account.
+3. Sign in with that account from then on. Keep the token for automation and
+   recovery.
+
+Compose sets `VLITE_TRUSTED_PROXY=1` because a local reverse proxy fronts the
+API. Keep the published ports on loopback, or put HTTPS in front of them. See
+[dashboard sign-in and accounts](SECURITY.md#dashboard-sign-in-and-accounts).
 
 ### Manual setup with Docker already installed
 
@@ -101,8 +135,8 @@ docker compose --profile dashboard up -d --no-build api dashboard
 docker compose ps
 ```
 
-Open <http://localhost:8081>, enter the API token, and connect. The UI sends
-requests to its own `/api/` origin; Nginx forwards them to the API container
+Open <http://localhost:8081> and complete the [first sign-in](#first-sign-in).
+The UI sends requests to its own `/api/` origin; Nginx forwards them to the API container
 over the private Compose network. The API is not exposed beyond loopback by
 default. Set `VLITE_PORT` or `VLITE_DASHBOARD_PORT` to change the host-side
 port while retaining the loopback bind.

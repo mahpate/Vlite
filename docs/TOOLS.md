@@ -1,38 +1,35 @@
 # Offline command-line tools
 
-Work directly with database files, without a
-REST or gRPC server.
+Work directly with database files, without a REST or gRPC server.
 
 ## Choose a tool
 
 - [Shell](#interactive-or-scripted-shell): inspect records, run searches and perform maintenance.
 - [Import](#validated-atomic-or-resumable-imports): validate and load vectors from JSONL, CSV, Parquet, Arrow or FAISS.
-- [Search quality](#search-quality-and-configurationdatabase-comparison): measure recall and compare database or index configurations.
+- [Search quality](#search-quality-and-configurationdatabase-comparison): measure recall and compare databases or index configurations.
 - [Index tuning](#index-tuning-advisor): find HNSW parameters for a target recall.
 - [MCP and agent skills](#mcp-server-and-agent-skills): connect an agent to a database through a separate stdio server.
-- [Graph operations](#graph-operations-experimental-source-only): typed reads and atomic writes on graph-enabled files (experimental `graph` builds from source only).
+- [Graph operations](#graph-operations-experimental-source-only): typed reads and atomic writes on graph-enabled files (experimental, source builds only).
 
-**Before opening a file:** stop its server or other exclusive owner. The offline
-shell/import/tuning tools acquire an exclusive file lock, even when the shell's
-tool-level `--read-only` guard is enabled. MCP defaults to a shared-lock read-only
-snapshot instead; it can coexist with other shared readers, not an exclusive writer.
+**Stop the server first.** The shell, import and tuning tools take an exclusive
+file lock, even with the shell's `--read-only` guard. MCP opens a shared-lock
+read-only snapshot by default, so it can run beside other readers but not
+beside a writer.
 
 ## Build and install
 
-Build the shell, import, tuning and quality tools with Rust 1.89 or later:
+Requires Rust 1.89 or later:
 
 ```powershell
 cargo build --locked --features tools --bins
-# Optional Parquet and Arrow IPC readers (Arrow/Parquet 56.2, MSRV 1.84):
+# Optional Parquet and Arrow IPC readers:
 cargo build --locked --features import-formats --bins
 ```
 
-`tools` enables JSON and CSV; `import-formats` additionally enables optional
-Arrow/Parquet dependencies. Neither is enabled in the default embedded build.
-Each tool supports `--help`; unknown/duplicate options and failures exit nonzero.
-The binaries are written to `target/debug/` by these build commands. Run them
-from that directory or add it to your PATH. For packaged binaries and platform
-requirements, see [installation](INSTALL.md).
+`tools` enables JSON and CSV; `import-formats` adds Arrow and Parquet. Neither
+is in the default embedded build. Binaries are written to `target/debug/`.
+Each tool supports `--help` and exits nonzero on errors. For packaged binaries,
+see [installation](INSTALL.md).
 
 ## Interactive or scripted shell
 
@@ -42,8 +39,8 @@ vlite-shell --db example.vlite --read-only --script commands.txt
 Get-Content commands.txt | vlite-shell --db example.vlite --read-only
 ```
 
-`--create N` explicitly creates a new format-v4 database and refuses an existing
-path. Without it, open requires an existing database. Commands are one per line:
+`--create N` creates a new format-v4 database and refuses an existing path.
+Without it, the database must exist. Enter one command per line:
 
 ```text
 help
@@ -66,23 +63,17 @@ upgrade upgraded.vlite
 quit
 ```
 
-Search supports the library's typed filters and exact metrics (`squared_l2`,
-`cosine`, `inner_product`); ANN supports L2/cosine, not inner product. JSON consumes
-the rest of the line, so strings may contain spaces without shell quoting.
-`#` at the start of a line is a comment. Prompts appear only with terminal stdin.
-Scripts/stdin fail at the first command error; earlier successful writes remain
-committed. Interactive command errors are printed and the REPL continues.
-
-`--read-only` is a **tool-level safety guard**: forbids put/delete/create and
-copy-out maintenance; ANN/rebuild only changes in-memory indexes. It does not
-make this shell use the shared-lock read-only engine API: the shell still
-opens with read/write permissions and an exclusive lock. Use
-`Database::open_read_only` or `vlite-mcp` for shared-lock readers. `verify` uses the engine's
-read-only maintenance API, releasing/reopening the database handle around it.
-Header/stats describe the selected collection plus file format/size, not raw
-header bytes. Browse uses the public bounded, ascending-ID page API: `browse LIMIT [AFTER_ID]`
-accepts 1–1,000 rows and prints `next_after` for continuation. Payloads
-are displayed as lossy UTF-8; writes accept UTF-8 strings.
+- Search accepts typed filters and the exact metrics `squared_l2`, `cosine`
+  and `inner_product`. ANN supports L2 and cosine.
+- JSON arguments run to the end of the line, so strings need no shell quoting.
+  Lines starting with `#` are comments.
+- Scripts and stdin stop at the first error; earlier writes stay committed.
+  The interactive shell prints errors and continues.
+- `browse LIMIT [AFTER_ID]` returns 1–1,000 rows in ascending ID order and
+  prints `next_after` for the next page. Payloads display as lossy UTF-8.
+- `--read-only` blocks put, delete, create and copy-out maintenance; ANN and
+  rebuild change only in-memory indexes. For a shared-lock reader, use
+  `Database::open_read_only` or `vlite-mcp`.
 
 ## Validated, atomic or resumable imports
 
@@ -91,67 +82,60 @@ vlite-import --db new.vlite --create 3 --input rows.jsonl --format jsonl
 vlite-import --db new.vlite --input embeddings.csv --format pgvector
 vlite-import --db new.vlite --input vectors.parquet --format parquet
 vlite-import --db new.vlite --input flat.faiss --format faiss
-# Explicitly opt into chunk-level atomicity and resume using the SAME input/options:
+# Chunked and resumable; rerun with the same input and options:
 vlite-import --db new.vlite --input large.jsonl --format jsonl --chunk-size 1000 --job 42
 ```
 
-Default mode reads and validates the **whole input** before submitting one
-`RejectChunk` import through the existing v4 durable checkpoint API. A parse,
-dimension, nonfinite vector, payload/metadata validation or frame-size error
-publishes no rows. Invalid text rows are counted with row numbers (first 20
-syntax errors shown); rejected engine rows report stable error codes. Existing
-v1–v3 files must first be explicitly upgraded using `vlite-maintain upgrade`.
-Named collections can be selected with `--collection NAME` and must already exist.
+By default, `vlite-import` reads and validates the whole input, then commits it
+as one atomic import. Any parse, dimension, non-finite vector, payload,
+metadata or frame-size error publishes no rows. Errors report row numbers (the
+first 20 syntax errors) or stable engine error codes.
 
-The default atomic maximum is conservatively 4,095 rows (one slot reserved for a
-checkpoint), also bounded by the engine's 16 MiB frame budget. A conservative
-byte-budget precheck may reject inputs just below the exact encoded limit.
-Larger inputs require explicit `--chunk-size 1..4095`. All rows are parsed and
-validated first even in chunked mode, but **I/O failures or checkpoint conflicts
-can leave earlier chunks committed**. There is no whole-file transaction across
-chunks. `--job` retries the last committed chunk with its engine digest and skips
-earlier committed chunks; it can also replay a finished job without writes.
-Keep the exact input, collection, chunk size and job ID unchanged for resume.
-Only the last committed chunk's digest is retained by the public API: earlier
-skipped chunks cannot be revalidated against their original contents. Aborted
-jobs cannot resume. Empty inputs import zero rows without creating a job marker.
-Success reports job ID, processed row count and chunks as JSON; on retry the row
-count includes previously committed rows. Import parsing currently holds the
-entire input in memory; this is not an unbounded streaming loader.
+- Imports need format v4. Upgrade older files with `vlite-maintain upgrade`.
+  `--collection NAME` selects an existing named collection.
+- One atomic import holds at most 4,095 rows (one slot is reserved for the
+  checkpoint) and must fit the engine's 16 MiB frame budget. The byte precheck
+  is conservative and may reject inputs just below the limit.
+- Larger inputs need `--chunk-size 1..4095`. All rows are still validated
+  first, but **I/O failures or checkpoint conflicts can leave earlier chunks
+  committed**. There is no transaction across chunks.
+- `--job ID` makes chunked imports resumable. A retry resubmits the last
+  committed chunk with its engine digest, skips earlier chunks, and can replay
+  a finished job without writes. Keep the input, collection, chunk size and job
+  ID unchanged. Earlier skipped chunks cannot be revalidated, and aborted jobs
+  cannot resume.
+- Empty inputs import zero rows without creating a job. Success prints the job
+  ID, row count (including earlier committed rows on retry) and chunks as JSON.
+- The whole input is held in memory; this is not a streaming loader.
+- Repeated IDs follow ordered upsert semantics: later rows replace earlier
+  ones. `--create` never overwrites an existing path.
 
 ### Supported input schemas
 
 - **JSONL:** one object per line with `id` (u64 JSON number), `vector` (float
-  array), optional `payload` (UTF-8 string), and optional `metadata` (the engine's
-  typed object). IDs above JavaScript's safe integer range must still be emitted
-  as exact JSON integer tokens. Unknown fields fail validation.
-- **CSV / pgvector CSV:** RFC CSV with header `id,vector` and optional `payload`
-  and `metadata` columns. The vector is a quoted pgvector/JSON literal such as
-  `"[1,2,3]"`; metadata is quoted typed JSON. Column order is arbitrary.
-- **PostgreSQL COPY text (`--format copy`):** tab-separated `id`, vector literal,
-  and optional payload. Optional `COPY ... FROM stdin;` header and `\.` terminator
-  are recognized. Payload supports `\\`, `\t`, `\n`, `\r`, and `\N` (empty).
-  Other escapes/column layouts/full SQL dumps are not supported.
-- **Parquet:** Arrow-compatible columns `id` (uint64 or nonnegative int64),
-  `vector` (list/large-list/fixed-size-list of float32/float64, or UTF-8 JSON
-  array), optional `payload` and `metadata` UTF-8 columns. Null id/vector/elements
-  are rejected; null optional columns are empty. Float64 vectors convert to f32
-  and values overflowing f32 are rejected. Reader supports uncompressed/Snappy
-  Parquet; other compression codecs are intentionally not enabled.
-- **Arrow IPC:** file or stream framing, with the same schema as Parquet.
-  Requires `import-formats`, as does Parquet. Compressed IPC is not supported.
-- **FAISS flat:** native `write_index` little-endian, 64-bit layout, fourcc
-  `IxF2` (IndexFlatL2) or `IxFI` (IndexFlatIP), trained flag, dimension/count,
-  matching metric and 64-bit float-count followed by contiguous float32 vectors.
-  Length, dimension and finiteness are checked; trailing data is rejected.
-  IDs are assigned from zero and payload/metadata are empty. Import transfers
-  **vectors**, not metric settings: choose L2 or inner-product at search time.
-  No IVF/PQ/HNSW, IDMap, GPU, transforms, endian conversion or 32-bit size_t
-  serialization. See [FAISS's serializer](https://github.com/facebookresearch/faiss/blob/main/faiss/impl/index_write.cpp).
-
-Repeated IDs retain the engine's ordered upsert semantics; existing IDs are
-replaced, not appended with duplicate identity. Output paths are never clobbered
-by `--create`.
+  array), and optional `payload` (UTF-8 string) and `metadata` (typed object).
+  Emit large IDs as exact JSON integers. Unknown fields fail validation.
+- **CSV / pgvector CSV:** header `id,vector` plus optional `payload` and
+  `metadata` columns, in any order. The vector is a quoted literal such as
+  `"[1,2,3]"`; metadata is quoted typed JSON.
+- **PostgreSQL COPY text (`--format copy`):** tab-separated `id`, vector
+  literal and optional payload. An optional `COPY ... FROM stdin;` header and
+  `\.` terminator are recognized. Payloads support `\\`, `\t`, `\n`, `\r` and
+  `\N` (empty); other escapes, layouts and SQL dumps are not supported.
+- **Parquet** (`import-formats`): columns `id` (uint64 or nonnegative int64),
+  `vector` (list, large list or fixed-size list of float32/float64, or a UTF-8
+  JSON array), and optional UTF-8 `payload` and `metadata`. Null IDs, vectors
+  or elements are rejected; null optional columns are empty. Float64 values
+  convert to f32 and overflow is rejected. Uncompressed and Snappy only.
+- **Arrow IPC** (`import-formats`): file or stream framing with the Parquet
+  schema. Compressed IPC is not supported.
+- **FAISS flat:** native little-endian, 64-bit `write_index` output for `IxF2`
+  (IndexFlatL2) or `IxFI` (IndexFlatIP). Length, dimension and finiteness are
+  checked; trailing data is rejected. IDs are assigned from zero with empty
+  payload and metadata. Only vectors are imported, so choose L2 or inner
+  product at search time. IVF, PQ, HNSW, IDMap, GPU, transforms, endian
+  conversion and 32-bit layouts are not supported. See
+  [FAISS's serializer](https://github.com/facebookresearch/faiss/blob/main/faiss/impl/index_write.cpp).
 
 ## Search quality and configuration/database comparison
 
@@ -161,68 +145,58 @@ vlite-quality --db example.vlite --m 8 --other-m 32 --other-ef-search 200 --json
 vlite-quality --db before.vlite --other-db after.vlite --json
 ```
 
-The existing `vlite-bench` already measures benchmark recall/latency, and
-`CollectionRef::ann_quality` already offers budgeted seeded recall. Those features
-are reused, not reimplemented as a new index: these tools add real-database input,
-parameter sweeping, rank/overlap analysis and side-by-side comparisons. The engine
-quality result and skipped reason are included alongside measured query metrics.
-Comparison uses identical queries from the primary file; IDs must have matching
-meaning in both files. Both sides are also measured against their own exact
-baseline. Different dimensions fail explicitly. Sequential opening permits two
-configurations of the same path without conflicting locks.
+`vlite-quality` measures ANN recall and latency on a real database, sweeps
+parameters, analyzes rank overlap and compares two configurations or two
+files. It also reports the engine's own quality result. Comparisons run the
+same queries from the primary file, so IDs must mean the same thing in both
+files; different dimensions fail. Each side is measured against its own exact
+baseline. Files open one after another, so two configurations of the same path
+do not conflict.
 
-Recall@k is intersection/exact count; overlap is intersection/union (Jaccard).
-Rank correlation is Pearson correlation of original rank positions on shared IDs
-(Spearman for unique engine rank positions); fewer than two shared IDs yield
-`null`, and the aggregate averages only defined correlations. It is not a
-penalty-based correlation over missing IDs. Reports use L2; output is compact
-JSON with `--json`, otherwise labeled human-readable summaries.
+- Recall@k is intersection ÷ exact count. Overlap is intersection ÷ union
+  (Jaccard).
+- Rank correlation is the Pearson correlation of rank positions on shared IDs.
+  Fewer than two shared IDs give `null`; the aggregate averages defined values.
+- Reports use L2. `--json` prints compact JSON; otherwise output is labeled
+  text.
 
 ## Index tuning advisor
-
-After measuring a baseline, sweep parameters to find a candidate configuration:
 
 ```powershell
 vlite-tune --db example.vlite --m 8,16,32 --ef-construction 64,128 --ef-search 20,50,100 --k 10 --samples 8 --target-recall 0.95 --json
 ```
 
-Sweeps up to 256 parameter combinations, builds deterministic L2 HNSW indexes
-in memory, and uses the same seeded sample of stored vectors for every candidate.
-Samples are bounded to 1–32, k to 1–100. The cheapest configuration meeting the
-target recall@k is recommended by the explicit cost function
+`vlite-tune` sweeps up to 256 parameter combinations. It builds deterministic
+L2 HNSW indexes in memory for the full collection and queries each with the same
+seeded sample of stored vectors (samples 1–32, k 1–100). It recommends the
+cheapest configuration that meets the target recall@k, using the cost
 `mean_query_us + memory_weight * component_MiB` (`--memory-weight`, default 1).
-A missing recommendation is JSON `null` and a nonzero exit status. Reports include
-build time, mean/p95 query latency, recall, Jaccard overlap, rank correlation and
-component byte estimates. Memory includes resident vectors and graph links, not
-allocator, record payload/metadata or node-object overhead; it is not peak RSS.
+If none qualifies, the recommendation is `null` and the exit status is nonzero.
 
-Measurements are local wall-clock estimates, not promises. Stored-vector queries
-include self-neighbors and can overestimate real-world recall. Evaluate production
-queries separately; tiny datasets and single samples are not statistically robust.
-Indexes are built for the full selected collection, not just the sample. No index
-or settings are persisted and source bytes remain unchanged.
+Reports include build time, mean and p95 latency, recall, Jaccard overlap, rank
+correlation and estimated component bytes (vectors and graph links only, not
+peak RSS). Stored-vector queries find themselves, which can overstate recall,
+so validate with production queries. The file is not changed.
 
 ## MCP server and agent skills
 
-These have their own installation guides, separate from the CLI tools:
+These have their own guides:
 
-- **[MCP server: supported tools, installation and client setup](MCP.md)**.
-  One local stdio server exposes seven read-only tools and two opt-in write
-  tools to your assistant. Download a native binary or build `vlite-mcp`.
-- **[Agent skills: the four skills and copy/paste installation](AGENT-SKILLS.md)**.
-  Install `vlite-rag`, `vlite-mcp`, `vlite-ops` and `vlite-index-tuning` as
-  complete folders in your assistant's skill directory.
+- **[MCP server](MCP.md):** one local stdio server with seven read-only tools
+  and two opt-in write tools. Download a native binary or build `vlite-mcp`.
+- **[Agent skills](AGENT-SKILLS.md):** install `vlite-rag`, `vlite-mcp`,
+  `vlite-ops` and `vlite-index-tuning` as complete folders in your assistant's
+  skill directory.
 
-MCP opens the database file directly, read-only by default; it is not a REST
-proxy. Installing an agent skill does not start that server or grant write
-permissions.
+MCP opens the database file directly, not through REST. Installing a skill
+does not start the server or grant write access.
 
 ## Graph operations (experimental, source-only)
 
 `vlite-graph-cli` runs one typed property-graph operation per invocation on a
 [graph-enabled file](STORAGE-FEATURES.md#graph-enabled-files-experimental-graph-feature).
 It needs the non-default `graph` and `json` features, so it is **not** in
-release archives, the Docker image or packages; build it from a source checkout:
+release archives, the Docker image or packages. Build it from a checkout:
 
 ```powershell
 cargo build --locked --features graph,json --bin vlite-graph-cli
@@ -232,8 +206,8 @@ cargo install --locked --path . --features graph,json --bin vlite-graph-cli
 
 Usage: `vlite-graph-cli --db PATH [--writable] [--explain] COMMAND [REQUEST]`.
 `REQUEST` is one JSON object; `-` reads it from stdin (at most 64 MiB) and
-omitting it means `{}`. Every command maps to one existing
-`vlite::property_graph` call; there is no graph query language.
+omitting it means `{}`. Each command maps to one `vlite::property_graph` call;
+there is no graph query language.
 
 | Command | Access | Library call |
 |---------|--------|--------------|
@@ -252,8 +226,8 @@ vlite-graph-cli --db kb.vlite neighbors '{"graph":"kb","node":{"key":"api"},"dir
 vlite-graph-cli --db kb.vlite --explain traverse '{"graph":"kb","start":[{"key":"api"}],"limits":{"max_hops":3}}'
 ```
 
-`ops.json` holds one batch; operations apply in order and commit together or
-not at all (at most 4,096 operations):
+`ops.json` holds one batch of at most 4,096 operations. They apply in order and
+commit together or not at all:
 
 ```json
 {"graph":"kb","ops":[
@@ -267,51 +241,47 @@ not at all (at most 4,096 operations):
 
 Batch operations: `create_node`, `upsert_node`, `patch_node` (`add_labels`,
 `remove_labels`, `set`, `unset`), `delete_node`, `create_edge`, `patch_edge`,
-`delete_edge`, `attach`, `detach`, and the vector mutations `put_vector`
-(`Mutation::PutWithMetadata` when `metadata` is given, otherwise
-`Mutation::Put`; `payload` is UTF-8 text) and `delete_vector`. Nodes are
-addressed by key, edges by `{"id":...}` or `{"key":...}`. `expected` is `"any"`
-(default), `"absent"` or `{"revision":"N"}`.
+`delete_edge`, `attach`, `detach`, `put_vector` (`Mutation::PutWithMetadata`
+when `metadata` is given, otherwise `Mutation::Put`; `payload` is UTF-8 text)
+and `delete_vector`. Nodes are addressed by key, edges by `{"id":...}` or
+`{"key":...}`. `expected` is `"any"` (default), `"absent"` or
+`{"revision":"N"}`.
 
-Contract:
-
-- **Access.** Reads open the file with `Database::open_read_only` (shared
-  lock) and never write; they coexist with other readers, such as read-only
-  `vlite-mcp`, and fail with `locked` while a writer owns the file. Writes
-  require `--writable`, take the exclusive lock for that one command and fail
-  with `locked` while any other handle is open. Passing `--writable` to a read,
-  or omitting it for a write, is a `usage` error. Stop the server or other
-  exclusive owner first, as for the other offline tools.
-- **Graph-enabled files only.** Files are never converted: graph commands on a
+- **Access.** Reads use `Database::open_read_only` (shared lock), never write,
+  and fail with `locked` while a writer owns the file. Writes require
+  `--writable` and take the exclusive lock for one command; they fail with
+  `locked` while any other handle is open. `--writable` on a read, or its
+  absence on a write, is a `usage` error.
+- **Graph-enabled files only.** Files are never converted. Graph commands on a
   vector-only file fail with `graphs_not_enabled`, and `init` refuses an
-  existing path. Copy a v4/v5 file out as a graph-enabled one with
+  existing path. Copy a v4/v5 file into a graph-enabled one with
   `vlite-maintain enable-graph SOURCE DESTINATION` (also a graph build).
-  Encrypted files are not supported by this tool.
+  Encrypted files are not supported.
 - **Bounded reads.** Queries accept `"limits"` (fields of `GraphLimits`;
-  defaults apply to omitted fields; values above the ceiling fail with
-  `graph_limit_exceeds_ceiling`, never clamped) and `"projection"` (`"all"`,
-  `"none"` or `{"only":[...]}`). Every result carries `graph`, `view_sequence`,
-  `complete`, `truncation`, `stats` and `cursor`. Pass a returned `cursor`
-  (lowercase hex) with the same request to continue `find-nodes` or
-  `neighbors`; a write in between fails it with `graph_cursor_stale`.
-  `--explain` returns the normalized query, effective limits, projection and
-  index choices without reading nodes or edges.
+  omitted fields use defaults; values above the ceiling fail with
+  `graph_limit_exceeds_ceiling` and are never clamped) and `"projection"`
+  (`"all"`, `"none"` or `{"only":[...]}`). Every result carries `graph`,
+  `view_sequence`, `complete`, `truncation`, `stats` and `cursor`. Pass a
+  returned lowercase-hex `cursor` with the same request to continue
+  `find-nodes` or `neighbors`; a write in between fails with
+  `graph_cursor_stale`. `--explain` returns the normalized query, effective
+  limits, projection and index choices without reading nodes or edges.
 - **Output.** Success prints one JSON object on stdout and exits 0. Failure
   prints `{"error":{"code":"...","message":"..."}}` on stderr and exits 1.
-  Codes are `usage`, `invalid_request` (malformed JSON, unknown or repeated
-  fields, keys or operations, malformed IDs and cursors that are not lowercase
-  hex), `invalid_input` (values the library rejects, such as invalid keys,
-  labels or query bounds, or a cursor from another query), the REST graph codes (for example
-  `graph_not_found`, `graph_node_not_found`, `graph_attached_record`) and
-  `locked`, `precondition_failed`, `io_error` and others for
-  database errors. Node, edge and record IDs, revisions and sequences are
-  decimal strings in output and accepted as decimal strings or JSON integers,
-  so values up to 2^64-1 keep full precision. Counts and limits are numbers.
+  Codes include `usage`, `invalid_request` (malformed JSON, unknown or repeated
+  fields, keys or operations, malformed IDs or cursors), `invalid_input`
+  (values the library rejects, such as invalid keys, labels, query bounds or a
+  cursor from another query), the REST graph codes (for example
+  `graph_not_found`, `graph_node_not_found`, `graph_attached_record`),
+  `locked`, `precondition_failed` and `io_error`. IDs, revisions and sequences
+  are decimal strings in output and accepted as strings or JSON integers, so
+  values up to 2^64-1 keep full precision. Counts and limits are numbers.
   Enumerations use `"name"` or `{"name":{...}}`.
 
 ## Tests
 
-The following commands are for contributors validating the tools:
+Tool tests use small fixtures generated in the test: CSV, JSONL, COPY, both
+FAISS flat metrics and, with `import-formats`, Arrow and Parquet.
 
 ```powershell
 cargo test --locked --features tools --test shell_cli --test import_tools --test tune_cli
@@ -319,7 +289,29 @@ cargo test --locked --all-features --test shell_cli --test import_tools --test t
 cargo test --locked --features graph,json --test graph_cli
 ```
 
-Fixtures are small and generated in-test: CSV, JSONL, COPY, both FAISS flat metric
-headers, and (with `import-formats`) Arrow files/streams and Parquet float lists.
-Tests cover read-only byte preservation, CRUD/filter/ANN shell scripts, malformed
-input atomicity, resumable replay, parameter selection and config/file comparison.
+Contributors validate a full change with:
+
+```text
+cargo test --locked --all-targets --all-features
+cargo test --locked -p vlite-graph
+cargo test --locked --features graph --test graph_storage --test graph_compat --test graph_traversal --test graph_maintenance --test graph_recovery
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo fmt --check
+docker compose --profile test run --build --rm tests
+python3 tests/rest_e2e.py
+python3 tests/tls_e2e.py
+```
+
+Browser acceptance tests need Playwright on the Docker host (inside WSL when
+Docker runs there):
+
+```text
+python3 -m pip install -r tests/requirements-dashboard.txt
+python3 -m playwright install --with-deps chromium
+python3 tests/dashboard_e2e.py
+```
+
+Website and documentation checks live in `tests/site_links.py`,
+`tests/release_docs.py` and `tests/content_budget.py`. See
+[development and testing](REFERENCE.md#development-and-testing) for what each
+suite covers, including the seeded crash-recovery histories.

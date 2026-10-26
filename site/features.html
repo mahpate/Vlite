@@ -35,7 +35,7 @@
     <div class="wrap">
       <div class="kicker">Features</div>
       <h1>What you can build with VLite</h1>
-      <p class="lead">One storage engine. Embedded in your app or behind an API you operate.</p>
+      <p class="lead">One engine, embedded in your app or behind an API you run.</p>
       <div class="cta"><a class="btn primary" href="./#quickstart">Get started</a><a class="btn" href="./#deployment-options">Choose a deployment</a><a class="btn" href="docs/INSTALL.html">Install</a></div>
     </div>
   </section>
@@ -50,172 +50,134 @@
       </div>
     </aside>
     <div class="docs-main feature-catalog">
-      <p>Optional capabilities show their requirements below. File formats describe storage compatibility, not product releases. SDK and transport coverage varies; each guide lists its API surface.</p>
       <section id="storage">
         <h2>Storage and records</h2>
-        <div class="table-scroll"><table><caption>Persistence, record operations and collections</caption><thead><tr><th>Feature</th><th>Support and requirements</th></tr></thead><tbody>
-          <tr><td>Single-file database</td><td>Portable, versioned binary log with an authoritative <code>.vlite</code> file. Optional indexes and administration can use sidecars.</td></tr>
-          <tr><td>Durable commits</td><td>Checksummed frames, filesystem sync before acknowledgement, explicit corruption and incomplete-tail errors.</td></tr>
-          <tr><td>Vector CRUD and browse</td><td>Put, get, delete, numeric-ID pagination, payload bytes and typed metadata. IDs retain all 64 bits.</td></tr>
-          <tr><td>Atomic batches</td><td>Up to 4,096 operations and 16 MiB per batch, within one collection. No cross-collection transaction.</td></tr>
-          <tr><td>Conditional writes</td><td>Record revisions, put-if-absent and revision-checked puts/deletes. Conflicts write nothing.</td></tr>
-          <tr><td>Named collections</td><td>Independent dimensions, IDs, settings and derived indexes within one file. Requires format V4 or V5.</td></tr>
-          <tr><td>Record expiry (TTL)</td><td>Absolute expiry timestamps, expiry-aware reads and compaction. Requires format V5.</td></tr>
-          <tr><td>Metadata-only updates</td><td>Change metadata without rewriting the vector or payload; preserve expiry. Requires format V5.</td></tr>
-          <tr><td>Resumable ingestion</td><td>Atomic chunks with durable checkpoints, replay detection, row validation and reject/skip-invalid policies. Requires format V4 or V5.</td></tr>
-          <tr><td>In-memory database</td><td>Create in memory, open from bytes and export bytes; the host handles persistence.</td></tr>
+        <div class="table-scroll"><table><caption>Persistence and records</caption><tbody>
+          <tr><th scope="row">Single file</th><td>One portable file, or fully in memory. Indexes can use sidecar files.</td></tr>
+          <tr><th scope="row">Durable commits</th><td>Checksummed and synced before a write succeeds.</td></tr>
+          <tr><th scope="row">Atomic batches</th><td>Up to 4,096 operations and 16 MiB, within one collection.</td></tr>
+          <tr><th scope="row">Conditional writes</th><td>Revision checks. A conflict writes nothing.</td></tr>
+          <tr><th scope="row">Collections</th><td>Separate dimensions, IDs and settings in one file.</td></tr>
+          <tr><th scope="row">Record lifecycle</th><td>Expiry, metadata-only updates and resumable imports.</td></tr>
         </tbody></table></div>
-        <p><a href="docs/REFERENCE.html">Storage contracts</a> &middot; <a href="docs/CAPABILITIES.html">Collections, revisions and ingestion</a></p>
+        <p><a href="docs/REFERENCE.html">Storage contracts</a> &middot; <a href="docs/CAPABILITIES.html">Capabilities</a></p>
       </section>
       <section id="search">
         <h2>Search and retrieval</h2>
-        <div class="table-scroll"><table><caption>Query modes and result shaping</caption><thead><tr><th>Feature</th><th>Support and requirements</th></tr></thead><tbody>
-          <tr><td>Exact vector search</td><td>Squared L2, cosine and negative inner product; f64 accumulation, distance/ID ordering and bounded top-k memory.</td></tr>
-          <tr><td>Approximate vector search</td><td>HNSW for squared L2 and cosine. Lazy mode may build synchronously; ready-only mode never builds.</td></tr>
-          <tr><td>Typed metadata filters</td><td>Equality, ranges, membership, existence and geographic radius predicates. Numeric types remain distinct.</td></tr>
-          <tr><td>Filtered ANN</td><td>Approximate retrieval with metadata eligibility checks; recall depends on the workload and search budget.</td></tr>
-          <tr><td>Automatic query planning</td><td>Exact scan, indexed exact, ready ANN and filtered ANN with plan/stats reporting. Auto mode never builds an ANN index.</td></tr>
-          <tr><td>Text search</td><td>BM25 on declared string metadata fields; lowercase alphanumeric tokenization.</td></tr>
-          <tr><td>Hybrid retrieval</td><td>Dense + BM25 or dense + sparse fusion using weighted reciprocal rank fusion.</td></tr>
-          <tr><td>Grouped results</td><td>Group nearest matches by a metadata field with a per-group hit cap.</td></tr>
-          <tr><td>Recommendations</td><td>Positive and negative examples, excluding example IDs from returned results.</td></tr>
-          <tr><td>Facets and statistics</td><td>Metadata facet counts and numeric statistics.</td></tr>
-          <tr><td>Geographic search</td><td>GeoPoint metadata, Haversine-radius filtering and ranking by vector or geographic distance.</td></tr>
-          <tr><td>Read-only query language</td><td>Parameterized vector/text search, predicates, groups, facets, ordering and limits. Not SQL or a scripting runtime.</td></tr>
+        <div class="table-scroll"><table><caption>Query modes</caption><tbody>
+          <tr><th scope="row">Exact search</th><td>Squared L2, cosine and negative inner product.</td></tr>
+          <tr><th scope="row">Approximate search</th><td>HNSW for L2 and cosine, with optional metadata filters.</td></tr>
+          <tr><th scope="row">Typed filters</th><td>Equality, ranges, membership, existence and geographic radius.</td></tr>
+          <tr><th scope="row">Text and hybrid</th><td>BM25 text search, fused with dense or sparse vectors.</td></tr>
+          <tr><th scope="row">Result shaping</th><td>Grouping, recommendations, facets and statistics.</td></tr>
+          <tr><th scope="row">Query planning</th><td>Picks an exact or indexed path and reports the plan.</td></tr>
+          <tr><th scope="row">Query language</th><td>Read-only, parameterized queries. Not SQL.</td></tr>
         </tbody></table></div>
-        <p><a href="docs/CAPABILITIES.html">Retrieval guide</a> &middot; <a href="docs/VECTORS.html">Sparse, hybrid and parsed queries</a></p>
+        <p><a href="docs/VECTORS.html">Retrieval guide</a></p>
       </section>
       <section id="indexes">
         <h2>Indexes and concurrency</h2>
-        <div class="table-scroll"><table><caption>Search acceleration and concurrent access</caption><thead><tr><th>Feature</th><th>Support and requirements</th></tr></thead><tbody>
-          <tr><td>Rebuildable HNSW</td><td>Deterministic construction, configurable graph/search budgets and bounded mutation buffering.</td></tr>
-          <tr><td>Scalar-u8 quantization</td><td>Compressed traversal codes with full-precision candidate reranking. Original vectors remain resident.</td></tr>
-          <tr><td>Metadata indexes</td><td>Equality and range indexes with full-filter rechecks; rebuilt on reopen/settings changes.</td></tr>
-          <tr><td>ANN restart snapshots</td><td>Optional validated graph cache tied to database state. Not available for encrypted databases.</td></tr>
-          <tr><td>Disk ANN</td><td>Optional graph/vector sidecar with a bounded node cache. Builds still need in-memory HNSW capacity; no metadata/expiry filtering.</td></tr>
-          <tr><td>Index quality and memory</td><td>Sampled recall against exact results, index identity/readiness and component-level memory diagnostics.</td></tr>
-          <tr><td>Parallel exact scans</td><td>Native Rayon scans above workload thresholds; not on WebAssembly.</td></tr>
-          <tr><td>Concurrent server reads</td><td>Shared read access and exclusive writes; bounded committed snapshots for eligible exact queries.</td></tr>
-          <tr><td>Shared embedded readers</td><td>Multiple read-only processes under shared file locks, excluding a writer. Reopen to see later commits.</td></tr>
-          <tr><td>Committed read snapshots</td><td>Rust handles for bounded exact search, get and browse outside the owner lock.</td></tr>
-          <tr><td>Background rebuilds</td><td>Explicit start, poll, cancel and maintenance controls; optional server scheduling and retry backoff.</td></tr>
-          <tr><td>Durable group commit</td><td>Optional shared sync for bounded concurrent record writes while retaining separate atomic frames.</td></tr>
-          <tr><td>Read-lock policy</td><td><code>--lock-held-reads</code> trades snapshot copying for holding the owner read lock during exact scans.</td></tr>
+        <div class="table-scroll"><table><caption>Acceleration and concurrent access</caption><tbody>
+          <tr><th scope="row">HNSW</th><td>Deterministic builds, tunable budgets and background rebuilds.</td></tr>
+          <tr><th scope="row">Quantization</th><td>Scalar u8 traversal with full-precision reranking.</td></tr>
+          <tr><th scope="row">Metadata indexes</th><td>Equality and range indexes.</td></tr>
+          <tr><th scope="row">Snapshots and disk ANN</th><td>Fast restarts and an optional on-disk graph.</td></tr>
+          <tr><th scope="row">Concurrency</th><td>Concurrent reads and exclusive writes. Several processes can share a file read-only.</td></tr>
         </tbody></table></div>
-        <p><a href="docs/ANN-SNAPSHOTS.html">ANN snapshots</a> &middot; <a href="docs/read-snapshots.html">Read snapshots</a> &middot; <a href="docs/CONSOLE-ADMIN.html">Index and concurrency controls</a></p>
+        <p><a href="docs/ANN-SNAPSHOTS.html">ANN snapshots</a> &middot; <a href="docs/read-snapshots.html">Read snapshots</a></p>
       </section>
       <section id="vectors">
         <h2>Vectors and AI integration</h2>
-        <div class="table-scroll"><table><caption>Embedding management and reranking</caption><thead><tr><th>Feature</th><th>Support and requirements</th></tr></thead><tbody>
-          <tr><td>Named dense vectors</td><td>Independent dimensions and metrics per vector name, with exact and ready-only named HNSW search. Requires format V5.</td></tr>
-          <tr><td>Sparse vectors</td><td>Sorted sparse values, derived inverted postings and negative-dot-product retrieval. Requires format V5.</td></tr>
-          <tr><td>Model version history</td><td>Active and retained vector versions, explicit retention/pruning and version-targeted search. Requires format V5.</td></tr>
-          <tr><td>Resumable re-embedding</td><td>Durable job checkpoints, source-revision checks and atomic activation after completion. Your application schedules provider work.</td></tr>
-          <tr><td>Embedding providers</td><td>Application-owned <code>Embedder</code> registry; optional OpenAI-compatible HTTP provider with <code>http-embedder</code>.</td></tr>
-          <tr><td>Reranking</td><td>Pluggable providers, exact metric rescoring and MMR diversity selection.</td></tr>
-          <tr><td>Typed float32 inputs</td><td>Python buffer and Node.js Float32Array search/batch methods; copied inputs, not zero-copy.</td></tr>
-          <tr><td>GPU exact search</td><td>Optional <code>gpu</code> build using wgpu, default-collection squared L2 with CPU reranking/fallback; no filtered or cosine GPU search.</td></tr>
+        <div class="table-scroll"><table><caption>Embeddings and reranking</caption><tbody>
+          <tr><th scope="row">Named vectors</th><td>Several dense vectors per record, each with its own dimensions and metric.</td></tr>
+          <tr><th scope="row">Sparse vectors</th><td>Inverted postings and dot-product retrieval.</td></tr>
+          <tr><th scope="row">Model versions</th><td>Keep, prune and search vector versions. Re-embed with resumable jobs.</td></tr>
+          <tr><th scope="row">Providers</th><td>Plug in your own embedders and rerankers.</td></tr>
+          <tr><th scope="row">GPU search</th><td>Optional exact L2 search on the GPU.</td></tr>
         </tbody></table></div>
-        <p><a href="docs/VECTORS.html">Vector and provider guide</a> &middot; <a href="docs/STORAGE-FEATURES.html">GPU and storage limits</a></p>
+        <p><a href="docs/STORAGE-FEATURES.html">Storage features</a></p>
       </section>
       <section id="interfaces">
         <h2>SDKs, APIs and deployment</h2>
-        <div class="table-scroll"><table><caption>Ways to use the same engine</caption><thead><tr><th>Feature</th><th>Support and requirements</th></tr></thead><tbody>
-          <tr><td>Embedded Rust</td><td>Direct database/collection APIs with explicit Cargo feature selection.</td></tr>
-          <tr><td>Native bindings</td><td>C ABI, synchronous Python and asynchronous Node.js/TypeScript bindings.</td></tr>
-          <tr><td>REST service</td><td>Authenticated JSON API, OpenAPI contract, capability discovery and structured errors. Requires <code>server</code>.</td></tr>
-          <tr><td>gRPC</td><td>Optional protobuf service with bounded streaming import/export, health and shared authorization. Requires <code>grpc</code> and a listener.</td></tr>
-          <tr><td>Bounded API work</td><td>Request/body limits, bounded admission and explicit overload errors; grouped writes drain on graceful shutdown.</td></tr>
-          <tr><td>Remote clients</td><td>Python, JavaScript/TypeScript, Go and .NET clients.</td></tr>
-          <tr><td>Docker</td><td>API and optional dashboard images, persistent data/admin volumes and loopback defaults.</td></tr>
-          <tr><td>Helm deployment</td><td>Chart and operational configuration for Kubernetes.</td></tr>
-          <tr><td>WebAssembly</td><td>Byte-buffer backend and wasm-bindgen wrapper; the host supplies time and persistence. No path locking or background threads.</td></tr>
-          <tr><td>Native platforms</td><td>Windows, Linux and macOS; available binaries/wheels vary by architecture and package.</td></tr>
+        <div class="table-scroll"><table><caption>Ways to use the engine</caption><tbody>
+          <tr><th scope="row">Embedded</th><td>Rust, C, Python and Node.js.</td></tr>
+          <tr><th scope="row">Server</th><td>REST with an OpenAPI contract, plus optional gRPC.</td></tr>
+          <tr><th scope="row">Remote clients</th><td>Python, JavaScript/TypeScript, Go and .NET.</td></tr>
+          <tr><th scope="row">Deployment</th><td>Docker images and a Helm chart.</td></tr>
+          <tr><th scope="row">WebAssembly</th><td>In-memory backend; the host stores the bytes.</td></tr>
         </tbody></table></div>
-        <p><a href="api.html">API reference</a> &middot; <a href="docs/GRPC.html">gRPC scope</a> &middot; <a href="docs/INSTALL.html">Installation matrix</a> &middot; <a href="https://github.com/mahpate/Vlite/blob/main/deploy/helm/vlite/README.md">Helm guide</a></p>
+        <p><a href="api.html">API</a> &middot; <a href="docs/GRPC.html">gRPC</a> &middot; <a href="docs/INSTALL.html">Installation</a></p>
       </section>
       <section id="security">
         <h2>Security and access control</h2>
-        <div class="table-scroll"><table><caption>Optional protection and authorization controls</caption><thead><tr><th>Feature</th><th>Support and requirements</th></tr></thead><tbody>
-          <tr><td>Encryption at rest</td><td>ChaCha20-Poly1305 frame bodies and Argon2id passphrase derivation. Frame prefixes remain visible.</td></tr>
-          <tr><td>Key rotation</td><td>Validated copy-out re-encryption; encrypted backups retain encrypted bytes.</td></tr>
-          <tr><td>Bearer authentication</td><td>Bootstrap admin/read-only tokens and scoped credentials.</td></tr>
-          <tr><td>Scoped authorization</td><td>Collection/operation permissions, credential expiry, rotation and revocation.</td></tr>
-          <tr><td>Credential quotas</td><td>Request-rate limits and aggregate/per-collection live-vector quotas.</td></tr>
-          <tr><td>Tenant namespaces</td><td>Tenant-scoped credentials, collections and quotas in the same file; not separate cryptographic isolation.</td></tr>
-          <tr><td>HTTPS and gRPC TLS</td><td>Native TLS or a trusted reverse proxy; optional gRPC client certificates.</td></tr>
-          <tr><td>Certificate reload</td><td>Admin-triggered validated identity/CA reload; existing sessions remain unchanged.</td></tr>
-          <tr><td>Audit and redaction</td><td>Administrative audit history, redacted request logs and allowlisted trace attributes.</td></tr>
+        <div class="table-scroll"><table><caption>Protection and access</caption><tbody>
+          <tr><th scope="row">Dashboard accounts</th><td>Password sign-in with super admin, editor and viewer roles.</td></tr>
+          <tr><th scope="row">API keys</th><td>Scoped to collections and operations. Expire, rotate and revoke them.</td></tr>
+          <tr><th scope="row">Tenants</th><td>Separate collections, keys, accounts and quotas in one file.</td></tr>
+          <tr><th scope="row">Encryption at rest</th><td>Optional, with validated key rotation.</td></tr>
+          <tr><th scope="row">TLS and audit</th><td>HTTPS, gRPC TLS and an audit history of admin changes.</td></tr>
         </tbody></table></div>
-        <p><a href="docs/SECURITY.html">Security guide</a> &middot; <a href="docs/CONSOLE-ADMIN.html">Credential and audit administration</a></p>
+        <p><a href="docs/SECURITY.html">Security guide</a> &middot; <a href="docs/CONSOLE-ADMIN.html">Server administration</a></p>
       </section>
       <section id="operations">
         <h2>Operations, recovery and integration</h2>
-        <div class="table-scroll"><table><caption>Maintenance and operational visibility</caption><thead><tr><th>Feature</th><th>Support and requirements</th></tr></thead><tbody>
-          <tr><td>Inspect and verify</td><td>Offline file/header/frame validation, detailed reports and keyed encrypted-file operations.</td></tr>
-          <tr><td>Backup and restore</td><td>Validated byte-preserving copies, backup drills, optional schedules/retention and restart-selected server restore.</td></tr>
-          <tr><td>Compaction and format upgrade</td><td>Validated copy-out maintenance; original files are not replaced in place.</td></tr>
-          <tr><td>Interrupted-write recovery</td><td>Explicit incomplete-tail repair; complete corruption fails closed.</td></tr>
-          <tr><td>Point-in-time restore</td><td>Sequence-targeted restore; timestamp targets require commit timestamps. Restores publish a new lineage.</td></tr>
-          <tr><td>Change feed</td><td>Lineage/sequence cursors, whole-commit batches and explicit cursor invalidation after history changes. Requires V4 or V5.</td></tr>
-          <tr><td>Read replicas</td><td>Validated log-segment export/apply, lag status and explicit promotion. File shipping, not automatic network replication.</td></tr>
-          <tr><td>Webhooks</td><td>At-least-once change-feed delivery with HMAC signatures, retry backoff and persisted subscriptions/cursor. Consumers deduplicate events.</td></tr>
-          <tr><td>Health and metrics</td><td>Health endpoints, JSON/Prometheus metrics, latency/route counters, queue/sync/snapshot and rebuild diagnostics.</td></tr>
-          <tr><td>Live logs</td><td>Bounded in-memory ring, sequence cursors, filters and JSONL export; not a durable log archive.</td></tr>
-          <tr><td>OpenTelemetry</td><td>Optional OTLP tracing through <code>otel</code>, with operator-configured collector.</td></tr>
+        <div class="table-scroll"><table><caption>Maintenance and visibility</caption><tbody>
+          <tr><th scope="row">Verify and repair</th><td>Offline validation and explicit repair of interrupted writes.</td></tr>
+          <tr><th scope="row">Backup and restore</th><td>Validated copies, schedules and point-in-time restore.</td></tr>
+          <tr><th scope="row">Changes</th><td>Change feed, signed webhooks and log-shipped read replicas.</td></tr>
+          <tr><th scope="row">Monitoring</th><td>Prometheus metrics, live logs and optional OpenTelemetry.</td></tr>
         </tbody></table></div>
-        <p><a href="docs/DOCKER-OPERATIONS.html">Deployment operations</a> &middot; <a href="docs/STORAGE-FEATURES.html">Recovery and replicas</a> &middot; <a href="docs/WEBHOOKS.html">Webhooks</a></p>
+        <p><a href="docs/DOCKER-OPERATIONS.html">Operations</a> &middot; <a href="docs/WEBHOOKS.html">Webhooks</a></p>
       </section>
       <section id="dashboard">
         <h2>Dashboard</h2>
         <ul class="list">
-          <li>Overview, Collections, Search, Observability, Administration and Developer Console workspaces.</li>
-          <li>Connection/token help, collection selection, snapshot cards and compatibility diagnostics.</li>
-          <li>Paginated record browsing, metadata columns, current-page sorting and Payload/Metadata/Vector/Raw JSON inspection.</li>
-          <li>Record editing, typed metadata, batch changes and confirmation before mutations.</li>
-          <li>Collection creation review, settings, index build/maintenance controls and readiness/quality views.</li>
-          <li>Exact/ANN/hybrid search, visual filters, comparisons, result inspection and recommendations.</li>
-          <li>Bounded JSON/CSV imports/exports, JSON write progress/pause and sampled PCA exploration.</li>
-          <li>Metric cards, sparklines, live logs, diagnostics and persistent audit inspection.</li>
-          <li>Signed-in identity badge (super admin, read-only, or API key and tenant).</li>
-          <li>Tenant lifecycle (create, usage, rename, vector limit, suspend/resume, delete), scoped credential limits/rotation/revocation, token-file reload and read-only token revocation.</li>
-          <li>Consistent backups, verification/drills, staged/PITR restore, restart selection, schedules/retention and automatic index maintenance.</li>
-          <li>Webhook subscription management, native TLS certificate reload and bounded replication-log export, with role/configuration availability notes.</li>
-          <li>REST playground, request/response inspector, copy-as-code and read-only scenarios.</li>
-          <li>Light/dark/system theme, optional saved appearance, compact spacing, guided onboarding and responsive keyboard-accessible navigation.</li>
+          <li>Sign in with a username and password.</li>
+          <li>Browse, edit, import and search records.</li>
+          <li>Create collections and build indexes.</li>
+          <li>Super admins manage users, tenants, API keys and the server.</li>
         </ul>
         <p><a href="dashboard.html">Take a tour</a> &middot; <a href="docs/CONSOLE.html">Dashboard guide</a></p>
       </section>
       <section id="tools">
         <h2>Command-line tools and agents</h2>
         <ul class="list">
-          <li><strong>Interactive/scripted shell:</strong> query records and collections; use <code>--read-only</code> to disable writes. The shell still takes an exclusive file lock.</li>
-          <li><strong>Offline maintenance:</strong> inspect, verify, backup, restore, compact, upgrade and re-encrypt.</li>
-          <li><strong>Import:</strong> CSV, JSONL, pgvector text and supported FAISS input; optional Parquet/Arrow IPC with <code>import-formats</code>.</li>
-          <li><strong>Search quality:</strong> exact-oracle recall, configuration/database comparison and bounded index evaluation.</li>
-          <li><strong>Index tuning:</strong> workload-based configuration advisor with memory/recall trade-offs.</li>
-          <li><strong>Benchmark harnesses:</strong> seeded or external vectors, mixed mutations and raw timing/memory reports.</li>
-          <li><strong>MCP server:</strong> stdio tools, shared-lock read-only access by default and explicit writable mode.</li>
-          <li><strong>Agent skills:</strong> RAG, MCP, operations and index tuning workflows.</li>
+          <li>A shell for interactive or scripted queries.</li>
+          <li>Inspect, verify, back up, compact and upgrade files.</li>
+          <li>Import CSV, JSONL and more. Measure recall and tune indexes.</li>
+          <li>An MCP server and agent skills.</li>
         </ul>
-        <p><a href="docs/TOOLS.html">CLI guide</a> &middot; <a href="docs/MCP.html">MCP guide</a> &middot; <a href="docs/AGENT-SKILLS.html">Agent skills</a></p>
+        <p><a href="docs/TOOLS.html">CLI guide</a> &middot; <a href="docs/MCP.html">MCP</a> &middot; <a href="docs/AGENT-SKILLS.html">Agent skills</a></p>
       </section>
       <section id="requirements">
         <h2>Requirements and boundaries</h2>
         <ul class="list">
-          <li>The live dataset must fit in RAM. Disk ANN bounds its node cache, not the database's overall memory footprint.</li>
-          <li>One exclusive writer or multiple shared read-only owners per file; no simultaneous embedded writer/readers across processes.</li>
-          <li>File creation defaults to V3; collections/checkpoints need V4+, and expiry/extended vectors need V5. Upgrades are explicit.</li>
-          <li>No cross-collection transactions, distributed consensus, automatic network replication or inner-product ANN.</li>
-          <li>Plaintext ANN sidecars are unavailable with encrypted databases. TLS and access controls are separate from file encryption.</li>
-          <li>Embeddings come from your application/provider. VLite does not bundle a semantic model runtime.</li>
-          <li>Recovery checks do not certify physical power-loss behavior; filesystem and hardware guarantees still apply.</li>
+          <li>The live dataset must fit in memory.</li>
+          <li>One writer, or several read-only readers, per file.</li>
+          <li>Some features need a newer file format. Upgrades are explicit.</li>
+          <li>No cross-collection transactions, distributed consensus or inner-product ANN.</li>
+          <li>Tenants share one file. Their isolation is logical, not cryptographic.</li>
+          <li>You supply the embeddings.</li>
+          <li>Durability depends on your filesystem and hardware.</li>
         </ul>
-        <details><summary>Experimental source capabilities</summary><p>Property-graph storage, bounded graph reads and graph-aware maintenance require the non-default <code>graph</code> build feature. They are not included in distributed release artifacts and are not part of the supported catalogue above. See <a href="docs/STORAGE-FEATURES.html#graph-enabled-files-experimental-graph-feature">graph-file requirements and limits</a>.</p></details>
+        <details><summary>Experimental source capabilities</summary><p>A non-default <code>graph</code> build adds property-graph storage. It is not in release artifacts. See <a href="docs/STORAGE-FEATURES.html#graph-enabled-files-experimental-graph-feature">graph-file requirements</a>.</p></details>
       </section>
     </div>
   </div>
 </main>
-<footer><div class="wrap"><p>VLite &middot; Single-file vector database &middot; MIT</p><nav aria-label="Footer"><a href="./">Home</a><a href="features.html">Features</a><a href="docs/">Docs</a><a href="https://github.com/mahpate/Vlite">GitHub</a></nav></div></footer>
+<footer>
+  <div class="wrap">
+    <span>© VLite contributors · MIT License</span>
+    <nav>
+      <a href="https://github.com/mahpate/Vlite">GitHub</a>
+      <a href="https://github.com/mahpate/Vlite/releases">Releases</a>
+      <a href="api.html">API</a>
+      <a href="architecture.html">Architecture</a>
+      <a href="compare.html">Benchmarks</a>
+      <a href="about.html">About</a>
+      <a href="asendme.html">ASENDME</a>
+    </nav>
+  </div>
+</footer>
 </body>
 </html>

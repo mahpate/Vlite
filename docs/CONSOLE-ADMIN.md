@@ -1,454 +1,340 @@
 # Console administration API
 
-Native HTTPS, gRPC mTLS/certificate reload, tenant isolation, persisted credential
-rate/vector limits and optional OTLP tracing are documented in [SECURITY.md](SECURITY.md).
+Reference for the server administration routes behind the dashboard. For
+sign-in and roles, see [dashboard sign-in and accounts](SECURITY.md#dashboard-sign-in-and-accounts).
+For TLS, tenants, credential limits and tracing, see [SECURITY.md](SECURITY.md).
 
-The bundled console talks to this same-origin experimental REST API. All routes
-below require bearer authentication (except static console files). Existing
-`VLITE_AUTH_TOKEN` / `VLITE_AUTH_TOKEN_FILE` and `--token-file` remain admin
-credentials. Existing bootstrap secrets are never returned. Scoped credential
-creation and rotation return a new secret exactly once; never log that response.
+Every route below needs authentication; only the static console files are
+public. The admin token (`VLITE_AUTH_TOKEN`, `VLITE_AUTH_TOKEN_FILE` or
+`--token-file`) is the super admin credential for automation and recovery.
+The server never returns bootstrap secrets. Creating or rotating a scoped
+credential returns its secret once, so never log that response.
 
 ## Configuration and roles
 
-- `VLITE_READ_ONLY_TOKEN` or `VLITE_READ_ONLY_TOKEN_FILE` optionally adds a distinct
-  read-only credential. Exactly one source is allowed. An empty read-only file
-  disables that credential. Read-only credentials require admin authentication.
-- `VLITE_ADMIN_DIR` enables backup/restore administration. Use a private,
-  operator-controlled, writable persistent directory. Snapshots contain all
-  database data. Untrusted local users must not be able to change this directory.
-- `--insecure-local` remains loopback-only; all callers have admin access in that
-  explicit development mode.
+- `VLITE_ADMIN_DIR` enables dashboard accounts, tenants, backups, restore,
+  webhooks and disk ANN. Use a private, writable, persistent directory that
+  untrusted local users cannot change. Snapshots in it contain all database data.
+- `VLITE_READ_ONLY_TOKEN` or `VLITE_READ_ONLY_TOKEN_FILE` adds a read-only
+  credential. Set one source only; an empty file disables it. It needs an
+  admin token.
+- `--insecure-local` is loopback-only. Every caller is admin and there is no
+  sign-in.
+- `VLITE_TRUSTED_PROXY=1` is for when a TLS-terminating or local reverse proxy
+  fronts the API. Password sign-in otherwise needs HTTPS or a loopback-only
+  listener. Docker Compose sets it.
+- `VLITE_SESSION_IDLE_MINUTES`, `VLITE_SESSION_MAX_HOURS`, `VLITE_ADMIN_USERNAME`
+  and `VLITE_ADMIN_PASSWORD_FILE`: see [sign-in settings](SECURITY.md#dashboard-sign-in-and-accounts).
 
-Read-only credentials permit authenticated GET/HEAD outside admin routes and
-non-building searches, including exact, approximate_ready, auto and hybrid
-where supported. Lazy approximate can build a graph and is therefore forbidden
-with HTTP 403. Scoped credentials additionally restrict collections and
-operations; lazy search requires both search and search_build. `/v1/admin/`
-routes require the bootstrap admin credential, except the read-only replication
-export endpoint, which permits database-wide read access. These rules are enforced by the server,
-not by console controls. Authentication failure returns 401. Existing requests
-already admitted before token rotation/revocation may complete.
+The server, not the console, enforces access:
 
-`GET /v1/capabilities`:
+- Read-only callers can use GET and HEAD outside admin routes, plus searches
+  that cannot build an index: exact, `approximate_ready`, `auto` and hybrid.
+  Lazy `approximate` can build a graph, so it returns 403.
+- Scoped credentials also restrict collections and operations. Lazy search
+  needs both `search` and `search_build`.
+- `/v1/admin/` routes need a super admin, except replication export, which
+  accepts database-wide read access.
+- Failed authentication returns 401. Requests admitted before a token rotation
+  or revocation may finish.
 
-```json
-{"version":"0.1.2","api_version":1,"role":"admin","features":{"read_only":true,"tokens_reload":true,"audit":true,"background_rebuild":true,"maintenance":true,"backup_restore":true,"conditional_writes":true,"filtered_ann":true},"routes":["/v1/capabilities"]}
-```
+`GET /v1/capabilities` returns `version`, `api_version`, `format_version`,
+`role`, `features`, `routes` and `identity`. Check `api_version` and
+`features`, not the package version.
 
-The example above shows legacy flags only. Current responses additionally report
-`format_version` and the advanced capability flags described in
-[CAPABILITIES.md](CAPABILITIES.md). `role` is `"admin"`, `"read_only"` or
-`"scoped"`; scoped responses include effective collections, operations and expiry.
-`routes` includes the complete supported
-data/admin route templates. Feature booleans reflect configuration where relevant.
-
-`identity` describes the presented token for display only (authorization still
-comes from `role` and `scope`). `kind` is `open` (no admin token configured),
-`super_admin` (bootstrap admin token), `read_only` or `scoped`; `label` is a
-plain-language summary such as `API key "ci" (<id>) · tenant "Acme"`. Scoped
-identities also report `credential_id`, `credential_name`, `tenant_id` and
-`tenant_name`. Secrets are never included. Labels contain operator-chosen names,
-so render them as text, not HTML. The dashboard shows this as the **Signed in
-as …** badge in the top bar and under **Connection**. Identity is REST-only;
-gRPC callers use REST capabilities to discover it. Older servers omit
-`identity`; the dashboard then falls back to the role.
-Clients should check API version and features rather than infer support from the
-package version. Existing data endpoints are unchanged, except search and index
-build now additionally accept optional `config`. `filtered_ann: true` means
-`filter` is accepted in `approximate` and `approximate_ready` search (filter-aware
-traversal, up to k eligible hits, no exact fallback); without it, send nonempty
-filters only in exact mode. Collections and hybrid/import workflows require
-explicit v4 creation or an offline copy-out upgrade; enabling the console does
-not migrate any file.
+- `role` is `admin`, `read_only` or `scoped`. Dashboard accounts report
+  `admin` for super admins and `scoped` otherwise. Scoped responses add the
+  effective collections, operations and expiry.
+- `features` booleans reflect configuration; see
+  [CAPABILITIES.md](CAPABILITIES.md). With `filtered_ann`, approximate modes
+  accept `filter`; without it, send filters only in exact mode.
+- `routes` lists every supported route template.
+- `identity` is for display only. `kind` is `open`, `super_admin`,
+  `read_only`, `scoped` or `user`; `label` is a plain summary such as
+  `API key "ci" (<id>) · tenant "Acme"`. Scoped identities add the credential
+  and tenant IDs and names; user identities add the username, account role
+  and tenant. Neither includes secrets. Labels contain operator-chosen names,
+  so render them as text.
 
 ## Dashboard administration walkthrough
 
-Open **Administration** in the sidebar after connecting in **Overview**.
-The top tabs and focused sub-tabs retain the old `#operations`, `#credentials`
-and `#webhooks` links. A direct legacy link still shows the full original view.
-Controls stay visible when unavailable: each workflow explains whether to reconnect
-with the bootstrap admin credential or configure a missing server capability.
-Configuration flags are not permission grants; the server enforces both.
+A super admin's sidebar adds **Users**, **Tenants**, **API keys** and
+**Server** to the pages everyone sees.
 
-- **Health / tokens:** refresh health, inspect token sources, reload configured
-  token files, revoke the read-only token, and read the bounded recent request
-  audit. Token files must be changed on the host first. Rotation may require
-  reconnecting. Environment secrets require restart.
-- **Scoped credentials / audit:** create, list, rotate with a grace interval, and
-  revoke expiring collection/operation-scoped credentials; read persistent audit.
-  Optional fields bind an existing 32-hex tenant ID, requests **per second**
-  (`1..1000000`), an aggregate vector limit, and a per-collection vector limit.
-  Blank means no additional limit; vector limits accept zero (no growth).
-  Dashboard numeric quotas are limited to `0..9007199254740991` for exact
-  JavaScript representation; the API accepts u64 values. Tenant-bound collection
-  names are local to the tenant. Create a wildcard `*` credential with the
-  `collections` operation when that tenant needs to create its first collection.
-  Secrets appear once, remain in memory, and clear on disconnect.
-- **Tenants:** list active tenants with their state, collection and vector
-  counts; create a named tenant with an optional aggregate vector quota; and
-  manage an existing tenant by ID. **Show usage and API keys** lists its
-  collections, vector usage against the limit and active/expired/revoked API
-  key counts. **Save name and limit** renames it and/or sets, keeps or removes
-  its vector limit (a lower limit keeps existing vectors but refuses new ones).
-  **Suspend** immediately blocks every API key bound to the tenant over REST and
-  gRPC and refuses new keys for it, without deleting data; **Resume** restores
-  its unexpired, unrevoked keys. Delete an empty tenant after dropping its
-  collections; deletion blocks bound credentials. Tenant state requires admin
-  authentication and `VLITE_ADMIN_DIR`; servers older than this release keep
-  only List, Create and Delete, and the other buttons explain why. Tenants
-  authenticate only with API keys; there are no tenant usernames or passwords.
-- **Backup / restore:** list/create snapshots, verify or drill a selected backup,
-  stage a restored copy, and select that copy for the next operator-managed
-  restart. Scheduled backup settings are read/merged/updated separately; a
-  manual scheduled cycle is also available. Read the current policy before
-  editing its JSON. Runtime scheduling changes do not rewrite environment
-  configuration. No restore action silently replaces the live file.
-- **Automation:** read and update the automatic index maintenance policy or run
-  one tick. The existing JSON policy exposes advanced settings; changes are
-  memory-only. Per-collection build, rebuild, polling/publication, cancellation,
-  quality and manual maintenance remain in **Collections → Index**.
-- **Webhooks / PITR:** list/create/delete subscriptions and inspect delivery
-  status; restore a selected sequence or timestamp into a new copy. Webhook
-  secrets are not redisplayed. Webhooks and backup-based recovery require an
-  admin directory. PITR creation does not select the copy for restart. A
-  sequence beyond the backup's log is rejected with 422
-  `invalid_restore_target`, and a timestamp on a file created without commit
-  timestamps with 409 `timestamps_unavailable`; restore by sequence instead.
-- **TLS certificates:** after an operator changes the host's certificate/key
-  and optional client CA files, validate and reload all registered file-backed
-  native TLS identities. All candidates validate before swapping; bad files
-  preserve existing identities. New handshakes see the update; existing
-  sessions do not. This does not upload files, enable a plaintext listener,
-  configure ports, or manage reverse-proxy certificates.
-- **Replication export:** export and download a bounded log segment after a
-  decimal u64 commit sequence. The default budget is 1 MiB (`1..16777216`
-  bytes). Success advances the input to `last_sequence`. This read-only workflow
-  also supports read-only credentials and scoped credentials with database-wide
-  `read` over `*`, when the server advertises the route. Downloaded segments
-  contain database data. Applying them needs an external replica workflow. A
-  format v1–v3 file answers 409 `requires_format_v4`; upgrading remains an
-  explicit offline operator step. An `after_sequence` beyond the end of the log
-  answers 409 `cursor_ahead`; start again from the replica's last applied
-  sequence or from 0.
+- **Users:** create dashboard accounts as super admin, editor or viewer, and
+  bind editors and viewers to one tenant or to all collections. Update or
+  delete accounts, or set a temporary password that the user must change at
+  next sign-in.
+- **Tenants:** list tenants with their state, collection and vector counts, and
+  create one with an optional vector limit. **Show usage and API keys** lists
+  its collections, usage and key counts. **Save name and limit** renames it or
+  changes the limit; a lower limit keeps existing vectors but refuses new ones.
+  **Suspend** blocks the tenant's API keys over REST and gRPC, refuses new keys,
+  blocks its users' sign-in and ends their sessions; data stays. **Resume**
+  restores sign-in and unexpired, unrevoked keys. **Delete** needs the tenant's
+  collections dropped first; it blocks bound keys and removes the tenant's user
+  accounts.
+- **API keys:** create, list, rotate with a grace period and revoke keys scoped
+  to collections and operations; read the persistent audit. Optional fields
+  bind a tenant ID and set requests per second (`1..1000000`), an aggregate and
+  a per-collection vector limit. Blank means no limit; zero means no growth.
+  The dashboard caps quotas at `9007199254740991`. A tenant's first key needs
+  `*` with the `collections` operation to create collections. New secrets show
+  once.
 
-Mutations retain confirmation dialogs and serialized, generation-checked
-requests; there are no automatic mutation retries or simulated successes.
-Disconnect and authentication failure clear admin results and pending downloads.
-The tenant/TLS/replication module shares the console's existing transport,
-confirmation, inspector and access context rather than storing a second token.
-Older or unconfigured servers may not expose a workflow even if the tab is
-present. Enabling TLS, editing secret files, restarting, offline file-format
-upgrades, configuring OTLP, and changing startup-only settings remain operator
-tasks, not dashboard forms. Database encryption is reported in Overview; keys
-are not uploaded or changed by these admin controls.
+**Server** holds health, monitoring and maintenance:
+
+- **Health and tokens:** refresh health, see token sources, reload token files,
+  revoke the read-only token and read the recent request audit. Change token
+  files on the host first.
+- **Monitoring:** request rates, errors, latency, a per-route table and the
+  live log tail.
+- **Backup and restore:** list and create snapshots, verify or drill a backup,
+  stage a restored copy and select it for the next restart. Read the scheduled
+  backup policy before editing it; runtime changes do not rewrite environment
+  settings. No action replaces the live file.
+- **Automation:** read or update the automatic index maintenance policy, or run
+  one tick. Changes last until restart. Per-collection index work stays in
+  **Collections → Index**.
+- **Webhooks and PITR:** see
+  [webhooks, disk ANN, PITR and encryption status](#webhooks-disk-ann-pitr-and-encryption-status).
+- **TLS certificates:** after you replace certificate, key or client CA files on
+  the host, validate and reload every file-backed TLS identity. All candidates
+  validate before any swap; bad files keep the current identities. Only new
+  handshakes see the change.
+- **Replication export:** download a bounded log segment after a commit
+  sequence. The budget defaults to 1 MiB (`1..16777216` bytes), and success
+  advances the input to `last_sequence`. Read-only keys and scoped keys with
+  database-wide `read` on `*` can use it. Segments contain database data;
+  applying them needs an external replica workflow. Format v1–v3 files return
+  409 `requires_format_v4`. A cursor past the end of the log returns 409
+  `cursor_ahead`; start again from the replica's last applied sequence or 0.
+
+Mutations ask for confirmation, run one at a time and never retry. Signing out
+clears admin results. Startup settings, secret and TLS files, and format
+upgrades stay host tasks.
 
 ## ANN maintenance observations and retry backoff
 
-`GET /v1/index/hnsw/maintenance` (or the collection-scoped equivalent) reports
-whether the active graph is ready and whether maintenance pressure recommends
-a rebuild. Readiness applies to the current active graph; it can remain ready
-while a background replacement is being constructed. Its optional `rebuild`
-object includes `phase`: `building`, `cancelling`, `ready_to_publish` (worker
-finished, still awaiting an explicit owner poll), or `discard_pending` (a
-terminal outcome still awaits polling). The same phase is available as
-`HnswRebuildProgress.phase` in the in-process Rust API. A status observation
-never publishes a finished rebuild. The active index is retained until explicit
-publication/discard; writes do not synchronously rebuild and ready-only search
-does not silently fall back to exact search.
+`GET /v1/index/hnsw/maintenance` (or its collection route) reports whether the
+active graph is ready and whether pressure recommends a rebuild. The graph can
+stay ready while a replacement builds. The optional `rebuild.phase` is
+`building`, `cancelling`, `ready_to_publish` (finished, waiting for a poll) or
+`discard_pending` (terminal, waiting for a poll); Rust exposes it as
+`HnswRebuildProgress.phase`. Observing never publishes. Writes never rebuild
+synchronously, and ready-only search never falls back to exact search.
 
-Automatic server maintenance retries scheduled rebuilds that end in catch-up
-overflow or supersession. Its retry backoff is disabled by default and does not
-change explicit `maintain_hnsw` calls. To opt in, set both fields in
-`PUT /v1/admin/maintenance/auto`:
+Automatic server maintenance can retry rebuilds that end in catch-up overflow
+or supersession. Backoff is off by default and never affects explicit
+`maintain_hnsw` calls. Enable it with `PUT /v1/admin/maintenance/auto`:
 
 ```json
 {"retry_backoff_initial_ms":250,"retry_backoff_max_ms":4000}
 ```
 
-The initial delay doubles on repeated failures for the same collection, capped
-at the configured maximum. Both values must be zero to disable, or satisfy
-`1 <= initial <= max <= 3600000` milliseconds. Tick responses identify a
-deferred retry as `retry_backoff` and report the attempt count and remaining
-delay; the auto-maintenance configuration response reports both settings.
+The delay doubles with each repeated failure for a collection, up to the
+maximum. Set both values to zero to disable, or use
+`1 <= initial <= max <= 3600000` milliseconds. Tick responses mark a deferred
+retry as `retry_backoff` with the attempt count and remaining delay.
 
 ## Opt-in durable group commit
 
-`vlite-server <path> --group-commit` coalesces concurrent record puts, deletes
-and atomic batch/metadata-patch requests (including collection REST routes and
-gRPC Put/Delete/WriteBatch/UpdateMetadata calls) into one shared datafile sync. The default remains
-one durable commit per request. Configure limits after the enabling flag:
+`vlite-server <path> --group-commit` coalesces concurrent puts, deletes, atomic
+batches and metadata patches into one shared datafile sync. This covers REST,
+collection routes and gRPC Put, Delete, WriteBatch and UpdateMetadata. The
+default stays one durable commit per request. Set limits after the flag:
 
 ```text
 --group-commit --group-commit-requests 16 --group-commit-bytes 67108864 --group-commit-delay-ms 0
 ```
 
-Defaults are 16 outstanding grouped writes, 64 MiB retained-input budget and a
-zero-delay opportunistic collection window. Valid bounds are 1–16 writes, 1024–268435456 bytes and
-0–100 ms. The byte budget conservatively charges retained vector/payload
-capacities and metadata/tree storage; it is not a total-process-memory limit.
-HTTP JSON/body limits and the existing 16 request/worker admission limits still
-apply. Full queues or budgets return HTTP 503 `busy` immediately; they do not
-spawn waiting tasks. A single request larger than the configured byte budget is
-also rejected as `busy`. The collection window bounds intentional accumulation,
-not disk-sync, lock-wait or end-to-end latency.
-Zero delay drains already queued work without waiting for additional requests;
-a positive delay can improve coalescing at low arrival rates but adds latency.
-OS timer granularity and scheduling can exceed the requested wait (on the tested
-Windows host, a 2 ms wait produced roughly 16 ms sequential-write latency).
+| Setting | Default | Range |
+|---|---|---|
+| Outstanding grouped writes | 16 | 1–16 |
+| Retained-input byte budget | 64 MiB | 1024–268435456 bytes |
+| Collection window | 0 ms | 0–100 ms |
 
-Accepted grouped requests execute FIFO by coordinator admission, under one
-exclusive owner lock. Authorization scope, quotas, conditional revisions/ETags,
-and atomic-batch validation run separately for each request against preceding
-accepted writes. A rejected request does not mutate the database or invalidate
-valid neighbors. Each accepted request keeps its own recovery frame and sequence;
-a group is **not** an all-or-nothing transaction across requests. Readers cannot
-observe partially applied groups, and no success response is released before
-the shared sync succeeds. Import, collection/admin and maintenance
-operations retain their existing independent durability paths and can interleave
-between groups; concurrent arrival across these paths does not establish order.
+- The byte budget conservatively charges retained vectors, payloads and
+  metadata; it is not a process memory limit. HTTP body limits and the 16
+  request and worker limits still apply.
+- A full queue or budget, or one request larger than the budget, returns 503
+  `busy` at once.
+- Zero delay drains queued work without waiting. A positive delay can improve
+  coalescing at low arrival rates but adds latency; on the tested Windows host,
+  a 2 ms wait gave roughly 16 ms sequential-write latency.
+- Requests run FIFO under one exclusive owner lock. Scope, quotas, conditional
+  revisions and batch validation run per request against earlier accepted
+  writes. A rejected request changes nothing and does not affect its neighbors.
+- Each request keeps its own frame and sequence. A group is **not** an
+  all-or-nothing transaction. Readers never see a partial group, and no success
+  returns before the shared sync succeeds.
+- Imports, collection and admin operations, and maintenance keep their own
+  durability paths and can run between groups.
+- If the shared sync fails, every pending success becomes 503
+  `commit_indeterminate`; validation failures keep their status. Append failures
+  also poison the owner. Nothing retries automatically. An unacknowledged group
+  can recover wholly or partly after a crash, so never infer absence from an
+  error or disconnect.
+- Graceful close stops admission and drains the coordinator before closing the
+  owner. Abrupt termination does not drain.
 
-On shared sync failure every would-be success becomes HTTP 503
-`commit_indeterminate`; validation failures keep their original status. Append
-failures also prevent neighboring successes and poison the owner. No automatic
-retry occurs. An unacknowledged group may recover wholly or partly after a crash;
-never infer absence from a disconnect or error. Disconnects retain admission and
-memory reservations until the worker completes. Graceful close (and ANN snapshot
-save during shutdown) stops admissions, drains/join the coordinator, then closes
-the owner. Abrupt termination does not drain it.
+In-process servers opt in with
+`Service::with_group_commit(GroupCommitConfig::default())` before cloning or
+publishing the service. Its tests cover crash, short-write and failed-sync
+recovery, not power loss.
 
-In-process servers can opt in with
-`Service::with_group_commit(GroupCommitConfig::default())` **before** cloning or
-publishing their service. `GET /metrics` includes
-`group_commit_groups_total` and `group_commit_requests_total`; these are attempted
-groups/requests, not a count of successful syncs.
+Metrics use the `group_commit_` prefix (`vlite_group_commit_` in Prometheus).
+`group_commit_enabled` always reports the policy; the rest appear only when
+enabled, and collection-scoped callers never see them.
 
-The coordinator also samples retained admission and queue gauges, request/byte
-high-water marks, request-limit/byte-budget/closed-queue rejections, queue-wait
-count/total/max nanoseconds, shared-sync count/total/max nanoseconds and failures,
-mutating requests per sync, and disconnected reply counts. Admission includes
-active work until completion, not just the pending channel; queue wait includes
-the collection window, owner-lock contention and earlier operations in the group.
-Sync timing starts after the final operation and includes durability-boundary
-health checks/bookkeeping, not mutation execution. No-op or validation-only groups
-do not increment sync counters. Requests per sync counts requests that appended
-frames, not frames or acknowledged responses. A failed shared sync still counts
-as an attempted sync. Independently sampled process-local counters are diagnostic,
-not an atomic accounting ledger.
+- `group_commit_groups_total` and `group_commit_requests_total` count attempted
+  groups and requests, not successful syncs.
+- Gauges: `admitted_requests`, `admitted_bytes`, `queued_requests`,
+  `peak_requests`, `peak_bytes`.
+- Counters: `rejected_requests_total`, `rejected_bytes_total`,
+  `rejected_closed_total`, `queue_wait_count_total`,
+  `queue_wait_nanoseconds_total`, `sync_count_total`, `sync_requests_total`,
+  `sync_failures_total`, `sync_nanoseconds_total`, `disconnected_replies_total`.
+- Maxima: `queue_wait_max_nanoseconds`, `sync_max_nanoseconds`.
 
-Global JSON and Prometheus metrics use the `group_commit_` prefix (Prometheus
-adds `vlite_`). Gauges include `admitted_requests`, `admitted_bytes`,
-`queued_requests`, `peak_requests` and `peak_bytes`. Counters include
-`rejected_requests_total`, `rejected_bytes_total`, `rejected_closed_total`,
-`queue_wait_count_total`, `queue_wait_nanoseconds_total`, `sync_count_total`,
-`sync_requests_total`, `sync_failures_total`, `sync_nanoseconds_total` and
-`disconnected_replies_total`; maxima are `queue_wait_max_nanoseconds` and
-`sync_max_nanoseconds`. Detailed group metrics are absent when disabled;
-`group_commit_enabled` always identifies the policy.
+Queue wait includes the window, lock contention and earlier work in the group;
+sync time starts after the last operation. These are process-local
+diagnostics, not an accounting ledger.
 
-Run the targeted fault/recovery coverage with:
-
-```text
-cargo test --features server --lib server::group_commit::tests
-```
-
-It checks v3/v4/v5 real coordinator subprocess exit after acknowledged groups and
-after an unacknowledged batch append before shared sync; every reported acknowledgement
-must reopen intact, and uncertain batches must remain atomic. Real-file,
-one-byte short writes exercise the storage append primitive at every byte cut
-of an atomic batch, including disk-full errors and write-zero outcomes. Partial
-tails must be reported without modification and require explicit
-`Database::discard_incomplete_tail` before reopening. Separate injected
-shared-sync failures verify no neighboring successes, preserved validation errors,
-poisoning, disconnected callers, bounded retained admission and graceful drain.
-Short-write injection tests the shared append primitive, not an injected device
-inside the coordinator. Process exit and injected I/O errors are not physical
-power-loss or filesystem/device fault qualification.
-
-Simple exact searches (without reranking or an indexed-filter path) capture a
-bounded immutable collection snapshot, then scan outside the owner lock while
-retaining the existing worker permit. Their results reflect the captured state;
-writes can commit during the scan. ANN, hybrid, reranking and indexed filtering
-keep their existing execution paths. Snapshot retention/cardinality/byte-limit
-exhaustion falls back to lock-held execution, not a new request error.
-For workloads where generation copying/reclamation worsens latency, start with
-`--lock-held-reads` to retain the owner read lock throughout exact scans.
-Embedded servers can use `Service::with_snapshot_reads(false)` before cloning
-the service. The default remains snapshot-enabled; `snapshot_reads_enabled` in
-global metrics exposes the selected policy. Neither policy weakens committed
-visibility or changes query results.
-Global metrics also expose `read_snapshot_active_captures` and
-`read_snapshot_retained_logical_bytes`. The latter counts capture-time logical
-bodies per distinct capture, including shared bodies more than once, not unique
-allocations or resident memory. Neither global retention nor group diagnostics
-are returned to collection-scoped principals.
-
-Reproduce the bounded local-disk comparison with:
+Reproduce the local-disk comparison with:
 
 ```text
 cargo test --release --features server --lib comparative_durable_write_benchmark -- --ignored --nocapture
 ```
 
 It checks reopening all 512 acknowledged records, with 16-dimensional vectors
-and 128-byte payloads, at concurrency 1 and 16. Two paired runs on a shared Windows
-host measured zero-delay grouping at 12571–15617 writes/s versus 1926–2910 writes/s
-with independent syncs at concurrency 16 (5.4–6.5x); grouped p99 was 1.52–1.65 ms
-versus 5.93–16.43 ms. This is a small noisy in-process workload, not a network or
-production SLO. Sequential zero-delay throughput was 6–8% lower; an explicit 2 ms
-window was dramatically slower sequentially due to host timer granularity.
-Tune against actual arrivals and storage rather than assuming grouping helps.
+and 128-byte payloads, at concurrency 1 and 16. Two paired runs on a shared
+Windows host measured zero-delay grouping at 12571–15617 writes/s versus
+1926–2910 writes/s with independent syncs at concurrency 16 (5.4–6.5x); grouped
+p99 was 1.52–1.65 ms versus 5.93–16.43 ms. This is a small, noisy in-process
+workload, not a production SLO. Sequential zero-delay throughput was
+6–8% lower; an explicit 2 ms window was much slower sequentially because of
+host timer granularity. Tune against real arrivals and storage.
+
+### Exact-search read snapshots
+
+Simple exact searches (no reranking or indexed filter) scan a bounded snapshot
+outside the owner lock, so writes can commit during the scan. When snapshot
+limits are exhausted, the search runs under the lock instead of failing. If
+snapshot copying hurts latency, start with `--lock-held-reads` (embedded:
+`Service::with_snapshot_reads(false)`); results are the same. Metrics:
+`snapshot_reads_enabled`, `read_snapshot_active_captures` and
+`read_snapshot_retained_logical_bytes` (logical bytes per capture, not resident
+memory).
 
 ## Token lifecycle and audit (admin only)
 
-- `GET /v1/admin/tokens` returns
-  `{generation,admin_file_configured,read_only_configured,read_only_file_configured}`.
-- `POST /v1/admin/tokens/reload` with `{}` reads **only configured files**, validates
-  both candidate credentials, and atomically swaps them. It returns the same
-  status object. Invalid/unavailable files leave both active credentials unchanged.
-  Admin files must contain a valid token; an empty read-only file revokes that
-  role. Identical admin/read-only tokens are rejected.
-- `POST /v1/admin/tokens/revoke-read-only` with `{}` immediately disables the
-  in-memory read-only token and increments generation. To persist revocation
-  across reload/restart, empty its configured file (or remove its environment
-  credential offline). A later explicit reload can re-enable a nonempty file.
-- Environment credentials are startup-only; restart to rotate the admin
-  environment credential. There is no HTTP arbitrary-token creation or file-path
-  input. Replace configured token files safely before reload; keep credentials
-  outside source control.
-- `GET /v1/admin/audit` returns `{items:[...],capacity:256}`. Items contain only
-  `{request_id,method,route,status,role,duration_ns,timestamp_unix_ms}`. Routes are
-  matched templates (for example `/v1/vectors/{id}`), or `"unmatched"`. No URL
-  query, actual record IDs, vectors, metadata, payloads, authentication headers,
-  or request bodies are recorded. Role is null when authentication failed.
-  The bounded process-local ring resets at restart and is not a durable,
-  tamper-evident compliance log. The audit request itself appears on the next read.
+| Route | Behavior |
+|---|---|
+| `GET /v1/admin/tokens` | Returns `{generation,admin_file_configured,read_only_configured,read_only_file_configured}`. |
+| `POST /v1/admin/tokens/reload` with `{}` | Reads only configured files, validates both credentials and swaps them atomically. Invalid files change nothing. An empty read-only file revokes that role; identical admin and read-only tokens are rejected. |
+| `POST /v1/admin/tokens/revoke-read-only` with `{}` | Disables the read-only token in memory and increments `generation`. Empty its file to keep it revoked after reload or restart. |
+| `GET /v1/admin/audit` | Returns `{items:[...],capacity:256}`. |
+
+Environment credentials are read at startup; restart to rotate them. No route
+creates arbitrary tokens or accepts file paths.
+
+Audit items contain only
+`{request_id,method,route,status,role,duration_ns,timestamp_unix_ms}`. `route`
+is the matched template or `"unmatched"`;
+`role` is null when authentication failed. Queries, IDs, vectors, metadata,
+payloads, headers and bodies are never recorded. The ring is process-local,
+resets at restart and is not a tamper-evident compliance log.
 
 ## HNSW configuration, jobs, and maintenance
 
-`config` is `{m,ef_construction,seed}`; omitted fields default to `16,100,42`.
-Bounds: `m` 2–64, `ef_construction` between `m` and 4096. Seed accepts a JSON u64
-or canonical decimal u64 string; administrative responses use a string to avoid
-JavaScript precision loss. `POST /v1/search` and `POST /v1/index/hnsw` accept this
-optional object, so ready-only queries can select a nondefault graph.
+`config` is `{m,ef_construction,seed}`, default `16,100,42`. `m` is 2–64 and
+`ef_construction` is `m`–4096. `seed` accepts a JSON u64 or a decimal string;
+admin responses use a string. `POST /v1/search` and `POST /v1/index/hnsw`
+accept `config`, so ready-only queries can select a non-default graph.
 
 `limits` is `{max_records,max_snapshot_vector_bytes}`, default
-`100000,134217728`; valid ranges are 1–1000000 and 1–268435456. Limits bound snapshot
-vectors/cardinality, **not** total process memory, duration, or graph allocations.
-Only `"squared_l2"` and `"cosine"` are ANN metrics.
+`100000,134217728`, with ranges 1–1000000 and 1–268435456. They bound the
+snapshot, **not** process memory, duration or graph allocations. ANN metrics
+are `"squared_l2"` and `"cosine"`.
 
-- `POST /v1/index/hnsw/rebuild` body `{config?,metric?,limits?}` starts one bounded
-  job and returns HTTP 202 `{"outcome":"running"}`; a pending job returns 409.
-- `GET /v1/index/hnsw/rebuild` observes without polling/publication. It returns the
-  same `{policy,status}` as maintenance GET below.
-- `POST /v1/index/hnsw/rebuild/poll` with `{}` nonblockingly reaps/publishes a
-  completed graph and returns `{outcome}`. Values are `"idle"`, `"running"`,
-  `"cancelling"`, `"published"`, `"cancelled"`, `"superseded"`,
-  `"catch_up_overflow"`. A terminal result is consumed; subsequent poll is idle.
-- `POST /v1/index/hnsw/rebuild/cancel` with `{}` returns `{cancelled:boolean}`.
-  Cancellation is cooperative; poll afterward to reap. It preserves the active
-  graph and does not wait for the worker.
-
-`GET /v1/index/hnsw/maintenance` returns:
+| Route | Behavior |
+|---|---|
+| `POST /v1/index/hnsw/rebuild` with `{config?,metric?,limits?}` | Starts one bounded job and returns 202 `{"outcome":"running"}`, or 409 if a job is pending. |
+| `GET /v1/index/hnsw/rebuild` | Observes without polling; returns `{policy,status}` like the maintenance GET. |
+| `POST /v1/index/hnsw/rebuild/poll` with `{}` | Reaps or publishes a finished graph without blocking. `outcome` is `idle`, `running`, `cancelling`, `published`, `cancelled`, `superseded` or `catch_up_overflow`. A terminal result is consumed. |
+| `POST /v1/index/hnsw/rebuild/cancel` with `{}` | Returns `{cancelled:boolean}`. Cancellation is cooperative and keeps the active graph; poll afterward. |
+| `GET /v1/index/hnsw/maintenance` | Returns the policy and status shown below. Never publishes. |
+| `PUT /v1/index/hnsw/maintenance` | Validates and replaces the process-local policy. Omitted fields use defaults. High-water bounds are 1–256 IDs and 1–8388608 vector bytes. Resets at restart. |
+| `POST /v1/index/hnsw/maintenance/tick` with `{}` | Polls or publishes a matching job, then starts a replacement if needed. Returns `{outcome,started,status}`; a mismatched pending job returns 409. |
 
 ```json
 {"policy":{"config":{"m":16,"ef_construction":100,"seed":"42"},"metric":"squared_l2","limits":{"max_records":100000,"max_snapshot_vector_bytes":134217728},"rebuild_at_buffered_ids":128,"rebuild_at_buffer_vector_bytes":4194304},"status":{"ready":false,"pressure":"unavailable","active_buffer":null,"rebuild":null}}
 ```
 
-`PUT` on this route replaces the process-local policy, validating it before
-publication, and returns the same envelope. Omitted fields use defaults (not
-previous values). High-water bounds: IDs 1–256 and vector bytes 1–8388608.
-Policy resets at restart. **There is no automatic timer or hidden retry.**
+- `pressure` is `healthy`, `rebuild_recommended`, `capacity_exhausted`,
+  `unavailable` or `catch_up_overflow`.
+- `active_buffer` is null or
+  `{buffered_ids,buffer_vector_bytes,remaining_ids,remaining_vector_bytes}`.
+- `rebuild` is null or
+  `{config,metric,snapshot_records,processed_records,worker_finished,terminal_reason,catchup_buffer}`.
+  Progress counts records; it is not an ETA.
 
-`POST /v1/index/hnsw/maintenance/tick` with `{}` explicitly polls/publishes a
-matching job, then starts a replacement if necessary. Returns
-`{outcome,started:boolean,status}`. Mismatched pending jobs return 409.
-
-`status.pressure` is `"healthy"`, `"rebuild_recommended"`,
-`"capacity_exhausted"`, `"unavailable"`, or `"catch_up_overflow"`.
-`active_buffer` is null or
-`{buffered_ids,buffer_vector_bytes,remaining_ids,remaining_vector_bytes}`.
-`rebuild` is null or
-`{config,metric,snapshot_records,processed_records,worker_finished,terminal_reason,catchup_buffer}`.
-`terminal_reason` is null or an outcome string; `catchup_buffer` uses the same
-capacity schema. Progress is record count, not an ETA. Status readiness is for
-the selected **maintenance policy's** config/metric. GET never publishes.
-Synchronous index POST remains compatible and returns 204. A graph/config change
-can require changing search config, including ready-only searches.
+Readiness applies to the maintenance policy's config and metric. There is no
+hidden timer or retry. The synchronous index POST still returns 204.
 
 ## Safe backup and restart-selected restore (admin only)
 
-- `GET /v1/admin/backups` returns
-  `{enabled,items:[{name,kind:"backup"|"restore",bytes}],restart_required:true}`.
-  At most 1000 generated regular-file entries are listed, without arbitrary paths.
-- `POST /v1/admin/backups` with `{}` takes a serialized snapshot while the database
-  owner lock excludes writers. It syncs and validates a staged complete copy,
-  then publishes without overwrite under a generated `backup-*.vlite` name.
-  Response HTTP 201: `{name,inspection,restart_required:true}`.
-  Snapshot copying is synchronous database work and may delay reads/writes;
-  monitor disk space and schedule large copies during a maintenance window.
-- `POST /v1/admin/restores` body `{"backup":"backup-....vlite"}` validates a
-  generated existing backup and creates a **new** generated `restore-*.vlite`
-  copy without overwriting anything. Response HTTP 201 uses the same schema.
-- `POST /v1/admin/restores/select` body `{"name":"restore-....vlite"}` validates
-  the restored copy again, then atomically records its basename in the private
-  `next-startup` marker. Response `{name,inspection,restart_required:true}`.
+| Route | Behavior |
+|---|---|
+| `GET /v1/admin/backups` | Returns `{enabled,items:[{name,kind,bytes}],restart_required:true}`, where `kind` is `backup` or `restore`. Lists at most 1000 generated files. |
+| `POST /v1/admin/backups` with `{}` | Snapshots while the owner lock excludes writers, then syncs, validates and publishes a new `backup-*.vlite` without overwrite. Returns 201 `{name,inspection,restart_required:true}`. Copying delays other database work, so schedule large copies. |
+| `POST /v1/admin/restores` with `{"backup":"backup-....vlite"}` | Validates the backup and creates a new `restore-*.vlite`. Returns 201 with the same schema. Optional `sequence` or `timestamp_ms` selects a PITR target. |
+| `POST /v1/admin/restores/select` with `{"name":"restore-....vlite"}` | Revalidates the copy and records it in the private `next-startup` marker. Returns `{name,inspection,restart_required:true}`. |
 
-`inspection` contains
+`inspection` is
 `{format_version,dimensions,live_records,file_bytes,valid_bytes,incomplete_tail_bytes}`.
-Disabled administration returns 409 for copy/selection operations. Arbitrary
-paths, traversal, symlinks, and overwrite destinations are not accepted. Local
-administrators must not manipulate snapshots concurrently with the service.
-Invalid backups never replace the active database.
+Without `VLITE_ADMIN_DIR`, copy and select return 409. Paths, traversal,
+symlinks and overwrites are rejected, and invalid backups never replace the
+active database. Do not change snapshots by hand while the server runs.
 
-**Selection does not switch or replace the live owner.** On the next server
-startup with the same `VLITE_ADMIN_DIR`, the binary fully validates and opens the
-selected restored copy instead of its positional database argument. A configured
-`--create-if-missing` dimension must still match. A bad selection fails startup,
-never silently falls back. The original database remains untouched and usable
-offline. The marker persists across subsequent restarts; remove `next-startup`
-offline to return to the positional database, or select another restored copy.
-Do not delete/move a selected restored file. There is no upload/download/delete,
-remote path selection, or in-place disaster recovery endpoint.
+**Selection does not switch the live database.** At the next startup with the
+same `VLITE_ADMIN_DIR`, the server validates and opens the selected copy instead
+of its positional path. A `--create-if-missing` dimension must still match. A
+bad selection fails startup; it never falls back. The original file stays
+untouched. The marker persists: remove `next-startup` offline to return to the
+positional database, or select another copy. Do not move or delete a selected
+copy. There is no upload, download, delete or in-place recovery route.
 
-Copy/selection directory sync is used on Unix; Windows directory-entry
-power-loss durability retains the engine's documented limitation. An I/O failure
-after publication can leave the named output present: inspect before retrying.
-Administration is experimental: protect plain HTTP with a trusted TLS proxy,
-retain independent off-host backups, and use least privilege for console tokens.
+Unix syncs the directory after copies and selection; Windows keeps the
+engine's directory-entry power-loss limitation. An I/O error after publication
+can leave the output present, so inspect it before retrying.
 
 ## Webhooks, disk ANN, PITR and encryption status
 
-**Webhooks and point-in-time restore** contains bootstrap-admin-only controls.
-These require a private `VLITE_ADMIN_DIR`. Refresh subscriptions lists delivery
-attempts, last success and last error; enter a returned 24-hex ID for individual
-status or confirmed deletion. Create accepts an HTTP(S) URL without embedded
-credentials/fragments, optional comma-separated collections (blank means all),
-known event names, and a 16–256-byte signing secret in a password field. Creation
-is confirmed. The input is cleared even on cancel/failure; the secret is redacted
-from the request inspector and is never returned or displayed after submission.
-Save the signing secret securely before creating the subscription; the console
-cannot recover it. See [WEBHOOKS.md](WEBHOOKS.md) for HMAC verification, at-least-once
-delivery, shared cursor, retries and consumer deduplication. Destination URLs are
-operator-controlled; the console does not send the bearer token to receivers.
-
-**Disk ANN** in Advanced retrieval uses the selected collection. Build requires
-index scope and explicit confirmation, uses the playground L2/cosine metric and
-HNSW configuration, and shows sidecar lineage/sequence/path-name metadata. Probe
-requires search scope and runs a one-neighbor query with the playground vector
-and ef. There is no status GET endpoint: the probe is an explicit read-only query,
-not polling or a build. A missing/stale sidecar errors; it never rebuilds silently.
-Sidecars require `VLITE_ADMIN_DIR` and are unsupported for encrypted databases.
-Build metadata is a snapshot and may become stale after external writes.
-
-**PITR** takes an existing generated backup name and either a commit sequence or
-Unix millisecond timestamp. Only nonnegative JavaScript-safe integers are accepted
-(up to 9,007,199,254,740,991); larger u64 values must use an exact-integer API client.
-The confirmed operation creates a new restored copy. It never replaces the live
-database or automatically selects the copy for startup. Existing restore-selection
-controls remain a separate confirmed action. No path/upload input is accepted.
-
-**Encryption badge:** Overview shows `is_encrypted` and the server's decimal-string
-key ID, not secret key material. If database information is unavailable to the
-credential/server (including scoped credentials), the badge says unavailable,
-never incorrectly claims encryption is off. It resets on disconnect. Encryption
-configuration and keys remain offline/server concerns; see [SECURITY.md](SECURITY.md).
+- **Webhooks** need a super admin and `VLITE_ADMIN_DIR`. List subscriptions
+  with delivery attempts, last success and last error; view or delete one by
+  its 24-hex ID. Create takes an HTTP(S) URL without credentials or fragment,
+  optional collections (blank means all), event names and a 16–256-byte
+  signing secret. Save the secret first: the console clears it, hides it from
+  the request inspector and can never show it again. The console never sends
+  your token to receivers. See [WEBHOOKS.md](WEBHOOKS.md) for signatures,
+  at-least-once delivery and retries.
+- **Disk ANN** (Advanced retrieval) builds a sidecar for the selected
+  collection. Build needs index scope and confirmation, uses the playground
+  metric and HNSW settings, and shows the sidecar's lineage and sequence.
+  **Probe** needs search scope and runs a one-neighbor query. There is no
+  status route. A missing or stale sidecar returns an error and never rebuilds
+  silently. Sidecars need `VLITE_ADMIN_DIR` and are unsupported for encrypted
+  databases.
+- **PITR** restores a generated backup to a commit sequence or Unix-millisecond
+  timestamp as a new copy. It never replaces the live database or selects the
+  copy for startup. A sequence past the backup's log returns 422
+  `invalid_restore_target`; a timestamp on a file without commit timestamps
+  returns 409 `timestamps_unavailable`, so restore by sequence. The dashboard
+  accepts integers up to 9,007,199,254,740,991; use an API client for larger
+  u64 values.
+- **Encryption badge:** Overview shows `is_encrypted` and the key ID, never key
+  material. If the caller cannot read database details (including scoped
+  keys), the badge says unavailable. Keys are managed on the server; see
+  [SECURITY.md](SECURITY.md).

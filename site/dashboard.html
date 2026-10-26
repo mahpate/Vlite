@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Dashboard | VLite</title>
-  <meta name="description" content="Run the VLite Dashboard locally: collection workspaces, vector search, record inspection, metrics and live logs.">
+  <meta name="description" content="Run the VLite dashboard: sign in, browse collections, search vectors and manage your server.">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
   <script src="assets/site.js?v=connected-tour-1"></script>
@@ -28,7 +28,9 @@
       <button class="icon-btn" id="theme-toggle" aria-label="Toggle dark mode">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
       </button>
-      <a class="btn" href="https://github.com/mahpate/Vlite">GitHub</a>
+      <a class="icon-btn" href="https://github.com/mahpate/Vlite" aria-label="GitHub repository">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5a11.5 11.5 0 0 0-3.6 22.4c.6.1.8-.3.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.2 1.2a11 11 0 0 1 5.8 0c2.2-1.5 3.2-1.2 3.2-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A11.5 11.5 0 0 0 12 .5z"/></svg>
+      </a>
     </div>
   </div>
 </header>
@@ -37,7 +39,7 @@
     <div class="wrap">
       <div class="kicker">VLite Dashboard</div>
       <h1>Your database, in focus</h1>
-      <p class="lead">Browse records, run searches and monitor your own VLite server.</p>
+      <p class="lead">Browse records, run searches and manage your own VLite server from the browser.</p>
       <div class="cta">
         <a class="btn primary" href="#start">Run the dashboard</a>
         <a class="btn" href="#screenshots">Take a tour</a>
@@ -69,56 +71,56 @@
   </section>
   <section id="start">
     <div class="wrap">
-      <div class="section-head"><h2>Run locally from source</h2></div>
-      <p>New to Docker or WSL? <a href="docs/DOCKER-OPERATIONS.html#first-deployment">Start with guided setup</a>
-        for published images, prerequisite installation and restart instructions.</p>
-      <p>Clone the repository and follow the <a href="docs/INSTALL.html">installation guide</a>.
-        From its root, with Docker running, prepare the API configuration and private token using the
-        <a href="https://github.com/mahpate/Vlite#quick-start-docker-rest-service">Docker REST quickstart</a>.
-        Then build both services from the current checkout:</p>
-      <p>The interface shown above requires a source build.</p>
+      <div class="section-head"><h2>Run the dashboard</h2></div>
+      <p>New to Docker or WSL? The <a href="docs/DOCKER-OPERATIONS.html#first-deployment">guided setup</a>
+        installs the prerequisites on Windows or Ubuntu and starts the published images.</p>
+      <p>To build from source, clone the repository and create the API token as shown in the
+        <a href="docs/DOCKER-OPERATIONS.html#manual-setup-with-docker-already-installed">manual setup</a>. Then run:</p>
       <pre class="code"><code>docker compose --profile dashboard up --build -d api dashboard</code></pre>
-      <p>Open <code>http://localhost:8081</code> for the standalone UI, or
-        <code>http://localhost:18084/dashboard</code> for the embedded UI.
-        Paste your existing <code>.secrets/api-token</code> value into the connection field.
-        These addresses refer to your own machine and only work after startup.</p>
-      <p>The standalone frontend proxies authenticated requests to the API; both views use the same database.
-        Tokens stay in page memory and are cleared on reload or Disconnect.
-        Keep the default loopback bindings; use the documented
-        <a href="docs/DOCKER-OPERATIONS.html">HTTPS deployment</a> before remote access.</p>
+      <p>Open <code>http://127.0.0.1:8081</code>, or the UI served by the API at
+        <code>http://127.0.0.1:18084/dashboard</code>. Both listen on loopback only.
+        Put <a href="docs/SECURITY.html#native-rest-tls-and-grpc-mutual-tls">HTTPS</a> in front before allowing remote access.</p>
+      <h3>First sign-in</h3>
+      <p>A new server has no accounts and no default password. Choose <strong>Use an access token instead</strong>
+        and paste the token from <code>.secrets/api-token</code>. Then create your super admin account under
+        <strong>Users &rarr; Add user</strong> and sign in with it from then on.</p>
     </div>
   </section>
   <section id="workflows" class="alt">
     <div class="wrap">
       <div class="section-head">
-        <h2>From records to operations</h2>
-        <p>Explore records, run queries and manage your database in six focused workspaces.</p>
+        <h2>What you can do</h2>
+        <p>Everyone sees Overview, Collections, Search and the Developer Console.
+          Super admins also see Tenants, Users, API keys and Server.</p>
       </div>
       <div class="grid cols-2">
-        <div class="card"><h3>Collections and record editing</h3>
-          <p>Six workspaces with Records, Write, Search, Index and Settings collection tabs. Inspect Payload, Metadata, Vector and Raw JSON views, edit typed metadata and review explicit mutation confirmations.</p></div>
-        <div class="card"><h3>Search and ingestion</h3>
-          <p>Exact and ANN search, typed filters, validated JSON writes, bounded import/export and copy-as-code. Failed search refreshes retain prior results with an explicit error.</p></div>
-        <div class="card"><h3>Metrics and live logs</h3>
-          <p>Request/search rates, latency percentiles, route tables, sparklines and filtered JSONL log exports. Global metrics/log views require a bootstrap admin token. Logs are a bounded, memory-only ring, not a durable archive.</p></div>
-        <div class="card"><h3>Administration and developer tools</h3>
-          <p>Inspect health and credentials, manage tenants (usage, rename, vector limit, suspend/resume), review maintenance operations and inspect API requests. A <strong>Signed in as</strong> badge shows whether you are the super admin, read-only, or an API key for a specific tenant; tenants use API keys only, not usernames or passwords. Follow the <a href="docs/CONSOLE-ADMIN.html">administration guide</a> for permissions, backups and operational safeguards.</p></div>
+        <div class="card"><h3>Collections and records</h3>
+          <p>Create collections, write or import records, and inspect each record's payload, metadata and vector.</p></div>
+        <div class="card"><h3>Search and indexes</h3>
+          <p>Run exact, approximate and hybrid searches with typed filters. Build HNSW indexes and copy any query as code.</p></div>
+        <div class="card"><h3>Users and tenants</h3>
+          <p>Super admins add users and tenants and issue API keys. Editors read, search and write; viewers read and search.
+            Each account sees one tenant or all collections.</p></div>
+        <div class="card"><h3>Server</h3>
+          <p>Super admins check health, metrics and live logs, and run backups and maintenance.</p></div>
       </div>
-      <h3>Know the boundaries</h3>
+      <h3>Limits</h3>
       <p>The dashboard does not generate embeddings. Writes replace records and require confirmation.
-        Stopping a browser wait does not cancel server work or retry it. For offline workflows, use the
-        <a href="docs/TOOLS.html">VLite CLI tools</a>; stop the server before opening its file with an exclusive-lock tool.</p>
+        For offline work, use the <a href="docs/TOOLS.html">CLI tools</a>.</p>
     </div>
   </section>
 </main>
 <footer>
   <div class="wrap">
-    <p>VLite &middot; Single-file vector database &middot; MIT</p>
-    <nav aria-label="Footer">
-      <a href="./">Home</a>
-      <a href="docs/CONSOLE.html">Dashboard guide</a>
-      <a href="docs/TOOLS.html">CLI tools</a>
+    <span>© VLite contributors · MIT License</span>
+    <nav>
       <a href="https://github.com/mahpate/Vlite">GitHub</a>
+      <a href="https://github.com/mahpate/Vlite/releases">Releases</a>
+      <a href="api.html">API</a>
+      <a href="architecture.html">Architecture</a>
+      <a href="compare.html">Benchmarks</a>
+      <a href="about.html">About</a>
+      <a href="asendme.html">ASENDME</a>
     </nav>
   </div>
 </footer>

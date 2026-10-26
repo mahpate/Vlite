@@ -57,7 +57,7 @@
       <div class="section-head">
         <div class="kicker">Quickstart</div>
         <h2>Create a file. Store vectors. Search.</h2>
-        <p>Start in-process with Python, Node.js or Rust, or run the API and dashboard yourself.</p>
+        <p>Embed it in Python, Node.js or Rust, or run the server and dashboard.</p>
       </div>
       <div class="tabs">
         <div class="tablist" role="tablist" aria-label="Quickstart language">
@@ -107,98 +107,80 @@ native = NativeLibrary()
         </div>
         <div class="tabpanel" role="tabpanel" id="p-docker" aria-labelledby="t-docker" hidden>
 <button class="copy" data-copy="c-docker">Copy</button>
-<pre class="code" id="c-docker"><span class="c-c"># Ubuntu 22.04/24.04 terminal. On Windows, use the Windows devbox tab.</span>
+<pre class="code" id="c-docker"><span class="c-c"># Ubuntu 22.04 or 24.04. On Windows, use the Windows devbox tab.</span>
 sudo apt-get update &amp;&amp; sudo apt-get install -y git
 git clone https://github.com/mahpate/Vlite &amp;&amp; cd Vlite
 sudo sh scripts/docker-dashboard.sh
-<span class="c-c"># Offers to install Docker + Compose; starts published images, no Rust build.</span>
+<span class="c-c"># Offers to install Docker, then starts the published images.</span>
 <span class="c-c"># Dashboard: http://127.0.0.1:8081   API: http://127.0.0.1:18084</span>
-<span class="c-c"># Follow the printed token command, then paste its value into the dashboard.</span></pre>
+<span class="c-c"># First sign-in: run the printed token command, choose "Use an access token</span>
+<span class="c-c"># instead" and paste the token. Then create your account in Users &#8594; Add user.</span></pre>
         </div>
         <div class="tabpanel" role="tabpanel" id="p-devbox" aria-labelledby="t-devbox" hidden>
 <button class="copy" data-copy="c-devbox">Copy</button>
 <pre class="code" id="c-devbox"><span class="c-c"># Windows 10 (build 19041+) or Windows 11; open PowerShell.</span>
 Invoke-WebRequest https://raw.githubusercontent.com/mahpate/Vlite/main/scripts/devbox.ps1 -OutFile devbox.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\devbox.ps1
-<span class="c-c"># Approve prerequisite installation. If asked to restart, restart and rerun that command.</span>
-<span class="c-c"># Sets up WSL 2, Ubuntu 24.04 and Docker; no Git or Rust required.</span>
+<span class="c-c"># If Windows asks you to restart, restart and run it again.</span>
 powershell -NoProfile -ExecutionPolicy Bypass -File .\devbox.ps1 -Token
+<span class="c-c"># Copies the admin token to the clipboard for your first sign-in.</span>
 <span class="c-c"># Dashboard: http://127.0.0.1:8082   API: http://127.0.0.1:18085</span></pre>
         </div>
       </div>
-      <p class="note landing-note">Supply your own embeddings; these examples use three-dimensional sample vectors. See <a href="api.html">API examples</a> and the <a href="docs/INSTALL.html">installation guide</a> for package and platform details.</p>
+      <p class="note landing-note">Bring your own embeddings. See the <a href="api.html">API examples</a> and <a href="docs/INSTALL.html">installation guide</a>.</p>
     </div>
   </section>
 
   <section id="dashboard-preview">
     <div class="wrap">
       <div class="section-head">
-        <div class="kicker">Inside the product</div>
+        <div class="kicker">Dashboard</div>
         <h2>Your data, in view</h2>
-        <p>Browse collections, inspect records and run searches in your own VLite dashboard.</p>
+        <p>Browse records, run searches and manage access from your browser.</p>
       </div>
       <figure class="landing-shot">
         <a href="dashboard.html#screenshots"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/dashboard/current-overview-dark.png?v=connected"><img src="assets/dashboard/current-overview-light.png?v=connected" data-light="assets/dashboard/current-overview-light.png?v=connected" data-dark="assets/dashboard/current-overview-dark.png?v=connected" alt="Connected VLite dashboard with sample records, database snapshot cards and index readiness." width="1440" height="1100" loading="lazy" decoding="async"></picture></a>
-        <figcaption>Your connections, records and searches in one workspace. <a href="dashboard.html">Take the tour and set up your dashboard &#8594;</a></figcaption>
+        <figcaption><a href="dashboard.html">Take the dashboard tour &#8594;</a></figcaption>
       </figure>
     </div>
   </section>
 
   <section id="products" class="alt">
     <div class="wrap">
-      <div class="section-head"><div class="kicker">The VLite toolkit</div><h2>One engine across retrieval workflows</h2></div>
-      <div class="diagram-legend" aria-label="Diagram color key"><span class="interface">Interfaces</span><span class="search">Search &amp; indexes</span><span class="storage">Storage</span><span class="operations">Operations &amp; tools</span><span class="error">Errors</span></div>
-      <div class="product-flow" aria-label="Retrieval workflow">
-        <span><b>01</b> Your application</span><span aria-hidden="true">&#8594;</span>
-        <span><b>02</b> VLite retrieval</span><span aria-hidden="true">&#8594;</span>
-        <span><b>03</b> Your results</span>
-      </div>
+      <div class="section-head"><div class="kicker">Toolkit</div><h2>One engine, many ways in</h2></div>
       <div class="product-map" aria-label="VLite product and capability overview">
         <div class="product-map-intro">
           <img src="assets/logo.svg" alt="" width="44" height="44">
           <div class="label">Single-file vector database</div>
           <h3>VLite</h3>
-          <p>Dense, sparse and hybrid retrieval with explicit durable commits. Written in Rust; embedded first.</p>
-          <div class="product-chips"><span>MIT licensed</span><span>Self-hosted</span></div>
+          <p>Dense, sparse and hybrid search with durable commits.</p>
           <a class="more" href="architecture.html">Explore the engine &#8594;</a>
         </div>
         <div class="product-map-core">
           <div class="product-map-row product-connect"><h3><span class="product-symbol" aria-hidden="true">{ }</span> SDKs &amp; APIs</h3><div class="product-chips"><a href="#quickstart">Rust</a><a href="#quickstart">Python</a><a href="#quickstart">Node.js</a><a href="docs/INSTALL.html">C ABI</a><a href="api.html">REST</a><a href="docs/GRPC.html">gRPC</a></div></div>
-          <div class="product-map-row product-retrieve"><h3><span class="product-symbol" aria-hidden="true">&#8981;</span> Search &amp; indexes</h3><div class="product-map-groups">
-            <div><h4>Retrieval</h4><div class="product-chips"><span>Dense vectors</span><span>Sparse vectors</span><span>BM25 hybrid</span><span>Typed filters</span><span>Grouped search</span></div></div>
-            <div><h4>Acceleration</h4><div class="product-chips"><span>Exact scans</span><span>HNSW</span><span>Scalar u8</span><span>Metadata indexes</span></div></div>
-          </div></div>
-          <div class="product-map-row product-store"><h3><span class="product-symbol" aria-hidden="true">&#9636;</span> Runtime &amp; storage</h3><div class="product-map-groups">
-            <div><h4>Operating model</h4><div class="product-chips"><span>Embedded</span><span>Durable batches</span><span>Collections</span><span>Index snapshots</span></div></div>
-            <div><h4>Platform packages</h4><div class="product-chips"><a href="docs/INSTALL.html">Linux</a><a href="docs/INSTALL.html">macOS</a><a href="docs/INSTALL.html">Windows</a></div></div>
-          </div></div>
+          <div class="product-map-row product-retrieve"><h3><span class="product-symbol" aria-hidden="true">&#8981;</span> Search &amp; indexes</h3><div class="product-chips"><span>Dense &amp; sparse</span><span>BM25 hybrid</span><span>Typed filters</span><span>HNSW</span><span>Scalar u8</span></div></div>
+          <div class="product-map-row product-store"><h3><span class="product-symbol" aria-hidden="true">&#9636;</span> Runtime &amp; storage</h3><div class="product-chips"><span>Embedded</span><span>Collections</span><span>Atomic batches</span><a href="docs/INSTALL.html">Linux</a><a href="docs/INSTALL.html">macOS</a><a href="docs/INSTALL.html">Windows</a></div></div>
         </div>
-        <aside class="product-map-tools" aria-label="Evidence and tools">
-          <h3>Measured performance</h3><p>Latency, recall, build time and durability trade-offs, with raw samples and workload limits.</p><a class="more" href="compare.html">Explore benchmarks &#8594;</a>
+        <aside class="product-map-tools" aria-label="Tools and agents">
           <h3>Tools &amp; agents</h3>
-          <a href="dashboard.html"><strong>Dashboard</strong><span>Inspect, search and operate</span></a>
-          <a href="docs/TOOLS.html"><strong>CLI tools</strong><span>Local database workflows</span></a>
-          <a href="docs/MCP.html"><strong>MCP server</strong><span>Connect an agent to your database &middot; Install and configure</span></a>
-          <a href="docs/AGENT-SKILLS.html"><strong>Agent skills</strong><span>RAG, MCP, operations and tuning &middot; Install the skills</span></a>
+          <a href="dashboard.html"><strong>Dashboard</strong><span>Browse, search and administer</span></a>
+          <a href="docs/TOOLS.html"><strong>CLI tools</strong><span>Shell, imports and tuning</span></a>
+          <a href="docs/MCP.html"><strong>MCP server</strong><span>Connect an agent</span></a>
+          <a href="docs/AGENT-SKILLS.html"><strong>Agent skills</strong><span>RAG, operations and tuning</span></a>
         </aside>
       </div>
-      <div class="section-head" id="deployment-options"><h3>Where does VLite run?</h3><p>Inside your app, or as an API service you operate. Both store data in your own database file.</p></div>
+      <div class="section-head" id="deployment-options"><h3>Where does VLite run?</h3><p>In your app, or as a server you run. Either way, the data stays in your file.</p></div>
       <div class="grid cols-2 deployment-options">
         <article class="card"><div class="label">Embedded</div><h3>Your app opens the file</h3>
           <picture><source media="(prefers-color-scheme: dark)" srcset="assets/diagrams/deployment-embedded-dark.svg"><img src="assets/diagrams/deployment-embedded-light.svg" data-light="assets/diagrams/deployment-embedded-light.svg" data-dark="assets/diagrams/deployment-embedded-dark.svg" alt="Embedded: your application calls the VLite library in the same process; the library owns a local database file. No API service or dashboard is required." width="520" height="690" loading="lazy"></picture>
-          <p>Include the library in your application. You manage the database file; there is no separate database service.</p><a class="more" href="#quickstart">Embedded example &#8594;</a></article>
-        <article class="card"><div class="label">Self-hosted</div><h3>You run the API and keep the data</h3>
+          <p>Add the library to your app. There is no separate service.</p><a class="more" href="#quickstart">Embedded example &#8594;</a></article>
+        <article class="card"><div class="label">Self-hosted</div><h3>You run the server</h3>
           <picture><source media="(prefers-color-scheme: dark)" srcset="assets/diagrams/deployment-self-hosted-dark.svg"><img src="assets/diagrams/deployment-self-hosted-light.svg" data-light="assets/diagrams/deployment-self-hosted-light.svg" data-dark="assets/diagrams/deployment-self-hosted-dark.svg" alt="Self-hosted: clients and an optional browser dashboard call vlite-server. Its embedded engine owns the database file on your server's persistent storage." width="520" height="690" loading="lazy"></picture>
-          <p>Run <code>vlite-server</code> on your machine or server. It handles API requests and reads/writes the file. No separate storage service is needed.</p><a class="more" href="docs/DOCKER-OPERATIONS.html">Deployment guide &#8594;</a></article>
+          <p><code>vlite-server</code> serves REST, gRPC and the dashboard. You manage access, HTTPS, backups and upgrades.</p><a class="more" href="docs/DOCKER-OPERATIONS.html">Deployment guide &#8594;</a></article>
       </div>
-      <p class="note landing-note"><strong>What do you self-host?</strong> The API service and its persistent storage.
-        The dashboard is optional: serve it from the API at <code>/dashboard</code>, or run the separate frontend
-        container that proxies requests to the API. It uses the same database, not its own.
-        You manage access, HTTPS for remote use, backups and upgrades.</p>
-      <p class="note landing-note">Language bindings: Rust, Python, Node.js and C; a separate WASM surface is also available. API coverage and platform support vary by package. <a href="docs/INSTALL.html">Check the installation matrix</a>.</p>
       <aside class="product-adoption" aria-label="Applications using VLite">
         <div><div class="label">Used in real applications</div><h3>VLite powers internal workflows at ASENDME</h3>
-          <p><a href="https://asendme.com">ASENDME.com</a> and <a href="https://asendme.app">ASENDME.app</a> both use VLite internally.</p></div>
+          <p><a href="https://asendme.com">ASENDME.com</a> and <a href="https://asendme.app">ASENDME.app</a> both use VLite.</p></div>
         <a class="btn" href="asendme.html">Explore ASENDME &#8594;</a>
       </aside>
     </div>
@@ -206,36 +188,38 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\devbox.ps1 -Token
 
   <section id="features">
     <div class="wrap">
-      <div class="section-head"><div class="kicker">Features</div><h2>Start simple. Go deeper when needed.</h2><p><a href="features.html">Explore all features</a>, including optional capabilities and requirements.</p></div>
+      <div class="section-head"><div class="kicker">Features</div><h2>Start simple. Go deeper when needed.</h2><p><a href="features.html">See all features</a></p></div>
       <div class="grid cols-3" id="capabilities">
-        <article class="card"><div class="label">Storage</div><h3>Durable, explicit commits</h3><p>Checksummed frames and synchronization before successful writes. Single-collection atomic batches support up to 4,096 operations.</p><a class="more" href="docs/REFERENCE.html">Storage contract &#8594;</a></article>
-        <article class="card"><div class="label">Retrieval</div><h3>Exact to hybrid search</h3><p>Dense and sparse vectors, typed filters, BM25 hybrid ranking, grouped search and recommendations.</p><a class="more" href="docs/VECTORS.html">Retrieval guide &#8594;</a></article>
-        <article class="card"><div class="label">Indexes</div><h3>Rebuildable acceleration</h3><p>Optional HNSW and snapshots, scalar u8 quantization, metadata indexes, disk-ANN sidecars and opt-in GPU exact L2.</p><a class="more" href="docs/ANN-SNAPSHOTS.html">Index lifecycle &#8594;</a></article>
-        <article class="card"><div class="label">Data lifecycle</div><h3>Collections to recovery</h3><p>Collections, expiry, resumable re-embedding and imports. Point-in-time restore, change feeds and log-shipped read replicas.</p><a class="more" href="docs/STORAGE-FEATURES.html">Storage features &#8594;</a></article>
-        <article class="card"><div class="label">Security</div><h3>Control access to your data</h3><p>Opt-in encryption at rest, scoped credentials, quotas and TLS configuration. Verify deployment settings before remote access.</p><a class="more" href="docs/SECURITY.html">Security guide &#8594;</a></article>
-        <article class="card"><div class="label">Operations</div><h3>Inspect and maintain</h3><p>Metrics, optional tracing, backups and maintenance tools. The live log tail is bounded and memory-only, not a durable audit archive.</p><a class="more" href="docs/DOCKER-OPERATIONS.html">Operations guide &#8594;</a></article>
+        <article class="card"><div class="label">Storage</div><h3>Durable, explicit commits</h3><p>Checksummed, synced writes. Atomic batches of up to 4,096 operations.</p><a class="more" href="docs/REFERENCE.html">Storage contract &#8594;</a></article>
+        <article class="card"><div class="label">Retrieval</div><h3>Exact to hybrid search</h3><p>Dense and sparse vectors, typed filters and BM25 hybrid ranking.</p><a class="more" href="docs/VECTORS.html">Retrieval guide &#8594;</a></article>
+        <article class="card"><div class="label">Indexes</div><h3>Rebuildable acceleration</h3><p>HNSW with snapshots, u8 quantization and metadata indexes.</p><a class="more" href="docs/ANN-SNAPSHOTS.html">Index lifecycle &#8594;</a></article>
+        <article class="card"><div class="label">Data lifecycle</div><h3>Collections to recovery</h3><p>Collections, expiry, resumable imports, point-in-time restore and change feeds.</p><a class="more" href="docs/STORAGE-FEATURES.html">Storage features &#8594;</a></article>
+        <article class="card"><div class="label">Security</div><h3>Control access</h3><p>Dashboard accounts with roles, scoped API keys, quotas, TLS and encryption at rest.</p><a class="more" href="docs/SECURITY.html">Security guide &#8594;</a></article>
+        <article class="card"><div class="label">Operations</div><h3>Inspect and maintain</h3><p>Metrics, optional tracing, backups and a live log tail.</p><a class="more" href="docs/DOCKER-OPERATIONS.html">Operations guide &#8594;</a></article>
       </div>
     </div>
   </section>
 
   <section id="data-safety" class="alt">
     <div class="wrap">
-      <div class="section-head"><div class="kicker">Know the boundaries</div><h2>Data safety you can reason about</h2><p>Corruption fails closed. Incomplete trailing writes require explicit repair; committed data is never silently discarded. Search indexes remain rebuildable from stored records.</p></div>
-      <p class="callout">VLite keeps the live dataset in memory and replays the log on open. A file supports one exclusive owner or multiple shared read-only owners. Size deployments for the full dataset. Optional indexes and maintenance can use sidecars. Filesystem and directory-entry durability have platform-specific limitations; process-crash tests are not physical power-loss qualification.</p>
-      <nav class="landing-evidence" aria-label="Technical evidence"><a href="architecture.html">Architecture &#8594;</a><a href="docs/REFERENCE.html">Data-safety contracts &#8594;</a><a href="compare.html">Benchmarks &amp; methodology &#8594;</a><a href="docs/RELEASE-0.4.1.html">Release notes &#8594;</a></nav>
-    </div>
-  </section>
-  <section>
-    <div class="wrap">
-      <div class="section-head"><h2>Build your first search.</h2></div>
-      <div class="cta"><a class="btn primary" href="#quickstart">Get started</a><a class="btn" href="docs/">Read the docs</a></div>
+      <div class="section-head"><div class="kicker">Know the boundaries</div><h2>Data safety you can reason about</h2><p>Corruption fails closed. Committed data is never silently discarded. Indexes rebuild from stored records.</p></div>
+      <p class="callout">Limits: the live dataset is held in memory, so size machines for it. A file has one writer or several read-only readers. Durability depends on your filesystem.</p>
+      <nav class="landing-evidence" aria-label="Technical evidence"><a href="architecture.html">Architecture &#8594;</a><a href="docs/REFERENCE.html">Data-safety contracts &#8594;</a><a href="compare.html">Benchmarks &#8594;</a><a href="docs/RELEASE-0.4.1.html">Release notes &#8594;</a></nav>
     </div>
   </section>
 </main>
 <footer>
   <div class="wrap">
-    <span>&copy; VLite contributors &middot; MIT License</span>
-    <nav aria-label="Footer"><a href="https://github.com/mahpate/Vlite">GitHub</a><a href="https://github.com/mahpate/Vlite/releases">Releases</a><a href="api.html">API</a><a href="dashboard.html">Dashboard</a><a href="docs/TOOLS.html">CLI</a><a href="architecture.html">Architecture</a><a href="compare.html">Benchmarks</a><a href="about.html">About</a><a href="asendme.html">ASENDME</a></nav>
+    <span>© VLite contributors · MIT License</span>
+    <nav>
+      <a href="https://github.com/mahpate/Vlite">GitHub</a>
+      <a href="https://github.com/mahpate/Vlite/releases">Releases</a>
+      <a href="api.html">API</a>
+      <a href="architecture.html">Architecture</a>
+      <a href="compare.html">Benchmarks</a>
+      <a href="about.html">About</a>
+      <a href="asendme.html">ASENDME</a>
+    </nav>
   </div>
 </footer>
 </body>
