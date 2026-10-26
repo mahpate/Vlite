@@ -1,6 +1,6 @@
 ---
 goal: Optional embedded property-graph layer for VLite with schema-guided agent operations, bounded traversal and hybrid vector/graph retrieval, delivered with minimum impact on existing VLite behavior
-version: 1.2.17
+version: 1.2.18
 date_created: 2026-10-23
 last_updated: 2026-10-25
 owner: VLite maintainers (mahpate/Vlite)
@@ -36,6 +36,8 @@ Not yet implemented:
 - the NFR-002 components that need later capabilities: property-index memory (EPIC-008) and hybrid-retrieve latency (ITEM-039, EPIC-010);
 - schema, graph-specific server, MCP, SDK and hybrid retrieval surfaces (EPIC-008 and later).
 
+**Wave 1 (v1.2.18, 2026-10-25; source-only, opt-in `graph` builds, not distributed):** EPIC-008 (declared schema, property indexes, `ensure_edge`, observed schema), EPIC-009 (`vlite-mcp` graph tools), EPIC-010 `GraphRef::retrieve`, EPIC-011 REST graph routes and graph-scoped credentials (GATE-007 passed by security review), EPIC-012 C ABI and Python graph APIs and EPIC-015 ITEM-051 (read-only graph query text, `vlite-graph-cli query`) are implemented. The second list above is superseded by Section 14.2 for these epics. Still pending (wave 2): MCP schema, retrieve and query tools (part of AC-018, ITEM-038, ITEM-052), the MCP proxy (ITEM-043) and EPIC-013. EPIC-014 was skipped by owner decision (Section 14.2). Graph writes follow the database's durability mode, including the opt-in periodic mode, which is outside this PRD.
+
 The user-requested command-line and Dashboard follow-ups are tracked in
 [Section 14.3](#143-requested-command-line-and-dashboard-follow-ups). They are
 not implemented by the P1 work above and do not include a graph query language.
@@ -45,7 +47,7 @@ and approves no gate.
 
 The REG-001..REG-008 regression baseline is pinned to commit `347b01d` (re-pinned in v1.2.10, see `decisions.md`). The DO-005 performance record is still the `81ff901` measurement in [`baseline.md`](baseline.md) and must be re-measured before REG-010 budgets are enforced.
 
-GATE-002, GATE-003 and GATE-008 remain open. The implementation status above distinguishes delivered work from the remaining target design; open gates do not authorize adding graph support to distributed artifacts.
+GATE-002, GATE-003 and GATE-008 remain open. GATE-007 passed by security review on 2026-10-25 (a code-reading review of EPIC-011; its one LOW finding is fixed). GATE-008 is not approved: graph is in no Docker image, release binary or package, and the artifact feature pins are unchanged. The implementation status above distinguishes delivered work from the remaining target design; open gates do not authorize adding graph support to distributed artifacts.
 
 The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in RFC 2119.
 
@@ -60,7 +62,7 @@ The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "S
 - **How it integrates**: Nodes optionally *attach* to records in existing collections, so vector/lexical/hybrid search (`src\hybrid.rs`) finds pivot records, then a bounded traversal expands context and returns evidence paths, all in one call over one consistent view.
 - **Agent simplicity**: Typed MCP tools first (schema discovery, get, neighbors, traverse, shortest path, retrieve, writable batch) with compact outputs, explicit completeness, no embeddings by default. Whether to add an optional read-only text syntax — a simple graph query syntax or a small custom graph pattern syntax, or neither — is decided later by a deterministic, separately authorized evaluation; both would compile to the same internal query representation.
 - **Phases**: P0 decisions + baseline/regression harness → P1 Rust core MVP → P2 standalone agent MVP (MCP over core) → P3 hybrid retrieval + shared-owner server/MCP proxy → P4 C/Python/Node SDKs + docs → P5 optional language evaluation/implementation. Each phase ships a usable deliverable and has entry/exit gates.
-- **Explicitly not in MVP**: any text graph query language, clustering/distributed operation, advanced MVCC concurrency, weighted/all-paths analytics, cascade deletes, graph TTL, arbitrary plugins, UI/dashboard graph views, every-language adapters.
+- **Explicitly not in MVP**: any text graph query language, clustering/distributed operation, advanced MVCC concurrency, weighted/all-paths analytics, cascade deletes, graph TTL, arbitrary plugins, UI/dashboard graph views, every-language adapters. (2026-10-25: the repository owner directed adding a narrow read-only graph query text, delivered as EPIC-015 ITEM-051 without the EPIC-014 evaluation; Dashboard graph support stays a requested follow-up, FOLLOWUP-002.)
 
 ## 1. Goals and Non-Goals
 
@@ -73,7 +75,7 @@ The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "S
 - **Non-Goal 1**: General-purpose graph database feature set, full query-language compatibility claims, network wire protocols, graph algorithms library.
 - **Non-Goal 2**: Distributed/clustered/replicated-write graph operation; multi-writer or MVCC snapshot concurrency.
 - **Non-Goal 3**: Changing default file creation (format V3 via `Database::create`, `src\lib.rs` line 853) or migrating any existing file implicitly.
-- **Non-Goal 4**: Dashboard/console graph UI, gRPC graph services, WASM graph build, every-language adapters in MVP.
+- **Non-Goal 4**: Dashboard/console graph UI, gRPC graph services, WASM graph build, every-language adapters in MVP. (Dashboard graph support is a requested post-MVP follow-up, FOLLOWUP-002 in Section 14.3.)
 
 ### Personas
 
@@ -111,13 +113,13 @@ The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "S
 
 ### Out of Scope (deferred)
 
-- A general-purpose or full-featured text graph query language — parser, planner and semantic obligations are unjustified; only a very simple optional read-only syntax is considered, and only if RD-011's evaluation shows need.
+- A general-purpose or full-featured text graph query language — parser, planner and semantic obligations are unjustified; only a very simple optional read-only syntax is considered, and only if RD-011's evaluation shows need. (2026-10-25: the repository owner directed adding that narrow read-only syntax without the RD-011 evaluation; see EPIC-014/EPIC-015. A general-purpose language stays out of scope.)
 - Cascade node deletion — high-degree cascades can exceed the 4,096-operation / 16 MiB batch limits (`src\lib.rs` lines 80-82) and cannot be atomic.
 - Graph-node TTL/expiry and expiry of attached vector records — independent expiry would create dangling relationships.
 - Weighted shortest path, all-paths, k-shortest paths, centrality/community analytics — unmeasured demand, unbounded cost.
 - Advanced temporal modeling (bitemporal validity vs recording time) — product hypothesis; only simple evidence properties are in scope (REQ-016).
 - Graph change-feed events — `ChangeKind` (`src\changes.rs` line 109) is not `#[non_exhaustive]`; adding variants is a breaking API change. MVP rejects explicitly (REQ-053); a separate API MAY be planned later.
-- gRPC graph services, dashboard graph UI, WASM graph support — not needed for agent MVP; each adds contract surface.
+- gRPC graph services, dashboard graph UI, WASM graph support — not needed for agent MVP; each adds contract surface. (Dashboard graph support was requested on 2026-10-24 as FOLLOWUP-002 and is still pending.)
 - Clustering, distributed graph, multi-writer MVCC, arbitrary plugins/procedures — separate multi-month investments.
 - Embedding, depending on or copying any external graph engine — a second engine would create a second commit domain and new dependencies (RD-001, CON-001, CON-003).
 
@@ -818,6 +820,8 @@ flowchart LR
 
 Language hold point: GATE-005/GATE-006 never block P1-P4. Typed APIs and MCP tools are the supported interface regardless of the language decision.
 
+Gate status (v1.2.18, 2026-10-25): GATE-005 experiments were not run; EPIC-014 was skipped by owner decision. GATE-006 is satisfied by the repository owner's 2026-10-25 decision to add the narrow read-only graph query text, not by experiment evidence. GATE-007 passed by security review on 2026-10-25 (a code-reading review of the EPIC-011 REST routes and credentials; its one LOW finding, deleting an attached node without collection authorization, is fixed); proxy credential handling is reviewed with ITEM-043 in wave 2. GATE-008 is not approved: no graph feature is in the Docker image, release binaries or packages, and the artifact feature pins are unchanged. The other gates are unchanged. Wave 1 was implemented by owner direction ahead of the formal GATE-004/GATE-009 reviews; that does not approve them.
+
 ### 14.2 Epics
 
 - EPIC-001: P0 — Pin artifact feature sets and build the graph-off regression harness (no graph code; zero behavior change).
@@ -903,67 +907,67 @@ All EPIC-003 implementation items are done. The epic stays open for its formal g
 | ITEM-029 | REST `/changes` (`src\server\features.rs` ~116) returns the explicit 501 error on graph-enabled files; webhook registration and server startup with configured webhooks on a graph-enabled file fail with `GraphChangeFeedUnsupported` instead of reaching the silent `Err(_) => continue` loops (`src\server\webhooks.rs` 374-379, 438). Vector-only behavior unchanged. | Done (v1.2.15: `GET /v1/changes` is 501 `graph_change_feed_unsupported`; `POST /v1/admin/webhooks` is rejected before anything is stored; startup with subscriptions in `webhooks.json` fails before any audit, credential, scheduler or webhook state is written; the dispatcher never starts a worker; vector-only files are unchanged) | ./src/server/features.rs, ./src/server/webhooks.rs, ./src/server/admin.rs, ./src/server.rs |
 | ITEM-030 | TEST-015 surface tests for LEG-017, LEG-019 and LEG-020 on vector-only and graph-enabled files. | Done (v1.2.15: `tests\graph_server_surfaces.rs` runs each case on a vector-only file, an empty graph-enabled file and a populated one; CI runs it in the `--all-features` workspace run and in a `server,graph` step without `grpc` or `mcp`) | ./tests/graph_server_surfaces.rs |
 
-- EPIC-008: P2 — Declared and observed schema, declared property indexes, `ensure_edge`.
+- EPIC-008: P2 — Declared and observed schema, declared property indexes, `ensure_edge`. **Done (v1.2.18).**
 
 | Task | Description | Status | Relevant Files |
 |------|-------------|--------|----------------|
-| ITEM-031 | `PutSchema` entry encoding and replay; declared label/relationship definitions per REQ-030; enforcement in mutation validation (all in the shared engine). | Not Started | ./src/property_graph/engine/codec.rs, ./src/property_graph/engine/schema.rs, ./src/property_graph/engine/mutate.rs |
-| ITEM-032 | Observed schema summary with PD-011 budget and declared/observed marking; declared exact/range property indexes following the `src\metadata_index.rs` design (REQ-033); `ensure_edge` for `UniqueTriple`; adapter exposure. | Not Started | ./src/property_graph/engine/schema.rs, ./src/property_graph/mod.rs |
-| ITEM-033 | TEST-010 schema tests including index-versus-scan equivalence. | Not Started | ./tests/graph_schema.rs |
+| ITEM-031 | `PutSchema` entry encoding and replay; declared label/relationship definitions per REQ-030; enforcement in mutation validation (all in the shared engine). | Done (v1.2.18: `PutSchema` tag 12 replaces the whole declared schema; enforcement runs in the engine's shared apply path so planning, replay and recovery agree; rejections are `GraphSchemaViolation`, REST 409 `graph_schema_violation`) | ./src/property_graph/engine/codec.rs, ./src/property_graph/engine/schema.rs, ./src/property_graph/engine/mutate.rs |
+| ITEM-032 | Observed schema summary with PD-011 budget and declared/observed marking; declared exact/range property indexes following the `src\metadata_index.rs` design (REQ-033); `ensure_edge` for `UniqueTriple`; adapter exposure. | Done (v1.2.18: observed schema with the PD-011 budget and declared/observed origin; exact/range property indexes are derived state rebuilt on replay; `ensure_edge` for `UniqueTriple`; `GraphRef::schema`/`observed_schema`, `GraphMut::put_schema`/`ensure_edge`) | ./src/property_graph/engine/schema.rs, ./src/property_graph/mod.rs |
+| ITEM-033 | TEST-010 schema tests including index-versus-scan equivalence. | Done (v1.2.18: `tests\graph_schema.rs`, including index-versus-scan equivalence; CI graph step runs it) | ./tests/graph_schema.rs |
 
-- EPIC-009: P2 — Standalone MCP graph tools and agent guidance. Read tools depend only on GATE-004; schema tools additionally depend on EPIC-008.
-
-| Task | Description | Status | Relevant Files |
-|------|-------------|--------|----------------|
-| ITEM-034 | Add cfg-gated graph tools (Section 3.6) to `tool_definitions` and `tools/call`, listed only when the opened file is graph-enabled; read-only versus writable sets; compact outputs; `vlite_info` graph fields only on graph-enabled files. | Not Started | ./src/bin/vlite-mcp.rs |
-| ITEM-035 | `[[test]] graph_mcp` (`required-features = ["mcp", "graph"]`); deterministic fixtures for UC-002..UC-004; vector-only `tools/list` equals the golden fixture. | Not Started | ./Cargo.toml, ./tests/graph_mcp.rs, ./tests/fixtures/graph_agent/tasks.json |
-| ITEM-036 | Additive MCP guide and skill guidance per REQ-037/REQ-039. | Not Started | ./docs/MCP.md, ./skills/vlite-mcp/SKILL.md, ./skills/vlite-mcp/references/tools.md |
-
-- EPIC-010: P3 — Hybrid pivot-and-expand retrieval with evidence.
+- EPIC-009: P2 — Standalone MCP graph tools and agent guidance. Read tools depend only on GATE-004; schema tools additionally depend on EPIC-008. **Items done (v1.2.18); MCP schema tools for AC-018 pending (wave 2).**
 
 | Task | Description | Status | Relevant Files |
 |------|-------------|--------|----------------|
-| ITEM-037 | `retrieve` per REQ-040..REQ-042 in the adapter using existing search APIs (no change to `hybrid.rs`) for pivots and `vlite-graph` traversal for expansion; pivot bounds PD-015/PD-016; re-validation; `unmapped_pivots`; evidence projection; `stats.pivot_ms` and `stats.expand_ms`. | Not Started | ./src/property_graph/retrieve.rs, ./src/property_graph/mod.rs |
-| ITEM-038 | `vlite_graph_retrieve` MCP tool; UC-001 fixture (AC-029). | Not Started | ./src/bin/vlite-mcp.rs, ./tests/fixtures/graph_agent/tasks.json |
-| ITEM-039 | TEST-011 same-view tests; record pivot and expansion timings for the P3 exit report. | Not Started | ./tests/graph_hybrid.rs, ./Cargo.toml |
+| ITEM-034 | Add cfg-gated graph tools (Section 3.6) to `tool_definitions` and `tools/call`, listed only when the opened file is graph-enabled; read-only versus writable sets; compact outputs; `vlite_info` graph fields only on graph-enabled files. | Done (v1.2.18: read tools `vlite_graph_list`, `_get`, `_find_nodes`, `_neighbors`, `_traverse`, `_shortest_path`; write tools `vlite_graph_create`, `_drop`, `_write` with `--writable`; vector-only `tools/list` unchanged. AC-018 is not complete: schema tools come in wave 2) | ./src/bin/vlite-mcp.rs |
+| ITEM-035 | `[[test]] graph_mcp` (`required-features = ["mcp", "graph"]`); deterministic fixtures for UC-002..UC-004; vector-only `tools/list` equals the golden fixture. | Done (v1.2.18: `tests\graph_mcp.rs` with UC-002..UC-004 fixtures) | ./Cargo.toml, ./tests/graph_mcp.rs, ./tests/fixtures/graph_agent/tasks.json |
+| ITEM-036 | Additive MCP guide and skill guidance per REQ-037/REQ-039. | Done (v1.2.18: experimental, source-only sections in `docs\MCP.md` and the `vlite-mcp` skill) | ./docs/MCP.md, ./skills/vlite-mcp/SKILL.md, ./skills/vlite-mcp/references/tools.md |
 
-- EPIC-011: P3 — REST graph routes and MCP proxy mode (after GATE-007).
-
-| Task | Description | Status | Relevant Files |
-|------|-------------|--------|----------------|
-| ITEM-040 | cfg-gated REST graph routes executing under one read guard (reads) or write guard (writes); errors mapped as in EPIC-007. | Not Started | ./src/server.rs, ./src/server/graph.rs |
-| ITEM-041 | Graph scope in credentials; per-hop evidence authorization with `redacted` counts. | Not Started | ./src/server/credentials.rs |
-| ITEM-042 | OpenAPI fragment merged only in graph builds (RD-013); TEST-012 validates the merged document (parses, every graph route documented, existing paths byte-identical). | Not Started | ./src/openapi_graph.json, ./src/server.rs |
-| ITEM-043 | `mcp-proxy` feature and `vlite-mcp --server URL` forwarding; never opens the file; graph tools listed only when the server reports a graph-enabled database. | Not Started | ./Cargo.toml, ./src/bin/vlite-mcp.rs |
-| ITEM-044 | TEST-012 server/proxy tests including read-guard hold-time measurement. | Not Started | ./tests/rest_graph.rs |
-
-- EPIC-012: P4 — C ABI and Python graph APIs.
+- EPIC-010: P3 — Hybrid pivot-and-expand retrieval with evidence. **ITEM-037/ITEM-039 done (v1.2.18); ITEM-038 pending (wave 2).**
 
 | Task | Description | Status | Relevant Files |
 |------|-------------|--------|----------------|
-| ITEM-045 | `vlite-ffi` feature `graph = ["vlite/graph"]` (non-default); graph JSON commands via `vlite_execute`; header documentation. | Not Started | ./bindings/c/Cargo.toml, ./bindings/c/src/lib.rs, ./bindings/c/src/features.rs, ./bindings/c/vlite.h |
-| ITEM-046 | Python methods mirroring Rust names; tests including rejection when the library lacks graph. | Not Started | ./bindings/python/vlite_embedded/__init__.py, ./bindings/python/test_features.py, ./tests/embedded_e2e.py |
+| ITEM-037 | `retrieve` per REQ-040..REQ-042 in the adapter using existing search APIs (no change to `hybrid.rs`) for pivots and `vlite-graph` traversal for expansion; pivot bounds PD-015/PD-016; re-validation; `unmapped_pivots`; evidence projection; `stats.pivot_ms` and `stats.expand_ms`. | Done (v1.2.18: `GraphRef::retrieve`; pivots through the unchanged `search_hybrid`; `GraphPivotTooExpensive` (REST 422) for the PD-016 exact-scan bound; deadline covers only expansion) | ./src/property_graph/retrieve.rs, ./src/property_graph/mod.rs |
+| ITEM-038 | `vlite_graph_retrieve` MCP tool; UC-001 fixture (AC-029). | Not Started (wave 2) | ./src/bin/vlite-mcp.rs, ./tests/fixtures/graph_agent/tasks.json |
+| ITEM-039 | TEST-011 same-view tests; record pivot and expansion timings for the P3 exit report. | Done (v1.2.18: `tests\graph_hybrid.rs` same-view, re-validation, unmapped pivots, bounds, truncation and cancellation; a stepping-clock unit test covers the deadline. No reference-machine timings are recorded) | ./tests/graph_hybrid.rs, ./Cargo.toml |
 
-- EPIC-013: P4 — Node graph API and user guides.
-
-| Task | Description | Status | Relevant Files |
-|------|-------------|--------|----------------|
-| ITEM-047 | Node methods and typings following the existing `index.js`/`worker.js` asynchronous call model (no model change); tests. `addon.cc` changes only if JSON pass-through is insufficient. | Not Started | ./bindings/node/index.js, ./bindings/node/index.d.ts, ./bindings/node/worker.js, ./bindings/node/features.test.mjs |
-| ITEM-048 | `docs\GRAPH.md` plus additive README and capabilities sections: opt-in, compatibility, limits, consistency, rollback, release-note text for GATE-008. | Not Started | ./docs/GRAPH.md, ./README.md, ./docs/CAPABILITIES.md |
-
-- EPIC-014: P5 — Graph language evaluation (OPTIONAL; requires GATE-005; not CI).
+- EPIC-011: P3 — REST graph routes and MCP proxy mode (after GATE-007). **ITEM-040..ITEM-042 and ITEM-044 done (v1.2.18); GATE-007 passed 2026-10-25; ITEM-043 pending (wave 2).**
 
 | Task | Description | Status | Relevant Files |
 |------|-------------|--------|----------------|
-| ITEM-049 | Define at least 40 synthetic tasks over a synthetic graph with gold answers/paths; document the two VLite-defined candidate grammars: (1) small custom graph pattern syntax — one compact path expression with node labels, edge types, direction and a bounded hop range `1..N` (N ≤ ceiling), plus `$params`; (2) simple graph query syntax — one pattern clause, one property-filter clause, a projection clause and a limit clause, with the same hop bound and `$params`. Neither may reuse `SEARCH` or other keywords of `src\query_language.rs`. | Not Started | ./benchmarks/graph_language/tasks.jsonl, ./benchmarks/graph_language/GRAMMARS.md |
-| ITEM-050 | Harness scoring REQ-070 metrics with at least two authorized model families; raw metrics output; apply RD-011; record the evaluation report. | Not Started | ./benchmarks/graph_language/run_eval.py, ./docs/projects/feature-agent-graph/language-evaluation.md |
+| ITEM-040 | cfg-gated REST graph routes executing under one read guard (reads) or write guard (writes); errors mapped as in EPIC-007. | Done (v1.2.18: `src\server\graph.rs`; one read guard per read, the write guard per write; vector-only files answer 409 `graphs_not_enabled` after authentication) | ./src/server.rs, ./src/server/graph.rs |
+| ITEM-041 | Graph scope in credentials; per-hop evidence authorization with `redacted` counts. | Done (v1.2.18: `graph_read`/`graph_write` bound to `graphs` `["*"]` or 1..64 names; collection scope never implies graph access; batch vector ops and deleting attached nodes also need collection write) | ./src/server/credentials.rs |
+| ITEM-042 | OpenAPI fragment merged only in graph builds (RD-013); TEST-012 validates the merged document (parses, every graph route documented, existing paths byte-identical). | Done (v1.2.18: `src\openapi_graph.json` merged only in graph builds; `src\openapi.json` unchanged) | ./src/openapi_graph.json, ./src/server.rs |
+| ITEM-043 | `mcp-proxy` feature and `vlite-mcp --server URL` forwarding; never opens the file; graph tools listed only when the server reports a graph-enabled database. | Not Started (wave 2) | ./Cargo.toml, ./src/bin/vlite-mcp.rs |
+| ITEM-044 | TEST-012 server/proxy tests including read-guard hold-time measurement. | Done (v1.2.18: `tests\rest_graph.rs`, including read-guard hold-time p50/p99 via `GET /v1/admin/graph/stats`. GATE-007 passed by security review 2026-10-25) | ./tests/rest_graph.rs |
 
-- EPIC-015: P5 — Narrow read-only graph language (CONDITIONAL; only if GATE-006 selects a language).
+- EPIC-012: P4 — C ABI and Python graph APIs. **Done (v1.2.18).**
 
 | Task | Description | Status | Relevant Files |
 |------|-------------|--------|----------------|
-| ITEM-051 | Separate parser in the shared engine producing `GraphQuery`; typed errors for unsupported constructs; `explain`; adapter entry point. `src\query_language.rs` untouched. | Not Started | ./src/property_graph/engine/language.rs, ./src/property_graph/mod.rs |
-| ITEM-052 | `vlite_graph_query` MCP tool (read-only); parse and semantic equivalence tests against typed operations; supported-syntax section in the graph guide. | Not Started | ./src/bin/vlite-mcp.rs, ./tests/graph_language.rs, ./docs/GRAPH.md |
+| ITEM-045 | `vlite-ffi` feature `graph = ["vlite/graph"]` (non-default); graph JSON commands via `vlite_execute`; header documentation. | Done (v1.2.18: `{"op":"graph","request":{...}}` envelope and `{"op":"capabilities"}`; builds without the feature return `unsupported`) | ./bindings/c/Cargo.toml, ./bindings/c/src/lib.rs, ./bindings/c/src/features.rs, ./bindings/c/vlite.h |
+| ITEM-046 | Python methods mirroring Rust names; tests including rejection when the library lacks graph. | Done (v1.2.18: Python `create_with_graph`, `supports_graph`, `graph_*` methods; `bindings\python\test_graph.py` and `tests\embedded_e2e.py`) | ./bindings/python/vlite_embedded/__init__.py, ./bindings/python/test_features.py, ./tests/embedded_e2e.py |
+
+- EPIC-013: P4 — Node graph API and user guides. **Not Started (wave 2).**
+
+| Task | Description | Status | Relevant Files |
+|------|-------------|--------|----------------|
+| ITEM-047 | Node methods and typings following the existing `index.js`/`worker.js` asynchronous call model (no model change); tests. `addon.cc` changes only if JSON pass-through is insufficient. | Not Started (wave 2) | ./bindings/node/index.js, ./bindings/node/index.d.ts, ./bindings/node/worker.js, ./bindings/node/features.test.mjs |
+| ITEM-048 | `docs\GRAPH.md` plus additive README and capabilities sections: opt-in, compatibility, limits, consistency, rollback, release-note text for GATE-008. | Not Started (wave 2) | ./docs/GRAPH.md, ./README.md, ./docs/CAPABILITIES.md |
+
+- EPIC-014: P5 — Graph language evaluation (OPTIONAL; requires GATE-005; not CI). **Skipped by owner decision 2026-10-25:** the repository owner directed adding the graph query language; the LLM evaluation and GATE-005 experiments were not run, and GATE-006 is satisfied by that decision rather than by experiment evidence.
+
+| Task | Description | Status | Relevant Files |
+|------|-------------|--------|----------------|
+| ITEM-049 | Define at least 40 synthetic tasks over a synthetic graph with gold answers/paths; document the two VLite-defined candidate grammars: (1) small custom graph pattern syntax — one compact path expression with node labels, edge types, direction and a bounded hop range `1..N` (N ≤ ceiling), plus `$params`; (2) simple graph query syntax — one pattern clause, one property-filter clause, a projection clause and a limit clause, with the same hop bound and `$params`. Neither may reuse `SEARCH` or other keywords of `src\query_language.rs`. | Skipped by owner decision 2026-10-25 (the repository owner directed adding the graph query language; the LLM evaluation was not run) | ./benchmarks/graph_language/tasks.jsonl, ./benchmarks/graph_language/GRAMMARS.md |
+| ITEM-050 | Harness scoring REQ-070 metrics with at least two authorized model families; raw metrics output; apply RD-011; record the evaluation report. | Skipped by owner decision 2026-10-25 (no evaluation report; GATE-005 experiments not run) | ./benchmarks/graph_language/run_eval.py, ./docs/projects/feature-agent-graph/language-evaluation.md |
+
+- EPIC-015: P5 — Narrow read-only graph language (CONDITIONAL; only if GATE-006 selects a language). **ITEM-051 done (v1.2.18, owner-directed); ITEM-052 pending (wave 2).**
+
+| Task | Description | Status | Relevant Files |
+|------|-------------|--------|----------------|
+| ITEM-051 | Separate parser in the shared engine producing `GraphQuery`; typed errors for unsupported constructs; `explain`; adapter entry point. `src\query_language.rs` untouched. | Done (v1.2.18: `engine\language.rs`, `GraphRef::query_text`/`explain_text`, `parse_graph_query`, `vlite-graph-cli query`, `docs\GRAPH-QUERY.md`, `tests\graph_language.rs`; `src\query_language.rs` unchanged) | ./src/property_graph/engine/language.rs, ./src/property_graph/mod.rs |
+| ITEM-052 | `vlite_graph_query` MCP tool (read-only); parse and semantic equivalence tests against typed operations; supported-syntax section in the graph guide. | Not Started (wave 2) | ./src/bin/vlite-mcp.rs, ./tests/graph_language.rs, ./docs/GRAPH.md |
 
 ### 14.3 Requested command-line and Dashboard follow-ups
 
@@ -978,7 +982,7 @@ non-goal, approve an open gate or change distributed artifact feature sets.
 | Follow-up | Scope to define before implementation | Prerequisites | Status |
 |-----------|---------------------------------------|---------------|--------|
 | FOLLOWUP-001: command-line graph operations | A user-facing interface to the existing typed graph operations, beyond `vlite-maintain enable-graph` and `strip-graph`. Define command placement, read/write coverage, explicit file enablement, read-only behavior, bounded results and machine-readable output before adding commands. Reuse the graph adapter rather than introducing a text query language. | v1.2.17: the user moved this ahead of publication and the DO-005 refresh (source-only build, kept out of distributed artifacts); review the command contract. Preserve opt-in builds, existing vector commands, file-lock ownership and applicable phase/release gates. | Implemented as source-only `vlite-graph-cli` (`graph,json` features; [contract](../../TOOLS.md#graph-operations-experimental-source-only), [decision](decisions.md#followup-001-source-only-graph-cli-v1217-implemented-and-reviewed-source-only-not-distributed)); implemented and reviewed; source-only, not distributed. Gates unchanged |
-| FOLLOWUP-002: Dashboard graph support | Define graph discovery, operation coverage and presentation of bounds, truncation and errors in the existing Dashboard. Browser access must use the server owner, never open the database independently or bypass authorization. | Complete current publication and DO-005 refresh; EPIC-011 graph REST routes, graph-scoped credentials, authorization, graph-build OpenAPI and endpoint tests (ITEM-040..ITEM-042, ITEM-044). EPIC-011 retains its P3 entry gates, including GATE-007; the UI contract must then be reviewed. | Requested; blocked on REST/authorization prerequisites |
+| FOLLOWUP-002: Dashboard graph support | Define graph discovery, operation coverage and presentation of bounds, truncation and errors in the existing Dashboard. Browser access must use the server owner, never open the database independently or bypass authorization. | Complete current publication and DO-005 refresh; EPIC-011 graph REST routes, graph-scoped credentials, authorization, graph-build OpenAPI and endpoint tests (ITEM-040..ITEM-042, ITEM-044). EPIC-011 retains its P3 entry gates, including GATE-007; the UI contract must then be reviewed. | Requested; pending. v1.2.18: the REST prerequisites (ITEM-040..ITEM-042, ITEM-044) are implemented and GATE-007 passed on 2026-10-25; the UI contract is not yet defined or reviewed, and the DO-005 refresh is deferred (see below) |
 
 Dashboard controls must remain unavailable when the server lacks graph
 capability or the file is not graph-enabled. Existing vector-only Dashboard
@@ -988,6 +992,13 @@ requires GATE-008; recording this backlog is not that approval.
 The optional graph query language remains outside these follow-ups.
 EPIC-014/EPIC-015 still require GATE-005/GATE-006 independently and are not
 prerequisites for typed CLI or Dashboard operations.
+(2026-10-25: the repository owner directed adding the read-only graph query
+text; EPIC-014 was skipped and ITEM-051 added a `vlite-graph-cli query`
+command. Typed operations remain the primary interface.)
+
+DO-005 (2026-10-25): the graph-off refresh is deferred by the owner. The
+benchmark policy is unchanged, the baseline remains `81ff901`, and the rejected
+`4312fb3` results are not evidence.
 
 ## 15. Change Log
 
@@ -1122,3 +1133,4 @@ prerequisites for typed CLI or Dashboard operations.
   - **Still open:** the DO-005 graph-off record is still `81ff901` and must be re-measured before REG-010 budgets are enforced or GATE-008 is requested. Every gate stays open. Graph command-line and Dashboard support were requested after this change; the PRD keeps a Dashboard graph UI as an MVP non-goal and plans REST graph routes in EPIC-011 behind GATE-007, so that work needs a PRD amendment first.
 - 2026-10-24 — v1.2.16: recorded the user-requested command-line and Dashboard follow-ups in Section 14.3, including their ordering after current publication and the DO-005 refresh, the Dashboard's EPIC-011 REST/authorization prerequisites, and the continued exclusion of graph query-language work. This is backlog tracking, not implemented CLI/UI support or approval of any phase, security or distribution gate. The [rejected DO-005 refresh record](decisions.md#do-005-graph-off-refresh-attempts-rejected) preserves the failed attempts and the open CPU-attribution decision without accepting their performance figures or changing the historical baseline.
 - 2026-10-25 — v1.2.17: implemented FOLLOWUP-001 as the source-only `vlite-graph-cli` binary (`required-features = ["graph", "json"]`): typed JSON reads with explicit limits, truncation and cursors, `--explain`, and atomic `batch` writes through `GraphMut::write_batch` behind `--writable`, with exact u64 identifiers and structured errors. At the user's request this precedes publication and the DO-005 refresh; it is not in distributed artifacts, approves no phase, security or release gate (including GATE-008), and leaves the rejected DO-005 attempts, the historical baseline and the benchmark backlog unchanged. See [the decision](decisions.md#followup-001-source-only-graph-cli-v1217-implemented-and-reviewed-source-only-not-distributed) and [`docs/TOOLS.md`](../../TOOLS.md#graph-operations-experimental-source-only).
+- 2026-10-25 — v1.2.18: graph wave 1 integrated on one branch (source-only, opt-in `graph` builds; not distributed). EPIC-008 (ITEM-031..ITEM-033), EPIC-009 (ITEM-034..ITEM-036), EPIC-010 ITEM-037/ITEM-039, EPIC-011 ITEM-040..ITEM-042/ITEM-044, EPIC-012 (ITEM-045/ITEM-046) and EPIC-015 ITEM-051 are Done. Wave 2 remains: MCP schema tools (AC-018), ITEM-038, ITEM-043, ITEM-052 and EPIC-013. EPIC-014 (ITEM-049/ITEM-050) was skipped by owner decision on 2026-10-25: the owner directed adding the graph query language, the LLM evaluation and GATE-005 experiments were not run, and GATE-006 is satisfied by owner decision rather than experiment evidence. The Non-Goal, Out-of-Scope and Section 14.3 notes record that direction without rewriting earlier text. GATE-007 passed by security review on 2026-10-25 (a code-reading review); its LOW finding (`delete_node` on an attached node removed attachments without collection authorization) is fixed: scoped credentials now need collection `write` and access to every collection attached to the node. New error mappings: `GraphSchemaViolation` → 409 `graph_schema_violation` and `GraphPivotTooExpensive` → 422 `graph_pivot_too_expensive` in REST, gRPC (via the shared table), the CLI/MCP JSON layer and the C ABI. Graph writes follow the database durability mode, including the separate opt-in periodic mode. FOLLOWUP-002 (Dashboard) is still pending. DO-005 is deferred by the owner: policy unchanged, baseline `81ff901`, the rejected `4312fb3` results are not evidence. GATE-008 is not approved: no graph in the Docker image, release binaries or packages, and the artifact pins are unchanged. Integration notes: the REG-001 fixture `tests\fixtures\api_surface\vlite-default.txt` gains only the three graph-independent lazy-durability items (`Durability`, `MIN_FLUSH_INTERVAL`, `MAX_FLUSH_INTERVAL`), and `tests\admin_route_coverage.py` lists `GET /v1/admin/graph/stats` as a graph-only admin route without a Dashboard control until FOLLOWUP-002. Decisions are in `decisions.md` (EPIC-008 to EPIC-012 and EPIC-015 sections).

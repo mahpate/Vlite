@@ -685,3 +685,131 @@ language. REST, MCP, SDK and Dashboard surfaces are unchanged.
 against a stub) covers round trips, atomic batches with vector mutations and
 `u64::MAX` records, unchanged file bytes after failed requests and reads, lock
 ownership, refusal of non-graph files and the help contract.
+
+## Graph wave 1 (v1.2.18, 2026-10-25; source-only, opt-in `graph` builds, not distributed)
+
+Wave 1 integrates EPIC-008 to EPIC-012 and EPIC-015 ITEM-051 on one branch.
+Graph stays out of the Docker image, release binaries and packages, and the
+artifact feature pins are unchanged, so GATE-008 is not approved. DO-005 is
+deferred by the owner on 2026-10-25: the benchmark policy is unchanged, the
+baseline stays `81ff901`, and the rejected `4312fb3` results above are not
+evidence. Graph writes go through the normal commit path, so they follow the
+database's durability mode, including the opt-in periodic mode added
+separately (outside this PRD).
+
+### EPIC-008 schema and property indexes (DO-008)
+
+- **Entry.** `PutSchema` is graph entry tag 12. Each entry carries the whole
+  declared schema of one graph (labels, relationship types, required, typed
+  and unique properties, allowed endpoints, `Multi`/`UniqueTriple`
+  multiplicity, exact/range property indexes) and replaces the previous one;
+  there are no partial schema edits. Other tags are unchanged, and unknown tags
+  are still corruption.
+- **Enforcement.** Validation runs in the engine's shared apply path, so the
+  planner, replay and recovery accept and reject the same entries. A rejected
+  batch writes nothing. Files without a schema behave exactly as before.
+- **Indexes.** Declared property indexes are derived state. They are not
+  persisted; replay rebuilds them on reopen. `find_nodes` returns the same
+  results with and without an index (`IndexChoice::PropertyExactIndex` or
+  `PropertyRangeIndex` in `explain`).
+- **Maintenance.** Compaction writes `PutSchema` right after `CreateGraph`, so
+  compact, reencrypt and backup keep the schema.
+- **Errors.** Violations are `Error::GraphSchemaViolation`: REST 409
+  `graph_schema_violation`, the same code in the CLI, MCP and C ABI.
+- `ensure_edge` applies to `UniqueTriple` relationship types. The observed
+  schema keeps the PD-011 budget and marks entries declared or observed.
+
+### EPIC-009 MCP graph tools
+
+- Tools are compiled only with `graph` and listed and callable only on
+  graph-enabled files. Read tools: `vlite_graph_list`, `vlite_graph_get`,
+  `vlite_graph_find_nodes`, `vlite_graph_neighbors`, `vlite_graph_traverse`,
+  `vlite_graph_shortest_path`. With `--writable` only: `vlite_graph_create`,
+  `vlite_graph_drop` and `vlite_graph_write` (one atomic `GraphOp` batch).
+  `vlite_info` adds `graph_enabled`/`graphs` on graph-enabled files only.
+- **Output shape.** The tools use the same JSON contract as `vlite-graph-cli`
+  through the shared `src/bin/tool_support/graph_json.rs`: u64 values as
+  decimal strings, unknown fields rejected, explicit limits up to
+  `GraphLimits::CEILING`, truncation and cursors returned as-is, optional
+  `explain`, and the REST error codes.
+- Vector-only files keep the golden `tools/list` and transcript byte for byte.
+- Pending for wave 2: schema tools (AC-018), `vlite_graph_retrieve`
+  (ITEM-038) and `vlite_graph_query` (ITEM-052).
+
+### EPIC-010 hybrid retrieval
+
+- Pivots use the unchanged `search_hybrid` (exact or ready-ANN vector leg, BM25
+  text leg) on the same view as the expansion. Hits are re-validated, mapped
+  through attachments, and unmapped ones are counted in a bounded
+  `unmapped_pivots`.
+- **Timing.** `stats.pivot_ms` measures pivot search, re-validation and
+  mapping, and has no deadline. `stats.expand_ms` measures expansion and
+  evidence projection. The read deadline (PD-008) and cancellation apply only
+  to the expansion.
+- **Bounds.** PD-015 `pivot.k` ≤ 100 (default 20). PD-016 exact-scan bound:
+  default 100,000 records, ceiling 1,000,000; above the bound the call fails
+  with `Error::GraphPivotTooExpensive` (REST 422
+  `graph_pivot_too_expensive`). Evidence excerpts default 512 bytes, ceiling
+  4,096 (PD-013). Evidence items are capped by `max_evidence_items`, default
+  100, ceiling 1,000. All bounds are checked before execution.
+- An ANN vector leg without a ready index returns `IndexNotReady`; it never
+  falls back to an exact scan silently.
+
+### EPIC-011 REST routes and authorization (GATE-007)
+
+- **Roles.** The admin token has full access. The read-only token can call the
+  read routes. `vlk_` credentials need `graph_read` or `graph_write` plus a
+  `graphs` binding of `["*"]` or 1–64 graph names. Collection scope never
+  implies graph access, and graph scope never implies collection access.
+  Tenant credentials cannot hold graph operations.
+- **Order.** Authentication and authorization come first; vector-only files
+  then answer 409 `graphs_not_enabled`.
+- **Collections.** Batches with vector or attachment operations also need
+  collection `write`, collection access and quota. GATE-007 fix: for scoped
+  credentials, `delete_node` looks up the node's attached records under the
+  held write lock and needs collection `write` and access to every attached
+  collection, because deleting the node removes those attachments. No other
+  graph operation drops attachments implicitly (`drop_graph` needs an empty
+  graph).
+- **OpenAPI.** `src/openapi_graph.json` is merged into the served document only
+  in graph builds. `src/openapi.json` stays byte-identical.
+- **Hold time.** Read and write guard hold times are kept per guard and served
+  at `GET /v1/admin/graph/stats` (admin only). An indicative debug-build
+  measurement in `tests/rest_graph.rs` showed read p99 of 11 ms; it is not a
+  reference-machine figure.
+- **GATE-007:** passed by security review on 2026-10-25. The review read the
+  code (no penetration test). It found one LOW issue, the `delete_node`
+  attachment case above, which is fixed and covered by
+  `deleting_an_attached_node_needs_collection_write_scope`. Proxy credential
+  handling is reviewed with ITEM-043 in wave 2.
+
+### EPIC-012 C ABI and Python
+
+- Graph commands use the envelope `{"op":"graph","request":{...}}` with the
+  same JSON contract as the CLI. `{"op":"capabilities"}` reports
+  `{"graph": bool}`.
+- `vlite-ffi` has a non-default `graph = ["vlite/graph"]` feature. Builds
+  without it parse the envelope and return `unsupported`; Python raises
+  `EmbeddedError("unsupported")`, including with libraries that predate the
+  feature.
+- Graph create accepts `flush_interval_ms` like the other create paths.
+- Error codes match REST, including `graph_schema_violation` and
+  `graph_pivot_too_expensive`.
+
+### EPIC-015 graph query text (ITEM-051)
+
+- **Decision.** The repository owner directed adding the graph query language
+  on 2026-10-25. EPIC-014 was skipped: no LLM evaluation was run, GATE-005
+  experiments were not run, and GATE-006 is satisfied by the owner's decision
+  rather than by experiment evidence.
+- **Scope.** The language is read-only and VLite-specific. Each accepted text
+  maps one-to-one to a typed `GraphQuery` (`GetNode`, `FindNodes`, `GetEdge`,
+  `Neighbors`, `Traverse`, `ShortestPath`) and adds no execution semantics.
+  Unsupported constructs, parameter problems and size caps return typed errors
+  with byte offsets.
+- **Keywords.** It may share clause words with `src/query_language.rs` because
+  the entry points are separate and each rejects the other's texts.
+  `SEARCH` is rejected. `src/query_language.rs` is unchanged.
+- Entry points: `GraphRef::query_text`/`explain_text`, `parse_graph_query` and
+  `vlite-graph-cli query`. The grammar is in `docs/GRAPH-QUERY.md`. The MCP
+  tool (ITEM-052) is pending.
