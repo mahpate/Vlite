@@ -94,14 +94,34 @@ shortest-path search reports `exhausted`, never an uncertified "no path".
 **REST access.** Graph routes accept the admin token, the read-only token
 (reads only) or `vlk_` credentials with `graph_read` / `graph_write` and a
 `graphs` binding naming the graph (or `["*"]`). Signed-in users also have graph
-access: `super_admin` and `editor` can read and write, `viewer` can read. This
-covers every graph regardless of tenant; tenant- and user-specific graph
-scoping is planned. Collection scope never implies graph scope, and tenant
-`vlk_` credentials cannot hold graph scope. Batches that write vectors also
+access: `super_admin` and `editor` can read and write, `viewer` can read,
+narrowed per account by the `graphs` and `graph_access` knobs below.
+Collection scope never implies graph scope. Batches that write vectors also
 need write scope on each collection. Retrieve needs `read` on the pivot
 collection; evidence from collections the caller cannot read is left out and
 counted in `redacted`. Collections are named as stored, so tenant users reach
 only their tenant's `t<tenant_id>__<name>` collections.
+
+**Tenant and user scoping (v1.2.20).** Graphs are tenant-owned like
+collections. For a tenanted principal (a tenant `vlk_` key or a signed-in
+user with a `tenant_id`), graph names in paths, create bodies and `graphs`
+bindings are tenant-local: `g` is stored as `t<tenant_id>__g`, responses show
+`g`, and lists show only that tenant's graphs. A tenant-local name is at most
+28 bytes. The admin token, the read-only token and untenanted principals use
+stored names and see every graph. A tenant cannot be deleted while it owns
+graphs (409 `tenant_not_empty`). Graph files are unchanged; scoping is by
+name only, and the CLI and MCP-on-file paths have no tenants.
+
+| Account field | Values | Effect |
+| --- | --- | --- |
+| `graphs` | absent/`null` (role default `["*"]`), `[]`, or 1-64 names | Graphs the account may use, within its tenant |
+| `graph_access` | absent/`null` (role default), `none`, `read`, `write` | Caps graph operations; never above the role (viewer: `read`) |
+
+`POST /v1/admin/users` and `PUT /v1/admin/users/{id}` accept both (`null`
+resets on update); super admins take neither, and a viewer with `write` is
+422. Changing either ends the account's sessions. Account views and
+`/v1/auth/session` report the stored knobs; `GET /v1/capabilities` `scope`
+reports the effective grant. Builds without `graph` refuse both fields.
 
 **Embedded.** Python and Node enable graph methods only when the loaded native
 library reports `{"graph": true}`; otherwise every graph method fails with

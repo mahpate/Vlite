@@ -3,8 +3,8 @@
     "/v1/graphs": {
       "get": {
         "operationId": "GraphList",
-        "summary": "List graphs (scoped credentials see only bound graphs)",
-        "description": "Requires the admin token, the read-only token, or a scoped credential with graph_read whose graphs binding names this graph (or is [\"*\"]). Collection scope never implies graph scope. Runs under one database read guard.",
+        "summary": "List graphs (scoped callers see only bound graphs of their tenant)",
+        "description": "Requires the admin token, the read-only token, or a scoped credential with graph_read whose graphs binding names this graph (or is [\"*\"]). Collection scope never implies graph scope. Runs under one database read guard. Signed-in accounts get graph_read (viewer) or graph_read and graph_write (editor), narrowed by their graphs and graph_access knobs. Graphs are tenant-owned: a tenanted principal (tenant credential or tenanted signed-in account) uses tenant-local names, stored as t<tenant_id>__<name> (at most 28 bytes locally), and responses show the tenant-local name; other callers use stored names.",
         "responses": {
           "200": {
             "description": "Graphs sorted by name",
@@ -81,7 +81,7 @@
       "post": {
         "operationId": "GraphCreate",
         "summary": "Create an empty graph",
-        "description": "Requires the admin token or a scoped credential with graph_write whose graphs binding names the new graph (or is [\"*\"]).",
+        "description": "Requires the admin token or a scoped credential with graph_write whose graphs binding names the new graph (or is [\"*\"]). Graphs are tenant-owned: a tenanted principal (tenant credential or tenanted signed-in account) uses tenant-local names, stored as t<tenant_id>__<name> (at most 28 bytes locally), and responses show the tenant-local name; other callers use stored names.",
         "requestBody": {
           "required": true,
           "content": {

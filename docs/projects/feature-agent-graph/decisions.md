@@ -798,6 +798,8 @@ separately (outside this PRD).
 
 ### Signed-in user graph access (owner decision 2026-10-25)
 
+> Superseded by [Tenant and user graph scoping (v1.2.20)](#tenant-and-user-graph-scoping-v1220).
+
 - **Decision.** The owner chose, after being told graphs are not per tenant,
   to give signed-in Dashboard accounts graph access: super admins keep full
   access (they are the admin role); editors get `graph_read` and
@@ -895,3 +897,53 @@ GATE-008 is not approved; the artifact pins exclude `graph` and `mcp-proxy`.
   GATE-007 re-review of wave 2 and the account grants is pending. DO-005 is
   deferred by the owner until after the UI work. Remaining: EPIC-014
   (skipped by owner), GATE-008 and tenant- or user-scoped graphs (future).
+
+## Tenant and user graph scoping (v1.2.20)
+
+Owner request: "tenant specific or user specific knobs for graph access".
+Supersedes [Signed-in user graph access](#signed-in-user-graph-access-owner-decision-2026-10-25).
+Source-only, opt-in `graph` builds. **Needs the GATE-007 re-review.**
+
+- **Tenant-owned graphs.** Graph names are qualified like collections: a
+  tenanted principal (signed-in user with `tenant_id` or tenant `vlk_` key)
+  addresses `g`, stored as `t<tenant_id>__g` (`tenants::qualify`), on create,
+  list, get and every per-graph route. Responses unqualify names; lists keep
+  only graphs the grant covers. Untenanted principals and the admin/read-only
+  tokens use stored names, as for collections. `Grant::graph_allowed` checks
+  the stored name against `owns` and the qualified bindings; the private
+  `account` exemption is gone. Tenant-local names are at most 28 bytes (the
+  35-byte prefix plus the 63-byte graph-name limit).
+- **Tenant keys.** `graph_scope` no longer refuses tenant credentials; their
+  `graphs` bindings are tenant-local and validated with the 28-byte limit.
+- **Account knobs.** `graphs` (absent = role default `["*"]`; `[]` = none;
+  or 1-64 names validated like credential bindings) and `graph_access`
+  (`none` | `read` | `write`, capped by the role; a viewer with `write`, or a
+  super admin with either knob, is 422). Stored with serde defaults and
+  skipped when absent, so older `users.json` files load unchanged; builds
+  without `graph` refuse both fields (`deny_unknown_fields`), failing closed
+  rather than dropping a restriction. Changing either bumps the account
+  version and ends its sessions. Account views and `/v1/auth/session`
+  report the stored knobs; `GET /v1/capabilities` `scope` reports the grant.
+- **Unchanged.** Vector checks for batches and retrieve keep the exact
+  stored collection name (`cover`). Graph files and on-disk names are
+  unchanged. The CLI and MCP-on-file paths have no tenants; the MCP proxy
+  goes through REST and inherits the new rules.
+- **Deliberate narrowing.** Existing tenanted accounts lose access to
+  untenanted and other tenants' graphs. Untenanted accounts and keys are
+  unchanged. Tenant delete is refused (409 `tenant_not_empty`) while the
+  tenant owns graphs.
+- **Residual risks.** The 64-graph limit is per file and shared by all
+  tenants, so one tenant can exhaust it. Untenanted principals can create
+  `t<id>__*` names directly, as for collections. Graph error messages carry
+  no graph name.
+- **Tests.** `tests/rest_graph.rs` (`tenant_accounts_own_isolated_graphs_under_unqualified_names`,
+  `tenant_credentials_bind_graphs_inside_their_tenant`,
+  `account_graph_knobs_narrow_access`, `tenanted_editors_write_only_their_own_vectors`,
+  `tenanted_accounts_retrieve_only_their_own_evidence`), `tests/users.rs`
+  (`graph_knobs_are_validated_and_reported`,
+  `account_files_without_graph_knobs_still_load`), `graph_scope_is_qualified_by_tenant`
+  in `src/server/credentials.rs`, and the Dashboard helpers in
+  `tests/dashboard_graph.test.cjs`.
+- **Dashboard.** `src/dashboard/graph.js` exports `accountGraphRequest`,
+  `accountGraphChanges`, `accountGraphFields` and `accountGraphView`. The
+  user form lives in redesign-owned files; wiring it is a pending hook.

@@ -22,18 +22,18 @@ Editors and viewers are bound to one tenant, and see only its collections, or
 to all collections.
 
 In source builds with the experimental `graph` feature, signed-in viewers
-also get `graph_read` and editors `graph_read` and `graph_write` on every
-graph, including tenanted accounts. Graphs are not tenant-scoped, so a
-tenant's users can see and change graph structure (nodes, edges, properties)
-that other tenants' users created. Vector isolation is kept: graph batches
+also get `graph_read` and editors `graph_read` and `graph_write`, narrowed per
+account by `graphs` and `graph_access`
+([graph scoping](GRAPH.md#surfaces)). Graphs are
+tenant-owned: tenanted accounts and tenant API keys reach only
+`t<tenant_id>__*` graphs, under tenant-local names. Vector isolation is kept: graph batches
 that attach, detach, write or delete vectors, and `delete_node` on a node
 with attachments, need `write` on a collection the account's tenant owns,
 named by its stored name `t<tenant_id>__<name>`. Retrieve
 (`POST /v1/graphs/{graph}/retrieve`) needs `read` on the pivot collection by
 the same rule, and evidence from any other collection is dropped and counted
-as `redacted`. API keys are unchanged:
-tenant keys cannot hold graph operations. Per-tenant and per-user graph
-scoping is a planned follow-up.
+as `redacted`. Tenant API keys may hold graph operations with tenant-local
+`graphs` bindings. The 64-graph limit is per file, shared by every tenant.
 
 - **Requirements:** password sign-in needs protected mode, meaning an admin
   token and the admin directory. Editor and viewer accounts also need a
@@ -157,8 +157,9 @@ Tenant routes need a super admin and `VLITE_ADMIN_DIR`:
   collections. Resume restores unexpired, unrevoked keys. Suspension persists
   in `tenants.json` across restarts. Older servers refuse to start on a store
   that contains a suspended tenant, so resume tenants before downgrading.
-* `DELETE /v1/admin/tenants/{id}` requires every tenant collection to be dropped
-  first (409 `tenant_not_empty` otherwise). Deletion tombstones the immutable ID
+* `DELETE /v1/admin/tenants/{id}` requires every tenant collection (and, with
+  the `graph` feature, graph) to be dropped first (409 `tenant_not_empty`
+  otherwise). Deletion tombstones the immutable ID
   and immediately makes every bound credential fail closed (403
   `tenant_unavailable`). IDs are never reused. Unknown or deleted IDs return 404
   `tenant_not_found` on the lifecycle routes.
