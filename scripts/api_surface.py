@@ -15,9 +15,9 @@ baseline [--rev 347b01d] [--features LIST] [--output PATH]
 check [--features LIST] [--baseline PATH]
     Builds docs for the working tree (target/api-surface) and compares with
     the baseline list; prints additions/removals and exits 1 on any
-    difference. With `graph` in --features (C-2), additions under
-    `vlite::property_graph::` are reported as ALLOWED and do not fail; any
-    other addition, and every removal, still fails.
+    difference. Additions under `vlite::property_graph::` (always compiled
+    since v0.5.1; C-2) are reported as ALLOWED and do not fail; any other
+    addition, and every removal, still fails.
 
 `all.html` lists items (structs, enums, functions, traits, macros, constants,
 type aliases, ...) but not methods or fields; signature compatibility of
@@ -107,10 +107,10 @@ def main() -> int:
     actual = build(ROOT, ROOT / "target" / "api-surface", args.features)
     removed = sorted(set(expected) - set(actual))
     added = sorted(set(actual) - set(expected))
-    allowed: list[str] = []
-    if "graph" in re.split(r"[,\s]+", args.features.strip()):
-        allowed = [item for item in added if item.split(" ", 1)[1].startswith(GRAPH_PREFIX)]
-        added = [item for item in added if item not in allowed]
+    # C-2: the graph is always compiled since v0.5.1 (`graph` is a no-op alias),
+    # so additions under vlite::property_graph:: are allowed in every build.
+    allowed = [item for item in added if item.split(" ", 1)[1].startswith(GRAPH_PREFIX)]
+    added = [item for item in added if item not in allowed]
     for item in removed:
         print(f"REMOVED {item}")
     for item in allowed:

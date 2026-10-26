@@ -22,7 +22,7 @@ GROUPS = [
     ("Operations", ["DOCKER-OPERATIONS", "SECURITY", "WEBHOOKS", "TOOLS"]),
     ("Agents", ["MCP", "AGENT-SKILLS"]),
     ("Console", ["CONSOLE", "CONSOLE-ADMIN"]),
-    ("Releases", ["RELEASE-0.5.0", "RELEASE-0.4.1", "RELEASE-0.4.0", "RELEASE-0.3.0", "RELEASE-0.2.0"]),
+    ("Releases", ["RELEASE-0.5.1", "RELEASE-0.5.0", "RELEASE-0.4.1", "RELEASE-0.4.0", "RELEASE-0.3.0", "RELEASE-0.2.0"]),
 ]
 
 

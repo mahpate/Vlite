@@ -32,7 +32,7 @@ not support graph files.
   new account fields `graphs` and `graph_access`.
 
 See [GRAPH](GRAPH.md), [GRAPH-QUERY](GRAPH-QUERY.md), [MCP](MCP.md) and
-[TOOLS](TOOLS.md#graph-operations-experimental). Names and outputs may change.
+[TOOLS](TOOLS.md#graph-operations). Names and outputs may change.
 
 ## Other changes
 

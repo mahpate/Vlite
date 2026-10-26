@@ -303,15 +303,6 @@ fn committed_fixture(name: &str) -> Vec<u8> {
 // Assertions.
 // ---------------------------------------------------------------------------
 
-#[track_caller]
-fn assert_graph_rejected<T>(entry_point: &str, result: vlite::Result<T>) {
-    match result {
-        Err(Error::UnsupportedFeature(FLAG_GRAPH)) => {}
-        Err(other) => panic!("{entry_point}: expected UnsupportedFeature(4), got {other:?}"),
-        Ok(_) => panic!("{entry_point}: graph-flagged file was accepted"),
-    }
-}
-
 /// What a `--features graph` build returns for a graph fixture when the
 /// call's key matches the file (EPIC-006).
 #[derive(Clone, Copy, Debug)]
@@ -341,12 +332,6 @@ fn assert_outcome(
     result: vlite::Result<()>,
 ) -> bool {
     let rejected = result.is_err();
-    #[cfg(not(feature = "graph"))]
-    {
-        let _ = (encrypted, keyed, graph);
-        assert_graph_rejected(entry_point, result);
-    }
-    #[cfg(feature = "graph")]
     match (encrypted, keyed, result) {
         (true, false, Err(Error::EncryptionKeyRequired))
         | (false, true, Err(Error::NotEncrypted)) => {}
@@ -394,12 +379,8 @@ fn probe_all(fixture: &Fixture, scratch: &Path, follower_base: &Path) -> usize {
     // `--features graph` builds (feature-agent-graph ITEM-010); the other
     // entry points follow in EPIC-006 (`assert_outcome`).
     let mut database_check = |name: &str, result: vlite::Result<()>| {
-        if cfg!(feature = "graph") {
-            if let Err(Error::UnsupportedFeature(FLAG_GRAPH)) = result {
-                panic!("{} {name}: graph build rejected a graph file", fixture.name);
-            }
-        } else {
-            assert_graph_rejected(&format!("{} {name}", fixture.name), result);
+        if let Err(Error::UnsupportedFeature(FLAG_GRAPH)) = result {
+            panic!("{} {name}: graph build rejected a graph file", fixture.name);
         }
         checked += 1;
     };
@@ -760,7 +741,6 @@ fn every_library_entry_point_rejects_graph_flagged_files() {
 
 /// In `--features graph` builds the DO-003 draft fixtures are valid graph
 /// files: the op-12 frame replays into graph "g" and the vector record stays.
-#[cfg(feature = "graph")]
 #[test]
 fn graph_builds_open_the_draft_fixtures() {
     let dir = tempdir().unwrap();

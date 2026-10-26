@@ -53,23 +53,26 @@ parallel reads, use multiple spawned processes, each loading its own
 `NativeLibrary` and opening `read_only=True`; do not reuse inherited handles after
 fork. Explicitly close handles, for example with `with native.open(...) as db:`.
 
-## Opt-in periodic durability
+## Durability
 
-By default every write is synced to disk before it returns. For higher write
-throughput, pass `flush_interval_ms=` (1–60000) to `native.create(...)` or
-`native.open(...)`:
+Since v0.5.1 file handles default to periodic durability: writes reach the OS
+immediately and a background flusher syncs them every 60 s (`flush_interval_ms=`
+1–60000 changes the interval); `close` performs a final sync. A process crash
+loses nothing acknowledged, but **an OS crash or power loss can lose up to about
+the last interval (~60 s by default) of acknowledged writes**. Pass
+`durability="full"` to sync every write before it returns:
 
 ```python
-with native.open("vectors.vlite", flush_interval_ms=100) as db:
+with native.open("vectors.vlite", durability="full") as db:
     db.put("1", [0.0, 1.0])
+with native.open("vectors.vlite", flush_interval_ms=100) as db:
+    db.put("2", [1.0, 0.0])
     db.sync()  # optional explicit durable point
 ```
 
-Writes reach the OS immediately and a background flusher syncs at most every
-interval; `close` performs a final sync. A process crash loses nothing
-acknowledged, but **an OS crash or power loss can lose acknowledged writes from
-roughly the last interval**. A failed sync poisons the handle. Invalid intervals
-raise `EmbeddedError` with code `"invalid_durability"`. The setting is per handle
+`create_in_memory` databases use `durability="none"`: nothing is written to
+disk. A failed sync poisons the handle. Invalid modes or intervals raise
+`EmbeddedError` with code `"invalid_durability"`. The setting is per handle
 and not stored in the file. See
 [periodic durability](https://github.com/mahpate/Vlite/blob/main/docs/REFERENCE.md#periodic-lazy-durability).
 
@@ -172,16 +175,16 @@ The direct feature suite defaults to `target/debug` and accepts
 `VLITE_TEST_LIBRARY` to validate an exact alternate/bundled library. It creates
 and cleans its test files below the binding directory.
 
-## Opt-in property graph (experimental)
+## Property graph (opt-in per file)
 
-Graph methods need a library built with the non-default `graph` feature; release
-wheels and libraries include it since v0.5.0. The default `vlite-ffi` source
-build does not. `native.supports_graph` (or
-`native.capabilities()`) reports availability; without it every graph method
-raises `EmbeddedError(code="unsupported")`.
+Every library since v0.5.1 includes the graph methods; graphs live only in
+files created with `create_with_graph` (or copied with
+`vlite-maintain enable-graph`). `native.supports_graph` (or
+`native.capabilities()`) reports availability; against an older library built
+without graph every graph method raises `EmbeddedError(code="unsupported")`.
 
 ```python
-native = NativeLibrary()  # or the path of a graph source build
+native = NativeLibrary()  # or the path of a source build
 with native.create_with_graph("agent.vlite", 3) as db:   # new V5 graph file
     db.create_graph("memory")
     db.graph_write_batch("memory", [
@@ -201,9 +204,8 @@ and `graph_explain`. Selectors are a key string, an integer ID or an explicit
 Read results and error codes follow `bindings/c/FEATURES.md` ("Property graph").
 
 ```text
-cargo build -p vlite-ffi --features graph --target-dir target/graph-ffi
-VLITE_TEST_LIBRARY=target/graph-ffi/debug/vlite_ffi.dll VLITE_TEST_EXPECT_GRAPH=1 python bindings/python/test_graph.py
-VLITE_TEST_EXPECT_GRAPH=0 python bindings/python/test_graph.py   # default library: unsupported
+cargo build -p vlite-ffi
+VLITE_TEST_LIBRARY=target/debug/vlite_ffi.dll VLITE_TEST_EXPECT_GRAPH=1 python bindings/python/test_graph.py
 ```
 
 ## Optional contiguous float32 search and bulk puts

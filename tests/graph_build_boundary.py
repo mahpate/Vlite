@@ -1,4 +1,4 @@
-"""Keep the internal vlite-graph crate isolated and pin graph into shipped artifacts (GATE-008)."""
+"""Keep the internal vlite-graph crate isolated; the property graph is always compiled (v0.5.1)."""
 from pathlib import Path
 import re
 import subprocess
@@ -11,8 +11,8 @@ CRATE = ROOT / "crates" / "vlite-graph"
 # the workspace-only crate compiles the same files through one `#[path]` module.
 ENGINE = ROOT / "src" / "property_graph" / "engine"
 HARNESS = '#[path = "../../../src/property_graph/engine/mod.rs"]'
-# GATE-008 (approved by the owner on 2026-10-25 for v0.5.0): distributed
-# artifacts must include these opt-in features; `default` must not.
+# GATE-008 (v0.5.0) pinned these into distributed artifacts. Since v0.5.1 the
+# graph is always compiled and `graph` is a no-op alias kept for old commands.
 SHIPPED_GRAPH_FEATURES = {"graph", "mcp-proxy"}
 # Artifact-producing `cargo build --release --bins` commands in each file.
 ARTIFACT_BUILDS = {"Dockerfile": 1, ".github/workflows/release.yml": 2}
@@ -55,13 +55,12 @@ class GraphBuildBoundary(unittest.TestCase):
         for target in root.get("target", {}).values():
             for table in ("dependencies", "dev-dependencies", "build-dependencies"):
                 self.assertNotIn("vlite-graph", target.get(table, {}), table)
-        # `graph` only compiles the in-package engine; it enables nothing else
-        # and is never on by default.
+        # `graph` is a no-op compatibility alias: the engine is always compiled.
         self.assertEqual(root["features"]["graph"], [])
         self.assertNotIn("graph", root["features"]["default"])
         # `mcp-proxy` (ITEM-043) layers the graph tools over a remote server;
         # it is never on by default but is pinned into artifacts (GATE-008).
-        self.assertIn("graph", root["features"]["mcp-proxy"])
+        self.assertNotIn("graph", root["features"]["mcp-proxy"])
         self.assertNotIn("mcp-proxy", root["features"]["default"])
         for features in ((), ("--all-features",)):
             with self.subTest(features=features):
@@ -76,7 +75,15 @@ class GraphBuildBoundary(unittest.TestCase):
         self.assertIn("pub use engine::*;", lib)
         self.assertTrue((ENGINE / "mod.rs").is_file())
         root_lib = (ROOT / "src" / "lib.rs").read_text(encoding="utf-8")
-        self.assertIn('#[cfg(feature = "graph")]\npub mod property_graph;', root_lib)
+        self.assertIn("\npub mod property_graph;", root_lib)
+
+    def test_graph_is_not_feature_gated(self):
+        # v0.5.1: no source, test or binding code depends on the `graph` alias.
+        gated = subprocess.run(
+            ["git", "grep", "-n", "-E", r'feature *= *\"graph\"', "--", "*.rs"],
+            cwd=ROOT, capture_output=True, text=True,
+        ).stdout.splitlines()
+        self.assertEqual(gated, [])
 
     def test_engine_is_pure_and_module_relative(self):
         files = sorted(ENGINE.rglob("*.rs"))
@@ -122,8 +129,8 @@ class GraphBuildBoundary(unittest.TestCase):
 
     def test_ffi_artifact_builds_enable_graph(self):
         ffi = load_toml(ROOT / "bindings" / "c" / "Cargo.toml")["features"]
-        self.assertEqual(ffi["graph"], ["vlite/graph"])
-        # The crate default stays graph-free; only artifact recipes opt in.
+        # A no-op alias: graph commands are always built since v0.5.1.
+        self.assertEqual(ffi["graph"], [])
         self.assertNotIn("graph", ffi.get("default", []))
         for name, count in FFI_BUILDS.items():
             text = (ROOT / name).read_text(encoding="utf-8")
@@ -144,9 +151,9 @@ class GraphBuildBoundary(unittest.TestCase):
         # FOLLOWUP-001/ITEM-043: the graph command line and the MCP server
         # (with graph tools and `--server` proxy mode) ship in every release
         # archive, built by the pinned `--bins` commands above.
-        bins = load_toml(ROOT / "Cargo.toml")["bin"]
-        graph_bins = [entry["name"] for entry in bins if "graph" in entry.get("required-features", [])]
-        self.assertEqual(graph_bins, ["vlite-graph-cli"])
+        bins = {entry["name"]: entry for entry in load_toml(ROOT / "Cargo.toml")["bin"]}
+        self.assertEqual(bins["vlite-graph-cli"]["required-features"], ["json"])
+        self.assertFalse([name for name, entry in bins.items() if "graph" in entry.get("required-features", [])])
         release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
         archives = re.findall(r'for name in \["vlite-server",[^\]]*\]', release)
         self.assertEqual(len(archives), ARTIFACT_BUILDS[".github/workflows/release.yml"])

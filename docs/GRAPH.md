@@ -1,11 +1,12 @@
-# Property graphs (experimental, opt-in)
+# Property graphs (opt-in per file)
 
 VLite can store named property graphs (nodes, typed edges and attachments to
-vector records) in the same file and commit log as vectors. Graph support is
-the non-default `graph` Cargo feature. Since v0.5.0 the release binaries,
-C library, wheels and Node release tarballs are built with it (`vlite-mcp` also
-with `mcp-proxy`). The Docker image's API server (`vlite-server`) has graph;
-`vlite-graph-cli` is not in the image. It stays opt-in per file: graphs exist
+vector records) in the same file and commit log as vectors. Since v0.5.1 graph
+support is compiled into every build: the library, binaries, C library, wheels,
+Node packages and the Docker image's API server (`vlite-server`).
+`vlite-graph-cli` is not in the image. The `graph` Cargo feature remains as a
+no-op alias so existing `--features graph` builds still work. Graphs stay
+opt-in per file: graphs exist
 only in files created with `create_with_graph` or `vlite-graph-cli init`, or copied with
 `vlite-maintain enable-graph`; other files behave as vector-only files.
 
@@ -13,29 +14,29 @@ only in files created with `create_with_graph` or `vlite-graph-cli init`, or cop
 
 | Surface | Release artifact | Source checkout |
 |---------|------------------|-----------------|
-| Rust | — | `vlite` with `features = ["graph"]` |
-| CLI | `vlite-graph-cli` in the release archive | `cargo install --locked --path . --features graph,json --bin vlite-graph-cli` |
-| MCP | `vlite-mcp` in the release archive | `cargo install --locked --path . --features "mcp graph mcp-proxy" --bin vlite-mcp` |
-| REST | `vlite-server` in the archive and Docker image (`vlite-graph-cli` is not in the image) | `cargo build --locked --release --features server,graph --bin vlite-server` |
-| C, Python, Node | release C library, wheels, Node release tarballs | `cargo build --locked --release -p vlite-ffi --features graph` |
+| Rust | — | `vlite` (default features) |
+| CLI | `vlite-graph-cli` in the release archive | `cargo install --locked --path . --features json --bin vlite-graph-cli` |
+| MCP | `vlite-mcp` in the release archive | `cargo install --locked --path . --features "mcp mcp-proxy" --bin vlite-mcp` |
+| REST | `vlite-server` in the archive and Docker image (`vlite-graph-cli` is not in the image) | `cargo build --locked --release --features server --bin vlite-server` |
+| C, Python, Node | release C library, wheels, Node release tarballs | `cargo build --locked --release -p vlite-ffi` |
 
-Builds without the feature (the Cargo default, the default `vlite-ffi` crate)
-have no graph code, routes, tools or OpenAPI entries.
+Vector-only files are unaffected: on them the graph routes, tools and
+capabilities stay absent or report that graphs are not enabled.
 
 ## Compatibility and rollback
 
 - Graph-enabled files are v5 files with header flag `FLAG_GRAPH = 4`; graph
   commits are op-12 frames. Files are never converted in place.
-- Builds without `graph` and older releases refuse them with
-  `UnsupportedFeature(4)`. Vector-only files behave the same in both builds.
+- Releases before v0.5.1 built without `graph` (and releases before v0.5.0)
+  refuse them with `UnsupportedFeature(4)`. Vector-only files behave the same in both builds.
 - `vlite-maintain enable-graph SOURCE DESTINATION` copies a v4/v5 file out as
   a graph-enabled file.
 - To roll back, run `vlite-maintain strip-graph SOURCE DESTINATION
-  --confirm-graph-data-loss` in a graph build. It copies the vectors to a plain
+  --confirm-graph-data-loss`. It copies the vectors to a plain
   v5 file and drops the graphs; keep the source if you may need them.
 - Backup, restore, verify, compaction, re-encryption and replicas carry graph
   state; `upgrade` rejects graph files. Format rules are in
-  [STORAGE-FEATURES](STORAGE-FEATURES.md#graph-enabled-files-experimental-graph-feature).
+  [STORAGE-FEATURES](STORAGE-FEATURES.md#graph-enabled-files-opt-in-per-file).
 
 ## Data model and consistency
 
@@ -89,8 +90,8 @@ shortest-path search reports `exhausted`, never an uncertified "no path".
 | Surface | What it offers |
 |---------|----------------|
 | Rust | `create_with_graph`, `create_graph`/`drop_graph`/`list_graphs`, `graph_mut(name)`, `graph(name)`, `explain`, `query_text`, `retrieve` |
-| CLI | `vlite-graph-cli`; see [graph operations](TOOLS.md#graph-operations-experimental) |
-| MCP | `vlite_graph_*` tools, on a file or through a server with `--server URL` (`mcp-proxy` feature); see [MCP](MCP.md#property-graph-tools-experimental) |
+| CLI | `vlite-graph-cli`; see [graph operations](TOOLS.md#graph-operations) |
+| MCP | `vlite_graph_*` tools, on a file or through a server with `--server URL` (`mcp-proxy` feature); see [MCP](MCP.md#property-graph-tools) |
 | REST | `/v1/graphs` routes: list, create, drop, gets, find, neighbors, traverse, shortest path, explain, schema, retrieve, query, batch |
 | C ABI | `{"op":"capabilities"}` and `{"op":"graph","request":{...}}` |
 | Python | `supports_graph()`, `create_with_graph()`, `graph_*` methods |
@@ -126,7 +127,7 @@ name only, and the CLI and MCP-on-file paths have no tenants.
 resets on update); super admins take neither, and a viewer with `write` is
 422. Changing either ends the account's sessions. Account views and
 `/v1/auth/session` report the stored knobs; `GET /v1/capabilities` `scope`
-reports the effective grant. Builds without `graph` refuse both fields.
+reports the effective grant. Servers older than v0.5.0 refuse both fields.
 
 **Embedded.** Python and Node enable graph methods only when the loaded native
 library reports `{"graph": true}`; otherwise every graph method fails with

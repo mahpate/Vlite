@@ -86,19 +86,22 @@ class NativeLibrary:
 
     def create(self, path: str | os.PathLike[str], dimensions: int, *, format: int | None = None,
                key: bytes | None = None, passphrase: str | None = None,
-               commit_timestamps: bool = False, flush_interval_ms: int | None = None) -> "Database":
+               commit_timestamps: bool = False, flush_interval_ms: int | None = None,
+               durability: str | None = None) -> "Database":
         """Create without overwrite. Default format is 3; 5 enables all new surfaces.
 
-        `flush_interval_ms` (1..60000) opts this handle into periodic durability:
-        commits are written but synced in the background at most that often, so an
-        OS crash or power loss may lose recently acknowledged commits (a process
-        crash does not). Call `Database.sync()` to force durability.
+        File handles default to periodic durability: commits are written at once
+        but synced in the background every 60 s (or every `flush_interval_ms`,
+        1..60000), so an OS crash or power loss may lose up to that much recently
+        acknowledged work (a process crash does not). Call `Database.sync()` to
+        force durability, or pass ``durability="full"`` to sync every commit.
+        ``durability="none"`` is only valid for `create_in_memory`.
         """
         if format == 5 or key is not None or passphrase is not None or commit_timestamps:
             return self._create_feature(str(Path(path)), dimensions, format, key, passphrase, commit_timestamps,
-                                        flush_interval_ms)
+                                        flush_interval_ms, durability)
         request = {"op": "create", "path": str(Path(path)), "dimensions": dimensions,
-                   **_given(flush_interval_ms=flush_interval_ms)}
+                   **_given(flush_interval_ms=flush_interval_ms, durability=durability)}
         if format is not None:
             request["format"] = format
         return Database(self, int(self._execute(0, request)["handle"]))
@@ -117,37 +120,39 @@ class NativeLibrary:
 
     @property
     def supports_graph(self) -> bool:
-        """Whether the library was built with the opt-in ``graph`` feature (enabled in release wheels)."""
+        """Whether the library includes the property graph (every library since 0.5.1)."""
         return bool(self.capabilities().get("graph"))
 
     def create_with_graph(self, path: str | os.PathLike[str], dimensions: int, *, format: int | None = None,
                           key: bytes | None = None, passphrase: str | None = None,
                           commit_timestamps: bool = False,
-                          flush_interval_ms: int | None = None) -> "Database":
+                          flush_interval_ms: int | None = None,
+                          durability: str | None = None) -> "Database":
         """Create a NEW graph-enabled (V5) file without overwrite; never converts an existing file.
-        Raises ``unsupported`` unless the library was built with the ``graph`` feature.
-        ``flush_interval_ms`` opts into periodic (lazy) durability, as for ``create``."""
+        Raises ``unsupported`` on libraries older than 0.5.1 built without the graph.
+        ``durability`` and ``flush_interval_ms`` work as for ``create``."""
         options = {"credentials": _credentials(key, passphrase), "commit_timestamps": commit_timestamps,
-                   **_given(format=format, flush_interval_ms=flush_interval_ms)}
+                   **_given(format=format, flush_interval_ms=flush_interval_ms, durability=durability)}
         result = _graph_call(lambda request: self._execute(0, {"op": "graph", "request": request}),
                              {"op": "create", "path": str(Path(path)), "dimensions": dimensions, "options": options})
         return Database(self, int(result["handle"]))
 
     def _create_feature(self, path, dimensions, format, key, passphrase, commit_timestamps,
-                        flush_interval_ms=None):
+                        flush_interval_ms=None, durability=None):
         options = {"credentials": _credentials(key, passphrase), "commit_timestamps": commit_timestamps,
-                   **_given(format=format, flush_interval_ms=flush_interval_ms)}
+                   **_given(format=format, flush_interval_ms=flush_interval_ms, durability=durability)}
         result = self._feature("create", path=path, dimensions=dimensions, options=options)
         return Database(self, int(result["handle"]))
 
     def create_in_memory(self, dimensions: int, *, format: int | None = None, key: bytes | None = None,
                          passphrase: str | None = None, commit_timestamps: bool = False) -> "Database":
-        """Host-owned byte-image database; persist with Database.to_bytes()."""
+        """Host-owned byte-image database (durability ``"none"``): nothing is written
+        to disk and the data is lost when the handle closes; persist with Database.to_bytes()."""
         return self._create_feature(None, dimensions, format, key, passphrase, commit_timestamps)
 
     def open(self, path: str | os.PathLike[str], *, key: bytes | None = None,
              passphrase: str | None = None, read_only: bool = False,
-             flush_interval_ms: int | None = None) -> "Database":
+             flush_interval_ms: int | None = None, durability: str | None = None) -> "Database":
         """Open an existing file. ``read_only=True`` takes a shared OS lock so any
         number of processes can read the same file concurrently; mutations raise
         ``EmbeddedError`` with code ``read_only`` and writers get ``locked``.
@@ -155,18 +160,18 @@ class NativeLibrary:
         C ABI calls are serialized within one process. For parallel reads, spawn
         multiple processes, each opening its own ``read_only=True`` handle.
         Key/passphrase credentials also work with read-only opens.
-        `flush_interval_ms` selects periodic durability as in `create`.
+        ``durability`` and ``flush_interval_ms`` work as in `create` (periodic, 60 s by default).
         """
         if key is None and passphrase is None:
             request = {"op": "open", "path": str(Path(path))}
             if read_only:
                 request["read_only"] = True
-            request.update(_given(flush_interval_ms=flush_interval_ms))
+            request.update(_given(flush_interval_ms=flush_interval_ms, durability=durability))
             result = self._execute(0, request)
         else:
             result = self._feature("open", path=str(Path(path)), credentials=_credentials(key, passphrase),
                                    **({"read_only": True} if read_only else {}),
-                                   **_given(flush_interval_ms=flush_interval_ms))
+                                   **_given(flush_interval_ms=flush_interval_ms, durability=durability))
         return Database(self, int(result["handle"]))
 
     def open_from_bytes(self, data: bytes, *, key: bytes | None = None,
@@ -219,8 +224,8 @@ class Database:
         return self._execute("info")
 
     def sync(self) -> None:
-        """Force acknowledged commits to stable storage (a no-op unless the handle
-        was opened with `flush_interval_ms`)."""
+        """Force acknowledged commits to stable storage (a no-op for ``durability="full"``
+        and in-memory handles)."""
         self._execute("sync")
 
     def get(self, id: str, *, collection: str | None = None) -> dict:

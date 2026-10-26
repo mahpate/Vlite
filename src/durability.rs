@@ -1,4 +1,5 @@
-//! Opt-in periodic ("lazy") flushing. See `Database::set_durability`.
+//! Durability modes and the periodic ("lazy") flusher. See
+//! `Database::set_durability`.
 
 use std::fs::File;
 use std::io;
@@ -11,21 +12,36 @@ use std::time::Duration;
 pub const MIN_FLUSH_INTERVAL: Duration = Duration::from_millis(1);
 /// Longest accepted `Durability::Periodic` interval.
 pub const MAX_FLUSH_INTERVAL: Duration = Duration::from_secs(60);
+/// Interval of the default durability, `Durability::Periodic` (since v0.5.1).
+pub const DEFAULT_FLUSH_INTERVAL: Duration = MAX_FLUSH_INTERVAL;
 
 /// When a commit is forced to stable storage.
 ///
-/// `Full` (the default) syncs every commit before acknowledging it.
-/// `Periodic` writes each commit to the file (the OS page cache) before
-/// acknowledging it but syncs from a background flusher at most once per
-/// `interval`, so a process crash loses nothing, while an OS crash or power
-/// loss may lose a suffix of recently acknowledged commits.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// `Periodic` (the default since v0.5.1, every `DEFAULT_FLUSH_INTERVAL`)
+/// writes each commit to the file (the OS page cache) before acknowledging
+/// it but syncs from a background flusher at most once per `interval`, so a
+/// process crash loses nothing, while an OS crash or power loss may lose a
+/// suffix of recently acknowledged commits (up to about one interval).
+/// `Full` syncs every commit before acknowledging it.
+/// `None` keeps the database in memory only (`Database::create_in_memory`,
+/// `Database::open_from_bytes`): nothing is written to disk and every commit
+/// is lost when the process exits unless the caller saves `to_bytes()`. It
+/// is the only mode an in-memory handle accepts, and file-backed handles
+/// reject it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Durability {
-    #[default]
     Full,
-    Periodic {
-        interval: Duration,
-    },
+    Periodic { interval: Duration },
+    None,
+}
+
+impl Default for Durability {
+    /// `Periodic` every `DEFAULT_FLUSH_INTERVAL` (60 s).
+    fn default() -> Self {
+        Self::Periodic {
+            interval: DEFAULT_FLUSH_INTERVAL,
+        }
+    }
 }
 
 impl Durability {
@@ -43,7 +59,7 @@ impl Durability {
 
     pub fn validate(self) -> crate::Result<()> {
         match self {
-            Self::Full => Ok(()),
+            Self::Full | Self::None => Ok(()),
             Self::Periodic { interval }
                 if (MIN_FLUSH_INTERVAL..=MAX_FLUSH_INTERVAL).contains(&interval) =>
             {

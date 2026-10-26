@@ -1,5 +1,5 @@
 //! EPIC-004 H-4 integrity matrix and the TEST-005 legacy-path matrix
-//! (ITEM-017/018), built only with the `graph` feature.
+//! (ITEM-017/018).
 //!
 //! LEG-001..LEG-008 through the public API: ordinary delete, conditional
 //! delete, batch delete, expiry, overwrite, metadata update and import paths

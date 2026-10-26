@@ -52,7 +52,7 @@ az extension add --name containerapp --upgrade
 
 Replace `1536` with your embedding model's dimension. This is creation-only;
 existing database headers win. The script explicitly creates **format 4** for
-tenant collections. It defaults to the published `v0.5.0` API image and Python
+tenant collections. It defaults to the published `v0.5.1` API image and Python
 3.12 probe image; use `-Image` and `-ProbeImage` to pin verified image digests.
 `-Cpu 1` allocates 2 GiB RAM; supported CPU choices are 0.5, 1, 2 and 4, with
 twice that number of GiB RAM. Size for the live dataset, indexes and replay peaks.

@@ -4,8 +4,8 @@
 //! `cargo package -p vlite` ships it without any crate dependency. It compiles
 //! in two places from the same files:
 //!
-//! - as `vlite::property_graph::engine` (crate-private) when `vlite` is built
-//!   with the non-default `graph` feature, and
+//! - as `vlite::property_graph::engine` (crate-private) in every `vlite`
+//!   build, and
 //! - as the root module of the unpublished, workspace-only `vlite-graph`
 //!   crate (`crates/vlite-graph`), which includes this file by `#[path]` so the
 //!   engine is built and unit-tested in isolation.

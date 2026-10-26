@@ -8,7 +8,7 @@ mod collection;
 mod crypto;
 pub mod disk_ann;
 mod durability;
-pub use durability::{Durability, MAX_FLUSH_INTERVAL, MIN_FLUSH_INTERVAL};
+pub use durability::{DEFAULT_FLUSH_INTERVAL, Durability, MAX_FLUSH_INTERVAL, MIN_FLUSH_INTERVAL};
 #[cfg(feature = "gpu")]
 pub mod gpu;
 mod storage;
@@ -28,7 +28,6 @@ pub mod import;
 mod metadata;
 pub mod metadata_index;
 pub mod planner;
-#[cfg(feature = "graph")]
 pub mod property_graph;
 pub mod quality;
 pub mod quantize;
@@ -72,7 +71,7 @@ pub mod maintenance;
 #[cfg(feature = "server")]
 pub mod server;
 // Lets the REST graph routes share the tools' `vlite::` graph JSON module.
-#[cfg(all(feature = "server", feature = "graph"))]
+#[cfg(feature = "server")]
 extern crate self as vlite;
 
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
@@ -401,84 +400,61 @@ pub enum Error {
     /// The GPU path failed; callers may fall back to the CPU search.
     GpuUnavailable(&'static str),
     /// The file was not created with `create_with_graph`.
-    #[cfg(feature = "graph")]
     GraphsNotEnabled,
     /// Graph-enabled files need format V5.
-    #[cfg(feature = "graph")]
     GraphsRequireV5,
-    #[cfg(feature = "graph")]
     InvalidGraphName,
-    #[cfg(feature = "graph")]
     GraphExists,
-    #[cfg(feature = "graph")]
     GraphNotFound,
     /// Drop refused: the graph still has nodes or edges.
-    #[cfg(feature = "graph")]
     GraphNotEmpty,
     /// At most 64 graphs may be live at once.
-    #[cfg(feature = "graph")]
     TooManyGraphs,
     /// `create_node` on a key that already names a live node.
-    #[cfg(feature = "graph")]
     GraphKeyExists,
     /// An edge key exists with a different source, relationship type,
     /// destination or properties (REQ-009).
-    #[cfg(feature = "graph")]
     GraphKeyConflict,
     /// No live node has the given key.
-    #[cfg(feature = "graph")]
     GraphNodeNotFound,
     /// No live edge has the given ID or key.
-    #[cfg(feature = "graph")]
     GraphEdgeNotFound,
     /// Node delete refused: `incident` edges still reference the node.
-    #[cfg(feature = "graph")]
     GraphNodeHasEdges {
         incident: usize,
     },
     /// The node already has an attachment in this collection, or the record
     /// is already attached to a node.
-    #[cfg(feature = "graph")]
     GraphAttachmentConflict,
     /// The node has no attachment in this collection.
-    #[cfg(feature = "graph")]
     GraphAttachmentNotFound,
     /// Only live records without an expiry can be attached.
-    #[cfg(feature = "graph")]
     GraphRecordNotAttachable,
     /// Delete refused: the record is attached to a graph node; detach it first.
-    #[cfg(feature = "graph")]
     GraphAttachedRecord,
     /// Expiry refused: attached records cannot expire.
-    #[cfg(feature = "graph")]
     GraphAttachedRecordExpiry,
     /// A graph read limit is above its ceiling; limits are never clamped.
-    #[cfg(feature = "graph")]
     GraphLimitExceedsCeiling {
         limit: &'static str,
         requested: u64,
         ceiling: u64,
     },
     /// The graph changed after the page cursor was issued; restart the read.
-    #[cfg(feature = "graph")]
     GraphCursorStale,
     /// Change feeds do not cover graph-enabled files (REQ-053).
-    #[cfg(feature = "graph")]
     GraphChangeFeedUnsupported,
     /// The maintenance operation does not accept graph-enabled files
     /// (LEG-010: `maintenance::upgrade`); use `maintenance::strip_graph` or
     /// `maintenance::enable_graph` instead.
-    #[cfg(feature = "graph")]
     GraphUnsupportedOperation,
     /// Invalid graph maintenance options, such as `strip_graph` without
     /// `confirm_graph_data_loss` or `enable_graph` on an unsuitable source.
-    #[cfg(feature = "graph")]
     GraphInvalidOptions(&'static str),
     /// A graph write breaks the graph's declared schema (REQ-030): `rule` is
     /// `type`, `required`, `unique`, `endpoints` or `unique_triple`,
     /// `element` the label or relationship type and `property` the property
     /// concerned, if any. Nothing was written.
-    #[cfg(feature = "graph")]
     GraphSchemaViolation {
         rule: &'static str,
         element: String,
@@ -486,7 +462,6 @@ pub enum Error {
     },
     /// A hybrid-retrieve pivot would exact-scan a collection above its
     /// live-record bound (PD-016); use a ready ANN leg or a text-only pivot.
-    #[cfg(feature = "graph")]
     GraphPivotTooExpensive,
 }
 
@@ -675,64 +650,46 @@ impl fmt::Display for Error {
                 "disk index was built for a different committed state; rebuild it"
             ),
             Self::GpuUnavailable(reason) => write!(f, "GPU search unavailable: {reason}"),
-            #[cfg(feature = "graph")]
             Self::GraphsNotEnabled => write!(
                 f,
                 "this database is not graph-enabled; create it with create_with_graph"
             ),
-            #[cfg(feature = "graph")]
             Self::GraphsRequireV5 => write!(f, "graph-enabled databases require format V5"),
-            #[cfg(feature = "graph")]
             Self::InvalidGraphName => {
                 write!(f, "graph names must match ^[a-z][a-z0-9_-]{{0,62}}$")
             }
-            #[cfg(feature = "graph")]
             Self::GraphExists => write!(f, "graph already exists"),
-            #[cfg(feature = "graph")]
             Self::GraphNotFound => write!(f, "graph not found"),
-            #[cfg(feature = "graph")]
             Self::GraphNotEmpty => write!(f, "graph has nodes or edges; empty it first"),
-            #[cfg(feature = "graph")]
             Self::TooManyGraphs => write!(f, "at most 64 graphs may be live at once"),
-            #[cfg(feature = "graph")]
             Self::GraphKeyExists => write!(f, "graph node key already exists"),
-            #[cfg(feature = "graph")]
             Self::GraphKeyConflict => write!(
                 f,
                 "graph edge key already exists with different endpoints, type or properties"
             ),
-            #[cfg(feature = "graph")]
             Self::GraphNodeNotFound => write!(f, "graph node not found"),
-            #[cfg(feature = "graph")]
             Self::GraphEdgeNotFound => write!(f, "graph edge not found"),
-            #[cfg(feature = "graph")]
             Self::GraphNodeHasEdges { incident } => write!(
                 f,
                 "graph node has {incident} incident edges; delete them first"
             ),
-            #[cfg(feature = "graph")]
             Self::GraphAttachmentConflict => write!(
                 f,
                 "the node already has an attachment in this collection, or the record is attached elsewhere"
             ),
-            #[cfg(feature = "graph")]
             Self::GraphAttachmentNotFound => {
                 write!(f, "the node has no attachment in this collection")
             }
-            #[cfg(feature = "graph")]
             Self::GraphRecordNotAttachable => {
                 write!(f, "only live records without an expiry can be attached")
             }
-            #[cfg(feature = "graph")]
             Self::GraphAttachedRecord => write!(
                 f,
                 "record is attached to a graph node; detach it before deleting"
             ),
-            #[cfg(feature = "graph")]
             Self::GraphAttachedRecordExpiry => {
                 write!(f, "records attached to a graph node cannot expire")
             }
-            #[cfg(feature = "graph")]
             Self::GraphLimitExceedsCeiling {
                 limit,
                 requested,
@@ -741,23 +698,18 @@ impl fmt::Display for Error {
                 f,
                 "graph limit {limit} = {requested} exceeds its ceiling {ceiling}"
             ),
-            #[cfg(feature = "graph")]
             Self::GraphCursorStale => write!(
                 f,
                 "the graph changed after the cursor was issued; restart the read"
             ),
-            #[cfg(feature = "graph")]
             Self::GraphChangeFeedUnsupported => {
                 write!(f, "change feeds are not supported on graph-enabled files")
             }
-            #[cfg(feature = "graph")]
             Self::GraphUnsupportedOperation => write!(
                 f,
                 "operation not supported on graph-enabled files; use maintenance::strip_graph or maintenance::enable_graph"
             ),
-            #[cfg(feature = "graph")]
             Self::GraphInvalidOptions(reason) => write!(f, "invalid graph options: {reason}"),
-            #[cfg(feature = "graph")]
             Self::GraphSchemaViolation {
                 rule,
                 element,
@@ -766,13 +718,11 @@ impl fmt::Display for Error {
                 f,
                 "graph schema rule {rule} violated by {element}.{property}"
             ),
-            #[cfg(feature = "graph")]
             Self::GraphSchemaViolation {
                 rule,
                 element,
                 property: None,
             } => write!(f, "graph schema rule {rule} violated by {element}"),
-            #[cfg(feature = "graph")]
             Self::GraphPivotTooExpensive => write!(
                 f,
                 "pivot would exact-scan a collection above max_exact_scan_records; use a ready ANN index or a text-only pivot"
@@ -953,7 +903,6 @@ pub struct Database {
     /// Opened with `open_read_only`: shared OS lock, read-only file handle.
     read_only: bool,
     /// Named graphs; `Some` exactly for graph-enabled (`FLAG_GRAPH`) files.
-    #[cfg(feature = "graph")]
     graph: Option<property_graph::engine::GraphState>,
 }
 
@@ -1153,6 +1102,16 @@ fn open_shared(path: &Path) -> Result<LockedFile> {
     }
 }
 
+/// In-memory handles are `None` for life; file handles start `Full` until the
+/// public constructors apply `Durability::default()`.
+fn initial_durability(file: &LockedFile) -> Durability {
+    if file.is_memory() {
+        Durability::None
+    } else {
+        Durability::Full
+    }
+}
+
 fn validate_dimensions(dimensions: usize) -> Result<()> {
     if !(1..=MAX_DIMENSIONS).contains(&dimensions) {
         return Err(Error::InvalidDimensions(dimensions));
@@ -1233,12 +1192,14 @@ impl Database {
             file.write_all(header)?;
             file.sync_all()?;
             Ok(file)
-        })
+        })?
+        .with_durability(Durability::default())
     }
 
     /// Creates a database held entirely in memory (no file, no lock): the
-    /// WebAssembly backend. Commits are durable only as far as the caller
-    /// persists `to_bytes()`.
+    /// WebAssembly backend and `vlite-server --durability none`. Its
+    /// durability is `Durability::None`: commits are durable only as far as
+    /// the caller persists `to_bytes()`.
     pub fn create_in_memory(dimensions: usize, options: CreateOptions) -> Result<Self> {
         Self::create_backed(dimensions, options, 0, |header| {
             Ok(LockedFile::memory(header.to_vec()))
@@ -1247,6 +1208,7 @@ impl Database {
 
     /// Opens a database from a complete byte image (as produced by `to_bytes`,
     /// `backup` or a closed file). Corrupt or incomplete images are rejected.
+    /// The handle is in memory (`Durability::None`); nothing is written back.
     pub fn open_from_bytes(bytes: Vec<u8>, key: Option<&EncryptionKey>) -> Result<Self> {
         Self::open_backed(LockedFile::memory(bytes), key)
     }
@@ -1309,7 +1271,7 @@ impl Database {
         let file = make(&header)?;
         Ok(Self {
             flusher: None,
-            durability: Durability::Full,
+            durability: initial_durability(&file),
             file,
             version,
             lineage,
@@ -1333,7 +1295,6 @@ impl Database {
             commit_times: Vec::new(),
             clock: None,
             read_only: false,
-            #[cfg(feature = "graph")]
             graph: (flags & format::FLAG_GRAPH != 0).then(property_graph::engine::GraphState::new),
         })
     }
@@ -1343,13 +1304,13 @@ impl Database {
     /// Corrupt files and incomplete trailing writes are rejected, not truncated.
     /// Encrypted files need `open_encrypted`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::open_inner(path.as_ref(), None)
+        Self::open_inner(path.as_ref(), None)?.with_durability(Durability::default())
     }
 
     /// Opens an encrypted database. A wrong key is `EncryptionKeyMismatch`
     /// (never garbage data); an unencrypted file is `NotEncrypted`.
     pub fn open_encrypted(path: impl AsRef<Path>, key: &EncryptionKey) -> Result<Self> {
-        Self::open_inner(path.as_ref(), Some(key))
+        Self::open_inner(path.as_ref(), Some(key))?.with_durability(Durability::default())
     }
 
     fn open_inner(path: &Path, key: Option<&EncryptionKey>) -> Result<Self> {
@@ -1378,7 +1339,7 @@ impl Database {
     fn open_read_only_inner(path: &Path, key: Option<&EncryptionKey>) -> Result<Self> {
         let mut database = Self::open_backed(open_shared(path)?, key)?;
         database.read_only = true;
-        Ok(database)
+        database.with_durability(Durability::default())
     }
 
     /// Whether this handle came from `open_read_only`.
@@ -1397,7 +1358,7 @@ impl Database {
         let imports = import::Registry::from_markers(&loaded.imports);
         Ok(Self {
             flusher: None,
-            durability: Durability::Full,
+            durability: initial_durability(&file),
             file,
             version: loaded.version,
             lineage: loaded.lineage,
@@ -1422,7 +1383,6 @@ impl Database {
             commit_times: loaded.commit_times,
             clock: None,
             read_only: false,
-            #[cfg(feature = "graph")]
             graph: loaded.graph,
         })
     }
@@ -1517,23 +1477,45 @@ impl Database {
         self.ensure_healthy().is_err()
     }
 
-    /// The handle's current durability mode (`Full` unless changed).
+    /// The handle's current durability mode: `Durability::default()`
+    /// (`Periodic`, 60 s) for file-backed handles unless changed, and always
+    /// `Durability::None` for in-memory handles.
     pub fn durability(&self) -> Durability {
         self.durability
     }
 
     /// Selects when commits reach stable storage for this open handle; the
-    /// setting is not persisted and every open starts in `Durability::Full`.
+    /// setting is not persisted and every file open starts in
+    /// `Durability::default()` (`Periodic` every 60 s since v0.5.1).
     ///
     /// `Periodic` acknowledges a commit once its frame is written to the file
     /// (the OS page cache, which survives a process crash) and syncs from a
     /// background thread at most once per interval, so an OS crash or power
-    /// loss may lose a suffix of acknowledged commits. Switching away from
-    /// `Periodic` (or `close`) first syncs everything written. A failed
-    /// periodic sync poisons the handle. Read-only and in-memory handles
-    /// accept the setting but never write, so it has no effect on them.
+    /// loss may lose a suffix of acknowledged commits. `Full` syncs every
+    /// commit before acknowledging it. Switching away from `Periodic` (or
+    /// `close`) first syncs everything written. A failed periodic sync
+    /// poisons the handle. Read-only handles accept `Full` and `Periodic`
+    /// but never write, so neither has an effect on them.
+    ///
+    /// `None` (in memory only) is the fixed mode of in-memory handles:
+    /// file-backed handles reject it, and in-memory handles reject `Full`
+    /// and `Periodic`, both with `InvalidDurability`, so a handle never
+    /// claims a durability it cannot provide.
     pub fn set_durability(&mut self, durability: Durability) -> Result<()> {
         durability.validate()?;
+        match (self.file.is_memory(), durability) {
+            (true, Durability::None) | (false, Durability::Full | Durability::Periodic { .. }) => {}
+            (true, _) => {
+                return Err(Error::InvalidDurability(
+                    "in-memory databases are never persisted; only Durability::None applies",
+                ));
+            }
+            (false, _) => {
+                return Err(Error::InvalidDurability(
+                    "Durability::None is only valid for in-memory databases",
+                ));
+            }
+        }
         self.ensure_healthy()?;
         if let Some(flusher) = self.flusher.take()
             && let Err(error) = flusher.shutdown()
@@ -1543,7 +1525,6 @@ impl Database {
         }
         if let Durability::Periodic { interval } = durability
             && !self.read_only
-            && !self.file.is_memory()
         {
             self.flusher = Some(durability::Flusher::start(
                 self.file.try_clone()?,
@@ -1562,8 +1543,8 @@ impl Database {
     }
 
     /// Forces every acknowledged commit to stable storage now. A no-op under
-    /// `Durability::Full` (each commit is already synced) and for read-only
-    /// or in-memory handles. A sync failure returns `CommitIndeterminate`
+    /// `Durability::Full` (each commit is already synced), for read-only
+    /// handles, and under `Durability::None` (there is no storage). A sync failure returns `CommitIndeterminate`
     /// and poisons the handle.
     pub fn sync(&self) -> Result<()> {
         self.ensure_healthy()?;
@@ -1731,7 +1712,6 @@ impl Database {
             return Err(Error::ExpiryRequiresUpgrade);
         }
         expected.check(state.revisions.get(&id).copied())?;
-        #[cfg(feature = "graph")]
         if expiry.is_some() && self.is_attached(collection, id) {
             return Err(Error::GraphAttachedRecordExpiry);
         }
@@ -1772,7 +1752,6 @@ impl Database {
         self.commit_frame(sequence, &frame)?;
         self.state_mut(collection)
             .apply_metadata_committed(id, metadata.clone(), sequence);
-        #[cfg(feature = "graph")]
         self.touch_graph_record(collection, id, sequence);
         Ok(sequence)
     }
@@ -1830,7 +1809,6 @@ impl Database {
         if current.is_none() {
             return Ok(false);
         }
-        #[cfg(feature = "graph")]
         if self.is_attached(collection, id) {
             return Err(Error::GraphAttachedRecord);
         }
@@ -1860,7 +1838,6 @@ impl Database {
             return Err(Error::BatchRequiresUpgrade);
         }
         let body_bytes = self.validate_batch(collection, operations)?;
-        #[cfg(feature = "graph")]
         self.ensure_no_attached_delete(collection, operations)?;
         let sequence = self.next_sequence()?;
         let frame = if collection == 0 {
@@ -2111,7 +2088,6 @@ impl Database {
     /// Cursor positioned at the current head: `changes_after` returns only
     /// commits made after this call. Needs format v4 or newer.
     pub fn feed_cursor(&self) -> Result<changes::FeedCursor> {
-        #[cfg(feature = "graph")]
         if self.graph.is_some() {
             return Err(Error::GraphChangeFeedUnsupported);
         }
@@ -2130,7 +2106,6 @@ impl Database {
         cursor: &changes::FeedCursor,
         max_events: usize,
     ) -> Result<changes::ChangeBatch> {
-        #[cfg(feature = "graph")]
         if self.graph.is_some() {
             return Err(Error::GraphChangeFeedUnsupported);
         }
@@ -2201,7 +2176,6 @@ impl Database {
                 self.commit_times = loaded.commit_times;
                 // Graph followers replay graph frames too (REQ-054); the
                 // flags check above keeps graph and vector files apart.
-                #[cfg(feature = "graph")]
                 {
                     self.graph = loaded.graph;
                 }
@@ -2227,7 +2201,6 @@ impl Database {
         expires_at_ms: Option<u64>,
     ) {
         let vector_bytes = record.as_ref().map_or(0, |record| record.vector.len() * 4);
-        #[cfg(feature = "graph")]
         self.touch_graph_record(collection, id, sequence);
         let state = self
             .collections
@@ -3373,10 +3346,24 @@ mod tests {
     }
 
     #[test]
-    fn full_durability_is_the_default_and_syncs_every_commit() {
+    fn periodic_is_the_default_and_full_syncs_every_commit() {
         let directory = tempfile::tempdir().unwrap();
-        let mut db = Database::create(directory.path().join("full.vlite"), 1).unwrap();
+        let path = directory.path().join("full.vlite");
+        let db = Database::create(&path, 1).unwrap();
+        assert_eq!(Durability::default(), periodic(60_000));
+        assert_eq!(DEFAULT_FLUSH_INTERVAL, MAX_FLUSH_INTERVAL);
+        assert_eq!(db.durability(), Durability::default());
+        assert!(db.flusher.is_some());
+        db.close().unwrap();
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.durability(), Durability::default());
+        drop(db);
+        let mut db = Database::open(&path)
+            .unwrap()
+            .with_durability(Durability::Full)
+            .unwrap();
         assert_eq!(db.durability(), Durability::Full);
+        assert!(db.flusher.is_none());
         let before = syncs();
         for id in 0..5 {
             db.put(id, &[id as f32], b"").unwrap();
@@ -3441,7 +3428,11 @@ mod tests {
         db.close().unwrap();
         let mut db = Database::open(&path).unwrap();
         assert_eq!(db.len(), 5);
-        assert_eq!(db.durability(), Durability::Full, "the mode is per handle");
+        assert_eq!(
+            db.durability(),
+            Durability::default(),
+            "the mode is per handle"
+        );
         db.set_durability(periodic(60_000)).unwrap();
         db.put(6, &[6.0], b"").unwrap();
         drop(db);
@@ -3498,7 +3489,7 @@ mod tests {
         }
         assert!(Durability::periodic(MIN_FLUSH_INTERVAL).is_ok());
         assert!(Durability::periodic(MAX_FLUSH_INTERVAL).is_ok());
-        assert_eq!(db.durability(), Durability::Full);
+        assert_eq!(db.durability(), Durability::default());
 
         db.set_durability(periodic(60_000)).unwrap();
         let before = syncs();
@@ -3515,7 +3506,7 @@ mod tests {
     }
 
     #[test]
-    fn periodic_durability_is_inert_for_read_only_and_memory_handles() {
+    fn periodic_is_inert_for_read_only_and_none_is_fixed_for_memory_handles() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("ro.vlite");
         Database::create(&path, 1)
@@ -3523,18 +3514,43 @@ mod tests {
             .put(1, &[1.0], b"")
             .unwrap();
         let mut db = Database::open_read_only(&path).unwrap();
+        assert!(db.flusher.is_none());
+        assert_eq!(db.durability(), Durability::default());
         db.set_durability(periodic(10)).unwrap();
         assert!(db.flusher.is_none());
         assert_eq!(db.durability(), periodic(10));
+        assert!(matches!(
+            db.set_durability(Durability::None),
+            Err(Error::InvalidDurability(_))
+        ));
         db.sync().unwrap();
         db.close().unwrap();
 
+        let mut db = Database::open(&path).unwrap();
+        assert!(matches!(
+            db.set_durability(Durability::None),
+            Err(Error::InvalidDurability(_))
+        ));
+        assert_eq!(db.durability(), Durability::default());
+        assert!(db.flusher.is_some(), "a rejected mode keeps the flusher");
+        db.close().unwrap();
+
         let mut db = Database::create_in_memory(1, CreateOptions::default()).unwrap();
-        db.set_durability(periodic(10)).unwrap();
+        assert_eq!(db.durability(), Durability::None);
+        for durable in [Durability::Full, periodic(10)] {
+            assert!(matches!(
+                db.set_durability(durable),
+                Err(Error::InvalidDurability(_))
+            ));
+        }
+        db.set_durability(Durability::None).unwrap();
         assert!(db.flusher.is_none());
         db.put(1, &[1.0], b"").unwrap();
         db.sync().unwrap();
         assert_eq!(db.unsynced_commits(), 0);
+        let reopened = Database::open_from_bytes(db.to_bytes().unwrap(), None).unwrap();
+        assert_eq!(reopened.durability(), Durability::None);
+        assert_eq!(reopened.len(), 1);
     }
 
     #[test]

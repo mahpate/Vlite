@@ -10,9 +10,6 @@ verify PATH | drill BACKUP WORKDIR"
     };
 }
 
-#[cfg(not(feature = "graph"))]
-const USAGE: &str = usage!();
-#[cfg(feature = "graph")]
 const USAGE: &str = concat!(
     usage!(),
     " | enable-graph SOURCE DESTINATION | strip-graph SOURCE DESTINATION --confirm-graph-data-loss"
@@ -73,7 +70,6 @@ fn run() -> Result<(), Box<dyn Error>> {
                 report.collections, report.probes
             );
         }
-        #[cfg(feature = "graph")]
         (Some("enable-graph"), 3) => {
             let report = maintenance::enable_graph(&args[1], &args[2], None)?;
             println!(
@@ -82,7 +78,6 @@ fn run() -> Result<(), Box<dyn Error>> {
             );
             print_report(&report.output);
         }
-        #[cfg(feature = "graph")]
         (Some("strip-graph"), 3 | 4) => {
             // Without the flag the library refuses (confirm_graph_data_loss).
             let confirm = match args.get(3) {

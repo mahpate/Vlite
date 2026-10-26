@@ -419,8 +419,15 @@ pub(super) fn record_bytes(
 mod tests {
     use super::*;
 
+    // Group commit coalesces syncs, so these tests opt into full durability.
+    fn full(db: crate::Result<Database>) -> Database {
+        db.unwrap()
+            .with_durability(crate::Durability::Full)
+            .unwrap()
+    }
+
     fn service(path: &std::path::Path, max_requests: usize) -> Service {
-        Service::new(Database::create(path, 1).unwrap())
+        Service::new(full(Database::create(path, 1)))
             .with_group_commit(GroupCommitConfig {
                 max_requests,
                 max_delay: Duration::from_millis(100),
@@ -587,7 +594,7 @@ mod tests {
         use tower::ServiceExt;
         let directory = tempfile::tempdir_in(".").unwrap();
         let path = directory.path().join("rest-group.vlite");
-        let mut db = Database::create(&path, 1).unwrap();
+        let mut db = full(Database::create(&path, 1));
         db.put(1, &[0.0], b"").unwrap();
         let service = Service::new(db)
             .with_group_commit(GroupCommitConfig {
@@ -727,14 +734,17 @@ mod tests {
         use tower::ServiceExt;
         let directory = tempfile::tempdir_in(".").unwrap();
         let path = directory.path().join("metadata-group.vlite");
-        let service =
-            Service::new(Database::create_with_format(&path, 1, crate::FormatVersion::V5).unwrap())
-                .with_group_commit(GroupCommitConfig {
-                    max_requests: 2,
-                    max_delay: Duration::from_millis(100),
-                    ..Default::default()
-                })
-                .unwrap();
+        let service = Service::new(full(Database::create_with_format(
+            &path,
+            1,
+            crate::FormatVersion::V5,
+        )))
+        .with_group_commit(GroupCommitConfig {
+            max_requests: 2,
+            max_delay: Duration::from_millis(100),
+            ..Default::default()
+        })
+        .unwrap();
         let expiry = crate::current_time_ms() + 60_000;
         let first = {
             let service = service.clone();
@@ -967,7 +977,7 @@ mod tests {
     async fn byte_and_request_backpressure_are_immediate_and_release_permits() {
         let directory = tempfile::tempdir_in(".").unwrap();
         let path = directory.path().join("bounded.vlite");
-        let service = Service::new(Database::create(&path, 1).unwrap())
+        let service = Service::new(full(Database::create(&path, 1)))
             .with_group_commit(GroupCommitConfig {
                 max_requests: 2,
                 max_bytes: 1024,
@@ -1237,7 +1247,7 @@ mod tests {
             other => panic!("unexpected crash fixture format: {other}"),
         };
         tokio::runtime::Runtime::new().unwrap().block_on(async {
-            let service = Service::new(Database::create_with_format(&path, 1, format).unwrap())
+            let service = Service::new(full(Database::create_with_format(&path, 1, format)))
                 .with_group_commit(GroupCommitConfig {
                     max_requests: 4,
                     max_delay: Duration::from_millis(100),
@@ -1337,7 +1347,7 @@ mod tests {
     async fn active_disconnect_overload_and_shutdown_drain_keep_admission_bounded() {
         let directory = tempfile::tempdir_in(".").unwrap();
         let path = directory.path().join("active-drain.vlite");
-        let service = Service::new(Database::create(&path, 1).unwrap())
+        let service = Service::new(full(Database::create(&path, 1)))
             .with_group_commit(GroupCommitConfig {
                 max_requests: 1,
                 max_bytes: 1024,
@@ -1405,7 +1415,7 @@ mod tests {
     async fn disconnected_sync_failure_drains_and_preserves_atomic_validation() {
         let directory = tempfile::tempdir_in(".").unwrap();
         let path = directory.path().join("failed-drain.vlite");
-        let mut db = Database::create(&path, 1).unwrap();
+        let mut db = full(Database::create(&path, 1));
         db.put(0, &[0.0], b"previously acknowledged").unwrap();
         let service = Service::new(db)
             .with_group_commit(GroupCommitConfig {
@@ -1556,7 +1566,7 @@ mod tests {
             for delay in [None, Some(Duration::ZERO), Some(Duration::from_millis(2))] {
                 let directory = tempfile::tempdir_in(".").unwrap();
                 let path = directory.path().join("bench.vlite");
-                let service = Service::new(Database::create(&path, 16).unwrap());
+                let service = Service::new(full(Database::create(&path, 16)));
                 let service = if let Some(max_delay) = delay {
                     service
                         .with_group_commit(GroupCommitConfig {

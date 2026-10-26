@@ -1,8 +1,8 @@
-//! Property-graph tools of `vlite-mcp` (EPIC-009; opt-in `graph` feature).
+//! Property-graph tools of `vlite-mcp` (EPIC-009).
 //!
 //! Listed and callable only when the opened file is graph-enabled; on
-//! vector-only files `tools/list`, `vlite_info` and calls behave exactly as in
-//! builds without `graph`. Read tools never write. Write tools exist only
+//! vector-only files `tools/list`, `vlite_info` and calls behave exactly as
+//! before graph support existed. Read tools never write. Write tools exist only
 //! with `--writable`. Inputs bind typed JSON fields and reuse the
 //! `vlite-graph-cli` request JSON; `vlite_graph_query` is the one free-text
 //! tool and only accepts the read-only query text of EPIC-015, which

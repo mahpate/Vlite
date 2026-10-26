@@ -1,6 +1,6 @@
 {
   "name": "@vlite/embedded",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Worker-backed embedded VLite for Node.js",
   "type": "module",
   "license": "MIT",

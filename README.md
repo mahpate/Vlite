@@ -31,7 +31,7 @@ file, so there is no separate database service to operate.
   graphs, with user accounts, roles and tenants.
 - **Storage options.** Encryption at rest, point-in-time restore, a change
   feed, file-shipped read replicas and a disk-based ANN index.
-- **Property graphs (experimental).** Opt-in per file: nodes, typed edges and
+- **Property graphs.** Built in; opt-in per file: nodes, typed edges and
   links to vector records, with bounded traversal and graph retrieval.
 - **Tools.** Interactive shell, validated imports, offline maintenance, index
   tuning, a graph CLI, an MCP server and agent skills.
@@ -156,9 +156,9 @@ Prebuilt packages: [PyPI](docs/INSTALL.md#pypi) and [release assets](docs/INSTAL
 | Command-line tools and tests | [TOOLS](docs/TOOLS.md) |
 | gRPC, MCP and agent skills | [GRPC](docs/GRPC.md), [MCP](docs/MCP.md), [AGENT-SKILLS](docs/AGENT-SKILLS.md) |
 | Webhooks | [WEBHOOKS](docs/WEBHOOKS.md) |
-| Property graphs (experimental, opt-in) | [GRAPH](docs/GRAPH.md) |
+| Property graphs (opt-in per file) | [GRAPH](docs/GRAPH.md) |
 | Benchmarks | [Methodology](benchmarks/README.md), [results](benchmarks/RESULTS.md) |
-| Upgrade notes | [Release notes](docs/RELEASE-0.5.0.md) |
+| Upgrade notes | [Release notes](docs/RELEASE-0.5.1.md) |
 
 ## Status and limitations
 
@@ -171,9 +171,11 @@ are on the [releases page](https://github.com/mahpate/Vlite/releases).
 - Replicas are file-shipped. There is no networked replication.
 - Deleted records use disk space until you compact to a new file.
 - Durability depends on the OS and storage honoring sync. It is not a
-  power-loss guarantee. Opt-in [periodic durability](docs/REFERENCE.md#periodic-lazy-durability)
-  (`--durability periodic`) defers sync and can lose about the last flush
-  interval on an OS crash or power loss.
+  power-loss guarantee. The default [periodic durability](docs/REFERENCE.md#periodic-lazy-durability)
+  syncs every 60 s, so an OS crash or power loss can lose up to about 60 s of
+  acknowledged writes (a process crash loses nothing). `--durability full`
+  syncs every commit; `--durability none` keeps data in memory only and loses
+  it on restart.
 
 ## License
 

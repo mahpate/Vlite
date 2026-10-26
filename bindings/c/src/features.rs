@@ -20,6 +20,8 @@ pub(super) enum Request {
         #[serde(default)]
         read_only: bool,
         #[serde(default)]
+        durability: Option<String>,
+        #[serde(default)]
         flush_interval_ms: Option<u64>,
     },
     OpenFromBytes {
@@ -246,12 +248,20 @@ pub(super) struct Options {
     credentials: Credentials,
     #[serde(default)]
     commit_timestamps: bool,
-    /// Opt-in `Durability::Periodic` flush interval (1..=60000 ms).
+    /// `"periodic"` (file default, every 60 s), `"full"`, or `"none"`
+    /// (the only mode for in-memory databases).
+    #[serde(default)]
+    durability: Option<String>,
+    /// `Durability::Periodic` flush interval (1..=60000 ms).
     #[serde(default)]
     flush_interval_ms: Option<u64>,
 }
-/// Validated create options and the requested durability mode.
-pub(super) fn create_options(options: Options) -> Result<(CreateOptions, vlite::Durability)> {
+/// Validated create options and the requested durability mode (`None` keeps
+/// the handle's own mode).
+pub(super) fn create_options(
+    options: Options,
+    in_memory: bool,
+) -> Result<(CreateOptions, Option<vlite::Durability>)> {
     let format = match options.format {
         None => None,
         Some(3) => Some(FormatVersion::V3),
@@ -259,7 +269,11 @@ pub(super) fn create_options(options: Options) -> Result<(CreateOptions, vlite::
         Some(5) => Some(FormatVersion::V5),
         _ => return Err(invalid("format must be 3, 4 or 5")),
     };
-    let durability = durability(options.flush_interval_ms)?;
+    let durability = durability(
+        options.durability.as_deref(),
+        options.flush_interval_ms,
+        in_memory,
+    )?;
     Ok((
         CreateOptions {
             format,
@@ -352,12 +366,12 @@ pub(super) fn execute(state: &mut State, handle: u64, request: Request) -> Resul
             dimensions,
             options,
         } => {
-            let (options, durability) = create_options(options)?;
+            let (options, durability) = create_options(options, path.is_none())?;
             let db = match path {
                 Some(path) => Database::create_with_options(path, dimensions, options),
                 None => Database::create_in_memory(dimensions, options),
             }
-            .and_then(|db| db.with_durability(durability))
+            .and_then(|db| with_durability(db, durability))
             .map_err(failure)?;
             return insert(state, handle, db);
         }
@@ -365,9 +379,10 @@ pub(super) fn execute(state: &mut State, handle: u64, request: Request) -> Resul
             path,
             credentials,
             read_only,
+            durability: mode,
             flush_interval_ms,
         } => {
-            let durability = durability(flush_interval_ms)?;
+            let durability = durability(mode.as_deref(), flush_interval_ms, false)?;
             let key = credentials.key()?;
             let db = match (key, read_only) {
                 (Some(key), false) => Database::open_encrypted(path, &key),
@@ -375,7 +390,7 @@ pub(super) fn execute(state: &mut State, handle: u64, request: Request) -> Resul
                 (None, false) => Database::open(path),
                 (None, true) => Database::open_read_only(path),
             }
-            .and_then(|db| db.with_durability(durability))
+            .and_then(|db| with_durability(db, durability))
             .map_err(failure)?;
             return insert(state, handle, db);
         }

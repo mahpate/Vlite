@@ -1,5 +1,4 @@
-//! EPIC-006 TEST-008 (ITEM-022..ITEM-026): graph-aware maintenance, built
-//! only with the `graph` feature.
+//! EPIC-006 TEST-008 (ITEM-022..ITEM-026): graph-aware maintenance.
 //!
 //! Graph state must be equal after `compact*`, `backup*`/`restore*`, `drill`,
 //! `reencrypt` and `restore_to` (by sequence and by timestamp) in plain,

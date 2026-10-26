@@ -18,10 +18,9 @@ schemas are deliberately not duplicated; they need not match REST/embedded APIs.
 - `vlite_build_index`: explicitly build when available/authorized; it may be
   expensive even when changing only in-memory state.
 
-### Experimental graph tools (`graph` builds)
+### Graph tools
 
-Advertised only by builds with the `graph` feature, and only for graph-enabled
-files. See `docs/MCP.md` for arguments, limits and error codes.
+Advertised only for graph-enabled files. See `docs/MCP.md` for arguments, limits and error codes.
 
 - `vlite_graph_list`: graphs and node/edge counts; call before graph queries.
 - `vlite_graph_get`: one node or edge by key/ID; `null` means absent.

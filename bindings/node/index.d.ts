@@ -88,17 +88,17 @@ export class NativeLibrary {
    * Writers require exclusive access (`locked` while readers exist, and vice versa).
    * Snapshot at open: close and reopen to see new commits. Parallel reads need separate processes.
    */
-  open(path: string, options?: Credentials & { readOnly?: boolean }): Promise<Database>;
+  open(path: string, options?: Credentials & DurabilityOptions & { readOnly?: boolean }): Promise<Database>;
   createInMemory(dimensions: number, options?: CreateOptions): Promise<Database>;
-  /** Optional capabilities compiled into the loaded library; libraries predating the op report `{ graph: false }`. */
+  /** Optional capabilities compiled into the loaded library (`graph` is true since 0.5.1); libraries predating the op report `{ graph: false }`. */
   capabilities(): Promise<{ graph: boolean }>;
-  /** Whether the loaded library was built with the opt-in `graph` feature (enabled in release tarballs). */
+  /** Whether the loaded library includes the property graph (every library since 0.5.1). */
   supportsGraph(): Promise<boolean>;
   /**
    * Create a NEW graph-enabled (V5) file without overwrite; never converts an existing file.
-   * Rejects with `unsupported` unless the loaded library was built with the `graph` feature.
+   * Rejects with `unsupported` on libraries older than 0.5.1 built without the graph.
    */
-  createWithGraph(path: string, dimensions: number, options?: CreateOptions & { flushIntervalMs?: number }): Promise<Database>;
+  createWithGraph(path: string, dimensions: number, options?: CreateOptions): Promise<Database>;
   openFromBytes(data: Uint8Array, options?: Credentials): Promise<Database>;
   /** Closed/copied log; new destination. Exactly one of sequence/timestampMs is required. */
   restoreTo(logPath: string, destination: string, options: Credentials & {
@@ -190,7 +190,7 @@ export class Database {
   buildDiskAnn(path: string, options?: Scope & { metric?: "squared_l2" | "cosine" }): Promise<DiskAnnSource>;
   searchDiskAnn(path: string, vector: number[], k: number, options?: { efSearch?: number; cacheBytes?: number }): Promise<Hit[]>;
   toBytes(): Promise<Uint8Array>;
-  /** Property graph (opt-in `graph` feature, enabled in release tarballs); without it every method rejects with `unsupported`. */
+  /** Property graph (always compiled in since 0.5.1; libraries older than that reject every method with `unsupported`). */
   isGraphEnabled(): Promise<boolean>;
   listGraphs(): Promise<GraphInfo[]>;
   createGraph(name: string): Promise<GraphInfo>;
@@ -219,7 +219,13 @@ export class Database {
 }
 export interface Credentials { key?: Uint8Array; passphrase?: string }
 export interface Float32PutOperation { id: string; vector: Float32Array; payload?: Uint8Array; metadata?: Metadata }
-export interface CreateOptions extends Credentials { format?: 3 | 4 | 5; commitTimestamps?: boolean }
+/**
+ * File handles default to `"periodic"` (background sync every `flushIntervalMs`, 1..60000, default 60000):
+ * an OS crash or power loss can lose up to that much acknowledged work; a process crash loses nothing.
+ * `"full"` syncs every commit. `"none"` is the only mode for in-memory databases (data is lost on close).
+ */
+export interface DurabilityOptions { durability?: "periodic" | "full" | "none"; flushIntervalMs?: number }
+export interface CreateOptions extends Credentials, DurabilityOptions { format?: 3 | 4 | 5; commitTimestamps?: boolean }
 export interface FilterOptions extends Scope { filter?: Condition[]; metric?: DistanceMetric }
 export interface SearchGroup { value: MetadataValue; hits: Hit[] }
 export interface FacetCount { value: MetadataValue; count: number }

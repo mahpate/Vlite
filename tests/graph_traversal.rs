@@ -1,5 +1,4 @@
-//! EPIC-005 traversal integration test (ITEM-020, TEST-006), built only with
-//! the `graph` feature.
+//! EPIC-005 traversal integration test (ITEM-020, TEST-006).
 //!
 //! Seeded random graphs (self-loops, parallel edges, deletions, labels and
 //! properties) are queried through the public `GraphRef` reads and compared

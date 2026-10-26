@@ -79,22 +79,25 @@ export class NativeLibrary {
       catch { this.#pending.delete(id); reject(new EmbeddedError("worker_failed", "Cannot admit operation; worker unavailable")); }
     });
   }
-  async create(path, dimensions, { format, key, passphrase, commitTimestamps = false } = {}) {
+  /** File handles default to periodic durability (60 s); `durability: "full"` syncs every commit. */
+  async create(path, dimensions, { format, key, passphrase, commitTimestamps = false, durability, flushIntervalMs } = {}) {
     if (format === 5 || key !== undefined || passphrase !== undefined || commitTimestamps) {
-      return this.#createFeature(path, dimensions, { format, key, passphrase, commitTimestamps });
+      return this.#createFeature(path, dimensions, { format, key, passphrase, commitTimestamps, durability, flushIntervalMs });
     }
-    const result = await this._request("0", { op: "create", path, dimensions, ...optional("format", format) });
+    const result = await this._request("0", { op: "create", path, dimensions, ...optional("format", format),
+      ...durabilityFields(durability, flushIntervalMs) });
     return new Database(this, result.handle);
   }
   _feature(op, fields = {}) { return this._request("0", { op: "features", request: { op, ...fields } }); }
-  async #createFeature(path, dimensions, { format, key, passphrase, commitTimestamps = false }) {
+  async #createFeature(path, dimensions, { format, key, passphrase, commitTimestamps = false, durability, flushIntervalMs }) {
     const result = await this._feature("create", { path, dimensions, options: {
       ...optional("format", format), credentials: credentials(key, passphrase), commit_timestamps: commitTimestamps,
+      ...durabilityFields(durability, flushIntervalMs),
     } });
     return new Database(this, result.handle);
   }
   createInMemory(dimensions, options = {}) { return this.#createFeature(null, dimensions, options); }
-  /** Optional capabilities compiled into the loaded library, e.g. `{ graph: false }`. */
+  /** Optional capabilities compiled into the loaded library, e.g. `{ graph: true }`. */
   async capabilities() {
     try { return await this._request("0", { op: "capabilities" }); }
     catch (error) {
@@ -103,18 +106,18 @@ export class NativeLibrary {
       throw error;
     }
   }
-  /** Whether the loaded library was built with the opt-in `graph` feature (enabled in release tarballs). */
+  /** Whether the loaded library includes the property graph (every library since 0.5.1). */
   async supportsGraph() { return Boolean((await this.capabilities()).graph); }
   /** Create a NEW graph-enabled (V5) file without overwrite; never converts an existing file. */
-  async createWithGraph(path, dimensions, { format, key, passphrase, commitTimestamps = false, flushIntervalMs } = {}) {
+  async createWithGraph(path, dimensions, { format, key, passphrase, commitTimestamps = false, durability, flushIntervalMs } = {}) {
     const options = { credentials: credentials(key, passphrase), commit_timestamps: commitTimestamps,
-      ...optional("format", format), ...optional("flush_interval_ms", flushIntervalMs) };
+      ...optional("format", format), ...durabilityFields(durability, flushIntervalMs) };
     const result = await graphCall(this._request("0", { op: "graph", request: { op: "create", path, dimensions, options } }));
     return new Database(this, result.handle);
   }
   /** Open a snapshot; readOnly shares file locks, rejects mutations, and excludes writers. */
-  async open(path, { key, passphrase, readOnly = false } = {}) {
-    const flag = readOnly ? { read_only: true } : {};
+  async open(path, { key, passphrase, readOnly = false, durability, flushIntervalMs } = {}) {
+    const flag = { ...(readOnly ? { read_only: true } : {}), ...durabilityFields(durability, flushIntervalMs) };
     const result = key === undefined && passphrase === undefined
       ? await this._request("0", { op: "open", path, ...flag })
       : await this._feature("open", { path, credentials: credentials(key, passphrase), ...flag });
@@ -346,7 +349,7 @@ export class Database {
   }
   async toBytes() { return Buffer.from((await this.#feature("to_bytes")).bytes_base64, "base64"); }
 
-  // Property graph (opt-in `graph` feature, enabled in release tarballs). Nodes and edges are selected by key (string),
+  // Property graph (opt-in per file; always compiled since 0.5.1). Nodes and edges are selected by key (string),
   // ID (bigint, safe integer or { id: "decimal" }) or { key }; IDs and revisions come back as
   // decimal strings. Libraries without the feature reject with EmbeddedError("unsupported").
   #graph(op, fields = {}) { return graphCall(this.#call("graph", { request: { op, ...fields } })); }
@@ -422,6 +425,9 @@ function snake(value) {
     [key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`), snake(item)]));
 }
 
+function durabilityFields(durability, flushIntervalMs) {
+  return { ...optional("durability", durability), ...optional("flush_interval_ms", flushIntervalMs) };
+}
 // Libraries that predate the graph op reject the envelope as an unknown variant.
 function graphCall(promise) {
   return promise.catch((error) => {

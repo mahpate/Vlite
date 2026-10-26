@@ -43,10 +43,10 @@ for the expected surface. Do not invent unadvertised provider flags/token settin
    database to answer one question, dump embeddings, or put vectors in context.
    A record fetch may include a vector: omit it from reports.
 
-## Property graphs (experimental)
+## Property graphs
 
-Builds with `graph` (release binaries since v0.5.0) advertise `vlite_graph_*`
-tools, and only for graph-enabled files. `mcp-proxy`
+`vlite-mcp` (every build since v0.5.1) advertises `vlite_graph_*` tools, and
+only for graph-enabled files. `mcp-proxy`
 builds can instead forward them to a `vlite-server` (`--server URL
 --token-env VAR`), which authorizes every call. When discovery
 lists them:

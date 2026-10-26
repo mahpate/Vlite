@@ -9,7 +9,7 @@ Work directly with database files, without a REST or gRPC server.
 - [Search quality](#search-quality-and-configurationdatabase-comparison): measure recall and compare databases or index configurations.
 - [Index tuning](#index-tuning-advisor): find HNSW parameters for a target recall.
 - [MCP and agent skills](#mcp-server-and-agent-skills): connect an agent to a database through a separate stdio server.
-- [Graph operations](#graph-operations-experimental): typed reads and atomic writes on graph-enabled files (experimental).
+- [Graph operations](#graph-operations): typed reads and atomic writes on graph-enabled files.
 
 **Stop the server first.** The shell, import and tuning tools take an exclusive
 file lock, even with the shell's `--read-only` guard. MCP opens a shared-lock
@@ -191,19 +191,21 @@ These have their own guides:
 MCP opens the database file directly, not through REST. Installing a skill
 does not start the server or grant write access.
 
-## Graph operations (experimental)
+<a id="graph-operations-experimental"></a>
+
+## Graph operations
 
 `vlite-graph-cli` runs one typed property-graph operation per invocation on a
-[graph-enabled file](STORAGE-FEATURES.md#graph-enabled-files-experimental-graph-feature).
-It needs the non-default `graph` and `json` features. Release archives ship it
-since v0.5.0. The Docker image's API server (`vlite-server`) has graph;
+[graph-enabled file](STORAGE-FEATURES.md#graph-enabled-files-opt-in-per-file).
+It needs the `json` feature (graph is compiled into every build since v0.5.1).
+Release archives ship it since v0.5.0. The Docker image's API server (`vlite-server`) has graph;
 `vlite-graph-cli` is not in the image, and packages do not include the CLI.
 To build it from a checkout:
 
 ```powershell
-cargo build --locked --features graph,json --bin vlite-graph-cli
+cargo build --locked --features json --bin vlite-graph-cli
 # or install it into ~/.cargo/bin from the checkout
-cargo install --locked --path . --features graph,json --bin vlite-graph-cli
+cargo install --locked --path . --features json --bin vlite-graph-cli
 ```
 
 Usage: `vlite-graph-cli --db PATH [--writable] [--explain] COMMAND [REQUEST]`.
@@ -260,7 +262,7 @@ and `delete_vector`. Nodes are addressed by key, edges by `{"id":...}` or
 - **Graph-enabled files only.** Files are never converted. Graph commands on a
   vector-only file fail with `graphs_not_enabled`, and `init` refuses an
   existing path. Copy a v4/v5 file into a graph-enabled one with
-  `vlite-maintain enable-graph SOURCE DESTINATION` (also a graph build).
+  `vlite-maintain enable-graph SOURCE DESTINATION`.
   Encrypted files are not supported.
 - **Bounded reads.** Queries accept `"limits"` (fields of `GraphLimits`;
   omitted fields use defaults; values above the ceiling fail with
@@ -297,7 +299,7 @@ FAISS flat metrics and, with `import-formats`, Arrow and Parquet.
 ```powershell
 cargo test --locked --features tools --test shell_cli --test import_tools --test tune_cli
 cargo test --locked --all-features --test shell_cli --test import_tools --test tune_cli
-cargo test --locked --features graph,json --test graph_cli
+cargo test --locked --features json --test graph_cli
 ```
 
 Contributors validate a full change with:
@@ -305,7 +307,7 @@ Contributors validate a full change with:
 ```text
 cargo test --locked --all-targets --all-features
 cargo test --locked -p vlite-graph
-cargo test --locked --features graph --test graph_storage --test graph_compat --test graph_traversal --test graph_maintenance --test graph_recovery
+cargo test --locked --test graph_storage --test graph_compat --test graph_traversal --test graph_maintenance --test graph_recovery
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo fmt --check
 docker compose --profile test run --build --rm tests

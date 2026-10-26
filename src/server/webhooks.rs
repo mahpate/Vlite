@@ -84,7 +84,6 @@ impl Dispatcher {
                 .map_err(|e| std::io::Error::other(format!("invalid webhook cursor: {e}")))?;
         // LEG-019: the worker consumes the change feed, which graph-enabled
         // files reject; never start one that would skip it silently.
-        #[cfg(feature = "graph")]
         if service.graph_enabled {
             return reject_graph_subscriptions(&service, Some(&directory));
         }
@@ -132,7 +131,6 @@ fn disabled() -> ApiError {
 /// directory: subscriptions stored in `webhooks.json` on a graph-enabled
 /// file fail startup with `GraphChangeFeedUnsupported` (REQ-053). No-op for
 /// vector-only files and without an admin directory.
-#[cfg(feature = "graph")]
 pub(super) fn reject_graph_subscriptions(
     service: &Service,
     directory: Option<&std::path::Path>,
@@ -241,7 +239,6 @@ async fn create(
     input: Result<Json<Create>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     // LEG-019: rejected before validation; nothing is stored.
-    #[cfg(feature = "graph")]
     service.reject_graph_feed()?;
     let input = body(input)?;
     validate(&input)?;

@@ -148,21 +148,21 @@ JSON-RPC 2.0, including the MCP lifecycle, `ping` and tool discovery/calls.
 Protocol messages alone are written to stdout; diagnostics are written to stderr.
 Tool failures return `isError: true` with a clear message; malformed JSON and protocol errors use JSON-RPC errors. `vlite_search` returns IDs and distances, not vectors. `vlite_get` and `vlite_list` omit vectors unless explicitly requested by `vlite_get`.
 
-## Property graph tools (experimental)
+<a id="property-graph-tools-experimental"></a>
 
-> **Experimental.** Since v0.5.0 the released `vlite-mcp` is built with the
-> `graph` and `mcp-proxy` features. Names, arguments and outputs may still
-> change in later releases.
+## Property graph tools
 
-To build the same tools from source:
+The released `vlite-mcp` includes the graph tools and the `mcp-proxy`
+feature. Since v0.5.1 the graph tools are compiled into every `mcp` build. To
+build the same binary from source:
 
 ```sh
-cargo install --locked --path . --features "mcp graph mcp-proxy" --bin vlite-mcp
+cargo install --locked --path . --features "mcp mcp-proxy" --bin vlite-mcp
 ```
 
 The graph tools are listed and callable only when the opened file is
 graph-enabled (created with graph support). On a vector-only file, `tools/list`,
-`vlite_info` and every call are byte-identical to a build without `graph`, and
+`vlite_info` and every call are byte-identical to a vector-only server, and
 calling a graph tool returns `unknown tool`. On a graph-enabled file
 `vlite_info` adds `graph_enabled: true` and `graphs` (name, node and edge counts).
 

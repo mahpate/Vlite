@@ -1,23 +1,8 @@
 //! C ABI: owned UTF-8 JSON responses, opaque numeric handles, no network runtime.
 
 mod features;
-#[cfg(feature = "graph")]
 mod graph;
 mod typed;
-
-/// Builds without the `graph` feature parse the `graph` envelope and reject
-/// every graph request with this stable error.
-#[cfg(not(feature = "graph"))]
-mod graph {
-    use super::{Result, State, Value};
-
-    pub(super) fn execute(_: &mut State, _: u64, _: Value) -> Result<Value> {
-        Err((
-            "unsupported",
-            "graph operations require a library built with the graph feature".into(),
-        ))
-    }
-}
 
 use base64::{Engine, prelude::BASE64_STANDARD};
 use serde::Deserialize;
@@ -55,8 +40,7 @@ enum Request {
     Features {
         request: features::Request,
     },
-    /// Property-graph operations (`graph.rs`); `unsupported` without the
-    /// `graph` feature.
+    /// Property-graph operations (`graph.rs`).
     Graph {
         request: Value,
     },
@@ -68,7 +52,10 @@ enum Request {
         /// 3 (default) or 4. Only v4 supports named collections and imports.
         #[serde(default)]
         format: Option<u32>,
-        /// Opt-in `Durability::Periodic` flush interval (1..=60000 ms).
+        /// `"periodic"` (default, every 60 s) or `"full"`; see `durability`.
+        #[serde(default)]
+        durability: Option<String>,
+        /// `Durability::Periodic` flush interval (1..=60000 ms).
         #[serde(default)]
         flush_interval_ms: Option<u64>,
     },
@@ -77,7 +64,10 @@ enum Request {
         /// Shared-lock read-only handle (`Database::open_read_only`).
         #[serde(default)]
         read_only: bool,
-        /// Opt-in `Durability::Periodic` flush interval (1..=60000 ms).
+        /// `"periodic"` (default, every 60 s) or `"full"`; see `durability`.
+        #[serde(default)]
+        durability: Option<String>,
+        /// `Durability::Periodic` flush interval (1..=60000 ms).
         #[serde(default)]
         flush_interval_ms: Option<u64>,
     },
@@ -418,11 +408,44 @@ fn failure(error: vlite::Error) -> Failure {
     (code, error.to_string())
 }
 
-/// `Durability` for an optional `flush_interval_ms` request field.
-fn durability(flush_interval_ms: Option<u64>) -> Result<vlite::Durability> {
-    flush_interval_ms.map_or(Ok(vlite::Durability::Full), |ms| {
-        vlite::Durability::periodic_ms(ms).map_err(failure)
-    })
+/// `Durability` for the optional `durability` (`"periodic"`, `"full"` or
+/// `"none"`) and `flush_interval_ms` request fields. File handles default to
+/// `Durability::default()` (periodic, 60 s); in-memory handles are always
+/// `none`. `None` means "keep the handle's own mode".
+fn durability(
+    mode: Option<&str>,
+    flush_interval_ms: Option<u64>,
+    in_memory: bool,
+) -> Result<Option<vlite::Durability>> {
+    let rejected = |message: &str| ("invalid_durability", message.to_owned());
+    match (mode, flush_interval_ms, in_memory) {
+        (None | Some("none"), None, true) => Ok(None),
+        (_, _, true) => Err(rejected(
+            "in-memory databases are never persisted; only durability \"none\" applies",
+        )),
+        (Some("none"), _, false) => Err(rejected(
+            "durability \"none\" is only available for in-memory databases",
+        )),
+        (Some("full"), Some(_), false) => Err(rejected(
+            "flush_interval_ms requires durability \"periodic\"",
+        )),
+        (Some("full"), None, false) => Ok(Some(vlite::Durability::Full)),
+        (None | Some("periodic"), Some(ms), false) => vlite::Durability::periodic_ms(ms)
+            .map(Some)
+            .map_err(failure),
+        (None | Some("periodic"), None, false) => Ok(Some(vlite::Durability::default())),
+        (Some(_), _, false) => Err(rejected(
+            "durability must be \"periodic\", \"full\" or \"none\"",
+        )),
+    }
+}
+
+/// Applies `durability` unless the handle keeps its own mode.
+fn with_durability(db: Database, durability: Option<vlite::Durability>) -> vlite::Result<Database> {
+    match durability {
+        Some(durability) => db.with_durability(durability),
+        None => Ok(db),
+    }
 }
 
 fn invalid(message: &str) -> Failure {
@@ -741,7 +764,7 @@ fn execute(handle: u64, request: Request) -> Result<Value> {
         return Ok(result);
     }
     match request {
-        Request::Capabilities {} => return Ok(json!({"graph": cfg!(feature = "graph")})),
+        Request::Capabilities {} => return Ok(json!({"graph": true})),
         Request::Graph { request } => {
             let result = graph::execute(&mut state, handle, request)?;
             if result.to_string().len() > 8 * 1024 * 1024 - 1024 {
@@ -768,9 +791,10 @@ fn execute(handle: u64, request: Request) -> Result<Value> {
                     path,
                     dimensions,
                     format,
+                    durability: mode,
                     flush_interval_ms,
                 } => {
-                    let durability = durability(flush_interval_ms)?;
+                    let durability = durability(mode.as_deref(), flush_interval_ms, false)?;
                     match format {
                         None | Some(3) => Database::create(path, dimensions),
                         Some(4) => {
@@ -778,20 +802,21 @@ fn execute(handle: u64, request: Request) -> Result<Value> {
                         }
                         Some(_) => return Err(invalid("format must be 3 or 4")),
                     }
-                    .and_then(|db| db.with_durability(durability))
+                    .and_then(|db| with_durability(db, durability))
                 }
                 Request::Open {
                     path,
                     read_only,
+                    durability: mode,
                     flush_interval_ms,
                 } => {
-                    let durability = durability(flush_interval_ms)?;
+                    let durability = durability(mode.as_deref(), flush_interval_ms, false)?;
                     if read_only {
                         Database::open_read_only(path)
                     } else {
                         Database::open(path)
                     }
-                    .and_then(|db| db.with_durability(durability))
+                    .and_then(|db| with_durability(db, durability))
                 }
                 _ => unreachable!(),
             }
@@ -1366,37 +1391,6 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "graph"))]
-    #[test]
-    fn builds_without_graph_reject_graph_requests_and_graph_files() {
-        assert_eq!(
-            call(0, b"{\"op\":\"capabilities\"}")["result"],
-            json!({"graph": false})
-        );
-        for request in [
-            json!({"op":"create","path":"never.vlite","dimensions":2}),
-            json!({"op":"list_graphs"}),
-            json!({"op":"anything","extra":1}),
-        ] {
-            let response = call(
-                0,
-                json!({"op":"graph","request":request})
-                    .to_string()
-                    .as_bytes(),
-            );
-            assert_eq!(response["error"]["code"], "unsupported", "{response}");
-        }
-        assert!(!std::path::Path::new("never.vlite").exists());
-        assert_eq!(
-            call(0, b"{\"op\":\"graph\"}")["error"]["code"],
-            "invalid_input"
-        );
-        assert_eq!(
-            call(0, b"{\"op\":\"capabilities\",\"x\":1}")["error"]["code"],
-            "invalid_input"
-        );
-    }
-
     #[test]
     fn abi_handles_close_and_reopen_without_reusing_ids() {
         let directory = tempfile::tempdir().unwrap();
@@ -1462,7 +1456,7 @@ mod tests {
     }
 
     #[test]
-    fn periodic_durability_is_opt_in_validated_and_syncable() {
+    fn periodic_is_the_default_and_durability_modes_are_validated() {
         let directory = tempfile::tempdir_in(".").unwrap();
         let path = directory.path().join("periodic.vlite");
         let feature = |value| json!({"op":"features","request":value});
@@ -1485,6 +1479,62 @@ mod tests {
             );
             assert!(!missing.exists());
         }
+        let missing = directory.path().join("bad-mode.vlite");
+        for options in [
+            json!({"durability":"none"}),
+            json!({"durability":"sometimes"}),
+            json!({"durability":"full","flush_interval_ms":10}),
+        ] {
+            let mut create = json!({"op":"create","path":missing,"dimensions":2});
+            for (key, value) in options.as_object().unwrap() {
+                create[key] = value.clone();
+            }
+            assert_eq!(code(0, create), "invalid_durability");
+            assert_eq!(
+                code(
+                    0,
+                    feature(json!({"op":"create","path":missing,"dimensions":2,
+                        "options":options}))
+                ),
+                "invalid_durability"
+            );
+            assert!(!missing.exists());
+        }
+        for options in [
+            json!({"durability":"full"}),
+            json!({"durability":"periodic"}),
+            json!({"flush_interval_ms":5}),
+        ] {
+            assert_eq!(
+                code(
+                    0,
+                    feature(json!({"op":"create","dimensions":2,"options":options}))
+                ),
+                "invalid_durability"
+            );
+        }
+        let memory: u64 = ok(
+            0,
+            feature(json!({"op":"create","dimensions":2,"options":{"durability":"none"}})),
+        )["handle"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        ok(memory, json!({"op":"put","id":"1","vector":[1,0]}));
+        ok(memory, json!({"op":"sync"}));
+        ok(memory, json!({"op":"close"}));
+        let full: u64 = ok(
+            0,
+            json!({"op":"create","path":directory.path().join("full.vlite"),
+                "dimensions":2,"durability":"full"}),
+        )["handle"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        ok(full, json!({"op":"put","id":"1","vector":[1,0]}));
+        ok(full, json!({"op":"close"}));
         let db: u64 = ok(
             0,
             json!({"op":"create","path":path,"dimensions":2,"flush_interval_ms":60_000}),

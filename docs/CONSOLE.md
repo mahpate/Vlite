@@ -159,7 +159,7 @@ credentials.
 
 ## Explore graphs
 
-**Graph** is a read-only explorer for experimental, opt-in
+**Graph** is a read-only explorer for opt-in
 [property graphs](GRAPH.md) in a graph-enabled file. Choose a graph and an
 operation, such as a traversal, then **Run query** or **Explain plan**. Results
 list nodes, edges and paths and draw up to 40 nodes. Change graphs with the

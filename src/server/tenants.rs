@@ -294,7 +294,6 @@ async fn delete(
                 ));
             }
             // Tenant graphs block deletion like tenant collections.
-            #[cfg(feature = "graph")]
             if service_clone.graph_enabled
                 && db
                     .list_graphs()?

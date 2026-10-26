@@ -171,10 +171,11 @@ and return an error, and path-based APIs fail at runtime. `bindings/wasm` is a
 wasm-bindgen package with a Node smoke test. The in-memory backend also works
 natively.
 
-## Graph-enabled files (experimental, `graph` feature)
+## Graph-enabled files (opt-in per file)
 
-The non-default Cargo feature `graph` (in release artifacts since v0.5.0) stores named
-property graphs in the same log as vectors. `Database::create_with_graph`
+Every build since v0.5.1 can store named property graphs in the same log as
+vectors (the `graph` Cargo feature is a no-op alias). New files stay plain
+unless graph is requested. `Database::create_with_graph`
 creates a v5 file with header flag `FLAG_GRAPH = 4`;
 `maintenance::enable_graph` writes a graph-enabled copy of a v4 or v5 file.
 Graph commits are op-12 frames on the same commit path as vectors, so locking,
@@ -204,7 +205,7 @@ sequences, checksums, encryption and commit timestamps work as usual.
   shortest-path search returns `Exhausted`, never an unproven "no path". Paged
   cursors are bound to the query and graph sequence: graph writes and
   attached-record updates invalidate them, unrelated vector writes do not.
-- **Maintenance.** In graph builds, `inspect`, `inspect_detail`, `verify`,
+- **Maintenance.** `inspect`, `inspect_detail`, `verify`,
   `backup`, `restore`, `compact*`, `reencrypt`, `restore_to`, `drill`, log
   export and read replicas handle graph files. `compact*` keeps graph IDs and
   never reuses node or edge IDs; like vector compaction, it restarts sequences
@@ -213,7 +214,7 @@ sequences, checksums, encryption and commit timestamps work as usual.
   copies the vector data to a v5 file without graphs and needs
   `confirm_graph_data_loss = true`. `vlite-maintain` gains `enable-graph` and
   `strip-graph --confirm-graph-data-loss`.
-- **Unsupported.** Builds without `graph`, and older releases, reject graph
+- **Unsupported.** Releases before v0.5.0, and v0.5.0 builds without `graph`, reject graph
   files with `UnsupportedFeature(4)`. `maintenance::upgrade` returns
   `GraphUnsupportedOperation` and change feeds return
   `GraphChangeFeedUnsupported`. The server answers `/v1/changes` with 501
@@ -222,18 +223,20 @@ sequences, checksums, encryption and commit timestamps work as usual.
   retrieval, query text and the server, MCP and SDK surfaces are in the
   [property graph guide](GRAPH.md).
 - **CLI.** `vlite-graph-cli` runs these reads and write batches with JSON; see
-  [Graph operations](TOOLS.md#graph-operations-experimental).
+  [Graph operations](TOOLS.md#graph-operations).
 
 ## Periodic (lazy) durability
 
-Every commit is synced before acknowledgement by default. A handle can opt in
-to `Durability::Periodic { interval }` (1 ms–60 s), which writes commits to the
-OS immediately and syncs them from a background flusher, for vector and graph
-writes alike. A process crash loses nothing acknowledged; an **OS crash or
-power loss can lose about the last interval**. Use `sync()` for an explicit
-durable point; `close()` syncs and a failed sync poisons the handle. The mode is
-not persisted. Server: `--durability periodic --flush-interval-ms N`; C ABI and
-Python: `flush_interval_ms` plus `sync`. See
+Since v0.5.1 file handles default to `Durability::Periodic` with a 60 s
+interval (1 ms–60 s allowed): commits reach the OS immediately and a background
+flusher syncs them, for vector and graph writes alike. A process crash loses
+nothing acknowledged; an **OS crash or power loss can lose up to about the last
+interval (~60 s by default)**. `Durability::Full` syncs every commit before
+acknowledgement. `Durability::None` is the in-memory mode: nothing touches
+disk and all data is lost on restart. Use `sync()` for an explicit durable
+point; `close()` syncs and a failed sync poisons the handle. The mode is not
+persisted. Server: `--durability periodic|full|none [--flush-interval-ms N]`;
+C ABI, Python and Node: `durability` and `flush_interval_ms` plus `sync`. See
 [periodic durability](REFERENCE.md#periodic-lazy-durability) for reopen cases.
 
 ## Limitations

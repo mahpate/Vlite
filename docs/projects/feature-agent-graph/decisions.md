@@ -663,7 +663,7 @@ graph-requiring binary and that `Dockerfile` and `release.yml` do not name it.
 
 **Contract.** `vlite-graph-cli --db PATH [--writable] [--explain] COMMAND [REQUEST]`,
 one JSON request object per call (`-` for stdin, capped at 64 MiB). The full
-user contract is in [`docs/TOOLS.md`](../../TOOLS.md#graph-operations-experimental).
+user contract is in [`docs/TOOLS.md`](../../TOOLS.md#graph-operations).
 
 - Reads (`graphs`, `get-node`, `get-edge`, `find-nodes`, `neighbors`,
   `traverse`, `shortest-path`) use `Database::open_read_only` and
@@ -977,3 +977,21 @@ not cover resource limits beyond `GraphLimits::CEILING`.
   GATE-008 request.
 - **Release note.** The ITEM-048 text in `docs/GRAPH.md` ships in
   `docs/RELEASE-0.5.0.md`.
+
+## Graph compiled by default, no longer experimental (v0.5.1, owner decision 2026-10-26)
+
+- **Decision.** The owner asked to "include the property graph by default and
+  remove the experimental tag/feature" for v0.5.1, and confirmed that new
+  files stay plain unless graph is explicitly requested.
+- **Build.** Graph code is always compiled. The `graph` Cargo feature (crate
+  and `vlite-ffi`) remains as an empty no-op alias so existing
+  `--features graph` / `server,graph` commands, scripts and CI still build;
+  `mcp-proxy` is unchanged. The graph-free code paths are removed.
+- **Files.** Unchanged: a file holds graphs only after `create_with_graph`,
+  `vlite-graph-cli init` or `vlite-maintain enable-graph`. Graph-enabled files
+  still reject change feeds, webhooks and upgrade.
+- **Docs.** "Experimental" labels for the property graph are removed from the
+  guides, READMEs and help text (PRD v1.2.23). Website and Dashboard copy is
+  updated separately.
+- **DO-005.** Still deferred; the baseline stays `81ff901` and the REG-010
+  policy is unchanged.

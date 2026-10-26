@@ -1,4 +1,4 @@
-//! Shared EPIC-006 test helpers (`graph` feature only): a graph workload that
+//! Shared EPIC-006 test helpers: a graph workload that
 //! touches every graph entry kind, and a canonical snapshot of everything
 //! observable through the public API.
 #![allow(dead_code)]

@@ -1,7 +1,7 @@
 //! `vlite-graph-cli`: one typed graph operation per invocation (FOLLOWUP-001).
 //!
-//! Opt-in: it requires the non-default `graph` and `json` features, which
-//! release archives enable since v0.5.0 (GATE-008). Every command maps onto an
+//! It requires the `json` feature (the property graph is compiled into every
+//! build since v0.5.1; release archives ship it since v0.5.0). Every command maps onto an
 //! existing `vlite::property_graph` call; the `query` command parses one
 //! read-only graph query text (docs/GRAPH-QUERY.md) into exactly one typed
 //! read and runs it with `GraphRef::query_text`. Reads

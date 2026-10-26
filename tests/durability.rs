@@ -1,9 +1,9 @@
-//! Opt-in `Durability::Periodic`: acknowledged commits are written before
-//! the call returns, so a process crash (here: `process::exit` in a child
-//! process, which runs no destructors and therefore no final sync) loses
-//! nothing; graph frames, encryption and commit timestamps use the same path.
+//! `Durability::Periodic` (the default since v0.5.1): acknowledged commits are
+//! written before the call returns, so a process crash (here: `process::exit`
+//! in a child process, which runs no destructors and therefore no final sync)
+//! loses nothing; graph frames, encryption and commit timestamps use the same
+//! path. `Durability::None` is the in-memory-only mode.
 
-#[cfg(feature = "graph")]
 mod graph_support;
 
 use std::path::Path;
@@ -84,8 +84,47 @@ fn periodic_commits_survive_a_process_crash() {
         assert_eq!(db.len(), 99, "{name}");
         assert!(db.get(7).unwrap().is_none());
         assert_eq!(db.get(99).unwrap().unwrap().payload, b"p99");
-        assert_eq!(db.durability(), Durability::Full);
+        assert_eq!(db.durability(), Durability::default());
     }
+}
+
+#[test]
+fn file_handles_default_to_periodic_and_memory_handles_are_none_only() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("modes.vlite");
+    let mut db = Database::create(&path, 1).unwrap();
+    assert_eq!(db.durability(), lazy());
+    assert_eq!(Durability::default(), lazy());
+    assert_eq!(vlite::DEFAULT_FLUSH_INTERVAL, Duration::from_secs(60));
+    assert!(matches!(
+        db.set_durability(Durability::None),
+        Err(vlite::Error::InvalidDurability(_))
+    ));
+    db.set_durability(Durability::Full).unwrap();
+    db.put(1, &[1.0], b"").unwrap();
+    db.close().unwrap();
+
+    let mut memory = Database::create_in_memory(1, CreateOptions::default()).unwrap();
+    assert_eq!(memory.durability(), Durability::None);
+    assert!(matches!(
+        memory.set_durability(Durability::Full),
+        Err(vlite::Error::InvalidDurability(_))
+    ));
+    memory.put(1, &[1.0], b"memory").unwrap();
+    assert_eq!(memory.unsynced_commits(), 0);
+    memory.sync().unwrap();
+    // Nothing is written anywhere: dropping the handle loses the data unless
+    // the caller kept `to_bytes()`.
+    let image = memory.to_bytes().unwrap();
+    drop(memory);
+    let reopened = Database::open_from_bytes(image, None).unwrap();
+    assert_eq!(reopened.durability(), Durability::None);
+    assert_eq!(reopened.get(1).unwrap().unwrap().payload, b"memory");
+    assert_eq!(
+        std::fs::read_dir(directory.path()).unwrap().count(),
+        1,
+        "in-memory handles never create files"
+    );
 }
 
 /// What an OS crash can leave of the unsynced suffix and what reopen does:
@@ -163,7 +202,6 @@ fn periodic_handles_reject_invalid_intervals_and_expose_sync() {
     db.close().unwrap();
 }
 
-#[cfg(feature = "graph")]
 mod graph {
     use super::*;
     use graph_support::*;

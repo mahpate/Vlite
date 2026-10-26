@@ -6,7 +6,6 @@ use crate::crypto::Cipher;
 pub use crate::logops::{
     LogSegment, RestoreReport, RestoreTarget, export_log_segment, reencrypt, restore_to,
 };
-#[cfg(feature = "graph")]
 #[doc(no_inline)]
 pub use crate::property_graph::{
     GraphCounts, GraphInspection, GraphVerification, StripGraphReport, enable_graph, inspect_graph,
@@ -362,7 +361,7 @@ fn compact_inner(
 /// IDs, vector bits, payloads and metadata are preserved in the `default`
 /// collection; the output gets a new lineage. The source is never modified and
 /// the destination must not exist. A v4 source is compacted as by `compact`.
-/// With the `graph` feature, graph-enabled sources are refused with
+/// Graph-enabled sources are refused with
 /// `GraphUnsupportedOperation` (LEG-010).
 pub fn upgrade(
     source_path: impl AsRef<Path>,
@@ -370,7 +369,6 @@ pub fn upgrade(
 ) -> Result<CompactionReport> {
     let mut file = source(source_path.as_ref())?;
     let loaded = format::load(&mut file)?;
-    #[cfg(feature = "graph")]
     if loaded.graph.is_some() {
         return Err(Error::GraphUnsupportedOperation);
     }
@@ -481,15 +479,9 @@ pub fn drill(backup_path: impl AsRef<Path>, workdir: impl AsRef<Path>) -> Result
 
 /// The drill's graph check: a graph-enabled backup must reopen to exactly
 /// its replayed graph state (LEG-011).
-#[cfg(feature = "graph")]
 fn graph_check(loaded: format::Loaded) -> impl FnOnce(&Database) -> bool {
     let graph = loaded.graph;
     move |db| db.graph == graph
-}
-
-#[cfg(not(feature = "graph"))]
-fn graph_check(_: format::Loaded) -> impl FnOnce(&Database) -> bool {
-    |_| true
 }
 
 fn probe(
@@ -665,7 +657,6 @@ pub(crate) fn write_v5(
             Some(&marker),
         ))?;
     }
-    #[cfg(feature = "graph")]
     if extra_flags & format::FLAG_GRAPH != 0
         && let Some(state) = &loaded.graph
     {

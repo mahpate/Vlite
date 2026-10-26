@@ -1,7 +1,5 @@
-#[cfg(feature = "graph")]
 #[path = "tool_support/graph_json.rs"]
 mod graph_json;
-#[cfg(feature = "graph")]
 #[path = "tool_support/graph_mcp.rs"]
 mod graph_mcp;
 #[cfg(feature = "mcp-proxy")]
@@ -485,7 +483,6 @@ fn tool_call(
     name: &str,
     args: &Value,
 ) -> ToolResult {
-    #[cfg(feature = "graph")]
     if let Some(result) = graph_mcp::call(db, read_only, name, args) {
         return result;
     }
@@ -505,7 +502,6 @@ fn tool_call(
             let bytes = std::fs::metadata(path).map(|m| m.len()).ok();
             #[allow(unused_mut)]
             let mut info = json!({"format_version":db.format_version(),"dimensions":dimensions,"count":total,"collections":items,"read_only":read_only,"file_bytes":bytes});
-            #[cfg(feature = "graph")]
             graph_mcp::extend_info(db, &mut info)?;
             Ok(info)
         }
@@ -740,10 +736,7 @@ fn dispatch(backend: &mut Backend, config: &Config, message: Value) -> Option<Va
             Backend::Local(db) => {
                 #[allow(unused_mut)]
                 let mut tools = tool_definitions(config.read_only);
-                #[cfg(feature = "graph")]
                 tools.extend(graph_mcp::tool_definitions(db, config.read_only));
-                #[cfg(not(feature = "graph"))]
-                let _ = db;
                 Some(json!({"tools":tools}))
             }
             #[cfg(feature = "mcp-proxy")]

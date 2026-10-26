@@ -1,4 +1,4 @@
-#![cfg(all(feature = "server", feature = "graph"))]
+#![cfg(feature = "server")]
 //! TEST-015 (feature-agent-graph EPIC-007, ITEM-030; AC-028, FM-017): the
 //! existing REST, gRPC and webhook surfaces on a vector-only file, an empty
 //! graph-enabled file (records, no graphs) and a populated graph-enabled file

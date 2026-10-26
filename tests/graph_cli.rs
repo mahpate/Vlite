@@ -5,7 +5,7 @@
 //! `{"error":{"code","message"}}` object on stderr and a nonzero exit for
 //! failure, u64 identifiers as decimal strings, read commands that never write
 //! and writes that need `--writable`.
-#![cfg(all(feature = "graph", feature = "json"))]
+#![cfg(feature = "json")]
 
 mod cli_support;
 

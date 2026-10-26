@@ -21,7 +21,7 @@ gRPC, the SDKs and MCP are unchanged.
 Editors and viewers are bound to one tenant, and see only its collections, or
 to all collections.
 
-With the experimental `graph` feature (release builds include it), signed-in
+With the property graph (compiled into every build since v0.5.1), signed-in
 viewers also get `graph_read` and editors `graph_read` and `graph_write`,
 narrowed per account by `graphs` and `graph_access`
 ([graph scoping](GRAPH.md#surfaces)). Graphs are

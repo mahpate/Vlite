@@ -1,5 +1,5 @@
 //! EPIC-006 TEST-004 (ITEM-026): crash and fault injection on graph-enabled
-//! files, built only with the `graph` feature.
+//! files.
 //!
 //! A crash during a graph append leaves the state before or after the batch,
 //! never a part of it (AC-005, INV-007): every truncation of the last graph

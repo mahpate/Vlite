@@ -1,5 +1,5 @@
 //! EPIC-015 ITEM-051 graph query text integration test (REQ-070, REQ-071,
-//! AC-023), built only with the `graph` feature.
+//! AC-023).
 //!
 //! Every accepted text must parse to exactly the typed `GraphQuery` it stands
 //! for, and `GraphRef::query_text` must return exactly what

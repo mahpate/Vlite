@@ -36,7 +36,6 @@ mod audit;
 mod collections;
 mod credentials;
 mod features;
-#[cfg(feature = "graph")]
 mod graph;
 mod group_commit;
 pub use group_commit::GroupCommitConfig;
@@ -182,10 +181,8 @@ pub struct Service {
     group_commit: Option<Arc<group_commit::Coordinator>>,
     snapshot_reads: bool,
     /// Fixed for the service lifetime: the owned file never changes.
-    #[cfg(feature = "graph")]
     graph_enabled: bool,
     /// EPIC-011: graph read/write guard hold times.
-    #[cfg(feature = "graph")]
     graph_stats: Arc<graph::GuardStats>,
 }
 
@@ -233,7 +230,6 @@ impl Service {
         })?;
         let format_version = database.format_version();
         let lineage = database.lineage();
-        #[cfg(feature = "graph")]
         let graph_enabled = database.is_graph_enabled();
         let etag_ident: Arc<str> = match lineage {
             Some(lineage) => format!("{lineage:016x}").into(),
@@ -268,9 +264,7 @@ impl Service {
             started: Instant::now(),
             group_commit: None,
             snapshot_reads: true,
-            #[cfg(feature = "graph")]
             graph_enabled,
-            #[cfg(feature = "graph")]
             graph_stats: Arc::default(),
         })
     }
@@ -393,7 +387,6 @@ impl Service {
     /// LEG-019/LEG-020: change-feed consumers (REST `/v1/changes`, gRPC
     /// `Changes`/`WatchChanges`, webhooks) reject graph-enabled files
     /// explicitly (REQ-053) before parsing input or opening a stream.
-    #[cfg(feature = "graph")]
     fn reject_graph_feed(&self) -> Result<(), ApiError> {
         if self.graph_enabled {
             return Err(Error::GraphChangeFeedUnsupported.into());
@@ -541,10 +534,7 @@ fn configured_routes(service: Service) -> Router {
         *published = Some(service.admin.clone());
     }
     let observation = service.clone();
-    #[cfg(feature = "graph")]
     let graph_routes = graph::routes();
-    #[cfg(not(feature = "graph"))]
-    let graph_routes = Router::new();
     admin::routes()
         .merge(graph_routes)
         .merge(tls::routes())
@@ -675,12 +665,9 @@ fn configured_routes(service: Service) -> Router {
 }
 
 /// The served OpenAPI document: `openapi.json` unchanged, plus the graph
-/// paths fragment in graph builds (RD-013).
+/// paths fragment (RD-013).
 fn openapi_document() -> &'static str {
-    #[cfg(feature = "graph")]
-    return graph::openapi();
-    #[cfg(not(feature = "graph"))]
-    include_str!("openapi.json")
+    graph::openapi()
 }
 
 fn dashboard_asset(content_type: &'static str, content: &'static str) -> impl IntoResponse {
@@ -770,7 +757,6 @@ enum Need {
 /// listed is admin-only (deny-unmapped).
 fn permission(method: &Method, route: &str) -> Need {
     use credentials::Op;
-    #[cfg(feature = "graph")]
     if let Some(op) = graph::route_op(method, route) {
         return Need::Op(op, Reach::Filtered);
     }
@@ -894,7 +880,6 @@ fn authorize(
             || route == "/v1/collections/{collection}/query"
             || route == "/v1/collections/{collection}/embed"
             || route == "/v1/collections/{collection}/search/disk-ann");
-    #[cfg(feature = "graph")]
     let search = search || graph::read_post(method, route);
     let read_only_allowed =
         path.starts_with("/v1/auth/") || (!path.starts_with("/v1/admin/") && (read || search));
@@ -1514,7 +1499,6 @@ impl From<Error> for ApiError {
             // LEG-017: every graph variant is explicit, never the 500 below.
             // State conflicts (including references to missing graph
             // entities) are 409, invalid input 422, unsupported surfaces 501.
-            #[cfg(feature = "graph")]
             Error::GraphsNotEnabled
             | Error::GraphExists
             | Error::GraphNotFound
@@ -1535,7 +1519,6 @@ impl From<Error> for ApiError {
             | Error::GraphSchemaViolation { .. } => {
                 Self::new(StatusCode::CONFLICT, graph_code(&error), error.to_string())
             }
-            #[cfg(feature = "graph")]
             Error::GraphsRequireV5
             | Error::InvalidGraphName
             | Error::GraphLimitExceedsCeiling { .. }
@@ -1545,7 +1528,6 @@ impl From<Error> for ApiError {
                 graph_code(&error),
                 error.to_string(),
             ),
-            #[cfg(feature = "graph")]
             Error::GraphChangeFeedUnsupported => Self::new(
                 StatusCode::NOT_IMPLEMENTED,
                 graph_code(&error),
@@ -1558,7 +1540,6 @@ impl From<Error> for ApiError {
 
 /// Stable REST error code (gRPC `vlite-error-code` trailer) of each graph
 /// `Error` variant: its snake_case name.
-#[cfg(feature = "graph")]
 fn graph_code(error: &Error) -> &'static str {
     match error {
         Error::GraphsNotEnabled => "graphs_not_enabled",
@@ -3671,7 +3652,7 @@ mod tests {
 
 /// LEG-017 (TEST-015): every graph `Error` variant has an explicit status and
 /// stable code; none reaches the generic 500 arm.
-#[cfg(all(test, feature = "graph"))]
+#[cfg(test)]
 mod graph_errors {
     use super::*;
 

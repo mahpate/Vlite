@@ -1,4 +1,4 @@
-# Graph query text (experimental, `graph` feature)
+# Graph query text
 
 VLite's property graph is read through the typed `GraphQuery` API
 ([`GraphRef::query`](../src/property_graph/read.rs)). The **graph query text** is
@@ -151,7 +151,7 @@ invalid value. The CLI codes are `graph_query_<kind>`.
 
 The Dashboard's read-only **Graph** workspace (Data → Graph, FOLLOWUP-002,
 `src/dashboard/graph.js`) uses the typed REST routes, not the query text. A
-server without the `graph` feature or a file without graphs (409
+server older than v0.5.0 or a file without graphs (409
 `graphs_not_enabled`) shows an explanation instead of the explorer. Credentials
 without `graph_read` or a graph binding see a "no graph access" notice.
 
@@ -170,6 +170,6 @@ Signed-in accounts' graph access follows their role and the `graphs` and
 
 The query text was added at the repository owner's direction on 2026-10-25.
 That direction skipped the EPIC-014 LLM evaluation (GATE-005 experiments were
-not run). It is experimental and opt-in, like the rest of the `graph`
-feature. MCP exposes it as the read-only `vlite_graph_query` tool (ITEM-052),
+not run). Like the rest of the property graph it is compiled into every build
+since v0.5.1 and works on graph-enabled files. MCP exposes it as the read-only `vlite_graph_query` tool (ITEM-052),
 and REST as `POST /v1/graphs/{graph}/query`.

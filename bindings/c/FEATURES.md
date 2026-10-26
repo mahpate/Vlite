@@ -39,14 +39,16 @@ except `configure_vector`, which defaults to squared L2.
 ## Handle-zero operations
 
 - `create`: `dimensions`, optional `path` (null/omitted for memory), `options`:
-  `{format?:3|4|5, credentials?:{key_base64?:string,passphrase?:string}, commit_timestamps?:bool, flush_interval_ms?:number}`.
+  `{format?:3|4|5, credentials?:{key_base64?:string,passphrase?:string}, commit_timestamps?:bool, durability?:"periodic"|"full"|"none", flush_interval_ms?:number}`.
   Returns `{handle}`. A raw key is exactly 32 bytes, padded base64. Key and
   passphrase are mutually exclusive. Encryption/timestamps imply V5 unless an
   incompatible explicit format is provided. Default remains V3.
-  `flush_interval_ms` (1–60000) opts in to periodic durability: an OS crash or
-  power loss can lose acknowledged writes from roughly the last interval. Use the
-  base `{"op":"sync"}` request to force a sync; see `bindings/README.md`.
-- `open`: `path`, optional `credentials`, `flush_interval_ms`; returns `{handle}`.
+  File databases default to periodic durability every 60 s (`flush_interval_ms`
+  1–60000): an OS crash or power loss can lose acknowledged writes from roughly
+  the last interval. `"full"` syncs every commit; `"none"` is the only mode for
+  in-memory databases. Use the base `{"op":"sync"}` request to force a sync; see
+  `bindings/README.md`.
+- `open`: `path`, optional `credentials`, `durability`, `flush_interval_ms`; returns `{handle}`.
 - `open_from_bytes`: `bytes_base64`, optional `credentials`; returns `{handle}`.
 - `restore_to`: `log_path`, new `destination`, optional `base_backup`, exactly
   one of `sequence` / `timestamp_ms`, optional `credentials`. Returns
@@ -142,14 +144,14 @@ key IDs are non-secret. Passphrases use engine Argon2id defaults and stored KDF
 parameters. Losing keys loses data. In-memory databases are durable only after
 the host saves `to_bytes()` output.
 
-## Property graph (opt-in `graph` feature)
+## Property graph
 
 `{"op":"capabilities"}` (any handle, no other fields) returns `{"graph": bool}`.
 Graph commands are carried as `{"op":"graph","request":{"op":..., ...}}` and are
-compiled only with `cargo build -p vlite-ffi --features graph`; the feature is
-not default, but release libraries, wheels and Node release tarballs enable it since
-v0.5.0. Without it every graph request returns `unsupported` (libraries predating this envelope return
-`invalid_input` for the unknown `graph` op). The JSON mirrors the
+compiled into every library since v0.5.1 (the `graph` feature is a no-op
+alias). Libraries from v0.5.0 built without it return `unsupported` for every
+graph request (libraries predating this envelope return `invalid_input` for the
+unknown `graph` op). The JSON mirrors the
 `vlite-graph-cli`: node/edge/record IDs, revisions and sequences are decimal
 strings (JSON integers are also accepted on input), unknown fields are rejected,
 and node/edge selectors are `{"id":"…"}` or `{"key":"…"}`.
@@ -230,6 +232,6 @@ Floats are row-major, dimensions must be positive, and the count must equal
 `operations.length * dimensions` without overflow, with at most 4096 rows.
 An empty row list accepts a zero-length buffer. Puts go through the existing
 atomic batch implementation, including validation, read-only protection,
-serialization and sync-before-acknowledgment. Input vectors are copied into
+serialization and the handle's durability mode. Input vectors are copied into
 owned operations before execution; neither call retains caller pointers.
 No owner locks, file locks or durability policies are relaxed.

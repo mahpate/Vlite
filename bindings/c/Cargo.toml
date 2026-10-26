@@ -1,6 +1,6 @@
 [package]
 name = "vlite-ffi"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT"
@@ -10,9 +10,9 @@ description = "Versioned C ABI for the VLite embedded database"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-# Opt-in property-graph commands. Release libraries, wheels and Node packages
-# enable them since v0.5.0 (GATE-008); the default crate build stays graph-free.
-graph = ["vlite/graph"]
+# Property-graph commands are always built since v0.5.1; `graph` is a no-op
+# alias kept so existing `--features graph` builds still work.
+graph = []
 
 [dependencies]
 vlite = { path = "../..", features = ["json"] }

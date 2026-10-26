@@ -1,10 +1,10 @@
-//! Named property graphs stored in graph-enabled VLite files (`graph` feature).
+//! Named property graphs stored in graph-enabled VLite files.
 //!
 //! A graph-enabled file is a format-v5 file whose header carries `FLAG_GRAPH`
 //! (DO-001). Graph changes are op-12 frames (DO-003) written through the same
 //! writer, checksums, encryption, sequence and locking as vector commits, and
-//! replayed atomically on open. Builds without the `graph` feature and older
-//! releases reject these files with `Error::UnsupportedFeature(4)`.
+//! replayed atomically on open. Releases before v0.5.0 (and v0.5.0 builds
+//! without the then-optional `graph` feature) reject these files with `Error::UnsupportedFeature(4)`.
 //!
 //! Status (EPIC-004 mutations): graphs can be created, dropped and listed;
 //! [`GraphMut`] writes nodes, edges, attachments and attached-collection
@@ -513,7 +513,7 @@ impl Database {
     /// Creates a graph-enabled database: format V5 with the `FLAG_GRAPH`
     /// header bit, combinable with encryption and commit timestamps. An
     /// explicit V3/V4 `format` returns `GraphsRequireV5`. Graph-unaware
-    /// readers, including builds without the `graph` feature, reject the
+    /// readers, including pre-0.5.1 builds without the `graph` feature, reject the
     /// file with `UnsupportedFeature(4)`. Ordinary files never become
     /// graph-enabled.
     pub fn create_with_graph(

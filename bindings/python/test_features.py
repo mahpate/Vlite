@@ -45,10 +45,13 @@ class Features(unittest.TestCase):
             action()
         self.assertEqual(caught.exception.code, code)
 
-    def test_periodic_durability_is_opt_in_and_syncable(self):
+    def test_periodic_durability_is_default_and_modes_are_validated(self):
         plain = self.directory / "periodic.vlite"
         encrypted = self.directory / "periodic-encrypted.vlite"
         self.error("invalid_durability", lambda: self.native.create(plain, 2, flush_interval_ms=0))
+        self.error("invalid_durability", lambda: self.native.create(plain, 2, durability="none"))
+        self.error("invalid_durability", lambda: self.native.create(plain, 2, durability="full",
+                                                                    flush_interval_ms=10))
         self.error("invalid_durability", lambda: self.native.create(encrypted, 2, format=5, key=b"k" * 32,
                                                                     flush_interval_ms=60001))
         self.assertFalse(plain.exists())
@@ -67,6 +70,11 @@ class Features(unittest.TestCase):
             self.assertEqual(db.info()["records"], 1)
         with self.native.open(plain, read_only=True, flush_interval_ms=10) as db:
             self.assertEqual(db.info()["records"], 3)
+            db.sync()
+        with self.native.open(plain, durability="full") as db:
+            db.put("4", [1, 1])
+        with self.native.open(plain) as db:
+            self.assertEqual(db.info()["records"], 4)
             db.sync()
 
     def test_ttl_metadata_and_aggregated_geo_retrieval(self):

@@ -239,7 +239,6 @@ pub fn configured_admin_router(
         .transpose()?;
     // LEG-019: stored webhooks on a graph-enabled file fail startup before
     // any audit, credential, scheduler or webhook state is touched.
-    #[cfg(feature = "graph")]
     super::webhooks::reject_graph_subscriptions(&service, directory.as_deref())?;
     // The audit log and credential store live in the private admin directory.
     // Scoped credentials additionally require an admin token: without one
@@ -410,10 +409,7 @@ async fn capabilities(
     let v4 = s.format_version >= 4;
     // LEG-019/REQ-053: graph-enabled files reject change-feed consumers
     // (`/v1/changes`, webhooks), so never advertise them there.
-    #[cfg(feature = "graph")]
     let feed = !s.graph_enabled;
-    #[cfg(not(feature = "graph"))]
-    let feed = true;
     let backups = s.admin.directory.is_some();
     let scoped = s.admin.credentials.is_some();
     let audit_log = s.admin.audit_log.is_some();

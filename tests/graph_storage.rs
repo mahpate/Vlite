@@ -1,5 +1,4 @@
-//! EPIC-003 graph storage foundation (ITEM-009/010/011/012/013/014), built
-//! only with the `graph` feature.
+//! EPIC-003 graph storage foundation (ITEM-009/010/011/012/013/014).
 //!
 //! Covers graph-enabled create/reopen in plain, encrypted and commit-timestamp
 //! files, strict op-12 replay (checksums, prefix fields, body decoding,

@@ -1,5 +1,4 @@
-//! EPIC-010 hybrid pivot-and-expand retrieval (ITEM-039, TEST-011), built
-//! only with the `graph` feature.
+//! EPIC-010 hybrid pivot-and-expand retrieval (ITEM-039, TEST-011).
 //!
 //! `GraphRef::retrieve` runs a vector/text pivot through the existing
 //! `search_hybrid`, maps pivot records to nodes through attachments,

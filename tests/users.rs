@@ -1018,7 +1018,6 @@ async fn editor_and_viewer_accounts_need_a_v4_database() {
 
 /// Graph knobs: `graphs` (absent = role default, `[]` = none, or names) and
 /// `graph_access` (`none` | `read` | `write`, capped by role).
-#[cfg(feature = "graph")]
 #[tokio::test]
 async fn graph_knobs_are_validated_and_reported() {
     let dir = tempfile::tempdir_in(".").unwrap();
@@ -1178,23 +1177,18 @@ async fn account_files_without_graph_knobs_still_load() {
     users["users"][0]["graph_access"] = json!("read");
     std::fs::write(&file, users.to_string()).unwrap();
     let service = Service::new(Database::open(&path).unwrap());
-    let loaded = configured_admin_router(service.clone(), options(dir.path()));
-    if cfg!(feature = "graph") {
-        let app = loaded.unwrap();
-        let list = admin(&app, "GET", "/v1/admin/users", Value::Null).await;
-        assert_eq!(
-            list.body["items"][0]["graph_access"], "read",
-            "{}",
-            list.body
-        );
-        assert_eq!(
-            list.body["items"][0]["graphs"],
-            Value::Null,
-            "{}",
-            list.body
-        );
-    } else {
-        assert!(loaded.is_err());
-    }
+    let app = configured_admin_router(service.clone(), options(dir.path())).unwrap();
+    let list = admin(&app, "GET", "/v1/admin/users", Value::Null).await;
+    assert_eq!(
+        list.body["items"][0]["graph_access"], "read",
+        "{}",
+        list.body
+    );
+    assert_eq!(
+        list.body["items"][0]["graphs"],
+        Value::Null,
+        "{}",
+        list.body
+    );
     service.close().await.unwrap();
 }

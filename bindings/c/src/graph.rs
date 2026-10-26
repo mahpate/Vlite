@@ -1,4 +1,4 @@
-//! Opt-in property-graph operations (`graph` feature) carried by the existing
+//! Property-graph operations carried by the existing
 //! owned JSON ABI as `{"op":"graph","request":{"op":...}}`.
 //!
 //! The request and response JSON mirror the opt-in `vlite-graph-cli`:
@@ -1026,9 +1026,9 @@ pub(super) fn execute(state: &mut State, handle: u64, request: Value) -> Result<
         if handle != 0 {
             return Err(invalid("graph create requires handle 0"));
         }
-        let (options, durability) = features::create_options(options)?;
+        let (options, durability) = features::create_options(options, false)?;
         let db = Database::create_with_graph(path, dimensions, options)
-            .and_then(|db| db.with_durability(durability))
+            .and_then(|db| with_durability(db, durability))
             .map_err(graph_failure)?;
         return features::insert(state, handle, db);
     }

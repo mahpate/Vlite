@@ -193,7 +193,6 @@ fn status_code(error: &ApiError) -> tonic::Code {
         (503, "commit_indeterminate") => Code::Unknown,
         (400..=499, _) => Code::InvalidArgument,
         // LEG-020: change feeds on graph-enabled files.
-        #[cfg(feature = "graph")]
         (501, _) => Code::Unimplemented,
         _ => Code::Internal,
     }
@@ -1601,7 +1600,6 @@ impl VLite for Adapter {
             false,
             false,
             |service, _, _, request| async move {
-                #[cfg(feature = "graph")]
                 service.reject_graph_feed()?;
                 let cursor = if request.cursor.is_empty() {
                     crate::changes::FeedCursor::beginning()
@@ -1654,7 +1652,6 @@ impl VLite for Adapter {
                 false,
                 |_service, _, request_id, request| async move {
                     // Fails the call itself, so no stream ever opens.
-                    #[cfg(feature = "graph")]
                     _service.reject_graph_feed()?;
                     let cursor = if request.cursor.is_empty() {
                         crate::changes::FeedCursor::beginning()
@@ -2196,7 +2193,7 @@ fn request_collection<T: 'static>(request: &T) -> String {
 
 /// LEG-017 (TEST-015): graph errors keep explicit gRPC codes and the stable
 /// REST code in the trailer.
-#[cfg(all(test, feature = "graph"))]
+#[cfg(test)]
 mod graph_errors {
     use super::*;
 

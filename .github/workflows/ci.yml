@@ -30,19 +30,16 @@ jobs:
         run: cargo test --locked --features graph,json --test graph_cli
       - name: Server with graph but without grpc or mcp (ITEM-027..030; catches cfg gaps hidden by --all-features)
         run: cargo test --locked --features server,graph --test graph_server_surfaces --test rest_graph
-      - name: Graph-off parity in default features (C-1; includes graph_regression and graph_compat)
+      - name: Default features (graph always compiled since v0.5.1; includes graph_regression and graph_compat)
         run: cargo test --locked --workspace --all-targets
       - name: REG-008 served OpenAPI bytes and MCP tools/list/outputs match the baseline capture
         run: cargo test --locked --features server,mcp --test graph_surface_parity
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
-      - name: REG-001 public API item list matches the baseline
+      - name: REG-001 public API item list matches the baseline (additions under vlite::property_graph allowed, C-2)
         if: matrix.toolchain == 'stable'
         run: python scripts/api_surface.py check
-      - name: REG-001 with graph, only additions under vlite::property_graph are allowed (C-2)
-        if: matrix.toolchain == 'stable'
-        run: python scripts/api_surface.py check --features graph
       - name: Build optional gRPC server
         run: cargo build --locked --features grpc --bin vlite-server
       - name: Install protobuf smoke-test dependencies
@@ -53,12 +50,10 @@ jobs:
       - run: python tests/embedded_e2e.py target/debug/${{ runner.os == 'Windows' && 'vlite_ffi.dll' || runner.os == 'macOS' && 'libvlite_ffi.dylib' || 'libvlite_ffi.so' }}
       - name: Verify typed float32 embedded inputs and legacy fallback
         run: python bindings/python/test_typed_vectors.py
-      - name: Default vlite-ffi rejects graph commands as unsupported (ITEM-046)
+      - name: Default vlite-ffi serves graph commands (always compiled since v0.5.1; ITEM-046)
         run: python bindings/python/test_graph.py
         env:
-          VLITE_TEST_EXPECT_GRAPH: "0"
-      - name: Opt-in vlite-ffi graph commands, as shipped in release libraries (ITEM-045)
-        run: cargo test --locked -p vlite-ffi --features graph --target-dir target/graph-ffi
+          VLITE_TEST_EXPECT_GRAPH: "1"
       - run: python benchmarks/embedded.py --library target/debug/${{ runner.os == 'Windows' && 'vlite_ffi.dll' || runner.os == 'macOS' && 'libvlite_ffi.dylib' || 'libvlite_ffi.so' }} --records 12 --dimensions 3 --trials 1 --read-passes 2 --output embedded-smoke.json
       - run: python tests/benchmark_comparison.py
       - run: python tests/native_campaign.py
@@ -160,13 +155,13 @@ jobs:
       - run: npm --prefix bindings/node test
         env:
           VLITE_TEST_EXPECT_GRAPH: "1"
-      - name: Default vlite-ffi rejects Node graph methods as unsupported (ITEM-047)
+      - name: Default vlite-ffi serves Node graph methods (always compiled since v0.5.1; ITEM-047)
         working-directory: bindings/node
         run: |
           cargo build --locked --release -p vlite-ffi --target-dir ../../target/node-default
           node --test graph.test.mjs
         env:
-          VLITE_TEST_EXPECT_GRAPH: "0"
+          VLITE_TEST_EXPECT_GRAPH: "1"
           VLITE_TEST_LIBRARY: ${{ github.workspace }}/target/node-default/release/${{ runner.os == 'Windows' && 'vlite_ffi.dll' || runner.os == 'macOS' && 'libvlite_ffi.dylib' || 'libvlite_ffi.so' }}
       - run: npm --prefix bindings/node run typecheck
       - run: node bindings/node/pack.mjs node-packages

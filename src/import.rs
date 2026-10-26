@@ -554,7 +554,6 @@ impl Database {
         }
         // LEG-007: a delete of an attached record rejects the whole chunk,
         // independent of the policy, after idempotency and conflict checks.
-        #[cfg(feature = "graph")]
         self.ensure_no_attached_delete(collection, operations)?;
         if invalid_rows != 0 && policy == InvalidRowPolicy::RejectChunk {
             report.outcome = ImportChunkOutcome::Rejected;

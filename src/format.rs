@@ -19,20 +19,15 @@ pub(crate) const FLAG_ENCRYPTED: u16 = 1;
 pub(crate) const FLAG_TIMESTAMPS: u16 = 2;
 pub(crate) const KNOWN_FLAGS: u16 = FLAG_ENCRYPTED | FLAG_TIMESTAMPS;
 /// Header flag (v5, DO-001): the file stores named property graphs in op-12
-/// frames. Every reader of a build with the `graph` feature accepts it
+/// frames. Every reader of a graph-aware build (all builds since v0.5.1) accepts it
 /// (paths that cannot serve graph files, such as change feeds and `upgrade`,
-/// reject them explicitly); builds without the feature reject it with
+/// reject them explicitly); older builds reject it with
 /// `UnsupportedFeature(FLAG_GRAPH)`.
-#[cfg(feature = "graph")]
 pub(crate) const FLAG_GRAPH: u16 = crate::property_graph::engine::codec::FLAG_GRAPH;
 /// Graph frame operation (DO-003), valid only in files carrying `FLAG_GRAPH`.
-#[cfg(feature = "graph")]
 const OP_GRAPH: u8 = crate::property_graph::engine::codec::OP_GRAPH;
 /// Header flags this build accepts in addition to `KNOWN_FLAGS`.
-#[cfg(feature = "graph")]
 const GRAPH_READER_FLAGS: u16 = FLAG_GRAPH;
-#[cfg(not(feature = "graph"))]
-const GRAPH_READER_FLAGS: u16 = 0;
 pub(crate) const OP_TIME_ANCHOR: u8 = 11;
 pub(crate) const PREFIX_SIZE: usize = 36;
 pub(crate) const FOOTER_SIZE: usize = 16;
@@ -312,7 +307,6 @@ pub(crate) struct Loaded {
     /// for files created with commit timestamps.
     pub commit_times: Vec<(u64, u64)>,
     /// Replayed named graphs; `Some` exactly when the header has `FLAG_GRAPH`.
-    #[cfg(feature = "graph")]
     pub graph: Option<crate::property_graph::engine::GraphState>,
 }
 
@@ -511,7 +505,6 @@ fn wrap(
 
 /// Graph frame (op 12, DO-003) carrying one encoded graph body of `count`
 /// entries. Collection, reserved and ID prefix fields are zero.
-#[cfg(feature = "graph")]
 pub(crate) fn graph_frame(sequence: u64, count: u32, body: &[u8]) -> Vec<u8> {
     wrap(OP_GRAPH, 0, sequence, 0, count, body.len() as u32, body)
 }
@@ -1247,7 +1240,7 @@ pub(crate) fn load<R: Read + Seek>(file: &mut R) -> Result<Loaded> {
     load_with(file, None)
 }
 
-/// Full replay. With the `graph` feature it also accepts graph-enabled files
+/// Full replay. It also accepts graph-enabled files
 /// and replays their op-12 frames into `Loaded::graph`.
 pub(crate) fn load_with<R: Read + Seek>(
     file: &mut R,
@@ -1284,7 +1277,6 @@ pub(crate) fn load_with<R: Read + Seek>(
         flags,
         cipher: cipher.clone(),
         commit_times: Vec::new(),
-        #[cfg(feature = "graph")]
         graph: (flags & FLAG_GRAPH != 0).then(crate::property_graph::engine::GraphState::new),
     };
     let mut jobs: HashMap<u64, JobReplay> = HashMap::new();
@@ -1356,9 +1348,7 @@ pub(crate) fn load_with<R: Read + Seek>(
             5..=7 => version >= V4,
             8 => version >= V5,
             9 | 10 => version >= V5,
-            // FLAG_GRAPH only passes the header check in graph builds, and
-            // only on v5.
-            #[cfg(feature = "graph")]
+            // FLAG_GRAPH only passes the header check on v5.
             OP_GRAPH => version >= V5 && flags & FLAG_GRAPH != 0,
             _ => false,
         };
@@ -1381,7 +1371,6 @@ pub(crate) fn load_with<R: Read + Seek>(
         let id = u64_at(&prefix, 16);
         let count = u32_at(&prefix, 24) as usize;
         let payload_len = u32_at(&prefix, 28) as usize;
-        #[cfg(feature = "graph")]
         if operation == OP_GRAPH
             && !crate::property_graph::valid_frame_prefix(id, count, payload_len)
         {
@@ -1512,13 +1501,11 @@ pub(crate) fn load_with<R: Read + Seek>(
                     metadata: crate::Metadata::new(),
                 };
                 collection_mut(&mut loaded, collection_id).put(id, record, sequence, None);
-                #[cfg(feature = "graph")]
                 touch_attached(&mut loaded, collection_id, id, sequence);
             }
             4 => {
                 let record = decode_extended(body, target_dimensions, offset, version >= V5)?;
                 collection_mut(&mut loaded, collection_id).put(id, record, sequence, None);
-                #[cfg(feature = "graph")]
                 touch_attached(&mut loaded, collection_id, id, sequence);
             }
             9 => {
@@ -1527,7 +1514,6 @@ pub(crate) fn load_with<R: Read + Seek>(
                     return Err(corrupt(offset, "invalid expiry marker"));
                 }
                 let expiry = (expiry_flag == 1).then(|| u64_at(body, 1));
-                #[cfg(feature = "graph")]
                 ensure_attached_record_survives(
                     &loaded,
                     collection_id,
@@ -1537,7 +1523,6 @@ pub(crate) fn load_with<R: Read + Seek>(
                 )?;
                 let record = decode_extended(&body[9..], target_dimensions, offset, true)?;
                 collection_mut(&mut loaded, collection_id).put(id, record, sequence, expiry);
-                #[cfg(feature = "graph")]
                 touch_attached(&mut loaded, collection_id, id, sequence);
             }
             8 => {
@@ -1545,11 +1530,9 @@ pub(crate) fn load_with<R: Read + Seek>(
                     .map_err(|_| corrupt(offset, "invalid metadata update"))?;
                 collection_mut(&mut loaded, collection_id)
                     .update_metadata(id, metadata, sequence, offset)?;
-                #[cfg(feature = "graph")]
                 touch_attached(&mut loaded, collection_id, id, sequence);
             }
             2 => {
-                #[cfg(feature = "graph")]
                 ensure_attached_record_survives(&loaded, collection_id, id, true, offset)?;
                 collection_mut(&mut loaded, collection_id).delete(id);
             }
@@ -1559,7 +1542,6 @@ pub(crate) fn load_with<R: Read + Seek>(
                 if let Some(marker) = &marker {
                     replay_marker(&mut jobs, collection_id, marker, operations.len(), offset)?;
                 }
-                #[cfg(feature = "graph")]
                 for operation in &operations {
                     match operation {
                         Mutation::Delete { id } => {
@@ -1667,7 +1649,6 @@ pub(crate) fn load_with<R: Read + Seek>(
                     .imports
                     .push(LoadedImportMarker::CollectionDropped(collection));
             }
-            #[cfg(feature = "graph")]
             OP_GRAPH => crate::property_graph::frame::replay(
                 loaded
                     .graph
@@ -1728,7 +1709,6 @@ fn collection_mut(loaded: &mut Loaded, id: u16) -> &mut LoadedCollection {
         .expect("collection existence checked before decoding")
 }
 
-#[cfg(feature = "graph")]
 fn ensure_attached_record_survives(
     loaded: &Loaded,
     collection: u16,
@@ -1752,7 +1732,6 @@ fn ensure_attached_record_survives(
 
 /// Live writes advance the owning graph's `graph_sequence` when an attached
 /// record changes (Section 3.5); replay must rebuild the same value.
-#[cfg(feature = "graph")]
 fn touch_attached(loaded: &mut Loaded, collection: u16, record: u64, sequence: u64) {
     if let Some(graph) = loaded.graph.as_mut() {
         graph.touch_record(collection, record, sequence);

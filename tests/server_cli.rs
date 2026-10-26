@@ -134,11 +134,7 @@ fn periodic_durability_flags_are_validated_before_file_creation() {
     let directory = tempfile::tempdir_in(".").unwrap();
     let path = directory.path().join("durability-invalid.vlite");
     for (args, expected) in [
-        (vec!["--durability", "lazy"], "full or periodic"),
-        (
-            vec!["--flush-interval-ms", "100"],
-            "requires --durability periodic",
-        ),
+        (vec!["--durability", "lazy"], "periodic, full or none"),
         (
             vec!["--durability", "full", "--flush-interval-ms", "100"],
             "requires --durability periodic",
@@ -154,6 +150,31 @@ fn periodic_durability_flags_are_validated_before_file_creation() {
         (
             vec!["--durability", "full", "--durability", "full"],
             "usage:",
+        ),
+        (
+            vec!["--durability", "none"],
+            "--durability none requires --create-if-missing",
+        ),
+        (
+            vec![
+                "--durability",
+                "none",
+                "--create-if-missing",
+                "2",
+                "--flush-interval-ms",
+                "100",
+            ],
+            "requires --durability periodic",
+        ),
+        (
+            vec![
+                "--durability",
+                "none",
+                "--create-if-missing",
+                "2",
+                "--ann-snapshot",
+            ],
+            "cannot be used with --durability none",
         ),
     ] {
         let error = fails(&path, &args);
@@ -188,6 +209,84 @@ fn periodic_acknowledged_writes_survive_abrupt_process_termination() {
         assert_eq!(status, 200);
         assert_eq!(record["vector"], json!([id as f64, 1.0]));
     }
+}
+
+#[test]
+fn none_durability_rejects_persistent_state_before_touching_the_path() {
+    let directory = tempfile::tempdir_in(".").unwrap();
+    let path = directory.path().join("none-invalid.vlite");
+    let admin = directory.path().join("admin");
+    let hex = "ab".repeat(32);
+    for (name, value, expected) in [
+        (
+            "VLITE_ADMIN_DIR",
+            admin.to_str().unwrap(),
+            "VLITE_ADMIN_DIR",
+        ),
+        (
+            "VLITE_ENCRYPTION_KEY_HEX",
+            hex.as_str(),
+            "encryption protects data at rest",
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_vlite-server"))
+            .arg(&path)
+            .args(["--insecure-local", "--durability", "none"])
+            .args(["--create-if-missing", "2", "--bind", "127.0.0.1:0"])
+            .env_remove("VLITE_AUTH_TOKEN")
+            .env_remove("VLITE_AUTH_TOKEN_FILE")
+            .env_remove("VLITE_ADMIN_DIR")
+            .env(name, value)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.contains(expected), "{name}: {error}");
+        assert!(!path.exists());
+        assert!(!admin.exists());
+    }
+}
+
+#[test]
+fn none_durability_serves_from_memory_and_loses_everything_on_restart() {
+    let directory = tempfile::tempdir_in(".").unwrap();
+    let path = directory.path().join("memory.vlite");
+    let server = Server::start_with_options(&path, false, &["--durability", "none"]);
+    for id in 0..4 {
+        let (status, _) = server.request(
+            "PUT",
+            &format!("/v1/vectors/{id}"),
+            json!({"vector":[id,1]}),
+        );
+        assert_eq!(status, 204);
+    }
+    let (status, record) = server.request("GET", "/v1/vectors/3", Value::Null);
+    assert_eq!(status, 200);
+    assert_eq!(record["vector"], json!([3.0, 1.0]));
+    assert!(!path.exists(), "--durability none never creates the file");
+    drop(server);
+    assert!(!path.exists());
+
+    let server = Server::start_with_options(&path, false, &["--durability", "none"]);
+    assert_eq!(
+        server.request("GET", "/v1/vectors/3", Value::Null).0,
+        404,
+        "in-memory data does not survive a restart"
+    );
+    drop(server);
+
+    // An existing file at the path is neither read, locked nor modified.
+    std::fs::write(&path, b"not a database").unwrap();
+    let server = Server::start_with_options(&path, false, &["--durability", "none"]);
+    assert_eq!(
+        server
+            .request("PUT", "/v1/vectors/1", json!({"vector":[1,2]}))
+            .0,
+        204
+    );
+    assert_eq!(server.request("GET", "/v1/vectors/1", Value::Null).0, 200);
+    drop(server);
+    assert_eq!(std::fs::read(&path).unwrap(), b"not a database");
 }
 
 impl Server {

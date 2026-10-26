@@ -24,7 +24,7 @@ Related references:
 - [Vector extensions](VECTORS.md): named and sparse vectors, model versions,
   providers and rerankers.
 - [MCP server](MCP.md) and [agent skills](AGENT-SKILLS.md) for AI agents.
-- [Upgrade notes](RELEASE-0.5.0.md) for the current release.
+- [Upgrade notes](RELEASE-0.5.1.md) for the current release.
 
 Sections below describe legacy and default files unless marked otherwise.
 
@@ -1059,8 +1059,9 @@ cooperative on some platforms and do not stop hostile software.
 
 Each `put`, successful `delete` or nonempty `write_batch` appends one
 checksummed frame with a commit footer and calls `File::sync_all()`. Memory
-changes, and the call succeeds, only after the sync succeeds. This default
-`Durability::Full` mode can be relaxed per handle; see
+changes, and the call succeeds, only after the sync succeeds. That is
+`Durability::Full`; since v0.5.1 file handles default to `Periodic` (sync every
+60 s), so the sync moves to a background flusher; see
 [periodic durability](#periodic-lazy-durability). Open validates every header,
 length, sequence number, checksum and footer before exposing any vector.
 
@@ -1108,15 +1109,21 @@ physical power loss.
 
 ## Periodic (lazy) durability
 
-`Durability::Periodic { interval }` (1 ms–60 s) is an opt-in, per-handle trade
-of crash durability for write throughput. Every commit, vector or graph, is
-still written in full to the OS before success, but `sync_all()` moves to a
-background flusher that runs at most once per interval.
+`Durability::Periodic { interval }` (1 ms–60 s) is the default since v0.5.1
+(`Durability::default()`, interval `DEFAULT_FLUSH_INTERVAL` = 60 s): a
+per-handle trade of crash durability for write throughput. Every commit, vector
+or graph, is still written in full to the OS before success, but `sync_all()`
+moves to a background flusher that runs at most once per interval.
+`Durability::Full` syncs every commit, as before v0.5.1.
+`Durability::None` is the mode of in-memory handles (`create_in_memory`,
+`open_from_bytes`): nothing is written to disk and the data is gone when the
+handle is dropped. `set_durability` rejects `None` on file handles and
+`Full`/`Periodic` on in-memory handles with `InvalidDurability`.
 
 ```rust
 use vlite::{Database, Durability};
-let mut db = Database::open("vectors.vlite")?
-    .with_durability(Durability::periodic_ms(100)?)?;
+let mut db = Database::open("vectors.vlite")? // periodic, 60 s
+    .with_durability(Durability::periodic_ms(100)?)?; // or Durability::Full
 db.put(1, &[0.0; 3], b"payload")?;
 db.sync()?; // explicit durable point
 db.close()?; // final sync, reports failure
@@ -1124,15 +1131,22 @@ db.close()?; // final sync, reports failure
 ```
 
 - A process crash loses nothing acknowledged. An **OS crash or power loss can
-  lose acknowledged commits from about the last interval**; only a suffix is
-  lost, never the synced prefix.
+  lose acknowledged commits from about the last interval** (up to ~60 s by
+  default); only a suffix is lost, never the synced prefix. Choose `Full` when
+  every acknowledged write must survive an OS crash.
 - `sync()` forces durability and `unsynced_commits()` counts pending commits.
   `close()` syncs and reports errors; a failed sync poisons the handle.
-- The mode is not persisted: each open starts as `Full`. Read-only and
-  in-memory handles start no flusher. Change-feed reads, segment export and ANN
-  sidecar saves sync first.
-- Server: `--durability periodic --flush-interval-ms N`. C ABI and Python:
-  `flush_interval_ms` on open/create plus `sync`.
+- The mode is not persisted: each open starts with the default. Read-only
+  handles start no flusher, and replica followers stay `Full`. Change-feed
+  reads, segment export and ANN sidecar saves sync first.
+- Server: `--durability periodic|full|none` (default `periodic`) and
+  `--flush-interval-ms N` (periodic only, default 60000). `none` serves a fresh
+  in-memory database: it never creates, reads, locks or writes the path, needs
+  `--create-if-missing <dimensions>`, logs a startup warning, loses every write
+  on restart, and rejects `--ann-snapshot`, encryption keys and
+  `VLITE_ADMIN_DIR` (backups, audit and accounts need a file).
+- C ABI, Python and Node: `durability` (`"periodic"`, `"full"`, or `"none"` for
+  in-memory only) and `flush_interval_ms` on open/create, plus `sync`.
 
 After an OS crash, missing whole frames open normally; a partial final frame
 returns `IncompleteTail` (explicit tail repair); a zero-filled suffix returns

@@ -23,9 +23,9 @@ VLITE_API uint32_t vlite_abi_version(void);
    Feature create/open/open_from_bytes/restore_to require handle=0.
    Feature-created database handles use the same close/free functions.
    {"op":"capabilities"} (any handle) returns {"graph":bool}. Property-graph
-   commands use {"op":"graph","request":{"op":..., ...}} and need a library
-   built from source with the non-default `graph` feature; other builds return
-   error code "unsupported" (builds predating graph return "invalid_input").
+   commands use {"op":"graph","request":{"op":..., ...}}; every library since
+   0.5.1 includes them (0.5.0 builds without `graph` return "unsupported",
+   builds predating graph return "invalid_input").
    Graph create requires handle=0; see FEATURES.md "Property graph". */
 VLITE_API char *vlite_execute(uint64_t handle, const uint8_t *input, size_t length);
 /* Optional additive symbols: detect availability when loading older ABI-1 builds.

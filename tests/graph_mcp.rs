@@ -4,7 +4,7 @@
 //! appear only on graph-enabled files; write tools only with `--writable`.
 //! `tests/fixtures/graph_agent/tasks.json` holds the scripted UC-002..UC-004
 //! agent tasks (AC-018).
-#![cfg(all(feature = "mcp", feature = "graph"))]
+#![cfg(feature = "mcp")]
 
 use std::{
     io::Write,

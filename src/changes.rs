@@ -169,7 +169,6 @@ pub(crate) fn read_changes<R: Read + Seek>(
     let header = format::read_log_header_with(file, key, known)?;
     // REQ-053: graph-enabled files have no change feed in this release; the
     // explicit error replaces any silent omission of graph frames.
-    #[cfg(feature = "graph")]
     if header.flags & format::FLAG_GRAPH != 0 {
         return Err(Error::GraphChangeFeedUnsupported);
     }

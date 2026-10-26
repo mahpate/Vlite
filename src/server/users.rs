@@ -87,17 +87,6 @@ impl AccountRole {
     }
 }
 
-#[cfg(not(feature = "graph"))]
-const EDITOR_OPS: &[Op] = &[
-    Op::Read,
-    Op::Search,
-    Op::SearchBuild,
-    Op::Write,
-    Op::Import,
-    Op::Index,
-    Op::Collections,
-];
-#[cfg(feature = "graph")]
 const EDITOR_OPS: &[Op] = &[
     Op::Read,
     Op::Search,
@@ -109,15 +98,11 @@ const EDITOR_OPS: &[Op] = &[
     Op::GraphRead,
     Op::GraphWrite,
 ];
-#[cfg(not(feature = "graph"))]
-const VIEWER_OPS: &[Op] = &[Op::Read, Op::Search];
-#[cfg(feature = "graph")]
 const VIEWER_OPS: &[Op] = &[Op::Read, Op::Search, Op::GraphRead];
 
 /// Per-account graph operation cap. The effective level is the lower of this
 /// and the role's (editor: write, viewer: read); a viewer can never hold
 /// `write`.
-#[cfg(feature = "graph")]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum GraphAccess {
@@ -130,7 +115,6 @@ pub(super) enum GraphAccess {
 /// Super admins always have full graph access, so they take neither knob.
 /// `graphs` is `[]` (no graph), `["*"]` or 1..64 graph names, interpreted
 /// inside the tenant like a tenant credential's binding.
-#[cfg(feature = "graph")]
 fn check_graph(
     role: AccountRole,
     tenant: Option<&str>,
@@ -171,11 +155,9 @@ struct Account {
     version: u64,
     /// Graph names this account may use; absent is the role default
     /// (`["*"]` within the tenant), `[]` is no graph access.
-    #[cfg(feature = "graph")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     graphs: Option<Vec<String>>,
     /// Graph operation cap below the role; absent is the role default.
-    #[cfg(feature = "graph")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     graph_access: Option<GraphAccess>,
 }
@@ -193,7 +175,6 @@ impl Account {
             && self.graph_valid()
     }
 
-    #[cfg(feature = "graph")]
     fn graph_valid(&self) -> bool {
         check_graph(
             self.role,
@@ -204,14 +185,8 @@ impl Account {
         .is_ok()
     }
 
-    #[cfg(not(feature = "graph"))]
-    fn graph_valid(&self) -> bool {
-        true
-    }
-
     /// Effective graph level: the role's, capped by `graph_access`; an empty
     /// `graphs` binding means none.
-    #[cfg(feature = "graph")]
     fn graph_level(&self) -> GraphAccess {
         let role = match self.role {
             AccountRole::Viewer => GraphAccess::Read,
@@ -225,7 +200,6 @@ impl Account {
     }
 
     /// Scoped operations for a signed-in editor or viewer.
-    #[cfg(feature = "graph")]
     fn ops(&self) -> Vec<Op> {
         let level = self.graph_level();
         self.role
@@ -238,11 +212,6 @@ impl Account {
                 _ => true,
             })
             .collect()
-    }
-
-    #[cfg(not(feature = "graph"))]
-    fn ops(&self) -> Vec<Op> {
-        self.role.ops().to_vec()
     }
 }
 
@@ -764,9 +733,7 @@ impl Accounts {
             created_unix_ms: now,
             updated_unix_ms: now,
             version: 1,
-            #[cfg(feature = "graph")]
             graphs: None,
-            #[cfg(feature = "graph")]
             graph_access: None,
         };
         let event = json!({"event":"user_created","actor":"bootstrap","user_id":account.id,
@@ -1175,7 +1142,6 @@ fn sign_in(
                 lineage,
                 expires,
             );
-            #[cfg(feature = "graph")]
             if let Some(graphs) = account.graphs.as_ref().filter(|_| !grant.graphs.is_empty()) {
                 grant.graphs.clone_from(graphs);
             }
@@ -1244,7 +1210,6 @@ fn user_view(service: &Service, account: &Account) -> Value {
     });
     // Stored knobs (null = role default); the effective scope is in
     // `GET /v1/capabilities` `scope`.
-    #[cfg(feature = "graph")]
     {
         view["graphs"] = json!(account.graphs);
         view["graph_access"] = json!(account.graph_access);
@@ -1630,10 +1595,8 @@ struct CreateUser {
     must_change_password: Option<bool>,
     #[serde(default)]
     disabled: Option<bool>,
-    #[cfg(feature = "graph")]
     #[serde(default)]
     graphs: Option<Vec<String>>,
-    #[cfg(feature = "graph")]
     #[serde(default)]
     graph_access: Option<GraphAccess>,
 }
@@ -1647,7 +1610,6 @@ async fn create(
     let input = body(input)?;
     let username = normalize_username(&input.username)?;
     check_scope(&service, input.role, input.tenant_id.as_deref())?;
-    #[cfg(feature = "graph")]
     check_graph(
         input.role,
         input.tenant_id.as_deref(),
@@ -1671,9 +1633,7 @@ async fn create(
         created_unix_ms: now,
         updated_unix_ms: now,
         version: 1,
-        #[cfg(feature = "graph")]
         graphs: input.graphs,
-        #[cfg(feature = "graph")]
         graph_access: input.graph_access,
     };
     let actor = actor(&principal);
@@ -1697,7 +1657,6 @@ async fn create(
             #[allow(unused_mut)]
             let mut event = json!({"event":"user_created","actor":actor,"user_id":account.id,
                 "username":account.username,"role":account.role.name(),"tenant_id":account.tenant_id});
-            #[cfg(feature = "graph")]
             {
                 event["graphs"] = json!(account.graphs);
                 event["graph_access"] = json!(account.graph_access);
@@ -1725,32 +1684,20 @@ struct UpdateUser {
     disabled: Option<bool>,
     #[serde(default)]
     must_change_password: Option<bool>,
-    #[cfg(feature = "graph")]
     #[serde(default, deserialize_with = "tenants::present")]
     graphs: Option<Option<Vec<String>>>,
-    #[cfg(feature = "graph")]
     #[serde(default, deserialize_with = "tenants::present")]
     graph_access: Option<Option<GraphAccess>>,
 }
 
 impl UpdateUser {
-    #[cfg(feature = "graph")]
     fn graph_empty(&self) -> bool {
         self.graphs.is_none() && self.graph_access.is_none()
     }
-
-    #[cfg(not(feature = "graph"))]
-    fn graph_empty(&self) -> bool {
-        true
-    }
 }
 
-#[cfg(feature = "graph")]
 const UPDATE_FIELDS: &str = "provide at least one of username, role, tenant_id, disabled, \
      must_change_password, graphs, graph_access";
-#[cfg(not(feature = "graph"))]
-const UPDATE_FIELDS: &str =
-    "provide at least one of username, role, tenant_id, disabled, must_change_password";
 
 /// Any effective change bumps the account version, which ends its sessions.
 async fn update(
@@ -1807,7 +1754,6 @@ async fn update(
                 account.must_change_password = must;
                 changed.push("must_change_password");
             }
-            #[cfg(feature = "graph")]
             {
                 if let Some(graphs) = input.graphs.filter(|g| *g != account.graphs) {
                     account.graphs = graphs;
@@ -1849,7 +1795,6 @@ async fn update(
             let mut event = json!({"event":"user_updated","actor":actor,"user_id":account.id,
                 "username":account.username,"changed":changed,"role":account.role.name(),
                 "tenant_id":account.tenant_id,"disabled":account.disabled});
-            #[cfg(feature = "graph")]
             {
                 event["graphs"] = json!(account.graphs);
                 event["graph_access"] = json!(account.graph_access);
@@ -2089,9 +2034,7 @@ mod tests {
             created_unix_ms: 0,
             updated_unix_ms: 0,
             version: 1,
-            #[cfg(feature = "graph")]
             graphs: None,
-            #[cfg(feature = "graph")]
             graph_access: None,
         };
         for at in 0..20 {

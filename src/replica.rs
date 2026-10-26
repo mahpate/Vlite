@@ -88,8 +88,8 @@ impl ReplicaFollower {
     /// primary still has.
     ///
     /// Graph-enabled followers replay graph frames like any other commit
-    /// (REQ-054, LEG-014); builds without the `graph` feature reject them at
-    /// the header with `UnsupportedFeature`, before any tail repair.
+    /// (REQ-054, LEG-014). Followers stay in `Durability::Full`: every applied
+    /// segment is synced before it is acknowledged.
     pub fn open(path: impl AsRef<Path>, key: Option<&EncryptionKey>) -> Result<Self> {
         let path = path.as_ref();
         let db = match Database::open_inner(path, key) {

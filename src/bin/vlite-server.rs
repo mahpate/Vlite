@@ -15,12 +15,14 @@ use vlite::{
     },
 };
 
-const USAGE: &str = "usage: vlite-server <database-path> [--create-if-missing <dimensions> [--create-format 3|4|5]] [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--lock-held-reads] [--group-commit [--group-commit-requests <1..16>] [--group-commit-bytes <1024..268435456>] [--group-commit-delay-ms <0..100>]] [--durability full|periodic [--flush-interval-ms <1..60000>]] [--encryption-key-file <path> | VLITE_ENCRYPTION_KEY | VLITE_ENCRYPTION_KEY_HEX] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS; dashboard sign-in (needs VLITE_ADMIN_DIR and an admin token): VLITE_TRUSTED_PROXY=1 behind a proxy that sets X-Forwarded-Proto/For, VLITE_SESSION_IDLE_MINUTES (default 30), VLITE_SESSION_MAX_HOURS (default 8), optional first super admin: VLITE_ADMIN_USERNAME with VLITE_ADMIN_PASSWORD_FILE; [--log-buffer <n>] (default 2000, maximum 100000)";
+const USAGE: &str = "usage: vlite-server <database-path> [--create-if-missing <dimensions> [--create-format 3|4|5]] [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--lock-held-reads] [--group-commit [--group-commit-requests <1..16>] [--group-commit-bytes <1024..268435456>] [--group-commit-delay-ms <0..100>]] [--durability periodic|full|none] (default periodic) [--flush-interval-ms <1..60000>] (periodic only, default 60000; none keeps the database in memory only, needs --create-if-missing and loses all data when the server stops) [--encryption-key-file <path> | VLITE_ENCRYPTION_KEY | VLITE_ENCRYPTION_KEY_HEX] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS; dashboard sign-in (needs VLITE_ADMIN_DIR and an admin token): VLITE_TRUSTED_PROXY=1 behind a proxy that sets X-Forwarded-Proto/For, VLITE_SESSION_IDLE_MINUTES (default 30), VLITE_SESSION_MAX_HOURS (default 8), optional first super admin: VLITE_ADMIN_USERNAME with VLITE_ADMIN_PASSWORD_FILE; [--log-buffer <n>] (default 2000, maximum 100000)";
 
 struct Config {
     lock_held_reads: bool,
     group_commit: Option<GroupCommitConfig>,
-    /// Per-open commit durability (Full unless --durability periodic).
+    /// Per-open commit durability: `Periodic` every 60 s unless `--durability`
+    /// says otherwise. `None` serves a fresh in-memory database and never
+    /// touches `path`.
     durability: Durability,
     otlp_endpoint: Option<String>,
     path: PathBuf,
@@ -188,7 +190,7 @@ fn config() -> Result<Config, Box<dyn Error>> {
     let mut seen_log_buffer = false;
     let mut group_commit = None;
     let mut lock_held_reads = false;
-    let mut periodic: Option<bool> = None;
+    let mut mode: Option<&'static str> = None;
     let mut flush_interval_ms: Option<u64> = None;
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -213,11 +215,12 @@ fn config() -> Result<Config, Box<dyn Error>> {
                     _ => unreachable!(),
                 }
             }
-            Some("--durability") if periodic.is_none() => {
-                periodic = Some(match args.next().ok_or(USAGE)?.to_str() {
-                    Some("full") => false,
-                    Some("periodic") => true,
-                    _ => return Err("--durability must be full or periodic".into()),
+            Some("--durability") if mode.is_none() => {
+                mode = Some(match args.next().ok_or(USAGE)?.to_str() {
+                    Some("full") => "full",
+                    Some("periodic") => "periodic",
+                    Some("none") => "none",
+                    _ => return Err("--durability must be periodic, full or none".into()),
                 });
             }
             Some("--flush-interval-ms") if flush_interval_ms.is_none() => {
@@ -288,11 +291,25 @@ fn config() -> Result<Config, Box<dyn Error>> {
             "--otlp-endpoint / OTEL_EXPORTER_OTLP_ENDPOINT requires the otel feature".into(),
         );
     }
-    let durability = match (periodic, flush_interval_ms) {
-        (Some(true), interval) => Durability::periodic_ms(interval.unwrap_or(100))?,
+    let durability = match (mode.unwrap_or("periodic"), flush_interval_ms) {
+        ("periodic", Some(interval)) => Durability::periodic_ms(interval)?,
+        ("periodic", None) => Durability::default(),
         (_, Some(_)) => return Err("--flush-interval-ms requires --durability periodic".into()),
-        _ => Durability::Full,
+        ("full", None) => Durability::Full,
+        _ => Durability::None,
     };
+    let in_memory = durability == Durability::None;
+    if in_memory {
+        if dimensions.is_none() {
+            return Err("--durability none requires --create-if-missing <dimensions>: the in-memory database always starts empty".into());
+        }
+        if ann_snapshot {
+            return Err(
+                "--ann-snapshot needs a database file; it cannot be used with --durability none"
+                    .into(),
+            );
+        }
+    }
     if format.is_some() && dimensions.is_none() {
         return Err("--create-format requires --create-if-missing".into());
     }
@@ -434,6 +451,15 @@ fn config() -> Result<Config, Box<dyn Error>> {
     {
         return Err("encryption requires --create-format 5".into());
     }
+    let admin_directory = std::env::var_os("VLITE_ADMIN_DIR").map(PathBuf::from);
+    if in_memory {
+        if encryption_key.is_some() {
+            return Err("encryption protects data at rest; --durability none never writes the database, so remove the encryption key".into());
+        }
+        if admin_directory.is_some() {
+            return Err("VLITE_ADMIN_DIR (backups, credentials, accounts, webhooks, audit log and startup selection) persists state on disk; it cannot be used with --durability none".into());
+        }
+    }
     let config = Config {
         lock_held_reads,
         group_commit,
@@ -457,7 +483,7 @@ fn config() -> Result<Config, Box<dyn Error>> {
         token_file: token_file.map(PathBuf::from),
         read_only_token,
         read_only_file,
-        admin_directory: std::env::var_os("VLITE_ADMIN_DIR").map(PathBuf::from),
+        admin_directory,
         log_buffer_capacity,
         schedule: schedule()?,
         accounts: account_settings()?,
@@ -471,6 +497,17 @@ fn config() -> Result<Config, Box<dyn Error>> {
 }
 
 fn open(config: &Config) -> vlite::Result<(Database, PathBuf)> {
+    if config.durability == Durability::None {
+        // Validated: dimensions are set; no key, admin directory or snapshot.
+        let db = Database::create_in_memory(
+            config.dimensions.expect("validated dimensions"),
+            vlite::CreateOptions {
+                format: Some(config.format),
+                ..Default::default()
+            },
+        )?;
+        return Ok((db, config.path.clone()));
+    }
     let selected = config
         .admin_directory
         .as_deref()
@@ -629,6 +666,16 @@ async fn run() -> Result<(), Box<dyn Error>> {
         None => None,
     };
     let (mut database, active) = open(&config)?;
+    let in_memory = config.durability == Durability::None;
+    if in_memory {
+        vlite::server::log_stderr(
+            "warn",
+            "server",
+            json!({"event":"durability_none","path":active.display().to_string(),
+                "message":"--durability none: the database is held in memory only and nothing is written to disk; all data is lost when the server stops or restarts"})
+                .to_string(),
+        );
+    }
     let snapshot = config
         .ann_snapshot
         .then(|| Database::ann_snapshot_path(&active));
@@ -651,7 +698,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
     if let Some(tls) = &config.grpc_tls {
         service.register_tls(tls.clone())?;
     }
-    let router = match configured_admin_router(service.clone(), options(&config, Some(active))) {
+    let database_path = (!in_memory).then_some(active);
+    let router = match configured_admin_router(service.clone(), options(&config, database_path)) {
         Ok(router) => router,
         Err(error) => {
             // Never leave a scheduler or the database open on failed startup.
