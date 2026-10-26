@@ -754,7 +754,70 @@
     else init(win);
   }
 
-  const api = { init, boot, utils: { graphPath, selector, selectorList, list, conditions, typedValue, equality, limits, projection, cursor, direction,
+  // Account graph knobs for the user-management form (v1.2.20). `graphs` text: blank = role
+  // default ("*" within the account's tenant), "[]" = no graphs, otherwise comma/space-separated
+  // names; `access`:
+  // "" = role default, or none/read/write (viewers top out at read). Tenant names are unqualified
+  // and at most 28 bytes so the stored t{tenant}__{name} fits the 63-byte graph-name limit.
+  const GRAPH_ACCESS = ["none", "read", "write"];
+  const GRAPH_NAME = /^[a-z][a-z0-9_-]{0,62}$/;
+  function accountGraphNames(value, tenanted) {
+    if (text(value).trim() === "[]") return [];
+    const names = text(value).split(/[\s,]+/).filter((name) => name !== "");
+    if (names.length === 0) return null;
+    if (names.length > 64) throw new Error("Bind at most 64 graphs; no request sent");
+    if (new Set(names).size !== names.length) throw new Error("Graph names must not repeat; no request sent");
+    if (names.includes("*")) {
+      if (names.length > 1) throw new Error("Use * alone (every graph) or a list of names; no request sent");
+      return names;
+    }
+    const max = tenanted ? 28 : 63;
+    for (const name of names) {
+      if (!GRAPH_NAME.test(name) || name.length > max) {
+        throw new Error(`Graph name "${name}" must be 1 to ${max} characters: lowercase letters, digits, '_' or '-', starting with a letter; no request sent`);
+      }
+    }
+    return names;
+  }
+  function accountGraphKnobs(fields, role, tenanted) {
+    const graphs = accountGraphNames(fields?.graphs, tenanted);
+    const access = text(fields?.access).trim();
+    if (access !== "" && !GRAPH_ACCESS.includes(access)) throw new Error("Graph access must be none, read or write; no request sent");
+    const knobs = { graphs, graph_access: access === "" ? null : access };
+    if (role === "super_admin" && (knobs.graphs !== null || knobs.graph_access !== null)) {
+      throw new Error("Super admins always have every graph; clear the graph fields; no request sent");
+    }
+    if (role === "viewer" && knobs.graph_access === "write") throw new Error("Viewers cannot write graphs; choose read or none; no request sent");
+    return knobs;
+  }
+  // Fields to merge into POST /v1/admin/users; role defaults are omitted.
+  function accountGraphRequest(fields, role, tenanted) {
+    const knobs = accountGraphKnobs(fields, role, tenanted);
+    return Object.fromEntries(Object.entries(knobs).filter(([, value]) => value !== null));
+  }
+  // Fields to merge into PUT /v1/admin/users/{id}: only differences; null resets to the role default.
+  function accountGraphChanges(current, fields, role, tenanted) {
+    const knobs = accountGraphKnobs(fields, role, tenanted);
+    const changes = {};
+    if (JSON.stringify(knobs.graphs) !== JSON.stringify(current?.graphs ?? null)) changes.graphs = knobs.graphs;
+    if (knobs.graph_access !== (current?.graph_access ?? null)) changes.graph_access = knobs.graph_access;
+    return changes;
+  }
+  // Form values for a listed account, and a one-line summary for the user list.
+  function accountGraphFields(item) {
+    return { graphs: Array.isArray(item?.graphs) ? (item.graphs.length === 0 ? "[]" : item.graphs.join(", ")) : "", access: GRAPH_ACCESS.includes(item?.graph_access) ? item.graph_access : "" };
+  }
+  function accountGraphView(item) {
+    if (item?.role === "super_admin") return "every graph";
+    const roleLevel = item?.role === "editor" ? "write" : "read";
+    const level = Array.isArray(item?.graphs) && item.graphs.length === 0 ? "none"
+      : GRAPH_ACCESS.includes(item?.graph_access) && GRAPH_ACCESS.indexOf(item.graph_access) < GRAPH_ACCESS.indexOf(roleLevel) ? item.graph_access : roleLevel;
+    if (level === "none") return "no graph access";
+    const scope = !Array.isArray(item?.graphs) || item.graphs.includes("*") ? (item?.tenant_id ? "every tenant graph" : "every graph") : item.graphs.join(", ");
+    return `${level === "write" ? "read and write" : "read"}: ${scope}`;
+  }
+
+  const api = { init, boot, utils: { accountGraphNames, accountGraphRequest, accountGraphChanges, accountGraphFields, accountGraphView, graphPath, selector, selectorList, list, conditions, typedValue, equality, limits, projection, cursor, direction,
     body, request, errorCode, errorText, openapiHasGraphs, availability, truncationText, indexText, propertiesText, normalize, summary, explainRows,
     statsCards, truncationRows, layout, OPERATIONS, LIMITS, STATS_ROUTE } };
   if (typeof window !== "undefined") { window.VLiteGraphTools = api; boot(window); }

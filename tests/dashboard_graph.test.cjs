@@ -146,3 +146,33 @@ test("layout places traversal depths in columns, caps nodes and keeps edges betw
 test("init tolerates a page without the graph section", () => {
   assert.equal(init({ document: { getElementById: () => null } }), null);
 });
+
+test("account graph knobs are validated and only differences are sent", () => {
+  const { accountGraphNames, accountGraphRequest, accountGraphChanges, accountGraphFields, accountGraphView } = utils;
+  assert.equal(accountGraphNames(" ", false), null);
+  assert.deepEqual(accountGraphNames("[]", true), []);
+  assert.deepEqual(accountGraphNames("g, h\nk", true), ["g", "h", "k"]);
+  assert.deepEqual(accountGraphNames("*", true), ["*"]);
+  assert.deepEqual(accountGraphNames("a".repeat(63), false), ["a".repeat(63)]);
+  for (const bad of ["G", "* g", "g g", "1g", "a".repeat(29)]) assert.throws(() => accountGraphNames(bad, true), /no request sent/, bad);
+  assert.throws(() => accountGraphNames(Array.from({ length: 65 }, (_, i) => `g${i}`).join(" "), false), /at most 64/);
+
+  assert.deepEqual(accountGraphRequest({ graphs: "", access: "" }, "editor", false), {});
+  assert.deepEqual(accountGraphRequest({ graphs: "g", access: "read" }, "editor", true), { graphs: ["g"], graph_access: "read" });
+  assert.throws(() => accountGraphRequest({ access: "write" }, "viewer", false), /Viewers cannot write/);
+  assert.throws(() => accountGraphRequest({ graphs: "g" }, "super_admin", false), /Super admins/);
+  assert.throws(() => accountGraphRequest({ access: "admin" }, "editor", false), /none, read or write/);
+
+  const current = { role: "editor", graphs: ["g"], graph_access: "read" };
+  assert.deepEqual(accountGraphChanges(current, accountGraphFields(current), "editor", false), {});
+  assert.deepEqual(accountGraphChanges(current, { graphs: "", access: "read" }, "editor", false), { graphs: null });
+  assert.deepEqual(accountGraphChanges({ role: "editor" }, { graphs: "[]", access: "" }, "editor", false), { graphs: [] });
+  assert.deepEqual(accountGraphFields({ graphs: [] }), { graphs: "[]", access: "" });
+
+  assert.equal(accountGraphView({ role: "super_admin" }), "every graph");
+  assert.equal(accountGraphView({ role: "editor" }), "read and write: every graph");
+  assert.equal(accountGraphView({ role: "viewer", tenant_id: "a".repeat(32) }), "read: every tenant graph");
+  assert.equal(accountGraphView(current), "read: g");
+  assert.equal(accountGraphView({ role: "editor", graphs: [] }), "no graph access");
+  assert.equal(accountGraphView({ role: "viewer", graph_access: "none" }), "no graph access");
+});
