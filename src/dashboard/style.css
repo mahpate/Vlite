@@ -78,17 +78,18 @@ summary { cursor: pointer; font-weight: 650; color: var(--studio-text); }
 .topbar-title { flex: 1 1 300px; min-width: 0; }
 .topbar-title h1 { margin: 0; font-size: 24px; }
 .topbar-title p { margin: 2px 0 0; font-size: 13px; }
-.topbar-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+/* Actions and the account menu may shrink so a long identity truncates instead of widening the page. */
+.topbar-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; max-width: 100%; }
 .topbar-actions button { margin: 0; }
 .badges { display: flex; flex-wrap: wrap; gap: 8px; }
 .badge { display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px; border: 1px solid var(--studio-border); border-radius: 999px; background: var(--studio-surface); color: var(--studio-muted); font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
 #connection-badge::before { content: ""; width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: currentColor; }
 #connection-badge[data-connected="true"] { border-color: var(--studio-success); background: var(--studio-success-soft); color: var(--studio-success); }
-.user-menu { position: relative; margin-left: auto; }
+.user-menu { position: relative; min-width: 0; max-width: 100%; margin-left: auto; }
 .user-menu > summary { gap: 8px; padding: 4px 10px 4px 4px; border: 1px solid transparent; border-radius: 999px; transition: background var(--studio-motion), border-color var(--studio-motion); }
 .user-menu > summary:hover, .user-menu[open] > summary { border-color: var(--studio-border); background: var(--studio-surface); }
 .user-menu > summary .icon { width: 32px; height: 32px; flex: 0 0 32px; padding: 6px; border-radius: 50%; background: var(--studio-accent-soft); color: var(--studio-accent); }
-.user-menu > summary::after { content: ""; width: 7px; height: 7px; margin: 0 4px; border: solid var(--studio-muted); border-width: 0 2px 2px 0; transform: translateY(-2px) rotate(45deg); transition: transform var(--studio-motion); }
+.user-menu > summary::after { content: ""; flex: none; width: 7px; height: 7px; margin: 0 4px; border: solid var(--studio-muted); border-width: 0 2px 2px 0; transform: translateY(-2px) rotate(45deg); transition: transform var(--studio-motion); }
 .user-menu[open] > summary::after { transform: translateY(2px) rotate(-135deg); }
 #identity-badge { display: inline-block; max-width: min(56ch, calc(100vw - 140px)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #identity-badge[data-identity="super_admin"] { border-color: var(--studio-accent); background: var(--studio-accent-soft); color: var(--studio-accent); }
