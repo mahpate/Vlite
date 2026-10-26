@@ -629,6 +629,18 @@ No option is chosen, no thresholds are changed and no new run is authorized
 by this record. The graph-off refresh remains blocked pending that decision
 and a genuine coordinated quiet host window; existing gates remain unchanged.
 
+**Separate-host comparison (2026-10-25/26; informational only).** A campaign
+on a different host compared `81ff901` with `c024dce` under the unchanged CPU
+policy (handoff branch `mahpate-do005-sephost-handoff`, commit `3bef798`). It
+is not baseline evidence. The outcome was INCOMPLETE: 58 of 60 slots were
+accepted, and two `hnsw_100k_384` slots failed the policy on all three
+attempts. The host was an AMD EPYC Hyper-V VM, so the reference identity
+checks fail. The quiet window held only partially, and the VM stalled for
+about 74 minutes. The pinned revision is also behind current `main`. Its
+figures are not cited here; `baseline.md` and `81ff901` are unchanged. By
+owner direction (2026-10-25), the DO-005 rerun is deferred until the Dashboard
+graph work is finished and will measure the `main` of that time.
+
 ## FOLLOWUP-001 source-only graph CLI (v1.2.17; implemented and reviewed; source-only, not distributed)
 
 **Ordering.** The user chose to implement and test a source-only, opt-in graph
