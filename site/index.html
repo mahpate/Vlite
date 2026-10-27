@@ -10,7 +10,9 @@
   <meta property="og:type" content="website">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
+  <link rel="preload" href="assets/fonts/outfit-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
   <script src="assets/site.js"></script>
+  <script type="module" src="assets/landing3d.js"></script>
 </head>
 <body class="landing">
 <a class="landing-skip" href="#main-content">Skip to content</a>
@@ -185,10 +187,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\devbox.ps1 -Token
           <a class="more" href="architecture.html">Explore the engine &#8594;</a>
         </div>
         <div class="product-map-core">
-          <div class="product-map-row product-connect"><h3><span class="product-symbol" aria-hidden="true">{ }</span> SDKs &amp; APIs</h3><div class="product-chips"><a href="#quickstart">Rust</a><a href="#quickstart">Python</a><a href="#quickstart">Node.js</a><a href="https://github.com/mahpate/Vlite/blob/main/clients/README.md#go">Go</a><a href="https://github.com/mahpate/Vlite/blob/main/clients/README.md#net">.NET</a><a href="docs/INSTALL.html">C ABI</a><a href="api.html">REST</a><a href="docs/GRPC.html">gRPC</a></div></div>
-          <div class="product-map-row product-retrieve"><h3><span class="product-symbol" aria-hidden="true">&#8981;</span> Search &amp; indexes</h3><div class="product-chips"><span>Exact search</span><span>Dense &amp; sparse</span><span>BM25 hybrid</span><span>Typed filters</span><span>HNSW</span><span>Scalar u8</span></div></div>
-          <div class="product-map-row product-store"><h3><span class="product-symbol" aria-hidden="true">&#9636;</span> Runtime &amp; storage</h3><div class="product-chips"><span>Embedded</span><a href="docs/DOCKER-OPERATIONS.html">Docker</a><span>Collections</span><span>Atomic batches</span><a href="docs/INSTALL.html">Linux</a><a href="docs/INSTALL.html">macOS</a><a href="docs/INSTALL.html">Windows</a></div></div>
-          <div class="product-map-row product-graph"><h3><span class="product-symbol" aria-hidden="true">&#9741;</span> Property graphs <span class="badge">Opt-in</span></h3><div class="product-chips"><span>Nodes &amp; typed edges</span><span>Vector attachments</span><span>Traversal &amp; paths</span><span>Graph retrieval</span><a href="docs/GRAPH.html">Graph guide</a></div></div>
+          <div class="product-map-row product-connect"><div class="lane-art" aria-hidden="true"></div><h3><span class="product-symbol" aria-hidden="true">{ }</span> SDKs &amp; APIs</h3><div class="product-chips"><a href="#quickstart">Rust</a><a href="#quickstart">Python</a><a href="#quickstart">Node.js</a><a href="https://github.com/mahpate/Vlite/blob/main/clients/README.md#go">Go</a><a href="https://github.com/mahpate/Vlite/blob/main/clients/README.md#net">.NET</a><a href="docs/INSTALL.html">C ABI</a><a href="api.html">REST</a><a href="docs/GRPC.html">gRPC</a></div></div>
+          <div class="product-map-row product-retrieve"><div class="lane-art" aria-hidden="true"></div><h3><span class="product-symbol" aria-hidden="true">&#8981;</span> Search &amp; indexes</h3><div class="product-chips"><span>Exact search</span><span>Dense &amp; sparse</span><span>BM25 hybrid</span><span>Typed filters</span><span>HNSW</span><span>Scalar u8</span></div></div>
+          <div class="product-map-row product-store"><div class="lane-art" aria-hidden="true"></div><h3><span class="product-symbol" aria-hidden="true">&#9636;</span> Runtime &amp; storage</h3><div class="product-chips"><span>Embedded</span><a href="docs/DOCKER-OPERATIONS.html">Docker</a><span>Collections</span><span>Atomic batches</span><a href="docs/INSTALL.html">Linux</a><a href="docs/INSTALL.html">macOS</a><a href="docs/INSTALL.html">Windows</a></div></div>
+          <div class="product-map-row product-graph"><div class="lane-art" aria-hidden="true"></div><h3><span class="product-symbol" aria-hidden="true">&#9741;</span> Property graphs <span class="badge">Opt-in</span></h3><div class="product-chips"><span>Nodes &amp; typed edges</span><span>Vector attachments</span><span>Traversal &amp; paths</span><span>Graph retrieval</span><a href="docs/GRAPH.html">Graph guide</a></div></div>
         </div>
         <aside class="product-map-tools" aria-label="Tools and agents">
           <h3>Tools &amp; agents</h3>

@@ -29,6 +29,25 @@
       });
     }
 
+    if (document.body.classList.contains("landing") && window.matchMedia("(pointer: fine)").matches) {
+      const spots = ".card, .product-map-row, .product-map-tools > a, .product-map-intro";
+      let pending = null;
+      document.addEventListener("pointermove", (event) => {
+        if (!pending) {
+          requestAnimationFrame(() => {
+            const { target, x, y } = pending;
+            pending = null;
+            const card = target instanceof Element && target.closest(spots);
+            if (!card) return;
+            const box = card.getBoundingClientRect();
+            card.style.setProperty("--mx", `${x - box.left}px`);
+            card.style.setProperty("--my", `${y - box.top}px`);
+          });
+        }
+        pending = { target: event.target, x: event.clientX, y: event.clientY };
+      }, { passive: true });
+    }
+
     document.querySelectorAll("[role=tablist]").forEach((list) => {
       const tabs = [...list.querySelectorAll("[role=tab]")];
       const select = (tab) => {
