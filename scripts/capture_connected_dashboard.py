@@ -362,6 +362,14 @@ def capture(output):
             assert api("/v1/graphs/tour_draft")["graph"]["node_count"] == 2
             page.locator("#graph-drop").click()
             page.locator("#confirmation").get_by_role("button", name="Confirm", exact=True).click()
+            expect(page.locator("#graph-drop-result")).to_contain_text("graph_not_empty")
+            assert api("/v1/graphs/tour_draft")["graph"]["node_count"] == 2
+            for key in ("tour-source", "tour-destination"):
+                node = api("/v1/graphs/tour_draft/nodes/get", {"node": {"key": key}})["node"]
+                graph_edit("delete_node", {"key": key, "revision": node["revision"]})
+            assert api("/v1/graphs/tour_draft")["graph"]["node_count"] == 0
+            page.locator("#graph-drop").click()
+            page.locator("#confirmation").get_by_role("button", name="Confirm", exact=True).click()
             expect(page.locator("#graph-drop-result")).to_contain_text('Deleted graph "tour_draft"')
             assert [graph["name"] for graph in api("/v1/graphs")["graphs"]] == ["articles"]
             api("/v1/vectors/901")

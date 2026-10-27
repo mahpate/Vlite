@@ -14,13 +14,15 @@ class GraphApi(FakeApi):
                 "collections": ["*"], "graphs": ["g"], "operations": ["read", "search", "graph_read"]})
         self.conflict = False
         self.graphs = ["g", "h"]
+        self.nonempty = {"g", "h"}
 
     def api(self, method, path, query, body, headers):
         if path == "/v1/graphs":
             if method == "POST":
                 self.graphs.append(body["graph"])
                 return 201, {"graph": {"name": body["graph"]}}, {}
-            return 200, {"graphs": [{"name": name, "node_count": 2, "edge_count": 1} for name in self.graphs]}, {}
+            return 200, {"graphs": [{"name": name, "node_count": 2 if name in self.nonempty else 0,
+                                     "edge_count": 1 if name in self.nonempty else 0} for name in self.graphs]}, {}
         if path == "/v1/graphs/g/nodes/find":
             return 200, {"nodes": [
                 {"id": "18446744073709551615", "key": "n", "labels": ["Doc"], "properties": {}, "revision": "7"},
@@ -33,8 +35,10 @@ class GraphApi(FakeApi):
                 return self.error(409, "graph_revision_conflict")
             return 200, {"revision": "8", "results": []}, {}
         if method == "DELETE" and path in ["/v1/graphs/" + name for name in self.graphs]:
+            if path.rsplit("/", 1)[1] in self.nonempty:
+                return self.error(409, "graph_not_empty")
             self.graphs.remove(path.rsplit("/", 1)[1])
-            return 204, None, {}
+            return 200, {"dropped": path.rsplit("/", 1)[1]}, {}
         return super().api(method, path, query, body, headers)
 
 
@@ -187,9 +191,15 @@ def check(browser):
     assert fake.graphs == ["g", "h"]
     page.locator("#graph-drop").click()
     confirm(page, "no revision precondition")
+    expect(page.locator("#graph-drop-result")).to_contain_text("graph_not_empty")
+    assert fake.graphs == ["g", "h"]
+    assert len([entry for entry in fake.log if entry["method"] == "DELETE"]) == 1, "Nonempty graphs must not retry"
+    fake.nonempty.remove("g")
+    page.locator("#graph-drop").click()
+    confirm(page, 'Permanently delete empty graph "g"')
     expect(page.locator("#graph-drop-result")).to_contain_text('Deleted graph "g"')
     assert fake.graphs == ["h"]
-    assert len([entry for entry in fake.log if entry["method"] == "DELETE"]) == 1
+    assert len([entry for entry in fake.log if entry["method"] == "DELETE"]) == 2
     response = page.evaluate("window.VLiteGraphConnection.request('DELETE', '/v1/graphs/h/batch')")
     assert response["value"]["error"]["code"] == "unsupported_route"
     assert not errors, errors

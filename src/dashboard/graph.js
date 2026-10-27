@@ -1081,7 +1081,7 @@
         if (!canWrite(state.caps, graph)) throw new Error("Graph write access is required");
         const bridge = win.VLiteGraphConnection;
         if (typeof bridge?.confirm !== "function") throw new Error("Reconnect before deleting a graph; confirmation is unavailable");
-        if (!await bridge.confirm(`Permanently delete graph "${graph}" and all its nodes, edges and record links? Vector records are not deleted. This cannot be undone and has no revision precondition. No automatic retry.`)) return;
+        if (!await bridge.confirm(`Permanently delete empty graph "${graph}"? Delete its nodes and edges first; nonempty graphs are rejected. Vector records are not deleted. This cannot be undone and has no revision precondition. No automatic retry.`)) return;
         if (generation !== state.generation || graph !== $("graph-name").value) throw new Error("Connection or graph changed; no deletion sent");
         $("graph-editor").inert = true;
         $("graph-create").inert = true;

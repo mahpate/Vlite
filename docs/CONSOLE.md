@@ -163,7 +163,7 @@ credentials.
 Diagrams show up to 40 nodes and 400 edges in **2D** or force-directed **3D**;
 tables retain all results. Pick nodes or edges to edit or **Connect two nodes**.
 Writes require confirmation; edits require current revisions, rejecting conflicts.
-Graph deletion is permanent. Requery after writes.
+Only empty graphs can be deleted. Requery after writes.
 
 ![Graph traversal drawn as a node-link view](../site/assets/dashboard/current-graph.png?v=connected)
 
