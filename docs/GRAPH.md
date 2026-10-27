@@ -4,9 +4,8 @@ VLite can store named property graphs (nodes, typed edges and attachments to
 vector records) in the same file and commit log as vectors. Since v0.5.1 graph
 support is compiled into every build: the library, binaries, C library, wheels,
 Node packages and the Docker image's API server (`vlite-server`).
-`vlite-graph-cli` is not in the image. The `graph` Cargo feature remains as a
-no-op alias so existing `--features graph` builds still work. Graphs stay
-opt-in per file: graphs exist
+`vlite-graph-cli` is not in the image; there is no `graph` Cargo feature.
+Graphs stay opt-in per file: graphs exist
 only in files created with `create_with_graph` or `vlite-graph-cli init`, or copied with
 `vlite-maintain enable-graph`; other files behave as vector-only files.
 
@@ -173,8 +172,7 @@ the engine records them: upserts carry the full labels and properties
 
 - **Rust.** `ChangeKind::{GraphCreated, GraphDropped, GraphBatch}` and the
   `property_graph::GraphChange` operation enum (also re-exported as
-  `changes::GraphChange`). Both enums are `#[non_exhaustive]` since
-  v0.6.0, so exhaustive matches need a wildcard arm.
+  `changes::GraphChange`).
 - **REST.** Scoped credentials see graph events only with `graph_read` and a
   `graphs` binding that covers the graph; other events of the same commit are
   still returned and the cursor advances past hidden events. Tenant
@@ -185,12 +183,10 @@ the engine records them: upserts carry the full labels and properties
   updates).
 - **C ABI, Python, Node, wasm.** `changes_after` events carry the type in
   `kind`, as for vector events, plus the fields above.
-- **Webhooks.** Graph events are opt-in: list `graph_created`,
-  `graph_dropped` and/or `graph_batch` in `events`. The optional `graphs`
-  filter (up to 64 names) limits them to named graphs; `collections` filters
-  only vector events. Subscriptions that list only vector types, including
-  every subscription stored by an older server, keep the previous payload and
-  never receive graph events.
+- **Webhooks.** A subscription without `events` receives every vector and
+  graph event. The optional `events` list selects types, the optional
+  `graphs` filter (up to 64 names) limits graph events to named graphs and
+  `collections` filters only vector events.
 - `GET /v1/capabilities` reports `change_feed` and `webhooks` on graph files
   as on vector files.
 

@@ -158,8 +158,8 @@ Tenant routes need a super admin and `VLITE_ADMIN_DIR`:
   collections. Resume restores unexpired, unrevoked keys. Suspension persists
   in `tenants.json` across restarts. Older servers refuse to start on a store
   that contains a suspended tenant, so resume tenants before downgrading.
-* `DELETE /v1/admin/tenants/{id}` requires every tenant collection (and, with
-  the `graph` feature, graph) to be dropped first (409 `tenant_not_empty`
+* `DELETE /v1/admin/tenants/{id}` requires every tenant collection and graph
+  to be dropped first (409 `tenant_not_empty`
   otherwise). Deletion tombstones the immutable ID
   and immediately makes every bound credential fail closed (403
   `tenant_unavailable`). IDs are never reused. Unknown or deleted IDs return 404

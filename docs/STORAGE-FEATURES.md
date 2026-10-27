@@ -174,7 +174,7 @@ natively.
 ## Graph-enabled files (opt-in per file)
 
 Every build since v0.5.1 can store named property graphs in the same log as
-vectors (the `graph` Cargo feature is a no-op alias). New files stay plain
+vectors; there is no `graph` Cargo feature. New files stay plain
 unless graph is requested. `Database::create_with_graph`
 creates a v5 file with header flag `FLAG_GRAPH = 4`;
 `maintenance::enable_graph` writes a graph-enabled copy of a v4 or v5 file.
@@ -219,7 +219,7 @@ sequences, checksums, encryption and commit timestamps work as usual.
 - **Change feed.** Since v0.6.0 `feed_cursor`, `changes_after` and
   `read_log_changes` report graph commits as `GraphCreated`, `GraphDropped`
   and `GraphBatch` events, and `/v1/changes`, gRPC `Changes`/`WatchChanges`
-  and webhooks (opt-in per subscription) serve them; see
+  and webhooks serve them; see
   [Change feed and webhooks](GRAPH.md#change-feed-and-webhooks).
 - **Unsupported.** Releases before v0.5.0, and v0.5.0 builds without `graph`, reject graph
   files with `UnsupportedFeature(4)`. The server maps graph errors to 409

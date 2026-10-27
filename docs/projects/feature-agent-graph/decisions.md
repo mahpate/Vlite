@@ -1012,17 +1012,25 @@ not cover resource limits beyond `GraphLimits::CEILING`.
   in log order, a `graph_batch` per maximal run of graph entries and the
   usual `put`/`delete` events, all with the commit's sequence. Graph events
   have an empty `collection`. Encrypted files decrypt with the database key.
-- **API compatibility.** `ChangeKind` and the new `GraphChange` are
-  `#[non_exhaustive]`; downstream exhaustive matches on `ChangeKind` need a
-  wildcard arm (a source break, noted for the v0.6.0 release notes).
-  `GraphChangeFeedUnsupported` and `GraphUnsupportedOperation` remain public
-  (and keep their HTTP/C codes) but the feed and `upgrade` no longer return
-  them.
-- **Webhooks.** Graph event kinds are opt-in: a subscription receives them only
-  when it lists them in `events`, so existing subscriptions keep the exact
-  vector payloads. An optional `graphs` list filters graph events by name;
-  `collections` filters only vector events. Stored subscriptions without the
-  new field load unchanged; responses add `graphs` (`null` when unset).
+- **No compatibility machinery (user guidance, 2026-10-26).** "Since we
+  don't have the customers who is using VLite, you can assume users will use
+  the latest version and Vlite formats." So:
+  - `ChangeKind` and `GraphChange` are exhaustive; the new variants are a
+    source break for exhaustive matches, noted only in the release notes.
+    Bindings match the graph variants explicitly; there are no
+    unknown-type shims, feature negotiation or versioned feed parameters.
+  - `GraphChangeFeedUnsupported` and `GraphUnsupportedOperation` are removed
+    with their codes; no graph error maps to HTTP 501 or gRPC
+    `UNIMPLEMENTED` any more.
+  - The `graph` Cargo feature alias is removed from `vlite` and `vlite-ffi`;
+    no CI, release, Docker, wheel or Node build passed it for a reason other
+    than the alias, so they now build with their other features.
+  - v3/v4 file reading is unchanged (out of scope). The next step, new files
+    graph-enabled by default, will not keep a pre-0.5.0 opt-out.
+- **Webhooks.** `events` is optional: a subscription without it receives every
+  vector and graph event. `events` selects types, an optional `graphs` list
+  filters graph events by name and `collections` filters only vector events.
+  Responses include `events` and `graphs` (`null` when unset).
 - **Authorization.** REST scoped readers see graph events only with
   `graph_read` and a `graphs` binding that covers the graph; tenant
   credentials still cannot read `/v1/changes`; gRPC feeds stay admin-only.

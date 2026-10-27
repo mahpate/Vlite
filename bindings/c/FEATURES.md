@@ -148,8 +148,7 @@ the host saves `to_bytes()` output.
 
 `{"op":"capabilities"}` (any handle, no other fields) returns `{"graph": bool}`.
 Graph commands are carried as `{"op":"graph","request":{"op":..., ...}}` and are
-compiled into every library since v0.5.1 (the `graph` feature is a no-op
-alias). Libraries from v0.5.0 built without it return `unsupported` for every
+compiled into every library since v0.5.1. Libraries from v0.5.0 built without it return `unsupported` for every
 graph request (libraries predating this envelope return `invalid_input` for the
 unknown `graph` op). The JSON mirrors the
 `vlite-graph-cli`: node/edge/record IDs, revisions and sequences are decimal
@@ -189,8 +188,8 @@ Graph errors use the REST names: `graphs_not_enabled`, `graphs_require_v5`,
 `graph_attachment_conflict`, `graph_attachment_not_found`,
 `graph_record_not_attachable`, `graph_attached_record`,
 `graph_attached_record_expiry`, `graph_limit_exceeds_ceiling`,
-`graph_cursor_stale`, `graph_change_feed_unsupported`,
-`graph_unsupported_operation` and `graph_invalid_options`. Other failures keep
+`graph_cursor_stale`, `graph_invalid_options`, `graph_schema_violation` and
+`graph_pivot_too_expensive`. Other failures keep
 the existing codes (`read_only`, `locked`, `invalid_input`, …); responses over
 8 MiB return `response_too_large`. A library without the feature opening a
 graph-enabled file keeps the existing `invalid_input` rejection.

@@ -12,14 +12,13 @@ Webhooks are configured by bootstrap admin credentials and require a private
 }
 ```
 
-`collections` is optional (omitted means every collection); event names are
+`collections` and `events` are optional: omitted `collections` means every
+collection and omitted `events` means every event type. Event names are
 `put`, `delete`, `metadata_update`, `collection_created`, `collection_dropped`,
-`settings_updated`, `vectors_updated` and, since v0.6.0, the graph events
-`graph_created`, `graph_dropped` and `graph_batch`. Graph events are opt-in: a
-subscription receives them only when it lists them in `events`, so existing
-subscriptions keep their vector-only payloads. The optional `graphs` list (up
-to 64 names) limits graph events to named graphs; `collections` filters only
-vector events. Graph event shapes are in
+`settings_updated`, `vectors_updated` and the graph events `graph_created`,
+`graph_dropped` and `graph_batch`. The optional `graphs` list (up to 64 names)
+limits graph events to named graphs; `collections` filters only vector events.
+Graph event shapes are in
 [Change feed and webhooks](GRAPH.md#change-feed-and-webhooks). URLs must be
 absolute HTTP(S) URLs without embedded credentials or fragments. Redirects are disabled so a
 signature secret is not forwarded to a redirect target. Subscription secrets
