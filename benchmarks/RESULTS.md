@@ -5,6 +5,40 @@ See [methodology and reproduction](README.md) before interpreting the numbers.
 
 No zvec, Milvus, Weaviate, FAISS or other unmeasured engine results are inferred.
 
+## Release 0.6.0 against 81ff901, October 27, 2026 UTC
+
+v0.6.0 (`6428b69`) and the earlier DO-005 baseline `81ff901` were built from
+clean `git archive` copies (release, default features, Rust 1.99.1) and run
+with the `graph_baseline.py` reference profile, five runs per workload, on a
+dedicated Azure Standard_D16s_v5 VM (16 vCPU Xeon Platinum 8370C, 64 GiB,
+Windows Server 2022, Premium SSD data disk). Revision order alternated per
+run. Every run passed the unchanged `graph_reference.py` gate (background CPU
+mean ≤10% and no half-second sample above 50%). The first VM passed 54 of 60
+runs; the 6 small-workload runs that failed the gate were rerun once each, all
+passing, on a second VM of the same type. The failed originals are kept in the
+raw file.
+
+[Full tables, per-run CPU and method](results/graph-reference-v0.6.0-vs-81ff901-azure.md) ·
+[raw runs](results/graph-reference-v0.6.0-vs-81ff901-azure.json).
+
+100,000 × 384 dimensions, 1,000 queries, k=10, medians (81ff901 → v0.6.0):
+
+| Workload | Ingest (vectors/s) | Reopen (ms) | Query p50 (ms) | HNSW build (s) | HNSW p50 (ms) | Peak working set (MiB) |
+|---|---:|---:|---:|---:|---:|---:|
+| Exact | 37,092 → 220,074 | 1,018 → 240 | 8.174 → 8.540 | – | – | 328 → 326 |
+| Filtered exact (1 in 10) | 33,183 → 163,754 | 1,078 → 298 | 3.796 → 4.021 | – | – | 384 → 382 |
+| HNSW m=16, ef=200/64 | 34,500 → 219,562 | 1,018 → 241 | 8.108 → 8.410 | 796 → 18 | 2.652 → 2.140 | 347 → 388 |
+
+- **Faster writes, reopen and index builds.** Ingest is 5–6× faster, reopen
+  about 4× faster and HNSW construction 44× faster; HNSW p50 and p99 drop 19%.
+- **Exact queries are 4–6% slower** and HNSW peak memory is 12% higher.
+  Small workloads (64–1,024 vectors) are listed in the full tables; their
+  sub-millisecond timings are noisy.
+- **HNSW recall is 0.26 in both builds** at search ef=64 on uniform random
+  384-dimensional data, a stress setting rather than a tuned configuration.
+- Two VMs of the same SKU, not the historical DO-005 reference host;
+  `baseline.md` is unchanged.
+
 ## Current-source vector regression, October 25, 2026 UTC
 
 The first attempt was contended and is retained separately, not used below.

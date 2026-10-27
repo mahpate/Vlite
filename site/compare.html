@@ -44,11 +44,42 @@
       <h1>VLite <span class="grad">benchmarks</span></h1>
       <p class="lead">Search latency, recall, build time and storage, measured on fixed builds with raw data.</p>
       <div class="cta">
-        <a class="btn primary" href="#current-source">Vector search</a>
+        <a class="btn primary" href="#release-060">Latest release</a>
+        <a class="btn" href="#current-source">Vector search</a>
         <a class="btn" href="#historical-results">Multi-engine results</a>
         <a class="btn" href="#concurrent-readers">Concurrent reads</a>
         <a class="btn" href="#reproduce">Reproduce</a>
       </div>
+    </div>
+  </section>
+
+  <section id="release-060">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="kicker">Latest release</div>
+        <h2>Latest release against the earlier baseline</h2>
+        <p>100,000 vectors &times; 384 dimensions, 1,000 queries, k=10, five runs per workload.
+        Dedicated Azure Standard_D16s_v5 VM (Xeon Platinum 8370C), October 27, 2026 UTC. Medians shown.</p>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Workload</th><th>Ingest (vectors/s)</th><th>Reopen</th><th>Exact p50</th><th>HNSW build</th></tr></thead>
+        <tbody>
+          <tr><td>Exact</td><td>37,092 &rarr; 220,074</td><td>1,018 &rarr; 240 ms</td><td>8.17 &rarr; 8.54 ms</td><td>&ndash;</td></tr>
+          <tr><td>Filtered exact</td><td>33,183 &rarr; 163,754</td><td>1,078 &rarr; 298 ms</td><td>3.80 &rarr; 4.02 ms</td><td>&ndash;</td></tr>
+          <tr><td>HNSW (m=16, ef=64)</td><td>34,500 &rarr; 219,562</td><td>1,018 &rarr; 241 ms</td><td>8.11 &rarr; 8.41 ms</td><td>796 &rarr; 18 s</td></tr>
+        </tbody>
+      </table></div>
+      <ul class="list">
+        <li>Ingest is 5&ndash;6&times; faster, reopen about 4&times; faster and HNSW builds 44&times; faster; HNSW p50 drops 19%.</li>
+        <li>Exact query latency is 4&ndash;6% slower and HNSW peak memory 12% higher. HNSW recall is 0.26 in both builds at ef=64 on uniform random data.</li>
+        <li>All 60 runs passed the background-CPU gate; 6 small-workload runs were rerun on a second VM of the same type.</li>
+      </ul>
+      <details class="benchmark-archive"><summary>Builds</summary>
+        <p>Release 0.6.0, commit <code>6428b69</code>, against the earlier baseline commit <code>81ff901</code>. Both built from clean source
+          with Rust 1.99.1, release profile and default features; revision order alternated per run.</p>
+      </details>
+      <p class="muted"><a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/results/graph-reference-v0.6.0-vs-81ff901-azure.md">Full tables and method</a>
+        &middot; <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/results/graph-reference-v0.6.0-vs-81ff901-azure.json">Raw runs</a></p>
     </div>
   </section>
 
