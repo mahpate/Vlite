@@ -44,84 +44,74 @@
       <h1>VLite <span class="grad">benchmarks</span></h1>
       <p class="lead">Search latency, recall, build time and storage, measured on fixed builds with raw data.</p>
       <div class="cta">
-        <a class="btn primary" href="#release-060">Latest release</a>
-        <a class="btn" href="#current-source">Vector search</a>
-        <a class="btn" href="#historical-results">Multi-engine results</a>
+        <a class="btn primary" href="#baseline">Baseline</a>
         <a class="btn" href="#concurrent-readers">Concurrent reads</a>
+        <a class="btn" href="#features">Feature comparison</a>
         <a class="btn" href="#reproduce">Reproduce</a>
       </div>
     </div>
   </section>
 
-  <section id="release-060">
+  <section class="stats-strip" aria-label="Baseline highlights">
+    <div class="wrap stats">
+      <div class="card stat"><b>220k</b><span>vectors/s ingest, 5.9&times; the previous baseline</span></div>
+      <div class="card stat"><b>240 ms</b><span>reopen of 100k vectors, down from 1,018 ms</span></div>
+      <div class="card stat"><b>18 s</b><span>HNSW build, 44&times; faster</span></div>
+      <div class="card stat"><b>2.14 ms</b><span>HNSW query p50, 19% lower</span></div>
+    </div>
+  </section>
+
+  <section id="baseline" class="alt">
     <div class="wrap">
       <div class="section-head">
-        <div class="kicker">Latest release</div>
-        <h2>Latest release against the earlier baseline</h2>
-        <p>100,000 vectors &times; 384 dimensions, 1,000 queries, k=10, five runs per workload.
-        Dedicated Azure Standard_D16s_v5 VM (Xeon Platinum 8370C), October 27, 2026 UTC. Medians shown.</p>
+        <div class="kicker">Baseline</div>
+        <h2>Current performance baseline</h2>
+        <p>100,000 vectors &times; 384 dimensions, k=10, 10 queries per run, five runs per workload.
+          Dedicated Azure Standard_D16s_v5 VM, October 27, 2026 UTC. Medians; previous baseline &rarr; current.</p>
       </div>
       <div class="table-wrap"><table>
-        <thead><tr><th>Workload</th><th>Ingest (vectors/s)</th><th>Reopen</th><th>Exact p50</th><th>HNSW build</th></tr></thead>
+        <thead><tr><th>Workload</th><th>Ingest (vectors/s)</th><th>Reopen</th><th>Query p50</th><th>HNSW build</th><th>Peak memory</th></tr></thead>
         <tbody>
-          <tr><td>Exact</td><td>37,092 &rarr; 220,074</td><td>1,018 &rarr; 240 ms</td><td>8.17 &rarr; 8.54 ms</td><td>&ndash;</td></tr>
-          <tr><td>Filtered exact</td><td>33,183 &rarr; 163,754</td><td>1,078 &rarr; 298 ms</td><td>3.80 &rarr; 4.02 ms</td><td>&ndash;</td></tr>
-          <tr><td>HNSW (m=16, ef=64)</td><td>34,500 &rarr; 219,562</td><td>1,018 &rarr; 241 ms</td><td>8.11 &rarr; 8.41 ms</td><td>796 &rarr; 18 s</td></tr>
+          <tr><td>Exact</td><td>37,092 &rarr; <strong>220,074</strong></td><td>1,018 &rarr; <strong>240 ms</strong></td><td>8.17 &rarr; 8.54 ms</td><td>&ndash;</td><td>328 &rarr; 326 MiB</td></tr>
+          <tr><td>Filtered exact</td><td>33,183 &rarr; <strong>163,754</strong></td><td>1,078 &rarr; <strong>298 ms</strong></td><td>3.80 &rarr; 4.02 ms</td><td>&ndash;</td><td>384 &rarr; 382 MiB</td></tr>
+          <tr><td>HNSW (m=16, ef=64)</td><td>34,500 &rarr; <strong>219,562</strong></td><td>1,018 &rarr; <strong>241 ms</strong></td><td>2.65 &rarr; <strong>2.14 ms</strong> (HNSW)</td><td>796 &rarr; <strong>18 s</strong></td><td>347 &rarr; 388 MiB</td></tr>
         </tbody>
       </table></div>
-      <ul class="list">
-        <li>Ingest is 5&ndash;6&times; faster, reopen about 4&times; faster and HNSW builds 44&times; faster; HNSW p50 drops 19%.</li>
-        <li>Exact query latency is 4&ndash;6% slower and HNSW peak memory 12% higher. HNSW recall is 0.26 in both builds at ef=64 on uniform random data.</li>
-        <li>All 60 runs passed the background-CPU gate; 6 small-workload runs were rerun on a second VM of the same type.</li>
-      </ul>
-      <details class="benchmark-archive"><summary>Builds</summary>
-        <p>Release 0.6.0, commit <code>6428b69</code>, against the earlier baseline commit <code>81ff901</code>. Both built from clean source
-          with Rust 1.99.1, release profile and default features; revision order alternated per run.</p>
+      <div class="grid cols-3" style="margin-top: 28px">
+        <div class="card"><h3>Faster writes</h3><p>Ingest is 5&ndash;6&times; faster, reopen about 4&times; faster and HNSW builds 44&times; faster.</p></div>
+        <div class="card"><h3>Trade-offs</h3><p>Exact queries are 4&ndash;6% slower and HNSW peak memory is 12% higher. HNSW recall is 0.26 in both builds on uniform random data.</p></div>
+        <div class="card"><h3>Quiet runs</h3><p>All 60 runs passed the background-CPU check. Six small runs were repeated on a second identical VM.</p></div>
+      </div>
+      <details class="benchmark-archive"><summary>Builds and method</summary>
+        <p>Release 0.6.0, commit <code>6428b69</code>, measured against the previous baseline commit <code>81ff901</code> in the same campaign.
+          Clean source builds with Rust 1.99.1, release profile, default features; build order alternated per run.
+          Windows Server 2022, Xeon Platinum 8370C (16 vCPU), 64 GiB, Premium SSD data disk.</p>
       </details>
-      <p class="muted"><a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/results/graph-reference-v0.6.0-vs-81ff901-azure.md">Full tables and method</a>
+      <p class="muted"><a href="https://github.com/mahpate/Vlite/blob/main/docs/projects/feature-agent-graph/baseline.md">Baseline record</a>
+        &middot; <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/results/graph-reference-v0.6.0-vs-81ff901-azure.md">Full tables</a>
         &middot; <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/results/graph-reference-v0.6.0-vs-81ff901-azure.json">Raw runs</a></p>
     </div>
   </section>
 
-  <section id="current-source" class="alt">
+  <section id="concurrent-readers">
     <div class="wrap">
       <div class="section-head">
-        <div class="kicker">Vector search</div>
-        <h2>Latency, recall and build time</h2>
-        <p>4,096 vectors &times; 128 dimensions, 100 queries and five trials per workload.
-        Shared WSL2 host; squared L2, k=10, HNSW m=16 and construction/search ef=100.</p>
+        <div class="kicker">Server</div>
+        <h2>Concurrent reads</h2>
+        <p>REST search throughput with 1&ndash;16 concurrent clients. Before: exclusive lock. After: shared read lock and parallel exact scan.</p>
       </div>
-      <div class="table-wrap"><table>
-        <thead><tr><th>Build</th><th>Exact p50</th><th>ANN p50 / p95</th><th>Recall@10</th><th>Index build</th><th>Ingest</th><th>Reopen</th></tr></thead>
-        <tbody>
-          <tr><td>Release baseline</td><td>0.914 ms</td><td>0.649 / 0.743 ms</td><td>0.941</td><td>3,787 ms</td><td>56,985 vectors/s</td><td>35.681 ms</td></tr>
-          <tr><td>Source, default</td><td>0.918 ms</td><td>0.635 / 0.735 ms</td><td>0.941</td><td>3,747 ms</td><td>55,956 vectors/s</td><td>37.920 ms</td></tr>
-          <tr><td>Source, graph enabled</td><td>0.934 ms</td><td>0.635 / 0.725 ms</td><td>0.941</td><td>3,763 ms</td><td>56,649 vectors/s</td><td>36.747 ms</td></tr>
-        </tbody>
-      </table></div>
-      <ul class="list">
-        <li>Under mixed writes (16 durable replacements per query), lazy rebuilds push median trial ANN p99 to
-          3,753 / 3,745 / 3,749 ms for the tag / default / graph builds.</li>
-        <li>Static recall is 0.941, below a 0.99 target; mixed recall is 0.954. Exact IDs and distances match the independent oracle.</li>
-        <li>Differences between the builds are small and do not establish a speedup or a regression.</li>
-      </ul>
-      <details class="benchmark-archive"><summary>Builds and measurement details</summary>
-        <p>Release baseline: the 0.4 release tag, commit <code>38d5704</code>. Source variants: commit <code>059650e</code>,
-          with default features and with graph enabled (vector-path overhead only, not graph traversal).
-          Fixed builds, measured on October 25, 2026 UTC with Rust release builds on a shared WSL2 x86_64 host
-          (Xeon Platinum 8370C), not dedicated hardware. A contended first attempt was excluded.</p>
-        <p>Thirty fresh child processes, one seed and metric, sequential queries and a warm filesystem.
-          Static values are medians of trial-level statistics. Mixed trials rebuild at queries 17, 34, 51, 68 and 85.
-          Whole-child peak RSS was about 11.84 MiB in each variant, including dataset and oracle.</p>
+      <div class="table-wrap"><table><thead><tr><th>Search</th><th>Concurrent readers</th><th>QPS before</th><th>QPS after</th><th>p50 / p95 / p99 ms before</th><th>p50 / p95 / p99 ms after</th></tr></thead><tbody><tr><td>Exact</td><td>1</td><td>483</td><td><strong>788</strong></td><td>2.00 / 2.51 / 3.21</td><td>1.25 / 1.41 / 1.65</td></tr><tr><td>Exact</td><td>4</td><td>636</td><td><strong>1,529</strong></td><td>6.11 / 7.21 / 8.52</td><td>2.62 / 3.22 / 3.52</td></tr><tr><td>Exact</td><td>8</td><td>634</td><td><strong>1,927</strong></td><td>12.27 / 14.16 / 18.30</td><td>4.22 / 5.95 / 6.89</td></tr><tr><td>Exact</td><td>16</td><td>629</td><td><strong>2,155</strong></td><td>24.77 / 29.44 / 35.89</td><td>7.58 / 11.37 / 12.77</td></tr><tr><td>HNSW</td><td>1</td><td>1,528</td><td><strong>1,560</strong></td><td>0.64 / 0.78 / 0.97</td><td>0.62 / 0.76 / 0.97</td></tr><tr><td>HNSW</td><td>4</td><td>3,521</td><td><strong>4,038</strong></td><td>1.13 / 1.30 / 1.67</td><td>0.95 / 1.37 / 1.65</td></tr><tr><td>HNSW</td><td>8</td><td>3,491</td><td><strong>4,310</strong></td><td>2.26 / 2.54 / 3.75</td><td>1.77 / 2.92 / 3.59</td></tr><tr><td>HNSW</td><td>16</td><td>3,447</td><td><strong>4,648</strong></td><td>4.58 / 5.16 / 8.38</td><td>3.22 / 6.18 / 7.80</td></tr></tbody></table></div>
+      <p>Single-reader exact search on 100k &times; 768: p50 <strong>44.8 ms &rarr; 10.2 ms</strong> (22 &rarr; 98 QPS) from the parallel exact scan.</p>
+      <details class="benchmark-archive"><summary>Setup and limitations</summary>
+      <p class="muted">vlite-server REST, 20k &times; 128 clustered dataset, k=10, keep-alive client threads, zero errors. Before is the previous release build.
+        Native Windows 11, Xeon Platinum 8370C (8 cores / 16 threads), CPU gated to &le;50% before each trial. Latency still rises under contention at 16 readers.</p>
       </details>
-      <p class="muted"><a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/results/vector-revisions-4096-128d-wsl-quiet.json">Raw samples and hashes</a>
-        &middot; <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/RESULTS.md">Findings and limitations</a>
-        &middot; <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/README.md">Reproduction</a></p>
+      <p class="muted"><a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/results/concurrent-readers-windows.json">Raw data</a></p>
     </div>
   </section>
 
   <details id="historical-results" class="benchmark-archive">
-    <summary class="wrap">Historical multi-engine results</summary>
+    <summary class="wrap">Earlier measurements: multi-engine comparison and HNSW traversal</summary>
   <section id="results">
     <div class="wrap">
       <div class="section-head"><div class="kicker">Historical multi-engine benchmark &middot; archived builds</div>
@@ -207,25 +197,12 @@
     </div>
   </section>
 
-  </details>
-
-  <section id="concurrent-readers" class="alt">
-    <div class="wrap">
-      <h2>Concurrent reads</h2>
-      <p>REST search throughput with 1&ndash;16 concurrent clients. Before: exclusive lock. After: shared read lock and parallel exact scan.</p>
-      <div class="table-wrap"><table><thead><tr><th>Search</th><th>Concurrent readers</th><th>QPS before</th><th>QPS after</th><th>p50 / p95 / p99 ms before</th><th>p50 / p95 / p99 ms after</th></tr></thead><tbody><tr><td>Exact</td><td>1</td><td>483</td><td><strong>788</strong></td><td>2.00 / 2.51 / 3.21</td><td>1.25 / 1.41 / 1.65</td></tr><tr><td>Exact</td><td>4</td><td>636</td><td><strong>1,529</strong></td><td>6.11 / 7.21 / 8.52</td><td>2.62 / 3.22 / 3.52</td></tr><tr><td>Exact</td><td>8</td><td>634</td><td><strong>1,927</strong></td><td>12.27 / 14.16 / 18.30</td><td>4.22 / 5.95 / 6.89</td></tr><tr><td>Exact</td><td>16</td><td>629</td><td><strong>2,155</strong></td><td>24.77 / 29.44 / 35.89</td><td>7.58 / 11.37 / 12.77</td></tr><tr><td>HNSW</td><td>1</td><td>1,528</td><td><strong>1,560</strong></td><td>0.64 / 0.78 / 0.97</td><td>0.62 / 0.76 / 0.97</td></tr><tr><td>HNSW</td><td>4</td><td>3,521</td><td><strong>4,038</strong></td><td>1.13 / 1.30 / 1.67</td><td>0.95 / 1.37 / 1.65</td></tr><tr><td>HNSW</td><td>8</td><td>3,491</td><td><strong>4,310</strong></td><td>2.26 / 2.54 / 3.75</td><td>1.77 / 2.92 / 3.59</td></tr><tr><td>HNSW</td><td>16</td><td>3,447</td><td><strong>4,648</strong></td><td>4.58 / 5.16 / 8.38</td><td>3.22 / 6.18 / 7.80</td></tr></tbody></table></div>
-      <p>Single-reader exact search on 100k &times; 768: p50 <strong>44.8 ms &rarr; 10.2 ms</strong> (22 &rarr; 98 QPS) from the parallel exact scan.</p>
-      <details class="benchmark-archive"><summary>Setup and limitations</summary>
-      <p class="muted">vlite-server REST, 20k &times; 128 clustered dataset, k=10, keep-alive client threads, zero errors. Before is the previous release build.
-        Native Windows 11, Xeon Platinum 8370C (8 cores / 16 threads), CPU gated to &le;50% before each trial. Latency still rises under contention at 16 readers.</p>
-      </details>
-      <p class="muted"><a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/results/concurrent-readers-windows.json">Raw data</a></p>
-    </div>
-  </section>
-
   <section id="hnsw-traversal">
     <div class="wrap">
-      <h2>HNSW traversal</h2>
+      <div class="section-head">
+        <div class="kicker">Archived &middot; HNSW traversal</div>
+        <h2>Visited-node bitmap</h2>
+      </div>
       <p>A visited-node bitmap replaced per-node hashing in graph construction and search,
         for graphs up to 8,388,608 nodes. On 5,000 synthetic 128-dimensional vectors,
         median rebuild time fell from <strong>5.552 s to 5.080 s</strong> (8.5%),
@@ -244,6 +221,8 @@
         <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/results/hnsw-visited-windows.json">Raw timings</a></p>
     </div>
   </section>
+
+  </details>
 
   <section id="features" class="alt">
     <div class="wrap">
@@ -297,12 +276,11 @@
     <div class="wrap">
       <div class="section-head">
         <div class="kicker">Methodology</div>
-        <h2>Reproduce these results</h2>
-        <p>Build the exact measured commits with the same Rust release toolchain in separate directories,
-          following the <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/README.md#paired-source-revision-regression-october-25-2026-utc">campaign instructions</a>.
-          Then run the <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/revision_campaign.py">revision campaign runner</a>;
-          it keeps five repetitions and raw samples per workload. See also the
-          <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/README.md#performance-work-included-in-041-measured-october-23-2026">development measurements</a>.</p>
+        <h2>Reproduce the baseline</h2>
+        <p>Build each commit from a clean source archive with the same Rust release toolchain, then run
+          <code>python scripts/graph_baseline.py measure --rev &lt;commit&gt; --profile reference --runs 5</code>
+          on an otherwise idle machine. The <a href="https://github.com/mahpate/Vlite/blob/main/docs/projects/feature-agent-graph/baseline.md">baseline record</a>
+          lists the VM, disk, commands and quiet-host check.</p>
       </div>
       <p class="muted">Archived comparisons: pinned packages and commands are in the
         <a href="https://github.com/mahpate/Vlite/blob/main/benchmarks/README.md#multi-engine-comparison">archived methodology</a>;

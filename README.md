@@ -40,8 +40,9 @@ service to operate.
 - **Tools.** Interactive shell, validated imports, offline maintenance, index
   tuning, a graph CLI, an MCP server and agent skills.
 - **Performance.** At 100,000 × 384 dimensions, v0.6.0 ingests 5–6× faster,
-  reopens about 4× faster and builds HNSW 44× faster than the earlier
-  baseline, with exact queries 4–6% slower.
+  reopens about 4× faster and builds HNSW 44× faster than the previous
+  baseline, with exact queries 4–6% slower. These results are now the
+  benchmark baseline.
   [Results](benchmarks/RESULTS.md#release-060-against-81ff901-october-27-2026-utc)
 
 ## Key terms

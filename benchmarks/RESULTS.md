@@ -21,7 +21,7 @@ raw file.
 [Full tables, per-run CPU and method](results/graph-reference-v0.6.0-vs-81ff901-azure.md) ·
 [raw runs](results/graph-reference-v0.6.0-vs-81ff901-azure.json).
 
-100,000 × 384 dimensions, 1,000 queries, k=10, medians (81ff901 → v0.6.0):
+100,000 × 384 dimensions, 10 queries per run (batch 1,000), k=10, medians (81ff901 → v0.6.0):
 
 | Workload | Ingest (vectors/s) | Reopen (ms) | Query p50 (ms) | HNSW build (s) | HNSW p50 (ms) | Peak working set (MiB) |
 |---|---:|---:|---:|---:|---:|---:|
@@ -36,8 +36,9 @@ raw file.
   sub-millisecond timings are noisy.
 - **HNSW recall is 0.26 in both builds** at search ef=64 on uniform random
   384-dimensional data, a stress setting rather than a tuned configuration.
-- Two VMs of the same SKU, not the historical DO-005 reference host;
-  `baseline.md` is unchanged.
+- **This is the DO-005 baseline.** By owner decision on 2026-10-27 the v0.6.0
+  column replaces the retired `81ff901` workstation record; see
+  [`baseline.md`](../docs/projects/feature-agent-graph/baseline.md).
 
 ## Current-source vector regression, October 25, 2026 UTC
 

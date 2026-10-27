@@ -8,7 +8,7 @@ Companion to [`feature-agent-graph.prd.md`](feature-agent-graph.prd.md) v1.2.10,
 | DO-002 | **Decided** (deterministic rule satisfied) | Attachments (PD-012) | None for the rule |
 | DO-003 | **Proposed final, pending review** | Op tag 12 (lowest unused, proven); the shared engine codec implements tags 1..11 and VLite's graph-aware loader dispatches op-12 frames through `property_graph::frame::replay`. Vector mutations reuse `encode_batch_entries`; public graph-batch writing is ITEM-015 and not yet implemented. | GATE-003 and EPIC-003 code review must accept the full entry table, including the `PatchNode`/`PatchEdge` field-name length change (`u16`, see below) |
 | DO-004 | **Decided** (re-grep done) | LEG-001..LEG-020 plus LEG-021..LEG-026 | Folded into PRD Section 3.4 (v1.2.9, before EPIC-004 code) |
-| DO-005 | **Recorded** | Reference baseline of clean `81ff901` (5 runs, 100,000 × 384, 10 queries) in [`baseline.md`](baseline.md); storage details were queried after the run, not captured with it | REG-010 budgets (PD-014) remain proposals for GATE-004. The REG-001..REG-008 fixtures moved to `347b01d` in v1.2.10; this performance record stays at `81ff901` and must be re-measured at `347b01d` on the reference machine before REG-010 is enforced or GATE-008 is requested |
+| DO-005 | **Recorded (re-baselined 2026-10-27)** | Release 0.6.0 (`6428b69`) on an Azure Standard_D16s_v5 VM, 5 runs per workload, 100,000 × 384 with 10 queries, paired with a same-host rerun of `81ff901`; all 60 runs passed the unchanged CPU gate. See [`baseline.md`](baseline.md) and [Re-baseline on Azure](#re-baseline-on-azure-owner-decision-2026-10-27) | REG-010 budgets (PD-014) remain proposals for GATE-004. The retired `81ff901` workstation record is kept in `baseline.md` for history |
 | DO-006 | **Chosen under delegation** | PD-001 string keys (1..=256 UTF-8 bytes, unique per graph) + internal monotonic `u64` IDs, never reused | Chosen by the delegated workflow on the user's instruction to proceed; formal GATE-002 sign-off still to be recorded |
 
 ## DO-001 — Graph-file marker
@@ -1059,3 +1059,24 @@ not cover resource limits beyond `GraphLimits::CEILING`.
   create command. `maintenance::enable_graph` and `strip_graph` are unchanged.
 - **Existing files.** v3, v4 and plain v5 files open as vector-only and are
   never upgraded silently; `upgrade` behaviour is unchanged.
+
+## Re-baseline on Azure (owner decision 2026-10-27)
+
+- **Decision.** After reviewing the combined Azure campaign, the owner asked
+  to "publish new results as the baseline". DO-005 now uses release 0.6.0
+  (`6428b69`) measured on an Azure Standard_D16s_v5 VM (Xeon Platinum 8370C,
+  16 vCPU, 64 GiB, Windows Server 2022, 256 GiB Premium SSD P15 data disk).
+  [`baseline.md`](baseline.md) records the machine, commands and medians.
+- **Evidence.** Reference profile, five runs per workload, `81ff901` and
+  `6428b69` alternating per run. 54 runs came from the first VM; the six
+  small-workload runs that failed the CPU gate there were rerun once each, all
+  passing, on a second VM of the same configuration. All 60 runs passed the
+  unchanged policy (background CPU mean ≤10%, no half-second sample above
+  50%). Raw runs, including the superseded ones, are in
+  `benchmarks/results/graph-reference-v0.6.0-vs-81ff901-azure.json`.
+- **Unchanged.** The quiet-host policy, the REG-010 budget proposals (PD-014,
+  GATE-004) and the rejected `4312fb3` attempts. The rejected local runs stay
+  invalid; this decision adopts only the Azure campaign.
+- **Follow-up.** `scripts\graph_reference.py` still pins the retired
+  workstation's identity, so NFR-002/NFR-003 graph-on measurements must move
+  to this VM configuration before they are compared with the new baseline.
