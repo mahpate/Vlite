@@ -546,10 +546,12 @@
   <section id="credentials" class="wide">
     <h2>API keys (scoped credentials)</h2>
     <div id="admin-credential-form">
-    <p>Bootstrap admin only. A scoped credential is limited to named collections (bound to those collections' identities; a dropped and recreated collection or another database fails closed) and selected operations, and always expires. The secret is returned once: it is shown masked here, kept only in this page's memory, never placed in the request inspector, history, exports or browser storage, and cleared when you sign out.</p>
+    <p>Super admin only. A scoped credential is limited to collections, graphs and selected operations, and always expires. Collection bindings use collection identities; dropping and recreating a collection or using another database fails closed. Graph bindings use names within the selected tenant, if any. The secret is returned once: it is shown masked here, kept only in this page's memory, never placed in the request inspector, history, exports or browser storage, and cleared when you sign out.</p>
     <p data-admin-availability="scoped_credentials">Sign in to check scoped credential support.</p>
     <label>Name (required, 1..64 UTF-8 bytes)<input id="cred-name" maxlength="64" required></label>
     <label>Collections (comma-separated, or * for all)<input id="cred-collections" value="default" spellcheck="false"></label>
+    <label>Graphs (comma-separated names, or * for all; blank = no graph access)<input id="cred-graphs" maxlength="4095" spellcheck="false" autocapitalize="none" autocomplete="off" aria-describedby="cred-graph-help"></label>
+    <p id="cred-graph-help">Graph operations require at least one graph name. Names start with a lowercase letter and use lowercase letters, digits, dash or underscore (up to 63 characters, or 28 within a tenant). Graph-only keys use collections * without granting vector operations.</p>
     <fieldset id="cred-operations"><legend>Operations</legend>
       <label><input type="checkbox" name="cred-op" value="read" checked> read</label>
       <label><input type="checkbox" name="cred-op" value="search" checked> search</label>
@@ -560,6 +562,8 @@
       <label><input type="checkbox" name="cred-op" value="collections"> collections</label>
       <label><input type="checkbox" name="cred-op" value="diagnostics"> diagnostics</label>
       <label><input type="checkbox" name="cred-op" value="backup"> backup</label>
+      <label><input type="checkbox" name="cred-op" value="graph_read"> graph_read (read and query graphs)</label>
+      <label><input type="checkbox" name="cred-op" value="graph_write"> graph_write (create and change graphs)</label>
     </fieldset>
     <label>Expires in days (1..365)<input id="cred-days" type="number" min="1" max="365" value="30"></label>
     <fieldset><legend>Optional tenant and usage limits</legend>
@@ -578,7 +582,7 @@
     </div>
     <button id="cred-list" data-admin data-feature="scoped_credentials" type="button" class="secondary">List credentials</button>
     <label>Rotation grace for the old secret (0..86400 seconds)<input id="cred-grace" type="number" min="0" max="86400" value="3600"></label>
-    <div class="table-scroll"><table id="cred-table"><caption>Credentials (secrets are never listed)</caption><thead><tr><th>ID</th><th>Name</th><th>Collections</th><th>Operations</th><th>Status</th><th>Expires</th><th>Actions</th></tr></thead><tbody></tbody></table></div>
+    <div class="table-scroll"><table id="cred-table"><caption>Credentials (secrets are never listed)</caption><thead><tr><th>ID</th><th>Name</th><th>Scope (collections, graphs and limits)</th><th>Operations</th><th>Status</th><th>Expires</th><th>Actions</th></tr></thead><tbody></tbody></table></div>
     <pre id="cred-result"></pre>
     </div>
   </section>

@@ -139,6 +139,25 @@ def check(root):
                 "src", "assets/dashboard/" + frames[0] + "?v=connected")
             expect(static.locator(".tour-controls")).to_be_hidden()
             fallback.close()
+            # The flow is a self-contained SVG: no script or external asset is needed.
+            flow = (root / "assets" / "dashboard-flow.svg").read_text(encoding="utf-8")
+            assert "<script" not in flow and "href=" not in flow
+            page.goto(base + "/assets/dashboard-flow.svg")
+            assert page.locator("svg").get_attribute("aria-labelledby") == "title description"
+            for scheme, background in (("light", "rgb(247, 248, 252)"), ("dark", "rgb(12, 16, 27)")):
+                page.emulate_media(color_scheme=scheme, reduced_motion="no-preference")
+                assert page.locator("svg > rect").first.evaluate("el => getComputedStyle(el).fill") == background
+                assert page.locator(".pulse").first.evaluate("el => getComputedStyle(el).animationName") == "flow"
+                assert page.locator(".pulse").first.evaluate("el => getComputedStyle(el).animationIterationCount") == "3"
+                page.emulate_media(reduced_motion="reduce")
+                assert page.locator(".pulse").first.evaluate("el => getComputedStyle(el).animationName") == "none"
+            for width in (1440, 390, 320):
+                page.set_viewport_size({"width": width, "height": 1000})
+                page.goto(base + "/dashboard.html")
+                page.get_by_text("Request flow", exact=True).click()
+                expect(page.locator('img[src="assets/dashboard-flow.svg"]')).to_be_visible()
+                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+            assert not errors, errors
             context.close()
             browser.close()
     finally:

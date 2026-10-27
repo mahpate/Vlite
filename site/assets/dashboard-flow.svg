@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="580" viewBox="0 0 1040 580" role="img" aria-labelledby="title description">
+  <title id="title">From dashboard sign-in to one VLite file</title>
+  <desc id="description">Sign in with an account or API token. The dashboard sends requests to the VLite API, which checks tenant, graph, collection and operation permissions. Allowed requests reach collections and graphs in one database file. Responses return to the dashboard. Super admins manage users, tenants, API keys and backups through the API. Moving dashes indicate request and response direction, not measured traffic.</desc>
+  <style>
+    :root { color-scheme: light dark; --bg:#f7f8fc; --surface:#fff; --text:#172033; --muted:#536078; --border:#dce1ed; --accent:#6d43d5; --search:#087d99; --success:#087657 }
+    @media (prefers-color-scheme:dark) { :root { --bg:#0c101b; --surface:#141b2b; --text:#edf1fa; --muted:#a9b6cd; --border:#303e57; --accent:#bda4ff; --search:#65d2ed; --success:#64dbad } }
+    text { font-family:system-ui,-apple-system,"Segoe UI",sans-serif; fill:var(--text); font-size:17px }
+    .heading { font-size:28px; font-weight:700 } .label { font-size:20px; font-weight:650 } .small { font-size:15px; fill:var(--muted) }
+    .card { fill:var(--surface); stroke:var(--border); stroke-width:2 }
+    .route { fill:none; stroke:var(--accent); stroke-width:2; marker-end:url(#arrow) }
+    .response { stroke:var(--search); marker-end:url(#back) }
+    .pulse { stroke-dasharray:6 14; animation:flow 1.5s linear 3 }
+    @keyframes flow { to { stroke-dashoffset:-40 } }
+    @media (prefers-reduced-motion:reduce) { .pulse { animation:none; stroke-dasharray:none } }
+  </style>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 8 4 0 8Z" fill="var(--accent)"/></marker>
+    <marker id="back" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 8 4 0 8Z" fill="var(--search)"/></marker>
+  </defs>
+  <rect width="1040" height="580" rx="18" fill="var(--bg)"/>
+  <text x="40" y="52" class="heading">Your dashboard. Your API. One file.</text>
+  <text x="40" y="82" class="small">A request follows the same permission checks as any other API client.</text>
+  <rect class="card" x="40" y="130" width="245" height="180" rx="14"/>
+  <text x="62" y="168" class="label">1. Sign in</text>
+  <text x="62" y="203">Account or access token</text>
+  <text x="62" y="237" class="small">Browse, search and edit</text>
+  <text x="62" y="264" class="small">only what your role permits.</text>
+  <rect class="card" x="385" y="130" width="270" height="180" rx="14"/>
+  <text x="407" y="168" class="label">2. API checks access</text>
+  <text x="407" y="203">Tenant + operations</text>
+  <text x="407" y="237" class="small">Collection identities</text>
+  <text x="407" y="264" class="small">Graph name bindings</text>
+  <rect class="card" x="755" y="130" width="245" height="180" rx="14"/>
+  <text x="777" y="168" class="label">3. One .vlite file</text>
+  <text x="777" y="203">Collections + graphs</text>
+  <text x="777" y="237" class="small">Vectors, metadata, edges</text>
+  <text x="777" y="264" class="small">and attached records</text>
+  <path class="route pulse" d="M285 200H377"/>
+  <path class="route pulse" d="M655 200H747"/>
+  <text x="304" y="181" class="small">request</text>
+  <text x="672" y="181" class="small">allowed</text>
+  <path class="route response pulse" d="M755 280H663"/>
+  <path class="route response pulse" d="M385 280H293"/>
+  <text x="304" y="337" class="small">response</text>
+  <text x="665" y="337" class="small">results</text>
+  <rect class="card" x="40" y="387" width="960" height="143" rx="14"/>
+  <text x="62" y="426" class="label">Super admins manage access and recovery through the API</text>
+  <text x="62" y="462">Users / tenants / scoped API keys / backups</text>
+  <text x="62" y="496" class="small">Accounts, keys and backup files live in the private admin directory, outside the .vlite file.</text>
+  <path class="route pulse" d="M520 387V318"/>
+  <text x="40" y="560" class="small">Illustrative flow, not live traffic. Motion stops after a short preview; reduced motion stays still.</text>
+</svg>

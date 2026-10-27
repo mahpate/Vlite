@@ -2168,6 +2168,63 @@ async fn tenanted_accounts_retrieve_only_their_own_evidence() {
     assert_eq!(code(&body), "graph_not_found");
 }
 
+#[tokio::test]
+async fn dashboard_graph_key_scope_survives_listing_and_rotation() {
+    let f = fixture(true).await;
+    let app = &f.app;
+    let tenant_id = tenant(app, "mahpate").await;
+    admin_graph(app, &format!("t{tenant_id}__pool")).await;
+    let token = credential(
+        app,
+        json!({"collections": ["*"], "graphs": ["pool"],
+            "operations": ["graph_read", "graph_write"], "tenant_id": tenant_id}),
+    )
+    .await;
+    let (status, caps) = call(app, Some(&token), "GET", "/v1/capabilities", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let scope = &caps["scope"];
+    assert_eq!(scope["graphs"], json!(["pool"]));
+    assert_eq!(scope["operations"], json!(["graph_read", "graph_write"]));
+    assert_eq!(scope["collections"], json!(["*"]));
+    assert_eq!(scope["tenant_id"], tenant_id);
+    let id = scope["credential_id"].as_str().unwrap();
+    let (status, listed) = call(app, Some(ADMIN), "GET", "/v1/admin/credentials", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let entry = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == id)
+        .unwrap();
+    assert_eq!(entry["graphs"], scope["graphs"]);
+    assert_eq!(entry["operations"], scope["operations"]);
+    let (status, rotated) = call(
+        app,
+        Some(ADMIN),
+        "POST",
+        &format!("/v1/admin/credentials/{id}/rotate"),
+        Some(json!({"grace_seconds": 0})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(rotated["credential"]["graphs"], json!(["pool"]));
+    let (status, caps) = call(
+        app,
+        Some(rotated["token"].as_str().unwrap()),
+        "GET",
+        "/v1/capabilities",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let mut expected = scope.clone();
+    expected["credential_id"] = rotated["credential"]["id"].clone();
+    assert_ne!(expected["credential_id"], id);
+    assert_eq!(caps["scope"], expected);
+    let (status, _) = call(app, Some(&token), "GET", "/v1/capabilities", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
 /// API credentials: a tenant credential's `graphs` binding names graphs
 /// inside its tenant, and one without graph operations reaches no graph.
 #[tokio::test]

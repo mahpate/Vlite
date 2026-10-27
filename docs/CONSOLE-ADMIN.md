@@ -1,14 +1,11 @@
 # Console administration API
 
-Reference for the server administration routes behind the dashboard. For
-sign-in and roles, see [dashboard sign-in and accounts](SECURITY.md#dashboard-sign-in-and-accounts).
-For TLS, tenants, credential limits and tracing, see [SECURITY.md](SECURITY.md).
+See [SECURITY.md](SECURITY.md) for sign-in, roles, TLS, tenants, credential limits and tracing.
 
-Every route below needs authentication; only the static console files are
-public. The admin token (`VLITE_AUTH_TOKEN`, `VLITE_AUTH_TOKEN_FILE` or
-`--token-file`) is the super admin credential for automation and recovery.
-The server never returns bootstrap secrets. Creating or rotating a scoped
-credential returns its secret once, so never log that response.
+Routes require authentication; static console files are public. The admin token
+(`VLITE_AUTH_TOKEN`, `VLITE_AUTH_TOKEN_FILE` or `--token-file`) grants super-admin
+access. Bootstrap secrets are never returned; scoped secrets return once on
+creation/rotation. Never log them.
 
 ## Configuration and roles
 
@@ -74,12 +71,20 @@ Super admins work in **Administration**. Its **Users & access** tab holds:
   collections and graphs dropped first; it blocks bound keys and removes the
   tenant's user accounts.
 - **API keys:** create, list, rotate with a grace period and revoke keys scoped
-  to collections and operations; read the persistent audit. Optional fields
-  bind a tenant ID and set requests per second (`1..1000000`), an aggregate and
-  a per-collection vector limit. Blank means no limit; zero means no growth.
-  The dashboard caps quotas at `9007199254740991`. A tenant's first key needs
-  `*` with the `collections` operation to create collections. New secrets show
-  once.
+  to collections, graphs and operations. Optional limits: tenant ID, requests/s
+  (`1..1000000`), total/per-collection vectors (`0..9007199254740991`).
+  Blank means unlimited; zero forbids growth. Creating collections requires
+  `collections` on `*`. Secrets show once.
+
+### Issue a graph-scoped API key
+
+Select `graph_read` / `graph_write`; **Graphs** requires 1–64 distinct names
+matching `^[a-z][a-z0-9_-]{0,62}$` (28 characters within tenants), or `*` alone.
+For `mahpate`, copy its tenant ID from **Tenants**; enter graph `pool`.
+Graph-only keys send `collections: ["*"]` without vector permissions.
+`POST /v1/admin/credentials` already accepts this `graphs` array.
+Check `GET /v1/capabilities` → `scope` with the key.
+Listing and rotation show graph scope; rotation preserves permissions.
 
 **Administration** and **Observability** also hold:
 

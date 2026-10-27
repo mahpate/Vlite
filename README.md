@@ -145,6 +145,11 @@ Super admins can create, rename, limit, suspend, resume and delete tenants.
 Sign-in requires protected mode. See the [dashboard guide](docs/CONSOLE.md) and
 [accounts and sessions](docs/SECURITY.md#dashboard-sign-in-and-accounts).
 
+API keys can bind `graph_read` and `graph_write` to named graphs within a tenant.
+See [issuing graph-scoped keys](docs/CONSOLE-ADMIN.md#issue-a-graph-scoped-api-key).
+
+![Dashboard requests pass through API permission checks before reaching collections and graphs in one VLite file.](site/assets/dashboard-flow.svg)
+
 ## Clients and integrations
 
 - **Python, embedded:** `python -m pip install vlite-embedded` (Python 3.11+). [Guide](bindings/python/README.md)

@@ -361,7 +361,7 @@
     const match = /^(vlk_[a-z2-7]{12}_)(.+)$/.exec(token);
     return match ? `${match[1]}${"\u2022".repeat(12)} (${match[2].length}-character secret hidden)` : `${"\u2022".repeat(12)} (${token.length}-character secret hidden)`;
   }
-  const OPERATIONS = ["read", "search", "search_build", "write", "import", "index", "collections", "diagnostics", "backup"];
+  const OPERATIONS = ["read", "search", "search_build", "write", "import", "index", "collections", "diagnostics", "backup", "graph_read", "graph_write"];
   function optionalLimit(value, min, max, label) {
     if (value === undefined || (typeof value === "string" && !value.trim())) return undefined;
     const source = typeof value === "string" ? value.trim() : value;
@@ -373,12 +373,13 @@
     return number;
   }
   function credentialRequest(input, now = Date.now()) {
-    const collections = input.collections.trim() === "*" ? ["*"] : input.collections.split(",").map((value) => value.trim()).filter(Boolean);
+    const operations = [...new Set(input.operations)];
+    if (!operations.length || operations.some((value) => !OPERATIONS.includes(value))) throw new Error(`Select at least one operation from ${OPERATIONS.join(", ")}`);
+    const graphOnly = operations.every((value) => value === "graph_read" || value === "graph_write");
+    const collections = graphOnly || input.collections.trim() === "*" ? ["*"] : commaList(input.collections);
     if (!collections.length || collections.length > 64) throw new Error("Scope 1..64 collections, or * for all");
     if (!(collections.length === 1 && collections[0] === "*")) collections.forEach(collectionName);
     if (new Set(collections).size !== collections.length) throw new Error("Duplicate collection scope");
-    const operations = [...new Set(input.operations)];
-    if (!operations.length || operations.some((value) => !OPERATIONS.includes(value))) throw new Error(`Select at least one operation from ${OPERATIONS.join(", ")}`);
     const days = Number(input.days);
     if (!Number.isInteger(days) || days < 1 || days > 365) throw new Error("Expiry must be 1..365 days; credentials always expire");
     const body = { collections, operations, expires_unix_ms: now + days * 86400000 };
@@ -392,6 +393,17 @@
         body.tenant_id = tenant;
       }
     }
+    const graphs = commaList(input.graphs);
+    const graphOps = operations.some((value) => value === "graph_read" || value === "graph_write");
+    if (graphOps) {
+      if (!graphs.length || graphs.length > 64) throw new Error("Graph operations require 1..64 graph names, or * for all");
+      if (!(graphs.length === 1 && graphs[0] === "*")) {
+        if (graphs.some((value) => !GRAPH_NAME.test(value))) throw new Error("Graph names match ^[a-z][a-z0-9_-]{0,62}$; * must be used alone");
+        if (body.tenant_id && graphs.some((value) => value.length > 28)) throw new Error("Tenant graph names must be at most 28 characters");
+      }
+      if (new Set(graphs).size !== graphs.length) throw new Error("Duplicate graph scope");
+      body.graphs = graphs;
+    } else if (graphs.length) throw new Error("Select graph_read or graph_write to grant access to graphs");
     for (const [key, min, max, label] of [
       ["requests_per_second", 1, 1000000, "Requests per second"],
       ["max_vectors", 0, Number.MAX_SAFE_INTEGER, "Total vector quota"],
@@ -401,6 +413,12 @@
       if (value !== undefined) body[key] = value;
     }
     return body;
+  }
+  function credentialScope(item) {
+    return [`collections [${item.collections.join(", ")}]`, `graphs [${(item.graphs ?? []).join(", ") || "none"}]`,
+      item.tenant_id ? `tenant ${item.tenant_id}` : "no tenant",
+      `rate ${item.requests_per_second ?? "unlimited"} requests/s`,
+      `vectors ${item.max_vectors ?? "unlimited"} total / ${item.max_vectors_per_collection ?? "unlimited"} per collection`].join("; ");
   }
   function graceSeconds(value) {
     const seconds = Number(value);
@@ -1553,7 +1571,7 @@
     // Scoped credentials: the token is held only in `secret` and rendered masked.
     function showSecret(value, credential) {
       secret = value;
-      text("cred-secret", value ? `New secret for ${credential.id}${credential.name ? ` (${credential.name})` : ""}: ${maskSecret(value)}. Shown once: copy it now; it cannot be retrieved again.` : "No new secret.");
+      text("cred-secret", value ? `New secret for ${credential.id}${credential.name ? ` (${credential.name})` : ""}: ${maskSecret(value)}. Scope: ${credentialScope(credential)}; operations [${credential.operations.join(", ")}]. Shown once: copy it now; it cannot be retrieved again.` : "No new secret.");
     }
     function credentialRows(items) {
       table("cred-table", items.map((item) => {
@@ -1568,9 +1586,7 @@
             actions.append(button);
           }
         }
-        const scope = [item.collections.join(", "), item.tenant_id ? `tenant ${item.tenant_id}` : "no tenant",
-          `rate ${item.requests_per_second ?? "unlimited"} requests/s`,
-          `vectors ${item.max_vectors ?? "unlimited"} total / ${item.max_vectors_per_collection ?? "unlimited"} per collection`].join("; ");
+        const scope = credentialScope(item);
         return [item.id, item.name, scope, item.operations.join(", "), state, when(item.expires_unix_ms), actions];
       }));
     }
@@ -1596,7 +1612,7 @@
       admin("scoped_credentials");
       if (verb === "rotate") {
         const grace = graceSeconds($("cred-grace").value);
-        if (!await ctx.confirm(`Rotate credential ${item.id}? A new secret with the same scope is shown once. The old secret ${grace ? `keeps working for ${grace} seconds, then stops` : "stops working immediately"}.`)) return;
+        if (!await ctx.confirm(`Rotate credential ${item.id}? Scope stays unchanged: ${credentialScope(item)}; operations [${item.operations.join(", ")}]. A new secret is shown once. The old secret ${grace ? `keeps working for ${grace} seconds, then stops` : "stops working immediately"}.`)) return;
         showSecret(null);
         const result = await credentialMutation(() => ctx.api("POST", `/v1/admin/credentials/${item.id}/rotate`, { grace_seconds: grace }, { sensitive: true, data: false }), `Rotate ${item.id}`);
         showSecret(result.token, result.credential);
@@ -1609,14 +1625,14 @@
     }
     on("cred-create", async () => {
       admin("scoped_credentials");
-      const body = credentialRequest({ name: $("cred-name").value.trim(), collections: $("cred-collections").value,
+      const body = credentialRequest({ name: $("cred-name").value.trim(), collections: $("cred-collections").value, graphs: $("cred-graphs").value,
         operations: [...document.querySelectorAll('input[name="cred-op"]:checked')].map((input) => input.value), days: $("cred-days").value,
         tenant_id: $("cred-tenant")?.value, requests_per_second: $("cred-rpm")?.value,
         max_vectors: $("cred-max-vectors")?.value, max_vectors_per_collection: $("cred-max-vectors-per-collection")?.value });
       if (body.tenant_id != null) admin("tenants");
       if ("requests_per_second" in body) admin("credential_rate_limits");
       if ("max_vectors" in body || "max_vectors_per_collection" in body) admin("credential_vector_quotas");
-      if (!await ctx.confirm(`Create a credential for collections [${body.collections.join(", ")}] with operations [${body.operations.join(", ")}], expiring ${when(body.expires_unix_ms)}? Tenant: ${body.tenant_id ?? "none"}; rate: ${body.requests_per_second ?? "unlimited"} requests/s; vectors: ${body.max_vectors ?? "unlimited"} total / ${body.max_vectors_per_collection ?? "unlimited"} per collection. The secret is shown once.`)) return;
+      if (!await ctx.confirm(`Create a credential with ${credentialScope(body)}; operations [${body.operations.join(", ")}], expiring ${when(body.expires_unix_ms)}? The secret is shown once.`)) return;
       showSecret(null);
       const result = await credentialMutation(() => ctx.api("POST", "/v1/admin/credentials", body, { sensitive: true, data: false }), "Create");
       showSecret(result.token, result.credential);
@@ -1698,7 +1714,7 @@
         for (const name of ["import-result", "sample-analysis", "record-comparison", "search-comparison", "scenario-result", "health-result", "code-examples", "payload-preview", "vector-slice-result", "vector-summary", "compatibility", "rebuild-result", "maintenance-result", "maintenance-scope", "token-result", "audit-result", "backup-result",
           "collection-result", "quality-result", "job-result", "job-invalid", "auto-maintenance-result", "backup-schedule-result", "slow-summary", "prometheus-result", "cred-result", "persistent-audit-result"]) text(name, "");
         for (const name of ["batch-ids", "request-body", "scenario", "filter-value", "import-file", "scenario-file", "job-file", "job-id", "new-collection-name", "drop-collection-name", "cred-name"]) $(name).value = "";
-        for (const name of ["cred-tenant", "cred-rpm", "cred-max-vectors", "cred-max-vectors-per-collection"]) if ($(name)) $(name).value = "";
+        for (const name of ["cred-graphs", "cred-tenant", "cred-rpm", "cred-max-vectors", "cred-max-vectors-per-collection"]) if ($(name)) $(name).value = "";
         $("batch-metadata").value = "{}"; $("collection-settings").value = "{}"; $("new-collection-settings").value = "{}";
         for (const name of ["collections-table", "index-memory-table", "slow-table", "cred-table"]) $(name).querySelector("tbody").replaceChildren();
         progress(0, 1);
@@ -1773,7 +1789,7 @@
   window.VLiteTools = { init, utils: {
     jsonDocuments, collectionDraft, codeSnippet, responseSummary,
     id, vector, metadata, record, savedQuery, csvParse, csvExport, distances, analyze, pca,
-    collectionName, collectionPath, settings, scoreDirection, redact, maskSecret, OPERATIONS, credentialRequest, graceSeconds,
+    collectionName, collectionPath, settings, scoreDirection, redact, maskSecret, OPERATIONS, credentialRequest, credentialScope, graceSeconds,
     expiry, rerank, sparseVector, webhookRequest, WEBHOOK_EVENTS, feedRows, pitrRequest, feedPath,
     boundedInteger, importRows, chunk, resumePlan, savedQueryV2, autoMaintenance, autoMaintenanceForm, backupSchedule, memoryRows, requestAllowed, isSearch,
   } };

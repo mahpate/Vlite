@@ -465,7 +465,46 @@ def capture(output):
             save("current-backups.png")
             show("#cred-list").click()
             expect(page.locator("#cred-result")).to_contain_text("credential slots used")
-            save("current-credentials.png", "#cred-create")
+            tenant = api("/v1/admin/tenants", {"name": "mahpate"}, "POST")["tenant"]["id"]
+            api("/v1/graphs", {"graph": f"t{tenant}__pool"}, "POST")
+            page.locator("#cred-name").fill("pool graph")
+            page.locator("#cred-tenant").fill(tenant)
+            page.locator("#cred-graphs").fill("pool")
+            page.locator("#cred-collections").fill("")
+            for operation in page.locator('input[name="cred-op"]').all():
+                operation.set_checked(operation.input_value() in ("graph_read", "graph_write"))
+            page.locator("#cred-create").click()
+            expect(page.locator("#confirmation-text")).to_contain_text("graphs [pool]")
+            with page.expect_response(lambda response: response.request.method == "POST"
+                                      and response.url.endswith("/v1/admin/credentials")) as issued:
+                page.locator("#confirmation button[value=confirm]").click()
+            created = issued.value.json()
+
+            def graph_capabilities(secret):
+                request = urllib.request.Request(backend + "/v1/capabilities",
+                                                 headers={"Authorization": "Bearer " + secret})
+                with urllib.request.urlopen(request, timeout=15) as response:
+                    scope = json.load(response)["scope"]
+                assert scope["graphs"] == ["pool"], scope
+                assert scope["operations"] == ["graph_read", "graph_write"], scope
+                assert scope["collections"] == ["*"], scope
+                assert scope["tenant_id"] == tenant, scope
+
+            graph_capabilities(created["token"])
+            key_row = page.locator("#cred-table tbody tr").filter(has_text="pool graph")
+            expect(key_row).to_contain_text("graphs [pool]")
+            expect(page.locator("#cred-secret")).to_contain_text("graphs [pool]")
+            page.locator("#cred-clear").click()
+            save("current-credentials.png", "#cred-graphs")
+            key_row.get_by_role("button", name=f'Rotate {created["credential"]["id"]}', exact=True).click()
+            expect(page.locator("#confirmation-text")).to_contain_text("graphs [pool]")
+            with page.expect_response(lambda response: response.request.method == "POST"
+                                      and response.url.endswith("/rotate")) as rotated:
+                page.locator("#confirmation button[value=confirm]").click()
+            graph_capabilities(rotated.value.json()["token"])
+            expect(page.locator("#cred-secret")).to_contain_text("graphs [pool]")
+            page.locator("#cred-clear").click()
+            print("Verified dashboard-issued and rotated mahpate/pool graph-only keys through GET /v1/capabilities.")
             show("#tenant-name").fill("Demo workspace")
             page.locator("#tenant-max-vectors").fill("1000")
             page.locator("#tenant-create").click()

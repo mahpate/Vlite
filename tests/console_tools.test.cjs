@@ -90,6 +90,25 @@ for (const bad of [{ days: 0 }, { days: 366 }, { operations: [] }, { operations:
   assert.throws(() => u.credentialRequest({ collections: "docs", operations: ["read"], days: 30, name: "ci", ...bad }, now));
 const credentialDraft = { collections: "docs", operations: ["read"], days: 30, name: "ci" };
 const tenant = "0123456789abcdef0123456789abcdef";
+const graphDraft = { ...credentialDraft, collections: "", operations: ["graph_read", "graph_write"], graphs: "pool", tenant_id: tenant };
+assert.deepEqual(u.credentialRequest(graphDraft, now), {
+  collections: ["*"], operations: ["graph_read", "graph_write"], graphs: ["pool"], tenant_id: tenant,
+  expires_unix_ms: now + 30 * 86400000, name: "ci",
+});
+assert.deepEqual(u.credentialRequest({ ...graphDraft, graphs: " * " }, now).graphs, ["*"]);
+assert.deepEqual(u.credentialRequest({ ...graphDraft, operations: ["graph_read"], graphs: "pool, road-map_2" }, now).graphs, ["pool", "road-map_2"]);
+assert.equal(u.credentialRequest({ ...graphDraft, graphs: Array.from({ length: 64 }, (_, index) => `g${index}`).join(",") }, now).graphs.length, 64);
+assert.deepEqual(u.credentialRequest({ ...graphDraft, collections: "docs", operations: ["read", "graph_write"] }, now).collections, ["docs"]);
+assert.ok(!("graphs" in u.credentialRequest({ ...credentialDraft, graphs: " , " }, now)));
+for (const graphs of ["", " , ", "Pool", "1pool", "../pool", "pool?", "pool,pool", "*,pool", "a".repeat(64),
+  Array.from({ length: 65 }, (_, index) => `g${index}`).join(",")])
+  assert.throws(() => u.credentialRequest({ ...graphDraft, graphs }, now));
+assert.throws(() => u.credentialRequest({ ...credentialDraft, graphs: "pool" }, now), /Select graph_read/);
+assert.throws(() => u.credentialRequest({ ...graphDraft, graphs: "a".repeat(29) }, now), /28 characters/);
+assert.equal(u.credentialRequest({ ...graphDraft, graphs: "a".repeat(28) }, now).graphs[0].length, 28);
+assert.equal(u.credentialRequest({ ...graphDraft, tenant_id: "", graphs: "a".repeat(63) }, now).graphs[0].length, 63);
+assert.match(u.credentialScope(u.credentialRequest(graphDraft, now)), /graphs \[pool\]/);
+assert.match(u.credentialScope(u.credentialRequest(credentialDraft, now)), /graphs \[none\]/);
 assert.deepEqual(u.credentialRequest({ ...credentialDraft, tenant_id: ` ${tenant} `, requests_per_second: "1000000",
   max_vectors: "0", max_vectors_per_collection: "9007199254740991" }, now), {
   collections: ["docs"], operations: ["read"], expires_unix_ms: now + 30 * 86400000, name: "ci", tenant_id: tenant,
@@ -251,8 +270,9 @@ async function adminHandlerChecks() {
   }
   const elements = new Map([...fs.readFileSync("src/dashboard/index.html", "utf8").matchAll(/\bid="([^"]+)"/g)]
     .map((match) => [match[1], new Element()]));
+  let selectedOps = ["read"], listedKeys = [];
   const document = { getElementById: (name) => elements.get(name) ?? null, documentElement: new Element(),
-    querySelectorAll: (selector) => selector === 'input[name="cred-op"]:checked' ? [{ value: "read" }] : [],
+    querySelectorAll: (selector) => selector === 'input[name="cred-op"]:checked' ? selectedOps.map((value) => ({ value })) : [],
     createElement: () => new Element() };
   const featureNames = ["scoped_credentials", "tenants", "credential_rate_limits", "credential_vector_quotas", "backup_restore", "backup_verify_drill", "webhooks"];
   const caps = { role: "admin", features: Object.fromEntries(featureNames.map((name) => [name, true])) };
@@ -264,8 +284,9 @@ async function adminHandlerChecks() {
     api: async (method, path, body, options) => {
       requests.push({ method, path, body, options });
       if (failure) throw failure;
-      if (method === "GET" && path === "/v1/admin/credentials") return { items: [], capacity: 64 };
-      return { token: tokenValue, credential: { id: "abcdefghijk2", name: "ci" } };
+      if (method === "GET" && path === "/v1/admin/credentials") return { items: listedKeys, capacity: 64 };
+      return { token: tokenValue, credential: { id: "abcdefghijk2", name: "ci", collections: ["*"],
+        operations: selectedOps, ...(selectedOps.includes("graph_read") ? { graphs: ["pool"] } : {}) } };
     },
   };
   const sandbox = { window: { addEventListener() {}, matchMedia: () => ({ addEventListener() {}, removeEventListener() {} }) },
@@ -278,7 +299,8 @@ async function adminHandlerChecks() {
   const click = (name) => elements.get(name).listeners.click();
   function draft() {
     field("cred-name", "ci"); field("cred-collections", "docs"); field("cred-days", "30");
-    for (const name of ["cred-tenant", "cred-rpm", "cred-max-vectors", "cred-max-vectors-per-collection"]) field(name, "");
+    selectedOps = ["read"];
+    for (const name of ["cred-graphs", "cred-tenant", "cred-rpm", "cred-max-vectors", "cred-max-vectors-per-collection"]) field(name, "");
   }
   draft();
   await click("cred-create");
@@ -292,13 +314,36 @@ async function adminHandlerChecks() {
   await click("cred-clear");
   await assert.rejects(click("cred-copy"), /No secret/);
   requests.length = 0;
+  draft(); selectedOps = ["graph_write"]; field("cred-graphs", "");
+  await assert.rejects(click("cred-create"), /Graph operations require/);
+  assert.equal(requests.length, 0, "Invalid graph scope must not issue a request");
+  draft(); selectedOps = ["graph_read", "graph_write"];
+  field("cred-graphs", "pool"); field("cred-tenant", tenant); field("cred-collections", "");
+  await click("cred-create");
+  assert.deepEqual(Array.from(requests[0].body.graphs), ["pool"]);
+  assert.deepEqual(Array.from(requests[0].body.collections), ["*"]);
+  assert.match(confirmations.at(-1), /graphs \[pool\]/);
+  assert.match(elements.get("cred-secret").textContent, /graphs \[pool\]/);
+  listedKeys = [{ id: "abcdefghijk2", name: "ci", collections: ["*"], graphs: ["pool"], tenant_id: tenant,
+    operations: selectedOps, state: "active", expires_unix_ms: now + 86400000 }];
+  await click("cred-list");
+  const keyRow = elements.get("cred-table").querySelector("tbody").children[0];
+  assert.match(keyRow.children[2].textContent, /graphs \[pool\]/);
+  field("cred-grace", "0");
+  await keyRow.children[6].children[0].children[0].listeners.click();
+  assert.match(confirmations.at(-1), /Scope stays unchanged:.*graphs \[pool\]/);
+  assert.match(elements.get("cred-secret").textContent, /graphs \[pool\]/);
+  assert.equal(requests.at(-2).path, "/v1/admin/credentials/abcdefghijk2/rotate");
+  assert.deepEqual(Object.keys(requests.at(-2).body), ["grace_seconds"]);
+  listedKeys = [];
+  requests.length = 0;
   draft(); field("cred-tenant", tenant); field("cred-rpm", "12"); field("cred-max-vectors", "0"); field("cred-max-vectors-per-collection", "9");
   await click("cred-create");
   assert.equal(requests[0].body.tenant_id, tenant);
   assert.equal(requests[0].body.requests_per_second, 12);
   assert.equal(requests[0].body.max_vectors, 0);
   assert.equal(requests[0].body.max_vectors_per_collection, 9);
-  assert.match(confirmations.at(-1), /rate: 12 requests\/s; vectors: 0 total \/ 9 per collection/);
+  assert.match(confirmations.at(-1), /rate 12 requests\/s; vectors 0 total \/ 9 per collection/);
   for (const [input, feature, value] of [["cred-tenant", "tenants", tenant], ["cred-rpm", "credential_rate_limits", "1"],
     ["cred-max-vectors", "credential_vector_quotas", "0"], ["cred-max-vectors-per-collection", "credential_vector_quotas", "0"]]) {
     requests.length = 0; draft(); field(input, value); caps.features[feature] = false;
@@ -330,7 +375,7 @@ async function adminHandlerChecks() {
   await assert.rejects(click("cred-copy"), /No secret/);
   failure = null;
   tools.clear();
-  for (const name of ["cred-tenant", "cred-rpm", "cred-max-vectors", "cred-max-vectors-per-collection"])
+  for (const name of ["cred-graphs", "cred-tenant", "cred-rpm", "cred-max-vectors", "cred-max-vectors-per-collection"])
     assert.equal(elements.get(name).value, "");
   console.log("PASS admin handlers: blank/zero credential scopes and limits, capability/role gates, confirmations, secret clearing, indeterminate durability");
 }
