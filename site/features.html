@@ -122,8 +122,8 @@
       </section>
       <section id="graph">
         <h2>Property graphs</h2>
-        <div class="table-scroll"><table><caption>Opt-in graphs stored in the same file and commit log as vectors</caption><thead><tr><th scope="col">Feature</th><th scope="col">Support and requirements</th></tr></thead><tbody>
-          <tr><th scope="row">Opt-in per file</th><td>Create a graph file with <code>create_with_graph</code> or <code>vlite-graph-cli init</code>, or copy one with <code>vlite-maintain enable-graph</code>. Other files stay vector-only. Older releases refuse graph files.</td></tr>
+        <div class="table-scroll"><table><caption>Graphs stored in the same file and commit log as vectors</caption><thead><tr><th scope="col">Feature</th><th scope="col">Support and requirements</th></tr></thead><tbody>
+          <tr><th scope="row">On by default</th><td>New files hold vectors and graphs, and older releases cannot open them. Ask for format 3 or 4 for a plain vector file. <code>vlite-maintain enable-graph</code> adds graph support to a copy of a plain format 4 or 5 file.</td></tr>
           <tr><th scope="row">Availability</th><td>Compiled into every build: release binaries, the C library, Python wheels, Node.js release tarballs and the Docker API server. <code>vlite-graph-cli</code> ships in the release archives, not the Docker image.</td></tr>
           <tr><th scope="row">Data model</th><td>Up to 64 named graphs per file. Nodes have a unique key, labels and typed properties; edges have a type, endpoints, an optional key and properties. Attachments link nodes to live vector records.</td></tr>
           <tr><th scope="row">Atomic graph batches</th><td>Up to 4,096 node, edge, attachment and vector operations, in any collection, commit atomically or not at all. <code>expected</code> makes an operation conditional.</td></tr>
@@ -215,12 +215,12 @@
         <h2>Command-line tools and agents</h2>
         <ul class="list">
           <li><strong>Interactive or scripted shell:</strong> query records and collections; <code>--read-only</code> disables writes, but the shell still takes an exclusive file lock.</li>
-          <li><strong>Offline maintenance:</strong> inspect, verify, back up, restore, compact, upgrade and re-encrypt, plus <code>enable-graph</code> and <code>strip-graph</code> for graph files.</li>
+          <li><strong>Offline maintenance:</strong> inspect, verify, back up, restore, compact, upgrade and re-encrypt, plus <code>enable-graph</code> and <code>strip-graph</code> to add or remove graph support.</li>
           <li><strong>Import:</strong> CSV, JSONL, pgvector text and supported FAISS input; optional Parquet and Arrow IPC with <code>import-formats</code>.</li>
           <li><strong>Search quality:</strong> exact-oracle recall, configuration and database comparison, and bounded index evaluation.</li>
           <li><strong>Index tuning:</strong> a workload-based configuration advisor with memory and recall trade-offs.</li>
           <li><strong>Benchmark harnesses:</strong> seeded or external vectors, mixed writes and deletes, and raw timing and memory reports.</li>
-          <li><strong>Graph CLI:</strong> <code>vlite-graph-cli</code> creates graph files and runs graph reads and write batches as JSON.</li>
+          <li><strong>Graph CLI:</strong> <code>vlite-graph-cli</code> creates files and runs graph reads and write batches as JSON.</li>
           <li><strong>MCP server:</strong> stdio tools with shared-lock read-only access by default and an explicit <code>--writable</code> mode. Graph tools work on a file or through a server with <code>--server URL</code>.</li>
           <li><strong>Agent skills:</strong> four skills for RAG, MCP, operations and index tuning.</li>
         </ul>
@@ -231,13 +231,13 @@
         <ul class="list">
           <li>The live dataset must fit in RAM. Disk ANN bounds its node cache, not the database's overall memory footprint.</li>
           <li>One exclusive writer or several shared read-only owners per file; no embedded writer and readers across processes at the same time.</li>
-          <li>File creation defaults to format 3. Collections and checkpoints need format 4 or 5; expiry and extended vectors need format 5. Upgrades are explicit.</li>
+          <li>New files are format 5 with graphs, which older releases cannot open. Format 3 or 4 creates a plain vector file without the newer features. Upgrades are explicit.</li>
           <li>Vector batches stay within one collection; only graph batches span collections. No distributed consensus, automatic network replication or inner-product ANN.</li>
           <li>Plaintext ANN sidecars are unavailable with encrypted databases. TLS and access controls are separate from file encryption.</li>
           <li>Tenants share one file. Their isolation is logical, not cryptographic.</li>
           <li>Embeddings come from your application or provider. VLite does not bundle a model runtime.</li>
           <li>Recovery checks do not certify physical power-loss behavior; filesystem and hardware guarantees still apply.</li>
-          <li>Property graphs are opt-in per file. gRPC has no graph service.</li>
+          <li>gRPC has no graph service.</li>
         </ul>
       </section>
     </div>

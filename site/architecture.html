@@ -72,7 +72,7 @@
       <tbody>
         <tr><td>Database</td><td>One <code>.vlite</code> file with your records, collections and graphs. Embed it, or serve it with <code>vlite-server</code>, one file per server.</td></tr>
         <tr><td>Collection</td><td>A named set of records, like a table, with its own vector size and settings. Every database has <code>default</code>; named collections need <a href="#versions">format v4 or newer</a>.</td></tr>
-        <tr><td>Graph</td><td>A named property graph in the same file: nodes, typed edges and links to records. Available in graph-enabled files.</td></tr>
+        <tr><td>Graph</td><td>A named property graph in the same file: nodes, typed edges and links to records.</td></tr>
         <tr><td>Tenant</td><td>A private space for one team or customer in the same file. Its users and API keys see only its collections and graphs.</td></tr>
         <tr><td>User</td><td>A person who signs in to the dashboard as super admin, editor or viewer. Apps use API keys.</td></tr>
       </tbody>
@@ -157,7 +157,7 @@ flowchart LR
       <tbody>
         <tr><td>1 &middot; encrypted</td><td>Frame bodies are sealed with ChaCha20-Poly1305, and an encryption descriptor follows the header.</td></tr>
         <tr><td>2 &middot; timestamps</td><td>Each commit is preceded by a time-anchor frame (op 11), so a restore can target a point in time.</td></tr>
-        <tr><td>4 &middot; graph</td><td>The file holds property graphs. Opt-in per file.</td></tr>
+        <tr><td>4 &middot; graph</td><td>The file can hold property graphs. Set by default on new files.</td></tr>
       </tbody>
     </table>
     <p>Only v5 files have flags. Unknown bits fail with <code>UnsupportedFeature</code> rather than being ignored, so an older binary never misreads a newer file.</p>
@@ -231,12 +231,12 @@ flowchart LR
     <h2 id="versions">Format versions</h2>
     <p>Features that need new on-disk structures use a newer format version. Files are never converted silently: using such a feature on an older file returns an error such as <code>MetadataRequiresUpgrade</code> or <code>CollectionsRequireUpgrade</code>, and the file is left unchanged.</p>
     <figure class="diagram" data-diagram="formats">
-      <picture><source srcset="assets/diagrams/formats-dark.svg" media="(prefers-color-scheme: dark)"><img src="assets/diagrams/formats-light.svg" data-light="assets/diagrams/formats-light.svg" data-dark="assets/diagrams/formats-dark.svg" alt="Explicit file-format progression from base logs to collections, then expiry and extended vectors." loading="lazy"></picture>
+      <picture><source srcset="assets/diagrams/formats-dark.svg" media="(prefers-color-scheme: dark)"><img src="assets/diagrams/formats-light.svg" data-light="assets/diagrams/formats-light.svg" data-dark="assets/diagrams/formats-dark.svg" alt="Explicit file-format progression from base logs to collections, then expiry and extended vectors, then property graphs, the default for new files." loading="lazy"></picture>
       <a class="diagram-full" href="assets/diagrams/formats-light.svg" data-light="assets/diagrams/formats-light.svg" data-dark="assets/diagrams/formats-dark.svg">Open full-size diagram</a>
       <details class="diagram-source"><summary>Text diagram</summary>
 <pre class="mermaid">
 flowchart LR
-  V3["V1–V3&lt;br/&gt;base log · default for create"] --> V4["V4&lt;br/&gt;lineage · collections · import checkpoints"] --> V5["V5&lt;br/&gt;expiry · geo metadata · named/sparse vectors"]
+  V3["V1–V3&lt;br/&gt;base log"] --> V4["V4&lt;br/&gt;lineage · collections · import checkpoints"] --> V5["V5&lt;br/&gt;expiry · geo metadata · named/sparse vectors"] --> G["V5 + graph&lt;br/&gt;property graphs · default for new files"]
 </pre></details>
     </figure>
     <table class="param-table">
@@ -244,23 +244,23 @@ flowchart LR
       <tbody>
         <tr><td>1</td><td>Put and delete frames; written only by older releases</td></tr>
         <tr><td>2</td><td>Atomic batches; written only by older releases</td></tr>
-        <tr><td>3</td><td>Typed metadata; the default for new files</td></tr>
+        <tr><td>3</td><td>Typed metadata</td></tr>
         <tr><td>4</td><td>Lineage, collections, settings and import checkpoints; enables the change feed</td></tr>
         <tr><td>5</td><td>Flags, encryption, commit timestamps, expiry, metadata-only updates, geo metadata, named and sparse vectors</td></tr>
-        <tr><td>5 + graph</td><td>Property graphs (opt-in)</td></tr>
+        <tr><td>5 + graph</td><td>Property graphs; the default for new files</td></tr>
       </tbody>
     </table>
     <ul class="list">
-      <li>To create a v4 or v5 file, use <code>create_with_format</code>, or <code>create_with_options</code> for encryption and commit timestamps. The server takes <code>--create-format 4</code> or <code>5</code> with <code>--create-if-missing</code>, and creates v5 when it is given an encryption key.</li>
+      <li>New files are v5 with the graph flag. For a plain vector file, ask for v3 or v4 with <code>create_with_format</code>, or pass the server <code>--create-format 3</code> or <code>4</code> with <code>--create-if-missing</code>. <code>create_with_options</code> adds encryption and commit timestamps.</li>
       <li><code>vlite-maintain upgrade</code> rewrites a v1&ndash;v4 file as v4 with a new lineage. A v5 file stays v5; upgrade never produces v5.</li>
       <li>Compaction writes v3 for v1&ndash;v3 files and otherwise keeps the version.</li>
-      <li>Graph files are created with <code>create_with_graph</code> or <code>vlite-graph-cli init</code>. <code>vlite-maintain enable-graph</code> copies a v4 or v5 file into a new graph-enabled v5 file, and <code>strip-graph</code> copies it back to plain v5 and drops every graph.</li>
-      <li>Older releases refuse graph files with <code>UnsupportedFeature</code>.</li>
+      <li><code>vlite-maintain enable-graph</code> copies a plain v4 or v5 file into a new v5 file with the graph flag, and <code>strip-graph</code> copies one back to plain v5 and drops every graph.</li>
+      <li>Older releases refuse files with the graph flag (<code>UnsupportedFeature</code>).</li>
       <li>Backup, restore, verify, compaction, upgrade, re-encryption and replicas keep graph state.</li>
     </ul>
 
     <h2 id="graph-frames">Graph frames</h2>
-    <p>Graph-enabled files store property graphs in op 12 frames. Each frame changes one graph and commits as one unit, together with any vector writes it carries. Graph indexes are rebuilt when the file opens; there is no graph sidecar.</p>
+    <p>Property graphs are stored in op 12 frames. Each frame changes one graph and commits as one unit, together with any vector writes it carries. Graph indexes are rebuilt when the file opens; there is no graph sidecar.</p>
     <div class="bytemap small" role="img" aria-label="Graph frame body: byte 0 version, always 1; byte 1 reserved; bytes 2 to 3 graph ID, below 64; then the entries, as many as the prefix count.">
       <div class="bm-row">
         <span class="bm-cell c-ver" style="--w:3">0<b>version</b><i>1</i></span>
@@ -609,7 +609,7 @@ sequenceDiagram
       <li>Opening a file replays the log, so open time and memory grow with data. Compaction reclaims space.</li>
       <li>HNSW and ScalarU8 are approximate. Inner product always searches exactly.</li>
       <li>Tenants are logical only. Webhooks are at-least-once, and streaming exports are not point-in-time snapshots.</li>
-      <li>Graphs are opt-in per file. gRPC has no graph service.</li>
+      <li>gRPC has no graph service.</li>
     </ul>
     <p>More detail: <a href="docs/REFERENCE.html">Reference</a> &middot; <a href="docs/STORAGE-FEATURES.html">Storage features</a> &middot; <a href="docs/SECURITY.html">Security</a></p>
   </main>
