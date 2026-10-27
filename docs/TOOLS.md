@@ -196,7 +196,7 @@ does not start the server or grant write access.
 ## Graph operations
 
 `vlite-graph-cli` runs one typed property-graph operation per invocation on a
-[graph-enabled file](STORAGE-FEATURES.md#graph-enabled-files-opt-in-per-file).
+[graph-enabled file](STORAGE-FEATURES.md#graph-enabled-files).
 It needs the `json` feature (graph is compiled into every build since v0.5.1).
 Release archives ship it since v0.5.0. The Docker image's API server (`vlite-server`) has graph;
 `vlite-graph-cli` is not in the image, and packages do not include the CLI.

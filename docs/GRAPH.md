@@ -37,7 +37,7 @@ capabilities stay absent or report that graphs are not enabled.
 - Backup, restore, verify, compaction, re-encryption, replicas, log export
   and `upgrade` (a validated copy, since graph files are already the latest
   format) carry graph state. Format rules are in
-  [STORAGE-FEATURES](STORAGE-FEATURES.md#graph-enabled-files-opt-in-per-file).
+  [STORAGE-FEATURES](STORAGE-FEATURES.md#graph-enabled-files).
 
 ## Data model and consistency
 
