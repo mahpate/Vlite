@@ -133,8 +133,9 @@
           <tr><th scope="row">Query text</th><td>A small read-only language that maps to one typed read.</td></tr>
           <tr><th scope="row">Surfaces</th><td>Rust, <code>vlite-graph-cli</code>, MCP <code>vlite_graph_*</code> tools, REST <code>/v1/graphs</code>, the C ABI, Python, Node.js and the dashboard Graph workspace. Schemas, retrieval and query text are not in the C ABI, Python or Node.js yet.</td></tr>
           <tr><th scope="row">Access control</th><td>Graphs are tenant-owned. API keys need <code>graph_read</code> or <code>graph_write</code> and a <code>graphs</code> binding; accounts get role-based access, narrowed by <code>graphs</code> and <code>graph_access</code>. Collection scope never implies graph scope.</td></tr>
-          <tr><th scope="row">Maintenance and rollback</th><td>Backup, restore, verify, compaction, re-encryption and read replicas keep graph state. <code>vlite-maintain strip-graph --confirm-graph-data-loss</code> copies the vectors to a plain format 5 file.</td></tr>
-          <tr><th scope="row">Not supported</th><td>Change feeds and webhooks refuse graph files, gRPC has no graph service, format upgrade rejects graph files, and <code>vlite-graph-cli</code> cannot open encrypted files.</td></tr>
+          <tr><th scope="row">Maintenance and rollback</th><td>Backup, restore, verify, compaction, format upgrade, re-encryption and read replicas keep graph state. <code>vlite-maintain strip-graph --confirm-graph-data-loss</code> copies the vectors to a plain format 5 file.</td></tr>
+          <tr><th scope="row">Change feed and webhooks</th><td>Graph commits appear as <code>graph_created</code>, <code>graph_dropped</code> and <code>graph_batch</code> events. Webhooks can limit graph events to named graphs.</td></tr>
+          <tr><th scope="row">Not supported</th><td>gRPC has no graph service, and <code>vlite-graph-cli</code> cannot open encrypted files.</td></tr>
         </tbody></table></div>
         <p><a href="docs/GRAPH.html">Graph guide</a> &middot; <a href="docs/GRAPH-QUERY.html">Graph query language</a> &middot; <a href="docs/TOOLS.html#graph-operations">Graph CLI</a> &middot; <a href="docs/MCP.html#property-graph-tools">MCP graph tools</a></p>
       </section>
@@ -180,9 +181,9 @@
           <tr><th scope="row">Compaction and format upgrade</th><td>Validated copy-out maintenance; original files are never replaced in place.</td></tr>
           <tr><th scope="row">Interrupted-write recovery</th><td>Explicit repair of an incomplete tail; complete but corrupt data fails closed.</td></tr>
           <tr><th scope="row">Point-in-time restore</th><td>Sequence-targeted restore; timestamp targets need commit timestamps. Restores publish a new lineage.</td></tr>
-          <tr><th scope="row">Change feed</th><td>Lineage and sequence cursors, whole-commit batches and explicit cursor invalidation after history changes. Requires format 4 or 5; not available for graph files.</td></tr>
+          <tr><th scope="row">Change feed</th><td>Lineage and sequence cursors, whole-commit batches and explicit cursor invalidation after history changes. Covers vector and graph commits. Requires format 4 or 5.</td></tr>
           <tr><th scope="row">Read replicas</th><td>Validated log-segment export and apply, lag status and explicit promotion. File shipping, not automatic network replication.</td></tr>
-          <tr><th scope="row">Webhooks</th><td>At-least-once change-feed delivery with HMAC signatures, retry backoff and persisted subscriptions and cursor. Consumers deduplicate events.</td></tr>
+          <tr><th scope="row">Webhooks</th><td>At-least-once change-feed delivery with HMAC signatures, retry backoff and persisted subscriptions and cursor. Every event type by default, with optional event, collection and graph filters. Consumers deduplicate events.</td></tr>
           <tr><th scope="row">Health and metrics</th><td>Health endpoints, JSON and Prometheus metrics, latency and route counters, and queue, sync, snapshot and rebuild diagnostics.</td></tr>
           <tr><th scope="row">Live logs</th><td>A bounded in-memory ring, sequence cursors, filters and JSONL export; not a durable log archive.</td></tr>
           <tr><th scope="row">OpenTelemetry</th><td>Optional OTLP tracing through <code>otel</code>, with an operator-configured collector.</td></tr>
@@ -236,7 +237,7 @@
           <li>Tenants share one file. Their isolation is logical, not cryptographic.</li>
           <li>Embeddings come from your application or provider. VLite does not bundle a model runtime.</li>
           <li>Recovery checks do not certify physical power-loss behavior; filesystem and hardware guarantees still apply.</li>
-          <li>Property graphs are opt-in per file. Graph files do not support change feeds, webhooks or format upgrade.</li>
+          <li>Property graphs are opt-in per file. gRPC has no graph service.</li>
         </ul>
       </section>
     </div>

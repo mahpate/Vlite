@@ -255,8 +255,8 @@ flowchart LR
       <li><code>vlite-maintain upgrade</code> rewrites a v1&ndash;v4 file as v4 with a new lineage. A v5 file stays v5; upgrade never produces v5.</li>
       <li>Compaction writes v3 for v1&ndash;v3 files and otherwise keeps the version.</li>
       <li>Graph files are created with <code>create_with_graph</code> or <code>vlite-graph-cli init</code>. <code>vlite-maintain enable-graph</code> copies a v4 or v5 file into a new graph-enabled v5 file, and <code>strip-graph</code> copies it back to plain v5 and drops every graph.</li>
-      <li>Older releases refuse graph files with <code>UnsupportedFeature</code>, and <code>upgrade</code> refuses them too.</li>
-      <li>Backup, restore, verify, compaction, re-encryption and replicas keep graph state.</li>
+      <li>Older releases refuse graph files with <code>UnsupportedFeature</code>.</li>
+      <li>Backup, restore, verify, compaction, upgrade, re-encryption and replicas keep graph state.</li>
     </ul>
 
     <h2 id="graph-frames">Graph frames</h2>
@@ -295,7 +295,7 @@ flowchart LR
       <li>Up to 64 graphs per file, with names up to 63 bytes. Each frame holds up to 4,096 entries and 16 MiB.</li>
       <li>Node and edge keys are up to 256 bytes, a node has up to 8 labels, and properties hold up to 64 fields and 64 KiB.</li>
       <li>A vector record attached to a node cannot be deleted or given an expiry.</li>
-      <li>Change feeds and webhooks are off for graph files.</li>
+      <li>The change feed and webhooks report graph commits as <code>graph_created</code>, <code>graph_dropped</code> and <code>graph_batch</code> events.</li>
     </ul>
 
     <h2 id="sidecars">Sidecar files</h2>
@@ -609,7 +609,7 @@ sequenceDiagram
       <li>Opening a file replays the log, so open time and memory grow with data. Compaction reclaims space.</li>
       <li>HNSW and ScalarU8 are approximate. Inner product always searches exactly.</li>
       <li>Tenants are logical only. Webhooks are at-least-once, and streaming exports are not point-in-time snapshots.</li>
-      <li>Graphs are opt-in per file. Graph files turn off change feeds and webhooks.</li>
+      <li>Graphs are opt-in per file. gRPC has no graph service.</li>
     </ul>
     <p>More detail: <a href="docs/REFERENCE.html">Reference</a> &middot; <a href="docs/STORAGE-FEATURES.html">Storage features</a> &middot; <a href="docs/SECURITY.html">Security</a></p>
   </main>
