@@ -1,20 +1,19 @@
 {
-  "data": "Synthetic demo records in isolated disposable databases",
-  "graph_data": "The Graph view uses a second, graph-enabled database with the same records, because graph-enabled files have no change feed or webhooks",
+  "data": "Synthetic demo records and an articles graph in one isolated disposable database",
   "record_count": 8,
   "connected": true,
-  "backend_image": "ghcr.io/mahpate/vlite-api:v0.5.0",
+  "backend_image": "vlite-capture:source",
   "format_version": 5,
   "source_assets": {
     "admin-tools.js": "e46d3ab6267dcab8dacec1128debc2a0433e61b6c0519dd2d0a34453eee2f52a",
-    "app.js": "46797a24aa0375afc8a957c0fcbd16a0ba05548810745941c94aa724f120be7f",
-    "console-tools.js": "7121e89ec273e1d9190b92e8e22c2e4d98e25f5fb12f0a5c6522b3c8d96748ae",
-    "graph.css": "04a36f69d1f2bb7b2707d1e0c3fbe6c927e1b88da657d671b5565d785c3c2f5a",
     "graph.js": "f05e83c2a7f10cae7f7e4b3af7104769c85c47a6a6426a6c4489cf42581e2e7a",
-    "index.html": "ab56b2c036cc9f8459983003aa279d608acc83f93f5be8458bfb475669da5631",
-    "navigation.js": "5b7fabfdb4afa9599fa7242b9748f2f821638baa8eb2491140898779da035621",
+    "console-tools.js": "f89b6e236ec67be8265856a1db5adabc0bcc7c39112ce38acf5358b814c6f89c",
+    "index.html": "63630114e3304bec9bc72026151b43cdbc3a08dd9747be959bd70076f7d61d7d",
     "observability.js": "23e6217b65ae58fd3cd5adeefb5a3f156d84e935fc4d09e994e798490fbb83c1",
-    "style.css": "f8508b89e4c77a48fb21ccac8d769570657c48cab0571f5d20f827e1e11d7199"
+    "app.js": "46797a24aa0375afc8a957c0fcbd16a0ba05548810745941c94aa724f120be7f",
+    "style.css": "e6e0881d35ddea76789546a575ae47e5cb388c8ecb38aa9e144f2310be743621",
+    "navigation.js": "5b7fabfdb4afa9599fa7242b9748f2f821638baa8eb2491140898779da035621",
+    "graph.css": "04a36f69d1f2bb7b2707d1e0c3fbe6c927e1b88da657d671b5565d785c3c2f5a"
   },
   "captures": [
     {
@@ -25,7 +24,7 @@
     {
       "file": "current-overview-light.png",
       "workspace": "Overview",
-      "sha256": "3367c60fc5a92ef5b353943aae977da9479840ffac05cce8edcfdc078856fdc9"
+      "sha256": "032299da4f2eb7c901674f9995296fa6c8d2d10a53b37c5781b27a95fa16b4a7"
     },
     {
       "file": "current-records.png",
@@ -50,27 +49,27 @@
     {
       "file": "current-write.png",
       "workspace": "Collections",
-      "sha256": "92ffe73d6d3e10fc662b2fa429e8911fea0b2056c63d1301ecb5b59c46d262bd"
+      "sha256": "c49275dec0543328cfb048458a558dcb8d9204377ae69179d2c2e7786b60398e"
     },
     {
       "file": "current-index.png",
       "workspace": "Collections",
-      "sha256": "53ba6736c5add869314de2dde12240b8a208b0ba7164eea4089b2bbabab8a707"
+      "sha256": "20e3aaad7ecaeaa078d730f545e300eb3d3244f1556f2f599f93d753bccbb766"
     },
     {
       "file": "current-collections.png",
       "workspace": "Collections",
-      "sha256": "17342b8eb78402151d07c65091fed205d119f3f313516d372b0ca08976e78b9c"
+      "sha256": "17287a47a6b53f6d3c53931667997c4f4323be501cd9c7036194c4da8419792f"
     },
     {
       "file": "current-search.png",
       "workspace": "Search",
-      "sha256": "b571b128e9c6483ba308b65ffcc6ae12a4760c6d8e8dad5bf2b2c0d661aa7cae"
+      "sha256": "cdb99e4ba312a0c6ac1f6a5d959ff34bf5ba2852f091e9b6fdeeaee26b2d70bf"
     },
     {
       "file": "current-hybrid.png",
       "workspace": "Search",
-      "sha256": "af1fd97dbfbd61d9c2a8f3dfaa48dc2aa566997ea525a7e95a026c61926a26b2"
+      "sha256": "79fd44da19110740c5992df1f67db0a64973d951e03e1c8447c969a87f0ad0e8"
     },
     {
       "file": "current-retrieval.png",
@@ -80,47 +79,52 @@
     {
       "file": "current-explore.png",
       "workspace": "Search",
-      "sha256": "04b8a2978399072632d39bb053aa278e4756a5f4f04f0145b5b09d49c7ee5989"
+      "sha256": "dab1160a837e6bd096cae070e76275a3fa22e20a64723716d3f5acc4c757d231"
     },
     {
       "file": "current-import.png",
       "workspace": "Collections",
-      "sha256": "2c90d6af648adb63c59b7cfed655cc962f0c2f54e5266e870c62e1b44f442c40"
+      "sha256": "d9c9a513728dcd81d47d575c4ab20964d668844b9edf1d25ecd928d7de399802"
+    },
+    {
+      "file": "current-graph.png",
+      "workspace": "Graph",
+      "sha256": "d9c664654434db81e0436f395b1cdb1a24e070cab206f428902367f5a67a3013"
     },
     {
       "file": "current-observability.png",
       "workspace": "Observability",
-      "sha256": "7fc4dccd9d711c86536debe94e05607bdb7ac102e6b770e1d716106afd4c212a"
+      "sha256": "a0c1d170a2c39e3880e51175ca40ff4b768de2fb9287b9a7542b2b3c987dd45f"
     },
     {
       "file": "current-feed.png",
       "workspace": "Observability",
-      "sha256": "7eb6772f9cedc00b80b0b35bdac229ed80fec8f3e50905299fa4cfbc08949e56"
+      "sha256": "602be0ef232f29d07a96e17fb38633f5b00a69935881bd4baaaa851f70df496d"
     },
     {
       "file": "current-administration.png",
       "workspace": "Administration",
-      "sha256": "0c23a7a1aaada133c73a2b14c69b927b5b44d65857ef2d9ca5b1e1ab74d1edcb"
+      "sha256": "b3b1c7453da934014b00f32945c3defd1d6578b52861d3e18511c895e8208d43"
     },
     {
       "file": "current-users.png",
       "workspace": "Administration",
-      "sha256": "b89ad6ef7d34ddd29599cdd7368c19ed75b6d84215f6d69aa99ceb7d7d28ce60"
+      "sha256": "e5874335120a227bea569e97b8a070071b7261d9c448d564429526364c6d754b"
     },
     {
       "file": "current-backups.png",
       "workspace": "Administration",
-      "sha256": "6af6d34b21197fdbce5d500dc652771957ea11ac49a9e1031206d145413fc113"
+      "sha256": "cdbbc521d722bd6a1f56398c5e972c4ec89aef6dd5fda2c72e8f5a4cc4cce1c8"
     },
     {
       "file": "current-credentials.png",
       "workspace": "Administration",
-      "sha256": "6ce5d96fd0e1cbf669ccf6cd824dd0ab4cc5db05ea977aa833c23e6c3e639bce"
+      "sha256": "7285318d540c2dab557ac3c7927a95809edcf6815f8d367ed404adad463f367a"
     },
     {
       "file": "current-tenants.png",
       "workspace": "Administration",
-      "sha256": "e0944e57e1562b9c79c655a5bfffab9cc68771e0ce231b9df20d04cb3e027c50"
+      "sha256": "cb659bfc2bcbde2dd92bb186995f5db3f6e9f1b75f30635ebba4203f56c18e95"
     },
     {
       "file": "current-automation.png",
@@ -130,37 +134,32 @@
     {
       "file": "current-webhooks.png",
       "workspace": "Administration",
-      "sha256": "ba63828cf6d7cbcd9e189abfad3d126df53797ea85f62c11e768c4b9e5f827ca"
+      "sha256": "20fdf4a2ee1814da1c3a726faed74e8f4d63d591c6e296137b0faf4c343cfdfa"
     },
     {
       "file": "current-tls.png",
       "workspace": "Administration",
-      "sha256": "b4b0d1f24809e07f492dfc3d8c4101139b75edf23e0b2e06214bcf24f66beb3b"
+      "sha256": "b5baaa12c4b82f37b7386dba6c62f8832ad54aed0af65f16ff76d2c514349684"
     },
     {
       "file": "current-replication.png",
       "workspace": "Administration",
-      "sha256": "3a82c089f8d1b47fbfbca6d6ba66c23384be50fcc81ffe8368508946f56ce96f"
+      "sha256": "f76c58a7b68ffbc2f57d663b64a21785dfa3a09d0ec68c176ebc481c64ae0399"
     },
     {
       "file": "current-developer.png",
       "workspace": "Developer Console",
-      "sha256": "a3885ae1806cd7c21a3e4b92e80c4540285f18ee879c735a2b3917daa5cf19b4"
+      "sha256": "f1f0858b14f09730961980c4db6ffa2cb49123aee4b595ae6f1e2ff610f87e6f"
     },
     {
       "file": "current-overview-dark.png",
       "workspace": "Overview",
-      "sha256": "f611b76dc3d101e3ccceb427bad8990d5df51d3b29cf5463630a1c69e7d6f781"
+      "sha256": "357546d1c66ae06079b9330380b526e27e8ffd06dcb16143dfc9ac024d4ab631"
     },
     {
       "file": "current-preferences.png",
       "workspace": "Overview",
-      "sha256": "ba67f44696110dc4d7ac3471292a9b1c4416d8ac0a0e0c7b58f39ac7f40afe7e"
-    },
-    {
-      "file": "current-graph.png",
-      "workspace": "Graph",
-      "sha256": "d88146051b20a8fa5198b7f499579a901ac700d68bdefb94afe2b98078bba6c7"
+      "sha256": "c7983649f2d3b47881e0b58bb3eb3dc04212905d3720cb85613d29f9bd0a634e"
     }
   ]
 }

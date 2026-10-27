@@ -99,7 +99,7 @@
         ["current-explore.png", "Analyze & compare: compare records and inspect a sampled vector projection."],
         ["current-graph.png", "Graph: traverse a property graph and see the linked nodes and edges it returns."],
         ["current-observability.png", "Observability: inspect real request metrics, routes and server logs."],
-        ["current-feed.png", "Change feed: inspect committed events and page through their history."],
+        ["current-feed.png", "Change feed: inspect committed vector and graph events and page through their history."],
         ["current-administration.png", "Administration: inspect server health and manage operational controls."],
         ["current-users.png", "Users & access: add people, choose their role and reset passwords."],
         ["current-credentials.png", "API keys: issue limited access, rotate secrets and inspect audit history."],
