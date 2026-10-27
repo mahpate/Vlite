@@ -387,7 +387,8 @@ async fn reg008_served_openapi_matches_baseline_except_approved_additions() {
 fn mcp_transcript(mode: &str) -> Vec<Value> {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("mcp.vlite");
-    let mut db = Database::create(&path, 2).unwrap();
+    // The baseline transcript is of a vector-only file.
+    let mut db = Database::create_with_format(&path, 2, vlite::FormatVersion::V3).unwrap();
     db.put(1, &[0.0, 0.0], b"origin").unwrap();
     db.put(2, &[1.0, 1.0], b"near").unwrap();
     db.put(3, &[2.0, 2.0], b"far").unwrap();

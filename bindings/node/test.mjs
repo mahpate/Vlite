@@ -29,7 +29,8 @@ test("embedded persistence, errors, ordering, binary data and shutdown", { timeo
       id: "18446744073709551615", vector: [1, 0, 0], payload_base64: "AP8=", metadata, revision,
     });
     assert.equal(await db.revision("7"), null);
-    assert.equal((await db.info()).format_version, 3);
+    assert.equal((await db.info()).format_version, 5);
+    assert.equal(await db.isGraphEnabled(), true);
     await assert.rejects(db.searchApproximateReady([1, 0, 0], 1), code("index_not_ready"));
     assert.equal((await db.search([1, 0, 0], 1, { metric: "cosine" }))[0].distance, 0);
     assert.equal((await db.search([1, 0, 0], 1, { metric: "inner_product" }))[0].distance, -1);
@@ -125,7 +126,7 @@ test("format v4 collections, revisions, planned/hybrid/quantized search and resu
   try {
     const path = join(directory, "v4.vlite");
     await assert.rejects(native.create(join(directory, "bad.vlite"), 2, { format: 6 }), code("invalid_input"));
-    const legacy = await native.create(join(directory, "v3.vlite"), 2);
+    const legacy = await native.create(join(directory, "v3.vlite"), 2, { format: 3 });
     await assert.rejects(legacy.createCollection("docs", 2), code("requires_format_v4"));
     await legacy.close();
     let db = await native.create(path, 2, { format: 4 });

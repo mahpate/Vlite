@@ -3,7 +3,7 @@
 // VLITE_TEST_EXPECT_GRAPH=1 or 0 to assert which variant VLITE_TEST_LIBRARY is.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdir, rm, access } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
@@ -23,7 +23,6 @@ async function fixture(fn) {
   try { await fn(native, directory); }
   finally { await native.close(); await rm(directory, { recursive: true }); }
 }
-const exists = path => access(path).then(() => true, () => false);
 
 test("capabilities report the loaded library variant", async () => fixture(async native => {
   assert.deepEqual(await native.capabilities(), { graph: GRAPH });
@@ -33,7 +32,7 @@ test("capabilities report the loaded library variant", async () => fixture(async
 
 async function populate(native, directory) {
   const path = join(directory, "graph.vlite");
-  const db = await native.createWithGraph(path, 2);
+  const db = await native.create(path, 2);
   assert.equal(await db.isGraphEnabled(), true);
   assert.deepEqual(await db.listGraphs(), []);
   assert.deepEqual(await db.createGraph("g"), { name: "g", node_count: 0, edge_count: 0 });
@@ -128,7 +127,7 @@ test("change feed reports graph events in log order", { skip: !GRAPH && "library
 
 test("graph error codes, atomic rejection and selector validation", { skip: !GRAPH && "library built without graph" }, async () => fixture(async (native, directory) => {
   const { path, db } = await populate(native, directory);
-  await assert.rejects(native.createWithGraph(path, 2), code("io_error"));
+  await assert.rejects(native.create(path, 2), code("io_error"));
   await assert.rejects(db.createGraph("g"), code("graph_exists"));
   await assert.rejects(db.createGraph("Bad"), code("invalid_graph_name"));
   await assert.rejects(db.graphGetNode("nope", "a"), code("graph_not_found"));
@@ -144,10 +143,7 @@ test("graph error codes, atomic rejection and selector validation", { skip: !GRA
   await assert.rejects(db.graphGetNode("g", -1n), TypeError);
   await assert.rejects(db.graphTraverse("g", "a"), TypeError);
 
-  const v4 = join(directory, "v4.vlite");
-  await assert.rejects(native.createWithGraph(v4, 2, { format: 4 }), code("graphs_require_v5"));
-  assert.equal(await exists(v4), false);
-  const plain = await native.create(join(directory, "plain.vlite"), 2);
+  const plain = await native.create(join(directory, "plain.vlite"), 2, { format: 4 });
   assert.equal(await plain.isGraphEnabled(), false);
   await assert.rejects(plain.listGraphs(), code("graphs_not_enabled"));
   await assert.rejects(plain.createGraph("g"), code("graphs_not_enabled"));
@@ -159,7 +155,7 @@ test("graph error codes, atomic rejection and selector validation", { skip: !GRA
 test("encrypted graph files require credentials", { skip: !GRAPH && "library built without graph" }, async () => fixture(async (native, directory) => {
   const path = join(directory, "secret.vlite");
   const key = Uint8Array.from({ length: 32 }, (_, index) => index);
-  const db = await native.createWithGraph(path, 2, { key, commitTimestamps: true });
+  const db = await native.create(path, 2, { key, commitTimestamps: true });
   await db.createGraph("g");
   await db.graphWriteBatch("g", [{ op: "create_node", key: "a" }]);
   assert.equal(await db.isEncrypted(), true);
@@ -173,7 +169,7 @@ test("encrypted graph files require credentials", { skip: !GRAPH && "library bui
 test("library shutdown closes graph-created handles", { skip: !GRAPH && "library built without graph" }, async () => fixture(async (_, directory) => {
   const path = join(directory, "left-open.vlite");
   const first = new NativeLibrary(nativeOptions);
-  const db = await first.createWithGraph(path, 2);
+  const db = await first.create(path, 2);
   await db.createGraph("g");
   await first.close();
   const second = new NativeLibrary(nativeOptions);
@@ -184,9 +180,6 @@ test("library shutdown closes graph-created handles", { skip: !GRAPH && "library
 }));
 
 test("every graph method rejects with unsupported without graph", { skip: GRAPH && "library built with graph" }, async () => fixture(async (native, directory) => {
-  const path = join(directory, "never.vlite");
-  await assert.rejects(native.createWithGraph(path, 2), code("unsupported"));
-  assert.equal(await exists(path), false);
   const db = await native.create(join(directory, "plain.vlite"), 2);
   for (const action of [
     () => db.isGraphEnabled(), () => db.listGraphs(), () => db.createGraph("g"), () => db.dropGraph("g"),

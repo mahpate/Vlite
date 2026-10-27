@@ -1508,8 +1508,7 @@ impl From<Error> for ApiError {
             | Error::GraphSchemaViolation { .. } => {
                 Self::new(StatusCode::CONFLICT, graph_code(&error), error.to_string())
             }
-            Error::GraphsRequireV5
-            | Error::InvalidGraphName
+            Error::InvalidGraphName
             | Error::GraphLimitExceedsCeiling { .. }
             | Error::GraphInvalidOptions(_)
             | Error::GraphPivotTooExpensive => Self::new(
@@ -1527,7 +1526,6 @@ impl From<Error> for ApiError {
 fn graph_code(error: &Error) -> &'static str {
     match error {
         Error::GraphsNotEnabled => "graphs_not_enabled",
-        Error::GraphsRequireV5 => "graphs_require_v5",
         Error::InvalidGraphName => "invalid_graph_name",
         Error::GraphExists => "graph_exists",
         Error::GraphNotFound => "graph_not_found",
@@ -3645,7 +3643,6 @@ mod graph_errors {
         const INVALID: StatusCode = StatusCode::UNPROCESSABLE_ENTITY;
         vec![
             (Error::GraphsNotEnabled, CONFLICT, "graphs_not_enabled"),
-            (Error::GraphsRequireV5, INVALID, "graphs_require_v5"),
             (Error::InvalidGraphName, INVALID, "invalid_graph_name"),
             (Error::GraphExists, CONFLICT, "graph_exists"),
             (Error::GraphNotFound, CONFLICT, "graph_not_found"),

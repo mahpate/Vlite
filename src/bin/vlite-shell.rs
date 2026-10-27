@@ -7,7 +7,7 @@ use std::{
     process::ExitCode,
 };
 use tool_support::{Result, main_result};
-use vlite::{Condition, Database, DistanceMetric, FormatVersion, HnswConfig, Metadata};
+use vlite::{Condition, Database, DistanceMetric, HnswConfig, Metadata};
 const HELP: &str = r#"vlite-shell --db PATH [--read-only] [--create DIMENSIONS] [--script FILE]
 Without --script reads stdin; prompts only on a terminal. One command per line.
 Commands: help | header | format | collections | stats | use NAME | browse [LIMIT] [AFTER_ID]
@@ -16,7 +16,7 @@ search {"vector":[1,2],"k":10,"ann":false,"ef_search":100,"metric":"squared_l2",
 Metadata uses typed values, e.g. {"tag":{"type":"string","value":"x"}}.
 Filters use engine JSON: [{"op":"eq","field":"tag","value":{"type":"string","value":"x"}}].
 verify | backup DEST | compact DEST | upgrade DEST | rebuild | quit
---create creates a new v4 database; refuses existing paths. Read-only forbids all writes
+--create creates a new graph-enabled v5 database; refuses existing paths. Read-only forbids all writes
 and copy-out maintenance, but allows in-memory ANN. Errors fail scripts immediately.
 "#;
 #[derive(Deserialize)]
@@ -67,7 +67,7 @@ fn run() -> Result<()> {
         return Err("--read-only conflicts with --create".into());
     }
     let mut db = Some(if let Some(d) = args.get("--create") {
-        Database::create_with_format(path, d.parse()?, FormatVersion::V4)?
+        Database::create(path, d.parse()?)?
     } else {
         Database::open(path)?
     });

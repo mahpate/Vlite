@@ -26,7 +26,7 @@ fn fixture() -> Vec<u8> {
 fn v3_golden_bytes_pin_typed_put_and_mixed_atomic_batch() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("v3.vlite");
-    let mut db = Database::create(&path, 2).unwrap();
+    let mut db = Database::create_with_format(&path, 2, vlite::FormatVersion::V3).unwrap();
     db.put_with_metadata(7, &[1.0, -0.0], &[0, 255], &metadata())
         .unwrap();
     db.write_batch(&[
@@ -55,7 +55,7 @@ fn v3_golden_bytes_pin_typed_put_and_mixed_atomic_batch() {
 fn typed_metadata_round_trips_and_survives_all_maintenance_without_source_changes() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("data.vlite");
-    let mut db = Database::create(&path, 2).unwrap();
+    let mut db = Database::create_with_format(&path, 2, vlite::FormatVersion::V3).unwrap();
     db.put_with_metadata(u64::MAX, &[1.0, -0.0], &[0, 255], &metadata())
         .unwrap();
     db.put_with_metadata(0, &[0.0, 1.0], b"old", &metadata())
@@ -99,7 +99,12 @@ fn typed_metadata_round_trips_and_survives_all_maintenance_without_source_change
 #[test]
 fn exact_filters_precede_top_k_and_use_strict_types_and_inclusive_ranges() {
     let directory = tempfile::tempdir().unwrap();
-    let mut db = Database::create(directory.path().join("filter.vlite"), 1).unwrap();
+    let mut db = Database::create_with_format(
+        directory.path().join("filter.vlite"),
+        1,
+        vlite::FormatVersion::V3,
+    )
+    .unwrap();
     for id in 0..10 {
         let metadata = BTreeMap::from([
             (
@@ -244,7 +249,7 @@ fn exact_filters_precede_top_k_and_use_strict_types_and_inclusive_ranges() {
 fn metadata_limits_reject_whole_batch_before_writing_and_old_files_require_upgrade() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("limits.vlite");
-    let mut db = Database::create(&path, 1).unwrap();
+    let mut db = Database::create_with_format(&path, 1, vlite::FormatVersion::V3).unwrap();
     let invalid = [
         BTreeMap::from([("".into(), V::Boolean(true))]),
         BTreeMap::from([("x".repeat(257), V::Boolean(true))]),
@@ -349,7 +354,7 @@ fn every_metadata_frame_truncation_and_corruption_fails_closed() {
 fn exact_metadata_byte_and_field_limits_round_trip() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("boundaries.vlite");
-    let mut db = Database::create(&path, 1).unwrap();
+    let mut db = Database::create_with_format(&path, 1, vlite::FormatVersion::V3).unwrap();
     let mut exact = (0..15)
         .map(|id| (format!("{id:02}"), V::String("x".repeat(4096))))
         .collect::<Metadata>();
@@ -384,7 +389,7 @@ fn metadata_process_exit_child() {
     let Some(path) = std::env::var_os("VLITE_METADATA_EXIT_PATH") else {
         return;
     };
-    let mut db = Database::create(path, 2).unwrap();
+    let mut db = Database::create_with_format(path, 2, vlite::FormatVersion::V3).unwrap();
     db.put_with_metadata(7, &[1.0, 2.0], b"single", &metadata())
         .unwrap();
     db.write_batch(&[

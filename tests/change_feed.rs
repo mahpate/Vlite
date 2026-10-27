@@ -225,7 +225,7 @@ fn compaction_and_future_cursors_are_clear_errors() {
 fn old_formats_and_closed_files_are_handled() {
     let directory = tempdir().unwrap();
     let old = directory.path().join("v3.vlite");
-    let mut db = Database::create(&old, 2).unwrap();
+    let mut db = Database::create_with_format(&old, 2, FormatVersion::V3).unwrap();
     db.put(1, &[1.0, 0.0], b"x").unwrap();
     assert!(matches!(
         db.changes_after(&FeedCursor::beginning(), 10),

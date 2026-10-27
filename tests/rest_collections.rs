@@ -455,7 +455,8 @@ async fn collection_index_routes_use_collection_identity_and_never_touch_default
 #[tokio::test]
 async fn v3_files_reject_collection_creation_but_serve_the_default_collection() {
     let directory = tempfile::tempdir().unwrap();
-    let db = Database::create(directory.path().join("v3.vlite"), 2).unwrap();
+    let db = Database::create_with_format(directory.path().join("v3.vlite"), 2, FormatVersion::V3)
+        .unwrap();
     let service = Service::new(db);
     let app = router(service.clone());
     let (status, _, error) = call(

@@ -39,7 +39,7 @@ vlite-shell --db example.vlite --read-only --script commands.txt
 Get-Content commands.txt | vlite-shell --db example.vlite --read-only
 ```
 
-`--create N` creates a new format-v4 database and refuses an existing path.
+`--create N` creates a new graph-enabled v5 database and refuses an existing path.
 Without it, the database must exist. Enter one command per line:
 
 ```text
@@ -219,7 +219,7 @@ to exactly one typed read; it adds no other capability.
 | `graphs` | read | `list_graphs` |
 | `get-node`, `get-edge`, `find-nodes`, `neighbors`, `traverse`, `shortest-path` | read | `GraphRef::query` (with `--explain`: `GraphRef::explain`) |
 | `query` | read | `GraphRef::query_text` (with `--explain`: `GraphRef::explain_text`) |
-| `init` | write | `Database::create_with_graph` (new file only) |
+| `init` | write | `Database::create` (new file only) |
 | `create-graph`, `drop-graph` | write | `create_graph`, `drop_graph` (empty graphs only) |
 | `batch` | write | `GraphMut::write_batch` (one atomic frame) |
 

@@ -81,9 +81,9 @@ with tempfile.TemporaryDirectory() as directory:
         assert db.search_auto([1,0], 1, collection='documents')['hits'][0]['id']=='1'
     with native.open(advanced) as db:
         assert db.get('1', collection='documents')['vector']==[1,0]
-    # Release wheels ship the opt-in graph commands (GATE-008, v0.5.0).
+    # Release wheels ship the graph; every new file is graph-enabled.
     assert native.capabilities() == {'graph': True}
-    with native.create_with_graph(Path(directory) / 'graph.vlite', 2) as db:
+    with native.create(Path(directory) / 'graph.vlite', 2) as db:
         assert db.is_graph_enabled()
         assert db.create_graph('g') == {'name': 'g', 'node_count': 0, 'edge_count': 0}
         assert db.list_graphs()[0]['name'] == 'g'

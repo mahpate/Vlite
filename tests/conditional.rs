@@ -90,7 +90,12 @@ fn assert_precondition_failed((status, body): (StatusCode, Value)) {
 
 fn app_with(records: &[u64]) -> (tempfile::TempDir, Service, Router) {
     let directory = tempfile::tempdir().unwrap();
-    let mut db = Database::create(directory.path().join("cas.vlite"), 1).unwrap();
+    let mut db = Database::create_with_format(
+        directory.path().join("cas.vlite"),
+        1,
+        vlite::FormatVersion::V3,
+    )
+    .unwrap();
     for &id in records {
         db.put(id, &[id as f32], b"p").unwrap();
     }
@@ -324,7 +329,7 @@ async fn v4_tags_survive_restart_and_divergent_raw_clones_fail_closed() {
 async fn reopened_service_rejects_tags_from_previous_instance() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("reopen.vlite");
-    let mut db = Database::create(&path, 1).unwrap();
+    let mut db = Database::create_with_format(&path, 1, vlite::FormatVersion::V3).unwrap();
     db.put(1, &[1.0], b"").unwrap();
     let service = Service::new(db);
     let app = router(service.clone());
@@ -417,7 +422,12 @@ async fn capabilities_advertise_conditional_writes_for_sdk_preflight() {
 #[tokio::test]
 async fn authentication_and_read_only_checks_precede_preconditions() {
     let directory = tempfile::tempdir().unwrap();
-    let mut db = Database::create(directory.path().join("auth.vlite"), 1).unwrap();
+    let mut db = Database::create_with_format(
+        directory.path().join("auth.vlite"),
+        1,
+        vlite::FormatVersion::V3,
+    )
+    .unwrap();
     db.put(1, &[1.0], b"").unwrap();
     let admin = "admin_secret_0123456789_ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     let reader = "reader_secret_0123456789_ABCDEFGHIJKLMNOPQRSTUVWXYZ";

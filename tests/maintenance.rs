@@ -10,7 +10,7 @@ use vlite::{
 };
 
 fn fixture(path: &Path) {
-    let mut db = Database::create(path, 2).unwrap();
+    let mut db = Database::create_with_format(path, 2, FormatVersion::V3).unwrap();
     db.put(9, &[1.0, -0.0], b"old").unwrap();
     db.put(4, &[-2.0, 3.0], b"deleted").unwrap();
     db.put(9, &[f32::MAX, -0.0], b"latest\0payload").unwrap();
@@ -142,7 +142,7 @@ fn maintenance_requires_exclusive_source_ownership_and_never_creates_missing_sou
     assert!(maintenance::backup(&source, &output).is_err());
     assert!(!source.exists());
     assert!(!output.exists());
-    let db = Database::create(&source, 1).unwrap();
+    let db = Database::create_with_format(&source, 1, FormatVersion::V3).unwrap();
     assert!(matches!(maintenance::inspect(&source), Err(Error::Locked)));
     assert!(matches!(
         maintenance::backup(&source, &output),
@@ -166,7 +166,7 @@ fn empty_compaction_removes_all_history_and_stays_writable() {
     let directory = tempdir().unwrap();
     let source = directory.path().join("source.vlite");
     let output = directory.path().join("output.vlite");
-    let mut db = Database::create(&source, 1).unwrap();
+    let mut db = Database::create_with_format(&source, 1, FormatVersion::V3).unwrap();
     db.put(1, &[1.0], b"").unwrap();
     db.delete(1).unwrap();
     db.close().unwrap();

@@ -88,7 +88,7 @@ class NativeLibrary:
                key: bytes | None = None, passphrase: str | None = None,
                commit_timestamps: bool = False, flush_interval_ms: int | None = None,
                durability: str | None = None) -> "Database":
-        """Create without overwrite. Default format is 3; 5 enables all new surfaces.
+        """Create without overwrite. New files are graph-enabled V5; ``format=3``/``4`` stay plain.
 
         File handles default to periodic durability: commits are written at once
         but synced in the background every 60 s (or every `flush_interval_ms`,
@@ -122,20 +122,6 @@ class NativeLibrary:
     def supports_graph(self) -> bool:
         """Whether the library includes the property graph (every library since 0.5.1)."""
         return bool(self.capabilities().get("graph"))
-
-    def create_with_graph(self, path: str | os.PathLike[str], dimensions: int, *, format: int | None = None,
-                          key: bytes | None = None, passphrase: str | None = None,
-                          commit_timestamps: bool = False,
-                          flush_interval_ms: int | None = None,
-                          durability: str | None = None) -> "Database":
-        """Create a NEW graph-enabled (V5) file without overwrite; never converts an existing file.
-        Raises ``unsupported`` on libraries older than 0.5.1 built without the graph.
-        ``durability`` and ``flush_interval_ms`` work as for ``create``."""
-        options = {"credentials": _credentials(key, passphrase), "commit_timestamps": commit_timestamps,
-                   **_given(format=format, flush_interval_ms=flush_interval_ms, durability=durability)}
-        result = _graph_call(lambda request: self._execute(0, {"op": "graph", "request": request}),
-                             {"op": "create", "path": str(Path(path)), "dimensions": dimensions, "options": options})
-        return Database(self, int(result["handle"]))
 
     def _create_feature(self, path, dimensions, format, key, passphrase, commit_timestamps,
                         flush_interval_ms=None, durability=None):

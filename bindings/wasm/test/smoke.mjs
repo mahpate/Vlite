@@ -17,13 +17,16 @@ db.delete(1);
 assert.equal(db.len(), 1);
 
 const image = db.toBytes();
+// Every new database is graph-enabled V5: header version 5, FLAG_GRAPH (4).
+assert.equal(image[8], 5);
+assert.equal(image[26] & 4, 4);
 const reopened = pkg.VLiteDatabase.fromBytes(image);
 assert.equal(reopened.len(), 1);
 assert.equal(reopened.search(new Float32Array([0, 1]), 1)[0], 2);
 
-// Opt-in V5 enables expiry, metadata-only writes, grouping and the durable change feed.
+// V5 (the default) enables expiry, metadata-only writes, grouping and the durable change feed.
 pkg.setClock(100);
-const advanced = pkg.VLiteDatabase.create(2, undefined, true);
+const advanced = pkg.VLiteDatabase.create(2);
 advanced.putWithExpiry(10, new Float32Array([1, 0]), new Uint8Array(), 500, JSON.stringify({
   category: { type: 'string', value: 'a' }, score: { type: 'integer', value: '7' },
 }));

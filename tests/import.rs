@@ -49,7 +49,7 @@ fn file_len(path: &Path) -> u64 {
 fn imports_require_v4_and_write_nothing_on_older_formats() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("v3.vlite");
-    let mut db = Database::create(&path, 2).unwrap();
+    let mut db = Database::create_with_format(&path, 2, FormatVersion::V3).unwrap();
     let before = file_len(&path);
     assert!(matches!(
         db.import_chunk(1, 1, &rows(0..2), REJECT),

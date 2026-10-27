@@ -20,13 +20,6 @@ use vlite::{Condition, MetadataValue};
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
-    /// Handle 0: a NEW graph-enabled (V5 + graph flag) file; never converts.
-    Create {
-        path: String,
-        dimensions: usize,
-        #[serde(default)]
-        options: features::Options,
-    },
     IsGraphEnabled {},
     ListGraphs {},
     CreateGraph {
@@ -58,7 +51,6 @@ fn graph_failure(error: vlite::Error) -> Failure {
     use vlite::Error as E;
     let code = match &error {
         E::GraphsNotEnabled => "graphs_not_enabled",
-        E::GraphsRequireV5 => "graphs_require_v5",
         E::InvalidGraphName => "invalid_graph_name",
         E::GraphExists => "graph_exists",
         E::GraphNotFound => "graph_not_found",
@@ -1014,22 +1006,6 @@ fn batch_output(graph: &str, result: &GraphBatchResult) -> Result<Value> {
 pub(super) fn execute(state: &mut State, handle: u64, request: Value) -> Result<Value> {
     let request: Request =
         serde_json::from_value(request).map_err(|error| ("invalid_input", error.to_string()))?;
-    if let Request::Create {
-        path,
-        dimensions,
-        options,
-    } = request
-    {
-        // Checked before the file is created.
-        if handle != 0 {
-            return Err(invalid("graph create requires handle 0"));
-        }
-        let (options, durability) = features::create_options(options, false)?;
-        let db = Database::create_with_graph(path, dimensions, options)
-            .and_then(|db| with_durability(db, durability))
-            .map_err(graph_failure)?;
-        return features::insert(state, handle, db);
-    }
     let db = state
         .databases
         .get_mut(&handle)
@@ -1071,7 +1047,6 @@ pub(super) fn execute(state: &mut State, handle: u64, request: Value) -> Result<
                 .map_err(graph_failure)?;
             explanation(&request.graph, &plan)
         }
-        Request::Create { .. } => unreachable!(),
         query => {
             let request = read_request(query)?;
             let read = db
@@ -1120,6 +1095,13 @@ mod tests {
         result["handle"].as_str().unwrap().parse().unwrap()
     }
 
+    /// Default creation: every new file is graph-enabled.
+    fn create(path: &std::path::Path) -> u64 {
+        let response = call(0, json!({"op": "create", "path": path, "dimensions": 2}));
+        assert_eq!(response["ok"], true, "{response}");
+        handle(&response["result"])
+    }
+
     fn close(handle: u64) {
         assert_eq!(call(handle, json!({"op": "close"}))["ok"], true);
     }
@@ -1134,10 +1116,7 @@ mod tests {
     fn changes_after_reports_graph_events_in_commit_order() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("feed.vlite");
-        let db = handle(&ok(
-            0,
-            json!({"op": "create", "path": path, "dimensions": 2}),
-        ));
+        let db = create(&path);
         ok(db, json!({"op": "create_graph", "graph": "g"}));
         let batch = ok(
             db,
@@ -1186,14 +1165,7 @@ mod tests {
     fn graph_commands_create_write_read_explain_and_persist() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("graph.vlite");
-        let db = handle(&ok(
-            0,
-            json!({"op": "create", "path": path, "dimensions": 2}),
-        ));
-        assert_eq!(
-            code(db, json!({"op": "create", "path": path, "dimensions": 2})),
-            "invalid_input"
-        );
+        let db = create(&path);
         assert_eq!(
             ok(db, json!({"op": "is_graph_enabled"})),
             json!({"graph_enabled": true})
@@ -1418,38 +1390,70 @@ mod tests {
     }
 
     #[test]
-    fn vector_only_files_and_bad_create_options_are_rejected() {
+    fn new_files_are_graph_enabled_and_explicit_v3_v4_stay_vector_only() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("vectors.vlite");
-        let db = handle(&call(0, json!({"op": "create", "path": path, "dimensions": 2}))["result"]);
-        assert_eq!(
-            ok(db, json!({"op": "is_graph_enabled"})),
-            json!({"graph_enabled": false})
-        );
-        assert_eq!(code(db, json!({"op": "list_graphs"})), "graphs_not_enabled");
-        assert_eq!(
-            code(db, json!({"op": "create_graph", "graph": "g"})),
-            "graphs_not_enabled"
-        );
-        close(db);
-        let v4 = directory.path().join("v4.vlite");
-        assert_eq!(
-            code(
-                0,
-                json!({"op": "create", "path": v4, "dimensions": 2, "options": {"format": 4}})
-            ),
-            "graphs_require_v5"
-        );
-        assert!(!v4.exists());
+        for (name, request) in [
+            ("default.vlite", json!({})),
+            ("v5.vlite", json!({"format": 5})),
+        ] {
+            let path = directory.path().join(name);
+            let mut create = json!({"op": "create", "path": path, "dimensions": 2});
+            create
+                .as_object_mut()
+                .unwrap()
+                .extend(request.as_object().unwrap().clone());
+            let db = handle(&call(0, create)["result"]);
+            assert_eq!(
+                ok(db, json!({"op": "is_graph_enabled"})),
+                json!({"graph_enabled": true}),
+                "{name}"
+            );
+            close(db);
+        }
         let timed = directory.path().join("timed.vlite");
-        let db = handle(&ok(
+        let feature = call(
             0,
-            json!({"op": "create", "path": timed, "dimensions": 2, "options": {"commit_timestamps": true}}),
-        ));
+            json!({"op": "features", "request": {"op": "create", "path": timed, "dimensions": 2,
+                   "options": {"commit_timestamps": true}}}),
+        );
+        let db = handle(&feature["result"]);
         assert_eq!(
             ok(db, json!({"op": "is_graph_enabled"})),
             json!({"graph_enabled": true})
         );
         close(db);
+        let memory = call(
+            0,
+            json!({"op": "features", "request": {"op": "create", "dimensions": 2}}),
+        );
+        let db = handle(&memory["result"]);
+        assert_eq!(
+            ok(db, json!({"op": "is_graph_enabled"})),
+            json!({"graph_enabled": true})
+        );
+        close(db);
+        for format in [3, 4] {
+            let path = directory.path().join(format!("v{format}.vlite"));
+            let db = handle(
+                &call(
+                    0,
+                    json!({"op": "create", "path": path, "dimensions": 2, "format": format}),
+                )["result"],
+            );
+            assert_eq!(
+                ok(db, json!({"op": "is_graph_enabled"})),
+                json!({"graph_enabled": false})
+            );
+            assert_eq!(code(db, json!({"op": "list_graphs"})), "graphs_not_enabled");
+            assert_eq!(
+                code(db, json!({"op": "create_graph", "graph": "g"})),
+                "graphs_not_enabled"
+            );
+            assert_eq!(
+                code(0, json!({"op": "create", "path": path, "dimensions": 2})),
+                "invalid_input"
+            );
+            close(db);
+        }
     }
 }

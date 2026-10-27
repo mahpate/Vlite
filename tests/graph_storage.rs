@@ -240,7 +240,7 @@ fn assert_corrupt<T>(result: vlite::Result<T>, offset: usize, reason: &str) {
 fn base_graph_file() -> Vec<u8> {
     let dir = tempdir().unwrap();
     let path = dir.path().join("base.vlite");
-    let mut db = Database::create_with_graph(&path, 2, CreateOptions::default()).unwrap();
+    let mut db = Database::create(&path, 2).unwrap();
     db.put(1, &[1.0, 2.0], b"one").unwrap();
     db.create_graph("g").unwrap();
     db.close().unwrap();
@@ -262,7 +262,7 @@ fn graph_files_round_trip_in_plain_encrypted_and_timestamp_formats() {
             encryption: encrypted.then(key),
             commit_timestamps: timestamps,
         };
-        let mut db = Database::create_with_graph(&path, 2, options).unwrap();
+        let mut db = Database::create_with_options(&path, 2, options).unwrap();
         assert!(db.is_graph_enabled(), "{label}");
         assert_eq!(db.format_version(), 5, "{label}");
         assert_eq!(db.list_graphs().unwrap(), Vec::new(), "{label}");
@@ -334,7 +334,7 @@ fn read_only_handles_refuse_graph_writes_without_touching_the_file() {
 fn sixty_four_live_graphs_and_dropped_ids_are_reused() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("limit.vlite");
-    let mut db = Database::create_with_graph(&path, 2, CreateOptions::default()).unwrap();
+    let mut db = Database::create(&path, 2).unwrap();
     for index in 0..64 {
         db.create_graph(&format!("g{index:02}")).unwrap();
     }
@@ -386,7 +386,7 @@ fn sixty_four_live_graphs_and_dropped_ids_are_reused() {
 fn names_follow_collection_rules_and_failures_write_nothing() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("names.vlite");
-    let mut db = Database::create_with_graph(&path, 2, CreateOptions::default()).unwrap();
+    let mut db = Database::create(&path, 2).unwrap();
     db.create_graph("a").unwrap();
     db.create_graph(&format!("z{}", "9".repeat(62))).unwrap();
     db.create_graph("default").unwrap();
@@ -422,49 +422,107 @@ fn names_follow_collection_rules_and_failures_write_nothing() {
     assert!(Error::GraphExists.to_string().contains("already exists"));
 }
 
+/// A vector-only V5 file as older builds wrote it: every new V5 file is
+/// graph-enabled, so clear `FLAG_GRAPH` (with a valid CRC) in a fresh,
+/// frame-free file.
+fn create_plain_v5(path: &std::path::Path) -> Database {
+    Database::create(path, 2).unwrap().close().unwrap();
+    let mut bytes = fs::read(path).unwrap();
+    assert_eq!(bytes.len(), HEADER);
+    bytes[26..28].copy_from_slice(&0u16.to_le_bytes());
+    let checksum = crc32(&bytes[..28]);
+    bytes[28..32].copy_from_slice(&checksum.to_le_bytes());
+    fs::write(path, bytes).unwrap();
+    Database::open(path).unwrap()
+}
+
 #[test]
-fn ordinary_files_stay_vector_only_in_graph_builds() {
+fn every_new_file_is_graph_enabled_by_default() {
+    let dir = tempdir().unwrap();
+    let mut created = vec![
+        (
+            "create",
+            Database::create(dir.path().join("a.vlite"), 2).unwrap(),
+        ),
+        (
+            "options",
+            Database::create_with_options(dir.path().join("b.vlite"), 2, CreateOptions::default())
+                .unwrap(),
+        ),
+        (
+            "explicit-v5",
+            Database::create_with_format(dir.path().join("c.vlite"), 2, FormatVersion::V5).unwrap(),
+        ),
+        (
+            "encrypted",
+            Database::create_with_options(
+                dir.path().join("d.vlite"),
+                2,
+                CreateOptions {
+                    encryption: Some(key()),
+                    commit_timestamps: true,
+                    ..CreateOptions::default()
+                },
+            )
+            .unwrap(),
+        ),
+        (
+            "memory",
+            Database::create_in_memory(2, CreateOptions::default()).unwrap(),
+        ),
+    ];
+    for (label, db) in &mut created {
+        assert!(db.is_graph_enabled(), "{label}");
+        assert_eq!(db.format_version(), 5, "{label}");
+        db.create_graph("g").unwrap();
+        assert_eq!(names(db), ["g"], "{label}");
+    }
+    let bytes = created.pop().unwrap().1.to_bytes().unwrap();
+    assert_eq!(header_flags(&bytes), FLAG_GRAPH);
+    for (_, db) in created {
+        db.close().unwrap();
+    }
+    assert_eq!(
+        header_flags(&fs::read(dir.path().join("a.vlite")).unwrap()),
+        FLAG_GRAPH
+    );
+}
+
+#[test]
+fn explicit_v3_v4_and_existing_plain_files_stay_vector_only() {
     let dir = tempdir().unwrap();
     for (label, format) in [
-        ("v3", FormatVersion::V3),
-        ("v4", FormatVersion::V4),
-        ("v5", FormatVersion::V5),
+        ("v3", Some(FormatVersion::V3)),
+        ("v4", Some(FormatVersion::V4)),
+        ("v5", None),
     ] {
         let path = dir.path().join(format!("{label}.vlite"));
-        let mut db = Database::create_with_format(&path, 2, format).unwrap();
+        let mut db = match format {
+            Some(format) => Database::create_with_format(&path, 2, format).unwrap(),
+            None => create_plain_v5(&path),
+        };
         assert!(!db.is_graph_enabled());
         assert!(matches!(db.create_graph("g"), Err(Error::GraphsNotEnabled)));
         assert!(matches!(db.drop_graph("g"), Err(Error::GraphsNotEnabled)));
         assert!(matches!(db.list_graphs(), Err(Error::GraphsNotEnabled)));
         db.put(1, &[1.0, 2.0], b"x").unwrap();
         db.close().unwrap();
+        // Opening never upgrades a vector-only file.
         let db = Database::open(&path).unwrap();
         assert!(!db.is_graph_enabled(), "{label}");
         drop(db);
-        if format == FormatVersion::V5 {
+        if format.is_none() {
             assert_eq!(header_flags(&fs::read(&path).unwrap()), 0);
         }
-
-        let refused = dir.path().join(format!("{label}-graph.vlite"));
-        if format != FormatVersion::V5 {
-            let options = CreateOptions {
-                format: Some(format),
-                ..CreateOptions::default()
-            };
-            assert!(matches!(
-                Database::create_with_graph(&refused, 2, options),
-                Err(Error::GraphsRequireV5)
-            ));
-            assert!(!refused.exists());
-        }
     }
-    let options = CreateOptions {
-        format: Some(FormatVersion::V5),
-        ..CreateOptions::default()
-    };
-    let db = Database::create_with_graph(dir.path().join("explicit.vlite"), 2, options).unwrap();
-    assert!(db.is_graph_enabled());
-    let mut memory = Database::create_in_memory(2, CreateOptions::default()).unwrap();
+    let mut memory = Database::create_in_memory(
+        2,
+        CreateOptions {
+            format: Some(FormatVersion::V4),
+            ..CreateOptions::default()
+        },
+    )
+    .unwrap();
     assert!(!memory.is_graph_enabled());
     assert!(matches!(
         memory.create_graph("g"),
@@ -478,9 +536,9 @@ fn vector_frames_are_byte_identical_in_graph_files() {
     let write = |name: &str, graph: bool| {
         let path = dir.path().join(name);
         let mut db = if graph {
-            Database::create_with_graph(&path, 2, CreateOptions::default()).unwrap()
+            Database::create(&path, 2).unwrap()
         } else {
-            Database::create_with_format(&path, 2, FormatVersion::V5).unwrap()
+            create_plain_v5(&path)
         };
         db.put(1, &[1.0, 2.0], b"one").unwrap();
         db.write_batch(&[
@@ -504,7 +562,7 @@ fn vector_frames_are_byte_identical_in_graph_files() {
 
     // Interleaved graph frames leave each vector frame's body and layout as is.
     let path = dir.path().join("mixed.vlite");
-    let mut db = Database::create_with_graph(&path, 2, CreateOptions::default()).unwrap();
+    let mut db = Database::create(&path, 2).unwrap();
     db.create_graph("g").unwrap();
     db.put(1, &[1.0, 2.0], b"one").unwrap();
     db.close().unwrap();
@@ -842,7 +900,7 @@ fn ordinary_frames_cannot_delete_or_expire_attached_records() {
 fn vector_entries_target_named_collections_and_keep_their_dimensions() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("collections.vlite");
-    let mut db = Database::create_with_graph(&path, 2, CreateOptions::default()).unwrap();
+    let mut db = Database::create(&path, 2).unwrap();
     let docs = db
         .create_collection(
             "docs",
@@ -913,7 +971,7 @@ fn vector_entries_target_named_collections_and_keep_their_dimensions() {
 fn malformed_vector_and_attachment_entries_fail_the_whole_open() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("expiring.vlite");
-    let mut db = Database::create_with_graph(&path, 2, CreateOptions::default()).unwrap();
+    let mut db = Database::create(&path, 2).unwrap();
     db.put(1, &[1.0, 2.0], b"one").unwrap();
     db.put_with_expiry(2, &[1.0, 2.0], b"two", &Metadata::new(), Some(u64::MAX / 2))
         .unwrap();
@@ -1058,7 +1116,7 @@ fn graph_handles_open_live_graphs_and_respect_read_only() {
     assert_eq!(fs::read(&path).unwrap(), before);
 
     let plain = dir.path().join("plain.vlite");
-    let mut db = Database::create_with_format(&plain, 2, FormatVersion::V5).unwrap();
+    let mut db = create_plain_v5(&plain);
     assert!(matches!(db.graph("g"), Err(Error::GraphsNotEnabled)));
     assert!(matches!(db.graph_mut("g"), Err(Error::GraphsNotEnabled)));
 }
@@ -1068,7 +1126,10 @@ fn op12_and_graph_flag_are_rejected_outside_graph_enabled_v5_files() {
     let dir = tempdir().unwrap();
     for format in [FormatVersion::V4, FormatVersion::V5] {
         let path = dir.path().join(format!("op12-{format:?}.vlite"));
-        let mut db = Database::create_with_format(&path, 2, format).unwrap();
+        let mut db = match format {
+            FormatVersion::V5 => create_plain_v5(&path),
+            _ => Database::create_with_format(&path, 2, format).unwrap(),
+        };
         db.put(1, &[1.0, 2.0], b"x").unwrap();
         db.close().unwrap();
         let mut bytes = fs::read(&path).unwrap();
@@ -1121,10 +1182,7 @@ fn op12_and_graph_flag_are_rejected_outside_graph_enabled_v5_files() {
 fn empty_graph_files_are_strictly_verified() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("empty.vlite");
-    Database::create_with_graph(&path, 2, CreateOptions::default())
-        .unwrap()
-        .close()
-        .unwrap();
+    Database::create(&path, 2).unwrap().close().unwrap();
     let bytes = fs::read(&path).unwrap();
     assert_eq!(bytes.len(), HEADER);
     let db = Database::open(&path).unwrap();
@@ -1160,7 +1218,7 @@ fn encrypted_graph_frames_are_sealed_and_authenticated() {
             encryption: encrypted.then(key),
             ..CreateOptions::default()
         };
-        let mut db = Database::create_with_graph(&path, 2, options).unwrap();
+        let mut db = Database::create_with_options(&path, 2, options).unwrap();
         db.create_graph(name).unwrap();
         db.close().unwrap();
         let bytes = fs::read(&path).unwrap();

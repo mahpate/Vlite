@@ -169,7 +169,7 @@ return `ImportsRequireUpgrade`.
 ## REST service and scoped credentials
 
 `vlite-server ... --create-if-missing --create-format 4` creates a v4
-database; the default is v3, and existing files are never migrated.
+database; the default is a graph-enabled v5 file, and existing files are never migrated.
 `GET /v1/capabilities` reports the format, role and supported flags.
 
 - Collection routes live under `/v1/collections/{name}` and never fall back
@@ -243,8 +243,8 @@ resumable, revision-checked re-embedding with an atomic switch of the active
 version. Provider and reranker traits and a read-only query language are Rust
 APIs. See [VECTORS.md](VECTORS.md) for APIs, grammar, limits and examples.
 
-## Property graphs (opt-in per file)
+## Property graphs
 
 Every build since v0.5.1 can store named property graphs in graph-enabled v5
-files, which older releases refuse. New files stay vector-only unless created
-with graph support or copied with `vlite-maintain enable-graph`. See [GRAPH.md](GRAPH.md).
+files, which older releases refuse. Every new file is graph-enabled unless an
+explicit v3/v4 format is requested; copy an older file with `vlite-maintain enable-graph`. See [GRAPH.md](GRAPH.md).

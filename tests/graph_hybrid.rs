@@ -23,8 +23,8 @@ use vlite::property_graph::{
     Retrieval, Retrieve, TruncationReason,
 };
 use vlite::{
-    AnnOptions, CollectionSettings, CollectionSpec, CreateOptions, Database, Error, HnswConfig,
-    Metadata, MetadataValue,
+    AnnOptions, CollectionSettings, CollectionSpec, Database, Error, HnswConfig, Metadata,
+    MetadataValue,
 };
 
 /// SplitMix64.
@@ -75,7 +75,7 @@ fn vector(id: u64) -> [f32; 2] {
 /// document node MENTIONS topic `i % topics`, and `topic-t` is attached to
 /// note `t + 1`.
 fn fixture(path: &Path, records: u64, topics: u64, attach_every: u64) -> Database {
-    let mut db = Database::create_with_graph(path, 2, CreateOptions::default()).unwrap();
+    let mut db = Database::create(path, 2).unwrap();
     db.set_collection_settings("default", text_settings())
         .unwrap();
     db.create_collection(

@@ -34,7 +34,7 @@ use serde_json::{Value, json};
 use tempfile::tempdir;
 use tower::ServiceExt;
 use vlite::{
-    CreateOptions, Database, FormatVersion,
+    Database, FormatVersion,
     server::{BearerToken, ServerOptions, Service, configured_admin_router},
 };
 
@@ -117,9 +117,10 @@ fn routes() -> Vec<(&'static str, &'static str, Option<Value>, bool)> {
 /// to node n) and edges n1-LINKS->n2-LINKS->n3; graph "empty" has no nodes.
 fn database(path: &Path, graph: bool) -> Database {
     let mut db = if graph {
-        Database::create_with_graph(path, 2, CreateOptions::default()).unwrap()
+        Database::create(path, 2).unwrap()
     } else {
-        Database::create_with_format(path, 2, FormatVersion::V5).unwrap()
+        // New files are graph-enabled; an explicit v4 stays vector-only.
+        Database::create_with_format(path, 2, FormatVersion::V4).unwrap()
     };
     for id in 1..=4u64 {
         db.put(id, &[id as f32, 1.0], format!("r{id}").as_bytes())

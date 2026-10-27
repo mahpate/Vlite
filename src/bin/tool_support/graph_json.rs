@@ -1,4 +1,4 @@
-//! Typed graph JSON shared by the opt-in graph tools (`vlite-graph-cli`
+//! Typed graph JSON shared by the graph tools (`vlite-graph-cli`
 //! and the `graph` tools of `vlite-mcp`): request parsing (every object
 //! rejects unknown fields) and output encoding. Node, edge and record IDs,
 //! revisions and sequences are decimal strings on output and accepted as
@@ -47,7 +47,6 @@ pub(crate) fn error_code(error: &Error) -> &'static str {
         Error::CommitIndeterminate(_) => "commit_indeterminate",
         Error::Poisoned => "poisoned",
         Error::GraphsNotEnabled => "graphs_not_enabled",
-        Error::GraphsRequireV5 => "graphs_require_v5",
         Error::InvalidGraphName => "invalid_graph_name",
         Error::GraphExists => "graph_exists",
         Error::GraphNotFound => "graph_not_found",

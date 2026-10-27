@@ -41,7 +41,7 @@ test("V5 TTL, metadata-only updates, grouped/recommended/faceted/statistical/geo
   await assert.rejects(db.putWithExpiry("4", [1], options), code("invalid_input"));
   await assert.rejects(db.put("4", [1, 1], { expectedRevision: "absent", expiresAtMs: 2 }), TypeError);
   await assert.rejects(db.putWithExpiry("4", [1, 1], { expiresAtMs: Number.MAX_SAFE_INTEGER + 1 }), TypeError);
-  const legacy = await native.createInMemory(2);
+  const legacy = await native.createInMemory(2, { format: 3 });
   await assert.rejects(legacy.putWithExpiry("1", [1, 0]), code("requires_format_v5"));
 }));
 

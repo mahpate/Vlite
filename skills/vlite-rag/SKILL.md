@@ -24,8 +24,8 @@ description: Build grounded retrieval-augmented generation with VLite embedded P
 ## Establish the contract before writing
 
 1. Inspect the existing database and selected collection's dimensions/settings.
-   New embedded databases default to format 3; use `format=4` for named
-   collections and persisted collection settings. V5-only features need format 5.
+   New embedded databases are graph-enabled format 5, with named collections,
+   persisted collection settings and V5 features; `format=3`/`4` stay plain.
    `create` refuses an existing path: never recover by deleting the file.
 2. Use numeric IDs encoded as **decimal strings**, for example `"1001"`.
    Arbitrary UUID strings are not record IDs. Put external document IDs in

@@ -993,7 +993,9 @@ async fn operators_can_seed_the_first_super_admin_from_a_file() {
 #[tokio::test]
 async fn editor_and_viewer_accounts_need_a_v4_database() {
     let dir = tempfile::tempdir_in(".").unwrap();
-    let service = Service::new(Database::create(dir.path().join("data.vlite"), 2).unwrap());
+    let service = Service::new(
+        Database::create_with_format(dir.path().join("data.vlite"), 2, FormatVersion::V3).unwrap(),
+    );
     let app = configured_admin_router(service.clone(), options(dir.path())).unwrap();
     let editor = admin(
         &app,

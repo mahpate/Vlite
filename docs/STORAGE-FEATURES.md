@@ -171,12 +171,12 @@ and return an error, and path-based APIs fail at runtime. `bindings/wasm` is a
 wasm-bindgen package with a Node smoke test. The in-memory backend also works
 natively.
 
-## Graph-enabled files (opt-in per file)
+## Graph-enabled files
 
 Every build since v0.5.1 can store named property graphs in the same log as
-vectors; there is no `graph` Cargo feature. New files stay plain
-unless graph is requested. `Database::create_with_graph`
-creates a v5 file with header flag `FLAG_GRAPH = 4`;
+vectors; there is no `graph` Cargo feature. Every new file is
+graph-enabled: `Database::create` writes a v5 file with header flag
+`FLAG_GRAPH = 4` (an explicit v3/v4 create stays plain);
 `maintenance::enable_graph` writes a graph-enabled copy of a v4 or v5 file.
 Graph commits are op-12 frames on the same commit path as vectors, so locking,
 sequences, checksums, encryption and commit timestamps work as usual.

@@ -1041,3 +1041,21 @@ not cover resource limits beyond `GraphLimits::CEILING`.
   every graph frame.
 - **DO-005.** Unchanged: still deferred, baseline `81ff901`, REG-010 policy
   unchanged.
+
+## New files graph-enabled by default (v0.6.0, user decision 2026-10-26)
+
+- **Decision.** After parity (PRD v1.2.25) the user asked that new files be
+  graph-enabled by default, with no compatibility shims (PRD v1.2.26,
+  ITEM-059). Every V5 create sets `FLAG_GRAPH`, and V5 is the default on
+  every create path: Rust (file and in-memory), `vlite-server
+  --create-if-missing`, `vlite-shell`/`vlite-import --create`,
+  `vlite-graph-cli init`, the C ABI, Python, Node and wasm.
+- **Removed opt-ins.** `create_with_graph` (Rust, Python), `createWithGraph`
+  (Node), the C graph `create` op, the wasm `formatV5` argument and
+  `Error::GraphsRequireV5`. There is no plain-create opt-out.
+- **Kept.** An explicit V3 or V4 request (`create_with_format`, server
+  `--create-format 3|4`, binding `format`) stays plain because those formats
+  cannot carry `FLAG_GRAPH`. `vlite-graph-cli init` stays as the graph CLI's
+  create command. `maintenance::enable_graph` and `strip_graph` are unchanged.
+- **Existing files.** v3, v4 and plain v5 files open as vector-only and are
+  never upgraded silently; `upgrade` behaviour is unchanged.

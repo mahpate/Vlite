@@ -6,7 +6,8 @@
 //!
 //! * REG-003 byte identity of newly created V3 files; V4/V5 identical after
 //!   masking lineage (+ header CRC) and, for encrypted files, the random
-//!   salt/nonce-derived bytes (descriptor, sealed bodies, body CRCs).
+//!   salt/nonce-derived bytes (descriptor, sealed bodies, body CRCs). New V5
+//!   files are graph-enabled, so their only other difference is `FLAG_GRAPH`.
 //! * REG-004 golden V3/V4/V5 (plain, encrypted, timestamps) files are opened,
 //!   read, written, reopened, compacted, backed up, restored and verified with
 //!   identical results and no header/version change.
@@ -171,8 +172,14 @@ fn reg003_reg006_new_files_match_baseline_bytes_and_results() {
             "{}: mutation results/errors differ from baseline (REG-006)",
             variant.name
         );
-        let created = fs::read(&path).unwrap();
+        let mut created = fs::read(&path).unwrap();
         let golden = golden_bytes(&variant);
+        if variant.name.starts_with("v5") {
+            // Every new V5 file is graph-enabled; the graph-off golden is not.
+            let flags = |bytes: &[u8]| u16::from_le_bytes([bytes[26], bytes[27]]);
+            assert_eq!(flags(&created), flags(&golden) | 4, "{}", variant.name);
+            created[26] &= !4;
+        }
         if variant.name == "v3" {
             assert!(
                 created == golden,

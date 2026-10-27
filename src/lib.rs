@@ -399,10 +399,9 @@ pub enum Error {
     StaleIndex,
     /// The GPU path failed; callers may fall back to the CPU search.
     GpuUnavailable(&'static str),
-    /// The file was not created with `create_with_graph`.
+    /// The file is not graph-enabled: a v3/v4 file, or a v5 file created
+    /// without `FLAG_GRAPH` (convert a copy with `maintenance::enable_graph`).
     GraphsNotEnabled,
-    /// Graph-enabled files need format V5.
-    GraphsRequireV5,
     InvalidGraphName,
     GraphExists,
     GraphNotFound,
@@ -646,9 +645,8 @@ impl fmt::Display for Error {
             Self::GpuUnavailable(reason) => write!(f, "GPU search unavailable: {reason}"),
             Self::GraphsNotEnabled => write!(
                 f,
-                "this database is not graph-enabled; create it with create_with_graph"
+                "this database is not graph-enabled; convert a copy with enable_graph"
             ),
-            Self::GraphsRequireV5 => write!(f, "graph-enabled databases require format V5"),
             Self::InvalidGraphName => {
                 write!(f, "graph names must match ^[a-z][a-z0-9_-]{{0,62}}$")
             }
@@ -814,13 +812,14 @@ pub struct RepairReport {
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FormatVersion {
-    /// The default for `Database::create`; readable by older VLite releases.
+    /// Readable by older VLite releases. Never graph-enabled.
     V3,
     /// Adds lineage, named collections, persisted settings and import
     /// checkpoints. Not readable by releases that predate it.
     V4,
     /// Adds record expiry, metadata-only updates, geospatial metadata and
-    /// named/sparse vector histories with re-embedding checkpoints.
+    /// named/sparse vector histories with re-embedding checkpoints. The
+    /// default: every new V5 file is graph-enabled (`FLAG_GRAPH`).
     /// Not readable by releases that predate it.
     V5,
 }
@@ -899,7 +898,8 @@ pub type CommitClock = Box<dyn FnMut() -> u64 + Send + Sync>;
 /// Optional features for `Database::create_with_options`.
 #[derive(Debug, Default)]
 pub struct CreateOptions {
-    /// Defaults to V3 unless a feature below requires V5.
+    /// Defaults to V5, which is always graph-enabled. An explicit V3 or V4
+    /// creates a plain vector file and rejects the features below.
     pub format: Option<FormatVersion>,
     /// Encrypt frame bodies at rest (requires, and implies, format V5).
     pub encryption: Option<EncryptionKey>,
@@ -1126,16 +1126,18 @@ fn validate_settings(settings: &CollectionSettings) -> Result<()> {
 }
 
 impl Database {
-    /// Creates a new format-v3 database without overwriting any existing path.
+    /// Creates a new graph-enabled format-v5 database without overwriting any
+    /// existing path.
     ///
     /// The file contents are synced before returning. The caller is responsible
     /// for platform-specific parent-directory durability after creation.
     pub fn create(path: impl AsRef<Path>, dimensions: usize) -> Result<Self> {
-        Self::create_with_format(path, dimensions, FormatVersion::V3)
+        Self::create_with_options(path, dimensions, CreateOptions::default())
     }
 
     /// Creates a new database in an explicit format. `dimensions` applies to
     /// the `default` collection. V4/V5 draw a random nonzero lineage from the OS.
+    /// V5 is graph-enabled; an explicit V3 or V4 creates a plain vector file.
     pub fn create_with_format(
         path: impl AsRef<Path>,
         dimensions: usize,
@@ -1152,24 +1154,16 @@ impl Database {
     }
 
     /// Creates a new database with optional encryption and commit timestamps.
-    /// Either feature needs format V5 (the default when one is requested; an
-    /// explicit older format is rejected).
+    /// The default format is V5 with `FLAG_GRAPH`, so every new file holds
+    /// both vectors and property graphs. Either feature needs V5 (an explicit
+    /// older format is rejected).
     pub fn create_with_options(
         path: impl AsRef<Path>,
         dimensions: usize,
         options: CreateOptions,
     ) -> Result<Self> {
-        Self::create_file(path.as_ref(), dimensions, options, 0)
-    }
-
-    /// `extra_flags` is 0, or `FLAG_GRAPH` from `create_with_graph`.
-    fn create_file(
-        path: &Path,
-        dimensions: usize,
-        options: CreateOptions,
-        extra_flags: u16,
-    ) -> Result<Self> {
-        Self::create_backed(dimensions, options, extra_flags, |header| {
+        let path = path.as_ref();
+        Self::create_backed(dimensions, options, |header| {
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -1184,11 +1178,12 @@ impl Database {
     }
 
     /// Creates a database held entirely in memory (no file, no lock): the
-    /// WebAssembly backend and `vlite-server --durability none`. Its
+    /// WebAssembly backend and `vlite-server --durability none`. Formats
+    /// follow `create_with_options` (graph-enabled V5 by default). Its
     /// durability is `Durability::None`: commits are durable only as far as
     /// the caller persists `to_bytes()`.
     pub fn create_in_memory(dimensions: usize, options: CreateOptions) -> Result<Self> {
-        Self::create_backed(dimensions, options, 0, |header| {
+        Self::create_backed(dimensions, options, |header| {
             Ok(LockedFile::memory(header.to_vec()))
         })
     }
@@ -1209,16 +1204,12 @@ impl Database {
     fn create_backed(
         dimensions: usize,
         options: CreateOptions,
-        extra_flags: u16,
         make: impl FnOnce(&[u8]) -> Result<LockedFile>,
     ) -> Result<Self> {
         validate_dimensions(dimensions)?;
-        let featured =
-            options.encryption.is_some() || options.commit_timestamps || extra_flags != 0;
+        let featured = options.encryption.is_some() || options.commit_timestamps;
         let format = match (options.format, featured) {
-            (None, false) => FormatVersion::V3,
-            (None, true) => FormatVersion::V5,
-            (Some(FormatVersion::V5), _) => FormatVersion::V5,
+            (None | Some(FormatVersion::V5), _) => FormatVersion::V5,
             (Some(_), true) => {
                 return Err(Error::InvalidEncryptionOptions(
                     "encryption and commit timestamps require format V5",
@@ -1235,7 +1226,6 @@ impl Database {
         if options.commit_timestamps {
             flags |= format::FLAG_TIMESTAMPS;
         }
-        flags |= extra_flags;
         let (version, lineage, header) = match format {
             FormatVersion::V3 => (format::CURRENT_VERSION, None, format::header(dimensions)),
             FormatVersion::V4 => {
@@ -1247,6 +1237,7 @@ impl Database {
                 )
             }
             FormatVersion::V5 => {
+                flags |= format::FLAG_GRAPH;
                 let lineage = format::new_lineage()?;
                 (
                     format::V5,
@@ -4045,7 +4036,9 @@ mod v4_tests {
     #[test]
     fn import_hook_requires_v4_and_open_jobs_block_drop_until_closed() {
         let directory = tempfile::tempdir().unwrap();
-        let mut v3 = Database::create(directory.path().join("v3.vlite"), 2).unwrap();
+        let mut v3 =
+            Database::create_with_format(directory.path().join("v3.vlite"), 2, FormatVersion::V3)
+                .unwrap();
         let rows = [put(1, &[1.0, 1.0], b"")];
         assert!(matches!(
             v3.commit_import_frame(0, &rows, &chunk(1, 1, &rows, 0)),

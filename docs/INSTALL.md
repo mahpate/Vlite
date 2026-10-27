@@ -10,8 +10,8 @@ not published.
 
 See [upgrade and rollback guidance](RELEASE-0.5.1.md) before upgrading an
 existing deployment. Release binaries, the C library, wheels and Node release
-tarballs include the [property graph](GRAPH.md), which is opt-in per file;
-files without graphs are unaffected. The Docker image's API server (`vlite-server`)
+tarballs include the [property graph](GRAPH.md); new files are graph-enabled
+and existing files are never converted. The Docker image's API server (`vlite-server`)
 has graph; `vlite-graph-cli` is not in the image.
 
 ## API and dashboard: first-time setup

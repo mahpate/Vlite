@@ -288,7 +288,7 @@ fn settings_persist_on_v4_and_are_memory_only_on_v3() {
     drop(db);
 
     let path = directory.path().join("v3.vlite");
-    let mut db = Database::create(&path, 2).unwrap();
+    let mut db = Database::create_with_format(&path, 2, FormatVersion::V3).unwrap();
     assert_eq!(db.format_version(), 3);
     assert!(matches!(
         db.create_collection("docs", spec(2)),

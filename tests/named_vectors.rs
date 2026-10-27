@@ -88,7 +88,7 @@ fn independent_spaces_ann_reopen_compaction_and_legacy_guard() {
     );
     db.close().unwrap();
     let legacy = Fixture::new();
-    let mut db = Database::create(&legacy.path, 2).unwrap();
+    let mut db = Database::create_with_format(&legacy.path, 2, vlite::FormatVersion::V3).unwrap();
     let before = std::fs::metadata(&legacy.path).unwrap().len();
     assert!(
         db.collection_mut("default")

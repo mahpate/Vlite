@@ -1,13 +1,14 @@
-# Property graphs (opt-in per file)
+# Property graphs
 
 VLite can store named property graphs (nodes, typed edges and attachments to
 vector records) in the same file and commit log as vectors. Since v0.5.1 graph
 support is compiled into every build: the library, binaries, C library, wheels,
 Node packages and the Docker image's API server (`vlite-server`).
 `vlite-graph-cli` is not in the image; there is no `graph` Cargo feature.
-Graphs stay opt-in per file: graphs exist
-only in files created with `create_with_graph` or `vlite-graph-cli init`, or copied with
-`vlite-maintain enable-graph`; other files behave as vector-only files.
+Every new file is graph-enabled: each create path (Rust, servers, CLIs, C,
+Python, Node, wasm, in-memory) writes a v5 file with `FLAG_GRAPH`. An explicit
+v3 or v4 create stays vector-only. Existing files without the flag open
+unchanged as vector-only files; copy one with `vlite-maintain enable-graph`.
 
 ## Get it
 
@@ -89,13 +90,13 @@ shortest-path search reports `exhausted`, never an uncertified "no path".
 
 | Surface | What it offers |
 |---------|----------------|
-| Rust | `create_with_graph`, `create_graph`/`drop_graph`/`list_graphs`, `graph_mut(name)`, `graph(name)`, `explain`, `query_text`, `retrieve` |
+| Rust | `create`, `create_graph`/`drop_graph`/`list_graphs`, `graph_mut(name)`, `graph(name)`, `explain`, `query_text`, `retrieve` |
 | CLI | `vlite-graph-cli`; see [graph operations](TOOLS.md#graph-operations) |
 | MCP | `vlite_graph_*` tools, on a file or through a server with `--server URL` (`mcp-proxy` feature); see [MCP](MCP.md#property-graph-tools) |
 | REST | `/v1/graphs` routes: list, create, drop, gets, find, neighbors, traverse, shortest path, explain, schema, retrieve, query, batch |
 | C ABI | `{"op":"capabilities"}` and `{"op":"graph","request":{...}}` |
-| Python | `supports_graph()`, `create_with_graph()`, `graph_*` methods |
-| Node | `supportsGraph()`, `createWithGraph()`, `graph*` methods ([guide](../bindings/node/README.md)) |
+| Python | `supports_graph()`, `create()`, `graph_*` methods |
+| Node | `supportsGraph()`, `create()`, `graph*` methods ([guide](../bindings/node/README.md)) |
 
 **REST access.** Graph routes accept the admin token, the read-only token
 (reads only) or `vlk_` credentials with `graph_read` / `graph_write` and a

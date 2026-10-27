@@ -9,7 +9,7 @@ use std::{
     process::ExitCode,
 };
 use tool_support::{Result, main_result};
-use vlite::{Database, FormatVersion, ImportChunkOutcome, InvalidRowPolicy, Metadata, Mutation};
+use vlite::{Database, ImportChunkOutcome, InvalidRowPolicy, Metadata, Mutation};
 const HELP: &str = r#"vlite-import --db PATH --input FILE --format csv|jsonl|pgvector|copy|faiss|parquet|arrow
  [--create DIMENSIONS] [--collection NAME] [--job ID] [--chunk-size N]
 CSV: header id,vector[,payload,metadata]; vector is a quoted JSON array.
@@ -435,7 +435,7 @@ fn run() -> Result<()> {
         }
     }
     let mut db = if args.contains_key("--create") {
-        Database::create_with_format(path, dims, FormatVersion::V4)?
+        Database::create(path, dims)?
     } else {
         Database::open(path)?
     };

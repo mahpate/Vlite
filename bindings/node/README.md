@@ -140,8 +140,8 @@ For parallel reads use separate processes, each opening its own read-only handle
 
 ## Format 4: collections, revisions, planned search and imports
 
-`native.create(path, dims)` still creates format 3. Pass `{ format: 4 }` for
-named collections, collection settings and resumable imports; on format 3 those
+`native.create(path, dims)` creates a graph-enabled format 5 file, which also has
+named collections, collection settings and resumable imports; on an explicit `{ format: 3 }` those
 calls reject with `requires_format_v4`.
 
 ```js
@@ -216,7 +216,7 @@ This package is Node-only, not a browser or edge-runtime binding.
 
 New methods use additive JSON operations through the existing ABI-1 library and
 worker; there are no new native symbols and no network calls. Use a matching
-new bundled library. Default creation remains format 3. Pass `{format:5}` for
+new bundled library. Default creation is format 5 (graph-enabled), with
 TTL/metadata-only mutations and named/sparse/model-versioned vectors.
 
 ```js
@@ -300,17 +300,17 @@ the default uses the package's platform prebuild.
 
 `npm run typecheck` also checks compile-time examples of every new method.
 
-## Property graph (opt-in per file)
+## Property graph
 
-Every native library since v0.5.1 includes the graph methods; graphs live only
-in files created with `createWithGraph` (or copied with
-`vlite-maintain enable-graph`). `native.capabilities()` returns `{graph}` and
+Every native library since v0.5.1 includes the graph methods, and every file
+made by `create` or `createInMemory` is graph-enabled (explicit `format` 3 or 4
+stays plain; copy older files with `vlite-maintain enable-graph`). `native.capabilities()` returns `{graph}` and
 `native.supportsGraph()` a boolean; against an older library built without
 graph every graph method rejects with `EmbeddedError` code `unsupported`. See [docs/GRAPH.md](../../docs/GRAPH.md).
 
 ```js
 const native = new NativeLibrary(); // or { libraryPath } for a source build
-const db = await native.createWithGraph("agent.vlite", 3); // new V5 graph file
+const db = await native.create("agent.vlite", 3); // new V5 graph file
 await db.createGraph("memory");
 await db.graphWriteBatch("memory", [
   { op: "create_node", key: "ada", labels: ["Person"] },
@@ -322,7 +322,7 @@ console.log((await db.graphShortestPath("memory", "ada", "acme")).shortest_path.
 await db.close();
 ```
 
-Methods: `createWithGraph`, `isGraphEnabled`, `listGraphs`, `createGraph`,
+Methods: `isGraphEnabled`, `listGraphs`, `createGraph`,
 `dropGraph`, `graphWriteBatch`, `graphGetNode`, `graphGetEdge`,
 `graphFindNodes`, `graphNeighbors`, `graphTraverse`, `graphShortestPath` and
 `graphExplain`. Selectors are a key string, a non-negative safe integer or

@@ -35,7 +35,7 @@ use serde_json::{Value, json};
 use tempfile::tempdir;
 use tower::ServiceExt;
 use vlite::{
-    CreateOptions, Database, FormatVersion, Metadata,
+    Database, FormatVersion, Metadata,
     property_graph::GraphOp,
     server::{BearerToken, ServerOptions, Service, configured_admin_router},
 };
@@ -63,7 +63,7 @@ impl Setup {
 fn database(path: &Path, setup: Setup) -> Database {
     let mut db = match setup {
         Setup::VectorOnly => Database::create_with_format(path, 2, FormatVersion::V5).unwrap(),
-        _ => Database::create_with_graph(path, 2, CreateOptions::default()).unwrap(),
+        _ => Database::create(path, 2).unwrap(),
     };
     for id in 1..=4u64 {
         db.put(id, &[id as f32, 1.0], format!("r{id}").as_bytes())

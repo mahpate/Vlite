@@ -12,7 +12,7 @@ use crate::{InvalidRowPolicy, MetadataValue};
 const FAR_FUTURE: u64 = 4_102_444_800_000;
 
 fn graph_db(path: &Path) -> Database {
-    let mut db = Database::create_with_graph(path, 2, CreateOptions::default()).unwrap();
+    let mut db = Database::create(path, 2).unwrap();
     db.create_graph("g").unwrap();
     db
 }

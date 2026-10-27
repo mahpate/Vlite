@@ -79,7 +79,8 @@ export class NativeLibrary {
       catch { this.#pending.delete(id); reject(new EmbeddedError("worker_failed", "Cannot admit operation; worker unavailable")); }
     });
   }
-  /** File handles default to periodic durability (60 s); `durability: "full"` syncs every commit. */
+  /** New files are graph-enabled V5 (`format: 3 | 4` stay plain). File handles default to periodic
+   * durability (60 s); `durability: "full"` syncs every commit. */
   async create(path, dimensions, { format, key, passphrase, commitTimestamps = false, durability, flushIntervalMs } = {}) {
     if (format === 5 || key !== undefined || passphrase !== undefined || commitTimestamps) {
       return this.#createFeature(path, dimensions, { format, key, passphrase, commitTimestamps, durability, flushIntervalMs });
@@ -108,13 +109,6 @@ export class NativeLibrary {
   }
   /** Whether the loaded library includes the property graph (every library since 0.5.1). */
   async supportsGraph() { return Boolean((await this.capabilities()).graph); }
-  /** Create a NEW graph-enabled (V5) file without overwrite; never converts an existing file. */
-  async createWithGraph(path, dimensions, { format, key, passphrase, commitTimestamps = false, durability, flushIntervalMs } = {}) {
-    const options = { credentials: credentials(key, passphrase), commit_timestamps: commitTimestamps,
-      ...optional("format", format), ...durabilityFields(durability, flushIntervalMs) };
-    const result = await graphCall(this._request("0", { op: "graph", request: { op: "create", path, dimensions, options } }));
-    return new Database(this, result.handle);
-  }
   /** Open a snapshot; readOnly shares file locks, rejects mutations, and excludes writers. */
   async open(path, { key, passphrase, readOnly = false, durability, flushIntervalMs } = {}) {
     const flag = { ...(readOnly ? { read_only: true } : {}), ...durabilityFields(durability, flushIntervalMs) };
@@ -349,7 +343,7 @@ export class Database {
   }
   async toBytes() { return Buffer.from((await this.#feature("to_bytes")).bytes_base64, "base64"); }
 
-  // Property graph (opt-in per file; always compiled since 0.5.1). Nodes and edges are selected by key (string),
+  // Property graph (new files are graph-enabled; always compiled since 0.5.1). Nodes and edges are selected by key (string),
   // ID (bigint, safe integer or { id: "decimal" }) or { key }; IDs and revisions come back as
   // decimal strings. Libraries without the feature reject with EmbeddedError("unsupported").
   #graph(op, fields = {}) { return graphCall(this.#call("graph", { request: { op, ...fields } })); }

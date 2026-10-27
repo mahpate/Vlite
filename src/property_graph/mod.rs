@@ -38,11 +38,8 @@
 //! within a scan budget.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 
-use crate::{
-    CreateOptions, Database, Error, Expected, FormatVersion, Metadata, Mutation, Result, format,
-};
+use crate::{Database, Error, Expected, Metadata, Mutation, Result, format};
 
 // The engine source is shared with the workspace-only `vlite-graph` harness
 // crate and compiled whole, so parts (for example harness-only accessors) are
@@ -515,24 +512,9 @@ pub(crate) fn valid_frame_prefix(id: u64, count: usize, payload_len: usize) -> b
 }
 
 impl Database {
-    /// Creates a graph-enabled database: format V5 with the `FLAG_GRAPH`
-    /// header bit, combinable with encryption and commit timestamps. An
-    /// explicit V3/V4 `format` returns `GraphsRequireV5`. Graph-unaware
-    /// readers, including pre-0.5.1 builds without the `graph` feature, reject the
-    /// file with `UnsupportedFeature(4)`. Ordinary files never become
-    /// graph-enabled.
-    pub fn create_with_graph(
-        path: impl AsRef<Path>,
-        dimensions: usize,
-        options: CreateOptions,
-    ) -> Result<Self> {
-        if matches!(options.format, Some(format) if format != FormatVersion::V5) {
-            return Err(Error::GraphsRequireV5);
-        }
-        Self::create_file(path.as_ref(), dimensions, options, format::FLAG_GRAPH)
-    }
-
-    /// Whether this file is graph-enabled (`FLAG_GRAPH`).
+    /// Whether this file is graph-enabled (`FLAG_GRAPH`): every file created
+    /// in format V5, the default. Existing v3/v4 files and v5 files written
+    /// without the flag stay vector-only until `enable_graph` converts a copy.
     pub fn is_graph_enabled(&self) -> bool {
         self.graph.is_some()
     }

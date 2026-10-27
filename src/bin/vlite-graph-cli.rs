@@ -29,7 +29,7 @@ use serde_json::{Value, json};
 use vlite::property_graph::{
     GraphOp, GraphQueryError, GraphQueryErrorKind, GraphTextError, ReadOptions, parse_graph_query,
 };
-use vlite::{CreateOptions, Database, Error, Metadata};
+use vlite::{Database, Error, Metadata};
 
 const HELP: &str = r#"vlite-graph-cli --db PATH [--writable] [--explain] COMMAND [REQUEST]
 Runs one typed graph operation on a graph-enabled VLite file and prints one
@@ -56,7 +56,7 @@ Reads (shared lock, never write; --explain plans a query without running it):
                 Text errors: graph_query_syntax|unsupported|parameter|limit.
 
 Writes (require --writable; exclusive lock):
-  init          {"dimensions":N}   creates a NEW graph-enabled file; never converts
+  init          {"dimensions":N}   creates a NEW file (graph-enabled, like every new file)
   create-graph  {"graph":"g"}
   drop-graph    {"graph":"g"}      empty graphs only
   batch         {"graph":"g","ops":[...]}   one atomic frame; nothing is written on error
@@ -266,8 +266,7 @@ fn execute(cli: &Cli) -> Result<Value, Failure> {
     match cli.command.as_str() {
         "init" => {
             let request: Init = parse(&text)?;
-            Database::create_with_graph(&cli.db, request.dimensions, CreateOptions::default())?
-                .close()?;
+            Database::create(&cli.db, request.dimensions)?.close()?;
             Ok(json!({"dimensions": request.dimensions, "graph_enabled": true}))
         }
         "create-graph" => {

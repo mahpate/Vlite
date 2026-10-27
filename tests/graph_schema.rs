@@ -85,7 +85,7 @@ fn schema() -> GraphSchema {
 
 fn schema_db(kind: Kind, dir: &std::path::Path) -> (std::path::PathBuf, Database) {
     let path = dir.join(format!("schema-{kind:?}.vlite"));
-    let mut db = Database::create_with_graph(&path, 2, kind.options()).unwrap();
+    let mut db = Database::create_with_options(&path, 2, kind.options()).unwrap();
     db.create_graph("g").unwrap();
     let mut graph = db.graph_mut("g").unwrap();
     graph.put_schema(&schema()).unwrap();
@@ -728,7 +728,7 @@ fn indexed_schema() -> GraphSchema {
 
 fn twin(dir: &std::path::Path, name: &str, declared: bool) -> Database {
     let path = dir.join(format!("{name}.vlite"));
-    let mut db = Database::create_with_graph(&path, 2, Kind::Plain.options()).unwrap();
+    let mut db = Database::create_with_options(&path, 2, Kind::Plain.options()).unwrap();
     db.create_graph("g").unwrap();
     let mut graph = db.graph_mut("g").unwrap();
     if declared {
@@ -951,7 +951,7 @@ fn declared_indexes_return_exactly_what_scans_return() {
 fn schema_writes_join_batches_and_report_an_outcome() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("batch.vlite");
-    let mut db = Database::create_with_graph(&path, 2, Kind::Plain.options()).unwrap();
+    let mut db = Database::create_with_options(&path, 2, Kind::Plain.options()).unwrap();
     db.create_graph("g").unwrap();
     let result = db
         .graph_mut("g")

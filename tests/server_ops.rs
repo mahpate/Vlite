@@ -486,7 +486,7 @@ async fn scopes_fail_closed_on_recreated_collections_and_switched_databases() {
 async fn change_feed_routes_report_requires_format_v4_on_old_files() {
     let dir = tempfile::tempdir().unwrap();
     let (service, app) = start(
-        Database::create(dir.path().join("v3.vlite"), 2).unwrap(),
+        Database::create_with_format(dir.path().join("v3.vlite"), 2, FormatVersion::V3).unwrap(),
         options(&dir.path().join("admin3")),
     );
     let caps = admin(&app, "GET", "/v1/capabilities", None).await;
@@ -671,7 +671,7 @@ async fn credentials_require_admin_token_directory_and_v4() {
     service.close().await.unwrap();
     // v3 database: creation fails explicitly.
     let (service, app) = start(
-        Database::create(dir.path().join("v3.vlite"), 2).unwrap(),
+        Database::create_with_format(dir.path().join("v3.vlite"), 2, FormatVersion::V3).unwrap(),
         options(&dir.path().join("admin3")),
     );
     let (status, error) = call(

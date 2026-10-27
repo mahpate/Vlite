@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use vlite::property_graph::{GraphOp, Neighbors, NodeSelector, ShortestPath, Traverse};
-use vlite::{CreateOptions, Database, Metadata, MetadataValue};
+use vlite::{Database, Metadata, MetadataValue};
 
 pub const BATCH: usize = 4_096;
 pub const GRAPH: &str = "bench";
@@ -215,7 +215,7 @@ pub struct Built {
 /// Creates a graph-enabled database at `path` with the graph [`GRAPH`] and
 /// writes every batch of `workload`, each with `write_batch`.
 pub fn build(path: &Path, workload: &mut Workload) -> Result<Built, Box<dyn Error>> {
-    let mut db = Database::create_with_graph(path, 2, CreateOptions::default())?;
+    let mut db = Database::create(path, 2)?;
     db.create_graph(GRAPH)?;
     let empty = file_len(path)?;
 

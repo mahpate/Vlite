@@ -233,14 +233,14 @@ mod graph {
         let directory = tempfile::tempdir().unwrap();
         for kind in KINDS {
             let reference = directory.path().join(format!("full-{kind:?}.vlite"));
-            let mut db = Database::create_with_graph(&reference, 2, kind.options()).unwrap();
+            let mut db = Database::create_with_options(&reference, 2, kind.options()).unwrap();
             clock(&mut db, 0);
             populate(&mut db);
             extend(&mut db);
             db.close().unwrap();
 
             let path = directory.path().join(format!("lazy-{kind:?}.vlite"));
-            Database::create_with_graph(&path, 2, kind.options())
+            Database::create_with_options(&path, 2, kind.options())
                 .unwrap()
                 .close()
                 .unwrap();

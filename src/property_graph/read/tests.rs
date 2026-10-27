@@ -11,7 +11,7 @@ use super::super::convert::{properties_from_metadata, property_conditions};
 use super::super::engine::conditions_match;
 use super::*;
 use crate::metadata::{self, MetadataValue};
-use crate::{CreateOptions, Database, Error};
+use crate::{Database, Error};
 
 /// SplitMix64: a small deterministic generator for seeded cases.
 struct Rng(u64);
@@ -142,7 +142,7 @@ fn property_conditions_match_exactly_like_record_filters() {
 }
 
 fn graph_db(path: &Path) -> Database {
-    let mut db = Database::create_with_graph(path, 2, CreateOptions::default()).unwrap();
+    let mut db = Database::create(path, 2).unwrap();
     db.create_graph("g").unwrap();
     db
 }

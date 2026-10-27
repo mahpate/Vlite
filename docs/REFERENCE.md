@@ -449,7 +449,7 @@ Follow the Docker [upgrade](DOCKER-OPERATIONS.md#upgrade) and
 
 ## Atomic batch writes
 
-New databases use format v3. A batch is one bounded, checksummed commit frame:
+New databases use format v5 with graphs enabled. A batch is one bounded, checksummed commit frame:
 
 ```rust
 use vlite::{Database, Mutation};
@@ -1157,7 +1157,7 @@ to `offset` or restore. Repair never does this automatically.
 
 ## Opt-in file format v4
 
-Format v4 is only created explicitly; opening an older file never upgrades it.
+Format v4 is only created explicitly (new files default to v5); opening an older file never upgrades it.
 Older binaries refuse v4, and v1–v3 handling is unchanged.
 
 The 32-byte header keeps the magic, version, dimensions and CRC-32. In v4,
@@ -1192,7 +1192,7 @@ The 32-byte database header:
 | Offset | Size | Value |
 |---|---|---|
 | 0 | 8 | `VLITEDB` followed by NUL |
-| 8 | 4 | Format version, 1, 2 or 3; new files use 3 |
+| 8 | 4 | Format version, 1, 2 or 3 (new files use 5) |
 | 12 | 4 | Dimensions |
 | 16 | 12 | Reserved, zero |
 | 28 | 4 | CRC-32 of bytes 0 through 27 |

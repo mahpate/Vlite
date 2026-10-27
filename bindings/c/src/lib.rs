@@ -795,14 +795,16 @@ fn execute(handle: u64, request: Request) -> Result<Value> {
                     flush_interval_ms,
                 } => {
                     let durability = durability(mode.as_deref(), flush_interval_ms, false)?;
-                    match format {
-                        None | Some(3) => Database::create(path, dimensions),
-                        Some(4) => {
-                            Database::create_with_format(path, dimensions, FormatVersion::V4)
-                        }
-                        Some(_) => return Err(invalid("format must be 3 or 4")),
-                    }
-                    .and_then(|db| with_durability(db, durability))
+                    // The default is a graph-enabled V5 file; an explicit
+                    // 3 or 4 creates a plain vector file.
+                    let format = match format {
+                        None | Some(5) => FormatVersion::V5,
+                        Some(3) => FormatVersion::V3,
+                        Some(4) => FormatVersion::V4,
+                        Some(_) => return Err(invalid("format must be 3, 4 or 5")),
+                    };
+                    Database::create_with_format(path, dimensions, format)
+                        .and_then(|db| with_durability(db, durability))
                 }
                 Request::Open {
                     path,
@@ -1651,9 +1653,9 @@ mod tests {
     }
 
     #[test]
-    fn default_v3_contract_is_unchanged_and_v4_is_opt_in() {
+    fn explicit_v3_contract_is_unchanged_and_v4_is_opt_in() {
         let directory = tempfile::tempdir().unwrap();
-        let v3 = create(&directory.path().join("v3.vlite"), 2, None);
+        let v3 = create(&directory.path().join("v3.vlite"), 2, Some(3));
         assert_eq!(
             ok(v3, json!({"op":"info"})),
             json!({"dimensions":2,"records":0,"format_version":3})
@@ -1698,7 +1700,7 @@ mod tests {
             json!({"persisted":false})
         );
         ok(v3, json!({"op":"close"}));
-        for format in [0, 2, 5] {
+        for format in [0, 2, 6] {
             assert_eq!(
                 code(
                     0,
@@ -1707,6 +1709,9 @@ mod tests {
                 "invalid_input"
             );
         }
+        let v5 = create(&directory.path().join("v5.vlite"), 2, Some(5));
+        assert_eq!(ok(v5, json!({"op":"info"}))["format_version"], 5);
+        ok(v5, json!({"op":"close"}));
         let v4 = create(&directory.path().join("v4.vlite"), 2, Some(4));
         assert_eq!(ok(v4, json!({"op":"info"}))["format_version"], 4);
         ok(v4, json!({"op":"close"}));

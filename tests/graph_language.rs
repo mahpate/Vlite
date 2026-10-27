@@ -16,7 +16,7 @@ use vlite::property_graph::{
     GraphQueryErrorKind, GraphTextError, Neighbors, NodeFilter, NodeSelector, PropertyProjection,
     ReadOptions, ShortestPath, Traverse, parse_graph_query,
 };
-use vlite::{Condition, CreateOptions, Database, Error, Metadata, MetadataValue};
+use vlite::{Condition, Database, Error, Metadata, MetadataValue};
 
 /// SplitMix64.
 struct Rng(u64);
@@ -311,7 +311,7 @@ fn garbage_and_mutated_texts_never_panic() {
 // Semantic equivalence on seeded graphs.
 
 fn seeded_graph(path: &Path, rng: &mut Rng) -> (Database, usize) {
-    let mut db = Database::create_with_graph(path, 2, CreateOptions::default()).unwrap();
+    let mut db = Database::create(path, 2).unwrap();
     db.create_graph("g").unwrap();
     let nodes = 10 + rng.below(15) as usize;
     let mut ops = Vec::new();

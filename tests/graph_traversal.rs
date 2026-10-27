@@ -24,7 +24,7 @@ use vlite::property_graph::{
     Neighbors, NodeFilter, NodeSelector, PathOutcome, ReadOptions, ShortestPath, Traversal,
     Traverse, TruncationReason,
 };
-use vlite::{Condition, CreateOptions, Database, Error, Expected, Metadata, MetadataValue};
+use vlite::{Condition, Database, Error, Expected, Metadata, MetadataValue};
 
 /// SplitMix64.
 struct Rng(u64);
@@ -58,7 +58,7 @@ const WIDE: GraphLimits = GraphLimits {
 };
 
 fn graph_db(path: &Path) -> Database {
-    let mut db = Database::create_with_graph(path, 2, CreateOptions::default()).unwrap();
+    let mut db = Database::create(path, 2).unwrap();
     db.create_graph("g").unwrap();
     db
 }

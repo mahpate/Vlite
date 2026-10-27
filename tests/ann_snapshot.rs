@@ -85,7 +85,7 @@ fn spec() -> CollectionSpec {
 
 fn create(path: &Path, layout: Layout) -> Database {
     match layout {
-        Layout::V3Default => Database::create(path, DIMS).unwrap(),
+        Layout::V3Default => Database::create_with_format(path, DIMS, FormatVersion::V3).unwrap(),
         Layout::V4Default => Database::create_with_format(path, DIMS, FormatVersion::V4).unwrap(),
         Layout::V4Named => {
             let mut db = Database::create_with_format(path, DIMS, FormatVersion::V4).unwrap();

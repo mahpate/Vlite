@@ -492,15 +492,13 @@ mod tests {
     use std::cell::Cell;
 
     use super::*;
+    use crate::Database;
     use crate::property_graph::GraphLimits;
-    use crate::{CreateOptions, Database};
 
     /// A graph whose single pivot node fans out to `fanout` topics, with a
     /// clock that advances `step` ms per reading.
     fn fan_out(dir: &std::path::Path, fanout: u64) -> Database {
-        let mut db =
-            Database::create_with_graph(dir.join("deadline.vlite"), 2, CreateOptions::default())
-                .unwrap();
+        let mut db = Database::create(dir.join("deadline.vlite"), 2).unwrap();
         db.put(1, &[0.0, 0.0], b"pivot").unwrap();
         db.create_graph("g").unwrap();
         let mut graph = db.graph_mut("g").unwrap();

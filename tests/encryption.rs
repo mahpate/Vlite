@@ -93,7 +93,10 @@ fn wrong_missing_and_unneeded_keys_give_clear_errors() {
     ));
 
     let plain = directory.path().join("plain.vlite");
-    Database::create(&plain, 3).unwrap().close().unwrap();
+    Database::create_with_format(&plain, 3, FormatVersion::V3)
+        .unwrap()
+        .close()
+        .unwrap();
     assert!(matches!(
         Database::open_encrypted(&plain, &key(1)),
         Err(Error::NotEncrypted)
@@ -230,7 +233,10 @@ fn encrypt_and_decrypt_conversions_preserve_the_log() {
     assert_eq!(db.get(2).unwrap().unwrap().payload, b"beta");
     // Pre-v5 sources cannot be encrypted without upgrading first.
     let v3 = directory.path().join("v3.vlite");
-    Database::create(&v3, 3).unwrap().close().unwrap();
+    Database::create_with_format(&v3, 3, FormatVersion::V3)
+        .unwrap()
+        .close()
+        .unwrap();
     assert!(
         maintenance::reencrypt(&v3, None, directory.path().join("x.vlite"), Some(&key(5))).is_err()
     );
@@ -283,7 +289,7 @@ fn encryption_requires_v5_and_plain_files_are_unchanged() {
 
     // A v3 file written today is byte-identical to the legacy layout.
     let path = directory.path().join("plain.vlite");
-    let mut db = Database::create(&path, 3).unwrap();
+    let mut db = Database::create_with_format(&path, 3, FormatVersion::V3).unwrap();
     db.put(1, &[1.0, 2.0, 3.0], b"x").unwrap();
     db.close().unwrap();
     let bytes = fs::read(&path).unwrap();

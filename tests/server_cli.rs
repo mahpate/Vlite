@@ -461,6 +461,26 @@ fn startup_never_overwrites_repairs_or_silently_changes_dimensions() {
 }
 
 #[test]
+fn create_if_missing_makes_graph_enabled_files_unless_an_older_format_is_requested() {
+    let directory = tempfile::tempdir().unwrap();
+    let default_path = directory.path().join("default.vlite");
+    drop(Server::start(&default_path));
+    let db = vlite::Database::open(&default_path).unwrap();
+    assert_eq!(db.format_version(), 5);
+    assert!(db.is_graph_enabled());
+    drop(db);
+    let v3_path = directory.path().join("v3.vlite");
+    drop(Server::start_with_options(
+        &v3_path,
+        false,
+        &["--create-format", "3"],
+    ));
+    let db = vlite::Database::open(&v3_path).unwrap();
+    assert_eq!(db.format_version(), 3);
+    assert!(!db.is_graph_enabled());
+}
+
+#[test]
 fn create_format_selects_v4_and_invalid_operational_options_fail_before_creation() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("v4.vlite");

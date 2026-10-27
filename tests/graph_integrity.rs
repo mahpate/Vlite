@@ -87,16 +87,15 @@ fn setup(path: &Path, setup: Setup, collection: &str) -> Database {
 /// `setup` with explicit create options (vector-only files are always V5).
 fn setup_with(path: &Path, setup: Setup, collection: &str, options: CreateOptions) -> Database {
     let mut db = match setup {
-        Setup::VectorOnly => Database::create_with_options(
+        Setup::VectorOnly => graph_support::create_vector_only(
             path,
             2,
             CreateOptions {
                 format: Some(FormatVersion::V5),
                 ..options
             },
-        )
-        .unwrap(),
-        _ => Database::create_with_graph(path, 2, options).unwrap(),
+        ),
+        _ => Database::create_with_options(path, 2, options).unwrap(),
     };
     if collection != "default" {
         db.create_collection(

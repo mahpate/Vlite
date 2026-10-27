@@ -2,7 +2,7 @@
 //! a byte image (`toBytes` / `fromBytes`). No files, locks or threads.
 
 use vlite::changes::{Change, ChangeKind, FeedCursor};
-use vlite::{CreateOptions, Database, EncryptionKey, FormatVersion, Metadata, MetadataValue};
+use vlite::{CreateOptions, Database, EncryptionKey, Metadata, MetadataValue};
 use wasm_bindgen::prelude::*;
 
 fn js_error(error: impl std::fmt::Display) -> JsError {
@@ -26,13 +26,10 @@ pub struct VLiteDatabase {
 
 #[wasm_bindgen]
 impl VLiteDatabase {
-    /// New empty database. A 32-byte `key` enables authenticated encryption.
+    /// New empty graph-enabled V5 database. A 32-byte `key` enables
+    /// authenticated encryption.
     #[wasm_bindgen(js_name = create)]
-    pub fn create(
-        dimensions: usize,
-        key: Option<Vec<u8>>,
-        format_v5: Option<bool>,
-    ) -> Result<VLiteDatabase, JsError> {
+    pub fn create(dimensions: usize, key: Option<Vec<u8>>) -> Result<VLiteDatabase, JsError> {
         let encryption = match key {
             Some(bytes) => Some(EncryptionKey::from_bytes(key_bytes(&bytes)?)),
             None => None,
@@ -41,7 +38,6 @@ impl VLiteDatabase {
             dimensions,
             CreateOptions {
                 encryption,
-                format: format_v5.unwrap_or(false).then_some(FormatVersion::V5),
                 ..CreateOptions::default()
             },
         )

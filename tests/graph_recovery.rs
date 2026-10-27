@@ -29,7 +29,7 @@ struct History {
 impl History {
     fn record(dir: &Path, kind: Kind) -> Self {
         let path = dir.join(format!("history-{kind:?}.vlite"));
-        let mut db = Database::create_with_graph(&path, 2, kind.options()).unwrap();
+        let mut db = Database::create_with_options(&path, 2, kind.options()).unwrap();
         clock(&mut db, 0);
         let mut images = vec![live_bytes(&db)];
         populate_with(&mut db, &mut |db| images.push(live_bytes(db)));

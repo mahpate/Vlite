@@ -62,6 +62,38 @@ impl Kind {
     }
 }
 
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xedb8_8320 & (0u32.wrapping_sub(crc & 1)));
+        }
+    }
+    !crc
+}
+
+/// A vector-only V5 file, as written before every new file became
+/// graph-enabled: creates the file, then clears `FLAG_GRAPH` (recomputing the
+/// header CRC) while it holds no frames, and reopens it.
+pub fn create_vector_only(path: &Path, dimensions: usize, options: CreateOptions) -> Database {
+    let key = options.encryption.clone();
+    Database::create_with_options(path, dimensions, options)
+        .unwrap()
+        .close()
+        .unwrap();
+    let mut bytes = fs::read(path).unwrap();
+    let flags = u16::from_le_bytes([bytes[26], bytes[27]]);
+    assert_ne!(flags & FLAG_GRAPH, 0);
+    bytes[26..28].copy_from_slice(&(flags & !FLAG_GRAPH).to_le_bytes());
+    let checksum = crc32(&bytes[..28]);
+    bytes[28..32].copy_from_slice(&checksum.to_le_bytes());
+    fs::write(path, bytes).unwrap();
+    let db = open(path, key.as_ref());
+    assert!(!db.is_graph_enabled());
+    db
+}
+
 pub fn open(path: &Path, key: Option<&EncryptionKey>) -> Database {
     match key {
         Some(key) => Database::open_encrypted(path, key),
@@ -121,7 +153,7 @@ pub const POPULATED: [usize; 4] = [3, 6, 6, 4];
 /// Graph-enabled file of `kind` holding the `populate` workload.
 pub fn graph_file(dir: &Path, name: &str, kind: Kind) -> PathBuf {
     let path = dir.join(format!("{name}-{kind:?}.vlite"));
-    let mut db = Database::create_with_graph(&path, 2, kind.options()).unwrap();
+    let mut db = Database::create_with_options(&path, 2, kind.options()).unwrap();
     clock(&mut db, 0);
     populate(&mut db);
     db.close().unwrap();
@@ -136,7 +168,7 @@ fn text(value: &str) -> MetadataValue {
 /// record and a delete.
 pub fn vector_file(dir: &Path, name: &str, kind: Kind) -> PathBuf {
     let path = dir.join(format!("{name}-{kind:?}.vlite"));
-    let mut db = Database::create_with_options(&path, 2, kind.options()).unwrap();
+    let mut db = create_vector_only(&path, 2, kind.options());
     clock(&mut db, 0);
     populate_vectors(&mut db);
     db.close().unwrap();

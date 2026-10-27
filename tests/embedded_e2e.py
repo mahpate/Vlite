@@ -38,7 +38,7 @@ def main():
         db = native.create(path, 3)
         fails("locked", lambda: native.open(path))
         fails("io_error", lambda: native.create(path, 3))
-        assert db.info() == {"dimensions": 3, "format_version": 3, "records": 0}
+        assert db.info() == {"dimensions": 3, "format_version": 5, "records": 0}
         metadata = {"n": {"type": "integer", "value": "-9223372036854775808"}}
         db.put("18446744073709551615", [1, 0, 0], payload_base64="AP8=", metadata=metadata)
         assert db.get("18446744073709551615")["metadata"] == metadata
@@ -115,14 +115,13 @@ def graph_surface(native, directory):
     """Graph commands (always compiled since v0.5.1); stable rejection from older libraries."""
     path = directory / "graph.vlite"
     if not native.supports_graph:
-        fails("unsupported", lambda: native.create_with_graph(path, 2))
-        assert not path.exists()
         with native.create(directory / "no-graph.vlite", 2) as db:
             fails("unsupported", db.list_graphs)
             fails("unsupported", lambda: db.graph_get_node("g", "a"))
         print("PASS graph: library built without the graph feature rejects graph commands as unsupported")
         return
-    with native.create_with_graph(path, 2) as db:
+    with native.create(path, 2) as db:
+        assert db.is_graph_enabled() and db.info()["format_version"] == 5
         db.create_graph("g")
         db.put("1", [1, 0])
         written = db.graph_write_batch("g", [
@@ -141,7 +140,7 @@ def graph_surface(native, directory):
 
 def v4_surface(native, directory):
     fails("invalid_input", lambda: native.create(directory / "bad.vlite", 2, format=6))
-    with native.create(directory / "legacy.vlite", 2) as legacy:
+    with native.create(directory / "legacy.vlite", 2, format=3) as legacy:
         fails("requires_format_v4", lambda: legacy.create_collection("docs", 2))
         legacy.put("1", [1, 0])
         revision = legacy.revision("1")

@@ -188,7 +188,7 @@ fn restore_to_cuts_graph_logs_at_whole_commits() {
     for kind in KINDS {
         let key = kind.key();
         let source = dir.path().join(format!("pitr-{kind:?}.vlite"));
-        let mut db = Database::create_with_graph(&source, 2, kind.options()).unwrap();
+        let mut db = Database::create_with_options(&source, 2, kind.options()).unwrap();
         clock(&mut db, 0);
         let mut states = vec![snapshot_bytes(live_bytes(&db), key.as_ref())];
         populate_with(&mut db, &mut |db| {
@@ -498,7 +498,7 @@ fn replica_followers_replay_graph_frames() {
         let key = kind.key();
         let primary = dir.path().join(format!("primary-{kind:?}.vlite"));
         let replica = dir.path().join(format!("replica-{kind:?}.vlite"));
-        let mut db = Database::create_with_graph(&primary, 2, kind.options()).unwrap();
+        let mut db = Database::create_with_options(&primary, 2, kind.options()).unwrap();
         clock(&mut db, 0);
         // Ship every commit as its own segment, alternating in-memory and
         // file-shipped segments; the follower must match the primary after

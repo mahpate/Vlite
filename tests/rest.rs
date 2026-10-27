@@ -53,7 +53,12 @@ async fn request(app: &Router, method: &str, path: &str, body: Value) -> (Status
 #[tokio::test]
 async fn exact_metrics_and_unsupported_ann_combinations_are_explicit() {
     let directory = tempfile::tempdir().unwrap();
-    let mut db = Database::create(directory.path().join("metrics.vlite"), 2).unwrap();
+    let mut db = Database::create_with_format(
+        directory.path().join("metrics.vlite"),
+        2,
+        vlite::FormatVersion::V3,
+    )
+    .unwrap();
     db.put(1, &[1.0, 0.0], b"").unwrap();
     db.put(2, &[4.0, 3.0], b"").unwrap();
     let app = router(Service::new(db));
@@ -204,7 +209,8 @@ async fn authentication_metrics_and_request_ids_are_enforced_without_mutations()
     use vlite::server::{BearerToken, authenticated_router};
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("auth.vlite");
-    let service = Service::new(Database::create(&path, 1).unwrap());
+    let service =
+        Service::new(Database::create_with_format(&path, 1, vlite::FormatVersion::V3).unwrap());
     let token = "test_secret_0123456789_ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     let app = authenticated_router(service.clone(), BearerToken::new(token).unwrap());
     for value in ["", "Basic abc", "Bearer wrong", &format!("Bearer {token}x")] {
@@ -286,7 +292,8 @@ async fn authentication_metrics_and_request_ids_are_enforced_without_mutations()
 async fn crud_search_batch_and_reopen_preserve_binary_payloads_and_full_u64_ids() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("api.vlite");
-    let service = Service::new(Database::create(&path, 2).unwrap());
+    let service =
+        Service::new(Database::create_with_format(&path, 2, vlite::FormatVersion::V3).unwrap());
     let app = router(service.clone());
     assert_eq!(
         request(&app, "GET", "/health", Value::Null).await.1["status"],
@@ -362,7 +369,10 @@ async fn crud_search_batch_and_reopen_preserve_binary_payloads_and_full_u64_ids(
 async fn invalid_batch_is_atomic_and_errors_are_structured() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("api.vlite");
-    Database::create(&path, 2).unwrap().close().unwrap();
+    Database::create_with_format(&path, 2, vlite::FormatVersion::V3)
+        .unwrap()
+        .close()
+        .unwrap();
     let before = std::fs::read(&path).unwrap();
     let service = Service::new(Database::open(&path).unwrap());
     let app = router(service.clone());
@@ -406,7 +416,8 @@ async fn invalid_batch_is_atomic_and_errors_are_structured() {
 async fn json_transport_and_search_limits_fail_without_mutation() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("api.vlite");
-    let service = Service::new(Database::create(&path, 2).unwrap());
+    let service =
+        Service::new(Database::create_with_format(&path, 2, vlite::FormatVersion::V3).unwrap());
     let app = router(service.clone());
     for (method, path, text, content_type, expected) in [
         ("PUT", "/v1/vectors/1", "{", true, 400),
@@ -475,7 +486,14 @@ async fn json_transport_and_search_limits_fail_without_mutation() {
 #[tokio::test]
 async fn contract_is_served_as_json_and_covers_routes_and_limits() {
     let directory = tempfile::tempdir().unwrap();
-    let service = Service::new(Database::create(directory.path().join("api.vlite"), 1).unwrap());
+    let service = Service::new(
+        Database::create_with_format(
+            directory.path().join("api.vlite"),
+            1,
+            vlite::FormatVersion::V3,
+        )
+        .unwrap(),
+    );
     let app = router(service.clone());
     let (status, contract) = request(&app, "GET", "/openapi.json", Value::Null).await;
     assert_eq!(status, 200);
@@ -571,7 +589,8 @@ async fn payload_limits_and_canonical_base64_are_enforced() {
     use base64::{Engine, prelude::BASE64_STANDARD};
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("payload.vlite");
-    let service = Service::new(Database::create(&path, 1).unwrap());
+    let service =
+        Service::new(Database::create_with_format(&path, 1, vlite::FormatVersion::V3).unwrap());
     let app = router(service.clone());
     let valid = BASE64_STANDARD.encode(vec![255; vlite::MAX_PAYLOAD_BYTES]);
     assert_eq!(
@@ -623,7 +642,8 @@ async fn payload_limits_and_canonical_base64_are_enforced() {
 async fn typed_metadata_filters_and_atomic_rejection_are_exposed_over_rest() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("metadata.vlite");
-    let service = Service::new(Database::create(&path, 1).unwrap());
+    let service =
+        Service::new(Database::create_with_format(&path, 1, vlite::FormatVersion::V3).unwrap());
     let app = router(service.clone());
     let metadata = json!({
         "category":{"type":"string","value":"docs"},
@@ -834,7 +854,8 @@ async fn metadata_requires_explicit_upgrade_over_rest_without_changing_legacy_fi
 async fn parallel_mutations_are_serialized_without_lost_writes() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("api.vlite");
-    let service = Service::new(Database::create(&path, 1).unwrap());
+    let service =
+        Service::new(Database::create_with_format(&path, 1, vlite::FormatVersion::V3).unwrap());
     let app = router(service.clone());
     let mut tasks = Vec::new();
     for id in 0..8 {
@@ -861,7 +882,14 @@ async fn parallel_mutations_are_serialized_without_lost_writes() {
 #[tokio::test]
 async fn approximate_mode_is_explicit_and_merges_mutations() {
     let directory = tempfile::tempdir().unwrap();
-    let service = Service::new(Database::create(directory.path().join("ann.vlite"), 2).unwrap());
+    let service = Service::new(
+        Database::create_with_format(
+            directory.path().join("ann.vlite"),
+            2,
+            vlite::FormatVersion::V3,
+        )
+        .unwrap(),
+    );
     let app = router(service.clone());
     for (id, vector) in [
         ("0", json!([0, 0])),

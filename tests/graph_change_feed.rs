@@ -45,7 +45,7 @@ fn graph_events(changes: &[Change]) -> Vec<&ChangeKind> {
 fn graph_commits_are_reported_with_keys_ids_and_revisions() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("feed.vlite");
-    let mut db = Database::create_with_graph(&path, 2, Kind::Timestamped.options()).unwrap();
+    let mut db = Database::create_with_options(&path, 2, Kind::Timestamped.options()).unwrap();
     clock(&mut db, 0);
     db.put(1, &[1.0, 0.0], b"one").unwrap(); // 1
     db.create_graph("kg").unwrap(); // 2
@@ -220,7 +220,7 @@ fn graph_commits_are_reported_with_keys_ids_and_revisions() {
 fn mixed_commits_keep_log_order_and_are_never_split() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("mixed.vlite");
-    let mut db = Database::create_with_graph(&path, 2, Kind::Plain.options()).unwrap();
+    let mut db = Database::create_with_options(&path, 2, Kind::Plain.options()).unwrap();
     db.create_graph("kg").unwrap(); // 1
     let mut graph = db.graph_mut("kg").unwrap();
     graph.create_node("ada", &[], &Metadata::new()).unwrap(); // 2
@@ -446,7 +446,7 @@ fn replica_followers_expose_the_graph_feed() {
     let dir = tempdir().unwrap();
     let primary = dir.path().join("primary.vlite");
     let replica = dir.path().join("replica.vlite");
-    let mut db = Database::create_with_graph(&primary, 2, Kind::Plain.options()).unwrap();
+    let mut db = Database::create_with_options(&primary, 2, Kind::Plain.options()).unwrap();
     clock(&mut db, 0);
     db.put(1, &[1.0, 1.0], b"one").unwrap();
     let segment = db.export_log(0, usize::MAX).unwrap();

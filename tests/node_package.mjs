@@ -51,9 +51,9 @@ import assert from "node:assert/strict";
 import { NativeLibrary } from "@vlite/embedded";
 const native = new NativeLibrary();
 try {
-  // Release packages ship the opt-in graph commands (GATE-008, v0.5.0).
+  // Release packages ship the graph commands (GATE-008, v0.5.0).
   assert.deepEqual(await native.capabilities(), {graph:true});
-  const graphDb = await native.createWithGraph("graph.vlite", 2);
+  const graphDb = await native.create("graph.vlite", 2);
   assert.deepEqual(await graphDb.createGraph("g"), {name:"g",node_count:0,edge_count:0});
   await graphDb.close();
   const db = await native.create("installed.vlite", 2);

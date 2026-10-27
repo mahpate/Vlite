@@ -13,7 +13,7 @@ use std::{
 };
 
 use serde_json::{Value, json};
-use vlite::{CreateOptions, Database};
+use vlite::Database;
 
 const READ_TOOLS: &[&str] = &[
     "vlite_graph_list",
@@ -44,7 +44,7 @@ fn fixture_text(name: &str) -> String {
 }
 
 fn vector_fixture(path: &Path) {
-    let mut db = Database::create(path, 2).unwrap();
+    let mut db = Database::create_with_format(path, 2, vlite::FormatVersion::V3).unwrap();
     db.put(1, &[0.0, 0.0], b"origin").unwrap();
     db.put(2, &[1.0, 1.0], b"near").unwrap();
     db.put(3, &[2.0, 2.0], b"far").unwrap();
@@ -52,7 +52,7 @@ fn vector_fixture(path: &Path) {
 }
 
 fn graph_fixture(path: &Path) {
-    let mut db = Database::create_with_graph(path, 2, CreateOptions::default()).unwrap();
+    let mut db = Database::create(path, 2).unwrap();
     db.put(1, &[0.0, 0.0], b"origin").unwrap();
     db.close().unwrap();
 }

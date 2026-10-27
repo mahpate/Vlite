@@ -24,7 +24,7 @@ service to operate.
   closed and recovery is explicit.
 - **Exact and approximate search.** Exact search with squared L2, cosine or
   inner product. HNSW for L2 and cosine. Typed metadata filters apply first.
-- **Property graphs.** Built in; opt-in per file: nodes, typed edges and
+- **Property graphs.** Built in; every new file can hold them: nodes, typed edges and
   links to vector records, with bounded traversal and graph retrieval.
 - **Atomic batches.** Write or delete up to 4,096 records in one commit.
 - **Advanced retrieval.** Opt-in collections, record expiry, named and sparse
@@ -43,8 +43,8 @@ service to operate.
 | Term | What it means in VLite |
 |---|---|
 | Database | One `.vlite` file with your records, collections and graphs. Embed it, or serve it with `vlite-server`, one file per server. |
-| Collection | A named set of records, like a table, with its own vector size and settings. Every database has `default`. Named collections need format v4 or newer; create server files with `--create-format 4` or `5`. |
-| Graph | A named property graph in the same file: nodes, typed edges and links to records. Available in graph-enabled files. |
+| Collection | A named set of records, like a table, with its own vector size and settings. Every database has `default`. Named collections need format v4 or newer; new files are v5. |
+| Graph | A named property graph in the same file: nodes, typed edges and links to records. Every new file is graph-enabled. |
 | Tenant | A private space for one team or customer in the same file. Its users and API keys see only its collections and graphs. |
 | User | A person who signs in to the dashboard as super admin, editor or viewer. Apps use API keys. |
 
@@ -171,7 +171,7 @@ Prebuilt packages: [PyPI](docs/INSTALL.md#pypi) and [release assets](docs/INSTAL
 | Command-line tools and tests | [TOOLS](docs/TOOLS.md) |
 | gRPC, MCP and agent skills | [GRPC](docs/GRPC.md), [MCP](docs/MCP.md), [AGENT-SKILLS](docs/AGENT-SKILLS.md) |
 | Webhooks | [WEBHOOKS](docs/WEBHOOKS.md) |
-| Property graphs (opt-in per file) | [GRAPH](docs/GRAPH.md) |
+| Property graphs | [GRAPH](docs/GRAPH.md) |
 | Benchmarks | [Methodology](benchmarks/README.md), [results](benchmarks/RESULTS.md) |
 | Upgrade notes | [Release notes](docs/RELEASE-0.5.1.md) |
 

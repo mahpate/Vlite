@@ -15,9 +15,9 @@ python -m pip install vlite-embedded
 
 Wheels support Windows x64, macOS arm64 and Linux x86_64/glibc 2.28+.
 
-`native.create(path, dims)` creates format 3; `native.create(path, dims,
-format=4)` enables named collections (`create_collection`, `list_collections`,
-`set_collection_settings`, `drop_collection`) and resumable imports
+`native.create(path, dims)` creates a graph-enabled format 5 file with named
+collections (`create_collection`, `list_collections`, `set_collection_settings`,
+`drop_collection`) and resumable imports
 (`next_import_job_id`, `import_chunk`, `import_status`, `import_finish`,
 `import_abort`). Record methods accept `collection=` and
 `expected_revision=` (`"absent"` or a revision string); conditional `put`
@@ -80,7 +80,7 @@ and not stored in the file. See
 
 These bindings use ctypes, not PyO3/maturin. The wheel bundles the same ABI-1
 Rust library as the Node package; new operations need a matching new library.
-Default creation remains format 3. Pass `format=5` to enable TTL/metadata-only
+Default creation is format 5 (graph-enabled), with TTL/metadata-only
 writes and named/sparse/model-versioned vectors. Encryption and commit timestamps
 imply format 5 if no explicit incompatible format is supplied.
 
@@ -177,17 +177,17 @@ The direct feature suite defaults to `target/debug` and accepts
 `VLITE_TEST_LIBRARY` to validate an exact alternate/bundled library. It creates
 and cleans its test files below the binding directory.
 
-## Property graph (opt-in per file)
+## Property graph
 
-Every library since v0.5.1 includes the graph methods; graphs live only in
-files created with `create_with_graph` (or copied with
-`vlite-maintain enable-graph`). `native.supports_graph` (or
+Every library since v0.5.1 includes the graph methods, and every file made by
+`create` or `create_in_memory` is graph-enabled (explicit `format=3` or `4`
+stays plain; copy older files with `vlite-maintain enable-graph`). `native.supports_graph` (or
 `native.capabilities()`) reports availability; against an older library built
 without graph every graph method raises `EmbeddedError(code="unsupported")`.
 
 ```python
 native = NativeLibrary()  # or the path of a source build
-with native.create_with_graph("agent.vlite", 3) as db:   # new V5 graph file
+with native.create("agent.vlite", 3) as db:   # new V5 graph file
     db.create_graph("memory")
     db.graph_write_batch("memory", [
         {"op": "create_node", "key": "ada", "labels": ["Person"]},
@@ -198,7 +198,7 @@ with native.create_with_graph("agent.vlite", 3) as db:   # new V5 graph file
     db.graph_shortest_path("memory", "ada", "acme")["shortest_path"]["outcome"]
 ```
 
-Methods: `create_with_graph`, `is_graph_enabled`, `list_graphs`, `create_graph`,
+Methods: `is_graph_enabled`, `list_graphs`, `create_graph`,
 `drop_graph`, `graph_write_batch`, `graph_get_node`, `graph_get_edge`,
 `graph_find_nodes`, `graph_neighbors`, `graph_traverse`, `graph_shortest_path`
 and `graph_explain`. Selectors are a key string, an integer ID or an explicit

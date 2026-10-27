@@ -25,7 +25,7 @@ use std::{
 use serde_json::{Value, json};
 use tempfile::{TempDir, tempdir};
 use vlite::{
-    CollectionSettings, CollectionSpec, CreateOptions, Database, FormatVersion,
+    CollectionSettings, CollectionSpec, Database, FormatVersion,
     server::{BearerToken, ServerOptions, Service, configured_admin_router},
 };
 
@@ -160,7 +160,7 @@ impl Session {
 /// n1-LINKS->n2-LINKS->n3; graph "h" has one node. Built through a local
 /// writable MCP session, so the file is identical for every copy.
 fn build(path: &Path) {
-    let mut db = Database::create_with_graph(path, 2, CreateOptions::default()).unwrap();
+    let mut db = Database::create(path, 2).unwrap();
     for id in 1..=4u64 {
         db.put(id, &[id as f32, 1.0], format!("r{id}").as_bytes())
             .unwrap();
@@ -600,7 +600,7 @@ fn authorization_is_per_graph_and_the_token_is_never_echoed() {
 fn vector_only_servers_list_no_graph_tools() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("vectors.vlite");
-    let mut db = Database::create_with_format(&path, 2, FormatVersion::V5).unwrap();
+    let mut db = Database::create_with_format(&path, 2, FormatVersion::V4).unwrap();
     db.put(1, &[1.0, 1.0], b"r1").unwrap();
     db.close().unwrap();
     let server = Server::start(&path, &directory.path().join("admin"));

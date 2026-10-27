@@ -25,7 +25,7 @@ fn operations() -> Vec<Mutation> {
 fn batch_is_one_commit_applied_in_order_and_survives_maintenance() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("batch.vlite");
-    let mut db = Database::create(&path, 2).unwrap();
+    let mut db = Database::create_with_format(&path, 2, vlite::FormatVersion::V3).unwrap();
     assert_eq!(db.format_version(), 3);
     db.put(3, &[9.0, 9.0], b"old").unwrap();
     db.write_batch(&operations()).unwrap();
@@ -61,7 +61,7 @@ fn batch_is_one_commit_applied_in_order_and_survives_maintenance() {
 fn invalid_batches_never_write_a_prefix_and_empty_batches_are_noops() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("batch.vlite");
-    let mut db = Database::create(&path, 2).unwrap();
+    let mut db = Database::create_with_format(&path, 2, vlite::FormatVersion::V3).unwrap();
     db.put(1, &[9.0, 9.0], b"old").unwrap();
     db.close().unwrap();
     let before = fs::read(&path).unwrap();
@@ -93,7 +93,7 @@ fn invalid_batches_never_write_a_prefix_and_empty_batches_are_noops() {
 fn exact_operation_and_encoded_byte_limits_are_enforced() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("limits.vlite");
-    let mut db = Database::create(&path, 1).unwrap();
+    let mut db = Database::create_with_format(&path, 1, vlite::FormatVersion::V3).unwrap();
     db.write_batch(&vec![Mutation::Delete { id: 1 }; MAX_BATCH_OPERATIONS])
         .unwrap();
     // 16 put entries: 16-byte metadata + 4-byte vector + payload.
@@ -126,7 +126,7 @@ fn exact_operation_and_encoded_byte_limits_are_enforced() {
 fn every_interrupted_batch_byte_preserves_the_entire_previous_state() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("interrupt.vlite");
-    let mut db = Database::create(&path, 2).unwrap();
+    let mut db = Database::create_with_format(&path, 2, vlite::FormatVersion::V3).unwrap();
     db.put(3, &[9.0, 9.0], b"old").unwrap();
     db.close().unwrap();
     let before = fs::read(&path).unwrap();
@@ -158,7 +158,7 @@ fn every_interrupted_batch_byte_preserves_the_entire_previous_state() {
 fn every_corrupt_batch_byte_fails_closed_and_never_repairs() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("corrupt.vlite");
-    let mut db = Database::create(&path, 2).unwrap();
+    let mut db = Database::create_with_format(&path, 2, vlite::FormatVersion::V3).unwrap();
     db.write_batch(&operations()).unwrap();
     db.close().unwrap();
     let complete = fs::read(&path).unwrap();
@@ -183,7 +183,7 @@ fn batch_process_exit_child() {
     let Some(path) = std::env::var_os("VLITE_BATCH_EXIT_PATH") else {
         return;
     };
-    let mut db = Database::create(path, 2).unwrap();
+    let mut db = Database::create_with_format(path, 2, vlite::FormatVersion::V3).unwrap();
     db.write_batch(&operations()).unwrap();
     std::process::exit(0);
 }

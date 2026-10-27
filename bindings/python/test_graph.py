@@ -75,7 +75,7 @@ class Capability(unittest.TestCase):
 class GraphEnabled(GraphBase):
     def populate(self):
         path = self.directory / "graph.vlite"
-        db = self.keep(self.native.create_with_graph(path, 2))
+        db = self.keep(self.native.create(path, 2))
         self.assertTrue(db.is_graph_enabled())
         self.assertEqual(db.list_graphs(), [])
         self.assertEqual(db.create_graph("g"), {"name": "g", "node_count": 0, "edge_count": 0})
@@ -148,7 +148,7 @@ class GraphEnabled(GraphBase):
 
     def test_stable_error_codes_and_atomic_batches(self):
         path, db, _ = self.populate()
-        self.error("io_error", lambda: self.native.create_with_graph(path, 2))
+        self.error("io_error", lambda: self.native.create(path, 2))
         self.error("graph_exists", lambda: db.create_graph("g"))
         self.error("invalid_graph_name", lambda: db.create_graph("Bad"))
         self.error("graph_not_found", lambda: db.graph_get_node("nope", "a"))
@@ -165,9 +165,7 @@ class GraphEnabled(GraphBase):
         with self.assertRaises(TypeError):
             db.graph_get_node("g", 1.5)
 
-        self.error("graphs_require_v5", lambda: self.native.create_with_graph(self.directory / "v4.vlite", 2, format=4))
-        self.assertFalse((self.directory / "v4.vlite").exists())
-        plain = self.keep(self.native.create(self.directory / "plain.vlite", 2))
+        plain = self.keep(self.native.create(self.directory / "plain.vlite", 2, format=4))
         self.assertFalse(plain.is_graph_enabled())
         self.error("graphs_not_enabled", plain.list_graphs)
         self.error("graphs_not_enabled", lambda: plain.create_graph("g"))
@@ -197,7 +195,7 @@ class GraphEnabled(GraphBase):
     def test_encrypted_graph_feed_decrypts_with_key(self):
         path = self.directory / "secret-feed.vlite"
         key = bytes(range(32))
-        db = self.keep(self.native.create_with_graph(path, 2, key=key))
+        db = self.keep(self.native.create(path, 2, key=key))
         db.create_graph("g")
         db.graph_write_batch("g", [{"op": "create_node", "key": "a"}])
         changes = db.changes_after()["changes"]
@@ -207,7 +205,7 @@ class GraphEnabled(GraphBase):
     def test_encrypted_graph_file_requires_credentials(self):
         path = self.directory / "secret.vlite"
         key = bytes(range(32))
-        db = self.keep(self.native.create_with_graph(path, 2, key=key, commit_timestamps=True))
+        db = self.keep(self.native.create(path, 2, key=key, commit_timestamps=True))
         db.create_graph("g")
         db.graph_write_batch("g", [{"op": "create_node", "key": "a"}])
         self.assertTrue(db.is_encrypted())
@@ -220,9 +218,6 @@ class GraphEnabled(GraphBase):
 @unittest.skipIf(GRAPH, "library built with the graph feature")
 class GraphUnsupported(GraphBase):
     def test_every_graph_method_raises_unsupported(self):
-        path = self.directory / "never.vlite"
-        self.error("unsupported", lambda: self.native.create_with_graph(path, 2))
-        self.assertFalse(path.exists())
         db = self.keep(self.native.create(self.directory / "plain.vlite", 2))
         for action in [
             db.is_graph_enabled, db.list_graphs, lambda: db.create_graph("g"), lambda: db.drop_graph("g"),

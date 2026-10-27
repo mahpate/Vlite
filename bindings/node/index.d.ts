@@ -81,7 +81,7 @@ export class EmbeddedError extends Error {
 }
 export class NativeLibrary {
   constructor(options?: { libraryPath?: string; addonPath?: string; maxPending?: number });
-  /** `format` defaults to 3; 4 enables named collections and resumable imports. */
+  /** New files are graph-enabled V5; an explicit `format: 3 | 4` creates a plain vector file. */
   create(path: string, dimensions: number, options?: CreateOptions): Promise<Database>;
   /**
    * `readOnly: true` shares the OS lock; mutations reject with `read_only`.
@@ -94,11 +94,6 @@ export class NativeLibrary {
   capabilities(): Promise<{ graph: boolean }>;
   /** Whether the loaded library includes the property graph (every library since 0.5.1). */
   supportsGraph(): Promise<boolean>;
-  /**
-   * Create a NEW graph-enabled (V5) file without overwrite; never converts an existing file.
-   * Rejects with `unsupported` on libraries older than 0.5.1 built without the graph.
-   */
-  createWithGraph(path: string, dimensions: number, options?: CreateOptions): Promise<Database>;
   openFromBytes(data: Uint8Array, options?: Credentials): Promise<Database>;
   /** Closed/copied log; new destination. Exactly one of sequence/timestampMs is required. */
   restoreTo(logPath: string, destination: string, options: Credentials & {

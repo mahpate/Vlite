@@ -95,7 +95,7 @@ class Features(unittest.TestCase):
         db.put("3", [1, 1], expires_at_ms=1, **scope)
         self.error("not_found", lambda: db.get("3", **scope))
         self.error("invalid_input", lambda: db.put_with_expiry("4", [1], **scope))
-        legacy = self.keep(self.native.create_in_memory(2))
+        legacy = self.keep(self.native.create_in_memory(2, format=3))
         self.error("requires_format_v5", lambda: legacy.put_with_expiry("1", [1, 0]))
         with self.assertRaises(ValueError):
             db.put("4", [1, 1], expires_at_ms=2, expected_revision="absent")

@@ -13,14 +13,14 @@ wasm-bindgen target/wasm32-unknown-unknown/release/vlite_wasm.wasm --target node
 node test/smoke.mjs pkg/vlite_wasm.js
 ```
 
-Use `--target web` or `bundler` for browsers. Pass `true` as the third
-`create` argument when V5-only mutations or the change feed are needed. Metadata
+Use `--target web` or `bundler` for browsers. `create` makes a graph-enabled V5
+image like every new VLite file, so V5 mutations and the change feed always work. Metadata
 arguments are JSON strings in the engine typed-metadata format. `feedCursor()`
 and `changesAfter()` return opaque cursor tokens and JSON strings respectively.
 Call `setClock(Date.now())` before operations that depend on time (TTL, commit
 timestamps): WebAssembly has no system clock.
 
-API: `VLiteDatabase.create(dimensions, key?, formatV5?)`, `VLiteDatabase.fromBytes(bytes, key?)`,
+API: `VLiteDatabase.create(dimensions, key?)`, `VLiteDatabase.fromBytes(bytes, key?)`,
 `put(id, Float32Array, Uint8Array)`, `putWithExpiry(id, vector, payload, expiresAtMs?, metadataJson?)`,
 `updateMetadata(id, metadataJson)`, `groupedSearch(query, groups, hitsPerGroup, field)`,
 `feedCursor()`, `changesAfter(cursorToken, maxEvents)`, `get(id)`, `delete(id)`, `search(query, k)`

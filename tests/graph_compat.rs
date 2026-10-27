@@ -71,13 +71,6 @@ fn header_v5(flags: u16) -> Vec<u8> {
     bytes
 }
 
-/// Rewrites header flags of an existing file and recomputes the header CRC.
-fn set_header_flags(bytes: &mut [u8], flags: u16) {
-    bytes[26..28].copy_from_slice(&flags.to_le_bytes());
-    let checksum = crc32(&bytes[..28]);
-    bytes[28..32].copy_from_slice(&checksum.to_le_bytes());
-}
-
 /// `format::wrap` layout: 36-byte prefix, body, 16-byte commit footer.
 fn frame(op: u8, sequence: u64, id: u64, count: u32, payload_len: u32, body: &[u8]) -> Vec<u8> {
     let mut bytes = b"VREC".to_vec();
@@ -247,8 +240,8 @@ fn key() -> EncryptionKey {
     EncryptionKey::from_bytes(KEY)
 }
 
-/// Encrypted V5 file written by the public API, then the header gets
-/// `FLAG_GRAPH` with a recomputed CRC. No op-12 frame is appended: sealing
+/// Encrypted V5 file written by the public API, which sets `FLAG_GRAPH` on
+/// every new file. No op-12 frame is appended: sealing
 /// needs the private cipher, and the header flag check precedes the
 /// encryption descriptor (format::read_log_header), so the frame is never
 /// reached by a graph-unaware reader.
@@ -266,10 +259,9 @@ fn graph_encrypted(dir: &Path) -> Vec<u8> {
     let reopened = Database::open_encrypted(&path, &key()).unwrap();
     assert_eq!(reopened.get(RECORD_ID).unwrap().unwrap().payload, PAYLOAD);
     drop(reopened);
-    let mut bytes = fs::read(&path).unwrap();
+    let bytes = fs::read(&path).unwrap();
     let flags = u16::from_le_bytes([bytes[26], bytes[27]]);
-    assert_eq!(flags, FLAG_ENCRYPTED);
-    set_header_flags(&mut bytes, flags | FLAG_GRAPH);
+    assert_eq!(flags, FLAG_ENCRYPTED | FLAG_GRAPH);
     bytes
 }
 

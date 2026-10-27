@@ -203,7 +203,7 @@ fn resume_conflict_and_legacy_format_do_not_modify_files() {
     );
     assert_eq!(before, std::fs::read(&db).unwrap());
     let legacy = f.path("legacy");
-    vlite::Database::create(&legacy, 2)
+    vlite::Database::create_with_format(&legacy, 2, vlite::FormatVersion::V3)
         .unwrap()
         .close()
         .unwrap();

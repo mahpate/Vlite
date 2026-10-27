@@ -10,8 +10,8 @@ No new native symbols or allocators are required. Send UTF-8 JSON to
 The response and ownership rules are unchanged: `{"ok":true,"result":...}` or
 `{"ok":false,"error":{"code":"...","message":"..."}}`. Free each non-null
 response exactly once with `vlite_response_free`, from the same loaded library.
-`vlite_abi_version()` remains 1. All old operations and default format-3 creation
-remain unchanged. The new `features` discriminator requires a matching new
+`vlite_abi_version()` remains 1. All old operations remain; plain `create`
+now makes a graph-enabled V5 file unless format 3 or 4 is passed. The new `features` discriminator requires a matching new
 library; old libraries reject it, never silently ignore it.
 
 ## Types and limits
@@ -42,7 +42,7 @@ except `configure_vector`, which defaults to squared L2.
   `{format?:3|4|5, credentials?:{key_base64?:string,passphrase?:string}, commit_timestamps?:bool, durability?:"periodic"|"full"|"none", flush_interval_ms?:number}`.
   Returns `{handle}`. A raw key is exactly 32 bytes, padded base64. Key and
   passphrase are mutually exclusive. Encryption/timestamps imply V5 unless an
-  incompatible explicit format is provided. Default remains V3.
+  incompatible explicit format is provided. The default is a graph-enabled V5 file.
   File databases default to periodic durability every 60 s (`flush_interval_ms`
   1–60000): an OS crash or power loss can lose acknowledged writes from roughly
   the last interval. `"full"` syncs every commit; `"none"` is the only mode for
@@ -157,7 +157,6 @@ and node/edge selectors are `{"id":"…"}` or `{"key":"…"}`.
 
 | `op` | Handle | Fields → result |
 |---|---|---|
-| `create` | 0 | `path`, `dimensions`, optional `options` (as feature `create`: `format`, `credentials`, `commit_timestamps`) → `{handle}`; creates a NEW V5 graph-enabled file, never converts |
 | `is_graph_enabled` | db | → `{graph_enabled}` |
 | `list_graphs` | db | → `{graphs:[{name,node_count,edge_count}]}` |
 | `create_graph` / `drop_graph` | db | `graph` → `{graph:{…}}` / `{dropped}`; drop requires an empty graph |
@@ -181,7 +180,7 @@ Batch `ops` are `create_node`, `upsert_node`, `patch_node`, `delete_node`,
 (`collection`, `id`, `vector`, optional `payload_base64`, `metadata`) and
 `delete_vector`; `expected` is `"any"`, `"absent"` or `{"revision":"…"}`.
 
-Graph errors use the REST names: `graphs_not_enabled`, `graphs_require_v5`,
+Graph errors use the REST names: `graphs_not_enabled`,
 `invalid_graph_name`, `graph_exists`, `graph_not_found`, `graph_not_empty`,
 `too_many_graphs`, `graph_key_exists`, `graph_key_conflict`,
 `graph_node_not_found`, `graph_edge_not_found`, `graph_node_has_edges`,

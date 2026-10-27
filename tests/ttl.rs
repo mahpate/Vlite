@@ -104,7 +104,7 @@ fn v5_tail_recovery_and_checksums_cover_expiry_fields() {
 fn new_persisted_features_require_opt_in_v5() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("legacy.vlite");
-    let mut db = Database::create(&path, 1).unwrap();
+    let mut db = Database::create_with_format(&path, 1, FormatVersion::V3).unwrap();
     db.put(1, &[1.0], b"x").unwrap();
     assert!(matches!(
         db.put_with_expiry(1, &[1.0], b"x", &Metadata::new(), Some(3)),

@@ -64,7 +64,9 @@ fn geo_radius_filter_and_geo_distance_ranking_are_deterministic() {
 #[test]
 fn geo_values_require_v5_and_invalid_coordinates_or_radius_are_rejected() {
     let directory = tempdir().unwrap();
-    let mut old = Database::create(directory.path().join("geo-old.vlite"), 1).unwrap();
+    let mut old =
+        Database::create_with_format(directory.path().join("geo-old.vlite"), 1, FormatVersion::V3)
+            .unwrap();
     assert!(
         old.put_with_metadata(1, &[0.0], b"", &geo(0.0, 0.0))
             .is_err()
