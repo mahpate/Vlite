@@ -149,7 +149,7 @@ invalid value. The CLI codes are `graph_query_<kind>`.
 
 ## Dashboard graph explorer
 
-The Dashboard's read-only **Graph** workspace (Data → Graph, FOLLOWUP-002,
+The Dashboard's **Graph** workspace (Data → Graph,
 `src/dashboard/graph.js`) uses the typed REST routes, not the query text. A
 server older than v0.5.0 or a file without graphs (409
 `graphs_not_enabled`) shows an explanation instead of the explorer. Credentials
@@ -159,10 +159,16 @@ It lists graphs, gets a node or edge by ID or key, finds nodes by label and an
 equality or JSON conditions, pages neighbors with direction and relationship
 filters, and runs bounded traversals and shortest paths. Results show
 completeness, truncation, budgets and indexes, a table, and a small SVG
-node-link view. **Explain plan** shows the normalized query and effective
-limits. Blank limits use server defaults. Values above the ceiling show the
+node-link view with optional manual 3D rotation. **Explain plan** shows the
+normalized query and effective limits. Blank limits use server defaults. Values above the ceiling show the
 REST error code, for example `graph_limit_exceeds_ceiling`. Admin sessions can
-load `GET /v1/admin/graph/stats`. Writes stay with REST, the CLI or MCP.
+load `GET /v1/admin/graph/stats`. Writers can create graphs and use **Add or edit
+graph data** for nodes, edges and record links. **Edit** loads a result's current
+revision; patches and deletions reject revision conflicts. Every write needs
+explicit confirmation and is never automatically retried. REST, CLI and MCP
+remain available for larger batches.
+Graph editing and 3D views require a current source build; v0.6.0 release
+binaries predate these dashboard additions.
 Signed-in accounts' graph access follows their role and the `graphs` and
 `graph_access` fields in Administration → Users & access (see SECURITY.md).
 

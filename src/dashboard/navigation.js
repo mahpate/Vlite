@@ -12,7 +12,7 @@
       title: "Search", description: "Find similar records with your own query vectors. VLite does not create embeddings.",
       tabs: [["search", "Vector search"], ["retrieval", "Advanced retrieval"], ["explore", "Analyze & compare"]]
     },
-    graph: { title: "Graph", description: "Read-only explorer for this file's property graphs, bounded by server limits.", tabs: [] },
+    graph: { title: "Graph", description: "Explore graphs in 2D or 3D and make confirmed edits with graph write access.", tabs: [] },
     observability: {
       title: "Observability", description: "Live server activity, diagnostics and the change feed.",
       tabs: [["observability", "Live monitor"], ["diagnostics", "Diagnostics"], ["change-feed", "Change feed"]]

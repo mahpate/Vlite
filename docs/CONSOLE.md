@@ -159,9 +159,9 @@ credentials.
 
 ## Explore graphs
 
-**Graph** explores [property graphs](GRAPH.md). Choose an operation, then **Run
+**Graph** (current source builds) explores [property graphs](GRAPH.md). Choose an operation, then **Run
 query** or **Explain plan**. Results show up to 40 nodes in **2D** or **3D**;
-rotation is manual. Writers can add nodes, edges and record links. **Edit**
+rotation is manual. Writers add nodes, edges and record links. **Edit**
 loads the current revision; changes require confirmation and reject conflicts.
 Requery after writes. Website and dashboard share theme colors.
 

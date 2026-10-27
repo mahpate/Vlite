@@ -42,6 +42,7 @@ def check(browser):
     fake = GraphApi()
     context, page, errors = mocked_page(browser, fake)
     page.get_by_role("link", name="Graph", exact=True).click()
+    expect(page.locator("#workspace-description")).to_contain_text("confirmed edits")
     expect(page.locator("#graph-editor")).to_be_visible()
     page.locator("#graph-create-name").fill("draft_graph")
     page.locator("#graph-create-save").click()
