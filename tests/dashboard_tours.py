@@ -145,7 +145,7 @@ def check(root):
         server.shutdown()
         server.server_close()
         thread.join()
-    print("Connected 28-step tour: sign-in screen, seven workspaces, unique verified captures, autoplay, step selection, pause, motion, offscreen, no-JS and guide images passed.")
+    print(f"Connected {len(frames)}-step tour: sign-in screen, seven workspaces, unique verified captures, autoplay, step selection, pause, motion, offscreen, no-JS and guide images passed.")
 
 
 if __name__ == "__main__":
