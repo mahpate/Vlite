@@ -82,7 +82,7 @@ Use ordinary `close` on any returned database handle.
 | `rerank` | `vector`, `candidates:[{id,distance?}]`, `limit`, optional `method` (`exact`/`mmr`), `metric`, `lambda` | hits |
 | `query` | `query`, optional vector `parameters` map | `{hits,groups,facets}` |
 | `feed_cursor` | none | opaque checksummed token |
-| `changes_after` | optional `cursor` (null/omitted = beginning), `max_events` (default 1000) | `{changes,next,has_more,head}` |
+| `changes_after` | optional `cursor` (null/omitted = beginning), `max_events` (default 1000) | `{changes,next,has_more,head}`; graph files add `graph_created`, `graph_dropped` and `graph_batch` kinds ([GRAPH.md](../../docs/GRAPH.md#change-feed-and-webhooks)) |
 | `encryption_info` | none | `{is_encrypted,key_id}` |
 | `build_disk_ann` | `path`, optional `collection`, `metric` | `{lineage,sequence,collection_id,live_records}` |
 | `search_disk_ann` | `path`, `vector`, `k`, optional `ef_search` (100), `cache_bytes` (8 MiB) | hits |

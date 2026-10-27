@@ -995,3 +995,41 @@ not cover resource limits beyond `GraphLimits::CEILING`.
   updated separately.
 - **DO-005.** Still deferred; the baseline stays `81ff901` and the REG-010
   policy is unchanged.
+
+## Graph/vector feature parity (v0.6.0, user decision 2026-10-26)
+
+- **Decision.** The user asked to "make sure both graph and vector gets enabled
+  with 100% features" and approved parity for change feeds, webhooks,
+  capabilities and upgrade on graph-enabled files (PRD v1.2.24, EPIC-016).
+  Next step, not part of this change: new files graph-enabled by default.
+  Create defaults are unchanged here.
+- **Feed events.** Graph commits produce `GraphCreated`, `GraphDropped` and
+  `GraphBatch` (`graph_created`, `graph_dropped`, `graph_batch` in JSON).
+  A batch lists the frame's entries as the engine records them, with node and
+  edge keys resolved from the replayed log, and `revision` = commit sequence.
+  The cursor format is unchanged and a commit is never split across pages.
+  A frame that interleaves graph entries with inline vector mutations yields,
+  in log order, a `graph_batch` per maximal run of graph entries and the
+  usual `put`/`delete` events, all with the commit's sequence. Graph events
+  have an empty `collection`. Encrypted files decrypt with the database key.
+- **API compatibility.** `ChangeKind` and the new `GraphChange` are
+  `#[non_exhaustive]`; downstream exhaustive matches on `ChangeKind` need a
+  wildcard arm (a source break, noted for the v0.6.0 release notes).
+  `GraphChangeFeedUnsupported` and `GraphUnsupportedOperation` remain public
+  (and keep their HTTP/C codes) but the feed and `upgrade` no longer return
+  them.
+- **Webhooks.** Graph event kinds are opt-in: a subscription receives them only
+  when it lists them in `events`, so existing subscriptions keep the exact
+  vector payloads. An optional `graphs` list filters graph events by name;
+  `collections` filters only vector events. Stored subscriptions without the
+  new field load unchanged; responses add `graphs` (`null` when unset).
+- **Authorization.** REST scoped readers see graph events only with
+  `graph_read` and a `graphs` binding that covers the graph; tenant
+  credentials still cannot read `/v1/changes`; gRPC feeds stay admin-only.
+- **Capabilities.** `change_feed` and `webhooks` no longer depend on whether
+  the file is graph-enabled.
+- **Upgrade.** Graph files are already the latest format, so `upgrade` behaves
+  as for a plain latest v5 file: a validated copy that keeps `FLAG_GRAPH` and
+  every graph frame.
+- **DO-005.** Unchanged: still deferred, baseline `81ff901`, REG-010 policy
+  unchanged.

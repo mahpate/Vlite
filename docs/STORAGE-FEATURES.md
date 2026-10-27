@@ -206,20 +206,24 @@ sequences, checksums, encryption and commit timestamps work as usual.
   cursors are bound to the query and graph sequence: graph writes and
   attached-record updates invalidate them, unrelated vector writes do not.
 - **Maintenance.** `inspect`, `inspect_detail`, `verify`,
-  `backup`, `restore`, `compact*`, `reencrypt`, `restore_to`, `drill`, log
-  export and read replicas handle graph files. `compact*` keeps graph IDs and
+  `backup`, `restore`, `compact*`, `reencrypt`, `restore_to`, `drill`,
+  `upgrade`, log export and read replicas handle graph files. Graph files are
+  already the latest format, so `upgrade` makes a validated copy that keeps the
+  graph flag and every graph frame. `compact*` keeps graph IDs and
   never reuses node or edge IDs; like vector compaction, it restarts sequences
   and drops commit timestamps. `maintenance::inspect_graph` and `verify_graph`
   report graph, node, edge and attachment counts. `maintenance::strip_graph`
   copies the vector data to a v5 file without graphs and needs
   `confirm_graph_data_loss = true`. `vlite-maintain` gains `enable-graph` and
   `strip-graph --confirm-graph-data-loss`.
+- **Change feed.** Since v0.6.0 `feed_cursor`, `changes_after` and
+  `read_log_changes` report graph commits as `GraphCreated`, `GraphDropped`
+  and `GraphBatch` events, and `/v1/changes`, gRPC `Changes`/`WatchChanges`
+  and webhooks (opt-in per subscription) serve them; see
+  [Change feed and webhooks](GRAPH.md#change-feed-and-webhooks).
 - **Unsupported.** Releases before v0.5.0, and v0.5.0 builds without `graph`, reject graph
-  files with `UnsupportedFeature(4)`. `maintenance::upgrade` returns
-  `GraphUnsupportedOperation` and change feeds return
-  `GraphChangeFeedUnsupported`. The server answers `/v1/changes` with 501
-  (gRPC `UNIMPLEMENTED`), refuses webhook subscriptions, and maps other graph
-  errors to 409 (state conflicts) or 422 (invalid input). Schemas, hybrid
+  files with `UnsupportedFeature(4)`. The server maps graph errors to 409
+  (state conflicts) or 422 (invalid input). Schemas, hybrid
   retrieval, query text and the server, MCP and SDK surfaces are in the
   [property graph guide](GRAPH.md).
 - **CLI.** `vlite-graph-cli` runs these reads and write batches with JSON; see

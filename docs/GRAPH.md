@@ -34,8 +34,9 @@ capabilities stay absent or report that graphs are not enabled.
 - To roll back, run `vlite-maintain strip-graph SOURCE DESTINATION
   --confirm-graph-data-loss`. It copies the vectors to a plain
   v5 file and drops the graphs; keep the source if you may need them.
-- Backup, restore, verify, compaction, re-encryption and replicas carry graph
-  state; `upgrade` rejects graph files. Format rules are in
+- Backup, restore, verify, compaction, re-encryption, replicas, log export
+  and `upgrade` (a validated copy, since graph files are already the latest
+  format) carry graph state. Format rules are in
   [STORAGE-FEATURES](STORAGE-FEATURES.md#graph-enabled-files-opt-in-per-file).
 
 ## Data model and consistency
@@ -134,10 +135,67 @@ library reports `{"graph": true}`; otherwise every graph method fails with
 `unsupported`. Schema, retrieval and query text are not in the C ABI, Python or
 Node yet.
 
+## Change feed and webhooks
+
+Since v0.6.0 the change feed covers graph-enabled files on every surface: the
+Rust API (`feed_cursor`, `changes_after`, `changes::read_log_changes`), REST
+`GET /v1/changes`, gRPC `Changes`/`WatchChanges`, webhooks, the C ABI
+`changes_after` and the Python, Node and wasm bindings. Cursors are unchanged
+and a commit is never split across pages; a commit that mixes vector and graph
+writes yields its events in log order (graph ops before and after an inline
+vector write become separate `graph_batch` events of the same `sequence`).
+Encrypted files decrypt graph events with the database key.
+
+| Event `type` | Fields | Meaning |
+| --- | --- | --- |
+| `graph_created` | `graph` | A graph was created |
+| `graph_dropped` | `graph` | An empty graph was dropped |
+| `graph_batch` | `graph`, `revision`, `operations` | One committed graph frame, in order |
+
+Graph events have `collection: ""`. `revision` is the commit sequence (a
+decimal string). Each operation has an `op`:
+
+| `op` | Fields |
+| --- | --- |
+| `node_upserted` | `id`, `key`, `labels`, `properties`, `created` |
+| `node_patched` | `id`, `key`, `add_labels`, `remove_labels`, `set`, `unset` |
+| `node_deleted` | `id`, `key` |
+| `edge_upserted` | `id`, `key` (or `null`), `source`, `source_key`, `relationship`, `destination`, `destination_key`, `properties`, `created` |
+| `edge_patched` | `id`, `key`, `set`, `unset` |
+| `edge_deleted` | `id`, `key` |
+| `attached`, `detached` | `node`, `node_key`, `collection`, `record` |
+| `schema_updated` | `schema` (the `PUT /v1/graphs/{graph}/schema` shape; empty removes it) |
+
+Node and edge IDs, `record` and `revision` are decimal strings in JSON;
+properties use the typed metadata JSON. Operations are the frame's entries as
+the engine records them: upserts carry the full labels and properties
+(`created` is false when the ID already existed), patches only the change.
+
+- **Rust.** `ChangeKind::{GraphCreated, GraphDropped, GraphBatch}` and the
+  `property_graph::GraphChange` operation enum (also re-exported as
+  `changes::GraphChange`). Both enums are `#[non_exhaustive]` since
+  v0.6.0, so exhaustive matches need a wildcard arm.
+- **REST.** Scoped credentials see graph events only with `graph_read` and a
+  `graphs` binding that covers the graph; other events of the same commit are
+  still returned and the cursor advances past hidden events. Tenant
+  credentials cannot read `/v1/changes`, as before.
+- **gRPC.** `ChangeKind` adds `GRAPH_CREATED`, `GRAPH_DROPPED` and
+  `GRAPH_BATCH`; `ChangeEvent` adds `graph`, `revision` and
+  `graph_operations` (`GraphChangeOperation`, with `schema_json` for schema
+  updates).
+- **C ABI, Python, Node, wasm.** `changes_after` events carry the type in
+  `kind`, as for vector events, plus the fields above.
+- **Webhooks.** Graph events are opt-in: list `graph_created`,
+  `graph_dropped` and/or `graph_batch` in `events`. The optional `graphs`
+  filter (up to 64 names) limits them to named graphs; `collections` filters
+  only vector events. Subscriptions that list only vector types, including
+  every subscription stored by an older server, keep the previous payload and
+  never receive graph events.
+- `GET /v1/capabilities` reports `change_feed` and `webhooks` on graph files
+  as on vector files.
+
 ## Not supported
 
-- Change feeds, `/v1/changes`, gRPC `Changes`/`WatchChanges` and webhooks
-  refuse graph files (`graph_change_feed_unsupported`).
 - gRPC has no graph service.
 - `vlite-graph-cli` does not open encrypted files (the library does).
 

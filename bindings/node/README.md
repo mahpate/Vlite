@@ -264,6 +264,8 @@ Also exposed, with explicit TypeScript declarations and `{collection}` support:
 - `feedCursor()` starts at head. `changesAfter(cursor,maxEvents)` returns
   `{changes,next,has_more,head}`; omit the cursor to start at the beginning.
   Persist `next`; committed batches are never split. TTL expiry is not an event.
+  Graph files add `graph_created`, `graph_dropped` and `graph_batch` kinds (see
+  [GRAPH.md](../../docs/GRAPH.md#change-feed-and-webhooks)).
   `query` executes only the bounded, read-only grammar in `docs/VECTORS.md`.
 - `native.create/open(...,{key:Uint8Array32})` or `{passphrase:"..."}`;
   credentials also work for in-memory create and byte-image open. Never pass

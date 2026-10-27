@@ -128,7 +128,9 @@ Additional methods (all accept `collection=` where meaningful):
   dictionaries with IDs and optional distances. The engine fetches live records.
 - `feed_cursor()` starts at head; `changes_after(cursor=None,max_events=1000)`
   starts at the beginning when omitted and returns `{changes,next,has_more,head}`.
-  Persist `next`; changes never split a committed batch. Expiry itself is not
+  Persist `next`; changes never split a committed batch. Graph files add
+  `graph_created`, `graph_dropped` and `graph_batch` kinds (see
+  [GRAPH.md](../../docs/GRAPH.md#change-feed-and-webhooks)). Expiry itself is not
   an event. Query syntax is documented in `docs/VECTORS.md`.
 - `native.create/open(...,key=bytes_of_length_32)` or `passphrase="..."` enables
   encrypted creation/opening. `is_encrypted()`, `encryption_key_id()` and

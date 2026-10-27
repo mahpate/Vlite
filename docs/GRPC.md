@@ -83,7 +83,11 @@ request map. `Changes` returns a durable cursor token and commit-boundary batch.
 as they appear, and continues polling until the client cancels. Watch/change
 access is admin-only because feed batches may contain events from any
 collection. The watch interval is clamped to 100 ms–60 s, and credentials are
-rechecked while polling.
+rechecked while polling. Since v0.6.0 both also serve graph-enabled files:
+`ChangeKind` adds `GRAPH_CREATED`, `GRAPH_DROPPED` and `GRAPH_BATCH`, and
+`ChangeEvent` adds `graph`, `revision` and `graph_operations`
+(`GraphChangeOperation`); see
+[Change feed and webhooks](GRAPH.md#change-feed-and-webhooks).
 
 `BuildDiskAnn` and `SearchDiskAnn` use an operator-specified sidecar path. They
 are not available for encrypted databases; the sidecar contains plaintext

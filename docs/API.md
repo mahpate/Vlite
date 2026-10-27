@@ -76,7 +76,10 @@ past the head of the log answers 409 `cursor_ahead`. The change feed and
 replication export need a format V4 or
 newer file: on a V1–V3 file both routes answer HTTP 409 `requires_format_v4`
 (`features.change_feed` in `GET /v1/capabilities` tells which). The server
-never upgrades a file automatically.
+never upgrades a file automatically. Since v0.6.0 graph-enabled files serve the
+feed too: graph commits add `graph_created`, `graph_dropped` and `graph_batch`
+events (with `collection: ""`), see
+[Change feed and webhooks](GRAPH.md#change-feed-and-webhooks).
 
 `GET /v1/admin/replication/export?after_sequence=0&max_bytes=1048576` exports a
 whole-commit, checksummed log segment as base64. This is a shipping primitive,
