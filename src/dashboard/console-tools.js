@@ -1652,8 +1652,14 @@
     function appearance() {
       applyAppearance();
       try {
-        if ($("remember-preferences").checked) localStorage.setItem("vlite-appearance", JSON.stringify({ theme: $("theme").value, density: $("density").value }));
-        else localStorage.removeItem("vlite-appearance");
+        if ($("remember-preferences").checked) {
+          localStorage.setItem("vlite-appearance", JSON.stringify({ theme: $("theme").value, density: $("density").value }));
+          if ($("theme").value === "system") localStorage.removeItem("vlite-theme");
+          else localStorage.setItem("vlite-theme", $("theme").value);
+        } else {
+          localStorage.removeItem("vlite-appearance");
+          localStorage.removeItem("vlite-theme");
+        }
       } catch { ctx.status("Appearance changed for this visit; browser storage is unavailable"); }
     }
     for (const key of ["theme", "density", "remember-preferences"]) $(key).addEventListener("change", appearance);
@@ -1668,7 +1674,17 @@
           $("theme").value = value.theme; $("density").value = value.density; $("remember-preferences").checked = true;
         }
       }
+      const shared = localStorage.getItem("vlite-theme");
+      if (["light", "dark"].includes(shared)) {
+        $("theme").value = shared;
+        $("remember-preferences").checked = true;
+      }
     } catch (error) { ctx.status(`Appearance preferences could not be loaded: ${error.message}`, true); }
+    window.addEventListener("storage", (event) => {
+      if (event.key !== "vlite-theme") return;
+      $("theme").value = ["light", "dark"].includes(event.newValue) ? event.newValue : "system";
+      applyAppearance();
+    });
     applyAppearance();
     return {
       clear() {

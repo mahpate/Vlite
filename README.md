@@ -161,6 +161,7 @@ Prebuilt packages: [PyPI](docs/INSTALL.md#pypi) and [release assets](docs/INSTAL
 | Install packages and release assets | [INSTALL](docs/INSTALL.md) |
 | Docker deployment, upgrades and rollback | [DOCKER-OPERATIONS](docs/DOCKER-OPERATIONS.md) |
 | Dashboard tasks | [CONSOLE](docs/CONSOLE.md) |
+| Interactive deployment and architecture layers | [Deployment](https://mahpate.github.io/Vlite/#deployment-options) · [Architecture](https://mahpate.github.io/Vlite/architecture.html#layers) |
 | Server administration | [CONSOLE-ADMIN](docs/CONSOLE-ADMIN.md) |
 | Sign-in, roles, tenants and TLS | [SECURITY](docs/SECURITY.md) |
 | REST endpoints | [API](docs/API.md) |

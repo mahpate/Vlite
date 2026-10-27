@@ -127,6 +127,8 @@ def dashboard_server(backend):
             pass
 
         def translate_path(self, path):
+            if path in ("/theme.css", "/dashboard/theme.css"):
+                return str(ROOT / "site" / "assets" / "theme.css")
             if path == "/dashboard":
                 path = "/"
             elif path.startswith("/dashboard/"):
@@ -311,15 +313,52 @@ def capture(output):
             nav.get_by_role("link", name="Graph", exact=True).click()
             expect(page.locator("#graph-controls")).to_be_visible()
             expect(page.locator("#graph-name")).to_have_value("articles")
+            page.locator("#graph-create-name").fill("tour_draft")
+            page.locator("#graph-create-save").click()
+            page.locator("#confirmation").get_by_role("button", name="Confirm", exact=True).click()
+            expect(page.locator("#graph-name")).to_have_value("tour_draft")
+            assert api("/v1/graphs/tour_draft")["graph"]["name"] == "tour_draft"
+            page.locator("#graph-name").select_option("articles")
+            api("/v1/graphs/tour_draft", method="DELETE")
+            page.locator("#graph-list").click()
+            expect(page.locator("#graph-editor")).to_be_visible()
+            page.locator("#graph-editor summary").click()
+            page.locator("#graph-edit-key").fill("tour-draft")
+            page.locator("#graph-edit-save").click()
+            page.locator("#confirmation").get_by_role("button", name="Cancel", exact=True).click()
+            assert api("/v1/graphs/articles/nodes/get", {"node": {"key": "tour-draft"}})["node"] is None
+            page.locator("#graph-edit-save").click()
+            page.locator("#confirmation").get_by_role("button", name="Confirm", exact=True).click()
+            expect(page.locator("#graph-edit-result")).to_contain_text("Edit committed")
+            draft = api("/v1/graphs/articles/nodes/get", {"node": {"key": "tour-draft"}})["node"]
+            page.locator("#graph-edit-action").select_option("patch_node")
+            page.locator("#graph-edit-key").fill("tour-draft")
+            page.locator("#graph-edit-revision").fill(draft["revision"])
+            page.locator("#graph-edit-labels").fill("Draft")
+            page.locator("#graph-edit-save").click()
+            page.locator("#confirmation").get_by_role("button", name="Confirm", exact=True).click()
+            expect(page.locator("#graph-edit-result")).to_contain_text("Edit committed")
+            draft = api("/v1/graphs/articles/nodes/get", {"node": {"key": "tour-draft"}})["node"]
+            assert draft["labels"] == ["Draft"]
+            page.locator("#graph-edit-action").select_option("delete_node")
+            page.locator("#graph-edit-key").fill("tour-draft")
+            page.locator("#graph-edit-revision").fill(draft["revision"])
+            page.locator("#graph-edit-save").click()
+            page.locator("#confirmation").get_by_role("button", name="Confirm", exact=True).click()
+            expect(page.locator("#graph-edit-result")).to_contain_text("Edit committed")
+            assert api("/v1/graphs/articles/nodes/get", {"node": {"key": "tour-draft"}})["node"] is None
+            page.locator("#graph-editor summary").click()
             page.locator("#graph-operation").select_option("traverse")
             page.locator("#graph-start").fill(ARTICLES[0][0])
             page.locator("#graph-run").click()
             expect(page.locator("#graph-summary")).to_have_text(re.compile(r"^Complete"))
             expect(page.locator("#graph-view .graph-node")).to_have_count(len(ARTICLES))
             expect(page.locator("#graph-view .graph-edge")).to_have_count(len(LINKS))
+            page.locator("#graph-view-mode").select_option("3d")
+            expect(page.locator("#graph-figure-caption")).to_contain_text("not an embedding")
             # The query form is taller than the window: frame its Run query row, just below the sticky
             # top bar, above the result and its node-link view.
-            page.locator("#graph .graph-actions").evaluate("""element => window.scrollBy(0,
+            page.locator("#graph .graph-actions").first.evaluate("""element => window.scrollBy(0,
                 element.getBoundingClientRect().top - document.querySelector(".topbar").getBoundingClientRect().bottom - 16)""")
             expect(page.locator("#graph-run")).to_be_in_viewport()
             expect(page.locator("#graph-view")).to_be_in_viewport(ratio=1)
@@ -399,6 +438,7 @@ def capture(output):
             # Text-mode hashes match tests/dashboard_tours.py on any checkout line ending.
             "source_assets": {file.name: hashlib.sha256(file.read_text(encoding="utf-8").encode()).hexdigest()
                               for file in (ROOT / "src" / "dashboard").iterdir() if file.is_file()},
+            "theme_sha256": hashlib.sha256((ROOT / "site" / "assets" / "theme.css").read_text(encoding="utf-8").encode()).hexdigest(),
             "captures": captures,
         }
         (output / "connected-captures.json").write_text(json.dumps(manifest, indent=2) + "\n")

@@ -612,6 +612,15 @@ fn configured_routes(service: Service) -> Router {
                     }),
                 )
                 .route(
+                    "/dashboard/theme.css",
+                    get(|| async {
+                        dashboard_asset(
+                            "text/css; charset=utf-8",
+                            include_str!("../site/assets/theme.css"),
+                        )
+                    }),
+                )
+                .route(
                     "/dashboard/style.css",
                     get(|| async {
                         dashboard_asset(
@@ -978,6 +987,7 @@ async fn observe(
             | "/dashboard"
             | "/dashboard/app.js"
             | "/dashboard/style.css"
+            | "/dashboard/theme.css"
             | "/dashboard/console-tools.js"
             | "/dashboard/admin-tools.js"
             | "/dashboard/graph.js"

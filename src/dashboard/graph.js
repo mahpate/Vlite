@@ -1,5 +1,5 @@
 "use strict";
-// Read-only property graph explorer (FOLLOWUP-002). Self-initialising against
+// Property graph explorer and revision-checked editor. Self-initialising against
 // <section id="graph">; does nothing when the section is absent. Graph controls stay hidden
 // unless GET /v1/graphs answers 200; the section otherwise explains why (no graph build, graphs
 // not enabled, or no graph access). Each check dispatches "vlite:graph-status" {status}.
@@ -23,6 +23,11 @@
   const VALUE_TYPES = ["string", "integer", "float", "boolean"];
   const STATS_ROUTE = "/v1/admin/graph/stats";
   const SVG_NS = "http://www.w3.org/2000/svg";
+  const EDITS = {
+    create_node: "Add node", patch_node: "Edit node", delete_node: "Delete node",
+    create_edge: "Add edge", patch_edge: "Edit edge", delete_edge: "Delete edge",
+    attach: "Link a record", detach: "Unlink records",
+  };
 
   const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
   const text = (value) => (typeof value === "string" ? value : value === undefined || value === null ? "" : String(value));
@@ -266,6 +271,55 @@
     return Object.keys(properties).map((name) => `${name}=${valueText(properties[name])}`).join("; ");
   }
 
+  function canWrite(caps, graph) {
+    if (caps?.role === "admin") return true;
+    const scope = caps?.scope;
+    return caps?.role === "scoped" && Array.isArray(scope?.operations) && scope.operations.includes("graph_write")
+      && Array.isArray(scope.graphs) && (scope.graphs.includes("*") || scope.graphs.includes(graph));
+  }
+
+  function mutation(operation, form) {
+    if (!Object.hasOwn(EDITS, operation)) throw new Error("Choose a supported edit; no request sent");
+    const required = (name, label) => {
+      const value = text(form[name]);
+      if (!value.trim()) throw new Error(`${label} is required; no request sent`);
+      return value;
+    };
+    const op = { op: operation };
+    if (operation.endsWith("_node")) op.key = required("key", "Node key");
+    if (operation === "create_node") op.labels = list(form.labels);
+    if (operation === "patch_node") {
+      op.add_labels = list(form.labels);
+      op.remove_labels = list(form.removeLabels);
+    }
+    if (operation === "create_edge") {
+      op.source = required("source", "Source node key");
+      op.destination = required("destination", "Destination node key");
+      op.relationship = required("relationship", "Relationship");
+      if (text(form.key)) op.key = text(form.key);
+    }
+    if (["patch_edge", "delete_edge"].includes(operation)) op.edge = selector(form.edgeKind || "key", form.key, "Edge");
+    if (operation.startsWith("patch_") || operation.startsWith("delete_")) {
+      op.expected = { revision: selector("id", required("revision", "Current revision"), "Revision").id };
+    }
+    if (operation.startsWith("create_") || operation.startsWith("patch_")) {
+      const properties = Object.create(null);
+      for (const row of form.properties || []) {
+        if (!text(row.name).trim()) throw new Error("Every property needs a name; remove empty rows");
+        if (Object.hasOwn(properties, row.name)) throw new Error("Property names must not repeat; no request sent");
+        properties[row.name] = typedValue(row.type, row.value);
+      }
+      op[operation.startsWith("patch_") ? "set" : "properties"] = properties;
+      if (operation.startsWith("patch_")) op.unset = list(form.unset);
+    }
+    if (operation === "attach" || operation === "detach") {
+      op.node = required("key", "Node key");
+      op.collection = required("collection", "Collection name");
+      if (operation === "attach") op.record = selector("id", form.record, "Record").id;
+    }
+    return { ops: [op] };
+  }
+
   // Flattens every read response shape into nodes/edges/paths tables.
   function normalize(value) {
     const out = { nodes: [], edges: [], paths: [], outcome: null, missing: false };
@@ -376,7 +430,25 @@
       });
     }
     const round = (value) => Math.round(value * 10) / 10;
-    const nodes = shown.map((node) => ({ ...node, x: round(placed.get(node.id).x), y: round(placed.get(node.id).y), text: text(node.key ?? node.id) }));
+    if (options.mode === "3d") {
+      const yaw = (Number(options.yaw) || 0) * Math.PI / 180;
+      const pitch = (Number(options.pitch) || 0) * Math.PI / 180;
+      const radius = Math.min(width, height) / 2 - pad;
+      shown.forEach((node, index) => {
+        const y = shown.length === 1 ? 0 : 1 - 2 * (index + 0.5) / shown.length;
+        const ring = Math.sqrt(1 - y * y);
+        const angle = index * Math.PI * (3 - Math.sqrt(5));
+        const x = Math.cos(angle) * ring, z = Math.sin(angle) * ring;
+        const rx = x * Math.cos(yaw) + z * Math.sin(yaw);
+        const rz = z * Math.cos(yaw) - x * Math.sin(yaw);
+        const ry = y * Math.cos(pitch) - rz * Math.sin(pitch);
+        const depth = y * Math.sin(pitch) + rz * Math.cos(pitch);
+        const scale = 3 / (3 - depth);
+        placed.set(node.id, { x: width / 2 + rx * radius * scale, y: height / 2 + ry * radius * scale, z: depth, scale });
+      });
+    }
+    const nodes = shown.map((node) => ({ ...node, ...placed.get(node.id), x: round(placed.get(node.id).x), y: round(placed.get(node.id).y), text: text(node.key ?? node.id) }));
+    if (options.mode === "3d") nodes.sort((a, b) => a.z - b.z);
     const edges = (result.edges || []).filter((edge) => placed.has(String(edge.source)) && placed.has(String(edge.target)))
       .map((edge) => ({ id: text(edge.id), label: text(edge.relationship), source: String(edge.source), target: String(edge.target) }));
     return { width, height, nodes, edges, omitted: all.length - shown.length };
@@ -416,14 +488,41 @@
     return [
       h(doc, "span", { class: "eyebrow", text: "PROPERTY GRAPH" }),
       h(doc, "h2", { id: "graph-title", text: "Graphs" }),
-      h(doc, "p", { text: "Explore the property graphs stored in this database file. This view is read-only: change graphs with the REST batch route, vlite-graph-cli or MCP." }),
+      h(doc, "p", { text: "Explore and edit property graphs in this database file. Writes require graph write access and explicit confirmation." }),
       h(doc, "p", { id: "graph-note", "aria-live": "polite", text: "Checking whether this server and file have graphs enabled…" }),
       h(doc, "button", { id: "graph-refresh", type: "button", class: "secondary", text: "Check graph access again" }),
       h(doc, "div", { id: "graph-controls", hidden: true },
         h(doc, "div", { class: "tool-group" },
           h(doc, "div", { class: "section-heading" }, h(doc, "h3", { text: "Graphs in this file" }), h(doc, "button", { id: "graph-list", type: "button", class: "secondary", text: "List graphs" })),
           table(doc, "graph-table", ["Name", "Nodes", "Edges", "Use"]),
-          h(doc, "label", {}, "Graph", h(doc, "select", { id: "graph-name" }))),
+          h(doc, "label", {}, "Graph", h(doc, "select", { id: "graph-name" })),
+          h(doc, "div", { id: "graph-create", hidden: true },
+            h(doc, "label", {}, "New graph name", h(doc, "input", { id: "graph-create-name", placeholder: "knowledge", autocomplete: "off" })),
+            h(doc, "p", { text: "Start with a lowercase letter; use lowercase letters, digits, hyphens or underscores. Maximum 63 characters, or 28 in a tenant." }),
+            h(doc, "button", { id: "graph-create-save", type: "button", class: "secondary", text: "Create graph" }),
+            h(doc, "p", { id: "graph-create-result", "aria-live": "polite" }))),
+        h(doc, "details", { class: "tool-group", id: "graph-editor", hidden: true },
+          h(doc, "summary", { text: "Add or edit graph data" }),
+          h(doc, "p", { text: "One edit commits atomically. Edits and deletions require the current revision from a query; conflicts never overwrite a newer revision. Node deletion also removes its edges and record links." }),
+          h(doc, "label", {}, "Action", options(doc, "graph-edit-action", Object.keys(EDITS), Object.values(EDITS))),
+          h(doc, "label", {}, "Node or edge key", h(doc, "input", { id: "graph-edit-key", autocomplete: "off" })),
+          h(doc, "label", { "data-edit-ops": "patch_edge delete_edge" }, "Select edge by", options(doc, "graph-edit-edge-kind", ["key", "id"], ["Key", "ID"])),
+          h(doc, "label", { "data-edit-ops": "patch_node delete_node patch_edge delete_edge" }, "Current revision", h(doc, "input", { id: "graph-edit-revision", inputmode: "numeric" })),
+          h(doc, "label", { "data-edit-ops": "create_node patch_node" }, "Labels to add (comma separated)", h(doc, "input", { id: "graph-edit-labels" })),
+          h(doc, "label", { "data-edit-ops": "patch_node" }, "Labels to remove (comma separated)", h(doc, "input", { id: "graph-edit-remove-labels" })),
+          h(doc, "label", { "data-edit-ops": "create_edge" }, "Source node key", h(doc, "input", { id: "graph-edit-source" })),
+          h(doc, "label", { "data-edit-ops": "create_edge" }, "Destination node key", h(doc, "input", { id: "graph-edit-destination" })),
+          h(doc, "label", { "data-edit-ops": "create_edge" }, "Relationship (for example, LINKS_TO)", h(doc, "input", { id: "graph-edit-relationship" })),
+          h(doc, "div", { "data-edit-ops": "create_node patch_node create_edge patch_edge" },
+            h(doc, "h4", { text: "Properties" }),
+            h(doc, "div", { id: "graph-edit-properties" }),
+            h(doc, "button", { id: "graph-add-property", type: "button", class: "secondary", text: "Add property" })),
+          h(doc, "label", { "data-edit-ops": "patch_node patch_edge" }, "Properties to remove (comma separated)", h(doc, "input", { id: "graph-edit-unset" })),
+          h(doc, "label", { "data-edit-ops": "attach detach" }, "Collection", h(doc, "input", { id: "graph-edit-collection", value: "default" })),
+          h(doc, "label", { "data-edit-ops": "attach" }, "Record ID", h(doc, "input", { id: "graph-edit-record", inputmode: "numeric" })),
+          h(doc, "p", { "data-edit-ops": "detach", text: "Unlinks every record in this collection from the node; it does not delete the records." }),
+          h(doc, "button", { id: "graph-edit-save", type: "button", text: "Review and apply edit" }),
+          h(doc, "pre", { id: "graph-edit-result", "aria-live": "polite" })),
         h(doc, "div", { class: "tool-group" },
           h(doc, "h3", { text: "Query" }),
           h(doc, "label", {}, "Operation", options(doc, "graph-operation", operationNames, operationNames.map((name) => OPERATIONS[name].title))),
@@ -459,11 +558,15 @@
         h(doc, "div", { class: "tool-group", id: "graph-results" },
           h(doc, "h3", { text: "Result" }),
           h(doc, "p", { id: "graph-summary", "aria-live": "polite", text: "Run a query to see nodes, edges and paths." }),
+          h(doc, "div", { class: "graph-actions" },
+            h(doc, "label", {}, "Result view", options(doc, "graph-view-mode", ["2d", "3d"], ["2D diagram", "3D graph"])),
+            h(doc, "label", { "data-graph-rotation": "", hidden: true }, "Turn", h(doc, "input", { id: "graph-yaw", type: "range", min: "-180", max: "180", value: "25" })),
+            h(doc, "label", { "data-graph-rotation": "", hidden: true }, "Tilt", h(doc, "input", { id: "graph-pitch", type: "range", min: "-80", max: "80", value: "15" }))),
           table(doc, "graph-explain-table", ["Plan", "Value"]),
           h(doc, "figure", { class: "graph-figure", hidden: true },
             h(doc, "figcaption", { id: "graph-figure-caption", text: "Node-link view" })),
-          table(doc, "graph-nodes", ["ID", "Key", "Labels", "Depth", "Properties"]),
-          table(doc, "graph-edges", ["ID", "Key", "Relationship", "Source", "Target", "Properties"]),
+          table(doc, "graph-nodes", ["ID", "Key", "Labels", "Depth", "Properties", "Revision", "Edit"]),
+          table(doc, "graph-edges", ["ID", "Key", "Relationship", "Source", "Target", "Properties", "Revision", "Edit"]),
           table(doc, "graph-paths", ["Path", "Nodes", "Edges"]),
           h(doc, "details", { class: "advanced-settings" }, h(doc, "summary", { text: "Response JSON" }), h(doc, "pre", { id: "graph-result" })))),
       h(doc, "div", { class: "tool-group", id: "graph-admin", hidden: true },
@@ -508,7 +611,7 @@
     if (!section.hasAttribute("aria-labelledby")) section.setAttribute("aria-labelledby", "graph-title");
     section.replaceChildren(...markup(doc));
     const $ = (id) => doc.getElementById(id);
-    const state = { status: "unknown", generation: 0, last: null };
+    const state = { status: "unknown", generation: 0, last: null, caps: null, result: { nodes: [], edges: [] } };
 
     const send = async (method, path, payload) => {
       const bridge = win.VLiteGraphConnection;
@@ -535,6 +638,7 @@
     const apply = (status, detail) => {
       state.status = status;
       $("graph-controls").hidden = status !== "available";
+      if (status !== "available") { state.caps = null; $("graph-editor").hidden = true; $("graph-create").hidden = true; }
       $("graph-note").textContent = status === "error" ? `Graph check failed: ${detail}` : NOTES[status] || "";
       if (status !== "available") $("graph-admin").hidden = true;
       // The user form offers account graph fields only on graph builds.
@@ -550,11 +654,20 @@
         h(doc, "td", { text: text(graph.name) }), h(doc, "td", { text: text(graph.node_count) }), h(doc, "td", { text: text(graph.edge_count) }),
         h(doc, "td", {}, h(doc, "button", { type: "button", "data-graph-use": text(graph.name), text: "Use" })))));
       section.querySelector('[data-graph-table="graph-table"]').hidden = false;
-      if (!graphs.length) $("graph-summary").textContent = "This file has graphs enabled but none you can read. Create one with the REST API, vlite-graph-cli or MCP.";
+      if (!graphs.length) $("graph-summary").textContent = "No readable graphs. Use Create graph if you have write access, or ask an admin for graph access.";
     };
 
     const probe = async () => {
       const generation = ++state.generation;
+      state.caps = null;
+      state.last = null;
+      $("graph-editor").hidden = true;
+      $("graph-create").hidden = true;
+      $("graph-controls").hidden = true;
+      $("graph-next").disabled = true;
+      clearResults();
+      resetEdit();
+      $("graph-result").textContent = "";
       const listed = await send("GET", "/v1/graphs");
       if (generation !== state.generation) return;
       let hasGraphPaths = false;
@@ -570,6 +683,9 @@
       const capabilities = await send("GET", "/v1/capabilities");
       if (generation !== state.generation) return;
       $("graph-admin").hidden = !(capabilities.status === 200 && object(capabilities.value) && capabilities.value.role === "admin");
+      state.caps = capabilities.status === 200 ? capabilities.value : null;
+      $("graph-editor").hidden = !canWrite(state.caps, $("graph-name").value);
+      $("graph-create").hidden = !(state.caps?.role === "admin" || state.caps?.scope?.operations?.includes("graph_write"));
     };
 
     const showTable = (id, rows) => {
@@ -579,12 +695,18 @@
     };
 
     const cell = (value) => h(doc, "td", { text: text(value) });
+    const editCell = (kind, item) => h(doc, "td", {}, h(doc, "button", {
+      type: "button", text: "Edit", "data-edit-kind": kind, "data-edit-id": text(item.id),
+      disabled: !canWrite(state.caps, $("graph-name").value) || (kind === "node" && item.key == null),
+    }));
 
     const draw = (result) => {
+      state.result = result;
       const figure = section.querySelector(".graph-figure");
       const old = figure.querySelector("svg");
       if (old) old.remove();
-      const view = layout(result);
+      const mode = $("graph-view-mode").value;
+      const view = layout(result, { mode, yaw: $("graph-yaw").value, pitch: $("graph-pitch").value });
       figure.hidden = view.nodes.length === 0;
       if (!view.nodes.length) return;
       const svg = doc.createElementNS(SVG_NS, "svg");
@@ -617,7 +739,7 @@
         const group = make("g", { class: "graph-node" });
         const title = make("title", {});
         title.textContent = `${node.key !== null ? `${node.key} ` : ""}(ID ${node.id})${node.labels.length ? ` ${node.labels.join(", ")}` : ""}`;
-        group.append(title, make("circle", { cx: node.x, cy: node.y, r: radius }));
+        group.append(title, make("circle", { cx: node.x, cy: node.y, r: radius * (node.scale || 1) }));
         const label = make("text", { x: node.x, y: node.y + radius + 14, "text-anchor": "middle" });
         label.textContent = node.text.length > 16 ? `${node.text.slice(0, 15)}…` : node.text;
         group.append(label);
@@ -626,7 +748,7 @@
       figure.prepend(svg);
       $("graph-figure-caption").textContent = view.omitted > 0
         ? `Node-link view of the first ${view.nodes.length} nodes (${view.omitted} more listed in the table).`
-        : "Node-link view of the result.";
+        : mode === "3d" ? "3D layout of this query result, not an embedding. Turn and Tilt rotate it; tables contain the exact data." : "Node-link view of the result.";
     };
 
     const clearResults = () => {
@@ -644,9 +766,9 @@
       const result = normalize(value);
       showTable("graph-nodes", result.nodes.map((node) => h(doc, "tr", {},
         h(doc, "td", {}, h(doc, "button", { type: "button", "data-graph-node": text(node.id), title: "Use this node ID in the query", text: text(node.id) })),
-        cell(node.key), cell(Array.isArray(node.labels) ? node.labels.join(", ") : ""), cell(node.depth), cell(propertiesText(node.properties)))));
+        cell(node.key), cell(Array.isArray(node.labels) ? node.labels.join(", ") : ""), cell(node.depth), cell(propertiesText(node.properties)), cell(node.revision), editCell("node", node))));
       showTable("graph-edges", result.edges.map((edge) => h(doc, "tr", {},
-        cell(edge.id), cell(edge.key), cell(edge.relationship), cell(edge.source_key ?? edge.source), cell(edge.target_key ?? edge.target), cell(propertiesText(edge.properties)))));
+        cell(edge.id), cell(edge.key), cell(edge.relationship), cell(edge.source_key ?? edge.source), cell(edge.target_key ?? edge.target), cell(propertiesText(edge.properties)), cell(edge.revision), editCell("edge", edge))));
       showTable("graph-paths", result.paths.map((path, index) => h(doc, "tr", {},
         cell(index + 1), cell((path.nodes || []).join(" → ")), cell((path.edges || []).join(", ")))));
       draw(result);
@@ -684,6 +806,8 @@
     const busy = (flag) => { for (const id of ["graph-run", "graph-explain"]) $(id).disabled = flag; };
 
     const run = async (explain) => {
+      const generation = state.generation;
+      const graph = $("graph-name").value;
       const operation = $("graph-operation").value;
       let call;
       try {
@@ -697,6 +821,7 @@
       $("graph-summary").textContent = explain ? "Explaining…" : "Running…";
       try {
         const response = await send(call.method, call.path, call.body);
+        if (generation !== state.generation || graph !== $("graph-name").value) return;
         $("graph-result").textContent = response.value === null ? "" : JSON.stringify(response.value, null, 2);
         clearResults();
         if (response.status !== 200) { $("graph-summary").textContent = errorText(response.status, response.value); return; }
@@ -724,6 +849,118 @@
       showTable("graph-truncations", truncationRows(response.value).map(([reason, total]) => h(doc, "tr", {}, cell(reason), cell(total))));
     };
 
+    const showEditFields = () => {
+      const action = $("graph-edit-action").value;
+      for (const element of section.querySelectorAll("[data-edit-ops]")) {
+        element.hidden = !element.dataset.editOps.split(" ").includes(action);
+      }
+    };
+    const resetEdit = () => {
+      for (const name of ["key", "revision", "labels", "remove-labels", "source", "destination", "relationship", "unset", "record"]) $(`graph-edit-${name}`).value = "";
+      $("graph-edit-properties").replaceChildren();
+      $("graph-edit-result").textContent = "";
+    };
+    let writing = false;
+    const saveEdit = async () => {
+      if (writing) return;
+      writing = true;
+      $("graph-edit-save").disabled = true;
+      const graph = $("graph-name").value;
+      const generation = state.generation;
+      try {
+        if (!canWrite(state.caps, graph)) throw new Error("Graph write access is required");
+        const values = {};
+        for (const name of ["key", "revision", "labels", "source", "destination", "relationship", "unset", "collection", "record"]) values[name] = $(`graph-edit-${name}`).value;
+        values.removeLabels = $("graph-edit-remove-labels").value;
+        values.edgeKind = $("graph-edit-edge-kind").value;
+        values.properties = [...$("graph-edit-properties").children].map(row => ({
+          name: row.querySelector("input").value, type: row.querySelector("select").value, value: row.querySelectorAll("input")[1].value,
+        }));
+        const action = $("graph-edit-action").value;
+        const body = mutation(action, values);
+        const preview = `${EDITS[action]} in graph "${graph}"?\n${JSON.stringify(body, null, 2)}\nThis is durable. No automatic retry.`;
+        const bridge = win.VLiteGraphConnection;
+        if (typeof bridge?.confirm !== "function") throw new Error("Reconnect to the dashboard before editing; confirmation is unavailable");
+        if (!await bridge.confirm(preview)) return;
+        if (generation !== state.generation || graph !== $("graph-name").value) throw new Error("Connection or graph changed; no edit sent");
+        $("graph-edit-result").textContent = "Applying edit...";
+        const response = await send("POST", graphPath(graph, "batch"), body);
+        if (generation !== state.generation || graph !== $("graph-name").value) return;
+        if (response.status !== 200) {
+          $("graph-edit-result").textContent = `${errorText(response.status, response.value)}\nNo automatic retry. Query current data before retrying; a network failure can have an unknown commit outcome.`;
+          return;
+        }
+        resetEdit();
+        clearResults();
+        $("graph-next").disabled = true;
+        state.last = null;
+        $("graph-summary").textContent = "Graph changed. Run a fresh query to see current data.";
+        $("graph-edit-result").textContent = `Edit committed.\n${JSON.stringify(response.value, null, 2)}`;
+      } catch (error) {
+        $("graph-edit-result").textContent = `Error: ${error.message}`;
+      } finally {
+        writing = false;
+        $("graph-edit-save").disabled = false;
+      }
+    };
+    $("graph-add-property").addEventListener("click", () => {
+      const row = h(doc, "div", { class: "graph-property-row" },
+        h(doc, "label", {}, "Name", h(doc, "input", { autocomplete: "off" })),
+        h(doc, "label", {}, "Type", h(doc, "select", {}, VALUE_TYPES.map(type => h(doc, "option", { value: type, text: type })))),
+        h(doc, "label", {}, "Value", h(doc, "input", { autocomplete: "off" })),
+        h(doc, "button", { type: "button", class: "secondary", text: "Remove property" }));
+      row.querySelector("button").addEventListener("click", () => row.remove());
+      $("graph-edit-properties").append(row);
+      row.querySelector("input").focus();
+    });
+    $("graph-edit-action").addEventListener("change", () => { resetEdit(); showEditFields(); });
+    $("graph-edit-save").addEventListener("click", saveEdit);
+    $("graph-create-save").addEventListener("click", async () => {
+      if (writing) return;
+      writing = true;
+      $("graph-create-save").disabled = true;
+      const generation = state.generation;
+      const name = $("graph-create-name").value.trim();
+      try {
+        const max = state.caps?.scope?.tenant_id ? 28 : 63;
+        if (!GRAPH_NAME.test(name) || name.length > max) throw new Error(`Use a lowercase graph name of at most ${max} characters`);
+        if (!canWrite(state.caps, name)) throw new Error("Your graph binding does not permit creating this graph");
+        const bridge = win.VLiteGraphConnection;
+        if (typeof bridge?.confirm !== "function") throw new Error("Reconnect before creating graphs; confirmation is unavailable");
+        if (!await bridge.confirm(`Create empty graph "${name}"? This is durable; no automatic retry.`)) return;
+        if (generation !== state.generation) throw new Error("Connection or graph changed; no request sent");
+        const response = await send("POST", "/v1/graphs", { graph: name });
+        if (generation !== state.generation) return;
+        if (response.status !== 201) throw new Error(`${errorText(response.status, response.value)}. No automatic retry; reload the graph list before trying again.`);
+        await probe();
+        $("graph-name").value = name;
+        changeGraph();
+        $("graph-create-name").value = "";
+        $("graph-create-result").textContent = `Created graph "${name}". Add nodes under Add or edit graph data.`;
+      } catch (error) {
+        $("graph-create-result").textContent = `Error: ${error.message}`;
+      } finally {
+        writing = false;
+        $("graph-create-save").disabled = false;
+      }
+    });
+    const changeGraph = () => {
+      state.generation++;
+      resetEdit();
+      clearResults();
+      $("graph-result").textContent = "";
+      state.last = null;
+      $("graph-next").disabled = true;
+      $("graph-editor").hidden = !canWrite(state.caps, $("graph-name").value);
+      $("graph-summary").textContent = "Graph changed. Run a query for this graph.";
+    };
+    $("graph-name").addEventListener("change", changeGraph);
+    for (const id of ["graph-view-mode", "graph-yaw", "graph-pitch"]) {
+      $(id).addEventListener(id === "graph-view-mode" ? "change" : "input", () => {
+        for (const control of section.querySelectorAll("[data-graph-rotation]")) control.hidden = $("graph-view-mode").value !== "3d";
+        draw(state.result);
+      });
+    }
     $("graph-refresh").addEventListener("click", probe);
     $("graph-list").addEventListener("click", probe);
     $("graph-operation").addEventListener("change", showFields);
@@ -734,12 +971,26 @@
     section.addEventListener("click", (event) => {
       const target = event.target && event.target.closest ? event.target.closest("button") : null;
       if (!target) return;
-      if (target.hasAttribute("data-graph-use")) $("graph-name").value = target.getAttribute("data-graph-use");
+      if (target.hasAttribute("data-graph-use")) { $("graph-name").value = target.getAttribute("data-graph-use"); changeGraph(); }
       if (target.hasAttribute("data-graph-node")) useNode(target.getAttribute("data-graph-node"));
+      if (target.hasAttribute("data-edit-kind")) {
+        const kind = target.dataset.editKind;
+        const item = state.result[kind === "node" ? "nodes" : "edges"].find(item => text(item.id) === target.dataset.editId);
+        if (!item || !canWrite(state.caps, $("graph-name").value)) return;
+        resetEdit();
+        $("graph-edit-action").value = `patch_${kind}`;
+        $("graph-edit-key").value = kind === "edge" && item.key == null ? text(item.id) : text(item.key);
+        $("graph-edit-edge-kind").value = item.key == null ? "id" : "key";
+        $("graph-edit-revision").value = text(item.revision);
+        showEditFields();
+        $("graph-editor").open = true;
+        $("graph-edit-key").focus();
+      }
     });
     win.addEventListener("vlite:connection", probe);
     win.addEventListener("hashchange", () => { if (win.location.hash === "#graph" && state.status !== "available") probe(); });
     showFields();
+    showEditFields();
     apply("signed-out");
     probe();
     return { probe, state };
@@ -816,7 +1067,7 @@
 
   const api = { init, boot, utils: { accountGraphNames, accountGraphRequest, accountGraphChanges, accountGraphFields, accountGraphView, graphPath, selector, selectorList, list, conditions, typedValue, equality, limits, projection, cursor, direction,
     body, request, errorCode, errorText, openapiHasGraphs, availability, truncationText, indexText, propertiesText, normalize, summary, explainRows,
-    statsCards, truncationRows, layout, OPERATIONS, LIMITS, STATS_ROUTE } };
+    statsCards, truncationRows, layout, canWrite, mutation, OPERATIONS, LIMITS, STATS_ROUTE } };
   if (typeof window !== "undefined") { window.VLiteGraphTools = api; boot(window); }
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })();

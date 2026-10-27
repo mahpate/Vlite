@@ -6,6 +6,9 @@
 !proto/**
 !src/
 !src/**
+!site/
+!site/assets/
+!site/assets/theme.css
 !deploy/
 !deploy/**
 !tests/

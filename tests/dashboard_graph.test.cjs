@@ -147,6 +147,53 @@ test("init tolerates a page without the graph section", () => {
   assert.equal(init({ document: { getElementById: () => null } }), null);
 });
 
+test("editing requires graph_write and an exact graph binding, never vector write", () => {
+  const { canWrite } = utils;
+  assert.equal(canWrite({ role: "admin" }, "g"), true);
+  for (const role of ["read_only", "unknown", "scoped"]) assert.equal(canWrite({ role }, "g"), false);
+  assert.equal(canWrite({ role: "scoped", scope: { operations: ["write"], graphs: ["*"] } }, "g"), false);
+  const caps = { role: "scoped", scope: { operations: ["graph_write"], graphs: ["g"] } };
+  assert.equal(canWrite(caps, "g"), true);
+  assert.equal(canWrite(caps, "other"), false);
+});
+
+test("guided edits match batch shapes and require revisions for updates and deletes", () => {
+  const { mutation } = utils;
+  const plain = (value) => JSON.parse(JSON.stringify(value));
+  assert.deepEqual(plain(mutation("create_node", { key: "n", labels: "Doc, Guide", properties: [{ name: "rank", type: "integer", value: "9007199254740993" }] })),
+    { ops: [{ op: "create_node", key: "n", labels: ["Doc", "Guide"], properties: { rank: { type: "integer", value: "9007199254740993" } } }] });
+  assert.deepEqual(plain(mutation("patch_node", { key: "n", revision: "18446744073709551615", labels: "Doc", unset: "rank" })),
+    { ops: [{ op: "patch_node", key: "n", add_labels: ["Doc"], remove_labels: [], expected: { revision: "18446744073709551615" }, set: {}, unset: ["rank"] }] });
+  assert.deepEqual(plain(mutation("create_edge", { source: "n", destination: "m", relationship: "LINKS" })),
+    { ops: [{ op: "create_edge", source: "n", destination: "m", relationship: "LINKS", properties: {} }] });
+  assert.deepEqual(mutation("delete_edge", { edgeKind: "id", key: "18446744073709551615", revision: "4" }),
+    { ops: [{ op: "delete_edge", edge: { id: "18446744073709551615" }, expected: { revision: "4" } }] });
+  assert.deepEqual(mutation("attach", { key: "n", collection: "docs", record: "18446744073709551615" }),
+    { ops: [{ op: "attach", node: "n", collection: "docs", record: "18446744073709551615" }] });
+  assert.deepEqual(mutation("detach", { key: "n", collection: "docs" }),
+    { ops: [{ op: "detach", node: "n", collection: "docs" }] });
+  for (const action of ["patch_node", "delete_node", "patch_edge", "delete_edge"]) assert.throws(() => mutation(action, { key: "n" }), /revision/);
+  assert.throws(() => mutation("create_edge", { source: "n" }), /Destination/);
+  assert.throws(() => mutation("create_node", { key: "n", properties: [{ name: "", type: "string", value: "x" }] }), /name/);
+  assert.throws(() => mutation("create_node", { key: "n", properties: [{ name: "x", type: "string" }, { name: "x", type: "string" }] }), /repeat/);
+  assert.throws(() => mutation("unknown", {}), /supported/);
+});
+
+test("3D projection is bounded, deterministic and rotates without changing graph identities", () => {
+  const result = { nodes: Array.from({ length: 60 }, (_, i) => ({ id: String(i), key: `n${i}` })), edges: [{ id: "1", source: "1", target: "2" }] };
+  const view = layout(result, { mode: "3d", yaw: 25, pitch: 15 });
+  assert.deepEqual(view, layout(result, { mode: "3d", yaw: 25, pitch: 15 }));
+  assert.equal(view.nodes.length, 40);
+  assert.equal(view.omitted, 20);
+  assert.equal(view.edges.length, 1);
+  for (const node of view.nodes) {
+    assert.ok(Number.isFinite(node.z) && node.scale > 0);
+    assert.ok(node.x > 0 && node.x < view.width && node.y > 0 && node.y < view.height);
+  }
+  assert.notDeepEqual(view.nodes, layout(result, { mode: "3d", yaw: 60 }).nodes);
+  assert.deepEqual(layout({ nodes: [] }, { mode: "3d" }).nodes, []);
+});
+
 test("account graph knobs are validated and only differences are sent", () => {
   const { accountGraphNames, accountGraphRequest, accountGraphChanges, accountGraphFields, accountGraphView } = utils;
   assert.equal(accountGraphNames(" ", false), null);

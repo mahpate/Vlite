@@ -5,6 +5,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY build.rs ./
 COPY proto ./proto
 COPY src ./src
+COPY site/assets/theme.css ./site/assets/theme.css
 COPY tests ./tests
 COPY examples ./examples
 COPY bindings/c ./bindings/c
@@ -51,6 +52,7 @@ CMD ["/data/vectors.vlite", "--create-if-missing", "3", "--bind", "0.0.0.0:8080"
 FROM nginxinc/nginx-unprivileged:1.30.6-alpine AS dashboard
 COPY deploy/dashboard.conf /etc/nginx/conf.d/default.conf
 COPY src/dashboard/ /usr/share/nginx/html/
+COPY site/assets/theme.css /usr/share/nginx/html/theme.css
 USER root
 RUN sed -i \
     -e 's|name="vlite-api-base" content=""|name="vlite-api-base" content="/api"|' \

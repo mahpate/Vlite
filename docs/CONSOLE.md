@@ -72,7 +72,7 @@ The sidebar groups seven workspaces. Tabs inside each workspace hold its views:
 | | **Overview** | Database size, health and shortcuts |
 | Data | **Collections** | Records, Add & edit, Import & export, Index, Manage |
 | Data | **Search** | Vector search, Advanced retrieval, Analyze & compare |
-| Data | **Graph** | Read-only graph queries and a node-link view, when graphs are enabled |
+| Data | **Graph** | Query, edit and rotate graphs in 2D or 3D |
 | Server | **Observability** | Live monitor, Diagnostics, Change feed |
 | Server | **Administration** | Health, Users & access, Backup & recovery, Server settings |
 | Tools | **Developer Console** | Requests and responses this dashboard sends |
@@ -159,11 +159,11 @@ credentials.
 
 ## Explore graphs
 
-**Graph** is a read-only explorer for opt-in
-[property graphs](GRAPH.md) in a graph-enabled file. Choose a graph and an
-operation, such as a traversal, then **Run query** or **Explain plan**. Results
-list nodes, edges and paths and draw up to 40 nodes. Change graphs with the
-REST API, `vlite-graph-cli` or MCP.
+**Graph** explores [property graphs](GRAPH.md). Choose an operation, then **Run
+query** or **Explain plan**. Results show up to 40 nodes in **2D** or **3D**;
+rotation is manual. Writers can add nodes, edges and record links. **Edit**
+loads the current revision; changes require confirmation and reject conflicts.
+Requery after writes. Website and dashboard share theme colors.
 
 ![Graph traversal drawn as a node-link view](../site/assets/dashboard/current-graph.png?v=connected)
 

@@ -1,0 +1,25 @@
+/* Shared by the website and the server's /dashboard/theme.css route. */
+:root {
+  --vlite-background: #f7f8fc;
+  --vlite-surface: #ffffff;
+  --vlite-subtle: #f1f3f9;
+  --vlite-text: #172033;
+  --vlite-muted: #536078;
+  --vlite-border: #dce1ed;
+  --vlite-accent: #6d43d5;
+  --vlite-accent-soft: #f0eaff;
+  --vlite-search: #087d99;
+  --vlite-success: #087657;
+}
+:root[data-theme="dark"] {
+  --vlite-background: #0c101b;
+  --vlite-surface: #141b2b;
+  --vlite-subtle: #1b2437;
+  --vlite-text: #edf1fa;
+  --vlite-muted: #a9b6cd;
+  --vlite-border: #303e57;
+  --vlite-accent: #bda4ff;
+  --vlite-accent-soft: #2c2345;
+  --vlite-search: #65d2ed;
+  --vlite-success: #64dbad;
+}

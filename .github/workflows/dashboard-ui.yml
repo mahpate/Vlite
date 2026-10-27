@@ -6,6 +6,8 @@ on:
     branches: [main]
     paths:
       - "src/dashboard/**"
+      - "site/assets/theme.css"
+      - "src/server.rs"
       - "tests/*admin*"
       - "tests/*console*"
       - "tests/*navigation*"
@@ -14,6 +16,8 @@ on:
   pull_request:
     paths:
       - "src/dashboard/**"
+      - "site/assets/theme.css"
+      - "src/server.rs"
       - "tests/*admin*"
       - "tests/*console*"
       - "tests/*navigation*"
@@ -45,3 +49,4 @@ jobs:
         run: |
           python tests/dashboard_e2e.py --mocked
           python tests/admin_e2e.py
+          python tests/dashboard_graph_ui.py

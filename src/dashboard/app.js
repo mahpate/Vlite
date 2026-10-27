@@ -1259,7 +1259,7 @@
       return request;
     })(),
   };
-  // Read-only graph explorer bridge (graph.js): same credential and API base, never the token itself.
+  // Graph tools share the connection and confirmation dialog, never the token itself.
   window.VLiteGraphConnection = (() => {
     let generation = 0;
     const controllers = new Set();
@@ -1294,6 +1294,7 @@
     }
     return {
       request,
+      confirm: confirmOperation,
       invalidate: () => {
         generation++;
         controllers.forEach((controller) => controller.abort());

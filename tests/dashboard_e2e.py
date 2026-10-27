@@ -884,7 +884,8 @@ class FakeApi:
             # mocked API tests exercise production routing, never a show-all variant.
             name = "index.html" if path in ("/dashboard", "/dashboard/") else path[len("/dashboard/"):]
             kind = {"html": "text/html", "js": "text/javascript", "css": "text/css"}[name.rsplit(".", 1)[1]]
-            with open(os.path.join(DASHBOARD_DIR, name), "rb") as stream:
+            asset = os.path.join(DASHBOARD_DIR, name) if name != "theme.css" else os.path.join(DASHBOARD_DIR, "..", "..", "site", "assets", "theme.css")
+            with open(asset, "rb") as stream:
                 return route.fulfill(status=200, body=stream.read(), headers={"content-type": kind + "; charset=utf-8", "content-security-policy": CSP})
         body = json.loads(request.post_data) if request.post_data else None
         self.log.append({"method": request.method, "path": path, "query": query, "body": body, "headers": request.headers})

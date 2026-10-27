@@ -39,6 +39,8 @@ def check(root):
     manifest = json.loads((assets / "connected-captures.json").read_text())
     assert manifest["connected"] and manifest["record_count"] >= 8
     assert manifest["format_version"] >= 5
+    assert manifest["theme_sha256"] == hashlib.sha256(
+        (root / "assets" / "theme.css").read_text(encoding="utf-8").encode()).hexdigest(), "Recapture after changing the shared theme"
     assert {capture["workspace"] for capture in manifest["captures"]} == {
         "Sign in", "Overview", "Collections", "Search", "Graph", "Observability", "Administration", "Developer Console",
     }

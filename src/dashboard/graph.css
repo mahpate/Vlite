@@ -1,6 +1,10 @@
 /* Property graph explorer (graph.js). Scoped to #graph; uses the dashboard --studio-* tokens. */
 #graph .graph-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 16px; }
 #graph .graph-equality { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 2fr); gap: 0 16px; }
+#graph .graph-property-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 2fr) auto; align-items: end; gap: 12px; }
+#graph .graph-property-row > * { min-width: 0; }
+#graph .graph-property-row button { margin-bottom: 12px; }
+#graph input[type="range"] { min-height: 44px; accent-color: var(--studio-accent); }
 #graph .graph-limits { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 0 16px; }
 #graph .graph-limits label { margin: 8px 0; font-family: ui-monospace, Consolas, monospace; font-weight: 500; }
 #graph textarea { min-height: 60px; resize: vertical; }
@@ -24,4 +28,5 @@
 #graph .table-scroll { max-width: 100%; }
 @media (max-width: 720px) {
   #graph .graph-equality { grid-template-columns: minmax(0, 1fr); }
+  #graph .graph-property-row { grid-template-columns: minmax(0, 1fr); }
 }

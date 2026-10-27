@@ -1,10 +1,16 @@
 (() => {
   const root = document.documentElement;
-  const stored = (() => { try { return localStorage.getItem("vlite-theme"); } catch { return null; } })();
+  let stored = (() => { try { return localStorage.getItem("vlite-theme"); } catch { return null; } })();
   const system = window.matchMedia("(prefers-color-scheme: dark)");
   const apply = (theme) => root.setAttribute("data-theme", theme);
+  if (!["light", "dark"].includes(stored)) stored = null;
   apply(stored || (system.matches ? "dark" : "light"));
   system.addEventListener("change", (event) => { if (!stored) apply(event.matches ? "dark" : "light"); });
+  window.addEventListener("storage", (event) => {
+    if (event.key !== "vlite-theme") return;
+    stored = ["light", "dark"].includes(event.newValue) ? event.newValue : null;
+    apply(stored || (system.matches ? "dark" : "light"));
+  });
 
   document.addEventListener("DOMContentLoaded", () => {
     const updateDiagrams = () => {
@@ -24,6 +30,7 @@
     if (toggle) {
       toggle.addEventListener("click", () => {
         const next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
+        stored = next;
         apply(next);
         try { localStorage.setItem("vlite-theme", next); } catch { /* private mode */ }
       });
@@ -97,7 +104,7 @@
         ["current-hybrid.png", "Hybrid search: combine vector similarity with text matches."],
         ["current-retrieval.png", "Advanced retrieval: recommend neighbors and count metadata facets."],
         ["current-explore.png", "Analyze & compare: compare records and inspect a sampled vector projection."],
-        ["current-graph.png", "Graph: traverse a property graph and see the linked nodes and edges it returns."],
+        ["current-graph.png", "Graph: traverse linked data, rotate the 3D result, or make confirmed edits with write access."],
         ["current-observability.png", "Observability: inspect real request metrics, routes and server logs."],
         ["current-feed.png", "Change feed: inspect committed vector and graph events and page through their history."],
         ["current-administration.png", "Administration: inspect server health and manage operational controls."],

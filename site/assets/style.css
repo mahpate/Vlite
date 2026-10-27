@@ -1,4 +1,5 @@
 @import url("diagrams/palette.css");
+@import url("theme.css");
 /* Self-hosted variable fonts (SIL OFL 1.1; licences in assets/fonts/) */
 @font-face { font-family: "Outfit"; font-style: normal; font-weight: 100 900; font-display: swap; src: url("fonts/outfit-latin-wght-normal.woff2") format("woff2"); }
 @font-face { font-family: "JetBrains Mono"; font-style: normal; font-weight: 100 800; font-display: swap; src: url("fonts/jetbrains-mono-latin-wght-normal.woff2") format("woff2"); }
@@ -20,19 +21,19 @@
 @media (max-width: 800px) { .docs-layout.feature-layout { grid-template-columns: minmax(0, 1fr); } }
 
 :root {
-  --bg: #ffffff;
-  --bg-soft: #f5f7fc;
-  --card: #ffffff;
-  --border: #e1e5f0;
-  --text: #0f172a;
-  --muted: #5b6478;
-  --accent: #4f46e5;
-  --accent-2: #0891b2;
+  --bg: var(--vlite-background);
+  --bg-soft: var(--vlite-subtle);
+  --card: var(--vlite-surface);
+  --border: var(--vlite-border);
+  --text: var(--vlite-text);
+  --muted: var(--vlite-muted);
+  --accent: var(--vlite-accent);
+  --accent-2: var(--vlite-search);
   --chip: #eef0fb;
   --chip-text: #3730a3;
   --code-bg: #0b1020;
   --code-text: #e2e8f0;
-  --good: #059669;
+  --good: var(--vlite-success);
   --shadow: 0 1px 2px rgba(15, 23, 42, .04), 0 8px 24px rgba(15, 23, 42, .06);
   --glow: color-mix(in srgb, var(--accent) 30%, transparent);
   --grid-line: rgba(15, 23, 42, .055);
@@ -46,18 +47,18 @@
 }
 
 :root[data-theme="dark"] {
-  --bg: #070b16;
-  --bg-soft: #0b1120;
-  --card: #0f1527;
-  --border: #1f2943;
-  --text: #e6e9f2;
-  --muted: #9aa4bb;
-  --accent: #818cf8;
-  --accent-2: #22d3ee;
+  --bg: var(--vlite-background);
+  --bg-soft: var(--vlite-subtle);
+  --card: var(--vlite-surface);
+  --border: var(--vlite-border);
+  --text: var(--vlite-text);
+  --muted: var(--vlite-muted);
+  --accent: var(--vlite-accent);
+  --accent-2: var(--vlite-search);
   --chip: #161d38;
   --chip-text: #c7d2fe;
   --code-bg: #050811;
-  --good: #34d399;
+  --good: var(--vlite-success);
   --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px rgba(0, 0, 0, .35);
   --glow: color-mix(in srgb, var(--accent) 45%, transparent);
   --grid-line: rgba(148, 163, 184, .075);

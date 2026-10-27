@@ -134,6 +134,7 @@ async fn graph_dashboard_assets_are_public_and_hardened() {
     for (uri, content_type, marker) in [
         ("/dashboard/graph.js", "text/javascript", "VLiteGraphTools"),
         ("/dashboard/graph.css", "text/css", "#graph"),
+        ("/dashboard/theme.css", "text/css", "--vlite-background"),
     ] {
         let response = app
             .clone()

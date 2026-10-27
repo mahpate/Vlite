@@ -1,3 +1,4 @@
+@import url("theme.css");
 :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--studio-text); background: var(--studio-background); font-size: 14px; }
 /* Design tokens: every color, shadow and radius below comes from these variables. */
 :root { --studio-background: #f7f8fc; --studio-surface: #fff; --studio-subtle: #f1f3f9; --studio-text: #172033; --studio-muted: #536078; --studio-border: #dce1ed; --studio-accent: #6d43d5; --studio-accent-soft: #f0eaff; --studio-on-accent: #fff; --studio-action: #6d43d5; --studio-action-hover: #5932b7; --studio-input-border: #8995ac; --studio-success: #087657; --studio-success-soft: #e6f7ef; --studio-danger: #b42338; --studio-danger-soft: #fff0f2; --studio-search: #087d99; --studio-shadow: 0 2px 8px #17203304, 0 12px 32px #17203305; --studio-radius: 16px; --studio-motion: 160ms ease; }
@@ -5,6 +6,9 @@
 :root { --studio-topbar: rgba(247, 248, 252, .86); --studio-shadow-lg: 0 18px 48px #1720331a, 0 2px 8px #1720330d; }
 :root[data-theme="dark"] { --studio-topbar: rgba(12, 16, 27, .86); --studio-shadow-lg: 0 18px 48px #00000059, 0 2px 8px #00000033; }
 [data-theme="dark"] { color-scheme: dark; }
+
+/* Semantic aliases keep the website and embedded dashboard on one palette. */
+:root, :root[data-theme="dark"] { --studio-background: var(--vlite-background); --studio-surface: var(--vlite-surface); --studio-subtle: var(--vlite-subtle); --studio-text: var(--vlite-text); --studio-muted: var(--vlite-muted); --studio-border: var(--vlite-border); --studio-accent: var(--vlite-accent); --studio-accent-soft: var(--vlite-accent-soft); --studio-search: var(--vlite-search); --studio-success: var(--vlite-success); }
 
 /* Base */
 * { box-sizing: border-box; }

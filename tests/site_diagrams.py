@@ -226,6 +226,29 @@ def check(site, screenshots=None):
                             path, width, page.evaluate("""[...document.querySelectorAll('body *')]
                               .filter(e => e.getBoundingClientRect().right > innerWidth + 1)
                               .slice(0, 8).map(e => [e.tagName, e.className])"""))
+                        if path in ("architecture.html", "index.html"):
+                            panels = page.locator(".spatial-diagram")
+                            assert panels.count() == (1 if path == "architecture.html" else 2)
+                            for panel in panels.all():
+                                button = panel.locator("button")
+                                button.click()
+                                assert button.get_attribute("aria-expanded") == "true"
+                                assert panel.locator(".spatial-stage").is_visible()
+                                assert panel.locator(".spatial-layer").count() in (3, 4)
+                                slider = panel.locator("input")
+                                slider.focus()
+                                slider.press("ArrowRight")
+                                assert slider.input_value() == "-17"
+                                assert panel.locator(".spatial-stack").evaluate(
+                                    "e => getComputedStyle(e).transform !== 'none'")
+                                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+                                if screenshots and width in (1440, 390):
+                                    screenshots.mkdir(parents=True, exist_ok=True)
+                                    scene = panel.locator(".spatial-stage").get_attribute("id")
+                                    panel.screenshot(path=str(screenshots / f"{Path(path).stem}-{scene}-{theme}-{width}.png"))
+                                button.click()
+                                assert button.get_attribute("aria-expanded") == "false"
+                                assert not panel.locator(".spatial-stage").is_visible()
                         if path == "architecture.html":
                             images = page.locator(".diagram img")
                             assert images.count() == 14
@@ -264,6 +287,9 @@ def check(site, screenshots=None):
                 opposite = "dark" if theme == "light" else "light"
                 decode_image(page, first, opposite)
                 assert first.evaluate("img => img.currentSrc").endswith(f"-{opposite}.svg")
+                page.emulate_media(color_scheme=opposite)
+                page.emulate_media(color_scheme=theme)
+                assert page.locator("html").get_attribute("data-theme") == opposite, "A manual theme must survive system changes"
                 assert not external, external
                 assert not errors, errors
                 context.close()

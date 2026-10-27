@@ -7,6 +7,8 @@
   <meta name="description" content="In-depth VLite architecture: the single-file format (header, frames, opcodes, format versions, graph frames and sidecar files), commit and recovery, locking, HNSW/quantized ANN, hybrid search, encryption, CDC and the REST/gRPC server.">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
+  <link rel="stylesheet" href="assets/diagrams3d.css">
+  <script defer src="assets/diagrams3d.js"></script>
   <script src="assets/site.js"></script>
 </head>
 <body>
@@ -85,7 +87,7 @@
     </div>
 
     <h2 id="layers">Layers</h2>
-    <p>Every interface calls the same <code>Database</code> core. Only the storage layer touches the file.</p>
+    <p>Every interface calls the same <code>Database</code> core. Only storage touches the file. Switch to 3D to rotate the layers.</p>
     <figure class="diagram" data-diagram="layers">
       <picture><source srcset="assets/diagrams/layers-dark.svg" media="(prefers-color-scheme: dark)"><img src="assets/diagrams/layers-light.svg" data-light="assets/diagrams/layers-light.svg" data-dark="assets/diagrams/layers-dark.svg" alt="VLite layers: interfaces call the Database core; search indexes are rebuildable; storage writes the authoritative file." loading="lazy"></picture>
       <a class="diagram-full" href="assets/diagrams/layers-light.svg" data-light="assets/diagrams/layers-light.svg" data-dark="assets/diagrams/layers-dark.svg">Open full-size diagram</a>
