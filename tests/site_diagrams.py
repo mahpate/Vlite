@@ -246,6 +246,15 @@ def check(site, screenshots=None):
                                     screenshots.mkdir(parents=True, exist_ok=True)
                                     scene = panel.locator(".spatial-stage").get_attribute("id")
                                     panel.screenshot(path=str(screenshots / f"{Path(path).stem}-{scene}-{theme}-{width}.png"))
+                                for key in ("Home", "End"):
+                                    slider.press(key)
+                                    assert panel.locator(".spatial-stage").evaluate("""stage => {
+                                        const box = stage.getBoundingClientRect();
+                                        return [...stage.querySelectorAll('.spatial-layer strong, .spatial-layer span')].every(e => {
+                                            const r = e.getBoundingClientRect();
+                                            return r.left >= box.left && r.right <= box.right && r.top >= box.top && r.bottom <= box.bottom;
+                                        });
+                                    }"""), (path, theme, width, key, "3D labels clipped")
                                 button.click()
                                 assert button.get_attribute("aria-expanded") == "false"
                                 assert not panel.locator(".spatial-stage").is_visible()

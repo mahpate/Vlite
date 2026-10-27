@@ -505,7 +505,7 @@
           h(doc, "summary", { text: "Add or edit graph data" }),
           h(doc, "p", { text: "One edit commits atomically. Edits and deletions require the current revision from a query; conflicts never overwrite a newer revision. Node deletion also removes its edges and record links." }),
           h(doc, "label", {}, "Action", options(doc, "graph-edit-action", Object.keys(EDITS), Object.values(EDITS))),
-          h(doc, "label", {}, "Node or edge key", h(doc, "input", { id: "graph-edit-key", autocomplete: "off" })),
+          h(doc, "label", {}, h(doc, "span", { id: "graph-edit-key-label", text: "Node key" }), h(doc, "input", { id: "graph-edit-key", autocomplete: "off" })),
           h(doc, "label", { "data-edit-ops": "patch_edge delete_edge" }, "Select edge by", options(doc, "graph-edit-edge-kind", ["key", "id"], ["Key", "ID"])),
           h(doc, "label", { "data-edit-ops": "patch_node delete_node patch_edge delete_edge" }, "Current revision", h(doc, "input", { id: "graph-edit-revision", inputmode: "numeric" })),
           h(doc, "label", { "data-edit-ops": "create_node patch_node" }, "Labels to add (comma separated)", h(doc, "input", { id: "graph-edit-labels" })),
@@ -851,6 +851,8 @@
 
     const showEditFields = () => {
       const action = $("graph-edit-action").value;
+      $("graph-edit-key-label").textContent = action === "create_edge" ? "Edge key (optional)"
+        : ["patch_edge", "delete_edge"].includes(action) ? `Edge ${$("graph-edit-edge-kind").value === "id" ? "ID" : "key"}` : "Node key";
       for (const element of section.querySelectorAll("[data-edit-ops]")) {
         element.hidden = !element.dataset.editOps.split(" ").includes(action);
       }
@@ -914,6 +916,7 @@
       row.querySelector("input").focus();
     });
     $("graph-edit-action").addEventListener("change", () => { resetEdit(); showEditFields(); });
+    $("graph-edit-edge-kind").addEventListener("change", showEditFields);
     $("graph-edit-save").addEventListener("click", saveEdit);
     $("graph-create-save").addEventListener("click", async () => {
       if (writing) return;

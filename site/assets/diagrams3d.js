@@ -23,7 +23,7 @@
     const picture = host?.querySelector("picture");
     if (!picture || !CSS.supports("transform-style", "preserve-3d")) continue;
     const panel = document.createElement("div");
-    panel.className = "spatial-diagram";
+    panel.className = `spatial-diagram${layers.length === 4 ? " spatial-architecture" : ""}`;
     const controls = document.createElement("div");
     controls.className = "spatial-controls";
     const toggle = document.createElement("button");
@@ -42,8 +42,7 @@
     layers.forEach(([title, detail, role], index) => {
       const layer = document.createElement("li");
       layer.className = `spatial-layer spatial-${role}`;
-      layer.style.setProperty("--depth", `${(layers.length - 1 - index) * 55}px`);
-      layer.style.setProperty("--order", index);
+      layer.style.setProperty("--depth-index", layers.length - 1 - index);
       const heading = document.createElement("strong");
       heading.textContent = `${index + 1}. ${title}`;
       const description = document.createElement("span");
@@ -71,6 +70,12 @@
       toggle.setAttribute("aria-expanded", String(active));
     });
     stage.append(stack);
+    if (layers.length === 4) {
+      const note = document.createElement("p");
+      note.className = "spatial-note";
+      note.textContent = "Logical layers, not a write sequence. The core queries indexes and commits through storage.";
+      stage.append(note);
+    }
     controls.append(toggle, label);
     panel.append(controls, stage);
     picture.before(panel);
