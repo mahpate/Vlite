@@ -500,12 +500,14 @@
     <pre id="prometheus-result"></pre>
   </section>
   <section id="change-feed" class="wide">
-    <h2>Change feed</h2><p>Database-wide committed events, not filtered to the active collection. Scoped credentials need read over all collections. Pages retain whole commits; limits are approximate. Compacted cursors require a full consumer resync. Expiry emits no event.</p>
+    <h2>Change feed</h2><p>Database-wide committed vector and graph events, not filtered to the active collection. Graph events name a graph instead of a collection. Scoped credentials need read over all collections and see graph events only for graphs they can read. Pages retain whole commits; limits are approximate. Compacted cursors require a full consumer resync. Expiry emits no event.</p>
     <label>Opaque cursor (blank starts retained history)<textarea id="feed-cursor" rows="2"></textarea></label>
     <label>Page limit<input id="feed-limit" type="number" min="1" max="10000" value="100"></label>
     <button id="feed-load" type="button" data-feature="change_feed" data-feed>Load page</button>
     <button id="feed-next" type="button" data-feature="change_feed" data-feed>Next page</button>
-    <p id="feed-status" role="status"></p><pre id="feed-result" aria-live="polite"></pre>
+    <p id="feed-status" role="status"></p>
+    <div class="table-scroll"><table id="feed-table"><caption>Events on this page</caption><thead><tr><th>Sequence</th><th>Event</th><th>Collection</th><th>Graph</th><th>Details</th></tr></thead><tbody></tbody></table></div>
+    <pre id="feed-result" aria-live="polite"></pre>
   </section>
   <section id="operations" class="wide">
     <h2>Server health</h2>
@@ -686,8 +688,10 @@
       <button id="webhook-list" type="button" data-admin data-feature="webhooks">Refresh subscriptions</button>
       <pre id="webhook-result" aria-live="polite"></pre>
       <label>Destination HTTP(S) URL<input id="webhook-url" type="url" autocomplete="off"></label>
-      <label>Collections (comma-separated; blank means all)<input id="webhook-collections"></label>
-      <label>Events (comma-separated)<input id="webhook-events" value="put,delete,metadata_update"></label>
+      <label>Events (comma-separated; blank sends every event)<input id="webhook-events"></label>
+      <p class="connection-hint">Vector events: put, delete, metadata_update, collection_created, collection_dropped, settings_updated, vectors_updated. Graph events: graph_created, graph_dropped, graph_batch.</p>
+      <label>Collections for vector events (comma-separated; blank means all)<input id="webhook-collections"></label>
+      <label>Graphs for graph events (comma-separated; blank means all)<input id="webhook-graphs"></label>
       <label>Signing secret (16..256 bytes; never returned or displayed)<input id="webhook-secret" type="password" autocomplete="new-password"></label>
       <button id="webhook-create" type="button" data-admin data-feature="webhooks">Create subscription</button>
       <label>Subscription ID (24 hex characters)<input id="webhook-id" maxlength="24"></label>
@@ -723,7 +727,7 @@
     <pre id="scenario-result"></pre>
   </section>
 </main>
-<footer>Experimental VLite console &middot; Passwords, tokens and database contents are never stored in browser storage. No undo or automatic retries.</footer>
+<footer>VLite console &middot; Passwords, tokens and database contents are never stored in browser storage. No undo or automatic retries.</footer>
 </div>
 </div>
 <dialog id="confirmation">

@@ -1,9 +1,9 @@
-"""Capture current-source dashboard workflows against isolated real APIs.
+"""Capture current-source dashboard workflows against an isolated real API.
 
 Run on a disposable Linux Docker host with tests/requirements-dashboard.txt.
 Only synthetic demo records are written; no existing server or volume is used.
-The Graph view comes from a second, graph-enabled database with the same records,
-because graph-enabled files have no change feed or webhooks.
+One new database holds the records, the extra collections and an `articles`
+graph, because every new file is graph-enabled.
 """
 
 import base64
@@ -26,7 +26,9 @@ import uuid
 from playwright.sync_api import expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
-IMAGE = os.environ.get("VLITE_CAPTURE_IMAGE", "ghcr.io/mahpate/vlite-api:v0.5.0")
+VERSION = re.search(r'^version = "([^"]+)"', (ROOT / "Cargo.toml").read_text(encoding="utf-8"), re.M)[1]
+# Defaults to the published API image for this checkout's version; the capture workflow builds one from source.
+IMAGE = os.environ.get("VLITE_CAPTURE_IMAGE", f"ghcr.io/mahpate/vlite-api:v{VERSION}")
 ARTICLES = (
     ("getting-started", "Getting started with VLite"), ("vector-search", "Vector search for support articles"),
     ("hybrid-search", "Hybrid search with typed metadata"), ("hnsw-index", "Choosing an HNSW index"),
@@ -40,42 +42,22 @@ LINKS = (
     ("vector-search", "NEXT", "hnsw-index"), ("python-client", "NEXT", "credentials"),
     ("backups", "SEE_ALSO", "monitoring"),
 )
-# vlite-server creates only plain files: a private server creates an empty one, then
-# vlite-maintain copies the closed file into a graph-enabled one for the real server.
-GRAPH_BOOTSTRAP = """set -eu
-env -u VLITE_ADMIN_DIR -u VLITE_TRUSTED_PROXY vlite-server /data/seed.vlite --create-if-missing 3 --create-format 5 --bind 127.0.0.1:8081 >/data/seed.log 2>&1 &
-seed=$!
-tries=0
-until grep -q '^LISTENING ' /data/seed.log; do
-  tries=$((tries + 1))
-  if [ "$tries" -gt 300 ] || ! kill -0 "$seed" 2>/dev/null; then cat /data/seed.log >&2; exit 1; fi
-  sleep 0.2
-done
-kill -TERM "$seed"
-if ! wait "$seed"; then cat /data/seed.log >&2; exit 1; fi
-vlite-maintain enable-graph /data/seed.vlite /data/demo.vlite
-rm -f /data/seed.*
-exec vlite-server /data/demo.vlite --bind 0.0.0.0:8080 --allow-remote
-"""
 
 
 def docker(*args, **kwargs):
     return subprocess.check_output(["docker", *args], text=True, **kwargs).strip()
 
 
-def start(name, token, graph=False):
-    """Run a disposable server on empty tmpfs volumes."""
-    if graph:
-        command = ("--entrypoint", "sh", IMAGE, "-c", GRAPH_BOOTSTRAP)
-    else:
-        command = ("--entrypoint", "vlite-server", IMAGE, "/data/demo.vlite", "--create-if-missing", "3",
-                   "--create-format", "5", "--bind", "0.0.0.0:8080", "--allow-remote")
+def start(name, token):
+    """Run a disposable server that creates a new graph-enabled file on empty tmpfs volumes."""
     # VLITE_TRUSTED_PROXY lets the sign-in screen offer passwords, as it does behind an HTTPS proxy.
     docker("run", "-d", "--name", name,
            "--mount", "type=tmpfs,target=/data,tmpfs-mode=1777",
            "--mount", "type=tmpfs,target=/admin,tmpfs-mode=1777",
            "-e", "VLITE_AUTH_TOKEN", "-e", "VLITE_ADMIN_DIR=/admin", "-e", "VLITE_TRUSTED_PROXY=1",
-           "-p", "127.0.0.1::8080", *command, env={**os.environ, "VLITE_AUTH_TOKEN": token})
+           "-p", "127.0.0.1::8080", "--entrypoint", "vlite-server", IMAGE, "/data/demo.vlite",
+           "--create-if-missing", "3", "--bind", "0.0.0.0:8080", "--allow-remote",
+           env={**os.environ, "VLITE_AUTH_TOKEN": token})
 
 
 def connect(name, token):
@@ -104,7 +86,7 @@ def connect(name, token):
 
 
 def seed(api):
-    """Write the synthetic articles and the extra collections that both databases show."""
+    """Write the synthetic articles and the extra collections."""
     for i, (_, title) in enumerate(ARTICLES, 101):
         api(f"/v1/vectors/{i}", {
             "vector": [round(1 - (i - 101) * .08, 2), round((i - 101) * .12, 2), .1],
@@ -121,7 +103,10 @@ def seed(api):
 
 def seed_graph(api):
     """Link the articles in an `articles` graph whose nodes are attached to their records."""
-    api("/v1/graphs", {"graph": "articles"}, "POST")
+    try:
+        api("/v1/graphs", {"graph": "articles"}, "POST")
+    except urllib.error.HTTPError as error:
+        raise RuntimeError(f"{IMAGE} did not create a graph-enabled database (HTTP {error.code})") from error
     ops = []
     for i, (key, title) in enumerate(ARTICLES, 101):
         ops.append({"op": "create_node", "key": key, "labels": ["Guide" if i < 105 else "Operations"],
@@ -186,15 +171,11 @@ def dashboard_server(backend):
 def capture(output):
     output.mkdir(parents=True, exist_ok=True)
     token = secrets.token_urlsafe(32)
-    names = ["vlite-connected-tour-" + uuid.uuid4().hex[:10] for _ in range(2)]
-    servers = []
+    name = "vlite-connected-tour-" + uuid.uuid4().hex[:10]
+    dashboard = None
     try:
-        start(names[0], token)
-        # Graph-enabled files reject the change feed and webhooks, so the Graph view comes from a
-        # second disposable database with the same articles and a small graph linking them.
-        start(names[1], token, graph=True)
-        backend, api = connect(names[0], token)
-        graph_backend, graph_api = connect(names[1], token)
+        start(name, token)
+        backend, api = connect(name, token)
         capabilities = api("/v1/capabilities")
         required = ("recommendations", "facets", "change_feed", "tenants",
                     "scoped_credentials", "auto_maintenance", "backup_restore", "webhooks")
@@ -202,18 +183,16 @@ def capture(output):
         if unavailable:
             raise RuntimeError(f"Capture database lacks required capabilities: {unavailable}")
         seed(api)
+        seed_graph(api)
         api("/v1/index/hnsw", {}, "POST")
         api("/v1/admin/backups", {}, "POST")
-        seed(graph_api)
-        seed_graph(graph_api)
         # Sample accounts with random, unsaved passwords; the browser signs in with the token.
         accounts = (("maya", "super_admin"), ("alex", "editor"), ("sam", "viewer"))
-        for call in (api, graph_api):
-            for username, role in accounts:
-                call("/v1/admin/users", {"username": username, "password": secrets.token_urlsafe(24), "role": role}, "POST")
-            if not call("/v1/auth/config")["password_login"]:
-                raise RuntimeError("Capture server does not offer password sign-in")
-        servers += [dashboard_server(backend), dashboard_server(graph_backend)]
+        for username, role in accounts:
+            api("/v1/admin/users", {"username": username, "password": secrets.token_urlsafe(24), "role": role}, "POST")
+        if not api("/v1/auth/config")["password_login"]:
+            raise RuntimeError("Capture server does not offer password sign-in")
+        dashboard = dashboard_server(backend)
         captures = []
         with sync_playwright() as p:
             browser = p.chromium.launch()
@@ -221,7 +200,7 @@ def capture(output):
                                     device_scale_factor=1, reduced_motion="reduce")
             errors = []
             page.on("pageerror", lambda error: errors.append(str(error)))
-            page.goto(f"http://127.0.0.1:{servers[0].server_port}/dashboard/")
+            page.goto(f"http://127.0.0.1:{dashboard.server_port}/dashboard/")
             nav = page.get_by_role("navigation", name="Dashboard navigation")
             menu = page.locator("#user-menu > summary")
 
@@ -329,6 +308,23 @@ def capture(output):
             expect(page.locator("#import-commit")).to_be_enabled()
             save("current-import.png")
 
+            nav.get_by_role("link", name="Graph", exact=True).click()
+            expect(page.locator("#graph-controls")).to_be_visible()
+            expect(page.locator("#graph-name")).to_have_value("articles")
+            page.locator("#graph-operation").select_option("traverse")
+            page.locator("#graph-start").fill(ARTICLES[0][0])
+            page.locator("#graph-run").click()
+            expect(page.locator("#graph-summary")).to_have_text(re.compile(r"^Complete"))
+            expect(page.locator("#graph-view .graph-node")).to_have_count(len(ARTICLES))
+            expect(page.locator("#graph-view .graph-edge")).to_have_count(len(LINKS))
+            # The query form is taller than the window: frame its Run query row, just below the sticky
+            # top bar, above the result and its node-link view.
+            page.locator("#graph .graph-actions").evaluate("""element => window.scrollBy(0,
+                element.getBoundingClientRect().top - document.querySelector(".topbar").getBoundingClientRect().bottom - 16)""")
+            expect(page.locator("#graph-run")).to_be_in_viewport()
+            expect(page.locator("#graph-view")).to_be_in_viewport(ratio=1)
+            save("current-graph.png", "#graph-summary")
+
             nav.get_by_role("link", name="Observability", exact=True).click()
             page.locator("#obs-interval").select_option("0")
             page.locator("#obs-refresh").click()
@@ -342,7 +338,10 @@ def capture(output):
             save("current-observability.png")
             show("#feed-load").click()
             expect(page.locator("#feed-result")).not_to_have_text("")
-            save("current-feed.png")
+            # The feed lists vector and graph events from the one database together.
+            expect(page.locator("#feed-table tbody")).to_contain_text("put")
+            expect(page.locator("#feed-table tbody")).to_contain_text("graph_batch")
+            save("current-feed.png", "#feed-table")
             nav.get_by_role("link", name="Administration", exact=True).click()
             page.locator("#refresh-health").click()
             expect(page.locator("#health-result")).to_contain_text("observed_at")
@@ -389,35 +388,12 @@ def capture(output):
             save("current-overview-dark.png")
             menu.click()
             save("current-preferences.png")
-            assert token not in page.locator("body").inner_text()
-            # The graph database is another origin, so the dashboard starts signed out with fresh preferences.
-            page.goto(f"http://127.0.0.1:{servers[1].server_port}/dashboard/")
-            expect(page.locator("#sign-in")).to_be_visible()
-            sign_in()
-            nav.get_by_role("link", name="Graph", exact=True).click()
-            expect(page.locator("#graph-controls")).to_be_visible()
-            expect(page.locator("#graph-name")).to_have_value("articles")
-            page.locator("#graph-operation").select_option("traverse")
-            page.locator("#graph-start").fill(ARTICLES[0][0])
-            page.locator("#graph-run").click()
-            expect(page.locator("#graph-summary")).to_have_text(re.compile(r"^Complete"))
-            expect(page.locator("#graph-view .graph-node")).to_have_count(len(ARTICLES))
-            expect(page.locator("#graph-view .graph-edge")).to_have_count(len(LINKS))
-            # The query form is taller than the window: frame its Run query row, just below the sticky
-            # top bar, above the result and its node-link view.
-            page.locator("#graph .graph-actions").evaluate("""element => window.scrollBy(0,
-                element.getBoundingClientRect().top - document.querySelector(".topbar").getBoundingClientRect().bottom - 16)""")
-            expect(page.locator("#graph-run")).to_be_in_viewport()
-            expect(page.locator("#graph-view")).to_be_in_viewport(ratio=1)
-            save("current-graph.png", "#graph-summary")
             assert not errors, errors
             assert token not in page.locator("body").inner_text()
             browser.close()
         assert len({item["sha256"] for item in captures}) == len(captures)
         manifest = {
-            "data": "Synthetic demo records in isolated disposable databases",
-            "graph_data": ("The Graph view uses a second, graph-enabled database with the same records, "
-                           "because graph-enabled files have no change feed or webhooks"),
+            "data": "Synthetic demo records and an articles graph in one isolated disposable database",
             "record_count": len(ARTICLES), "connected": True, "backend_image": IMAGE,
             "format_version": capabilities["format_version"],
             # Text-mode hashes match tests/dashboard_tours.py on any checkout line ending.
@@ -428,10 +404,10 @@ def capture(output):
         (output / "connected-captures.json").write_text(json.dumps(manifest, indent=2) + "\n")
         print(f"Captured {len(captures)} distinct connected views: the sign-in screen and all seven workspaces.")
     finally:
-        for server in servers:
-            server.shutdown()
-            server.server_close()
-        subprocess.run(["docker", "rm", "-f", *names], check=False,
+        if dashboard:
+            dashboard.shutdown()
+            dashboard.server_close()
+        subprocess.run(["docker", "rm", "-f", name], check=False,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 

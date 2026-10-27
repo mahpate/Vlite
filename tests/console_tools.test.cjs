@@ -195,7 +195,31 @@ for (const value of [[[1, 1], [1, 2]], [[2, 1], [1, 1]], [[-1, 1]], [[4294967296
 const hook = { url: "https://example.test/hook", secret: "random-signing-secret", collections: "docs,default", events: "put,metadata_update" };
 assert.deepEqual(u.webhookRequest(hook), { url: hook.url, secret: hook.secret, collections: ["docs", "default"], events: ["put", "metadata_update"] });
 assert.equal(u.webhookRequest({ ...hook, collections: "" }).collections, undefined);
-for (const bad of [{ url: "javascript:alert(1)" }, { url: "https://user:pass@example.test" }, { url: "https://example.test/#secret" }, { secret: "short" }, { secret: "x".repeat(257) }, { events: "put,put" }, { events: "expire" }, { events: "" }, { collections: "../docs" }, { collections: "docs,docs" }]) assert.throws(() => u.webhookRequest({ ...hook, ...bad }));
+for (const bad of [{ url: "javascript:alert(1)" }, { url: "https://user:pass@example.test" }, { url: "https://example.test/#secret" }, { secret: "short" }, { secret: "x".repeat(257) }, { events: "put,put" }, { events: "expire" }, { events: "graph_batch,graph_batch" }, { events: "graph_updated" }, { collections: "../docs" }, { collections: "docs,docs" }, { graphs: "Articles" }, { graphs: "1graph" }, { graphs: "a".repeat(64) }, { graphs: "articles,articles" }]) assert.throws(() => u.webhookRequest({ ...hook, ...bad }));
+assert.deepEqual(u.webhookRequest({ ...hook, events: " , ", collections: "" }), { url: hook.url, secret: hook.secret }, "Blank filters are omitted so the server sends every event");
+assert.deepEqual(u.webhookRequest({ ...hook, events: "graph_created, graph_batch,put", graphs: "articles, road-map_2" }),
+  { url: hook.url, secret: hook.secret, events: ["graph_created", "graph_batch", "put"], collections: ["docs", "default"], graphs: ["articles", "road-map_2"] });
+assert.equal(u.WEBHOOK_EVENTS.length, 10);
+assert.equal(u.webhookRequest({ ...hook, events: u.WEBHOOK_EVENTS.join(",") }).events.length, 10);
+assert.equal(u.webhookRequest({ ...hook, graphs: "a".repeat(63) }).graphs[0].length, 63);
+assert.equal(u.webhookRequest({ ...hook, graphs: Array.from({ length: 64 }, (_, n) => `g${n}`).join(",") }).graphs.length, 64);
+assert.throws(() => u.webhookRequest({ ...hook, graphs: Array.from({ length: 65 }, (_, n) => `g${n}`).join(",") }), /at most 64 graphs/);
+assert.deepEqual(u.feedRows([
+  { sequence: "7", collection: "docs", change: { type: "put", id: "42" } },
+  { sequence: "8", collection: "docs", change: { type: "collection_created", dimensions: 3 } },
+  { sequence: "9", collection: "", change: { type: "graph_batch", graph: "articles", revision: "12", operations: [{ op: "node_upserted" }, { op: "edge_upserted" }, { op: "node_upserted" }] } },
+  { sequence: "10", collection: "", change: { type: "graph_dropped", graph: "articles" } },
+  { sequence: "11", collection: "docs", change: { type: "vectors_updated" } },
+]), [
+  ["7", "put", "docs", null, "Record 42"],
+  ["8", "collection_created", "docs", null, "3 dimensions"],
+  ["9", "graph_batch", null, "articles", "Revision 12: 3 operations (2 node_upserted, 1 edge_upserted)"],
+  ["10", "graph_dropped", null, "articles", null],
+  ["11", "vectors_updated", "docs", null, null],
+]);
+assert.deepEqual(u.feedRows([{ sequence: "1", collection: "", change: { type: "graph_batch", graph: "g", revision: "1", operations: [{ op: "edge_deleted" }] } }])[0][4], "Revision 1: 1 operation (1 edge_deleted)");
+assert.deepEqual(u.feedRows(undefined), []);
+assert.deepEqual(u.feedRows([null]), [[null, "unknown", null, null, null]]);
 assert.equal(u.webhookRequest({ ...hook, collections: Array.from({ length: 64 }, (_, n) => `c${n}`).join(",") }).collections.length, 64);
 assert.throws(() => u.webhookRequest({ ...hook, collections: Array.from({ length: 65 }, (_, n) => `c${n}`).join(",") }));
 assert.throws(() => u.webhookRequest({ ...hook, secret: "😀".repeat(65) }), "Signing secret limit is UTF-8 bytes");
@@ -211,7 +235,7 @@ const ranked = { ...v2, query: { ...v2.query, vector: [1, 0], mode: "exact", rer
 assert.deepEqual(u.savedQueryV2(ranked, 2, "docs"), ranked);
 assert.throws(() => u.savedQueryV2({ ...ranked, query: { ...ranked.query, rerank: { ...ranked.query.rerank, secret: "x" } } }, 2, "docs"));
 assert.throws(() => u.savedQueryV2({ ...ranked, query: { ...ranked.query, mode: "hybrid" } }, 2, "docs"));
-console.log("PASS V5 console helpers: TTL, exact/MMR reranking, sparse pairs, webhook validation/redaction, PITR safe integers, feed cursor encoding and read-only route classification");
+console.log("PASS V5 console helpers: TTL, exact/MMR reranking, sparse pairs, webhook validation/redaction including graph events and filters, feed rows, PITR safe integers, feed cursor encoding and read-only route classification");
 
 // Exercise real registered admin handlers without a server, browser, timers or network.
 async function adminHandlerChecks() {

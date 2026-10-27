@@ -1450,7 +1450,9 @@ class FeatureApi(FakeApi):
         if path == "/v1/changes":
             from urllib.parse import parse_qs
             cursor = parse_qs(query).get("cursor", [""])[0]
-            return 200, {"changes": [{"sequence": "18446744073709551615", "collection": "docs", "change": {"type": "put", "id": "5"}}],
+            return 200, {"changes": [{"sequence": "18446744073709551614", "collection": "docs", "change": {"type": "put", "id": "5"}},
+                                     {"sequence": "18446744073709551615", "collection": "", "change": {"type": "graph_batch", "graph": "articles", "revision": "3",
+                                      "operations": [{"op": "node_upserted"}, {"op": "edge_upserted"}]}}],
                          "head": "18446744073709551615", "next_cursor": "a+b/=&?", "has_more": not cursor}, {}
         if path == "/v1/admin/restores":
             return 201, {"name": "vlite-restored-1.vlite", "restart_required": False}, {}
@@ -1551,6 +1553,10 @@ def exercise_features_mocked(browser):
     assert fake.log[-1]["body"] == {"vector": [1, 0], "k": 1, "ef_search": 100}
     control(page, "#feed-load").click()
     expect(control(page, "#feed-result")).to_contain_text("18446744073709551615")
+    feed_rows = page.locator("#feed-table tbody tr")
+    expect(feed_rows).to_have_count(2)
+    expect(feed_rows.nth(0)).to_contain_text("Record 5")
+    expect(feed_rows.nth(1).locator("td")).to_have_text(["18446744073709551615", "graph_batch", "--", "articles", "Revision 3: 2 operations (1 node_upserted, 1 edge_upserted)"])
     control(page, "#feed-next").click()
     expect(control(page, "#feed-next")).to_be_disabled()
     assert "cursor=a%2Bb%2F%3D%26%3F" in fake.log[-1]["query"]
@@ -1567,6 +1573,16 @@ def exercise_features_mocked(browser):
     expect(control(page, "#webhook-result")).to_contain_text("receiver unavailable")
     expect(control(page, "#webhook-secret")).to_have_value("")
     assert "local-webhook-signing-secret" not in visible_state(page)
+    assert set(fake.log[-1]["body"]) == {"url", "secret"}, "blank event and filter fields must be omitted so every event is sent"
+    control(page, "#webhook-events").fill("graph_batch, put")
+    control(page, "#webhook-graphs").fill("articles")
+    control(page, "#webhook-secret").fill("graph-webhook-signing-secret")
+    control(page, "#webhook-create").click()
+    confirm(page, "Create this webhook")
+    expect(control(page, "#webhook-secret")).to_have_value("")
+    posted = fake.log[-1]
+    assert posted["method"] == "POST" and posted["path"] == "/v1/admin/webhooks", posted["path"]
+    assert posted["body"]["events"] == ["graph_batch", "put"] and posted["body"]["graphs"] == ["articles"] and "collections" not in posted["body"], posted["body"]
     control(page, "#webhook-list").click()
     expect(control(page, "#webhook-result")).to_contain_text('"attempts": 2')
     control(page, "#webhook-id").fill("a" * 24)
@@ -1585,6 +1601,9 @@ def exercise_features_mocked(browser):
     sign_out(page)
     for name in ["group-result", "named-result", "geo-result", "recommend-result", "facets-result", "stats-result", "language-result", "disk-result", "feed-result", "webhook-result", "pitr-result"]:
         expect(control(page, "#" + name)).to_have_text("")
+    expect(page.locator("#feed-table tbody tr")).to_have_count(0)
+    for name in ["webhook-events", "webhook-graphs"]:
+        expect(page.locator("#" + name)).to_have_value("")
     assert not errors, errors
     context.close()
     # Read-only retrieval POSTs are not mistaken for mutations; admin actions stay gated.

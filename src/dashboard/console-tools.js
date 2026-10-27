@@ -46,6 +46,19 @@
     }
     element.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
   };
+  const table = (name, rows) => {
+    const body = $(name).querySelector("tbody");
+    body.replaceChildren();
+    for (const cells of rows) {
+      const row = document.createElement("tr");
+      for (const value of cells) {
+        const cell = document.createElement("td");
+        if (value instanceof Node) cell.append(value); else cell.textContent = value === null || value === undefined ? "--" : String(value);
+        row.append(cell);
+      }
+      body.append(row);
+    }
+  };
   function revealAndScroll(target) {
     const navigation = window.VLiteNavigation;
     if (navigation?.reveal) navigation.reveal(target);
@@ -552,18 +565,50 @@
     }
     return value;
   }
+  const WEBHOOK_EVENTS = ["put", "delete", "metadata_update", "collection_created", "collection_dropped", "settings_updated", "vectors_updated", "graph_created", "graph_dropped", "graph_batch"];
+  const GRAPH_NAME = /^[a-z][a-z0-9_-]{0,62}$/;
+  const commaList = (value) => (value ?? "").split(",").map((v) => v.trim()).filter(Boolean);
+  // Blank events, collections or graphs are omitted, so the server applies its default: everything.
   function webhookRequest(input) {
     const url = new URL(input.url);
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.hash) throw new Error("Webhook URL must use HTTP(S), without credentials or fragment");
     const secretBytes = new TextEncoder().encode(input.secret).length;
     if (secretBytes < 16 || secretBytes > 256) throw new Error("Signing secret must contain 16..256 bytes");
-    const events = input.events.split(",").map((v) => v.trim()).filter(Boolean);
-    if (!events.length || new Set(events).size !== events.length || events.some((v) => !["put", "delete", "metadata_update", "collection_created", "collection_dropped", "settings_updated", "vectors_updated"].includes(v))) throw new Error("Select unique supported webhook events");
-    const collections = input.collections.split(",").map((v) => v.trim()).filter(Boolean);
+    const events = commaList(input.events);
+    if (new Set(events).size !== events.length || events.some((v) => !WEBHOOK_EVENTS.includes(v))) throw new Error(`Webhook events must be unique and from: ${WEBHOOK_EVENTS.join(", ")}`);
+    const collections = commaList(input.collections);
     if (collections.length > 64) throw new Error("Webhook filters accept at most 64 collections");
     collections.forEach(collectionName);
     if (new Set(collections).size !== collections.length) throw new Error("Duplicate webhook collection");
-    return { url: url.href, events, secret: input.secret, ...(collections.length ? { collections } : {}) };
+    const graphs = commaList(input.graphs);
+    if (graphs.length > 64) throw new Error("Webhook filters accept at most 64 graphs");
+    if (graphs.some((v) => !GRAPH_NAME.test(v))) throw new Error("Graph names match ^[a-z][a-z0-9_-]{0,62}$");
+    if (new Set(graphs).size !== graphs.length) throw new Error("Duplicate webhook graph");
+    return { url: url.href, secret: input.secret, ...(events.length ? { events } : {}), ...(collections.length ? { collections } : {}), ...(graphs.length ? { graphs } : {}) };
+  }
+  // One row per feed event: sequence, event, collection, graph, details. Graph events carry a graph, not a collection.
+  function feedRows(changes) {
+    if (!Array.isArray(changes)) return [];
+    return changes.map((entry) => {
+      const change = object(entry?.change) ? entry.change : {};
+      const type = typeof change.type === "string" ? change.type : "unknown";
+      const graph = typeof change.graph === "string" ? change.graph : null;
+      let details = null;
+      if (typeof change.id === "string") details = `Record ${change.id}`;
+      else if (Number.isInteger(change.dimensions)) details = `${change.dimensions} dimensions`;
+      else if (type === "graph_batch") {
+        const operations = Array.isArray(change.operations) ? change.operations : [];
+        const counts = new Map();
+        for (const operation of operations) {
+          const op = typeof operation?.op === "string" ? operation.op : "unknown";
+          counts.set(op, (counts.get(op) ?? 0) + 1);
+        }
+        const summary = [...counts].map(([op, count]) => `${count} ${op}`).join(", ");
+        details = `Revision ${change.revision ?? "--"}: ${operations.length} operation${operations.length === 1 ? "" : "s"}${summary ? ` (${summary})` : ""}`;
+      }
+      const collection = graph === null && typeof entry?.collection === "string" && entry.collection ? entry.collection : null;
+      return [entry?.sequence ?? null, type, collection, graph, details];
+    });
   }
   function pitrRequest(backup, kind, target) {
     if (!/^[a-zA-Z0-9_.-]{1,96}$/.test(backup) || backup.includes("..")) throw new Error("Use an existing generated backup name, not a path");
@@ -653,9 +698,10 @@
     async function loadFeed(cursor) {
       if (!feedAllowed()) throw new Error("HTTP 403: change feed requires read over all collections");
       nextCursor = null; hasMore = false;
-      text("feed-result", ""); text("feed-status", "Loading page");
+      text("feed-result", ""); text("feed-status", "Loading page"); table("feed-table", []);
       const result = await ctx.api("GET", feedPath(cursor, $("feed-limit").value));
       nextCursor = result.next_cursor; hasMore = result.has_more === true;
+      table("feed-table", feedRows(result.changes));
       display("feed-result", result.changes);
       text("feed-status", { head: result.head, next_cursor: nextCursor, has_more: hasMore });
     }
@@ -682,7 +728,7 @@
       admin("webhooks");
       let body;
       try {
-        body = webhookRequest({ url: $("webhook-url").value, collections: $("webhook-collections").value, events: $("webhook-events").value, secret: $("webhook-secret").value });
+        body = webhookRequest({ url: $("webhook-url").value, collections: $("webhook-collections").value, graphs: $("webhook-graphs").value, events: $("webhook-events").value, secret: $("webhook-secret").value });
         if (!await ctx.confirm("Create this webhook subscription? Committed changes will be sent to the configured destination. Its signing secret cannot be recovered from the API.")) return;
         display("webhook-result", await ctx.api("POST", "/v1/admin/webhooks", body, { data: false, sensitive: true }));
       } finally { $("webhook-secret").value = ""; if (body) body.secret = ""; }
@@ -711,8 +757,9 @@
         $("recommend-vectors").value = $("recommend-negative-vectors").value = "[]";
         if (all) {
           nextCursor = null; hasMore = false;
-          for (const name of ["feed-cursor", "webhook-url", "webhook-collections", "webhook-secret", "webhook-id", "pitr-backup", "pitr-target"]) $(name).value = "";
+          for (const name of ["feed-cursor", "webhook-url", "webhook-events", "webhook-collections", "webhook-graphs", "webhook-secret", "webhook-id", "pitr-backup", "pitr-target"]) $(name).value = "";
           for (const name of ["feed-result", "feed-status", "webhook-result", "pitr-result"]) text(name, "");
+          table("feed-table", []);
         }
       },
       gate() {
@@ -1257,20 +1304,7 @@
       text("backup-result", await ctx.api("POST", "/v1/admin/restores/select", { name }));
     });
     // ---- EPIC-015 surfaces ----
-    const table = (name, rows) => {
-      const body = $(name).querySelector("tbody");
-      body.replaceChildren();
-      for (const cells of rows) {
-        const row = document.createElement("tr");
-        for (const value of cells) {
-          const cell = document.createElement("td");
-          if (value instanceof Node) cell.append(value); else cell.textContent = value === null || value === undefined ? "--" : String(value);
-          row.append(cell);
-        }
-        body.append(row);
-      }
-    };
-    const when = (ms) => ms === null || ms === undefined ? "--" : new Date(ms).toISOString();
+    const when =  (ms) => ms === null || ms === undefined ? "--" : new Date(ms).toISOString();
     function requireExtended() {
       if (!ctx.extended()) throw new Error("This server predates collections, settings and index diagnostics; upgrade the server");
     }
@@ -1724,7 +1758,7 @@
     jsonDocuments, collectionDraft, codeSnippet, responseSummary,
     id, vector, metadata, record, savedQuery, csvParse, csvExport, distances, analyze, pca,
     collectionName, collectionPath, settings, scoreDirection, redact, maskSecret, OPERATIONS, credentialRequest, graceSeconds,
-    expiry, rerank, sparseVector, webhookRequest, pitrRequest, feedPath,
+    expiry, rerank, sparseVector, webhookRequest, WEBHOOK_EVENTS, feedRows, pitrRequest, feedPath,
     boundedInteger, importRows, chunk, resumePlan, savedQueryV2, autoMaintenance, autoMaintenanceForm, backupSchedule, memoryRows, requestAllowed, isSearch,
   } };
 })();
