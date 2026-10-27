@@ -7,7 +7,9 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from graph_reference import CpuClock, calm_preflight, cpu_summary, run_process, source_manifest
+from graph_reference import (
+    CpuClock, calm_preflight, cpu_summary, reference_identity, run_process, source_manifest,
+)
 
 
 class ReferenceRunnerTests(unittest.TestCase):
@@ -65,6 +67,20 @@ class ReferenceRunnerTests(unittest.TestCase):
         ], 16)
         self.assertEqual(result["max_background_cpu_fraction"], 0)
         self.assertGreater(result["mean_background_cpu_fraction"], 0)
+
+    def test_identity_accepts_only_the_azure_baseline_host(self):
+        machine = {
+            "cpu": [{"Name": "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz"}],
+            "logical_cpus": 16, "ram_bytes": 68_713_967_616, "os_version": "10.0.20348",
+            "volume": {"DriveLetter": "F", "FileSystem": "NTFS"},
+            "disk": {"FriendlyName": "Msft Virtual Disk", "BusType": "SAS"},
+        }
+        self.assertTrue(all(reference_identity(machine).values()))
+        retired = dict(machine, ram_bytes=68_665_831_424, os_version="10.0.26300",
+                       volume={"DriveLetter": "Q", "FileSystem": "ReFS"})
+        checks = reference_identity(retired)
+        self.assertFalse(checks["ram"] or checks["os"] or checks["volume"])
+        self.assertTrue(checks["cpu"] and checks["disk"])
 
     def test_source_manifest_covers_benchmarks_engine_and_lockfile(self):
         manifest = source_manifest()

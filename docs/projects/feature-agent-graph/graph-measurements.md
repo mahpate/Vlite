@@ -33,7 +33,7 @@ Still open:
 | `graph_memory.exe` SHA-256 | `9e7031435b98295916a10bf4ece4f6c43e3c3943fa1edd6bdcb6a4a57c5fdce7` |
 | Source identity | 97-entry `source_sha256` manifest in the report (`Cargo.toml`, `Cargo.lock`, `build.rs`, every `.rs` and `Cargo.toml` under `src`, `examples` and `crates`, and the runner). The runner re-checks it after each repetition, and it was recomputed once more after collection with zero differences |
 
-The hardware matches the DO-005 description in [`baseline.md`](baseline.md). The report's `reference_identity_checks` (CPU model, 16 logical CPUs, RAM size, OS build, `Q:` ReFS volume, virtual SAS disk) are all true and `active_builds` is empty; the runner refuses to start otherwise.
+The hardware matches the DO-005 description in [`baseline.md`](baseline.md). The report's `reference_identity_checks` (CPU model, 16 logical CPUs, RAM size, OS build, `Q:` ReFS volume, virtual SAS disk) are all true and `active_builds` is empty; the runner refused to start otherwise. Since 2026-10-27 the runner checks the Azure DO-005 baseline host instead (see [`baseline.md`](baseline.md)), so this report's host is retired and its numbers are not comparable with a new run.
 
 ## Collection protocol
 

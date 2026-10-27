@@ -86,7 +86,7 @@ Binaries grew from 1,146,368 to 1,677,824 bytes (`vlite-bench`) and 2,829,824 to
 - Peak working set is the whole benchmark child process (dataset, database, exact oracle, index and queries), not marginal index memory, and is comparable only on Windows.
 - REG-010(b) open/replay time is `vlite-bench`'s `reopen_ms` of its own file; put throughput is `ingest_vectors_per_second`.
 - Six small-workload runs per build-pair come from a second VM of the same configuration (see above). The 100,000 × 384 results are single-VM.
-- `scripts\graph_reference.py` (the graph-on NFR-002/NFR-003 runner) still checks the retired workstation's identity (`Q:` ReFS, OS build 26300). NFR-002/NFR-003 measurements must run on this baseline's VM configuration before they are compared with it, so that check has to move to this host first.
+- `scripts\graph_reference.py` (the graph-on NFR-002/NFR-003 runner) now checks this VM configuration (D16s_v5, 16 vCPUs, 68,713,967,616 bytes RAM, OS build 20348, `F:` NTFS data disk). No graph-on run has been collected on it yet; graph benchmarks run with major releases.
 
 ## Previous baseline: `81ff901` (retired)
 

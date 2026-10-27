@@ -203,6 +203,34 @@ def source_manifest():
     }
 
 
+# The DO-005 baseline host (docs/projects/feature-agent-graph/baseline.md):
+# Azure Standard_D16s_v5, Windows Server 2022 build 20348, database files on the
+# 256 GiB Premium SSD data disk mounted as F: (NTFS).
+REFERENCE_HOST = {
+    "cpu": "8370C",
+    "logical_cpus": 16,
+    "ram_bytes": 68_713_967_616,
+    "os_version": "10.0.20348",
+    "drive": "F",
+    "file_system": "NTFS",
+    "disk_name": "Msft Virtual Disk",
+    "bus_type": "SAS",
+}
+
+
+def reference_identity(machine, host=REFERENCE_HOST):
+    return {
+        "cpu": any(host["cpu"] in cpu["Name"] for cpu in machine["cpu"]),
+        "logical_cpus": machine["logical_cpus"] == host["logical_cpus"],
+        "ram": machine["ram_bytes"] == host["ram_bytes"],
+        "os": machine["os_version"] == host["os_version"],
+        "volume": machine["volume"]["DriveLetter"] == host["drive"]
+        and machine["volume"]["FileSystem"] == host["file_system"],
+        "disk": machine["disk"]["FriendlyName"] == host["disk_name"]
+        and machine["disk"]["BusType"] == host["bus_type"],
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--latency-exe", type=Path, required=True)
@@ -218,20 +246,13 @@ def main():
     if min(args.runs, args.nodes, args.queries) < 1 or args.edges < 0:
         parser.error("runs/nodes/queries must be positive and edges nonnegative")
     machine = json.loads(args.machine_json.read_text(encoding="utf-8-sig"))
-    identity = {
-        "cpu": any("8370C" in cpu["Name"] for cpu in machine["cpu"]),
-        "logical_cpus": machine["logical_cpus"] == 16,
-        "ram": machine["ram_bytes"] == 68_665_831_424,
-        "os": machine["os_version"] == "10.0.26300",
-        "volume": machine["volume"]["DriveLetter"] == "Q"
-        and machine["volume"]["FileSystem"] == "ReFS",
-        "disk": machine["disk"]["FriendlyName"] == "Msft Virtual Disk"
-        and machine["disk"]["BusType"] == "SAS",
-    }
+    identity = reference_identity(machine)
     if not all(identity.values()) or machine["active_builds"]:
         raise RuntimeError(f"reference host mismatch or active builds: {identity}, {machine['active_builds']}")
-    if args.work_dir.resolve().drive.upper() != "Q:":
-        raise RuntimeError("reference database files must use the recorded Q: volume")
+    if args.work_dir.resolve().drive.upper() != f"{REFERENCE_HOST['drive']}:":
+        raise RuntimeError(
+            f"reference database files must use the recorded {REFERENCE_HOST['drive']}: data disk"
+        )
     args.work_dir.mkdir(parents=True, exist_ok=True)
     manifest = source_manifest()
     report = {

@@ -1077,6 +1077,9 @@ not cover resource limits beyond `GraphLimits::CEILING`.
 - **Unchanged.** The quiet-host policy, the REG-010 budget proposals (PD-014,
   GATE-004) and the rejected `4312fb3` attempts. The rejected local runs stay
   invalid; this decision adopts only the Azure campaign.
-- **Follow-up.** `scripts\graph_reference.py` still pins the retired
-  workstation's identity, so NFR-002/NFR-003 graph-on measurements must move
-  to this VM configuration before they are compared with the new baseline.
+- **Follow-up (done 2026-10-27).** `scripts\graph_reference.py` now pins
+  this VM configuration (OS build 20348, `F:` NTFS data disk, 68,713,967,616
+  bytes RAM) instead of the retired workstation. No graph-on run has been
+  collected yet.
+- **Cadence (owner decision 2026-10-27).** Benchmark campaigns, vector and
+  graph, run for major releases only, not for minor or patch releases.
