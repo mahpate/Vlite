@@ -112,7 +112,7 @@ with NativeLibrary(sys.argv[1]).open(sys.argv[2]) as db:
 
 
 def graph_surface(native, directory):
-    """Opt-in graph commands with a `--features graph` library; stable rejection otherwise."""
+    """Graph commands (always compiled since v0.5.1); stable rejection from older libraries."""
     path = directory / "graph.vlite"
     if not native.supports_graph:
         fails("unsupported", lambda: native.create_with_graph(path, 2))

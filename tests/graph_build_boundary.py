@@ -12,8 +12,8 @@ CRATE = ROOT / "crates" / "vlite-graph"
 ENGINE = ROOT / "src" / "property_graph" / "engine"
 HARNESS = '#[path = "../../../src/property_graph/engine/mod.rs"]'
 # GATE-008 (v0.5.0) pinned these into distributed artifacts. Since v0.5.1 the
-# graph is always compiled and `graph` is a no-op alias kept for old commands.
-SHIPPED_GRAPH_FEATURES = {"graph", "mcp-proxy"}
+# graph is always compiled; v0.6.0 removed the `graph` feature alias.
+SHIPPED_GRAPH_FEATURES = {"mcp-proxy"}
 # Artifact-producing `cargo build --release --bins` commands in each file.
 ARTIFACT_BUILDS = {"Dockerfile": 1, ".github/workflows/release.yml": 2}
 # Artifact-producing vlite-ffi builds (C library, wheels, Node packages) per file.
@@ -55,12 +55,10 @@ class GraphBuildBoundary(unittest.TestCase):
         for target in root.get("target", {}).values():
             for table in ("dependencies", "dev-dependencies", "build-dependencies"):
                 self.assertNotIn("vlite-graph", target.get(table, {}), table)
-        # `graph` is a no-op compatibility alias: the engine is always compiled.
-        self.assertEqual(root["features"]["graph"], [])
-        self.assertNotIn("graph", root["features"]["default"])
+        # The engine is always compiled; there is no `graph` feature.
+        self.assertNotIn("graph", root["features"])
         # `mcp-proxy` (ITEM-043) layers the graph tools over a remote server;
         # it is never on by default but is pinned into artifacts (GATE-008).
-        self.assertNotIn("graph", root["features"]["mcp-proxy"])
         self.assertNotIn("mcp-proxy", root["features"]["default"])
         for features in ((), ("--all-features",)):
             with self.subTest(features=features):
@@ -78,12 +76,21 @@ class GraphBuildBoundary(unittest.TestCase):
         self.assertIn("\npub mod property_graph;", root_lib)
 
     def test_graph_is_not_feature_gated(self):
-        # v0.5.1: no source, test or binding code depends on the `graph` alias.
+        # No source, test or binding code is gated on a `graph` feature.
         gated = subprocess.run(
             ["git", "grep", "-n", "-E", r'feature *= *\"graph\"', "--", "*.rs"],
             cwd=ROOT, capture_output=True, text=True,
         ).stdout.splitlines()
         self.assertEqual(gated, [])
+        # No build or test command in this repository selects a `graph` feature.
+        selected = subprocess.run(
+            ["git", "grep", "-n", "-E", "-e",
+             r'--features[ =]"?([A-Za-z0-9_-]+,)*graph("|,|[[:space:]]|$)|"--features", "graph"',
+             "--", ".github", "Dockerfile", "bindings/*.py", "bindings/*/*.mjs", "examples", "tests/*.rs"],
+            cwd=ROOT, capture_output=True, text=True,
+        )
+        self.assertIn(selected.returncode, (0, 1), selected.stderr)
+        self.assertEqual(selected.stdout.splitlines(), [])
 
     def test_engine_is_pure_and_module_relative(self):
         files = sorted(ENGINE.rglob("*.rs"))
@@ -127,25 +134,25 @@ class GraphBuildBoundary(unittest.TestCase):
                     self.assertIsNotNone(match)
                     self.assertEqual(sorted(match.group(1).split(",")), expected)
 
-    def test_ffi_artifact_builds_enable_graph(self):
-        ffi = load_toml(ROOT / "bindings" / "c" / "Cargo.toml")["features"]
-        # A no-op alias: graph commands are always built since v0.5.1.
-        self.assertEqual(ffi["graph"], [])
-        self.assertNotIn("graph", ffi.get("default", []))
+    def test_ffi_artifact_builds_include_graph(self):
+        # Graph commands are always built: vlite-ffi has no `graph` feature and
+        # every artifact build uses the default features.
+        ffi = load_toml(ROOT / "bindings" / "c" / "Cargo.toml").get("features", {})
+        self.assertNotIn("graph", ffi)
         for name, count in FFI_BUILDS.items():
             text = (ROOT / name).read_text(encoding="utf-8")
             with self.subTest(file=name):
                 if name.endswith((".py", ".mjs")):
-                    builds = re.findall(r'"build", "--locked", "--release", "-p", "vlite-ffi", ([^\]]*)', text)
+                    builds = re.findall(r'"build", "--locked", "--release", "-p", "vlite-ffi",\s*([^\]]*)', text)
                     self.assertEqual(len(builds), count)
                     for rest in builds:
-                        self.assertIn('"--features", "graph"', rest)
+                        self.assertNotIn('"--features"', rest)
                 else:
                     builds = [line for line in text.splitlines()
                               if "cargo build" in line and "--release" in line and "-p vlite-ffi" in line]
                     self.assertEqual(len(builds), count)
                     for line in builds:
-                        self.assertRegex(line, r"-p vlite-ffi --features graph\b")
+                        self.assertNotIn("--features", line)
 
     def test_release_archives_ship_graph_binaries(self):
         # FOLLOWUP-001/ITEM-043: the graph command line and the MCP server

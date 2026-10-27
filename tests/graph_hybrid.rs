@@ -659,7 +659,7 @@ fn truncation_and_cancellation_bound_the_expansion_not_the_pivots() {
 
 /// Indicative pivot and expansion timings (ITEM-039); not publishable
 /// measurements (DO-005). Run with
-/// `cargo test --release --features graph --test graph_hybrid -- --ignored --nocapture`.
+/// `cargo test --release --test graph_hybrid -- --ignored --nocapture`.
 #[test]
 #[ignore]
 fn indicative_timings() {

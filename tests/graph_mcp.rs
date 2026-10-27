@@ -1,4 +1,4 @@
-//! EPIC-009: `vlite-mcp` property-graph tools (opt-in `graph` feature).
+//! EPIC-009: `vlite-mcp` property-graph tools.
 //!
 //! Vector-only files keep the golden MCP transcript byte for byte; graph tools
 //! appear only on graph-enabled files; write tools only with `--writable`.

@@ -30,9 +30,6 @@ grpc = [
     "dep:protox",
 ]
 gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
-# The property graph is always compiled in since v0.5.1. `graph` is kept as a
-# no-op alias so existing `--features ...,graph` invocations still build.
-graph = []
 # ITEM-043: `vlite-mcp --server URL` forwards the graph tools to a running
 # vlite-server (in release artifacts since v0.5.0).
 mcp-proxy = ["mcp", "dep:reqwest"]

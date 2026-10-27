@@ -26,7 +26,7 @@ def main():
             import sysconfig
             env.setdefault("MACOSX_DEPLOYMENT_TARGET", sysconfig.get_config_var("MACOSX_DEPLOYMENT_TARGET") or "11.0")
         # Distributed wheels include the opt-in property-graph commands (GATE-008, v0.5.0).
-        subprocess.run(["cargo", "build", "--locked", "--release", "-p", "vlite-ffi", "--features", "graph",
+        subprocess.run(["cargo", "build", "--locked", "--release", "-p", "vlite-ffi",
                         "--manifest-path", str(root / "Cargo.toml")], env=env, check=True)
         name = "vlite_ffi.dll" if sys.platform == "win32" else "libvlite_ffi.dylib" if sys.platform == "darwin" else "libvlite_ffi.so"
         library = target / "release" / name

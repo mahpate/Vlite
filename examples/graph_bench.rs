@@ -1,6 +1,6 @@
 //! Graph workload latency benchmark (EPIC-005 ITEM-021, NFR-002/NFR-003).
 //!
-//! cargo run --release --locked --features graph --example graph_bench -- \
+//! cargo run --release --locked --example graph_bench -- \
 //!     [--nodes 100000] [--edges 1000000] [--queries 1000] [--seed 1] [--dir PATH]
 //!
 //! Builds the seeded synthetic graph of `graph_support/workload.rs`

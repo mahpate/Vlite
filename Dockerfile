@@ -22,8 +22,8 @@ RUN if [ "$VLITE_IMAGE_TESTS" = "1" ]; then cargo test --locked --workspace --al
          shipped) shipped="--bin vlite-smoke --bin vlite-maintain --bin vlite-bench --bin vlite-server" ;; \
          *) echo "VLITE_IMAGE_BINS must be all or shipped" >&2; exit 1 ;; \
        esac \
-    && cargo build --locked --release ${shipped:---bins} --features http-embedder,otel,tools,import-formats,json,mcp,server,grpc,gpu,graph,mcp-proxy \
-    && if [ "$VLITE_IMAGE_BINS" = "all" ]; then cargo build --locked --release -p vlite-ffi --features graph; fi
+    && cargo build --locked --release ${shipped:---bins} --features http-embedder,otel,tools,import-formats,json,mcp,server,grpc,gpu,mcp-proxy \
+    && if [ "$VLITE_IMAGE_BINS" = "all" ]; then cargo build --locked --release -p vlite-ffi; fi
 
 FROM build AS test
 CMD ["cargo", "test", "--locked", "--workspace", "--all-targets", "--all-features"]

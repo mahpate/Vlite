@@ -9,11 +9,6 @@ description = "Versioned C ABI for the VLite embedded database"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
-[features]
-# Property-graph commands are always built since v0.5.1; `graph` is a no-op
-# alias kept so existing `--features graph` builds still work.
-graph = []
-
 [dependencies]
 vlite = { path = "../..", features = ["json"] }
 serde = { version = "1", features = ["derive"] }

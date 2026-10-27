@@ -5,7 +5,7 @@
 //! V5 file whose header carries the proposed `FLAG_GRAPH = 4` bit (with a
 //! valid header CRC and one op-12 frame encoded with the DO-003 draft
 //! layout), and that op 12 is not accepted by the current replay allow-list.
-//! In `--features graph` builds the same calls follow the EPIC-006 contract
+//! Graph-aware builds (every build since v0.5.1) make the same calls follow the EPIC-006 contract
 //! instead (graph-aware maintenance, replicas, log export, `upgrade` and change
 //! feeds, v0.6.0), and every source stays byte-identical.
 //! The release-tag half (C-4) and the C ABI/Python/Node entry points are run by
@@ -303,7 +303,7 @@ fn committed_fixture(name: &str) -> Vec<u8> {
 // Assertions.
 // ---------------------------------------------------------------------------
 
-/// What a `--features graph` build returns for a graph fixture when the
+/// What a graph-aware build returns for a graph fixture when the
 /// call's key matches the file (EPIC-006).
 #[derive(Clone, Copy, Debug)]
 enum GraphBuild {
@@ -370,8 +370,8 @@ fn probe_all(fixture: &Fixture, scratch: &Path, follower_base: &Path) -> usize {
     let key = key();
     let out = |name: &str| scratch.join(format!("{}-{name}.vlite", fixture.name));
     let mut checked = 0usize;
-    // `Database` open/repair entry points become graph-aware in
-    // `--features graph` builds (feature-agent-graph ITEM-010); the other
+    // `Database` open/repair entry points are graph-aware
+    // (feature-agent-graph ITEM-010); the other
     // entry points follow in EPIC-006 (`assert_outcome`).
     let mut database_check = |name: &str, result: vlite::Result<()>| {
         if let Err(Error::UnsupportedFeature(FLAG_GRAPH)) = result {
@@ -734,7 +734,7 @@ fn every_library_entry_point_rejects_graph_flagged_files() {
     assert_eq!(total, fixtures.len() * 35);
 }
 
-/// In `--features graph` builds the DO-003 draft fixtures are valid graph
+/// In graph-aware builds the DO-003 draft fixtures are valid graph
 /// files: the op-12 frame replays into graph "g" and the vector record stays.
 #[test]
 fn graph_builds_open_the_draft_fixtures() {

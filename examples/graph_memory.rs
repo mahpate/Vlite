@@ -1,6 +1,6 @@
 //! Graph in-memory cost split (EPIC-005 ITEM-021, NFR-002).
 //!
-//! cargo run --release --locked --features graph --example graph_memory -- \
+//! cargo run --release --locked --example graph_memory -- \
 //!     [--smoke] [--nodes 100000] [--edges 1000000] [--queries 1000] [--seed 1] [--dir PATH]
 //!
 //! `--smoke` defaults to 10,000 nodes, 100,000 edges and 100 queries; explicit

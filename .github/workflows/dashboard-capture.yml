@@ -19,7 +19,7 @@ jobs:
       - name: Build the matching backend on this isolated runner
         run: |
           # vlite-maintain turns the capture's plain file into a graph-enabled one for the Graph view.
-          cargo build --locked --features server,graph --bin vlite-server --bin vlite-maintain
+          cargo build --locked --features server --bin vlite-server --bin vlite-maintain
           mkdir -p "$RUNNER_TEMP/capture-image"
           cp target/debug/vlite-server target/debug/vlite-maintain "$RUNNER_TEMP/capture-image/"
           printf '%s\n' 'FROM ubuntu:24.04' 'COPY vlite-server vlite-maintain /usr/local/bin/' 'ENTRYPOINT ["/usr/local/bin/vlite-server"]' | docker build -t vlite-capture:source -f - "$RUNNER_TEMP/capture-image"
