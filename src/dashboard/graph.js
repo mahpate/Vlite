@@ -723,7 +723,17 @@
       for (const edge of view.edges) {
         const from = at.get(edge.source);
         const to = at.get(edge.target);
-        if (edge.source === edge.target) continue;
+        if (edge.source === edge.target) {
+          const side = from.x > view.width / 2 ? -1 : 1;
+          const x = from.x + side * radius * (from.scale || 1);
+          const group = make("g", { class: "graph-edge" });
+          group.append(make("path", { d: `M${x},${from.y - 4} C${from.x + side * 55},${from.y - 35} ${from.x + side * 55},${from.y + 35} ${x},${from.y + 4}`, "marker-end": "url(#graph-arrow)" }));
+          const label = make("text", { x: from.x + side * 48, y: from.y + 4, "text-anchor": side > 0 ? "start" : "end" });
+          label.textContent = edge.label;
+          group.append(label);
+          svg.append(group);
+          continue;
+        }
         const dx = to.x - from.x;
         const dy = to.y - from.y;
         const length = Math.hypot(dx, dy) || 1;
@@ -867,6 +877,7 @@
       if (writing) return;
       writing = true;
       $("graph-edit-save").disabled = true;
+      $("graph-create-save").disabled = true;
       const graph = $("graph-name").value;
       const generation = state.generation;
       try {
@@ -885,6 +896,7 @@
         if (typeof bridge?.confirm !== "function") throw new Error("Reconnect to the dashboard before editing; confirmation is unavailable");
         if (!await bridge.confirm(preview)) return;
         if (generation !== state.generation || graph !== $("graph-name").value) throw new Error("Connection or graph changed; no edit sent");
+        $("graph-editor").inert = true;
         $("graph-edit-result").textContent = "Applying edit...";
         const response = await send("POST", graphPath(graph, "batch"), body);
         if (generation !== state.generation || graph !== $("graph-name").value) return;
@@ -892,6 +904,7 @@
           $("graph-edit-result").textContent = `${errorText(response.status, response.value)}\nNo automatic retry. Query current data before retrying; a network failure can have an unknown commit outcome.`;
           return;
         }
+        state.generation++;
         resetEdit();
         clearResults();
         $("graph-next").disabled = true;
@@ -902,7 +915,9 @@
         $("graph-edit-result").textContent = `Error: ${error.message}`;
       } finally {
         writing = false;
+        $("graph-editor").inert = false;
         $("graph-edit-save").disabled = false;
+        $("graph-create-save").disabled = false;
       }
     };
     $("graph-add-property").addEventListener("click", () => {
@@ -922,6 +937,7 @@
       if (writing) return;
       writing = true;
       $("graph-create-save").disabled = true;
+      $("graph-edit-save").disabled = true;
       const generation = state.generation;
       const name = $("graph-create-name").value.trim();
       try {
@@ -932,6 +948,7 @@
         if (typeof bridge?.confirm !== "function") throw new Error("Reconnect before creating graphs; confirmation is unavailable");
         if (!await bridge.confirm(`Create empty graph "${name}"? This is durable; no automatic retry.`)) return;
         if (generation !== state.generation) throw new Error("Connection or graph changed; no request sent");
+        $("graph-create").inert = true;
         const response = await send("POST", "/v1/graphs", { graph: name });
         if (generation !== state.generation) return;
         if (response.status !== 201) throw new Error(`${errorText(response.status, response.value)}. No automatic retry; reload the graph list before trying again.`);
@@ -944,7 +961,9 @@
         $("graph-create-result").textContent = `Error: ${error.message}`;
       } finally {
         writing = false;
+        $("graph-create").inert = false;
         $("graph-create-save").disabled = false;
+        $("graph-edit-save").disabled = false;
       }
     });
     const changeGraph = () => {

@@ -12,6 +12,7 @@
 #graph .graph-figure figcaption { color: var(--studio-muted); font-size: 12px; padding: 4px 8px; }
 #graph #graph-view { display: block; width: 100%; height: auto; max-height: 420px; }
 #graph #graph-view .graph-edge line { stroke: var(--studio-muted); stroke-width: 1.5; }
+#graph #graph-view .graph-edge path { stroke: var(--studio-muted); stroke-width: 1.5; fill: none; }
 #graph #graph-view .graph-edge text { fill: var(--studio-muted); font-size: 11px; }
 #graph #graph-view .graph-arrow { fill: var(--studio-muted); }
 #graph #graph-view .graph-node circle { fill: var(--studio-accent-soft); stroke: var(--studio-accent); stroke-width: 2; }

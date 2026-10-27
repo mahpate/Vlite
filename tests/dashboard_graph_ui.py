@@ -2,7 +2,7 @@
 
 from playwright.sync_api import expect, sync_playwright
 
-from dashboard_e2e import FakeApi, confirm, control, mocked_page
+from dashboard_e2e import MOCK_ORIGIN, FakeApi, confirm, control, mocked_page
 
 
 class GraphApi(FakeApi):
@@ -25,7 +25,8 @@ class GraphApi(FakeApi):
             return 200, {"nodes": [
                 {"id": "18446744073709551615", "key": "n", "labels": ["Doc"], "properties": {}, "revision": "7"},
                 {"id": "2", "key": "m", "labels": [], "properties": {}, "revision": "3"}],
-                "edges": [{"id": "1", "key": "e", "source": "18446744073709551615", "target": "2", "relationship": "LINKS", "revision": "5"}],
+                "edges": [{"id": "1", "key": "e", "source": "18446744073709551615", "target": "2", "relationship": "LINKS", "revision": "5"},
+                          {"id": "2", "key": "loop", "source": "2", "target": "2", "relationship": "SELF", "revision": "5"}],
                 "complete": True}, {}
         if path == "/v1/graphs/g/batch":
             if self.conflict:
@@ -72,6 +73,8 @@ def check(browser):
     page.locator("#graph-operation").select_option("find-nodes")
     page.locator("#graph-run").click()
     expect(page.locator("#graph-nodes tbody tr")).to_have_count(2)
+    expect(page.locator("#graph-view .graph-edge")).to_have_count(2)
+    expect(page.locator("#graph-view .graph-edge path")).to_have_count(1)
     page.locator("#graph-view-mode").select_option("3d")
     expect(page.locator("#graph-figure-caption")).to_contain_text("not an embedding")
     before = page.locator("#graph-view").inner_html()
@@ -119,6 +122,33 @@ def check(browser):
     assert page.evaluate("localStorage.getItem('vlite-theme')") == "light"
     control(page, "#theme").select_option("system")
     assert page.evaluate("localStorage.getItem('vlite-theme')") is None
+    assert not errors, errors
+    context.close()
+
+    # A pending mutation locks its draft and invalidates reads admitted before its commit.
+    fake = GraphApi()
+    context, page, errors = mocked_page(browser, fake)
+    page.get_by_role("link", name="Graph", exact=True).click()
+    page.locator("#graph-operation").select_option("find-nodes")
+    page.locator("#graph-run").click()
+    expect(page.locator("#graph-nodes tbody tr")).to_have_count(2)
+    reads, writes = [], []
+    context.route(MOCK_ORIGIN + "/v1/graphs/g/nodes/find", lambda route: reads.append(route))
+    context.route(MOCK_ORIGIN + "/v1/graphs/g/batch", lambda route: writes.append(route))
+    page.locator("#graph-run").click()
+    page.locator("#graph-nodes").get_by_role("button", name="Edit", exact=True).first.click()
+    page.locator("#graph-edit-save").click()
+    confirm(page, '"revision": "7"')
+    expect(page.locator("#graph-editor")).to_have_attribute("inert", "")
+    expect(page.locator("#graph-create-save")).to_be_disabled()
+    assert len(writes) == len(reads) == 1
+    writes[0].fulfill(status=200, json={"revision": "8"})
+    expect(page.locator("#graph-edit-result")).to_contain_text("Edit committed")
+    reads[0].fulfill(status=200, json={"nodes": [{"id": "old", "key": "stale"}], "complete": True})
+    expect(page.locator("#graph-run")).to_be_enabled()
+    expect(page.locator("#graph-summary")).to_contain_text("Run a fresh query")
+    expect(page.locator('[data-graph-table="graph-nodes"]')).to_be_hidden()
+    assert not page.locator("#graph-editor").evaluate("e => e.inert")
     assert not errors, errors
     context.close()
 
