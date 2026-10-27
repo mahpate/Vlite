@@ -16,10 +16,9 @@ struct Subscription {
     id: String,
     url: String,
     collections: Option<Vec<String>>,
-    events: Vec<String>,
-    /// Optional graph-name filter for graph events (v0.6.0). Absent in
-    /// stores written by older servers, so it defaults to None.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Selected event kinds; None delivers every kind, vector and graph.
+    events: Option<Vec<String>>,
+    /// Optional graph-name filter for graph events.
     graphs: Option<Vec<String>>,
     secret: String,
 }
@@ -158,8 +157,7 @@ pub(super) fn routes() -> Router<Service> {
 struct Create {
     url: String,
     collections: Option<Vec<String>>,
-    events: Vec<String>,
-    #[serde(default)]
+    events: Option<Vec<String>>,
     graphs: Option<Vec<String>>,
     secret: String,
 }
@@ -179,13 +177,11 @@ fn validate(input: &Create) -> Result<(), ApiError> {
     if input.secret.len() < 16 || input.secret.len() > 256 {
         return Err(unprocessable("webhook secret must be 16..256 UTF-8 bytes"));
     }
-    if input.events.is_empty()
-        || input.events.len() > EVENT_KINDS.len()
-        || input
-            .events
-            .iter()
-            .any(|e| !EVENT_KINDS.contains(&e.as_str()))
-    {
+    if input.events.as_ref().is_some_and(|events| {
+        events.is_empty()
+            || events.len() > EVENT_KINDS.len()
+            || events.iter().any(|e| !EVENT_KINDS.contains(&e.as_str()))
+    }) {
         return Err(unprocessable(
             "events must be a nonempty list of supported change kinds",
         ));
@@ -212,9 +208,8 @@ fn validate(input: &Create) -> Result<(), ApiError> {
     }
     Ok(())
 }
-/// Every event kind a subscription may select. Graph kinds are opt-in:
-/// subscriptions that list only vector kinds keep receiving exactly the
-/// vector events they received before v0.6.0.
+/// Every event kind a subscription may select; a subscription without an
+/// `events` list receives all of them.
 const EVENT_KINDS: [&str; 10] = [
     "put",
     "delete",
@@ -354,7 +349,9 @@ fn kind_name(change: &Change) -> &'static str {
 /// Vector events match the collections filter, graph events the graphs
 /// filter; an absent filter matches everything of that family.
 fn selects(sub: &Subscription, change: &Change) -> bool {
-    sub.events.iter().any(|kind| kind == kind_name(change))
+    sub.events
+        .as_ref()
+        .is_none_or(|kinds| kinds.iter().any(|kind| kind == kind_name(change)))
         && match super::graph::feed_graph(&change.kind) {
             Some(graph) => sub
                 .graphs

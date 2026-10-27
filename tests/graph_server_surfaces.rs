@@ -11,9 +11,9 @@
 //!   `WatchChanges` report `graph_created` / `graph_dropped` / `graph_batch`
 //!   events on graph-enabled files after authentication, filtered by the
 //!   caller's `graph_read` binding; vector events are unchanged.
-//! - LEG-019 (v0.6.0): webhooks register and start on graph-enabled files,
-//!   graph events reach only subscriptions that list graph kinds (optionally
-//!   bound by `graphs`), and stores written by older servers still load.
+//! - LEG-019 (v0.6.0): webhooks register and start on graph-enabled files;
+//!   subscriptions without `events` receive every vector and graph event,
+//!   and the optional `events`, `collections` and `graphs` filters narrow it.
 //!
 //! The every-variant HTTP/gRPC table is unit-tested next to the private
 //! mapping (`src\server.rs`, `src\server\grpc.rs`).
@@ -479,7 +479,7 @@ fn receiver() -> (String, std::sync::mpsc::Receiver<(String, Value)>) {
 }
 
 #[tokio::test]
-async fn leg019_webhooks_deliver_graph_events_to_opted_in_subscriptions() {
+async fn leg019_webhooks_deliver_all_events_by_default_and_filter_on_request() {
     for setup in SETUPS {
         let Fixture {
             _dir,
@@ -504,10 +504,15 @@ async fn leg019_webhooks_deliver_graph_events_to_opted_in_subscriptions() {
         let cursor = admin_dir.join("webhooks.cursor");
         assert!(wait_for(&cursor).await, "{setup:?}: worker never started");
         let (base, received) = receiver();
-        let subscribe = async |path: &str, events: Value, graphs: Option<Value>| {
+        let subscribe = async |path: &str, events: Option<Value>, graphs: Option<Value>| {
             let mut body = webhook();
             body["url"] = json!(format!("{base}/{path}"));
-            body["events"] = events;
+            match events {
+                Some(events) => body["events"] = events,
+                None => {
+                    body.as_object_mut().unwrap().remove("events");
+                }
+            }
             if let Some(graphs) = graphs {
                 body["graphs"] = graphs;
             }
@@ -515,17 +520,19 @@ async fn leg019_webhooks_deliver_graph_events_to_opted_in_subscriptions() {
             assert_eq!(created.0, StatusCode::CREATED, "{}", created.1);
             created.1
         };
-        // A pre-v0.6.0 style subscription: vector kinds only, no filter.
-        let legacy = subscribe("vector", json!(["put"]), None).await;
-        assert_eq!(legacy["graphs"], Value::Null);
+        // An explicit event filter: vector puts only.
+        let vector = subscribe("vector", Some(json!(["put"])), None).await;
+        assert_eq!(vector["graphs"], Value::Null);
         let bound = subscribe(
             "bound",
-            json!(["graph_created", "graph_batch"]),
+            Some(json!(["graph_created", "graph_batch"])),
             Some(json!(["g"])),
         )
         .await;
         assert_eq!(bound["graphs"], json!(["g"]));
-        subscribe("every", json!(["graph_created", "graph_batch"]), None).await;
+        // No `events` field: every vector and graph event is delivered.
+        let every = subscribe("every", None, None).await;
+        assert_eq!(every["events"], Value::Null);
 
         call(
             &app,
@@ -560,12 +567,12 @@ async fn leg019_webhooks_deliver_graph_events_to_opted_in_subscriptions() {
             .await;
             assert_eq!(batch.0, StatusCode::OK, "{}", batch.1);
         }
-        // Events may arrive over several worker ticks: legacy 1, "every" 2
-        // or 3, "bound" 1 or 2.
+        // Events may arrive over several worker ticks: "vector" 1, "every"
+        // 1, 3 or 4, "bound" 0, 1 or 2.
         let wanted = match setup {
-            Setup::VectorOnly => 1,
-            Setup::GraphEmpty => 6,
-            Setup::GraphPopulated => 4,
+            Setup::VectorOnly => 2,
+            Setup::GraphEmpty => 7,
+            Setup::GraphPopulated => 5,
         };
         let mut deliveries = BTreeMap::<String, Vec<Value>>::new();
         let started = Instant::now();
@@ -601,13 +608,13 @@ async fn leg019_webhooks_deliver_graph_events_to_opted_in_subscriptions() {
                 })
                 .unwrap_or_default()
         };
-        // The legacy subscription receives the unchanged vector payload only.
+        // The filtered subscription receives the vector payload only.
         assert_eq!(types("/vector"), ["put:default"], "{setup:?}");
         let put = &deliveries["/vector"][0];
         assert_eq!(put["collection"], "default");
         assert_eq!(put["change"]["id"], "5");
         if setup.graph() {
-            let mut every = vec!["graph_created:h".to_owned()];
+            let mut every = vec!["put:default".to_owned(), "graph_created:h".into()];
             if setup == Setup::GraphEmpty {
                 every.push("graph_created:g".into());
             }
@@ -624,7 +631,7 @@ async fn leg019_webhooks_deliver_graph_events_to_opted_in_subscriptions() {
             assert_eq!(batch["change"]["operations"][0]["op"], "node_upserted");
             assert_eq!(batch["change"]["operations"][0]["key"], "n9");
         } else {
-            assert!(!deliveries.contains_key("/every"));
+            assert_eq!(types("/every"), ["put:default"], "{setup:?}");
             assert!(!deliveries.contains_key("/bound"));
         }
         service.close().await.unwrap();
@@ -633,7 +640,7 @@ async fn leg019_webhooks_deliver_graph_events_to_opted_in_subscriptions() {
 
 #[tokio::test]
 async fn leg019_startup_with_configured_webhooks_starts_on_graph_files() {
-    // A webhook store written by a vector-only server (no `graphs` field).
+    // A webhook store configured while serving a vector-only file.
     let source = tempdir().unwrap();
     let configured = {
         let admin_dir = source.path().join("admin");
@@ -655,7 +662,6 @@ async fn leg019_startup_with_configured_webhooks_starts_on_graph_files() {
         service.close().await.unwrap();
         configured
     };
-    assert!(!String::from_utf8_lossy(&configured).contains("graphs"));
 
     for setup in SETUPS {
         let dir = tempdir().unwrap();
