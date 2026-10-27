@@ -379,6 +379,7 @@ def capture(output):
             expect(page.locator("#graph-editor")).to_be_visible()
             if not page.locator("#graph-editor").evaluate("element => element.open"):
                 page.locator("#graph-editor summary").click()
+            page.locator("#graph-edit-action").select_option("create_node")
             page.locator("#graph-edit-key").fill("tour-draft")
             page.locator("#graph-edit-save").click()
             page.locator("#confirmation").get_by_role("button", name="Cancel", exact=True).click()
