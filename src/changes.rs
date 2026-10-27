@@ -110,11 +110,7 @@ impl FeedCursor {
 }
 
 /// What happened in one committed operation.
-///
-/// Non-exhaustive since v0.6.0, when graph events were added: matches need a
-/// wildcard arm so later event kinds do not break consumers.
 #[derive(Clone, Debug, PartialEq)]
-#[non_exhaustive]
 pub enum ChangeKind {
     /// A record was inserted or replaced. `expires_at_ms` is set for records
     /// written with a time to live; expiry itself is not logged, consumers

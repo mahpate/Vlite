@@ -252,13 +252,15 @@ fn change_json(change: &Change) -> serde_json::Value {
         ChangeKind::CollectionDropped => ("collection_dropped", None, None, None, None),
         ChangeKind::SettingsUpdated { .. } => ("settings_updated", None, None, None, None),
         ChangeKind::VectorsUpdated => ("vectors_updated", None, None, None, None),
-        other => {
-            let mut output = serde_json::json!({"sequence":change.sequence.to_string(),"ordinal":change.ordinal,"collection":change.collection,"committed_at_ms":change.committed_at_ms,"kind":"unknown","id":null});
-            if let Some(serde_json::Value::Object(mut fields)) = other.graph_json() {
-                output["kind"] = fields.remove("type").unwrap_or(serde_json::Value::Null);
-                for (name, value) in fields {
-                    output[name] = value;
-                }
+        graph @ (ChangeKind::GraphCreated { .. }
+        | ChangeKind::GraphDropped { .. }
+        | ChangeKind::GraphBatch { .. }) => {
+            let mut output = serde_json::json!({"sequence":change.sequence.to_string(),"ordinal":change.ordinal,"collection":change.collection,"committed_at_ms":change.committed_at_ms,"id":null});
+            let Some(serde_json::Value::Object(fields)) = graph.graph_json() else {
+                unreachable!("graph feed event")
+            };
+            for (name, value) in fields {
+                output[if name == "type" { "kind".to_owned() } else { name }] = value;
             }
             return output;
         }

@@ -817,11 +817,10 @@ pub(super) fn execute(state: &mut State, handle: u64, request: Request) -> Resul
                 ChangeKind::CollectionDropped => event["kind"]=json!("collection_dropped"),
                 ChangeKind::SettingsUpdated { settings } => { event["kind"]=json!("settings_updated"); event["settings"]=settings_json(&settings); },
                 ChangeKind::VectorsUpdated => event["kind"]=json!("vectors_updated"),
-                other => {
-                    let mut fields = other.graph_json().unwrap_or_else(|| json!({"type":"unknown"}));
-                    let fields = fields.as_object_mut().expect("graph event object");
-                    event["kind"] = fields.remove("type").unwrap_or(json!("unknown"));
-                    for (name, value) in std::mem::take(fields) { event[name] = value; }
+                ref graph @ (ChangeKind::GraphCreated { .. } | ChangeKind::GraphDropped { .. } | ChangeKind::GraphBatch { .. }) => {
+                    let Some(Value::Object(mut fields)) = graph.graph_json() else { unreachable!("graph feed event") };
+                    event["kind"] = fields.remove("type").expect("graph event type");
+                    for (name, value) in fields { event[name] = value; }
                 },
             } event
         }).collect::<Vec<_>>();

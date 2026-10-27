@@ -1488,7 +1488,7 @@ impl From<Error> for ApiError {
             ),
             // LEG-017: every graph variant is explicit, never the 500 below.
             // State conflicts (including references to missing graph
-            // entities) are 409, invalid input 422, unsupported surfaces 501.
+            // entities) are 409 and invalid input 422.
             Error::GraphsNotEnabled
             | Error::GraphExists
             | Error::GraphNotFound
@@ -1505,7 +1505,6 @@ impl From<Error> for ApiError {
             | Error::GraphAttachedRecord
             | Error::GraphAttachedRecordExpiry
             | Error::GraphCursorStale
-            | Error::GraphUnsupportedOperation
             | Error::GraphSchemaViolation { .. } => {
                 Self::new(StatusCode::CONFLICT, graph_code(&error), error.to_string())
             }
@@ -1515,11 +1514,6 @@ impl From<Error> for ApiError {
             | Error::GraphInvalidOptions(_)
             | Error::GraphPivotTooExpensive => Self::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
-                graph_code(&error),
-                error.to_string(),
-            ),
-            Error::GraphChangeFeedUnsupported => Self::new(
-                StatusCode::NOT_IMPLEMENTED,
                 graph_code(&error),
                 error.to_string(),
             ),
@@ -1551,8 +1545,6 @@ fn graph_code(error: &Error) -> &'static str {
         Error::GraphAttachedRecordExpiry => "graph_attached_record_expiry",
         Error::GraphLimitExceedsCeiling { .. } => "graph_limit_exceeds_ceiling",
         Error::GraphCursorStale => "graph_cursor_stale",
-        Error::GraphChangeFeedUnsupported => "graph_change_feed_unsupported",
-        Error::GraphUnsupportedOperation => "graph_unsupported_operation",
         Error::GraphInvalidOptions(_) => "graph_invalid_options",
         Error::GraphSchemaViolation { .. } => "graph_schema_violation",
         Error::GraphPivotTooExpensive => "graph_pivot_too_expensive",
@@ -3651,7 +3643,6 @@ mod graph_errors {
     pub(super) fn table() -> Vec<(Error, StatusCode, &'static str)> {
         const CONFLICT: StatusCode = StatusCode::CONFLICT;
         const INVALID: StatusCode = StatusCode::UNPROCESSABLE_ENTITY;
-        const UNSUPPORTED: StatusCode = StatusCode::NOT_IMPLEMENTED;
         vec![
             (Error::GraphsNotEnabled, CONFLICT, "graphs_not_enabled"),
             (Error::GraphsRequireV5, INVALID, "graphs_require_v5"),
@@ -3704,16 +3695,6 @@ mod graph_errors {
                 "graph_limit_exceeds_ceiling",
             ),
             (Error::GraphCursorStale, CONFLICT, "graph_cursor_stale"),
-            (
-                Error::GraphChangeFeedUnsupported,
-                UNSUPPORTED,
-                "graph_change_feed_unsupported",
-            ),
-            (
-                Error::GraphUnsupportedOperation,
-                CONFLICT,
-                "graph_unsupported_operation",
-            ),
             (
                 Error::GraphInvalidOptions("confirm_graph_data_loss is required"),
                 INVALID,

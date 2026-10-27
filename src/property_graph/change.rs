@@ -5,7 +5,6 @@ use crate::Metadata;
 /// One graph operation inside a [`ChangeKind::GraphBatch`](crate::changes::ChangeKind::GraphBatch). IDs are the
 /// engine's node and edge IDs; keys are resolved from the log.
 #[derive(Clone, Debug, PartialEq)]
-#[non_exhaustive]
 pub enum GraphChange {
     /// A node was created (`created`) or its labels and properties replaced.
     NodeUpserted {

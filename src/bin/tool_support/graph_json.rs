@@ -65,8 +65,6 @@ pub(crate) fn error_code(error: &Error) -> &'static str {
         Error::GraphAttachedRecordExpiry => "graph_attached_record_expiry",
         Error::GraphLimitExceedsCeiling { .. } => "graph_limit_exceeds_ceiling",
         Error::GraphCursorStale => "graph_cursor_stale",
-        Error::GraphChangeFeedUnsupported => "graph_change_feed_unsupported",
-        Error::GraphUnsupportedOperation => "graph_unsupported_operation",
         Error::GraphInvalidOptions(_) => "graph_invalid_options",
         Error::GraphSchemaViolation { .. } => "graph_schema_violation",
         Error::GraphPivotTooExpensive => "graph_pivot_too_expensive",

@@ -80,7 +80,9 @@ fn change_json(change: Change) -> Value {
         ChangeKind::CollectionDropped => json!({"type":"collection_dropped"}),
         ChangeKind::SettingsUpdated { .. } => json!({"type":"settings_updated"}),
         ChangeKind::VectorsUpdated => json!({"type":"vectors_updated"}),
-        ref other => other.graph_json().expect("graph feed event"),
+        ref graph @ (ChangeKind::GraphCreated { .. }
+        | ChangeKind::GraphDropped { .. }
+        | ChangeKind::GraphBatch { .. }) => graph.graph_json().expect("graph feed event"),
     };
     json!({"sequence":change.sequence.to_string(),"ordinal":change.ordinal,"collection":change.collection,"committed_at_ms":change.committed_at_ms,"change":kind})
 }

@@ -192,8 +192,6 @@ fn status_code(error: &ApiError) -> tonic::Code {
         // The write may have committed: never safe to retry blindly.
         (503, "commit_indeterminate") => Code::Unknown,
         (400..=499, _) => Code::InvalidArgument,
-        // LEG-020: change feeds on graph-enabled files.
-        (501, _) => Code::Unimplemented,
         _ => Code::Internal,
     }
 }
@@ -2328,12 +2326,11 @@ mod graph_errors {
     use super::*;
 
     #[test]
-    fn every_graph_error_maps_to_failed_precondition_invalid_argument_or_unimplemented() {
+    fn every_graph_error_maps_to_failed_precondition_or_invalid_argument() {
         for (error, http, code) in crate::server::graph_errors::table() {
             let expected = match http.as_u16() {
                 409 => tonic::Code::FailedPrecondition,
                 422 => tonic::Code::InvalidArgument,
-                501 => tonic::Code::Unimplemented,
                 other => panic!("{code}: unexpected HTTP {other}"),
             };
             let status = status(ApiError::from(error), "graph-errors");

@@ -31,6 +31,38 @@ fn fixture(name: &str) -> String {
         .replace("\r\n", "\n")
 }
 
+/// Reviewed in-line edits to existing baseline lines, applied to the capture
+/// before comparison as `(baseline text, served text)`; each baseline text
+/// must occur exactly once. v1.2.24/v1.2.25 (EPIC-016, graph/vector feature
+/// parity): `/v1/changes` documents the graph event types, and
+/// `/v1/admin/webhooks` makes `events` optional (every event by default) and
+/// adds the `graphs` filter.
+const APPROVED_OPENAPI_EDITS: &[(&str, &str)] = &[
+    (
+        r##"ween pages"},"400":{"##,
+        r##"ween pages. Each event has sequence, ordinal, collection, committed_at_ms and a change object whose type is put, delete, metadata_update, collection_created, collection_dropped, settings_updated or vectors_updated (vector events), or graph_created, graph_dropped or graph_batch (graph-enabled files; collection is empty). Graph events carry graph; graph_batch also carries revision (decimal string) and the ordered operations of one graph frame: node_upserted, node_patched, node_deleted, edge_upserted, edge_patched, edge_deleted, attached, detached or schema_updated, with u64 IDs and records as decimal strings. Scoped credentials see graph events only for graphs their graph_read binding allows."},"400":{"##,
+    ),
+    (
+        r##"events","secret"],"properties":{"url":{"type":"string","format":"uri"},"collections":{"type":"array","items":{"type":"string"}},"events":{"type":"array","items":{"type":"string"}},"secret":{"type":"string","minLength":16,"maxLength":256}}}}}},"responses":{"201":{"description":"Created subscription; secret is not returned"},"409":{"description":"VLITE_ADMIN_DIR is required"},"422":{"description":"Invalid URL, event"##,
+        r##"secret"],"properties":{"url":{"type":"string","format":"uri"},"collections":{"type":"array","items":{"type":"string"},"description":"Optional filter for vector events; graph events ignore it"},"events":{"type":"array","minItems":1,"maxItems":10,"items":{"enum":["put","delete","metadata_update","collection_created","collection_dropped","settings_updated","vectors_updated","graph_created","graph_dropped","graph_batch"]},"description":"Optional event types to deliver; omitted means every vector and graph event"},"graphs":{"type":"array","maxItems":64,"items":{"type":"string","minLength":1,"maxLength":63},"description":"Optional filter for graph events; omitted means every graph"},"secret":{"type":"string","minLength":16,"maxLength":256}}}}}},"responses":{"201":{"description":"Created subscription; secret is not returned"},"409":{"description":"VLITE_ADMIN_DIR is required"},"422":{"description":"Invalid URL, event, graph filter"##,
+    ),
+];
+
+/// The baseline capture with every `APPROVED_OPENAPI_EDITS` entry applied.
+fn edited_golden() -> String {
+    let mut golden = fixture("openapi.json");
+    for (baseline, served) in APPROVED_OPENAPI_EDITS {
+        assert_eq!(
+            golden.matches(baseline).count(),
+            1,
+            "approved OpenAPI edit must match exactly one baseline location"
+        );
+        assert!(!baseline.contains('\n') && !served.contains('\n'));
+        golden = golden.replacen(baseline, served, 1);
+    }
+    golden
+}
+
 /// Reviewed post-baseline OpenAPI additions, each matched byte-for-byte (LF)
 /// at a line boundary; any other difference from the `347b01d` capture
 /// fails REG-008. The `347b01d` capture already contains every change
@@ -347,12 +379,8 @@ async fn reg008_served_openapi_matches_baseline_except_approved_additions() {
             !line.starts_with("    \"/v1/graphs") && !line.starts_with("    \"/v1/admin/graph/")
         })
         .collect();
-    let version = openapi_matches_baseline(
-        &served,
-        &fixture("openapi.json"),
-        APPROVED_OPENAPI_ADDITIONS,
-    )
-    .unwrap_or_else(|message| panic!("{message}"));
+    let version = openapi_matches_baseline(&served, &edited_golden(), APPROVED_OPENAPI_ADDITIONS)
+        .unwrap_or_else(|message| panic!("{message}"));
     assert_eq!(version, env!("CARGO_PKG_VERSION"), "served OpenAPI version");
 }
 

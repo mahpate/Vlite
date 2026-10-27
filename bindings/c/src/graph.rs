@@ -76,8 +76,6 @@ fn graph_failure(error: vlite::Error) -> Failure {
         E::GraphAttachedRecordExpiry => "graph_attached_record_expiry",
         E::GraphLimitExceedsCeiling { .. } => "graph_limit_exceeds_ceiling",
         E::GraphCursorStale => "graph_cursor_stale",
-        E::GraphChangeFeedUnsupported => "graph_change_feed_unsupported",
-        E::GraphUnsupportedOperation => "graph_unsupported_operation",
         E::GraphInvalidOptions(_) => "graph_invalid_options",
         E::GraphSchemaViolation { .. } => "graph_schema_violation",
         E::GraphPivotTooExpensive => "graph_pivot_too_expensive",

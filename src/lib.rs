@@ -442,13 +442,6 @@ pub enum Error {
     },
     /// The graph changed after the page cursor was issued; restart the read.
     GraphCursorStale,
-    /// Change feeds did not cover graph-enabled files in v0.5.x (REQ-053).
-    /// Kept for API compatibility; no longer returned since v0.6.0.
-    GraphChangeFeedUnsupported,
-    /// The maintenance operation does not accept graph-enabled files. Kept
-    /// for API compatibility: `maintenance::upgrade` returned it in v0.5.x
-    /// and accepts graph files since v0.6.0.
-    GraphUnsupportedOperation,
     /// Invalid graph maintenance options, such as `strip_graph` without
     /// `confirm_graph_data_loss` or `enable_graph` on an unsuitable source.
     GraphInvalidOptions(&'static str),
@@ -702,13 +695,6 @@ impl fmt::Display for Error {
             Self::GraphCursorStale => write!(
                 f,
                 "the graph changed after the cursor was issued; restart the read"
-            ),
-            Self::GraphChangeFeedUnsupported => {
-                write!(f, "change feeds are not supported on graph-enabled files")
-            }
-            Self::GraphUnsupportedOperation => write!(
-                f,
-                "operation not supported on graph-enabled files; use maintenance::strip_graph or maintenance::enable_graph"
             ),
             Self::GraphInvalidOptions(reason) => write!(f, "invalid graph options: {reason}"),
             Self::GraphSchemaViolation {
