@@ -431,6 +431,25 @@ def capture(output):
                 }))
             })""")
             print("Graph render state:", json.dumps(render_state), flush=True)
+            (output / "graph-result-diagnostic.json").write_text(page.locator("#graph-result").inner_text())
+            stability = page.locator("#graph-three-stage").evaluate("""element => new Promise(resolve => {
+                const frames = [];
+                const sample = time => {
+                    const box = element.getBoundingClientRect();
+                    frames.push({time, x: box.x, y: box.y, width: box.width, height: box.height,
+                                 visibility: document.visibilityState});
+                    if (frames.length === 4) resolve(frames);
+                    else requestAnimationFrame(sample);
+                };
+                requestAnimationFrame(sample);
+                setTimeout(() => resolve(frames), 2000);
+            })""")
+            print("Graph frame stability:", json.dumps(stability), flush=True)
+            page.wait_for_function("""() => {
+                document.querySelector("#graph-three-stage canvas").getContext("webgl2").finish();
+                return true;
+            }""", timeout=5000)
+            print("Graph GPU commands completed", flush=True)
             page.locator("#graph-three-stage").screenshot(path=str(output / "graph-stage-diagnostic.png"))
             print("Graph stage screenshot completed", flush=True)
             save("current-graph.png", "#graph-summary")
