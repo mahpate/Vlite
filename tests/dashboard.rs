@@ -140,7 +140,11 @@ async fn graph_dashboard_assets_are_public_and_hardened() {
         ("/dashboard/graph.css", "text/css", "#graph"),
         ("/dashboard/graph3d.js", "text/javascript", "forceLayout"),
         ("/dashboard/ambience.js", "text/javascript", "WebGLRenderer"),
-        ("/dashboard/three.min.js", "text/javascript", "WebGLRenderer"),
+        (
+            "/dashboard/three.min.js",
+            "text/javascript",
+            "WebGLRenderer",
+        ),
         ("/dashboard/three.LICENSE", "text/plain", "MIT License"),
         ("/dashboard/theme.css", "text/css", "--vlite-background"),
         (

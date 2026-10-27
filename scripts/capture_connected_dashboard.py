@@ -350,7 +350,10 @@ def capture(output):
             graph_edit("patch_edge", {"key": "tour-link", "revision": edge["revision"]}, {"status": "reviewed"})
             edge = api("/v1/graphs/tour_draft/edges/get", {"edge": {"key": "tour-link"}})["edge"]
             assert edge["properties"]["status"] == {"type": "string", "value": "reviewed"}
-            graph_edit("attach", {"key": "tour-source", "collection": "default", "record": "101"})
+            # Existing sample records belong to the articles graph. Attach a fresh
+            # disposable record so the smoke test respects attachment uniqueness.
+            api("/v1/vectors/901", {"vector": [0, 1, 0]}, "PUT")
+            graph_edit("attach", {"key": "tour-source", "collection": "default", "record": "901"})
             graph_edit("detach", {"key": "tour-source", "collection": "default"})
             graph_edit("delete_edge", {"key": "tour-link", "revision": edge["revision"]})
             assert api("/v1/graphs/tour_draft/edges/get", {"edge": {"key": "tour-link"}})["edge"] is None
@@ -361,7 +364,8 @@ def capture(output):
             page.locator("#confirmation").get_by_role("button", name="Confirm", exact=True).click()
             expect(page.locator("#graph-drop-result")).to_contain_text('Deleted graph "tour_draft"')
             assert [graph["name"] for graph in api("/v1/graphs")["graphs"]] == ["articles"]
-            api("/v1/vectors/101")
+            api("/v1/vectors/901")
+            api("/v1/vectors/901", method="DELETE")
             page.locator("#graph-name").select_option("articles")
             page.locator("#graph-list").click()
             expect(page.locator("#graph-editor")).to_be_visible()

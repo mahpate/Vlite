@@ -179,6 +179,80 @@ def decode_image(page, image, theme):
     image.evaluate("img => img.decode()")
 
 
+def check_diagram_palette(p, url):
+    """Inspect actual GPU color attributes through a test-only module export."""
+    browser = p.chromium.launch(args=SWIFTSHADER)
+    try:
+        context = browser.new_context(reduced_motion="reduce")
+        module = (ROOT / "site" / "assets" / "diagrams3d.js").read_text(encoding="utf-8")
+        context.route("**/assets/diagrams3d.js", lambda route: route.fulfill(
+            content_type="text/javascript", body=module + "\nexport { views };\n"))
+        page = context.new_page()
+        errors, warnings = [], []
+        track_errors(page, errors)
+        page.on("console", lambda message: message.type == "warning" and warnings.append(message.text))
+        inspect = """async () => {
+            const {views} = await import('./assets/diagrams3d.js');
+            return views.map(v => ({
+                name: v.picture.closest('figure')?.dataset.diagram || v.image.dataset.light,
+                roles: v.edges.map(e => e.role),
+                colors: [...v.pulses.geometry.getAttribute('color').array],
+                halos: v.halos.map(h => [h.role, ...h.mesh.material.uniforms.uColor.value]),
+            }));
+        }"""
+        for path, count in (("architecture.html", 14), ("index.html", 2)):
+            page.goto(f"{url}/{path}?force3d")
+            page.wait_for_function("document.documentElement.dataset.diagrams3d === 'ready'")
+            views = page.evaluate(inspect)
+            assert len(views) == count
+            for view in views:
+                assert all(0 <= role < 5 for role in view["roles"]), view
+                assert len(view["colors"]) == 3 * len(view["roles"])
+            if count == 14:
+                layers = next(v for v in views if v["name"] == "layers")
+                assert layers["roles"] == [2, 1, 2, 2], layers
+                bindings = next(v for v in views if v["name"] == "bindings")
+                # The published sequence SVG styles every actor as interface purple.
+                assert bindings["roles"] == [0, 0, 0, 0, 0, 0], bindings
+            # Distinct known channels make stale halo uniforms / pulse buffers unambiguous,
+            # including rgb() tokens rather than only hexadecimal palette values.
+            page.add_style_tag(content="""html[data-theme="light"] {
+                --diagram-interface: rgb(255, 0, 0); --diagram-search: rgb(0, 255, 0);
+                --diagram-storage: rgb(0, 0, 255); --diagram-operations: rgb(255, 255, 0);
+                --diagram-error: rgb(255, 0, 255); }
+                html[data-theme="dark"] {
+                --diagram-interface: rgb(0, 255, 255); --diagram-search: rgb(255, 0, 255);
+                --diagram-storage: rgb(255, 255, 0); --diagram-operations: rgb(0, 0, 255);
+                --diagram-error: rgb(0, 255, 0); }""")
+            palettes = {
+                "light": [[1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 0], [1, 0, 1]],
+                "dark": [[0, 1, 1], [1, 0, 1], [1, 1, 0], [0, 0, 1], [0, 1, 0]],
+            }
+            for theme, palette in palettes.items():
+                page.evaluate("theme => document.documentElement.dataset.theme = theme", theme)
+                page.wait_for_timeout(100)
+                for view in page.evaluate(inspect):
+                    assert view["colors"] == [c for role in view["roles"] for c in palette[role]], view
+                    assert all(values[1:] == palette[values[0]] for values in view["halos"]), view
+        assert not errors, errors
+        assert not warnings, warnings
+        # A malformed response is isolated to one figure with an actionable diagnostic.
+        context.route("**/diagrams/layers-light.svg", lambda route: route.fulfill(
+            content_type="image/svg+xml", body="<svg><broken>") if
+            route.request.resource_type == "fetch" else route.continue_())
+        page.goto(f"{url}/architecture.html?force3d")
+        page.wait_for_function("document.documentElement.dataset.diagrams3d === 'ready'")
+        picture = page.locator('figure[data-diagram="layers"] picture')
+        assert picture.get_attribute("data-diagrams3d-reason") == "unsupported-svg"
+        assert picture.locator("img").is_visible()
+        assert page.locator(".diagram-3d-stage").count() == 13
+        assert any("VLite diagram kept its SVG:" in warning and "layers-light.svg" in warning for warning in warnings)
+        assert not errors, errors
+        context.close()
+    finally:
+        browser.close()
+
+
 def check_diagram_scenes(p, url, screenshots=None):
     """Actual scissored WebGL output, not CSS panels masquerading as 3D."""
     browser = p.chromium.launch(args=SWIFTSHADER)
@@ -410,6 +484,7 @@ def check(site, screenshots=None):
             browser.close()
             forced = check_forced_3d(p, url, screenshots)
             check_diagram_scenes(p, url, screenshots)
+            check_diagram_palette(p, url)
     finally:
         server.shutdown()
         server.server_close()

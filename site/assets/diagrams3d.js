@@ -5,6 +5,30 @@ const motion = matchMedia("(prefers-reduced-motion: reduce)");
 const force = new URLSearchParams(location.search).has("force3d");
 const roles = ["interface", "search", "storage", "operations", "error"];
 const colors = ["#8b5cf6", "#0891b2", "#059669", "#d97706", "#dc2626"];
+const colorProbe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+function rgb(value) {
+  colorProbe.clearRect(0, 0, 1, 1);
+  colorProbe.fillStyle = "transparent";
+  colorProbe.fillStyle = value;
+  colorProbe.fillRect(0, 0, 1, 1);
+  return [...colorProbe.getImageData(0, 0, 1, 1).data].slice(0, 3).map(v => v / 255);
+}
+const sourceColors = colors.map(color => rgb(color).join(","));
+function sourceRole(element) {
+  const byStroke = sourceColors.indexOf(rgb(getComputedStyle(element).stroke).join(","));
+  if (byStroke >= 0) return byStroke;
+  return roles.findIndex(role => element.classList.contains(role));
+}
+function refreshPalette() {
+  const style = getComputedStyle(root);
+  const palette = roles.map((role, i) => rgb(style.getPropertyValue(`--diagram-${role}`).trim() || colors[i]));
+  for (const view of views) {
+    for (const halo of view.halos) halo.mesh.material.uniforms.uColor.value = palette[halo.role];
+    const attribute = view.pulses.geometry.getAttribute("color");
+    view.edges.forEach((edge, i) => attribute.setXYZ(i, ...palette[edge.role]));
+    attribute.needsUpdate = true;
+  }
+}
 let renderer, canvas, raf = 0, dead = false, previous = 0, elapsed = 0;
 const views = [];
 const cleanups = [];
@@ -139,8 +163,10 @@ async function geometry(image) {
         try {
           const length = edge.getTotalLength(), matrix = convert(edge);
           if (!length) continue;
-          edges.push(Array.from({ length: 97 }, (_, i) =>
-            edge.getPointAtLength(length * i / 96).matrixTransform(matrix)));
+          const points = Array.from({ length: 97 }, (_, i) =>
+            edge.getPointAtLength(length * i / 96).matrixTransform(matrix));
+          points.role = sourceRole(original);
+          edges.push(points);
         } finally { if (part) edge.remove(); }
       }
     }
@@ -148,9 +174,7 @@ async function geometry(image) {
     const halos = [];
     for (const element of measured.querySelectorAll(".node .label-container, rect.actor, rect[stroke], path[stroke], ellipse[stroke]")) {
       if (element.closest("defs") || element.hasAttribute("marker-end")) continue;
-      const stroke = element.getAttribute("style")?.match(/stroke:\s*(#[a-f0-9]{6})/i)?.[1] ||
-        element.getAttribute("stroke");
-      let role = colors.indexOf(stroke?.toLowerCase());
+      let role = sourceRole(element);
       if (role < 0 && element.classList.contains("actor")) {
         const name = element.getAttribute("name") || "";
         role = /^(F|Idx|D)$/.test(name) ? (name === "Idx" ? 1 : 2) : /^(DB|Enc)$/.test(name) ? 3 : 0;
@@ -160,6 +184,17 @@ async function geometry(image) {
       const a = new DOMPoint(b.x, b.y).matrixTransform(matrix);
       const z = new DOMPoint(b.x + b.width, b.y + b.height).matrixTransform(matrix);
       halos.push({ bounds: { x: a.x, y: a.y, width: z.x - a.x, height: z.y - a.y }, role });
+    }
+    for (const edge of edges) {
+      if (edge.role >= 0) continue;
+      const end = edge[edge.length - 1];
+      const distance = ({ bounds: b }) => sequence
+        ? Math.abs(end.x - (b.x + b.width / 2))
+        : Math.hypot(Math.max(b.x - end.x, 0, end.x - b.x - b.width),
+          Math.max(b.y - end.y, 0, end.y - b.y - b.height));
+      const closest = halos.reduce((best, halo) => !best || distance(halo) < distance(best) ? halo : best, null);
+      if (!closest) throw new Error("no-endpoint-role");
+      edge.role = closest.role;
     }
     return { vb: { x: vb.x, y: vb.y, width: vb.width, height: vb.height }, edges, halos, sequence };
   } finally { holder.remove(); }
@@ -208,8 +243,15 @@ async function start() {
       float line=1.-smoothstep(.025,.055,min(grid.x,grid.y));
       gl_FragColor=vec4(.30,.52,.86,(line*.25+.04)*sin(vUv.x*3.14159));}`;
     const parsed = await Promise.all(pictures.map(async picture => {
-      try { return { picture, image: picture.querySelector("img"), ...await geometry(picture.querySelector("img")) }; }
-      catch { return null; } // A single unavailable diagram must not disable the others.
+      try {
+        const data = await geometry(picture.querySelector("img"));
+        if (!data.edges.length) throw new Error("no-geometry");
+        return { picture, image: picture.querySelector("img"), ...data };
+      } catch (error) {
+        picture.dataset.diagrams3dReason = error.message || "svg-parse-error";
+        console.warn("VLite diagram kept its SVG:", picture.querySelector("img")?.getAttribute("src"), error);
+        return null; // A single unavailable diagram must not disable the others.
+      }
     }));
     for (const data of parsed.filter(Boolean)) {
       if (!data.edges.length) continue;
@@ -222,22 +264,22 @@ async function start() {
       floor.rotation.x = -0.65;
       scene.add(floor);
       const halos = data.halos.map(({ bounds, role }) => {
-        const color = (getComputedStyle(root).getPropertyValue(`--diagram-${roles[role]}`).trim() || colors[role]).slice(1);
-        const n = parseInt(color, 16);
         const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material(haloFragment, {
-          uColor: { value: [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255] },
+          uColor: { value: [0, 0, 0] },
           uSize: { value: [1, 1] },
         }));
         mesh.userData.role = roles[role];
         scene.add(mesh);
-        return { mesh, bounds };
+        return { mesh, bounds, role };
       });
       const points = new THREE.BufferGeometry();
       points.setAttribute("position", new THREE.BufferAttribute(new Float32Array(data.edges.length * 3), 3));
+      points.setAttribute("color", new THREE.BufferAttribute(new Float32Array(data.edges.length * 3), 3));
       const pulseMaterial = new THREE.ShaderMaterial({
-        vertexShader: `uniform float uDpr; void main(){gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.); gl_PointSize=15.*uDpr;}`,
-        fragmentShader: `void main(){float r=length(gl_PointCoord-.5)*2.;
-          float a=(1.-smoothstep(.1,1.,r)); gl_FragColor=vec4(.18,.65,.95,a*.9);}`,
+        vertexShader: `attribute vec3 color; varying vec3 vColor; uniform float uDpr;
+          void main(){vColor=color; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.); gl_PointSize=15.*uDpr;}`,
+        fragmentShader: `varying vec3 vColor; void main(){float r=length(gl_PointCoord-.5)*2.;
+          float a=(1.-smoothstep(.1,1.,r)); gl_FragColor=vec4(vColor,a*.9);}`,
         uniforms: { uDpr: { value: renderer.getPixelRatio() } }, transparent: true, depthTest: false, depthWrite: false,
       });
       const pulses = new THREE.Points(points, pulseMaterial);
@@ -250,6 +292,7 @@ async function start() {
       views.push({ ...data, scene, camera, stage, floor, halos, pulses });
     }
     if (!views.length) { stop("no-geometry"); return; }
+    refreshPalette();
     const listen = (target, event, fn) => {
       target.addEventListener(event, fn, { passive: true });
       cleanups.push(() => target.removeEventListener(event, fn));
@@ -260,7 +303,7 @@ async function start() {
     listen(motion, "change", () => { previous = 0; schedule(); });
     listen(canvas, "webglcontextlost", () => stop("context-lost"));
     listen(window, "pagehide", () => stop("pagehide"));
-    const theme = new MutationObserver(schedule);
+    const theme = new MutationObserver(() => { refreshPalette(); schedule(); });
     theme.observe(root, { attributes: true, attributeFilter: ["data-theme"] });
     cleanups.push(() => theme.disconnect());
     const resize = new ResizeObserver(schedule);
