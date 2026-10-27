@@ -15,6 +15,9 @@ use std::collections::BTreeMap;
 use std::io::{Read, Seek};
 use std::path::Path;
 
+/// Re-exported from [`crate::property_graph`], where it is defined.
+pub use crate::property_graph::GraphChange;
+
 /// Default and maximum events returned by one batch.
 pub const DEFAULT_FEED_BATCH: usize = 1000;
 pub const MAX_FEED_BATCH: usize = 10_000;
@@ -159,73 +162,6 @@ pub enum ChangeKind {
         graph: String,
         revision: u64,
         operations: Vec<GraphChange>,
-    },
-}
-
-/// One graph operation inside a [`ChangeKind::GraphBatch`]. IDs are the
-/// engine's node and edge IDs; keys are resolved from the log.
-#[derive(Clone, Debug, PartialEq)]
-#[non_exhaustive]
-pub enum GraphChange {
-    /// A node was created (`created`) or its labels and properties replaced.
-    NodeUpserted {
-        id: u64,
-        key: String,
-        labels: Vec<String>,
-        properties: Metadata,
-        created: bool,
-    },
-    NodePatched {
-        id: u64,
-        key: String,
-        add_labels: Vec<String>,
-        remove_labels: Vec<String>,
-        set: Metadata,
-        unset: Vec<String>,
-    },
-    NodeDeleted {
-        id: u64,
-        key: String,
-    },
-    /// An edge was created (`created`) or its properties replaced.
-    EdgeUpserted {
-        id: u64,
-        key: Option<String>,
-        source: u64,
-        source_key: String,
-        relationship: String,
-        destination: u64,
-        destination_key: String,
-        properties: Metadata,
-        created: bool,
-    },
-    EdgePatched {
-        id: u64,
-        key: Option<String>,
-        set: Metadata,
-        unset: Vec<String>,
-    },
-    EdgeDeleted {
-        id: u64,
-        key: Option<String>,
-    },
-    /// A node was attached to a record of `collection`.
-    Attached {
-        node: u64,
-        node_key: String,
-        collection: String,
-        record: u64,
-    },
-    /// A node was detached from `record` of `collection`.
-    Detached {
-        node: u64,
-        node_key: String,
-        collection: String,
-        record: u64,
-    },
-    /// The declared schema was replaced (an empty schema removes it).
-    SchemaUpdated {
-        schema: crate::property_graph::GraphSchema,
     },
 }
 
@@ -503,6 +439,7 @@ pub fn read_log_changes(
 impl GraphChange {
     /// One `graph_batch` operation in the REST/webhook/C ABI JSON shape:
     /// `op` names it, and u64 IDs and records are decimal strings.
+    #[doc(hidden)]
     pub fn to_json(&self) -> serde_json::Value {
         use serde_json::json;
         match self {
@@ -580,6 +517,7 @@ impl ChangeKind {
     /// The type-specific fields of a graph event in the REST/webhook/C ABI
     /// JSON shape (`type`, `graph`, and for `graph_batch` the decimal-string
     /// `revision` and `operations`); `None` for vector events.
+    #[doc(hidden)]
     pub fn graph_json(&self) -> Option<serde_json::Value> {
         use serde_json::json;
         Some(match self {

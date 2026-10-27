@@ -290,6 +290,7 @@ fn validate_properties(
 #[cfg(feature = "json")]
 impl PropertyType {
     /// The JSON name used by every tool surface (`"string"`, `"geopoint"`, ...).
+    #[doc(hidden)]
     pub fn json_name(self) -> &'static str {
         match self {
             PropertyType::String => "string",
@@ -330,6 +331,7 @@ fn property_definitions_json(
 impl GraphSchema {
     /// The declared schema in the `PUT /v1/graphs/{graph}/schema` request
     /// shape (round-trips through every tool surface).
+    #[doc(hidden)]
     pub fn to_json(&self) -> serde_json::Value {
         use serde_json::{Map, Value, json};
         let labels: Map<String, Value> = self

@@ -52,6 +52,7 @@ pub(crate) mod engine;
 
 // Some conversions (for example `Precondition` → `Expected`) are only used
 // by tests.
+mod change;
 #[allow(dead_code)]
 mod convert;
 pub(crate) mod feed;
@@ -60,6 +61,7 @@ mod maintain;
 mod read;
 mod retrieve;
 
+pub use change::GraphChange;
 pub use engine::schema::{
     GraphSchema, LabelDefinition, Multiplicity, ObservedEndpoint, ObservedLabel, ObservedProperty,
     ObservedRelationship, ObservedSchema, PropertyDefinition, PropertyIndexKind, PropertyType,
