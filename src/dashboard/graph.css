@@ -6,11 +6,19 @@
 #graph .graph-property-row button { margin-bottom: 12px; }
 #graph input[type="range"] { min-height: 44px; accent-color: var(--studio-accent); }
 #graph .graph-limits { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 0 16px; }
-#graph .graph-limits label { margin: 8px 0; font-family: ui-monospace, Consolas, monospace; font-weight: 500; }
+#graph .graph-limits label { margin: 8px 0; font-family: var(--vlite-font-mono); font-weight: 500; }
 #graph textarea { min-height: 60px; resize: vertical; }
 #graph .graph-figure { margin: 16px 0 0; border: 1px solid var(--studio-border); border-radius: 12px; background: var(--studio-subtle); padding: 8px; }
 #graph .graph-figure figcaption { color: var(--studio-muted); font-size: 12px; padding: 4px 8px; }
 #graph #graph-view { display: block; width: 100%; height: auto; max-height: 420px; }
+#graph .graph-three-stage { position: relative; width: 100%; height: clamp(280px, 42vw, 420px); overflow: hidden; border-radius: var(--studio-radius); background: radial-gradient(ellipse at 30% 20%, var(--studio-accent-soft), transparent 70%); }
+#graph .graph-three-stage canvas, #graph .graph-three-labels { position: absolute; inset: 0; width: 100%; height: 100%; }
+#graph .graph-three-labels { pointer-events: none; }
+#graph .graph-three-node { position: absolute; transform: translate(-50%, 0); pointer-events: auto; min-height: 28px; max-width: 90px; margin: 0; padding: 3px 7px; border: 1px solid var(--studio-border); border-radius: 8px; background: var(--studio-surface); color: var(--studio-text); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; box-shadow: var(--studio-shadow); }
+#graph .graph-three-node:hover, #graph .graph-three-node:focus-visible { border-color: var(--studio-accent); background: var(--studio-accent-soft); }
+#graph .graph-three-edge { position: absolute; transform: translate(-50%, 0); pointer-events: auto; min-height: 24px; max-width: 90px; margin: 0; padding: 2px 6px; border-radius: 6px; background: var(--studio-subtle); color: var(--studio-muted); font: 10px var(--vlite-font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#graph .graph-three-edge:hover, #graph .graph-three-edge:focus-visible { color: var(--studio-accent); border-color: var(--studio-accent); }
+#graph .graph-node, #graph .graph-edge { cursor: pointer; }
 #graph #graph-view .graph-edge line { stroke: var(--studio-muted); stroke-width: 1.5; }
 #graph #graph-view .graph-edge path { stroke: var(--studio-muted); stroke-width: 1.5; fill: none; }
 #graph #graph-view .graph-edge text { fill: var(--studio-muted); font-size: 11px; }
@@ -19,7 +27,7 @@
 #graph #graph-view .graph-node text { fill: var(--studio-text); font-size: 12px; }
 #graph #graph-table td:nth-child(2), #graph #graph-table td:nth-child(3) { font-variant-numeric: tabular-nums; }
 #graph #graph-explain-table th[scope="row"] { width: 9rem; text-transform: none; letter-spacing: 0; font-size: 12px; }
-#graph #graph-explain-table td, #graph #graph-paths td { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+#graph #graph-explain-table td, #graph #graph-paths td { font-family: var(--vlite-font-mono); font-size: 13px; }
 #graph #graph-note { color: var(--studio-muted); }
 /* Linux fonts run wider: keep every child shrinkable and wrap long names instead of widening the page. */
 #graph, #graph > *, #graph .tool-group, #graph .section-heading > *, #graph .graph-actions > *, #graph label, #graph select, #graph input, #graph textarea { min-width: 0; max-width: 100%; }

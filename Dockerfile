@@ -6,6 +6,8 @@ COPY build.rs ./
 COPY proto ./proto
 COPY src ./src
 COPY site/assets/theme.css ./site/assets/theme.css
+COPY site/assets/fonts ./site/assets/fonts
+COPY site/assets/vendor/three ./site/assets/vendor/three
 COPY tests ./tests
 COPY examples ./examples
 COPY bindings/c ./bindings/c
@@ -53,6 +55,9 @@ FROM nginxinc/nginx-unprivileged:1.30.6-alpine AS dashboard
 COPY deploy/dashboard.conf /etc/nginx/conf.d/default.conf
 COPY src/dashboard/ /usr/share/nginx/html/
 COPY site/assets/theme.css /usr/share/nginx/html/theme.css
+COPY site/assets/fonts /usr/share/nginx/html/fonts
+COPY site/assets/vendor/three/three.min.js /usr/share/nginx/html/three.min.js
+COPY site/assets/vendor/three/LICENSE /usr/share/nginx/html/three.LICENSE
 USER root
 RUN sed -i \
     -e 's|name="vlite-api-base" content=""|name="vlite-api-base" content="/api"|' \
@@ -64,6 +69,7 @@ RUN sed -i \
     -e 's|src="/dashboard/observability.js"|src="/observability.js"|' \
     -e 's|src="/dashboard/navigation.js"|src="/navigation.js"|' \
     -e 's|src="/dashboard/graph.js"|src="/graph.js"|' \
+    -e 's|src="/dashboard/ambience.js"|src="/ambience.js"|' \
     /usr/share/nginx/html/index.html
 USER 101
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \

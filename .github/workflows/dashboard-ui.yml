@@ -7,6 +7,8 @@ on:
     paths:
       - "src/dashboard/**"
       - "site/assets/theme.css"
+      - "site/assets/fonts/**"
+      - "site/assets/vendor/three/**"
       - "src/server.rs"
       - "tests/*admin*"
       - "tests/*console*"
@@ -17,6 +19,8 @@ on:
     paths:
       - "src/dashboard/**"
       - "site/assets/theme.css"
+      - "site/assets/fonts/**"
+      - "site/assets/vendor/three/**"
       - "src/server.rs"
       - "tests/*admin*"
       - "tests/*console*"

@@ -18,6 +18,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build the matching backend on this isolated runner
         run: |
+          cargo test --locked --features server --test dashboard --test rest_graph
           cargo build --locked --features server --bin vlite-server
           mkdir -p "$RUNNER_TEMP/capture-image"
           cp target/debug/vlite-server "$RUNNER_TEMP/capture-image/"

@@ -430,28 +430,11 @@
       });
     }
     const round = (value) => Math.round(value * 10) / 10;
-    if (options.mode === "3d") {
-      const yaw = (Number(options.yaw) || 0) * Math.PI / 180;
-      const pitch = (Number(options.pitch) || 0) * Math.PI / 180;
-      const radius = Math.min(width, height) / 2 - pad;
-      shown.forEach((node, index) => {
-        const y = shown.length === 1 ? 0 : 1 - 2 * (index + 0.5) / shown.length;
-        const ring = Math.sqrt(1 - y * y);
-        const angle = index * Math.PI * (3 - Math.sqrt(5));
-        const x = Math.cos(angle) * ring, z = Math.sin(angle) * ring;
-        const rx = x * Math.cos(yaw) + z * Math.sin(yaw);
-        const rz = z * Math.cos(yaw) - x * Math.sin(yaw);
-        const ry = y * Math.cos(pitch) - rz * Math.sin(pitch);
-        const depth = y * Math.sin(pitch) + rz * Math.cos(pitch);
-        const scale = 3 / (3 - depth);
-        placed.set(node.id, { x: width / 2 + rx * radius * scale, y: height / 2 + ry * radius * scale, z: depth, scale });
-      });
-    }
     const nodes = shown.map((node) => ({ ...node, ...placed.get(node.id), x: round(placed.get(node.id).x), y: round(placed.get(node.id).y), text: text(node.key ?? node.id) }));
-    if (options.mode === "3d") nodes.sort((a, b) => a.z - b.z);
-    const edges = (result.edges || []).filter((edge) => placed.has(String(edge.source)) && placed.has(String(edge.target)))
+    const connectedEdges = (result.edges || []).filter((edge) => placed.has(String(edge.source)) && placed.has(String(edge.target)));
+    const edges = connectedEdges.slice(0, 400)
       .map((edge) => ({ id: text(edge.id), label: text(edge.relationship), source: String(edge.source), target: String(edge.target) }));
-    return { width, height, nodes, edges, omitted: all.length - shown.length };
+    return { width, height, nodes, edges, omitted: all.length - shown.length, omittedEdges: connectedEdges.length - edges.length };
   }
 
   // ---------------------------------------------------------------- DOM
@@ -496,6 +479,8 @@
           h(doc, "div", { class: "section-heading" }, h(doc, "h3", { text: "Graphs in this file" }), h(doc, "button", { id: "graph-list", type: "button", class: "secondary", text: "List graphs" })),
           table(doc, "graph-table", ["Name", "Nodes", "Edges", "Use"]),
           h(doc, "label", {}, "Graph", h(doc, "select", { id: "graph-name" })),
+          h(doc, "button", { id: "graph-drop", type: "button", class: "secondary", hidden: true, text: "Delete this graph" }),
+          h(doc, "p", { id: "graph-drop-result", "aria-live": "polite" }),
           h(doc, "div", { id: "graph-create", hidden: true },
             h(doc, "label", {}, "New graph name", h(doc, "input", { id: "graph-create-name", placeholder: "knowledge", autocomplete: "off" })),
             h(doc, "p", { text: "Start with a lowercase letter; use lowercase letters, digits, hyphens or underscores. Maximum 63 characters, or 28 in a tenant." }),
@@ -522,6 +507,7 @@
           h(doc, "label", { "data-edit-ops": "attach" }, "Record ID", h(doc, "input", { id: "graph-edit-record", inputmode: "numeric" })),
           h(doc, "p", { "data-edit-ops": "detach", text: "Unlinks every record in this collection from the node; it does not delete the records." }),
           h(doc, "button", { id: "graph-edit-save", type: "button", text: "Review and apply edit" }),
+          h(doc, "button", { id: "graph-selected-delete", type: "button", class: "secondary", hidden: true, text: "Delete selected item" }),
           h(doc, "pre", { id: "graph-edit-result", "aria-live": "polite" })),
         h(doc, "div", { class: "tool-group" },
           h(doc, "h3", { text: "Query" }),
@@ -560,11 +546,14 @@
           h(doc, "p", { id: "graph-summary", "aria-live": "polite", text: "Run a query to see nodes, edges and paths." }),
           h(doc, "div", { class: "graph-actions" },
             h(doc, "label", {}, "Result view", options(doc, "graph-view-mode", ["2d", "3d"], ["2D diagram", "3D graph"])),
+            h(doc, "button", { id: "graph-connect-nodes", type: "button", class: "secondary", hidden: true, "aria-pressed": "false", text: "Connect two nodes" }),
             h(doc, "label", { "data-graph-rotation": "", hidden: true }, "Turn", h(doc, "input", { id: "graph-yaw", type: "range", min: "-180", max: "180", value: "25" })),
             h(doc, "label", { "data-graph-rotation": "", hidden: true }, "Tilt", h(doc, "input", { id: "graph-pitch", type: "range", min: "-80", max: "80", value: "15" }))),
           table(doc, "graph-explain-table", ["Plan", "Value"]),
           h(doc, "figure", { class: "graph-figure", hidden: true },
+            h(doc, "div", { id: "graph-three-stage", class: "graph-three-stage", hidden: true }),
             h(doc, "figcaption", { id: "graph-figure-caption", text: "Node-link view" })),
+          h(doc, "p", { id: "graph-pick-note", "aria-live": "polite" }),
           table(doc, "graph-nodes", ["ID", "Key", "Labels", "Depth", "Properties", "Revision", "Edit"]),
           table(doc, "graph-edges", ["ID", "Key", "Relationship", "Source", "Target", "Properties", "Revision", "Edit"]),
           table(doc, "graph-paths", ["Path", "Nodes", "Edges"]),
@@ -611,7 +600,10 @@
     if (!section.hasAttribute("aria-labelledby")) section.setAttribute("aria-labelledby", "graph-title");
     section.replaceChildren(...markup(doc));
     const $ = (id) => doc.getElementById(id);
-    const state = { status: "unknown", generation: 0, last: null, caps: null, result: { nodes: [], edges: [] } };
+    const state = { status: "unknown", generation: 0, last: null, caps: null, selected: null, linking: null, result: { nodes: [], edges: [] } };
+    let threeView = null, threeGeneration = 0;
+    const graphScript = doc.querySelector('script[src$="/graph.js"]');
+    const threeModule = new URL("graph3d.js", graphScript ? graphScript.src : new URL("/dashboard/graph.js", win.location.href)).href;
 
     const send = async (method, path, payload) => {
       const bridge = win.VLiteGraphConnection;
@@ -638,6 +630,7 @@
     const apply = (status, detail) => {
       state.status = status;
       $("graph-controls").hidden = status !== "available";
+      $("graph-drop").hidden = true;
       if (status !== "available") { state.caps = null; $("graph-editor").hidden = true; $("graph-create").hidden = true; }
       $("graph-note").textContent = status === "error" ? `Graph check failed: ${detail}` : NOTES[status] || "";
       if (status !== "available") $("graph-admin").hidden = true;
@@ -685,6 +678,7 @@
       $("graph-admin").hidden = !(capabilities.status === 200 && object(capabilities.value) && capabilities.value.role === "admin");
       state.caps = capabilities.status === 200 ? capabilities.value : null;
       $("graph-editor").hidden = !canWrite(state.caps, $("graph-name").value);
+      $("graph-drop").hidden = !canWrite(state.caps, $("graph-name").value);
       $("graph-create").hidden = !(state.caps?.role === "admin" || state.caps?.scope?.operations?.includes("graph_write"));
     };
 
@@ -702,17 +696,25 @@
 
     const draw = (result) => {
       state.result = result;
+      const version = ++threeGeneration;
+      threeView?.dispose();
+      threeView = null;
+      state.linking = null;
+      $("graph-connect-nodes").setAttribute("aria-pressed", "false");
+      $("graph-pick-note").textContent = "";
+      $("graph-connect-nodes").hidden = !canWrite(state.caps, $("graph-name").value) || !result.nodes.length;
       const figure = section.querySelector(".graph-figure");
       const old = figure.querySelector("svg");
       if (old) old.remove();
       const mode = $("graph-view-mode").value;
-      const view = layout(result, { mode, yaw: $("graph-yaw").value, pitch: $("graph-pitch").value });
+      for (const control of section.querySelectorAll("[data-graph-rotation]")) control.hidden = mode !== "3d";
+      const view = layout(result);
       figure.hidden = view.nodes.length === 0;
       if (!view.nodes.length) return;
       const svg = doc.createElementNS(SVG_NS, "svg");
       const set = (element, attributes) => { for (const [name, value] of Object.entries(attributes)) element.setAttribute(name, String(value)); return element; };
       const make = (tag, attributes) => set(doc.createElementNS(SVG_NS, tag), attributes);
-      set(svg, { id: "graph-view", viewBox: `0 0 ${view.width} ${view.height}`, role: "img", "aria-label": `${view.nodes.length} nodes and ${view.edges.length} edges` });
+      set(svg, { id: "graph-view", viewBox: `0 0 ${view.width} ${view.height}`, role: "group", "aria-label": `${view.nodes.length} nodes and ${view.edges.length} edges` });
       const defs = make("defs", {});
       const marker = make("marker", { id: "graph-arrow", viewBox: "0 0 8 8", refX: "8", refY: "4", markerWidth: "8", markerHeight: "8", orient: "auto-start-reverse" });
       marker.append(make("path", { d: "M0,0 L8,4 L0,8 z", class: "graph-arrow" }));
@@ -726,7 +728,7 @@
         if (edge.source === edge.target) {
           const side = from.x > view.width / 2 ? -1 : 1;
           const x = from.x + side * radius * (from.scale || 1);
-          const group = make("g", { class: "graph-edge" });
+          const group = make("g", { class: "graph-edge", "data-pick-edge": edge.id, tabindex: "0", role: "button", "aria-label": `Select edge ${edge.label} (ID ${edge.id})` });
           group.append(make("path", { d: `M${x},${from.y - 4} C${from.x + side * 55},${from.y - 35} ${from.x + side * 55},${from.y + 35} ${x},${from.y + 4}`, "marker-end": "url(#graph-arrow)" }));
           const label = make("text", { x: from.x + side * 48, y: from.y + 4, "text-anchor": side > 0 ? "start" : "end" });
           label.textContent = edge.label;
@@ -737,7 +739,7 @@
         const dx = to.x - from.x;
         const dy = to.y - from.y;
         const length = Math.hypot(dx, dy) || 1;
-        const group = make("g", { class: "graph-edge" });
+        const group = make("g", { class: "graph-edge", "data-pick-edge": edge.id, tabindex: "0", role: "button", "aria-label": `Select edge ${edge.label} (ID ${edge.id})` });
         group.append(make("line", { x1: from.x + (dx / length) * radius, y1: from.y + (dy / length) * radius,
           x2: to.x - (dx / length) * (radius + 2), y2: to.y - (dy / length) * (radius + 2), "marker-end": "url(#graph-arrow)" }));
         const label = make("text", { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 - 4, "text-anchor": "middle" });
@@ -746,7 +748,7 @@
         svg.append(group);
       }
       for (const node of view.nodes) {
-        const group = make("g", { class: "graph-node" });
+        const group = make("g", { class: "graph-node", "data-pick-node": node.id, tabindex: "0", role: "button", "aria-label": `Select node ${node.text}` });
         const title = make("title", {});
         title.textContent = `${node.key !== null ? `${node.key} ` : ""}(ID ${node.id})${node.labels.length ? ` ${node.labels.join(", ")}` : ""}`;
         group.append(title, make("circle", { cx: node.x, cy: node.y, r: radius * (node.scale || 1) }));
@@ -758,7 +760,33 @@
       figure.prepend(svg);
       $("graph-figure-caption").textContent = view.omitted > 0
         ? `Node-link view of the first ${view.nodes.length} nodes (${view.omitted} more listed in the table).`
-        : mode === "3d" ? "3D layout of this query result, not an embedding. Turn and Tilt rotate it; tables contain the exact data." : "Node-link view of the result.";
+        : "Node-link view of the result. Select nodes or edges to edit.";
+      if (view.omittedEdges) $("graph-figure-caption").textContent += ` ${view.omittedEdges} more edges are listed in the tables.`;
+      if (mode === "3d") {
+        $("graph-figure-caption").textContent = "Loading 3D graph; the 2D diagram and exact tables remain available.";
+        const fallback = reason => {
+          if (version !== threeGeneration) return;
+          threeView?.dispose();
+          threeView = null;
+          svg.hidden = false;
+          svg.style.display = "";
+          for (const control of section.querySelectorAll("[data-graph-rotation]")) control.hidden = true;
+          $("graph-figure-caption").textContent = `3D unavailable: ${reason}. Showing the 2D diagram; tables contain exact data.`;
+        };
+        if (win.navigator.connection?.saveData) { fallback("Data-saving mode is on"); return; }
+        import(threeModule).then(async module => {
+          await module.loadRenderer();
+          if (version !== threeGeneration) return;
+          try {
+            threeView = module.createGraph($("graph-three-stage"), view, {
+              onNode: pickNode, onEdge: id => selectItem("edge", id), onFailure: fallback,
+            });
+            threeView.rotate($("graph-yaw").value, $("graph-pitch").value);
+            svg.style.display = "none";
+            $("graph-figure-caption").textContent = `Force-directed 3D layout of this query result, not an embedding. Select nodes or edges to edit; Turn and Tilt rotate. Tables contain exact data.${view.omitted ? ` ${view.omitted} more nodes are listed in the tables.` : ""}${view.omittedEdges ? ` ${view.omittedEdges} more edges are listed in the tables.` : ""}`;
+          } catch (error) { fallback(error.message); }
+        }).catch(error => fallback(`The renderer could not load: ${error.message}`));
+      }
     };
 
     const clearResults = () => {
@@ -868,9 +896,57 @@
       }
     };
     const resetEdit = () => {
+      state.selected = null;
+      $("graph-selected-delete").hidden = true;
       for (const name of ["key", "revision", "labels", "remove-labels", "source", "destination", "relationship", "unset", "record"]) $(`graph-edit-${name}`).value = "";
       $("graph-edit-properties").replaceChildren();
       $("graph-edit-result").textContent = "";
+    };
+    const selectItem = (kind, id) => {
+      if (writing) return;
+      const item = state.result[kind === "node" ? "nodes" : "edges"].find(item => text(item.id) === id);
+      if (kind === "node") useNode(id);
+      if (!item || !canWrite(state.caps, $("graph-name").value) || (kind === "node" && item.key == null)) {
+        $("graph-operation").value = kind === "node" ? "get-node" : "get-edge";
+        $("graph-selector-kind").value = "id";
+        $("graph-selector").value = id;
+        showFields();
+        $("graph-pick-note").textContent = "Item selected for querying. Get its current data before editing; graph write access is required.";
+        return;
+      }
+      resetEdit();
+      state.selected = { kind, id };
+      $("graph-edit-action").value = `patch_${kind}`;
+      $("graph-edit-key").value = kind === "edge" && item.key == null ? text(item.id) : text(item.key);
+      $("graph-edit-edge-kind").value = item.key == null ? "id" : "key";
+      $("graph-edit-revision").value = text(item.revision);
+      $("graph-selected-delete").hidden = false;
+      $("graph-selected-delete").textContent = `Delete selected ${kind}`;
+      showEditFields();
+      $("graph-editor").open = true;
+      $("graph-edit-key").focus();
+    };
+    const pickNode = id => {
+      if (writing) return;
+      if (state.linking === null) { selectItem("node", id); return; }
+      const item = state.result.nodes.find(node => text(node.id) === id);
+      if (item?.key == null) { $("graph-pick-note").textContent = "Query this node's key before connecting it."; return; }
+      if (!state.linking.source) {
+        state.linking.source = item.key;
+        $("graph-pick-note").textContent = `Source "${item.key}" selected. Select the destination node.`;
+        return;
+      }
+      const source = state.linking.source;
+      state.linking = null;
+      $("graph-connect-nodes").setAttribute("aria-pressed", "false");
+      resetEdit();
+      $("graph-edit-action").value = "create_edge";
+      $("graph-edit-source").value = source;
+      $("graph-edit-destination").value = item.key;
+      showEditFields();
+      $("graph-editor").open = true;
+      $("graph-pick-note").textContent = "Endpoints selected. Name the relationship, then review and apply the edge.";
+      $("graph-edit-relationship").focus();
     };
     let writing = false;
     const saveEdit = async () => {
@@ -931,6 +1007,18 @@
       row.querySelector("input").focus();
     });
     $("graph-edit-action").addEventListener("change", () => { resetEdit(); showEditFields(); });
+    $("graph-selected-delete").addEventListener("click", () => {
+      if (!state.selected || writing) return;
+      $("graph-edit-action").value = `delete_${state.selected.kind}`;
+      showEditFields();
+      $("graph-edit-save").focus();
+    });
+    $("graph-connect-nodes").addEventListener("click", () => {
+      if (writing || !canWrite(state.caps, $("graph-name").value)) return;
+      state.linking = state.linking === null ? {} : null;
+      $("graph-connect-nodes").setAttribute("aria-pressed", String(state.linking !== null));
+      $("graph-pick-note").textContent = state.linking ? "Select the source node, then the destination in the diagram. You will review the edge before anything is written." : "Connecting cancelled. No edit sent.";
+    });
     $("graph-edit-edge-kind").addEventListener("change", showEditFields);
     $("graph-edit-save").addEventListener("click", saveEdit);
     $("graph-create-save").addEventListener("click", async () => {
@@ -974,15 +1062,42 @@
       state.last = null;
       $("graph-next").disabled = true;
       $("graph-editor").hidden = !canWrite(state.caps, $("graph-name").value);
+      $("graph-drop").hidden = !canWrite(state.caps, $("graph-name").value);
+      $("graph-drop-result").textContent = "";
       $("graph-summary").textContent = "Graph changed. Run a query for this graph.";
     };
     $("graph-name").addEventListener("change", changeGraph);
-    for (const id of ["graph-view-mode", "graph-yaw", "graph-pitch"]) {
-      $(id).addEventListener(id === "graph-view-mode" ? "change" : "input", () => {
-        for (const control of section.querySelectorAll("[data-graph-rotation]")) control.hidden = $("graph-view-mode").value !== "3d";
-        draw(state.result);
-      });
-    }
+    $("graph-view-mode").addEventListener("change", () => {
+      for (const control of section.querySelectorAll("[data-graph-rotation]")) control.hidden = $("graph-view-mode").value !== "3d";
+      draw(state.result);
+    });
+    for (const id of ["graph-yaw", "graph-pitch"]) $(id).addEventListener("input", () => threeView?.rotate($("graph-yaw").value, $("graph-pitch").value));
+    $("graph-drop").addEventListener("click", async () => {
+      if (writing) return;
+      const graph = $("graph-name").value, generation = state.generation;
+      writing = true;
+      $("graph-drop").disabled = true;
+      try {
+        if (!canWrite(state.caps, graph)) throw new Error("Graph write access is required");
+        const bridge = win.VLiteGraphConnection;
+        if (typeof bridge?.confirm !== "function") throw new Error("Reconnect before deleting a graph; confirmation is unavailable");
+        if (!await bridge.confirm(`Permanently delete graph "${graph}" and all its nodes, edges and record links? Vector records are not deleted. This cannot be undone and has no revision precondition. No automatic retry.`)) return;
+        if (generation !== state.generation || graph !== $("graph-name").value) throw new Error("Connection or graph changed; no deletion sent");
+        $("graph-editor").inert = true;
+        $("graph-create").inert = true;
+        const response = await send("DELETE", graphPath(graph));
+        if (generation !== state.generation) return;
+        if (response.status !== 200 && response.status !== 204) throw new Error(`${errorText(response.status, response.value)}. No automatic retry; reload the graph list before trying again.`);
+        await probe();
+        $("graph-drop-result").textContent = `Deleted graph "${graph}". Vector records were not changed.`;
+      } catch (error) { $("graph-drop-result").textContent = `Error: ${error.message}`; }
+      finally {
+        writing = false;
+        $("graph-drop").disabled = false;
+        $("graph-editor").inert = false;
+        $("graph-create").inert = false;
+      }
+    });
     $("graph-refresh").addEventListener("click", probe);
     $("graph-list").addEventListener("click", probe);
     $("graph-operation").addEventListener("change", showFields);
@@ -991,24 +1106,25 @@
     $("graph-next").addEventListener("click", () => { if (state.last) { $("graph-cursor").value = state.last; return run(false); } return undefined; });
     $("graph-stats").addEventListener("click", loadStats);
     section.addEventListener("click", (event) => {
+      const pick = event.target?.closest?.("[data-pick-node], [data-pick-edge]");
+      if (pick?.hasAttribute("data-pick-node")) { pickNode(pick.dataset.pickNode); return; }
+      if (pick?.hasAttribute("data-pick-edge")) { selectItem("edge", pick.dataset.pickEdge); return; }
       const target = event.target && event.target.closest ? event.target.closest("button") : null;
       if (!target) return;
       if (target.hasAttribute("data-graph-use")) { $("graph-name").value = target.getAttribute("data-graph-use"); changeGraph(); }
       if (target.hasAttribute("data-graph-node")) useNode(target.getAttribute("data-graph-node"));
       if (target.hasAttribute("data-edit-kind")) {
-        const kind = target.dataset.editKind;
-        const item = state.result[kind === "node" ? "nodes" : "edges"].find(item => text(item.id) === target.dataset.editId);
-        if (!item || !canWrite(state.caps, $("graph-name").value)) return;
-        resetEdit();
-        $("graph-edit-action").value = `patch_${kind}`;
-        $("graph-edit-key").value = kind === "edge" && item.key == null ? text(item.id) : text(item.key);
-        $("graph-edit-edge-kind").value = item.key == null ? "id" : "key";
-        $("graph-edit-revision").value = text(item.revision);
-        showEditFields();
-        $("graph-editor").open = true;
-        $("graph-edit-key").focus();
+        selectItem(target.dataset.editKind, target.dataset.editId);
       }
     });
+    section.addEventListener("keydown", event => {
+      if ((event.key === "Enter" || event.key === " ") && event.target.matches?.("[data-pick-node], [data-pick-edge]")) {
+        event.preventDefault();
+        event.target.dispatchEvent(new win.MouseEvent("click", { bubbles: true }));
+      }
+    });
+    win.addEventListener("pagehide", () => { threeGeneration++; threeView?.dispose(); threeView = null; });
+    win.addEventListener("pageshow", event => { if (event.persisted) draw(state.result); });
     win.addEventListener("vlite:connection", probe);
     win.addEventListener("hashchange", () => { if (win.location.hash === "#graph" && state.status !== "available") probe(); });
     showFields();

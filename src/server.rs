@@ -612,6 +612,82 @@ fn configured_routes(service: Service) -> Router {
                     }),
                 )
                 .route(
+                    "/dashboard/graph3d.js",
+                    get(|| async {
+                        dashboard_asset(
+                            "text/javascript; charset=utf-8",
+                            include_str!("dashboard/graph3d.js"),
+                        )
+                    }),
+                )
+                .route(
+                    "/dashboard/ambience.js",
+                    get(|| async {
+                        dashboard_asset(
+                            "text/javascript; charset=utf-8",
+                            include_str!("dashboard/ambience.js"),
+                        )
+                    }),
+                )
+                .route(
+                    "/dashboard/three.min.js",
+                    get(|| async {
+                        dashboard_asset(
+                            "text/javascript; charset=utf-8",
+                            include_str!("../site/assets/vendor/three/three.min.js"),
+                        )
+                    }),
+                )
+                .route(
+                    "/dashboard/three.LICENSE",
+                    get(|| async {
+                        dashboard_asset(
+                            "text/plain; charset=utf-8",
+                            include_str!("../site/assets/vendor/three/LICENSE"),
+                        )
+                    }),
+                )
+                .route(
+                    "/dashboard/fonts/outfit-latin-wght-normal.woff2",
+                    get(|| async {
+                        dashboard_asset(
+                            "font/woff2",
+                            include_bytes!("../site/assets/fonts/outfit-latin-wght-normal.woff2")
+                                .as_slice(),
+                        )
+                    }),
+                )
+                .route(
+                    "/dashboard/fonts/jetbrains-mono-latin-wght-normal.woff2",
+                    get(|| async {
+                        dashboard_asset(
+                            "font/woff2",
+                            include_bytes!(
+                                "../site/assets/fonts/jetbrains-mono-latin-wght-normal.woff2"
+                            )
+                            .as_slice(),
+                        )
+                    }),
+                )
+                .route(
+                    "/dashboard/fonts/OFL-Outfit.txt",
+                    get(|| async {
+                        dashboard_asset(
+                            "text/plain; charset=utf-8",
+                            include_str!("../site/assets/fonts/OFL-Outfit.txt"),
+                        )
+                    }),
+                )
+                .route(
+                    "/dashboard/fonts/OFL-JetBrainsMono.txt",
+                    get(|| async {
+                        dashboard_asset(
+                            "text/plain; charset=utf-8",
+                            include_str!("../site/assets/fonts/OFL-JetBrainsMono.txt"),
+                        )
+                    }),
+                )
+                .route(
                     "/dashboard/theme.css",
                     get(|| async {
                         dashboard_asset(
@@ -669,13 +745,13 @@ fn openapi_document() -> &'static str {
     graph::openapi()
 }
 
-fn dashboard_asset(content_type: &'static str, content: &'static str) -> impl IntoResponse {
+fn dashboard_asset(content_type: &'static str, content: impl IntoResponse) -> impl IntoResponse {
     (
         [
             (header::CONTENT_TYPE, content_type),
             (
                 header::CONTENT_SECURITY_POLICY,
-                "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+                "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
             ),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
             (header::REFERRER_POLICY, "no-referrer"),
@@ -992,6 +1068,14 @@ async fn observe(
             | "/dashboard/admin-tools.js"
             | "/dashboard/graph.js"
             | "/dashboard/graph.css"
+            | "/dashboard/graph3d.js"
+            | "/dashboard/ambience.js"
+            | "/dashboard/three.min.js"
+            | "/dashboard/three.LICENSE"
+            | "/dashboard/fonts/outfit-latin-wght-normal.woff2"
+            | "/dashboard/fonts/jetbrains-mono-latin-wght-normal.woff2"
+            | "/dashboard/fonts/OFL-Outfit.txt"
+            | "/dashboard/fonts/OFL-JetBrainsMono.txt"
             | "/dashboard/observability.js"
             | "/dashboard/navigation.js"
             | "/v1/auth/config"

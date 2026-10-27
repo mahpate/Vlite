@@ -95,7 +95,11 @@ def check_three_exports(site):
     bundle = (site / "assets" / "vendor" / "three" / "three.min.js").read_text(encoding="utf-8")
     exported = {name.split(" as ")[-1].strip()
                 for block in re.findall(r"export\s*\{([^}]*)\}", bundle) for name in block.split(",")}
-    used = set(re.findall(r"\bTHREE\.(\w+)", (site / "assets" / "landing3d.js").read_text(encoding="utf-8")))
+    used = set()
+    for module in ("landing3d.js", "diagrams3d.js"):
+        used.update(re.findall(r"\bTHREE\.(\w+)", (site / "assets" / module).read_text(encoding="utf-8")))
+    for module in ("graph3d.js", "ambience.js"):
+        used.update(re.findall(r"\bTHREE\.(\w+)", (ROOT / "src" / "dashboard" / module).read_text(encoding="utf-8")))
     assert used and used <= exported, sorted(used - exported)
 
 
@@ -175,6 +179,123 @@ def decode_image(page, image, theme):
     image.evaluate("img => img.decode()")
 
 
+def check_diagram_scenes(p, url, screenshots=None):
+    """Actual scissored WebGL output, not CSS panels masquerading as 3D."""
+    browser = p.chromium.launch(args=SWIFTSHADER)
+    try:
+        for theme in ("light", "dark"):
+            for motion in ("reduce", "no-preference"):
+                context = browser.new_context(color_scheme=theme, reduced_motion=motion,
+                                              viewport={"width": 1440, "height": 1050})
+                context.add_init_script("""(() => {
+                    const get = HTMLCanvasElement.prototype.getContext;
+                    window.webglCanvases = new Set();
+                    HTMLCanvasElement.prototype.getContext = function(type, ...args) {
+                        const result = get.call(this, type, ...args);
+                        if (result && /^webgl/.test(type)) window.webglCanvases.add(this);
+                        return result;
+                    };
+                })()""")
+                external, errors = [], []
+                context.route("**/*", lambda route: route.continue_() if route.request.url.startswith(url) else
+                              (external.append(route.request.url), route.abort())[-1])
+                page = context.new_page()
+                track_errors(page, errors)
+                for path, count in (("index.html", 2), ("architecture.html", 14)):
+                    page.goto(f"{url}/{path}?force3d")
+                    page.wait_for_function("document.documentElement.dataset.diagrams3d !== 'loading'")
+                    assert page.locator("html").get_attribute("data-diagrams3d") == "ready", (
+                        path, page.locator("html").get_attribute("data-diagrams3d-reason"), errors)
+                    stages = page.locator(".diagram-3d-stage")
+                    assert stages.count() == count
+                    assert page.locator(".diagrams-3d-canvas").count() == 1
+                    assert page.locator(".diagrams-3d-canvas").get_attribute("aria-hidden") == "true"
+                    # The landing hero/toolkit already own their existing contexts.
+                    assert page.evaluate("""[...webglCanvases].filter(c =>
+                        !c.matches('.hero-canvas, .lane-canvas')).length""") == 1
+                    widths = (1440, 900, 390, 320) if motion == "reduce" else (1440,)
+                    for width in widths:
+                        page.set_viewport_size({"width": width, "height": 1050})
+                        for index, stage in enumerate(stages.all()):
+                            image = stage.locator("img")
+                            decode_image(page, image, theme)
+                            page.wait_for_timeout(100)
+                            assert int(stage.get_attribute("data-edge-count")) > 0
+                            assert int(stage.get_attribute("data-halo-count")) > 0
+                            assert image.is_visible() and image.get_attribute("alt")
+                            if motion == "reduce":
+                                page.wait_for_timeout(100)
+                                before = stage.get_attribute("data-render-count")
+                                page.wait_for_timeout(160)
+                                assert stage.get_attribute("data-render-count") == before
+                                covered = changed_pixels(page, stage, ".diagrams-3d-canvas")
+                                assert covered > 0.0005, (path, theme, width, index, "no WebGL pixels", covered)
+                            elif width == 1440:
+                                assert drawn(page, stage, ".diagrams-3d-canvas", 0.0005, attempts=3) > 0.0005
+                            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), (path, width)
+                        if path == "architecture.html" and width == 1440 and motion == "reduce" and screenshots:
+                            screenshots.mkdir(parents=True, exist_ok=True)
+                            stages.first.screenshot(path=str(screenshots / f"architecture-3d-{theme}.png"))
+                        if path == "index.html" and width == 1440 and motion == "reduce" and screenshots:
+                            screenshots.mkdir(parents=True, exist_ok=True)
+                            page.locator(".deployment-options").screenshot(
+                                path=str(screenshots / f"deployment-3d-{theme}.png"))
+                    if motion == "no-preference":
+                        for name in (("commit", "bindings") if count == 14 else ()):
+                            stage = page.locator(f'figure[data-diagram="{name}"] picture')
+                            stage.scroll_into_view_if_needed()
+                            page.wait_for_timeout(150)
+                            step = int(stage.get_attribute("data-sequence-step"))
+                            page.wait_for_function(
+                                "([stage, step]) => Number(stage.dataset.sequenceStep) !== step",
+                                arg=[stage.element_handle(), step], timeout=3000)
+                            after = int(stage.get_attribute("data-sequence-step"))
+                            assert after == (step + 1) % int(stage.get_attribute("data-edge-count")), (name, step, after)
+                        last = stages.last
+                        last.scroll_into_view_if_needed()
+                        page.wait_for_timeout(200)
+                        frozen = stages.first.get_attribute("data-render-count")
+                        page.wait_for_timeout(200)
+                        if count == 14:
+                            assert stages.first.get_attribute("data-render-count") == frozen
+                    page.locator("#theme-toggle").click()
+                    page.wait_for_timeout(150)
+                    assert page.locator("html").get_attribute("data-diagrams3d") == "ready"
+                    # Reset persisted manual preference before testing the next document.
+                    page.evaluate("localStorage.removeItem('vlite-theme')")
+                assert not errors, errors
+                assert not external, external
+                context.close()
+        for fallback in ("no-webgl2", "save-data", "no-js"):
+            context = browser.new_context(java_script_enabled=fallback != "no-js", color_scheme="dark")
+            if fallback == "no-webgl2":
+                context.add_init_script("""(() => {
+                    const get = HTMLCanvasElement.prototype.getContext;
+                    HTMLCanvasElement.prototype.getContext = function(type, ...args) {
+                        return /^webgl/.test(type) ? null : get.call(this, type, ...args);
+                    };
+                })()""")
+            elif fallback == "save-data":
+                context.add_init_script("Object.defineProperty(navigator, 'connection', {value: {saveData: true}})")
+            page = context.new_page()
+            errors = []
+            track_errors(page, errors)
+            for path, count in (("index.html", 2), ("architecture.html", 14)):
+                page.goto(f"{url}/{path}?force3d")
+                page.wait_for_load_state("networkidle")
+                assert page.locator(".diagrams-3d-canvas, .diagram-3d-stage").count() == 0
+                images = page.locator(".deployment-options img" if count == 2 else ".diagram img")
+                assert images.count() == count
+                for image in images.all():
+                    decode_image(page, image, "dark")
+                if fallback != "no-js":
+                    assert page.locator("html").get_attribute("data-diagrams3d-reason") == fallback
+            assert not errors, errors
+            context.close()
+    finally:
+        browser.close()
+
+
 def check(site, screenshots=None):
     assets = site / "assets" / "diagrams"
     palette = json.loads((assets / "palette.json").read_text(encoding="utf-8"))
@@ -185,6 +306,11 @@ def check(site, screenshots=None):
     assert html.count('data-diagram="') == 14
     assert "cdn.jsdelivr.net" not in html
     assert 'site/assets/diagrams/layers-light.svg' in (ROOT / "README.md").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    for theme in ("light", "dark"):
+        render = f"architecture-3d-{theme}.png"
+        assert f"site/assets/{render}" in readme
+        assert (site / "assets" / render).read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
     for image in assets.glob("*.svg"):
         text = image.read_text(encoding="utf-8")
         svg = ET.fromstring(text)
@@ -226,38 +352,7 @@ def check(site, screenshots=None):
                             path, width, page.evaluate("""[...document.querySelectorAll('body *')]
                               .filter(e => e.getBoundingClientRect().right > innerWidth + 1)
                               .slice(0, 8).map(e => [e.tagName, e.className])"""))
-                        if path in ("architecture.html", "index.html"):
-                            panels = page.locator(".spatial-diagram")
-                            assert panels.count() == (1 if path == "architecture.html" else 2)
-                            for panel in panels.all():
-                                button = panel.locator("button")
-                                button.click()
-                                assert button.get_attribute("aria-expanded") == "true"
-                                assert panel.locator(".spatial-stage").is_visible()
-                                assert panel.locator(".spatial-layer").count() in (3, 4)
-                                slider = panel.locator("input")
-                                slider.focus()
-                                slider.press("ArrowRight")
-                                assert slider.input_value() == "-17"
-                                assert panel.locator(".spatial-stack").evaluate(
-                                    "e => getComputedStyle(e).transform !== 'none'")
-                                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-                                if screenshots and width in (1440, 390):
-                                    screenshots.mkdir(parents=True, exist_ok=True)
-                                    scene = panel.locator(".spatial-stage").get_attribute("id")
-                                    panel.screenshot(path=str(screenshots / f"{Path(path).stem}-{scene}-{theme}-{width}.png"))
-                                for key in ("Home", "End"):
-                                    slider.press(key)
-                                    assert panel.locator(".spatial-stage").evaluate("""stage => {
-                                        const box = stage.getBoundingClientRect();
-                                        return [...stage.querySelectorAll('.spatial-layer strong, .spatial-layer span')].every(e => {
-                                            const r = e.getBoundingClientRect();
-                                            return r.left >= box.left && r.right <= box.right && r.top >= box.top && r.bottom <= box.bottom;
-                                        });
-                                    }"""), (path, theme, width, key, "3D labels clipped")
-                                button.click()
-                                assert button.get_attribute("aria-expanded") == "false"
-                                assert not panel.locator(".spatial-stage").is_visible()
+                        assert page.locator(".spatial-diagram").count() == 0
                         if path == "architecture.html":
                             images = page.locator(".diagram img")
                             assert images.count() == 14
@@ -314,12 +409,15 @@ def check(site, screenshots=None):
             context.close()
             browser.close()
             forced = check_forced_3d(p, url, screenshots)
+            check_diagram_scenes(p, url, screenshots)
     finally:
         server.shutdown()
         server.server_close()
     print("Checked 32 standalone SVGs, shared palette, themes, no-JS, feature navigation and responsive pages.")
     print("Checked forced WebGL2 hero and toolkit scenes." if forced else
           "Skipped forced 3D checks: this Chromium has no WebGL2, even through SwiftShader.")
+    print("Checked shared WebGL pixels on both deployment diagrams and all 14 architecture figures, "
+          "light/dark, four widths, motion, ordered sequences, offscreen pause, context count and fallbacks.")
 
 
 if __name__ == "__main__":

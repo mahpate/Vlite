@@ -127,8 +127,13 @@ def dashboard_server(backend):
             pass
 
         def translate_path(self, path):
-            if path in ("/theme.css", "/dashboard/theme.css"):
-                return str(ROOT / "site" / "assets" / "theme.css")
+            name = path.removeprefix("/dashboard").lstrip("/")
+            if name == "theme.css" or name.startswith("fonts/"):
+                return str(ROOT / "site" / "assets" / name)
+            if name == "three.min.js":
+                return str(ROOT / "site" / "assets" / "vendor" / "three" / name)
+            if name == "three.LICENSE":
+                return str(ROOT / "site" / "assets" / "vendor" / "three" / "LICENSE")
             if path == "/dashboard":
                 path = "/"
             elif path.startswith("/dashboard/"):
@@ -197,7 +202,8 @@ def capture(output):
         dashboard = dashboard_server(backend)
         captures = []
         with sync_playwright() as p:
-            browser = p.chromium.launch()
+            browser = p.chromium.launch(args=["--enable-webgl", "--use-gl=angle",
+                                             "--use-angle=swiftshader", "--enable-unsafe-swiftshader"])
             page = browser.new_page(viewport={"width": 1440, "height": 1100}, color_scheme="light",
                                     device_scale_factor=1, reduced_motion="reduce")
             errors = []
@@ -225,6 +231,7 @@ def capture(output):
                     page.locator(focus).scroll_into_view_if_needed()
                 else:
                     page.evaluate("window.scrollTo(0, 0)")
+                page.evaluate("document.fonts.ready")
                 # Never expose even a masked token length or credential through a screenshot.
                 page.screenshot(path=str(output / filename), animations="disabled",
                                 mask=[page.locator("#token:visible")], mask_color="#e4e6ef")
@@ -318,11 +325,48 @@ def capture(output):
             page.locator("#confirmation").get_by_role("button", name="Confirm", exact=True).click()
             expect(page.locator("#graph-name")).to_have_value("tour_draft")
             assert api("/v1/graphs/tour_draft")["graph"]["name"] == "tour_draft"
+
+            def graph_edit(action, fields, properties=None):
+                if not page.locator("#graph-editor").evaluate("element => element.open"):
+                    page.locator("#graph-editor summary").click()
+                page.locator("#graph-edit-action").select_option(action)
+                for field, value in fields.items():
+                    page.locator("#graph-edit-" + field).fill(value)
+                if properties:
+                    for field, value in properties.items():
+                        page.locator("#graph-add-property").click()
+                        row = page.locator(".graph-property-row").last
+                        row.get_by_label("Name", exact=True).fill(field)
+                        row.get_by_label("Value", exact=True).fill(value)
+                page.locator("#graph-edit-save").click()
+                page.locator("#confirmation").get_by_role("button", name="Confirm", exact=True).click()
+                expect(page.locator("#graph-edit-result")).to_contain_text("Edit committed")
+
+            graph_edit("create_node", {"key": "tour-source"})
+            graph_edit("create_node", {"key": "tour-destination"})
+            graph_edit("create_edge", {"key": "tour-link", "source": "tour-source",
+                                      "destination": "tour-destination", "relationship": "LINKS_TO"})
+            edge = api("/v1/graphs/tour_draft/edges/get", {"edge": {"key": "tour-link"}})["edge"]
+            graph_edit("patch_edge", {"key": "tour-link", "revision": edge["revision"]}, {"status": "reviewed"})
+            edge = api("/v1/graphs/tour_draft/edges/get", {"edge": {"key": "tour-link"}})["edge"]
+            assert edge["properties"]["status"] == {"type": "string", "value": "reviewed"}
+            graph_edit("attach", {"key": "tour-source", "collection": "default", "record": "101"})
+            graph_edit("detach", {"key": "tour-source", "collection": "default"})
+            graph_edit("delete_edge", {"key": "tour-link", "revision": edge["revision"]})
+            assert api("/v1/graphs/tour_draft/edges/get", {"edge": {"key": "tour-link"}})["edge"] is None
+            page.locator("#graph-drop").click()
+            page.locator("#confirmation").get_by_role("button", name="Cancel", exact=True).click()
+            assert api("/v1/graphs/tour_draft")["graph"]["node_count"] == 2
+            page.locator("#graph-drop").click()
+            page.locator("#confirmation").get_by_role("button", name="Confirm", exact=True).click()
+            expect(page.locator("#graph-drop-result")).to_contain_text('Deleted graph "tour_draft"')
+            assert [graph["name"] for graph in api("/v1/graphs")["graphs"]] == ["articles"]
+            api("/v1/vectors/101")
             page.locator("#graph-name").select_option("articles")
-            api("/v1/graphs/tour_draft", method="DELETE")
             page.locator("#graph-list").click()
             expect(page.locator("#graph-editor")).to_be_visible()
-            page.locator("#graph-editor summary").click()
+            if not page.locator("#graph-editor").evaluate("element => element.open"):
+                page.locator("#graph-editor summary").click()
             page.locator("#graph-edit-key").fill("tour-draft")
             page.locator("#graph-edit-save").click()
             page.locator("#confirmation").get_by_role("button", name="Cancel", exact=True).click()
@@ -361,8 +405,17 @@ def capture(output):
             page.locator("#graph .graph-actions").first.evaluate("""element => window.scrollBy(0,
                 element.getBoundingClientRect().top - document.querySelector(".topbar").getBoundingClientRect().bottom - 16)""")
             expect(page.locator("#graph-run")).to_be_in_viewport()
-            expect(page.locator("#graph-view")).to_be_in_viewport(ratio=1)
+            expect(page.locator("#graph-three-stage")).to_be_in_viewport(ratio=1)
+            page.wait_for_function("Number(document.querySelector('#graph-three-stage').dataset.frames) > 0")
             save("current-graph.png", "#graph-summary")
+            page.locator(".graph-three-node").first.click()
+            expect(page.locator("#graph-edit-action")).to_have_value("patch_node")
+            expect(page.locator("#graph-edit-revision")).not_to_have_value("")
+            page.locator("#graph-add-property").click()
+            row = page.locator(".graph-property-row")
+            row.get_by_label("Name", exact=True).fill("review")
+            row.get_by_label("Value", exact=True).fill("Ready to review; no edit sent")
+            save("current-graph-edit.png", "#graph-editor")
 
             nav.get_by_role("link", name="Observability", exact=True).click()
             page.locator("#obs-interval").select_option("0")
@@ -439,6 +492,12 @@ def capture(output):
             "source_assets": {file.name: hashlib.sha256(file.read_text(encoding="utf-8").encode()).hexdigest()
                               for file in (ROOT / "src" / "dashboard").iterdir() if file.is_file()},
             "theme_sha256": hashlib.sha256((ROOT / "site" / "assets" / "theme.css").read_text(encoding="utf-8").encode()).hexdigest(),
+            "shared_assets": {name: hashlib.sha256(
+                                  (ROOT / "site" / "assets" / name).read_bytes() if name.endswith(".woff2")
+                                  else (ROOT / "site" / "assets" / name).read_text(encoding="utf-8").encode()).hexdigest()
+                              for name in ("fonts/outfit-latin-wght-normal.woff2",
+                                           "fonts/jetbrains-mono-latin-wght-normal.woff2",
+                                           "vendor/three/three.min.js")},
             "captures": captures,
         }
         (output / "connected-captures.json").write_text(json.dumps(manifest, indent=2) + "\n")

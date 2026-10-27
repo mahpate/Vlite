@@ -179,19 +179,41 @@ test("guided edits match batch shapes and require revisions for updates and dele
   assert.throws(() => mutation("unknown", {}), /supported/);
 });
 
-test("3D projection is bounded, deterministic and rotates without changing graph identities", () => {
+test("force-directed 3D is finite, deterministic and topology-sensitive without changing graph identities", async () => {
+  const { forceLayout } = await import("../src/dashboard/graph3d.js");
   const result = { nodes: Array.from({ length: 60 }, (_, i) => ({ id: String(i), key: `n${i}` })), edges: [{ id: "1", source: "1", target: "2" }] };
-  const view = layout(result, { mode: "3d", yaw: 25, pitch: 15 });
-  assert.deepEqual(view, layout(result, { mode: "3d", yaw: 25, pitch: 15 }));
+  const view = layout(result);
+  const nodes = forceLayout(view.nodes, view.edges);
+  assert.deepEqual(nodes, forceLayout(view.nodes, view.edges));
   assert.equal(view.nodes.length, 40);
   assert.equal(view.omitted, 20);
   assert.equal(view.edges.length, 1);
-  for (const node of view.nodes) {
-    assert.ok(Number.isFinite(node.z) && node.scale > 0);
-    assert.ok(node.x > 0 && node.x < view.width && node.y > 0 && node.y < view.height);
+  for (const node of nodes) {
+    assert.ok(Number.isFinite(node.x) && Number.isFinite(node.y) && Number.isFinite(node.z));
+    assert.ok(Math.hypot(node.x, node.y, node.z) <= 135.001);
+    assert.equal(typeof node.id, "string");
   }
-  assert.notDeepEqual(view.nodes, layout(result, { mode: "3d", yaw: 60 }).nodes);
-  assert.deepEqual(layout({ nodes: [] }, { mode: "3d" }).nodes, []);
+  assert.notDeepEqual(nodes, forceLayout(view.nodes, []));
+  assert.deepEqual(nodes, forceLayout(view.nodes, Array.from({ length: 400 }, () => view.edges[0])));
+  assert.deepEqual(forceLayout([], []), []);
+  assert.deepEqual(forceLayout([{ id: "18446744073709551615" }], []), [{ id: "18446744073709551615", x: 0, y: 0, z: 0 }]);
+  const dense = layout({ nodes: result.nodes, edges: Array.from({ length: 450 }, (_, i) => ({ id: String(i), source: "1", target: "2" })) });
+  assert.equal(dense.edges.length, 400);
+  assert.equal(dense.omittedEdges, 50);
+});
+
+test("3D labels stay inside the stage and avoid nearby node labels", async () => {
+  const { placeLabels } = await import("../src/dashboard/graph3d.js");
+  const boxes = placeLabels([
+    { x: 100, y: 100, width: 75, height: 28 },
+    { x: 130, y: 100, width: 75, height: 28 },
+    { x: 4, y: 4, width: 75, height: 28 },
+  ], 320, 280);
+  for (const box of boxes) {
+    assert.ok(box.left >= 4 && box.top >= 4);
+    assert.ok(box.left + box.width <= 316 && box.top + box.height <= 276);
+  }
+  assert.ok(boxes[0].top + boxes[0].height <= boxes[1].top || boxes[1].top + boxes[1].height <= boxes[0].top);
 });
 
 test("account graph knobs are validated and only differences are sent", () => {

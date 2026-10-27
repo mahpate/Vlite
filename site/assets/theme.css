@@ -1,5 +1,9 @@
 /* Shared by the website and the server's /dashboard/theme.css route. */
 :root {
+  --vlite-font-display: "Outfit", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --vlite-font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --vlite-radius: 14px;
+  --vlite-glass: linear-gradient(135deg, color-mix(in srgb, var(--vlite-surface) 96%, var(--vlite-accent)), var(--vlite-surface));
   --vlite-background: #f7f8fc;
   --vlite-surface: #ffffff;
   --vlite-subtle: #f1f3f9;

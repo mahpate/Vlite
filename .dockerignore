@@ -9,6 +9,11 @@
 !site/
 !site/assets/
 !site/assets/theme.css
+!site/assets/fonts/
+!site/assets/fonts/**
+!site/assets/vendor/
+!site/assets/vendor/three/
+!site/assets/vendor/three/**
 !deploy/
 !deploy/**
 !tests/

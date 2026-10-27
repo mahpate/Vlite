@@ -13,9 +13,11 @@ service to operate.
 [Docs](https://mahpate.github.io/Vlite/docs/)
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="site/assets/diagrams/layers-dark.svg">
-  <img src="site/assets/diagrams/layers-light.svg" alt="VLite architecture: interfaces call the Database core; search indexes are rebuildable; storage writes one authoritative file.">
+  <source media="(prefers-color-scheme: dark)" srcset="site/assets/architecture-3d-dark.png">
+  <img src="site/assets/architecture-3d-light.png" width="640" alt="VLite architecture with glass depth and edge pulses: interfaces call the Database core; search indexes are rebuildable; storage writes one authoritative file.">
 </picture>
+
+[Full SVG architecture](site/assets/diagrams/layers-light.svg) · [Interactive diagrams](https://mahpate.github.io/Vlite/architecture.html)
 
 ## Highlights
 

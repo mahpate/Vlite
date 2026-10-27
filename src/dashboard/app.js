@@ -1265,6 +1265,7 @@
     const controllers = new Set();
     const failure = (status, code, message) => ({ status, value: { error: { code, message } } });
     const allowed = (method, endpoint) => (/^\/v1\/graphs(\/[^?#]*)?$/.test(endpoint) && (method === "GET" || method === "POST"))
+      || (method === "DELETE" && /^\/v1\/graphs\/[^/?#]+$/.test(endpoint))
       || (method === "GET" && ["/v1/admin/graph/stats", "/v1/capabilities", "/openapi.json"].includes(endpoint));
     async function request(method, path, body) {
       const verb = String(method || "GET").toUpperCase();

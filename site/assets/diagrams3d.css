@@ -1,21 +1,35 @@
-.spatial-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 16px 0; }
-.spatial-controls button { min-height: 44px; font: inherit; cursor: pointer; }
-.spatial-controls label { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--muted); font-size: 14px; }
-.spatial-controls input { min-height: 44px; max-width: 100%; accent-color: var(--accent); }
-.spatial-diagram [hidden], .deployment-options picture[hidden], .diagram picture[hidden] { display: none; }
-.spatial-stage { perspective: 1000px; overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-soft); padding: 64px 20px 24px; }
-.spatial-stack { position: relative; transform-style: preserve-3d; transform: rotateX(8deg) rotateY(var(--turn, -18deg)); margin: 0 auto; padding: 0; list-style: none; width: min(70%, 360px); }
-.spatial-layer { position: relative; transform: translateZ(calc(var(--depth-index) * var(--layer-depth, 32px))); margin: 0 0 28px; padding: 16px; border: 2px solid var(--layer-color); border-radius: 12px; background: var(--card); color: var(--text); box-shadow: 8px 12px 0 color-mix(in srgb, var(--layer-color) 20%, var(--bg-soft)); }
-.spatial-layer:not(:last-child)::after { content: "\2193"; position: absolute; top: 100%; left: 50%; color: var(--muted); font-size: 22px; }
-.spatial-layer strong, .spatial-layer span { display: block; overflow-wrap: anywhere; }
-.spatial-layer span { margin-top: 4px; font-size: 13px; color: var(--muted); }
-.spatial-architecture .spatial-layer::after { content: none; }
-.spatial-note { position: relative; margin: 12px 0 0; color: var(--muted); font-size: 13px; }
-.spatial-interface { --layer-color: var(--diagram-interface); }
-.spatial-operations { --layer-color: var(--diagram-operations); }
-.spatial-search { --layer-color: var(--diagram-search); }
-.spatial-storage { --layer-color: var(--diagram-storage); }
+/* Applied only after local SVG geometry and WebGL are both ready. */
+.diagrams-3d-canvas {
+  position: fixed;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  width: 100vw;
+  height: 100vh;
+}
+.diagram-3d-stage {
+  display: block;
+  position: relative;
+  padding: 18px 12px 28px;
+  border: 1px solid color-mix(in srgb, var(--diagram-interface) 28%, var(--border));
+  border-radius: 16px;
+  background: linear-gradient(145deg, color-mix(in srgb, var(--diagram-interface) 9%, var(--card)), var(--bg-soft));
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 9%, transparent), 0 12px 24px -20px var(--diagram-search);
+  box-sizing: border-box;
+}
+.deployment-options .diagram-3d-stage { margin-top: 20px; }
+.deployment-options .diagram-3d-stage img { margin: 0; }
+.diagram-3d-measure {
+  position: fixed;
+  top: 0;
+  left: 0;
+  visibility: hidden;
+  pointer-events: none;
+  contain: strict;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+}
 @media (max-width: 560px) {
-  .spatial-stage { --layer-depth: 24px; padding: 48px 20px 12px; perspective: 1600px; }
-  .spatial-layer { padding: 12px; }
+  .diagram-3d-stage { padding: 12px 6px 22px; border-radius: 12px; }
 }

@@ -838,7 +838,7 @@ def exercise_epic015_real(page, base, token):
 # ---------------------------------------------------------------------------
 MOCK_ORIGIN = "http://vlite.test"
 DASHBOARD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "dashboard")
-CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
+CSP = "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src 'self'; img-src 'self' data:; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
 ALL_FEATURES = ["background_rebuild", "maintenance", "backup_restore", "audit", "filtered_ann", "collections", "imports", "per_record_etags",
                 "search_auto", "search_hybrid", "search_explain", "quantization", "auto_maintenance", "backup_schedule", "backup_verify_drill",
                 "slow_query_log", "prometheus_metrics", "scoped_credentials", "persistent_audit"]
@@ -883,8 +883,15 @@ class FakeApi:
             # Serve the real navigation.js alongside app.js and observability.js:
             # mocked API tests exercise production routing, never a show-all variant.
             name = "index.html" if path in ("/dashboard", "/dashboard/") else path[len("/dashboard/"):]
-            kind = {"html": "text/html", "js": "text/javascript", "css": "text/css"}[name.rsplit(".", 1)[1]]
-            asset = os.path.join(DASHBOARD_DIR, name) if name != "theme.css" else os.path.join(DASHBOARD_DIR, "..", "..", "site", "assets", "theme.css")
+            kind = {"html": "text/html", "js": "text/javascript", "css": "text/css", "woff2": "font/woff2", "txt": "text/plain"}.get(name.rsplit(".", 1)[1], "text/plain")
+            shared = os.path.join(DASHBOARD_DIR, "..", "..", "site", "assets")
+            asset = os.path.join(DASHBOARD_DIR, name)
+            if name == "theme.css" or name.startswith("fonts/"):
+                asset = os.path.join(shared, name)
+            elif name == "three.min.js":
+                asset = os.path.join(shared, "vendor", "three", name)
+            elif name == "three.LICENSE":
+                asset = os.path.join(shared, "vendor", "three", "LICENSE")
             with open(asset, "rb") as stream:
                 return route.fulfill(status=200, body=stream.read(), headers={"content-type": kind + "; charset=utf-8", "content-security-policy": CSP})
         body = json.loads(request.post_data) if request.post_data else None

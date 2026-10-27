@@ -29,7 +29,7 @@ def check(root):
         "current-payload.png", "current-metadata.png", "current-vector.png",
         "current-write.png", "current-import.png", "current-index.png", "current-collections.png",
         "current-search.png", "current-hybrid.png", "current-retrieval.png", "current-explore.png",
-        "current-graph.png", "current-observability.png", "current-feed.png", "current-administration.png",
+        "current-graph.png", "current-graph-edit.png", "current-observability.png", "current-feed.png", "current-administration.png",
         "current-users.png", "current-credentials.png", "current-tenants.png",
         "current-backups.png", "current-replication.png", "current-automation.png",
         "current-webhooks.png", "current-tls.png", "current-developer.png",
@@ -41,6 +41,15 @@ def check(root):
     assert manifest["format_version"] >= 5
     assert manifest["theme_sha256"] == hashlib.sha256(
         (root / "assets" / "theme.css").read_text(encoding="utf-8").encode()).hexdigest(), "Recapture after changing the shared theme"
+    assert set(manifest["shared_assets"]) == {
+        "fonts/outfit-latin-wght-normal.woff2", "fonts/jetbrains-mono-latin-wght-normal.woff2",
+        "vendor/three/three.min.js",
+    }
+    for name, checksum in manifest["shared_assets"].items():
+        file = root / "assets" / name
+        content = file.read_bytes() if name.endswith(".woff2") else file.read_text(encoding="utf-8").encode()
+        assert hashlib.sha256(content).hexdigest() == checksum, (
+            f"Recapture after changing shared dashboard asset {name}")
     assert {capture["workspace"] for capture in manifest["captures"]} == {
         "Sign in", "Overview", "Collections", "Search", "Graph", "Observability", "Administration", "Developer Console",
     }

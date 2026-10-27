@@ -105,6 +105,7 @@
         ["current-retrieval.png", "Advanced retrieval: recommend neighbors and count metadata facets."],
         ["current-explore.png", "Analyze & compare: compare records and inspect a sampled vector projection."],
         ["current-graph.png", "Graph: traverse linked data, rotate the 3D result, or make confirmed edits with write access."],
+        ["current-graph-edit.png", "Graph editor: select a node or edge, check its current revision, then review and confirm changes."],
         ["current-observability.png", "Observability: inspect real request metrics, routes and server logs."],
         ["current-feed.png", "Change feed: inspect committed vector and graph events and page through their history."],
         ["current-administration.png", "Administration: inspect server health and manage operational controls."],

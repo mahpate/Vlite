@@ -158,8 +158,13 @@ without `graph_read` or a graph binding see a "no graph access" notice.
 It lists graphs, gets a node or edge by ID or key, finds nodes by label and an
 equality or JSON conditions, pages neighbors with direction and relationship
 filters, and runs bounded traversals and shortest paths. Results show
-completeness, truncation, budgets and indexes, a table, and a small SVG
-node-link view with optional manual 3D rotation. **Explain plan** shows the
+completeness, truncation, budgets and indexes, exact tables, and an accessible SVG
+diagram or force-directed three.js **3D graph**. Diagrams display up to 40 nodes
+and 400 edges without changing the tables. **Turn** and **Tilt** rotate the view;
+select a node or edge to load its revision in the editor. **Connect two nodes**
+lets writers pick the source and destination before reviewing a new edge.
+Visualization code and fonts are bundled and served same-origin; reduced motion
+uses still frames and no WebGL2 preserves the SVG and tables. **Explain plan** shows the
 normalized query and effective limits. Blank limits use server defaults. Values above the ceiling show the
 REST error code, for example `graph_limit_exceeds_ceiling`. Admin sessions can
 load `GET /v1/admin/graph/stats`. Writers can create graphs and use **Add or edit
@@ -167,6 +172,9 @@ graph data** for nodes, edges and record links. **Edit** loads a result's curren
 revision; patches and deletions reject revision conflicts. Every write needs
 explicit confirmation and is never automatically retried. REST, CLI and MCP
 remain available for larger batches.
+**Delete this graph** permanently removes all its nodes, edges and record links,
+but not vector records. Unlike per-item edits, graph deletion has no revision
+precondition; it requires a separate destructive confirmation.
 Graph editing and 3D views require a current source build; v0.6.0 release
 binaries predate these dashboard additions.
 Signed-in accounts' graph access follows their role and the `graphs` and

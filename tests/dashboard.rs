@@ -53,7 +53,11 @@ async fn public_dashboard_assets_are_hardened_but_do_not_exempt_data_routes() {
         let csp = response.headers()["content-security-policy"]
             .to_str()
             .unwrap();
-        assert!(csp.contains("frame-ancestors 'none'") && csp.contains("connect-src 'self'"));
+        assert!(
+            csp.contains("frame-ancestors 'none'")
+                && csp.contains("connect-src 'self'")
+                && csp.contains("font-src 'self'")
+        );
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let content = std::str::from_utf8(&bytes).unwrap();
         assert!(content.contains(marker));
@@ -134,7 +138,21 @@ async fn graph_dashboard_assets_are_public_and_hardened() {
     for (uri, content_type, marker) in [
         ("/dashboard/graph.js", "text/javascript", "VLiteGraphTools"),
         ("/dashboard/graph.css", "text/css", "#graph"),
+        ("/dashboard/graph3d.js", "text/javascript", "forceLayout"),
+        ("/dashboard/ambience.js", "text/javascript", "WebGLRenderer"),
+        ("/dashboard/three.min.js", "text/javascript", "WebGLRenderer"),
+        ("/dashboard/three.LICENSE", "text/plain", "MIT License"),
         ("/dashboard/theme.css", "text/css", "--vlite-background"),
+        (
+            "/dashboard/fonts/OFL-Outfit.txt",
+            "text/plain",
+            "SIL OPEN FONT LICENSE",
+        ),
+        (
+            "/dashboard/fonts/OFL-JetBrainsMono.txt",
+            "text/plain",
+            "SIL OPEN FONT LICENSE",
+        ),
     ] {
         let response = app
             .clone()
@@ -155,6 +173,28 @@ async fn graph_dashboard_assets_are_public_and_hardened() {
         assert!(csp.contains("frame-ancestors 'none'") && csp.contains("connect-src 'self'"));
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         assert!(std::str::from_utf8(&bytes).unwrap().contains(marker));
+    }
+    for uri in [
+        "/dashboard/fonts/outfit-latin-wght-normal.woff2",
+        "/dashboard/fonts/jetbrains-mono-latin-wght-normal.woff2",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "{uri}");
+        assert_eq!(response.headers()["content-type"], "font/woff2");
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        assert!(
+            response.headers()["content-security-policy"]
+                .to_str()
+                .unwrap()
+                .contains("font-src 'self'")
+        );
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(bytes.starts_with(b"wOF2"), "{uri}");
+        assert!(bytes.len() > 1000, "{uri}");
     }
     service.close().await.unwrap();
 }

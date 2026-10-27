@@ -159,13 +159,15 @@ credentials.
 
 ## Explore graphs
 
-**Graph** (current source builds) explores [property graphs](GRAPH.md). Choose an operation, then **Run
-query** or **Explain plan**. Results show up to 40 nodes in **2D** or **3D**;
-rotation is manual. Writers add nodes, edges and record links. **Edit**
-loads the current revision; changes require confirmation and reject conflicts.
-Requery after writes. Website and dashboard share theme colors.
+**Graph** (source builds) explores [property graphs](GRAPH.md).
+Diagrams show up to 40 nodes and 400 edges in **2D** or force-directed **3D**;
+tables retain all results. Pick nodes or edges to edit or **Connect two nodes**.
+Writes require confirmation; edits require current revisions, rejecting conflicts.
+Graph deletion is permanent. Requery after writes.
 
 ![Graph traversal drawn as a node-link view](../site/assets/dashboard/current-graph.png?v=connected)
+
+![Revision-checked graph editor](../site/assets/dashboard/current-graph-edit.png?v=connected)
 
 ## Build an index
 
