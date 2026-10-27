@@ -70,7 +70,7 @@ exec sh "$@"
             repeat = subprocess.run(command, env=env, capture_output=True, text=True, timeout=15)
             assert repeat.returncode == 0, (repeat.stdout, repeat.stderr)
             assert token.read_text() == "keep-existing-token"
-            assert "VLITE_API_IMAGE=ghcr.io/mahpate/vlite-api:v0.5.1" in (work / "deployment" / ".env").read_text()
+            assert "VLITE_API_IMAGE=ghcr.io/mahpate/vlite-api:v0.6.0" in (work / "deployment" / ".env").read_text()
             calls = (work / "commands.log").read_text()
             assert "up -d --no-build --wait api dashboard" in calls
             assert "--volumes" not in calls

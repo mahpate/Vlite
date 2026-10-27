@@ -55,7 +55,7 @@ fork. Explicitly close handles, for example with `with native.open(...) as db:`.
 
 ## Durability
 
-Since v0.5.1 file handles default to periodic durability: writes reach the OS
+File handles default to periodic durability: writes reach the OS
 immediately and a background flusher syncs them every 60 s (`flush_interval_ms=`
 1–60000 changes the interval); `close` performs a final sync. A process crash
 loses nothing acknowledged, but **an OS crash or power loss can lose up to about
@@ -179,7 +179,7 @@ and cleans its test files below the binding directory.
 
 ## Property graph
 
-Every library since v0.5.1 includes the graph methods, and every file made by
+Every library includes the graph methods, and every file made by
 `create` or `create_in_memory` is graph-enabled (explicit `format=3` or `4`
 stays plain; copy older files with `vlite-maintain enable-graph`). `native.supports_graph` (or
 `native.capabilities()`) reports availability; against an older library built

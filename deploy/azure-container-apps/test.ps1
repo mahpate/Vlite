@@ -10,7 +10,7 @@ $config = @{
     SubscriptionId = 'test-subscription'; ResourceGroup = 'asendme-rg'
     StorageAccount = 'shared-storage'; Environment = 'vlite-env'; AppName = 'vlite-app'
     ShareName = 'vlite-data'; Location = 'westus2'; Cpu = 1; Dimensions = 1536
-    Image = 'ghcr.io/mahpate/vlite-api:v0.5.1'; ProbeImage = 'python:3.12-slim-bookworm'
+    Image = 'ghcr.io/mahpate/vlite-api:v0.6.0'; ProbeImage = 'python:3.12-slim-bookworm'
     ShareSizeGiB = 10; TimeoutSeconds = 0; AllowExperimentalAzureFiles = $true
 }
 $template = New-VLiteTemplate $config 'environment-id' 'test-only-token' 'revision-test'

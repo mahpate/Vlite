@@ -100,7 +100,7 @@
         <div class="tabpanel" role="tabpanel" id="p-py" aria-labelledby="t-py" tabindex="0">
 <button class="copy" data-copy="c-py" aria-label="Copy Python example">Copy</button>
 <pre class="code" id="c-py"><span class="c-c"># Python 3.11+; run in a fresh directory</span>
-<span class="c-c"># python -m pip install vlite-embedded==0.5.1</span>
+<span class="c-c"># python -m pip install vlite-embedded==0.6.0</span>
 <span class="c-k">from</span> vlite_embedded <span class="c-k">import</span> NativeLibrary
 
 native = NativeLibrary()
@@ -110,7 +110,7 @@ native = NativeLibrary()
         </div>
         <div class="tabpanel" role="tabpanel" id="p-node" aria-labelledby="t-node" hidden>
 <button class="copy" data-copy="c-node">Copy</button>
-<pre class="code" id="c-node"><span class="c-c">// npm install ./vlite-embedded-0.5.1-&lt;platform&gt;.tgz (release tarball)</span>
+<pre class="code" id="c-node"><span class="c-c">// npm install ./vlite-embedded-0.6.0-&lt;platform&gt;.tgz (release tarball)</span>
 <span class="c-k">import</span> { NativeLibrary } <span class="c-k">from</span> <span class="c-s">"@vlite/embedded"</span>;
 
 <span class="c-k">const</span> native = <span class="c-k">new</span> NativeLibrary();
@@ -124,7 +124,7 @@ native = NativeLibrary()
         </div>
         <div class="tabpanel" role="tabpanel" id="p-rust" aria-labelledby="t-rust" hidden>
 <button class="copy" data-copy="c-rust">Copy</button>
-<pre class="code" id="c-rust"><span class="c-c">// Cargo.toml: vlite = { git = "https://github.com/mahpate/Vlite", tag = "v0.5.1" }</span>
+<pre class="code" id="c-rust"><span class="c-c">// Cargo.toml: vlite = { git = "https://github.com/mahpate/Vlite", tag = "v0.6.0" }</span>
 <span class="c-k">use</span> vlite::Database;
 
 <span class="c-k">fn</span> main() -&gt; vlite::Result&lt;()&gt; {
@@ -236,7 +236,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\devbox.ps1 -Token
       <div class="glow-panel">
         <div class="section-head"><div class="kicker">Know the boundaries</div><h2>Data safety you can reason about</h2><p>Corruption fails closed. Committed data is never silently discarded. Indexes rebuild from stored records.</p></div>
         <p class="callout">Limits: the live dataset is held in memory, so size machines for it. A file has one writer or several read-only readers. Durability depends on your filesystem.</p>
-        <nav class="landing-evidence" aria-label="Technical evidence"><a href="architecture.html">Architecture &#8594;</a><a href="docs/REFERENCE.html">Data-safety contracts &#8594;</a><a href="compare.html">Benchmarks &#8594;</a><a href="docs/RELEASE-0.5.1.html">Release notes &#8594;</a></nav>
+        <nav class="landing-evidence" aria-label="Technical evidence"><a href="architecture.html">Architecture &#8594;</a><a href="docs/REFERENCE.html">Data-safety contracts &#8594;</a><a href="compare.html">Benchmarks &#8594;</a><a href="docs/RELEASE-0.6.0.html">Release notes &#8594;</a></nav>
       </div>
     </div>
   </section>

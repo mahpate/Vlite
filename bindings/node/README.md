@@ -302,7 +302,7 @@ the default uses the package's platform prebuild.
 
 ## Property graph
 
-Every native library since v0.5.1 includes the graph methods, and every file
+Every native library includes the graph methods, and every file
 made by `create` or `createInMemory` is graph-enabled (explicit `format` 3 or 4
 stays plain; copy older files with `vlite-maintain enable-graph`). `native.capabilities()` returns `{graph}` and
 `native.supportsGraph()` a boolean; against an older library built without

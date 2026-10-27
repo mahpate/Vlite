@@ -312,8 +312,8 @@ engine's durability contract for the handle's mode (below) and its
 filesystem/hardware limitations.
 
 **Durability.** File handles default to
-[periodic durability](../docs/REFERENCE.md#periodic-lazy-durability) since
-v0.5.1: commits are written to the OS before success but synced by a background
+[periodic durability](../docs/REFERENCE.md#periodic-lazy-durability):
+commits are written to the OS before success but synced by a background
 flusher every 60 s, so an OS crash or power loss can lose up to about 60 s of
 acknowledged writes (a process crash cannot). `create` and `open` (and the
 feature `create`/`open` requests, inside `options` for feature `create`) accept
