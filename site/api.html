@@ -7,7 +7,9 @@
   <meta name="description" content="VLite API reference: every Python, Node.js, Rust, C ABI and WebAssembly call, REST route, gRPC method and MCP tool.">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
+  <link rel="stylesheet" href="assets/api-reference.css">
   <script src="assets/site.js"></script>
+  <script src="assets/api-reference.js" defer></script>
 </head>
 <body>
 <header class="nav">
@@ -106,16 +108,35 @@
   <main class="docs-main api-ref">
     <p class="kicker">API</p>
     <h1 id="overview">VLite APIs</h1>
-    <p class="lead">Embed VLite in your app, or call the server over REST or gRPC. Every interface uses the same engine and file format. This page lists every public call; the guides explain them in depth.</p>
+    <p class="lead">One engine, every interface. Choose an API, find a call, and read its signature, behavior and access requirements in one place.</p>
 
-    <div class="grid cols-3 docs-cards">
-      <a class="card" href="https://github.com/mahpate/Vlite/blob/main/bindings/python/README.md"><span class="label">Embedded</span><h3>Python</h3><p class="muted"><code>vlite-embedded</code> &middot; Python 3.11+</p></a>
-      <a class="card" href="https://github.com/mahpate/Vlite/blob/main/bindings/node/README.md"><span class="label">Embedded</span><h3>Node.js</h3><p class="muted"><code>@vlite/embedded</code> &middot; Node.js 22.9+</p></a>
-      <a class="card" href="docs/REFERENCE.html"><span class="label">Embedded</span><h3>Rust and C</h3><p class="muted"><code>vlite</code> crate and C ABI</p></a>
-      <a class="card" href="docs/API.html"><span class="label">Server</span><h3>REST</h3><p class="muted">JSON over HTTP &middot; OpenAPI</p></a>
-      <a class="card" href="docs/GRPC.html"><span class="label">Server</span><h3>gRPC</h3><p class="muted"><code>vlite.v1.VLite</code> &middot; streaming</p></a>
-      <a class="card" href="docs/MCP.html"><span class="label">Agents</span><h3>MCP</h3><p class="muted">Tools for AI agents</p></a>
+    <div class="grid cols-3 docs-cards api-family-cards">
+      <a class="card" href="#rest" data-api-family="rest"><span class="label">Server</span><h3>REST</h3><p class="muted">HTTP routes, scopes and operations</p></a>
+      <a class="card" href="#sdk" data-api-family="node"><span class="label">Embedded</span><h3>Node.js</h3><p class="muted">Promise-based calls and typed options</p></a>
+      <a class="card" href="#rust" data-api-family="rust"><span class="label">Embedded</span><h3>Rust</h3><p class="muted">Types, methods and free functions</p></a>
+      <a class="card" href="#c-abi" data-api-family="c"><span class="label">Embedded</span><h3>C ABI</h3><p class="muted">Native functions and JSON requests</p></a>
+      <a class="card" href="#sdk" data-api-family="py"><span class="label">Embedded</span><h3>Python</h3><p class="muted">Synchronous calls and typed values</p></a>
+      <a class="card" href="#grpc" data-api-family="grpc"><span class="label">Server</span><h3>gRPC</h3><p class="muted">Protobuf methods and streaming</p></a>
+      <a class="card" href="#mcp" data-api-family="mcp"><span class="label">Agents</span><h3>MCP</h3><p class="muted">Read and write tools for AI agents</p></a>
+      <a class="card" href="#wasm" data-api-family="wasm"><span class="label">Embedded</span><h3>WebAssembly</h3><p class="muted">In-memory databases for the browser</p></a>
     </div>
+
+    <section id="api-browser" aria-labelledby="api-browser-title" hidden>
+      <div class="api-browser-heading"><h2 id="api-browser-title">Browse APIs</h2><a href="#embedded">Quick start and conventions</a></div>
+      <div class="api-families" role="group" aria-label="API family"></div>
+      <p id="api-family-description"></p>
+      <div class="api-filters">
+        <label for="api-search">Search this API<input id="api-search" type="search" placeholder="Method, route or keyword" autocomplete="off"></label>
+        <label for="api-category">Area<select id="api-category"><option value="">All areas</option></select></label>
+        <button id="api-clear" type="button">Clear filters</button>
+      </div>
+      <p id="api-count" role="status" aria-live="polite"></p>
+      <div class="api-browser-layout">
+        <nav id="api-results" aria-label="Matching API calls"></nav>
+        <article id="api-detail" aria-labelledby="api-detail-title" tabindex="-1"></article>
+      </div>
+      <p class="muted">Complete inventory checked against source. This reference never sends API requests. Need another interface? Choose its name above.</p>
+    </section>
 
     <h2 id="embedded">Quick start</h2>
     <p>Open a file in your process. No server is needed.</p>
@@ -1218,6 +1239,18 @@ searchManyF32(vectors: Float32Array[], k: number, options?: Scope &amp; { filter
         <tr><td><span class="verb get">GET</span> <code class="sig" data-api="rest:GET /dashboard/navigation.js">/dashboard/navigation.js</code></td><td>Serves the dashboard's navigation script.</td><td><span class="badge public" title="No credentials needed">Public</span></td></tr>
         <tr><td><span class="verb get">GET</span> <code class="sig" data-api="rest:GET /dashboard/observability.js">/dashboard/observability.js</code></td><td>Serves the dashboard's observability script.</td><td><span class="badge public" title="No credentials needed">Public</span></td></tr>
         <tr><td><span class="verb get">GET</span> <code class="sig" data-api="rest:GET /dashboard/style.css">/dashboard/style.css</code></td><td>Serves the dashboard stylesheet.</td><td><span class="badge public" title="No credentials needed">Public</span></td></tr>
+        <tr><td><span class="verb get">GET</span> <code class="sig" data-api="rest:GET /dashboard/admin-tools.js">/dashboard/admin-tools.js</code></td><td>Serves the dashboard administration controls.</td><td><span class="badge public">Public</span></td></tr>
+        <tr><td><span class="verb get">GET</span> <code class="sig" data-api="rest:GET /dashboard/graph.js">/dashboard/graph.js</code></td><td>Serves the graph query and revision-checked editor controls.</td><td><span class="badge public">Public</span></td></tr>
+        <tr><td><span class="verb get">GET</span> <code class="sig" data-api="rest:GET /dashboard/graph.css">/dashboard/graph.css</code></td><td>Serves graph workspace styles.</td><td><span class="badge public">Public</span></td></tr>
+        <tr><td><span class="verb get">GET</span> <code class="sig" data-api="rest:GET /dashboard/graph3d.js">/dashboard/graph3d.js</code></td><td>Serves the force-directed 3D graph renderer and picking helpers.</td><td><span class="badge public">Public</span></td></tr>
+        <tr><td><span class="verb get">GET</span> <code class="sig" data-api="rest:GET /dashboard/ambience.js">/dashboard/ambience.js</code></td><td>Serves the reduced-motion-aware decorative 3D accents.</td><td><span class="badge public">Public</span></td></tr>
+        <tr><td><span class="verb get">GET</span> <code class="sig" data-api="rest:GET /dashboard/theme.css">/dashboard/theme.css</code></td><td>Serves the shared light/dark theme tokens.</td><td><span class="badge public">Public</span></td></tr>
+        <tr><td><span class="verb get">GET</span> <code class="sig" data-api="rest:GET /dashboard/three.min.js">/dashboard/three.min.js</code></td><td>Serves the vendored three.js renderer without a CDN.</td><td><span class="badge public">Public</span></td></tr>
+        <tr><td><span class="verb get">GET</span> <code class="sig" data-api="rest:GET /dashboard/three.LICENSE">/dashboard/three.LICENSE</code></td><td>Serves the three.js MIT license.</td><td><span class="badge public">Public</span></td></tr>
+        <tr><td><span class="verb get">GET</span> <code class="sig" data-api="rest:GET /dashboard/fonts/outfit-latin-wght-normal.woff2">/dashboard/fonts/outfit-latin-wght-normal.woff2</code></td><td>Serves the self-hosted Outfit variable font.</td><td><span class="badge public">Public</span></td></tr>
+        <tr><td><span class="verb get">GET</span> <code class="sig" data-api="rest:GET /dashboard/fonts/jetbrains-mono-latin-wght-normal.woff2">/dashboard/fonts/jetbrains-mono-latin-wght-normal.woff2</code></td><td>Serves the self-hosted JetBrains Mono variable font.</td><td><span class="badge public">Public</span></td></tr>
+        <tr><td><span class="verb get">GET</span> <code class="sig" data-api="rest:GET /dashboard/fonts/OFL-Outfit.txt">/dashboard/fonts/OFL-Outfit.txt</code></td><td>Serves the Outfit font license.</td><td><span class="badge public">Public</span></td></tr>
+        <tr><td><span class="verb get">GET</span> <code class="sig" data-api="rest:GET /dashboard/fonts/OFL-JetBrainsMono.txt">/dashboard/fonts/OFL-JetBrainsMono.txt</code></td><td>Serves the JetBrains Mono font license.</td><td><span class="badge public">Public</span></td></tr>
         <tr><td><span class="verb get">GET</span> <code class="sig" data-api="rest:GET /health">/health</code></td><td>Reports that the server process is alive. It does not check the database.</td><td><span class="badge public" title="No credentials needed">Public</span></td></tr>
         <tr><td><span class="verb get">GET</span> <code class="sig" data-api="rest:GET /metrics">/metrics</code></td><td>Returns a metrics snapshot as JSON or in Prometheus text format.</td><td><code title="Credential scope">diagnostics</code></td></tr>
         <tr><td><span class="verb get">GET</span> <code class="sig" data-api="rest:GET /openapi.json">/openapi.json</code></td><td>Returns this server's OpenAPI contract.</td><td><span class="badge any" title="Any valid credential or signed-in account">Any key</span></td></tr>
@@ -1297,6 +1330,7 @@ searchManyF32(vectors: Float32Array[], k: number, options?: Scope &amp; { filter
     <table class="api-table cols-3">
       <thead><tr><th>Route</th><th>Description</th><th>Access</th></tr></thead>
       <tbody>
+        <tr><td><span class="verb post">POST</span> <code class="sig" data-api="rest:POST /v1/index/hnsw/quality">/v1/index/hnsw/quality</code></td><td>Measures the default collection's ready HNSW index against exact search. Uses the same quality request and report as the named-collection route; does not build an index.</td><td><code title="Credential scope">index</code></td></tr>
         <tr><td><span class="verb post">POST</span> <code class="sig" data-api="rest:POST /v1/collections/{collection}/index/disk-ann">/v1/collections/{collection}/index/disk-ann</code></td><td>Builds a disk ANN sidecar file in the server's private admin directory.</td><td><code title="Credential scope">index</code></td></tr>
         <tr><td><span class="verb get">GET</span> <code class="sig" data-api="rest:GET /v1/collections/{c}/index/hnsw">/v1/collections/{collection}/index/hnsw</code></td><td>Reports the collection index's identity, readiness and memory use by component.</td><td><code title="Credential scope">read</code></td></tr>
         <tr><td><span class="verb post">POST</span> <code class="sig" data-api="rest:POST /v1/collections/{c}/index/hnsw">/v1/collections/{collection}/index/hnsw</code></td><td>Builds the collection's index now.</td><td><code title="Credential scope">index</code></td></tr>
@@ -1413,7 +1447,7 @@ searchManyF32(vectors: Float32Array[], k: number, options?: Scope &amp; { filter
         <tr><td><span class="verb post">POST</span> <code class="sig" data-api="rest:POST /v1/admin/restores/select">/v1/admin/restores/select</code></td><td>Chooses a restored copy to open at the next startup.</td><td><span class="badge admin" title="The admin token or an admin account">Admin</span></td></tr>
       </tbody>
     </table>
-    <p>The server publishes its full contract at <code>/openapi.json</code>. See the <a href="docs/API.html">REST guide</a>.</p>
+    <p>This inventory includes every explicitly registered HTTP method, including dashboard assets that are not in the OpenAPI snapshot. <code>GET</code> routes also accept <code>HEAD</code> through Axum. The server publishes the API schema at <code>/openapi.json</code>. See the <a href="docs/API.html">REST guide</a> for request bodies, responses and errors.</p>
 
     <h2 id="grpc">gRPC</h2>
     <p>The gRPC service <code>vlite.v1.VLite</code> serves the same database as REST, with the same credentials, scopes and limits. It is off until you start <code>vlite-server</code> with <code>--grpc-bind ADDR</code>. Release binaries and the Docker image include it; source builds need the <code>grpc</code> Cargo feature. Add <code>--grpc-tls-cert</code> and <code>--grpc-tls-key</code> for TLS, and <code>--grpc-tls-client-ca</code> to require client certificates. The contract is <code>proto/vlite/v1/vlite.proto</code>. See the <a href="docs/GRPC.html">gRPC guide</a>.</p>

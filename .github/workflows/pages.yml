@@ -15,6 +15,8 @@ on:
       - "tests/release_docs.py"
       - "tests/content_budget.py"
       - "tests/api_reference.py"
+      - "tests/api_reference_ui.py"
+      - "tests/api_route_inventory.py"
       - "README.md"
       - "bindings/**/README.md"
       - "clients/**/README.md"
@@ -59,12 +61,14 @@ jobs:
           python tests/agent_docs.py
           python tests/content_budget.py
           python tests/api_reference.py
+          python tests/api_route_inventory.py
       - name: Check diagrams and dashboard tour
         run: |
           python -m pip install -r tests/requirements-dashboard.txt
           python -m playwright install --with-deps chromium
           python tests/site_diagrams.py _site
           python tests/dashboard_tours.py _site
+          python tests/api_reference_ui.py _site
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v4
         with:

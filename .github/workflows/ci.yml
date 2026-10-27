@@ -125,7 +125,9 @@ jobs:
           python tests/admin_route_coverage.py
       - name: Verify the website API reference documents every public API item
         if: matrix.os == 'ubuntu-latest'
-        run: python tests/api_reference.py
+        run: |
+          python tests/api_reference.py
+          python tests/api_route_inventory.py
       - uses: dtolnay/rust-toolchain@stable
       - run: python -m unittest discover -s clients/python -p test_client.py
       - run: python -m pip wheel --no-deps --wheel-dir client-dist ./clients/python

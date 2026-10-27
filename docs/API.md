@@ -6,6 +6,32 @@ scoped-credential policy; the dashboard sends its session cookie instead.
 Collection routes keep their collection-bound authorization checks. Errors use
 the `{"error":{"code":"...","message":"..."}}` envelope.
 
+The [website API browser](../site/api.html) provides the same searchable
+reference for REST, Node.js, Rust, C ABI, Python, gRPC, MCP and WebAssembly.
+Choose an interface and area, then select a call for its signature, behavior,
+access requirements and a permanent link. The full reference remains available
+without JavaScript. HTTP coverage is checked against registered server routes,
+not only the OpenAPI snapshot; dashboard asset routes are included separately.
+
+## HNSW quality
+
+`POST /v1/index/hnsw/quality` measures the default collection's ready index.
+`POST /v1/collections/{collection}/index/hnsw/quality` measures a named
+collection's index. Both require the `index` scope for that collection and use
+the same optional JSON body:
+
+```json
+{"samples": 16, "k": 5, "ef_search": 64, "seed": "42", "max_distance_evaluations": 100000}
+```
+
+Omitted fields use the server defaults. Optional `metric`, `config`,
+`quantization` and `rerank_multiplier` select the index identity, as on the
+search and build routes. The response contains `recall_at_k`, `samples_used`,
+`distance_evaluations` and `skipped_reason`; inspect the latter when recall is
+null: `budget` means the evaluation budget was exceeded; `empty` means no usable
+samples. This call compares ANN results with exact search; it does not build an
+index. `samples` is 1 to 32 (default 8), and `k` is 1 to 100 (default 10).
+
 ## Dashboard sign-in and accounts
 
 See [SECURITY.md](SECURITY.md#dashboard-sign-in-and-accounts) for roles,

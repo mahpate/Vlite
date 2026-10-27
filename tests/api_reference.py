@@ -18,7 +18,7 @@ Keys and their sources:
   c:graph-op/op                  graph batch operations
   c-fn:name                      functions in bindings/c/vlite.h
   wasm:name, wasm:Class.name     bindings/wasm/src/lib.rs (JavaScript names)
-  rest:METHOD /path              src/openapi.json and src/openapi_graph.json
+  rest:METHOD /path              registered routers in src/server.rs and src/server/
   grpc:Rpc                       proto/vlite/v1/vlite.proto
   mcp:tool                       src/bin/vlite-mcp.rs and src/bin/tool_support/graph_mcp.rs
 
@@ -375,14 +375,70 @@ GRAPH_TOOL_RE = re.compile(r'tool\(\s*(\w+|"[a-z_]+"),')
 GRAPH_CONST_RE = re.compile(r'const (\w+_TOOL): &str = "(\w+)";')
 
 
+def route_keys(source: str) -> set[str]:
+    """Extract explicit Axum methods, failing closed on unfamiliar route builders."""
+    constants = dict(re.findall(r'const (\w+): &str = "([^"]+)";', source))
+    keys: set[str] = set()
+    matches, offset = [], 0
+    while offset < len(source):
+        end = _skip_literal(source, offset)
+        if end != offset:
+            offset = end
+            continue
+        if re.match(r"\.(nest|route_service)\s*\(", source[offset:offset + 30]):
+            raise AssertionError("Nested/service routing needs explicit API inventory support")
+        if re.match(r"\.route\s*\(", source[offset:offset + 20]):
+            match = re.compile(r'\.route\s*\(\s*("[^"]+"|\w+)\s*,').match(source, offset)
+            assert match, "Unknown route expression; update route extraction"
+            matches.append(match)
+        offset += 1
+    for match in matches:
+        raw = match.group(1)
+        if raw == "route" and "for (route, _, kind) in QUERIES" in source:
+            queries = re.search(r"const QUERIES:.*?= \[(.*?)\];", source, re.S)
+            assert queries and re.search(r"fn query_route\b.*?\bpost\(", source, re.S)
+            keys.update(f"rest:POST {path}" for path in re.findall(r'"(/[^"]+)"', queries.group(1)))
+            continue
+        path = raw.strip('"') if raw.startswith('"') else constants.get(raw)
+        assert path, f"Unknown route constant {raw}; update route extraction"
+        depth, k, methods = 0, match.end(), set()
+        while k < len(source):
+            end = _skip_literal(source, k)
+            if end != k:
+                k = end
+                continue
+            if source[k] == ")" and depth == 0:
+                break
+            if depth == 0:
+                method = re.match(r"(?:axum::routing::)?(get|post|put|patch|delete|head|options|trace)\s*\(", source[k:])
+                if method and (k == 0 or not (source[k - 1].isalnum() or source[k - 1] == "_")):
+                    methods.add(method.group(1).upper())
+            if source[k] in "([{":
+                depth += 1
+            elif source[k] in ")]}":
+                depth -= 1
+            k += 1
+        assert methods and k < len(source), f"Unknown method router for {path}; update route extraction"
+        keys.update(f"rest:{method} {path}" for method in methods)
+    return keys
+
+
+def canonical_rest_key(key: str) -> str:
+    # Older OpenAPI paths spell the collection placeholder {c}.
+    return key.replace("{c}", "{collection}").replace("{job_id}", "{job}").replace("{n}", "{chunk}")
+
+
 def rest_keys(root: Path) -> set[str]:
-    keys = set()
+    sources = [root / "src/server.rs", *sorted((root / "src/server").glob("*.rs"))]
+    keys = set().union(*(route_keys(path.read_text(encoding="utf-8")) for path in sources))
+    declared = set()
     for spec in ("src/openapi.json", "src/openapi_graph.json"):
         doc = json.loads((root / spec).read_text(encoding="utf-8"))
         for path, item in doc["paths"].items():
             for method in ("get", "post", "put", "patch", "delete"):
                 if method in item:
-                    keys.add(f"rest:{method.upper()} {path}")
+                    declared.add(canonical_rest_key(f"rest:{method.upper()} {path}"))
+    assert declared <= keys, f"OpenAPI routes not registered by server: {sorted(declared - keys)}"
     return keys
 
 
@@ -425,7 +481,7 @@ def source_keys(root: Path = ROOT) -> dict[str, set[str]]:
 
 
 def page_keys(text: str) -> set[str]:
-    return {html.unescape(k) for k in re.findall(r'\bdata-api="([^"]+)"', text)}
+    return {canonical_rest_key(html.unescape(k)) for k in re.findall(r'\bdata-api="([^"]+)"', text)}
 
 
 def main(argv: list[str]) -> int:
