@@ -81,6 +81,15 @@ private ingress/VNet isolation requires separate network configuration.
 
 ## Updates and failures
 
+For an update between releases, manually run **Build deployment API image**
+(`deployment-image.yml`) on `main`. It tests and publishes the API for
+`linux/amd64` as `ghcr.io/mahpate/vlite-api:sha-<full-commit>`, without moving a
+release tag. Use the resulting digest, recorded in the job summary, for the
+deployment after CI passes. Publishing an image does not update an app.
+Preserve any deliberate live configuration changes, such as full durability
+and trusted-proxy settings: this script's creation template does not carry
+those overrides forward.
+
 Run the same command with the desired image. All old VLite revisions are
 deactivated, and **every revision must report zero replicas** before changing
 the storage binding or starting a replacement. This intentionally causes
