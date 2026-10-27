@@ -233,7 +233,8 @@ def capture(output):
                     page.evaluate("window.scrollTo(0, 0)")
                 page.evaluate("document.fonts.ready")
                 # Never expose even a masked token length or credential through a screenshot.
-                page.screenshot(path=str(output / filename), animations="disabled",
+                # Reduced motion already disables CSS and renderer animation.
+                page.screenshot(path=str(output / filename),
                                 mask=[page.locator("#token:visible")], mask_color="#e4e6ef")
                 captures.append({"file": filename,
                                  "workspace": workspace or page.locator("#workspace-title").inner_text(),
