@@ -233,7 +233,8 @@ def capture(output):
                     page.evaluate("window.scrollTo(0, 0)")
                 page.evaluate("document.fonts.ready")
                 # Never expose even a masked token length or credential through a screenshot.
-                page.screenshot(path=str(output / filename), animations="disabled",
+                # Hosted software WebGL readback can exceed the default 30 seconds.
+                page.screenshot(path=str(output / filename), animations="disabled", timeout=90_000,
                                 mask=[page.locator("#token:visible")], mask_color="#e4e6ef")
                 captures.append({"file": filename,
                                  "workspace": workspace or page.locator("#workspace-title").inner_text(),
@@ -420,38 +421,10 @@ def capture(output):
             expect(page.locator("#graph-run")).to_be_in_viewport()
             expect(page.locator("#graph-three-stage")).to_be_in_viewport(ratio=1)
             page.wait_for_function("Number(document.querySelector('#graph-three-stage').dataset.frames) > 0")
-            render_state = page.locator("#graph-three-stage").evaluate("""element => ({
-                frames: element.dataset.frames, paused: element.dataset.paused,
-                reduced: matchMedia("(prefers-reduced-motion: reduce)").matches,
-                width: element.clientWidth, height: element.clientHeight,
-                nodes: element.querySelectorAll(".graph-three-node").length,
-                canvas: [...element.querySelectorAll("canvas")].map(canvas => ({
-                    width: canvas.width, height: canvas.height,
-                    contextLost: canvas.getContext("webgl2").isContextLost()
-                }))
-            })""")
-            print("Graph render state:", json.dumps(render_state), flush=True)
-            (output / "graph-result-diagnostic.json").write_text(page.locator("#graph-result").inner_text())
-            stability = page.locator("#graph-three-stage").evaluate("""element => new Promise(resolve => {
-                const frames = [];
-                const sample = time => {
-                    const box = element.getBoundingClientRect();
-                    frames.push({time, x: box.x, y: box.y, width: box.width, height: box.height,
-                                 visibility: document.visibilityState});
-                    if (frames.length === 4) resolve(frames);
-                    else requestAnimationFrame(sample);
-                };
-                requestAnimationFrame(sample);
-                setTimeout(() => resolve(frames), 2000);
-            })""")
-            print("Graph frame stability:", json.dumps(stability), flush=True)
             page.wait_for_function("""() => {
                 document.querySelector("#graph-three-stage canvas").getContext("webgl2").finish();
                 return true;
             }""", timeout=5000)
-            print("Graph GPU commands completed", flush=True)
-            page.locator("#graph-three-stage").screenshot(path=str(output / "graph-stage-diagnostic.png"))
-            print("Graph stage screenshot completed", flush=True)
             save("current-graph.png", "#graph-summary")
             page.locator(".graph-three-node").first.click()
             expect(page.locator("#graph-edit-action")).to_have_value("patch_node")
