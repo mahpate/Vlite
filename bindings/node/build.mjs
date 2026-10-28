@@ -11,7 +11,7 @@ function run(command, args, cwd) {
   if (result.status !== 0) throw new Error(`${command} failed: ${result.status}`);
 }
 if (process.env.CARGO_BUILD_TARGET) throw new Error("Cross-compilation is not supported");
-const target = join(root, "target", "node-embedded");
+const target = join(root, "target", "node-default");
 // Distributed packages include the property-graph commands (GATE-008, v0.5.0).
 run("cargo", ["build", "--locked", "--release", "-p", "vlite-ffi", "--target-dir", target], root);
 run(process.execPath, [join(here, "node_modules", "node-gyp", "bin", "node-gyp.js"), "rebuild"], here);

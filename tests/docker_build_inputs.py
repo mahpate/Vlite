@@ -79,7 +79,21 @@ class DockerInputs(unittest.TestCase):
         text = (ROOT / "Dockerfile").read_text(encoding="utf-8")
         test = text.split("FROM source AS test\n")[1].split("FROM source AS build\n")[0]
         self.assertNotIn("VLITE_IMAGE_TESTS", test)
-        self.assertEqual(test.count("cargo test --locked --workspace --all-targets --all-features"), 1)
+        self.assertIn(
+            "cargo nextest run --locked --workspace --all-targets --all-features --test-threads 2",
+            test,
+        )
+        self.assertIn(
+            "amd64) nextest_arch=x86_64; "
+            "nextest_sha=b0959bc64232974224cf9fb22c915845398c0e8668fa7831eb5b43fb1eef781f",
+            test,
+        )
+        self.assertIn(
+            "arm64) nextest_arch=aarch64; "
+            "nextest_sha=9164568e9840c6509177086828ac7d3178c2d8feb0658b4d2bff62fa620e98c8",
+            test,
+        )
+        self.assertIn("sha256sum -c -", test)
         self.assertNotIn("cargo build", test)
         self.assertIn('CMD ["true"]', test)
         self.assertEqual(text.count("target=/app/target/debug,sharing=locked"), 2)

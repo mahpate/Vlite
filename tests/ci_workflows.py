@@ -132,6 +132,37 @@ class Policy(unittest.TestCase):
         self.assertIn("VLITE_IMAGE: vlite-smoke:local", browser)
         self.assertIn("VLITE_E2E_NO_BUILD: \"1\"", browser)
 
+    def test_graph_workspace_suite_only_repeats_unique_doctests(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn("cargo test --locked --workspace --all-targets --all-features", text)
+        self.assertIn("cargo test --locked -p vlite-graph --doc", text)
+        self.assertNotIn("cargo test --locked -p vlite-graph\n", text)
+
+    def test_client_ffi_builds_share_a_cached_target_directory(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn(". -> target/node-default", workflow)
+        self.assertNotIn("target/ffi-release", workflow)
+        self.assertIn(
+            "bindings/build_wheel.py --target-dir target/node-default --output embedded-wheels",
+            workflow,
+        )
+        self.assertIn("../../target/node-default", workflow)
+        self.assertIn("target/node-default/release/${{ runner.os", workflow)
+        node = (ROOT / "bindings/node/build.mjs").read_text(encoding="utf-8")
+        self.assertIn('join(root, "target", "node-default")', node)
+
+    def test_windows_uses_pinned_bounded_nextest_without_dropping_targets(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn("taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037", workflow)
+        self.assertIn("tool: cargo-nextest@0.9.150", workflow)
+        self.assertIn(
+            "cargo nextest run --locked --workspace --all-targets --all-features --test-threads 2",
+            workflow,
+        )
+        self.assertIn("cargo nextest run --locked --workspace --all-targets --test-threads 2", workflow)
+        self.assertIn("cargo test --locked --workspace --all-targets --all-features", workflow)
+        self.assertIn("run: cargo test --locked --workspace --all-targets\n", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()

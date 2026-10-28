@@ -62,15 +62,29 @@ jobs:
         with:
           key: ${{ matrix.os }}-${{ matrix.toolchain }}
           save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037
+        if: matrix.os == 'windows-latest'
+        with:
+          tool: cargo-nextest@0.9.150
+          fallback: none
       - run: cargo check --locked --no-default-features --lib
-      - run: cargo test --locked --workspace --all-targets --all-features
-      - run: cargo test --locked -p vlite-graph
+      - name: Test full feature suite with bounded Nextest on Windows
+        if: matrix.os == 'windows-latest'
+        run: cargo nextest run --locked --workspace --all-targets --all-features --test-threads 2
+      - name: Test full feature suite with Cargo on other platforms
+        if: matrix.os != 'windows-latest'
+        run: cargo test --locked --workspace --all-targets --all-features
+      - run: cargo test --locked -p vlite-graph --doc
       - name: Graph CLI with json only (FOLLOWUP-001; without tools or server)
         run: cargo test --locked --features json --test graph_cli
       - name: Server without grpc or mcp (ITEM-027..030; catches cfg gaps hidden by --all-features)
         run: cargo test --locked --features server --test graph_server_surfaces --test rest_graph
       - name: Default features (graph always compiled since v0.5.1; includes graph_regression and graph_compat)
+        if: matrix.os != 'windows-latest'
         run: cargo test --locked --workspace --all-targets
+      - name: Default feature suite with bounded Nextest on Windows
+        if: matrix.os == 'windows-latest'
+        run: cargo nextest run --locked --workspace --all-targets --test-threads 2
       - name: REG-008 served OpenAPI bytes and MCP tools/list/outputs match the baseline capture
         run: cargo test --locked --features server,mcp --test graph_surface_parity
       - uses: actions/setup-python@v6
@@ -179,7 +193,7 @@ jobs:
           save-if: ${{ github.event_name != 'pull_request' }}
       - run: python -m unittest discover -s clients/python -p test_client.py
       - run: python -m pip wheel --no-deps --wheel-dir client-dist ./clients/python
-      - run: python bindings/build_wheel.py --output embedded-wheels
+      - run: python bindings/build_wheel.py --target-dir target/node-default --output embedded-wheels
       - run: python tests/embedded_wheel.py embedded-wheels
       - name: Assemble verified local candidate
         shell: python

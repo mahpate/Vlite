@@ -54,6 +54,11 @@ python bindings/build_wheel.py --output embedded-wheels
 python tests/embedded_wheel.py embedded-wheels
 ```
 
+The wheel builder uses an isolated temporary Cargo target by default. To reuse
+compiled artifacts across local builds, pass `--target-dir <path>`; CI shares
+the cached target with the embedded Node package while still running each
+package's own build and tests.
+
 Install the generated `.whl` into the consuming application with
 `python -m pip install <wheel-path>`. The consuming machine needs only Python
 and its normal native OS runtime, not Rust or a server. CI retains these wheels

@@ -11,14 +11,18 @@ import tempfile
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--target-dir",
+        type=Path,
+        help="reuse a Cargo target directory instead of an isolated temporary one",
+    )
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     output = args.output.resolve()
     env = dict(os.environ)
-    # Use a known artifact directory, independent of user Cargo target-dir settings.
     with tempfile.TemporaryDirectory(prefix="vlite-wheel-") as temporary:
         temporary = Path(temporary)
-        target = temporary / "target"
+        target = args.target_dir.resolve() if args.target_dir else temporary / "target"
         env["CARGO_TARGET_DIR"] = str(target)
         if env.get("CARGO_BUILD_TARGET"):
             raise RuntimeError("Build wheels on the target host; CARGO_BUILD_TARGET must be unset")

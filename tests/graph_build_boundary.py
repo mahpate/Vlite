@@ -153,6 +153,10 @@ class GraphBuildBoundary(unittest.TestCase):
                     self.assertEqual(len(builds), count)
                     for line in builds:
                         self.assertNotIn("--features", line)
+        wheel = (ROOT / "bindings" / "build_wheel.py").read_text(encoding="utf-8")
+        node = (ROOT / "bindings" / "node" / "build.mjs").read_text(encoding="utf-8")
+        self.assertIn('"--target-dir"', wheel)
+        self.assertIn('join(root, "target", "node-default")', node)
 
     def test_release_archives_ship_graph_binaries(self):
         # FOLLOWUP-001/ITEM-043: the graph command line and the MCP server

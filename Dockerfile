@@ -14,10 +14,20 @@ COPY bindings/c ./bindings/c
 COPY crates ./crates
 
 FROM source AS test
+ARG TARGETARCH
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/app/target/debug,sharing=locked \
-    cargo test --locked --workspace --all-targets --all-features
+    case "$TARGETARCH" in \
+      amd64) nextest_arch=x86_64; nextest_sha=b0959bc64232974224cf9fb22c915845398c0e8668fa7831eb5b43fb1eef781f ;; \
+      arm64) nextest_arch=aarch64; nextest_sha=9164568e9840c6509177086828ac7d3178c2d8feb0658b4d2bff62fa620e98c8 ;; \
+      *) echo "Unsupported Nextest build architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.150/cargo-nextest-0.9.150-${nextest_arch}-unknown-linux-gnu.tar.gz" -o /tmp/cargo-nextest.tar.gz \
+    && echo "$nextest_sha  /tmp/cargo-nextest.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/cargo-nextest.tar.gz -C /usr/local/bin cargo-nextest \
+    && rm /tmp/cargo-nextest.tar.gz \
+    && cargo nextest run --locked --workspace --all-targets --all-features --test-threads 2
 # The build fails if any test fails; running this image does not repeat the suite.
 CMD ["true"]
 
