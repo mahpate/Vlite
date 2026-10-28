@@ -316,7 +316,13 @@ jobs:
         run: |
           python3 -m pip install -r tests/requirements-dashboard.txt
           python3 -m playwright install --with-deps chromium
+      - name: Build standalone dashboard image
+        run: docker build --target dashboard --tag vlite-dashboard-ui:test .
       - name: Verify dashboard with Chromium against Docker
+        env:
+          VLITE_IMAGE: vlite-smoke:local
+          VLITE_DASHBOARD_IMAGE: vlite-dashboard-ui:test
+          VLITE_E2E_NO_BUILD: "1"
         run: python3 tests/dashboard_e2e.py
 
 

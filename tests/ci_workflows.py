@@ -118,6 +118,13 @@ class Policy(unittest.TestCase):
         self.assertIn("actions/cache@", text)
         self.assertIn("docker-ci-v1-${{ runner.arch }}-", text)
 
+    def test_browser_checks_reuse_the_already_tested_runtime(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn("docker build --target dashboard --tag vlite-dashboard-ui:test .", text)
+        browser = text.split("- name: Verify dashboard with Chromium against Docker\n")[1]
+        self.assertIn("VLITE_IMAGE: vlite-smoke:local", browser)
+        self.assertIn("VLITE_E2E_NO_BUILD: \"1\"", browser)
+
 
 if __name__ == "__main__":
     unittest.main()
