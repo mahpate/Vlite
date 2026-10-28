@@ -19,11 +19,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/app/target/debug,sharing=locked \
     case "$TARGETARCH" in \
-      amd64) nextest_arch=x86_64; nextest_sha=b0959bc64232974224cf9fb22c915845398c0e8668fa7831eb5b43fb1eef781f ;; \
-      arm64) nextest_arch=aarch64; nextest_sha=9164568e9840c6509177086828ac7d3178c2d8feb0658b4d2bff62fa620e98c8 ;; \
+      amd64) nextest_arch=x86_64; nextest_sha=32d1d8c0567b7a80bee2bad8bb09125c846da96bc009b2de11ec08557290c770 ;; \
+      arm64) nextest_arch=aarch64; nextest_sha=6f82e375187cf3a1f3e336879a51940c315a5d0ce7253f7e517ad28295b74189 ;; \
       *) echo "Unsupported Nextest build architecture: $TARGETARCH" >&2; exit 1 ;; \
     esac \
-    && curl -fsSL "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.150/cargo-nextest-0.9.150-${nextest_arch}-unknown-linux-gnu.tar.gz" -o /tmp/cargo-nextest.tar.gz \
+    && curl -fsSL "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.149/cargo-nextest-0.9.149-${nextest_arch}-unknown-linux-gnu.tar.gz" -o /tmp/cargo-nextest.tar.gz \
     && echo "$nextest_sha  /tmp/cargo-nextest.tar.gz" | sha256sum -c - \
     && tar -xzf /tmp/cargo-nextest.tar.gz -C /usr/local/bin cargo-nextest \
     && rm /tmp/cargo-nextest.tar.gz \

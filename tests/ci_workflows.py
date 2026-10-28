@@ -154,7 +154,7 @@ class Policy(unittest.TestCase):
     def test_windows_uses_pinned_bounded_nextest_without_dropping_targets(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         self.assertIn("taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037", workflow)
-        self.assertIn("tool: cargo-nextest@0.9.150", workflow)
+        self.assertIn("tool: cargo-nextest@0.9.149", workflow)
         self.assertIn(
             "cargo nextest run --locked --workspace --all-targets --all-features --test-threads 2",
             workflow,

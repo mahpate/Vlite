@@ -85,14 +85,15 @@ class DockerInputs(unittest.TestCase):
         )
         self.assertIn(
             "amd64) nextest_arch=x86_64; "
-            "nextest_sha=b0959bc64232974224cf9fb22c915845398c0e8668fa7831eb5b43fb1eef781f",
+            "nextest_sha=32d1d8c0567b7a80bee2bad8bb09125c846da96bc009b2de11ec08557290c770",
             test,
         )
         self.assertIn(
             "arm64) nextest_arch=aarch64; "
-            "nextest_sha=9164568e9840c6509177086828ac7d3178c2d8feb0658b4d2bff62fa620e98c8",
+            "nextest_sha=6f82e375187cf3a1f3e336879a51940c315a5d0ce7253f7e517ad28295b74189",
             test,
         )
+        self.assertIn("cargo-nextest-0.9.149-", test)
         self.assertIn("sha256sum -c -", test)
         self.assertNotIn("cargo build", test)
         self.assertIn('CMD ["true"]', test)

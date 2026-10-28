@@ -65,7 +65,7 @@ jobs:
       - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037
         if: matrix.os == 'windows-latest'
         with:
-          tool: cargo-nextest@0.9.150
+          tool: cargo-nextest@0.9.149
           fallback: none
       - run: cargo check --locked --no-default-features --lib
       - name: Test full feature suite with bounded Nextest on Windows
