@@ -36,6 +36,30 @@ manifests select the host architecture automatically. Releases also publish
 digest references in their notes; pinning those digests gives an immutable
 deployment.
 
+## Source builds and CI caching
+
+Source builds require BuildKit (Docker Compose v2/buildx). Cargo downloads and
+compilation outputs use locked cache mounts, so source changes do not discard
+all dependency compilation. Runtime executables are copied out of the mounts
+before packaging; deleting a build cache cannot remove binaries from an image.
+The default runtime/API build still runs the full Rust suite. Only an explicitly
+CI-qualified build should set `VLITE_IMAGE_TESTS=0`; this does not change features
+or the shipped binaries. The `test` target always runs the full suite during
+image build, independently of that argument, and does not compile release
+binaries or repeat tests when its container starts.
+
+CI persists Docker cache mounts explicitly; buildx layer cache alone does not
+export their contents. Native Rust caches are separated by job, OS, compiler and
+Cargo inputs. PRs can restore native caches but do not save them. CI runs on
+main pushes, PRs and manual dispatch, cancelling superseded validation runs.
+Standalone branch pushes can use manual dispatch before a PR is opened.
+Only README/docs Markdown-only changes skip the native/container matrix;
+dashboard and embedded website assets still receive full checks. Client and
+documentation checks remain enabled, and manual dispatch always forces full CI.
+`CI required` is the stable aggregate check for branch protection; skipped
+documentation-only matrix entries are intentional, not substitutes for a
+failed or cancelled job. Release and deployment workflows are not cancelled.
+
 ## First deployment
 
 **First time on Windows?** Use the

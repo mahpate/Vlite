@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM rust:1.89-bookworm AS build
+FROM rust:1.89-bookworm AS source
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY build.rs ./
@@ -12,6 +12,16 @@ COPY tests ./tests
 COPY examples ./examples
 COPY bindings/c ./bindings/c
 COPY crates ./crates
+
+FROM source AS test
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/app/target,sharing=locked \
+    cargo test --locked --workspace --all-targets --all-features
+# The build fails if any test fails; running this image does not repeat the suite.
+CMD ["true"]
+
+FROM source AS build
 # Release image publishing sets VLITE_IMAGE_TESTS=0 because the same suite has
 # already passed natively on each published architecture, and
 # VLITE_IMAGE_BINS=shipped to build only the binaries the runtime and api
@@ -19,17 +29,20 @@ COPY crates ./crates
 # binary plus the graph-enabled C library.
 ARG VLITE_IMAGE_TESTS=1
 ARG VLITE_IMAGE_BINS=all
-RUN if [ "$VLITE_IMAGE_TESTS" = "1" ]; then cargo test --locked --workspace --all-targets --all-features; fi \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/app/target,sharing=locked \
+    if [ "$VLITE_IMAGE_TESTS" = "1" ]; then cargo test --locked --workspace --all-targets --all-features; \
+       elif [ "$VLITE_IMAGE_TESTS" != "0" ]; then echo "VLITE_IMAGE_TESTS must be 0 or 1" >&2; exit 1; fi \
     && case "$VLITE_IMAGE_BINS" in \
          all) shipped="" ;; \
          shipped) shipped="--bin vlite-smoke --bin vlite-maintain --bin vlite-bench --bin vlite-server" ;; \
          *) echo "VLITE_IMAGE_BINS must be all or shipped" >&2; exit 1 ;; \
        esac \
     && cargo build --locked --release ${shipped:---bins} --features http-embedder,otel,tools,import-formats,json,mcp,server,grpc,gpu,mcp-proxy \
-    && if [ "$VLITE_IMAGE_BINS" = "all" ]; then cargo build --locked --release -p vlite-ffi; fi
-
-FROM build AS test
-CMD ["cargo", "test", "--locked", "--workspace", "--all-targets", "--all-features"]
+    && if [ "$VLITE_IMAGE_BINS" = "all" ]; then cargo build --locked --release -p vlite-ffi; fi \
+    && mkdir /out \
+    && cp target/release/vlite-smoke target/release/vlite-maintain target/release/vlite-bench target/release/vlite-server /out/
 
 FROM debian:bookworm-slim AS runtime
 RUN groupadd --gid 10001 vlite \
@@ -38,10 +51,10 @@ RUN groupadd --gid 10001 vlite \
     && mkdir /admin \
     && chown vlite:vlite /data /admin \
     && chmod 700 /admin
-COPY --from=build /app/target/release/vlite-smoke /usr/local/bin/vlite-smoke
-COPY --from=build /app/target/release/vlite-maintain /usr/local/bin/vlite-maintain
-COPY --from=build /app/target/release/vlite-bench /usr/local/bin/vlite-bench
-COPY --from=build /app/target/release/vlite-server /usr/local/bin/vlite-server
+COPY --from=build /out/vlite-smoke /usr/local/bin/vlite-smoke
+COPY --from=build /out/vlite-maintain /usr/local/bin/vlite-maintain
+COPY --from=build /out/vlite-bench /usr/local/bin/vlite-bench
+COPY --from=build /out/vlite-server /usr/local/bin/vlite-server
 USER 10001:10001
 WORKDIR /data
 ENTRYPOINT ["/usr/local/bin/vlite-smoke"]

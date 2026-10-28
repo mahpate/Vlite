@@ -2,14 +2,51 @@ name: VLite CI
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      full: ${{ steps.route.outputs.full }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: python tests/ci_workflows.py
+      - id: route
+        run: python scripts/ci_policy.py route
+
+  documentation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Verify documentation contracts
+        run: |
+          python tests/release_docs.py
+          python tests/agent_docs.py
+          python tests/content_budget.py
+          python tests/api_reference.py
+          python tests/api_route_inventory.py
+
   native:
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -21,6 +58,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: ${{ matrix.os }}-${{ matrix.toolchain }}
+          save-if: ${{ github.event_name != 'pull_request' }}
       - run: cargo check --locked --no-default-features --lib
       - run: cargo test --locked --workspace --all-targets --all-features
       - run: cargo test --locked -p vlite-graph
@@ -129,6 +170,13 @@ jobs:
           python tests/api_reference.py
           python tests/api_route_inventory.py
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: clients-${{ matrix.os }}
+          workspaces: |
+            . -> target
+            . -> target/node-default
+          save-if: ${{ github.event_name != 'pull_request' }}
       - run: python -m unittest discover -s clients/python -p test_client.py
       - run: python -m pip wheel --no-deps --wheel-dir client-dist ./clients/python
       - run: python bindings/build_wheel.py --output embedded-wheels
@@ -180,6 +228,8 @@ jobs:
       - run: python tests/clients_e2e.py target/debug/vlite-server${{ runner.os == 'Windows' && '.exe' || '' }}
 
   manylinux:
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -195,6 +245,8 @@ jobs:
           path: manylinux-wheels/*.whl
 
   node-linux-package:
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -202,19 +254,45 @@ jobs:
         run: docker build --file bindings/node/Dockerfile --target artifacts --output type=local,dest=node-linux-packages .
 
   lint:
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: lint
+          save-if: ${{ github.event_name != 'pull_request' }}
       - run: cargo fmt --check
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
   docker:
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
+    env:
+      VLITE_IMAGE_TESTS: "0" # The tests target below always runs the full suite.
     steps:
       - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - uses: actions/cache@v4
+        with:
+          path: .buildkit-cache
+          key: docker-ci-v1-${{ runner.arch }}-${{ hashFiles('Dockerfile', '**/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            docker-ci-v1-${{ runner.arch }}-${{ hashFiles('Dockerfile', '**/Cargo.lock') }}-
+            docker-ci-v1-${{ runner.arch }}-
+      - uses: reproducible-containers/buildkit-cache-dance@e475a9cbcb5052f85fd3830f1266fa0c91ef8595
+        with:
+          cache-map: |
+            {
+              ".buildkit-cache/registry": {"target": "/usr/local/cargo/registry", "sharing": "locked"},
+              ".buildkit-cache/git": {"target": "/usr/local/cargo/git", "sharing": "locked"},
+              ".buildkit-cache/target": {"target": "/app/target", "sharing": "locked"}
+            }
       - run: docker compose --profile test run --build --rm tests
       - name: Verify persistent smoke and maintenance
         shell: bash
@@ -242,6 +320,8 @@ jobs:
 
 
   go-client:
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -259,11 +339,17 @@ jobs:
           go vet ./...
           go test -race ./...
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: go-server
+          save-if: ${{ github.event_name != 'pull_request' }}
       - run: cargo build --locked --features server --bin vlite-server
       - name: Go opt-in REST e2e against disposable server
         run: python clients/go/live_test.py go
 
   dotnet-client:
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -278,6 +364,10 @@ jobs:
       - name: Run fake HTTP handler tests
         run: dotnet run --project clients/dotnet/VLite.Client.Tests --configuration Release --no-build
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: dotnet-server
+          save-if: ${{ github.event_name != 'pull_request' }}
       - run: cargo build --locked --features server --bin vlite-server
       - name: .NET opt-in REST e2e against disposable server
         run: python clients/go/live_test.py dotnet
@@ -314,6 +404,8 @@ jobs:
         run: helm template vectors deploy/helm/vlite --set auth.token=abcdefghijklmnopqrstuvwxyz012345 --set tls.existingSecret=vlite-tls
 
   wasm:
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -321,6 +413,13 @@ jobs:
         with:
           toolchain: stable
           targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: wasm
+          workspaces: |
+            . -> target
+            bindings/wasm -> target
+          save-if: ${{ github.event_name != 'pull_request' }}
       - run: cargo check --locked --target wasm32-unknown-unknown --no-default-features --lib
       - name: Build and run the WebAssembly package in Node
         working-directory: bindings/wasm
@@ -329,3 +428,23 @@ jobs:
           cargo build --locked --release --target wasm32-unknown-unknown
           wasm-bindgen target/wasm32-unknown-unknown/release/vlite_wasm.wasm --target nodejs --out-dir pkg
           node test/smoke.mjs pkg/vlite_wasm.js
+
+  required:
+    name: CI required
+    if: always()
+    needs: [changes, documentation, native, clients, manylinux, node-linux-package, lint, docker, go-client, dotnet-client, python-integrations, helm-chart, wasm]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every applicable check
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        shell: python
+        run: |
+          import json, os
+          jobs = json.loads(os.environ["RESULTS"])
+          full = jobs["changes"]["outputs"].get("full")
+          assert full in ("true", "false"), "Change routing did not complete"
+          always = {"changes", "documentation", "clients", "python-integrations", "helm-chart"}
+          for name, job in jobs.items():
+              expected = {"success"} if full == "true" or name in always else {"skipped"}
+              assert job["result"] in expected, f"{name}: {job['result']} (expected {expected})"

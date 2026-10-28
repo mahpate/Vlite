@@ -62,7 +62,7 @@ class DockerInputs(unittest.TestCase):
     def test_release_images_build_only_the_shipped_binaries(self):
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn("ARG VLITE_IMAGE_BINS=all\n", dockerfile.replace("\r\n", "\n"))
-        copied = re.findall(r"COPY --from=build /app/target/release/(\S+) ", dockerfile)
+        copied = re.findall(r"COPY --from=build /out/(\S+) ", dockerfile)
         shipped = re.search(r'shipped\) shipped="([^"]*)"', dockerfile)
         self.assertIsNotNone(shipped)
         self.assertEqual(re.findall(r"--bin (\S+)", shipped.group(1)), copied)
@@ -74,6 +74,17 @@ class DockerInputs(unittest.TestCase):
         self.assertEqual(release.count("push-by-digest=true,name-canonical=true,push=true"), 3)
         self.assertEqual(release.count("VLITE_IMAGE_BINS=shipped"), 2)
         self.assertIn("docker buildx imagetools create", release)
+
+    def test_build_cache_outputs_and_test_stage_are_independent(self):
+        text = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        test = text.split("FROM source AS test\n")[1].split("FROM source AS build\n")[0]
+        self.assertNotIn("VLITE_IMAGE_TESTS", test)
+        self.assertEqual(test.count("cargo test --locked --workspace --all-targets --all-features"), 1)
+        self.assertNotIn("cargo build", test)
+        self.assertIn('CMD ["true"]', test)
+        self.assertEqual(text.count("target=/app/target,sharing=locked"), 2)
+        self.assertIn("&& cp target/release/vlite-smoke", text)
+        self.assertNotIn("COPY --from=build /app/target/", text)
 
 
 if __name__ == "__main__":

@@ -82,10 +82,15 @@ private ingress/VNet isolation requires separate network configuration.
 ## Updates and failures
 
 For an update between releases, manually run **Build deployment API image**
-(`deployment-image.yml`) on `main`. It tests and publishes the API for
+(`deployment-image.yml`) on `main` after **VLite CI** succeeds for that exact
+commit. Publication verifies a successful trusted main-branch CI run, including
+all eight native matrix jobs, lint and Docker checks; a PR run, an older commit,
+or a docs-only run cannot qualify. If needed, manually dispatch VLite CI on
+`main` to force the full matrix, then retry publication. The workflow builds
+without repeating those tests and publishes the API for
 `linux/amd64` as `ghcr.io/mahpate/vlite-api:sha-<full-commit>`, without moving a
 release tag. Use the resulting digest, recorded in the job summary, for the
-deployment after CI passes. Publishing an image does not update an app.
+deployment. Publishing an image does not update an app.
 Preserve any deliberate live configuration changes, such as full durability
 and trusted-proxy settings: this script's creation template does not carry
 those overrides forward.
