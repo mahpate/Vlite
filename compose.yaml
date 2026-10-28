@@ -6,6 +6,7 @@ services:
       target: runtime
       args:
         VLITE_IMAGE_TESTS: ${VLITE_IMAGE_TESTS:-1}
+        VLITE_IMAGE_BINS: ${VLITE_IMAGE_BINS:-all}
     volumes:
       - vlite-data:/data
     read_only: true
@@ -31,6 +32,7 @@ services:
       target: api
       args:
         VLITE_IMAGE_TESTS: ${VLITE_IMAGE_TESTS:-1}
+        VLITE_IMAGE_BINS: ${VLITE_IMAGE_BINS:-all}
     entrypoint: ["/usr/local/bin/vlite-server"]
     command: ["${VLITE_DATABASE_PATH:-/data/vectors.vlite}", "--create-if-missing", "${VLITE_DIMENSIONS:-3}", "--bind", "0.0.0.0:8080", "--allow-remote"]
     environment:

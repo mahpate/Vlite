@@ -275,6 +275,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       VLITE_IMAGE_TESTS: "0" # The tests target below always runs the full suite.
+      VLITE_IMAGE_BINS: shipped
     steps:
       - uses: actions/checkout@v5
       - uses: docker/setup-buildx-action@v3

@@ -116,6 +116,7 @@ class Policy(unittest.TestCase):
         self.assertIn("VLITE_IMAGE_TESTS=0", text)
         self.assertIn("buildkit-cache-dance@", text)
         self.assertIn("actions/cache@", text)
+        self.assertIn("docker-ci-v1-${{ runner.arch }}-", text)
 
 
 if __name__ == "__main__":

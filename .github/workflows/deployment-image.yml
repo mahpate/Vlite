@@ -32,6 +32,7 @@ jobs:
           key: api-cargo-v1-amd64-${{ hashFiles('Dockerfile', '**/Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
             api-cargo-v1-amd64-${{ hashFiles('Dockerfile', '**/Cargo.lock') }}-
+            docker-ci-v1-${{ runner.arch }}-${{ hashFiles('Dockerfile', '**/Cargo.lock') }}-${{ github.sha }}
             api-cargo-v1-amd64-
       - uses: reproducible-containers/buildkit-cache-dance@e475a9cbcb5052f85fd3830f1266fa0c91ef8595
         with:
