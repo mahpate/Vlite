@@ -48,8 +48,11 @@ or the shipped binaries. The `test` target always runs the full suite during
 image build, independently of that argument, and does not compile release
 binaries or repeat tests when its container starts.
 
-CI persists Docker cache mounts explicitly; buildx layer cache alone does not
-export their contents. Native Rust caches are separated by job, OS, compiler and
+CI persists Cargo downloads and Docker release compilation caches explicitly;
+buildx layer cache alone does not export their contents. Large debug/test
+artifacts stay in per-run mounts rather than being copied into a second image
+for export, which can exhaust hosted-runner disk space. Native Rust caches
+are separated by job, OS, compiler and
 Cargo inputs. PRs can restore native caches but do not save them. CI runs on
 main pushes, PRs and manual dispatch, cancelling superseded validation runs.
 Standalone branch pushes can use manual dispatch before a PR is opened.

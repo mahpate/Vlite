@@ -16,7 +16,7 @@ COPY crates ./crates
 FROM source AS test
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,target=/app/target,sharing=locked \
+    --mount=type=cache,target=/app/target/debug,sharing=locked \
     cargo test --locked --workspace --all-targets --all-features
 # The build fails if any test fails; running this image does not repeat the suite.
 CMD ["true"]
@@ -31,7 +31,8 @@ ARG VLITE_IMAGE_TESTS=1
 ARG VLITE_IMAGE_BINS=all
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,target=/app/target,sharing=locked \
+    --mount=type=cache,target=/app/target/debug,sharing=locked \
+    --mount=type=cache,target=/app/target/release,sharing=locked \
     if [ "$VLITE_IMAGE_TESTS" = "1" ]; then cargo test --locked --workspace --all-targets --all-features; \
        elif [ "$VLITE_IMAGE_TESTS" != "0" ]; then echo "VLITE_IMAGE_TESTS must be 0 or 1" >&2; exit 1; fi \
     && case "$VLITE_IMAGE_BINS" in \

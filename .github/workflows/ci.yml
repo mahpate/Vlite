@@ -282,17 +282,17 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: .buildkit-cache
-          key: docker-ci-v1-${{ runner.arch }}-${{ hashFiles('Dockerfile', '**/Cargo.lock') }}-${{ github.sha }}
+          key: docker-ci-v2-release-${{ runner.arch }}-${{ hashFiles('Dockerfile', '**/Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
-            docker-ci-v1-${{ runner.arch }}-${{ hashFiles('Dockerfile', '**/Cargo.lock') }}-
-            docker-ci-v1-${{ runner.arch }}-
+            docker-ci-v2-release-${{ runner.arch }}-${{ hashFiles('Dockerfile', '**/Cargo.lock') }}-
+            docker-ci-v2-release-${{ runner.arch }}-
       - uses: reproducible-containers/buildkit-cache-dance@e475a9cbcb5052f85fd3830f1266fa0c91ef8595
         with:
           cache-map: |
             {
               ".buildkit-cache/registry": {"target": "/usr/local/cargo/registry", "sharing": "locked"},
               ".buildkit-cache/git": {"target": "/usr/local/cargo/git", "sharing": "locked"},
-              ".buildkit-cache/target": {"target": "/app/target", "sharing": "locked"}
+              ".buildkit-cache/release": {"target": "/app/target/release", "sharing": "locked"}
             }
       - run: docker compose --profile test run --build --rm tests
       - name: Verify persistent smoke and maintenance

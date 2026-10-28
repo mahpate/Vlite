@@ -116,7 +116,14 @@ class Policy(unittest.TestCase):
         self.assertIn("VLITE_IMAGE_TESTS=0", text)
         self.assertIn("buildkit-cache-dance@", text)
         self.assertIn("actions/cache@", text)
-        self.assertIn("docker-ci-v1-${{ runner.arch }}-", text)
+        self.assertIn("docker-ci-v2-release-${{ runner.arch }}-", text)
+
+    def test_docker_cache_export_excludes_large_debug_test_binaries(self):
+        for workflow in ("ci.yml", "deployment-image.yml"):
+            text = (ROOT / ".github/workflows" / workflow).read_text(encoding="utf-8")
+            self.assertIn('"target": "/app/target/release"', text)
+            self.assertNotIn('"target": "/app/target"', text)
+            self.assertNotIn('"target": "/app/target/debug"', text)
 
     def test_browser_checks_reuse_the_already_tested_runtime(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")

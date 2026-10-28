@@ -82,7 +82,8 @@ class DockerInputs(unittest.TestCase):
         self.assertEqual(test.count("cargo test --locked --workspace --all-targets --all-features"), 1)
         self.assertNotIn("cargo build", test)
         self.assertIn('CMD ["true"]', test)
-        self.assertEqual(text.count("target=/app/target,sharing=locked"), 2)
+        self.assertEqual(text.count("target=/app/target/debug,sharing=locked"), 2)
+        self.assertEqual(text.count("target=/app/target/release,sharing=locked"), 1)
         self.assertIn("&& cp target/release/vlite-smoke", text)
         self.assertNotIn("COPY --from=build /app/target/", text)
 
