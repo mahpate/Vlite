@@ -8,7 +8,7 @@ prebuilt release assets are available from
 [GitHub releases](https://github.com/mahpate/Vlite/releases). npm packages are
 not published.
 
-See [upgrade and rollback guidance](RELEASE-0.6.0.md) before upgrading an
+See [upgrade and rollback guidance](RELEASE-0.6.1.md) before upgrading an
 existing deployment. Release binaries, the C library, wheels and Node release
 tarballs include the [property graph](GRAPH.md); new files are graph-enabled
 and existing files are never converted. The Docker image's API server (`vlite-server`)
@@ -42,7 +42,7 @@ On Windows, calculate a file's hash and compare it with its entry in
 `SHA256SUMS`:
 
 ```powershell
-Get-FileHash .\vlite-embedded-0.6.0-win32-x64.tgz -Algorithm SHA256
+Get-FileHash .\vlite-embedded-0.6.1-win32-x64.tgz -Algorithm SHA256
 ```
 
 Checksums detect altered or incomplete downloads; they are not a publisher
@@ -63,7 +63,7 @@ instead, choose a `vlite_embedded-*.whl` matching your OS and architecture and
 install its downloaded filename:
 
 ```text
-python -m pip install ./vlite_embedded-0.6.0-py3-none-win_amd64.whl
+python -m pip install ./vlite_embedded-0.6.1-py3-none-win_amd64.whl
 ```
 
 That example is for Windows x64. Linux x86_64/glibc 2.28+ should use the
@@ -101,7 +101,7 @@ without rebuilding. Reopen loses the index. Inner-product search is exact-only.
 Requires Node.js 22.9+. Choose a host-matching tarball:
 
 ```text
-npm install ./vlite-embedded-0.6.0-win32-x64.tgz
+npm install ./vlite-embedded-0.6.1-win32-x64.tgz
 ```
 
 Use `linux-x64` or the macOS `darwin-<architecture>` asset instead on those
@@ -138,7 +138,7 @@ python -m pip install vlite-client
 Node.js 22+:
 
 ```text
-npm install ./vlite-client-0.6.0.tgz
+npm install ./vlite-client-0.6.1.tgz
 ```
 
 Import `Client` from `vlite_client` in Python or `@vlite/client` in JavaScript.
@@ -160,7 +160,7 @@ certification.
 
 ## Additional packages
 
-See [upgrade and rollback guidance](RELEASE-0.6.0.md) before selecting a
+See [upgrade and rollback guidance](RELEASE-0.6.1.md) before selecting a
 new binary or database format. The native archives also ship the offline shell,
 import, tuning and quality tools. Go/.NET clients, the Helm chart and WASM
 wrapper sources are included in desktop/x64 archives; see the

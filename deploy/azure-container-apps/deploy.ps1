@@ -8,7 +8,7 @@ param(
     [ValidateLength(3, 32)][ValidatePattern('^vlite-[a-z0-9]+(-[a-z0-9]+)*$')][string]$Environment = 'vlite-env',
     [ValidateLength(3, 32)][ValidatePattern('^vlite-[a-z0-9]+(-[a-z0-9]+)*$')][string]$AppName = 'vlite-app',
     [ValidateLength(3, 63)][ValidatePattern('^vlite-[a-z0-9]+(-[a-z0-9]+)*$')][string]$ShareName = 'vlite-data',
-    [string]$Image = 'ghcr.io/mahpate/vlite-api:v0.6.0',
+    [string]$Image = 'ghcr.io/mahpate/vlite-api:v0.6.1',
     [string]$ProbeImage = 'python:3.12-slim-bookworm',
     [ValidateRange(1, 65536)][int]$Dimensions = 1536,
     [ValidateSet(0.5, 1, 2, 4)][double]$Cpu = 1,

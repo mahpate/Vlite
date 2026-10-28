@@ -50,8 +50,15 @@
   let collectionItems = [];
   let editorDirty = false;
   let loaded = null; // { collection, id, revision, etag } of the record last fetched into the editor
+  // True while the server lists no collection for this credential, for example a tenant that holds only graphs.
+  // The credential stays signed in; collection-bound routes are refused before any request is sent.
+  let vectorless = false;
+  // Set at sign-in without collections; the Graph workspace becomes the landing view once graph access is confirmed.
+  let landingPending = false;
+  const NO_COLLECTIONS = "No vector collections in this tenant yet. Records, vector search and indexes need a collection; graphs and administration still work.";
+  const requireCollection = () => { if (vectorless) throw Object.assign(new Error(NO_COLLECTIONS), { help: "" }); };
   const utils = () => window.VLiteTools.utils;
-  const path = (suffix) => utils().collectionPath(collection, suffix);
+  const path = (suffix) => { requireCollection(); return utils().collectionPath(collection, suffix); };
   const isSearchPath = (value) => utils().isSearch(value);
   const feature = (name) => capabilities?.features?.[name] === true;
   // Newer servers report format_version; older servers have none of the EPIC-015 routes.
@@ -59,7 +66,58 @@
   // Settings-sensitive routes (search, index status/build/rebuild/maintenance/quality). Legacy routes apply
   // historical hard defaults even for "default", so newer servers always get the collection route, which uses the
   // selected collection's stored settings (metric, HNSW, quantization, planner, text fields). Old servers: legacy.
-  const settingsPath = (suffix) => extended() ? `/v1/collections/${utils().collectionName(collection)}${suffix}` : path(suffix);
+  const settingsPath = (suffix) => { requireCollection(); return extended() ? `/v1/collections/${utils().collectionName(collection)}${suffix}` : path(suffix); };
+  // Views and controls that only work inside a vector collection.
+  const VECTOR_SECTIONS = ["browse", "editor", "write-json", "data-tools", "resumable-import", "index", "search", "retrieval", "explore"];
+  const VECTOR_CONTROLS = ["collection", "settings-load", "settings-save", "collection-settings"];
+  // Disables collection-bound controls while there is no collection and explains why in each affected view.
+  // Only controls this gate disabled are marked, so releasing it never enables a control another gate disabled.
+  function gateVectorControls() {
+    const empty = connected && vectorless;
+    for (const id of VECTOR_SECTIONS) {
+      const section = $(id);
+      if (!section) continue;
+      let note = section.querySelector("[data-vector-empty]");
+      if (!note && empty) {
+        note = document.createElement("p");
+        note.dataset.vectorEmpty = "";
+        note.setAttribute("role", "note");
+        note.textContent = NO_COLLECTIONS;
+        const heading = section.querySelector("h2");
+        const anchor = heading?.closest(".section-heading") || heading;
+        if (anchor) anchor.after(note);
+        else section.prepend(note);
+      }
+      if (note) note.hidden = !empty;
+    }
+    if (!empty) return;
+    const controls = VECTOR_SECTIONS.flatMap((id) => [...($(id)?.querySelectorAll("button, input, select, textarea") || [])])
+      .concat(VECTOR_CONTROLS.map($).filter(Boolean));
+    for (const element of controls) {
+      if (element.disabled) continue;
+      element.disabled = true;
+      element.dataset.vectorGate = "blocked";
+    }
+  }
+  function setVectorless(value) {
+    if (vectorless && !value) {
+      document.querySelectorAll('[data-vector-gate="blocked"]').forEach((element) => {
+        element.disabled = false;
+        delete element.dataset.vectorGate;
+      });
+    }
+    vectorless = value;
+    if (!value) landingPending = false;
+  }
+  // Landing on the Graph workspace only replaces the default or a collection-bound view, never a link the user chose.
+  if (typeof window.addEventListener === "function") window.addEventListener("vlite:graph-status", (event) => {
+    if (!landingPending || !connected || !vectorless) return;
+    landingPending = false;
+    if (event.detail?.status !== "available") return;
+    const route = window.VLiteNavigation?.resolveRoute?.(window.location.hash);
+    if (!route) return;
+    if (!window.location.hash || ["overview", "collections", "search"].includes(route.workspace)) window.VLiteNavigation.reveal("graph");
+  });
   function can(operation, target = collection) {
     if (!capabilities) return false;
     if (capabilities.role === "admin") return true;
@@ -103,8 +161,14 @@
           : feature(name) ? "Available. Review each confirmation before changing anything."
             : `Not available on this server. ${requirements[name] || "Use a server version that reports this capability."}`;
     });
+    gateVectorControls();
   }
   function collectionState() {
+    if (vectorless) {
+      $("collection-badge").textContent = "No vector collections";
+      $("collection-note").textContent = NO_COLLECTIONS;
+      return;
+    }
     $("collection-badge").textContent = `Collection: ${collection}`;
     $("collection-note").textContent = collection === "default"
       ? "Default collection (legacy routes). Every browse, edit, search, import and index action applies only to this collection."
@@ -320,6 +384,7 @@
     for (const id of ["overview", "inspector"]) $(id).textContent = "";
     resetCollectionData();
     dimensions = null;
+    setVectorless(false);
     collection = "default";
     collectionItems = [];
     $("collection").replaceChildren(new Option("default", "default"));
@@ -743,6 +808,12 @@
     modeChanged();
   }
   function showCollectionStats(info) {
+    if (!info) {
+      dimensions = null;
+      $("stat-records").textContent = "0";
+      $("stat-dimensions").textContent = "--";
+      return;
+    }
     dimensions = info.dimensions;
     // Refill only untouched example fields so user input is never overwritten.
     const example = exampleVector(info.dimensions);
@@ -753,7 +824,9 @@
   }
   function populateCollections(items, selected) {
     collectionItems = items;
-    $("collection").replaceChildren(...items.map((item) => new Option(`${item.name} (${item.dimensions} dims, ${item.live_records} records)`, item.name)));
+    $("collection").replaceChildren(...(items.length
+      ? items.map((item) => new Option(`${item.name} (${item.dimensions} dims, ${item.live_records} records)`, item.name))
+      : [new Option("No vector collections yet", "")]));
     $("collection").value = selected;
   }
   // Pending (unsaved) collection-bound state that a collection switch would discard.
@@ -820,12 +893,15 @@
     let info = null;
     if (extended()) {
       const listed = await api("GET", "/v1/collections");
-      if (!listed.items.length) throw new Error("This credential covers no existing collection");
+      if (!Array.isArray(listed?.items)) throw new Error("Server returned an invalid collection list; not connecting");
+      // No collection is valid (for example a tenant that only holds graphs): stay signed in without vector views.
       const names = listed.items.map((item) => item.name);
-      const selected = names.includes(previous) ? previous : names.includes("default") ? "default" : names[0];
+      const selected = names.includes(previous) ? previous : names.includes("default") ? "default" : names[0] ?? "";
       populateCollections(listed.items, selected);
       collection = selected;
-      info = listed.items.find((item) => item.name === selected);
+      setVectorless(!names.length);
+      landingPending = vectorless;
+      info = listed.items.find((item) => item.name === selected) ?? null;
     }
     collectionState();
     const overview = {};
@@ -838,9 +914,11 @@
       : overview.database?.is_encrypted === false ? "Encryption: off" : "Encryption: unavailable to this credential/server";
     showCollectionStats(collection === "default" && overview.database ? overview.database : info);
     $("stat-bytes").textContent = String(overview.metrics?.database_bytes ?? "Unavailable");
-    $("snapshot-note").textContent = "Snapshot from when you signed in or last refreshed. Select Refresh to see newer changes.";
+    $("snapshot-note").textContent = vectorless
+      ? `${NO_COLLECTIONS} Select Refresh after creating one.`
+      : "Snapshot from when you signed in or last refreshed. Select Refresh to see newer changes.";
     if (info) applySettings(info);
-    if (can("read")) await refreshIndex(true);
+    if (can("read") && !vectorless) await refreshIndex(true);
     show("compatibility", capabilities);
     tools.connected(capabilities);
     adminTools?.capabilities(capabilities);
@@ -1196,15 +1274,18 @@
     // Called by collection management after create/drop/settings so the selector stays truthful.
     refreshCollections: async () => {
       const listed = await api("GET", "/v1/collections");
-      const current = listed.items.find((item) => item.name === collection);
+      const current = vectorless ? null : listed.items.find((item) => item.name === collection);
       if (!current) {
+        const first = listed.items[0] ?? null;
         advanceWorkflowContext();
-        populateCollections(listed.items, listed.items[0]?.name);
-        collection = listed.items[0]?.name ?? "default";
+        populateCollections(listed.items, first?.name ?? "");
+        collection = first?.name ?? "";
+        setVectorless(extended() && !first);
         resetCollectionData();
-        tools?.collectionChanged(listed.items[0] ?? null);
+        tools?.collectionChanged(first);
         collectionState();
-        if (listed.items[0]) { showCollectionStats(listed.items[0]); applySettings(listed.items[0]); }
+        showCollectionStats(first);
+        if (first) applySettings(first);
       } else {
         populateCollections(listed.items, collection);
         showCollectionStats(current);

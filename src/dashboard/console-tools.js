@@ -1246,6 +1246,7 @@
     // each collection route takes its index identity from that collection's settings.
     function maintenanceScope() {
       const named = ctx.collection() !== "default";
+      if (!ctx.collection()) return text("maintenance-scope", "No vector collection selected; maintenance applies once a collection exists.");
       text("maintenance-scope", !ctx.extended()
         ? "Maintenance policy applies to the single (default) database."
         : named
@@ -1366,9 +1367,14 @@
       text("collection-result", { dropped: name, result });
       $("drop-collection-name").value = "";
     });
+    // Without a collection there is no record route to suggest, so the scenario starts empty.
+    function defaultScenario() {
+      const steps = ctx.collection() ? [{ path: ctx.path("/vectors/1"), expected_ids: ["1"] }] : [];
+      return JSON.stringify({ name: "get-record", steps }, null, 2);
+    }
     on("settings-load", async () => {
       requireExtended();
-      const info = await ctx.api("GET", `/v1/collections/${ctx.collection()}`);
+      const info = await ctx.api("GET", ctx.settingsPath(""));
       $("collection-settings").value = JSON.stringify(info.settings, null, 2);
       text("collection-result", { collection: info.name, settings_persisted: info.settings_persisted, text_index: info.text_index ?? null });
     });
@@ -1378,7 +1384,7 @@
       const change = settings(get("collection-settings"));
       if (!Object.keys(change).length) throw new Error("No settings to change");
       if (!await ctx.confirm(`Apply settings to collection ${owner}? Omitted fields keep their current values. Changing metric, HNSW or quantization makes an existing index stale until rebuilt; text fields and metadata indexes are rebuilt by the server.`)) return;
-      const result = await ctx.api("PUT", `/v1/collections/${owner}/settings`, change, { data: false });
+      const result = await ctx.api("PUT", ctx.settingsPath("/settings"), change, { data: false });
       text("collection-result", { collection: result.collection, persisted: result.persisted,
         note: result.persisted ? "Settings are durable." : "Applied in memory only (format v3 default collection); they reset when the server restarts." });
       $("collection-settings").value = JSON.stringify(result.collection.settings, null, 2);
@@ -1731,7 +1737,7 @@
         if (ctx.extended()) renderCollections(ctx.collections());
         maintenanceScope();
         $("cred-collections").value = credentialDefault = ctx.collection();
-        $("scenario").value = JSON.stringify({ name: "get-record", steps: [{ path: ctx.path("/vectors/1"), expected_ids: ["1"] }] }, null, 2);
+        $("scenario").value = defaultScenario();
         $("request-body").value = "{}";
       },
       loaded(item) {
@@ -1769,7 +1775,7 @@
         $("collection-settings").value = info?.settings ? JSON.stringify(info.settings, null, 2) : "{}";
         progress(0, 1);
         text("job-result", previousJob ? `Import job ${previousJob.id} (collection ${previousJob.collection}) remains open on the server; select that collection and Resume to continue.` : "");
-        $("scenario").value = JSON.stringify({ name: "get-record", steps: [{ path: ctx.path("/vectors/1"), expected_ids: ["1"] }] }, null, 2);
+        $("scenario").value = defaultScenario();
       },
       // Recompute state gates in both directions; authorization gates run afterward.
       gate() {

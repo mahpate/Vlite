@@ -39,7 +39,7 @@ service to operate.
   feed, file-shipped read replicas and a disk-based ANN index.
 - **Tools.** Interactive shell, validated imports, offline maintenance, index
   tuning, a graph CLI, an MCP server and agent skills.
-- **Performance.** At 100,000 × 384 dimensions, v0.6.0 ingests 5–6× faster,
+- **Performance.** At 100,000 × 384 dimensions, the 0.6 release ingests 5–6× faster,
   reopens about 4× faster and builds HNSW 44× faster than the previous
   baseline, with exact queries 4–6% slower. These results are now the
   benchmark baseline.
@@ -186,7 +186,7 @@ Prebuilt packages: [PyPI](docs/INSTALL.md#pypi) and [release assets](docs/INSTAL
 | Webhooks | [WEBHOOKS](docs/WEBHOOKS.md) |
 | Property graphs | [GRAPH](docs/GRAPH.md) |
 | Benchmarks | [Methodology](benchmarks/README.md), [results](benchmarks/RESULTS.md) |
-| Upgrade notes | [Release notes](docs/RELEASE-0.6.0.md) |
+| Upgrade notes | [Release notes](docs/RELEASE-0.6.1.md) |
 
 ## Status and limitations
 

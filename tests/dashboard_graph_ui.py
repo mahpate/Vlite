@@ -267,11 +267,62 @@ def check(browser):
         context.close()
 
 
+def check_graph_only_tenant(browser):
+    """A tenant with graphs but no vector collections signs in, lands on Graph and never calls a collection route."""
+    for role in ("scoped", "admin"):
+        fake = GraphApi(writable=role == "admin")
+        if role == "scoped":
+            fake.caps.update(role="scoped", scope={
+                "collections": ["*"], "graphs": ["g"], "operations": ["read", "search", "graph_read"]})
+        fake.collections = {}
+        context, page, errors = mocked_page(browser, fake)
+        expect(page.locator("#workspace-description")).to_contain_text("confirmed edits")
+        expect(page.locator("#graph-controls")).to_be_visible()
+        assert page.evaluate("location.hash") == "#graph"
+        expect(page.locator("#collection-badge")).to_have_text("No vector collections")
+        expect(page.locator("#collection")).to_be_disabled()
+        expect(page.locator("#collection-note")).to_contain_text("No vector collections in this tenant yet")
+        page.locator("#graph-operation").select_option("find-nodes")
+        page.locator("#graph-run").click()
+        expect(page.locator("#graph-nodes tbody tr")).to_have_count(2)
+        for section in ("search", "browse", "editor", "index"):
+            page.evaluate(f"window.VLiteNavigation.reveal('{section}')")
+            note = page.locator(f"#{section} [data-vector-empty]")
+            expect(note).to_be_visible()
+            expect(note).to_contain_text("No vector collections in this tenant yet")
+            enabled = page.locator(f"#{section}").evaluate(
+                "s => [...s.querySelectorAll('button, input, select, textarea')].filter(e => !e.disabled).map(e => e.id || e.name)")
+            assert enabled == [], (section, enabled)
+            for width in (1280, 768, 390):
+                page.set_viewport_size({"width": width, "height": 900})
+                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), (section, width)
+            page.set_viewport_size({"width": 1280, "height": 900})
+        page.evaluate("window.VLiteNavigation.reveal('database')")
+        expect(page.locator("#stat-records")).to_have_text("0")
+        page.locator("#session-refresh").click()
+        expect(page.locator("#status")).to_have_text("Connected; overview refreshed")
+        assert not any(entry["path"].startswith("/v1/collections/") for entry in fake.log), \
+            [entry["path"] for entry in fake.log if entry["path"].startswith("/v1/collections/")]
+
+        # Once a collection exists, Refresh restores the vector views.
+        fake.collections = {"docs": {"id": 1, "name": "docs", "dimensions": 2, "live_records": 1,
+                                     "settings": GraphApi().collections["docs"]["settings"], "settings_persisted": True}}
+        page.locator("#session-refresh").click()
+        expect(page.locator("#status")).to_have_text("Connected; overview refreshed")
+        expect(page.locator("#collection-badge")).to_have_text("Collection: docs")
+        page.evaluate("window.VLiteNavigation.reveal('search')")
+        expect(page.locator("#search [data-vector-empty]")).to_be_hidden()
+        expect(page.locator("#query")).to_be_enabled()
+        assert not errors, errors
+        context.close()
+
+
 if __name__ == "__main__":
     with sync_playwright() as p:
         browser = p.chromium.launch(args=["--enable-webgl", "--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"])
         try:
             check(browser)
+            check_graph_only_tenant(browser)
         finally:
             browser.close()
-    print("Graph editing, revision conflicts, read-only scope, confirmation invalidation and responsive 3D passed.")
+    print("Graph editing, revision conflicts, read-only scope, confirmation invalidation, responsive 3D and graph-only tenants passed.")
