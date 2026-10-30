@@ -11,7 +11,8 @@
 //! fencing tokens. Compaction, upgrade and restore rewrite revisions, so a
 //! holder of a version from before such an operation must re-read first; its
 //! next conditional write fails with `RevisionMismatch` rather than succeeding
-//! wrongly.
+//! wrongly. Directory-store checkpoints are not such an operation: they keep
+//! every live record's revision, so versions stay valid across them.
 //!
 //! Expiry needs a v5 file and returns `ExpiryRequiresUpgrade` otherwise.
 //! Listing scans the collection (O(entries)); keep large key spaces in

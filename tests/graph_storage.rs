@@ -1160,12 +1160,12 @@ fn op12_and_graph_flag_are_rejected_outside_graph_enabled_v5_files() {
 
     // Unknown flags beside FLAG_GRAPH stay unsupported.
     let mut bytes = base_graph_file();
-    bytes[26..28].copy_from_slice(&(FLAG_GRAPH | 8).to_le_bytes());
+    bytes[26..28].copy_from_slice(&(FLAG_GRAPH | 16).to_le_bytes());
     let checksum = crc32(&bytes[..28]);
     bytes[28..32].copy_from_slice(&checksum.to_le_bytes());
     assert!(matches!(
         Database::open_from_bytes(bytes, None),
-        Err(Error::UnsupportedFeature(8))
+        Err(Error::UnsupportedFeature(16))
     ));
 
     // A graph header with a corrupted header checksum.

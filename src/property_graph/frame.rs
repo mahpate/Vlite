@@ -34,6 +34,8 @@ fn corrupt(offset: u64, reason: &'static str) -> Error {
 /// `collections`. Afterwards every attachment the body touched (attached by
 /// an `Attach` entry or owning a record changed by a vector entry) must
 /// reference a live record without expiry. Any failure fails the open.
+/// `restated` bodies come from a checkpoint image and may repeat the last
+/// applied sequence.
 pub(crate) fn replay(
     state: &mut GraphState,
     collections: &mut BTreeMap<u16, LoadedCollection>,
@@ -41,6 +43,7 @@ pub(crate) fn replay(
     count: u32,
     body: &[u8],
     offset: u64,
+    restated: bool,
 ) -> Result<()> {
     let body = engine::decode_body(body, count)
         .map_err(|_| corrupt(offset, "invalid graph frame body"))?;
@@ -74,7 +77,7 @@ pub(crate) fn replay(
         }
     }
     state
-        .apply(sequence, &body)
+        .apply_at(sequence, &body, restated)
         .map_err(|_| corrupt(offset, "graph frame violates graph state"))?;
     for (collection, mutation) in mutations {
         let target = collections

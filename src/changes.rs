@@ -236,7 +236,19 @@ fn scan<R: Read + Seek>(
                 .map(|bytes| u64::from_le_bytes(bytes.try_into().expect("8 bytes")));
             continue;
         }
-        head = frame.sequence;
+        if frame.operation == format::OP_ADVANCE {
+            // Frames up to the checkpoint restate history; changes before it
+            // are no longer in the log.
+            if after < frame.sequence {
+                return Err(Error::CursorBeforeHistory {
+                    cursor: after,
+                    floor: frame.sequence,
+                });
+            }
+            head = frame.sequence;
+            continue;
+        }
+        head = head.max(frame.sequence);
         let committed_at = anchor_ms.take();
         let body = frame.body();
         let name_of = |collections: &BTreeMap<u16, (String, usize)>| {

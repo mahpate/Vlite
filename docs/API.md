@@ -98,7 +98,12 @@ cursor starts at the beginning of retained history. Commits are never split;
 HTTP 500: a damaged token answers 422 `invalid_cursor`; a token taken before a
 compaction, restore or upgrade answers 409 `cursor_compacted` and the consumer
 must resync from a fresh snapshot; a cursor (or replication `after_sequence`)
-past the head of the log answers 409 `cursor_ahead`. The change feed and
+past the head of the log answers 409 `cursor_ahead`; a cursor (or
+`after_sequence`) below a checkpoint's history floor, including a first
+request without a cursor, answers 409 `cursor_before_history` and names the
+floor in its message. Unlike `cursor_compacted`, the lineage and every later
+cursor stay valid. The consumer takes a fresh snapshot and resumes from a
+cursor at or above the floor. The change feed and
 replication export need a format V4 or
 newer file: on a V1–V3 file both routes answer HTTP 409 `requires_format_v4`
 (`features.change_feed` in `GET /v1/capabilities` tells which). The server

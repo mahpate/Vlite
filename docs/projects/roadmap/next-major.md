@@ -63,6 +63,10 @@ Local numbers below show direction only (see rules).
   ([storage features](../../STORAGE-FEATURES.md#key-value-store)): namespaces,
   ordered prefix lists, expiry, compare-and-set and fencing tokens, with no
   format change. REST and gRPC wait for the OpenAPI review.
+- **Speed P2, directory store:** in progress ([plan](p2-directory-store.md)).
+  Checkpoint images keep every record's revision, so compare-and-set and
+  fencing tokens survive checkpoints. Cursors below the floor return
+  `cursor_before_history`.
 
 ## Rules for every item
 

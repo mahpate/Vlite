@@ -1552,6 +1552,11 @@ impl From<Error> for ApiError {
             Error::CursorAhead { .. } => {
                 Self::new(StatusCode::CONFLICT, "cursor_ahead", error.to_string())
             }
+            Error::CursorBeforeHistory { .. } => Self::new(
+                StatusCode::CONFLICT,
+                "cursor_before_history",
+                error.to_string(),
+            ),
             Error::TimestampsUnavailable => Self::new(
                 StatusCode::CONFLICT,
                 "timestamps_unavailable",

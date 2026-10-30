@@ -26,9 +26,19 @@ pub(crate) const KNOWN_FLAGS: u16 = FLAG_ENCRYPTED | FLAG_TIMESTAMPS;
 pub(crate) const FLAG_GRAPH: u16 = crate::property_graph::engine::codec::FLAG_GRAPH;
 /// Graph frame operation (DO-003), valid only in files carrying `FLAG_GRAPH`.
 const OP_GRAPH: u8 = crate::property_graph::engine::codec::OP_GRAPH;
+/// Header flag (v5, Speed P2): the log may start with an advance frame (op
+/// 13) that restates history up to a checkpoint sequence. Written by
+/// directory-store checkpoints and kept by `pack`; never combined with
+/// `FLAG_TIMESTAMPS`.
+pub(crate) const FLAG_HISTORY: u16 = 8;
 /// Header flags this build accepts in addition to `KNOWN_FLAGS`.
-const GRAPH_READER_FLAGS: u16 = FLAG_GRAPH;
+const GRAPH_READER_FLAGS: u16 = FLAG_GRAPH | FLAG_HISTORY;
 pub(crate) const OP_TIME_ANCHOR: u8 = 11;
+/// Advance frame (Speed P2): valid only as the first frame of a
+/// `FLAG_HISTORY` log. Its sequence `S` is the checkpoint the following
+/// restated frames describe; they carry their original sequences (record
+/// revisions), non-decreasing and at most `S`, until the first frame at `S + 1`.
+pub(crate) const OP_ADVANCE: u8 = 13;
 pub(crate) const PREFIX_SIZE: usize = 36;
 pub(crate) const FOOTER_SIZE: usize = 16;
 const MAGIC: &[u8; 8] = b"VLITEDB\0";
@@ -308,6 +318,10 @@ pub(crate) struct Loaded {
     pub commit_times: Vec<(u64, u64)>,
     /// Replayed named graphs; `Some` exactly when the header has `FLAG_GRAPH`.
     pub graph: Option<crate::property_graph::engine::GraphState>,
+    /// Checkpoint sequence of a leading advance frame (0 when the log holds
+    /// its full history): sequences at or below it were restated, so change
+    /// feeds and log segments cannot start before it.
+    pub history_floor: u64,
 }
 
 impl Loaded {
@@ -501,6 +515,12 @@ fn wrap(
     bytes.extend_from_slice(&checksum.to_le_bytes());
     bytes.extend_from_slice(&sequence.to_le_bytes());
     bytes
+}
+
+/// Advance frame (op 13) declaring checkpoint sequence `sequence`; it has an
+/// empty body and zero collection, ID and count fields.
+pub(crate) fn advance_frame(sequence: u64) -> Vec<u8> {
+    wrap(OP_ADVANCE, 0, sequence, 0, 0, 0, &[])
 }
 
 /// Graph frame (op 12, DO-003) carrying one encoded graph body of `count`
@@ -1108,6 +1128,9 @@ pub(crate) fn read_log_header_with<R: Read + Seek>(
             if flags & !known_flags != 0 {
                 return Err(Error::UnsupportedFeature(flags & !known_flags));
             }
+            if flags & FLAG_HISTORY != 0 && flags & FLAG_TIMESTAMPS != 0 {
+                return Err(corrupt(0, "history flag combined with commit timestamps"));
+            }
         } else if bytes[26..28] != [0; 2] {
             return Err(corrupt(0, "nonzero reserved database header bytes"));
         }
@@ -1246,7 +1269,22 @@ pub(crate) fn load_with<R: Read + Seek>(
     file: &mut R,
     key: Option<&EncryptionKey>,
 ) -> Result<Loaded> {
-    let header = read_log_header(file, key)?;
+    load_inner(file, key, None)
+}
+
+/// Like `load_with`, with an already-open cipher (`None` for plaintext logs)
+/// standing in for the key; the descriptor must match.
+#[allow(dead_code)] // Consumed by the directory store's checkpoint (P2a).
+pub(crate) fn load_known<R: Read + Seek>(file: &mut R, cipher: Option<&Cipher>) -> Result<Loaded> {
+    load_inner(file, None, cipher)
+}
+
+fn load_inner<R: Read + Seek>(
+    file: &mut R,
+    key: Option<&EncryptionKey>,
+    known: Option<&Cipher>,
+) -> Result<Loaded> {
+    let header = read_log_header_with(file, key, known)?;
     let length = header.length;
     let LogHeader {
         version,
@@ -1278,12 +1316,17 @@ pub(crate) fn load_with<R: Read + Seek>(
         cipher: cipher.clone(),
         commit_times: Vec::new(),
         graph: (flags & FLAG_GRAPH != 0).then(crate::property_graph::engine::GraphState::new),
+        history_floor: 0,
     };
     let mut jobs: HashMap<u64, JobReplay> = HashMap::new();
     // Highest collection ID created by an op 5 in this log so far, and how
-    // many create frames were seen.
+    // many create frames and commit frames (excluding the advance) were seen.
     let mut created_high = 0u16;
     let mut creates_seen = 0u64;
+    let mut commits_seen = 0u64;
+    // Sequence of the last restated frame while frames after an advance may
+    // still restate history (sequence at most the floor); `None` otherwise.
+    let mut restating_from: Option<u64> = None;
     // A time anchor read ahead of its commit frame: (timestamp, frame bytes).
     let mut anchor: Option<(u64, u64)> = None;
     let mut disk = Vec::new();
@@ -1341,6 +1384,37 @@ pub(crate) fn load_with<R: Read + Seek>(
         if flags & FLAG_TIMESTAMPS != 0 && anchor.is_none() {
             return Err(corrupt(offset, "commit without a time anchor"));
         }
+        if operation == OP_ADVANCE {
+            let floor = u64_at(&prefix, 8);
+            let valid = flags & FLAG_HISTORY != 0
+                && offset == start
+                && prefix[5..8] == [0; 3]
+                && u64_at(&prefix, 16) == 0
+                && u32_at(&prefix, 24) == 0
+                && u32_at(&prefix, 28) == 0
+                && floor >= 1;
+            if !valid {
+                return Err(corrupt(offset, "invalid advance frame"));
+            }
+            let length_on_disk = (PREFIX_SIZE + seal + FOOTER_SIZE) as u64;
+            if remaining < length_on_disk {
+                loaded.incomplete_bytes = remaining;
+                break;
+            }
+            disk.clear();
+            disk.extend_from_slice(&prefix);
+            disk.resize(length_on_disk as usize, 0);
+            file.read_exact(&mut disk[PREFIX_SIZE..])?;
+            verified_frame(&disk, cipher.as_ref(), floor, offset)?;
+            loaded.sequence = floor;
+            loaded.history_floor = floor;
+            loaded.end += length_on_disk;
+            restating_from = Some(1);
+            continue;
+        }
+        if flags & FLAG_HISTORY != 0 && offset == start {
+            return Err(corrupt(offset, "history image without an advance frame"));
+        }
         let allowed = match operation {
             1 | 2 => true,
             3 => version >= 2,
@@ -1365,9 +1439,16 @@ pub(crate) fn load_with<R: Read + Seek>(
         }
         let collection_id = u16_at(&prefix, 5);
         let sequence = u64_at(&prefix, 8);
-        if loaded.sequence.checked_add(1) != Some(sequence) {
-            return Err(corrupt(offset, "non-contiguous commit sequence"));
-        }
+        let restated = match restating_from {
+            Some(last) if (last..=loaded.history_floor).contains(&sequence) => true,
+            _ => {
+                if loaded.sequence.checked_add(1) != Some(sequence) {
+                    return Err(corrupt(offset, "non-contiguous commit sequence"));
+                }
+                restating_from = None;
+                false
+            }
+        };
         let id = u64_at(&prefix, 16);
         let count = u32_at(&prefix, 24) as usize;
         let payload_len = u32_at(&prefix, 28) as usize;
@@ -1609,7 +1690,7 @@ pub(crate) fn load_with<R: Read + Seek>(
                 // header floor is only valid in the leading run of create
                 // frames that compaction/upgrade write to restate live
                 // collections (every frame so far is such a create).
-                let restating = creates_seen == loaded.sequence;
+                let restating = creates_seen == commits_seen;
                 if collection <= created_high
                     || (collection <= loaded.collection_floor && !restating)
                 {
@@ -1658,6 +1739,7 @@ pub(crate) fn load_with<R: Read + Seek>(
                 count as u32,
                 body,
                 offset,
+                restated,
             )?,
             _ => {
                 let settings = decode_settings(body).map_err(|reason| corrupt(offset, reason))?;
@@ -1669,7 +1751,12 @@ pub(crate) fn load_with<R: Read + Seek>(
                 collection.settings_persisted = true;
             }
         }
-        loaded.sequence = sequence;
+        if restated {
+            restating_from = Some(sequence);
+        } else {
+            loaded.sequence = sequence;
+        }
+        commits_seen += 1;
         loaded.end += anchor_len + frame_len;
         if let Some((timestamp, _)) = anchor.take() {
             loaded.commit_times.push((sequence, timestamp));
@@ -1746,6 +1833,93 @@ pub(crate) fn vector_frame(sequence: u64, collection: u16, body: &[u8]) -> Vec<u
 mod tests {
     use super::*;
 
+    fn history_log(flags: u16, frames: &[Vec<u8>]) -> Result<Loaded> {
+        let mut bytes = header_v5_flags(2, 9, 0, flags, None);
+        for frame in frames {
+            bytes.extend_from_slice(frame);
+        }
+        load(&mut std::io::Cursor::new(bytes))
+    }
+
+    fn history_record(sequence: u64, id: u64) -> Vec<u8> {
+        let record = Record {
+            vector: vec![1.0, 0.0],
+            payload: Vec::new(),
+            metadata: Default::default(),
+        };
+        record_frame_v5(sequence, 0, id, &record, None)
+    }
+
+    fn rejected(result: Result<Loaded>, reason: &str) {
+        match result {
+            Err(Error::Corrupt { reason: actual, .. }) => assert_eq!(actual, reason),
+            Err(other) => panic!("expected corrupt({reason}), got {other:?}"),
+            Ok(_) => panic!("expected corrupt({reason}), loaded"),
+        }
+    }
+
+    #[test]
+    fn history_images_restate_up_to_the_floor_then_resume_contiguously() {
+        let history = FLAG_GRAPH | FLAG_HISTORY;
+        let loaded = history_log(
+            history,
+            &[
+                advance_frame(3),
+                history_record(1, 1),
+                history_record(1, 2),
+                history_record(3, 3),
+                history_record(4, 1),
+                history_record(5, 2),
+            ],
+        )
+        .unwrap();
+        assert_eq!(loaded.sequence, 5);
+        assert_eq!(loaded.history_floor, 3);
+        let revisions = &loaded.collections[&0].revisions;
+        assert_eq!(revisions[&1], 4);
+        assert_eq!(revisions[&2], 5);
+        assert_eq!(revisions[&3], 3);
+
+        let contiguous = "non-contiguous commit sequence";
+        rejected(
+            history_log(
+                history,
+                &[advance_frame(3), history_record(3, 1), history_record(2, 2)],
+            ),
+            contiguous,
+        );
+        rejected(
+            history_log(history, &[advance_frame(3), history_record(5, 1)]),
+            contiguous,
+        );
+        rejected(
+            history_log(
+                history,
+                &[advance_frame(3), history_record(4, 1), history_record(3, 2)],
+            ),
+            contiguous,
+        );
+        rejected(
+            history_log(history, &[history_record(1, 1)]),
+            "history image without an advance frame",
+        );
+        rejected(
+            history_log(history, &[advance_frame(2), advance_frame(2)]),
+            "invalid advance frame",
+        );
+        rejected(
+            history_log(FLAG_GRAPH, &[advance_frame(2)]),
+            "invalid advance frame",
+        );
+        rejected(
+            history_log(history, &[advance_frame(0)]),
+            "invalid advance frame",
+        );
+        assert!(matches!(
+            history_log(history | FLAG_TIMESTAMPS, &[]),
+            Err(Error::Corrupt { .. })
+        ));
+    }
     fn reference_crc32(previous: u32, bytes: &[u8]) -> u32 {
         let mut crc = !previous;
         for &byte in bytes {

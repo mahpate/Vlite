@@ -539,7 +539,19 @@ impl GraphState {
     /// a graph entry, and for each graph owning a record touched by a vector
     /// mutation (Section 3.5); unrelated vector writes keep graph cursors valid.
     pub fn apply(&mut self, sequence: u64, body: &GraphBody) -> Result<(), GraphError> {
-        self.apply_entries(sequence, body)?;
+        self.apply_at(sequence, body, false)
+    }
+
+    /// [`Self::apply`] for bodies restated by a checkpoint image: several
+    /// bodies may share the checkpoint `sequence` (`restated`), so it need
+    /// only be at least the last applied sequence.
+    pub fn apply_at(
+        &mut self,
+        sequence: u64,
+        body: &GraphBody,
+        restated: bool,
+    ) -> Result<(), GraphError> {
+        self.apply_entries(sequence, body, restated)?;
         // Attachments of other graphs cannot change in this body, and any
         // attach/detach in this graph already advances it, so looking owners
         // up after the body applied is exact.
@@ -580,13 +592,18 @@ impl GraphState {
     /// Returns exactly what [`Self::apply`] would return, leaving the state
     /// unchanged (validate-then-append-then-apply, PAT-001).
     pub fn validate(&mut self, sequence: u64, body: &GraphBody) -> Result<(), GraphError> {
-        let undo = self.apply_entries(sequence, body)?;
+        let undo = self.apply_entries(sequence, body, false)?;
         self.rollback(body.graph_id, undo);
         Ok(())
     }
 
-    fn apply_entries(&mut self, sequence: u64, body: &GraphBody) -> Result<Vec<Undo>, GraphError> {
-        if sequence <= self.last_sequence {
+    fn apply_entries(
+        &mut self,
+        sequence: u64,
+        body: &GraphBody,
+        restated: bool,
+    ) -> Result<Vec<Undo>, GraphError> {
+        if sequence < self.last_sequence || (sequence == self.last_sequence && !restated) {
             return Err(GraphError::SequenceNotIncreasing {
                 last: self.last_sequence,
                 sequence,

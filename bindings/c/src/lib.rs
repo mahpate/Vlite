@@ -397,6 +397,7 @@ fn failure(error: vlite::Error) -> Failure {
         vlite::Error::ChangeFeedRequiresUpgrade => "change_feed_requires_upgrade",
         vlite::Error::CursorCompacted { .. } => "cursor_compacted",
         vlite::Error::CursorAhead { .. } => "cursor_ahead",
+        vlite::Error::CursorBeforeHistory { .. } => "cursor_before_history",
         vlite::Error::InvalidCursor(_) => "invalid_cursor",
         vlite::Error::TimestampsUnavailable => "timestamps_unavailable",
         vlite::Error::InvalidRestoreTarget(_) => "invalid_restore_target",

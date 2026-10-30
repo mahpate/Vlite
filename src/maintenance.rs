@@ -325,7 +325,7 @@ fn compact_inner(
     let cipher = key.map(Cipher::create).transpose()?;
     // Graph-enabled sources keep `FLAG_GRAPH` and their graph state; like
     // vector files, the rewrite carries no commit timestamps.
-    let graph_flags = loaded.flags & !format::KNOWN_FLAGS;
+    let graph_flags = loaded.flags & format::FLAG_GRAPH;
     let output = if loaded.version >= format::V4 {
         let lineage = format::new_lineage()?;
         publish_with(destination, key, |output| {
@@ -371,7 +371,7 @@ pub fn upgrade(
     let loaded = format::load(&mut file)?;
     require_complete(&loaded)?;
     let source = inspection(&loaded);
-    let graph_flags = loaded.flags & !format::KNOWN_FLAGS;
+    let graph_flags = loaded.flags & format::FLAG_GRAPH;
     let lineage = format::new_lineage()?;
     let output = publish(destination.as_ref(), |output| {
         if loaded.version >= format::V5 {
@@ -593,26 +593,54 @@ pub(crate) fn write_v5(
     cipher: Option<&Cipher>,
     extra_flags: u16,
 ) -> Result<()> {
+    write_v5_image(file, loaded, lineage, now_ms, cipher, extra_flags, 0)
+}
+
+/// `write_v5` with a history `floor`: when nonzero the output has
+/// `FLAG_HISTORY` and starts with an advance frame at `floor`, the
+/// directory-store checkpoint image. Records keep their original sequences
+/// (revisions, ascending) so compare-and-set tokens survive the checkpoint;
+/// collection frames restate at sequence 1 and vector, import and graph
+/// frames at `floor`. Without a floor, sequences restart at one.
+pub(crate) fn write_v5_image(
+    file: &mut File,
+    loaded: &format::Loaded,
+    lineage: u64,
+    now_ms: u64,
+    cipher: Option<&Cipher>,
+    extra_flags: u16,
+    floor: u64,
+) -> Result<()> {
     let mut sequence = 0u64;
-    let mut next = || -> Result<u64> {
+    let mut next = |revision: u64| -> Result<u64> {
+        if floor != 0 {
+            return Ok(revision);
+        }
         sequence = sequence.checked_add(1).ok_or(Error::SequenceExhausted)?;
         Ok(sequence)
     };
+    let mut flags = if cipher.is_some() {
+        format::FLAG_ENCRYPTED | extra_flags
+    } else {
+        extra_flags
+    };
+    if floor != 0 {
+        flags |= format::FLAG_HISTORY;
+    }
     file.write_all(&format::header_v5_flags(
         loaded.dimensions,
         lineage,
         loaded.collection_high,
-        if cipher.is_some() {
-            format::FLAG_ENCRYPTED | extra_flags
-        } else {
-            extra_flags
-        },
+        flags,
         cipher,
     ))?;
     let mut output = Sink { file, cipher };
+    if floor != 0 {
+        output.write_all(&format::advance_frame(floor))?;
+    }
     for (&id, collection) in loaded.collections.range(1..) {
         output.write_all(&format::collection_create_frame(
-            next()?,
+            next(1)?,
             id,
             &collection.name,
             collection.dimensions,
@@ -621,10 +649,11 @@ pub(crate) fn write_v5(
     }
     let default = &loaded.collections[&0];
     if default.settings_persisted {
-        output.write_all(&format::settings_frame(next()?, 0, &default.settings))?;
+        output.write_all(&format::settings_frame(next(1)?, 0, &default.settings))?;
     }
+    let mut live = Vec::new();
     for (&collection_id, collection) in &loaded.collections {
-        for (&id, record) in &collection.records {
+        for &id in collection.records.keys() {
             if collection
                 .expiries
                 .get(&id)
@@ -632,14 +661,22 @@ pub(crate) fn write_v5(
             {
                 continue;
             }
-            output.write_all(&format::record_frame_v5(
-                next()?,
-                collection_id,
-                id,
-                record,
-                collection.expiries.get(&id).copied(),
-            ))?;
+            let revision = collection.revisions.get(&id).copied().unwrap_or(1);
+            live.push((revision.clamp(1, floor.max(1)), collection_id, id));
         }
+    }
+    if floor != 0 {
+        live.sort_unstable();
+    }
+    for (revision, collection_id, id) in live {
+        let collection = &loaded.collections[&collection_id];
+        output.write_all(&format::record_frame_v5(
+            next(revision)?,
+            collection_id,
+            id,
+            &collection.records[&id],
+            collection.expiries.get(&id).copied(),
+        ))?;
     }
     for (&collection_id, collection) in &loaded.collections {
         let mut data = collection.vectors.clone();
@@ -650,13 +687,13 @@ pub(crate) fn write_v5(
                 .is_some_and(|expiry| *expiry <= now_ms)
         });
         let bytes = data.encode()?;
-        output.write_all(&format::vector_frame(next()?, collection_id, &bytes))?;
+        output.write_all(&format::vector_frame(next(floor)?, collection_id, &bytes))?;
     }
     let registry = import::Registry::from_markers(&loaded.imports);
     for (job, state) in registry.open_jobs() {
         let marker = import::snapshot_marker(job, state);
         output.write_all(&format::batch_frame_v4(
-            next()?,
+            next(floor)?,
             state.collection,
             &[],
             Some(&marker),
@@ -666,7 +703,7 @@ pub(crate) fn write_v5(
         && let Some(state) = &loaded.graph
     {
         crate::property_graph::frame::compacted_bodies(state, |count, body| {
-            output.write_all(&format::graph_frame(next()?, count, body))
+            output.write_all(&format::graph_frame(next(floor)?, count, body))
         })?;
     }
     Ok(())
@@ -677,6 +714,224 @@ mod tests {
     use super::*;
     use std::fs;
     use std::process::Command;
+
+    fn history_image_round_trip(key: Option<&crate::EncryptionKey>) {
+        use crate::{CreateOptions, Database, Error, Expected, Metadata};
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.vlite");
+        let options = CreateOptions {
+            encryption: key.cloned(),
+            ..CreateOptions::default()
+        };
+        let mut db = Database::create_with_options(&source, 2, options).unwrap();
+        db.put(1, &[1.0, 0.0], b"a").unwrap();
+        db.put(2, &[0.0, 1.0], b"b").unwrap();
+        db.put(1, &[1.0, 1.0], b"c").unwrap();
+        db.put(3, &[0.5, 0.5], b"d").unwrap();
+        db.delete(3).unwrap();
+        let lineage = db.lineage().unwrap();
+        db.close().unwrap();
+
+        let loaded = format::load_with(&mut File::open(&source).unwrap(), key).unwrap();
+        assert_eq!(loaded.sequence, 5);
+        let image = directory.path().join("image.vlite");
+        let mut output = File::create_new(&image).unwrap();
+        write_v5_image(
+            &mut output,
+            &loaded,
+            lineage,
+            0,
+            loaded.cipher.as_ref(),
+            loaded.flags & format::FLAG_GRAPH,
+            loaded.sequence,
+        )
+        .unwrap();
+        drop(output);
+
+        let reloaded = format::load_with(&mut File::open(&image).unwrap(), key).unwrap();
+        assert_eq!(reloaded.sequence, 5);
+        assert_eq!(reloaded.history_floor, 5);
+        assert_ne!(reloaded.flags & format::FLAG_HISTORY, 0);
+
+        let open = |path: &Path| match key {
+            Some(key) => Database::open_encrypted(path, key),
+            None => Database::open(path),
+        };
+        let mut db = open(&image).unwrap();
+        assert_eq!(db.lineage(), Some(lineage));
+        assert_eq!(db.revision(1).unwrap(), Some(3));
+        assert_eq!(db.revision(2).unwrap(), Some(2));
+        assert_eq!(db.revision(3).unwrap(), None);
+        assert!(matches!(
+            db.put_with_metadata_if(
+                2,
+                &[0.0, 1.0],
+                b"x",
+                &Metadata::new(),
+                Expected::Revision(1)
+            ),
+            Err(Error::RevisionMismatch { .. })
+        ));
+        let revision = db
+            .put_with_metadata_if(
+                2,
+                &[0.0, 1.0],
+                b"x",
+                &Metadata::new(),
+                Expected::Revision(2),
+            )
+            .unwrap();
+        assert_eq!(revision, 6);
+        let before = crate::changes::FeedCursor {
+            lineage,
+            sequence: 4,
+        };
+        assert!(matches!(
+            db.changes_after(&before, 10),
+            Err(Error::CursorBeforeHistory {
+                cursor: 4,
+                floor: 5
+            })
+        ));
+        let at_floor = crate::changes::FeedCursor {
+            lineage,
+            sequence: 5,
+        };
+        let batch = db.changes_after(&at_floor, 10).unwrap();
+        assert_eq!(batch.changes.len(), 1);
+        assert_eq!(batch.head, 6);
+        assert!(matches!(
+            db.export_log(0, 1 << 20),
+            Err(Error::CursorBeforeHistory {
+                cursor: 0,
+                floor: 5
+            })
+        ));
+        assert!(db.export_log(5, 1 << 20).is_ok());
+        db.close().unwrap();
+
+        let db = open(&image).unwrap();
+        assert_eq!(db.revision(1).unwrap(), Some(3));
+        assert_eq!(db.revision(2).unwrap(), Some(6));
+        db.close().unwrap();
+
+        let restored = directory.path().join("restored.vlite");
+        assert!(matches!(
+            crate::logops::restore_to(
+                None,
+                &image,
+                &restored,
+                crate::logops::RestoreTarget::Sequence(4),
+                key
+            ),
+            Err(Error::InvalidRestoreTarget(_))
+        ));
+        assert!(!restored.exists());
+        crate::logops::restore_to(
+            None,
+            &image,
+            &restored,
+            crate::logops::RestoreTarget::Sequence(5),
+            key,
+        )
+        .unwrap();
+        let db = open(&restored).unwrap();
+        assert_eq!(db.revision(2).unwrap(), Some(2));
+        assert_ne!(db.lineage(), Some(lineage));
+        db.close().unwrap();
+
+        // Compaction drops the history flag and renumbers from one.
+        let compacted = directory.path().join("compacted.vlite");
+        match key {
+            Some(key) => compact_with_key(&image, &compacted, key).map(|_| ()),
+            None => compact(&image, &compacted).map(|_| ()),
+        }
+        .unwrap();
+        let loaded = format::load_with(&mut File::open(&compacted).unwrap(), key).unwrap();
+        assert_eq!(loaded.flags & format::FLAG_HISTORY, 0);
+        assert_eq!(loaded.history_floor, 0);
+    }
+
+    #[test]
+    fn history_image_preserves_revisions_and_rejects_cursors_below_floor() {
+        history_image_round_trip(None);
+    }
+
+    #[test]
+    fn encrypted_history_image_preserves_revisions() {
+        let key = crate::EncryptionKey::from_bytes([7; 32]);
+        history_image_round_trip(Some(&key));
+    }
+
+    #[test]
+    fn history_image_keeps_graphs_and_open_imports_writable() {
+        use crate::{Database, ImportChunkOutcome, InvalidRowPolicy, Metadata, Mutation};
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.vlite");
+        let row = |id| Mutation::Put {
+            id,
+            vector: vec![1.0, 0.0],
+            payload: Vec::new(),
+        };
+        let mut db = Database::create(&source, 2).unwrap();
+        db.create_graph("g").unwrap();
+        {
+            let mut graph = db.graph_mut("g").unwrap();
+            graph
+                .create_node("a", &["Person"], &Metadata::new())
+                .unwrap();
+            graph
+                .create_node("b", &["Person"], &Metadata::new())
+                .unwrap();
+            graph
+                .create_edge(None, "a", "KNOWS", "b", &Metadata::new())
+                .unwrap();
+        }
+        db.import_chunk(1, 1, &[row(10)], InvalidRowPolicy::RejectChunk)
+            .unwrap();
+        let lineage = db.lineage().unwrap();
+        db.close().unwrap();
+
+        let loaded = format::load(&mut File::open(&source).unwrap()).unwrap();
+        let floor = loaded.sequence;
+        let image = directory.path().join("image.vlite");
+        let mut output = File::create_new(&image).unwrap();
+        write_v5_image(
+            &mut output,
+            &loaded,
+            lineage,
+            0,
+            None,
+            loaded.flags & format::FLAG_GRAPH,
+            floor,
+        )
+        .unwrap();
+        drop(output);
+
+        let mut db = Database::open(&image).unwrap();
+        let info = db.graph("g").unwrap().info();
+        assert_eq!((info.node_count, info.edge_count), (2, 1));
+        assert_eq!(db.import_status(1).unwrap().last_chunk, 1);
+        assert_eq!(
+            db.import_chunk(1, 1, &[row(10)], InvalidRowPolicy::RejectChunk)
+                .unwrap()
+                .outcome,
+            ImportChunkOutcome::AlreadyCommitted
+        );
+        db.import_chunk(1, 2, &[row(11)], InvalidRowPolicy::RejectChunk)
+            .unwrap();
+        db.graph_mut("g")
+            .unwrap()
+            .create_node("c", &["Person"], &Metadata::new())
+            .unwrap();
+        db.close().unwrap();
+
+        let db = Database::open(&image).unwrap();
+        assert_eq!(db.graph("g").unwrap().info().node_count, 3);
+        assert_eq!(db.import_status(1).unwrap().last_chunk, 2);
+        assert_eq!(db.len(), 2);
+        db.close().unwrap();
+    }
 
     #[test]
     fn failed_staging_write_or_validation_never_publishes_output() {

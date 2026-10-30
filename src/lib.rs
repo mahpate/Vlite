@@ -385,6 +385,13 @@ pub enum Error {
         cursor: u64,
         head: u64,
     },
+    /// The cursor predates the log's history floor: a directory-store
+    /// checkpoint restated everything up to `floor`. Take a snapshot and
+    /// resume the feed at `floor` or later.
+    CursorBeforeHistory {
+        cursor: u64,
+        floor: u64,
+    },
     InvalidCursor(&'static str),
     /// A timestamp restore needs a file created with commit timestamps.
     TimestampsUnavailable,
@@ -635,6 +642,10 @@ impl fmt::Display for Error {
             Self::CursorAhead { cursor, head } => write!(
                 f,
                 "cursor sequence {cursor} is past the end of the log ({head}); the log was truncated or replaced"
+            ),
+            Self::CursorBeforeHistory { cursor, floor } => write!(
+                f,
+                "cursor sequence {cursor} is before the history floor {floor}: a checkpoint restated earlier changes; take a snapshot and resume at {floor} or later"
             ),
             Self::InvalidCursor(reason) => write!(f, "invalid cursor: {reason}"),
             Self::TimestampsUnavailable => write!(

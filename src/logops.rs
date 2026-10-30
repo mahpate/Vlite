@@ -114,6 +114,11 @@ pub fn restore_to(
                     "target revision is beyond the end of the log",
                 ));
             }
+            if sequence < loaded.history_floor {
+                return Err(Error::InvalidRestoreTarget(
+                    "target revision is before the log's history floor (a checkpoint restated it)",
+                ));
+            }
             sequence
         }
         RestoreTarget::TimestampMs(timestamp) => {
@@ -338,7 +343,18 @@ pub(crate) fn read_segment<R: Read + Seek>(
             pending_anchor = Some(frame);
             continue;
         }
-        head = frame.sequence;
+        if frame.operation == format::OP_ADVANCE {
+            // A follower cannot replay restated history as a suffix.
+            if after_sequence < frame.sequence {
+                return Err(Error::CursorBeforeHistory {
+                    cursor: after_sequence,
+                    floor: frame.sequence,
+                });
+            }
+            head = frame.sequence;
+            continue;
+        }
+        head = head.max(frame.sequence);
         let anchor = pending_anchor.take();
         if frame.sequence <= after_sequence || full {
             continue;
