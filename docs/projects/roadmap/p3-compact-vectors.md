@@ -4,6 +4,9 @@
 [P2](p2-directory-store.md); goals are
 [F1/F3/S1/S2](../performance/storage-goals.md). The precision choice is resolved
 below; S1's conflicting default-size acceptance criterion is not waived.
+Shared framing, capability allocation and rollout follow the
+[compact-storage contract](compact-storage-contract.md); source codecs remain
+disabled until their complete read, write and maintenance paths are qualified.
 
 ## Precision decision
 

@@ -49,6 +49,11 @@ flowchart LR
 
 Local numbers below show direction only (see rules).
 
+- **Shared compact storage:** the [interface contract](compact-storage-contract.md)
+  reserves one guarded envelope for P3/P4/P5. Its first implementation slice
+  validates framing and capabilities without enabling production compact
+  writers; source codecs follow separately. Unsupported source data fails
+  closed. This is not completion of the size, residency or reopen targets.
 - **Speed P1, exact search (F2):** the boxed iterator is gone. At 100k×384,
   k=10 and 16 threads, p50 went from 8.2–8.3 ms to 7.1–7.9 ms, with identical
   results.

@@ -5,6 +5,9 @@ Depends on [P2](p2-directory-store.md); exits remain
 [S3/S4/F6](../performance/storage-goals.md): **<=24 B/edge disk,
 <=100 B/edge resident, >=1M edges/s bulk load, <=300 ms reopen at 1M edges**.
 No target is relaxed.
+Shared framing and capability allocation follow the
+[compact-storage contract](compact-storage-contract.md). P4 owns its graph
+codec; shared format and recovery changes have a single storage owner.
 
 ## Existing base and boundary
 
