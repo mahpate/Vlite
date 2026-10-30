@@ -778,7 +778,7 @@ pub(crate) fn write_v5_image(
             if floor != 0 {
                 output.write_all(&format::graph_snapshot_frame(floor, count, body))
             } else {
-                output.write_all(&format::graph_frame(next(floor)?, count, body))
+                output.write_all(&format::graph_frame(next(floor)?, 0, count, body))
             }
         })?;
     }
@@ -1092,7 +1092,7 @@ mod tests {
         }
         if let Some(state) = &loaded.graph {
             crate::property_graph::frame::compacted_bodies(state, now_ms, |count, body| {
-                bytes.extend(seal(format::graph_frame(floor, count, body)));
+                bytes.extend(seal(format::graph_frame(floor, 0, count, body)));
                 Ok(())
             })
             .unwrap();

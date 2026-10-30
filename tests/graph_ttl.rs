@@ -22,7 +22,10 @@ use vlite::property_graph::{
     Pivot, PropertyDefinition, PropertyType, ReadOptions, RelationshipDefinition, Retrieve,
     ShortestPath, Traverse, inspect_graph, verify_graph,
 };
-use vlite::{CreateOptions, Database, Error, Expected, Metadata, MetadataValue, Mutation};
+use vlite::{
+    CreateOptions, Database, EncryptionKey, Error, Expected, Metadata, MetadataValue, Mutation,
+    ReplicaFollower,
+};
 
 /// Expired at any wall-clock time the tests run.
 const PAST: u64 = 1;
@@ -864,13 +867,11 @@ fn later_operations_of_a_batch_cannot_revive_what_it_expired() {
     unchanged(&Database::open(&path).unwrap());
 }
 
-/// A full batch whose every other operation expires a node commits with a
-/// removal after each of them, beyond 4,097 frame entries, and replays.
-#[test]
-fn a_full_batch_that_expires_as_it_goes_commits_and_replays() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("g.vlite");
-    let mut db = Database::create(&path, 2).unwrap();
+/// Writes nodes `n0..n2047`, then one full batch that expires each `n{i}`
+/// before creating `m{i}`: a removal follows each expiry, so the frame holds
+/// 6,144 entries, 2,048 of them removals. Returns the file length before it.
+fn expire_as_it_goes(path: &Path, options: CreateOptions) -> usize {
+    let mut db = Database::create_with_options(path, 2, options).unwrap();
     db.create_graph("g").unwrap();
     let half = 2048;
     let creates = |prefix: &str| -> Vec<GraphOp> {
@@ -884,6 +885,7 @@ fn a_full_batch_that_expires_as_it_goes_commits_and_replays() {
     };
     let mut graph = db.graph_mut("g").unwrap();
     graph.write_batch(&creates("n")).unwrap();
+    let before = fs::metadata(path).unwrap().len() as usize;
     let ops: Vec<GraphOp> = creates("m")
         .into_iter()
         .enumerate()
@@ -891,7 +893,17 @@ fn a_full_batch_that_expires_as_it_goes_commits_and_replays() {
         .collect();
     assert_eq!(ops.len(), 4096);
     assert_eq!(graph.write_batch(&ops).unwrap().outcomes.len(), 4096);
-    drop(db);
+    before
+}
+
+/// A full batch whose every other operation expires a node commits with a
+/// removal after each of them, beyond 4,097 frame entries, and replays.
+#[test]
+fn a_full_batch_that_expires_as_it_goes_commits_and_replays() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("g.vlite");
+    let half = 2048;
+    expire_as_it_goes(&path, CreateOptions::default());
 
     assert_eq!(stored(&path), (half, 0, 0));
     verify_graph(&path, None).unwrap();
@@ -900,6 +912,48 @@ fn a_full_batch_that_expires_as_it_goes_commits_and_replays() {
     assert_eq!(counts(&graph), (half, 0));
     assert!(graph.get_node("n0").unwrap().output.is_none());
     assert!(graph.get_node("m2047").unwrap().output.is_some());
+}
+
+/// The prefix ID of that batch's frame counts its removals, so a torn copy,
+/// plain or encrypted, is an incomplete tail: open reports it, and repair
+/// and a follower discard exactly that frame.
+#[test]
+fn a_torn_batch_that_expires_as_it_goes_is_an_incomplete_tail() {
+    let dir = tempdir().unwrap();
+    let key = EncryptionKey::from_bytes([7; 32]);
+    for encrypted in [false, true] {
+        let path = dir.path().join(format!("{encrypted}.vlite"));
+        let options = CreateOptions {
+            encryption: encrypted.then(|| EncryptionKey::from_bytes([7; 32])),
+            ..CreateOptions::default()
+        };
+        let at = expire_as_it_goes(&path, options);
+        let key = encrypted.then_some(&key);
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(&bytes[at..at + 5], b"VREC\x0c");
+        assert_eq!(bytes[at + 16..at + 24], 2048u64.to_le_bytes());
+        assert_eq!(bytes[at + 24..at + 28], 6144u32.to_le_bytes());
+
+        let torn = &bytes[..bytes.len() - 1];
+        let open = || match key {
+            Some(key) => Database::open_encrypted(&path, key),
+            None => Database::open(&path),
+        };
+        fs::write(&path, torn).unwrap();
+        assert!(matches!(open(), Err(Error::IncompleteTail { .. })));
+        let report = match key {
+            Some(key) => Database::discard_incomplete_tail_encrypted(&path, key),
+            None => Database::discard_incomplete_tail(&path),
+        }
+        .unwrap();
+        assert_eq!(report.discarded_bytes as usize, torn.len() - at);
+        assert_eq!(fs::read(&path).unwrap(), bytes[..at]);
+        fs::write(&path, torn).unwrap();
+        drop(ReplicaFollower::open(&path, key).unwrap());
+        assert_eq!(fs::read(&path).unwrap(), bytes[..at]);
+        let db = open().unwrap();
+        assert_eq!(counts(&db.graph("g").unwrap()), (2048, 0));
+    }
 }
 
 #[test]

@@ -84,7 +84,7 @@ pub use retrieve::{
 mod tests;
 
 use convert::{graph_error, precondition, properties_from_metadata};
-use engine::codec::{BODY_HEADER_BYTES, ENTRY_HEADER_BYTES, MAX_BODY_ENTRIES};
+use engine::codec::{BODY_HEADER_BYTES, ENTRY_HEADER_BYTES};
 use engine::limits::{DEFAULT_OBSERVED_SCHEMA_BUDGET, MAX_BATCH_BYTES, MAX_BATCH_ENTRIES};
 use engine::{
     EdgeId, EdgeSelector, Graph, GraphBody, GraphEntry, GraphId, GraphMutation, GraphState,
@@ -574,14 +574,33 @@ enum Planned {
     Vector(u16, Mutation),
 }
 
-/// Op-12 prefix rule: no record ID, 1..=8193 entries (4,096 plus the
-/// reclaims, see [`MAX_BODY_ENTRIES`]), and a body that fits the entry
-/// headers and the 16 MiB batch limit.
+/// Op-12 prefix rule. The ID field, zero before graph expiry, counts the
+/// body's reclaims; the other entries number 1..=4,096 and the reclaims at
+/// most one more (one may open the body and one may follow each expiry
+/// entry, see [`GraphEntry::Reclaim`]). The body fits the entry headers,
+/// each reclaim's clock, the deadline of the expiry entry each later reclaim
+/// follows, and the 16 MiB batch limit. Without reclaims this is the rule
+/// from before graph expiry. The loader checks it before treating a short
+/// final frame as a torn tail, so a frame it rejects stays corrupt when torn.
 pub(crate) fn valid_frame_prefix(id: u64, count: usize, payload_len: usize) -> bool {
-    id == 0
-        && (1..=MAX_BODY_ENTRIES).contains(&count)
+    // Payloads: a reclaim's clock; an expiry entry's ID and deadline.
+    const RECLAIM_BYTES: usize = 8;
+    const DEADLINE_BYTES: usize = 16;
+    let Some(reclaims) = usize::try_from(id)
+        .ok()
+        .filter(|&reclaims| reclaims <= count)
+    else {
+        return false;
+    };
+    let counted = count - reclaims;
+    (1..=MAX_BATCH_ENTRIES).contains(&counted)
+        && reclaims <= counted + 1
         && payload_len <= MAX_BATCH_BYTES
-        && payload_len >= BODY_HEADER_BYTES + count * ENTRY_HEADER_BYTES
+        && payload_len
+            >= BODY_HEADER_BYTES
+                + count * ENTRY_HEADER_BYTES
+                + reclaims * RECLAIM_BYTES
+                + reclaims.saturating_sub(1) * DEADLINE_BYTES
 }
 
 impl Database {
@@ -682,7 +701,12 @@ impl Database {
         let state = self.graph.as_mut().ok_or(Error::GraphsNotEnabled)?;
         state.validate(sequence, body).map_err(graph_error)?;
         let encoded = engine::encode_body(body).map_err(graph_error)?;
-        let frame = format::graph_frame(sequence, body.entries.len() as u32, &encoded);
+        let frame = format::graph_frame(
+            sequence,
+            frame::reclaim_count(body),
+            body.entries.len() as u32,
+            &encoded,
+        );
         self.commit_frame(sequence, &frame)?;
         if let Some(state) = self.graph.as_mut()
             && state.apply(sequence, body).is_err()

@@ -28,6 +28,14 @@ fn corrupt(offset: u64, reason: &'static str) -> Error {
     Error::Corrupt { offset, reason }
 }
 
+/// The op-12 prefix ID of `body`: its reclaim entries (zero without them).
+pub(crate) fn reclaim_count(body: &GraphBody) -> u64 {
+    body.entries
+        .iter()
+        .filter(|entry| matches!(entry, GraphEntry::Reclaim { .. }))
+        .count() as u64
+}
+
 /// Replays one checksum-verified op-12 body committed at `sequence` (frame at
 /// `offset`). Every entry is decoded and validated first; then graph entries
 /// are applied atomically to `state` and vector entries, in body order, to
@@ -35,18 +43,22 @@ fn corrupt(offset: u64, reason: &'static str) -> Error {
 /// an `Attach` entry or owning a record changed by a vector entry) must
 /// reference a live record without expiry. Any failure fails the open.
 /// `restated` bodies come from a checkpoint image and may repeat the last
-/// applied sequence.
+/// applied sequence. The prefix `id` must count the body's reclaims.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn replay(
     state: &mut GraphState,
     collections: &mut BTreeMap<u16, LoadedCollection>,
     sequence: u64,
+    id: u64,
     count: u32,
     body: &[u8],
     offset: u64,
     restated: bool,
 ) -> Result<()> {
     let body = engine::decode_body(body, count)
-        .map_err(|_| corrupt(offset, "invalid graph frame body"))?;
+        .ok()
+        .filter(|body| reclaim_count(body) == id)
+        .ok_or_else(|| corrupt(offset, "invalid graph frame body"))?;
     let mut mutations = Vec::new();
     let mut touched = Vec::new();
     for entry in &body.entries {

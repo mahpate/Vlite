@@ -613,9 +613,18 @@ pub(crate) fn advance_frame(sequence: u64) -> Vec<u8> {
 }
 
 /// Graph frame (op 12, DO-003) carrying one encoded graph body of `count`
-/// entries. Collection, reserved and ID prefix fields are zero.
-pub(crate) fn graph_frame(sequence: u64, count: u32, body: &[u8]) -> Vec<u8> {
-    wrap(OP_GRAPH, 0, sequence, 0, count, body.len() as u32, body)
+/// entries, `reclaims` of them reclaim entries. The ID prefix field holds
+/// `reclaims`; the collection and reserved fields are zero.
+pub(crate) fn graph_frame(sequence: u64, reclaims: u64, count: u32, body: &[u8]) -> Vec<u8> {
+    wrap(
+        OP_GRAPH,
+        0,
+        sequence,
+        reclaims,
+        count,
+        body.len() as u32,
+        body,
+    )
 }
 
 /// Graph snapshot frame (op 15): one canonical checkpoint graph body of
@@ -1599,13 +1608,15 @@ fn load_inner<R: Read + Seek>(
             ));
         }
         // A snapshot loads into an empty graph state: before any graph
-        // frame, unless it continues the snapshot being read.
+        // frame, unless it continues the snapshot being read. Its body has
+        // no reclaims, so its ID is zero.
         let graph_started = loaded
             .graph
             .as_ref()
             .is_some_and(|graph| graph.last_sequence() != 0);
         if operation == OP_GRAPH_SNAPSHOT
-            && (!crate::property_graph::valid_frame_prefix(id, count, payload_len)
+            && (id != 0
+                || !crate::property_graph::valid_frame_prefix(id, count, payload_len)
                 || (snapshot.is_none() && graph_started))
         {
             return Err(corrupt(offset, "invalid graph snapshot"));
@@ -1910,6 +1921,7 @@ fn load_inner<R: Read + Seek>(
                     .get_or_insert_with(crate::property_graph::engine::GraphState::new),
                 &mut loaded.collections,
                 sequence,
+                id,
                 count as u32,
                 body,
                 offset,
@@ -2478,7 +2490,11 @@ mod tests {
         let (count, whole) = encode(0, &entries);
         let replayed = history_log(
             history,
-            &[advance_frame(5), records(), graph_frame(5, count, &whole)],
+            &[
+                advance_frame(5),
+                records(),
+                graph_frame(5, 0, count, &whole),
+            ],
         )
         .unwrap();
         let mut expected = GraphState::new();
@@ -2503,7 +2519,7 @@ mod tests {
                 advance_frame(5),
                 records(),
                 graph_snapshot_frame(5, count, &whole),
-                graph_frame(6, one, &delete),
+                graph_frame(6, 0, one, &delete),
             ],
         )
         .unwrap();
@@ -2589,7 +2605,7 @@ mod tests {
                 &[
                     advance_frame(5),
                     records(),
-                    graph_frame(5, other_count, &other),
+                    graph_frame(5, 0, other_count, &other),
                     snapshot(),
                 ],
             ),

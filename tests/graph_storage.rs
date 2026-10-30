@@ -682,7 +682,7 @@ fn malformed_graph_frames_fail_the_whole_open() {
     );
     assert_corrupt(open(frame(OP_GRAPH, 0, 3, 0, 0, len, &valid)), at, prefix);
     assert_corrupt(
-        open(frame(OP_GRAPH, 0, 3, 0, 8194, len, &valid)),
+        open(frame(OP_GRAPH, 0, 3, 0, 4097, len, &valid)),
         at,
         prefix,
     );
@@ -1273,6 +1273,68 @@ fn incomplete_graph_tail_is_rejected_then_explicitly_repaired() {
     assert_eq!(fs::read(&path).unwrap(), base);
     let db = Database::open(&path).unwrap();
     assert_eq!(db.list_graphs().unwrap()[0].node_count, 0);
+}
+
+/// Gap 3: the prefix ID of a graph frame counts its reclaim entries, and
+/// only those entries may take a frame past 4,096 entries. A torn frame that
+/// breaks this rule is corrupt rather than an incomplete tail: open, repair
+/// and a follower refuse it and keep the bytes. A complete frame's body must
+/// match its ID and place its reclaims validly.
+#[test]
+fn graph_frames_over_the_entry_limit_stay_corrupt_when_torn() {
+    let dir = tempdir().unwrap();
+    let base = base_graph_file();
+    let at = base.len();
+    let prefix = "invalid graph frame count, reserved ID or body length";
+    // `len` bytes of zero-payload `DropGraph` entries (zero-padded).
+    let drops = |len: usize| {
+        let mut body = vec![1, 0, 0, 0];
+        while body.len() < len {
+            body.extend_from_slice(&[2, 0, 0, 0, 0, 0, 0, 0]);
+        }
+        body.resize(len, 0);
+        body
+    };
+    for (id, count, len) in [
+        // No ID: 5,000 or 4,097 entries, as before graph expiry.
+        (0, 5000, 40004),
+        (0, 4097, 32780),
+        // 4,097 entries besides one reclaim.
+        (1, 4098, 32796),
+        // Three reclaims beside one entry: at most two can be placed.
+        (3, 4, 92),
+        // Two reclaims need 60 bytes: their clocks and an expiry deadline.
+        (2, 3, 59),
+    ] {
+        let whole = frame(OP_GRAPH, 0, 3, id, count, len as u32, &drops(len));
+        let path = dir.path().join(format!("torn-{id}-{count}.vlite"));
+        let torn = [base.as_slice(), &whole[..whole.len() - 1]].concat();
+        fs::write(&path, &torn).unwrap();
+        assert_corrupt(Database::open(&path), at, prefix);
+        assert_corrupt(Database::discard_incomplete_tail(&path), at, prefix);
+        assert_corrupt(ReplicaFollower::open(&path, None), at, prefix);
+        assert_eq!(fs::read(&path).unwrap(), torn, "{id} {count}");
+        let complete = [base.as_slice(), &whole].concat();
+        assert_corrupt(Database::open_from_bytes(complete, None), at, prefix);
+    }
+
+    let open = |id: u64, count: u32, body: &[u8]| {
+        let whole = frame(OP_GRAPH, 0, 3, id, count, body.len() as u32, body);
+        Database::open_from_bytes([base.as_slice(), &whole].concat(), None)
+    };
+    let invalid_body = "invalid graph frame body";
+    let reclaim = GraphEntry::Reclaim { at_ms: 5 };
+    let (count, tagged) = body(0, vec![reclaim.clone(), put_node(0, "a")]);
+    let db = open(1, count, &tagged).unwrap();
+    assert_eq!(db.list_graphs().unwrap()[0].node_count, 1);
+    assert_corrupt(open(0, count, &tagged), at, invalid_body);
+    let (count, untagged) = body(0, vec![put_node(0, "a"), put_node(1, "b")]);
+    assert_corrupt(open(1, count, &untagged), at, invalid_body);
+    // A reclaim after a node rather than an expiry entry.
+    let (_, node) = body(0, vec![put_node(0, "a")]);
+    let (_, alone) = body(0, vec![reclaim]);
+    let misplaced = [node, alone[4..].to_vec()].concat();
+    assert_corrupt(open(1, 2, &misplaced), at, invalid_body);
 }
 
 /// EPIC-006: the formerly graph-unaware paths carry graph files (LEG-009..011,

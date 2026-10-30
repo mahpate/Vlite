@@ -618,3 +618,26 @@ fn random_batches_are_atomic_and_replay_identically() {
         }
     });
 }
+
+/// Gap 3: the op-12 prefix ID counts the body's reclaims. Without them a
+/// frame keeps the 1..=4,096-entry rule; with them it may hold one reclaim
+/// more than its other entries, and its body must fit each reclaim's clock
+/// and the deadline of the expiry entry each later reclaim follows.
+#[test]
+fn frame_prefixes_bound_entries_by_their_reclaim_count() {
+    let max = MAX_BATCH_ENTRIES;
+    let legacy = |count: usize| valid_frame_prefix(0, count, 4 + 8 * count);
+    assert!(legacy(1) && legacy(max));
+    assert!(!legacy(0) && !legacy(max + 1) && !legacy(5000));
+    assert!(valid_frame_prefix(1, 2, 28) && !valid_frame_prefix(1, 2, 27));
+    assert!(valid_frame_prefix(2, 3, 60) && !valid_frame_prefix(2, 3, 59));
+    assert!(!valid_frame_prefix(1, 1, 1 << 10) && !valid_frame_prefix(3, 4, 1 << 10));
+    assert!(valid_frame_prefix(1, max + 1, 1 << 16));
+    assert!(!valid_frame_prefix(1, max + 2, 1 << 16));
+    // The largest body: an opening reclaim and one after each expiry entry.
+    assert!(valid_frame_prefix(4097, 8193, 163_860));
+    assert!(!valid_frame_prefix(4097, 8193, 163_859));
+    assert!(!valid_frame_prefix(4098, 8194, 1 << 20));
+    assert!(!valid_frame_prefix(9, 1, 1 << 10) && !valid_frame_prefix(u64::MAX, 1, 1 << 10));
+    assert!(!valid_frame_prefix(0, 1, MAX_BATCH_BYTES + 1));
+}
