@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Proposal. Not approved or scheduled; nothing here is implemented |
+| Status | Proposal. Not approved or scheduled; nothing here is implemented. Options B and C are being revisited in [`storage-goals.md`](storage-goals.md), which drops the single-file requirement |
 | Created | 2026-10-27 |
 | Scope | Vector and property-graph performance |
 | Baseline | DO-005, release 0.6.0 on Azure Standard_D16s_v5 ([`baseline.md`](../feature-agent-graph/baseline.md)) |
