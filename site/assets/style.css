@@ -228,6 +228,10 @@ h3 { font-weight: 600; letter-spacing: -.01em; }
 .product-adoption h3 { margin: 8px 0; }
 .product-adoption p { margin: 0; color: var(--muted); }
 .product-adoption > a { flex-shrink: 0; }
+.adoption-apps { display: flex; flex-wrap: wrap; gap: 10px 22px; margin: 4px 0 0; padding: 0; list-style: none; }
+.adoption-apps li { display: flex; align-items: center; gap: 10px; min-width: 0; font-weight: 600; }
+.adoption-apps .icon { width: 32px; height: 32px; border-radius: 10px; }
+.adoption-apps .icon svg { width: 17px; height: 17px; }
 @media (max-width: 1080px) { .product-map-core, .product-map-tools { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 640px) {
   .product-map-intro { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "logo label" "logo title" "text text" "more more"; gap: 2px 16px; padding: 22px; }
