@@ -99,7 +99,10 @@ Peer-pool gaps are tracked in the pool repository's `TODO.md` under
 ## Decisions
 
 1. **Approved:** the agent memory track (items 1–4) runs alongside the
-   storage goals, starting with the key-value API (item 2).
+   storage goals, starting with the key-value API (item 2). Its embedded
+   Rust API has landed
+   ([storage features](../../STORAGE-FEATURES.md#key-value-store)); REST and
+   gRPC routes wait for the OpenAPI review.
 2. **Open:** for graph TTL, does an expiring node expire its edges, or are
    nodes with live edges kept until the edges expire? Needed before item 3.
 3. **Approved:** openCypher with writes (item 6) is in scope, with graph
