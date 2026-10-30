@@ -5,6 +5,7 @@
 mod ann_snapshot;
 pub mod changes;
 mod collection;
+mod compact;
 mod crypto;
 mod directory;
 pub use directory::DEFAULT_CHECKPOINT_BYTES;

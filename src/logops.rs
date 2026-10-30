@@ -337,7 +337,9 @@ pub(crate) fn read_segment<R: Read + Seek>(
     let mut last = after_sequence;
     let mut pending_anchor: Option<RawFrame> = None;
     let mut full = false;
+    let mut check = crate::compact::ImageCheck::new(header.flags);
     while let Some(frame) = format::next_frame(file, &header, offset)? {
+        let at = offset;
         offset += frame.disk.len() as u64;
         if frame.operation == format::OP_TIME_ANCHOR {
             pending_anchor = Some(frame);
@@ -351,8 +353,28 @@ pub(crate) fn read_segment<R: Read + Seek>(
                     floor: frame.sequence,
                 });
             }
+            if let Some(check) = &mut check {
+                check.advance(frame.sequence, at)?;
+            }
             head = frame.sequence;
             continue;
+        }
+        if let Some(check) = &mut check {
+            let body_len = frame.body().len();
+            check.frame(
+                frame.operation,
+                frame.collection,
+                frame.sequence,
+                frame.id,
+                body_len,
+                at,
+            )?;
+        }
+        if frame.operation == format::OP_COMPACT_BLOCK {
+            check
+                .as_mut()
+                .ok_or_else(|| format::corrupt(at, "invalid operation or reserved record bytes"))?
+                .block(frame.collection, frame.id, frame.count, frame.body(), at)?;
         }
         head = head.max(frame.sequence);
         let anchor = pending_anchor.take();
@@ -368,6 +390,7 @@ pub(crate) fn read_segment<R: Read + Seek>(
             full = true;
         }
     }
+    crate::compact::end_scan(check, file, &header, offset)?;
     if after_sequence > head {
         return Err(Error::CursorAhead {
             cursor: after_sequence,

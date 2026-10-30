@@ -31,8 +31,13 @@ const OP_GRAPH: u8 = crate::property_graph::engine::codec::OP_GRAPH;
 /// directory-store checkpoints and kept by `pack`; never combined with
 /// `FLAG_TIMESTAMPS`.
 pub(crate) const FLAG_HISTORY: u16 = 8;
+/// Header flag (v5, compact storage contract): a `FLAG_HISTORY` image whose
+/// restated checkpoint holds op-16 blocks after a capability table. Readers
+/// accept it only behind the complete checks of `crate::compact`; older
+/// builds reject it with `UnsupportedFeature(FLAG_COMPACT)`.
+pub(crate) const FLAG_COMPACT: u16 = 16;
 /// Header flags this build accepts in addition to `KNOWN_FLAGS`.
-const GRAPH_READER_FLAGS: u16 = FLAG_GRAPH | FLAG_HISTORY;
+const GRAPH_READER_FLAGS: u16 = FLAG_GRAPH | FLAG_HISTORY | FLAG_COMPACT;
 pub(crate) const OP_TIME_ANCHOR: u8 = 11;
 /// Advance frame (Speed P2): valid only as the first frame of a
 /// `FLAG_HISTORY` log. Its sequence `S` is the checkpoint the following
@@ -50,6 +55,9 @@ pub(crate) const OP_RECORD_BLOCK: u8 = 14;
 /// `FLAG_HISTORY | FLAG_GRAPH` log at the checkpoint sequence, into an empty
 /// graph state.
 pub(crate) const OP_GRAPH_SNAPSHOT: u8 = 15;
+/// Compact block: one block of a `FLAG_COMPACT` image at the checkpoint
+/// sequence, starting with the capability table (`crate::compact`).
+pub(crate) const OP_COMPACT_BLOCK: u8 = 16;
 /// Per-entry header of a record block: ID, revision, expiry flag, expiry and
 /// extended-body length.
 const BLOCK_ENTRY_HEADER: usize = 29;
@@ -480,15 +488,15 @@ pub(crate) fn crc32(bytes: &[u8]) -> u32 {
     crc32_update(0, bytes)
 }
 
-fn u16_at(bytes: &[u8], offset: usize) -> u16 {
+pub(crate) fn u16_at(bytes: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap())
 }
 
-fn u32_at(bytes: &[u8], offset: usize) -> u32 {
+pub(crate) fn u32_at(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
 }
 
-fn u64_at(bytes: &[u8], offset: usize) -> u64 {
+pub(crate) fn u64_at(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
 }
 
@@ -1243,6 +1251,9 @@ pub(crate) fn read_log_header_with<R: Read + Seek>(
             if flags & FLAG_HISTORY != 0 && flags & FLAG_TIMESTAMPS != 0 {
                 return Err(corrupt(0, "history flag combined with commit timestamps"));
             }
+            if flags & FLAG_COMPACT != 0 && flags & FLAG_HISTORY == 0 {
+                return Err(corrupt(0, "compact flag without a history image"));
+            }
         } else if bytes[26..28] != [0; 2] {
             return Err(corrupt(0, "nonzero reserved database header bytes"));
         }
@@ -1445,6 +1456,7 @@ fn load_inner<R: Read + Seek>(
     // offset of their first frame.
     let mut blocks: Option<BlockRun> = None;
     let mut snapshot: Option<(u64, Vec<crate::property_graph::engine::GraphBody>)> = None;
+    let mut check = crate::compact::ImageCheck::new(flags);
     let mut disk = Vec::new();
     loop {
         let anchor_len = anchor.map_or(0, |(_, len)| len);
@@ -1460,6 +1472,9 @@ fn load_inner<R: Read + Seek>(
             let magic_len = partial.len().min(4);
             if partial[..magic_len] != b"VREC"[..magic_len] {
                 return Err(corrupt(offset, "invalid trailing record magic"));
+            }
+            if let Some(check) = &check {
+                check.torn(&partial, offset)?;
             }
             loaded.incomplete_bytes = remaining + anchor_len;
             break;
@@ -1522,6 +1537,9 @@ fn load_inner<R: Read + Seek>(
             disk.resize(length_on_disk as usize, 0);
             file.read_exact(&mut disk[PREFIX_SIZE..])?;
             verified_frame(&disk, cipher.as_ref(), floor, offset)?;
+            if let Some(check) = &mut check {
+                check.advance(floor, offset)?;
+            }
             loaded.sequence = floor;
             loaded.history_floor = floor;
             loaded.end += length_on_disk;
@@ -1544,14 +1562,19 @@ fn load_inner<R: Read + Seek>(
             OP_GRAPH_SNAPSHOT => {
                 version >= V5 && flags & FLAG_HISTORY != 0 && flags & FLAG_GRAPH != 0
             }
+            // FLAG_COMPACT only passes the header check with FLAG_HISTORY.
+            OP_COMPACT_BLOCK => version >= V5 && flags & FLAG_COMPACT != 0,
             _ => false,
         };
-        let reserved_clear =
-            if version >= V4 && matches!(operation, 1..=4 | 8 | 9 | 10 | OP_RECORD_BLOCK) {
-                prefix[7] == 0
-            } else {
-                prefix[5..8] == [0; 3]
-            };
+        let reserved_clear = if version >= V4
+            && matches!(
+                operation,
+                1..=4 | 8 | 9 | 10 | OP_RECORD_BLOCK | OP_COMPACT_BLOCK
+            ) {
+            prefix[7] == 0
+        } else {
+            prefix[5..8] == [0; 3]
+        };
         if !allowed || !reserved_clear {
             return Err(corrupt(
                 offset,
@@ -1581,8 +1604,10 @@ fn load_inner<R: Read + Seek>(
             let run = blocks.take().expect("pending record blocks");
             run.apply(&mut loaded, cipher.as_ref())?;
         }
-        if matches!(operation, OP_RECORD_BLOCK | OP_GRAPH_SNAPSHOT)
-            && (restating_from.is_none() || sequence != loaded.history_floor)
+        if matches!(
+            operation,
+            OP_RECORD_BLOCK | OP_GRAPH_SNAPSHOT | OP_COMPACT_BLOCK
+        ) && (restating_from.is_none() || sequence != loaded.history_floor)
         {
             return Err(corrupt(offset, "snapshot frame outside a checkpoint image"));
         }
@@ -1713,11 +1738,18 @@ fn load_inner<R: Read + Seek>(
             }
             count * 4 + payload_len
         } else {
-            // Ops 12 and 15 in graph builds; their prefix was validated above.
+            // Ops 12 and 15 in graph builds; their prefix was validated
+            // above. Op 16 is bounded by the image check below.
             payload_len
         };
+        if let Some(check) = &mut check {
+            check.frame(operation, collection_id, sequence, id, body_len, offset)?;
+        }
         let frame_len = (PREFIX_SIZE + body_len + seal + FOOTER_SIZE) as u64;
         if remaining < frame_len {
+            if let Some(check) = &check {
+                check.torn(&prefix, offset)?;
+            }
             loaded.incomplete_bytes = remaining + anchor_len;
             break;
         }
@@ -1936,6 +1968,10 @@ fn load_inner<R: Read + Seek>(
                     .1
                     .push(body);
             }
+            OP_COMPACT_BLOCK => check
+                .as_mut()
+                .expect("op 16 is only allowed with FLAG_COMPACT")
+                .block(collection_id, id, count as u32, body, offset)?,
             _ => {
                 let settings = decode_settings(body).map_err(|reason| corrupt(offset, reason))?;
                 let collection = loaded
@@ -1968,6 +2004,9 @@ fn load_inner<R: Read + Seek>(
             first,
         )?;
         loaded.graph = Some(state);
+    }
+    if let Some(check) = &mut check {
+        check.finish(loaded.end)?;
     }
     Ok(loaded)
 }

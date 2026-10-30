@@ -1158,14 +1158,15 @@ fn op12_and_graph_flag_are_rejected_outside_graph_enabled_v5_files() {
         "nonzero reserved database header bytes",
     );
 
-    // Unknown flags beside FLAG_GRAPH stay unsupported.
+    // Unknown flags beside FLAG_GRAPH stay unsupported (16 is now
+    // FLAG_COMPACT, covered by tests/compact_storage.rs).
     let mut bytes = base_graph_file();
-    bytes[26..28].copy_from_slice(&(FLAG_GRAPH | 16).to_le_bytes());
+    bytes[26..28].copy_from_slice(&(FLAG_GRAPH | 32).to_le_bytes());
     let checksum = crc32(&bytes[..28]);
     bytes[28..32].copy_from_slice(&checksum.to_le_bytes());
     assert!(matches!(
         Database::open_from_bytes(bytes, None),
-        Err(Error::UnsupportedFeature(16))
+        Err(Error::UnsupportedFeature(32))
     ));
 
     // A graph header with a corrupted header checksum.

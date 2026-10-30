@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Interface decisions accepted 2026-10-30; implementation pending. Defines what [P3](p3-compact-vectors.md), [P4](p4-compact-graph.md) and P5 share on top of [P2](p2-directory-store.md) |
+| Status | Interface decisions accepted 2026-10-30. Slice 0 implemented (`src/compact/mod.rs`, `tests/compact_storage.rs`; status in section 7); slices 1-3 pending. Defines what [P3](p3-compact-vectors.md), [P4](p4-compact-graph.md) and P5 share on top of [P2](p2-directory-store.md) |
 | Roadmap | [`next-major.md`](next-major.md); goals in [`storage-goals.md`](../performance/storage-goals.md) |
 | Validation | Design review only. Citations are `path:line` on this branch and may drift |
 
@@ -56,6 +56,9 @@ Byte copies of such images keep it. WAL headers never carry it: the directory
 masks them to `GRAPH | ENCRYPTED` (`src/directory.rs:37`, `:348`). Older
 builds refuse an unknown flag with `UnsupportedFeature` before replay or tail
 repair (`src/format.rs:1237-1241`). This meets P3's "reject before replay".
+Compact-aware builds report `FLAG_COMPACT` without `FLAG_HISTORY` as
+`Corrupt` at the header, and a `FLAG_COMPACT` image without a valid
+capability table as `Corrupt` before it is served.
 
 **Frame operation.** Add one op, `OP_COMPACT_BLOCK = 16`, shared by all
 owners. It is allowed only in v5 with `FLAG_HISTORY | FLAG_COMPACT`, at the
@@ -97,6 +100,19 @@ Entries must be used. Readers accept only explicitly implemented versions,
 not every smaller version. The flag covers old builds; the table covers
 new codecs. Unsupported critical data fails closed before state is published.
 
+Table details fixed by slice 0: the table is kind `0x0001`, codec version 1,
+critical, owner (frame `collection`) zero, and its frame `count` equals the
+number of entries; it has at least one entry. A matching entry has the same
+kind, version and flags as the block. An entry's critical bit must agree
+with its kind's range. A whole table is validated before support is decided,
+so a malformed table is `Corrupt`, never `UnsupportedFeature`. Then any
+entry outside the derived ranges `0x02xx` and `0x04xx` is
+`UnsupportedFeature(FLAG_COMPACT)` until a codec for it lands: critical
+kinds, storage-reserved kinds, unallocated kinds (their criticality is not
+fixed yet, so the flag bit is not trusted) and test kinds, which every build
+refuses while no test codec exists. A table version other than 1 is
+`UnsupportedFeature(FLAG_COMPACT)` as well.
+
 ## 4. Block and directory contract
 
 **Frame.** A block is one standard frame: 36-byte prefix, body, 16-byte
@@ -124,6 +140,15 @@ A section table of `(offset u32, length u32)` follows. Offsets count from
 the body start. They must ascend, must not overlap, and must stay in bounds.
 Codecs check every count with checked arithmetic before allocating, and use
 checked 32-bit ordinals as P4 requires.
+
+Envelope details fixed by slice 0: the first section starts at the header's
+first section offset. Each section follows at most 63 zero padding bytes,
+which is enough for 64-byte alignment. Sections are contiguous otherwise,
+and the last one ends the body. A body is at least 40 bytes: the header plus
+one section entry. The blocks of one owner and kind are consecutive frames
+with partitions 0, 1, 2 and so on, and they never resume after another
+owner or kind. Blocks of kinds `0x01xx` and `0x02xx` must belong to an
+existing collection (default, or created before the table).
 
 **Length bounds.** `next_frame` caps a body at 256 MiB
 (`src/format.rs:1349`, `:1372`). This contract caps a block body at 64 MiB,
@@ -196,7 +221,7 @@ hide an I/O or authentication error.
 |---|---|
 | Publication | Only a manifest replace publishes. Leftover unlisted files are removed on writable open (`src/directory.rs:826-842`) |
 | Verification | No block byte is used before its frame passes the footer checksum and, if encrypted, authentication (`src/format.rs:2132-2152`) |
-| Crash and torn tail | Blocks exist only in images, so a torn or corrupt block is corruption, never repaired. Only the active WAL allows torn-tail repair |
+| Crash and torn tail | Blocks exist only in images, so a torn or corrupt block is corruption, never repaired. Only the active WAL allows torn-tail repair. Any frame cut short at or before the floor of a compact image is corruption, whatever its operation. A torn write keeps the start of a frame, so the frame's own sequence tells an image frame from the first log frame after a single-file image. Fewer than 16 bytes cannot, and until a later frame has ended the image they fail closed as corruption. The image has no end marker: a cut exactly at a frame boundary is caught only when it leaves a table entry unused. Atomic publication protects that case, as it does every other log |
 | Encryption | No plaintext sidecars or spill files. Derived blocks are sealed like source blocks, or rebuilt in memory. `disk_ann` sidecars stay off for encrypted stores (`src/disk_ann.rs:143-154`) |
 | Record TTL | Records expired at checkpoint time are not written (`src/maintenance.rs:729-731`). Later expiry is masked at read time |
 | Graph TTL | A due node hides itself and every incident edge (`src/property_graph/engine/state.rs:122`, `:361-370`). Checkpoints drop due entities, and the edges of dropped nodes (`src/maintenance.rs:671-674`, `:774-783`). Reopen never revives them |
@@ -210,8 +235,9 @@ hide an I/O or authentication error.
 | Mixing | An image may mix legacy and compact objects. One collection or graph uses exactly one form per image |
 
 Emission order in an image: header, advance frame, collection and settings
-frames, capability table, then per collection ascending its source blocks,
-derived blocks and statistics. Vector and import frames follow, then per
+frames (ops 5 and 7, which readers accept only before the table), capability
+table, then per collection ascending its source blocks (op-14 record blocks
+for a legacy collection), derived blocks and statistics. Vector and import frames follow, then per
 graph ascending an op-15 snapshot or P4 blocks, then graph statistics. Graph
 blocks load after every record, so P4 validates attachments there.
 
@@ -225,6 +251,34 @@ blocks load after every record, so P4 validates attachments there.
 | 1c. P5 stats | P5 | Statistics and bitmaps as derived blocks | Stale binding is rebuilt, never served; skipping is conservative; corrupt fails |
 | 2. Shared wiring | Storage | Writers enabled per opted-in object, generation pinning, crash matrix | Extends `tests/directory_recovery_matrix.rs`, `tests/encryption.rs`, `tests/replica.rs` and `tests/graph_compat.rs` with compact images |
 | 3. Later slices | Each owner | P3b-d, P4 mutations and import, filter-aware ANN | The acceptance lists in the P3 and P4 designs |
+
+**Slice 0 status.** `src/compact/mod.rs` holds one concrete check, wired
+into the load loop (`src/format.rs`), the change feed (`src/changes.rs`)
+and segment export (`src/logops.rs`). `tests/compact_storage.rs` covers it,
+with the golden image `tests/fixtures/compact/derived-only-v5.hex` encoded
+independently of the implementation. Every path replays through one of
+those three readers, so an image this build cannot serve is refused before
+anything is written. That includes open, read-only and in-memory open,
+inspection, repair, replica, change feed, export, maintenance and directory
+checkpoints. Images with only declared derived kinds are served:
+
+- Byte copies keep the flag and every block: backup, directory pack,
+  restore, `restore_to` and re-encryption.
+- Rewrites from loaded state drop the derived blocks and the flag but lose
+  no source value: compact, upgrade, `enable_graph`, `strip_graph`,
+  `convert_to_directory` and directory checkpoints.
+
+Three slice 0 items are deferred because nothing would use them before the
+first codec:
+
+- The in-memory block directory arrives with the first block reader (1a or
+  1b) and generation pinning (slice 2).
+- The `check`, `apply`, `encode`, `bind` and `graph_keys` dispatch arrives
+  with its first handler.
+- Background rebuild and reporting of skipped derived blocks arrive with the
+  first derived codec. A public report needs the decision 7 API review.
+  Until then nothing is derived from a skipped block, so nothing stale can
+  be served.
 
 Rules for avoiding conflicts:
 
