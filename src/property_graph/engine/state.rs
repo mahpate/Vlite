@@ -17,7 +17,13 @@ use super::schema::{self, GraphSchema, PropertyIndex};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, btree_set};
 use std::iter::Peekable;
-use std::ops::Bound::{Excluded, Included, Unbounded};
+use std::ops::Bound::{Excluded, Unbounded};
+use std::sync::Arc;
+
+// A thin shared pointer keeps each entry to two machine words; Arc<str>
+// would add a length word to every adjacency entry.
+type AdjacencyEntry = (Arc<String>, EdgeId);
+type AdjacencyIndex = BTreeMap<NodeId, Vec<AdjacencyEntry>>;
 
 /// One named graph.
 #[derive(Clone, Debug, PartialEq)]
@@ -34,8 +40,11 @@ pub struct Graph {
     // Derived indexes.
     node_keys: BTreeMap<String, NodeId>,
     edge_keys: BTreeMap<String, EdgeId>,
-    out_edges: BTreeMap<NodeId, BTreeSet<(String, EdgeId)>>,
-    in_edges: BTreeMap<NodeId, BTreeSet<(String, EdgeId)>>,
+    out_edges: AdjacencyIndex,
+    in_edges: AdjacencyIndex,
+    /// Shared relationship names and their live edge counts. Counts belong to
+    /// this graph, not to the Arc, so cloning and rollback do not retain symbols.
+    relationships: BTreeMap<Arc<String>, usize>,
     labels: BTreeMap<String, BTreeSet<NodeId>>,
     /// Declared schema (EPIC-008); empty when none was declared.
     schema: GraphSchema,
@@ -50,6 +59,40 @@ fn remove_from<K: Ord, V: Ord>(map: &mut BTreeMap<K, BTreeSet<V>>, key: K, value
             map.remove(&key);
         }
     }
+}
+
+fn insert_adjacency(index: &mut AdjacencyIndex, node: NodeId, entry: AdjacencyEntry) {
+    let entries = index.entry(node).or_default();
+    let position = entries
+        .binary_search(&entry)
+        .expect_err("new adjacency entry");
+    entries.insert(position, entry);
+}
+
+fn remove_adjacency(index: &mut AdjacencyIndex, node: NodeId, entry: &AdjacencyEntry) {
+    let entries = index.get_mut(&node).expect("adjacency exists");
+    let position = entries
+        .binary_search(entry)
+        .expect("adjacency entry exists");
+    entries.remove(position);
+    if entries.is_empty() {
+        index.remove(&node);
+    } else if entries.capacity() > 4 && entries.len() <= entries.capacity() / 4 {
+        entries.shrink_to(entries.len() * 2);
+    }
+}
+
+fn adjacency_range<'a>(
+    entries: &'a [AdjacencyEntry],
+    relationship: &str,
+    after: Option<EdgeId>,
+) -> &'a [AdjacencyEntry] {
+    let start = entries.partition_point(|(kind, id)| {
+        kind.as_str() < relationship
+            || (kind.as_str() == relationship && after.is_some_and(|after| *id <= after))
+    });
+    let end = start + entries[start..].partition_point(|(kind, _)| kind.as_str() == relationship);
+    &entries[start..end]
 }
 
 impl Graph {
@@ -67,6 +110,7 @@ impl Graph {
             edge_keys: BTreeMap::new(),
             out_edges: BTreeMap::new(),
             in_edges: BTreeMap::new(),
+            relationships: BTreeMap::new(),
             labels: BTreeMap::new(),
             schema: GraphSchema::default(),
             property_indexes: BTreeMap::new(),
@@ -154,8 +198,12 @@ impl Graph {
         types: Option<&'a BTreeSet<String>>,
         after: Option<(&str, EdgeId)>,
     ) -> Adjacency<'a> {
-        let side = |index: &'a BTreeMap<NodeId, BTreeSet<(String, EdgeId)>>, used: bool| {
-            Side::new(used.then(|| index.get(&node)).flatten(), types, after).peekable()
+        let side = |index: &'a AdjacencyIndex, used: bool| {
+            let entries = used
+                .then(|| index.get(&node))
+                .flatten()
+                .map_or(&[][..], Vec::as_slice);
+            Side::new(entries, types, after).peekable()
         };
         Adjacency {
             out: side(&self.out_edges, direction != Direction::In),
@@ -165,14 +213,9 @@ impl Graph {
     /// Edges incident to `node` in `direction`, ordered by (relationship type,
     /// edge ID) ascending. A self-loop appears once, also for `Both`.
     pub fn edges_of(&self, node: NodeId, direction: Direction) -> Vec<EdgeId> {
-        let empty = BTreeSet::new();
-        let out = self.out_edges.get(&node).unwrap_or(&empty);
-        let inc = self.in_edges.get(&node).unwrap_or(&empty);
-        match direction {
-            Direction::Out => out.iter().map(|(_, id)| *id).collect(),
-            Direction::In => inc.iter().map(|(_, id)| *id).collect(),
-            Direction::Both => out.union(inc).map(|(_, id)| *id).collect(),
-        }
+        self.adjacency(node, direction, None, None)
+            .map(|(_, id)| id)
+            .collect()
     }
     /// `(collection, record)` attachments of `node`, ascending by collection.
     pub fn attachments(&self, node: NodeId) -> impl Iterator<Item = (u16, u64)> + '_ {
@@ -199,12 +242,9 @@ impl Graph {
         relationship: &str,
         destination: NodeId,
     ) -> impl Iterator<Item = EdgeId> + 'a {
-        let range =
-            (relationship.to_owned(), EdgeId(0))..=(relationship.to_owned(), EdgeId(u64::MAX));
-        self.out_edges
-            .get(&source)
-            .into_iter()
-            .flat_map(move |set| set.range(range.clone()))
+        let entries = self.out_edges.get(&source).map_or(&[][..], Vec::as_slice);
+        adjacency_range(entries, relationship, None)
+            .iter()
             .map(|(_, id)| *id)
             .filter(move |id| {
                 self.edges
@@ -250,15 +290,17 @@ impl Graph {
         if let Some(key) = &edge.key {
             self.edge_keys.insert(key.clone(), edge.id);
         }
-        let entry = (edge.relationship.clone(), edge.id);
-        self.out_edges
-            .entry(edge.source)
-            .or_default()
-            .insert(entry.clone());
-        self.in_edges
-            .entry(edge.destination)
-            .or_default()
-            .insert(entry);
+        let relationship = match self.relationships.get_key_value(&edge.relationship) {
+            Some((symbol, _)) => Arc::clone(symbol),
+            None => Arc::new(edge.relationship.clone()),
+        };
+        *self
+            .relationships
+            .entry(Arc::clone(&relationship))
+            .or_default() += 1;
+        let entry = (relationship, edge.id);
+        insert_adjacency(&mut self.out_edges, edge.source, entry.clone());
+        insert_adjacency(&mut self.in_edges, edge.destination, entry);
         self.edges.insert(edge.id, edge);
     }
 
@@ -267,9 +309,22 @@ impl Graph {
         if let Some(key) = &edge.key {
             self.edge_keys.remove(key);
         }
-        let entry = (edge.relationship.clone(), id);
-        remove_from(&mut self.out_edges, edge.source, &entry);
-        remove_from(&mut self.in_edges, edge.destination, &entry);
+        let (relationship, count) = self
+            .relationships
+            .get_key_value(&edge.relationship)
+            .expect("relationship exists");
+        let entry = (Arc::clone(relationship), id);
+        let remaining = count - 1;
+        remove_adjacency(&mut self.out_edges, edge.source, &entry);
+        remove_adjacency(&mut self.in_edges, edge.destination, &entry);
+        if remaining == 0 {
+            self.relationships.remove(&edge.relationship);
+        } else {
+            *self
+                .relationships
+                .get_mut(&edge.relationship)
+                .expect("relationship exists") = remaining;
+        }
         Some(edge)
     }
 
@@ -322,44 +377,38 @@ impl<'a> Iterator for Adjacency<'a> {
 
 /// One adjacency set of one node, restricted to `types`.
 struct Side<'a> {
-    set: Option<&'a BTreeSet<(String, EdgeId)>>,
+    entries: &'a [AdjacencyEntry],
     /// Types still to scan (typed scans only).
     types: Option<btree_set::Range<'a, String>>,
-    current: Option<btree_set::Range<'a, (String, EdgeId)>>,
+    current: std::slice::Iter<'a, AdjacencyEntry>,
 }
 
 impl<'a> Side<'a> {
     fn new(
-        set: Option<&'a BTreeSet<(String, EdgeId)>>,
+        entries: &'a [AdjacencyEntry],
         types: Option<&'a BTreeSet<String>>,
         after: Option<(&str, EdgeId)>,
     ) -> Self {
-        let Some(set) = set else {
-            return Self {
-                set: None,
-                types: None,
-                current: None,
-            };
-        };
         let (types, current) = match (types, after) {
-            (None, None) => (None, Some(set.range::<(String, EdgeId), _>(..))),
-            (None, Some((kind, edge))) => (
-                None,
-                Some(set.range((Excluded((kind.to_owned(), edge)), Unbounded))),
-            ),
-            (Some(types), None) => (Some(types.range::<str, _>(..)), None),
+            (None, None) => (None, entries.iter()),
+            (None, Some((kind, edge))) => {
+                let start = entries.partition_point(|(relationship, id)| {
+                    (relationship.as_str(), *id) <= (kind, edge)
+                });
+                (None, entries[start..].iter())
+            }
+            (Some(types), None) => (Some(types.range::<str, _>(..)), entries[..0].iter()),
             (Some(types), Some((kind, edge))) => (
                 Some(types.range::<str, _>((Excluded(kind), Unbounded))),
-                types.contains(kind).then(|| {
-                    set.range((
-                        Excluded((kind.to_owned(), edge)),
-                        Included((kind.to_owned(), EdgeId(u64::MAX))),
-                    ))
-                }),
+                if types.contains(kind) {
+                    adjacency_range(entries, kind, Some(edge)).iter()
+                } else {
+                    entries[..0].iter()
+                },
             ),
         };
         Self {
-            set: Some(set),
+            entries,
             types,
             current,
         }
@@ -371,17 +420,11 @@ impl<'a> Iterator for Side<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            if let Some(range) = &mut self.current
-                && let Some((kind, edge)) = range.next()
-            {
+            if let Some((kind, edge)) = self.current.next() {
                 return Some((kind.as_str(), *edge));
             }
-            let set = self.set?;
             let kind = self.types.as_mut()?.next()?;
-            self.current = Some(set.range((
-                Included((kind.clone(), EdgeId(0))),
-                Included((kind.clone(), EdgeId(u64::MAX))),
-            )));
+            self.current = adjacency_range(self.entries, kind, None).iter();
         }
     }
 }
@@ -1040,9 +1083,9 @@ pub enum MemoryComponent {
     NodeKeyIndex,
     /// Edge key → edge ID index.
     EdgeKeyIndex,
-    /// Outgoing `(relationship type, edge ID)` sets per source node.
+    /// Outgoing sorted `(interned relationship type, edge ID)` vectors.
     OutAdjacency,
-    /// Incoming `(relationship type, edge ID)` sets per destination node.
+    /// Incoming sorted adjacency vectors and their shared relationship names.
     InAdjacency,
     /// Label → node IDs index and declared property indexes.
     LabelIndex,
@@ -1063,6 +1106,7 @@ impl Graph {
             edge_keys,
             out_edges,
             in_edges,
+            relationships,
             labels,
             schema,
             property_indexes,
@@ -1083,6 +1127,7 @@ impl Graph {
         drop(out_edges);
         released(MemoryComponent::OutAdjacency);
         drop(in_edges);
+        drop(relationships);
         released(MemoryComponent::InAdjacency);
         drop(labels);
         drop(property_indexes);
