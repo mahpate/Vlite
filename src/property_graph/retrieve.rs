@@ -368,6 +368,8 @@ impl GraphRef<'_> {
 
         // Pivot phase: the unchanged hybrid search, re-validation, mapping.
         let pivot_started = clock();
+        // Gap 3: pivots and expansion see the graph at one read clock.
+        let at = self.with_clock(self.now());
         let query = HybridQuery {
             vector: pivot.vector.clone(),
             text: pivot.text.clone().unwrap_or_default(),
@@ -397,6 +399,7 @@ impl GraphRef<'_> {
             let node = graph_state
                 .attachment_owner(pivot_collection.id, hit.id)
                 .filter(|(graph, _)| *graph == self.graph.id())
+                .filter(|(_, node)| !self.graph.node_expired(*node, at.now()))
                 .and_then(|(_, node)| self.graph.node(node));
             let Some(node) = node else {
                 unmapped.count += 1;
@@ -441,7 +444,7 @@ impl GraphRef<'_> {
                 .filter(|hit| seen.insert(hit.node_id))
                 .map(|hit| NodeSelector::Id(hit.node_id))
                 .collect();
-            let read = self.traverse_with_clock(&traverse, options, clock)?;
+            let read = at.traverse_with_clock(&traverse, options, clock)?;
             retrieval.nodes = read.output.nodes;
             retrieval.edges = read.output.edges;
             retrieval.paths = read.output.paths;

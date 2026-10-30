@@ -14,6 +14,9 @@ pub struct ExecutionContext<'a> {
     pub clock: &'a dyn Fn() -> u64,
     /// Set by another thread to stop the read at the next check.
     pub cancel: Option<&'a AtomicBool>,
+    /// Ms since the Unix epoch that decides expiry: nodes and edges
+    /// due at it are hidden, and so is every edge of a hidden node.
+    pub now_ms: u64,
 }
 
 impl<'a> ExecutionContext<'a> {
@@ -22,6 +25,7 @@ impl<'a> ExecutionContext<'a> {
             view_sequence,
             clock,
             cancel: None,
+            now_ms: 0,
         }
     }
 }

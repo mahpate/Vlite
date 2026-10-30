@@ -1014,6 +1014,86 @@ fn failed_batches_roll_back_every_entry_kind() {
     assert_eq!(state, before);
 }
 
+/// A reclaim deletes every node due at its clock with all of the
+/// node's edges and attachments, and every edge due on its own. Keys become
+/// reusable; IDs do not.
+#[test]
+fn reclaim_removes_due_nodes_with_their_edges_and_due_edges() {
+    let node_expiry = |id, expires_at_ms| GraphEntry::NodeExpiry {
+        node_id: NodeId(id),
+        expires_at_ms,
+    };
+    let edge_expiry = |id, expires_at_ms| GraphEntry::EdgeExpiry {
+        edge_id: EdgeId(id),
+        expires_at_ms,
+    };
+    let mut h = Harness::new();
+    h.ok(vec![
+        put_node(0, "a", &[]),
+        put_node(1, "b", &[]),
+        put_node(2, "c", &[]),
+        put_edge(0, 0, 1, "R", Some("ab")),
+        put_edge(1, 1, 2, "R", None),
+        put_edge(2, 2, 0, "R", None),
+        attach(1, 1, 7),
+    ]);
+    h.ok(vec![
+        node_expiry(1, Some(10)),
+        edge_expiry(2, Some(20)),
+        edge_expiry(0, Some(u64::MAX)),
+    ]);
+    let graph = h.graph();
+    assert_eq!(graph.node(NodeId(1)).unwrap().revision, h.sequence);
+    assert_eq!(graph.node_expiry(NodeId(1)), Some(10));
+    assert_eq!(graph.edge_expiry(EdgeId(2)), Some(20));
+    assert!(!graph.has_due(9) && graph.has_due(10));
+    assert_eq!(graph.live_counts(9), (3, 3));
+    assert_eq!(graph.live_counts(10), (2, 1));
+    assert_eq!(graph.live_counts(20), (2, 0));
+    let edge = graph.edge(EdgeId(0)).unwrap();
+    assert!(!graph.edge_expired(edge, 9) && graph.edge_expired(edge, 10));
+
+    h.ok(vec![GraphEntry::Reclaim { at_ms: 9 }]);
+    assert_eq!((h.graph().node_count(), h.graph().edge_count()), (3, 3));
+    h.ok(vec![GraphEntry::Reclaim { at_ms: 10 }]);
+    let graph = h.graph();
+    assert_eq!((graph.node_count(), graph.edge_count()), (2, 1));
+    assert!(graph.node(NodeId(1)).is_none() && graph.edge(EdgeId(2)).is_some());
+    assert_eq!(graph.edge_expiry(EdgeId(0)), None);
+    assert_eq!(h.state.attachment_owner(1, 7), None);
+    h.ok(vec![
+        put_node(3, "b", &[]),
+        put_edge(3, 0, 3, "R", Some("ab")),
+    ]);
+    assert_eq!(
+        h.err(vec![node_expiry(1, None)]),
+        GraphError::NodeNotFound(NodeId(1))
+    );
+    assert_eq!(
+        h.err(vec![edge_expiry(1, None)]),
+        GraphError::EdgeNotFound(EdgeId(1))
+    );
+    // A cleared deadline is never due.
+    h.ok(vec![edge_expiry(2, None)]);
+    h.ok(vec![GraphEntry::Reclaim { at_ms: u64::MAX }]);
+    assert_eq!(h.graph().edge_count(), 2);
+
+    // An edge due on its own and through its node is deleted once, and a
+    // failing batch rolls its reclaim back.
+    h.ok(vec![node_expiry(3, Some(30)), edge_expiry(3, Some(25))]);
+    assert_eq!(
+        h.err(vec![
+            GraphEntry::Reclaim { at_ms: 30 },
+            put_edge(99, 0, 42, "R", None),
+        ]),
+        GraphError::NodeNotFound(NodeId(42))
+    );
+    assert_eq!(h.graph().live_counts(30), (2, 1));
+    h.ok(vec![GraphEntry::Reclaim { at_ms: 30 }]);
+    assert_eq!((h.graph().node_count(), h.graph().edge_count()), (2, 1));
+    assert!(!h.graph().has_due(u64::MAX));
+}
+
 #[test]
 fn later_entries_observe_earlier_ones() {
     let mut h = Harness::new();
@@ -1241,6 +1321,24 @@ fn check_invariants_detects_inconsistent_state() {
         }),
         GraphError::InvariantViolation("dangling attachment")
     );
+    assert_eq!(
+        corrupt(&|s| {
+            g(s).node_expiry.set(NodeId(9), Some(1));
+        }),
+        GraphError::InvariantViolation("dangling expiry")
+    );
+    assert_eq!(
+        corrupt(&|s| {
+            g(s).edge_expiry.set(EdgeId(9), Some(1));
+        }),
+        GraphError::InvariantViolation("dangling expiry")
+    );
+    assert_eq!(
+        corrupt(&|s| {
+            g(s).node_expiry.order.insert((1, NodeId(0)));
+        }),
+        rebuild
+    );
 }
 
 /// Seeded random batches mixing valid and invalid entries. Every commit is
@@ -1260,6 +1358,9 @@ fn seeded_random_batches_keep_invariants_and_replay_equal() {
         let (mut ok, mut failed) = (0, 0);
         for _ in 0..300 {
             let mut entries = Vec::new();
+            if next(4) == 0 {
+                entries.push(GraphEntry::Reclaim { at_ms: next(4) });
+            }
             for _ in 0..=next(2) {
                 let graph = h.graph();
                 let node = next(graph.next_node_id() + 2);
@@ -1270,7 +1371,7 @@ fn seeded_random_batches_keep_invariants_and_replay_equal() {
                 let label = ["A", "B", "C"][next(3) as usize];
                 let relationship = ["R", "S"][next(2) as usize];
                 let edge_key = (next(2) == 0).then(|| format!("e{}", next(8)));
-                entries.push(match next(11) {
+                entries.push(match next(13) {
                     0 | 1 => {
                         let id = if next(3) == 0 { node } else { new_node };
                         put_node(id, &format!("k{}", next(16)), &[label])
@@ -1301,6 +1402,14 @@ fn seeded_random_batches_keep_invariants_and_replay_equal() {
                     9 => GraphEntry::Detach {
                         node_id: NodeId(node),
                         collection: next(3) as u16,
+                    },
+                    10 => GraphEntry::NodeExpiry {
+                        node_id: NodeId(node),
+                        expires_at_ms: (next(2) == 0).then(|| next(4)),
+                    },
+                    11 => GraphEntry::EdgeExpiry {
+                        edge_id: EdgeId(edge),
+                        expires_at_ms: (next(2) == 0).then(|| next(4)),
                     },
                     _ => delete_vector(next(6)),
                 });

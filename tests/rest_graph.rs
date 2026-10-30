@@ -34,7 +34,8 @@ use serde_json::{Value, json};
 use tempfile::tempdir;
 use tower::ServiceExt;
 use vlite::{
-    Database, FormatVersion,
+    Database, Expected, FormatVersion, Metadata,
+    property_graph::EdgeRef,
     server::{BearerToken, ServerOptions, Service, configured_admin_router},
 };
 
@@ -1257,6 +1258,86 @@ async fn limits_bodies_and_malformed_input_are_explicit() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
     let (status, _) = call(app, Some(ADMIN), "PUT", "/v1/graphs/g/batch", None).await;
     assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+}
+
+/// Gap 3: graph deadlines are embedded-only. Views of expiring nodes and
+/// edges carry exactly the fields of other views, and batches cannot set or
+/// clear deadlines (unknown fields and operations are refused as before).
+#[tokio::test]
+async fn graph_deadlines_stay_off_the_rest_surface() {
+    let directory = tempdir().unwrap();
+    std::fs::create_dir(directory.path().join("admin")).unwrap();
+    let mut db = database(&directory.path().join("graph.vlite"), true);
+    db.create_graph("g").unwrap();
+    {
+        let mut graph = db.graph_mut("g").unwrap();
+        for key in ["kept", "ttl"] {
+            graph.create_node(key, &["Doc"], &Metadata::new()).unwrap();
+        }
+        graph
+            .create_edge(Some("plain"), "kept", "LINKS", "ttl", &Metadata::new())
+            .unwrap();
+        graph
+            .create_edge(Some("e"), "ttl", "LINKS", "kept", &Metadata::new())
+            .unwrap();
+        graph
+            .set_node_expiry("ttl", Some(u64::MAX / 2), Expected::Any)
+            .unwrap();
+        graph
+            .set_edge_expiry(EdgeRef::Key("e".into()), Some(u64::MAX / 2), Expected::Any)
+            .unwrap();
+    }
+    let service = Service::new(db);
+    let app = &configured_admin_router(service.clone(), options(directory.path())).unwrap();
+
+    let fields = |body: &Value, kind: &str| -> Vec<String> {
+        body[kind].as_object().unwrap().keys().cloned().collect()
+    };
+    let mut views = Vec::new();
+    for (route, kind, key) in [
+        ("nodes/get", "node", "kept"),
+        ("nodes/get", "node", "ttl"),
+        ("edges/get", "edge", "plain"),
+        ("edges/get", "edge", "e"),
+    ] {
+        let (status, body) = call(
+            app,
+            Some(ADMIN),
+            "POST",
+            &format!("/v1/graphs/g/{route}"),
+            Some(json!({kind: {"key": key}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(!body.to_string().contains("expires"), "{body}");
+        views.push(fields(&body, kind));
+    }
+    assert_eq!(views[0], views[1]);
+    assert_eq!(views[2], views[3]);
+
+    for op in [
+        json!({"op": "upsert_node", "key": "n9", "expires_at_ms": 1}),
+        json!({"op": "create_edge", "key": "n9", "source": "kept", "relationship": "LINKS",
+            "destination": "ttl", "expires_at_ms": 1}),
+        json!({"op": "patch_node", "key": "kept", "expires_at_ms": 1}),
+        json!({"op": "set_node_expiry", "key": "kept", "expires_at_ms": 1}),
+        json!({"op": "set_edge_expiry", "edge": {"key": "plain"}, "expires_at_ms": 1}),
+    ] {
+        let (status, body) = call(
+            app,
+            Some(ADMIN),
+            "POST",
+            "/v1/graphs/g/batch",
+            Some(json!({"ops": [op.clone()]})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{op}: {body}");
+        assert_eq!(code(&body), "invalid_json", "{op}: {body}");
+    }
+    let (status, body) = call(app, Some(ADMIN), "GET", "/v1/graphs/g", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["graph"]["node_count"], 2, "{body}");
+    assert_eq!(body["graph"]["edge_count"], 2, "{body}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

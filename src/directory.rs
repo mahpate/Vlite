@@ -661,12 +661,14 @@ impl Chain {
     }
 
     /// Replays the first `sealed` segments on a background thread into a
-    /// history image at `floor` (the last sealed commit).
+    /// history image at `floor` (the last sealed commit). Graph entities due
+    /// at `graph_now_ms` are left out of it (Gap 3).
     pub(crate) fn spawn(
         &mut self,
         sealed: usize,
         floor: u64,
         cipher: Option<Cipher>,
+        graph_now_ms: u64,
     ) -> Result<()> {
         let names: Vec<String> = self.names().into_iter().take(sealed).collect();
         let directory = self.directory.clone();
@@ -678,7 +680,7 @@ impl Chain {
                 if loaded.incomplete_bytes != 0 || loaded.sequence != floor {
                     return Err(corrupt(loaded.end, "sealed log segments changed"));
                 }
-                build_image(&directory, &loaded, cipher.as_ref(), floor)
+                build_image(&directory, &loaded, cipher.as_ref(), floor, graph_now_ms)
             })?;
         self.worker = Some(Worker { handle, sealed });
         Ok(())
@@ -775,6 +777,7 @@ fn build_image(
     loaded: &format::Loaded,
     cipher: Option<&Cipher>,
     floor: u64,
+    graph_now_ms: u64,
 ) -> Result<Built> {
     let lineage = loaded
         .lineage
@@ -785,6 +788,7 @@ fn build_image(
         loaded,
         lineage,
         crate::current_time_ms(),
+        graph_now_ms,
         cipher,
         loaded.flags & format::FLAG_GRAPH,
         floor,
@@ -922,7 +926,13 @@ pub(crate) fn create_converted(directory: &Path, loaded: &format::Loaded) -> Res
             write_new(&directory.join("wal-1.log"), &header)?;
             publish_manifest(directory, &["wal-1.log".to_owned()])?;
         } else {
-            let built = build_image(directory, loaded, cipher, loaded.sequence)?;
+            let built = build_image(
+                directory,
+                loaded,
+                cipher,
+                loaded.sequence,
+                crate::current_time_ms(),
+            )?;
             built
                 .image
                 .persist_noclobber(directory.join("image-1.vlite"))
@@ -1040,7 +1050,7 @@ mod tests {
         assert_eq!(chain.mapped(), [true, true, false]);
         assert_eq!(logical_bytes(&chain), expected);
 
-        chain.spawn(2, 2, None).unwrap();
+        chain.spawn(2, 2, None, 0).unwrap();
         let (built, sealed) = chain.take_build(true).unwrap();
         chain.install(built.unwrap(), sealed).unwrap();
         assert_eq!(chain.mapped(), [true, false]);

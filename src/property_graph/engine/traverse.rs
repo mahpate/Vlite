@@ -137,7 +137,7 @@ pub(super) fn traverse(
                 exec.truncation.stop(stop);
                 break 'expand;
             }
-            let Some(edge) = graph.edge(id) else {
+            let Some(edge) = graph.edge(id).filter(|edge| !exec.edge_hidden(edge)) else {
                 continue;
             };
             if !conditions_match(&edge.properties, plan.edge_filter) {
@@ -300,7 +300,7 @@ fn search(
                     exec.truncation.stop(stop);
                     return Shortest::Exhausted;
                 }
-                let Some(edge) = graph.edge(id) else {
+                let Some(edge) = graph.edge(id).filter(|edge| !exec.edge_hidden(edge)) else {
                     continue;
                 };
                 let next = other_end(edge, node);

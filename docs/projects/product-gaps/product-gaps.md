@@ -112,7 +112,9 @@ Peer-pool gaps are tracked in the pool repository's `TODO.md` under
    nodes and edges are hidden from reads at their deadline, as record expiry
    already does, and removed physically by compaction. A node's expiry
    persists in graph frames, so item 3 lands with or after the P2 format
-   change.
+   change. Its embedded Rust API has landed
+   ([property graphs](../../GRAPH.md#expiry-ttl)); REST, gRPC and MCP wait
+   for the OpenAPI review.
 3. **Approved:** openCypher with writes (item 6) is in scope, with graph
    depth (items 5–7).
 4. **Open:** which scale-out item (9, 10 or 11) comes first after the

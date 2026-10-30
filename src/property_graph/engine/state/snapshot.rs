@@ -167,6 +167,27 @@ impl GraphState {
                 });
                 Ok(Phase::Edges)
             }
+            // Gap 3: a deadline directly follows the entity it belongs to.
+            GraphEntry::NodeExpiry {
+                node_id,
+                expires_at_ms: Some(deadline),
+            } if phase == Phase::Nodes
+                && graph.nodes.last_key_value().map(|(id, _)| *id) == Some(node_id)
+                && graph.node_expiry.get(node_id).is_none() =>
+            {
+                graph.node_expiry.set(node_id, Some(deadline));
+                Ok(Phase::Nodes)
+            }
+            GraphEntry::EdgeExpiry {
+                edge_id,
+                expires_at_ms: Some(deadline),
+            } if phase == Phase::Edges
+                && graph.edges.last_key_value().map(|(id, _)| *id) == Some(edge_id)
+                && graph.edge_expiry.get(edge_id).is_none() =>
+            {
+                graph.edge_expiry.set(edge_id, Some(deadline));
+                Ok(Phase::Edges)
+            }
             GraphEntry::Attach {
                 node_id,
                 collection,
@@ -289,20 +310,36 @@ mod tests {
                     schema: graph.schema().clone(),
                 });
             }
-            entries.extend(graph.nodes().map(|node| GraphEntry::PutNode {
-                node_id: node.id,
-                key: node.key.clone(),
-                labels: node.labels.clone(),
-                properties: node.properties.clone(),
-            }));
-            entries.extend(graph.edges().map(|edge| GraphEntry::PutEdge {
-                edge_id: edge.id,
-                source: edge.source,
-                destination: edge.destination,
-                relationship: edge.relationship.clone(),
-                key: edge.key.clone(),
-                properties: edge.properties.clone(),
-            }));
+            for node in graph.nodes() {
+                entries.push(GraphEntry::PutNode {
+                    node_id: node.id,
+                    key: node.key.clone(),
+                    labels: node.labels.clone(),
+                    properties: node.properties.clone(),
+                });
+                if let Some(deadline) = graph.node_expiry(node.id) {
+                    entries.push(GraphEntry::NodeExpiry {
+                        node_id: node.id,
+                        expires_at_ms: Some(deadline),
+                    });
+                }
+            }
+            for edge in graph.edges() {
+                entries.push(GraphEntry::PutEdge {
+                    edge_id: edge.id,
+                    source: edge.source,
+                    destination: edge.destination,
+                    relationship: edge.relationship.clone(),
+                    key: edge.key.clone(),
+                    properties: edge.properties.clone(),
+                });
+                if let Some(deadline) = graph.edge_expiry(edge.id) {
+                    entries.push(GraphEntry::EdgeExpiry {
+                        edge_id: edge.id,
+                        expires_at_ms: Some(deadline),
+                    });
+                }
+            }
             for node in graph.nodes() {
                 entries.extend(graph.attachments(node.id).map(|(collection, record_id)| {
                     GraphEntry::Attach {
@@ -413,6 +450,33 @@ mod tests {
         state.apply(sequence, &body).unwrap();
     }
 
+    /// Deadlines on some of graph 1's nodes and edges.
+    fn add_deadlines(state: &mut GraphState) {
+        let body = GraphBody {
+            graph_id: GraphId(1),
+            entries: vec![
+                GraphEntry::NodeExpiry {
+                    node_id: NodeId(2),
+                    expires_at_ms: Some(5),
+                },
+                GraphEntry::NodeExpiry {
+                    node_id: NodeId(5),
+                    expires_at_ms: Some(u64::MAX),
+                },
+                GraphEntry::EdgeExpiry {
+                    edge_id: EdgeId(0),
+                    expires_at_ms: Some(7),
+                },
+                GraphEntry::EdgeExpiry {
+                    edge_id: EdgeId(10),
+                    expires_at_ms: Some(0),
+                },
+            ],
+        };
+        let sequence = state.last_sequence() + 1;
+        state.apply(sequence, &body).unwrap();
+    }
+
     #[test]
     fn snapshot_load_equals_replaying_the_same_bodies() {
         let mut states: Vec<GraphState> = (0..24).map(|seed| random_graph(seed).state).collect();
@@ -423,6 +487,10 @@ mod tests {
         let mut only_schema = GraphState::new();
         add_schema_graph(&mut only_schema);
         states.push(only_schema);
+        let mut with_deadlines = GraphState::new();
+        add_schema_graph(&mut with_deadlines);
+        add_deadlines(&mut with_deadlines);
+        states.push(with_deadlines);
         states.push(GraphState::new());
         for state in states {
             for chunk in [1, 3, MAX_BATCH_ENTRIES_FOR_TESTS] {
@@ -584,5 +652,70 @@ mod tests {
             GraphState::from_snapshot(50, canonical).unwrap(),
             replayed(50, &snapshot_bodies(&state, usize::MAX))
         );
+    }
+
+    /// A deadline is set, appears once and directly follows its node
+    /// or edge; reclaims never appear in a snapshot.
+    #[test]
+    fn snapshot_deadlines_directly_follow_their_entity() {
+        let mut state = GraphState::new();
+        add_schema_graph(&mut state);
+        add_deadlines(&mut state);
+        let canonical = snapshot_bodies(&state, usize::MAX);
+        let entries = canonical[0].entries.clone();
+        let node_expiry = |id, expires_at_ms| GraphEntry::NodeExpiry {
+            node_id: NodeId(id),
+            expires_at_ms,
+        };
+        assert_eq!(entries[4], node_expiry(2, Some(5)));
+        assert_eq!(entries[6], node_expiry(5, Some(u64::MAX)));
+        let changed = |change: &dyn Fn(&mut Vec<GraphEntry>)| {
+            let mut changed = entries.clone();
+            change(&mut changed);
+            vec![GraphBody {
+                graph_id: GraphId(1),
+                entries: changed,
+            }]
+        };
+        let moved = |from: usize, to: usize| {
+            changed(&|entries| {
+                let entry = entries.remove(from);
+                entries.insert(to, entry);
+            })
+        };
+        let cases: Vec<(&str, Vec<GraphBody>)> = vec![
+            (
+                "cleared deadline",
+                changed(&|e| e[4] = node_expiry(2, None)),
+            ),
+            (
+                "repeated deadline",
+                changed(&|e| e.insert(5, node_expiry(2, Some(6)))),
+            ),
+            (
+                "deadline of an earlier node",
+                changed(&|e| e[6] = node_expiry(0, Some(1))),
+            ),
+            ("node deadline among edges", moved(6, 7)),
+            ("edge deadline before its edge", moved(8, 7)),
+            ("edge deadline after a later edge", moved(13, 12)),
+            ("deadline among attachments", moved(13, 14)),
+            (
+                "reclaim",
+                changed(&|e| e.insert(0, GraphEntry::Reclaim { at_ms: 1 })),
+            ),
+        ];
+        for (name, bodies) in cases {
+            assert!(
+                GraphState::from_snapshot(50, bodies).is_err(),
+                "accepted: {name}"
+            );
+        }
+        let built = GraphState::from_snapshot(50, canonical).unwrap();
+        assert_eq!(
+            built.graph(GraphId(1)).unwrap().node_expiry(NodeId(2)),
+            Some(5)
+        );
+        assert_eq!(built, replayed(50, &snapshot_bodies(&state, usize::MAX)));
     }
 }

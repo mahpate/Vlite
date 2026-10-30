@@ -183,7 +183,8 @@ sequences, checksums, encryption and commit timestamps work as usual.
 
 - **Limits.** Graph names follow the collection-name rule. At most 64 graphs
   exist at once, and a dropped graph's ID can be reused. A frame holds
-  1..=4,096 entries and a body of at most 16 MiB. Names, keys, labels and
+  1..=4,096 entries (plus an optional leading entry that removes expired
+  nodes and edges) and a body of at most 16 MiB. Names, keys, labels and
   properties live only in the body, which is encrypted in encrypted files.
 - **Open.** Each graph frame is verified, decrypted, decoded, validated and
   applied atomically. A malformed frame fails the open with `Corrupt`; there
@@ -197,6 +198,12 @@ sequences, checksums, encryption and commit timestamps work as usual.
   `GraphAttachedRecord`, and setting an expiry fails with
   `GraphAttachedRecordExpiry`. Overwrites and metadata updates keep the
   attachment. Detach first to delete.
+- **Expiry.** Nodes and edges can carry deadlines (Rust API only). A due node
+  is hidden with all its edges, and a due edge on its own. Graph writes,
+  compaction and checkpoints remove what is due. Only files that use the
+  expiry operations contain the new entries, so other files are written as
+  before; older builds refuse those files as `Corrupt`. See
+  [Expiry](GRAPH.md#expiry-ttl).
 - **Reads.** `graph(name)` offers node and edge gets, paged `find_nodes` and
   `neighbors`, breadth-first `traverse`, canonical `shortest_path` and
   `explain`. `ReadOptions` bounds work and output and supports cancellation;

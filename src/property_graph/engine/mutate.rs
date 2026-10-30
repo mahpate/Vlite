@@ -12,9 +12,8 @@
 //! by the adapter, which can inspect the tentative attachments through
 //! [`Planner::state`] between mutations.
 
-use super::codec::{GraphBody, GraphEntry};
+use super::codec::{GraphBody, GraphEntry, max_entries};
 use super::error::GraphError;
-use super::limits::MAX_BATCH_ENTRIES;
 use super::model::{
     EdgeId, GraphEdge, GraphId, NodeId, Precondition, Properties, PropertyValue, validate_edge_key,
     validate_node_key,
@@ -78,6 +77,20 @@ pub enum GraphMutation {
     },
     DeleteEdge {
         edge: EdgeSelector,
+        expected: Precondition,
+    },
+    /// Sets (`Some`, ms since the Unix epoch) or clears (`None`) a
+    /// live node's deadline. At its deadline the node and every edge of it
+    /// become invisible and are later deleted.
+    SetNodeExpiry {
+        key: String,
+        expires_at_ms: Option<u64>,
+        expected: Precondition,
+    },
+    /// Sets or clears a live edge's own deadline.
+    SetEdgeExpiry {
+        edge: EdgeSelector,
+        expires_at_ms: Option<u64>,
         expected: Precondition,
     },
     /// Attaches a record; the adapter has checked that it is live without expiry.
@@ -230,7 +243,8 @@ impl Planner<'_> {
 
     /// Validates and tentatively applies one entry. On error nothing changes.
     fn push(&mut self, entry: GraphEntry) -> Result<(), GraphError> {
-        if self.entries.len() >= MAX_BATCH_ENTRIES {
+        let reclaims = matches!(self.entries.first(), Some(GraphEntry::Reclaim { .. }));
+        if self.entries.len() >= max_entries(reclaims) {
             return Err(GraphError::BatchSize("more than 4096 entries"));
         }
         entry.validate()?;
@@ -248,6 +262,18 @@ impl Planner<'_> {
     /// `collection`, already validated by the adapter).
     pub fn vector(&mut self, collection: u16, entry: Vec<u8>) -> Result<(), GraphError> {
         self.push(GraphEntry::VectorMutation { collection, entry })
+    }
+
+    /// Starts the batch by deleting every node and edge due at
+    /// `now_ms` (with the edges of due nodes), so later mutations see only
+    /// visible entities. Plans nothing when nothing is due. Call it before
+    /// any other mutation; the entry does not count against the batch limit.
+    pub fn reclaim_expired(&mut self, now_ms: u64) {
+        debug_assert!(self.entries.is_empty(), "reclaim must be the first entry");
+        if self.graph().has_due(now_ms) {
+            self.push(GraphEntry::Reclaim { at_ms: now_ms })
+                .expect("reclaiming due entities cannot fail");
+        }
     }
 
     fn node_id(&self, key: &str) -> Result<NodeId, GraphError> {
@@ -490,6 +516,30 @@ impl Planner<'_> {
                 let id = self.checked_edge(edge, *expected)?;
                 self.push(GraphEntry::DeleteEdge { edge_id: id })?;
                 Ok(MutationOutcome::EdgeDeleted(id))
+            }
+            GraphMutation::SetNodeExpiry {
+                key,
+                expires_at_ms,
+                expected,
+            } => {
+                let id = self.checked_node(key, *expected)?;
+                self.push(GraphEntry::NodeExpiry {
+                    node_id: id,
+                    expires_at_ms: *expires_at_ms,
+                })?;
+                Ok(MutationOutcome::Node { id, created: false })
+            }
+            GraphMutation::SetEdgeExpiry {
+                edge,
+                expires_at_ms,
+                expected,
+            } => {
+                let id = self.checked_edge(edge, *expected)?;
+                self.push(GraphEntry::EdgeExpiry {
+                    edge_id: id,
+                    expires_at_ms: *expires_at_ms,
+                })?;
+                Ok(MutationOutcome::Edge { id, created: false })
             }
             GraphMutation::Attach {
                 node,

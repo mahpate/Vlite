@@ -25,6 +25,75 @@ use std::sync::Arc;
 type AdjacencyEntry = (Arc<String>, EdgeId);
 type AdjacencyIndex = BTreeMap<NodeId, Vec<AdjacencyEntry>>;
 
+/// Sparse deadlines (ms since the Unix epoch) of nodes or edges, also
+/// ordered by deadline so due entities are found without a scan. Graphs that
+/// never expire anything keep both maps empty.
+#[derive(Clone, Debug, PartialEq)]
+struct Expiries<I> {
+    deadlines: BTreeMap<I, u64>,
+    // Derived index.
+    order: BTreeSet<(u64, I)>,
+}
+
+impl<I: Ord + Copy> Expiries<I> {
+    fn new() -> Self {
+        Self {
+            deadlines: BTreeMap::new(),
+            order: BTreeSet::new(),
+        }
+    }
+
+    fn get(&self, id: I) -> Option<u64> {
+        self.deadlines.get(&id).copied()
+    }
+
+    /// Sets or clears the deadline of `id`; returns the previous one.
+    fn set(&mut self, id: I, deadline: Option<u64>) -> Option<u64> {
+        let previous = match deadline {
+            Some(deadline) => self.deadlines.insert(id, deadline),
+            None => self.deadlines.remove(&id),
+        };
+        if let Some(previous) = previous {
+            self.order.remove(&(previous, id));
+        }
+        if let Some(deadline) = deadline {
+            self.order.insert((deadline, id));
+        }
+        previous
+    }
+
+    /// IDs whose deadline is at or before `now_ms`, earliest first.
+    fn due(&self, now_ms: u64) -> impl Iterator<Item = I> + '_ {
+        self.order
+            .iter()
+            .take_while(move |(deadline, _)| *deadline <= now_ms)
+            .map(|(_, id)| *id)
+    }
+
+    fn any_due(&self, now_ms: u64) -> bool {
+        self.order
+            .first()
+            .is_some_and(|(deadline, _)| *deadline <= now_ms)
+    }
+
+    fn is_due(&self, id: I, now_ms: u64) -> bool {
+        self.get(id).is_some_and(|deadline| deadline <= now_ms)
+    }
+
+    fn ids(&self) -> impl Iterator<Item = I> + '_ {
+        self.deadlines.keys().copied()
+    }
+
+    /// A copy whose order index is rebuilt from the deadlines.
+    fn rebuilt(&self) -> Self {
+        let mut copy = Self::new();
+        for (id, deadline) in &self.deadlines {
+            copy.set(*id, Some(*deadline));
+        }
+        copy
+    }
+}
+
 /// One named graph.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Graph {
@@ -50,6 +119,10 @@ pub struct Graph {
     schema: GraphSchema,
     /// Derived declared property indexes, keyed by (label, property).
     property_indexes: BTreeMap<(String, String), PropertyIndex>,
+    /// Node deadlines. A due node hides itself and every incident edge.
+    node_expiry: Expiries<NodeId>,
+    /// Edges' own deadlines.
+    edge_expiry: Expiries<EdgeId>,
 }
 
 fn remove_from<K: Ord, V: Ord>(map: &mut BTreeMap<K, BTreeSet<V>>, key: K, value: &V) {
@@ -114,6 +187,8 @@ impl Graph {
             labels: BTreeMap::new(),
             schema: GraphSchema::default(),
             property_indexes: BTreeMap::new(),
+            node_expiry: Expiries::new(),
+            edge_expiry: Expiries::new(),
         }
     }
 
@@ -226,6 +301,53 @@ impl Graph {
             .map(|(c, r)| (*c, *r))
     }
 
+    /// The node's deadline in ms since the Unix epoch, if it has one.
+    pub fn node_expiry(&self, id: NodeId) -> Option<u64> {
+        self.node_expiry.get(id)
+    }
+    /// The edge's own deadline, if it has one.
+    pub fn edge_expiry(&self, id: EdgeId) -> Option<u64> {
+        self.edge_expiry.get(id)
+    }
+    /// Whether a node or edge is due at `now_ms` (its deadline is at
+    /// or before it). Always false for a graph without deadlines, so reads
+    /// skip every other expiry check.
+    pub fn has_due(&self, now_ms: u64) -> bool {
+        self.node_expiry.any_due(now_ms) || self.edge_expiry.any_due(now_ms)
+    }
+    /// Whether the node is hidden at `now_ms`.
+    pub fn node_expired(&self, id: NodeId, now_ms: u64) -> bool {
+        self.node_expiry.is_due(id, now_ms)
+    }
+    /// Whether the edge is hidden at `now_ms`: its own deadline or
+    /// either endpoint's is due.
+    pub fn edge_expired(&self, edge: &GraphEdge, now_ms: u64) -> bool {
+        self.edge_expiry.is_due(edge.id, now_ms)
+            || self.node_expiry.is_due(edge.source, now_ms)
+            || self.node_expiry.is_due(edge.destination, now_ms)
+    }
+    /// The node and edge counts visible at `now_ms`.
+    pub fn live_counts(&self, now_ms: u64) -> (usize, usize) {
+        if !self.has_due(now_ms) {
+            return (self.nodes.len(), self.edges.len());
+        }
+        let (nodes, edges) = self.due(now_ms);
+        (
+            self.nodes.len() - nodes.len(),
+            self.edges.len() - edges.len(),
+        )
+    }
+    /// The due nodes and the hidden edges (due themselves or incident
+    /// to a due node) at `now_ms`.
+    fn due(&self, now_ms: u64) -> (Vec<NodeId>, BTreeSet<EdgeId>) {
+        let nodes: Vec<NodeId> = self.node_expiry.due(now_ms).collect();
+        let mut edges: BTreeSet<EdgeId> = self.edge_expiry.due(now_ms).collect();
+        for node in &nodes {
+            edges.extend(self.edges_of(*node, Direction::Both));
+        }
+        (nodes, edges)
+    }
+
     /// The declared schema; empty when none was declared.
     pub fn schema(&self) -> &GraphSchema {
         &self.schema
@@ -328,6 +450,33 @@ impl Graph {
         Some(edge)
     }
 
+    /// Deletes an edgeless node with its deadline and its attachments,
+    /// releasing them in `owners`.
+    fn delete_node(
+        &mut self,
+        owners: &mut BTreeMap<(u16, u64), (GraphId, NodeId)>,
+        id: NodeId,
+    ) -> Undo {
+        let attachments = self.attachments.remove(&id).unwrap_or_default();
+        for (collection, record) in &attachments {
+            owners.remove(&(*collection, *record));
+        }
+        let expiry = self.node_expiry.set(id, None);
+        let node = self.remove_node(id).expect("node exists");
+        Undo::DeleteNode {
+            node,
+            attachments,
+            expiry,
+        }
+    }
+
+    /// Deletes an edge with its deadline.
+    fn delete_edge(&mut self, id: EdgeId) -> Option<Undo> {
+        let edge = self.remove_edge(id)?;
+        let expiry = self.edge_expiry.set(id, None);
+        Some(Undo::DeleteEdge { edge, expiry })
+    }
+
     /// A copy whose derived indexes are rebuilt from authoritative data.
     fn rebuilt(&self) -> Self {
         let mut graph = Self::new(self.id, self.name.clone(), self.graph_sequence);
@@ -335,6 +484,8 @@ impl Graph {
         graph.next_edge_id = self.next_edge_id;
         graph.attachments = self.attachments.clone();
         graph.schema = self.schema.clone();
+        graph.node_expiry = self.node_expiry.rebuilt();
+        graph.edge_expiry = self.edge_expiry.rebuilt();
         self.nodes
             .values()
             .cloned()
@@ -445,13 +596,17 @@ pub(super) enum Undo {
     DeleteNode {
         node: GraphNode,
         attachments: BTreeMap<u16, u64>,
+        expiry: Option<u64>,
     },
     InsertEdge {
         id: EdgeId,
         previous_next: u64,
     },
     RestoreEdge(GraphEdge),
-    DeleteEdge(GraphEdge),
+    DeleteEdge {
+        edge: GraphEdge,
+        expiry: Option<u64>,
+    },
     Attach {
         node: NodeId,
         collection: u16,
@@ -462,6 +617,18 @@ pub(super) enum Undo {
         record: u64,
     },
     Schema(Box<GraphSchema>),
+    NodeExpiry {
+        id: NodeId,
+        previous: Option<u64>,
+        revision: u64,
+    },
+    EdgeExpiry {
+        id: EdgeId,
+        previous: Option<u64>,
+        revision: u64,
+    },
+    /// The edge and node deletions of one `Reclaim`, in apply order.
+    Reclaim(Vec<Undo>),
 }
 
 /// All named graphs of one graph-enabled file.
@@ -787,12 +954,7 @@ impl GraphState {
                         incident,
                     });
                 }
-                let attachments = graph.attachments.remove(node_id).unwrap_or_default();
-                for (collection, record) in &attachments {
-                    self.attachment_owners.remove(&(*collection, *record));
-                }
-                let node = graph.remove_node(*node_id).expect("node exists");
-                Undo::DeleteNode { node, attachments }
+                graph.delete_node(&mut self.attachment_owners, *node_id)
             }
             GraphEntry::PutEdge {
                 edge_id,
@@ -845,11 +1007,9 @@ impl GraphState {
                 edge.revision = sequence;
                 Undo::RestoreEdge(old)
             }
-            GraphEntry::DeleteEdge { edge_id } => Undo::DeleteEdge(
-                graph
-                    .remove_edge(*edge_id)
-                    .ok_or(GraphError::EdgeNotFound(*edge_id))?,
-            ),
+            GraphEntry::DeleteEdge { edge_id } => graph
+                .delete_edge(*edge_id)
+                .ok_or(GraphError::EdgeNotFound(*edge_id))?,
             GraphEntry::Attach {
                 node_id,
                 collection,
@@ -912,6 +1072,48 @@ impl GraphState {
                     record,
                 }
             }
+            GraphEntry::NodeExpiry {
+                node_id,
+                expires_at_ms,
+            } => {
+                let node = graph
+                    .nodes
+                    .get_mut(node_id)
+                    .ok_or(GraphError::NodeNotFound(*node_id))?;
+                let revision = std::mem::replace(&mut node.revision, sequence);
+                Undo::NodeExpiry {
+                    id: *node_id,
+                    previous: graph.node_expiry.set(*node_id, *expires_at_ms),
+                    revision,
+                }
+            }
+            GraphEntry::EdgeExpiry {
+                edge_id,
+                expires_at_ms,
+            } => {
+                let edge = graph
+                    .edges
+                    .get_mut(edge_id)
+                    .ok_or(GraphError::EdgeNotFound(*edge_id))?;
+                let revision = std::mem::replace(&mut edge.revision, sequence);
+                Undo::EdgeExpiry {
+                    id: *edge_id,
+                    previous: graph.edge_expiry.set(*edge_id, *expires_at_ms),
+                    revision,
+                }
+            }
+            GraphEntry::Reclaim { at_ms } => {
+                // Hidden edges go first, so every due node is then edgeless.
+                let (nodes, edges) = graph.due(*at_ms);
+                let mut undo = Vec::with_capacity(nodes.len() + edges.len());
+                for id in edges {
+                    undo.extend(graph.delete_edge(id));
+                }
+                for id in nodes {
+                    undo.push(graph.delete_node(&mut self.attachment_owners, id));
+                }
+                Undo::Reclaim(undo)
+            }
         };
         Ok(Some(undo))
     }
@@ -927,6 +1129,7 @@ impl GraphState {
                     self.names.insert(graph.name.clone(), graph_id);
                     self.graphs.insert(graph_id, *graph);
                 }
+                Undo::Reclaim(undo) => self.rollback(graph_id, undo),
                 other => self.rollback_in_graph(graph_id, other),
             }
         }
@@ -935,7 +1138,7 @@ impl GraphState {
     fn rollback_in_graph(&mut self, graph_id: GraphId, inverse: Undo) {
         let graph = self.graphs.get_mut(&graph_id).expect("graph exists");
         match inverse {
-            Undo::CreateGraph | Undo::DropGraph(_) => unreachable!(),
+            Undo::CreateGraph | Undo::DropGraph(_) | Undo::Reclaim(_) => unreachable!(),
             Undo::HighWater {
                 next_node_id,
                 next_edge_id,
@@ -951,7 +1154,11 @@ impl GraphState {
                 graph.remove_node(node.id);
                 graph.insert_node(node);
             }
-            Undo::DeleteNode { node, attachments } => {
+            Undo::DeleteNode {
+                node,
+                attachments,
+                expiry,
+            } => {
                 for (collection, record) in &attachments {
                     self.attachment_owners
                         .insert((*collection, *record), (graph_id, node.id));
@@ -959,6 +1166,7 @@ impl GraphState {
                 if !attachments.is_empty() {
                     graph.attachments.insert(node.id, attachments);
                 }
+                graph.node_expiry.set(node.id, expiry);
                 graph.insert_node(node);
             }
             Undo::InsertEdge { id, previous_next } => {
@@ -968,7 +1176,10 @@ impl GraphState {
             Undo::RestoreEdge(edge) => {
                 graph.edges.insert(edge.id, edge);
             }
-            Undo::DeleteEdge(edge) => graph.insert_edge(edge),
+            Undo::DeleteEdge { edge, expiry } => {
+                graph.edge_expiry.set(edge.id, expiry);
+                graph.insert_edge(edge);
+            }
             Undo::Attach { node, collection } => {
                 let map = graph.attachments.get_mut(&node).expect("attachment");
                 let record = map.remove(&collection).expect("attachment");
@@ -993,6 +1204,22 @@ impl GraphState {
             Undo::Schema(schema) => {
                 graph.schema = *schema;
                 graph.rebuild_property_indexes();
+            }
+            Undo::NodeExpiry {
+                id,
+                previous,
+                revision,
+            } => {
+                graph.node_expiry.set(id, previous);
+                graph.nodes.get_mut(&id).expect("node exists").revision = revision;
+            }
+            Undo::EdgeExpiry {
+                id,
+                previous,
+                revision,
+            } => {
+                graph.edge_expiry.set(id, previous);
+                graph.edges.get_mut(&id).expect("edge exists").revision = revision;
             }
         }
     }
@@ -1035,6 +1262,17 @@ impl GraphState {
                         return Err(violation("record attached twice"));
                     }
                 }
+            }
+            if graph
+                .node_expiry
+                .ids()
+                .any(|n| !graph.nodes.contains_key(&n))
+                || graph
+                    .edge_expiry
+                    .ids()
+                    .any(|e| !graph.edges.contains_key(&e))
+            {
+                return Err(violation("dangling expiry"));
             }
             if graph.rebuilt() != *graph {
                 return Err(violation("derived graph indexes differ from a rebuild"));
@@ -1131,13 +1369,17 @@ impl Graph {
             labels,
             schema,
             property_indexes,
+            node_expiry,
+            edge_expiry,
         } = self;
         drop(name);
         drop(schema);
         released(MemoryComponent::GraphName);
         drop(nodes);
+        drop(node_expiry);
         released(MemoryComponent::NodeRecords);
         drop(edges);
+        drop(edge_expiry);
         released(MemoryComponent::EdgeRecords);
         drop(attachments);
         released(MemoryComponent::Attachments);

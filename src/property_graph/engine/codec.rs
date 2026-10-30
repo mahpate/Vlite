@@ -37,7 +37,8 @@ pub const BODY_HEADER_BYTES: usize = 4;
 pub const ENTRY_HEADER_BYTES: usize = 8;
 
 /// Entry tags (closed set). Tag 12 carries a declared schema (EPIC-008; layout
-/// in [`super::schema`]).
+/// in [`super::schema`]). Tags 13..=15 (Gap 3) appear only in files that use
+/// graph expiry.
 pub mod tag {
     pub const CREATE_GRAPH: u8 = 1;
     pub const DROP_GRAPH: u8 = 2;
@@ -51,6 +52,9 @@ pub mod tag {
     pub const ATTACH: u8 = 10;
     pub const DETACH: u8 = 11;
     pub const PUT_SCHEMA: u8 = 12;
+    pub const NODE_EXPIRY: u8 = 13;
+    pub const EDGE_EXPIRY: u8 = 14;
+    pub const RECLAIM: u8 = 15;
     pub const VECTOR_MUTATION: u8 = 64;
 }
 
@@ -116,6 +120,24 @@ pub enum GraphEntry {
     PutSchema {
         schema: GraphSchema,
     },
+    /// Sets (`Some`) or clears (`None`) a live node's deadline, in ms
+    /// since the Unix epoch. Payload: `node_id u64`, then `deadline u64` only
+    /// when set.
+    NodeExpiry {
+        node_id: NodeId,
+        expires_at_ms: Option<u64>,
+    },
+    /// Sets or clears a live edge's own deadline; same layout.
+    EdgeExpiry {
+        edge_id: EdgeId,
+        expires_at_ms: Option<u64>,
+    },
+    /// Removes every node whose deadline is at or before `at_ms` with
+    /// all its edges and attachments, then every edge whose own deadline is
+    /// at or before `at_ms`. Allowed only as the first entry of a body.
+    Reclaim {
+        at_ms: u64,
+    },
     /// One `encode_batch_entries` entry for `collection`, carried verbatim.
     /// Only its envelope is checked here; the adapter validates its content.
     VectorMutation {
@@ -140,6 +162,9 @@ impl GraphEntry {
             Self::Attach { .. } => tag::ATTACH,
             Self::Detach { .. } => tag::DETACH,
             Self::PutSchema { .. } => tag::PUT_SCHEMA,
+            Self::NodeExpiry { .. } => tag::NODE_EXPIRY,
+            Self::EdgeExpiry { .. } => tag::EDGE_EXPIRY,
+            Self::Reclaim { .. } => tag::RECLAIM,
             Self::VectorMutation { .. } => tag::VECTOR_MUTATION,
         }
     }
@@ -165,7 +190,10 @@ impl GraphEntry {
             | Self::DeleteNode { .. }
             | Self::DeleteEdge { .. }
             | Self::Attach { .. }
-            | Self::Detach { .. } => Ok(()),
+            | Self::Detach { .. }
+            | Self::NodeExpiry { .. }
+            | Self::EdgeExpiry { .. }
+            | Self::Reclaim { .. } => Ok(()),
             Self::PutNode {
                 key,
                 labels,
@@ -268,11 +296,29 @@ impl GraphBody {
                 "a graph batch has at least one entry",
             ));
         }
-        if self.entries.len() > MAX_BATCH_ENTRIES {
+        if self.entries.len() > max_entries(self.reclaims()) {
             return Err(GraphError::BatchSize("more than 4096 entries"));
+        }
+        if self.entries[1..]
+            .iter()
+            .any(|entry| matches!(entry, GraphEntry::Reclaim { .. }))
+        {
+            return Err(GraphError::Corrupt("reclaim must be the first entry"));
         }
         self.entries.iter().try_for_each(GraphEntry::validate)
     }
+
+    /// Whether the body starts with a `Reclaim` entry.
+    fn reclaims(&self) -> bool {
+        matches!(self.entries.first(), Some(GraphEntry::Reclaim { .. }))
+    }
+}
+
+/// Entries allowed in a body. A leading `Reclaim` does not count, so
+/// reclaiming never shrinks the caller's batch; its 16 bytes do count
+/// against [`MAX_BATCH_BYTES`].
+pub fn max_entries(reclaims: bool) -> usize {
+    MAX_BATCH_ENTRIES + usize::from(reclaims)
 }
 
 fn put_labels(labels: &BTreeSet<String>, bytes: &mut Vec<u8>) {
@@ -386,6 +432,20 @@ fn encode_payload(entry: &GraphEntry, bytes: &mut Vec<u8>) {
             bytes.extend_from_slice(&[0, 0]);
         }
         GraphEntry::PutSchema { schema } => schema.encode_into(bytes),
+        GraphEntry::NodeExpiry {
+            node_id: NodeId(id),
+            expires_at_ms,
+        }
+        | GraphEntry::EdgeExpiry {
+            edge_id: EdgeId(id),
+            expires_at_ms,
+        } => {
+            bytes.extend_from_slice(&id.to_le_bytes());
+            if let Some(deadline) = expires_at_ms {
+                bytes.extend_from_slice(&deadline.to_le_bytes());
+            }
+        }
+        GraphEntry::Reclaim { at_ms } => bytes.extend_from_slice(&at_ms.to_le_bytes()),
         GraphEntry::VectorMutation { collection, entry } => {
             bytes.extend_from_slice(&collection.to_le_bytes());
             bytes.extend_from_slice(&[0, 0]);
@@ -451,6 +511,11 @@ fn payload_len(entry: &GraphEntry) -> Result<usize, GraphError> {
         GraphEntry::Attach { .. } => 20,
         GraphEntry::Detach { .. } => 12,
         GraphEntry::PutSchema { schema } => schema.encoded_len(),
+        GraphEntry::NodeExpiry { expires_at_ms, .. }
+        | GraphEntry::EdgeExpiry { expires_at_ms, .. } => {
+            8 + if expires_at_ms.is_some() { 8 } else { 0 }
+        }
+        GraphEntry::Reclaim { .. } => 8,
         GraphEntry::VectorMutation { entry, .. } => entry
             .len()
             .checked_add(4)
@@ -535,6 +600,14 @@ impl<'a> Reader<'a> {
             Ok(())
         } else {
             Err(GraphError::Corrupt("non-zero reserved bytes"))
+        }
+    }
+    /// An optional trailing `u64`: absent when the payload ends here.
+    fn deadline(&mut self) -> Result<Option<u64>, GraphError> {
+        if self.bytes.is_empty() {
+            Ok(None)
+        } else {
+            self.u64().map(Some)
         }
     }
     fn string(&mut self, len: usize) -> Result<String, GraphError> {
@@ -667,6 +740,15 @@ fn decode_payload(tag: u8, payload: &[u8]) -> Result<GraphEntry, GraphError> {
         tag::PUT_SCHEMA => GraphEntry::PutSchema {
             schema: schema::decode(r.take(r.bytes.len())?)?,
         },
+        tag::NODE_EXPIRY => GraphEntry::NodeExpiry {
+            node_id: NodeId(r.u64()?),
+            expires_at_ms: r.deadline()?,
+        },
+        tag::EDGE_EXPIRY => GraphEntry::EdgeExpiry {
+            edge_id: EdgeId(r.u64()?),
+            expires_at_ms: r.deadline()?,
+        },
+        tag::RECLAIM => GraphEntry::Reclaim { at_ms: r.u64()? },
         tag::VECTOR_MUTATION => {
             let collection = r.u16()?;
             r.reserved_u16()?;
@@ -689,13 +771,15 @@ pub fn decode_body(bytes: &[u8], count: u32) -> Result<GraphBody, GraphError> {
     if bytes.len() > MAX_BATCH_BYTES {
         return Err(GraphError::BatchSize("more than 16777216 bytes"));
     }
+    // The first entry's tag byte; a leading `Reclaim` does not count.
+    let reclaims = bytes.get(BODY_HEADER_BYTES) == Some(&tag::RECLAIM);
     let count = count as usize;
     if count == 0 {
         return Err(GraphError::BatchSize(
             "a graph batch has at least one entry",
         ));
     }
-    if count > MAX_BATCH_ENTRIES {
+    if count > max_entries(reclaims) {
         return Err(GraphError::BatchSize("more than 4096 entries"));
     }
     let Some((header, mut rest)) = bytes.split_at_checked(BODY_HEADER_BYTES) else {
@@ -729,7 +813,11 @@ pub fn decode_body(bytes: &[u8], count: u32) -> Result<GraphBody, GraphError> {
         let Some((payload, after)) = after.split_at_checked(len as usize) else {
             return Err(GraphError::Corrupt("truncated entry payload"));
         };
-        entries.push(decode_payload(envelope[0], payload)?);
+        let entry = decode_payload(envelope[0], payload)?;
+        if matches!(entry, GraphEntry::Reclaim { .. }) && !entries.is_empty() {
+            return Err(GraphError::Corrupt("reclaim must be the first entry"));
+        }
+        entries.push(entry);
         rest = after;
     }
     if entries.len() != count {
@@ -775,6 +863,10 @@ mod tests {
     /// One entry of every closed tag.
     fn every_entry() -> Vec<GraphEntry> {
         vec![
+            // Gap 3: a reclaim may only open a body.
+            GraphEntry::Reclaim {
+                at_ms: 1_700_000_000_000,
+            },
             GraphEntry::CreateGraph { name: "kg".into() },
             GraphEntry::GraphHighWater {
                 next_node_id: 10,
@@ -813,6 +905,22 @@ mod tests {
                 edge_id: EdgeId(20),
                 set: Properties::from([("ok".into(), PropertyValue::Boolean(true))]),
                 unset: labels(&["weight"]),
+            },
+            GraphEntry::NodeExpiry {
+                node_id: NodeId(10),
+                expires_at_ms: Some(u64::MAX),
+            },
+            GraphEntry::NodeExpiry {
+                node_id: NodeId(10),
+                expires_at_ms: None,
+            },
+            GraphEntry::EdgeExpiry {
+                edge_id: EdgeId(21),
+                expires_at_ms: Some(0),
+            },
+            GraphEntry::EdgeExpiry {
+                edge_id: EdgeId(21),
+                expires_at_ms: None,
             },
             GraphEntry::Attach {
                 node_id: NodeId(10),
@@ -1002,6 +1110,78 @@ mod tests {
             }),
             detach
         );
+        // Gap 3: NodeExpiry and EdgeExpiry: id, then the deadline only when set.
+        for (tag, id) in [(13u8, 4u64), (14, 5)] {
+            let entry = |expires_at_ms| match tag {
+                13 => GraphEntry::NodeExpiry {
+                    node_id: NodeId(id),
+                    expires_at_ms,
+                },
+                _ => GraphEntry::EdgeExpiry {
+                    edge_id: EdgeId(id),
+                    expires_at_ms,
+                },
+            };
+            let mut set = vec![tag, 0, 0, 0, 16, 0, 0, 0];
+            set.extend_from_slice(&id.to_le_bytes());
+            set.extend_from_slice(&1_000u64.to_le_bytes());
+            assert_eq!(p(entry(Some(1_000))), set);
+            let mut clear = vec![tag, 0, 0, 0, 8, 0, 0, 0];
+            clear.extend_from_slice(&id.to_le_bytes());
+            assert_eq!(p(entry(None)), clear);
+        }
+        let mut reclaim = vec![15, 0, 0, 0, 8, 0, 0, 0];
+        reclaim.extend_from_slice(&77u64.to_le_bytes());
+        assert_eq!(p(GraphEntry::Reclaim { at_ms: 77 }), reclaim);
+    }
+
+    /// An expiry payload is 8 or 16 bytes, and a reclaim only opens a
+    /// body, where it does not count against the entry limit.
+    #[test]
+    fn expiry_payloads_and_reclaim_placement_are_strict() {
+        for tag in [tag::NODE_EXPIRY, tag::EDGE_EXPIRY] {
+            for len in [1, 7, 9, 15] {
+                assert_eq!(
+                    decode_one(&raw(tag, &vec![0; len])),
+                    Err(GraphError::Corrupt("truncated entry payload")),
+                    "tag {tag}, {len} bytes"
+                );
+            }
+            assert_eq!(
+                decode_one(&raw(tag, &[0; 17])),
+                Err(GraphError::Corrupt("trailing entry payload bytes"))
+            );
+        }
+        assert_eq!(
+            decode_one(&raw(tag::RECLAIM, &[0; 9])),
+            Err(GraphError::Corrupt("trailing entry payload bytes"))
+        );
+
+        let reclaim = GraphEntry::Reclaim { at_ms: 5 };
+        let late = body(vec![GraphEntry::DropGraph, reclaim.clone()]);
+        let misplaced = GraphError::Corrupt("reclaim must be the first entry");
+        assert_eq!(late.validate(), Err(misplaced.clone()));
+        assert_eq!(encode_body(&late), Err(misplaced.clone()));
+        let mut bytes = encode_one(GraphEntry::DropGraph);
+        bytes.extend_from_slice(&encode_one(reclaim.clone())[BODY_HEADER_BYTES..]);
+        assert_eq!(decode_body(&bytes, 2), Err(misplaced));
+
+        let mut entries = vec![reclaim];
+        entries.extend(vec![GraphEntry::DropGraph; MAX_BATCH_ENTRIES]);
+        let full = body(entries);
+        let encoded = encode_body(&full).unwrap();
+        assert_eq!(
+            decode_body(&encoded, MAX_BATCH_ENTRIES as u32 + 1).unwrap(),
+            full
+        );
+        let mut over = full;
+        over.entries.push(GraphEntry::DropGraph);
+        assert_eq!(
+            encode_body(&over),
+            Err(GraphError::BatchSize("more than 4096 entries"))
+        );
+        assert_eq!(max_entries(false), MAX_BATCH_ENTRIES);
+        assert_eq!(max_entries(true), MAX_BATCH_ENTRIES + 1);
     }
 
     #[test]
@@ -1010,7 +1190,7 @@ mod tests {
         let tags: BTreeSet<u8> = entries.iter().map(GraphEntry::tag).collect();
         assert_eq!(
             tags,
-            BTreeSet::from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 64])
+            BTreeSet::from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 64])
         );
         for entry in &entries {
             let encoded = encode_one(entry.clone());
@@ -1087,7 +1267,7 @@ mod tests {
 
     #[test]
     fn unknown_tags_are_rejected() {
-        for tag in (0..=255u8).filter(|t| !matches!(t, 1..=12 | 64)) {
+        for tag in (0..=255u8).filter(|t| !matches!(t, 1..=15 | 64)) {
             assert_eq!(
                 decode_one(&raw(tag, &[])),
                 Err(GraphError::UnknownEntryTag(tag)),
@@ -1100,6 +1280,13 @@ mod tests {
             decode_one(&raw(tag::PUT_SCHEMA, &[])),
             Err(GraphError::Corrupt(_))
         ));
+        // Gap 3: so is an empty expiry or reclaim payload.
+        for tag in [tag::NODE_EXPIRY, tag::EDGE_EXPIRY, tag::RECLAIM] {
+            assert!(
+                matches!(decode_one(&raw(tag, &[])), Err(GraphError::Corrupt(_))),
+                "tag {tag}"
+            );
+        }
     }
 
     #[test]

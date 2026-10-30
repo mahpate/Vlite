@@ -445,6 +445,7 @@ fn work_limits_include_large_hub_degree_cap_and_cancellation() {
         view_sequence: super::super::testkit::VIEW,
         clock: &clock,
         cancel: Some(&cancel),
+        now_ms: 0,
     };
     let query = query(QueryOp::Neighbors {
         node: NodeSelector::Id(NodeId(0)),

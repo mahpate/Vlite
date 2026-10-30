@@ -1103,7 +1103,8 @@ impl Tally {
 
 impl Graph {
     /// The REQ-031 summary, scanning at most `budget` entities (PD-011).
-    pub fn observed_schema(&self, budget: u64) -> Result<ObservedSchema, GraphError> {
+    /// Entities due at `now_ms` are scanned but not counted.
+    pub fn observed_schema(&self, budget: u64, now_ms: u64) -> Result<ObservedSchema, GraphError> {
         if budget == 0 {
             return Err(GraphError::InvalidQuery(
                 "the observed schema budget must be at least 1",
@@ -1121,14 +1122,21 @@ impl Graph {
         let mut relationships: BTreeMap<&str, Tally> = BTreeMap::new();
         let mut endpoints: BTreeMap<(&str, &str, &str), u64> = BTreeMap::new();
         let mut scanned = 0u64;
+        let expired_at = self.has_due(now_ms).then_some(now_ms);
         for node in self.nodes().take(budget as usize) {
             scanned += 1;
+            if expired_at.is_some_and(|now| self.node_expired(node.id, now)) {
+                continue;
+            }
             for label in &node.labels {
                 labels.entry(label).or_default().add(&node.properties);
             }
         }
         for edge in self.edges().take((budget - scanned) as usize) {
             scanned += 1;
+            if expired_at.is_some_and(|now| self.edge_expired(edge, now)) {
+                continue;
+            }
             relationships
                 .entry(&edge.relationship)
                 .or_default()

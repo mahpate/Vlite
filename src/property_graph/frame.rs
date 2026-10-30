@@ -165,9 +165,12 @@ pub(crate) fn load_snapshot(
 /// and edge IDs so deleted IDs are never reused. Bodies stay within the batch
 /// entry and byte limits; `emit` receives each body's entry count and bytes.
 /// Attachments are checked against live records, so these frames must
-/// follow the record frames.
+/// follow the record frames. Nodes due at `now_ms` are dropped with
+/// their edges and attachments, and so are edges due at `now_ms`; a kept
+/// deadline follows its node or edge as an expiry entry.
 pub(crate) fn compacted_bodies(
     state: &GraphState,
+    now_ms: u64,
     mut emit: impl FnMut(u32, &[u8]) -> Result<()>,
 ) -> Result<()> {
     let encode = |body: &GraphBody| {
@@ -178,21 +181,47 @@ pub(crate) fn compacted_bodies(
         let create = GraphEntry::CreateGraph {
             name: graph.name().into(),
         };
-        let nodes = graph.nodes().map(|node| GraphEntry::PutNode {
-            node_id: node.id,
-            key: node.key.clone(),
-            labels: node.labels.clone(),
-            properties: node.properties.clone(),
+        let live_nodes = || {
+            graph
+                .nodes()
+                .filter(move |node| !graph.node_expired(node.id, now_ms))
+        };
+        let nodes = live_nodes().flat_map(|node| {
+            let expiry = graph
+                .node_expiry(node.id)
+                .map(|deadline| GraphEntry::NodeExpiry {
+                    node_id: node.id,
+                    expires_at_ms: Some(deadline),
+                });
+            std::iter::once(GraphEntry::PutNode {
+                node_id: node.id,
+                key: node.key.clone(),
+                labels: node.labels.clone(),
+                properties: node.properties.clone(),
+            })
+            .chain(expiry)
         });
-        let edges = graph.edges().map(|edge| GraphEntry::PutEdge {
-            edge_id: edge.id,
-            source: edge.source,
-            destination: edge.destination,
-            relationship: edge.relationship.clone(),
-            key: edge.key.clone(),
-            properties: edge.properties.clone(),
-        });
-        let attachments = graph.nodes().flat_map(|node| {
+        let edges = graph
+            .edges()
+            .filter(|edge| !graph.edge_expired(edge, now_ms))
+            .flat_map(|edge| {
+                let expiry = graph
+                    .edge_expiry(edge.id)
+                    .map(|deadline| GraphEntry::EdgeExpiry {
+                        edge_id: edge.id,
+                        expires_at_ms: Some(deadline),
+                    });
+                std::iter::once(GraphEntry::PutEdge {
+                    edge_id: edge.id,
+                    source: edge.source,
+                    destination: edge.destination,
+                    relationship: edge.relationship.clone(),
+                    key: edge.key.clone(),
+                    properties: edge.properties.clone(),
+                })
+                .chain(expiry)
+            });
+        let attachments = live_nodes().flat_map(|node| {
             graph
                 .attachments(node.id)
                 .map(move |(collection, record_id)| GraphEntry::Attach {

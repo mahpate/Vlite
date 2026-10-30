@@ -117,7 +117,7 @@ The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "S
 
 - A general-purpose or full-featured text graph query language — parser, planner and semantic obligations are unjustified; only a very simple optional read-only syntax is considered, and only if RD-011's evaluation shows need. (2026-10-25: the repository owner directed adding that narrow read-only syntax without the RD-011 evaluation; see EPIC-014/EPIC-015. A general-purpose language stays out of scope.)
 - Cascade node deletion — high-degree cascades can exceed the 4,096-operation / 16 MiB batch limits (`src\lib.rs` lines 80-82) and cannot be atomic.
-- Graph-node TTL/expiry and expiry of attached vector records — independent expiry would create dangling relationships.
+- Graph-node TTL/expiry and expiry of attached vector records — independent expiry would create dangling relationships. (Product gap 3, decided 2026-10-30, later added node and edge expiry with cascade to the embedded Rust API; attached records still cannot expire.)
 - Weighted shortest path, all-paths, k-shortest paths, centrality/community analytics — unmeasured demand, unbounded cost.
 - Advanced temporal modeling (bitemporal validity vs recording time) — product hypothesis; only simple evidence properties are in scope (REQ-016).
 - Graph change-feed events — `ChangeKind` (`src\changes.rs` line 109) is not `#[non_exhaustive]`; adding variants is a breaking API change. MVP rejects explicitly (REQ-053); a separate API MAY be planned later.

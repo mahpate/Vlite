@@ -120,6 +120,8 @@ pub struct NodeView {
     pub labels: BTreeSet<String>,
     pub properties: Properties,
     pub revision: u64,
+    /// The node's deadline in ms since the Unix epoch, if any.
+    pub expires_at_ms: Option<u64>,
 }
 
 /// An edge as returned by reads, with both endpoint keys.
@@ -134,6 +136,8 @@ pub struct EdgeView {
     pub target_key: String,
     pub properties: Properties,
     pub revision: u64,
+    /// The edge's own deadline, if any.
+    pub expires_at_ms: Option<u64>,
 }
 
 /// A path as its nodes (one more than its edges) and edges, in order.
@@ -341,6 +345,9 @@ pub(super) struct Exec<'g, 'c> {
     pub(super) truncation: Truncation,
     pub(super) stats: QueryStats,
     projection: &'g PropertyProjection,
+    /// The read clock when something is due at it; `None` skips
+    /// every expiry check.
+    expired_at: Option<u64>,
 }
 
 fn project(properties: &Properties, projection: &PropertyProjection) -> Properties {
@@ -363,7 +370,15 @@ impl Exec<'_, '_> {
             labels: node.labels.clone(),
             properties: project(&node.properties, self.projection),
             revision: node.revision,
+            expires_at_ms: self.graph.node_expiry(node.id),
         }
+    }
+
+    /// Whether the edge, or an endpoint of it, is due at the read
+    /// clock.
+    pub(super) fn edge_hidden(&self, edge: &GraphEdge) -> bool {
+        self.expired_at
+            .is_some_and(|now| self.graph.edge_expired(edge, now))
     }
 
     pub(super) fn edge_view(&self, edge: &GraphEdge) -> Result<EdgeView, GraphError> {
@@ -389,6 +404,7 @@ impl Exec<'_, '_> {
             target_key: target.key.clone(),
             properties: project(&edge.properties, self.projection),
             revision: edge.revision,
+            expires_at_ms: self.graph.edge_expiry(edge.id),
         })
     }
 }
@@ -552,15 +568,25 @@ fn fingerprint_projection(fingerprint: &mut Fingerprint, projection: &PropertyPr
     }
 }
 
-fn find<'g>(graph: &'g Graph, selector: &NodeSelector) -> Option<&'g GraphNode> {
+/// The node `selector` names, unless it is missing or due at `expired_at`.
+fn find<'g>(
+    graph: &'g Graph,
+    selector: &NodeSelector,
+    expired_at: Option<u64>,
+) -> Option<&'g GraphNode> {
     match selector {
         NodeSelector::Id(id) => graph.node(*id),
         NodeSelector::Key(key) => graph.node_by_key(key),
     }
+    .filter(|node| !expired_at.is_some_and(|now| graph.node_expired(node.id, now)))
 }
 
-fn resolve(graph: &Graph, selector: &NodeSelector) -> Result<NodeId, GraphError> {
-    find(graph, selector)
+fn resolve(
+    graph: &Graph,
+    selector: &NodeSelector,
+    expired_at: Option<u64>,
+) -> Result<NodeId, GraphError> {
+    find(graph, selector, expired_at)
         .map(|node| node.id)
         .ok_or_else(|| match selector {
             NodeSelector::Id(id) => GraphError::NodeNotFound(*id),
@@ -599,6 +625,7 @@ fn prepare<'q>(
     graph: &Graph,
     query: &'q GraphQuery,
     limits: &GraphLimits,
+    expired_at: Option<u64>,
 ) -> Result<(Plan<'q>, Vec<IndexChoice>), GraphError> {
     limits.validate()?;
     validate_projection(&query.projection)?;
@@ -698,7 +725,7 @@ fn prepare<'q>(
                 cursor.as_deref(),
             )?;
             let plan = Plan::Neighbors {
-                node: resolve(graph, node)?,
+                node: resolve(graph, node, expired_at)?,
                 direction: *direction,
                 types: types.as_ref(),
                 conditions: edge_conditions,
@@ -738,7 +765,7 @@ fn prepare<'q>(
             let mut seen = HashSet::new();
             let mut nodes = Vec::new();
             for selector in start {
-                let id = resolve(graph, selector)?;
+                let id = resolve(graph, selector, expired_at)?;
                 if seen.insert(id) {
                     nodes.push((id, selector));
                 }
@@ -769,8 +796,8 @@ fn prepare<'q>(
             validate_selector(destination)?;
             validate_types(types.as_ref())?;
             let plan = Plan::ShortestPath {
-                source: resolve(graph, source)?,
-                destination: resolve(graph, destination)?,
+                source: resolve(graph, source, expired_at)?,
+                destination: resolve(graph, destination, expired_at)?,
                 direction: *direction,
                 types: types.as_ref(),
             };
@@ -813,7 +840,8 @@ pub fn execute(
     limits: &GraphLimits,
     context: &ExecutionContext<'_>,
 ) -> Result<QueryResult, GraphError> {
-    let (plan, indexes) = prepare(graph, query, limits)?;
+    let expired_at = graph.has_due(context.now_ms).then_some(context.now_ms);
+    let (plan, indexes) = prepare(graph, query, limits, expired_at)?;
     if query.explain {
         let explanation = Explanation {
             query: normalized(query, &plan),
@@ -843,6 +871,7 @@ pub fn execute(
             ..QueryStats::default()
         },
         projection: &query.projection,
+        expired_at,
     };
     let (mut output, cursor) = match begin {
         Ok(()) => run(&mut exec, &plan)?,
@@ -929,14 +958,17 @@ fn run(
     let graph = exec.graph;
     Ok(match plan {
         Plan::GetNode(selector) => (
-            QueryOutput::Node(find(graph, selector).map(|node| exec.node_view(node))),
+            QueryOutput::Node(
+                find(graph, selector, exec.expired_at).map(|node| exec.node_view(node)),
+            ),
             None,
         ),
         Plan::GetEdge(selector) => {
             let edge = match selector {
                 EdgeSelector::Id(id) => graph.edge(*id),
                 EdgeSelector::Key(key) => graph.edge_by_key(key),
-            };
+            }
+            .filter(|edge| !exec.edge_hidden(edge));
             (
                 QueryOutput::Edge(edge.map(|edge| exec.edge_view(edge)).transpose()?),
                 None,
@@ -1060,6 +1092,12 @@ fn find_nodes(
             break;
         }
         last = Some(node.id);
+        if exec
+            .expired_at
+            .is_some_and(|now| graph.node_expired(node.id, now))
+        {
+            continue;
+        }
         if conditions_match(&node.properties, conditions) {
             nodes.push(exec.node_view(node));
         }
@@ -1110,7 +1148,7 @@ fn neighbors(
             break;
         }
         last = Some((kind, id));
-        let Some(edge) = graph.edge(id) else {
+        let Some(edge) = graph.edge(id).filter(|edge| !exec.edge_hidden(edge)) else {
             continue;
         };
         if !conditions_match(&edge.properties, conditions) {

@@ -1,4 +1,5 @@
 use super::super::codec::{decode_body, encode_body};
+use super::super::limits::MAX_BATCH_ENTRIES;
 use super::*;
 use std::collections::BTreeMap;
 
@@ -83,12 +84,24 @@ impl Db {
     }
 
     fn run(&mut self, mutations: &[GraphMutation]) -> Result<Vec<MutationOutcome>, GraphError> {
+        self.run_at(None, mutations)
+    }
+
+    /// `run`, with the batch first reclaiming what is due at `now` (Gap 3).
+    fn run_at(
+        &mut self,
+        now: Option<u64>,
+        mutations: &[GraphMutation],
+    ) -> Result<Vec<MutationOutcome>, GraphError> {
         self.sequence += 1;
         let before = self.state.clone();
         let sequence = self.sequence;
         let state = &mut self.state;
         let planned = (|| -> Result<_, GraphError> {
             let mut planner = state.planner(sequence, G)?;
+            if let Some(now) = now {
+                planner.reclaim_expired(now);
+            }
             let outcomes = mutations
                 .iter()
                 .map(|m| planner.mutate(m))
@@ -536,6 +549,90 @@ fn touch_record_advances_only_the_owning_graph() {
     assert_eq!(db.graph().graph_sequence(), 60);
 }
 
+/// Deadlines are planned like other writes, and a batch that starts
+/// with `reclaim_expired` sees due nodes (with all their edges) and due
+/// edges as absent. The reclaim does not count against the entry limit.
+#[test]
+fn deadlines_are_planned_and_due_entities_are_absent() {
+    let mut db = Db::new();
+    db.ok(&[
+        create("a"),
+        create("b"),
+        edge(Some("e"), "a", "b"),
+        edge(Some("f"), "b", "b"),
+    ]);
+    let node_expiry = |key: &str, expires_at_ms, expected| GraphMutation::SetNodeExpiry {
+        key: key.into(),
+        expires_at_ms,
+        expected,
+    };
+    let edge_expiry = |key: &str, expires_at_ms, expected| GraphMutation::SetEdgeExpiry {
+        edge: EdgeSelector::Key(key.into()),
+        expires_at_ms,
+        expected,
+    };
+    assert_eq!(
+        db.err(&[node_expiry("a", Some(10), Precondition::Absent)]),
+        GraphError::PreconditionFailed { current: Some(2) }
+    );
+    assert_eq!(
+        db.ok(&[
+            node_expiry("a", Some(10), Precondition::Revision(2)),
+            edge_expiry("f", Some(20), Precondition::Any),
+        ]),
+        [node(0, false), edge_outcome(1, false)]
+    );
+    assert_eq!(db.graph().node_expiry(NodeId(0)), Some(10));
+    assert_eq!(db.graph().node(NodeId(0)).unwrap().revision, db.sequence);
+    assert_eq!(db.graph().edge_expiry(EdgeId(1)), Some(20));
+    assert_eq!(
+        db.err(&[node_expiry("z", None, Precondition::Any)]),
+        GraphError::UnknownNodeKey("z".into())
+    );
+    assert_eq!(
+        db.err(&[edge_expiry("z", None, Precondition::Any)]),
+        GraphError::UnknownEdgeKey("z".into())
+    );
+    db.check();
+
+    // Nothing is due before the first deadline, so nothing is planned.
+    assert!(db.run_at(Some(9), &[]).unwrap().is_empty());
+    assert_eq!(db.graph().node_count(), 2);
+    // From 10, `a` and its edge `e` are absent.
+    assert_eq!(
+        db.run_at(Some(10), &[node_expiry("a", None, Precondition::Any)]),
+        Err(GraphError::UnknownNodeKey("a".into()))
+    );
+    assert_eq!(
+        db.run_at(Some(10), &[edge(None, "b", "a")]),
+        Err(GraphError::UnknownNodeKey("a".into()))
+    );
+    assert_eq!(
+        db.run_at(Some(10), &[edge_expiry("e", None, Precondition::Any)]),
+        Err(GraphError::UnknownEdgeKey("e".into()))
+    );
+    assert_eq!(
+        db.run_at(Some(10), &[create("a"), edge(Some("e"), "a", "b")]),
+        Ok(vec![node(2, true), edge_outcome(2, true)])
+    );
+    assert_eq!(db.graph().node_count(), 2);
+    assert_eq!(db.graph().node_expiry(NodeId(0)), None);
+    db.check();
+    // From 20, `f` is absent on its own; `b` stays.
+    db.run_at(Some(20), &[create("c")]).unwrap();
+    assert!(db.graph().edge_by_key("f").is_none());
+    assert_eq!((db.graph().node_count(), db.graph().edge_count()), (3, 1));
+    db.check();
+
+    db.ok(&[node_expiry("c", Some(30), Precondition::Any)]);
+    let full: Vec<_> = (0..MAX_BATCH_ENTRIES)
+        .map(|i| create(&format!("n{i}")))
+        .collect();
+    db.run_at(Some(30), &full).unwrap();
+    assert_eq!(db.graph().node_count(), 2 + MAX_BATCH_ENTRIES);
+    db.check();
+}
+
 // ---------------------------------------------------------------------------
 // Reference model (TEST-003): an independent map-based model of the planner's
 // semantics, driven by seeded random batches.
@@ -829,8 +926,11 @@ impl Model {
                     true,
                 )
             }
-            GraphMutation::PutSchema(_) | GraphMutation::EnsureEdge { .. } => {
-                unreachable!("the model generates no schema mutations")
+            GraphMutation::PutSchema(_)
+            | GraphMutation::EnsureEdge { .. }
+            | GraphMutation::SetNodeExpiry { .. }
+            | GraphMutation::SetEdgeExpiry { .. } => {
+                unreachable!("the model generates no schema or expiry mutations")
             }
         })
     }

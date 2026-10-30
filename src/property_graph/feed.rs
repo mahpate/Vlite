@@ -250,9 +250,13 @@ impl FeedGraphs {
                         .unwrap_or_default(),
                 },
                 GraphEntry::PutSchema { schema } => GraphChange::SchemaUpdated { schema },
+                // Gap 3: deadlines and reclaims are not reported (yet).
                 GraphEntry::GraphHighWater { .. }
                 | GraphEntry::CreateGraph { .. }
                 | GraphEntry::DropGraph
+                | GraphEntry::NodeExpiry { .. }
+                | GraphEntry::EdgeExpiry { .. }
+                | GraphEntry::Reclaim { .. }
                 | GraphEntry::VectorMutation { .. } => continue,
             };
             run.push(change);

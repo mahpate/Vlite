@@ -55,6 +55,43 @@ capabilities stay absent or report that graphs are not enabled.
 - One exclusive writer or several read-only handles per file. Graph writes
   follow the database durability mode.
 
+## Expiry (TTL)
+
+Nodes and edges can carry a deadline in ms since the Unix epoch, as records
+can. This is in the embedded Rust API only; REST, gRPC, MCP, the CLI and the
+bindings do not expose it yet.
+
+- **Set and clear.** `GraphMut::set_node_expiry(key, Some(ms), expected)` and
+  `set_edge_expiry(edge, ...)`, or `GraphOp::SetNodeExpiry` and
+  `SetEdgeExpiry` in a batch, so a node can be created with a deadline
+  atomically. `None` clears it. Each bumps the revision; upserts and patches
+  keep the deadline. `NodeView` and `EdgeView` report it as `expires_at_ms`.
+- **Cascade.** From its deadline a node is hidden with every edge of it,
+  whatever the edges' own deadlines. An edge's own deadline hides only that
+  edge. No dangling edge is ever visible or stored.
+- **Reads** hide what is due at the read clock (deadline at or before it):
+  the current time, or a fixed time from `GraphRef::with_clock(ms)`. Gets,
+  `find_nodes`, `neighbors`, `traverse`, `shortest_path`, `retrieve`, `info`,
+  `list_graphs` and `observed_schema` all honour it, and a hidden start node
+  fails like a missing one. The clock only decides visibility; it is not
+  time travel.
+- **Writes.** Each graph write first removes what is due at the current time,
+  in the same atomic frame, so due entities are absent for it:
+  `Expected::Absent` succeeds (the key gets a new ID), `Expected::Revision`
+  fails with `RevisionMismatch { current: None }`, their keys and unique
+  property values are free again, and an edge or attachment to a due node
+  fails with `GraphNodeNotFound`. A failed batch removes nothing. The removal
+  is one computed entry, not one operation per entity, so the 4,096-operation
+  limit is unaffected.
+- **Storage.** Compaction, `upgrade`, directory checkpoints and
+  `convert_to_directory` drop due nodes with all their edges, and due edges.
+  Deadlines survive reopen, backup and these rewrites. Files that never use
+  the expiry operations are written exactly as before; older builds refuse
+  those that do as `Corrupt`.
+- **Limits.** Attached records still cannot expire. The change feed does not
+  report deadlines or removals yet. Until the next graph write an expired node
+  keeps its attachments, so their records stay protected.
+
 ## Limits
 
 Omitted limits use defaults; larger values fail with
@@ -195,13 +232,13 @@ the engine records them: upserts carry the full labels and properties
 
 - gRPC has no graph service.
 - `vlite-graph-cli` does not open encrypted files (the library does).
-- Nodes and edges cannot expire, and reads cannot ask for an earlier point in
-  time.
+- Reads cannot ask for an earlier point in time, and graph expiry is in the
+  Rust API only (see [Expiry](#expiry-ttl)).
 - Query text is read-only. There are no weighted paths and no graph
   algorithms such as PageRank or community detection.
 
-Proposed additions are listed in
-[product gaps](projects/product-gaps/product-gaps.md); none is approved yet.
+Other proposed additions are listed in
+[product gaps](projects/product-gaps/product-gaps.md).
 
 ## Release note text for GATE-008 (approved for v0.5.0)
 

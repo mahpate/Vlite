@@ -342,7 +342,9 @@ pub fn compact(
     compact_at(source_path, destination, crate::current_time_ms())
 }
 
-/// Compacts at an explicit Unix-millisecond clock; v5 records expired at or before `now_ms` are omitted.
+/// Compacts at an explicit Unix-millisecond clock; v5 records expired at or
+/// before `now_ms` are omitted, and so are graph nodes and edges due by then
+/// with every edge of an omitted node.
 pub fn compact_at(
     source_path: impl AsRef<Path>,
     destination: impl AsRef<Path>,
@@ -647,7 +649,16 @@ pub(crate) fn write_v5(
     cipher: Option<&Cipher>,
     extra_flags: u16,
 ) -> Result<()> {
-    write_v5_image(file, loaded, lineage, now_ms, cipher, extra_flags, 0)
+    write_v5_image(
+        file,
+        loaded,
+        lineage,
+        now_ms,
+        now_ms,
+        cipher,
+        extra_flags,
+        0,
+    )
 }
 
 /// `write_v5` with a history `floor`: when nonzero the output has
@@ -658,12 +669,16 @@ pub(crate) fn write_v5(
 /// tokens survive the checkpoint; vector and import frames restate at
 /// `floor`, and the graph as op-15 snapshot frames at `floor` (Speed P2b).
 /// Without a floor, sequences restart at one and every record and graph body
-/// gets its own frame. Records expired at `now_ms` are dropped (S6).
+/// gets its own frame. Records expired at `now_ms` are dropped (S6), and so
+/// are graph nodes and edges due at `graph_now_ms` with every edge of a
+/// dropped node (Gap 3).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_v5_image(
     file: &mut File,
     loaded: &format::Loaded,
     lineage: u64,
     now_ms: u64,
+    graph_now_ms: u64,
     cipher: Option<&Cipher>,
     extra_flags: u16,
     floor: u64,
@@ -759,7 +774,7 @@ pub(crate) fn write_v5_image(
     if extra_flags & format::FLAG_GRAPH != 0
         && let Some(state) = &loaded.graph
     {
-        crate::property_graph::frame::compacted_bodies(state, |count, body| {
+        crate::property_graph::frame::compacted_bodies(state, graph_now_ms, |count, body| {
             if floor != 0 {
                 output.write_all(&format::graph_snapshot_frame(floor, count, body))
             } else {
@@ -801,6 +816,7 @@ mod tests {
             &mut output,
             &loaded,
             lineage,
+            0,
             0,
             loaded.cipher.as_ref(),
             loaded.flags & format::FLAG_GRAPH,
@@ -962,6 +978,7 @@ mod tests {
             &loaded,
             lineage,
             0,
+            0,
             None,
             loaded.flags & format::FLAG_GRAPH,
             floor,
@@ -1074,7 +1091,7 @@ mod tests {
             )));
         }
         if let Some(state) = &loaded.graph {
-            crate::property_graph::frame::compacted_bodies(state, |count, body| {
+            crate::property_graph::frame::compacted_bodies(state, now_ms, |count, body| {
                 bytes.extend(seal(format::graph_frame(floor, count, body)));
                 Ok(())
             })
@@ -1223,6 +1240,7 @@ mod tests {
             &mut output,
             &loaded,
             lineage,
+            now,
             now,
             loaded.cipher.as_ref(),
             loaded.flags & format::FLAG_GRAPH,

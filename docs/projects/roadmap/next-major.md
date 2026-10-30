@@ -74,6 +74,13 @@ Local numbers below show direction only (see rules).
   parallel and in bulk instead of by replay. F4 is not measured yet; the
   DO-005 run qualifies it. Loading is still linear in the image size (see
   the plan's limits).
+- **Gap 3, graph TTL:** the embedded Rust API is done
+  ([property graphs](../../GRAPH.md#expiry-ttl)). Nodes and edges take
+  deadlines; an expired node is hidden with all its edges (cascade), and an
+  edge can also expire on its own. Graph writes, compaction and checkpoints
+  remove expired entities as one computed entry, so the 4,096-operation
+  limit is unaffected. Files that do not use expiry keep their encoding.
+  REST, gRPC and MCP wait for the OpenAPI review.
 
 ## Rules for every item
 

@@ -918,6 +918,9 @@ pub struct Database {
     read_only: bool,
     /// Named graphs; `Some` exactly for graph-enabled (`FLAG_GRAPH`) files.
     graph: Option<property_graph::engine::GraphState>,
+    /// The latest clock graph writes and checkpoints used (see
+    /// `graph_now`).
+    graph_clock: u64,
 }
 
 /// Source of commit timestamps (milliseconds since the Unix epoch).
@@ -1373,6 +1376,7 @@ impl Database {
             clock: None,
             read_only: false,
             graph: (flags & format::FLAG_GRAPH != 0).then(property_graph::engine::GraphState::new),
+            graph_clock: 0,
         })
     }
 
@@ -1461,6 +1465,7 @@ impl Database {
             clock: None,
             read_only: false,
             graph: loaded.graph,
+            graph_clock: 0,
         })
     }
 
@@ -1689,6 +1694,7 @@ impl Database {
         }
         let floor = self.sequence;
         let cipher = self.cipher.clone();
+        let graph_now = self.graph_now();
         let Some(chain) = self.file.chain_mut() else {
             return Ok(false);
         };
@@ -1721,9 +1727,19 @@ impl Database {
             }
         }
         if let Some(chain) = self.file.chain_mut() {
-            chain.spawn(sealed, floor, cipher)?;
+            chain.spawn(sealed, floor, cipher, graph_now)?;
         }
         Ok(true)
+    }
+
+    /// The clock for a graph write or checkpoint: the current time,
+    /// but never earlier than one used before. A checkpoint image drops the
+    /// graph entities due at its clock while the open state keeps them until
+    /// the next graph write reclaims them, so that write must not use an
+    /// earlier clock.
+    pub(crate) fn graph_now(&mut self) -> u64 {
+        self.graph_clock = self.graph_clock.max(current_time_ms());
+        self.graph_clock
     }
 
     /// Installs a finished background build (waiting for it with `wait`).

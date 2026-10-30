@@ -191,6 +191,8 @@ pub struct NodeView {
     pub labels: BTreeSet<String>,
     pub properties: Metadata,
     pub revision: u64,
+    /// The node's deadline in ms since the Unix epoch, if it has one.
+    pub expires_at_ms: Option<u64>,
 }
 
 /// An edge as returned by reads, with both endpoint keys.
@@ -206,6 +208,8 @@ pub struct EdgeView {
     pub target_key: String,
     pub properties: Metadata,
     pub revision: u64,
+    /// The edge's own deadline, if it has one.
+    pub expires_at_ms: Option<u64>,
 }
 
 /// A path: node IDs (one more than edges) and edge IDs, in order.
@@ -625,6 +629,7 @@ fn node_view(node: engine::NodeView) -> NodeView {
         labels: node.labels,
         properties: metadata_from_properties(&node.properties),
         revision: node.revision,
+        expires_at_ms: node.expires_at_ms,
     }
 }
 
@@ -639,6 +644,7 @@ fn edge_view(edge: engine::EdgeView) -> EdgeView {
         target_key: edge.target_key,
         properties: metadata_from_properties(&edge.properties),
         revision: edge.revision,
+        expires_at_ms: edge.expires_at_ms,
     }
 }
 
@@ -776,6 +782,7 @@ impl GraphRef<'_> {
             view_sequence: self.view_sequence,
             clock,
             cancel: options.cancel,
+            now_ms: self.now(),
         };
         engine::execute(self.graph, &query, &options.limits, &context).map_err(graph_error)
     }

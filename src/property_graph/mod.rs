@@ -84,7 +84,7 @@ pub use retrieve::{
 mod tests;
 
 use convert::{graph_error, precondition, properties_from_metadata};
-use engine::codec::{BODY_HEADER_BYTES, ENTRY_HEADER_BYTES};
+use engine::codec::{BODY_HEADER_BYTES, ENTRY_HEADER_BYTES, max_entries};
 use engine::limits::{DEFAULT_OBSERVED_SCHEMA_BUDGET, MAX_BATCH_BYTES, MAX_BATCH_ENTRIES};
 use engine::{
     EdgeId, EdgeSelector, Graph, GraphBody, GraphEntry, GraphId, GraphMutation, GraphState,
@@ -101,11 +101,13 @@ pub struct GraphInfo {
 }
 
 impl GraphInfo {
-    fn of(graph: &Graph) -> Self {
+    /// Counts the nodes and edges visible at `now_ms`.
+    fn of(graph: &Graph, now_ms: u64) -> Self {
+        let (node_count, edge_count) = graph.live_counts(now_ms);
         Self {
             name: graph.name().into(),
-            node_count: graph.node_count(),
-            edge_count: graph.edge_count(),
+            node_count,
+            edge_count,
         }
     }
 }
@@ -120,6 +122,23 @@ pub struct GraphRef<'db> {
     /// The database's commit sequence when the handle was obtained; for a
     /// read-only database, the open-time sequence.
     view_sequence: u64,
+    /// The clock set by [`GraphRef::with_clock`]; `None` reads at the
+    /// current time.
+    now_ms: Option<u64>,
+}
+
+impl<'db> GraphRef<'db> {
+    /// The same view read at `now_ms` (ms since the Unix epoch)
+    /// instead of the current time. Nodes and edges whose deadline is at or
+    /// before it are hidden, and so is every edge of a hidden node. The
+    /// clock decides visibility only; it is not time travel, so entities a
+    /// write, compaction or checkpoint already removed do not come back.
+    pub fn with_clock(&self, now_ms: u64) -> GraphRef<'db> {
+        GraphRef {
+            now_ms: Some(now_ms),
+            ..*self
+        }
+    }
 }
 
 impl GraphRef<'_> {
@@ -127,8 +146,14 @@ impl GraphRef<'_> {
         self.graph.name()
     }
 
+    /// Counts what is visible at the handle's clock.
     pub fn info(&self) -> GraphInfo {
-        GraphInfo::of(self.graph)
+        GraphInfo::of(self.graph, self.now())
+    }
+
+    /// The read clock: [`GraphRef::with_clock`] or the current time.
+    fn now(&self) -> u64 {
+        self.now_ms.unwrap_or_else(crate::current_time_ms)
     }
 
     /// The declared schema (REQ-030); empty when none was declared.
@@ -142,7 +167,7 @@ impl GraphRef<'_> {
     /// when the budget stopped the scan.
     pub fn observed_schema(&self, budget: Option<u64>) -> Result<ObservedSchema> {
         self.graph
-            .observed_schema(budget.unwrap_or(DEFAULT_OBSERVED_SCHEMA_BUDGET))
+            .observed_schema(budget.unwrap_or(DEFAULT_OBSERVED_SCHEMA_BUDGET), self.now())
             .map_err(graph_error)
     }
 }
@@ -224,6 +249,23 @@ pub enum GraphOp {
     },
     DeleteEdge {
         edge: EdgeRef,
+        expected: Expected,
+    },
+    /// Sets (`Some`, ms since the Unix epoch) or clears (`None`) the
+    /// deadline of a live node and bumps its revision. From the deadline
+    /// the node and every edge of it are hidden from reads, absent for
+    /// writes and preconditions, and removed by the next graph write,
+    /// compaction or checkpoint.
+    SetNodeExpiry {
+        key: String,
+        expires_at_ms: Option<u64>,
+        expected: Expected,
+    },
+    /// Sets or clears the deadline of a live edge; only the edge
+    /// expires.
+    SetEdgeExpiry {
+        edge: EdgeRef,
+        expires_at_ms: Option<u64>,
         expected: Expected,
     },
     /// Attaches a live record without expiry of `collection` to a node. A
@@ -323,8 +365,9 @@ impl GraphMut<'_> {
         self.graph().name()
     }
 
+    /// Counts what is visible at the current time.
     pub fn info(&self) -> GraphInfo {
-        GraphInfo::of(self.graph())
+        GraphInfo::of(self.graph(), crate::current_time_ms())
     }
 
     /// Validates every operation, appends one op-12 frame, syncs, then
@@ -440,6 +483,34 @@ impl GraphMut<'_> {
         self.revision(GraphOp::DeleteEdge { edge, expected })
     }
 
+    /// Sets or clears a node's deadline (see [`GraphOp::SetNodeExpiry`]).
+    pub fn set_node_expiry(
+        &mut self,
+        key: &str,
+        expires_at_ms: Option<u64>,
+        expected: Expected,
+    ) -> Result<GraphWrite> {
+        self.written(GraphOp::SetNodeExpiry {
+            key: key.into(),
+            expires_at_ms,
+            expected,
+        })
+    }
+
+    /// Sets or clears an edge's deadline (see [`GraphOp::SetEdgeExpiry`]).
+    pub fn set_edge_expiry(
+        &mut self,
+        edge: EdgeRef,
+        expires_at_ms: Option<u64>,
+        expected: Expected,
+    ) -> Result<GraphWrite> {
+        self.written(GraphOp::SetEdgeExpiry {
+            edge,
+            expires_at_ms,
+            expected,
+        })
+    }
+
     /// Returns the commit revision.
     pub fn attach(&mut self, node: &str, collection: &str, record: u64) -> Result<u64> {
         self.revision(GraphOp::Attach {
@@ -502,11 +573,12 @@ enum Planned {
     Vector(u16, Mutation),
 }
 
-/// Op-12 prefix rule: no record ID, 1..=4096 entries, and a body that fits
-/// the entry headers and the 16 MiB batch limit.
+/// Op-12 prefix rule: no record ID, 1..=4096 entries (one more when the body
+/// starts with a reclaim), and a body that fits the entry headers and
+/// the 16 MiB batch limit.
 pub(crate) fn valid_frame_prefix(id: u64, count: usize, payload_len: usize) -> bool {
     id == 0
-        && (1..=MAX_BATCH_ENTRIES).contains(&count)
+        && (1..=max_entries(true)).contains(&count)
         && payload_len <= MAX_BATCH_BYTES
         && payload_len >= BODY_HEADER_BYTES + count * ENTRY_HEADER_BYTES
 }
@@ -549,23 +621,31 @@ impl Database {
     }
 
     /// Durably drops an empty named graph (`GraphNotEmpty` otherwise).
+    /// Expired nodes and edges do not count; the same frame removes
+    /// them.
     pub fn drop_graph(&mut self, name: &str) -> Result<()> {
+        let now = self.graph_now();
         let state = self.graphs()?;
         engine::model::validate_graph_name(name).map_err(graph_error)?;
-        let graph_id = state.graph_by_name(name).ok_or(Error::GraphNotFound)?.id();
-        self.commit_graph(
-            &GraphBody {
-                graph_id,
-                entries: vec![GraphEntry::DropGraph],
-            },
-            &[],
-        )
-        .map(drop)
+        let graph = state.graph_by_name(name).ok_or(Error::GraphNotFound)?;
+        let mut entries = Vec::new();
+        if graph.has_due(now) {
+            entries.push(GraphEntry::Reclaim { at_ms: now });
+        }
+        entries.push(GraphEntry::DropGraph);
+        let graph_id = graph.id();
+        self.commit_graph(&GraphBody { graph_id, entries }, &[])
+            .map(drop)
     }
 
     /// Live graphs in name order.
     pub fn list_graphs(&self) -> Result<Vec<GraphInfo>> {
-        let mut graphs: Vec<GraphInfo> = self.graphs()?.graphs().map(GraphInfo::of).collect();
+        let now = crate::current_time_ms();
+        let mut graphs: Vec<GraphInfo> = self
+            .graphs()?
+            .graphs()
+            .map(|graph| GraphInfo::of(graph, now))
+            .collect();
         graphs.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(graphs)
     }
@@ -579,6 +659,7 @@ impl Database {
             db: self,
             graph,
             view_sequence: self.sequence,
+            now_ms: None,
         })
     }
 
@@ -682,6 +763,24 @@ impl Database {
                 edge: selector(edge),
                 expected: precondition(*expected),
             },
+            GraphOp::SetNodeExpiry {
+                key,
+                expires_at_ms,
+                expected,
+            } => GraphMutation::SetNodeExpiry {
+                key: key.clone(),
+                expires_at_ms: *expires_at_ms,
+                expected: precondition(*expected),
+            },
+            GraphOp::SetEdgeExpiry {
+                edge,
+                expires_at_ms,
+                expected,
+            } => GraphMutation::SetEdgeExpiry {
+                edge: selector(edge),
+                expires_at_ms: *expires_at_ms,
+                expected: precondition(*expected),
+            },
             GraphOp::Attach {
                 node,
                 collection,
@@ -745,9 +844,13 @@ impl Database {
             .map(|op| self.plan_input(op))
             .collect::<Result<Vec<_>>>()?;
         let sequence = self.next_sequence()?;
+        let now = self.graph_now();
         let collections = &self.collections;
         let state = self.graph.as_mut().ok_or(Error::GraphsNotEnabled)?;
         let mut planner = state.planner(sequence, graph_id).map_err(graph_error)?;
+        // Gap 3: entities due now are removed first, so every operation
+        // sees them as absent.
+        planner.reclaim_expired(now);
         // Record liveness after the batch's earlier vector mutations.
         let mut live: BTreeMap<(u16, u64), bool> = BTreeMap::new();
         let mut vectors = Vec::new();
@@ -820,7 +923,12 @@ impl Database {
             outcomes.push(outcome);
         }
         let body = planner.finish();
-        if body.entries.is_empty() {
+        // A reclaim alone changes nothing visible and is not committed.
+        if body
+            .entries
+            .iter()
+            .all(|entry| matches!(entry, GraphEntry::Reclaim { .. }))
+        {
             return Ok(GraphBatchResult {
                 revision: None,
                 outcomes,
