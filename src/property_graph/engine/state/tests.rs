@@ -1094,6 +1094,118 @@ fn reclaim_removes_due_nodes_with_their_edges_and_due_edges() {
     assert!(!h.graph().has_due(u64::MAX));
 }
 
+/// Adjacency list updates since the last call on this thread.
+fn adjacency_updates() -> usize {
+    ADJACENCY_UPDATES.with(|updates| updates.replace(0))
+}
+
+/// Reclaiming a high-degree node updates each affected adjacency list
+/// once, not once per edge, and rolling the reclaim back restores each list
+/// once, with relationship order, self-loops, parallel edges, keys and
+/// attachments intact.
+#[test]
+fn reclaim_updates_each_adjacency_list_once() {
+    let mut h = Harness::new();
+    // Hub 0 and nodes 1..=4.
+    h.ok((0..5)
+        .map(|id| put_node(id, &format!("n{id}"), &[]))
+        .collect());
+    // Out, in, self-loop and parallel edges of the hub, of three types.
+    let shapes = [
+        (0, 1, "B"),
+        (1, 0, "A"),
+        (0, 0, "C"),
+        (0, 2, "A"),
+        (3, 0, "B"),
+    ];
+    let degree = 3000;
+    let mut entries: Vec<GraphEntry> = (0..degree)
+        .map(|id| {
+            let (source, destination, relationship) = shapes[id as usize % shapes.len()];
+            let key = (id % 7 == 0).then(|| format!("e{id}"));
+            put_edge(id, source, destination, relationship, key.as_deref())
+        })
+        .collect();
+    // Edges between other nodes; edge 3001 is due on its own.
+    entries.extend([
+        put_edge(degree, 1, 2, "A", Some("x")),
+        put_edge(degree + 1, 2, 3, "B", None),
+        put_edge(degree + 2, 4, 1, "C", None),
+        put_edge(degree + 3, 1, 2, "B", None),
+    ]);
+    h.ok(entries);
+    h.ok(vec![
+        attach(0, 1, 7),
+        attach(1, 1, 8),
+        GraphEntry::NodeExpiry {
+            node_id: NodeId(0),
+            expires_at_ms: Some(10),
+        },
+        GraphEntry::EdgeExpiry {
+            edge_id: EdgeId(degree + 1),
+            expires_at_ms: Some(5),
+        },
+        GraphEntry::EdgeExpiry {
+            edge_id: EdgeId(degree + 3),
+            expires_at_ms: Some(u64::MAX),
+        },
+    ]);
+
+    // The same state as deleting each hidden edge, then the hub.
+    let sequence = h.sequence + 1;
+    let mut deleted: Vec<GraphEntry> = (0..=degree + 1)
+        .filter(|id| *id != degree)
+        .map(|id| GraphEntry::DeleteEdge {
+            edge_id: EdgeId(id),
+        })
+        .collect();
+    deleted.push(GraphEntry::DeleteNode { node_id: NodeId(0) });
+    let mut expected = h.state.clone();
+    expected.apply(sequence, &body(G, deleted)).unwrap();
+
+    // Out lists of nodes 0, 1, 2 and 3, and their in lists.
+    let lists = 8;
+    let before = h.state.clone();
+    let reclaim = vec![GraphEntry::Reclaim { at_ms: 10 }];
+    adjacency_updates();
+    h.state
+        .validate(sequence, &body(G, reclaim.clone()))
+        .unwrap();
+    assert_eq!(adjacency_updates(), 2 * lists);
+    assert_eq!(h.state, before);
+    let failing = vec![
+        GraphEntry::Reclaim { at_ms: 10 },
+        put_edge(degree + 4, 1, 42, "A", None),
+    ];
+    assert_eq!(
+        h.state.apply(sequence, &body(G, failing)),
+        Err(GraphError::NodeNotFound(NodeId(42)))
+    );
+    assert_eq!(adjacency_updates(), 2 * lists);
+    assert_eq!(h.state, before);
+    h.state.check_invariants().unwrap();
+
+    let mut reclaimed = h.state.clone();
+    adjacency_updates();
+    reclaimed
+        .apply(sequence, &body(G, reclaim.clone()))
+        .unwrap();
+    assert_eq!(adjacency_updates(), lists);
+    assert_eq!(reclaimed, expected);
+    h.ok(reclaim);
+    assert_eq!(h.state, expected);
+    let graph = h.graph();
+    assert_eq!((graph.node_count(), graph.edge_count()), (4, 3));
+    assert_eq!(
+        graph.edges_of(NodeId(1), Direction::Both),
+        [EdgeId(degree), EdgeId(degree + 3), EdgeId(degree + 2)]
+    );
+    // Node 1 kept one of its 601 incoming entries, and the capacity went.
+    assert!(graph.in_edges[&NodeId(1)].capacity() <= 4);
+    assert_eq!(h.state.attachment_owner(1, 7), None);
+    assert_eq!(h.state.attachment_owner(1, 8), Some((G, NodeId(1))));
+}
+
 #[test]
 fn later_entries_observe_earlier_ones() {
     let mut h = Harness::new();

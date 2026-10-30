@@ -682,7 +682,7 @@ fn malformed_graph_frames_fail_the_whole_open() {
     );
     assert_corrupt(open(frame(OP_GRAPH, 0, 3, 0, 0, len, &valid)), at, prefix);
     assert_corrupt(
-        open(frame(OP_GRAPH, 0, 3, 0, 4097, len, &valid)),
+        open(frame(OP_GRAPH, 0, 3, 0, 8194, len, &valid)),
         at,
         prefix,
     );

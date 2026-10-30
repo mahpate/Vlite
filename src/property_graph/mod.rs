@@ -84,7 +84,7 @@ pub use retrieve::{
 mod tests;
 
 use convert::{graph_error, precondition, properties_from_metadata};
-use engine::codec::{BODY_HEADER_BYTES, ENTRY_HEADER_BYTES, max_entries};
+use engine::codec::{BODY_HEADER_BYTES, ENTRY_HEADER_BYTES, MAX_BODY_ENTRIES};
 use engine::limits::{DEFAULT_OBSERVED_SCHEMA_BUDGET, MAX_BATCH_BYTES, MAX_BATCH_ENTRIES};
 use engine::{
     EdgeId, EdgeSelector, Graph, GraphBody, GraphEntry, GraphId, GraphMutation, GraphState,
@@ -254,8 +254,9 @@ pub enum GraphOp {
     /// Sets (`Some`, ms since the Unix epoch) or clears (`None`) the
     /// deadline of a live node and bumps its revision. From the deadline
     /// the node and every edge of it are hidden from reads, absent for
-    /// writes and preconditions, and removed by the next graph write,
-    /// compaction or checkpoint.
+    /// writes and preconditions (including later operations of the same
+    /// batch), and removed by the next graph write, compaction or
+    /// checkpoint.
     SetNodeExpiry {
         key: String,
         expires_at_ms: Option<u64>,
@@ -573,12 +574,12 @@ enum Planned {
     Vector(u16, Mutation),
 }
 
-/// Op-12 prefix rule: no record ID, 1..=4096 entries (one more when the body
-/// starts with a reclaim), and a body that fits the entry headers and
-/// the 16 MiB batch limit.
+/// Op-12 prefix rule: no record ID, 1..=8193 entries (4,096 plus the
+/// reclaims, see [`MAX_BODY_ENTRIES`]), and a body that fits the entry
+/// headers and the 16 MiB batch limit.
 pub(crate) fn valid_frame_prefix(id: u64, count: usize, payload_len: usize) -> bool {
     id == 0
-        && (1..=max_entries(true)).contains(&count)
+        && (1..=MAX_BODY_ENTRIES).contains(&count)
         && payload_len <= MAX_BATCH_BYTES
         && payload_len >= BODY_HEADER_BYTES + count * ENTRY_HEADER_BYTES
 }
@@ -848,13 +849,16 @@ impl Database {
         let collections = &self.collections;
         let state = self.graph.as_mut().ok_or(Error::GraphsNotEnabled)?;
         let mut planner = state.planner(sequence, graph_id).map_err(graph_error)?;
-        // Gap 3: entities due now are removed first, so every operation
-        // sees them as absent.
+        // Gap 3: entities due now are removed first, and again after an
+        // operation whose deadline is due, so every operation sees them as
+        // absent.
         planner.reclaim_expired(now);
         // Record liveness after the batch's earlier vector mutations.
         let mut live: BTreeMap<(u16, u64), bool> = BTreeMap::new();
         let mut vectors = Vec::new();
         for item in planned {
+            // Before the attachment check below.
+            planner.reclaim_due();
             let outcome = match item {
                 Planned::Vector(collection, mutation) => {
                     let id = frame::mutation_id(&mutation);

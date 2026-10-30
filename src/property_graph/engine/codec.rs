@@ -134,7 +134,9 @@ pub enum GraphEntry {
     },
     /// Removes every node whose deadline is at or before `at_ms` with
     /// all its edges and attachments, then every edge whose own deadline is
-    /// at or before `at_ms`. Allowed only as the first entry of a body.
+    /// at or before `at_ms`. Allowed as the first entry of a body and
+    /// directly after an expiry entry due at `at_ms`; all reclaims of a body
+    /// share one `at_ms`.
     Reclaim {
         at_ms: u64,
     },
@@ -296,29 +298,54 @@ impl GraphBody {
                 "a graph batch has at least one entry",
             ));
         }
-        if self.entries.len() > max_entries(self.reclaims()) {
-            return Err(GraphError::BatchSize("more than 4096 entries"));
-        }
-        if self.entries[1..]
-            .iter()
-            .any(|entry| matches!(entry, GraphEntry::Reclaim { .. }))
-        {
-            return Err(GraphError::Corrupt("reclaim must be the first entry"));
-        }
+        check_entries(&self.entries)?;
         self.entries.iter().try_for_each(GraphEntry::validate)
-    }
-
-    /// Whether the body starts with a `Reclaim` entry.
-    fn reclaims(&self) -> bool {
-        matches!(self.entries.first(), Some(GraphEntry::Reclaim { .. }))
     }
 }
 
-/// Entries allowed in a body. A leading `Reclaim` does not count, so
-/// reclaiming never shrinks the caller's batch; its 16 bytes do count
-/// against [`MAX_BATCH_BYTES`].
-pub fn max_entries(reclaims: bool) -> usize {
-    MAX_BATCH_ENTRIES + usize::from(reclaims)
+/// Entries allowed in a body: [`MAX_BATCH_ENTRIES`] counted entries plus
+/// the reclaims, which do not count. One reclaim may open the body and one
+/// may follow each expiry entry, so reclaiming never shrinks the caller's
+/// batch; reclaim bytes do count against [`MAX_BATCH_BYTES`].
+pub const MAX_BODY_ENTRIES: usize = 2 * MAX_BATCH_ENTRIES + 1;
+
+/// At most [`MAX_BATCH_ENTRIES`] entries besides reclaims, and each reclaim
+/// opens the body or directly follows an expiry entry due at its clock, all
+/// at one clock (see [`GraphEntry::Reclaim`]).
+fn check_entries(entries: &[GraphEntry]) -> Result<(), GraphError> {
+    let reclaim = |entry: &GraphEntry| match entry {
+        GraphEntry::Reclaim { at_ms } => Some(*at_ms),
+        _ => None,
+    };
+    let reclaims = entries.iter().filter_map(reclaim).count();
+    if entries.len() - reclaims > MAX_BATCH_ENTRIES {
+        return Err(GraphError::BatchSize("more than 4096 entries"));
+    }
+    let mut clock = None;
+    for (index, at_ms) in entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| Some((index, reclaim(entry)?)))
+    {
+        let placed = match index.checked_sub(1).map(|before| &entries[before]) {
+            None => true,
+            Some(
+                GraphEntry::NodeExpiry {
+                    expires_at_ms: Some(deadline),
+                    ..
+                }
+                | GraphEntry::EdgeExpiry {
+                    expires_at_ms: Some(deadline),
+                    ..
+                },
+            ) => *deadline <= at_ms,
+            Some(_) => false,
+        };
+        if !placed || *clock.get_or_insert(at_ms) != at_ms {
+            return Err(GraphError::Corrupt("misplaced reclaim"));
+        }
+    }
+    Ok(())
 }
 
 fn put_labels(labels: &BTreeSet<String>, bytes: &mut Vec<u8>) {
@@ -771,15 +798,13 @@ pub fn decode_body(bytes: &[u8], count: u32) -> Result<GraphBody, GraphError> {
     if bytes.len() > MAX_BATCH_BYTES {
         return Err(GraphError::BatchSize("more than 16777216 bytes"));
     }
-    // The first entry's tag byte; a leading `Reclaim` does not count.
-    let reclaims = bytes.get(BODY_HEADER_BYTES) == Some(&tag::RECLAIM);
     let count = count as usize;
     if count == 0 {
         return Err(GraphError::BatchSize(
             "a graph batch has at least one entry",
         ));
     }
-    if count > max_entries(reclaims) {
+    if count > MAX_BODY_ENTRIES {
         return Err(GraphError::BatchSize("more than 4096 entries"));
     }
     let Some((header, mut rest)) = bytes.split_at_checked(BODY_HEADER_BYTES) else {
@@ -813,16 +838,13 @@ pub fn decode_body(bytes: &[u8], count: u32) -> Result<GraphBody, GraphError> {
         let Some((payload, after)) = after.split_at_checked(len as usize) else {
             return Err(GraphError::Corrupt("truncated entry payload"));
         };
-        let entry = decode_payload(envelope[0], payload)?;
-        if matches!(entry, GraphEntry::Reclaim { .. }) && !entries.is_empty() {
-            return Err(GraphError::Corrupt("reclaim must be the first entry"));
-        }
-        entries.push(entry);
+        entries.push(decode_payload(envelope[0], payload)?);
         rest = after;
     }
     if entries.len() != count {
         return Err(GraphError::Corrupt("fewer entries than the frame count"));
     }
+    check_entries(&entries)?;
     Ok(GraphBody { graph_id, entries })
 }
 
@@ -863,7 +885,7 @@ mod tests {
     /// One entry of every closed tag.
     fn every_entry() -> Vec<GraphEntry> {
         vec![
-            // Gap 3: a reclaim may only open a body.
+            // Gap 3: a reclaim may open a body.
             GraphEntry::Reclaim {
                 at_ms: 1_700_000_000_000,
             },
@@ -1135,8 +1157,9 @@ mod tests {
         assert_eq!(p(GraphEntry::Reclaim { at_ms: 77 }), reclaim);
     }
 
-    /// An expiry payload is 8 or 16 bytes, and a reclaim only opens a
-    /// body, where it does not count against the entry limit.
+    /// An expiry payload is 8 or 16 bytes. A reclaim opens a body or directly
+    /// follows an expiry entry due at its clock, all at one clock, and
+    /// reclaims do not count against the entry limit.
     #[test]
     fn expiry_payloads_and_reclaim_placement_are_strict() {
         for tag in [tag::NODE_EXPIRY, tag::EDGE_EXPIRY] {
@@ -1158,20 +1181,62 @@ mod tests {
         );
 
         let reclaim = GraphEntry::Reclaim { at_ms: 5 };
-        let late = body(vec![GraphEntry::DropGraph, reclaim.clone()]);
-        let misplaced = GraphError::Corrupt("reclaim must be the first entry");
-        assert_eq!(late.validate(), Err(misplaced.clone()));
-        assert_eq!(encode_body(&late), Err(misplaced.clone()));
-        let mut bytes = encode_one(GraphEntry::DropGraph);
-        bytes.extend_from_slice(&encode_one(reclaim.clone())[BODY_HEADER_BYTES..]);
-        assert_eq!(decode_body(&bytes, 2), Err(misplaced));
+        let node_expiry = |deadline| GraphEntry::NodeExpiry {
+            node_id: NodeId(1),
+            expires_at_ms: deadline,
+        };
+        let edge_expiry = |deadline| GraphEntry::EdgeExpiry {
+            edge_id: EdgeId(1),
+            expires_at_ms: deadline,
+        };
+        let misplaced = GraphError::Corrupt("misplaced reclaim");
+        for entries in [
+            vec![GraphEntry::DropGraph, reclaim.clone()],
+            // After an expiry that is not due, or a cleared one.
+            vec![node_expiry(Some(6)), reclaim.clone()],
+            vec![edge_expiry(None), reclaim.clone()],
+            vec![reclaim.clone(), reclaim.clone()],
+            // Another clock.
+            vec![
+                reclaim.clone(),
+                node_expiry(Some(4)),
+                GraphEntry::Reclaim { at_ms: 4 },
+            ],
+        ] {
+            let late = body(entries.clone());
+            assert_eq!(late.validate(), Err(misplaced.clone()), "{entries:?}");
+            assert_eq!(encode_body(&late), Err(misplaced.clone()));
+            let mut bytes = encode_one(entries[0].clone());
+            for entry in &entries[1..] {
+                bytes.extend_from_slice(&encode_one(entry.clone())[BODY_HEADER_BYTES..]);
+            }
+            assert_eq!(
+                decode_body(&bytes, entries.len() as u32),
+                Err(misplaced.clone())
+            );
+        }
+        for entries in [
+            vec![node_expiry(Some(5)), reclaim.clone()],
+            vec![reclaim.clone(), edge_expiry(Some(3)), reclaim.clone()],
+        ] {
+            let placed = body(entries);
+            let encoded = encode_body(&placed).unwrap();
+            assert_eq!(
+                decode_body(&encoded, placed.entries.len() as u32).unwrap(),
+                placed
+            );
+        }
 
-        let mut entries = vec![reclaim];
-        entries.extend(vec![GraphEntry::DropGraph; MAX_BATCH_ENTRIES]);
+        // A full batch with a reclaim opening it and after every entry.
+        let mut entries = vec![reclaim.clone()];
+        for _ in 0..MAX_BATCH_ENTRIES {
+            entries.extend([node_expiry(Some(5)), reclaim.clone()]);
+        }
+        assert_eq!(entries.len(), MAX_BODY_ENTRIES);
         let full = body(entries);
         let encoded = encode_body(&full).unwrap();
         assert_eq!(
-            decode_body(&encoded, MAX_BATCH_ENTRIES as u32 + 1).unwrap(),
+            decode_body(&encoded, MAX_BODY_ENTRIES as u32).unwrap(),
             full
         );
         let mut over = full;
@@ -1180,8 +1245,6 @@ mod tests {
             encode_body(&over),
             Err(GraphError::BatchSize("more than 4096 entries"))
         );
-        assert_eq!(max_entries(false), MAX_BATCH_ENTRIES);
-        assert_eq!(max_entries(true), MAX_BATCH_ENTRIES + 1);
     }
 
     #[test]
@@ -1690,7 +1753,17 @@ mod tests {
             Err(GraphError::BatchSize("more than 4096 entries"))
         );
         assert_eq!(
-            decode_body(&encoded, MAX_BATCH_ENTRIES as u32 + 1),
+            decode_body(&encoded, MAX_BODY_ENTRIES as u32 + 1),
+            Err(GraphError::BatchSize("more than 4096 entries"))
+        );
+        // A frame count within the body bound still holds 4,096 counted
+        // entries at most.
+        let mut bytes = vec![BODY_VERSION, 0, 1, 0];
+        for _ in 0..=MAX_BATCH_ENTRIES {
+            bytes.extend_from_slice(&[tag::DROP_GRAPH, 0, 0, 0, 0, 0, 0, 0]);
+        }
+        assert_eq!(
+            decode_body(&bytes, MAX_BATCH_ENTRIES as u32 + 1),
             Err(GraphError::BatchSize("more than 4096 entries"))
         );
         assert_eq!(

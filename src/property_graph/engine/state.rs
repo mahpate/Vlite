@@ -134,7 +134,21 @@ fn remove_from<K: Ord, V: Ord>(map: &mut BTreeMap<K, BTreeSet<V>>, key: K, value
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Adjacency list updates on this thread, for tests: one per list each
+    /// call touches. Each update costs at most linear time in its list.
+    static ADJACENCY_UPDATES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Counts one adjacency list update in tests; does nothing otherwise.
+fn adjacency_update() {
+    #[cfg(test)]
+    ADJACENCY_UPDATES.with(|updates| updates.set(updates.get() + 1));
+}
+
 fn insert_adjacency(index: &mut AdjacencyIndex, node: NodeId, entry: AdjacencyEntry) {
+    adjacency_update();
     let entries = index.entry(node).or_default();
     let position = entries
         .binary_search(&entry)
@@ -143,11 +157,39 @@ fn insert_adjacency(index: &mut AdjacencyIndex, node: NodeId, entry: AdjacencyEn
 }
 
 fn remove_adjacency(index: &mut AdjacencyIndex, node: NodeId, entry: &AdjacencyEntry) {
+    adjacency_update();
     let entries = index.get_mut(&node).expect("adjacency exists");
     let position = entries
         .binary_search(entry)
         .expect("adjacency entry exists");
     entries.remove(position);
+    trim_adjacency(index, node);
+}
+
+/// Inserts new entries, in any order, into one list in a single merge.
+fn insert_adjacencies(index: &mut AdjacencyIndex, node: NodeId, mut added: Vec<AdjacencyEntry>) {
+    adjacency_update();
+    added.sort_unstable();
+    let entries = index.entry(node).or_default();
+    entries.append(&mut added);
+    // Two sorted runs, which the stable sort detects and merges.
+    entries.sort();
+}
+
+/// Removes entries of one list, in any order, in a single pass.
+fn remove_adjacencies(index: &mut AdjacencyIndex, node: NodeId, mut removed: Vec<AdjacencyEntry>) {
+    adjacency_update();
+    removed.sort_unstable();
+    let mut removed = removed.into_iter().peekable();
+    let entries = index.get_mut(&node).expect("adjacency exists");
+    entries.retain(|entry| removed.next_if_eq(entry).is_none());
+    debug_assert!(removed.peek().is_none(), "adjacency entries exist");
+    trim_adjacency(index, node);
+}
+
+/// Drops an empty list and the capacity a shrunken list no longer needs.
+fn trim_adjacency(index: &mut AdjacencyIndex, node: NodeId) {
+    let entries = index.get_mut(&node).expect("adjacency exists");
     if entries.is_empty() {
         index.remove(&node);
     } else if entries.capacity() > 4 && entries.len() <= entries.capacity() / 4 {
@@ -412,18 +454,38 @@ impl Graph {
         if let Some(key) = &edge.key {
             self.edge_keys.insert(key.clone(), edge.id);
         }
-        let relationship = match self.relationships.get_key_value(&edge.relationship) {
-            Some((symbol, _)) => Arc::clone(symbol),
-            None => Arc::new(edge.relationship.clone()),
-        };
-        *self
-            .relationships
-            .entry(Arc::clone(&relationship))
-            .or_default() += 1;
-        let entry = (relationship, edge.id);
+        let entry = (self.count_relationship(&edge.relationship), edge.id);
         insert_adjacency(&mut self.out_edges, edge.source, entry.clone());
         insert_adjacency(&mut self.in_edges, edge.destination, entry);
         self.edges.insert(edge.id, edge);
+    }
+
+    /// The shared symbol of `relationship`, counting one more edge of it.
+    fn count_relationship(&mut self, relationship: &String) -> Arc<String> {
+        let symbol = match self.relationships.get_key_value(relationship) {
+            Some((symbol, _)) => Arc::clone(symbol),
+            None => Arc::new(relationship.clone()),
+        };
+        *self.relationships.entry(Arc::clone(&symbol)).or_default() += 1;
+        symbol
+    }
+
+    /// The shared symbol of `relationship`, counting one edge of it less.
+    fn uncount_relationship(&mut self, relationship: &String) -> Arc<String> {
+        let (symbol, count) = self
+            .relationships
+            .get_key_value(relationship)
+            .expect("relationship exists");
+        let (symbol, remaining) = (Arc::clone(symbol), count - 1);
+        if remaining == 0 {
+            self.relationships.remove(relationship);
+        } else {
+            *self
+                .relationships
+                .get_mut(relationship)
+                .expect("relationship exists") = remaining;
+        }
+        symbol
     }
 
     fn remove_edge(&mut self, id: EdgeId) -> Option<GraphEdge> {
@@ -431,22 +493,9 @@ impl Graph {
         if let Some(key) = &edge.key {
             self.edge_keys.remove(key);
         }
-        let (relationship, count) = self
-            .relationships
-            .get_key_value(&edge.relationship)
-            .expect("relationship exists");
-        let entry = (Arc::clone(relationship), id);
-        let remaining = count - 1;
+        let entry = (self.uncount_relationship(&edge.relationship), id);
         remove_adjacency(&mut self.out_edges, edge.source, &entry);
         remove_adjacency(&mut self.in_edges, edge.destination, &entry);
-        if remaining == 0 {
-            self.relationships.remove(&edge.relationship);
-        } else {
-            *self
-                .relationships
-                .get_mut(&edge.relationship)
-                .expect("relationship exists") = remaining;
-        }
         Some(edge)
     }
 
@@ -475,6 +524,56 @@ impl Graph {
         let edge = self.remove_edge(id)?;
         let expiry = self.edge_expiry.set(id, None);
         Some(Undo::DeleteEdge { edge, expiry })
+    }
+
+    /// Deletes existing edges with their deadlines, updating each adjacency
+    /// list once however many of its entries go (a reclaimed hub may take
+    /// thousands). Returns the edges and deadlines for
+    /// [`Graph::restore_edges`].
+    fn delete_edges(&mut self, ids: BTreeSet<EdgeId>) -> Vec<(GraphEdge, Option<u64>)> {
+        let mut outgoing: BTreeMap<NodeId, Vec<AdjacencyEntry>> = BTreeMap::new();
+        let mut incoming: BTreeMap<NodeId, Vec<AdjacencyEntry>> = BTreeMap::new();
+        let mut deleted = Vec::with_capacity(ids.len());
+        for id in ids {
+            let edge = self.edges.remove(&id).expect("edge exists");
+            if let Some(key) = &edge.key {
+                self.edge_keys.remove(key);
+            }
+            let entry = (self.uncount_relationship(&edge.relationship), id);
+            outgoing.entry(edge.source).or_default().push(entry.clone());
+            incoming.entry(edge.destination).or_default().push(entry);
+            deleted.push((edge, self.edge_expiry.set(id, None)));
+        }
+        for (node, entries) in outgoing {
+            remove_adjacencies(&mut self.out_edges, node, entries);
+        }
+        for (node, entries) in incoming {
+            remove_adjacencies(&mut self.in_edges, node, entries);
+        }
+        deleted
+    }
+
+    /// Restores edges removed by [`Graph::delete_edges`], updating each
+    /// adjacency list once.
+    fn restore_edges(&mut self, deleted: Vec<(GraphEdge, Option<u64>)>) {
+        let mut outgoing: BTreeMap<NodeId, Vec<AdjacencyEntry>> = BTreeMap::new();
+        let mut incoming: BTreeMap<NodeId, Vec<AdjacencyEntry>> = BTreeMap::new();
+        for (edge, expiry) in deleted {
+            if let Some(key) = &edge.key {
+                self.edge_keys.insert(key.clone(), edge.id);
+            }
+            let entry = (self.count_relationship(&edge.relationship), edge.id);
+            outgoing.entry(edge.source).or_default().push(entry.clone());
+            incoming.entry(edge.destination).or_default().push(entry);
+            self.edge_expiry.set(edge.id, expiry);
+            self.edges.insert(edge.id, edge);
+        }
+        for (node, entries) in outgoing {
+            insert_adjacencies(&mut self.out_edges, node, entries);
+        }
+        for (node, entries) in incoming {
+            insert_adjacencies(&mut self.in_edges, node, entries);
+        }
     }
 
     /// A copy whose derived indexes are rebuilt from authoritative data.
@@ -627,8 +726,12 @@ pub(super) enum Undo {
         previous: Option<u64>,
         revision: u64,
     },
-    /// The edge and node deletions of one `Reclaim`, in apply order.
-    Reclaim(Vec<Undo>),
+    /// The deletions of one `Reclaim`: the hidden edges with their
+    /// deadlines, then the due nodes in apply order.
+    Reclaim {
+        edges: Vec<(GraphEdge, Option<u64>)>,
+        nodes: Vec<Undo>,
+    },
 }
 
 /// All named graphs of one graph-enabled file.
@@ -1105,14 +1208,12 @@ impl GraphState {
             GraphEntry::Reclaim { at_ms } => {
                 // Hidden edges go first, so every due node is then edgeless.
                 let (nodes, edges) = graph.due(*at_ms);
-                let mut undo = Vec::with_capacity(nodes.len() + edges.len());
-                for id in edges {
-                    undo.extend(graph.delete_edge(id));
-                }
-                for id in nodes {
-                    undo.push(graph.delete_node(&mut self.attachment_owners, id));
-                }
-                Undo::Reclaim(undo)
+                let edges = graph.delete_edges(edges);
+                let nodes = nodes
+                    .into_iter()
+                    .map(|id| graph.delete_node(&mut self.attachment_owners, id))
+                    .collect();
+                Undo::Reclaim { edges, nodes }
             }
         };
         Ok(Some(undo))
@@ -1129,7 +1230,13 @@ impl GraphState {
                     self.names.insert(graph.name.clone(), graph_id);
                     self.graphs.insert(graph_id, *graph);
                 }
-                Undo::Reclaim(undo) => self.rollback(graph_id, undo),
+                Undo::Reclaim { edges, nodes } => {
+                    self.rollback(graph_id, nodes);
+                    self.graphs
+                        .get_mut(&graph_id)
+                        .expect("graph exists")
+                        .restore_edges(edges);
+                }
                 other => self.rollback_in_graph(graph_id, other),
             }
         }
@@ -1138,7 +1245,7 @@ impl GraphState {
     fn rollback_in_graph(&mut self, graph_id: GraphId, inverse: Undo) {
         let graph = self.graphs.get_mut(&graph_id).expect("graph exists");
         match inverse {
-            Undo::CreateGraph | Undo::DropGraph(_) | Undo::Reclaim(_) => unreachable!(),
+            Undo::CreateGraph | Undo::DropGraph(_) | Undo::Reclaim { .. } => unreachable!(),
             Undo::HighWater {
                 next_node_id,
                 next_edge_id,

@@ -22,7 +22,7 @@ use vlite::property_graph::{
     Pivot, PropertyDefinition, PropertyType, ReadOptions, RelationshipDefinition, Retrieve,
     ShortestPath, Traverse, inspect_graph, verify_graph,
 };
-use vlite::{CreateOptions, Database, Error, Expected, Metadata, MetadataValue};
+use vlite::{CreateOptions, Database, Error, Expected, Metadata, MetadataValue, Mutation};
 
 /// Expired at any wall-clock time the tests run.
 const PAST: u64 = 1;
@@ -66,6 +66,32 @@ fn expire_edge(db: &mut Database, key: &str, at: Option<u64>) {
         .unwrap()
         .set_edge_expiry(EdgeRef::Key(key.into()), at, Expected::Any)
         .unwrap();
+}
+
+fn expire_node_op(key: &str, at: Option<u64>) -> GraphOp {
+    GraphOp::SetNodeExpiry {
+        key: key.into(),
+        expires_at_ms: at,
+        expected: Expected::Any,
+    }
+}
+
+fn expire_edge_op(key: &str, at: Option<u64>) -> GraphOp {
+    GraphOp::SetEdgeExpiry {
+        edge: EdgeRef::Key(key.into()),
+        expires_at_ms: at,
+        expected: Expected::Any,
+    }
+}
+
+fn edge_op(key: Option<&str>, source: &str, destination: &str) -> GraphOp {
+    GraphOp::CreateEdge {
+        key: key.map(str::to_owned),
+        source: source.into(),
+        relationship: "R".into(),
+        destination: destination.into(),
+        properties: Metadata::new(),
+    }
 }
 
 fn node_expiry(graph: &GraphRef<'_>, key: &str) -> Option<u64> {
@@ -554,7 +580,8 @@ fn expired_entities_are_absent_for_writes() {
         panic!("unexpected outcome {:?}", result.outcomes[0]);
     };
 
-    // Hidden at the wall clock at once, before anything is reclaimed.
+    // Hidden at the wall clock at once. The batch removed a and b itself (each
+    // before its next operation); cd stays stored until the next write.
     {
         let graph = db.graph("g").unwrap();
         assert_eq!(nodes(&graph), ["c", "d"]);
@@ -633,6 +660,248 @@ fn expired_entities_are_absent_for_writes() {
     assert_eq!(counts(&graph), (3, 1));
 }
 
+/// A deadline due at the batch's clock takes effect for the rest of the
+/// batch: the node goes with every edge and attachment of it, the edge on its
+/// own, and later operations may reuse their keys and the record.
+#[test]
+fn later_operations_of_a_batch_see_its_due_deadlines() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("g.vlite");
+    let mut db = Database::create(&path, 2).unwrap();
+    db.put(1, &[1.0, 0.0], b"one").unwrap();
+    db.create_graph("g").unwrap();
+    build(&mut db, &["a", "b", "c"], &["ab", "bc", "ca"]);
+    db.graph_mut("g")
+        .unwrap()
+        .attach("a", "default", 1)
+        .unwrap();
+    let (old_a, old_ab, old_bc) = {
+        let graph = db.graph("g").unwrap();
+        let edge = |key| graph.get_edge_by_key(key).unwrap().output.unwrap().id;
+        (
+            graph.get_node("a").unwrap().output.unwrap().id,
+            edge("ab"),
+            edge("bc"),
+        )
+    };
+    let result = db
+        .graph_mut("g")
+        .unwrap()
+        .write_batch(&[
+            expire_node_op("a", Some(PAST)),
+            // The record is free once a is gone.
+            GraphOp::Vector {
+                collection: "default".into(),
+                mutation: Mutation::Delete { id: 1 },
+            },
+            GraphOp::UpsertNode {
+                key: "a".into(),
+                labels: vec!["N".into()],
+                properties: Metadata::new(),
+                expected: Expected::Absent,
+            },
+            edge_op(Some("ab"), "a", "b"),
+            expire_edge_op("bc", Some(PAST)),
+            edge_op(Some("bc"), "b", "c"),
+        ])
+        .unwrap();
+    let written: Vec<(u64, bool)> = result
+        .outcomes
+        .iter()
+        .filter_map(|outcome| match outcome {
+            GraphOpOutcome::Node(write) | GraphOpOutcome::Edge(write) => {
+                Some((write.id, write.created))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(written[0], (old_a, false));
+    assert_eq!(written[3], (old_bc, false));
+    for (index, old) in [(1, old_a), (2, old_ab), (4, old_bc)] {
+        assert!(written[index].1 && written[index].0 != old, "{written:?}");
+    }
+
+    let check = |db: &Database| {
+        assert!(db.get(1).unwrap().is_none());
+        let graph = db.graph("g").unwrap();
+        assert_eq!(nodes(&graph), ["b", "c", "a"]);
+        // ca went with the old a.
+        assert_eq!(edges(&graph, &["ab", "bc", "ca"]), ["ab", "bc"]);
+        assert_eq!(node_expiry(&graph, "a"), None);
+        assert_eq!(edge_expiry(&graph, "bc"), None);
+        assert_eq!(counts(&graph), (3, 2));
+    };
+    check(&db);
+    drop(db);
+    // The batch itself removed everything it expired, and replays the same.
+    assert_eq!(stored(&path), (3, 2, 0));
+    verify_graph(&path, None).unwrap();
+    check(&Database::open(&path).unwrap());
+}
+
+/// What a batch's own deadline expired cannot be revived, patched or linked
+/// to by its later operations, and the failed batch writes nothing.
+#[test]
+fn later_operations_of_a_batch_cannot_revive_what_it_expired() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("g.vlite");
+    let mut db = Database::create(&path, 2).unwrap();
+    db.put(1, &[1.0, 0.0], b"one").unwrap();
+    db.create_graph("g").unwrap();
+    build(&mut db, &["a", "b", "c"], &["ab", "bc"]);
+    let (b, ab) = {
+        let graph = db.graph("g").unwrap();
+        (
+            graph.get_node("b").unwrap().output.unwrap().revision,
+            graph
+                .get_edge_by_key("ab")
+                .unwrap()
+                .output
+                .unwrap()
+                .revision,
+        )
+    };
+    let length = fs::metadata(&path).unwrap().len();
+    let unchanged = |db: &Database| {
+        let graph = db.graph("g").unwrap();
+        assert_eq!(nodes(&graph), ["a", "b", "c"]);
+        assert_eq!(edges(&graph, &["ab", "bc"]), ["ab", "bc"]);
+        let node = graph.get_node("b").unwrap().output.unwrap();
+        assert_eq!((node.revision, node.expires_at_ms), (b, None));
+        let edge = graph.get_edge_by_key("ab").unwrap().output.unwrap();
+        assert_eq!((edge.revision, edge.expires_at_ms), (ab, None));
+    };
+    let node_gone = |error: &Error| matches!(error, Error::GraphNodeNotFound);
+    let edge_gone = |error: &Error| matches!(error, Error::GraphEdgeNotFound);
+    let stale = |error: &Error| matches!(error, Error::RevisionMismatch { current: None });
+    let expire_b = || expire_node_op("b", Some(PAST));
+    let expire_ab = || expire_edge_op("ab", Some(PAST));
+    type Check<'a> = &'a dyn Fn(&Error) -> bool;
+    let cases: Vec<(Vec<GraphOp>, Check<'_>)> = vec![
+        (vec![expire_b(), expire_node_op("b", None)], &node_gone),
+        (
+            vec![
+                expire_b(),
+                GraphOp::PatchNode {
+                    key: "b".into(),
+                    patch: NodePatch::default(),
+                    expected: Expected::Any,
+                },
+            ],
+            &node_gone,
+        ),
+        (
+            vec![
+                expire_b(),
+                GraphOp::UpsertNode {
+                    key: "b".into(),
+                    labels: Vec::new(),
+                    properties: Metadata::new(),
+                    expected: Expected::Revision(b),
+                },
+            ],
+            &stale,
+        ),
+        (vec![expire_b(), edge_op(None, "a", "b")], &node_gone),
+        (
+            vec![
+                expire_b(),
+                GraphOp::Attach {
+                    node: "b".into(),
+                    collection: "default".into(),
+                    record: 1,
+                },
+            ],
+            &node_gone,
+        ),
+        // Its edges went with it.
+        (vec![expire_b(), expire_edge_op("ab", None)], &edge_gone),
+        (vec![expire_ab(), expire_edge_op("ab", None)], &edge_gone),
+        (
+            vec![
+                expire_ab(),
+                GraphOp::PatchEdge {
+                    edge: EdgeRef::Key("ab".into()),
+                    set: props("w", 1),
+                    unset: Vec::new(),
+                    expected: Expected::Any,
+                },
+            ],
+            &edge_gone,
+        ),
+        (
+            vec![
+                expire_ab(),
+                GraphOp::DeleteEdge {
+                    edge: EdgeRef::Key("ab".into()),
+                    expected: Expected::Revision(ab),
+                },
+            ],
+            &stale,
+        ),
+        // A replacement planned earlier in a failing batch is rolled back.
+        (
+            vec![
+                expire_b(),
+                GraphOp::CreateNode {
+                    key: "b".into(),
+                    labels: Vec::new(),
+                    properties: Metadata::new(),
+                },
+                edge_op(None, "b", "z"),
+            ],
+            &node_gone,
+        ),
+    ];
+    for (ops, expected) in cases {
+        let error = db.graph_mut("g").unwrap().write_batch(&ops).unwrap_err();
+        assert!(expected(&error), "{ops:?}: {error:?}");
+        assert_eq!(fs::metadata(&path).unwrap().len(), length, "{ops:?}");
+        unchanged(&db);
+    }
+    drop(db);
+    verify_graph(&path, None).unwrap();
+    unchanged(&Database::open(&path).unwrap());
+}
+
+/// A full batch whose every other operation expires a node commits with a
+/// removal after each of them, beyond 4,097 frame entries, and replays.
+#[test]
+fn a_full_batch_that_expires_as_it_goes_commits_and_replays() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("g.vlite");
+    let mut db = Database::create(&path, 2).unwrap();
+    db.create_graph("g").unwrap();
+    let half = 2048;
+    let creates = |prefix: &str| -> Vec<GraphOp> {
+        (0..half)
+            .map(|index| GraphOp::CreateNode {
+                key: format!("{prefix}{index}"),
+                labels: Vec::new(),
+                properties: Metadata::new(),
+            })
+            .collect()
+    };
+    let mut graph = db.graph_mut("g").unwrap();
+    graph.write_batch(&creates("n")).unwrap();
+    let ops: Vec<GraphOp> = creates("m")
+        .into_iter()
+        .enumerate()
+        .flat_map(|(index, create)| [expire_node_op(&format!("n{index}"), Some(PAST)), create])
+        .collect();
+    assert_eq!(ops.len(), 4096);
+    assert_eq!(graph.write_batch(&ops).unwrap().outcomes.len(), 4096);
+    drop(db);
+
+    assert_eq!(stored(&path), (half, 0, 0));
+    verify_graph(&path, None).unwrap();
+    let db = Database::open(&path).unwrap();
+    let graph = db.graph("g").unwrap();
+    assert_eq!(counts(&graph), (half, 0));
+    assert!(graph.get_node("n0").unwrap().output.is_none());
+    assert!(graph.get_node("m2047").unwrap().output.is_some());
+}
+
 #[test]
 fn expired_entities_free_their_unique_values() {
     let mut db = memory();
@@ -684,6 +953,38 @@ fn expired_entities_free_their_unique_values() {
         .unwrap();
     assert!(second.created);
     assert_ne!(second.id, first.id);
+
+    // The operations after a deadline due in the same batch see the value
+    // and the edge identity free as well.
+    let result = graph
+        .write_batch(&[
+            expire_node_op("u2", Some(PAST)),
+            GraphOp::CreateNode {
+                key: "u3".into(),
+                labels: vec!["U".into()],
+                properties: email.clone(),
+            },
+            GraphOp::SetEdgeExpiry {
+                edge: EdgeRef::Id(second.id),
+                expires_at_ms: Some(PAST),
+                expected: Expected::Any,
+            },
+            GraphOp::EnsureEdge {
+                source: "v".into(),
+                relationship: "ONE".into(),
+                destination: "w".into(),
+                properties: Metadata::new(),
+            },
+        ])
+        .unwrap();
+    let GraphOpOutcome::Edge(third) = result.outcomes[3] else {
+        panic!("unexpected outcome {:?}", result.outcomes[3]);
+    };
+    assert!(third.created);
+    assert_ne!(third.id, second.id);
+    let graph = db.graph("g").unwrap();
+    assert_eq!(nodes(&graph), ["v", "w", "u3"]);
+    assert_eq!(counts(&graph), (3, 1));
 }
 
 #[test]
@@ -783,8 +1084,9 @@ fn deadlines_survive_reopen_and_unreclaimed_entities_stay_hidden() {
 }
 
 /// Nodes a..d with edges ab, bc, cd, da and ca and record 1 attached to b.
-/// d expires at `FAR` and edge ca at `FAR - 5`; the last write expires b
-/// (taking ab and bc) and edge cd, so the source still stores them.
+/// d expires at `FAR` and edge ca at `FAR - 5`. The last write expires edge
+/// cd, which its next operation removes, and then b (taking ab and bc),
+/// which the source still stores.
 fn expiring_source(db: &mut Database) {
     db.put(1, &[1.0, 0.0], b"one").unwrap();
     db.create_graph("g").unwrap();
@@ -799,16 +1101,8 @@ fn expiring_source(db: &mut Database) {
         .unwrap();
     graph
         .write_batch(&[
-            GraphOp::SetNodeExpiry {
-                key: "b".into(),
-                expires_at_ms: Some(PAST),
-                expected: Expected::Any,
-            },
-            GraphOp::SetEdgeExpiry {
-                edge: EdgeRef::Key("cd".into()),
-                expires_at_ms: Some(PAST),
-                expected: Expected::Any,
-            },
+            expire_edge_op("cd", Some(PAST)),
+            expire_node_op("b", Some(PAST)),
         ])
         .unwrap();
 }
@@ -834,7 +1128,7 @@ fn compaction_drops_expired_nodes_with_their_edges() {
     let mut db = Database::create(&source, 2).unwrap();
     expiring_source(&mut db);
     drop(db);
-    assert_eq!(stored(&source), (4, 5, 1));
+    assert_eq!(stored(&source), (4, 4, 1));
 
     let compacted = dir.path().join("c.vlite");
     maintenance::compact(&source, &compacted).unwrap();
@@ -882,7 +1176,7 @@ fn deadlines_survive_conversion_and_backup() {
     // A file backup is a byte copy: the expired entities are still stored.
     let copy = dir.path().join("copy.vlite");
     maintenance::backup(&file, &copy).unwrap();
-    assert_eq!(stored(&copy), (4, 5, 1));
+    assert_eq!(stored(&copy), (4, 4, 1));
     verify_graph(&copy, None).unwrap();
     {
         let db = Database::open(&copy).unwrap();

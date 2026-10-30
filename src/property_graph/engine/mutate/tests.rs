@@ -1,5 +1,6 @@
 use super::super::codec::{decode_body, encode_body};
 use super::super::limits::MAX_BATCH_ENTRIES;
+use super::super::model::Direction;
 use super::*;
 use std::collections::BTreeMap;
 
@@ -630,6 +631,173 @@ fn deadlines_are_planned_and_due_entities_are_absent() {
         .collect();
     db.run_at(Some(30), &full).unwrap();
     assert_eq!(db.graph().node_count(), 2 + MAX_BATCH_ENTRIES);
+    db.check();
+}
+
+/// A deadline due at the batch clock takes effect within the batch: the
+/// next mutation first plans a reclaim at that clock, so it and every later
+/// one see the node (with all its edges and attachments) or the edge as
+/// absent. Reclaims do not count against the entry limit.
+#[test]
+fn deadlines_due_at_the_batch_clock_take_effect_within_the_batch() {
+    let mut db = Db::new();
+    let attach = |node: &str| GraphMutation::Attach {
+        node: node.into(),
+        collection: 1,
+        record: 7,
+    };
+    db.ok(&[
+        create("a"),
+        create("b"),
+        edge(Some("e"), "a", "b"),
+        edge(Some("f"), "b", "b"),
+        attach("a"),
+    ]);
+    let node_expiry = |key: &str, expires_at_ms| GraphMutation::SetNodeExpiry {
+        key: key.into(),
+        expires_at_ms,
+        expected: Precondition::Any,
+    };
+    let edge_expiry = |key: &str, expires_at_ms| GraphMutation::SetEdgeExpiry {
+        edge: EdgeSelector::Key(key.into()),
+        expires_at_ms,
+        expected: Precondition::Any,
+    };
+    let revision = db.graph().node_by_key("a").unwrap().revision;
+    let expire_a = || node_expiry("a", Some(10));
+    let rejected = [
+        (
+            vec![expire_a(), node_expiry("a", None)],
+            GraphError::UnknownNodeKey("a".into()),
+        ),
+        (
+            vec![expire_a(), edge(None, "b", "a")],
+            GraphError::UnknownNodeKey("a".into()),
+        ),
+        (
+            vec![expire_a(), attach("a")],
+            GraphError::UnknownNodeKey("a".into()),
+        ),
+        (
+            vec![
+                expire_a(),
+                GraphMutation::UpsertNode {
+                    key: "a".into(),
+                    labels: set(&["L"]),
+                    properties: Properties::new(),
+                    expected: Precondition::Revision(revision),
+                },
+            ],
+            GraphError::PreconditionFailed { current: None },
+        ),
+        (
+            vec![expire_a(), edge_expiry("e", None)],
+            GraphError::UnknownEdgeKey("e".into()),
+        ),
+        (
+            vec![
+                edge_expiry("f", Some(3)),
+                GraphMutation::PatchEdge {
+                    edge: EdgeSelector::Key("f".into()),
+                    set: Properties::new(),
+                    unset: BTreeSet::new(),
+                    expected: Precondition::Any,
+                },
+            ],
+            GraphError::UnknownEdgeKey("f".into()),
+        ),
+    ];
+    for (mutations, error) in rejected {
+        assert_eq!(db.run_at(Some(10), &mutations), Err(error), "{mutations:?}");
+    }
+    // A deadline after the clock changes nothing else.
+    assert_eq!(
+        db.run_at(
+            Some(10),
+            &[node_expiry("a", Some(11)), node_expiry("a", None)]
+        ),
+        Ok(vec![node(0, false), node(0, false)])
+    );
+    db.check();
+
+    // The body: a due expiry entry is followed by a reclaim at the clock,
+    // planned by the next mutation even when that one fails.
+    {
+        let mut planner = db.state.planner(db.sequence + 1, G).unwrap();
+        planner.reclaim_expired(10);
+        planner.mutate(&expire_a()).unwrap();
+        assert_eq!(
+            planner.mutate(&edge_expiry("e", None)),
+            Err(GraphError::UnknownEdgeKey("e".into()))
+        );
+        planner.mutate(&create("a")).unwrap();
+        assert!(matches!(
+            planner.finish().entries[..],
+            [
+                GraphEntry::NodeExpiry { .. },
+                GraphEntry::Reclaim { at_ms: 10 },
+                GraphEntry::PutNode { .. },
+            ]
+        ));
+    }
+    let replaced = db
+        .run_at(
+            Some(10),
+            &[
+                expire_a(),
+                create("a"),
+                edge(Some("e"), "a", "b"),
+                attach("a"),
+                edge_expiry("f", Some(10)),
+                edge(Some("f"), "b", "b"),
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        replaced,
+        [
+            node(0, false),
+            node(2, true),
+            edge_outcome(2, true),
+            MutationOutcome::Attached(NodeId(2)),
+            edge_outcome(1, false),
+            edge_outcome(3, true),
+        ]
+    );
+    let graph = db.graph();
+    assert_eq!((graph.node_count(), graph.edge_count()), (2, 2));
+    assert_eq!(
+        graph.edges_of(NodeId(1), Direction::Both),
+        [EdgeId(2), EdgeId(3)]
+    );
+    assert_eq!(db.state.attachment_owner(1, 7), Some((G, NodeId(2))));
+    db.check();
+
+    // Half the batch expires nodes and half replaces them: 6,144 entries.
+    let half = MAX_BATCH_ENTRIES / 2;
+    db.ok(&(0..half)
+        .map(|i| create(&format!("n{i}")))
+        .collect::<Vec<_>>());
+    let mut full: Vec<_> = (0..half)
+        .flat_map(|i| {
+            [
+                node_expiry(&format!("n{i}"), Some(10)),
+                create(&format!("n{i}")),
+            ]
+        })
+        .collect();
+    full.push(create("last"));
+    assert_eq!(
+        db.run_at(Some(10), &full),
+        Err(GraphError::BatchSize("more than 4096 entries"))
+    );
+    full.pop();
+    db.run_at(Some(10), &full).unwrap();
+    assert_eq!(db.graph().node_count(), 2 + half);
+    assert_eq!(
+        db.graph().node_by_key("n0").unwrap().id,
+        NodeId(3 + half as u64)
+    );
     db.check();
 }
 

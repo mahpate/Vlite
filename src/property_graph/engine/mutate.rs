@@ -3,17 +3,21 @@
 //! A [`Planner`] turns caller mutations into graph entries for one batch.
 //! Each mutation is resolved against the current state plus every earlier
 //! mutation of the same batch (they are applied tentatively as they are
-//! planned), so later mutations observe earlier ones. Dropping or finishing
-//! the planner rolls every tentative change back: planning never changes
-//! committed state. The caller then commits the returned body and applies it
-//! with [`GraphState::apply`] (validate, append, apply: PAT-001).
+//! planned), so later mutations observe earlier ones. With a batch clock
+//! ([`Planner::reclaim_expired`]) entities due at it are absent: they are
+//! deleted first, and again before the mutation after a due deadline.
+//! Dropping or finishing the planner rolls every tentative change back:
+//! planning never changes committed state. The caller then commits the
+//! returned body and applies it with [`GraphState::apply`] (validate,
+//! append, apply: PAT-001).
 //!
 //! Record existence for attachments and vector-mutation contents are checked
 //! by the adapter, which can inspect the tentative attachments through
 //! [`Planner::state`] between mutations.
 
-use super::codec::{GraphBody, GraphEntry, max_entries};
+use super::codec::{GraphBody, GraphEntry};
 use super::error::GraphError;
+use super::limits::MAX_BATCH_ENTRIES;
 use super::model::{
     EdgeId, GraphEdge, GraphId, NodeId, Precondition, Properties, PropertyValue, validate_edge_key,
     validate_node_key,
@@ -186,7 +190,11 @@ pub struct Planner<'a> {
     state: &'a mut GraphState,
     graph_id: GraphId,
     sequence: u64,
+    /// The batch clock set by [`Planner::reclaim_expired`].
+    now_ms: Option<u64>,
     entries: Vec<GraphEntry>,
+    /// Entries other than reclaims, which do not count against the limit.
+    counted: usize,
     undo: Vec<Undo>,
 }
 
@@ -206,7 +214,9 @@ impl GraphState {
             state: self,
             graph_id,
             sequence,
+            now_ms: None,
             entries: Vec::new(),
+            counted: 0,
             undo: Vec::new(),
         })
     }
@@ -243,8 +253,8 @@ impl Planner<'_> {
 
     /// Validates and tentatively applies one entry. On error nothing changes.
     fn push(&mut self, entry: GraphEntry) -> Result<(), GraphError> {
-        let reclaims = matches!(self.entries.first(), Some(GraphEntry::Reclaim { .. }));
-        if self.entries.len() >= max_entries(reclaims) {
+        let counts = !matches!(entry, GraphEntry::Reclaim { .. });
+        if counts && self.counted >= MAX_BATCH_ENTRIES {
             return Err(GraphError::BatchSize("more than 4096 entries"));
         }
         entry.validate()?;
@@ -254,6 +264,7 @@ impl Planner<'_> {
         {
             self.undo.push(undo);
         }
+        self.counted += usize::from(counts);
         self.entries.push(entry);
         Ok(())
     }
@@ -261,16 +272,29 @@ impl Planner<'_> {
     /// Adds one vector-mutation entry (one `encode_batch_entries` entry for
     /// `collection`, already validated by the adapter).
     pub fn vector(&mut self, collection: u16, entry: Vec<u8>) -> Result<(), GraphError> {
+        self.reclaim_due();
         self.push(GraphEntry::VectorMutation { collection, entry })
     }
 
-    /// Starts the batch by deleting every node and edge due at
-    /// `now_ms` (with the edges of due nodes), so later mutations see only
-    /// visible entities. Plans nothing when nothing is due. Call it before
-    /// any other mutation; the entry does not count against the batch limit.
+    /// Sets the batch clock to `now_ms` and starts the batch by deleting
+    /// every node and edge due at it (with the edges of due nodes), so later
+    /// mutations see only visible entities. Call it before any other
+    /// mutation.
     pub fn reclaim_expired(&mut self, now_ms: u64) {
         debug_assert!(self.entries.is_empty(), "reclaim must be the first entry");
-        if self.graph().has_due(now_ms) {
+        self.now_ms = Some(now_ms);
+        self.reclaim_due();
+    }
+
+    /// Deletes what is due at the batch clock: everything at the start, and
+    /// later only what the previous expiry entry made due, so a deadline
+    /// takes effect for the rest of the batch. Plans nothing without a clock
+    /// or when nothing is due; reclaims do not count against the batch
+    /// limit. [`Planner::mutate`] and [`Planner::vector`] call it first.
+    pub fn reclaim_due(&mut self) {
+        if let Some(now_ms) = self.now_ms
+            && self.graph().has_due(now_ms)
+        {
             self.push(GraphEntry::Reclaim { at_ms: now_ms })
                 .expect("reclaiming due entities cannot fail");
         }
@@ -313,9 +337,11 @@ impl Planner<'_> {
         }
     }
 
-    /// Plans one mutation. On error nothing planned by this call remains;
-    /// earlier mutations stay planned.
+    /// Plans one mutation. On error nothing planned by this call remains,
+    /// except a reclaim of what an earlier expiry made due (the next call
+    /// would plan it anyway); earlier mutations stay planned.
     pub fn mutate(&mut self, mutation: &GraphMutation) -> Result<MutationOutcome, GraphError> {
+        self.reclaim_due();
         match mutation {
             GraphMutation::CreateNode {
                 key,

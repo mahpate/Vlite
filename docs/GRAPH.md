@@ -75,22 +75,25 @@ bindings do not expose it yet.
   `list_graphs` and `observed_schema` all honour it, and a hidden start node
   fails like a missing one. The clock only decides visibility; it is not
   time travel.
-- **Writes.** Each graph write first removes what is due at the current time,
-  in the same atomic frame, so due entities are absent for it:
-  `Expected::Absent` succeeds (the key gets a new ID), `Expected::Revision`
-  fails with `RevisionMismatch { current: None }`, their keys and unique
-  property values are free again, and an edge or attachment to a due node
-  fails with `GraphNodeNotFound`. A failed batch removes nothing. The removal
-  is one computed entry, not one operation per entity, so the 4,096-operation
-  limit is unaffected.
+- **Writes.** Each graph write takes the current time once as its clock and
+  first removes what is due at it, in the same atomic frame, so due entities
+  are absent for it: `Expected::Absent` succeeds (the key gets a new ID),
+  `Expected::Revision` fails with `RevisionMismatch { current: None }`, their
+  keys and unique property values are free again, and an edge or attachment
+  to a due node fails with `GraphNodeNotFound`. A deadline at or before that
+  clock set by an operation takes effect for the rest of the batch the same
+  way, so later operations cannot clear, patch or link to what it expired. A
+  failed batch removes nothing. Each removal is one computed entry, not one
+  operation per entity, so the 4,096-operation limit is unaffected.
 - **Storage.** Compaction, `upgrade`, directory checkpoints and
   `convert_to_directory` drop due nodes with all their edges, and due edges.
   Deadlines survive reopen, backup and these rewrites. Files that never use
   the expiry operations are written exactly as before; older builds refuse
   those that do as `Corrupt`.
 - **Limits.** Attached records still cannot expire. The change feed does not
-  report deadlines or removals yet. Until the next graph write an expired node
-  keeps its attachments, so their records stay protected.
+  report deadlines or removals yet. Until the next graph write, or the next
+  operation of the same batch, an expired node keeps its attachments, so
+  their records stay protected.
 
 ## Limits
 
