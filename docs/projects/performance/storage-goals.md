@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Draft for review. Not approved; nothing here is implemented |
+| Status | Goals approved 2026-10-30. Work order in [`next-major.md`](../roadmap/next-major.md); nothing implemented yet |
 | Created | 2026-10-29 |
 | Replaces | Options B and C of [`performance-proposal.md`](performance-proposal.md). Option A there still applies to today's format |
 | Key decision | VLite no longer has to keep a database in one file |
@@ -134,12 +134,16 @@ to form the next major release.
   manifest shipping.
 - Quantized and float16 defaults trade bit-exact stored values for size.
 
-## Decisions needed
+## Decisions
 
-1. Approve the directory store as the format for new databases, with old
-   `.vlite` files still readable and converted only on request.
-2. Default stored vector precision for new collections: float16 (smaller,
-   slightly changed stored values) or float32 (unchanged, larger).
-3. Whether competitor parity targets F1–F3 and F7 are release blockers for
-   the next major release, or tracked goals.
-4. Phase order: start with phase 1, or go straight to phase 2.
+Approved 2026-10-30: all goals (S1–S6, F1–F8, must-not-regress) and all
+phases.
+
+1. **Approved:** the directory store is the format for new databases. Old
+   `.vlite` files stay readable and are converted only on request.
+2. **Open:** default stored vector precision for new collections: float16
+   (smaller, slightly changed stored values) or float32 (unchanged, larger).
+   Needed before phase 3.
+3. **Open:** whether parity targets F1–F3 and F7 block the release or stay
+   tracked goals. Needed before the release benchmark.
+4. **Approved:** phase 1 first, then phase 2.

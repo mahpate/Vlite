@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Agreed scope 2026-10-30. Work starts with wave 1 below |
+| Status | All goals and work items approved 2026-10-30. Speed P1 and the key-value API start first |
 | Sources | [`storage-goals.md`](../performance/storage-goals.md) (speed and size goals, decisions 1–4), [`product-gaps.md`](../product-gaps/product-gaps.md) (gaps 1–12), Option A of [`performance-proposal.md`](../performance/performance-proposal.md) |
 | Benchmarks | DO-005 runs once, after the next store version lands, under the unchanged quiet gate. No campaign runs before then |
 
@@ -10,16 +10,16 @@
 
 | Item | Track | What it delivers | Goals or exit | Size | Needs first |
 |---|---|---|---|---|---|
-| Speed P1: quick wins | Speed | Remove the exact-search regression, background index rebuilds, compact in-memory graph | F2, F5, S4 | S–M | Decision 4 (phase order) |
-| Speed P2: directory store | Speed | WAL, immutable segments and an atomic manifest, background merges, converter | F4, S6, no regressions | L | Decision 1 (format) |
-| Speed P3: compact vectors | Speed | float16 storage, quantized codes, saved ANN graph, SIMD | F1, F3, S1, S2 | L | P2; decision 2 (precision) |
+| Speed P1: quick wins | Speed | Remove the exact-search regression, background index rebuilds, compact in-memory graph | F2, F5, S4 | S–M | Ready (phase order approved) |
+| Speed P2: directory store | Speed | WAL, immutable segments and an atomic manifest, background merges, converter | F4, S6, no regressions | L | P1 (format approved) |
+| Speed P3: compact vectors | Speed | float16 storage, quantized codes, saved ANN graph, SIMD | F1, F3, S1, S2 | L | P2; precision choice (open) |
 | Speed P4: compact graph | Speed | CSR adjacency, encoded labels, parallel bulk load | S3, S4, F6 | M–L | P2 |
 | Speed P5: filters and server | Speed | Segment statistics and bitmaps, filter-aware ANN, Arrow or protobuf responses | F7, F8, S5 | M | P2 |
-| Gap 2: key-value API | Agent memory | Namespaced string keys, vector-free values, expiry, conditional writes | Pool claims, framework stores | S–M | OpenAPI approval |
-| Gap 3: graph TTL | Agent memory | Expiring nodes and edges with no dangling edges | Replaces the pool's sweeper | M | Edge-expiry rule decision |
+| Gap 2: key-value API | Agent memory | Namespaced string keys, vector-free values, expiry, conditional writes | Pool claims, framework stores | S–M | Ready: Rust API first; OpenAPI diff reviewed before merge |
+| Gap 3: graph TTL | Agent memory | Expiring nodes and edges with no dangling edges | Replaces the pool's sweeper | M | Edge-expiry rule (open) |
 | Gap 4: time-aware graph | Agent memory | `valid_from`/`valid_to` and "as of" reads | Fact history | M | Revisit the PRD deferral |
 | Gap 1: agent memory API | Agent memory | remember, recall, consolidate, forget | Mem0/Zep-style layer | M | Gaps 2–4 |
-| Gaps 5–7 | Graph depth | Graph algorithms, Cypher subset with writes, GraphRAG ingestion | Graph parity | L | Scope decision 3 |
+| Gaps 5–7 | Graph depth | Graph algorithms, Cypher subset with writes, GraphRAG ingestion | Graph parity | L | Ready (Cypher writes approved) |
 | Gaps 8 and 12 | Serving | Server-side reranking and embeddings, gRPC graph | SDK reach | M | None |
 | Gaps 9–11 | Scale-out | Network replication, object storage tier, branching | Cost and availability | L | Speed P2 |
 
@@ -36,6 +36,13 @@ flowchart LR
   P5 --> BENCH[DO-005 and major release]
   MEM --> BENCH
 ```
+
+## Still open
+
+- Default stored precision, float16 or float32 (before P3).
+- Graph TTL edge-expiry rule (before gap 3).
+- Whether parity targets F1–F3 and F7 block the release.
+- Which scale-out item comes first after P2.
 
 ## Rules for every item
 

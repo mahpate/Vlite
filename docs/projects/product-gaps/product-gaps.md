@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Research for review. Not approved; nothing here is implemented or scheduled |
+| Status | Approved 2026-10-30 as the feature track of [`next-major.md`](../roadmap/next-major.md); nothing implemented yet |
 | Created | 2026-10-29 |
 | Scope | What VLite's vector store, property graph and the peer pool (a private, owner-only project) still lack to form one complete product |
 | Related | [`storage-goals.md`](../performance/storage-goals.md) (speed and size), [`feature-agent-graph.prd.md`](../feature-agent-graph/feature-agent-graph.prd.md) (graph scope and deferrals) |
@@ -96,11 +96,13 @@ Peer-pool gaps are tracked in the pool repository's `TODO.md` under
   validity rules must not leave dangling edges.
 - Benchmarks are run only at major releases.
 
-## Decisions needed
+## Decisions
 
-1. Approve the agent memory track (items 1–4) as the next feature work
-   alongside the storage goals, or keep storage first.
-2. For graph TTL: should an expiring node expire its edges, or should nodes
-   with live edges be kept until the edges expire?
-3. Whether openCypher with writes (item 6) moves into scope.
-4. Which scale-out item (9, 10 or 11) comes first after the directory store.
+1. **Approved:** the agent memory track (items 1–4) runs alongside the
+   storage goals, starting with the key-value API (item 2).
+2. **Open:** for graph TTL, does an expiring node expire its edges, or are
+   nodes with live edges kept until the edges expire? Needed before item 3.
+3. **Approved:** openCypher with writes (item 6) is in scope, with graph
+   depth (items 5–7).
+4. **Open:** which scale-out item (9, 10 or 11) comes first after the
+   directory store.
