@@ -44,6 +44,24 @@ flowchart LR
 - Whether parity targets F1–F3 and F7 block the release.
 - Which scale-out item comes first after P2.
 
+## Progress
+
+Local numbers below show direction only (see rules).
+
+- **Speed P1, exact search (F2):** the boxed iterator is gone. At 100k×384,
+  k=10 and 16 threads, p50 went from 8.2–8.3 ms to 7.1–7.9 ms, with identical
+  results.
+- **Speed P1, background rebuilds (F5):** opt-in
+  `set_background_hnsw_rebuild` keeps serving the ready index while a buffer
+  overflow rebuilds in the background. The stall has not been measured yet.
+- **Speed P1, compact graph (S4):** partly done. Sorted adjacency with shared
+  relationship names cut adjacency from 146 to 54 B/edge and total retained
+  memory from 1,016 to 925 B/edge. Edge records (761 B/edge) are next.
+- **Gap 2, key-value:** the embedded Rust API is done
+  ([storage features](../../STORAGE-FEATURES.md#key-value-store)): namespaces,
+  ordered prefix lists, expiry, compare-and-set and fencing tokens, with no
+  format change. REST and gRPC wait for the OpenAPI review.
+
 ## Rules for every item
 
 - Existing `.vlite` files keep opening; format changes arrive only with P2 and

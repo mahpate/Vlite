@@ -243,6 +243,36 @@ persisted. Server: `--durability periodic|full|none [--flush-interval-ms N]`;
 C ABI, Python and Node: `durability` and `flush_interval_ms` plus `sync`. See
 [periodic durability](REFERENCE.md#periodic-lazy-durability) for reopen cases.
 
+## Key-value store
+
+`Database::kv_store(collection)` (Rust only, v4+) stores namespaced string keys
+with byte values, no vector needed. It uses an ordinary one-dimension
+collection, created on first use, so the file format is unchanged.
+
+```rust
+use vlite::{Expected, kv::KvPut};
+let mut kv = db.kv_store("agent-memory")?;
+let token = kv.put("pool", "claim/42", b"worker-a", KvPut {
+    expected: Expected::Absent,        // create only
+    expires_at_ms: Some(lease_end_ms), // v5 files only
+})?;
+kv.delete("pool", "claim/42", Expected::Revision(token))?;
+```
+
+- **Versions** are commit sequences. Use them for compare-and-set
+  (`Expected::Revision`) and as fencing tokens. They change after compaction,
+  upgrade or restore, so re-read the entry after any of those.
+- **Expiry** hides an entry at its deadline. `Expected::Absent` then
+  succeeds. Expiry on a v4 file returns `ExpiryRequiresUpgrade`.
+- **Listing** with `view().list(namespace, prefix, after, limit)` returns keys
+  in order, up to 10,000 per page. It scans the whole collection.
+- **Limits:** namespaces up to 255 bytes, keys up to 1,024 bytes, values just
+  under 1 MiB.
+- **Hash collisions:** keys hash to 16 consecutive record IDs. If all 16 hold
+  other keys, `KvSlotsExhausted` is returned. Other records in the collection
+  are never overwritten.
+- REST, gRPC and bindings come after the OpenAPI review.
+
 ## Limitations
 
 - A passphrase is only as strong as its entropy; tune `KdfParams` for your

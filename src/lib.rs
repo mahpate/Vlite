@@ -25,6 +25,7 @@ mod format;
 mod hnsw;
 pub mod hybrid;
 pub mod import;
+pub mod kv;
 mod metadata;
 pub mod metadata_index;
 pub mod planner;
@@ -456,6 +457,12 @@ pub enum Error {
     /// A hybrid-retrieve pivot would exact-scan a collection above its
     /// live-record bound (PD-016); use a ready ANN leg or a text-only pivot.
     GraphPivotTooExpensive,
+    /// Invalid key-value namespace, key or list limit.
+    InvalidKvKey(&'static str),
+    /// Every probe slot for the key holds a different live key; nothing was written.
+    KvSlotsExhausted,
+    /// The collection does not have exactly one dimension.
+    NotKvCollection,
 }
 
 impl fmt::Display for Error {
@@ -712,6 +719,14 @@ impl fmt::Display for Error {
                 f,
                 "pivot would exact-scan a collection above max_exact_scan_records; use a ready ANN index or a text-only pivot"
             ),
+            Self::InvalidKvKey(reason) => write!(f, "invalid key-value request: {reason}"),
+            Self::KvSlotsExhausted => write!(
+                f,
+                "every key-value probe slot holds a different key; use another collection"
+            ),
+            Self::NotKvCollection => {
+                write!(f, "a key-value collection must have exactly one dimension")
+            }
         }
     }
 }
