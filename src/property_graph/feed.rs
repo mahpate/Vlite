@@ -15,7 +15,7 @@ use crate::changes::{ChangeKind, GraphChange};
 use crate::{Error, Metadata, Mutation, Record, Result, format};
 
 use super::convert::metadata_from_properties;
-use super::engine::{self, GraphEntry};
+use super::engine::GraphEntry;
 
 #[derive(Default)]
 struct Tracked {
@@ -37,19 +37,21 @@ fn labels(set: &BTreeSet<String>) -> Vec<String> {
 }
 
 impl FeedGraphs {
-    /// Decodes one checksum-verified op-12 body into `(collection, kind)`
-    /// events. `collections` maps collection IDs to names and dimensions.
+    /// Decodes one checksum-verified op-12 or op-15 frame at `offset` into
+    /// `(collection, kind)` events, by the rule full replay applies
+    /// ([`super::frame::decode_frame`]). `collections` maps collection IDs
+    /// to names and dimensions.
     pub(crate) fn frame(
         &mut self,
-        sequence: u64,
-        count: u32,
-        body: &[u8],
+        frame: &format::RawFrame,
         offset: u64,
         collections: &BTreeMap<u16, (String, usize)>,
     ) -> Result<Vec<(String, ChangeKind)>> {
         let corrupt = |reason| Error::Corrupt { offset, reason };
+        let sequence = frame.sequence;
+        let snapshot = frame.operation == format::OP_GRAPH_SNAPSHOT;
         let body =
-            engine::decode_body(body, count).map_err(|_| corrupt("invalid graph frame body"))?;
+            super::frame::decode_frame(snapshot, frame.id, frame.count, frame.body(), offset)?;
         let graph_id = body.graph_id.0;
         let collection_name = |collection: u16| {
             collections

@@ -98,6 +98,8 @@ All integers below are little-endian.
 | 28 | 4 | payload_len | body length (as op 3 batch frames) |
 | 32 | 4 | prefix CRC32 | existing |
 
+> Superseded in part by [Gap 3 graph frame rule](#gap-3-graph-frame-rule-2026-10-30): for op 12, `id` counts the body's reclaim entries.
+
 The body follows (sealed with the existing AEAD in encrypted files: 12-byte nonce + ciphertext + 16-byte tag), then the footer `VCMT` + CRC32 u32 + sequence u64.
 
 **Body (tested):**
@@ -257,6 +259,7 @@ Recorded under the user's delegation. These are engineering decisions, not GATE 
   - `collection` and `reserved` are 0, `id` is 0;
   - `1 <= count <= 4,096`;
   - `payload_len` is between the body length implied by `count` (`4 + 8·count`) and 16 MiB.
+  - Superseded in part by [Gap 3 graph frame rule](#gap-3-graph-frame-rule-2026-10-30): `id` counts the body's reclaim entries.
 - Replay order: the prefix CRC, body CRC and sequence are checked, encrypted bodies are opened, and the body is then decoded completely and applied by the atomic `GraphState::apply` (validate first, roll back on error). Any failure fails the whole open with `Corrupt`; no partial graph state is ever published.
 - Writes use the existing commit path: sequence, lock, CRC, sealing, timestamp anchors and `durable_group`.
 - `create_with_graph` creates a V5 file with `FLAG_GRAPH`. An explicit V3 or V4 request returns `GraphsRequireV5`.
@@ -1083,3 +1086,31 @@ not cover resource limits beyond `GraphLimits::CEILING`.
   collected yet.
 - **Cadence (owner decision 2026-10-27).** Benchmark campaigns, vector and
   graph, run for major releases only, not for minor or patch releases.
+
+## Gap 3 graph frame rule (2026-10-30)
+
+Graph expiry (product gap item 3) adds reclaim entries to op-12 bodies, and
+the op-12 prefix `id` counts them. This supersedes the `id` value in
+[DO-003](#do-003--graph-frame-byte-layout-and-op-tag) and the frame-prefix
+rule in
+[EPIC-003 storage integration](#epic-003-storage-integration-v126-uncommitted-pending-review),
+which stay as written.
+
+- **Op 12, `id` 0.** Unchanged: no reclaim entries, `1 <= count <= 4,096`,
+  and `payload_len` between `4 + 8·count` and 16 MiB. Files that never use
+  graph expiry keep this rule and their bytes.
+- **Op 12, `id` above 0.** `id` is the number of reclaim entries in the
+  body. The other entries number 1..=4,096, and there is at most one more
+  reclaim than other entries. `payload_len` is at most 16 MiB and at least
+  `4 + 8·count + 8·id + 16·(id − 1)`: the entry headers, each reclaim's
+  clock, and the expiry entry each later reclaim follows. Older builds reject
+  these frames as corrupt.
+- **Op 15 (checkpoint snapshot).** `id` is 0 and the body has no reclaim
+  entries; count and length follow the op-12 `id` 0 rule.
+- **One rule for every reader.** `frame::check_prefix` checks the prefix, and
+  `frame::decode_frame` decodes the body and requires exactly `id` reclaims.
+  Full replay (open, tail repair, `ReplicaFollower`, maintenance, directory
+  stores) and the change feed (`read_log_changes`, `changes_after` and the
+  surfaces built on them) use both, so the feed reports no frame that open
+  rejects. The loader checks the prefix before it treats a short final frame
+  as a torn tail, so a frame that breaks the rule is corrupt even when torn.

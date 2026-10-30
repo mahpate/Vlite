@@ -36,6 +36,52 @@ pub(crate) fn reclaim_count(body: &GraphBody) -> u64 {
         .count() as u64
 }
 
+/// Checks the prefix of an op-12 frame, or of an op-15 snapshot frame when
+/// `snapshot`, at `offset`: [`super::valid_frame_prefix`], and ID 0 for
+/// snapshots, whose bodies hold no reclaims. The loader applies it before
+/// treating a short final frame as a torn tail.
+pub(crate) fn check_prefix(
+    snapshot: bool,
+    id: u64,
+    count: usize,
+    payload_len: usize,
+    offset: u64,
+) -> Result<()> {
+    if (snapshot && id != 0) || !super::valid_frame_prefix(id, count, payload_len) {
+        let reason = if snapshot {
+            "invalid graph snapshot"
+        } else {
+            "invalid graph frame count, reserved ID or body length"
+        };
+        return Err(corrupt(offset, reason));
+    }
+    Ok(())
+}
+
+/// Decodes the checksum-verified body of an op-12 frame, or of an op-15
+/// snapshot frame when `snapshot`: its prefix passes [`check_prefix`] and
+/// the body decodes with exactly `id` reclaims. Full replay and the change
+/// feed decode graph frames only through this, so they accept the same
+/// frames.
+pub(crate) fn decode_frame(
+    snapshot: bool,
+    id: u64,
+    count: u32,
+    body: &[u8],
+    offset: u64,
+) -> Result<GraphBody> {
+    check_prefix(snapshot, id, count as usize, body.len(), offset)?;
+    let reason = if snapshot {
+        "invalid graph snapshot"
+    } else {
+        "invalid graph frame body"
+    };
+    engine::decode_body(body, count)
+        .ok()
+        .filter(|body| reclaim_count(body) == id)
+        .ok_or_else(|| corrupt(offset, reason))
+}
+
 /// Replays one checksum-verified op-12 body committed at `sequence` (frame at
 /// `offset`). Every entry is decoded and validated first; then graph entries
 /// are applied atomically to `state` and vector entries, in body order, to
@@ -43,7 +89,8 @@ pub(crate) fn reclaim_count(body: &GraphBody) -> u64 {
 /// an `Attach` entry or owning a record changed by a vector entry) must
 /// reference a live record without expiry. Any failure fails the open.
 /// `restated` bodies come from a checkpoint image and may repeat the last
-/// applied sequence. The prefix `id` must count the body's reclaims.
+/// applied sequence. The body is decoded by [`decode_frame`], so the prefix
+/// `id` must count its reclaims.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn replay(
     state: &mut GraphState,
@@ -55,10 +102,7 @@ pub(crate) fn replay(
     offset: u64,
     restated: bool,
 ) -> Result<()> {
-    let body = engine::decode_body(body, count)
-        .ok()
-        .filter(|body| reclaim_count(body) == id)
-        .ok_or_else(|| corrupt(offset, "invalid graph frame body"))?;
+    let body = decode_frame(false, id, count, body, offset)?;
     let mut mutations = Vec::new();
     let mut touched = Vec::new();
     for entry in &body.entries {

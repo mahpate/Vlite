@@ -395,7 +395,7 @@ fn scan<R: Read + Seek>(
                 // Snapshot bodies of a checkpoint image track graph keys for
                 // later frames; like all restated frames, they are at or
                 // before every valid cursor.
-                events = graphs.frame(frame.sequence, frame.count, body, offset, &collections)?;
+                events = graphs.frame(&frame, offset, &collections)?;
             }
             // Record blocks restate records at the checkpoint: no change is
             // after the cursor, and no later frame needs their contents.

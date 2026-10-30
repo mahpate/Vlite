@@ -15,6 +15,7 @@ use std::fs;
 use std::path::Path;
 
 use tempfile::tempdir;
+use vlite::changes::{Change, ChangeKind, FeedCursor, GraphChange, read_log_changes};
 use vlite::maintenance;
 use vlite::property_graph::{
     Direction, EdgeRef, EvidenceSpec, Expansion, FindNodes, GraphOp, GraphOpOutcome, GraphRef,
@@ -1248,6 +1249,65 @@ fn deadlines_survive_conversion_and_backup() {
     let packed = dir.path().join("packed.vlite");
     maintenance::backup(&store, &packed).unwrap();
     assert_reclaimed(&packed);
+}
+
+/// The change feed reads frames whose prefix ID counts their removals:
+/// plain and encrypted closed logs report what the open database reports,
+/// and a directory store feeds from its checkpoint image on.
+#[test]
+fn change_feeds_read_frames_that_carry_removals() {
+    let dir = tempdir().unwrap();
+    // Creating e removes b, which `expiring_source` expired.
+    let create_e = |db: &mut Database| {
+        db.graph_mut("g")
+            .unwrap()
+            .create_node("e", &[], &Metadata::new())
+            .unwrap();
+    };
+    let created_e = |changes: &[Change]| {
+        matches!(
+            &changes.last().unwrap().kind,
+            ChangeKind::GraphBatch { operations, .. }
+                if matches!(
+                    &operations[..],
+                    [GraphChange::NodeUpserted { key, created: true, .. }] if key == "e"
+                )
+        )
+    };
+    for encrypted in [false, true] {
+        let path = dir.path().join(format!("{encrypted}.vlite"));
+        let key = || encrypted.then(|| EncryptionKey::from_bytes([7; 32]));
+        let options = CreateOptions {
+            encryption: key(),
+            ..CreateOptions::default()
+        };
+        let mut db = Database::create_with_options(&path, 2, options).unwrap();
+        expiring_source(&mut db);
+        let at = fs::metadata(&path).unwrap().len() as usize;
+        create_e(&mut db);
+        let live = db.changes_after(&FeedCursor::beginning(), 10_000).unwrap();
+        drop(db);
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(&bytes[at..at + 5], b"VREC\x0c");
+        assert_eq!(bytes[at + 16..at + 24], 1u64.to_le_bytes());
+        let closed =
+            read_log_changes(&path, key().as_ref(), &FeedCursor::beginning(), 10_000).unwrap();
+        assert_eq!(closed, live);
+        assert!(created_e(&closed.changes), "{:?}", closed.changes);
+    }
+
+    let store = dir.path().join("store");
+    let mut db = Database::create_directory(&store, 2, CreateOptions::default()).unwrap();
+    db.set_checkpoint_threshold(None);
+    expiring_source(&mut db);
+    let floor = db.checkpoint().unwrap().unwrap();
+    create_e(&mut db);
+    let cursor = FeedCursor {
+        lineage: db.lineage().unwrap(),
+        sequence: floor,
+    };
+    let fed = db.changes_after(&cursor, 10_000).unwrap();
+    assert!(created_e(&fed.changes), "{:?}", fed.changes);
 }
 
 /// Pre-TTL encodings of `workload` (captured at d530b4c, after the 32-byte

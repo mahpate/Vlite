@@ -1599,26 +1599,22 @@ fn load_inner<R: Read + Seek>(
         let id = u64_at(&prefix, 16);
         let count = u32_at(&prefix, 24) as usize;
         let payload_len = u32_at(&prefix, 28) as usize;
-        if operation == OP_GRAPH
-            && !crate::property_graph::valid_frame_prefix(id, count, payload_len)
-        {
-            return Err(corrupt(
+        if matches!(operation, OP_GRAPH | OP_GRAPH_SNAPSHOT) {
+            crate::property_graph::frame::check_prefix(
+                operation == OP_GRAPH_SNAPSHOT,
+                id,
+                count,
+                payload_len,
                 offset,
-                "invalid graph frame count, reserved ID or body length",
-            ));
+            )?;
         }
         // A snapshot loads into an empty graph state: before any graph
-        // frame, unless it continues the snapshot being read. Its body has
-        // no reclaims, so its ID is zero.
+        // frame, unless it continues the snapshot being read.
         let graph_started = loaded
             .graph
             .as_ref()
             .is_some_and(|graph| graph.last_sequence() != 0);
-        if operation == OP_GRAPH_SNAPSHOT
-            && (id != 0
-                || !crate::property_graph::valid_frame_prefix(id, count, payload_len)
-                || (snapshot.is_none() && graph_started))
-        {
+        if operation == OP_GRAPH_SNAPSHOT && snapshot.is_none() && graph_started {
             return Err(corrupt(offset, "invalid graph snapshot"));
         }
         let target_dimensions =
@@ -1928,8 +1924,13 @@ fn load_inner<R: Read + Seek>(
                 restated,
             )?,
             OP_GRAPH_SNAPSHOT => {
-                let body = crate::property_graph::engine::decode_body(body, count as u32)
-                    .map_err(|_| corrupt(offset, "invalid graph snapshot"))?;
+                let body = crate::property_graph::frame::decode_frame(
+                    true,
+                    id,
+                    count as u32,
+                    body,
+                    offset,
+                )?;
                 snapshot
                     .get_or_insert_with(|| (offset, Vec::new()))
                     .1

@@ -641,3 +641,126 @@ fn frame_prefixes_bound_entries_by_their_reclaim_count() {
     assert!(!valid_frame_prefix(9, 1, 1 << 10) && !valid_frame_prefix(u64::MAX, 1, 1 << 10));
     assert!(!valid_frame_prefix(0, 1, MAX_BATCH_BYTES + 1));
 }
+
+/// Gap 3: an encrypted log applies the same graph frame rule to the
+/// decrypted body. A correctly sealed frame whose prefix ID does not count
+/// its reclaims is corrupt for full replay and the change feed alike.
+#[test]
+fn sealed_graph_frames_follow_one_rule_for_replay_and_feeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sealed.vlite");
+    let key = || crate::EncryptionKey::from_bytes([7; 32]);
+    let options = crate::CreateOptions {
+        encryption: Some(key()),
+        ..crate::CreateOptions::default()
+    };
+    let mut db = Database::create_with_options(&path, 2, options).unwrap();
+    db.create_graph("g").unwrap();
+    db.close().unwrap();
+    let base = fs::read(&path).unwrap();
+    let cipher = format::read_log_header(&mut fs::File::open(&path).unwrap(), Some(&key()))
+        .unwrap()
+        .cipher
+        .unwrap();
+    let body = engine::encode_body(&GraphBody {
+        graph_id: GraphId(0),
+        entries: vec![
+            GraphEntry::Reclaim { at_ms: 5 },
+            GraphEntry::PutNode {
+                node_id: engine::NodeId(0),
+                key: "a".into(),
+                labels: Default::default(),
+                properties: Default::default(),
+            },
+        ],
+    })
+    .unwrap();
+    let check = |id: u64| {
+        let sealed = cipher
+            .seal_frame(&format::graph_frame(2, id, 2, &body))
+            .unwrap();
+        fs::write(&path, [base.as_slice(), &sealed].concat()).unwrap();
+        let start = crate::changes::FeedCursor::beginning();
+        [
+            Database::open_encrypted(&path, &key()).map(drop),
+            crate::changes::read_log_changes(&path, Some(&key()), &start, 16).map(drop),
+        ]
+    };
+    for result in check(1) {
+        result.unwrap();
+    }
+    for (id, reason) in [
+        (0, "invalid graph frame body"),
+        (2, "invalid graph frame count, reserved ID or body length"),
+    ] {
+        for (reader, result) in ["open", "feed"].into_iter().zip(check(id)) {
+            assert!(
+                matches!(&result, Err(Error::Corrupt { reason: actual, .. }) if *actual == reason),
+                "{reader} {id}: {result:?}"
+            );
+        }
+    }
+}
+
+/// Gap 3: op-15 snapshot bodies hold no reclaims, so their prefix ID is 0.
+/// A checkpoint image breaking that, with or without a reclaim in the body,
+/// is corrupt for full replay and the change feed alike.
+#[test]
+fn snapshot_frames_keep_id_zero_for_replay_and_feeds() {
+    let image = |id: u64, reclaim: bool| {
+        let mut entries = vec![
+            GraphEntry::CreateGraph { name: "g".into() },
+            GraphEntry::GraphHighWater {
+                next_node_id: 0,
+                next_edge_id: 0,
+            },
+        ];
+        if reclaim {
+            entries.insert(0, GraphEntry::Reclaim { at_ms: 5 });
+        }
+        let count = entries.len() as u32;
+        let graph_id = GraphId(0);
+        let body = engine::encode_body(&GraphBody { graph_id, entries }).unwrap();
+        // Rewrite the prefix ID with valid checksums.
+        let mut frame = format::graph_snapshot_frame(5, count, &body);
+        frame[16..24].copy_from_slice(&id.to_le_bytes());
+        let checksum = format::crc32(&frame[..32]);
+        frame[32..36].copy_from_slice(&checksum.to_le_bytes());
+        let end = frame.len() - 16;
+        let checksum = format::crc32(&frame[..end]);
+        frame[end + 4..end + 8].copy_from_slice(&checksum.to_le_bytes());
+        let flags = format::FLAG_HISTORY | format::FLAG_GRAPH;
+        let mut bytes = format::header_v5_flags(2, 9, 0, flags, None);
+        bytes.extend(format::advance_frame(5));
+        bytes.extend(frame);
+        bytes
+    };
+    let check = |bytes: Vec<u8>| {
+        let floor = crate::changes::FeedCursor {
+            lineage: 9,
+            sequence: 5,
+        };
+        let mut file = std::io::Cursor::new(bytes);
+        [
+            format::load(&mut file).map(drop),
+            crate::changes::read_changes(&mut file, None, None, &floor, 16).map(drop),
+        ]
+    };
+    for result in check(image(0, false)) {
+        result.unwrap();
+    }
+    for (id, reclaim) in [(1, false), (0, true), (1, true)] {
+        for (reader, result) in ["load", "feed"].into_iter().zip(check(image(id, reclaim))) {
+            assert!(
+                matches!(
+                    result,
+                    Err(Error::Corrupt {
+                        reason: "invalid graph snapshot",
+                        ..
+                    })
+                ),
+                "{reader} {id} {reclaim}: {result:?}"
+            );
+        }
+    }
+}

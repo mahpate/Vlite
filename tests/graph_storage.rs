@@ -11,7 +11,7 @@
 use std::fs;
 
 use tempfile::tempdir;
-use vlite::changes::{ChangeKind, FeedCursor, read_log_changes};
+use vlite::changes::{ChangeKind, FeedCursor, GraphChange, read_log_changes};
 use vlite::maintenance;
 use vlite::property_graph::GraphInfo;
 use vlite::{
@@ -1335,6 +1335,58 @@ fn graph_frames_over_the_entry_limit_stay_corrupt_when_torn() {
     let (_, alone) = body(0, vec![reclaim]);
     let misplaced = [node, alone[4..].to_vec()].concat();
     assert_corrupt(open(1, 2, &misplaced), at, invalid_body);
+}
+
+/// Gap 3: the change feed of a closed log checks graph frames by the rule
+/// full replay applies, so it reports no frame the open rejects. A reclaim
+/// under prefix ID 0 (checksums valid), an ID without reclaims and a
+/// complete ID-0 frame past 4,096 entries are corrupt for both; the
+/// matching ID feeds the node.
+#[test]
+fn closed_log_feeds_reject_graph_frames_that_replay_rejects() {
+    let dir = tempdir().unwrap();
+    let base = base_graph_file();
+    let at = base.len();
+    let path = dir.path().join("feed.vlite");
+    let check = |id: u64, count: u32, body: &[u8]| {
+        let whole = frame(OP_GRAPH, 0, 3, id, count, body.len() as u32, body);
+        fs::write(&path, [base.as_slice(), &whole].concat()).unwrap();
+        let opened = Database::open(&path).map(drop);
+        (
+            opened,
+            read_log_changes(&path, None, &FeedCursor::beginning(), 16),
+        )
+    };
+    let (count, tagged) = body(0, vec![GraphEntry::Reclaim { at_ms: 5 }, put_node(0, "a")]);
+    let (opened, fed) = check(1, count, &tagged);
+    opened.unwrap();
+    let fed = fed.unwrap();
+    assert_eq!((fed.head, fed.next.sequence), (3, 3));
+    assert!(matches!(
+        &fed.changes.last().unwrap().kind,
+        ChangeKind::GraphBatch { operations, .. }
+            if matches!(&operations[..], [GraphChange::NodeUpserted { key, .. }] if key == "a")
+    ));
+
+    let rejects = |id: u64, count: u32, body: &[u8], reason: &str| {
+        let (opened, fed) = check(id, count, body);
+        assert_corrupt(opened, at, reason);
+        match fed {
+            Err(Error::Corrupt { reason: actual, .. }) => assert_eq!(actual, reason),
+            other => panic!("expected corruption ({reason}), got {other:?}"),
+        }
+    };
+    let invalid_body = "invalid graph frame body";
+    rejects(0, count, &tagged, invalid_body);
+    let (count, untagged) = body(0, vec![put_node(0, "a"), put_node(1, "b")]);
+    rejects(1, count, &untagged, invalid_body);
+    // 4,097 `DropGraph` entries.
+    let mut drops = vec![1, 0, 0, 0];
+    for _ in 0..4097 {
+        drops.extend_from_slice(&[2, 0, 0, 0, 0, 0, 0, 0]);
+    }
+    let prefix = "invalid graph frame count, reserved ID or body length";
+    rejects(0, 4097, &drops, prefix);
 }
 
 /// EPIC-006: the formerly graph-unaware paths carry graph files (LEG-009..011,
