@@ -272,6 +272,8 @@ impl CollectionMut<'_> {
 
     /// Background rebuild with options. ScalarU8 snapshots hold u8 codes and
     /// count `dims` bytes per record against `max_snapshot_vector_bytes`.
+    /// With `set_background_hnsw_rebuild`, capture instead shares full records
+    /// (4 bytes per component) and training/encoding runs on the worker.
     pub fn start_hnsw_rebuild_with_options(
         &mut self,
         config: HnswConfig,

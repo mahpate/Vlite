@@ -146,6 +146,7 @@ pub(crate) struct Collection {
     pub expiries: std::sync::Arc<BTreeMap<u64, u64>>,
     pub live_body_bytes: u64,
     pub index: Option<hnsw::Index>,
+    pub background_hnsw: Option<HnswRebuildLimits>,
     pub metadata_indexes: MetadataIndexes,
     pub text_index: TextIndex,
 }
@@ -166,6 +167,7 @@ impl Collection {
             expiries: std::sync::Arc::new(loaded.expiries),
             live_body_bytes: loaded.live_body_bytes,
             index: None,
+            background_hnsw: None,
             metadata_indexes: MetadataIndexes::default(),
             text_index: TextIndex::default(),
         };
@@ -499,6 +501,12 @@ impl CollectionMut<'_> {
         metric: DistanceMetric,
     ) -> Result<()> {
         self.db.build_hnsw_in(self.id, config, metric)
+    }
+
+    /// See `Database::set_background_hnsw_rebuild`. This option is handle-local
+    /// and applies only to this collection.
+    pub fn set_background_hnsw_rebuild(&mut self, limits: Option<HnswRebuildLimits>) -> Result<()> {
+        self.db.set_background_hnsw_in(self.id, limits)
     }
 
     /// Lazily (re)builds like `Database::search_approximate_filtered_with_metric`.

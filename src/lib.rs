@@ -2352,6 +2352,104 @@ impl Database {
 
     // ---------------------------------------------------------------- HNSW
 
+    /// Opts the default collection into nonblocking lazy HNSW rebuilds.
+    ///
+    /// `Some(limits)` makes ordinary approximate queries poll/start background
+    /// construction and search the last matching index plus an exact scan of
+    /// all mutations since its build. Until a matching index exists, they use
+    /// exact search. Deletes, expiry and current filters are always respected.
+    /// Explicit ready-only queries still return `IndexNotReady` if no matching
+    /// index exists; explicit builds remain synchronous.
+    ///
+    /// The delta can grow beyond the normal 256-ID / 8-MiB buffer while a
+    /// worker runs, trading memory and exact-scan latency for no rebuild wait.
+    /// Snapshot capture obeys `limits`; failures are returned, never replaced
+    /// by an inline build. Oversized deltas cannot be saved in ANN snapshot v1;
+    /// publish a rebuild first. Queries drive polling, not a timer.
+    ///
+    /// Defaults to `None` (legacy inline rebuilding). This is an in-memory,
+    /// per-collection option, not persisted; set it again after reopening.
+    /// `None` restores legacy buffer limits and discards an oversized index.
+    pub fn set_background_hnsw_rebuild(&mut self, limits: Option<HnswRebuildLimits>) -> Result<()> {
+        self.set_background_hnsw_in(0, limits)
+    }
+
+    fn set_background_hnsw_in(
+        &mut self,
+        collection: u16,
+        limits: Option<HnswRebuildLimits>,
+    ) -> Result<()> {
+        self.ensure_healthy()?;
+        if let Some(limits) = limits {
+            limits.validate(0, self.state(collection).dimensions)?;
+        }
+        let state = self.state_mut(collection);
+        if state.background_hnsw == limits {
+            return Ok(());
+        }
+        state.background_hnsw = limits;
+        if let Some(index) = &mut state.index {
+            index.set_background(limits.is_some());
+            let (ids, bytes) = index.buffer_usage();
+            if limits.is_none()
+                && (ids > MAX_HNSW_BUFFER_IDS || bytes > MAX_HNSW_BUFFER_VECTOR_BYTES)
+            {
+                state.index = None;
+            }
+        }
+        if let Some((owner, job)) = &mut self.rebuild
+            && *owner == collection
+        {
+            // A job started under another buffering contract must not publish
+            // an index that silently switches the collection's contract back.
+            if limits.is_some() {
+                job.set_background(true);
+            }
+            job.stop(HnswRebuildStatus::Superseded);
+        }
+        Ok(())
+    }
+
+    fn background_hnsw_needs_maintenance(
+        &self,
+        collection: u16,
+        config: HnswConfig,
+        metric: DistanceMetric,
+        options: AnnOptions,
+    ) -> bool {
+        if self.state(collection).background_hnsw.is_none() {
+            return false;
+        }
+        match &self.rebuild {
+            Some((owner, job)) => job.finished() && (*owner == collection || job.is_background()),
+            None => self.state(collection).index.as_ref().is_none_or(|index| {
+                !index.ready_for(config, metric, options.quantization) || index.buffer_usage().0 > 0
+            }),
+        }
+    }
+
+    fn maintain_background_hnsw_in(
+        &mut self,
+        collection: u16,
+        config: HnswConfig,
+        metric: DistanceMetric,
+        options: AnnOptions,
+    ) -> Result<()> {
+        let owner = self
+            .rebuild
+            .as_ref()
+            .filter(|(owner, job)| *owner == collection || (job.is_background() && job.finished()))
+            .map_or(collection, |(owner, _)| *owner);
+        self.poll_rebuild_in(owner)?;
+        if self.rebuild.is_none()
+            && self.background_hnsw_needs_maintenance(collection, config, metric, options)
+        {
+            let limits = self.state(collection).background_hnsw.expect("opted in");
+            self.start_rebuild_with_options_in(collection, config, metric, options, limits)?;
+        }
+        Ok(())
+    }
+
     /// Builds/replaces the optional in-memory HNSW index from committed live records.
     ///
     /// Clears the mutation buffer. Nothing is written to the database file.
@@ -2396,6 +2494,9 @@ impl Database {
         }
         let state = self.state_mut(collection);
         state.index = Some(hnsw::Index::build(&state.records, config, metric, options));
+        if state.background_hnsw.is_some() {
+            state.index.as_mut().expect("built index").set_background(true);
+        }
         Ok(())
     }
 
@@ -2405,9 +2506,12 @@ impl Database {
     /// subsequent write copies the ID tree only. ScalarU8 training/encoding
     /// remains synchronous. Shared record bodies are capped at 256 MiB,
     /// in addition to the supplied vector and record limits. The current
-    /// graph is retained until normal mutation-buffer overflow. No automatic
-    /// fallback, retry, polling or publication occurs in search/write methods.
-    /// Use ready-only queries and poll explicitly to avoid synchronous builds.
+    /// graph is retained until normal mutation-buffer overflow. By default no
+    /// automatic fallback, retry, polling or publication occurs in searches.
+    /// With `set_background_hnsw_rebuild`, capture always shares full records,
+    /// quantization runs on the worker, deltas grow beyond the normal limits,
+    /// and ordinary approximate queries drive polling and publication.
+    /// Otherwise use ready-only queries and poll explicitly to avoid inline builds.
     /// One job exists per database across all collections.
     pub fn start_hnsw_rebuild(
         &mut self,
@@ -2447,8 +2551,12 @@ impl Database {
         validate_ann_metric(metric)?;
         options.validate()?;
         let state = self.state(collection);
-        limits.validate_for(state.records.len(), state.dimensions, options)?;
-        if options.quantization == Quantization::None
+        if state.background_hnsw.is_some() {
+            limits.validate(state.records.len(), state.dimensions)?;
+        } else {
+            limits.validate_for(state.records.len(), state.dimensions, options)?;
+        }
+        if (options.quantization == Quantization::None || state.background_hnsw.is_some())
             && state.live_body_bytes > rebuild::MAX_HNSW_RETAINED_RECORD_BYTES
         {
             return Err(Error::HnswRebuildTooLarge);
@@ -2456,15 +2564,20 @@ impl Database {
         if self.rebuild.is_some() {
             return Err(Error::HnswRebuildBusy);
         }
-        let mut job = rebuild::Job::start(&state.records, config, metric, options)?;
+        let mut job = if state.background_hnsw.is_some() {
+            rebuild::Job::start_background(&state.records, config, metric, options)?
+        } else {
+            rebuild::Job::start(&state.records, config, metric, options)?
+        };
         job.set_vector_sequence(state.vector_sequence);
         self.rebuild = Some((collection, job));
         Ok(())
     }
 
     /// Nonblocking poll. A completed worker is joined and atomically published
-    /// with bounded committed-mutation catch-up, or explicitly discarded.
-    /// Catch-up has the same 256-ID / 8-MiB vector limits as the active graph.
+    /// with committed-mutation catch-up, or explicitly discarded.
+    /// By default catch-up has the active graph's 256-ID / 8-MiB vector limits.
+    /// The background-query option allows both buffers to grow past these limits.
     /// Overflow never rejects durable writes or publishes stale snapshot data.
     pub fn poll_hnsw_rebuild(&mut self) -> Result<HnswRebuildStatus> {
         self.poll_rebuild_in(0)
@@ -2486,7 +2599,14 @@ impl Database {
         }
         let (status, index) = job.finish()?;
         if let Some(index) = index {
-            self.state_mut(collection).index = Some(index);
+            let state = self.state_mut(collection);
+            let previous = state.index.replace(index);
+            if state.background_hnsw.is_some()
+                && let Some(previous) = previous
+            {
+                // Large graph destruction is maintenance work too.
+                previous.retire()?;
+            }
         }
         Ok(status)
     }
@@ -2655,8 +2775,9 @@ impl Database {
 
     /// Approximate squared-L2 search; exact search remains the default.
     ///
-    /// Lazily rebuilds after buffer overflow, reopen, or construction-parameter change.
-    /// The first query includes the full rebuild cost. Returned distances are exact
+    /// By default lazily rebuilds after buffer overflow, reopen, or parameter change.
+    /// The first query includes the full rebuild cost unless
+    /// `set_background_hnsw_rebuild` is enabled. Returned distances are exact
     /// for the visited candidates; nearest-neighbor recall is not guaranteed.
     pub fn search_approximate(
         &mut self,
@@ -2693,7 +2814,8 @@ impl Database {
     /// not nodes visited; selective or empty-match filters may visit every
     /// reachable node. Returns up to k eligible hits with exact distances,
     /// ordered by distance then ID. Recall and filling k are not guaranteed,
-    /// and there is no exact fallback. Empty conditions are unfiltered search.
+    /// and by default there is no exact fallback. The background-query option
+    /// exact-scans until a matching index is published. Empty conditions are unfiltered search.
     pub fn search_approximate_filtered_with_metric(
         &mut self,
         query: &[f32],
@@ -2721,6 +2843,34 @@ impl Database {
         let state = self.state(collection);
         if k == 0 || state.records.is_empty() {
             return Ok(Vec::new());
+        }
+        if state.background_hnsw.is_some() {
+            self.maintain_background_hnsw_in(collection, config, metric, AnnOptions::default())?;
+            if self
+                .state(collection)
+                .index
+                .as_ref()
+                .is_none_or(|index| !index.ready_for(config, metric, Quantization::None))
+            {
+                return self.search_in(
+                    collection,
+                    query,
+                    k,
+                    conditions,
+                    metric,
+                    &mut SearchStats::default(),
+                );
+            }
+            return self.search_ready_in(
+                collection,
+                query,
+                k,
+                ef_search,
+                config,
+                conditions,
+                metric,
+                &mut SearchStats::default(),
+            );
         }
         if state
             .index

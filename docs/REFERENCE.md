@@ -641,6 +641,8 @@ Each owner keeps one graph, identified by its construction parameters and
 metric. Lazy queries rebuild a missing or mismatched graph synchronously;
 ready-only queries return `IndexNotReady` instead. Reopening starts without a
 graph unless the server loads a valid [ANN snapshot](ANN-SNAPSHOTS.md).
+The handle-local [automatic background option](#automatic-nonblocking-approximate-queries-opt-in)
+changes only the lazy-query behavior described above.
 
 Cosine uses `1 - clamp(dot / (norm_a * norm_b), -1, 1)` in f64 and never
 normalizes stored vectors. Zero queries are rejected, and zero-norm records
@@ -796,6 +798,57 @@ separate and off by default.
 
 ## Background HNSW rebuilds (Rust)
 
+### Automatic, nonblocking approximate queries (opt-in)
+
+```rust
+db.set_background_hnsw_rebuild(Some(vlite::HnswRebuildLimits::default()))?;
+// Same setter on CollectionMut opts in only that named collection.
+let hits = db.search_approximate(&query, k, ef_search, config)?;
+```
+
+This handle-local option defaults to `None` and must be reapplied after open.
+It changes ordinary approximate queries, not exact search or explicit builds.
+Queries poll completed work and start a replacement when the matching graph
+is missing or has buffered mutations. They search the last matching graph
+and exactly merge every changed record; deleted/expired records and stale
+metadata are never returned. Before the first matching graph is published
+(including metric/configuration changes), they use an exact scan. Ready-only
+APIs retain their existing missing-index error and never schedule work.
+The server honors the option when an embedded caller supplies a configured
+`Database`; no REST setting or request field was added.
+
+Both active and catch-up deltas may exceed the legacy 256-ID / 8-MiB limits,
+so a slow worker increases retained-vector memory and exact delta-scan time
+instead of invalidating the ready graph or cancelling catch-up. Snapshot
+record/vector limits and the 256-MiB retained-record-body cap still apply;
+in this mode even quantized builds capture shared full records and train/encode
+on the worker. Errors are returned explicitly, never hidden with an inline
+build. Only one collection can rebuild at a time; other opted-in collections
+continue searching their ready graph/delta or exact-scanning until it is free.
+Queries can reap completed opted-in jobs from another collection; legacy
+explicit jobs still require their owner's explicit poll.
+Published old graphs are freed off the query thread. Disabling the option
+restores legacy limits, discards an oversized active index and supersedes any
+pending job for that collection.
+
+The bounded `maintenance_mixed_load` example now exercises ordinary
+approximate queries with this option and reports
+`max_query_with_rebuild_pending_ns` for queries that began with a pending
+worker/publication, plus `max_query_during_rebuild_phase_ns` for the whole
+320-write phase (which exceeds the legacy ID limit). Raw samples record the
+pending flag; the first maximum is null if no such query was observed:
+
+```powershell
+cargo run --locked --release --features json --example maintenance_mixed_load
+```
+
+These are local, indicative operation timings, not a DO-005 campaign or a
+claim that every query finishes within 10 ms. Traversal, exact delta scanning,
+CPU contention and caller/server lock queues still take time; queries do not
+wait for index construction.
+
+### Explicit lifecycle (unchanged by default)
+
 The owner has an **opt-in** lifecycle: `start_hnsw_rebuild(config, metric,
 limits)`, `poll_hnsw_rebuild()` and `cancel_hnsw_rebuild()`. REST, the C ABI,
 the Python and Node wrappers and the dashboard expose it too, and server
@@ -821,7 +874,7 @@ limits do not cap RSS: map overhead, graph links, scratch space and the old
 graph use memory too, and the old and new graphs coexist.
 
 While a job runs, the owner tracks each changed ID against its snapshot-era
-vector, within the **256-ID / 8-MiB** buffer limits. Overflow cancels the job
+vector, by default within the **256-ID / 8-MiB** buffer limits. Overflow cancels the job
 with `CatchUpOverflow`; writes stay committed and **no stale graph is
 published**. A job whose catch-up does not cover the collection's current
 version is superseded. Nothing falls back to exact search or a synchronous
