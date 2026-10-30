@@ -103,8 +103,16 @@ Peer-pool gaps are tracked in the pool repository's `TODO.md` under
    Rust API has landed
    ([storage features](../../STORAGE-FEATURES.md#key-value-store)); REST and
    gRPC routes wait for the OpenAPI review.
-2. **Open:** for graph TTL, does an expiring node expire its edges, or are
-   nodes with live edges kept until the edges expire? Needed before item 3.
+2. **Decided 2026-10-30:** for graph TTL, an expiring node takes its edges
+   with it (cascade), and an edge can also expire on its own. This matches
+   Memgraph TTL ("the vertex and all its associated edges will be deleted")
+   and Neo4j APOC TTL (`DETACH DELETE`). No surveyed store keeps a node alive
+   until its edges expire. ArangoDB TTL indexes and Cosmos DB Gremlin TTL do
+   not cascade and can leave dangling edges, which VLite rules out. Expired
+   nodes and edges are hidden from reads at their deadline, as record expiry
+   already does, and removed physically by compaction. A node's expiry
+   persists in graph frames, so item 3 lands with or after the P2 format
+   change.
 3. **Approved:** openCypher with writes (item 6) is in scope, with graph
    depth (items 5–7).
 4. **Open:** which scale-out item (9, 10 or 11) comes first after the

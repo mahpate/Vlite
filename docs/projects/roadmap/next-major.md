@@ -16,7 +16,7 @@
 | Speed P4: compact graph | Speed | CSR adjacency, encoded labels, parallel bulk load | S3, S4, F6 | M–L | P2 |
 | Speed P5: filters and server | Speed | Segment statistics and bitmaps, filter-aware ANN, Arrow or protobuf responses | F7, F8, S5 | M | P2 |
 | Gap 2: key-value API | Agent memory | Namespaced string keys, vector-free values, expiry, conditional writes | Pool claims, framework stores | S–M | Ready: Rust API first; OpenAPI diff reviewed before merge |
-| Gap 3: graph TTL | Agent memory | Expiring nodes and edges with no dangling edges | Replaces the pool's sweeper | M | Edge-expiry rule (open) |
+| Gap 3: graph TTL | Agent memory | Expiring nodes and edges with no dangling edges | Replaces the pool's sweeper | M | Edge-expiry rule decided (cascade); lands with or after P2 |
 | Gap 4: time-aware graph | Agent memory | `valid_from`/`valid_to` and "as of" reads | Fact history | M | Revisit the PRD deferral |
 | Gap 1: agent memory API | Agent memory | remember, recall, consolidate, forget | Mem0/Zep-style layer | M | Gaps 2–4 |
 | Gaps 5–7 | Graph depth | Graph algorithms, Cypher subset with writes, GraphRAG ingestion | Graph parity | L | Ready (Cypher writes approved) |
@@ -40,7 +40,6 @@ flowchart LR
 ## Still open
 
 - Default stored precision, float16 or float32 (before P3).
-- Graph TTL edge-expiry rule (before gap 3).
 - Whether parity targets F1–F3 and F7 block the release.
 - Which scale-out item comes first after P2.
 
