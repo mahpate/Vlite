@@ -50,11 +50,11 @@ new owner decision, and the PRD's original reason still has to be answered.
 | 5 | **Graph algorithms**: PageRank, community detection, weighted shortest path, centrality | Graph | Needed for ranking, clustering and GraphRAG summaries | Revisits a PRD deferral (deferred for unbounded cost). Needs edge weights and the same limits and deadlines as traversal (today at most 4 hops, 10,000 visited nodes, 5 s) |
 | 6 | **Cypher/GQL subset with writes** | Graph | Most graph users and LLM tools expect openCypher | Extends the read-only [`GRAPH-QUERY.md`](../../GRAPH-QUERY.md). A general-purpose language stays out of scope unless the owner changes that |
 | 7 | **Document-to-graph ingestion (GraphRAG)**: extract entities and relationships from text into nodes, edges and linked chunks | Vector + graph | Turns raw documents into a searchable knowledge graph in one step | Needs a pluggable extraction model; never sends data to an external service without explicit configuration |
-| 8 | **Server-side reranking and embedding providers** | Vector | Reranker and embedding-provider traits exist only in the Rust API; the server and SDKs can't use them | Configurable per collection, off by default |
+| 8 | **Managed embedding providers and custom server rerankers** | Vector | REST already embeds with hashing or opt-in HTTP; REST/gRPC already expose exact/MMR reranking. Missing: admin-managed provider bindings and custom server rerankers | [Serving design](../roadmap/serving-contract.md); external providers off by default, per-collection authorization |
 | 9 | **Network replication and failover** | Platform | Replicas are file-shipped today and there is one writer per file | Depends on the directory store in [`storage-goals.md`](../performance/storage-goals.md) (WAL and segment shipping) |
 | 10 | **Object storage tier** (Azure Blob or S3 segments, read-only serverless readers) | Platform | Lowers cost for large, cold data | Depends on the directory store; Azure Files stays experimental |
 | 11 | **Database branching**: cheap copy-on-write forks | Platform | Safe agent experiments and test copies | Natural once segments are immutable |
-| 12 | **gRPC graph service** | Graph | gRPC covers vectors only | Revisits a PRD deferral; the REST and MCP graph surfaces already exist |
+| 12 | **gRPC graph service** | Graph | Graph query/mutation RPCs are missing; graph change events already stream over gRPC | [Serving design](../roadmap/serving-contract.md); revisits a PRD deferral, reuses REST/MCP semantics |
 
 Peer-pool gaps are tracked in the pool repository's `TODO.md` under
 "Product gaps (2026-10-29 research)". In short:

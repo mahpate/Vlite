@@ -14,13 +14,13 @@
 | Speed P2: directory store | Speed | WAL, immutable segments and an atomic manifest, background merges, converter | F4, S6, no regressions | L | P1 (format approved) |
 | [Speed P3: compact vectors](p3-compact-vectors.md) | Speed | Opt-in float16 storage, quantized codes, saved ANN graph, SIMD | F1, F3, S1, S2 | L | P2; float32 default retained |
 | [Speed P4: compact graph](p4-compact-graph.md) | Speed | CSR adjacency, encoded labels, parallel bulk load | S3, S4, F6 | M–L | P2 |
-| Speed P5: filters and server | Speed | Segment statistics and bitmaps, filter-aware ANN, Arrow or protobuf responses | F7, F8, S5 | M | P2 |
+| [Speed P5: filters and server](p5-filters-and-serving.md) | Speed | Segment statistics and bitmaps, filter-aware ANN, Arrow or protobuf responses | F7, F8, S5 | M | P2; shared compact contract |
 | Gap 2: key-value API | Agent memory | Namespaced string keys, vector-free values, expiry, conditional writes | Pool claims, framework stores | S–M | Ready: Rust API first; OpenAPI diff reviewed before merge |
 | Gap 3: graph TTL | Agent memory | Expiring nodes and edges with no dangling edges | Replaces the pool's sweeper | M | Edge-expiry rule decided (cascade); lands with or after P2 |
-| Gap 4: time-aware graph | Agent memory | `valid_from`/`valid_to` and "as of" reads | Fact history | M | Revisit the PRD deferral |
+| [Gap 4: time-aware graph](gap4-temporal-graph.md) | Agent memory | `valid_from`/`valid_to` and "as of" reads | Fact history | M | Shared format owner; preserves accepted TTL rules |
 | Gap 1: agent memory API | Agent memory | remember, recall, consolidate, forget | Mem0/Zep-style layer | M | Gaps 2–4 |
-| Gaps 5–7 | Graph depth | Graph algorithms, Cypher subset with writes, GraphRAG ingestion | Graph parity | L | Ready (Cypher writes approved) |
-| Gaps 8 and 12 | Serving | Server-side reranking and embeddings, gRPC graph | SDK reach | M | None |
+| Gaps 5–7 | Graph depth | [Bounded algorithms](gap5-graph-algorithms.md), Cypher subset with writes, GraphRAG ingestion | Graph parity | L | Algorithms can start independently of CSR; later adapter parity required |
+| [Gaps 8 and 12](serving-contract.md) | Serving | Managed embedding/custom-reranker providers, gRPC graph query/mutation parity | SDK reach | M | Wire/API approval; existing embedding, exact/MMR and graph feeds retained |
 | Gaps 9–11 | Scale-out | Network replication, object storage tier, branching | Cost and availability | L | Speed P2 |
 
 ```mermaid
@@ -99,6 +99,15 @@ Local numbers below show direction only (see rules).
   and properties, and deterministic parallel import. It preserves graph TTL
   and attachment rules. Implementation and S3/S4/F6 qualification remain
   outstanding; the byte budgets are estimates, not measured results.
+- **Parallel designs:** [temporal graphs](gap4-temporal-graph.md),
+  [bounded algorithms](gap5-graph-algorithms.md),
+  [filters](p5-filters-and-serving.md) and
+  [serving](serving-contract.md) now have implementation boundaries and
+  acceptance matrices. They are plans, not shipped capabilities. Temporal
+  validity retains closed intervals but does not restore TTL-deleted data;
+  algorithms operate on bounded local projections. Exact filtered search
+  keeps its oracle; approximate search does not acquire an exact top-k
+  guarantee. Serving schemas remain proposals, not approved wire changes.
 
 ## Rules for every item
 
