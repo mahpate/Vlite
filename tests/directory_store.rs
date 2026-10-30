@@ -257,6 +257,76 @@ fn graphs_survive_checkpoints() {
 }
 
 #[test]
+fn graph_feed_resolves_keys_restated_by_a_checkpoint() {
+    use vlite::changes::ChangeKind;
+    use vlite::property_graph::GraphChange;
+    let root = tempdir().unwrap();
+    let dir = root.path().join("store");
+    let mut db = Database::create_directory(&dir, 2, CreateOptions::default()).unwrap();
+    db.set_checkpoint_threshold(None);
+    db.create_graph("g").unwrap();
+    db.put(1, &[1.0, 0.0], b"one").unwrap();
+    {
+        let mut graph = db.graph_mut("g").unwrap();
+        for key in ["ann", "bob", "cid"] {
+            graph
+                .create_node(key, &["Person"], &Metadata::new())
+                .unwrap();
+        }
+        graph.attach("ann", "default", 1).unwrap();
+    }
+    let floor = db.checkpoint().unwrap().unwrap();
+    let lineage = db.lineage().unwrap();
+    db.close().unwrap();
+
+    let mut db = Database::open(&dir).unwrap();
+    db.set_checkpoint_threshold(None);
+    {
+        let mut graph = db.graph_mut("g").unwrap();
+        graph
+            .create_edge(Some("ab"), "ann", "KNOWS", "bob", &Metadata::new())
+            .unwrap();
+        graph.detach("ann", "default").unwrap();
+        graph.delete_node("cid", Expected::Any).unwrap();
+    }
+    db.close().unwrap();
+
+    let db = Database::open_read_only(&dir).unwrap();
+    let cursor = FeedCursor {
+        lineage,
+        sequence: floor,
+    };
+    let operations: Vec<GraphChange> = db
+        .changes_after(&cursor, 10)
+        .unwrap()
+        .changes
+        .into_iter()
+        .flat_map(|change| match change.kind {
+            ChangeKind::GraphBatch { operations, .. } => operations,
+            other => panic!("unexpected change {other:?}"),
+        })
+        .collect();
+    assert_eq!(operations.len(), 3, "{operations:?}");
+    assert!(matches!(
+        &operations[0],
+        GraphChange::EdgeUpserted { source_key, destination_key, .. }
+            if source_key == "ann" && destination_key == "bob"
+    ));
+    assert!(matches!(
+        &operations[1],
+        GraphChange::Detached { node_key, record: 1, .. } if node_key == "ann"
+    ));
+    assert!(matches!(
+        &operations[2],
+        GraphChange::NodeDeleted { key, .. } if key == "cid"
+    ));
+    let graph = db.graph("g").unwrap();
+    assert_eq!(graph.info().node_count, 2);
+    assert_eq!(graph.info().edge_count, 1);
+    drop(db);
+}
+
+#[test]
 fn read_only_and_shared_readers() {
     let root = tempdir().unwrap();
     let dir = root.path().join("store");

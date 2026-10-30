@@ -528,6 +528,10 @@ impl GraphState {
     pub fn attachment_owner(&self, collection: u16, record: u64) -> Option<(GraphId, NodeId)> {
         self.attachment_owners.get(&(collection, record)).copied()
     }
+    /// Every attached `(collection, record)`, ascending.
+    pub fn attached_records(&self) -> impl Iterator<Item = (u16, u64)> + '_ {
+        self.attachment_owners.keys().copied()
+    }
 
     /// Applies `body` committed at `sequence` atomically: on error nothing changes.
     ///
@@ -1151,6 +1155,8 @@ impl Graph {
         released(MemoryComponent::LabelIndex);
     }
 }
+
+mod snapshot;
 
 #[cfg(test)]
 mod tests;

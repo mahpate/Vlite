@@ -391,9 +391,15 @@ fn scan<R: Read + Seek>(
                     .unwrap_or_default();
                 events.push((name, ChangeKind::SettingsUpdated { settings }));
             }
-            crate::property_graph::engine::codec::OP_GRAPH => {
+            crate::property_graph::engine::codec::OP_GRAPH | format::OP_GRAPH_SNAPSHOT => {
+                // Snapshot bodies of a checkpoint image track graph keys for
+                // later frames; like all restated frames, they are at or
+                // before every valid cursor.
                 events = graphs.frame(frame.sequence, frame.count, body, offset, &collections)?;
             }
+            // Record blocks restate records at the checkpoint: no change is
+            // after the cursor, and no later frame needs their contents.
+            format::OP_RECORD_BLOCK => {}
             _ => return Err(corrupt()),
         }
         if frame.sequence <= after {

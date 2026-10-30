@@ -1,18 +1,20 @@
-//! Directory store (P2a): one database as a directory holding an optional
-//! checkpoint image plus write-ahead log segments, listed in order by an
-//! atomically replaced `MANIFEST`.
+//! Directory store (P2a, P2b): one database as a directory holding an
+//! optional checkpoint image plus write-ahead log segments, listed in order
+//! by an atomically replaced `MANIFEST`.
 //!
 //! The listed files, each later file minus its own header, concatenate into
 //! exactly the byte stream of a single-file database. Replay, the change
 //! feed, replication and the maintenance tools therefore read a directory
 //! through the same code paths as a file. Commits append to the last log
-//! segment only; earlier segments are immutable.
+//! segment only; earlier segments are immutable and read through read-only
+//! memory mappings (P2b).
 //!
 //! A checkpoint seals the active log (sync, then publish a manifest with a
 //! fresh empty log), replays the sealed prefix on a background thread into a
 //! `FLAG_HISTORY` image whose floor is the last sealed commit, and installs
 //! it with one more manifest publication. Every crash point leaves either
-//! the old or the new manifest, and both describe a complete database.
+//! the old or the new manifest, and both describe a complete database. The
+//! image holds record blocks and a graph snapshot, which load in bulk.
 
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -162,12 +164,38 @@ fn lock_file(file: &File, shared: bool) -> Result<()> {
 
 /// One listed file. `skip` header bytes are hidden for every file after the
 /// first; the file contributes `len` logical bytes starting at `start`.
+/// Immutable files (the image and sealed logs) are read through `map` when
+/// the platform maps them.
 struct Segment {
     file: File,
     name: String,
     skip: u64,
     start: u64,
     len: u64,
+    map: Option<Mapping>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type Mapping = memmap2::Mmap;
+#[cfg(target_arch = "wasm32")]
+type Mapping = Box<[u8]>;
+
+/// Maps an immutable segment read-only (Speed P2b), or `None` to read it
+/// through the file handle.
+fn map_sealed(file: &File) -> Option<Mapping> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // SAFETY: only files no handle writes again are mapped: images and
+        // sealed logs, listed by the manifest under `LOCK`, which every
+        // writer holds exclusively. Outside tampering (truncation while
+        // mapped) is the one way the mapped bytes could change.
+        unsafe { memmap2::Mmap::map(file) }.ok()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = file;
+        None
+    }
 }
 
 /// The logical byte stream over a list of segments with one cursor. Writes
@@ -201,9 +229,22 @@ impl Segments {
         let segment = &self.list[index];
         let within = position - segment.start;
         let want = (buffer.len() as u64).min(segment.len - within) as usize;
-        let mut file = &segment.file;
-        file.seek(SeekFrom::Start(segment.skip + within))?;
-        let read = file.read(&mut buffer[..want])?;
+        let at = segment.skip + within;
+        let mapped = segment.map.as_ref().and_then(|map| {
+            let at = usize::try_from(at).ok()?;
+            map.get(at..at.checked_add(want)?)
+        });
+        let read = match mapped {
+            Some(bytes) => {
+                buffer[..want].copy_from_slice(bytes);
+                want
+            }
+            None => {
+                let mut file = &segment.file;
+                file.seek(SeekFrom::Start(at))?;
+                file.read(&mut buffer[..want])?
+            }
+        };
         self.position += read as u64;
         Ok(read)
     }
@@ -387,7 +428,9 @@ fn open_segments(
             }
         };
         let len = size - skip;
+        let writable = writable_last && index + 1 == names.len();
         list.push(Segment {
+            map: if writable { None } else { map_sealed(&file) },
             file,
             name: name.clone(),
             skip,
@@ -527,6 +570,20 @@ impl Chain {
         number
     }
 
+    /// Whether each segment is read through a memory mapping.
+    #[cfg(test)]
+    fn mapped(&mut self) -> Vec<bool> {
+        let state = self
+            .segments
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner);
+        state
+            .list
+            .iter()
+            .map(|segment| segment.map.is_some())
+            .collect()
+    }
+
     /// Atomically replaces `MANIFEST`. `Ok(false)` means the new manifest is
     /// in place but the directory sync failed, so it may not survive power
     /// loss; files it no longer lists must then be kept.
@@ -586,12 +643,18 @@ impl Chain {
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner);
         let start = state.total();
+        // The published manifest seals the former active log: it is never
+        // written or truncated again.
+        if let Some(sealed) = state.list.last_mut() {
+            sealed.map = map_sealed(&sealed.file);
+        }
         state.list.push(Segment {
             file,
             name,
             skip: header_len,
             start,
             len: 0,
+            map: None,
         });
         state.position = start;
         Ok(Some(state.list.len() - 1))
@@ -662,6 +725,7 @@ impl Chain {
         state.list.insert(
             0,
             Segment {
+                map: map_sealed(&file),
                 file,
                 name,
                 skip: 0,
@@ -672,6 +736,8 @@ impl Chain {
         state.restart();
         state.position = state.total();
         let total = state.total();
+        // Dropping the replaced segments unmaps them before removal, which
+        // Windows requires.
         let obsolete: Vec<String> = replaced.into_iter().map(|segment| segment.name).collect();
         if durable {
             for name in obsolete {
@@ -923,5 +989,78 @@ mod tests {
         ] {
             assert_eq!(parse_name(bad), None, "{bad}");
         }
+    }
+
+    fn logical_bytes(chain: &Chain) -> Vec<u8> {
+        chain.seek(SeekFrom::Start(0)).unwrap();
+        let mut bytes = Vec::new();
+        let mut buffer = [0; 7];
+        loop {
+            let read = chain.read(&mut buffer).unwrap();
+            if read == 0 {
+                return bytes;
+            }
+            bytes.extend_from_slice(&buffer[..read]);
+        }
+    }
+
+    fn load(chain: &mut Chain) -> format::Loaded {
+        let segments = chain
+            .segments
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner);
+        format::load_known(segments, None).unwrap()
+    }
+
+    #[test]
+    fn sealed_segments_and_images_are_mapped_and_read_identically() {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("store");
+        let header = format::header_v5_flags(2, 7, 0, 0, None);
+        let frame = |sequence: u64| {
+            let record = crate::Record {
+                vector: vec![sequence as f32, 1.0],
+                payload: vec![sequence as u8; 5],
+                metadata: crate::Metadata::new(),
+            };
+            format::frame(sequence, sequence, Some(&record))
+        };
+        let mut chain = create(&store, &header).unwrap();
+        let mut expected = header.clone();
+        for sequence in 1..=3 {
+            if sequence > 1 {
+                assert_eq!(chain.rotate().unwrap(), Some(sequence as usize - 1));
+            }
+            chain.seek(SeekFrom::End(0)).unwrap();
+            let bytes = frame(sequence);
+            assert_eq!(chain.write(&bytes).unwrap(), bytes.len());
+            expected.extend_from_slice(&bytes);
+        }
+        // Sealed logs are mapped; the active log stays a plain file.
+        assert_eq!(chain.mapped(), [true, true, false]);
+        assert_eq!(logical_bytes(&chain), expected);
+
+        chain.spawn(2, 2, None).unwrap();
+        let (built, sealed) = chain.take_build(true).unwrap();
+        chain.install(built.unwrap(), sealed).unwrap();
+        assert_eq!(chain.mapped(), [true, false]);
+        let loaded = load(&mut chain);
+        assert_eq!((loaded.sequence, loaded.history_floor), (3, 2));
+        assert_eq!(loaded.collections[&0].records.len(), 3);
+        let installed = logical_bytes(&chain);
+        drop(chain);
+
+        // Readers map every segment, including the last.
+        let mut reader = open(&store, Access::ReadShared).unwrap();
+        assert_eq!(reader.mapped(), [true, true]);
+        assert_eq!(logical_bytes(&reader), installed);
+        assert_eq!(load(&mut reader).sequence, 3);
+        drop(reader);
+        let mut writer = open(&store, Access::Write).unwrap();
+        assert_eq!(writer.mapped(), [true, false]);
+        assert_eq!(logical_bytes(&writer), installed);
+        writer.seek(SeekFrom::End(0)).unwrap();
+        writer.write(&frame(4)).unwrap();
+        assert_eq!(load(&mut writer).sequence, 4);
     }
 }

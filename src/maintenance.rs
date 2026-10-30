@@ -652,10 +652,13 @@ pub(crate) fn write_v5(
 
 /// `write_v5` with a history `floor`: when nonzero the output has
 /// `FLAG_HISTORY` and starts with an advance frame at `floor`, the
-/// directory-store checkpoint image. Records keep their original sequences
-/// (revisions, ascending) so compare-and-set tokens survive the checkpoint;
-/// collection frames restate at sequence 1 and vector, import and graph
-/// frames at `floor`. Without a floor, sequences restart at one.
+/// directory-store checkpoint image. Collection frames restate at sequence
+/// 1; live records follow as op-14 record blocks per collection in ID order,
+/// each record keeping its original sequence (revision) so compare-and-set
+/// tokens survive the checkpoint; vector and import frames restate at
+/// `floor`, and the graph as op-15 snapshot frames at `floor` (Speed P2b).
+/// Without a floor, sequences restart at one and every record and graph body
+/// gets its own frame. Records expired at `now_ms` are dropped (S6).
 pub(crate) fn write_v5_image(
     file: &mut File,
     loaded: &format::Loaded,
@@ -705,32 +708,32 @@ pub(crate) fn write_v5_image(
     if default.settings_persisted {
         output.write_all(&format::settings_frame(next(1)?, 0, &default.settings))?;
     }
-    let mut live = Vec::new();
     for (&collection_id, collection) in &loaded.collections {
-        for &id in collection.records.keys() {
-            if collection
-                .expiries
-                .get(&id)
-                .is_some_and(|expiry| *expiry <= now_ms)
-            {
+        let mut block = format::RecordBlock::new(collection_id);
+        for (&id, record) in &collection.records {
+            let expiry = collection.expiries.get(&id).copied();
+            if expiry.is_some_and(|expiry| expiry <= now_ms) {
+                continue;
+            }
+            if floor == 0 {
+                output.write_all(&format::record_frame_v5(
+                    next(1)?,
+                    collection_id,
+                    id,
+                    record,
+                    expiry,
+                ))?;
                 continue;
             }
             let revision = collection.revisions.get(&id).copied().unwrap_or(1);
-            live.push((revision.clamp(1, floor.max(1)), collection_id, id));
+            block.push(id, revision.clamp(1, floor), expiry, record);
+            if block.is_full() {
+                output.write_all(&block.take_frame(floor))?;
+            }
         }
-    }
-    if floor != 0 {
-        live.sort_unstable();
-    }
-    for (revision, collection_id, id) in live {
-        let collection = &loaded.collections[&collection_id];
-        output.write_all(&format::record_frame_v5(
-            next(revision)?,
-            collection_id,
-            id,
-            &collection.records[&id],
-            collection.expiries.get(&id).copied(),
-        ))?;
+        if !block.is_empty() {
+            output.write_all(&block.take_frame(floor))?;
+        }
     }
     for (&collection_id, collection) in &loaded.collections {
         let mut data = collection.vectors.clone();
@@ -757,7 +760,11 @@ pub(crate) fn write_v5_image(
         && let Some(state) = &loaded.graph
     {
         crate::property_graph::frame::compacted_bodies(state, |count, body| {
-            output.write_all(&format::graph_frame(next(floor)?, count, body))
+            if floor != 0 {
+                output.write_all(&format::graph_snapshot_frame(floor, count, body))
+            } else {
+                output.write_all(&format::graph_frame(next(floor)?, count, body))
+            }
         })?;
     }
     Ok(())
@@ -985,6 +992,299 @@ mod tests {
         assert_eq!(db.import_status(1).unwrap().last_chunk, 2);
         assert_eq!(db.len(), 2);
         db.close().unwrap();
+    }
+
+    /// The P2a checkpoint image of `loaded`: one op-9 frame per live record
+    /// in revision order and op-12 graph frames. P2b snapshot frames must
+    /// load to exactly the state this image replays to.
+    fn replayed_history_image(
+        loaded: &format::Loaded,
+        lineage: u64,
+        now_ms: u64,
+        floor: u64,
+    ) -> Vec<u8> {
+        let cipher = loaded.cipher.as_ref();
+        let seal = |frame: Vec<u8>| match cipher {
+            Some(cipher) => cipher.seal_frame(&frame).unwrap(),
+            None => frame,
+        };
+        let live = |collection: &format::LoadedCollection, id: &u64| {
+            !collection
+                .expiries
+                .get(id)
+                .is_some_and(|expiry| *expiry <= now_ms)
+        };
+        let flags =
+            (loaded.flags & (format::FLAG_ENCRYPTED | format::FLAG_GRAPH)) | format::FLAG_HISTORY;
+        let mut bytes = format::header_v5_flags(
+            loaded.dimensions,
+            lineage,
+            loaded.collection_high,
+            flags,
+            cipher,
+        );
+        bytes.extend(seal(format::advance_frame(floor)));
+        for (&id, collection) in loaded.collections.range(1..) {
+            bytes.extend(seal(format::collection_create_frame(
+                1,
+                id,
+                &collection.name,
+                collection.dimensions,
+                &collection.settings,
+            )));
+        }
+        let default = &loaded.collections[&0];
+        if default.settings_persisted {
+            bytes.extend(seal(format::settings_frame(1, 0, &default.settings)));
+        }
+        let mut records = Vec::new();
+        for (&collection_id, collection) in &loaded.collections {
+            for id in collection.records.keys().filter(|id| live(collection, id)) {
+                records.push((collection.revisions[id], collection_id, *id));
+            }
+        }
+        records.sort_unstable();
+        for (revision, collection_id, id) in records {
+            let collection = &loaded.collections[&collection_id];
+            bytes.extend(seal(format::record_frame_v5(
+                revision,
+                collection_id,
+                id,
+                &collection.records[&id],
+                collection.expiries.get(&id).copied(),
+            )));
+        }
+        for (&collection_id, collection) in &loaded.collections {
+            let mut data = collection.vectors.clone();
+            data.records.retain(|id, _| live(collection, id));
+            bytes.extend(seal(format::vector_frame(
+                floor,
+                collection_id,
+                &data.encode().unwrap(),
+            )));
+        }
+        let registry = import::Registry::from_markers(&loaded.imports);
+        for (job, state) in registry.open_jobs() {
+            let marker = import::snapshot_marker(job, state);
+            bytes.extend(seal(format::batch_frame_v4(
+                floor,
+                state.collection,
+                &[],
+                Some(&marker),
+            )));
+        }
+        if let Some(state) = &loaded.graph {
+            crate::property_graph::frame::compacted_bodies(state, |count, body| {
+                bytes.extend(seal(format::graph_frame(floor, count, body)));
+                Ok(())
+            })
+            .unwrap();
+        }
+        bytes
+    }
+
+    fn frame_operations(path: &Path, key: Option<&EncryptionKey>) -> Vec<u8> {
+        let mut file = File::open(path).unwrap();
+        let header = format::read_log_header(&mut file, key).unwrap();
+        let mut offset = header.start;
+        let mut operations = Vec::new();
+        while let Some(frame) = format::next_frame(&mut file, &header, offset).unwrap() {
+            offset += frame.disk.len() as u64;
+            operations.push(frame.operation);
+        }
+        assert_eq!(offset, header.length);
+        operations
+    }
+
+    fn assert_same_loaded_state(actual: &format::Loaded, expected: &format::Loaded) {
+        assert_eq!(actual.sequence, expected.sequence);
+        assert_eq!(actual.history_floor, expected.history_floor);
+        assert_eq!(actual.lineage, expected.lineage);
+        assert_eq!(actual.flags, expected.flags);
+        assert_eq!(actual.collection_high, expected.collection_high);
+        assert_eq!(actual.incomplete_bytes, 0);
+        assert_eq!(actual.imports, expected.imports);
+        assert_eq!(actual.graph, expected.graph);
+        assert_eq!(
+            actual.collections.keys().collect::<Vec<_>>(),
+            expected.collections.keys().collect::<Vec<_>>()
+        );
+        for (id, collection) in &actual.collections {
+            let reference = &expected.collections[id];
+            assert_eq!(collection.name, reference.name);
+            assert_eq!(collection.dimensions, reference.dimensions);
+            assert_eq!(collection.settings, reference.settings);
+            assert_eq!(collection.settings_persisted, reference.settings_persisted);
+            assert_eq!(collection.records, reference.records);
+            assert_eq!(collection.revisions, reference.revisions);
+            assert_eq!(collection.expiries, reference.expiries);
+            assert_eq!(collection.live_body_bytes, reference.live_body_bytes);
+            assert_eq!(
+                collection.vectors.encode().unwrap(),
+                reference.vectors.encode().unwrap()
+            );
+        }
+    }
+
+    fn snapshot_image_loads_like_replayed_image(key: Option<&EncryptionKey>) {
+        use crate::property_graph::{
+            GraphSchema, LabelDefinition, PropertyDefinition, PropertyType,
+        };
+        use crate::{
+            CollectionSpec, CreateOptions, InvalidRowPolicy, Metadata, MetadataValue, Mutation,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.vlite");
+        let options = CreateOptions {
+            encryption: key.cloned(),
+            ..CreateOptions::default()
+        };
+        let mut db = Database::create_with_options(&source, 2, options).unwrap();
+        let tagged = |value: u64| {
+            Metadata::from([("tag".to_string(), MetadataValue::Integer(value as i64))])
+        };
+        // About 1.5 MB of records: the default collection needs two blocks.
+        let ids: Vec<u64> = (0..2_400).collect();
+        for chunk in ids.chunks(400) {
+            let operations: Vec<Mutation> = chunk
+                .iter()
+                .map(|&id| Mutation::PutWithMetadata {
+                    id: id * 3,
+                    vector: vec![id as f32, 1.0],
+                    payload: vec![(id % 251) as u8; 600],
+                    metadata: tagged(id),
+                })
+                .collect();
+            db.write_batch(&operations).unwrap();
+        }
+        db.put(6, &[0.5, 0.5], b"overwritten").unwrap();
+        db.delete(9).unwrap();
+        let (far, near, now) = (4_000_000_000_000, 3_000_000_000_000, 3_500_000_000_000);
+        db.put_with_expiry(10_000, &[1.0, 1.0], b"kept", &Metadata::new(), Some(far))
+            .unwrap();
+        db.put_with_expiry(10_001, &[1.0, 2.0], b"gone", &Metadata::new(), Some(near))
+            .unwrap();
+        db.create_collection(
+            "docs",
+            CollectionSpec {
+                dimensions: 3,
+                settings: Default::default(),
+            },
+        )
+        .unwrap();
+        {
+            let mut docs = db.collection_mut("docs").unwrap();
+            for id in [4, 2, 8] {
+                docs.put_with_metadata(id, &[id as f32, 0.0, 1.0], b"doc", &tagged(id))
+                    .unwrap();
+            }
+        }
+        db.create_graph("people").unwrap();
+        {
+            let mut graph = db.graph_mut("people").unwrap();
+            let schema = GraphSchema::default().label(
+                "Person",
+                LabelDefinition::new("a person")
+                    .property("age", PropertyDefinition::new(PropertyType::Integer)),
+            );
+            graph.put_schema(&schema).unwrap();
+            let age =
+                |years: i64| Metadata::from([("age".to_string(), MetadataValue::Integer(years))]);
+            graph.create_node("ann", &["Person"], &age(31)).unwrap();
+            graph.create_node("bob", &["Person"], &age(27)).unwrap();
+            graph
+                .create_node("cid", &["Team"], &Metadata::new())
+                .unwrap();
+            graph
+                .create_edge(Some("ab"), "ann", "KNOWS", "bob", &Metadata::new())
+                .unwrap();
+            graph
+                .create_edge(None, "bob", "MEMBER", "cid", &Metadata::new())
+                .unwrap();
+            graph.attach("ann", "docs", 4).unwrap();
+            graph.attach("bob", "default", 6).unwrap();
+        }
+        db.create_graph("empty").unwrap();
+        let row = Mutation::Put {
+            id: 20_000,
+            vector: vec![2.0, 2.0],
+            payload: Vec::new(),
+        };
+        db.import_chunk(1, 1, &[row], InvalidRowPolicy::RejectChunk)
+            .unwrap();
+        let lineage = db.lineage().unwrap();
+        db.close().unwrap();
+
+        let loaded = format::load_with(&mut File::open(&source).unwrap(), key).unwrap();
+        let floor = loaded.sequence;
+        let image = directory.path().join("image.vlite");
+        let mut output = File::create_new(&image).unwrap();
+        write_v5_image(
+            &mut output,
+            &loaded,
+            lineage,
+            now,
+            loaded.cipher.as_ref(),
+            loaded.flags & format::FLAG_GRAPH,
+            floor,
+        )
+        .unwrap();
+        drop(output);
+        let reference = directory.path().join("reference.vlite");
+        fs::write(
+            &reference,
+            replayed_history_image(&loaded, lineage, now, floor),
+        )
+        .unwrap();
+
+        let operations = frame_operations(&image, key);
+        let count = |operation: u8| operations.iter().filter(|op| **op == operation).count();
+        assert!(count(format::OP_RECORD_BLOCK) >= 3, "{operations:?}");
+        assert!(count(format::OP_GRAPH_SNAPSHOT) >= 2, "{operations:?}");
+        assert_eq!((count(9), count(12)), (0, 0), "{operations:?}");
+        let reference_operations = frame_operations(&reference, key);
+        assert!(!reference_operations.contains(&format::OP_RECORD_BLOCK));
+
+        let actual = format::load_with(&mut File::open(&image).unwrap(), key).unwrap();
+        let expected = format::load_with(&mut File::open(&reference).unwrap(), key).unwrap();
+        assert_same_loaded_state(&actual, &expected);
+        let default = &actual.collections[&0];
+        assert_eq!(default.expiries.get(&10_000), Some(&far));
+        assert!(!default.records.contains_key(&10_001));
+        assert!(!default.records.contains_key(&9));
+        assert_eq!(default.records[&6].payload, b"overwritten");
+        let graph = actual.graph.as_ref().unwrap();
+        assert_eq!(graph.graphs().count(), 2);
+        assert_eq!(graph.last_sequence(), floor);
+        graph.check_invariants().unwrap();
+
+        // The image opens and accepts writes against restated revisions.
+        let open = |path: &Path| match key {
+            Some(key) => Database::open_encrypted(path, key),
+            None => Database::open(path),
+        };
+        let mut db = open(&image).unwrap();
+        assert_eq!(db.revision(6).unwrap(), Some(default.revisions[&6]));
+        assert_eq!(db.graph("people").unwrap().info().node_count, 3);
+        db.graph_mut("people")
+            .unwrap()
+            .create_node("dan", &["Person"], &Metadata::new())
+            .unwrap();
+        db.close().unwrap();
+        let db = open(&image).unwrap();
+        assert_eq!(db.graph("people").unwrap().info().node_count, 4);
+        db.close().unwrap();
+    }
+
+    #[test]
+    fn history_image_uses_snapshot_frames_and_loads_like_replayed_image() {
+        snapshot_image_loads_like_replayed_image(None);
+    }
+
+    #[test]
+    fn encrypted_history_image_uses_snapshot_frames() {
+        let key = crate::EncryptionKey::from_bytes([9; 32]);
+        snapshot_image_loads_like_replayed_image(Some(&key));
     }
 
     #[test]

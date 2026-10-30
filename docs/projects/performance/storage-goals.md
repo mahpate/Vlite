@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Goals approved 2026-10-30. Work order in [`next-major.md`](../roadmap/next-major.md); nothing implemented yet |
+| Status | Goals approved 2026-10-30. Work order and progress in [`next-major.md`](../roadmap/next-major.md); no goal counts as met until the major-release DO-005 run measures it |
 | Created | 2026-10-29 |
 | Replaces | Options B and C of [`performance-proposal.md`](performance-proposal.md). Option A there still applies to today's format |
 | Key decision | VLite no longer has to keep a database in one file |

@@ -289,10 +289,14 @@ store/
 ```
 
 - **Checkpoints** fold the logs into one image on a background thread, so
-  reopen replays the image plus a short log instead of the whole history.
+  reopen loads the image plus a short log instead of the whole history.
   One starts after a commit once the active log passes 64 MiB. Change it with
   `set_checkpoint_threshold(Some(bytes))`, turn it off with `None`, or run one
   and wait with `checkpoint()`, which returns the floor sequence.
+- **Reopen** maps the image and sealed logs read-only and loads the image's
+  records and graphs in bulk, in parallel, instead of replaying them; only
+  the active log is replayed. Earlier releases cannot open a directory that
+  this release has checkpointed, or a backup packed from one.
 - **Kept across checkpoints:** the lineage, every record's revision
   (compare-and-set and fencing tokens still match), graphs and encryption.
 - **History below the floor is gone.** Change-feed and log-segment requests

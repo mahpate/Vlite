@@ -39,6 +39,27 @@ pub(crate) const OP_TIME_ANCHOR: u8 = 11;
 /// restated frames describe; they carry their original sequences (record
 /// revisions), non-decreasing and at most `S`, until the first frame at `S + 1`.
 pub(crate) const OP_ADVANCE: u8 = 13;
+/// Record block (Speed P2b): live records of one collection restated by a
+/// checkpoint image, IDs strictly ascending, each with its revision and
+/// expiry. Valid only in a `FLAG_HISTORY` log at the checkpoint sequence and
+/// before any graph frame; it replaces one op-9 frame per record.
+pub(crate) const OP_RECORD_BLOCK: u8 = 14;
+/// Graph snapshot (Speed P2b): the canonical graph bodies of a checkpoint
+/// image (`property_graph::frame::compacted_bodies`), loaded directly into
+/// graph state instead of being replayed entry by entry. Valid only in a
+/// `FLAG_HISTORY | FLAG_GRAPH` log at the checkpoint sequence, into an empty
+/// graph state.
+pub(crate) const OP_GRAPH_SNAPSHOT: u8 = 15;
+/// Per-entry header of a record block: ID, revision, expiry flag, expiry and
+/// extended-body length.
+const BLOCK_ENTRY_HEADER: usize = 29;
+/// Writers close a record block once its body reaches this many bytes.
+const RECORD_BLOCK_TARGET: usize = 1 << 20;
+/// Maximum entries of one record block.
+const MAX_BLOCK_RECORDS: usize = 4096;
+/// Largest valid record-block body: the last entry may start just below the
+/// target.
+const MAX_RECORD_BLOCK: usize = RECORD_BLOCK_TARGET + BLOCK_ENTRY_HEADER + MAX_EXTENDED_BODY;
 pub(crate) const PREFIX_SIZE: usize = 36;
 pub(crate) const FOOTER_SIZE: usize = 16;
 pub(crate) const MAGIC: &[u8; 8] = b"VLITEDB\0";
@@ -75,13 +96,81 @@ pub(crate) const MAX_EXTENDED_BODY: usize =
 
 pub(crate) fn extended_body(vector: &[f32], payload: &[u8], metadata: &crate::Metadata) -> Vec<u8> {
     let mut body = Vec::new();
+    push_extended(&mut body, vector, payload, metadata);
+    body
+}
+
+fn push_extended(body: &mut Vec<u8>, vector: &[f32], payload: &[u8], metadata: &crate::Metadata) {
     for value in vector {
         body.extend_from_slice(&value.to_le_bytes());
     }
     body.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     body.extend_from_slice(payload);
     body.extend_from_slice(&crate::metadata::encode(metadata));
-    body
+}
+
+/// Builds op-14 record blocks of one collection. Callers push records in
+/// ascending ID order and emit the block when it is full.
+pub(crate) struct RecordBlock {
+    collection: u16,
+    count: u32,
+    body: Vec<u8>,
+}
+
+impl RecordBlock {
+    pub(crate) fn new(collection: u16) -> Self {
+        Self {
+            collection,
+            count: 0,
+            body: Vec::new(),
+        }
+    }
+
+    /// Appends one entry: ID, revision, expiry marker (flag byte and value,
+    /// 0 without expiry), extended-body length and the extended body.
+    pub(crate) fn push(&mut self, id: u64, revision: u64, expiry: Option<u64>, record: &Record) {
+        self.body.extend_from_slice(&id.to_le_bytes());
+        self.body.extend_from_slice(&revision.to_le_bytes());
+        self.body.push(u8::from(expiry.is_some()));
+        self.body
+            .extend_from_slice(&expiry.unwrap_or(0).to_le_bytes());
+        let length_at = self.body.len();
+        self.body.extend_from_slice(&[0; 4]);
+        push_extended(
+            &mut self.body,
+            &record.vector,
+            &record.payload,
+            &record.metadata,
+        );
+        let length = (self.body.len() - length_at - 4) as u32;
+        self.body[length_at..length_at + 4].copy_from_slice(&length.to_le_bytes());
+        self.count += 1;
+    }
+
+    pub(crate) fn is_full(&self) -> bool {
+        self.count as usize >= MAX_BLOCK_RECORDS || self.body.len() >= RECORD_BLOCK_TARGET
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// The op-14 frame at `sequence` holding the pushed entries; the block
+    /// is empty again afterwards.
+    pub(crate) fn take_frame(&mut self, sequence: u64) -> Vec<u8> {
+        let frame = wrap(
+            OP_RECORD_BLOCK,
+            self.collection,
+            sequence,
+            0,
+            self.count,
+            self.body.len() as u32,
+            &self.body,
+        );
+        self.count = 0;
+        self.body.clear();
+        frame
+    }
 }
 
 /// Body bytes the record occupies in a single-record frame (used for
@@ -527,6 +616,20 @@ pub(crate) fn advance_frame(sequence: u64) -> Vec<u8> {
 /// entries. Collection, reserved and ID prefix fields are zero.
 pub(crate) fn graph_frame(sequence: u64, count: u32, body: &[u8]) -> Vec<u8> {
     wrap(OP_GRAPH, 0, sequence, 0, count, body.len() as u32, body)
+}
+
+/// Graph snapshot frame (op 15): one canonical checkpoint graph body of
+/// `count` entries, laid out like an op-12 frame.
+pub(crate) fn graph_snapshot_frame(sequence: u64, count: u32, body: &[u8]) -> Vec<u8> {
+    wrap(
+        OP_GRAPH_SNAPSHOT,
+        0,
+        sequence,
+        0,
+        count,
+        body.len() as u32,
+        body,
+    )
 }
 
 /// Single put/delete frame for the default collection (byte-identical to v1–v3).
@@ -1328,6 +1431,11 @@ fn load_inner<R: Read + Seek>(
     let mut restating_from: Option<u64> = None;
     // A time anchor read ahead of its commit frame: (timestamp, frame bytes).
     let mut anchor: Option<(u64, u64)> = None;
+    // Checkpoint-image snapshot frames not yet applied (Speed P2b): the run
+    // of record blocks being read, and the graph snapshot bodies with the
+    // offset of their first frame.
+    let mut blocks: Option<BlockRun> = None;
+    let mut snapshot: Option<(u64, Vec<crate::property_graph::engine::GraphBody>)> = None;
     let mut disk = Vec::new();
     loop {
         let anchor_len = anchor.map_or(0, |(_, len)| len);
@@ -1423,13 +1531,18 @@ fn load_inner<R: Read + Seek>(
             9 | 10 => version >= V5,
             // FLAG_GRAPH only passes the header check on v5.
             OP_GRAPH => version >= V5 && flags & FLAG_GRAPH != 0,
+            OP_RECORD_BLOCK => version >= V5 && flags & FLAG_HISTORY != 0,
+            OP_GRAPH_SNAPSHOT => {
+                version >= V5 && flags & FLAG_HISTORY != 0 && flags & FLAG_GRAPH != 0
+            }
             _ => false,
         };
-        let reserved_clear = if version >= V4 && matches!(operation, 1..=4 | 8 | 9 | 10) {
-            prefix[7] == 0
-        } else {
-            prefix[5..8] == [0; 3]
-        };
+        let reserved_clear =
+            if version >= V4 && matches!(operation, 1..=4 | 8 | 9 | 10 | OP_RECORD_BLOCK) {
+                prefix[7] == 0
+            } else {
+                prefix[5..8] == [0; 3]
+            };
         if !allowed || !reserved_clear {
             return Err(corrupt(
                 offset,
@@ -1438,6 +1551,32 @@ fn load_inner<R: Read + Seek>(
         }
         let collection_id = u16_at(&prefix, 5);
         let sequence = u64_at(&prefix, 8);
+        // A pending snapshot or run of record blocks ends at the first frame
+        // that does not continue it.
+        if operation != OP_GRAPH_SNAPSHOT
+            && let Some((first, bodies)) = snapshot.take()
+        {
+            let floor = loaded.history_floor;
+            let state = crate::property_graph::frame::load_snapshot(
+                &loaded.collections,
+                floor,
+                bodies,
+                first,
+            )?;
+            loaded.graph = Some(state);
+        }
+        if blocks
+            .as_ref()
+            .is_some_and(|run| operation != OP_RECORD_BLOCK || run.collection != collection_id)
+        {
+            let run = blocks.take().expect("pending record blocks");
+            run.apply(&mut loaded, cipher.as_ref())?;
+        }
+        if matches!(operation, OP_RECORD_BLOCK | OP_GRAPH_SNAPSHOT)
+            && (restating_from.is_none() || sequence != loaded.history_floor)
+        {
+            return Err(corrupt(offset, "snapshot frame outside a checkpoint image"));
+        }
         let restated = match restating_from {
             Some(last) if (last..=loaded.history_floor).contains(&sequence) => true,
             _ => {
@@ -1459,21 +1598,33 @@ fn load_inner<R: Read + Seek>(
                 "invalid graph frame count, reserved ID or body length",
             ));
         }
-        let target_dimensions = if operation <= 4 || operation == 9 {
-            loaded
-                .collections
-                .get(&collection_id)
-                .ok_or_else(|| corrupt(offset, "record references unknown collection"))?
-                .dimensions
-        } else if operation == 8 || operation == 10 {
-            loaded
-                .collections
-                .get(&collection_id)
-                .ok_or_else(|| corrupt(offset, "metadata update references unknown collection"))?;
-            0
-        } else {
-            0
-        };
+        // A snapshot loads into an empty graph state: before any graph
+        // frame, unless it continues the snapshot being read.
+        let graph_started = loaded
+            .graph
+            .as_ref()
+            .is_some_and(|graph| graph.last_sequence() != 0);
+        if operation == OP_GRAPH_SNAPSHOT
+            && (!crate::property_graph::valid_frame_prefix(id, count, payload_len)
+                || (snapshot.is_none() && graph_started))
+        {
+            return Err(corrupt(offset, "invalid graph snapshot"));
+        }
+        let target_dimensions =
+            if operation <= 4 || operation == 9 || operation == OP_RECORD_BLOCK {
+                loaded
+                    .collections
+                    .get(&collection_id)
+                    .ok_or_else(|| corrupt(offset, "record references unknown collection"))?
+                    .dimensions
+            } else if operation == 8 || operation == 10 {
+                loaded.collections.get(&collection_id).ok_or_else(|| {
+                    corrupt(offset, "metadata update references unknown collection")
+                })?;
+                0
+            } else {
+                0
+            };
         let body_len = if operation == 3 {
             let (max_count, max_bytes) = if version >= V4 {
                 (
@@ -1533,6 +1684,19 @@ fn load_inner<R: Read + Seek>(
                 return Err(corrupt(offset, "invalid expiring record length"));
             }
             payload_len
+        } else if operation == OP_RECORD_BLOCK {
+            // Records are restated before every graph frame, so no
+            // attachment can refer to them yet.
+            let min_entry = BLOCK_ENTRY_HEADER + target_dimensions * 4 + 8;
+            if id != 0
+                || !(1..=MAX_BLOCK_RECORDS).contains(&count)
+                || payload_len > MAX_RECORD_BLOCK
+                || payload_len < count * min_entry
+                || graph_started
+            {
+                return Err(corrupt(offset, "invalid record block"));
+            }
+            payload_len
         } else if operation <= 2 {
             if (operation == 1 && count != target_dimensions)
                 || (operation == 2 && (count != 0 || payload_len != 0))
@@ -1542,7 +1706,7 @@ fn load_inner<R: Read + Seek>(
             }
             count * 4 + payload_len
         } else {
-            // Op 12 in graph builds; its prefix was validated above.
+            // Ops 12 and 15 in graph builds; their prefix was validated above.
             payload_len
         };
         let frame_len = (PREFIX_SIZE + body_len + seal + FOOTER_SIZE) as u64;
@@ -1554,6 +1718,17 @@ fn load_inner<R: Read + Seek>(
         disk.extend_from_slice(&prefix);
         disk.resize(frame_len as usize, 0);
         file.read_exact(&mut disk[PREFIX_SIZE..])?;
+        if operation == OP_RECORD_BLOCK {
+            // Verified and decoded with the rest of the run (restated, so
+            // only the read position and commit count advance here).
+            blocks
+                .get_or_insert_with(|| BlockRun::new(&loaded, collection_id))
+                .push(offset, std::mem::take(&mut disk), cipher.as_ref())?;
+            restating_from = Some(sequence);
+            commits_seen += 1;
+            loaded.end += anchor_len + frame_len;
+            continue;
+        }
         let frame = verified_frame(&disk, cipher.as_ref(), sequence, offset)?;
         let body = &frame[PREFIX_SIZE..PREFIX_SIZE + body_len];
         match operation {
@@ -1740,6 +1915,14 @@ fn load_inner<R: Read + Seek>(
                 offset,
                 restated,
             )?,
+            OP_GRAPH_SNAPSHOT => {
+                let body = crate::property_graph::engine::decode_body(body, count as u32)
+                    .map_err(|_| corrupt(offset, "invalid graph snapshot"))?;
+                snapshot
+                    .get_or_insert_with(|| (offset, Vec::new()))
+                    .1
+                    .push(body);
+            }
             _ => {
                 let settings = decode_settings(body).map_err(|reason| corrupt(offset, reason))?;
                 let collection = loaded
@@ -1761,7 +1944,175 @@ fn load_inner<R: Read + Seek>(
             loaded.commit_times.push((sequence, timestamp));
         }
     }
+    if let Some(run) = blocks {
+        run.apply(&mut loaded, cipher.as_ref())?;
+    }
+    if let Some((first, bodies)) = snapshot {
+        let state = crate::property_graph::frame::load_snapshot(
+            &loaded.collections,
+            loaded.history_floor,
+            bodies,
+            first,
+        )?;
+        loaded.graph = Some(state);
+    }
     Ok(loaded)
+}
+
+/// One decoded record-block entry.
+struct BlockEntry {
+    id: u64,
+    revision: u64,
+    expiry: Option<u64>,
+    record: Record,
+    body_bytes: u64,
+}
+
+/// Pending record blocks are verified and decoded once they hold this many
+/// bytes, bounding the undecoded copy kept in memory.
+const BLOCK_BATCH_BYTES: usize = 64 << 20;
+
+/// A run of record blocks (op 14) of one collection, read but not yet
+/// applied (Speed P2b). Blocks are verified and decoded in batches, in
+/// parallel off wasm; the entries are added to the collection in bulk when
+/// the run ends.
+struct BlockRun {
+    collection: u16,
+    dimensions: usize,
+    /// The checkpoint sequence the blocks restate.
+    floor: u64,
+    /// Complete frames not yet verified: offset and on-disk bytes.
+    frames: Vec<(u64, Vec<u8>)>,
+    frame_bytes: usize,
+    /// Highest record ID so far; every later ID must exceed it.
+    last_id: Option<u64>,
+    entries: Vec<BlockEntry>,
+}
+
+impl BlockRun {
+    fn new(loaded: &Loaded, collection: u16) -> Self {
+        let target = &loaded.collections[&collection];
+        Self {
+            collection,
+            dimensions: target.dimensions,
+            floor: loaded.history_floor,
+            frames: Vec::new(),
+            frame_bytes: 0,
+            last_id: target.records.keys().next_back().copied(),
+            entries: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, offset: u64, disk: Vec<u8>, cipher: Option<&Cipher>) -> Result<()> {
+        self.frame_bytes += disk.len();
+        self.frames.push((offset, disk));
+        if self.frame_bytes >= BLOCK_BATCH_BYTES {
+            self.decode(cipher)?;
+        }
+        Ok(())
+    }
+
+    /// Verifies and decodes the pending frames and appends their entries,
+    /// which must continue the strictly ascending ID order.
+    fn decode(&mut self, cipher: Option<&Cipher>) -> Result<()> {
+        let frames = std::mem::take(&mut self.frames);
+        self.frame_bytes = 0;
+        let (dimensions, floor) = (self.dimensions, self.floor);
+        let decode = |(offset, disk): &(u64, Vec<u8>)| {
+            let frame = verified_frame(disk, cipher, floor, *offset)?;
+            decode_block(&frame, dimensions, floor)
+                .ok_or_else(|| corrupt(*offset, "invalid record block"))
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let decoded: Vec<Vec<BlockEntry>> = {
+            use rayon::prelude::*;
+            frames.par_iter().map(decode).collect::<Result<_>>()?
+        };
+        #[cfg(target_arch = "wasm32")]
+        let decoded: Vec<Vec<BlockEntry>> = frames.iter().map(decode).collect::<Result<_>>()?;
+        for ((offset, _), block) in frames.iter().zip(decoded) {
+            if self.last_id.is_some_and(|last| block[0].id <= last) {
+                return Err(corrupt(*offset, "invalid record block"));
+            }
+            self.last_id = block.last().map(|entry| entry.id);
+            self.entries.extend(block);
+        }
+        Ok(())
+    }
+
+    /// Adds every entry to the collection, as restating each record in its
+    /// own frame would. All IDs exceed the collection's existing records, so
+    /// no record is replaced and no staged vector data refers to them.
+    fn apply(mut self, loaded: &mut Loaded, cipher: Option<&Cipher>) -> Result<()> {
+        self.decode(cipher)?;
+        let target = collection_mut(loaded, self.collection);
+        let entries = self.entries;
+        target.live_body_bytes += entries.iter().map(|entry| entry.body_bytes).sum::<u64>();
+        extend_ascending(
+            &mut target.revisions,
+            entries.iter().map(|entry| (entry.id, entry.revision)),
+        );
+        extend_ascending(
+            &mut target.expiries,
+            entries
+                .iter()
+                .filter_map(|entry| Some((entry.id, entry.expiry?))),
+        );
+        let records = entries.into_iter().map(|entry| (entry.id, entry.record));
+        if target.records.is_empty() {
+            target.records = records.collect();
+        } else {
+            for (id, record) in records {
+                target.records.insert(id, record);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Adds entries whose keys all exceed the map's, building it in bulk when
+/// it is empty.
+fn extend_ascending<V>(map: &mut BTreeMap<u64, V>, entries: impl Iterator<Item = (u64, V)>) {
+    if map.is_empty() {
+        *map = entries.collect();
+    } else {
+        map.extend(entries);
+    }
+}
+
+/// Decodes the verified plaintext frame of a record block: exactly `count`
+/// entries with strictly ascending IDs, revisions in `1..=floor`, canonical
+/// expiry markers and extended bodies that fill the body exactly.
+fn decode_block(frame: &[u8], dimensions: usize, floor: u64) -> Option<Vec<BlockEntry>> {
+    let count = u32_at(frame, 24) as usize;
+    let body = &frame[PREFIX_SIZE..frame.len() - FOOTER_SIZE];
+    let mut entries: Vec<BlockEntry> = Vec::with_capacity(count);
+    let mut at = 0;
+    for _ in 0..count {
+        let header = body.get(at..at + BLOCK_ENTRY_HEADER)?;
+        let (id, revision) = (u64_at(header, 0), u64_at(header, 8));
+        let (flag, expiry) = (header[16], u64_at(header, 17));
+        let length = u32_at(header, 25) as usize;
+        if flag > 1
+            || (flag == 0 && expiry != 0)
+            || !(1..=floor).contains(&revision)
+            || entries.last().is_some_and(|last| last.id >= id)
+        {
+            return None;
+        }
+        at += BLOCK_ENTRY_HEADER;
+        let record_body = body.get(at..at.checked_add(length)?)?;
+        let record = decode_extended(record_body, dimensions, 0, true).ok()?;
+        at += length;
+        entries.push(BlockEntry {
+            id,
+            revision,
+            expiry: (flag == 1).then_some(expiry),
+            body_bytes: record_body_len(&record),
+            record,
+        });
+    }
+    (at == body.len()).then_some(entries)
 }
 
 /// Verifies a complete on-disk frame (footer, checksum, and for encrypted files
@@ -1919,6 +2270,344 @@ mod tests {
             Err(Error::Corrupt { .. })
         ));
     }
+
+    fn block_record(id: u64) -> Record {
+        let mut metadata = crate::Metadata::new();
+        if id % 2 == 1 {
+            metadata.insert("id".into(), crate::MetadataValue::Integer(id as i64));
+        }
+        Record {
+            vector: vec![id as f32, 1.0],
+            payload: id.to_le_bytes()[..(id % 9) as usize].to_vec(),
+            metadata,
+        }
+    }
+
+    fn block(collection: u16, entries: &[(u64, u64, Option<u64>)]) -> RecordBlock {
+        let mut block = RecordBlock::new(collection);
+        for &(id, revision, expiry) in entries {
+            block.push(id, revision, expiry, &block_record(id));
+        }
+        block
+    }
+
+    #[test]
+    fn record_blocks_load_like_restated_record_frames() {
+        let history = FLAG_HISTORY;
+        let tail = record_frame_v5(6, 0, 9, &block_record(9), None);
+        let blocks = history_log(
+            history,
+            &[
+                advance_frame(5),
+                block(0, &[(1, 2, None), (4, 5, Some(9_000))]).take_frame(5),
+                block(0, &[(7, 1, None), (8, 5, None)]).take_frame(5),
+                tail.clone(),
+            ],
+        )
+        .unwrap();
+        let frames = history_log(
+            history,
+            &[
+                advance_frame(5),
+                record_frame_v5(1, 0, 7, &block_record(7), None),
+                record_frame_v5(2, 0, 1, &block_record(1), None),
+                record_frame_v5(5, 0, 4, &block_record(4), Some(9_000)),
+                record_frame_v5(5, 0, 8, &block_record(8), None),
+                tail,
+            ],
+        )
+        .unwrap();
+        assert_eq!(blocks.sequence, 6);
+        assert_eq!(blocks.history_floor, 5);
+        let (actual, expected) = (&blocks.collections[&0], &frames.collections[&0]);
+        assert_eq!(actual.records, expected.records);
+        assert_eq!(
+            actual.records.keys().copied().collect::<Vec<_>>(),
+            [1, 4, 7, 8, 9]
+        );
+        assert_eq!(actual.revisions, expected.revisions);
+        assert_eq!(actual.revisions[&7], 1);
+        assert_eq!(actual.expiries, BTreeMap::from([(4, 9_000)]));
+        assert_eq!(actual.expiries, expected.expiries);
+        assert_eq!(actual.live_body_bytes, expected.live_body_bytes);
+
+        // A torn final block is an incomplete tail, like any other frame.
+        let torn = block(0, &[(3, 1, None)]).take_frame(5);
+        let loaded = history_log(
+            history,
+            &[
+                advance_frame(5),
+                block(0, &[(2, 1, None)]).take_frame(5),
+                torn[..torn.len() - 3].to_vec(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(loaded.collections[&0].records.len(), 1);
+        assert_eq!(loaded.incomplete_bytes, torn.len() as u64 - 3);
+    }
+
+    #[test]
+    fn record_blocks_are_rejected_outside_canonical_checkpoint_images() {
+        let history = FLAG_HISTORY;
+        let invalid = "invalid record block";
+        let outside = "snapshot frame outside a checkpoint image";
+        let one = |revision| block(0, &[(1, revision, None)]);
+        let image = |frame: Vec<u8>| history_log(history, &[advance_frame(5), frame]);
+        rejected(
+            history_log(FLAG_GRAPH, &[one(1).take_frame(1)]),
+            "invalid operation or reserved record bytes",
+        );
+        rejected(image(one(1).take_frame(4)), outside);
+        rejected(image(one(1).take_frame(6)), outside);
+        rejected(
+            history_log(
+                history,
+                &[advance_frame(5), history_record(3, 2), one(1).take_frame(3)],
+            ),
+            outside,
+        );
+        for entries in [
+            [(4, 1, None), (2, 1, None)],
+            [(4, 1, None), (4, 1, None)],
+            [(4, 0, None), (5, 1, None)],
+            [(4, 1, None), (5, 6, None)],
+        ] {
+            rejected(image(block(0, &entries).take_frame(5)), invalid);
+        }
+        // IDs ascend across the blocks of a collection and past records
+        // restated before them.
+        rejected(
+            history_log(
+                history,
+                &[
+                    advance_frame(5),
+                    block(0, &[(4, 1, None)]).take_frame(5),
+                    block(0, &[(4, 1, None)]).take_frame(5),
+                ],
+            ),
+            invalid,
+        );
+        rejected(
+            history_log(
+                history,
+                &[advance_frame(5), history_record(2, 9), one(1).take_frame(5)],
+            ),
+            invalid,
+        );
+        rejected(
+            image(block(3, &[(1, 1, None)]).take_frame(5)),
+            "record references unknown collection",
+        );
+        let mut flag = one(1);
+        flag.body[16] = 2;
+        let mut value = one(1);
+        value.body[17] = 1;
+        let mut trailing = one(1);
+        trailing.body.push(0);
+        let mut missing = one(1);
+        missing.count = 2;
+        let mut empty = one(1);
+        empty.count = 0;
+        let mut long_entry = one(1);
+        long_entry.body[25] += 1;
+        let mut short_entry = one(1);
+        short_entry.body[25] -= 1;
+        for mut bad in [
+            flag,
+            value,
+            trailing,
+            missing,
+            empty,
+            long_entry,
+            short_entry,
+        ] {
+            rejected(image(bad.take_frame(5)), invalid);
+        }
+        let mut frame = one(1).take_frame(5);
+        frame[PREFIX_SIZE + 3] ^= 1;
+        rejected(image(frame), "commit footer or record checksum mismatch");
+    }
+
+    #[test]
+    fn graph_snapshots_load_like_restated_graph_frames() {
+        use crate::property_graph::engine::{
+            GraphBody, GraphEntry, GraphId, GraphState, NodeId, encode_body,
+        };
+        let history = FLAG_HISTORY | FLAG_GRAPH;
+        let node = |id: u64, key: &str| GraphEntry::PutNode {
+            node_id: NodeId(id),
+            key: key.into(),
+            labels: Default::default(),
+            properties: Default::default(),
+        };
+        let encode = |graph: u16, entries: &[GraphEntry]| {
+            let body = GraphBody {
+                graph_id: GraphId(graph),
+                entries: entries.to_vec(),
+            };
+            (entries.len() as u32, encode_body(&body).unwrap())
+        };
+        let entries = [
+            GraphEntry::CreateGraph { name: "g".into() },
+            node(0, "a"),
+            node(3, "b"),
+            GraphEntry::Attach {
+                node_id: NodeId(0),
+                collection: 0,
+                record_id: 1,
+            },
+            GraphEntry::GraphHighWater {
+                next_node_id: 7,
+                next_edge_id: 2,
+            },
+        ];
+        let records = || block(0, &[(1, 2, None)]).take_frame(5);
+        // One snapshot may span several frames.
+        let (first_count, first) = encode(0, &entries[..2]);
+        let (second_count, second) = encode(0, &entries[2..]);
+        let loaded = history_log(
+            history,
+            &[
+                advance_frame(5),
+                records(),
+                graph_snapshot_frame(5, first_count, &first),
+                graph_snapshot_frame(5, second_count, &second),
+            ],
+        )
+        .unwrap();
+        let (count, whole) = encode(0, &entries);
+        let replayed = history_log(
+            history,
+            &[advance_frame(5), records(), graph_frame(5, count, &whole)],
+        )
+        .unwrap();
+        let mut expected = GraphState::new();
+        expected
+            .apply_at(
+                5,
+                &GraphBody {
+                    graph_id: GraphId(0),
+                    entries: entries.to_vec(),
+                },
+                true,
+            )
+            .unwrap();
+        assert_eq!(loaded.graph.as_ref(), Some(&expected));
+        assert_eq!(loaded.graph, replayed.graph);
+
+        // Later graph frames apply on top of the snapshot.
+        let (one, delete) = encode(0, &[GraphEntry::DeleteNode { node_id: NodeId(3) }]);
+        let loaded = history_log(
+            history,
+            &[
+                advance_frame(5),
+                records(),
+                graph_snapshot_frame(5, count, &whole),
+                graph_frame(6, one, &delete),
+            ],
+        )
+        .unwrap();
+        assert_eq!(loaded.sequence, 6);
+        let graph = loaded.graph.unwrap();
+        assert!(graph.graph(GraphId(0)).unwrap().node(NodeId(3)).is_none());
+
+        let invalid = "invalid graph snapshot";
+        let snapshot = || graph_snapshot_frame(5, count, &whole);
+        rejected(
+            history_log(FLAG_HISTORY, &[advance_frame(5), records(), snapshot()]),
+            "invalid operation or reserved record bytes",
+        );
+        rejected(
+            history_log(FLAG_GRAPH, &[graph_snapshot_frame(1, count, &whole)]),
+            "invalid operation or reserved record bytes",
+        );
+        rejected(
+            history_log(
+                history,
+                &[
+                    advance_frame(5),
+                    records(),
+                    graph_snapshot_frame(4, count, &whole),
+                ],
+            ),
+            "snapshot frame outside a checkpoint image",
+        );
+        let missing = "graph attachment references a missing or expiring record";
+        rejected(
+            history_log(history, &[advance_frame(5), snapshot()]),
+            missing,
+        );
+        rejected(
+            history_log(
+                history,
+                &[
+                    advance_frame(5),
+                    block(0, &[(1, 2, Some(9_000))]).take_frame(5),
+                    snapshot(),
+                ],
+            ),
+            missing,
+        );
+        let (unclosed_count, unclosed) = encode(0, &entries[..4]);
+        rejected(
+            history_log(
+                history,
+                &[
+                    advance_frame(5),
+                    records(),
+                    graph_snapshot_frame(5, unclosed_count, &unclosed),
+                ],
+            ),
+            invalid,
+        );
+        rejected(
+            history_log(
+                history,
+                &[
+                    advance_frame(5),
+                    records(),
+                    graph_snapshot_frame(5, count - 1, &whole),
+                ],
+            ),
+            invalid,
+        );
+        // A snapshot loads only into an empty graph state, and record blocks
+        // precede every graph frame.
+        let (other_count, other) = encode(
+            1,
+            &[
+                GraphEntry::CreateGraph { name: "h".into() },
+                GraphEntry::GraphHighWater {
+                    next_node_id: 0,
+                    next_edge_id: 0,
+                },
+            ],
+        );
+        rejected(
+            history_log(
+                history,
+                &[
+                    advance_frame(5),
+                    records(),
+                    graph_frame(5, other_count, &other),
+                    snapshot(),
+                ],
+            ),
+            invalid,
+        );
+        rejected(
+            history_log(
+                history,
+                &[
+                    advance_frame(5),
+                    graph_snapshot_frame(5, other_count, &other),
+                    records(),
+                ],
+            ),
+            "invalid record block",
+        );
+    }
+
     fn reference_crc32(previous: u32, bytes: &[u8]) -> u32 {
         let mut crc = !previous;
         for &byte in bytes {

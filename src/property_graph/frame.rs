@@ -131,13 +131,40 @@ pub(crate) fn replay(
     Ok(())
 }
 
-/// Writes `state` as the op-12 bodies of a compacted file (REQ-052): per
+/// Builds the graph state of a checkpoint image from its op-15 snapshot
+/// bodies (Speed P2b), all restated at `sequence`; `offset` is the first
+/// snapshot frame. The bodies are exactly what [`compacted_bodies`] writes;
+/// loading them equals replaying them as op-12 frames, including the check
+/// that every attachment references a live record without expiry.
+pub(crate) fn load_snapshot(
+    collections: &BTreeMap<u16, LoadedCollection>,
+    sequence: u64,
+    bodies: Vec<GraphBody>,
+    offset: u64,
+) -> Result<GraphState> {
+    let state = GraphState::from_snapshot(sequence, bodies)
+        .map_err(|_| corrupt(offset, "invalid graph snapshot"))?;
+    for (collection, record) in state.attached_records() {
+        if !collections.get(&collection).is_some_and(|target| {
+            target.records.contains_key(&record) && !target.expiries.contains_key(&record)
+        }) {
+            return Err(corrupt(
+                offset,
+                "graph attachment references a missing or expiring record",
+            ));
+        }
+    }
+    Ok(state)
+}
+
+/// Writes `state` as the op-12 bodies of a compacted file (REQ-052), or the
+/// op-15 snapshot bodies of a checkpoint image: per
 /// graph in ID order (IDs kept), `CreateGraph`, the declared schema if any,
 /// every node, every edge and
 /// every attachment, then a `GraphHighWater` entry with the graph's next node
 /// and edge IDs so deleted IDs are never reused. Bodies stay within the batch
 /// entry and byte limits; `emit` receives each body's entry count and bytes.
-/// Attachments are replayed against live records, so these frames must
+/// Attachments are checked against live records, so these frames must
 /// follow the record frames.
 pub(crate) fn compacted_bodies(
     state: &GraphState,

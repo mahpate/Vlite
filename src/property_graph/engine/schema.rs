@@ -965,14 +965,17 @@ pub(super) fn check_entry(graph: &Graph, entry: &GraphEntry) -> Result<(), Graph
                 .ok_or(GraphError::InvariantViolation("applied edge is missing"))?;
             check_edge(graph, edge, matches!(entry, GraphEntry::PutEdge { .. }))
         }
-        GraphEntry::PutSchema { .. } => {
-            graph.nodes().try_for_each(|node| check_node(graph, node))?;
-            graph
-                .edges()
-                .try_for_each(|edge| check_edge(graph, edge, true))
-        }
+        GraphEntry::PutSchema { .. } => check_graph(graph),
         _ => Ok(()),
     }
+}
+
+/// Checks every node and edge of `graph` against its declared schema.
+pub(super) fn check_graph(graph: &Graph) -> Result<(), GraphError> {
+    graph.nodes().try_for_each(|node| check_node(graph, node))?;
+    graph
+        .edges()
+        .try_for_each(|edge| check_edge(graph, edge, true))
 }
 
 /// Whether an item of a schema summary is declared, observed or both.

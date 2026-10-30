@@ -69,7 +69,11 @@ Local numbers below show direction only (see rules).
   atomic manifest. Background checkpoints bound reopen replay (S6) and keep
   every record's revision, so compare-and-set and fencing tokens survive.
   Cursors below the floor return `cursor_before_history`. Converters go both
-  ways. Next is P2b: memory-mapped segments for F4.
+  ways. P2b is implemented: the image and sealed logs are memory-mapped, and
+  an image stores records as blocks and graphs as snapshots that load in
+  parallel and in bulk instead of by replay. F4 is not measured yet; the
+  DO-005 run qualifies it. Loading is still linear in the image size (see
+  the plan's limits).
 
 ## Rules for every item
 

@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | P2a done: directory layout, background checkpoints and converters have landed. P2b (memory-mapped segments) is next |
+| Status | P2a done: directory layout, background checkpoints and converters have landed. P2b implemented: mapped immutable segments, and images whose records and graphs load in bulk instead of by replay. F4 is not yet measured; it is qualified in the major-release DO-005 run |
 | Goals | F4 (reopen time), S6 (no unbounded log growth), no regressions ([`storage-goals.md`](../performance/storage-goals.md)) |
 | Roadmap | [`next-major.md`](next-major.md) |
 
@@ -50,15 +50,20 @@ feed, log segments and graph code run unchanged. All files share one cipher
 descriptor. A file that the manifest does not list is ignored on open and
 removed by the next writable open or checkpoint.
 
-### Checkpoint image (landed)
+### Checkpoint image
 
 A checkpoint image is an ordinary v5 file with `FLAG_HISTORY`:
 
 1. An advance frame (op 13) at the floor `S`, the last sequence the image
    covers.
 2. Collection creates and settings at sequence 1.
-3. Each live record at its original revision, ascending.
-4. Vector data, open import-job markers and graph state at `S`.
+3. Live records as record blocks (op 14) at `S`, per collection in ID order.
+   Each entry keeps the record's original revision (P2b).
+4. Vector data and open import-job markers at `S`, then the graph state as
+   graph snapshot frames (op 15) at `S` (P2b).
+
+P2a images wrote each live record as its own frame at its revision, in
+ascending order, and the graph state as op 12 frames. They still load.
 
 The loader accepts sequences that do not decrease and stay at or below `S`
 while restating. Strict contiguity resumes at `S + 1`. These are rejected as
@@ -67,14 +72,65 @@ corrupt:
 - an advance frame anywhere except first;
 - a history image without an advance frame;
 - a sequence that decreases, or skips past `S + 1`;
-- history combined with commit timestamps.
+- history combined with commit timestamps;
+- an op 14 or 15 frame outside the restated prefix of a history image, or
+  at a sequence other than `S`.
+
+### Loading an image (P2b)
+
+Reopen no longer replays an image frame by frame.
+
+- **Mapped segments.** The image and sealed logs never change while the
+  manifest lists them, so they are memory-mapped read-only and read without
+  a system call per frame. The active log is read through its file handle.
+  A writer maps a log once a rotation has sealed it and an image once a
+  checkpoint has installed it. It unmaps both before deleting them, which
+  Windows requires. Read-only handles map every listed file, because no
+  writer can run while they hold the shared lock. If mapping fails, reads
+  fall back to the file handle.
+- **Record blocks (op 14).** A block holds 1 to 4,096 records of one
+  collection, about 1 MiB of body at most. Each entry is the ID, revision,
+  expiry flag and expiry, and body length (29 bytes), followed by an op 4
+  record body. The loader verifies a collection's blocks (CRC and, when
+  encrypted, the authentication tag) and decodes them in parallel, in
+  batches of up to 64 MiB. It then builds the record, revision and expiry
+  maps in bulk from the sorted entries. IDs must rise strictly within and
+  across blocks and exceed every record already loaded, and revisions must
+  lie in `1..=S`.
+- **Graph snapshot (op 15).** The bodies use the graph frame format. Per
+  graph, they list the creation, the schema, and then nodes, edges and
+  attachments in ascending order. The loader builds the graph state directly
+  and appends adjacency in order instead of replaying each entry. It
+  rejects a snapshot that is not canonical: IDs out of order, duplicate keys,
+  missing endpoints, an invalid schema, or an attachment to a missing or
+  expiring record. A snapshot loads only into an empty graph state, after
+  every record block.
+- **Readers of raw frames.** The change feed reads snapshot bodies only to
+  learn graph keys for later events. Restated frames never produce events.
+  Log segments, backup, restore and re-encryption copy op 14 and 15 frames
+  like any other frame.
+- **Compatibility.** A P2b build opens files and P2a images unchanged.
+  Builds before P2b report an image written by P2b, or a backup packed from
+  it, as corrupt (unknown op 14).
+
+Limits of P2b:
+
+- Loading is still eager and linear in the image size, spread across cores.
+  Every record is decoded into memory. Derived metadata, text and sparse
+  indexes are rebuilt on open, and the ANN index is built as before. Reopen
+  independent of data size needs columnar or lazily loaded segments (P3 to
+  P5).
+- The active log after the image is still replayed. The checkpoint
+  threshold bounds it (64 MiB by default).
+- If another process truncates a mapped file, a reader can fault (SIGBUS on
+  Unix). `LOCK` excludes VLite writers only.
 
 Compaction drops the flag and renumbers from one, as before.
 
 ### Why revisions survive
 
 A revision is the sequence of the commit that last wrote a record. The image
-writes each live record at that sequence. Replay therefore assigns the same
+stores each live record with that sequence, so loading it assigns the same
 revisions, and conditional writes and fencing tokens behave exactly as they
 would without the checkpoint. Deleted records have no revision to keep. A later
 put still gets a sequence above `S`, so revisions only grow and are never
@@ -131,7 +187,7 @@ not listed, so they are ignored.
 | Stage | Contents | Exit |
 |---|---|---|
 | P2a (done) | Checkpoint image, directory layout, `create_directory`, checkpoint, background merge at a WAL threshold (64 MiB default), converters | S6. Reopen replays one image plus a bounded WAL. Revisions, cursors at or above the floor, and lineage survive checkpoints |
-| P2b | Memory-mapped immutable segments; the index and graph are loaded from the image instead of replayed | F4 (reopen in 50 ms or less) |
+| P2b (implemented; F4 not yet measured) | Memory-mapped immutable segments; the index and graph are loaded from the image instead of replayed (record blocks and graph snapshots, loaded in parallel and in bulk) | F4 (reopen in 50 ms or less), qualified in the major-release DO-005 run |
 
 P3 to P5 build on these segments: compact vectors, CSR graph adjacency, and
 per-segment statistics.
