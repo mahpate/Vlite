@@ -4,8 +4,8 @@
 |---|---|
 | Status | Research for review. Not approved; nothing here is implemented or scheduled |
 | Created | 2026-10-29 |
-| Scope | What VLite's vector store, property graph and the [peer pool](https://github.com/mahpate/copilot-worker-pool) still lack to form one complete product |
-| Related | [`storage-goals.md`](../performance/storage-goals.md) (speed and size), [`feature-agent-graph.prd.md`](../feature-agent-graph/feature-agent-graph.prd.md) (graph scope and deferrals), pool [`TODO.md`](https://github.com/mahpate/copilot-worker-pool/blob/main/TODO.md) |
+| Scope | What VLite's vector store, property graph and the peer pool (a private, owner-only project) still lack to form one complete product |
+| Related | [`storage-goals.md`](../performance/storage-goals.md) (speed and size), [`feature-agent-graph.prd.md`](../feature-agent-graph/feature-agent-graph.prd.md) (graph scope and deferrals) |
 
 ## Method
 
