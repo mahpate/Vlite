@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Status | All goals and work items approved 2026-10-30. Speed P1 and the key-value API start first |
-| Sources | [`storage-goals.md`](../performance/storage-goals.md) (speed and size goals, decisions 1–4), [`product-gaps.md`](../product-gaps/product-gaps.md) (gaps 1–12), Option A of [`performance-proposal.md`](../performance/performance-proposal.md) |
+| Sources | [`storage-goals.md`](../performance/storage-goals.md) (speed and size goals, decisions 1–5), [`product-gaps.md`](../product-gaps/product-gaps.md) (gaps 1–12), Option A of [`performance-proposal.md`](../performance/performance-proposal.md) |
 | Benchmarks | DO-005 runs once, after the next store version lands, under the unchanged quiet gate. No campaign runs before then |
 
 ## Work items
@@ -12,7 +12,7 @@
 |---|---|---|---|---|---|
 | Speed P1: quick wins | Speed | Remove the exact-search regression, background index rebuilds, compact in-memory graph | F2, F5, S4 | S–M | Ready (phase order approved) |
 | Speed P2: directory store | Speed | WAL, immutable segments and an atomic manifest, background merges, converter | F4, S6, no regressions | L | P1 (format approved) |
-| Speed P3: compact vectors | Speed | float16 storage, quantized codes, saved ANN graph, SIMD | F1, F3, S1, S2 | L | P2; precision choice (open) |
+| [Speed P3: compact vectors](p3-compact-vectors.md) | Speed | Opt-in float16 storage, quantized codes, saved ANN graph, SIMD | F1, F3, S1, S2 | L | P2; float32 default retained |
 | [Speed P4: compact graph](p4-compact-graph.md) | Speed | CSR adjacency, encoded labels, parallel bulk load | S3, S4, F6 | M–L | P2 |
 | Speed P5: filters and server | Speed | Segment statistics and bitmaps, filter-aware ANN, Arrow or protobuf responses | F7, F8, S5 | M | P2 |
 | Gap 2: key-value API | Agent memory | Namespaced string keys, vector-free values, expiry, conditional writes | Pool claims, framework stores | S–M | Ready: Rust API first; OpenAPI diff reviewed before merge |
@@ -39,7 +39,9 @@ flowchart LR
 
 ## Still open
 
-- Default stored precision, float16 or float32 (before P3).
+- S1's default-settings size target conflicts with the chosen float32 default.
+  Whether to qualify an explicit float16 profile instead remains a release
+  decision; the original criterion is not waived.
 - Whether parity targets F1–F3 and F7 block the release.
 - Which scale-out item comes first after P2.
 
@@ -81,6 +83,12 @@ Local numbers below show direction only (see rules).
   remove expired entities as one computed entry, so the 4,096-operation
   limit is unaffected. Files that do not use expiry keep their encoding.
   REST, gRPC and MCP wait for the OpenAPI review.
+- **Speed P3, compact vectors:** the [design](p3-compact-vectors.md) keeps
+  float32 as the storage default and makes float16 explicit. It reuses the
+  existing scalar-u8/reranking and ANN snapshot mechanisms, with columnar
+  source access and compact persisted topology. A rotated one-bit codec is
+  an opt-in candidate, not an unmeasured new default. Implementation and
+  F1/F3/S1/S2 qualification remain outstanding.
 - **Speed P4, compact graph:** the [design](p4-compact-graph.md) is ready:
   immutable CSR checkpoint blocks, a bounded update overlay, encoded labels
   and properties, and deterministic parallel import. It preserves graph TTL

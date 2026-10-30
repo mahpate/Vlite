@@ -35,9 +35,12 @@ same build before any claim is made.
 | S5 | Metadata and attachments | Stored raw in each record | ≥3× smaller on typical JSON |
 | S6 | Space after deletes and TTL expiry | Reclaimed only by offline compaction | Reclaimed automatically by background merges, within one merge cycle |
 
-Float32 stays available as an opt-in for users who need bit-exact stored
-values. Smaller stored vectors change stored values, so S1's default is a
-user decision (see [Decisions needed](#decisions-needed)).
+The [P3 precision decision](../roadmap/p3-compact-vectors.md) keeps float32
+as the default to preserve existing values and exact results; float16 is
+explicitly selected. This does **not** meet S1's original default-settings
+criterion: float32 components alone require 3,072 B. An opt-in float16 result
+cannot close that goal without a separate acceptance-profile decision
+(see [Decisions](#decisions)). The 1,700 B target is unchanged and unqualified.
 
 ### Faster
 
@@ -72,7 +75,7 @@ user decision (see [Decisions needed](#decisions-needed)).
 | Versioned manifests | LanceDB, Delta Lake | Must-not-regress | Each commit writes a new manifest version. Point-in-time restore and read snapshots become "open manifest N" instead of a full copy. |
 | Memory-mapped, aligned columns | zvec (Arrow + mmap), LanceDB, DuckDB | F2, F4, S2 | Vectors, IDs and metadata are separate 64-byte-aligned columns. Search reads them straight from mapped files. |
 | Quantized search with re-ranking | Qdrant (scalar, binary), Weaviate and LanceDB (RaBitQ), Elastic BBQ, FAISS (PQ) | F1, S1, S2 | Keep 1-bit or 8-bit codes in memory, search them, then re-rank the top candidates with full-precision vectors. |
-| float16/bfloat16 storage | pgvector `halfvec`, Milvus, Qdrant | S1 | Default stored precision for new collections, if approved. |
+| float16/bfloat16 storage | pgvector `halfvec`, Milvus, Qdrant | S1 | Explicit compact precision; float32 stays the compatibility default. |
 | Disk-friendly ANN graph | DiskANN/Vamana (Milvus, SQL Server), zvec/Proxima HNSW | F1, F3, S2 | Build the graph once per sealed segment, store it as a flat array, and load it by mapping the file. |
 | IVF partitions for large segments | FAISS, LanceDB IVF-PQ, zvec | F3 | Optional for large, rarely-updated collections; much faster to build than HNSW. |
 | Background merges | Qdrant optimizers, Milvus compaction, LSM trees | F5, S6 | Merge small segments, drop deleted and expired records, and build the large index off the query path. |
@@ -132,7 +135,8 @@ to form the next major release.
   segments and manifest.
 - Replicas, change feed and restore move from file copies to segment and
   manifest shipping.
-- Quantized and float16 defaults trade bit-exact stored values for size.
+- Float16 storage trades bit-exact input values for size and is explicit.
+  Quantized ANN traversal is separate from stored precision.
 
 ## Decisions
 
@@ -141,9 +145,15 @@ phases.
 
 1. **Approved:** the directory store is the format for new databases. Old
    `.vlite` files stay readable and are converted only on request.
-2. **Open:** default stored vector precision for new collections: float16
-   (smaller, slightly changed stored values) or float32 (unchanged, larger).
-   Needed before phase 3.
+2. **Decided 2026-10-30:** float32 remains the default; float16 is an explicit
+   compact-storage choice. This preserves the must-not-regress exact-default
+   invariant and follows the separation of stored datatype from derived ANN
+   quantization ([P3 design and sources](../roadmap/p3-compact-vectors.md)).
+   S1's original default-size criterion consequently remains unmet.
 3. **Open:** whether parity targets F1–F3 and F7 block the release or stay
    tracked goals. Needed before the release benchmark.
 4. **Approved:** phase 1 first, then phase 2.
+5. **Open before release:** whether S1 may qualify the explicit float16
+   profile instead of default settings. Keep the original acceptance
+   criterion until that decision; neither a design estimate nor an opt-in
+   measurement silently changes it.
