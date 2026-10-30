@@ -4,7 +4,7 @@ use super::error::GraphError;
 use super::limits::{
     MAX_GRAPH_NAME_BYTES, MAX_KEY_BYTES, MAX_LABEL_BYTES, MAX_LABELS, MAX_RELATIONSHIP_TYPE_BYTES,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 /// Internal named-graph ID (`0..MAX_GRAPHS`), unique among live graphs; the ID of
 /// a dropped (empty) graph may be assigned to a later graph.
@@ -29,8 +29,8 @@ pub enum PropertyValue {
     GeoPoint { latitude: f64, longitude: f64 },
 }
 
-/// Properties of a node or edge. Mirrors `vlite::Metadata`.
-pub type Properties = BTreeMap<String, PropertyValue>;
+/// Properties of a node or edge. Mirrors `vlite::Metadata`, stored compactly.
+pub use super::property_map::Properties;
 
 /// A property filter condition. Variants mirror `vlite::Condition`
 /// one-to-one; the adapter validates with the `vlite` filter rules before

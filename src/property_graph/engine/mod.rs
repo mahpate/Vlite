@@ -54,6 +54,7 @@ mod meter;
 pub mod model;
 mod mutate;
 pub mod properties;
+pub mod property_map;
 mod query;
 pub mod schema;
 mod state;

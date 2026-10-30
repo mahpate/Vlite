@@ -55,8 +55,11 @@ Local numbers below show direction only (see rules).
   `set_background_hnsw_rebuild` keeps serving the ready index while a buffer
   overflow rebuilds in the background. The stall has not been measured yet.
 - **Speed P1, compact graph (S4):** partly done. Sorted adjacency with shared
-  relationship names cut adjacency from 146 to 54 B/edge and total retained
-  memory from 1,016 to 925 B/edge. Edge records (761 B/edge) are next.
+  relationship names cut adjacency from 146 to 54 B/edge. A compact sorted
+  property map (a B-tree allocated a ~630 B node even for one property) cut
+  edge records from 761 to 265 B/edge. Retained memory for the smoke graph
+  (10k nodes, 100k edges) fell from 101.6 MB to 37.9 MB, about 379 B/edge
+  against the ≤100 B/edge goal; the rest waits for CSR storage in P4.
 - **Gap 2, key-value:** the embedded Rust API is done
   ([storage features](../../STORAGE-FEATURES.md#key-value-store)): namespaces,
   ordered prefix lists, expiry, compare-and-set and fencing tokens, with no
