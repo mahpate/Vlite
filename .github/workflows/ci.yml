@@ -26,6 +26,10 @@ jobs:
         with:
           python-version: "3.11"
       - run: python tests/ci_workflows.py
+      - name: Verify compact precision and graph algorithm golden oracles
+        run: |
+          python tests/compact_float16_oracle.py --self-test
+          python tests/graph_algorithm_oracle.py --self-test
       - id: route
         run: python scripts/ci_policy.py route
 

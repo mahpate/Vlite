@@ -1,0 +1,323 @@
+{
+  "schema": "vlite.graph-algorithm-golden",
+  "version": 1,
+  "contract": {
+    "description": "Independent tiny mathematical reference inputs and expected outputs for future Rust tests; no engine algorithms are implemented by these fixtures. Node/edge id is the stable numeric ID used for comparisons; public_id is an opaque public identifier. Every edge supplies an explicit nonnegative weight, used only when weight_policy is explicit. Scope is a complete induced local projection with no work/output truncation.",
+    "score_abs_tolerance": 1e-8,
+    "mass_abs_tolerance": 1e-12,
+    "residual_abs_tolerance": 1e-12,
+    "ordering": "Output rows and scope ID sets ascend by numeric ID, never by score or public ID. Path arrays preserve traversal order. Path candidates compare exact f64 cost, hops, then numeric edge-ID tuple. Betweenness selected/completed sources preserve SplitMix64-v1 sampling order, NOT node-ID order.",
+    "bounds": "1..6 nodes, at most 12 physical edges, H=0..4; walks of length 0..H and simple paths are exhaustively enumerated, not benchmarked. Scope filters are all-label conjunction and explicit relationship inclusion (or any). Seeds are deduplicated; out/in/both arcs are projected before induction.",
+    "pagerank_reference": "stationary_scores solve (I-d*T^transpose)r=(1-d)p with exact rational arithmetic, including dangling redistribution to p. They are NOT an iterative result or a claimed iteration count. Future Rust tests run the supplied tolerance=1e-10 and max_iterations=100, require converged=true, completed-step L1 change <= tolerance and unit mass within 1e-12, and compare the last full vector to stationary_scores within 1e-8. fixed_point_l1_residual describes the stationary reference only.",
+    "exclusions": "No Rust engine coverage, invalid-input API assertions, TTL/storage/authorization, resource exhaustion, partial sweeps/sources, partial sampling, or cross-platform bitwise equality claims. No edge-property condition filters are modeled."
+  },
+  "cases": [
+    {
+      "name": "weighted_zero_hops_identity",
+      "algorithm": "weighted_shortest_path",
+      "purpose": "A zero-hop scope permits the identity path without traversing edges.",
+      "nodes": [{"id": 1, "public_id": "start", "labels": []}],
+      "edges": [],
+      "parameters": {"scope": {"seeds": [1], "max_hops": 0, "direction": "out", "node_labels": "any", "relationship_types": "any"}, "source": 1, "target": 1, "weight_policy": "unit"},
+      "expected": {"scope_node_ids": [1], "scope_edge_ids": [], "output": {"status": "found", "path": {"cost": 0, "hops": 0, "edge_ids": [], "node_ids": [1]}}}
+    },
+    {
+      "name": "weighted_diamond",
+      "algorithm": "weighted_shortest_path",
+      "purpose": "Two-hop cost 1+1 beats the direct cost 3.",
+      "nodes": [
+        {"id": 1, "public_id": "start", "labels": []},
+        {"id": 2, "public_id": "via", "labels": []},
+        {"id": 3, "public_id": "finish", "labels": []}
+      ],
+      "edges": [
+        {"id": 30, "public_id": "direct", "source": 1, "target": 3, "relationship": "r", "weight": 3},
+        {"id": 20, "public_id": "last", "source": 2, "target": 3, "relationship": "r", "weight": 1},
+        {"id": 10, "public_id": "first", "source": 1, "target": 2, "relationship": "r", "weight": 1}
+      ],
+      "parameters": {"scope": {"seeds": [1], "max_hops": 2, "direction": "out", "node_labels": "any", "relationship_types": ["r"]}, "source": 1, "target": 3, "weight_policy": "explicit"},
+      "expected": {"scope_node_ids": [1, 2, 3], "scope_edge_ids": [10, 20, 30], "output": {"status": "found", "path": {"cost": 2, "hops": 2, "edge_ids": [10, 20], "node_ids": [1, 2, 3]}}}
+    },
+    {
+      "name": "weighted_hops_before_edge_ids",
+      "algorithm": "weighted_shortest_path",
+      "purpose": "Equal cost chooses fewer hops despite lexicographically smaller multi-edge alternative; zero cycle cannot win.",
+      "nodes": [
+        {"id": 1, "public_id": "a", "labels": []},
+        {"id": 2, "public_id": "b", "labels": []},
+        {"id": 3, "public_id": "c", "labels": []}
+      ],
+      "edges": [
+        {"id": 1, "public_id": "small-first", "source": 1, "target": 2, "relationship": "r", "weight": 0},
+        {"id": 2, "public_id": "second", "source": 2, "target": 3, "relationship": "r", "weight": 2},
+        {"id": 3, "public_id": "cycle", "source": 2, "target": 1, "relationship": "r", "weight": 0},
+        {"id": 90, "public_id": "direct", "source": 1, "target": 3, "relationship": "r", "weight": 2}
+      ],
+      "parameters": {"scope": {"seeds": [1], "max_hops": 4, "direction": "out", "node_labels": "any", "relationship_types": "any"}, "source": 1, "target": 3, "weight_policy": "explicit"},
+      "expected": {"scope_node_ids": [1, 2, 3], "scope_edge_ids": [1, 2, 3, 90], "output": {"status": "found", "path": {"cost": 2, "hops": 1, "edge_ids": [90], "node_ids": [1, 3]}}}
+    },
+    {
+      "name": "weighted_edge_tuple_not_last_edge_or_public_id",
+      "algorithm": "weighted_shortest_path",
+      "purpose": "Equal-cost equal-hop alternatives compare the whole numeric edge-ID sequence; parallel arcs remain distinct.",
+      "nodes": [
+        {"id": 1, "public_id": "z", "labels": []},
+        {"id": 2, "public_id": "y", "labels": []},
+        {"id": 3, "public_id": "x", "labels": []},
+        {"id": 4, "public_id": "w", "labels": []}
+      ],
+      "edges": [
+        {"id": 9, "public_id": "a", "source": 1, "target": 2, "relationship": "a", "weight": 1},
+        {"id": 1, "public_id": "b", "source": 2, "target": 4, "relationship": "r", "weight": 1},
+        {"id": 5, "public_id": "z", "source": 1, "target": 3, "relationship": "z", "weight": 1},
+        {"id": 100, "public_id": "c", "source": 3, "target": 4, "relationship": "r", "weight": 1},
+        {"id": 6, "public_id": "d", "source": 1, "target": 3, "relationship": "r", "weight": 1}
+      ],
+      "parameters": {"scope": {"seeds": [1], "max_hops": 2, "direction": "out", "node_labels": "any", "relationship_types": "any"}, "source": 1, "target": 4, "weight_policy": "explicit"},
+      "expected": {"scope_node_ids": [1, 2, 3, 4], "scope_edge_ids": [1, 5, 6, 9, 100], "output": {"status": "found", "path": {"cost": 2, "hops": 2, "edge_ids": [5, 100], "node_ids": [1, 3, 4]}}}
+    },
+    {
+      "name": "weighted_cheaper_prefix_exhausts_hops",
+      "algorithm": "weighted_shortest_path",
+      "purpose": "A cost-0 two-hop prefix to node 3 cannot replace its cost-2 one-hop prefix when H=2. Destination is in scope via the costlier prefix.",
+      "nodes": [
+        {"id": 1, "public_id": "s", "labels": []},
+        {"id": 2, "public_id": "detour", "labels": []},
+        {"id": 3, "public_id": "junction", "labels": []},
+        {"id": 4, "public_id": "t", "labels": []}
+      ],
+      "edges": [
+        {"id": 1, "public_id": "cheap-a", "source": 1, "target": 2, "relationship": "r", "weight": 0},
+        {"id": 2, "public_id": "cheap-b", "source": 2, "target": 3, "relationship": "r", "weight": 0},
+        {"id": 3, "public_id": "short", "source": 1, "target": 3, "relationship": "r", "weight": 2},
+        {"id": 4, "public_id": "finish", "source": 3, "target": 4, "relationship": "r", "weight": 1}
+      ],
+      "parameters": {"scope": {"seeds": [1], "max_hops": 2, "direction": "out", "node_labels": "any", "relationship_types": "any"}, "source": 1, "target": 4, "weight_policy": "explicit"},
+      "expected": {"scope_node_ids": [1, 2, 3, 4], "scope_edge_ids": [1, 2, 3, 4], "output": {"status": "found", "path": {"cost": 3, "hops": 2, "edge_ids": [3, 4], "node_ids": [1, 3, 4]}}}
+    },
+    {
+      "name": "weighted_scope_excludes_bridge",
+      "algorithm": "weighted_shortest_path",
+      "purpose": "Excluded intermediate labels and relationship types cannot bridge seeds; an unrelated disconnected eligible node is not admitted.",
+      "nodes": [
+        {"id": 1, "public_id": "s", "labels": ["keep", "active"]},
+        {"id": 2, "public_id": "excluded", "labels": ["keep"]},
+        {"id": 3, "public_id": "t", "labels": ["keep", "active"]},
+        {"id": 4, "public_id": "outside", "labels": ["keep", "active"]}
+      ],
+      "edges": [
+        {"id": 1, "public_id": "bridge-a", "source": 1, "target": 2, "relationship": "r", "weight": 0},
+        {"id": 2, "public_id": "bridge-b", "source": 2, "target": 3, "relationship": "r", "weight": 0},
+        {"id": 3, "public_id": "excluded-type", "source": 1, "target": 3, "relationship": "other", "weight": 0}
+      ],
+      "parameters": {"scope": {"seeds": [3, 1, 1], "max_hops": 2, "direction": "out", "node_labels": ["keep", "active"], "relationship_types": ["r"]}, "source": 1, "target": 3, "weight_policy": "explicit"},
+      "expected": {"scope_node_ids": [1, 3], "scope_edge_ids": [], "output": {"status": "no_path_within_scope_and_hops", "path": null}}
+    },
+    {
+      "name": "weighted_in_direction_unit_weights",
+      "algorithm": "weighted_shortest_path",
+      "purpose": "In reverses traversal but preserves physical edge IDs; unit policy ignores supplied numeric weights.",
+      "nodes": [
+        {"id": 1, "public_id": "a", "labels": []},
+        {"id": 2, "public_id": "b", "labels": []},
+        {"id": 3, "public_id": "c", "labels": []}
+      ],
+      "edges": [
+        {"id": 10, "public_id": "a-b", "source": 1, "target": 2, "relationship": "r", "weight": 90},
+        {"id": 20, "public_id": "b-c", "source": 2, "target": 3, "relationship": "r", "weight": 20}
+      ],
+      "parameters": {"scope": {"seeds": [3], "max_hops": 2, "direction": "in", "node_labels": "any", "relationship_types": "any"}, "source": 3, "target": 1, "weight_policy": "unit"},
+      "expected": {"scope_node_ids": [1, 2, 3], "scope_edge_ids": [10, 20], "output": {"status": "found", "path": {"cost": 2, "hops": 2, "edge_ids": [20, 10], "node_ids": [3, 2, 1]}}}
+    },
+    {
+      "name": "weighted_identity",
+      "algorithm": "weighted_shortest_path",
+      "purpose": "Source equals destination has zero cost and no edges even with a retained zero loop.",
+      "nodes": [{"id": 7, "public_id": "self", "labels": []}],
+      "edges": [{"id": 1, "public_id": "loop", "source": 7, "target": 7, "relationship": "r", "weight": 0}],
+      "parameters": {"scope": {"seeds": [7], "max_hops": 1, "direction": "both", "node_labels": "any", "relationship_types": "any"}, "source": 7, "target": 7, "weight_policy": "explicit"},
+      "expected": {"scope_node_ids": [7], "scope_edge_ids": [1], "output": {"status": "found", "path": {"cost": 0, "hops": 0, "edge_ids": [], "node_ids": [7]}}}
+    },
+    {
+      "name": "pagerank_reciprocal_pair",
+      "algorithm": "pagerank",
+      "purpose": "Reciprocal two-node uniform rank is exactly (1/2,1/2).",
+      "nodes": [{"id": 1, "public_id": "a", "labels": []}, {"id": 2, "public_id": "b", "labels": []}],
+      "edges": [
+        {"id": 1, "public_id": "a-b", "source": 1, "target": 2, "relationship": "r", "weight": 1},
+        {"id": 2, "public_id": "b-a", "source": 2, "target": 1, "relationship": "r", "weight": 1}
+      ],
+      "parameters": {"scope": {"seeds": [1], "max_hops": 1, "direction": "out", "node_labels": "any", "relationship_types": "any"}, "damping": 0.85, "tolerance": 1e-10, "max_iterations": 100, "personalization": null, "weight_policy": "unit"},
+      "expected": {"scope_node_ids": [1, 2], "scope_edge_ids": [1, 2], "output": {"stationary_scores": [{"node_id": 1, "score": 0.5}, {"node_id": 2, "score": 0.5}], "mass": 1, "fixed_point_l1_residual": 0}}
+    },
+    {
+      "name": "pagerank_uniform_dangling_pair",
+      "algorithm": "pagerank",
+      "purpose": "A->B, dangling B: scores are 1/(2+d), (1+d)/(2+d), i.e. 20/57 and 37/57.",
+      "nodes": [{"id": 1, "public_id": "a", "labels": []}, {"id": 2, "public_id": "b", "labels": []}],
+      "edges": [{"id": 1, "public_id": "a-b", "source": 1, "target": 2, "relationship": "r", "weight": 1}],
+      "parameters": {"scope": {"seeds": [1], "max_hops": 1, "direction": "out", "node_labels": "any", "relationship_types": "any"}, "damping": 0.85, "tolerance": 1e-10, "max_iterations": 100, "personalization": null, "weight_policy": "explicit"},
+      "expected": {"scope_node_ids": [1, 2], "scope_edge_ids": [1], "output": {"stationary_scores": [{"node_id": 1, "score": 0.3508771929824561}, {"node_id": 2, "score": 0.6491228070175439}], "mass": 1, "fixed_point_l1_residual": 0}}
+    },
+    {
+      "name": "pagerank_personalized_dangling_pair",
+      "algorithm": "pagerank",
+      "purpose": "Dangling mass goes to p=(1,0), not uniform; d=1/2 gives (2/3,1/3).",
+      "nodes": [{"id": 1, "public_id": "a", "labels": []}, {"id": 2, "public_id": "b", "labels": []}],
+      "edges": [{"id": 1, "public_id": "a-b", "source": 1, "target": 2, "relationship": "r", "weight": 1}],
+      "parameters": {"scope": {"seeds": [1], "max_hops": 1, "direction": "out", "node_labels": "any", "relationship_types": "any"}, "damping": 0.5, "tolerance": 1e-10, "max_iterations": 100, "personalization": [{"node_id": 1, "mass": 7}], "weight_policy": "explicit"},
+      "expected": {"scope_node_ids": [1, 2], "scope_edge_ids": [1], "output": {"stationary_scores": [{"node_id": 1, "score": 0.6666666666666666}, {"node_id": 2, "score": 0.3333333333333333}], "mass": 1, "fixed_point_l1_residual": 0}}
+    },
+    {
+      "name": "pagerank_personalized_isolates",
+      "algorithm": "pagerank",
+      "purpose": "Two isolates redistribute all mass to normalized p=(1/4,3/4).",
+      "nodes": [{"id": 1, "public_id": "a", "labels": []}, {"id": 2, "public_id": "b", "labels": []}],
+      "edges": [],
+      "parameters": {"scope": {"seeds": [2, 1], "max_hops": 1, "direction": "out", "node_labels": "any", "relationship_types": "any"}, "damping": 0.85, "tolerance": 1e-10, "max_iterations": 100, "personalization": [{"node_id": 2, "mass": 3}, {"node_id": 1, "mass": 1}], "weight_policy": "explicit"},
+      "expected": {"scope_node_ids": [1, 2], "scope_edge_ids": [], "output": {"stationary_scores": [{"node_id": 1, "score": 0.25}, {"node_id": 2, "score": 0.75}], "mass": 1, "fixed_point_l1_residual": 0}}
+    },
+    {
+      "name": "pagerank_zero_weight_is_dangling",
+      "algorithm": "pagerank",
+      "purpose": "Only zero-weight outgoing arcs, including a loop, leave both nodes dangling; p is not replaced by uniform.",
+      "nodes": [{"id": 1, "public_id": "a", "labels": []}, {"id": 2, "public_id": "b", "labels": []}],
+      "edges": [
+        {"id": 1, "public_id": "zero", "source": 1, "target": 2, "relationship": "r", "weight": 0},
+        {"id": 2, "public_id": "zero-loop", "source": 2, "target": 2, "relationship": "r", "weight": 0}
+      ],
+      "parameters": {"scope": {"seeds": [1, 2], "max_hops": 1, "direction": "out", "node_labels": "any", "relationship_types": "any"}, "damping": 0.85, "tolerance": 1e-10, "max_iterations": 100, "personalization": [{"node_id": 1, "mass": 1}, {"node_id": 2, "mass": 3}], "weight_policy": "explicit"},
+      "expected": {"scope_node_ids": [1, 2], "scope_edge_ids": [1, 2], "output": {"stationary_scores": [{"node_id": 1, "score": 0.25}, {"node_id": 2, "score": 0.75}], "mass": 1, "fixed_point_l1_residual": 0}}
+    },
+    {
+      "name": "pagerank_weighted_loop_and_parallel",
+      "algorithm": "pagerank",
+      "purpose": "Node 1 sends 1/4 to itself and 3/4 to node 2, which returns all to 1; d=1/2 yields (6/11,5/11). Both must add the loop only once.",
+      "nodes": [{"id": 1, "public_id": "a", "labels": []}, {"id": 2, "public_id": "b", "labels": []}],
+      "edges": [
+        {"id": 1, "public_id": "loop", "source": 1, "target": 1, "relationship": "r", "weight": 1},
+        {"id": 2, "public_id": "parallel-a", "source": 1, "target": 2, "relationship": "r", "weight": 1},
+        {"id": 3, "public_id": "parallel-b", "source": 1, "target": 2, "relationship": "r", "weight": 2}
+      ],
+      "parameters": {"scope": {"seeds": [1], "max_hops": 1, "direction": "both", "node_labels": "any", "relationship_types": "any"}, "damping": 0.5, "tolerance": 1e-10, "max_iterations": 100, "personalization": null, "weight_policy": "explicit"},
+      "expected": {"scope_node_ids": [1, 2], "scope_edge_ids": [1, 2, 3], "output": {"stationary_scores": [{"node_id": 1, "score": 0.5454545454545454}, {"node_id": 2, "score": 0.45454545454545453}], "mass": 1, "fixed_point_l1_residual": 0}}
+    },
+    {
+      "name": "communities_pairs_isolate",
+      "algorithm": "label_propagation",
+      "purpose": "Symmetrize directed pairs; collapse parallel neighbors and ignore loops. Raw labels need canonicalizing to minimum member ID, not label value.",
+      "nodes": [
+        {"id": 10, "public_id": "a", "labels": []},
+        {"id": 20, "public_id": "b", "labels": []},
+        {"id": 30, "public_id": "c", "labels": []},
+        {"id": 40, "public_id": "d", "labels": []},
+        {"id": 50, "public_id": "isolate", "labels": []}
+      ],
+      "edges": [
+        {"id": 1, "public_id": "a-b", "source": 10, "target": 20, "relationship": "r", "weight": 1},
+        {"id": 2, "public_id": "a-b-again", "source": 10, "target": 20, "relationship": "r", "weight": 1},
+        {"id": 3, "public_id": "c-d", "source": 30, "target": 40, "relationship": "r", "weight": 1},
+        {"id": 4, "public_id": "a-loop", "source": 10, "target": 10, "relationship": "r", "weight": 1}
+      ],
+      "parameters": {"scope": {"seeds": [50, 30, 10], "max_hops": 1, "direction": "out", "node_labels": "any", "relationship_types": "any"}, "max_sweeps": 20},
+      "expected": {"scope_node_ids": [10, 20, 30, 40, 50], "scope_edge_ids": [1, 2, 3, 4], "output": {
+        "assignments": [{"node_id": 10, "community_id": 10}, {"node_id": 20, "community_id": 10}, {"node_id": 30, "community_id": 30}, {"node_id": 40, "community_id": 30}, {"node_id": 50, "community_id": 50}],
+        "sweep_assignments": [
+          [{"node_id": 10, "label": 20}, {"node_id": 20, "label": 20}, {"node_id": 30, "label": 40}, {"node_id": 40, "label": 40}, {"node_id": 50, "label": 50}],
+          [{"node_id": 10, "label": 20}, {"node_id": 20, "label": 20}, {"node_id": 30, "label": 40}, {"node_id": 40, "label": 40}, {"node_id": 50, "label": 50}]
+        ], "sweeps": 2, "converged": true, "complete": true
+      }}
+    },
+    {
+      "name": "communities_asynchronous_tie_keep",
+      "algorithm": "label_propagation",
+      "purpose": "Ascending asynchronous updates leave raw labels (4,3,3,4). Node 4 must keep its tied current label 4 rather than smaller 3. Parallel arcs collapse before counting votes; a second unchanged full sweep certifies convergence.",
+      "nodes": [{"id": 1, "public_id": "a", "labels": []}, {"id": 2, "public_id": "b", "labels": []}, {"id": 3, "public_id": "c", "labels": []}, {"id": 4, "public_id": "d", "labels": []}],
+      "edges": [
+        {"id": 1, "public_id": "a-d", "source": 1, "target": 4, "relationship": "r", "weight": 1},
+        {"id": 2, "public_id": "b-c", "source": 2, "target": 3, "relationship": "r", "weight": 1},
+        {"id": 3, "public_id": "c-d", "source": 3, "target": 4, "relationship": "r", "weight": 1},
+        {"id": 4, "public_id": "c-d-parallel", "source": 3, "target": 4, "relationship": "r", "weight": 1},
+        {"id": 5, "public_id": "d-loop", "source": 4, "target": 4, "relationship": "r", "weight": 1}
+      ],
+      "parameters": {"scope": {"seeds": [2, 1], "max_hops": 1, "direction": "out", "node_labels": "any", "relationship_types": "any"}, "max_sweeps": 20},
+      "expected": {"scope_node_ids": [1, 2, 3, 4], "scope_edge_ids": [1, 2, 3, 4, 5], "output": {
+        "assignments": [{"node_id": 1, "community_id": 1}, {"node_id": 2, "community_id": 2}, {"node_id": 3, "community_id": 2}, {"node_id": 4, "community_id": 1}],
+        "sweep_assignments": [
+          [{"node_id": 1, "label": 4}, {"node_id": 2, "label": 3}, {"node_id": 3, "label": 3}, {"node_id": 4, "label": 4}],
+          [{"node_id": 1, "label": 4}, {"node_id": 2, "label": 3}, {"node_id": 3, "label": 3}, {"node_id": 4, "label": 4}]
+        ], "sweeps": 2, "converged": true, "complete": true
+      }}
+    },
+    {
+      "name": "communities_smallest_tie_capped",
+      "algorithm": "label_propagation",
+      "purpose": "Node 1 chooses smallest tied label 3, then immediate updates propagate it. One changed full sweep is not certified convergence, even though its canonical assignment already groups all nodes.",
+      "nodes": [{"id": 4, "public_id": "d", "labels": []}, {"id": 2, "public_id": "b", "labels": []}, {"id": 1, "public_id": "a", "labels": []}, {"id": 3, "public_id": "c", "labels": []}],
+      "edges": [
+        {"id": 1, "public_id": "a-c", "source": 1, "target": 3, "relationship": "r", "weight": 1},
+        {"id": 2, "public_id": "a-d", "source": 1, "target": 4, "relationship": "r", "weight": 1},
+        {"id": 3, "public_id": "b-c", "source": 2, "target": 3, "relationship": "r", "weight": 1},
+        {"id": 4, "public_id": "b-d", "source": 2, "target": 4, "relationship": "r", "weight": 1}
+      ],
+      "parameters": {"scope": {"seeds": [2, 1], "max_hops": 1, "direction": "out", "node_labels": "any", "relationship_types": "any"}, "max_sweeps": 1},
+      "expected": {"scope_node_ids": [1, 2, 3, 4], "scope_edge_ids": [1, 2, 3, 4], "output": {
+        "assignments": [{"node_id": 1, "community_id": 1}, {"node_id": 2, "community_id": 1}, {"node_id": 3, "community_id": 1}, {"node_id": 4, "community_id": 1}],
+        "sweep_assignments": [[{"node_id": 1, "label": 3}, {"node_id": 2, "label": 3}, {"node_id": 3, "label": 3}, {"node_id": 4, "label": 3}]],
+        "sweeps": 1, "converged": false, "complete": false
+      }}
+    },
+    {
+      "name": "betweenness_directed_chain",
+      "algorithm": "betweenness",
+      "purpose": "Only ordered pair (1,3) contributes to 2; full directed normalization gives 1/2, not 1.",
+      "nodes": [{"id": 1, "public_id": "a", "labels": []}, {"id": 2, "public_id": "b", "labels": []}, {"id": 3, "public_id": "c", "labels": []}],
+      "edges": [
+        {"id": 1, "public_id": "a-b", "source": 1, "target": 2, "relationship": "r", "weight": 1},
+        {"id": 2, "public_id": "b-c", "source": 2, "target": 3, "relationship": "r", "weight": 1}
+      ],
+      "parameters": {"scope": {"seeds": [1], "max_hops": 2, "direction": "out", "node_labels": "any", "relationship_types": "any"}, "samples": 3, "sampling_seed": 0},
+      "expected": {"scope_node_ids": [1, 2, 3], "scope_edge_ids": [1, 2], "output": {"scores": [{"node_id": 1, "score": 0}, {"node_id": 2, "score": 0.5}, {"node_id": 3, "score": 0}], "selected_sources": [3, 1, 2], "completed_sources": [3, 1, 2], "completed_source_count": 3, "estimated": false}}
+    },
+    {
+      "name": "betweenness_diamond_parallel_loop_isolate",
+      "algorithm": "betweenness",
+      "purpose": "Both shortest paths from 1 to 4 contribute equally despite parallel 1->2 arcs; ignore loop. Isolate remains in n=5 denominator 12, giving each middle node 1/24.",
+      "nodes": [{"id": 1, "public_id": "a", "labels": []}, {"id": 2, "public_id": "b", "labels": []}, {"id": 3, "public_id": "c", "labels": []}, {"id": 4, "public_id": "d", "labels": []}, {"id": 5, "public_id": "isolate", "labels": []}],
+      "edges": [
+        {"id": 1, "public_id": "a-b", "source": 1, "target": 2, "relationship": "r", "weight": 1},
+        {"id": 2, "public_id": "a-b-parallel", "source": 1, "target": 2, "relationship": "r", "weight": 1},
+        {"id": 3, "public_id": "a-c", "source": 1, "target": 3, "relationship": "r", "weight": 1},
+        {"id": 4, "public_id": "b-d", "source": 2, "target": 4, "relationship": "r", "weight": 1},
+        {"id": 5, "public_id": "c-d", "source": 3, "target": 4, "relationship": "r", "weight": 1},
+        {"id": 6, "public_id": "loop", "source": 2, "target": 2, "relationship": "r", "weight": 1}
+      ],
+      "parameters": {"scope": {"seeds": [5, 1], "max_hops": 2, "direction": "out", "node_labels": "any", "relationship_types": "any"}, "samples": 5, "sampling_seed": 0},
+      "expected": {"scope_node_ids": [1, 2, 3, 4, 5], "scope_edge_ids": [1, 2, 3, 4, 5, 6], "output": {"scores": [{"node_id": 1, "score": 0}, {"node_id": 2, "score": 0.041666666666666664}, {"node_id": 3, "score": 0.041666666666666664}, {"node_id": 4, "score": 0}, {"node_id": 5, "score": 0}], "selected_sources": [3, 5, 4, 1, 2], "completed_sources": [3, 5, 4, 1, 2], "completed_source_count": 5, "estimated": false}}
+    },
+    {
+      "name": "betweenness_both_chain_no_extra_halving",
+      "algorithm": "betweenness",
+      "purpose": "Both adds reverse arcs; ordered pairs (1,3) and (3,1) make middle score 1. Do not divide by 2 again.",
+      "nodes": [{"id": 1, "public_id": "a", "labels": []}, {"id": 2, "public_id": "b", "labels": []}, {"id": 3, "public_id": "c", "labels": []}],
+      "edges": [
+        {"id": 1, "public_id": "a-b", "source": 1, "target": 2, "relationship": "r", "weight": 1},
+        {"id": 2, "public_id": "b-c", "source": 2, "target": 3, "relationship": "r", "weight": 1}
+      ],
+      "parameters": {"scope": {"seeds": [3], "max_hops": 2, "direction": "both", "node_labels": "any", "relationship_types": "any"}, "samples": 3, "sampling_seed": 0},
+      "expected": {"scope_node_ids": [1, 2, 3], "scope_edge_ids": [1, 2], "output": {"scores": [{"node_id": 1, "score": 0}, {"node_id": 2, "score": 1}, {"node_id": 3, "score": 0}], "selected_sources": [3, 1, 2], "completed_sources": [3, 1, 2], "completed_source_count": 3, "estimated": false}}
+    },
+    {
+      "name": "betweenness_two_nodes",
+      "algorithm": "betweenness",
+      "purpose": "n<=2 always yields zero without dividing by zero, even with reciprocal arcs.",
+      "nodes": [{"id": 1, "public_id": "a", "labels": []}, {"id": 2, "public_id": "b", "labels": []}],
+      "edges": [
+        {"id": 1, "public_id": "a-b", "source": 1, "target": 2, "relationship": "r", "weight": 1},
+        {"id": 2, "public_id": "b-a", "source": 2, "target": 1, "relationship": "r", "weight": 1}
+      ],
+      "parameters": {"scope": {"seeds": [1], "max_hops": 1, "direction": "out", "node_labels": "any", "relationship_types": "any"}, "samples": 2, "sampling_seed": 0},
+      "expected": {"scope_node_ids": [1, 2], "scope_edge_ids": [1, 2], "output": {"scores": [{"node_id": 1, "score": 0}, {"node_id": 2, "score": 0}], "selected_sources": [1, 2], "completed_sources": [1, 2], "completed_source_count": 2, "estimated": false}}
+    }
+  ]
+}

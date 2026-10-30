@@ -243,6 +243,13 @@ stopping rules differ. VLite's golden oracle below is authoritative.
 
 Run golden PageRank with tolerance 1e-10 and 100 iterations; compare scores within 1e-8.
 IDs, counts and path costs for integer fixtures must match exactly.
+[`graph_algorithm_oracle.py`](../../../tests/graph_algorithm_oracle.py) checks
+[`golden.json`](../../../tests/fixtures/graph_algorithms/golden.json) using tiny
+exhaustive paths, exact-rational stationary PageRank and full-sample centrality.
+CI also verifies rejection of corrupted answers and duplicate JSON keys.
+Stationary PageRank scores are not fabricated iteration counts; future Rust
+tests must independently establish convergence and compare within tolerance.
+These fixtures do not yet test engine code, TTL, authorization or work limits.
 Deliver S1: scoped adapter, visibility hook, unified meter and result contract with exhaustion oracles.
 Deliver S2: degree and hop-constrained Dijkstra. Deliver S3: PageRank and deterministic label propagation.
 Deliver S4: seeded sampled betweenness. Deliver S5: separately approved serving contracts and documentation.

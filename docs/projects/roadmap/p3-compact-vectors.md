@@ -168,6 +168,15 @@ writes, deterministic rebuild, stale cache, concurrent checkpoint/snapshot
 retirement, and bounded cache/overflow tests. Floating-point edge cases and
 stable exact ordering are correctness gates, not approximate recall tests.
 
+The independent conversion oracle is
+[`tests/compact_float16_oracle.py`](../../../tests/compact_float16_oracle.py),
+with bit-pattern fixtures in
+[`float16-cases.json`](../../../tests/fixtures/compact/float16-cases.json).
+It checks signed zero, subnormal/normal transitions, nearest-even ties and
+overflow against Python's binary16 encoder. Its CI self-test rejects a
+deliberately corrupted expected bit. This validates the reference answers,
+not the future Rust codec: P3a must consume the same fixtures.
+
 Major-release measurements retain the unchanged DO-005 host/quiet policy.
 F1 requires p50 <=1.0 ms at 100k x 768 and recall@10 >=0.95; F3 requires
 build time <=2x zvec at the same dimensions. S2 includes codes, graph,
