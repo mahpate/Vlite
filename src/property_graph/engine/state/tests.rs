@@ -551,6 +551,144 @@ fn adjacency_is_ordered_by_relationship_type_then_edge_id() {
 }
 
 #[test]
+fn compact_adjacency_matches_ordered_sets_for_every_cursor_and_type_filter() {
+    let mut h = Harness::new();
+    h.ok(vec![
+        put_node(0, "a", &[]),
+        put_node(1, "b", &[]),
+        put_node(2, "isolated", &[]),
+        put_edge(0, 0, 1, "z", None),
+        put_edge(1, 0, 0, "a", None),
+        put_edge(2, 1, 0, "B", None),
+        put_edge(3, 0, 1, "a", None),
+        put_edge(4, 1, 0, "a", None),
+        put_edge(5, 0, 0, "B", None),
+        put_edge(6, 0, 1, "_", None),
+    ]);
+    let filters = [
+        None,
+        Some(set(&[])),
+        Some(set(&["missing"])),
+        Some(set(&["a"])),
+        Some(set(&["B", "a", "missing"])),
+        Some(set(&["B", "_", "a", "z"])),
+    ];
+    let mut cursors = vec![None];
+    for kind in ["0", "B", "C", "_", "a", "b", "z", "zz"] {
+        for id in [0, 1, 3, 6, 7, u64::MAX] {
+            cursors.push(Some((kind, EdgeId(id))));
+        }
+    }
+    let graph = h.graph();
+    for node in [NodeId(0), NodeId(1), NodeId(2), NodeId(99)] {
+        for direction in [Direction::Out, Direction::In, Direction::Both] {
+            let expected: BTreeSet<_> = graph
+                .edges()
+                .filter(|edge| {
+                    (direction != Direction::In && edge.source == node)
+                        || (direction != Direction::Out && edge.destination == node)
+                })
+                .map(|edge| (edge.relationship.as_str(), edge.id))
+                .collect();
+            for types in &filters {
+                for after in &cursors {
+                    let expected: Vec<_> = expected
+                        .iter()
+                        .copied()
+                        .filter(|(kind, _)| types.as_ref().is_none_or(|types| types.contains(*kind)))
+                        .filter(|entry| after.is_none_or(|after| *entry > after))
+                        .collect();
+                    let actual: Vec<_> = graph
+                        .adjacency(node, direction, types.as_ref(), *after)
+                        .collect();
+                    assert_eq!(actual, expected, "{node:?} {direction:?} {types:?} {after:?}");
+                }
+            }
+        }
+        for relationship in ["B", "_", "a", "missing", "z"] {
+            for destination in [NodeId(0), NodeId(1), NodeId(2)] {
+                let expected: Vec<_> = graph
+                    .edges()
+                    .filter(|edge| {
+                        edge.source == node
+                            && edge.relationship == relationship
+                            && edge.destination == destination
+                    })
+                    .map(|edge| edge.id)
+                    .collect();
+                assert_eq!(
+                    graph
+                        .edges_between(node, relationship, destination)
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn adjacency_symbols_are_shared_and_reclaimed_across_clones_and_rollback() {
+    let mut h = Harness::new();
+    h.ok(vec![
+        put_node(0, "a", &[]),
+        put_node(1, "b", &[]),
+        put_edge(0, 0, 1, "R", None),
+        put_edge(1, 1, 0, "R", None),
+    ]);
+    let graph = h.graph();
+    assert_eq!(graph.relationships.len(), 1);
+    assert_eq!(graph.relationships.get(&"R".to_owned()), Some(&2));
+    let out = &graph.out_edges[&NodeId(0)][0].0;
+    let inc = &graph.in_edges[&NodeId(1)][0].0;
+    let parallel = &graph.out_edges[&NodeId(1)][0].0;
+    assert!(Arc::ptr_eq(out, inc));
+    assert!(Arc::ptr_eq(out, parallel));
+    assert_eq!(
+        std::mem::size_of::<AdjacencyEntry>(),
+        std::mem::size_of::<usize>() + std::mem::size_of::<EdgeId>()
+    );
+
+    let snapshot = h.state.clone();
+    h.ok(vec![
+        GraphEntry::DeleteEdge { edge_id: EdgeId(0) },
+        GraphEntry::DeleteEdge { edge_id: EdgeId(1) },
+    ]);
+    assert!(h.graph().relationships.is_empty());
+    assert!(h.graph().out_edges.is_empty());
+    assert!(h.graph().in_edges.is_empty());
+    assert_eq!(snapshot.graph(G).unwrap().relationships.len(), 1);
+    h.err(vec![
+        put_edge(2, 0, 0, "TEMP", None),
+        put_edge(3, 0, 99, "FAIL", None),
+    ]);
+    assert!(h.graph().relationships.is_empty());
+    h.ok(vec![put_edge(2, 0, 0, "R", None)]);
+    h.err(vec![
+        GraphEntry::DeleteEdge { edge_id: EdgeId(2) },
+        put_edge(3, 0, 99, "FAIL", None),
+    ]);
+    assert_eq!(h.graph().relationships.get(&"R".to_owned()), Some(&1));
+}
+
+#[test]
+fn compact_adjacency_reclaims_capacity_after_degree_drops() {
+    let mut index = AdjacencyIndex::new();
+    let relationship = Arc::new("R".to_owned());
+    let node = NodeId(0);
+    for id in 0..256 {
+        insert_adjacency(&mut index, node, (Arc::clone(&relationship), EdgeId(id)));
+    }
+    for id in 0..255 {
+        remove_adjacency(&mut index, node, &(Arc::clone(&relationship), EdgeId(id)));
+    }
+    assert_eq!(index[&node].len(), 1);
+    assert!(index[&node].capacity() <= 4);
+    remove_adjacency(&mut index, node, &(relationship, EdgeId(255)));
+    assert!(index.is_empty());
+}
+
+#[test]
 fn indexes_do_not_depend_on_commit_grouping() {
     let mut first = Harness::new();
     let mut second = Harness::new();

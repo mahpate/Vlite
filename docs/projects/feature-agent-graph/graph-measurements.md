@@ -197,3 +197,31 @@ An earlier single run on a machine whose load was not recorded (build 20.946 s, 
 ## Raw data
 
 [`measurements/epic005-reference-0.4.1.json`](measurements/epic005-reference-0.4.1.json) holds, for every repetition, the complete output of both executables, the CPU samples, the process peak working set, and the machine, toolchain, hash and protocol records. `completed` is `true`.
+
+## In-memory adjacency compaction (local development, not DO-005)
+
+The in-memory adjacency indexes now use per-node sorted vectors instead of
+tree sets. Relationship names are interned across both directions using thin
+shared pointers: an adjacency entry is one pointer plus one `EdgeId` (16 B
+on 64-bit targets), with vector capacity and per-node map overhead in addition.
+Ordering remains lexical relationship type followed by edge ID, not symbol
+insertion order. Typed scans and cursors binary-search the vectors, and merging
+both directions still emits self-loops once. Symbols are removed when their
+last edge is removed, including during validation and failed-batch rollback.
+The write log and frame codecs are unchanged.
+
+This is an adjacency improvement, not a claim that S4's whole-graph target has
+been reached. Authoritative node and edge records still retain their existing
+string and property-map representations to preserve reference-returning engine
+interfaces. The counting allocator attributes the intern table and shared
+relationship allocations to `in_adjacency`, which is released after both
+directions; component totals still include every owned allocation.
+
+The development environment refused Cargo execution without interactive
+approval. Consequently no local before/after release memory or latency result
+is available, and formatting, Clippy, workspace tests and graph doctests could
+not run. The reference values above (1,015.99 B/edge total, 145.13 B/edge
+adjacency; neighbors p50/p99 34.8/69.5 us and traverse 376.3/677.2 us) are
+historical, not a local baseline. Re-run `graph_memory` and `graph_bench` in
+release mode at 100,000 nodes, 1,000,000 edges and 1,000 queries before making
+a memory-reduction or latency-nonregression claim. No DO-005 campaign was run.
