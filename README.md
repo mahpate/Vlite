@@ -198,12 +198,24 @@ are on the [releases page](https://github.com/mahpate/Vlite/releases).
 - HNSW is approximate and supports L2 and cosine only.
 - Replicas are file-shipped. There is no networked replication.
 - Deleted records use disk space until you compact to a new file.
+- Graphs: nodes and edges cannot expire, there are no point-in-time reads,
+  weighted paths or graph algorithms, query text is read-only, and gRPC has
+  no graph service. Traversal stops at 4 hops and 10,000 visited nodes.
 - Durability depends on the OS and storage honoring sync. It is not a
   power-loss guarantee. The default [periodic durability](docs/REFERENCE.md#periodic-lazy-durability)
   syncs every 60 s, so an OS crash or power loss can lose up to about 60 s of
   acknowledged writes (a process crash loses nothing). `--durability full`
   syncs every commit; `--durability none` keeps data in memory only and loses
   it on restart.
+
+## What's next
+
+These plans are proposals under review, not commitments:
+
+- [Storage and speed goals](docs/projects/performance/storage-goals.md):
+  smaller files and faster search, with an optional directory-based store.
+- [Product gaps](docs/projects/product-gaps/product-gaps.md): agent memory,
+  graph expiry and history, graph algorithms, replication and more.
 
 ## License
 

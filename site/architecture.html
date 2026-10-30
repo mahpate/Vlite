@@ -606,12 +606,12 @@ sequenceDiagram
 
     <h2 id="limitations">Limitations</h2>
     <ul class="list">
-      <li>One writer per file. VLite is not a multi-writer database.</li>
+      <li>One writer per file. Replicas are file-shipped, not networked.</li>
       <li>Periodic sync can lose 60 s on OS crash; full fsyncs each commit, so batch writes.</li>
       <li>Opening a file replays the log, so open time and memory grow with data. Compaction reclaims space.</li>
       <li>HNSW and ScalarU8 are approximate. Inner product always searches exactly.</li>
       <li>Tenants are logical only. Webhooks are at-least-once, and streaming exports are not point-in-time snapshots.</li>
-      <li>gRPC has no graph service.</li>
+      <li>No gRPC graph service, graph expiry or graph algorithms.</li>
     </ul>
     <p>More detail: <a href="docs/REFERENCE.html">Reference</a> &middot; <a href="docs/STORAGE-FEATURES.html">Storage features</a> &middot; <a href="docs/SECURITY.html">Security</a></p>
   </main>

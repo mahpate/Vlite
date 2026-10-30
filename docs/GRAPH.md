@@ -195,6 +195,13 @@ the engine records them: upserts carry the full labels and properties
 
 - gRPC has no graph service.
 - `vlite-graph-cli` does not open encrypted files (the library does).
+- Nodes and edges cannot expire, and reads cannot ask for an earlier point in
+  time.
+- Query text is read-only. There are no weighted paths and no graph
+  algorithms such as PageRank or community detection.
+
+Proposed additions are listed in
+[product gaps](projects/product-gaps/product-gaps.md); none is approved yet.
 
 ## Release note text for GATE-008 (approved for v0.5.0)
 

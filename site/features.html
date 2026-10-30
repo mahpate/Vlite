@@ -135,7 +135,7 @@
           <tr><th scope="row">Access control</th><td>Graphs are tenant-owned. API keys need <code>graph_read</code> or <code>graph_write</code> and a <code>graphs</code> binding; accounts get role-based access, narrowed by <code>graphs</code> and <code>graph_access</code>. Collection scope never implies graph scope.</td></tr>
           <tr><th scope="row">Maintenance and rollback</th><td>Backup, restore, verify, compaction, format upgrade, re-encryption and read replicas keep graph state. <code>vlite-maintain strip-graph --confirm-graph-data-loss</code> copies the vectors to a plain format 5 file.</td></tr>
           <tr><th scope="row">Change feed and webhooks</th><td>Graph commits appear as <code>graph_created</code>, <code>graph_dropped</code> and <code>graph_batch</code> events. Webhooks can limit graph events to named graphs.</td></tr>
-          <tr><th scope="row">Not supported</th><td>gRPC has no graph service, and <code>vlite-graph-cli</code> cannot open encrypted files.</td></tr>
+          <tr><th scope="row">Not supported</th><td>gRPC has no graph service, and <code>vlite-graph-cli</code> cannot open encrypted files. Graph nodes and edges cannot expire, reads cannot ask for an earlier point in time, query text cannot write, and there are no weighted paths or graph algorithms such as PageRank.</td></tr>
         </tbody></table></div>
         <p><a href="docs/GRAPH.html">Graph guide</a> &middot; <a href="docs/GRAPH-QUERY.html">Graph query language</a> &middot; <a href="docs/TOOLS.html#graph-operations">Graph CLI</a> &middot; <a href="docs/MCP.html#property-graph-tools">MCP graph tools</a></p>
       </section>

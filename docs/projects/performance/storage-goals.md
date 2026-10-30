@@ -7,6 +7,7 @@
 | Replaces | Options B and C of [`performance-proposal.md`](performance-proposal.md). Option A there still applies to today's format |
 | Key decision | VLite no longer has to keep a database in one file |
 | Baseline | DO-005, release 0.6.0 ([`baseline.md`](../feature-agent-graph/baseline.md)); competitor runs in [`RESULTS.md`](../../../benchmarks/RESULTS.md) and [`compare.html`](../../../site/compare.html) |
+| Related | Feature gaps beyond speed and size: [`product-gaps.md`](../product-gaps/product-gaps.md) |
 
 ## Why revisit
 
