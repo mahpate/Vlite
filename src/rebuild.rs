@@ -59,7 +59,8 @@ impl HnswBufferCapacity {
             buffered_ids,
             buffer_vector_bytes,
             remaining_ids: MAX_HNSW_BUFFER_IDS.saturating_sub(buffered_ids),
-            remaining_vector_bytes: MAX_HNSW_BUFFER_VECTOR_BYTES.saturating_sub(buffer_vector_bytes),
+            remaining_vector_bytes: MAX_HNSW_BUFFER_VECTOR_BYTES
+                .saturating_sub(buffer_vector_bytes),
         }
     }
 
@@ -438,19 +439,30 @@ mod tests {
         for id in 0..8 {
             db.put(id, &[id as f32 + 10.0], b"old").unwrap();
         }
-        db.put_with_expiry(4, &[0.0], b"expired before build", &Metadata::new(), Some(1))
-            .unwrap();
+        db.put_with_expiry(
+            4,
+            &[0.0],
+            b"expired before build",
+            &Metadata::new(),
+            Some(1),
+        )
+        .unwrap();
         db.build_hnsw(config).unwrap();
         let release = paused_rebuild(&mut db);
         for id in 100..400 {
-            db.put(id, &[(id - 100) as f32 / 1000.0], b"new")
-                .unwrap();
+            db.put(id, &[(id - 100) as f32 / 1000.0], b"new").unwrap();
         }
         db.delete(0).unwrap();
         db.delete(3).unwrap();
         db.put(3, &[90.0], b"reinserted").unwrap();
-        db.put_with_expiry(5, &[0.0], b"expired during build", &Metadata::new(), Some(1))
-            .unwrap();
+        db.put_with_expiry(
+            5,
+            &[0.0],
+            b"expired during build",
+            &Metadata::new(),
+            Some(1),
+        )
+        .unwrap();
         let metadata = Metadata::from([("fresh".into(), MetadataValue::Boolean(true))]);
         db.put_with_metadata(2, &[-0.1], b"updated", &metadata)
             .unwrap();
@@ -466,7 +478,12 @@ mod tests {
         }];
         assert_eq!(
             db.search_approximate_filtered_with_metric(
-                &[0.0], 10, 1000, config, &conditions, DistanceMetric::SquaredL2,
+                &[0.0],
+                10,
+                1000,
+                config,
+                &conditions,
+                DistanceMetric::SquaredL2,
             )
             .unwrap(),
             db.search_filtered(&[0.0], 10, &conditions).unwrap()
@@ -520,7 +537,8 @@ mod tests {
         assert_eq!(
             db.search_approximate_with_metric(&[2.0], 2, 2, config, DistanceMetric::Cosine)
                 .unwrap(),
-            db.search_with_metric(&[2.0], 2, DistanceMetric::Cosine).unwrap()
+            db.search_with_metric(&[2.0], 2, DistanceMetric::Cosine)
+                .unwrap()
         );
         assert!(!db.rebuild.as_ref().unwrap().1.finished());
         release.send(()).unwrap();
@@ -574,15 +592,25 @@ mod tests {
         let config = HnswConfig::default();
         db.set_background_hnsw_rebuild(Some(HnswRebuildLimits::default()))
             .unwrap();
-        assert!(db.search_approximate(&[0.0], 0, 10, config).unwrap().is_empty());
+        assert!(
+            db.search_approximate(&[0.0], 0, 10, config)
+                .unwrap()
+                .is_empty()
+        );
         assert!(db.rebuild.is_none());
         db.put(1, &[1.0], b"").unwrap();
-        assert_eq!(db.search_approximate(&[1.0], 1, 10, config).unwrap()[0].id, 1);
+        assert_eq!(
+            db.search_approximate(&[1.0], 1, 10, config).unwrap()[0].id,
+            1
+        );
         assert!(db.rebuild.is_some());
         assert!(db.state(0).index.is_none());
         publish(&mut db);
         db.put(2, &[2.0], b"new").unwrap();
-        assert_eq!(db.search_approximate(&[2.0], 1, 10, config).unwrap()[0].id, 2);
+        assert_eq!(
+            db.search_approximate(&[2.0], 1, 10, config).unwrap()[0].id,
+            2
+        );
         assert!(db.rebuild.is_some());
         assert_eq!(db.state(0).index.as_ref().unwrap().graph_nodes(), 1);
         publish(&mut db);
@@ -683,7 +711,10 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), previous);
         db.set_background_hnsw_rebuild(None).unwrap();
         assert!(db.state(0).index.is_none());
-        assert_eq!(db.search_approximate(&[1.0], 1, 10, config).unwrap()[0].id, 1);
+        assert_eq!(
+            db.search_approximate(&[1.0], 1, 10, config).unwrap()[0].id,
+            1
+        );
         assert!(db.rebuild.is_none());
     }
 

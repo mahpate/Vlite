@@ -595,13 +595,18 @@ fn compact_adjacency_matches_ordered_sets_for_every_cursor_and_type_filter() {
                     let expected: Vec<_> = expected
                         .iter()
                         .copied()
-                        .filter(|(kind, _)| types.as_ref().is_none_or(|types| types.contains(*kind)))
+                        .filter(|(kind, _)| {
+                            types.as_ref().is_none_or(|types| types.contains(*kind))
+                        })
                         .filter(|entry| after.is_none_or(|after| *entry > after))
                         .collect();
                     let actual: Vec<_> = graph
                         .adjacency(node, direction, types.as_ref(), *after)
                         .collect();
-                    assert_eq!(actual, expected, "{node:?} {direction:?} {types:?} {after:?}");
+                    assert_eq!(
+                        actual, expected,
+                        "{node:?} {direction:?} {types:?} {after:?}"
+                    );
                 }
             }
         }
@@ -638,7 +643,12 @@ fn adjacency_symbols_are_shared_and_reclaimed_across_clones_and_rollback() {
     ]);
     let graph = h.graph();
     assert_eq!(graph.relationships.len(), 1);
-    assert_eq!(graph.relationships.get(&"R".to_owned()), Some(&2));
+    assert_eq!(
+        graph
+            .relationships
+            .get(&std::sync::Arc::new(String::from("R"))),
+        Some(&2)
+    );
     let out = &graph.out_edges[&NodeId(0)][0].0;
     let inc = &graph.in_edges[&NodeId(1)][0].0;
     let parallel = &graph.out_edges[&NodeId(1)][0].0;
@@ -668,7 +678,12 @@ fn adjacency_symbols_are_shared_and_reclaimed_across_clones_and_rollback() {
         GraphEntry::DeleteEdge { edge_id: EdgeId(2) },
         put_edge(3, 0, 99, "FAIL", None),
     ]);
-    assert_eq!(h.graph().relationships.get(&"R".to_owned()), Some(&1));
+    assert_eq!(
+        h.graph()
+            .relationships
+            .get(&std::sync::Arc::new(String::from("R"))),
+        Some(&1)
+    );
 }
 
 #[test]

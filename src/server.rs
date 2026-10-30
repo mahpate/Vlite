@@ -2928,7 +2928,15 @@ fn execute(
                 db.search_in(collection, vector, candidate_k, filter, metric, &mut stats)?
             } else {
                 db.search_ready_with_options_in(
-                    collection, vector, candidate_k, ef, config, options, filter, metric, &mut stats,
+                    collection,
+                    vector,
+                    candidate_k,
+                    ef,
+                    config,
+                    options,
+                    filter,
+                    metric,
+                    &mut stats,
                 )?
             };
             Executed {
@@ -3585,7 +3593,11 @@ mod tests {
                 "rerank": {"mode": "exact", "candidates": 2}
             }))
             .unwrap();
-            assert!(execute(&db, 0, &Target::Legacy, &input, true).unwrap().is_none());
+            assert!(
+                execute(&db, 0, &Target::Legacy, &input, true)
+                    .unwrap()
+                    .is_none()
+            );
             rebuild_stale(&mut db, 0, &Target::Legacy, &input, &Metrics::default()).unwrap();
             assert_eq!(db.state(0).index.is_none(), background);
             assert_eq!(db.rebuild.is_some(), background);
@@ -3620,7 +3632,11 @@ mod tests {
                     db.put(id, &[id as f32], b"new").unwrap();
                 }
                 assert!(db.state(0).index.is_some());
-                assert!(execute(&db, 0, &Target::Legacy, &input, true).unwrap().is_none());
+                assert!(
+                    execute(&db, 0, &Target::Legacy, &input, true)
+                        .unwrap()
+                        .is_none()
+                );
                 rebuild_stale(&mut db, 0, &Target::Legacy, &input, &Metrics::default()).unwrap();
                 assert_eq!(db.state(0).index.as_ref().unwrap().graph_nodes(), 1);
                 let executed = execute(&db, 0, &Target::Legacy, &input, false)

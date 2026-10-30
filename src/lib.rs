@@ -2495,7 +2495,11 @@ impl Database {
         let state = self.state_mut(collection);
         state.index = Some(hnsw::Index::build(&state.records, config, metric, options));
         if state.background_hnsw.is_some() {
-            state.index.as_mut().expect("built index").set_background(true);
+            state
+                .index
+                .as_mut()
+                .expect("built index")
+                .set_background(true);
         }
         Ok(())
     }
@@ -4478,16 +4482,8 @@ mod v4_tests {
                         for k in [0, 10, records.len() + 1] {
                             let mut stats = SearchStats::default();
                             let actual = exact_search(
-                                &records,
-                                expiries,
-                                &query,
-                                query_norm,
-                                k,
-                                conditions,
-                                metric,
-                                candidates,
-                                100,
-                                &mut stats,
+                                &records, expiries, &query, query_norm, k, conditions, metric,
+                                candidates, 100, &mut stats,
                             );
                             let bits = |hits: &[SearchHit]| {
                                 hits.iter()

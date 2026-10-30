@@ -151,9 +151,14 @@ fn run_rounds(
         measure(samples, phase, "read_scan", round, pending(db)?, || {
             db.search_with_metric(vector, 10, metric)
         })?;
-        measure(samples, phase, "approximate_read", round, pending(db)?, || {
-            db.search_approximate_with_metric(vector, 10, 100, config, metric)
-        })?;
+        measure(
+            samples,
+            phase,
+            "approximate_read",
+            round,
+            pending(db)?,
+            || db.search_approximate_with_metric(vector, 10, 100, config, metric),
+        )?;
         let condition = [Condition::Eq {
             field: "group".to_owned(),
             value: MetadataValue::Integer((id % 16) as i64),
