@@ -183,6 +183,7 @@ pub(crate) struct Index {
     entry: Option<usize>,
     buffered: BTreeMap<u64, Buffered>,
     buffered_bytes: usize,
+    background: bool,
     /// ScalarU8 only: codec and node-major codes (`dimensions` bytes per node).
     quantizer: Option<ScalarU8>,
     codes: Vec<u8>,
@@ -444,6 +445,7 @@ impl Index {
             entry: None,
             buffered: BTreeMap::new(),
             buffered_bytes: 0,
+            background: false,
             quantizer: None,
             codes: Vec::new(),
         }
@@ -452,6 +454,20 @@ impl Index {
     pub fn adopt_buffer(&mut self, changes: Self) {
         self.buffered = changes.buffered;
         self.buffered_bytes = changes.buffered_bytes;
+        self.background = changes.background;
+    }
+
+    pub(crate) fn set_background(&mut self, enabled: bool) {
+        self.background = enabled;
+    }
+
+    pub(crate) fn retire(self) -> Result<()> {
+        drop(
+            std::thread::Builder::new()
+                .name("vlite-hnsw-retire".into())
+                .spawn(move || drop(self))?,
+        );
+        Ok(())
     }
 
     /// Called only after sync, before authoritative records are replaced.
@@ -472,8 +488,9 @@ impl Index {
         );
         let removed = prior.map_or(0, |entry| original_bytes + entry.current_bytes);
         let bytes = self.buffered_bytes - removed + original_bytes + current_bytes;
-        if (prior.is_none() && self.buffered.len() == MAX_HNSW_BUFFER_IDS)
-            || bytes > MAX_HNSW_BUFFER_VECTOR_BYTES
+        if !self.background
+            && ((prior.is_none() && self.buffered.len() >= MAX_HNSW_BUFFER_IDS)
+                || bytes > MAX_HNSW_BUFFER_VECTOR_BYTES)
         {
             return false;
         }
@@ -1069,6 +1086,11 @@ impl Index {
     /// node-major codes. Identity and digest framing belong to `ann_snapshot`.
     pub(crate) fn write_snapshot(&self, w: &mut impl Write) -> io::Result<()> {
         let too_large = || io::Error::other("HNSW index exceeds ANN snapshot format v1 limits");
+        if self.buffered.len() > MAX_HNSW_BUFFER_IDS
+            || self.buffered_bytes > MAX_HNSW_BUFFER_VECTOR_BYTES
+        {
+            return Err(too_large());
+        }
         let u32_of = |value: usize| u32::try_from(value).map_err(|_| too_large());
         w.write_all(&u32_of(self.config.m)?.to_le_bytes())?;
         w.write_all(&u32_of(self.config.ef_construction)?.to_le_bytes())?;
@@ -1437,6 +1459,10 @@ mod tests {
         assert!(index.track(0, Some(&record), vector_bytes));
         assert!(!index.track(16, Some(&record), vector_bytes));
         assert_eq!(index.buffer_usage(), (16, MAX_HNSW_BUFFER_VECTOR_BYTES));
+        index.set_background(true);
+        assert!(index.track(16, Some(&record), vector_bytes));
+        assert!(index.buffer_usage().1 > MAX_HNSW_BUFFER_VECTOR_BYTES);
+        assert!(index.write_snapshot(&mut Vec::new()).is_err());
         let mut index = Index::build(
             &crate::records::RecordMap::new(),
             HnswConfig::default(),

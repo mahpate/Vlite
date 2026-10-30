@@ -23,7 +23,7 @@ use vlite::{
 const RECORDS: usize = 2_048;
 const DIMS: usize = 32;
 const BASELINE_ROUNDS: usize = 8;
-const REBUILD_ROUNDS: usize = 64;
+const REBUILD_ROUNDS: usize = 320;
 const POST_ROUNDS: usize = 8;
 const LARGE_PAYLOAD_BYTES: usize = 32 * 1024;
 const SEED: u64 = 0x564C_4954_455F_3341;
@@ -34,6 +34,7 @@ struct Sample {
     operation: &'static str,
     round: usize,
     elapsed_ns: u128,
+    rebuild_pending: bool,
 }
 
 struct Workload<'a> {
@@ -75,6 +76,7 @@ fn measure<T>(
     phase: &'static str,
     operation: &'static str,
     round: usize,
+    rebuild_pending: bool,
     f: impl FnOnce() -> vlite::Result<T>,
 ) -> vlite::Result<T> {
     let started = Instant::now();
@@ -84,6 +86,7 @@ fn measure<T>(
         operation,
         round,
         elapsed_ns: started.elapsed().as_nanos(),
+        rebuild_pending,
     });
     Ok(value)
 }
@@ -128,7 +131,12 @@ fn run_rounds(
 ) -> vlite::Result<()> {
     let metric = DistanceMetric::Cosine;
     let config = HnswConfig::default();
-    let options = AnnOptions::default();
+    let pending = |db: &Database| -> vlite::Result<bool> {
+        Ok(db
+            .hnsw_maintenance_status(config, metric, Default::default())?
+            .rebuild
+            .is_some())
+    };
     for round in 0..rounds {
         let id = id_base + round as u64;
         let vector = &workload.vectors[round.wrapping_mul(17) % workload.vectors.len()];
@@ -137,20 +145,21 @@ fn run_rounds(
         } else {
             b"small-update"
         };
-        measure(samples, phase, "write", round, || {
+        measure(samples, phase, "write", round, pending(db)?, || {
             db.put_with_metadata(id, vector, payload, &group(id))
         })?;
-        measure(samples, phase, "read_scan", round, || {
+        measure(samples, phase, "read_scan", round, pending(db)?, || {
             db.search_with_metric(vector, 10, metric)
+        })?;
+        measure(samples, phase, "approximate_read", round, pending(db)?, || {
+            db.search_approximate_with_metric(vector, 10, 100, config, metric)
         })?;
         let condition = [Condition::Eq {
             field: "group".to_owned(),
             value: MetadataValue::Integer((id % 16) as i64),
         }];
-        measure(samples, phase, "filtered_read", round, || {
-            db.search_approximate_ready_with_options(
-                vector, 10, 100, config, options, &condition, metric,
-            )
+        measure(samples, phase, "filtered_read", round, pending(db)?, || {
+            db.search_approximate_filtered_with_metric(vector, 10, 100, config, &condition, metric)
         })?;
         if phase == "rebuild"
             && let Some(progress) = db
@@ -226,6 +235,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &mut stages,
     )?;
 
+    db.set_background_hnsw_rebuild(Some(HnswRebuildLimits::default()))?;
     let rebuild_started = Instant::now();
     db.start_hnsw_rebuild_with_options(config, metric, options, HnswRebuildLimits::default())?;
     let rebuild_start_ns = rebuild_started.elapsed().as_nanos();
@@ -242,15 +252,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let wait_started = Instant::now();
     let deadline = Instant::now() + std::time::Duration::from_secs(60);
     loop {
-        let status = db.hnsw_maintenance_status(config, metric, Default::default())?;
-        if let Some(progress) = status.rebuild
-            && progress.worker_finished
-        {
-            let outcome = db.poll_hnsw_rebuild()?;
-            if outcome != vlite::HnswRebuildStatus::Published {
-                return Err(format!("rebuild ended as {outcome:?}").into());
-            }
-            break;
+        match db.poll_hnsw_rebuild()? {
+            vlite::HnswRebuildStatus::Published | vlite::HnswRebuildStatus::Idle => break,
+            vlite::HnswRebuildStatus::Running => {}
+            outcome => return Err(format!("rebuild ended as {outcome:?}").into()),
         }
         if Instant::now() >= deadline {
             return Err("background rebuild exceeded its 60-second bound".into());
@@ -277,9 +282,27 @@ fn main() -> Result<(), Box<dyn Error>> {
                 "operation": sample.operation,
                 "round": sample.round,
                 "elapsed_ns": sample.elapsed_ns,
+                "rebuild_pending": sample.rebuild_pending,
             })
         })
         .collect::<Vec<_>>();
+    let max_query_during_rebuild_phase_ns = samples
+        .iter()
+        .filter(|sample| {
+            sample.phase == "rebuild"
+                && matches!(sample.operation, "approximate_read" | "filtered_read")
+        })
+        .map(|sample| sample.elapsed_ns)
+        .max()
+        .unwrap_or_default();
+    let max_query_with_rebuild_pending_ns = samples
+        .iter()
+        .filter(|sample| {
+            sample.rebuild_pending
+                && matches!(sample.operation, "approximate_read" | "filtered_read")
+        })
+        .map(|sample| sample.elapsed_ns)
+        .max();
     let archive = json!({
         "schema": 1,
         "benchmark": "maintenance_mixed_load",
@@ -304,6 +327,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             "metric": "cosine",
             "query_k": 10,
             "ef_search": 100,
+            "background_hnsw_rebuild": true,
             "hnsw": {
                 "m": config.m,
                 "ef_construction": config.ef_construction,
@@ -313,6 +337,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
         "rebuild_start_ns": rebuild_start_ns,
         "rebuild_wait_ns": rebuild_wait_ns,
+        "max_query_during_rebuild_phase_ns": max_query_during_rebuild_phase_ns,
+        "max_query_with_rebuild_pending_ns": max_query_with_rebuild_pending_ns,
         "observed_rebuild_phases": stages,
         "summary": summarize(&samples),
         "raw_samples": raw_samples,

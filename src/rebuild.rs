@@ -58,8 +58,8 @@ impl HnswBufferCapacity {
         Self {
             buffered_ids,
             buffer_vector_bytes,
-            remaining_ids: MAX_HNSW_BUFFER_IDS - buffered_ids,
-            remaining_vector_bytes: MAX_HNSW_BUFFER_VECTOR_BYTES - buffer_vector_bytes,
+            remaining_ids: MAX_HNSW_BUFFER_IDS.saturating_sub(buffered_ids),
+            remaining_vector_bytes: MAX_HNSW_BUFFER_VECTOR_BYTES.saturating_sub(buffer_vector_bytes),
         }
     }
 
@@ -191,6 +191,7 @@ pub(crate) struct Job {
     snapshot_records: usize,
     processed: Arc<AtomicUsize>,
     vector_sequence: u64,
+    background: bool,
 }
 
 impl Job {
@@ -205,11 +206,32 @@ impl Job {
         metric: DistanceMetric,
         options: AnnOptions,
     ) -> Result<Self> {
+        Self::start_inner(records, config, metric, options, false)
+    }
+
+    pub(crate) fn start_background(
+        records: &crate::records::RecordMap,
+        config: HnswConfig,
+        metric: DistanceMetric,
+        options: AnnOptions,
+    ) -> Result<Self> {
+        Self::start_inner(records, config, metric, options, true)
+    }
+
+    fn start_inner(
+        records: &crate::records::RecordMap,
+        config: HnswConfig,
+        metric: DistanceMetric,
+        options: AnnOptions,
+        background: bool,
+    ) -> Result<Self> {
         enum Snapshot {
             Vectors(crate::records::RecordMap),
             Codes(QuantizedSnapshot),
+            Encode(crate::records::RecordMap),
         }
         let snapshot = match options.quantization {
+            Quantization::ScalarU8 if background => Snapshot::Encode(records.clone()),
             Quantization::ScalarU8 => Snapshot::Codes(QuantizedSnapshot::encode(records, metric)),
             Quantization::None => Snapshot::Vectors(records.clone()),
         };
@@ -226,28 +248,41 @@ impl Job {
                 Snapshot::Codes(codes) => {
                     Index::build_quantized(codes, config, metric, options, &stop, &progress)
                 }
+                Snapshot::Encode(records) => {
+                    let codes = QuantizedSnapshot::encode(&records, metric);
+                    Index::build_quantized(codes, config, metric, options, &stop, &progress)
+                }
             })?;
+        let mut changes = Index::build(&crate::records::RecordMap::new(), config, metric, options);
+        changes.set_background(background);
         Ok(Self {
             worker: Some(worker),
             cancel,
             terminal: None,
-            changes: Some(Index::build(
-                &crate::records::RecordMap::new(),
-                config,
-                metric,
-                options,
-            )),
+            changes: Some(changes),
             config,
             metric,
             options,
             snapshot_records: records.len(),
             processed,
             vector_sequence: 0,
+            background,
         })
     }
 
     pub fn options(&self) -> AnnOptions {
         self.options
+    }
+
+    pub(crate) fn is_background(&self) -> bool {
+        self.background
+    }
+
+    pub(crate) fn set_background(&mut self, enabled: bool) {
+        self.background = enabled;
+        if let Some(changes) = &mut self.changes {
+            changes.set_background(enabled);
+        }
     }
 
     pub fn set_vector_sequence(&mut self, sequence: u64) {
@@ -314,6 +349,11 @@ impl Job {
             .join()
             .map_err(|_| Error::HnswRebuildFailed)?;
         if let Some(reason) = self.terminal {
+            if self.background
+                && let Some(index) = index
+            {
+                index.retire()?;
+            }
             return Ok((reason, None));
         }
         let mut index = index.ok_or(Error::HnswRebuildFailed)?;
@@ -338,8 +378,344 @@ impl Drop for Job {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Database, MAX_DIMENSIONS};
+    use crate::{Condition, Database, MAX_DIMENSIONS, Metadata, MetadataValue};
     use std::time::{Duration, Instant};
+
+    fn paused_rebuild(db: &mut Database) -> std::sync::mpsc::Sender<()> {
+        let config = HnswConfig::default();
+        let metric = DistanceMetric::SquaredL2;
+        let options = AnnOptions::default();
+        let index = Index::build(&db.state(0).records, config, metric, options);
+        let mut changes = Index::build(&crate::records::RecordMap::new(), config, metric, options);
+        changes.set_background(true);
+        let (release, wait) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            // A broken query must fail rather than hang the test indefinitely.
+            let _ = wait.recv_timeout(Duration::from_secs(10));
+            Some(index)
+        });
+        db.rebuild = Some((
+            0,
+            Job {
+                worker: Some(worker),
+                cancel: Arc::new(AtomicBool::new(false)),
+                terminal: None,
+                changes: Some(changes),
+                config,
+                metric,
+                options,
+                snapshot_records: db.state(0).records.len(),
+                processed: Arc::new(AtomicUsize::new(0)),
+                vector_sequence: db.state(0).vector_sequence,
+                background: true,
+            },
+        ));
+        release
+    }
+
+    fn publish(db: &mut Database) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match db.poll_hnsw_rebuild().unwrap() {
+                HnswRebuildStatus::Running => {
+                    assert!(Instant::now() < deadline);
+                    thread::yield_now();
+                }
+                status => {
+                    assert_eq!(status, HnswRebuildStatus::Published);
+                    break;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn background_queries_do_not_wait_and_merge_delta_beyond_legacy_limit() {
+        let mut db = Database::create_in_memory(1, crate::CreateOptions::default()).unwrap();
+        let config = HnswConfig::default();
+        db.set_background_hnsw_rebuild(Some(HnswRebuildLimits::default()))
+            .unwrap();
+        for id in 0..8 {
+            db.put(id, &[id as f32 + 10.0], b"old").unwrap();
+        }
+        db.put_with_expiry(4, &[0.0], b"expired before build", &Metadata::new(), Some(1))
+            .unwrap();
+        db.build_hnsw(config).unwrap();
+        let release = paused_rebuild(&mut db);
+        for id in 100..400 {
+            db.put(id, &[(id - 100) as f32 / 1000.0], b"new")
+                .unwrap();
+        }
+        db.delete(0).unwrap();
+        db.delete(3).unwrap();
+        db.put(3, &[90.0], b"reinserted").unwrap();
+        db.put_with_expiry(5, &[0.0], b"expired during build", &Metadata::new(), Some(1))
+            .unwrap();
+        let metadata = Metadata::from([("fresh".into(), MetadataValue::Boolean(true))]);
+        db.put_with_metadata(2, &[-0.1], b"updated", &metadata)
+            .unwrap();
+        db.update_metadata(6, &metadata).unwrap();
+        let hits = db.search_approximate(&[0.0], 1000, 1000, config).unwrap();
+        assert!(!db.rebuild.as_ref().unwrap().1.finished());
+        assert_eq!(hits, db.search(&[0.0], 1000).unwrap());
+        assert!(hits.iter().any(|hit| hit.id == 100));
+        assert!(hits.iter().all(|hit| ![0, 4, 5].contains(&hit.id)));
+        let conditions = [Condition::Eq {
+            field: "fresh".into(),
+            value: MetadataValue::Boolean(true),
+        }];
+        assert_eq!(
+            db.search_approximate_filtered_with_metric(
+                &[0.0], 10, 1000, config, &conditions, DistanceMetric::SquaredL2,
+            )
+            .unwrap(),
+            db.search_filtered(&[0.0], 10, &conditions).unwrap()
+        );
+        assert!(db.state(0).index.as_ref().unwrap().buffer_usage().0 > MAX_HNSW_BUFFER_IDS);
+        assert_eq!(
+            db.hnsw_maintenance_status(config, DistanceMetric::SquaredL2, Default::default())
+                .unwrap()
+                .active_buffer
+                .unwrap()
+                .remaining_ids,
+            0
+        );
+        release.send(()).unwrap();
+        publish(&mut db);
+        assert_eq!(
+            db.search_approximate_ready(&[0.0], 1000, 1000, config)
+                .unwrap(),
+            db.search(&[0.0], 1000).unwrap()
+        );
+        assert_eq!(db.state(0).index.as_ref().unwrap().graph_nodes(), 8);
+    }
+
+    #[test]
+    fn background_cold_and_mismatched_queries_use_exact_without_waiting() {
+        let mut db = Database::create_in_memory(1, crate::CreateOptions::default()).unwrap();
+        db.put(1, &[1.0], b"").unwrap();
+        db.set_background_hnsw_rebuild(Some(HnswRebuildLimits::default()))
+            .unwrap();
+        let release = paused_rebuild(&mut db);
+        db.put(2, &[2.0], b"new").unwrap();
+        let config = HnswConfig::default();
+        assert_eq!(
+            db.search_approximate(&[2.0], 2, 2, config).unwrap(),
+            db.search(&[2.0], 2).unwrap()
+        );
+        assert!(db.state(0).index.is_none());
+        assert!(matches!(
+            db.search_approximate_ready(&[2.0], 2, 2, config),
+            Err(Error::IndexNotReady)
+        ));
+        assert!(!db.rebuild.as_ref().unwrap().1.finished());
+        release.send(()).unwrap();
+        publish(&mut db);
+        let release = paused_rebuild(&mut db);
+        let changed = HnswConfig { seed: 7, ..config };
+        assert_eq!(
+            db.search_approximate(&[2.0], 2, 2, changed).unwrap(),
+            db.search(&[2.0], 2).unwrap()
+        );
+        assert_eq!(
+            db.search_approximate_with_metric(&[2.0], 2, 2, config, DistanceMetric::Cosine)
+                .unwrap(),
+            db.search_with_metric(&[2.0], 2, DistanceMetric::Cosine).unwrap()
+        );
+        assert!(!db.rebuild.as_ref().unwrap().1.finished());
+        release.send(()).unwrap();
+        publish(&mut db);
+    }
+
+    #[test]
+    fn background_option_defaults_to_legacy_inline_rebuild() {
+        let mut db = Database::create_in_memory(1, crate::CreateOptions::default()).unwrap();
+        let config = HnswConfig::default();
+        db.put(0, &[0.0], b"").unwrap();
+        db.build_hnsw(config).unwrap();
+        assert!(db.state(0).background_hnsw.is_none());
+        for id in 1..=MAX_HNSW_BUFFER_IDS as u64 + 1 {
+            db.put(id, &[id as f32], b"").unwrap();
+        }
+        assert!(db.state(0).index.is_none());
+        assert!(matches!(
+            db.search_approximate_ready(&[0.0], 1, 10, config),
+            Err(Error::IndexNotReady)
+        ));
+        assert_eq!(
+            db.search_approximate(&[0.0], 1, 10, config).unwrap()[0].id,
+            0
+        );
+        assert!(db.rebuild.is_none());
+        assert_eq!(db.state(0).index.as_ref().unwrap().buffer_usage(), (0, 0));
+    }
+
+    #[test]
+    fn background_rebuild_limits_fail_explicitly_without_inline_build() {
+        let mut db = Database::create_in_memory(1, crate::CreateOptions::default()).unwrap();
+        db.put(1, &[1.0], b"").unwrap();
+        db.put(2, &[2.0], b"").unwrap();
+        db.set_background_hnsw_rebuild(Some(HnswRebuildLimits {
+            max_records: 1,
+            max_snapshot_vector_bytes: 4,
+        }))
+        .unwrap();
+        assert!(matches!(
+            db.search_approximate(&[0.0], 1, 10, HnswConfig::default()),
+            Err(Error::HnswRebuildTooLarge)
+        ));
+        assert!(db.rebuild.is_none());
+        assert!(db.state(0).index.is_none());
+    }
+
+    #[test]
+    fn background_queries_automatically_start_and_publish_rebuilds() {
+        let mut db = Database::create_in_memory(1, crate::CreateOptions::default()).unwrap();
+        let config = HnswConfig::default();
+        db.set_background_hnsw_rebuild(Some(HnswRebuildLimits::default()))
+            .unwrap();
+        assert!(db.search_approximate(&[0.0], 0, 10, config).unwrap().is_empty());
+        assert!(db.rebuild.is_none());
+        db.put(1, &[1.0], b"").unwrap();
+        assert_eq!(db.search_approximate(&[1.0], 1, 10, config).unwrap()[0].id, 1);
+        assert!(db.rebuild.is_some());
+        assert!(db.state(0).index.is_none());
+        publish(&mut db);
+        db.put(2, &[2.0], b"new").unwrap();
+        assert_eq!(db.search_approximate(&[2.0], 1, 10, config).unwrap()[0].id, 2);
+        assert!(db.rebuild.is_some());
+        assert_eq!(db.state(0).index.as_ref().unwrap().graph_nodes(), 1);
+        publish(&mut db);
+        assert_eq!(db.state(0).index.as_ref().unwrap().graph_nodes(), 2);
+    }
+
+    #[test]
+    fn background_option_is_collection_local_and_resets_on_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("local-option.vlite");
+        let mut db = Database::create(&path, 1).unwrap();
+        let other = db
+            .create_collection(
+                "other",
+                crate::CollectionSpec {
+                    dimensions: 1,
+                    settings: Default::default(),
+                },
+            )
+            .unwrap()
+            .id;
+        db.collection_mut("other")
+            .unwrap()
+            .set_background_hnsw_rebuild(Some(HnswRebuildLimits::default()))
+            .unwrap();
+        assert!(db.state(0).background_hnsw.is_none());
+        assert!(db.state(other).background_hnsw.is_some());
+        db.set_background_hnsw_rebuild(Some(HnswRebuildLimits::default()))
+            .unwrap();
+        db.close().unwrap();
+        let db = Database::open(&path).unwrap();
+        assert!(db.state(0).background_hnsw.is_none());
+        assert!(db.state(other).background_hnsw.is_none());
+    }
+
+    #[test]
+    fn background_queries_reap_finished_jobs_from_other_opted_in_collections() {
+        let mut db = Database::create_in_memory(1, crate::CreateOptions::default()).unwrap();
+        let config = HnswConfig::default();
+        let metric = DistanceMetric::SquaredL2;
+        db.put(1, &[1.0], b"").unwrap();
+        db.set_background_hnsw_rebuild(Some(HnswRebuildLimits::default()))
+            .unwrap();
+        let other = db
+            .create_collection(
+                "other",
+                crate::CollectionSpec {
+                    dimensions: 1,
+                    settings: Default::default(),
+                },
+            )
+            .unwrap()
+            .id;
+        let mut collection = db.collection_mut("other").unwrap();
+        collection
+            .set_background_hnsw_rebuild(Some(HnswRebuildLimits::default()))
+            .unwrap();
+        collection.put(2, &[2.0], b"").unwrap();
+        db.search_approximate(&[1.0], 1, 10, config).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !db.rebuild.as_ref().unwrap().1.finished() {
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        let hits = db
+            .collection_mut("other")
+            .unwrap()
+            .search_approximate_filtered_with_metric(&[2.0], 1, 10, config, &[], metric)
+            .unwrap();
+        assert_eq!(hits[0].id, 2);
+        assert!(db.state(0).index.is_some());
+        assert!(db.state(other).index.is_none());
+        assert_eq!(db.rebuild.as_ref().unwrap().0, other);
+    }
+
+    #[test]
+    fn background_snapshot_limits_stay_compatible_and_disabling_restores_legacy_limits() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("index.ann");
+        let mut db = Database::create_in_memory(1, crate::CreateOptions::default()).unwrap();
+        let config = HnswConfig::default();
+        db.put(1, &[1.0], b"").unwrap();
+        db.set_background_hnsw_rebuild(Some(HnswRebuildLimits::default()))
+            .unwrap();
+        db.build_hnsw(config).unwrap();
+        db.save_ann_snapshot(&path).unwrap();
+        db.state_mut(0).index = None;
+        assert!(matches!(
+            db.load_ann_snapshot(&path).unwrap(),
+            crate::AnnSnapshotLoad::Loaded { indexes: 1 }
+        ));
+        let previous = std::fs::read(&path).unwrap();
+        for id in 100..400 {
+            db.put(id, &[id as f32], b"").unwrap();
+        }
+        assert!(db.state(0).index.is_some());
+        assert!(matches!(db.save_ann_snapshot(&path), Err(Error::Io(_))));
+        assert_eq!(std::fs::read(&path).unwrap(), previous);
+        db.set_background_hnsw_rebuild(None).unwrap();
+        assert!(db.state(0).index.is_none());
+        assert_eq!(db.search_approximate(&[1.0], 1, 10, config).unwrap()[0].id, 1);
+        assert!(db.rebuild.is_none());
+    }
+
+    #[test]
+    fn background_quantized_rebuild_keeps_catchup_beyond_legacy_limit() {
+        let mut db = Database::create_in_memory(1, crate::CreateOptions::default()).unwrap();
+        let config = HnswConfig::default();
+        let metric = DistanceMetric::SquaredL2;
+        let options = AnnOptions {
+            quantization: Quantization::ScalarU8,
+            ..Default::default()
+        };
+        db.put(1, &[10.0], b"").unwrap();
+        db.set_background_hnsw_rebuild(Some(HnswRebuildLimits::default()))
+            .unwrap();
+        db.build_hnsw_with_options(config, metric, options).unwrap();
+        db.start_hnsw_rebuild_with_options(config, metric, options, HnswRebuildLimits::default())
+            .unwrap();
+        for id in 100..400 {
+            db.put(id, &[(id - 100) as f32], b"new").unwrap();
+        }
+        db.delete(1).unwrap();
+        let (hits, _) = db
+            .search_approximate_ready_with_options(&[0.0], 1000, 1000, config, options, &[], metric)
+            .unwrap();
+        assert_eq!(hits, db.search(&[0.0], 1000).unwrap());
+        publish(&mut db);
+        let (hits, _) = db
+            .search_approximate_ready_with_options(&[0.0], 1000, 1000, config, options, &[], metric)
+            .unwrap();
+        assert_eq!(hits, db.search(&[0.0], 1000).unwrap());
+    }
 
     #[test]
     fn publication_rejects_a_generation_not_covered_by_catchup() {
@@ -407,6 +783,7 @@ mod tests {
             snapshot_records: 0,
             processed: Arc::new(AtomicUsize::new(0)),
             vector_sequence: 0,
+            background: false,
         }
     }
 

@@ -2808,9 +2808,8 @@ fn search_sizes(db: &Database, collection: u16, input: &Search) -> (usize, usize
     (candidate_k, 100.max(candidate_k.min(live)))
 }
 
-/// `mode=approximate` index (re)build, run under the exclusive lock only
-/// when the shared-lock attempt found the index stale. Rechecks staleness so
-/// concurrent requests that raced to this point rebuild at most once.
+/// `mode=approximate` maintenance under the exclusive lock. Legacy mode
+/// rebuilds stale indexes inline; opted-in collections only poll/start workers.
 fn rebuild_stale(
     db: &mut Database,
     collection: u16,
@@ -2824,6 +2823,10 @@ fn rebuild_stale(
     let filter = input.filter.as_deref().unwrap_or(&[]);
     let vector = input.vector.as_deref().unwrap_or(&[]);
     db.validate_hnsw_query(collection, vector, candidate_k, ef, config, filter, metric)?;
+    if db.state(collection).background_hnsw.is_some() {
+        db.maintain_background_hnsw_in(collection, config, metric, options)?;
+        return Ok(());
+    }
     if approximate_stale(db, collection, input, config, metric, options) {
         let started = Instant::now();
         db.build_hnsw_with_options_in(collection, config, metric, options)?;
@@ -2855,13 +2858,14 @@ fn approximate_stale(
 }
 
 /// Executes a search under the shared lock. Returns `Ok(None)` only for
-/// `mode=approximate` with a stale index; the caller then runs
-/// `rebuild_stale` exclusively and retries.
+/// `mode=approximate` requiring index maintenance; the caller then runs
+/// `rebuild_stale` exclusively and retries without another maintenance request.
 fn execute(
     db: &Database,
     collection: u16,
     target: &Target,
     input: &Search,
+    allow_maintenance: bool,
 ) -> Result<Option<Executed>, ApiError> {
     let (metric, config, options) = search_identity(db, collection, target, input)?;
     if matches!(
@@ -2905,22 +2909,30 @@ fn execute(
                     filter,
                     metric,
                 )?;
-                if approximate_stale(db, collection, input, config, metric, options) {
+                if db.state(collection).background_hnsw.is_some() {
+                    if allow_maintenance
+                        && candidate_k > 0
+                        && live > 0
+                        && db.background_hnsw_needs_maintenance(collection, config, metric, options)
+                    {
+                        return Ok(None);
+                    }
+                } else if approximate_stale(db, collection, input, config, metric, options) {
                     return Ok(None);
                 }
             }
+            let hits = if input.mode == SearchMode::Approximate
+                && db.state(collection).background_hnsw.is_some()
+                && approximate_stale(db, collection, input, config, metric, options)
+            {
+                db.search_in(collection, vector, candidate_k, filter, metric, &mut stats)?
+            } else {
+                db.search_ready_with_options_in(
+                    collection, vector, candidate_k, ef, config, options, filter, metric, &mut stats,
+                )?
+            };
             Executed {
-                hits: distances(db.search_ready_with_options_in(
-                    collection,
-                    vector,
-                    candidate_k,
-                    ef,
-                    config,
-                    options,
-                    filter,
-                    metric,
-                    &mut stats,
-                )?),
+                hits: distances(hits),
                 stats,
                 plan: None,
                 ef_search: Some(ef),
@@ -3061,9 +3073,13 @@ async fn search_core(
     input.validate(&role)?;
     let metrics = service.metrics.clone();
     let started = Instant::now();
-    let attempt = move |db: &Database, role: admin::Role, target: Target, input: Search| {
+    let attempt = move |db: &Database,
+                        role: admin::Role,
+                        target: Target,
+                        input: Search,
+                        allow_maintenance: bool| {
         let collection = open(db, &role, &target)?;
-        let executed = execute(db, collection, &target, &input)?;
+        let executed = execute(db, collection, &target, &input, allow_maintenance)?;
         let binding = (
             tenants::qualify(&role, target.name()),
             collection,
@@ -3108,7 +3124,8 @@ async fn search_core(
                         Err(error) => return Err(error.into()),
                     }
                 }
-                let (executed, binding, role, target, input) = attempt(db, role, target, input)?;
+                let (executed, binding, role, target, input) =
+                    attempt(db, role, target, input, true)?;
                 Ok((None, executed, binding, role, target, input))
             },
             |(snapshot, mut executed, binding, role, target, input)| {
@@ -3136,14 +3153,14 @@ async fn search_core(
     let (input, collection, executed) = match executed {
         Some(executed) => (input, collection, executed),
         None => {
-            // Rare path: the approximate index is stale. Rebuild exclusively,
-            // then search under the same write guard so a concurrent writer
-            // cannot invalidate the fresh index between the two steps.
+            // Maintain exclusively, then query the same committed generation.
+            // Opted-in collections never construct an index under this guard.
             service
                 .run(move |db| {
                     let collection = open(db, &role, &target)?;
                     rebuild_stale(db, collection, &target, &input, &metrics)?;
-                    let (executed, binding, _, _, input) = attempt(&*db, role, target, input)?;
+                    let (executed, binding, _, _, input) =
+                        attempt(&*db, role, target, input, false)?;
                     let executed = executed.ok_or_else(|| internal("index stale after rebuild"))?;
                     Ok((input, binding, executed))
                 })
@@ -3549,8 +3566,73 @@ fn enforce_quota(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::HnswRebuildStatus;
     use axum::{body::Body, http::Request};
+    use std::time::Duration;
     use tower::ServiceExt;
+
+    #[test]
+    fn approximate_server_honors_background_option_and_preserves_legacy_builds() {
+        for background in [false, true] {
+            let mut db = Database::create_in_memory(1, crate::CreateOptions::default()).unwrap();
+            db.put(1, &[1.0], b"old").unwrap();
+            if background {
+                db.set_background_hnsw_rebuild(Some(crate::HnswRebuildLimits::default()))
+                    .unwrap();
+            }
+            let input: Search = serde_json::from_value(json!({
+                "vector": [0.0], "k": 1, "mode": "approximate", "ef_search": 10,
+                "rerank": {"mode": "exact", "candidates": 2}
+            }))
+            .unwrap();
+            assert!(execute(&db, 0, &Target::Legacy, &input, true).unwrap().is_none());
+            rebuild_stale(&mut db, 0, &Target::Legacy, &input, &Metrics::default()).unwrap();
+            assert_eq!(db.state(0).index.is_none(), background);
+            assert_eq!(db.rebuild.is_some(), background);
+            db.put(2, &[0.0], b"new").unwrap();
+            db.delete(1).unwrap();
+            db.put_with_expiry(3, &[0.0], b"expired", &crate::Metadata::new(), Some(1))
+                .unwrap();
+            let executed = execute(&db, 0, &Target::Legacy, &input, false)
+                .unwrap()
+                .unwrap();
+            let Hits::Vector(hits) = executed.hits else {
+                panic!("expected vector hits");
+            };
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].id, 2);
+            assert_eq!(executed.stats.reranked_candidates, 1);
+            if background {
+                let deadline = Instant::now() + Duration::from_secs(30);
+                loop {
+                    match db.poll_hnsw_rebuild().unwrap() {
+                        HnswRebuildStatus::Running => {
+                            assert!(Instant::now() < deadline);
+                            std::thread::yield_now();
+                        }
+                        status => {
+                            assert_eq!(status, HnswRebuildStatus::Published);
+                            break;
+                        }
+                    }
+                }
+                for id in 100..400 {
+                    db.put(id, &[id as f32], b"new").unwrap();
+                }
+                assert!(db.state(0).index.is_some());
+                assert!(execute(&db, 0, &Target::Legacy, &input, true).unwrap().is_none());
+                rebuild_stale(&mut db, 0, &Target::Legacy, &input, &Metrics::default()).unwrap();
+                assert_eq!(db.state(0).index.as_ref().unwrap().graph_nodes(), 1);
+                let executed = execute(&db, 0, &Target::Legacy, &input, false)
+                    .unwrap()
+                    .unwrap();
+                let Hits::Vector(hits) = executed.hits else {
+                    panic!("expected vector hits");
+                };
+                assert_eq!(hits[0].id, 2);
+            }
+        }
+    }
 
     #[tokio::test]
     async fn disconnected_worker_keeps_its_permit_and_close_waits_for_its_commit() {

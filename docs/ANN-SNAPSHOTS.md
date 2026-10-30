@@ -42,6 +42,12 @@ control. Preserve the primary-file lock: never share the same sidecar between
 independent database owners. The cache is replaceable; an older binary that
 does not support snapshots ignores it.
 
+The handle-local `set_background_hnsw_rebuild(Some(limits))` option does not
+change the snapshot format. Its growing mutation delta can exceed snapshot
+v1's 256-ID / 8-MiB limits; saving then returns an explicit error. Publish a
+new rebuild before saving. Existing snapshots remain readable, and loading
+one preserves the handle's background-rebuild option.
+
 Snapshot loading avoids graph reconstruction, not database replay or validation.
 Report measured restart time rather than promising instant startup. Original
 f32 records remain resident even with scalar-u8 traversal; persisting the graph

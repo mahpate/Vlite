@@ -445,11 +445,13 @@ pub(crate) fn load(db: &mut Database, path: &Path) -> AnnSnapshotLoad {
     match read(db, path) {
         Ok(indexes) => {
             let count = indexes.len();
-            for (id, index) in indexes {
-                db.collections
+            for (id, mut index) in indexes {
+                let collection = db
+                    .collections
                     .get_mut(&id)
-                    .expect("validated sections reference live collections")
-                    .index = Some(index);
+                    .expect("validated sections reference live collections");
+                index.set_background(collection.background_hnsw.is_some());
+                collection.index = Some(index);
             }
             AnnSnapshotLoad::Loaded { indexes: count }
         }
