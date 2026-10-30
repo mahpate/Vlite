@@ -80,6 +80,19 @@ No competing graph engine has been measured. Figures are from
    deterministic summation without FMA and per-call overhead. Options:
    AVX-512, a separate faster opt-in mode, and pre-normalised vectors for
    cosine. Exact top-k IDs must not change.
+   The F2 investigation found unchanged exact-distance arithmetic since
+   `81ff901`, but snapshot sharing (`04014fc`) added a function-pointer record
+   iterator over `Arc<Record>`. The scan now keeps concrete iterator types through
+   serial scanning and parallel row collection, removing that adapter call
+   and the boxed iterator without changing record ownership or summation.
+   `examples/exact_search_bench.rs` provides a bounded 100k x 384, k=10
+   local check with a bit-exact full-sort oracle and result fingerprint.
+   Run identical source in release mode on each revision, with identical
+   `RAYON_NUM_THREADS` (both 1 and the normal pool size), and alternate
+   revision order. This is indicative only, not a DO-005 campaign.
+   Local before/after timings and Rust checks remain unverified: the peer
+   environment denied Cargo execution without interactive approval.
+   The measured 4-6% regression is not yet confirmed resolved.
 2. **HNSW query latency.** Use quantization (SQ8/PQ) to pick candidates, then
    re-rank with full vectors. Store a flat neighbour layout in an
    `ann_snapshot` v2 to cut memory jumps, and prefetch neighbour vectors.

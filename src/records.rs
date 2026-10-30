@@ -16,10 +16,28 @@ use std::{
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct RecordMap(Arc<BTreeMap<u64, Arc<Record>>>);
 
-type RecordIter<'a> = std::iter::Map<
-    std::collections::btree_map::Iter<'a, u64, Arc<Record>>,
-    fn((&'a u64, &'a Arc<Record>)) -> (&'a u64, &'a Record),
->;
+pub(crate) struct RecordIter<'a>(std::collections::btree_map::Iter<'a, u64, Arc<Record>>);
+
+impl<'a> Iterator for RecordIter<'a> {
+    type Item = (&'a u64, &'a Record);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|(id, record)| (id, record.as_ref()))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.size_hint()
+    }
+}
+
+impl DoubleEndedIterator for RecordIter<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.0.next_back().map(|(id, record)| (id, record.as_ref()))
+    }
+}
+
+impl ExactSizeIterator for RecordIter<'_> {}
+impl std::iter::FusedIterator for RecordIter<'_> {}
 
 impl RecordMap {
     pub fn new() -> Self {
@@ -52,7 +70,7 @@ impl RecordMap {
         Arc::make_mut(&mut self.0).remove(id)
     }
     pub fn iter(&self) -> RecordIter<'_> {
-        self.0.iter().map(|(id, record)| (id, record.as_ref()))
+        RecordIter(self.0.iter())
     }
     pub fn keys(&self) -> impl DoubleEndedIterator<Item = &u64> + ExactSizeIterator {
         self.0.keys()

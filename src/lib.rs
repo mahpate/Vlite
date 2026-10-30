@@ -3103,13 +3103,53 @@ fn exact_search(
     if limit == 0 {
         return Vec::new();
     }
-    let scan: Box<dyn Iterator<Item = (&u64, &Record)>> = match candidates {
-        None => Box::new(records.iter()),
-        Some(ids) => Box::new(ids.iter().filter_map(|id| records.get_key_value(id))),
-    };
+    match candidates {
+        None => exact_search_rows(
+            records.iter(),
+            records.len(),
+            expiries,
+            query,
+            query_norm,
+            limit,
+            conditions,
+            metric,
+            now_ms,
+            stats,
+        ),
+        Some(ids) => exact_search_rows(
+            ids.iter().filter_map(|id| records.get_key_value(id)),
+            ids.len(),
+            expiries,
+            query,
+            query_norm,
+            limit,
+            conditions,
+            metric,
+            now_ms,
+            stats,
+        ),
+    }
+}
+
+// Keep the concrete iterator through collection and the serial scan so record
+// dereferencing can inline instead of calling an adapter through a vtable.
+#[allow(clippy::too_many_arguments)]
+fn exact_search_rows<'a>(
+    scan: impl Iterator<Item = (&'a u64, &'a Record)>,
+    rows: usize,
+    expiries: &BTreeMap<u64, u64>,
+    query: &[f32],
+    query_norm: f64,
+    limit: usize,
+    conditions: &[Condition],
+    metric: DistanceMetric,
+    now_ms: u64,
+    stats: &mut SearchStats,
+) -> Vec<SearchHit> {
+    #[cfg(target_arch = "wasm32")]
+    let _ = rows;
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let rows = candidates.map_or(records.len(), BTreeSet::len);
         if rows >= PARALLEL_MIN_ROWS
             && rows.saturating_mul(query.len()) >= PARALLEL_MIN_WORK
             && rayon::current_num_threads() > 1
@@ -4179,5 +4219,154 @@ mod v4_tests {
         );
         assert_eq!(hits.iter().map(|hit| hit.id).collect::<Vec<_>>(), [11, 7]);
         assert_eq!((stats.records_scanned, stats.distance_evaluations), (3, 3));
+    }
+
+    #[test]
+    fn record_iterator_preserves_order_size_and_snapshot_sharing() {
+        let mut records: records::RecordMap = (0..5)
+            .map(|id| {
+                (
+                    id,
+                    Record {
+                        vector: vec![id as f32],
+                        payload: Vec::new(),
+                        metadata: Metadata::new(),
+                    },
+                )
+            })
+            .collect();
+        let snapshot = records.clone();
+        let mut iter = records.iter();
+        assert_eq!(iter.len(), 5);
+        assert_eq!(*iter.next().unwrap().0, 0);
+        assert_eq!(*iter.next_back().unwrap().0, 4);
+        assert_eq!(iter.size_hint(), (3, Some(3)));
+        assert_eq!(iter.map(|(&id, _)| id).collect::<Vec<_>>(), [1, 2, 3]);
+        records.get_mut(&2).unwrap().vector[0] = 100.0;
+        assert_eq!(snapshot[&2].vector, [2.0]);
+        assert_eq!(records[&2].vector, [100.0]);
+        assert!(std::ptr::eq(
+            snapshot.get(&1).unwrap(),
+            records.get(&1).unwrap()
+        ));
+    }
+
+    #[test]
+    fn concrete_exact_iterators_match_full_sort_distance_bits_and_stats() {
+        let records: records::RecordMap = (0..4096u64)
+            .map(|id| {
+                (
+                    id,
+                    Record {
+                        vector: (0..384)
+                            .map(|dim| {
+                                if id == 0 {
+                                    0.0
+                                } else {
+                                    ((id / 2 * 17 + dim * 31) % 257) as f32 / 128.0 - 1.0
+                                }
+                            })
+                            .collect(),
+                        payload: Vec::new(),
+                        metadata: Metadata::from([(
+                            "group".into(),
+                            MetadataValue::Integer((id % 3) as i64),
+                        )]),
+                    },
+                )
+            })
+            .collect();
+        let query: Vec<f32> = (0..384).map(|dim| (dim % 13) as f32 / 16.0).collect();
+        let subset: BTreeSet<u64> = (0..9000).step_by(2).collect();
+        let filter = [Condition::Eq {
+            field: "group".into(),
+            value: MetadataValue::Integer(1),
+        }];
+        let expiries: BTreeMap<u64, u64> = (0..4096)
+            .step_by(5)
+            .map(|id| (id, if id % 2 == 0 { 100 } else { 101 }))
+            .collect();
+        let empty_expiries = BTreeMap::new();
+        let check = || {
+            for metric in [
+                DistanceMetric::SquaredL2,
+                DistanceMetric::Cosine,
+                DistanceMetric::InnerProduct,
+            ] {
+                let query_norm = validate_metric_query(&query, metric).unwrap();
+                for candidates in [None, Some(&subset)] {
+                    let visibility = [(&[][..], &empty_expiries), (&filter[..], &expiries)];
+                    for (conditions, expiries) in visibility {
+                        let scan: Vec<_> = records
+                            .iter()
+                            .filter(|(id, _)| candidates.is_none_or(|ids| ids.contains(*id)))
+                            .collect();
+                        let eligible: Vec<_> = scan
+                            .iter()
+                            .copied()
+                            .filter(|(id, record)| {
+                                !expiries.get(*id).is_some_and(|&expiry| expiry <= 100)
+                                    && metadata::matches(&record.metadata, conditions)
+                            })
+                            .collect();
+                        let mut expected: Vec<_> = eligible
+                            .iter()
+                            .filter_map(|(id, record)| {
+                                metric_distance(
+                                    &record.vector,
+                                    &query,
+                                    metric,
+                                    vector_norm(&record.vector),
+                                    query_norm,
+                                )
+                                .map(|distance| SearchHit { id: **id, distance })
+                            })
+                            .collect();
+                        expected.sort_by(|a, b| {
+                            a.distance.total_cmp(&b.distance).then(a.id.cmp(&b.id))
+                        });
+                        for k in [0, 10, records.len() + 1] {
+                            let mut stats = SearchStats::default();
+                            let actual = exact_search(
+                                &records,
+                                expiries,
+                                &query,
+                                query_norm,
+                                k,
+                                conditions,
+                                metric,
+                                candidates,
+                                100,
+                                &mut stats,
+                            );
+                            let bits = |hits: &[SearchHit]| {
+                                hits.iter()
+                                    .map(|hit| (hit.id, hit.distance.to_bits()))
+                                    .collect::<Vec<_>>()
+                            };
+                            assert_eq!(bits(&actual), bits(&expected[..k.min(expected.len())]));
+                            assert_eq!(
+                                stats.records_scanned,
+                                if k == 0 { 0 } else { scan.len() as u64 }
+                            );
+                            assert_eq!(
+                                stats.distance_evaluations,
+                                if k == 0 { 0 } else { eligible.len() as u64 }
+                            );
+                        }
+                    }
+                }
+            }
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        for threads in [1, 4] {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(check);
+        }
+        #[cfg(target_arch = "wasm32")]
+        check();
     }
 }
