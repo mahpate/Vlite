@@ -41,7 +41,7 @@ pub(crate) const OP_TIME_ANCHOR: u8 = 11;
 pub(crate) const OP_ADVANCE: u8 = 13;
 pub(crate) const PREFIX_SIZE: usize = 36;
 pub(crate) const FOOTER_SIZE: usize = 16;
-const MAGIC: &[u8; 8] = b"VLITEDB\0";
+pub(crate) const MAGIC: &[u8; 8] = b"VLITEDB\0";
 /// Version written by `Database::create` and by compaction of v1–v3 sources.
 pub(crate) const CURRENT_VERSION: u32 = 3;
 /// Opt-in format with lineage, collections and import checkpoints.
@@ -403,7 +403,7 @@ fn u64_at(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
 }
 
-fn corrupt(offset: u64, reason: &'static str) -> Error {
+pub(crate) fn corrupt(offset: u64, reason: &'static str) -> Error {
     Error::Corrupt { offset, reason }
 }
 
@@ -1274,7 +1274,6 @@ pub(crate) fn load_with<R: Read + Seek>(
 
 /// Like `load_with`, with an already-open cipher (`None` for plaintext logs)
 /// standing in for the key; the descriptor must match.
-#[allow(dead_code)] // Consumed by the directory store's checkpoint (P2a).
 pub(crate) fn load_known<R: Read + Seek>(file: &mut R, cipher: Option<&Cipher>) -> Result<Loaded> {
     load_inner(file, None, cipher)
 }

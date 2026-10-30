@@ -273,6 +273,39 @@ kv.delete("pool", "claim/42", Expected::Revision(token))?;
   are never overwritten.
 - REST, gRPC and bindings come after the OpenAPI review.
 
+## Directory store
+
+`Database::create_directory(path, dimensions, options)` (Rust only, v5)
+stores a database as a directory instead of one file. Every other API,
+including `Database::open`, `open_read_only`, the server and the maintenance
+tools, accepts the directory path unchanged.
+
+```text
+store/
+  LOCK            held while open (exclusive, or shared for read-only)
+  MANIFEST        ordered list of the live files, replaced atomically
+  image-N.vlite   checkpoint image, optional
+  wal-N.log       write-ahead logs; only the last one is appended
+```
+
+- **Checkpoints** fold the logs into one image on a background thread, so
+  reopen replays the image plus a short log instead of the whole history.
+  One starts after a commit once the active log passes 64 MiB. Change it with
+  `set_checkpoint_threshold(Some(bytes))`, turn it off with `None`, or run one
+  and wait with `checkpoint()`, which returns the floor sequence.
+- **Kept across checkpoints:** the lineage, every record's revision
+  (compare-and-set and fencing tokens still match), graphs and encryption.
+- **History below the floor is gone.** Change-feed and log-segment requests
+  for an earlier cursor return `CursorBeforeHistory` (REST 409
+  `cursor_before_history`). Take a snapshot, then resume from the floor. A
+  new replica of a checkpointed store starts from a backup.
+- **Converters:** `maintenance::convert_to_directory(file, dir)` keeps the
+  lineage, revisions and cursors. `maintenance::backup(dir, file)` packs a
+  directory back into one file.
+- **Not supported:** commit timestamps and v3 or v4 formats. Crash recovery
+  trims a torn tail of the active log only; damage elsewhere is reported as
+  corruption.
+
 ## Limitations
 
 - A passphrase is only as strong as its entropy; tune `KdfParams` for your

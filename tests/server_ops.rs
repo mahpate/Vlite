@@ -562,6 +562,42 @@ async fn change_feed_cursor_failures_are_client_errors() {
 }
 
 #[tokio::test]
+async fn feed_cursors_before_a_directory_checkpoint_are_conflicts() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store");
+    let mut db = Database::create_directory(&store, 2, vlite::CreateOptions::default()).unwrap();
+    db.set_checkpoint_threshold(None);
+    for id in 1..=4u64 {
+        db.put(id, &[1.0, id as f32], b"").unwrap();
+    }
+    let lineage = db.lineage().unwrap();
+    assert_eq!(db.checkpoint().unwrap(), Some(4));
+    db.put(9, &[9.0, 9.0], b"").unwrap();
+    let (service, app) = start(db, options(&dir.path().join("admin")));
+    let early = FeedCursor {
+        lineage,
+        sequence: 2,
+    };
+    for uri in [
+        format!("/v1/changes?cursor={}", early.to_token()),
+        "/v1/admin/replication/export?after_sequence=2&max_bytes=4096".to_owned(),
+    ] {
+        let (status, error) = call(&app, Some(ADMIN), "GET", &uri, None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{uri}: {error}");
+        assert_eq!(error["error"]["code"], "cursor_before_history", "{uri}");
+    }
+    let floor = FeedCursor {
+        lineage,
+        sequence: 4,
+    };
+    let uri = format!("/v1/changes?cursor={}", floor.to_token());
+    let (status, page) = call(&app, Some(ADMIN), "GET", &uri, None).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["head"], "5");
+    service.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn restore_targets_the_log_cannot_serve_are_client_errors() {
     let dir = tempfile::tempdir().unwrap();
     let mut db = v4(&dir.path().join("db.vlite"));

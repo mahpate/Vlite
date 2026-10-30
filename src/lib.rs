@@ -6,6 +6,8 @@ mod ann_snapshot;
 pub mod changes;
 mod collection;
 mod crypto;
+mod directory;
+pub use directory::DEFAULT_CHECKPOINT_BYTES;
 pub mod disk_ann;
 mod durability;
 pub use durability::{DEFAULT_FLUSH_INTERVAL, Durability, MAX_FLUSH_INTERVAL, MIN_FLUSH_INTERVAL};
@@ -937,6 +939,8 @@ pub struct CreateOptions {
 enum Backing {
     Disk(File),
     Memory(storage::MemFile),
+    /// Directory store: checkpoint image plus log segments (`directory`).
+    Chain(Box<directory::Chain>),
 }
 
 struct LockedFile(Backing);
@@ -958,6 +962,7 @@ impl Backing {
         match self {
             Backing::Disk(file) => Ok(BackingLen(file.metadata()?.len())),
             Backing::Memory(memory) => Ok(BackingLen(memory.len())),
+            Backing::Chain(chain) => Ok(BackingLen(chain.len())),
         }
     }
 }
@@ -967,6 +972,7 @@ impl io::Read for Backing {
         match self {
             Backing::Disk(file) => file.read(buf),
             Backing::Memory(memory) => memory.read(buf),
+            Backing::Chain(chain) => chain.read(buf),
         }
     }
 }
@@ -976,6 +982,7 @@ impl Seek for Backing {
         match self {
             Backing::Disk(file) => file.seek(position),
             Backing::Memory(memory) => memory.seek(position),
+            Backing::Chain(chain) => chain.seek(position),
         }
     }
 }
@@ -983,6 +990,21 @@ impl Seek for Backing {
 impl LockedFile {
     fn disk(file: File) -> Self {
         Self(Backing::Disk(file))
+    }
+
+    fn chain(chain: directory::Chain) -> Self {
+        Self(Backing::Chain(Box::new(chain)))
+    }
+
+    fn chain_mut(&mut self) -> Option<&mut directory::Chain> {
+        match &mut self.0 {
+            Backing::Chain(chain) => Some(chain),
+            _ => None,
+        }
+    }
+
+    fn is_chain(&self) -> bool {
+        matches!(self.0, Backing::Chain(_))
     }
 
     fn memory(bytes: Vec<u8>) -> Self {
@@ -995,6 +1017,7 @@ impl LockedFile {
         match &self.0 {
             Backing::Disk(file) => file.sync_all(),
             Backing::Memory(_) => Ok(()),
+            Backing::Chain(chain) => chain.sync_all(),
         }
     }
 
@@ -1002,6 +1025,7 @@ impl LockedFile {
         match &self.0 {
             Backing::Disk(file) => file.set_len(length),
             Backing::Memory(memory) => memory.set_len(length),
+            Backing::Chain(chain) => chain.set_len(length),
         }
     }
 
@@ -1010,6 +1034,7 @@ impl LockedFile {
         match &self.0 {
             Backing::Disk(file) => Ok(file.metadata()?.len()),
             Backing::Memory(memory) => Ok(memory.len()),
+            Backing::Chain(chain) => Ok(chain.len()),
         }
     }
 
@@ -1017,6 +1042,7 @@ impl LockedFile {
         match &self.0 {
             Backing::Disk(file) => file.unlock(),
             Backing::Memory(_) => Ok(()),
+            Backing::Chain(chain) => chain.unlock(),
         }
     }
 
@@ -1024,6 +1050,7 @@ impl LockedFile {
         match &self.0 {
             Backing::Disk(file) => file.try_clone(),
             Backing::Memory(_) => Err(io::Error::other("in-memory storage")),
+            Backing::Chain(chain) => chain.try_clone(),
         }
     }
 
@@ -1033,7 +1060,7 @@ impl LockedFile {
 
     fn memory_bytes(&self) -> Option<Vec<u8>> {
         match &self.0 {
-            Backing::Disk(_) => None,
+            Backing::Disk(_) | Backing::Chain(_) => None,
             Backing::Memory(memory) => Some(memory.to_bytes()),
         }
     }
@@ -1044,6 +1071,7 @@ impl io::Read for &LockedFile {
         match &self.0 {
             Backing::Disk(file) => (&*file).read(buf),
             Backing::Memory(memory) => memory.read(buf),
+            Backing::Chain(chain) => chain.read(buf),
         }
     }
 }
@@ -1059,6 +1087,7 @@ impl Seek for &LockedFile {
         match &self.0 {
             Backing::Disk(file) => (&*file).seek(position),
             Backing::Memory(memory) => memory.seek(position),
+            Backing::Chain(chain) => chain.seek(position),
         }
     }
 }
@@ -1074,6 +1103,7 @@ impl Write for LockedFile {
         match &self.0 {
             Backing::Disk(file) => (&*file).write(buf),
             Backing::Memory(memory) => memory.write(buf),
+            Backing::Chain(chain) => chain.write(buf),
         }
     }
 
@@ -1100,6 +1130,12 @@ fn lock(file: File) -> Result<LockedFile> {
 }
 
 fn open_locked(path: &Path) -> Result<LockedFile> {
+    if path.is_dir() {
+        return Ok(LockedFile::chain(directory::open(
+            path,
+            directory::Access::Write,
+        )?));
+    }
     let file = OpenOptions::new().read(true).write(true).open(path)?;
     lock(file)
 }
@@ -1107,6 +1143,12 @@ fn open_locked(path: &Path) -> Result<LockedFile> {
 /// Read-only handle under a shared OS lock: any number of shared holders
 /// coexist (across processes too), but never alongside an exclusive writer.
 fn open_shared(path: &Path) -> Result<LockedFile> {
+    if path.is_dir() {
+        return Ok(LockedFile::chain(directory::open(
+            path,
+            directory::Access::ReadShared,
+        )?));
+    }
     let file = OpenOptions::new().read(true).open(path)?;
     match file.try_lock_shared() {
         Ok(()) => Ok(LockedFile::disk(file)),
@@ -1199,6 +1241,37 @@ impl Database {
             file.write_all(header)?;
             file.sync_all()?;
             Ok(file)
+        })?
+        .with_durability(Durability::default())
+    }
+
+    /// Creates a new directory store at `path` (which must not exist): a
+    /// `LOCK` file, a `MANIFEST` and write-ahead log segments, plus a
+    /// checkpoint image once `checkpoint` (or the automatic threshold, see
+    /// `set_checkpoint_threshold`) has run. `open`, `open_read_only` and the
+    /// maintenance tools accept the directory wherever they accept a file.
+    ///
+    /// Directory stores are format V5 and may be encrypted; commit
+    /// timestamps (`UnsupportedFeature`) and older formats
+    /// (`UnsupportedVersion`) are rejected.
+    pub fn create_directory(
+        path: impl AsRef<Path>,
+        dimensions: usize,
+        options: CreateOptions,
+    ) -> Result<Self> {
+        if options.commit_timestamps {
+            return Err(Error::UnsupportedFeature(format::FLAG_TIMESTAMPS));
+        }
+        match options.format {
+            None | Some(FormatVersion::V5) => {}
+            Some(FormatVersion::V4) => return Err(Error::UnsupportedVersion(format::V4)),
+            Some(FormatVersion::V3) => {
+                return Err(Error::UnsupportedVersion(format::CURRENT_VERSION));
+            }
+        }
+        let path = path.as_ref();
+        Self::create_backed(dimensions, options, |header| {
+            Ok(LockedFile::chain(directory::create(path, header)?))
         })?
         .with_durability(Durability::default())
     }
@@ -1564,6 +1637,131 @@ impl Database {
         self.flusher
             .as_ref()
             .map_or(0, durability::Flusher::pending)
+    }
+
+    // ---------------------------------------------------------- directory store
+
+    /// Whether this handle is a directory store (`create_directory`).
+    pub fn is_directory(&self) -> bool {
+        self.file.is_chain()
+    }
+
+    /// Sets the active-log size (bytes of commit frames) at which a directory
+    /// store starts a background checkpoint; `None` disables automatic
+    /// checkpoints. Defaults to `DEFAULT_CHECKPOINT_BYTES`. A no-op for
+    /// single-file and in-memory databases.
+    pub fn set_checkpoint_threshold(&mut self, bytes: Option<u64>) {
+        if let Some(chain) = self.file.chain_mut() {
+            chain.threshold = bytes;
+        }
+    }
+
+    /// Checkpoints a directory store now and waits for it: the active log is
+    /// sealed behind a fresh one, the sealed history is folded into a new
+    /// image (revisions, lineage and compare-and-set state are kept), and
+    /// the replaced files are removed. Commits continue while an automatic
+    /// checkpoint builds; this call blocks until the image is installed.
+    ///
+    /// Returns the image's history floor (the last commit it holds), or
+    /// `None` when there was nothing to checkpoint or the handle is not a
+    /// directory store. Change-feed cursors older than the floor then get
+    /// `CursorBeforeHistory`.
+    pub fn checkpoint(&mut self) -> Result<Option<u64>> {
+        self.ensure_healthy()?;
+        if !self.file.is_chain() {
+            return Ok(None);
+        }
+        if self.read_only {
+            return Err(Error::ReadOnly);
+        }
+        self.finish_checkpoint(true)?;
+        if !self.start_checkpoint()? {
+            return Ok(None);
+        }
+        self.finish_checkpoint(true)
+    }
+
+    /// Seals the active log and starts the background image build. Returns
+    /// whether a build started.
+    fn start_checkpoint(&mut self) -> Result<bool> {
+        if self.sequence == 0 {
+            return Ok(false);
+        }
+        let floor = self.sequence;
+        let cipher = self.cipher.clone();
+        let Some(chain) = self.file.chain_mut() else {
+            return Ok(false);
+        };
+        let sealed = match chain.rotate() {
+            Ok(Some(sealed)) => sealed,
+            Ok(None) => return Ok(false),
+            Err(error) => {
+                if matches!(error, Error::CommitIndeterminate(_)) {
+                    self.poisoned = true;
+                }
+                return Err(error);
+            }
+        };
+        // New commits land in the fresh segment; the flusher must sync it.
+        if let Some(flusher) = self.flusher.take() {
+            if let Err(error) = flusher.shutdown() {
+                self.poisoned = true;
+                return Err(Error::CommitIndeterminate(error));
+            }
+            if let Durability::Periodic { interval } = self.durability {
+                match self.file.try_clone().map_err(Error::from).and_then(|file| {
+                    durability::Flusher::start(file, interval).map_err(Error::from)
+                }) {
+                    Ok(flusher) => self.flusher = Some(flusher),
+                    Err(error) => {
+                        self.poisoned = true;
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        if let Some(chain) = self.file.chain_mut() {
+            chain.spawn(sealed, floor, cipher)?;
+        }
+        Ok(true)
+    }
+
+    /// Installs a finished background build (waiting for it with `wait`).
+    /// Returns the installed image's floor.
+    fn finish_checkpoint(&mut self, wait: bool) -> Result<Option<u64>> {
+        let Some(chain) = self.file.chain_mut() else {
+            return Ok(None);
+        };
+        let Some((built, sealed)) = chain.take_build(wait) else {
+            return Ok(None);
+        };
+        let built = built?;
+        let floor = built.floor;
+        let (end, flags) = chain.install(built, sealed)?;
+        self.end = end;
+        self.flags = flags;
+        Ok(Some(floor))
+    }
+
+    /// Automatic checkpoint step after a successful commit. Never fails the
+    /// commit: a failed build is retried at the next threshold crossing.
+    fn checkpoint_after_commit(&mut self) {
+        if self.group_active || self.read_only || self.poisoned {
+            return;
+        }
+        let Some(chain) = self.file.chain_mut() else {
+            return;
+        };
+        if chain.worker_finished() {
+            let _ = self.finish_checkpoint(false);
+        }
+        if self
+            .file
+            .chain_mut()
+            .is_some_and(directory::Chain::wants_checkpoint)
+        {
+            let _ = self.start_checkpoint();
+        }
     }
 
     fn next_sequence(&self) -> Result<u64> {
@@ -1964,10 +2162,11 @@ impl Database {
             if let Some(flusher) = &self.flusher {
                 flusher.mark_written();
             }
-            Ok(())
         } else {
-            self.commit_frame_with_sync(sequence, frame, LockedFile::sync_all)
+            self.commit_frame_with_sync(sequence, frame, LockedFile::sync_all)?;
         }
+        self.checkpoint_after_commit();
+        Ok(())
     }
 
     /// Internal owner-locked group of record mutations. Only put, delete,
@@ -2021,6 +2220,7 @@ impl Database {
             self.poisoned = true;
             return Err(Error::CommitIndeterminate(error));
         }
+        self.checkpoint_after_commit();
         Ok(value)
     }
 
@@ -3201,6 +3401,9 @@ impl Database {
             job.stop(HnswRebuildStatus::Cancelled);
             job.finish()?;
         }
+        // Install a running checkpoint so its work is kept; a failed build
+        // leaves the sealed logs in place, which is equally valid.
+        let _ = self.finish_checkpoint(true);
         if let Some(flusher) = self.flusher.take()
             && let Err(error) = flusher.shutdown()
         {

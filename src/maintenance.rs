@@ -66,7 +66,16 @@ pub struct CompactionReport {
     pub output: Inspection,
 }
 
+/// Read-only source under an exclusive lock. A directory store reads as its
+/// logical byte stream, so every tool accepts it (and `backup` packs it into
+/// a single file).
 pub(crate) fn source(path: &Path) -> Result<LockedFile> {
+    if path.is_dir() {
+        return Ok(LockedFile::chain(crate::directory::open(
+            path,
+            crate::directory::Access::ReadExclusive,
+        )?));
+    }
     lock(File::open(path)?)
 }
 
@@ -190,6 +199,51 @@ pub fn backup_with_key(
     key: &EncryptionKey,
 ) -> Result<Inspection> {
     backup_inner(source_path.as_ref(), destination.as_ref(), Some(key))
+}
+
+/// Converts a V5 single-file database into a new directory store at
+/// `destination` (which must not exist): one checkpoint image holding every
+/// record revision, compare-and-set state and graph, plus an empty log. The
+/// lineage is kept, so change-feed cursors at or after the source's last
+/// commit stay valid. The source is never modified.
+///
+/// Pack a directory store back into one file with `backup`. Older formats
+/// (`UnsupportedVersion`; run `upgrade` first) and files with commit
+/// timestamps (`UnsupportedFeature`) are rejected.
+pub fn convert_to_directory(
+    source_path: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+) -> Result<Inspection> {
+    convert_inner(source_path.as_ref(), destination.as_ref(), None)
+}
+
+/// `convert_to_directory` of an encrypted file; the store stays encrypted
+/// under the same key.
+pub fn convert_to_directory_with_key(
+    source_path: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+    key: &EncryptionKey,
+) -> Result<Inspection> {
+    convert_inner(source_path.as_ref(), destination.as_ref(), Some(key))
+}
+
+fn convert_inner(
+    source_path: &Path,
+    destination: &Path,
+    key: Option<&EncryptionKey>,
+) -> Result<Inspection> {
+    let mut file = source(source_path)?;
+    let loaded = format::load_with(&mut file, key)?;
+    require_complete(&loaded)?;
+    if loaded.version != format::V5 {
+        return Err(Error::UnsupportedVersion(loaded.version));
+    }
+    if loaded.flags & format::FLAG_TIMESTAMPS != 0 {
+        return Err(Error::UnsupportedFeature(format::FLAG_TIMESTAMPS));
+    }
+    crate::directory::create_converted(destination, &loaded)?;
+    drop(file);
+    inspect_inner(destination, key)
 }
 
 fn backup_inner(

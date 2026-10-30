@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | P2a in progress: the checkpoint image format has landed; the directory layout, checkpoint and converters are next |
+| Status | P2a done: directory layout, background checkpoints and converters have landed. P2b (memory-mapped segments) is next |
 | Goals | F4 (reopen time), S6 (no unbounded log growth), no regressions ([`storage-goals.md`](../performance/storage-goals.md)) |
 | Roadmap | [`next-major.md`](next-major.md) |
 
@@ -19,7 +19,7 @@ restart, or it loses its identity to get rid of that history.
 
 | Store | Pattern | What we take |
 |---|---|---|
-| RocksDB, LevelDB | Write-ahead log plus immutable files, listed in a `MANIFEST`; a one-line `CURRENT` file names the live manifest and is swapped atomically | `CURRENT` and `MANIFEST-N` with an atomic rename, and ignoring files that the manifest does not list |
+| RocksDB, LevelDB | Write-ahead log plus immutable files, listed in a `MANIFEST`; a one-line `CURRENT` file names the live manifest and is swapped atomically | A manifest replaced by an atomic rename, and ignoring files that the manifest does not list |
 | Qdrant, Milvus, Lance | Segments sealed when full and merged in the background; the WAL is truncated once its contents are in a segment | WAL rotation, background merge, size threshold |
 | SQLite WAL, Postgres | Checkpoints fold the WAL into the main image while readers keep their snapshot | A checkpoint is a background step, not a maintenance command |
 | etcd, Raft logs | A snapshot replaces the log prefix, the log keeps its index, and requests for compacted history return an error | Keep sequences across a checkpoint, and return an explicit error for cursors below the floor (`cursor_before_history`, like etcd's `ErrCompacted`) |
@@ -29,20 +29,26 @@ restart, or it loses its identity to get rid of that history.
 ### Directory layout
 
 ```text
-db.vlite.d/
+db/
   LOCK            exclusive or shared OS lock, held while open
-  CURRENT         names the live manifest; replaced by temp, fsync, rename, fsync directory
-  MANIFEST-N      ordered file list and history floor, protected by a CRC
-  image-N.vlite   checkpoint image (FLAG_HISTORY), optional
+  MANIFEST        ordered file list, protected by a CRC; replaced by temp, fsync, rename
+  image-N.vlite   checkpoint image (FLAG_HISTORY), optional, always first
   wal-N.log       write-ahead logs, oldest first; only the last one is appended
 ```
+
+A single `MANIFEST` replaced by rename is enough here. Unlike RocksDB's, it
+is rewritten in full on every change and is a few lines long, so a `CURRENT`
+indirection would add a file without adding safety. File numbers come from
+one counter. An image is numbered when it is installed, so it can carry a
+higher number than the log that follows it (`image-3`, `wal-2`); the
+manifest only requires log numbers to increase.
 
 Each file starts with a full v5 header. Its magic, version, dimensions,
 lineage, cipher descriptor and graph flag must match the other files. The
 engine reads the chain as one logical log, so the existing replay, change
 feed, log segments and graph code run unchanged. All files share one cipher
 descriptor. A file that the manifest does not list is ignored on open and
-removed by the next checkpoint.
+removed by the next writable open or checkpoint.
 
 ### Checkpoint image (landed)
 
@@ -102,19 +108,29 @@ not listed, so they are ignored.
 
 ### Converters and limits
 
-- File to directory: a checkpoint image at the file's sequence, plus an empty
-  WAL. The lineage, revisions and cursors are kept.
-- Directory to file: concatenate the chain, skipping every header after the
-  first. The result is an ordinary `FLAG_HISTORY` file.
-- Directories do not support commit timestamps, in-memory `to_bytes`, or the
-  offline file tools such as compaction and repair. These return explicit
-  errors; pack the directory to a file first.
+- File to directory: `maintenance::convert_to_directory` writes a checkpoint
+  image at the file's sequence, plus an empty log. The lineage, revisions and
+  cursors are kept. An empty source becomes a single empty log, and files
+  with commit timestamps are rejected.
+- Directory to file: `maintenance::backup` concatenates the chain, skipping
+  every header after the first. The result is an ordinary file, with
+  `FLAG_HISTORY` once the directory has been checkpointed.
+- A background checkpoint starts after a commit once the active log passes
+  the threshold (`set_checkpoint_threshold`, 64 MiB by default; `None` turns
+  it off). `checkpoint()` runs one and waits for it. A failed background
+  build keeps the sealed logs, and the next checkpoint seals them again.
+- Directories reject commit timestamps and the v3 and v4 formats at
+  creation.
+- A replica of a checkpointed primary bootstraps from a backup, because a
+  replica must start at sequence 0 or from a backup.
+- Torn-tail repair on open applies to the active log only. Damage in a sealed
+  log or the image is reported as corruption.
 
 ## Staging
 
 | Stage | Contents | Exit |
 |---|---|---|
-| P2a | Checkpoint image (done), directory layout, `create_directory`, checkpoint, background merge at a WAL threshold (64 MiB default), converters | S6. Reopen replays one image plus a bounded WAL. Revisions, cursors at or above the floor, and lineage survive checkpoints |
+| P2a (done) | Checkpoint image, directory layout, `create_directory`, checkpoint, background merge at a WAL threshold (64 MiB default), converters | S6. Reopen replays one image plus a bounded WAL. Revisions, cursors at or above the floor, and lineage survive checkpoints |
 | P2b | Memory-mapped immutable segments; the index and graph are loaded from the image instead of replayed | F4 (reopen in 50 ms or less) |
 
 P3 to P5 build on these segments: compact vectors, CSR graph adjacency, and
