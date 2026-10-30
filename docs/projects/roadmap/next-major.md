@@ -13,7 +13,7 @@
 | Speed P1: quick wins | Speed | Remove the exact-search regression, background index rebuilds, compact in-memory graph | F2, F5, S4 | S–M | Ready (phase order approved) |
 | Speed P2: directory store | Speed | WAL, immutable segments and an atomic manifest, background merges, converter | F4, S6, no regressions | L | P1 (format approved) |
 | Speed P3: compact vectors | Speed | float16 storage, quantized codes, saved ANN graph, SIMD | F1, F3, S1, S2 | L | P2; precision choice (open) |
-| Speed P4: compact graph | Speed | CSR adjacency, encoded labels, parallel bulk load | S3, S4, F6 | M–L | P2 |
+| [Speed P4: compact graph](p4-compact-graph.md) | Speed | CSR adjacency, encoded labels, parallel bulk load | S3, S4, F6 | M–L | P2 |
 | Speed P5: filters and server | Speed | Segment statistics and bitmaps, filter-aware ANN, Arrow or protobuf responses | F7, F8, S5 | M | P2 |
 | Gap 2: key-value API | Agent memory | Namespaced string keys, vector-free values, expiry, conditional writes | Pool claims, framework stores | S–M | Ready: Rust API first; OpenAPI diff reviewed before merge |
 | Gap 3: graph TTL | Agent memory | Expiring nodes and edges with no dangling edges | Replaces the pool's sweeper | M | Edge-expiry rule decided (cascade); lands with or after P2 |
@@ -81,6 +81,11 @@ Local numbers below show direction only (see rules).
   remove expired entities as one computed entry, so the 4,096-operation
   limit is unaffected. Files that do not use expiry keep their encoding.
   REST, gRPC and MCP wait for the OpenAPI review.
+- **Speed P4, compact graph:** the [design](p4-compact-graph.md) is ready:
+  immutable CSR checkpoint blocks, a bounded update overlay, encoded labels
+  and properties, and deterministic parallel import. It preserves graph TTL
+  and attachment rules. Implementation and S3/S4/F6 qualification remain
+  outstanding; the byte budgets are estimates, not measured results.
 
 ## Rules for every item
 
