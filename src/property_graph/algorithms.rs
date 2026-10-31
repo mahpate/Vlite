@@ -1,4 +1,4 @@
-//! Bounded local graph algorithms on [`GraphRef`] (Gap 5 slices S1 and S2).
+//! Bounded local graph algorithms on [`GraphRef`] (Gap 5 slices S1 to S3).
 //!
 //! [`GraphRef::algorithm`] extracts one explicit local scope and runs one
 //! algorithm on it, within the read limits ([`GraphLimits`]) plus the
@@ -18,20 +18,27 @@
 //!   decides every lookup; due nodes and edges are invisible and a due node
 //!   hides its edges.
 //! - Budgets: the list lengths and limits are checked before any work.
-//!   Everything else, including condition conversion, seed and endpoint
-//!   resolution, relationship-type probes that find nothing, extraction,
-//!   rescans, rejected edges, weight validation, the computation and the
-//!   building of the public result, shares `max_edges_examined`,
-//!   `max_vertex_operations`, `max_scratch_bytes` (every buffer at its
-//!   allocated capacity, reserved before allocation), the deadline and
-//!   cancellation, checked before any work, before every 64th charged
-//!   operation and before returning. Any stop before the result was built
-//!   returns no output. An invalid or missing item is reported only if the
-//!   run reaches it.
+//!   Everything else, including condition conversion, seed, endpoint and
+//!   personalization resolution, relationship-type probes that find
+//!   nothing, extraction, rescans, rejected edges, weight validation, the
+//!   computation (every iteration or sweep) and the building of the public
+//!   result, shares `max_edges_examined`, `max_vertex_operations`,
+//!   `max_scratch_bytes` (every buffer at its allocated capacity, reserved
+//!   before allocation), the deadline and cancellation, checked before any
+//!   work, before every 64th charged operation and before returning. Any
+//!   stop before the result was built returns no output. An invalid or
+//!   missing item is reported only if the run reaches it.
+//! - Iterations: PageRank and label propagation build their request echo
+//!   and reserve every buffer, their result rows included, before their
+//!   first full step, and never return a partial step. Stopped after one
+//!   (by `max_iterations`, a budget, the deadline or cancellation) they
+//!   return the last full step with the echo, marked incomplete; stopped
+//!   before it, nothing.
 //! - Results ([`GraphAlgorithmRead`]): rows ascend by node ID, paths keep
 //!   traversal order, and the view sequence and TTL clock are echoed, with
-//!   the normalized request when the computation finished. Output caps
-//!   apply to finished results.
+//!   the normalized request alongside every output. Output caps apply to
+//!   finished results. Scores and communities are local to the scope,
+//!   never global analytics.
 //!
 //! Embedded callers choose the graph; nothing follows attachments or
 //! returns properties or vectors, and there are no continuation cursors.
@@ -46,7 +53,9 @@ use crate::{Condition, Error, MetadataValue, metadata};
 use super::GraphRef;
 use super::convert::graph_error;
 use super::engine::algorithm as kernel;
-pub use super::engine::algorithm::GraphAlgorithmLimits;
+pub use super::engine::algorithm::{
+    CommunityAssignment, GraphAlgorithmLimits, LabelPropagationOutput, NodeScore, PageRankOutput,
+};
 use super::engine::{ExecutionContext, Graph, NodeId, PropertyCondition, PropertyValue};
 use super::read::{Direction, GraphLimits, NodeSelector};
 
@@ -106,6 +115,30 @@ pub enum GraphAlgorithm {
         destination: NodeSelector,
         weight_property: Option<String>,
     },
+    /// Damped PageRank by synchronous full steps over the computational
+    /// arcs (parallel arcs add their weights, self-loops count). `damping`
+    /// (default 0.85) and `tolerance` (default 1e-8) must be finite and
+    /// strictly between 0 and 1. The teleport vector is uniform over the
+    /// scoped nodes, or the normalized `personalization` masses: 1..=10,000
+    /// positive finite masses on distinct seeds. A node with no outgoing
+    /// weight gives its mass to the teleport vector. The run converges when
+    /// one full step changes the vector by at most `tolerance` in L1, after
+    /// at most `max_iterations` steps. `weight_property` names a weight as
+    /// for `WeightedShortestPath`; `None` weighs every arc 1.
+    PageRank {
+        damping: Option<f64>,
+        tolerance: Option<f64>,
+        personalization: Option<Vec<(NodeSelector, f64)>>,
+        weight_property: Option<String>,
+    },
+    /// Label propagation over the undirected simple graph of the scope
+    /// (parallel edges collapse, self-loops and direction are ignored).
+    /// Every node starts with its own ID as its label; each sweep visits
+    /// nodes ascending and updates in place, keeping the current label when
+    /// it ties for the most frequent neighbor label and otherwise taking
+    /// the smallest such label. A sweep without changes converges; at most
+    /// `max_iterations` sweeps run.
+    LabelPropagation,
 }
 
 /// A scope and the algorithm to run on it.
@@ -172,6 +205,10 @@ pub enum GraphAlgorithmOutput {
     /// One row per scoped node, ascending by node ID.
     Degree(Vec<DegreeRow>),
     WeightedShortestPath(WeightedPathOutcome),
+    /// Scores of the last full step, ascending by node ID.
+    PageRank(PageRankOutput),
+    /// Communities of the last full sweep, ascending by node ID.
+    LabelPropagation(LabelPropagationOutput),
 }
 
 /// Why an algorithm result is incomplete. A result reports at most one
@@ -191,12 +228,15 @@ pub enum GraphAlgorithmTruncation {
     VertexLimit,
     /// A buffer would exceed `max_scratch_bytes`.
     MemoryLimit,
-    /// The finished output exceeds an output cap: degree rows are cut to
-    /// `max_output_nodes`; a path over the node, edge or path cap is
-    /// withheld.
+    /// The finished output exceeds an output cap: degree, score and
+    /// community rows are cut to `max_output_nodes`; a path over the node,
+    /// edge or path cap is withheld.
     OutputLimit,
     Deadline,
     Cancelled,
+    /// `max_iterations` full PageRank steps or label propagation sweeps
+    /// finished without converging; the output is the last of them.
+    IterationLimit,
 }
 
 /// Work done by one run. Only `elapsed_ms` depends on timing.
@@ -225,14 +265,17 @@ pub struct GraphAlgorithmStats {
 #[non_exhaustive]
 pub struct GraphAlgorithmRead {
     /// `None` when extraction or computation stopped (or a path exceeds an
-    /// output cap); never an analysis of a partial scope.
+    /// output cap); never an analysis of a partial scope. PageRank and
+    /// label propagation stopped after their first full step keep the last
+    /// full step, with `complete` and `computation_complete` false.
     pub output: Option<GraphAlgorithmOutput>,
     /// True exactly when `truncation` is empty.
     pub complete: bool,
     pub truncation: Vec<GraphAlgorithmTruncation>,
     /// Extraction finished. Local completeness never means global coverage.
     pub scope_complete: bool,
-    /// The computation and the public result finished, output caps aside.
+    /// The computation and the public result finished, output caps aside;
+    /// PageRank and label propagation also converged.
     pub computation_complete: bool,
     pub view_sequence: u64,
     /// The TTL clock every visibility decision used.
@@ -241,8 +284,11 @@ pub struct GraphAlgorithmRead {
     pub algorithm_version: u32,
     /// The normalized request: seeds as ascending distinct node IDs, path
     /// endpoints as node IDs, relationship types and labels sorted and
-    /// deduplicated. It is built under the run's budgets, so it is `Some`
-    /// exactly when `computation_complete` is true.
+    /// deduplicated, and for PageRank the effective damping and tolerance
+    /// and the personalization as node IDs ascending with their masses as
+    /// given. It is built under the run's budgets: `Some` when
+    /// `computation_complete` is true, and with every partial PageRank or
+    /// label propagation output.
     pub request: Option<GraphAlgorithmRequest>,
     /// The hop bound used for the scope and paths.
     pub max_hops: u64,
@@ -254,17 +300,18 @@ pub struct GraphAlgorithmRead {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum GraphAlgorithmError {
-    /// Invalid limits, scope, selectors or conditions
+    /// Invalid limits, scope, selectors, conditions or PageRank parameters
     /// (`GraphLimitExceedsCeiling`, `InvalidQuery`, `InvalidFilter`), or a
-    /// seed or path endpoint that is missing or not visible
-    /// (`GraphNodeNotFound`).
+    /// seed, path endpoint or personalization node that is missing or not
+    /// visible (`GraphNodeNotFound`).
     Read(Error),
     /// A retained edge lacks the weight property (the smallest such edge ID).
     MissingWeight { edge_id: u64 },
     /// A retained edge's weight is negative, non-finite, an integer above
     /// 2^53 or not a number (the smallest such edge ID).
     InvalidWeight { edge_id: u64, reason: &'static str },
-    /// The winning path cost exceeds the largest finite f64.
+    /// The winning path cost, a node's PageRank out-weight or the
+    /// personalization total exceeds the largest finite f64.
     NumericOverflow,
 }
 
@@ -278,7 +325,9 @@ impl fmt::Display for GraphAlgorithmError {
             Self::InvalidWeight { edge_id, reason } => {
                 write!(f, "invalid weight on graph edge {edge_id}: {reason}")
             }
-            Self::NumericOverflow => write!(f, "path cost exceeds the largest finite f64"),
+            Self::NumericOverflow => {
+                write!(f, "a numeric result exceeds the largest finite f64")
+            }
         }
     }
 }
@@ -352,7 +401,7 @@ fn run(
         cancel: options.cancel,
         now_ms,
     };
-    let (result, staged) = kernel::run_with(
+    let (mut result, staged) = kernel::run_with(
         graph,
         &borrowed(request),
         &options.limits,
@@ -362,8 +411,12 @@ fn run(
         |finished, meter| stage(request, finished, meter),
     )
     .map_err(algorithm_error)?;
+    // Iterative rows are the engine's, moved without a copy.
     let (output, request) = match staged {
-        Some((output, request)) => (output, Some(request)),
+        Some((output, echo)) => {
+            let output = output.or_else(|| result.output.take().and_then(iterated));
+            (output, Some(echo))
+        }
         None => (None, None),
     };
     let stats = result.stats;
@@ -404,17 +457,29 @@ fn borrowed(request: &GraphAlgorithmRequest) -> kernel::Request<'_, NodeSelector
             LabelScope::Any => None,
             LabelScope::All(labels) => Some(labels),
         },
-        path: match &request.algorithm {
-            GraphAlgorithm::Degree => None,
+        job: match &request.algorithm {
+            GraphAlgorithm::Degree => kernel::Job::Degree,
             GraphAlgorithm::WeightedShortestPath {
                 source,
                 destination,
                 weight_property,
-            } => Some(kernel::PathRequest {
+            } => kernel::Job::Path(kernel::PathRequest {
                 source,
                 destination,
                 weight_property: weight_property.as_deref(),
             }),
+            GraphAlgorithm::PageRank {
+                damping,
+                tolerance,
+                personalization,
+                weight_property,
+            } => kernel::Job::PageRank(kernel::RankRequest {
+                damping: damping.unwrap_or(kernel::DEFAULT_DAMPING),
+                tolerance: tolerance.unwrap_or(kernel::DEFAULT_TOLERANCE),
+                personalization: personalization.as_deref(),
+                weight_property: weight_property.as_deref(),
+            }),
+            GraphAlgorithm::LabelPropagation => kernel::Job::LabelPropagation,
         },
     }
 }
@@ -520,9 +585,11 @@ fn property_conditions(
     Ok(converted)
 }
 
-/// The public output and the normalized request echo of a finished run,
-/// one vertex unit per row, ID, seed, name and condition, every buffer
-/// reserved first.
+/// The public output and the normalized request echo, one vertex unit per
+/// row, ID, seed, name, condition and personalization entry, every buffer
+/// reserved first. The iterative algorithms stage before their first step,
+/// with no output: their rows are moved from the engine (see
+/// [`iterated`]).
 fn stage(
     request: &GraphAlgorithmRequest,
     finished: &kernel::Finished<'_>,
@@ -569,6 +636,34 @@ fn stage(
             }
         }
         (GraphAlgorithm::WeightedShortestPath { .. }, None) => unreachable!("endpoints resolve"),
+        (
+            GraphAlgorithm::PageRank {
+                damping,
+                tolerance,
+                weight_property,
+                ..
+            },
+            _,
+        ) => {
+            let personalization = match finished.personalization {
+                None => None,
+                Some(entries) => {
+                    meter.reserve(entries.len(), size_of::<(NodeSelector, f64)>())?;
+                    meter.vertices(entries.len() as u64)?;
+                    let mut echo = Vec::with_capacity(entries.len());
+                    echo.extend(entries.iter().map(|&(node, mass)| (id(node), mass)));
+                    Some(echo)
+                }
+            };
+            meter.reserve(weight_property.as_ref().map_or(0, String::len), 1)?;
+            GraphAlgorithm::PageRank {
+                damping: Some(damping.unwrap_or(kernel::DEFAULT_DAMPING)),
+                tolerance: Some(tolerance.unwrap_or(kernel::DEFAULT_TOLERANCE)),
+                personalization,
+                weight_property: weight_property.as_deref().map(copy),
+            }
+        }
+        (GraphAlgorithm::LabelPropagation, _) => GraphAlgorithm::LabelPropagation,
     };
     let request = GraphAlgorithmRequest {
         scope: GraphAlgorithmScope {
@@ -635,7 +730,25 @@ fn public_output(
         ) => GraphAlgorithmOutput::WeightedShortestPath(
             WeightedPathOutcome::NoPathWithinScopeAndHops,
         ),
+        // Staged before the first step; never reached.
+        kernel::AlgorithmOutput::PageRank(_) | kernel::AlgorithmOutput::LabelPropagation(_) => {
+            unreachable!("iterative outputs are moved, not staged")
+        }
     })
+}
+
+/// The public form of an iterative output: the engine's rows, whose
+/// buffers the engine reserved and paid for before its first step.
+fn iterated(output: kernel::AlgorithmOutput) -> Option<GraphAlgorithmOutput> {
+    match output {
+        kernel::AlgorithmOutput::PageRank(output) => Some(GraphAlgorithmOutput::PageRank(output)),
+        kernel::AlgorithmOutput::LabelPropagation(output) => {
+            Some(GraphAlgorithmOutput::LabelPropagation(output))
+        }
+        kernel::AlgorithmOutput::Degree(_) | kernel::AlgorithmOutput::WeightedShortestPath(_) => {
+            None
+        }
+    }
 }
 
 fn truncation(reason: kernel::AlgorithmTruncation) -> GraphAlgorithmTruncation {
@@ -651,6 +764,7 @@ fn truncation(reason: kernel::AlgorithmTruncation) -> GraphAlgorithmTruncation {
         Engine::OutputLimit => GraphAlgorithmTruncation::OutputLimit,
         Engine::Deadline => GraphAlgorithmTruncation::Deadline,
         Engine::Cancelled => GraphAlgorithmTruncation::Cancelled,
+        Engine::IterationLimit => GraphAlgorithmTruncation::IterationLimit,
     }
 }
 

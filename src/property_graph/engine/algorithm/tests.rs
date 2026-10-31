@@ -60,10 +60,32 @@ fn check(result: &AlgorithmResult, now_ms: u64) {
     assert_eq!(result.scope_complete, result.projection.is_some());
     assert!(result.scope_complete || !result.computation_complete);
     if !result.computation_complete {
-        assert!(result.output.is_none());
+        // Only iterative outputs may be partial: their last full step.
+        match &result.output {
+            None => {}
+            Some(AlgorithmOutput::PageRank(_) | AlgorithmOutput::LabelPropagation(_)) => {
+                assert!(result.scope_complete && !result.truncation.is_empty());
+            }
+            Some(other) => panic!("partial output {other:?}"),
+        }
     }
     if result.complete {
         assert!(result.output.is_some());
+    }
+    let rows: Option<Vec<u64>> = match &result.output {
+        Some(AlgorithmOutput::PageRank(output)) => {
+            assert!(output.iterations >= 1 && output.residual >= 0.0);
+            Some(output.scores.iter().map(|row| row.node_id).collect())
+        }
+        Some(AlgorithmOutput::LabelPropagation(output)) => {
+            assert!(output.sweeps >= 1);
+            Some(output.assignments.iter().map(|row| row.node_id).collect())
+        }
+        _ => None,
+    };
+    if let Some(rows) = rows {
+        assert!(rows.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(rows.len() as u64 <= result.stats.nodes_extracted);
     }
     if let Some(projection) = &result.projection {
         assert!(projection.nodes.windows(2).all(|pair| pair[0] < pair[1]));
@@ -105,6 +127,12 @@ fn held_bytes(result: &AlgorithmResult) -> u64 {
         Some(AlgorithmOutput::WeightedShortestPath(WeightedPathOutcome::Found(path))) => {
             path.nodes.capacity() * size_of::<NodeId>()
                 + path.edges.capacity() * size_of::<EdgeId>()
+        }
+        Some(AlgorithmOutput::PageRank(output)) => {
+            output.scores.capacity() * size_of::<NodeScore>()
+        }
+        Some(AlgorithmOutput::LabelPropagation(output)) => {
+            output.assignments.capacity() * size_of::<CommunityAssignment>()
         }
         _ => 0,
     };
@@ -1200,6 +1228,7 @@ fn invalid_requests_fail_before_any_work() {
     let caps = GraphAlgorithmLimits {
         max_scratch_bytes: (256 << 20) + 1,
         max_vertex_operations: 0,
+        ..CAPS
     };
     assert_eq!(
         attempt(&base, &degree, &limits, &caps),
@@ -1671,6 +1700,13 @@ fn results_are_deterministic_and_reads_do_not_mutate() {
             Algorithm::Degree,
             path("a", "c", Some("w")),
             path("a", "c", None),
+            Algorithm::PageRank {
+                damping: 0.85,
+                tolerance: 1e-10,
+                personalization: None,
+                weight_property: Some("w".into()),
+            },
+            Algorithm::LabelPropagation,
         ] {
             let canonical = scope(&["a", "d"], direction);
             let mut shuffled = scope(&["d", "a", "d"], direction);
@@ -1977,3 +2013,5 @@ fn exact_cost_ties_go_to_fewer_hops() {
         }
     }
 }
+
+mod iterative;

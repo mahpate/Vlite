@@ -1,20 +1,22 @@
-//! Bounded local graph algorithms (Gap 5 slices S1 and S2).
+//! Bounded local graph algorithms (Gap 5 slices S1 to S3).
 //!
 //! [`run_with`] (and [`run`], its owned-request form) extracts one explicit
 //! local scope and runs one algorithm on it:
 //!
 //! - Shape: limits, caps and the request's bounded shape are checked before
 //!   any work: 1..=10,000 seed selectors, 1..=256 relationship types and
-//!   1..=8 labels (raw counts, before deduplication), and a 1..=256-byte
-//!   weight name. Callers check their edge conditions (at most 64) the same
-//!   way.
+//!   1..=8 labels (raw counts, before deduplication), a 1..=256-byte weight
+//!   name, PageRank's damping and tolerance (finite, strictly inside the
+//!   unit interval) and 1..=10,000 raw personalization entries. Callers
+//!   check their edge conditions (at most 64) the same way.
 //! - Preparation runs under the meter, which starts before it: edge
 //!   condition conversion (the caller's), then relationship types and labels
 //!   (validated, sorted and deduplicated), seed selectors (validated,
 //!   resolved, label-checked, sorted and deduplicated; every seed must be
-//!   visible and carry every scope label) and the path endpoints, one vertex
-//!   unit per item plus the sorts. An invalid or missing item is an error
-//!   only if the meter reaches it.
+//!   visible and carry every scope label), the path endpoints and the
+//!   personalization entries (resolved, checked, sorted and summed), one
+//!   vertex unit per item and pass plus the sorts. An invalid or missing
+//!   item is an error only if the meter reaches it.
 //! - Scope: level-synchronous breadth-first discovery from the seeds admits
 //!   the eligible nodes up to `max_hops` hops away, one level at a time;
 //!   then every admitted node's adjacency is scanned again to retain every
@@ -37,11 +39,17 @@
 //!   returning.
 //! - Results: any stop before the computation and staging finished returns
 //!   no output, never an analysis of a prefix. Output caps apply to the
-//!   finished output before staging.
+//!   finished output before staging. The iterative algorithms stage the
+//!   request first, reserve every buffer and prepay their rows before their
+//!   first full step; a stop after it (a budget, the deadline, cancellation
+//!   or `max_iterations`) returns the last full step, marked incomplete,
+//!   and discards the interrupted one.
 //!
 //! Algorithms: [`Algorithm::Degree`] (raw degrees over retained physical
-//! edges) and [`Algorithm::WeightedShortestPath`] (Dijkstra over
-//! (node, hops) states with exact sums).
+//! edges), [`Algorithm::WeightedShortestPath`] (Dijkstra over
+//! (node, hops) states with exact sums), [`Algorithm::PageRank`] and
+//! [`Algorithm::LabelPropagation`] (synchronous and in-place sweeps over the
+//! extracted projection, see the `iterative` module).
 
 use super::error::GraphError;
 use super::filter::{conditions_match, validate_conditions};
@@ -66,6 +74,11 @@ pub const ALGORITHM_VERSION: u32 = 1;
 pub const MAX_SEEDS: u64 = GraphLimits::CEILING.max_visited_nodes;
 /// The most raw relationship types one scope may name.
 pub const MAX_SCOPE_TYPES: u64 = 256;
+/// PageRank's damping factor when a caller names none.
+pub const DEFAULT_DAMPING: f64 = 0.85;
+/// PageRank's convergence bound on the L1 change of one full step when a
+/// caller names none.
+pub const DEFAULT_TOLERANCE: f64 = 1e-8;
 /// Edge-ID sequence slots per path state (`GraphLimits::CEILING.max_hops`).
 const MAX_PATH_HOPS: usize = 4;
 const _: () = assert!(GraphLimits::CEILING.max_hops as usize == MAX_PATH_HOPS);
@@ -74,30 +87,37 @@ const _: () = assert!(GraphLimits::CEILING.max_hops as usize == MAX_PATH_HOPS);
 const STATE_BYTES: usize = size_of::<[EdgeId; MAX_PATH_HOPS]>() + 3 * size_of::<usize>();
 
 /// Caps an algorithm adds to [`GraphLimits`]. Values above
-/// [`GraphAlgorithmLimits::CEILING`] are rejected, never clamped, and both
-/// must be at least 1.
+/// [`GraphAlgorithmLimits::CEILING`] are rejected, never clamped, and every
+/// cap must be at least 1.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct GraphAlgorithmLimits {
     /// Vertex operations: request items, typed adjacency probes, sort
-    /// steps, level merges, node loops, state initialization, heap actions
-    /// and result staging.
+    /// steps, level merges, node loops, state initialization, heap actions,
+    /// iterative node updates and result staging.
     pub max_vertex_operations: u64,
     /// Bytes of every scratch and output buffer at its allocated capacity,
     /// reserved before the buffer is allocated. Reservations accumulate, so
     /// this bounds the peak.
     pub max_scratch_bytes: u64,
+    /// Full PageRank iterations or label propagation sweeps (default 20,
+    /// ceiling 100). Reaching it without converging stops the run with
+    /// [`AlgorithmTruncation::IterationLimit`]; the other algorithms ignore
+    /// it.
+    pub max_iterations: u64,
 }
 
 impl GraphAlgorithmLimits {
     pub const DEFAULT: Self = Self {
         max_vertex_operations: 100_000,
         max_scratch_bytes: 64 << 20,
+        max_iterations: 20,
     };
 
     pub const CEILING: Self = Self {
         max_vertex_operations: 1_000_000,
         max_scratch_bytes: 256 << 20,
+        max_iterations: 100,
     };
 
     /// Rejects the first cap above its ceiling, then zero caps.
@@ -106,6 +126,7 @@ impl GraphAlgorithmLimits {
             [
                 ("max_vertex_operations", limits.max_vertex_operations),
                 ("max_scratch_bytes", limits.max_scratch_bytes),
+                ("max_iterations", limits.max_iterations),
             ]
         };
         for ((limit, requested), (_, ceiling)) in
@@ -127,6 +148,11 @@ impl GraphAlgorithmLimits {
         if self.max_scratch_bytes == 0 {
             return Err(GraphError::InvalidQuery(
                 "max_scratch_bytes must be at least 1",
+            ));
+        }
+        if self.max_iterations == 0 {
+            return Err(GraphError::InvalidQuery(
+                "max_iterations must be at least 1",
             ));
         }
         Ok(())
@@ -169,6 +195,29 @@ pub enum Algorithm {
         destination: NodeSelector,
         weight_property: Option<String>,
     },
+    /// Damped PageRank by synchronous full steps over the computational
+    /// arcs: `damping` and `tolerance` must be finite and strictly between
+    /// 0 and 1. The teleport vector is uniform over the scoped nodes, or
+    /// the normalized positive `personalization` masses on distinct seeds.
+    /// Parallel arcs add their weights and self-loops count; a node with
+    /// no outgoing weight gives its mass to the teleport vector. The run
+    /// converges when one full step changes the vector by at most
+    /// `tolerance` in L1. `weight_property` names a nonnegative integer or
+    /// float edge property; `None` weighs every arc 1.
+    PageRank {
+        damping: f64,
+        tolerance: f64,
+        personalization: Option<Vec<(NodeSelector, f64)>>,
+        weight_property: Option<String>,
+    },
+    /// Label propagation over the undirected simple graph of the projection
+    /// (parallel edges collapse, self-loops are ignored, direction is not
+    /// used): every node starts with its own ID as its label; each sweep
+    /// visits nodes ascending and updates in place, keeping the current
+    /// label when it ties for the most frequent neighbor label and
+    /// otherwise taking the smallest such label. A sweep without changes
+    /// converges.
+    LabelPropagation,
 }
 
 /// A node selector borrowed from a caller's request.
@@ -202,9 +251,27 @@ pub struct PathRequest<'s, S> {
     pub weight_property: Option<&'s str>,
 }
 
-/// A borrowed request: one local scope, and a path to find in it (`None`
-/// runs [`Algorithm::Degree`]). `None` types or labels mean any; `Some`
-/// lists must not be empty, and duplicates are ignored.
+/// The PageRank part of a [`Request`] (see [`Algorithm::PageRank`]).
+#[derive(Debug)]
+pub struct RankRequest<'s, S> {
+    pub damping: f64,
+    pub tolerance: f64,
+    pub personalization: Option<&'s [(S, f64)]>,
+    pub weight_property: Option<&'s str>,
+}
+
+/// The algorithm of a [`Request`].
+#[derive(Debug)]
+pub enum Job<'s, S> {
+    Degree,
+    Path(PathRequest<'s, S>),
+    PageRank(RankRequest<'s, S>),
+    LabelPropagation,
+}
+
+/// A borrowed request: one local scope and the algorithm to run on it.
+/// `None` types or labels mean any; `Some` lists must not be empty, and
+/// duplicates are ignored.
 #[derive(Debug)]
 pub struct Request<'s, S> {
     pub seeds: &'s [S],
@@ -212,11 +279,12 @@ pub struct Request<'s, S> {
     pub types: Option<&'s [String]>,
     /// Labels every scoped node, seeds included, must carry.
     pub labels: Option<&'s [String]>,
-    pub path: Option<PathRequest<'s, S>>,
+    pub job: Job<'s, S>,
 }
 
-/// A finished run handed to the caller's staging step (see [`run_with`]):
-/// the capped output (`None` when an output cap withheld a path) and the
+/// A run handed to the caller's staging step (see [`run_with`]): the capped
+/// output (`None` when an output cap withheld a path, and always for the
+/// iterative algorithms, which stage before they compute) and the
 /// normalized request.
 #[derive(Debug)]
 pub struct Finished<'r> {
@@ -229,6 +297,9 @@ pub struct Finished<'r> {
     pub labels: Option<&'r [&'r str]>,
     /// The resolved path source and destination.
     pub endpoints: Option<(NodeId, NodeId)>,
+    /// The resolved PageRank personalization, ascending by node, with the
+    /// masses as given.
+    pub personalization: Option<&'r [(NodeId, f64)]>,
 }
 
 /// Why a result is incomplete. Results list each reason at most once, in
@@ -253,6 +324,8 @@ pub enum AlgorithmTruncation {
     OutputLimit,
     Deadline,
     Cancelled,
+    /// `max_iterations` full steps finished without converging.
+    IterationLimit,
 }
 
 /// Degree of one scoped node.
@@ -290,6 +363,50 @@ pub enum AlgorithmOutput {
     /// One row per scoped node, ascending by node ID.
     Degree(Vec<DegreeRow>),
     WeightedShortestPath(WeightedPathOutcome),
+    PageRank(PageRankOutput),
+    LabelPropagation(LabelPropagationOutput),
+}
+
+/// One node's PageRank score.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct NodeScore {
+    pub node_id: u64,
+    pub score: f64,
+}
+
+/// The last full PageRank step: the scores sum to 1 up to rounding.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct PageRankOutput {
+    /// Ascending by node ID; at most `max_output_nodes` rows.
+    pub scores: Vec<NodeScore>,
+    /// Full steps completed (at least 1).
+    pub iterations: u64,
+    /// The L1 change of the last full step.
+    pub residual: f64,
+    /// The last full step changed the vector by at most the tolerance.
+    pub converged: bool,
+}
+
+/// One node's community: the smallest node ID sharing its label.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CommunityAssignment {
+    pub node_id: u64,
+    pub community_id: u64,
+}
+
+/// The labels after the last full sweep.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LabelPropagationOutput {
+    /// Ascending by node ID; at most `max_output_nodes` rows.
+    pub assignments: Vec<CommunityAssignment>,
+    /// Full sweeps completed (at least 1), the unchanged one included.
+    pub sweeps: u64,
+    /// The last full sweep changed no label.
+    pub converged: bool,
 }
 
 /// Work done by one run. Only `elapsed_ms` depends on timing.
@@ -330,7 +447,8 @@ pub struct Projection {
 
 /// The result of [`run`] and [`run_with`]. `complete` is true exactly when
 /// `truncation` is empty; `output` is `None` whenever preparation,
-/// extraction, computation or staging stopped.
+/// extraction, computation or staging stopped, except that an iterative
+/// algorithm stopped after its first full step keeps the last full step.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AlgorithmResult {
     pub output: Option<AlgorithmOutput>,
@@ -339,7 +457,8 @@ pub struct AlgorithmResult {
     /// Extraction finished.
     pub scope_complete: bool,
     /// The computation and staging finished and passed the final deadline
-    /// and cancellation check (output caps aside).
+    /// and cancellation check (output caps aside); an iterative algorithm
+    /// also converged.
     pub computation_complete: bool,
     pub view_sequence: u64,
     /// The TTL clock every visibility decision used.
@@ -367,7 +486,8 @@ pub enum AlgorithmError {
     /// A retained edge's weight is not a finite nonnegative number within
     /// the exact integer range.
     InvalidWeight { edge: EdgeId, reason: &'static str },
-    /// The winning path cost exceeds the largest finite f64.
+    /// The winning path cost, a node's PageRank out-weight or the
+    /// personalization total exceeds the largest finite f64.
     NumericOverflow,
 }
 
@@ -396,17 +516,29 @@ pub fn run(
         direction: scope.direction,
         types: scope.types.as_deref(),
         labels: scope.labels.as_deref(),
-        path: match algorithm {
-            Algorithm::Degree => None,
+        job: match algorithm {
+            Algorithm::Degree => Job::Degree,
             Algorithm::WeightedShortestPath {
                 source,
                 destination,
                 weight_property,
-            } => Some(PathRequest {
+            } => Job::Path(PathRequest {
                 source,
                 destination,
                 weight_property: weight_property.as_deref(),
             }),
+            Algorithm::PageRank {
+                damping,
+                tolerance,
+                personalization,
+                weight_property,
+            } => Job::PageRank(RankRequest {
+                damping: *damping,
+                tolerance: *tolerance,
+                personalization: personalization.as_deref(),
+                weight_property: weight_property.as_deref(),
+            }),
+            Algorithm::LabelPropagation => Job::LabelPropagation,
         },
     };
     let conditions = |_: &mut Meter<'_>| Ok(Cow::Borrowed(&scope.edge_conditions[..]));
@@ -430,7 +562,9 @@ pub fn run(
 /// converts the edge conditions, then the request is prepared, the scope
 /// extracted and the algorithm run. A finished output is capped and handed
 /// to `stage`, under the same meter, before the final check; `stage`'s
-/// value is returned only when the run completed (output caps aside).
+/// value is returned only when the run completed (output caps aside). The
+/// iterative algorithms call `stage` (with no output) before their setup,
+/// and return its value with any output they keep.
 /// Truncation returns `Ok` with no output; invalid input and weights
 /// return `Err`.
 pub fn run_with<'s, S: Seed, T>(
@@ -465,49 +599,98 @@ pub fn run_with<'s, S: Seed, T>(
             edge_zero: ready.types.as_ref().and_then(|_| graph.edge(EdgeId(0))),
         };
         let extracted = projection.insert(local.extract(&ready.seeds, &mut meter)?);
-        let output = match ready.endpoints {
-            None => AlgorithmOutput::Degree(degree(extracted, request.direction, &mut meter)?),
-            Some(endpoints) => AlgorithmOutput::WeightedShortestPath(local.shortest_path(
-                extracted,
-                request.path.as_ref().and_then(|path| path.weight_property),
-                endpoints,
-                &mut meter,
-            )?),
+        let finished = |output| Finished {
+            output,
+            seeds: &ready.seeds,
+            types: ready.types.as_deref(),
+            labels: ready.labels.as_deref(),
+            endpoints: ready.endpoints,
+            personalization: ready.teleport.as_ref().map(|teleport| &teleport.masses[..]),
         };
-        let (output, cut) = cap(output, limits);
-        let staged = stage(
-            &Finished {
-                output: output.as_ref(),
-                seeds: &ready.seeds,
-                types: ready.types.as_deref(),
-                labels: ready.labels.as_deref(),
-                endpoints: ready.endpoints,
-            },
-            &mut meter,
-        )?;
-        Ok((output, cut, staged))
+        let iterated = match &request.job {
+            Job::Degree | Job::Path(_) => {
+                let output = match (&request.job, ready.endpoints) {
+                    (Job::Path(path), Some(endpoints)) => {
+                        AlgorithmOutput::WeightedShortestPath(local.shortest_path(
+                            extracted,
+                            path.weight_property,
+                            endpoints,
+                            &mut meter,
+                        )?)
+                    }
+                    _ => AlgorithmOutput::Degree(degree(extracted, request.direction, &mut meter)?),
+                };
+                let (output, cut) = cap(output, limits);
+                let staged = stage(&finished(output.as_ref()), &mut meter)?;
+                return Ok(Computed {
+                    output,
+                    cut,
+                    staged,
+                    iterative: false,
+                    stop: None,
+                });
+            }
+            Job::PageRank(rank) => {
+                let staged = stage(&finished(None), &mut meter)?;
+                let settings = iterative::Rank {
+                    damping: rank.damping,
+                    tolerance: rank.tolerance,
+                    weight_property: rank.weight_property,
+                    teleport: ready.teleport.as_ref(),
+                    max_iterations: caps.max_iterations,
+                };
+                (local.page_rank(extracted, &settings, &mut meter)?, staged)
+            }
+            Job::LabelPropagation => {
+                let staged = stage(&finished(None), &mut meter)?;
+                let iterated = iterative::label_propagation(
+                    extracted,
+                    caps.max_iterations,
+                    limits.max_output_nodes,
+                    &mut meter,
+                )?;
+                (iterated, staged)
+            }
+        };
+        let (iterative::Iterated { output, cut, stop }, staged) = iterated;
+        Ok(Computed {
+            output: Some(output),
+            cut,
+            staged,
+            iterative: true,
+            stop,
+        })
     });
 
     let mut truncation = Vec::new();
     let mut output = None;
     let mut staged = None;
+    let mut computation_complete = false;
     let elapsed_ms = match computed {
         Err(Halt::Failed(error)) => return Err(error),
         Err(Halt::Truncated(reason)) => {
             truncation.push(reason);
             meter.elapsed_ms()
         }
-        Ok((finished, cut, value)) => {
+        Ok(computed) => {
             let (elapsed_ms, check) = meter.finish();
-            match check {
-                Ok(()) => {
-                    output = finished;
-                    staged = Some(value);
-                    if cut {
+            match computed.stop.or(check.err()) {
+                None => {
+                    output = computed.output;
+                    staged = Some(computed.staged);
+                    computation_complete = true;
+                    if computed.cut {
                         truncation.push(AlgorithmTruncation::OutputLimit);
                     }
                 }
-                Err(reason) => truncation.push(reason),
+                Some(reason) => {
+                    truncation.push(reason);
+                    // An iterative output is the last full step.
+                    if computed.iterative {
+                        output = computed.output;
+                        staged = Some(computed.staged);
+                    }
+                }
             }
             elapsed_ms
         }
@@ -530,7 +713,7 @@ pub fn run_with<'s, S: Seed, T>(
         complete: truncation.is_empty(),
         truncation,
         scope_complete: projection.is_some(),
-        computation_complete: staged.is_some(),
+        computation_complete,
         view_sequence: context.view_sequence,
         read_time_ms: context.now_ms,
         seeds,
@@ -576,17 +759,55 @@ fn check_shape<S>(request: &Request<'_, S>) -> Result<(), GraphError> {
             return Err(GraphError::TooManyLabels);
         }
     }
-    if request
-        .path
-        .as_ref()
-        .and_then(|path| path.weight_property)
-        .is_some_and(|name| name.is_empty() || name.len() > MAX_FIELD_NAME_BYTES)
-    {
+    let weight = match &request.job {
+        Job::Degree | Job::LabelPropagation => None,
+        Job::Path(path) => path.weight_property,
+        Job::PageRank(rank) => {
+            let open = |value: f64| value > 0.0 && value < 1.0;
+            if !open(rank.damping) {
+                return Err(GraphError::InvalidQuery(
+                    "damping must be finite and strictly between 0 and 1",
+                ));
+            }
+            if !open(rank.tolerance) {
+                return Err(GraphError::InvalidQuery(
+                    "tolerance must be finite and strictly between 0 and 1",
+                ));
+            }
+            if let Some(entries) = rank.personalization {
+                if entries.is_empty() {
+                    return Err(GraphError::InvalidQuery(
+                        "personalization must not be empty",
+                    ));
+                }
+                if entries.len() as u64 > MAX_SEEDS {
+                    return Err(GraphError::LimitExceedsCeiling {
+                        limit: "personalization",
+                        requested: entries.len() as u64,
+                        ceiling: MAX_SEEDS,
+                    });
+                }
+            }
+            rank.weight_property
+        }
+    };
+    if weight.is_some_and(|name| name.is_empty() || name.len() > MAX_FIELD_NAME_BYTES) {
         return Err(GraphError::InvalidQuery(
             "a weight property name must have 1..=256 bytes",
         ));
     }
     Ok(())
+}
+
+/// The parts of a run that reached staging: the capped output, whether an
+/// output cap cut it, the staged value and, for the iterative algorithms,
+/// why they stopped before converging.
+struct Computed<T> {
+    output: Option<AlgorithmOutput>,
+    cut: bool,
+    staged: T,
+    iterative: bool,
+    stop: Option<AlgorithmTruncation>,
 }
 
 /// Applies the output caps to a finished output: degree rows are cut to
@@ -616,11 +837,13 @@ struct Prepared<'s> {
     labels: Option<Vec<&'s str>>,
     seeds: Vec<NodeId>,
     endpoints: Option<(NodeId, NodeId)>,
+    teleport: Option<iterative::Teleport>,
 }
 
 impl<'s> Prepared<'s> {
-    /// Types, labels, seeds and endpoints in that order, one vertex unit
-    /// per item plus the sorts; every buffer is reserved first.
+    /// Types, labels, seeds, then the path endpoints or the
+    /// personalization, one vertex unit per item plus the sorts; every
+    /// buffer is reserved first.
     fn new<S: Seed>(
         graph: &Graph,
         request: &Request<'s, S>,
@@ -659,9 +882,8 @@ impl<'s> Prepared<'s> {
         if seeds.len() as u64 > limits.max_visited_nodes {
             return Err(GraphError::InvalidQuery("distinct seeds exceed max_visited_nodes").into());
         }
-        let endpoints = match &request.path {
-            None => None,
-            Some(path) => {
+        let endpoints = match &request.job {
+            Job::Path(path) => {
                 meter.vertex()?;
                 let source = resolve(graph, path.source.selector(), expired_at)?.id;
                 if seeds.binary_search(&source).is_err() {
@@ -671,6 +893,16 @@ impl<'s> Prepared<'s> {
                 let destination = resolve(graph, path.destination.selector(), expired_at)?.id;
                 Some((source, destination))
             }
+            _ => None,
+        };
+        let teleport = match &request.job {
+            Job::PageRank(RankRequest {
+                personalization: Some(entries),
+                ..
+            }) => Some(iterative::teleport(
+                graph, entries, &seeds, expired_at, meter,
+            )?),
+            _ => None,
         };
         Ok(Self {
             conditions,
@@ -678,6 +910,7 @@ impl<'s> Prepared<'s> {
             labels,
             seeds,
             endpoints,
+            teleport,
         })
     }
 }
@@ -1612,6 +1845,8 @@ fn any_below(cost: &[u64], index: usize) -> bool {
     let (limb, bit) = (index / 64, index % 64);
     cost[..limb].iter().any(|limb| *limb != 0) || cost[limb] & ((1u64 << bit) - 1) != 0
 }
+
+mod iterative;
 
 #[cfg(test)]
 mod tests;

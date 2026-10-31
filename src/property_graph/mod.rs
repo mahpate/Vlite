@@ -37,11 +37,13 @@
 //! [`GraphRef::observed_schema`] summarizes declared and observed shapes
 //! within a scan budget.
 //!
-//! Algorithms (Gap 5, S1 and S2): [`GraphRef::algorithm`] extracts one
-//! explicit bounded local scope ([`GraphAlgorithmScope`]) and runs raw degree
-//! or a hop-constrained weighted shortest path on it under one meter
-//! ([`GraphLimits`] plus [`GraphAlgorithmLimits`]); an incomplete run returns
-//! no analytic output.
+//! Algorithms (Gap 5, S1 to S3): [`GraphRef::algorithm`] extracts one
+//! explicit bounded local scope ([`GraphAlgorithmScope`]) and runs raw
+//! degree, a hop-constrained weighted shortest path, PageRank or label
+//! propagation on it under one meter ([`GraphLimits`] plus
+//! [`GraphAlgorithmLimits`]); an incomplete extraction returns no analytic
+//! output, and an iterative run stopped early returns only its last full
+//! step, marked incomplete.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -67,10 +69,10 @@ mod read;
 mod retrieve;
 
 pub use algorithms::{
-    DegreeRow, GraphAlgorithm, GraphAlgorithmError, GraphAlgorithmLimits, GraphAlgorithmOptions,
-    GraphAlgorithmOutput, GraphAlgorithmRead, GraphAlgorithmRequest, GraphAlgorithmScope,
-    GraphAlgorithmStats, GraphAlgorithmTruncation, LabelScope, RelationshipScope, WeightedPath,
-    WeightedPathOutcome,
+    CommunityAssignment, DegreeRow, GraphAlgorithm, GraphAlgorithmError, GraphAlgorithmLimits,
+    GraphAlgorithmOptions, GraphAlgorithmOutput, GraphAlgorithmRead, GraphAlgorithmRequest,
+    GraphAlgorithmScope, GraphAlgorithmStats, GraphAlgorithmTruncation, LabelPropagationOutput,
+    LabelScope, NodeScore, PageRankOutput, RelationshipScope, WeightedPath, WeightedPathOutcome,
 };
 pub use change::GraphChange;
 pub use engine::schema::{

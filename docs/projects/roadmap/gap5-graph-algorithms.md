@@ -3,7 +3,9 @@
 Status: S1 and S2 are implemented and independently reviewed in embedded Rust, unreleased.
 The surface and budget corrections in `1202f3cc` are accepted; integration
 `9ad5b63a` adds exact-sum reference cases and the API-reference entry.
-S3 to S5 remain design. Wire surfaces are out of scope until separately approved.
+S3 (PageRank and label propagation) is implemented in embedded Rust, unreleased,
+and awaits independent review of its additive surface; S4 and S5 remain design.
+Wire surfaces are out of scope until separately approved.
 Audit citations refer to base `d530b4c`; TTL integration is reconciled with `cf146fe`.
 Open means not verified or not decided. No performance gains are claimed.
 
@@ -342,7 +344,93 @@ Review regressions also failed first: buffer growth (4,097 self-loops held 196,6
 preparation under a pre-set cancellation, absent-type probes (1,800 vertex units for 25,600 probes) and adapter staging.
 All 24 golden cases check S1 scope node and edge IDs exactly, plus degrees derived from the oracle's scope.
 The 11 weighted_shortest_path cases check outcomes, costs and path IDs exactly.
-PageRank, label propagation and betweenness golden values are not exercised by Rust code yet.
+Betweenness golden values are not exercised by Rust code yet; S3 coverage is listed below.
+
+## Implemented S3 (unreleased, under review)
+
+PageRank and label propagation run on the same extracted projection, TTL clock and meter as S1 and S2.
+The additions below are additive and await independent review; nothing else in the surface changed.
+
+```rust
+// GraphAlgorithm (new variants)
+PageRank {
+    damping: Option<f64>,   // default 0.85
+    tolerance: Option<f64>, // default 1e-8
+    personalization: Option<Vec<(NodeSelector, f64)>>,
+    weight_property: Option<String>,
+},
+LabelPropagation,
+
+// GraphAlgorithmOutput (new variants)
+PageRank(PageRankOutput),
+LabelPropagation(LabelPropagationOutput),
+
+#[non_exhaustive] pub struct PageRankOutput {
+    pub scores: Vec<NodeScore>, pub iterations: u64, pub residual: f64, pub converged: bool,
+}
+#[non_exhaustive] pub struct NodeScore { pub node_id: u64, pub score: f64 }
+#[non_exhaustive] pub struct LabelPropagationOutput {
+    pub assignments: Vec<CommunityAssignment>, pub sweeps: u64, pub converged: bool,
+}
+#[non_exhaustive] pub struct CommunityAssignment { pub node_id: u64, pub community_id: u64 }
+
+// GraphAlgorithmLimits (new field): max_iterations, default 20, ceiling 100, at least 1.
+// GraphAlgorithmTruncation (new last variant): IterationLimit.
+```
+
+No `Error` or `GraphAlgorithmError` variant is added.
+Bad damping, tolerance, masses, an empty personalization, a repeated node or a non-seed node is `Read(InvalidQuery)`.
+More than 10,000 personalization entries is `Read(GraphLimitExceedsCeiling)` with limit `personalization`.
+A missing or due personalization node is `Read(GraphNodeNotFound)`.
+`MissingWeight` and `InvalidWeight` keep the S2 weight rules over every retained edge, in edge-ID order.
+`NumericOverflow` now also covers a non-finite out-weight sum or personalization total; its text became generic.
+
+### S3 semantics as implemented
+
+PageRank arcs are those of S1/S2: one per edge for Out and In, two per non-loop edge for Both, one per loop.
+Parallel arcs add their weights and self-loops count; zero-weight-only nodes are dangling.
+Each node's out-weight sum is formed in arc order (edge-ID order; Both adds the reverse arc second).
+The teleport vector is 1/n, or each mass divided by the total of the masses summed in ascending node order.
+A step zeroes the next vector and sums dangling mass ascending, adds r(u)*(w/s(u)) for each arc in edge-ID order,
+then sets (1-d)p+d(next+Dp) and accumulates the L1 change ascending, all in binary64.
+Label propagation symmetrizes non-loop edges, sorts and deduplicates neighbor pairs, and ignores weights.
+A sweep reads this sweep's label for smaller neighbors and the last sweep's for the others.
+The community ID is the smallest node ID holding the label in the last full assignment.
+
+### S3 metering and partial results
+
+Setup charges one unit per edge and per node for weights, sums, finiteness, teleport and state vectors.
+Label propagation charges pair collection and deduplication per pair, the sort, offsets and state.
+Every buffer (weights, sums, teleport, ranks, next, rows; or pairs, offsets, labels, votes, rows) is reserved at capacity first.
+The request echo is staged and the result rows are reserved and prepaid before the first step.
+A PageRank step charges 2n vertex units and one edge unit per arc; a sweep n vertex units and one edge unit per neighbor entry.
+Nothing allocates or is charged after the last full step except the final deadline and cancellation check.
+A stop inside the first step returns `output: None` and `request: None`.
+A later stop discards the interrupted step and returns the last full one with the echo, `complete` and `computation_complete` false.
+A converged run whose final check fails keeps its output but lists Deadline or Cancelled.
+`computation_complete` is true only for a converged run that passed the final check (output caps aside).
+
+### Proposed S3 decisions for review
+
+1. Iterative outputs are returned with their provenance (iterations or sweeps, residual, converged, echo); S1/S2 rules are unchanged.
+2. Only the first reason is listed: IterationLimit (or a budget) is listed alone even when rows were also cut.
+3. `iterations` and `sweeps` include the converging step or unchanged sweep; a cap that ends on a converged step is complete.
+4. Personalization is echoed as node IDs ascending with the masses as given, not normalized; damping and tolerance are echoed as their effective values.
+5. Score and community rows are cut to `max_output_nodes` after the computation, which still runs over every scoped node.
+6. The output types are `#[non_exhaustive]` and re-exported; `GraphAlgorithmLimits` gains a field, as decision 9 above allows.
+
+### S3 coverage
+
+The engine adds 10 tests: closed forms, documented sweeps, caps, every vertex, edge and scratch budget,
+fake-clock deadlines (including steps over 300 isolated nodes), cancellation, output caps, weights, validation order and the TTL clock.
+Random scopes (TTL, types, labels, conditions, directions) match a naive PageRank bitwise and a naive label propagation exactly, converged or capped.
+The adapter adds 7 tests: the 6 stationary PageRank goldens within 1e-8 (tolerance 1e-10, mass 1 within 1e-12)
+and the 3 label propagation goldens exactly, every sweep included, on exact IDs and through a database file.
+All 12 cases of `iterative-cases.json` (checked by `tests/graph_iteration_oracle.py`) match every one of their 17 full steps or sweeps within 1e-14.
+Their synthetic interruptions map to the vertex budget that stops the same update; they are not engine budgets.
+The adapter also covers the echo, partial-result provenance, typed errors, the shared budget and non-mutation.
+Both suites were written first and failed to compile (61 errors, all missing S3 API) before the implementation passed.
+Remaining gates: independent review of this surface, the API-reference row, S4 betweenness, CSR parity and serving.
 
 ## GraphRAG and competitors
 
@@ -386,10 +474,10 @@ exhaustive paths, exact-rational stationary PageRank and full-sample centrality.
 CI also verifies rejection of corrupted answers and duplicate JSON keys.
 Stationary PageRank scores are not fabricated iteration counts; future Rust
 tests must independently establish convergence and compare within tolerance.
-Rust tests consume them for S1 and S2 (see Coverage); TTL and work limits have their own Rust tests.
+Rust tests consume them for S1 to S3 (see Coverage); TTL and work limits have their own Rust tests.
 Authorization stays untested until a serving slice exists.
 Delivered S1: scoped adapter, visibility hook, unified meter and result contract with exhaustion oracles.
-Delivered S2: degree and hop-constrained Dijkstra. Deliver S3: PageRank and deterministic label propagation.
+Delivered S2: degree and hop-constrained Dijkstra. Delivered S3 (under review): PageRank and deterministic label propagation.
 Deliver S4: seeded sampled betweenness. Deliver S5: separately approved serving contracts and documentation.
 Each slice must pass its oracle before the next. CSR must pass identical adapter fixtures later.
 Risks: rescans consume budgets; dense graphs may yield no values. Cancellation is cooperative.

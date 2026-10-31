@@ -129,9 +129,11 @@ shortest-path search reports `exhausted`, never an uncertified "no path".
 ## Bounded local algorithms (Rust, unreleased)
 
 `GraphRef::algorithm(&request, &options)` runs one algorithm on one explicit
-local scope (Gap 5 slices S1 and S2). Its embedded Rust surface is reviewed
-and accepted, but unreleased; REST, gRPC, MCP, query text, the CLI
-and the bindings do not expose it. Nothing is stored and nothing writes.
+local scope (Gap 5 slices S1 to S3). Its S1 and S2 embedded Rust surface is
+reviewed and accepted; the S3 additions (PageRank, label propagation,
+`max_iterations` and `IterationLimit`) await the same review. All of it is
+unreleased; REST, gRPC, MCP, query text, the CLI and the bindings do not
+expose it. Nothing is stored and nothing writes.
 
 - **Scope** (`GraphAlgorithmScope`): up to 10,000 seed selectors of this
   graph (resolved, deduplicated, sorted; each must be visible and carry every
@@ -155,30 +157,61 @@ and the bindings do not expose it. Nothing is stored and nothing writes.
   exact sums rounded once to f64; a winning cost above `f64::MAX` is
   `NumericOverflow`. `NoPathWithinScopeAndHops` is returned only after a
   complete search.
+- **PageRank** (`GraphAlgorithm::PageRank`): damped PageRank over the
+  scope's computational arcs (`Both` uses each non-loop edge both ways),
+  by synchronous full steps in a fixed order. `damping` (default 0.85) and
+  `tolerance` (default 1e-8) must be finite and strictly between 0 and 1.
+  The teleport vector is uniform over the scoped nodes, or the normalized
+  `personalization`: positive finite masses on distinct seeds. Parallel
+  arcs add their weights and self-loops count; weights follow the shortest
+  path rules, and a node whose out-weight sum is not finite is
+  `NumericOverflow`. A node with no outgoing weight (including only zero
+  weights) gives its mass to the teleport vector. The run starts from the
+  teleport vector and converges when one full step changes the vector by
+  at most `tolerance` in L1. Each row is a `NodeScore`; the output reports
+  `iterations`, the last step's `residual` and `converged`.
+- **Label propagation** (`GraphAlgorithm::LabelPropagation`): communities
+  of the scope's undirected simple graph (direction is ignored, parallel
+  edges collapse, self-loops do not vote). Every node starts with its own
+  ID; each sweep visits nodes by ascending ID and updates in place. A node
+  keeps its label when it ties for the most frequent neighbor label,
+  otherwise it takes the smallest most frequent one; isolated nodes keep
+  theirs. A sweep with no change converges. Each row names the node and
+  its `community_id`, the smallest node ID with the same label.
+- **Iterations.** Both run at most `max_iterations` full steps or sweeps.
+  They build the request echo and reserve every buffer, their rows
+  included, before the first one, and never return a partial step. A run
+  stopped after a full step (by the cap, as `IterationLimit`, or by a
+  budget, the deadline or cancellation) returns the last full step and the
+  echo with `complete` and `computation_complete` false; a run stopped
+  before it returns nothing. Only the stopping reason is listed, even
+  when rows were also cut. Scores and communities describe the local
+  scope only, never the whole graph.
 - **Budgets.** Only the limits and list lengths are checked before work.
-  Condition conversion, seed and endpoint resolution, relationship-type
-  probes that find nothing, extraction, rescans, rejected edges, weight
-  validation, the computation and the building of the public result share
-  `max_edges_examined`, the deadline and cancellation, plus two algorithm
+  Condition conversion, seed, endpoint and personalization resolution,
+  relationship-type probes that find nothing, extraction, rescans, rejected
+  edges, weight validation, the computation (every step or sweep) and the
+  building of the public result share
+  `max_edges_examined`, the deadline and cancellation, plus the algorithm
   caps. Scratch bytes count every buffer at its allocated capacity, reserved
   before allocation. Cancellation and the deadline are checked before any
   work, before every 64th charged operation and before returning. A run that
   stops before the result is built returns `output: None` and
   `request: None` with its reason (`complete: false`), never an analysis of
   a partial scope; an invalid or missing item is reported only if the run
-  reaches it. Output caps apply afterwards: degree rows are cut to
-  `max_output_nodes`; a path over a cap is withheld.
+  reaches it. Output caps apply afterwards: degree, score and community
+  rows are cut to `max_output_nodes`; a path over a cap is withheld.
 
 | Algorithm cap | Default | Ceiling |
 |---------------|---------|---------|
 | `max_vertex_operations` | 100,000 | 1,000,000 |
 | `max_scratch_bytes` | 64 MiB | 256 MiB |
+| `max_iterations` | 20 | 100 |
 
 Results echo `view_sequence`, `read_time_unix_ms`, `algorithm_version`, the
-normalized request (when the computation finished) and work statistics. There are no cursors, no attachment
-or payload access and no whole-graph mode. PageRank, label propagation and
-sampled betweenness are planned; see the
-[Gap 5 design](projects/roadmap/gap5-graph-algorithms.md).
+normalized request (with every output) and work statistics. There are no cursors, no attachment
+or payload access and no whole-graph mode. Sampled betweenness is planned;
+see the [Gap 5 design](projects/roadmap/gap5-graph-algorithms.md).
 
 ## Surfaces
 

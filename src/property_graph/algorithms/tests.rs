@@ -1,14 +1,16 @@
-//! Adapter tests for bounded local algorithms (Gap 5 S1 and S2).
+//! Adapter tests for bounded local algorithms (Gap 5 S1 to S3).
 //!
 //! Golden cases come from `tests/fixtures/graph_algorithms/golden.json`,
 //! checked independently by `tests/graph_algorithm_oracle.py`. Every one of
 //! the 24 cases checks the S1 projection (its expected scope node and edge
 //! IDs) and the degrees derived from that expected scope; the 11
-//! `weighted_shortest_path` cases also check the S2 path outcome. PageRank,
-//! label propagation and betweenness outputs belong to later slices and are
-//! not claimed. The remaining tests cover the public request and result
-//! mapping, typed errors, the TTL clock, budgets, cancellation, the
-//! deadline, output caps and non-mutation through a real database file.
+//! `weighted_shortest_path` cases also check the S2 path outcome. The S3
+//! PageRank and label propagation outputs, and the finite-step traces of
+//! `tests/fixtures/graph_algorithms/iterative-cases.json`, are checked in
+//! the `iterative` child module; betweenness outputs belong to a later
+//! slice and are not claimed. The remaining tests cover the public request
+//! and result mapping, typed errors, the TTL clock, budgets, cancellation,
+//! the deadline, output caps and non-mutation through a real database file.
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -857,7 +859,7 @@ fn invalid_requests_are_typed_errors_before_any_work() {
     );
     assert_eq!(
         GraphAlgorithmError::NumericOverflow.to_string(),
-        "path cost exceeds the largest finite f64"
+        "a numeric result exceeds the largest finite f64"
     );
     assert!(matches!(
         GraphAlgorithmError::from(Error::GraphNodeNotFound),
@@ -1385,3 +1387,5 @@ fn exact_cost_ties_go_to_fewer_hops_through_the_public_api() {
         );
     }
 }
+
+mod iterative;
