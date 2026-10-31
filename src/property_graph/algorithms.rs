@@ -5,39 +5,49 @@
 //! algorithm caps ([`GraphAlgorithmLimits`]):
 //!
 //! - Scope ([`GraphAlgorithmScope`]): 1..=`max_visited_nodes` distinct seeds
-//!   of this graph, a direction, explicit relationship types or
-//!   [`RelationshipScope::Any`], an all-labels node filter or
-//!   [`LabelScope::Any`], and edge property conditions (record-filter
-//!   semantics). Seeds must be visible and carry every scope label.
-//!   Breadth-first discovery admits eligible nodes up to `max_hops` hops
-//!   from the seeds; then every admitted node's adjacency is scanned again
-//!   and every eligible edge between admitted nodes is retained (an induced
+//!   of this graph (at most 10,000 selectors), a direction, explicit
+//!   relationship types (at most 256) or [`RelationshipScope::Any`], an
+//!   all-labels node filter (at most 8) or [`LabelScope::Any`], and edge
+//!   property conditions (record-filter semantics, at most 64). Seeds must
+//!   be visible and carry every scope label. Breadth-first discovery admits
+//!   eligible nodes up to `max_hops` hops from the seeds, one level at a
+//!   time; then every admitted node's adjacency is scanned again and every
+//!   eligible edge between admitted nodes is retained (an induced
 //!   projection). Excluded nodes never bridge the scope.
 //! - Visibility: one TTL clock (the handle's, see [`GraphRef::with_clock`])
 //!   decides every lookup; due nodes and edges are invisible and a due node
 //!   hides its edges.
-//! - Budgets: extraction, rescans, rejected edges, weight validation and the
-//!   computation share `max_edges_examined`, `max_vertex_operations`,
-//!   `max_scratch_bytes`, the deadline and cancellation, checked before any
-//!   work, before every 64th charged operation and before returning. Any
-//!   stop before the computation finished returns no output.
+//! - Budgets: the list lengths and limits are checked before any work.
+//!   Everything else, including condition conversion, seed and endpoint
+//!   resolution, relationship-type probes that find nothing, extraction,
+//!   rescans, rejected edges, weight validation, the computation and the
+//!   building of the public result, shares `max_edges_examined`,
+//!   `max_vertex_operations`, `max_scratch_bytes` (every buffer at its
+//!   allocated capacity, reserved before allocation), the deadline and
+//!   cancellation, checked before any work, before every 64th charged
+//!   operation and before returning. Any stop before the result was built
+//!   returns no output. An invalid or missing item is reported only if the
+//!   run reaches it.
 //! - Results ([`GraphAlgorithmRead`]): rows ascend by node ID, paths keep
-//!   traversal order, and the normalized request, view sequence and TTL
-//!   clock are echoed. Output caps apply to finished results.
+//!   traversal order, and the view sequence and TTL clock are echoed, with
+//!   the normalized request when the computation finished. Output caps
+//!   apply to finished results.
 //!
 //! Embedded callers choose the graph; nothing follows attachments or
 //! returns properties or vectors, and there are no continuation cursors.
 
+use std::borrow::Cow;
 use std::fmt;
+use std::mem::size_of;
 use std::sync::atomic::AtomicBool;
 
-use crate::{Condition, Error};
+use crate::{Condition, Error, MetadataValue, metadata};
 
 use super::GraphRef;
-use super::convert::{graph_error, property_conditions};
+use super::convert::graph_error;
 use super::engine::algorithm as kernel;
 pub use super::engine::algorithm::GraphAlgorithmLimits;
-use super::engine::{ExecutionContext, Graph, NodeId, NodeSelector as EngineSelector};
+use super::engine::{ExecutionContext, Graph, NodeId, PropertyCondition, PropertyValue};
 use super::read::{Direction, GraphLimits, NodeSelector};
 
 /// Relationship types a scope follows. There is no default: a scope names
@@ -45,7 +55,7 @@ use super::read::{Direction, GraphLimits, NodeSelector};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RelationshipScope {
     Any,
-    /// A non-empty list; duplicates are ignored.
+    /// A non-empty list of at most 256 entries; duplicates are ignored.
     Only(Vec<String>),
 }
 
@@ -54,7 +64,8 @@ pub enum RelationshipScope {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LabelScope {
     Any,
-    /// A non-empty list (at most 8 labels); a node must carry all of them.
+    /// A non-empty list of at most 8 entries (duplicates count); a node
+    /// must carry all of them.
     All(Vec<String>),
 }
 
@@ -115,6 +126,8 @@ pub struct GraphAlgorithmOptions<'a> {
     /// `deadline_ms` bound the whole run; the output caps apply to the
     /// finished result.
     pub limits: GraphLimits,
+    /// Vertex operations and scratch bytes of the whole run, from resolving
+    /// the request to building this result.
     pub algorithm_limits: GraphAlgorithmLimits,
     pub cancel: Option<&'a AtomicBool>,
 }
@@ -219,7 +232,7 @@ pub struct GraphAlgorithmRead {
     pub truncation: Vec<GraphAlgorithmTruncation>,
     /// Extraction finished. Local completeness never means global coverage.
     pub scope_complete: bool,
-    /// The computation finished, output caps aside.
+    /// The computation and the public result finished, output caps aside.
     pub computation_complete: bool,
     pub view_sequence: u64,
     /// The TTL clock every visibility decision used.
@@ -228,8 +241,9 @@ pub struct GraphAlgorithmRead {
     pub algorithm_version: u32,
     /// The normalized request: seeds as ascending distinct node IDs, path
     /// endpoints as node IDs, relationship types and labels sorted and
-    /// deduplicated.
-    pub request: GraphAlgorithmRequest,
+    /// deduplicated. It is built under the run's budgets, so it is `Some`
+    /// exactly when `computation_complete` is true.
+    pub request: Option<GraphAlgorithmRequest>,
     /// The hop bound used for the scope and paths.
     pub max_hops: u64,
     pub stats: GraphAlgorithmStats,
@@ -315,6 +329,11 @@ impl GraphRef<'_> {
 }
 
 /// Runs `request` on `graph` at TTL clock `now_ms`.
+///
+/// Limits, then the condition shape (record-filter rules), then the engine's
+/// shape checks run before any work; the request is read in place, and its
+/// condition conversion, the public output and the request echo are charged
+/// to the run's meter.
 fn run(
     graph: &Graph,
     view_sequence: u64,
@@ -323,70 +342,33 @@ fn run(
     options: &GraphAlgorithmOptions<'_>,
     clock: &dyn Fn() -> u64,
 ) -> Result<GraphAlgorithmRead, GraphAlgorithmError> {
-    // Limits first, as every read does, then conditions.
     options.limits.validate().map_err(graph_error)?;
     options.algorithm_limits.validate().map_err(graph_error)?;
-    let (scope, algorithm) = engine_request(request)?;
+    let conditions = &request.scope.edge_conditions;
+    metadata::validate_filter(conditions)?;
     let context = ExecutionContext {
         view_sequence,
         clock,
         cancel: options.cancel,
         now_ms,
     };
-    let result = kernel::run(
+    let (result, staged) = kernel::run_with(
         graph,
-        &scope,
-        &algorithm,
+        &borrowed(request),
         &options.limits,
         &options.algorithm_limits,
         &context,
+        |meter| property_conditions(conditions, meter).map(Cow::Owned),
+        |finished, meter| stage(request, finished, meter),
     )
-    .map_err(|error| match error {
-        kernel::AlgorithmError::Graph(error) => GraphAlgorithmError::Read(graph_error(error)),
-        kernel::AlgorithmError::MissingWeight(edge) => {
-            GraphAlgorithmError::MissingWeight { edge_id: edge.0 }
-        }
-        kernel::AlgorithmError::InvalidWeight { edge, reason } => {
-            GraphAlgorithmError::InvalidWeight {
-                edge_id: edge.0,
-                reason,
-            }
-        }
-        kernel::AlgorithmError::NumericOverflow => GraphAlgorithmError::NumericOverflow,
-    })?;
-
-    let id = |node: NodeId| NodeSelector::Id(node.0);
-    let algorithm = match (&request.algorithm, result.endpoints) {
-        (GraphAlgorithm::Degree, _) => GraphAlgorithm::Degree,
-        (
-            GraphAlgorithm::WeightedShortestPath {
-                weight_property, ..
-            },
-            Some((source, destination)),
-        ) => GraphAlgorithm::WeightedShortestPath {
-            source: id(source),
-            destination: id(destination),
-            weight_property: weight_property.clone(),
-        },
-        (GraphAlgorithm::WeightedShortestPath { .. }, None) => unreachable!("endpoints resolve"),
-    };
-    let request = GraphAlgorithmRequest {
-        scope: GraphAlgorithmScope {
-            seeds: result.seeds.iter().copied().map(id).collect(),
-            direction: scope.direction,
-            relationship_types: scope.types.map_or(RelationshipScope::Any, |types| {
-                RelationshipScope::Only(types.into_iter().collect())
-            }),
-            node_labels: scope.labels.map_or(LabelScope::Any, |labels| {
-                LabelScope::All(labels.into_iter().collect())
-            }),
-            edge_conditions: request.scope.edge_conditions.clone(),
-        },
-        algorithm,
+    .map_err(algorithm_error)?;
+    let (output, request) = match staged {
+        Some((output, request)) => (output, Some(request)),
+        None => (None, None),
     };
     let stats = result.stats;
     Ok(GraphAlgorithmRead {
-        output: result.output.map(output),
+        output,
         complete: result.complete,
         truncation: result.truncation.into_iter().map(truncation).collect(),
         scope_complete: result.scope_complete,
@@ -408,74 +390,252 @@ fn run(
     })
 }
 
-/// The engine scope and algorithm of `request`; conditions are validated
-/// with the record-filter rules.
-fn engine_request(
-    request: &GraphAlgorithmRequest,
-) -> Result<(kernel::AlgorithmScope, kernel::Algorithm), Error> {
+/// The engine's view of `request`, borrowed in place.
+fn borrowed(request: &GraphAlgorithmRequest) -> kernel::Request<'_, NodeSelector> {
     let scope = &request.scope;
-    let scope = kernel::AlgorithmScope {
-        seeds: scope.seeds.iter().map(node_selector).collect(),
+    kernel::Request {
+        seeds: &scope.seeds,
         direction: scope.direction,
         types: match &scope.relationship_types {
             RelationshipScope::Any => None,
-            RelationshipScope::Only(types) => Some(types.iter().cloned().collect()),
+            RelationshipScope::Only(types) => Some(types),
         },
         labels: match &scope.node_labels {
             LabelScope::Any => None,
-            LabelScope::All(labels) => Some(labels.iter().cloned().collect()),
+            LabelScope::All(labels) => Some(labels),
         },
-        edge_conditions: property_conditions(&scope.edge_conditions)?,
-    };
-    let algorithm = match &request.algorithm {
-        GraphAlgorithm::Degree => kernel::Algorithm::Degree,
-        GraphAlgorithm::WeightedShortestPath {
-            source,
-            destination,
-            weight_property,
-        } => kernel::Algorithm::WeightedShortestPath {
-            source: node_selector(source),
-            destination: node_selector(destination),
-            weight_property: weight_property.clone(),
+        path: match &request.algorithm {
+            GraphAlgorithm::Degree => None,
+            GraphAlgorithm::WeightedShortestPath {
+                source,
+                destination,
+                weight_property,
+            } => Some(kernel::PathRequest {
+                source,
+                destination,
+                weight_property: weight_property.as_deref(),
+            }),
         },
-    };
-    Ok((scope, algorithm))
-}
-
-fn node_selector(selector: &NodeSelector) -> EngineSelector {
-    match selector {
-        NodeSelector::Id(id) => EngineSelector::Id(NodeId(*id)),
-        NodeSelector::Key(key) => EngineSelector::Key(key.clone()),
     }
 }
 
-fn output(output: kernel::AlgorithmOutput) -> GraphAlgorithmOutput {
-    match output {
-        kernel::AlgorithmOutput::Degree(rows) => GraphAlgorithmOutput::Degree(
-            rows.into_iter()
-                .map(|row| DegreeRow {
-                    node_id: row.node.0,
-                    in_degree: row.in_degree,
-                    out_degree: row.out_degree,
-                    incident_degree: row.incident_degree,
-                })
-                .collect(),
-        ),
-        kernel::AlgorithmOutput::WeightedShortestPath(outcome) => {
-            GraphAlgorithmOutput::WeightedShortestPath(match outcome {
-                kernel::WeightedPathOutcome::Found(path) => {
-                    WeightedPathOutcome::Found(WeightedPath {
-                        cost: path.cost,
-                        node_ids: path.nodes.into_iter().map(|node| node.0).collect(),
-                        edge_ids: path.edges.into_iter().map(|edge| edge.0).collect(),
-                    })
-                }
-                kernel::WeightedPathOutcome::NoPathWithinScopeAndHops => {
-                    WeightedPathOutcome::NoPathWithinScopeAndHops
-                }
-            })
+impl kernel::Seed for NodeSelector {
+    fn selector(&self) -> kernel::Selector<'_> {
+        match self {
+            Self::Id(id) => kernel::Selector::Id(NodeId(*id)),
+            Self::Key(key) => kernel::Selector::Key(key),
         }
     }
+}
+
+fn algorithm_error(error: kernel::AlgorithmError) -> GraphAlgorithmError {
+    match error {
+        kernel::AlgorithmError::Graph(error) => GraphAlgorithmError::Read(graph_error(error)),
+        kernel::AlgorithmError::MissingWeight(edge) => {
+            GraphAlgorithmError::MissingWeight { edge_id: edge.0 }
+        }
+        kernel::AlgorithmError::InvalidWeight { edge, reason } => {
+            GraphAlgorithmError::InvalidWeight {
+                edge_id: edge.0,
+                reason,
+            }
+        }
+        kernel::AlgorithmError::NumericOverflow => GraphAlgorithmError::NumericOverflow,
+    }
+}
+
+/// A copy of `text` at exactly its length.
+fn copy(text: &str) -> String {
+    let mut copy = String::with_capacity(text.len());
+    copy.push_str(text);
+    copy
+}
+
+/// Heap bytes a copy of `condition` allocates for its strings.
+fn condition_bytes(condition: &Condition) -> usize {
+    let text = |value: &MetadataValue| match value {
+        MetadataValue::String(text) => text.len(),
+        _ => 0,
+    };
+    match condition {
+        Condition::Eq { field, value } => field.len() + text(value),
+        Condition::Range { field, min, max } => {
+            field.len() + min.iter().chain(max).map(text).sum::<usize>()
+        }
+        Condition::GeoRadius { field, .. } => field.len(),
+    }
+}
+
+/// The engine form of a property value; strings are copied at their length.
+fn property_value(value: &MetadataValue) -> PropertyValue {
+    match value {
+        MetadataValue::String(text) => PropertyValue::String(copy(text)),
+        MetadataValue::Integer(value) => PropertyValue::Integer(*value),
+        MetadataValue::Float(value) => PropertyValue::Float(*value),
+        MetadataValue::Boolean(value) => PropertyValue::Boolean(*value),
+        MetadataValue::GeoPoint {
+            latitude,
+            longitude,
+        } => PropertyValue::GeoPoint {
+            latitude: *latitude,
+            longitude: *longitude,
+        },
+    }
+}
+
+/// The engine conditions of the validated `conditions`, one vertex unit
+/// each, every buffer reserved first.
+fn property_conditions(
+    conditions: &[Condition],
+    meter: &mut kernel::Meter<'_>,
+) -> Result<Vec<PropertyCondition>, kernel::AlgorithmTruncation> {
+    meter.reserve(conditions.len(), size_of::<PropertyCondition>())?;
+    let mut converted = Vec::with_capacity(conditions.len());
+    for condition in conditions {
+        meter.vertex()?;
+        meter.reserve(condition_bytes(condition), 1)?;
+        converted.push(match condition {
+            Condition::Eq { field, value } => PropertyCondition::Eq {
+                field: copy(field),
+                value: property_value(value),
+            },
+            Condition::Range { field, min, max } => PropertyCondition::Range {
+                field: copy(field),
+                min: min.as_ref().map(property_value),
+                max: max.as_ref().map(property_value),
+            },
+            Condition::GeoRadius {
+                field,
+                latitude,
+                longitude,
+                radius_meters,
+            } => PropertyCondition::GeoRadius {
+                field: copy(field),
+                latitude: *latitude,
+                longitude: *longitude,
+                radius_meters: *radius_meters,
+            },
+        });
+    }
+    Ok(converted)
+}
+
+/// The public output and the normalized request echo of a finished run,
+/// one vertex unit per row, ID, seed, name and condition, every buffer
+/// reserved first.
+fn stage(
+    request: &GraphAlgorithmRequest,
+    finished: &kernel::Finished<'_>,
+    meter: &mut kernel::Meter<'_>,
+) -> Result<(Option<GraphAlgorithmOutput>, GraphAlgorithmRequest), kernel::AlgorithmTruncation> {
+    let output = match finished.output {
+        None => None,
+        Some(output) => Some(public_output(output, meter)?),
+    };
+    let id = |node: NodeId| NodeSelector::Id(node.0);
+    meter.reserve(finished.seeds.len(), size_of::<NodeSelector>())?;
+    meter.vertices(finished.seeds.len() as u64)?;
+    let mut seeds = Vec::with_capacity(finished.seeds.len());
+    seeds.extend(finished.seeds.iter().map(|&node| id(node)));
+    let relationship_types = match finished.types {
+        None => RelationshipScope::Any,
+        Some(types) => RelationshipScope::Only(strings(types, meter)?),
+    };
+    let node_labels = match finished.labels {
+        None => LabelScope::Any,
+        Some(labels) => LabelScope::All(strings(labels, meter)?),
+    };
+    let scope = &request.scope;
+    meter.reserve(scope.edge_conditions.len(), size_of::<Condition>())?;
+    let mut edge_conditions = Vec::with_capacity(scope.edge_conditions.len());
+    for condition in &scope.edge_conditions {
+        meter.vertex()?;
+        meter.reserve(condition_bytes(condition), 1)?;
+        edge_conditions.push(condition.clone());
+    }
+    let algorithm = match (&request.algorithm, finished.endpoints) {
+        (GraphAlgorithm::Degree, _) => GraphAlgorithm::Degree,
+        (
+            GraphAlgorithm::WeightedShortestPath {
+                weight_property, ..
+            },
+            Some((source, destination)),
+        ) => {
+            meter.reserve(weight_property.as_ref().map_or(0, String::len), 1)?;
+            GraphAlgorithm::WeightedShortestPath {
+                source: id(source),
+                destination: id(destination),
+                weight_property: weight_property.as_deref().map(copy),
+            }
+        }
+        (GraphAlgorithm::WeightedShortestPath { .. }, None) => unreachable!("endpoints resolve"),
+    };
+    let request = GraphAlgorithmRequest {
+        scope: GraphAlgorithmScope {
+            seeds,
+            direction: scope.direction,
+            relationship_types,
+            node_labels,
+            edge_conditions,
+        },
+        algorithm,
+    };
+    Ok((output, request))
+}
+
+/// Copies of sorted scope names, one vertex unit each.
+fn strings(
+    names: &[&str],
+    meter: &mut kernel::Meter<'_>,
+) -> Result<Vec<String>, kernel::AlgorithmTruncation> {
+    meter.reserve(names.len(), size_of::<String>())?;
+    let mut copies = Vec::with_capacity(names.len());
+    for name in names {
+        meter.vertex()?;
+        meter.reserve(name.len(), 1)?;
+        copies.push(copy(name));
+    }
+    Ok(copies)
+}
+
+/// The public form of a finished output, one vertex unit per row or ID.
+fn public_output(
+    output: &kernel::AlgorithmOutput,
+    meter: &mut kernel::Meter<'_>,
+) -> Result<GraphAlgorithmOutput, kernel::AlgorithmTruncation> {
+    Ok(match output {
+        kernel::AlgorithmOutput::Degree(rows) => {
+            meter.reserve(rows.len(), size_of::<DegreeRow>())?;
+            meter.vertices(rows.len() as u64)?;
+            let mut public = Vec::with_capacity(rows.len());
+            public.extend(rows.iter().map(|row| DegreeRow {
+                node_id: row.node.0,
+                in_degree: row.in_degree,
+                out_degree: row.out_degree,
+                incident_degree: row.incident_degree,
+            }));
+            GraphAlgorithmOutput::Degree(public)
+        }
+        kernel::AlgorithmOutput::WeightedShortestPath(kernel::WeightedPathOutcome::Found(path)) => {
+            let ids = path.nodes.len() + path.edges.len();
+            meter.reserve(ids, size_of::<u64>())?;
+            meter.vertices(ids as u64)?;
+            let mut node_ids = Vec::with_capacity(path.nodes.len());
+            node_ids.extend(path.nodes.iter().map(|node| node.0));
+            let mut edge_ids = Vec::with_capacity(path.edges.len());
+            edge_ids.extend(path.edges.iter().map(|edge| edge.0));
+            GraphAlgorithmOutput::WeightedShortestPath(WeightedPathOutcome::Found(WeightedPath {
+                cost: path.cost,
+                node_ids,
+                edge_ids,
+            }))
+        }
+        kernel::AlgorithmOutput::WeightedShortestPath(
+            kernel::WeightedPathOutcome::NoPathWithinScopeAndHops,
+        ) => GraphAlgorithmOutput::WeightedShortestPath(
+            WeightedPathOutcome::NoPathWithinScopeAndHops,
+        ),
+    })
 }
 
 fn truncation(reason: kernel::AlgorithmTruncation) -> GraphAlgorithmTruncation {

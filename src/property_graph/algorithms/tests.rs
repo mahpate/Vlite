@@ -264,6 +264,34 @@ fn exact_graph(case: &Value) -> GraphState {
     state
 }
 
+/// The engine result for `request` at TTL clock `now_ms`, through the same
+/// borrowed request and metered condition conversion as the adapter, with
+/// no staging.
+fn kernel_run(
+    graph: &Graph,
+    now_ms: u64,
+    request: &GraphAlgorithmRequest,
+    options: &GraphAlgorithmOptions<'_>,
+) -> kernel::AlgorithmResult {
+    let clock = || 0;
+    let context = ExecutionContext {
+        now_ms,
+        ..ExecutionContext::new(5, &clock)
+    };
+    let conditions = &request.scope.edge_conditions;
+    kernel::run_with(
+        graph,
+        &borrowed(request),
+        &options.limits,
+        &options.algorithm_limits,
+        &context,
+        |meter| property_conditions(conditions, meter).map(Cow::Owned),
+        |_, _| Ok(()),
+    )
+    .unwrap()
+    .0
+}
+
 #[test]
 fn golden_scopes_and_paths_match_the_oracle_on_exact_ids() {
     let (mut scopes, mut paths) = (0, 0);
@@ -276,19 +304,9 @@ fn golden_scopes_and_paths_match_the_oracle_on_exact_ids() {
         let options = fixture_options(&case);
 
         // S1: the engine's projection is exactly the expected scope.
-        let (scope, algorithm) = engine_request(&degree_request(&request)).unwrap();
-        let context = ExecutionContext::new(5, &clock);
-        let projection = kernel::run(
-            graph,
-            &scope,
-            &algorithm,
-            &options.limits,
-            &options.algorithm_limits,
-            &context,
-        )
-        .unwrap()
-        .projection
-        .unwrap();
+        let projection = kernel_run(graph, 0, &degree_request(&request), &options)
+            .projection
+            .unwrap();
         let expected = &case["expected"];
         assert_eq!(
             projection
@@ -1219,7 +1237,7 @@ fn requests_are_normalized_and_reads_do_not_mutate() {
     );
     assert_eq!(
         first.request,
-        GraphAlgorithmRequest {
+        Some(GraphAlgorithmRequest {
             scope: GraphAlgorithmScope {
                 seeds: vec![NodeSelector::Id(n["a"]), NodeSelector::Id(n["c"])],
                 direction: Direction::Out,
@@ -1232,7 +1250,7 @@ fn requests_are_normalized_and_reads_do_not_mutate() {
                 destination: NodeSelector::Id(n["d"]),
                 weight_property: Some("weight".into()),
             },
-        }
+        })
     );
     assert_eq!(first.view_sequence, graph.view_sequence());
     assert_eq!(first.read_time_unix_ms, now);
@@ -1240,7 +1258,9 @@ fn requests_are_normalized_and_reads_do_not_mutate() {
 
     // The normalized request reproduces the result; reads are repeatable
     // and leave the state and the file untouched.
-    let again = graph.algorithm(&first.request, &hops(3)).unwrap();
+    let again = graph
+        .algorithm(first.request.as_ref().unwrap(), &hops(3))
+        .unwrap();
     let mut second = graph.algorithm(&request, &hops(3)).unwrap();
     second.stats.elapsed_ms = first.stats.elapsed_ms;
     assert_eq!(second, first);
@@ -1249,4 +1269,119 @@ fn requests_are_normalized_and_reads_do_not_mutate() {
     assert_eq!(graph.graph, &state);
     drop(db);
     assert_eq!(std::fs::read(&file).unwrap(), bytes);
+}
+
+/// The engine's own stats for `request` on `graph`, without the public
+/// conversion of the result.
+fn engine_stats(
+    graph: &GraphRef<'_>,
+    request: &GraphAlgorithmRequest,
+    options: &GraphAlgorithmOptions<'_>,
+) -> kernel::AlgorithmStats {
+    kernel_run(graph.graph, graph.now(), request, options).stats
+}
+
+/// Shape caps precede any work; seed resolution, the public output and the
+/// request echo all run under the one meter.
+#[test]
+fn preparation_and_staging_share_one_budget() {
+    let mut db = memory();
+    small(&mut db);
+    let graph = db.graph("g").unwrap().with_clock(crate::current_time_ms());
+    let flag = AtomicBool::new(true);
+    let cancelled = GraphAlgorithmOptions {
+        cancel: Some(&flag),
+        ..hops(2)
+    };
+
+    // 257 relationship types exceed the scope cap before the cancellation
+    // check.
+    let mut many = degree(scope(vec![key("a")], Direction::Out));
+    many.scope.relationship_types =
+        RelationshipScope::Only((0..257).map(|index| format!("T{index}")).collect());
+    assert!(matches!(
+        read_error(graph.algorithm(&many, &cancelled)),
+        Error::GraphLimitExceedsCeiling {
+            limit: "relationship_types",
+            requested: 257,
+            ceiling: 256
+        }
+    ));
+
+    // 9,999 duplicate seeds and a missing one: a pre-set cancellation or a
+    // one-operation cap stops resolution before it reaches the missing key.
+    let mut seeds = vec![key("a"); 9_999];
+    seeds.push(key("zz"));
+    let crowd = degree(scope(seeds, Direction::Out));
+    assert!(matches!(
+        read_error(graph.algorithm(&crowd, &hops(2))),
+        Error::GraphNodeNotFound
+    ));
+    let read = graph.algorithm(&crowd, &cancelled).unwrap();
+    assert_eq!(read.truncation, vec![GraphAlgorithmTruncation::Cancelled]);
+    assert_eq!(
+        (read.stats.vertex_operations, read.stats.scratch_bytes),
+        (0, 0)
+    );
+    let mut one = hops(2);
+    one.algorithm_limits.max_vertex_operations = 1;
+    let read = graph.algorithm(&crowd, &one).unwrap();
+    assert_eq!(read.truncation, vec![GraphAlgorithmTruncation::VertexLimit]);
+    assert_eq!(read.stats.vertex_operations, 1);
+
+    // The public rows and the request echo are charged after the engine's
+    // work; one unit or byte short of the whole run returns no output.
+    for request in [
+        degree(scope(vec![key("a"), key("d")], Direction::Both)),
+        path("a", "d", Direction::Out, Some("weight")),
+    ] {
+        let full = graph.algorithm(&request, &hops(3)).unwrap();
+        assert!(full.complete);
+        let engine = engine_stats(&graph, &request, &hops(3));
+        assert_eq!(full.stats.edges_examined, engine.edges_examined);
+        assert!(full.stats.vertex_operations > engine.vertex_operations);
+        assert!(full.stats.scratch_bytes > engine.scratch_bytes);
+        let mut options = hops(3);
+        options.algorithm_limits.max_vertex_operations = full.stats.vertex_operations - 1;
+        let read = graph.algorithm(&request, &options).unwrap();
+        assert_eq!(read.truncation, vec![GraphAlgorithmTruncation::VertexLimit]);
+        assert!(read.scope_complete && !read.computation_complete && read.output.is_none());
+        let mut options = hops(3);
+        options.algorithm_limits.max_scratch_bytes = full.stats.scratch_bytes - 1;
+        let read = graph.algorithm(&request, &options).unwrap();
+        assert_eq!(read.truncation, vec![GraphAlgorithmTruncation::MemoryLimit]);
+        assert!(read.scope_complete && !read.computation_complete && read.output.is_none());
+    }
+}
+
+/// s→t weighs 2^53 + 2; s→x→y→t weighs 2^53, 1 and 1. The exact sums tie,
+/// so the direct edge wins on hops (a per-addition rounding would pick the
+/// three-edge path).
+#[test]
+fn exact_cost_ties_go_to_fewer_hops_through_the_public_api() {
+    let mut db = memory();
+    let float = |value| Some(MetadataValue::Float(value));
+    let big = 9_007_199_254_740_992.0;
+    let (n, e) = build(
+        &mut db,
+        "tie",
+        &[("s", &[]), ("x", &[]), ("y", &[]), ("t", &[])],
+        &[
+            ("sx", "s", "R", "x", float(big)),
+            ("xy", "x", "R", "y", float(1.0)),
+            ("yt", "y", "R", "t", float(1.0)),
+            ("st", "s", "R", "t", float(big + 2.0)),
+        ],
+    );
+    let graph = db.graph("tie").unwrap();
+    for direction in [Direction::Out, Direction::Both] {
+        let read = graph
+            .algorithm(&path("s", "t", direction, Some("weight")), &hops(3))
+            .unwrap();
+        assert!(read.complete);
+        assert_eq!(
+            *path_outcome(&read),
+            found(9_007_199_254_740_994.0, &[n["s"], n["t"]], &[e["st"]])
+        );
+    }
 }

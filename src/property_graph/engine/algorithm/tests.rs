@@ -3,18 +3,24 @@
 //! cancellation, TTL, validation, weights and determinism.
 
 use super::super::codec::{GraphBody, GraphEntry};
+use super::super::limits::MAX_BATCH_ENTRIES;
 use super::super::model::{Precondition, Properties};
 use super::super::mutate::{EdgeSelector, GraphMutation};
 use super::super::testkit::{
-    G, Rng, TYPES, TestGraph, VIEW, edge, hub_graph, int, node, props, random_graph, set,
+    G, Rng, TYPES, TestGraph, VIEW, edge, hub_graph, int, node, props, random_graph,
 };
 use super::*;
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::AtomicBool;
 
 fn key(key: &str) -> NodeSelector {
     NodeSelector::Key(key.into())
+}
+
+/// An owned type or label list.
+fn names(items: &[&str]) -> Vec<String> {
+    items.iter().map(|item| (*item).to_owned()).collect()
 }
 
 fn scope(seeds: &[&str], direction: Direction) -> AlgorithmScope {
@@ -79,6 +85,30 @@ fn check(result: &AlgorithmResult, now_ms: u64) {
         assert_eq!(result.stats.nodes_extracted, 0);
         assert_eq!(result.stats.edges_extracted, 0);
     }
+    assert!(
+        result.stats.scratch_bytes >= held_bytes(result),
+        "reserved {} < held {}",
+        result.stats.scratch_bytes,
+        held_bytes(result)
+    );
+}
+
+/// Heap bytes the buffers of `result` actually hold, at their allocated
+/// capacity. Reservations are cumulative, so they must cover these.
+fn held_bytes(result: &AlgorithmResult) -> u64 {
+    let projection = result.projection.as_ref().map_or(0, |projection| {
+        projection.nodes.capacity() * size_of::<NodeId>()
+            + projection.edges.capacity() * size_of::<ProjectedEdge>()
+    });
+    let output = match &result.output {
+        Some(AlgorithmOutput::Degree(rows)) => rows.capacity() * size_of::<DegreeRow>(),
+        Some(AlgorithmOutput::WeightedShortestPath(WeightedPathOutcome::Found(path))) => {
+            path.nodes.capacity() * size_of::<NodeId>()
+                + path.edges.capacity() * size_of::<EdgeId>()
+        }
+        _ => 0,
+    };
+    (result.seeds.capacity() * size_of::<NodeId>() + projection + output) as u64
 }
 
 /// Runs at TTL clock `now_ms` with a monotonic clock fixed at 0.
@@ -254,7 +284,7 @@ fn scope_filters_apply_to_seeds_intermediates_and_edges() {
 
     // Only R: b's S edge never leads to c.
     let mut only_r = scope(&["a"], Direction::Out);
-    only_r.types = Some(set(&["R"]));
+    only_r.types = Some(names(&["R"]));
     let result = exec(graph, &only_r, &Algorithm::Degree, &hops(4));
     assert_eq!(projected(&result), (vec![a, b], e[..2].to_vec()));
     // Types also filter the induced edges: e2 (S) and e4 (T) stay out.
@@ -265,7 +295,7 @@ fn scope_filters_apply_to_seeds_intermediates_and_edges() {
 
     // Labels A and B: only c qualifies, so a and b never bridge.
     let mut ab = scope(&["c"], Direction::Both);
-    ab.labels = Some(set(&["A", "B"]));
+    ab.labels = Some(names(&["A", "B"]));
     let result = exec(graph, &ab, &Algorithm::Degree, &hops(4));
     assert_eq!(projected(&result), (vec![c], vec![e[3]]));
     assert_eq!(degrees(&result), vec![(c, 1, 1, 1)]);
@@ -397,6 +427,11 @@ fn visible(graph: &Graph, id: NodeId) -> bool {
     graph.node_expiry(id).is_none_or(|at| at > NOW)
 }
 
+/// Whether `carried` holds every one of `labels`.
+fn carries_all(labels: &[String], carried: &BTreeSet<String>) -> bool {
+    labels.iter().all(|label| carried.contains(label))
+}
+
 /// The projection by definition: breadth-first layers over eligible arcs,
 /// then every eligible edge between admitted nodes.
 fn naive_projection(
@@ -410,7 +445,7 @@ fn naive_projection(
             && scope
                 .labels
                 .as_ref()
-                .is_none_or(|labels| labels.is_subset(&graph.node(id).unwrap().labels))
+                .is_none_or(|labels| carries_all(labels, &graph.node(id).unwrap().labels))
     };
     let eligible: Vec<&GraphEdge> = graph
         .edges()
@@ -579,15 +614,13 @@ fn random_scopes_match_naive_oracles() {
         }
         let graph = db.graph();
         let direction = rng.pick(&[Direction::Out, Direction::In, Direction::Both]);
-        let types = rng.chance(40).then(|| {
-            let mut types = set(&[rng.pick(&TYPES)]);
-            types.insert(rng.pick(&TYPES).to_owned());
-            types
-        });
+        let types = rng
+            .chance(40)
+            .then(|| names(&[rng.pick(&TYPES), rng.pick(&TYPES)]));
         let labels = match rng.below(3) {
             0 => None,
-            1 => Some(set(&["A"])),
-            _ => Some(set(&["A", "B"])),
+            1 => Some(names(&["A"])),
+            _ => Some(names(&["A", "B"])),
         };
         let edge_conditions = if rng.chance(30) {
             vec![PropertyCondition::Range {
@@ -605,7 +638,7 @@ fn random_scopes_match_naive_oracles() {
                 visible(graph, node.id)
                     && labels
                         .as_ref()
-                        .is_none_or(|labels| labels.is_subset(&node.labels))
+                        .is_none_or(|labels| carries_all(labels, &node.labels))
             })
             .collect();
         let live: Vec<NodeId> = graph
@@ -1192,29 +1225,34 @@ fn invalid_requests_fail_before_any_work() {
             ceiling: 10_000
         }))
     );
-    bad.seeds = vec![key("")];
-    assert_eq!(
-        attempt(&bad, &degree, &limits, &CAPS),
-        Err(AlgorithmError::Graph(GraphError::InvalidNodeKey))
-    );
     let mut bad = base.clone();
-    bad.types = Some(BTreeSet::new());
+    bad.types = Some(vec![]);
     assert_eq!(
         attempt(&bad, &degree, &limits, &CAPS),
         invalid("a relationship type scope must not be empty")
     );
-    bad.types = Some(set(&[""]));
+    bad.types = Some(vec!["R".to_owned(); 257]);
     assert_eq!(
         attempt(&bad, &degree, &limits, &CAPS),
-        Err(AlgorithmError::Graph(GraphError::InvalidRelationshipType))
+        Err(AlgorithmError::Graph(GraphError::LimitExceedsCeiling {
+            limit: "relationship_types",
+            requested: 257,
+            ceiling: 256
+        }))
     );
     let mut bad = base.clone();
-    bad.labels = Some(BTreeSet::new());
+    bad.labels = Some(vec![]);
     assert_eq!(
         attempt(&bad, &degree, &limits, &CAPS),
         invalid("a label scope must not be empty")
     );
     bad.labels = Some((0..9).map(|index| format!("L{index}")).collect());
+    assert_eq!(
+        attempt(&bad, &degree, &limits, &CAPS),
+        Err(AlgorithmError::Graph(GraphError::TooManyLabels))
+    );
+    // Duplicates count toward the raw label cap.
+    bad.labels = Some(vec!["A".to_owned(); 9]);
     assert_eq!(
         attempt(&bad, &degree, &limits, &CAPS),
         Err(AlgorithmError::Graph(GraphError::TooManyLabels))
@@ -1229,7 +1267,6 @@ fn invalid_requests_fail_before_any_work() {
         attempt(&bad, &degree, &limits, &CAPS),
         Err(AlgorithmError::Graph(GraphError::InvalidQuery(_)))
     ));
-
     for weight in [String::new(), "w".repeat(257)] {
         let algorithm = Algorithm::WeightedShortestPath {
             source: key("a"),
@@ -1241,13 +1278,52 @@ fn invalid_requests_fail_before_any_work() {
             invalid("a weight property name must have 1..=256 bytes")
         );
     }
+}
+
+#[test]
+fn invalid_items_fail_in_metered_order() {
+    let db = hand_graph();
+    let graph = db.graph();
+    let base = scope(&["a"], Direction::Out);
+    let degree = Algorithm::Degree;
+    let limits = hops(2);
+    let attempt = |scope: &AlgorithmScope, algorithm: &Algorithm| {
+        run_at(graph, scope, algorithm, &limits, &CAPS, 0)
+    };
+    let mut bad = base.clone();
+    bad.seeds = vec![key("")];
+    assert_eq!(
+        attempt(&bad, &degree),
+        Err(AlgorithmError::Graph(GraphError::InvalidNodeKey))
+    );
+    let mut bad = base.clone();
+    bad.types = Some(names(&[""]));
+    assert_eq!(
+        attempt(&bad, &degree),
+        Err(AlgorithmError::Graph(GraphError::InvalidRelationshipType))
+    );
+    let mut bad = base.clone();
+    bad.labels = Some(names(&[""]));
+    assert_eq!(
+        attempt(&bad, &degree),
+        Err(AlgorithmError::Graph(GraphError::InvalidLabel))
+    );
+    // Items are prepared in order: types, labels, seeds, endpoints.
+    let mut bad = base.clone();
+    bad.seeds = vec![key("")];
+    bad.types = Some(names(&["R", ""]));
+    bad.labels = Some(names(&[""]));
+    assert_eq!(
+        attempt(&bad, &degree),
+        Err(AlgorithmError::Graph(GraphError::InvalidRelationshipType))
+    );
     let algorithm = Algorithm::WeightedShortestPath {
         source: key("a"),
         destination: key(""),
         weight_property: None,
     };
     assert_eq!(
-        attempt(&base, &algorithm, &limits, &CAPS),
+        attempt(&base, &algorithm),
         Err(AlgorithmError::Graph(GraphError::InvalidNodeKey))
     );
 
@@ -1255,12 +1331,12 @@ fn invalid_requests_fail_before_any_work() {
     let mut missing = base.clone();
     missing.seeds = vec![key("a"), NodeSelector::Id(NodeId(99))];
     assert_eq!(
-        attempt(&missing, &degree, &limits, &CAPS),
+        attempt(&missing, &degree),
         Err(AlgorithmError::Graph(GraphError::NodeNotFound(NodeId(99))))
     );
     missing.seeds = vec![key("zz")];
     assert_eq!(
-        attempt(&missing, &degree, &limits, &CAPS),
+        attempt(&missing, &degree),
         Err(AlgorithmError::Graph(GraphError::UnknownNodeKey(
             "zz".into()
         )))
@@ -1496,7 +1572,7 @@ fn ranking_uses_exact_costs() {
     let graph = db.graph();
     let e = edge_ids(graph);
     let mut r = scope(&["s"], Direction::Out);
-    r.types = Some(set(&["R"]));
+    r.types = Some(names(&["R"]));
     let result = exec(graph, &r, &path("s", "t", Some("w")), &hops(3));
     assert_eq!(found(&result).edges, vec![e[0]]);
     assert_eq!(found(&result).cost, (big + 2) as f64);
@@ -1513,7 +1589,7 @@ fn ranking_uses_exact_costs() {
     // Sums beyond f64::MAX: the direct S edge wins; forcing two S edges
     // overflows.
     let mut s = scope(&["s"], Direction::Out);
-    s.types = Some(set(&["S"]));
+    s.types = Some(names(&["S"]));
     let result = exec(graph, &s, &path("s", "t", Some("w")), &hops(2));
     assert_eq!(
         (found(&result).cost, &found(&result).edges),
@@ -1626,4 +1702,278 @@ fn results_are_deterministic_and_reads_do_not_mutate() {
         }
     }
     assert!(graph == &before);
+}
+
+/// Node `s` (ID 0) with `count` self-loops of type `R` (IDs from 0),
+/// committed as raw bodies of at most 4096 entries.
+fn self_loops(count: u64) -> TestGraph {
+    let mut db = TestGraph::new();
+    db.commit(GraphBody {
+        graph_id: G,
+        entries: vec![GraphEntry::PutNode {
+            node_id: NodeId(0),
+            key: "s".into(),
+            labels: Default::default(),
+            properties: Properties::new(),
+        }],
+    });
+    let loops: Vec<GraphEntry> = (0..count)
+        .map(|id| GraphEntry::PutEdge {
+            edge_id: EdgeId(id),
+            source: NodeId(0),
+            destination: NodeId(0),
+            relationship: "R".into(),
+            key: None,
+            properties: Properties::new(),
+        })
+        .collect();
+    for chunk in loops.chunks(MAX_BATCH_ENTRIES) {
+        db.commit(GraphBody {
+            graph_id: G,
+            entries: chunk.to_vec(),
+        });
+    }
+    db
+}
+
+/// 4097 retained self-loops: a buffer that grows by doubling holds 8192
+/// slots (196,608 bytes of edges alone), so a budget sized for 4097
+/// entries must stop, and every finished run must have reserved at least
+/// the capacity it holds (see `check`).
+#[test]
+fn scratch_covers_buffer_growth_before_allocation() {
+    let db = self_loops(4097);
+    let graph = db.graph();
+    let limits = GraphLimits {
+        max_edges_per_node: 5000,
+        max_edges_examined: 100_000,
+        ..hops(0)
+    };
+    let seed = scope(&["s"], Direction::Out);
+    let full = exec(graph, &seed, &Algorithm::Degree, &limits);
+    assert!(full.complete);
+    assert_eq!(degrees(&full), vec![(NodeId(0), 4097, 4097, 4097)]);
+    let projection = full.projection.as_ref().unwrap();
+    assert!(projection.edges.capacity() >= 4097);
+    assert!(full.stats.scratch_bytes >= held_bytes(&full));
+    let bytes = |max_scratch_bytes| GraphAlgorithmLimits {
+        max_scratch_bytes,
+        ..CAPS
+    };
+    let result = run_at(graph, &seed, &Algorithm::Degree, &limits, &bytes(98_416), 0).unwrap();
+    assert_eq!(result.truncation, vec![AlgorithmTruncation::MemoryLimit]);
+    assert!(result.output.is_none() && result.projection.is_none());
+    let at = |budget| run_at(graph, &seed, &Algorithm::Degree, &limits, &bytes(budget), 0);
+    assert_eq!(at(full.stats.scratch_bytes).unwrap(), full);
+    assert_eq!(
+        at(full.stats.scratch_bytes - 1).unwrap().truncation,
+        vec![AlgorithmTruncation::MemoryLimit]
+    );
+    // The same holds for a path over the loops and for Both.
+    for (direction, algorithm) in [
+        (Direction::Both, Algorithm::Degree),
+        (Direction::Out, path("s", "s", None)),
+        (Direction::In, path("s", "s", None)),
+    ] {
+        let seed = scope(&["s"], direction);
+        let full = exec(graph, &seed, &algorithm, &limits);
+        assert!(full.complete, "{direction:?}");
+        assert!(full.stats.scratch_bytes >= held_bytes(&full));
+    }
+}
+
+/// Seed and endpoint resolution, label checks and the seed sort run under
+/// the meter: 9,999 duplicate seeds and a missing one.
+#[test]
+fn preparation_is_metered_from_the_start() {
+    let db = hand_graph();
+    let graph = db.graph();
+    let mut seeds = scope(&["a"], Direction::Out);
+    seeds.seeds = vec![key("a"); 9_999];
+    seeds.seeds.push(key("zz"));
+    let degree = Algorithm::Degree;
+    let missing = Err(AlgorithmError::Graph(GraphError::UnknownNodeKey(
+        "zz".into(),
+    )));
+    assert_eq!(run_at(graph, &seeds, &degree, &hops(1), &CAPS, 0), missing);
+
+    // A pre-set cancellation stops before the first resolution.
+    let flag = AtomicBool::new(true);
+    let result = timed(graph, &seeds, &degree, &hops(1), &|| 0, Some(&flag));
+    assert_eq!(result.truncation, vec![AlgorithmTruncation::Cancelled]);
+    let stats = result.stats;
+    assert_eq!(
+        (
+            stats.vertex_operations,
+            stats.edges_examined,
+            stats.scratch_bytes
+        ),
+        (0, 0, 0)
+    );
+    assert!(result.seeds.is_empty() && result.endpoints.is_none());
+    let to_missing = path("a", "zz", None);
+    let result = timed(
+        graph,
+        &scope(&["a"], Direction::Out),
+        &to_missing,
+        &hops(1),
+        &|| 0,
+        Some(&flag),
+    );
+    assert_eq!(result.truncation, vec![AlgorithmTruncation::Cancelled]);
+
+    // One vertex operation resolves one selector.
+    let one = GraphAlgorithmLimits {
+        max_vertex_operations: 1,
+        ..CAPS
+    };
+    let result = run_at(graph, &seeds, &degree, &hops(1), &one, 0).unwrap();
+    assert_eq!(result.truncation, vec![AlgorithmTruncation::VertexLimit]);
+    assert_eq!(result.stats.vertex_operations, 1);
+    assert!(result.seeds.is_empty());
+
+    // The seed buffer is reserved before it is allocated.
+    let byte = GraphAlgorithmLimits {
+        max_scratch_bytes: 1,
+        ..CAPS
+    };
+    let result = run_at(graph, &seeds, &degree, &hops(1), &byte, 0).unwrap();
+    assert_eq!(result.truncation, vec![AlgorithmTruncation::MemoryLimit]);
+    assert_eq!(
+        (result.stats.vertex_operations, result.stats.scratch_bytes),
+        (0, 0)
+    );
+
+    // The deadline covers resolution: the second clock read, before the
+    // 65th operation, is late.
+    let reads = Cell::new(0u64);
+    let clock = || {
+        reads.set(reads.get() + 1);
+        if reads.get() < 2 { 0 } else { 1_000 }
+    };
+    let limits = GraphLimits {
+        deadline_ms: 10,
+        ..hops(1)
+    };
+    let result = timed(graph, &seeds, &degree, &limits, &clock, None);
+    assert_eq!(result.truncation, vec![AlgorithmTruncation::Deadline]);
+    assert_eq!(result.stats.vertex_operations, 64);
+    assert!(result.seeds.is_empty());
+}
+
+/// 100 seeds in a chain of `R` edges with a scope of 256 absent types:
+/// every scan probes each type, and the probes are charged and checked
+/// although they yield no edge.
+#[test]
+fn absent_relationship_type_probes_are_charged_and_interruptible() {
+    let mut db = TestGraph::new();
+    let names: Vec<String> = (0..100).map(|index| format!("n{index}")).collect();
+    let mut mutations: Vec<GraphMutation> = names
+        .iter()
+        .map(|name| node(name, &[], Properties::new()))
+        .collect();
+    mutations.extend(
+        names
+            .windows(2)
+            .map(|pair| edge(None, &pair[0], "R", &pair[1], Properties::new())),
+    );
+    db.run(&mutations);
+    let graph = db.graph();
+    let mut absent = scope(&[], Direction::Both);
+    absent.seeds = graph
+        .nodes()
+        .map(|node| NodeSelector::Id(node.id))
+        .collect();
+    absent.types = Some((0..256).map(|index| format!("X{index:03}")).collect());
+
+    let full = exec(graph, &absent, &Algorithm::Degree, &hops(0));
+    assert!(full.complete);
+    assert_eq!(
+        (full.stats.edges_examined, full.stats.edges_extracted),
+        (0, 0)
+    );
+    assert!(
+        full.stats.vertex_operations >= 100 * 256,
+        "{}",
+        full.stats.vertex_operations
+    );
+
+    // A vertex cap stops inside the probes.
+    let caps = GraphAlgorithmLimits {
+        max_vertex_operations: 10_000,
+        ..CAPS
+    };
+    let result = run_at(graph, &absent, &Algorithm::Degree, &hops(0), &caps, 0).unwrap();
+    assert_eq!(result.truncation, vec![AlgorithmTruncation::VertexLimit]);
+    assert_eq!(
+        (result.stats.vertex_operations, result.stats.edges_examined),
+        (10_000, 0)
+    );
+    assert!(!result.scope_complete);
+
+    // Cancellation raised at the 100th clock read interrupts the probes.
+    let flag = AtomicBool::new(false);
+    let reads = Cell::new(0u64);
+    let clock = || {
+        reads.set(reads.get() + 1);
+        if reads.get() == 100 {
+            flag.store(true, AtomicOrdering::Relaxed);
+        }
+        0
+    };
+    let result = timed(
+        graph,
+        &absent,
+        &Algorithm::Degree,
+        &hops(0),
+        &clock,
+        Some(&flag),
+    );
+    assert_eq!(result.truncation, vec![AlgorithmTruncation::Cancelled]);
+    assert_eq!(
+        (result.stats.vertex_operations, result.stats.edges_examined),
+        (99 * 64, 0)
+    );
+}
+
+/// The case a per-addition oracle gets wrong: s→t weighs 2^53 + 2 and
+/// s→x→y→t weighs 2^53, 1 and 1, all floats. The exact sums tie, so the
+/// direct edge wins on hops, whichever is created first.
+#[test]
+fn exact_cost_ties_go_to_fewer_hops() {
+    let big = 9_007_199_254_740_992.0;
+    let float = |value: f64| props(&[("w", PropertyValue::Float(value))]);
+    for direct_first in [true, false] {
+        let mut db = TestGraph::new();
+        let mut mutations = vec![
+            node("s", &[], Properties::new()),
+            node("x", &[], Properties::new()),
+            node("y", &[], Properties::new()),
+            node("t", &[], Properties::new()),
+            edge(Some("sx"), "s", "R", "x", float(big)),
+            edge(Some("xy"), "x", "R", "y", float(1.0)),
+            edge(Some("yt"), "y", "R", "t", float(1.0)),
+        ];
+        let direct = edge(Some("st"), "s", "R", "t", float(big + 2.0));
+        if direct_first {
+            mutations.insert(4, direct);
+        } else {
+            mutations.push(direct);
+        }
+        db.run(&mutations);
+        let graph = db.graph();
+        let direct = graph.edge_by_key("st").unwrap().id;
+        for direction in [Direction::Out, Direction::Both] {
+            let result = exec(
+                graph,
+                &scope(&["s"], direction),
+                &path("s", "t", Some("w")),
+                &hops(3),
+            );
+            let winner = found(&result);
+            assert_eq!(winner.edges, vec![direct]);
+            assert_eq!(winner.nodes, vec![db.id("s"), db.id("t")]);
+            assert_eq!(winner.cost, 9_007_199_254_740_994.0);
+        }
+    }
 }

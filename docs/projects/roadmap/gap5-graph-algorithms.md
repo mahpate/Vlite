@@ -252,39 +252,51 @@ pub enum GraphAlgorithmError {
 Outputs are `#[non_exhaustive]`: `GraphAlgorithmRead`, `GraphAlgorithmOutput::{Degree(Vec<DegreeRow>), WeightedShortestPath(WeightedPathOutcome)}`,
 `WeightedPathOutcome::{Found(WeightedPath), NoPathWithinScopeAndHops}`, `GraphAlgorithmTruncation` and `GraphAlgorithmStats`.
 `GraphAlgorithmRead` holds output, complete, truncation, scope_complete, computation_complete,
-view_sequence, read_time_unix_ms, algorithm_version (1), the normalized request, max_hops and stats.
+view_sequence, read_time_unix_ms, algorithm_version (1), request, max_hops and stats.
+`request: Option<GraphAlgorithmRequest>` is the normalized request echo, `Some` exactly when computation_complete.
 Only implemented variants exist; S3 and S4 add variants, caps and quality fields later.
 Existing types, fields, `Error` variants, `GraphRead` and ordinary read limits are unchanged.
 
 | Failure | Result |
 |---|---|
-| A read or algorithm limit above its ceiling; more than 10,000 seed selectors | `Read(GraphLimitExceedsCeiling)` |
-| A zero algorithm cap; no seed; an empty `Only` or `All` list; a seed lacking a scope label | `Read(InvalidQuery)` |
+| A read or algorithm limit above its ceiling; over 10,000 seed selectors or 256 `Only` entries | `Read(GraphLimitExceedsCeiling)` |
+| A zero algorithm cap; no seed; an empty `Only` or `All` list; over 8 `All` entries (duplicates count) | `Read(InvalidQuery)` |
+| An invalid type, label or key; a seed lacking a scope label | `Read(InvalidQuery)` |
 | More distinct seeds than max_visited_nodes; a path source that is not a seed; a bad weight name | `Read(InvalidQuery)` |
 | An invalid edge condition | `Read(InvalidFilter)` |
 | A missing, due or other-graph seed or path endpoint | `Read(GraphNodeNotFound)` |
 | A retained edge lacking the weight / holding a bad one (smallest edge ID) | `MissingWeight` / `InvalidWeight` |
 | A winning cost above `f64::MAX` | `NumericOverflow` |
 
-Checks run in order: read limits, algorithm caps, conditions, scope shape, then seed resolution.
+Before any work: read limits, algorithm caps, condition shape, then the request shape (list lengths, weight name).
+Then, under the meter: condition conversion, types, labels, seeds (resolution and label check), endpoints.
+An item error (invalid name or key, missing node, seed lacking a label) surfaces only if the meter reaches it;
+a pre-set cancellation or an exhausted budget stops first, so the request is never normalized unmetered.
 `Read` reuses the ordinary read mapping of `GraphError` to `Error`, so codes match other reads.
 Work limits and cancellation are truncations (`Ok`, `complete == false`), never errors.
 
 ### Metering as implemented
 
 One meter charges edge units (`max_edges_examined`), vertex operations and scratch bytes.
-It reads the monotonic deadline clock once at start and checks cancellation, then the deadline.
+It starts after the shape checks and before any per-item work: it reads the monotonic deadline clock and checks cancellation, then the deadline.
 Each charge first tests its budget, then checks cancellation and deadline when the combined count reaches a multiple of 64.
-A final check runs before output caps; failing it returns no output.
-Seed resolution is validated before the meter starts and charged after it: one vertex operation per selector, plus two for path endpoints, plus sort steps.
+A final check runs after the public result is built; failing it returns no output and no request echo.
+Preparation charges one vertex per condition, type, label, seed selector and path endpoint, plus sort steps.
 Sort steps cost n times the bit length of n vertex operations.
-Discovery charges one vertex per seed and per expanded node, one edge unit per adjacency entry and one vertex per admission.
-`max_edges_per_node` is checked before each entry (DegreeLimit); admitting more than max_visited_nodes is VisitedLimit.
+Discovery is level-synchronous: one vertex per seed copied and per expanded node, one edge unit per adjacency entry.
+Each level's new nodes are sorted (sort steps), checked against max_visited_nodes (VisitedLimit) and merged (one vertex per node).
+`max_edges_per_node` is checked before each entry (DegreeLimit), across all types of a node.
+A typed scope probes each listed type of each scanned node with one lazy range lookup charged one vertex, found or not,
+so absent types are charged and the cancellation, deadline and vertex checks interrupt them.
 The rescan charges one vertex per admitted node and one edge unit per entry again; Both retains an edge at its stored source.
 Degree charges one vertex per node and one edge unit per retained edge.
 Paths charge one edge unit per retained edge for weight validation, one per arc placed and one per relaxation.
 They charge one vertex per node prefix, per state initialized, per heap push, pop and improvement, and per path node.
-Every buffer reserves its estimated bytes before allocation; reservations accumulate, so they bound the peak.
+The adapter then converts the output and echoes the normalized request: one vertex per row, ID, seed, name and condition.
+Scratch counts every buffer at its allocated capacity, reserved before allocation, including the adapter's.
+A growing buffer doubles (at least 4 slots) into a new allocation reserved in full first.
+Reservations accumulate and are never released, so old and simultaneously live buffers stay charged and the total bounds the peak.
+Uncharged: the result envelope (flags, stats, at most one truncation reason with at most one node ID), error values and allocator headers.
 `arcs` counts computational arcs: one per retained edge for Out and In, two per non-loop edge and one per loop for Both.
 
 ### Numeric rules as implemented
@@ -294,6 +306,8 @@ Path costs are exact fixed-point sums sized for the hop bound, compared exactly 
 The result is therefore independent of addition order and platform.
 States are (node, hops) for hops 0..=H with an indexed heap of at most (H+1)*V entries.
 The winner is the smallest (cost, hops, edge-ID sequence); a costlier prefix with fewer hops stays in its own state.
+Example: a direct edge of 2^53+2 and a path of 2^53, 1 and 1 tie exactly, so the direct edge wins on hops.
+`tests/graph_algorithm_oracle.py` rounds each addition and picks the 3-edge path there; its update is pending (parent-owned).
 A visible destination outside the projection gives NoPathWithinScopeAndHops after a complete run.
 
 ### Decisions to confirm in review
@@ -308,14 +322,20 @@ A visible destination outside the projection gives NoPathWithinScopeAndHops afte
 8. A due or missing destination fails as GraphNodeNotFound; a visible one outside the scope gives no path.
 9. `GraphAlgorithmLimits` is `#[non_exhaustive]` so S3/S4 caps can be added without a break.
 10. Unpinned handles sample the TTL clock per call, as ordinary reads do; `with_clock` pins it.
+11. Proposed correction: `request` is `Option`, echoed only when computation_complete; a stop never forces a request clone.
+12. `Only` lists hold at most 256 entries and `All` lists at most 8, counted before deduplication.
+13. Item errors surface in metered order (types, labels, seeds, endpoints); cancellation or exhaustion first returns `Ok`.
 
 ### Coverage
 
-The engine has 15 unit tests, run by both `vlite` and `vlite-graph`.
+The engine has 20 unit tests, run by both `vlite` and `vlite-graph`.
 They check exact budgets at and below need, fake-clock deadlines in edge-free loops, a naive oracle and replay.
 They also check split commits and reinsertion in descending ID order (new IDs must ascend).
-The adapter has 10 tests over the public API, including TTL equality, filters, weights, caps, typed errors and non-mutation.
+Every engine result is checked to have reserved at least the capacity of the buffers it returns.
+The adapter has 12 tests over the public API, including TTL equality, filters, weights, caps, typed errors and non-mutation.
 Each suite was written first and failed (0 of 15, 0 of 10) before the implementation passed.
+Review regressions also failed first: buffer growth (4,097 self-loops held 196,656 bytes against 98,416 reserved),
+preparation under a pre-set cancellation, absent-type probes (1,800 vertex units for 25,600 probes) and adapter staging.
 All 21 golden cases check S1 scope node and edge IDs exactly, plus degrees derived from the oracle's scope.
 The 8 weighted_shortest_path cases check outcomes, costs and path IDs exactly.
 PageRank, label propagation and betweenness golden values are not exercised by Rust code yet.

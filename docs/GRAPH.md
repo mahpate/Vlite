@@ -133,10 +133,11 @@ local scope (Gap 5 slices S1 and S2). It is in the embedded Rust API only and
 its signatures are still under review; REST, gRPC, MCP, query text, the CLI
 and the bindings do not expose it. Nothing is stored and nothing writes.
 
-- **Scope** (`GraphAlgorithmScope`): seeds of this graph (resolved,
-  deduplicated, sorted; each must be visible and carry every scope label), a
-  direction, `RelationshipScope::Any` or `Only(types)`, `LabelScope::Any` or
-  `All(labels)`, and edge conditions with record-filter semantics.
+- **Scope** (`GraphAlgorithmScope`): up to 10,000 seed selectors of this
+  graph (resolved, deduplicated, sorted; each must be visible and carry every
+  scope label), a direction, `RelationshipScope::Any` or `Only(types)` (at
+  most 256), `LabelScope::Any` or `All(labels)` (at most 8, duplicates
+  count), and edge conditions with record-filter semantics.
   Breadth-first discovery admits eligible nodes up to `max_hops` from the
   seeds, then a rescan keeps every eligible edge between admitted nodes.
   Excluded nodes never bridge the scope. One TTL clock decides visibility,
@@ -154,14 +155,19 @@ and the bindings do not expose it. Nothing is stored and nothing writes.
   exact sums rounded once to f64; a winning cost above `f64::MAX` is
   `NumericOverflow`. `NoPathWithinScopeAndHops` is returned only after a
   complete search.
-- **Budgets.** Extraction, rescans, rejected edges, weight validation and the
-  computation share `max_edges_examined`, the deadline and cancellation,
-  plus two algorithm caps; cancellation and the deadline are checked before
-  any work, before every 64th charged operation and before returning. A run
-  that stops before its computation finishes returns `output: None` with its
-  reason (`complete: false`), never an analysis of a partial scope. Output
-  caps apply afterwards: degree rows are cut to `max_output_nodes`; a path
-  over a cap is withheld.
+- **Budgets.** Only the limits and list lengths are checked before work.
+  Condition conversion, seed and endpoint resolution, relationship-type
+  probes that find nothing, extraction, rescans, rejected edges, weight
+  validation, the computation and the building of the public result share
+  `max_edges_examined`, the deadline and cancellation, plus two algorithm
+  caps. Scratch bytes count every buffer at its allocated capacity, reserved
+  before allocation. Cancellation and the deadline are checked before any
+  work, before every 64th charged operation and before returning. A run that
+  stops before the result is built returns `output: None` and
+  `request: None` with its reason (`complete: false`), never an analysis of
+  a partial scope; an invalid or missing item is reported only if the run
+  reaches it. Output caps apply afterwards: degree rows are cut to
+  `max_output_nodes`; a path over a cap is withheld.
 
 | Algorithm cap | Default | Ceiling |
 |---------------|---------|---------|
@@ -169,7 +175,7 @@ and the bindings do not expose it. Nothing is stored and nothing writes.
 | `max_scratch_bytes` | 64 MiB | 256 MiB |
 
 Results echo `view_sequence`, `read_time_unix_ms`, `algorithm_version`, the
-normalized request and work statistics. There are no cursors, no attachment
+normalized request (when the computation finished) and work statistics. There are no cursors, no attachment
 or payload access and no whole-graph mode. PageRank, label propagation and
 sampled betweenness are planned; see the
 [Gap 5 design](projects/roadmap/gap5-graph-algorithms.md).

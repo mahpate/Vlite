@@ -1,28 +1,43 @@
 //! Bounded local graph algorithms (Gap 5 slices S1 and S2).
 //!
-//! [`run`] extracts one explicit local scope and runs one algorithm on it:
+//! [`run_with`] (and [`run`], its owned-request form) extracts one explicit
+//! local scope and runs one algorithm on it:
 //!
-//! - Scope: 1..=`max_visited_nodes` distinct seeds (resolved, deduplicated
-//!   and sorted; every seed must be visible and carry every scope label), a
-//!   direction, an explicit relationship-type set or any type, an all-labels
-//!   node filter or any label, and edge property conditions. Breadth-first
-//!   discovery from the ascending seeds admits eligible nodes up to
-//!   `max_hops` hops away; then every admitted node's adjacency is scanned
-//!   again to retain every eligible edge between admitted endpoints (an
-//!   induced projection). Visibility is decided once at `now_ms`: due nodes
-//!   and edges are invisible and a due endpoint hides its edges. Excluded
-//!   nodes never bridge the scope.
-//! - Budgets: discovery, rescans, rejected edges, weight validation and every
-//!   computational pass share one meter. Adjacency entries, retained edges
-//!   and arcs charge `max_edges_examined`; seed resolution, sorting, node
-//!   admissions, node loops, state initialization and heap actions charge
-//!   `max_vertex_operations`; buffers are reserved against
-//!   `max_scratch_bytes` before they are allocated. Cancellation and the
+//! - Shape: limits, caps and the request's bounded shape are checked before
+//!   any work: 1..=10,000 seed selectors, 1..=256 relationship types and
+//!   1..=8 labels (raw counts, before deduplication), and a 1..=256-byte
+//!   weight name. Callers check their edge conditions (at most 64) the same
+//!   way.
+//! - Preparation runs under the meter, which starts before it: edge
+//!   condition conversion (the caller's), then relationship types and labels
+//!   (validated, sorted and deduplicated), seed selectors (validated,
+//!   resolved, label-checked, sorted and deduplicated; every seed must be
+//!   visible and carry every scope label) and the path endpoints, one vertex
+//!   unit per item plus the sorts. An invalid or missing item is an error
+//!   only if the meter reaches it.
+//! - Scope: level-synchronous breadth-first discovery from the seeds admits
+//!   the eligible nodes up to `max_hops` hops away, one level at a time;
+//!   then every admitted node's adjacency is scanned again to retain every
+//!   eligible edge between admitted endpoints (an induced projection).
+//!   Visibility is decided once at `now_ms`: due nodes and edges are
+//!   invisible and a due endpoint hides its edges. Excluded nodes never
+//!   bridge the scope.
+//! - Budgets: preparation, discovery, rescans, rejected edges, weight
+//!   validation, every computational pass and the caller's staging of the
+//!   result share one meter. Adjacency entries, retained edges and arcs
+//!   charge `max_edges_examined`; item preparation, typed adjacency probes
+//!   (one per scanned node and scope type, found or not), sorting, level
+//!   merges, node loops, state initialization and heap actions charge
+//!   `max_vertex_operations`; every buffer is reserved against
+//!   `max_scratch_bytes` at the capacity it allocates, before allocating it
+//!   (a growing buffer doubles, and both copies are charged).
+//!   Reservations accumulate, so they bound the peak. Cancellation and the
 //!   deadline are checked before any work, before every 64th charged
 //!   operation (edge and vertex units together) and once more before
 //!   returning.
-//! - Results: any truncation before the computation finished returns no
-//!   output, never an analysis of a prefix. Output caps apply afterwards.
+//! - Results: any stop before the computation and staging finished returns
+//!   no output, never an analysis of a prefix. Output caps apply to the
+//!   finished output before staging.
 //!
 //! Algorithms: [`Algorithm::Degree`] (raw degrees over retained physical
 //! edges) and [`Algorithm::WeightedShortestPath`] (Dijkstra over
@@ -30,17 +45,17 @@
 
 use super::error::GraphError;
 use super::filter::{conditions_match, validate_conditions};
-use super::limits::{CHECK_INTERVAL, GraphLimits, MAX_FIELD_NAME_BYTES};
+use super::limits::{CHECK_INTERVAL, GraphLimits, MAX_FIELD_NAME_BYTES, MAX_LABELS};
 use super::meter::ExecutionContext;
 use super::model::{
     Direction, EdgeId, GraphEdge, GraphNode, NodeId, PropertyCondition, PropertyValue,
-    validate_labels, validate_node_key, validate_relationship_type,
+    validate_label, validate_node_key, validate_relationship_type,
 };
 use super::query::NodeSelector;
 use super::state::Graph;
 use super::traverse::other_end;
+use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, VecDeque};
 use std::mem::size_of;
 use std::sync::atomic::Ordering as AtomicOrdering;
 
@@ -48,14 +63,14 @@ use std::sync::atomic::Ordering as AtomicOrdering;
 pub const ALGORITHM_VERSION: u32 = 1;
 
 /// The most raw seed selectors one request may name.
-const MAX_SEEDS: u64 = GraphLimits::CEILING.max_visited_nodes;
+pub const MAX_SEEDS: u64 = GraphLimits::CEILING.max_visited_nodes;
+/// The most raw relationship types one scope may name.
+pub const MAX_SCOPE_TYPES: u64 = 256;
 /// Edge-ID sequence slots per path state (`GraphLimits::CEILING.max_hops`).
 const MAX_PATH_HOPS: usize = 4;
 const _: () = assert!(GraphLimits::CEILING.max_hops as usize == MAX_PATH_HOPS);
-/// Estimated bytes of one admitted node: its ordered-set entry, its queue
-/// slot and its slot in the sorted node list.
-const NODE_BYTES: usize = 48;
-/// Estimated fixed bytes of one path state besides its cost limbs.
+/// Fixed bytes of one path state besides its cost limbs: its edge-ID
+/// sequence, parent, heap slot and heap entry.
 const STATE_BYTES: usize = size_of::<[EdgeId; MAX_PATH_HOPS]>() + 3 * size_of::<usize>();
 
 /// Caps an algorithm adds to [`GraphLimits`]. Values above
@@ -64,12 +79,13 @@ const STATE_BYTES: usize = size_of::<[EdgeId; MAX_PATH_HOPS]>() + 3 * size_of::<
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct GraphAlgorithmLimits {
-    /// Vertex operations: seed resolutions, sort steps, node admissions and
-    /// node loops, state initialization and heap actions.
+    /// Vertex operations: request items, typed adjacency probes, sort
+    /// steps, level merges, node loops, state initialization, heap actions
+    /// and result staging.
     pub max_vertex_operations: u64,
-    /// Estimated bytes of every scratch and output buffer, reserved before
-    /// the buffer is allocated. Reservations accumulate, so this bounds the
-    /// peak.
+    /// Bytes of every scratch and output buffer at its allocated capacity,
+    /// reserved before the buffer is allocated. Reservations accumulate, so
+    /// this bounds the peak.
     pub max_scratch_bytes: u64,
 }
 
@@ -123,15 +139,16 @@ impl Default for GraphAlgorithmLimits {
     }
 }
 
-/// One explicit local scope. `None` means any relationship type or any
-/// label; `Some` sets must not be empty.
+/// One explicit local scope, owned (see [`Request`] for the borrowed form).
+/// `None` means any relationship type or any label; `Some` lists must not
+/// be empty, and duplicates are ignored.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AlgorithmScope {
     pub seeds: Vec<NodeSelector>,
     pub direction: Direction,
-    pub types: Option<BTreeSet<String>>,
+    pub types: Option<Vec<String>>,
     /// Labels every scoped node, seeds included, must carry.
-    pub labels: Option<BTreeSet<String>>,
+    pub labels: Option<Vec<String>>,
     pub edge_conditions: Vec<PropertyCondition>,
 }
 
@@ -154,11 +171,72 @@ pub enum Algorithm {
     },
 }
 
+/// A node selector borrowed from a caller's request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Selector<'s> {
+    Id(NodeId),
+    Key(&'s str),
+}
+
+/// A caller's node selector type, read in place so that a request is never
+/// copied before the meter starts.
+pub trait Seed {
+    fn selector(&self) -> Selector<'_>;
+}
+
+impl Seed for NodeSelector {
+    fn selector(&self) -> Selector<'_> {
+        match self {
+            Self::Id(id) => Selector::Id(*id),
+            Self::Key(key) => Selector::Key(key),
+        }
+    }
+}
+
+/// The path part of a [`Request`]: [`Algorithm::WeightedShortestPath`]
+/// from `source`, which must be a seed, to `destination`.
+#[derive(Debug)]
+pub struct PathRequest<'s, S> {
+    pub source: &'s S,
+    pub destination: &'s S,
+    pub weight_property: Option<&'s str>,
+}
+
+/// A borrowed request: one local scope, and a path to find in it (`None`
+/// runs [`Algorithm::Degree`]). `None` types or labels mean any; `Some`
+/// lists must not be empty, and duplicates are ignored.
+#[derive(Debug)]
+pub struct Request<'s, S> {
+    pub seeds: &'s [S],
+    pub direction: Direction,
+    pub types: Option<&'s [String]>,
+    /// Labels every scoped node, seeds included, must carry.
+    pub labels: Option<&'s [String]>,
+    pub path: Option<PathRequest<'s, S>>,
+}
+
+/// A finished run handed to the caller's staging step (see [`run_with`]):
+/// the capped output (`None` when an output cap withheld a path) and the
+/// normalized request.
+#[derive(Debug)]
+pub struct Finished<'r> {
+    pub output: Option<&'r AlgorithmOutput>,
+    /// The resolved seeds, deduplicated and ascending.
+    pub seeds: &'r [NodeId],
+    /// The relationship types, sorted and deduplicated.
+    pub types: Option<&'r [&'r str]>,
+    /// The labels, sorted and deduplicated.
+    pub labels: Option<&'r [&'r str]>,
+    /// The resolved path source and destination.
+    pub endpoints: Option<(NodeId, NodeId)>,
+}
+
 /// Why a result is incomplete. Results list each reason at most once, in
 /// declaration order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AlgorithmTruncation {
-    /// Discovery would admit more than `max_visited_nodes` nodes.
+    /// Discovery would admit more than `max_visited_nodes` nodes (detected
+    /// when a level ends).
     VisitedLimit,
     /// `max_edges_examined` was spent.
     EdgeLimit,
@@ -227,8 +305,8 @@ pub struct AlgorithmStats {
     /// Edge units charged (adjacency entries, retained edges and arcs).
     pub edges_examined: u64,
     pub vertex_operations: u64,
-    /// Estimated bytes reserved before allocation, cumulative over the run
-    /// (an upper bound on the scratch and output peak).
+    /// Bytes reserved before allocation at allocated capacity, cumulative
+    /// over the run (an upper bound on the scratch and output peak).
     pub scratch_bytes: u64,
     pub elapsed_ms: u64,
 }
@@ -250,8 +328,9 @@ pub struct Projection {
     pub edges: Vec<ProjectedEdge>,
 }
 
-/// The result of [`run`]. `complete` is true exactly when `truncation` is
-/// empty; `output` is `None` whenever extraction or computation stopped.
+/// The result of [`run`] and [`run_with`]. `complete` is true exactly when
+/// `truncation` is empty; `output` is `None` whenever preparation,
+/// extraction, computation or staging stopped.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AlgorithmResult {
     pub output: Option<AlgorithmOutput>,
@@ -259,15 +338,17 @@ pub struct AlgorithmResult {
     pub truncation: Vec<AlgorithmTruncation>,
     /// Extraction finished.
     pub scope_complete: bool,
-    /// The computation finished and passed the final deadline and
-    /// cancellation check (output caps aside).
+    /// The computation and staging finished and passed the final deadline
+    /// and cancellation check (output caps aside).
     pub computation_complete: bool,
     pub view_sequence: u64,
     /// The TTL clock every visibility decision used.
     pub read_time_ms: u64,
-    /// The resolved seeds, deduplicated and ascending.
+    /// The resolved seeds, deduplicated and ascending (empty when
+    /// preparation stopped).
     pub seeds: Vec<NodeId>,
-    /// The resolved path source and destination.
+    /// The resolved path source and destination (`None` when preparation
+    /// stopped).
     pub endpoints: Option<(NodeId, NodeId)>,
     /// The finished projection.
     pub projection: Option<Projection>,
@@ -296,12 +377,9 @@ impl From<GraphError> for AlgorithmError {
     }
 }
 
-/// Runs `algorithm` on the local scope `scope` of `graph`.
-///
-/// Limits, caps, the scope and the algorithm are validated and the seeds
-/// and path endpoints resolved before the meter starts; resolution is
-/// charged right after the start check. Truncation returns `Ok` with no
-/// output; invalid input and weights return `Err`.
+/// Runs `algorithm` on the local scope `scope` of `graph`: [`run_with`] on
+/// the borrowed request, with the conditions validated first and no
+/// staging.
 pub fn run(
     graph: &Graph,
     scope: &AlgorithmScope,
@@ -312,210 +390,343 @@ pub fn run(
 ) -> Result<AlgorithmResult, AlgorithmError> {
     limits.validate()?;
     caps.validate()?;
-    validate(scope, algorithm)?;
-    let expired_at = graph.has_due(context.now_ms).then_some(context.now_ms);
-    let mut seeds = Vec::with_capacity(scope.seeds.len());
-    for selector in &scope.seeds {
-        let node = resolve(graph, selector, expired_at)?;
-        if scope
-            .labels
-            .as_ref()
-            .is_some_and(|labels| !labels.is_subset(&node.labels))
-        {
-            return Err(GraphError::InvalidQuery("every seed must carry every scope label").into());
-        }
-        seeds.push(node.id);
-    }
-    seeds.sort_unstable();
-    seeds.dedup();
-    if seeds.len() as u64 > limits.max_visited_nodes {
-        return Err(GraphError::InvalidQuery("distinct seeds exceed max_visited_nodes").into());
-    }
-    let endpoints = match algorithm {
-        Algorithm::Degree => None,
-        Algorithm::WeightedShortestPath {
-            source,
-            destination,
-            ..
-        } => {
-            let source = resolve(graph, source, expired_at)?.id;
-            if seeds.binary_search(&source).is_err() {
-                return Err(GraphError::InvalidQuery("the path source must be a seed").into());
-            }
-            Some((source, resolve(graph, destination, expired_at)?.id))
-        }
+    validate_conditions(&scope.edge_conditions)?;
+    let request = Request {
+        seeds: &scope.seeds,
+        direction: scope.direction,
+        types: scope.types.as_deref(),
+        labels: scope.labels.as_deref(),
+        path: match algorithm {
+            Algorithm::Degree => None,
+            Algorithm::WeightedShortestPath {
+                source,
+                destination,
+                weight_property,
+            } => Some(PathRequest {
+                source,
+                destination,
+                weight_property: weight_property.as_deref(),
+            }),
+        },
     };
-
-    let (mut meter, begin) = Meter::start(context, limits, caps);
-    let mut projection = None;
-    let local = Local {
+    let conditions = |_: &mut Meter<'_>| Ok(Cow::Borrowed(&scope.edge_conditions[..]));
+    run_with(
         graph,
-        scope,
+        &request,
         limits,
-        expired_at,
-    };
+        caps,
+        context,
+        conditions,
+        |_, _| Ok(()),
+    )
+    .map(|(result, _)| result)
+}
+
+/// Runs one algorithm on the local scope `request` names.
+///
+/// Limits, caps and the request's bounded shape are checked first; the
+/// caller checks its conditions' shape before calling. Everything else
+/// runs under one meter, started before any per-item work: `conditions`
+/// converts the edge conditions, then the request is prepared, the scope
+/// extracted and the algorithm run. A finished output is capped and handed
+/// to `stage`, under the same meter, before the final check; `stage`'s
+/// value is returned only when the run completed (output caps aside).
+/// Truncation returns `Ok` with no output; invalid input and weights
+/// return `Err`.
+pub fn run_with<'s, S: Seed, T>(
+    graph: &Graph,
+    request: &Request<'s, S>,
+    limits: &GraphLimits,
+    caps: &GraphAlgorithmLimits,
+    context: &ExecutionContext<'_>,
+    conditions: impl FnOnce(&mut Meter<'_>) -> Result<Cow<'s, [PropertyCondition]>, AlgorithmTruncation>,
+    stage: impl FnOnce(&Finished<'_>, &mut Meter<'_>) -> Result<T, AlgorithmTruncation>,
+) -> Result<(AlgorithmResult, Option<T>), AlgorithmError> {
+    limits.validate()?;
+    caps.validate()?;
+    check_shape(request)?;
+    let expired_at = graph.has_due(context.now_ms).then_some(context.now_ms);
+    let (mut meter, begin) = Meter::start(context, limits, caps);
+    let mut prepared = None;
+    let mut projection = None;
     let computed = begin.map_err(Halt::from).and_then(|()| {
-        // Resolution: one unit per raw selector and endpoint, then the sort.
-        let raw = scope.seeds.len();
-        meter.reserve(raw, size_of::<NodeId>())?;
-        meter.vertices(raw as u64 + 2 * u64::from(endpoints.is_some()))?;
-        meter.vertices(sort_cost(raw))?;
-        let extracted = projection.insert(local.extract(&seeds, &mut meter)?);
-        match (algorithm, endpoints) {
-            (Algorithm::Degree, _) => Ok(AlgorithmOutput::Degree(degree(
+        let conditions = conditions(&mut meter)?;
+        let ready = prepared.insert(Prepared::new(
+            graph, request, limits, expired_at, conditions, &mut meter,
+        )?);
+        let local = Local {
+            graph,
+            direction: request.direction,
+            types: ready.types.as_deref(),
+            labels: ready.labels.as_deref(),
+            conditions: &ready.conditions,
+            limits,
+            expired_at,
+            edge_zero: ready.types.as_ref().and_then(|_| graph.edge(EdgeId(0))),
+        };
+        let extracted = projection.insert(local.extract(&ready.seeds, &mut meter)?);
+        let output = match ready.endpoints {
+            None => AlgorithmOutput::Degree(degree(extracted, request.direction, &mut meter)?),
+            Some(endpoints) => AlgorithmOutput::WeightedShortestPath(local.shortest_path(
                 extracted,
-                scope.direction,
-                &mut meter,
-            )?)),
-            (
-                Algorithm::WeightedShortestPath {
-                    weight_property, ..
-                },
-                Some(endpoints),
-            ) => Ok(AlgorithmOutput::WeightedShortestPath(local.shortest_path(
-                extracted,
-                weight_property.as_deref(),
+                request.path.as_ref().and_then(|path| path.weight_property),
                 endpoints,
                 &mut meter,
-            )?)),
-            (Algorithm::WeightedShortestPath { .. }, None) => unreachable!("endpoints resolve"),
-        }
+            )?),
+        };
+        let (output, cut) = cap(output, limits);
+        let staged = stage(
+            &Finished {
+                output: output.as_ref(),
+                seeds: &ready.seeds,
+                types: ready.types.as_deref(),
+                labels: ready.labels.as_deref(),
+                endpoints: ready.endpoints,
+            },
+            &mut meter,
+        )?;
+        Ok((output, cut, staged))
     });
 
     let mut truncation = Vec::new();
     let mut output = None;
+    let mut staged = None;
     let elapsed_ms = match computed {
         Err(Halt::Failed(error)) => return Err(error),
         Err(Halt::Truncated(reason)) => {
             truncation.push(reason);
             meter.elapsed_ms()
         }
-        Ok(finished) => {
+        Ok((finished, cut, value)) => {
             let (elapsed_ms, check) = meter.finish();
             match check {
-                Ok(()) => output = Some(finished),
+                Ok(()) => {
+                    output = finished;
+                    staged = Some(value);
+                    if cut {
+                        truncation.push(AlgorithmTruncation::OutputLimit);
+                    }
+                }
                 Err(reason) => truncation.push(reason),
             }
             elapsed_ms
         }
     };
-    let computation_complete = output.is_some();
-    match &mut output {
-        Some(AlgorithmOutput::Degree(rows)) if rows.len() as u64 > limits.max_output_nodes => {
-            rows.truncate(limits.max_output_nodes as usize);
-            truncation.push(AlgorithmTruncation::OutputLimit);
-        }
-        Some(AlgorithmOutput::WeightedShortestPath(WeightedPathOutcome::Found(path)))
-            if limits.max_output_paths == 0
-                || path.nodes.len() as u64 > limits.max_output_nodes
-                || path.edges.len() as u64 > limits.max_output_edges =>
-        {
-            output = None;
-            truncation.push(AlgorithmTruncation::OutputLimit);
-        }
-        _ => {}
-    }
+    let (seeds, endpoints) =
+        prepared.map_or((Vec::new(), None), |ready| (ready.seeds, ready.endpoints));
     let stats = AlgorithmStats {
         nodes_extracted: projection.as_ref().map_or(0, |p| p.nodes.len() as u64),
         edges_extracted: projection.as_ref().map_or(0, |p| p.edges.len() as u64),
         arcs: projection
             .as_ref()
-            .map_or(0, |p| arc_count(p, scope.direction) as u64),
+            .map_or(0, |p| arc_count(p, request.direction) as u64),
         edges_examined: meter.edges,
         vertex_operations: meter.vertices,
         scratch_bytes: meter.scratch,
         elapsed_ms,
     };
-    Ok(AlgorithmResult {
+    let result = AlgorithmResult {
         output,
         complete: truncation.is_empty(),
         truncation,
         scope_complete: projection.is_some(),
-        computation_complete,
+        computation_complete: staged.is_some(),
         view_sequence: context.view_sequence,
         read_time_ms: context.now_ms,
         seeds,
         endpoints,
         projection,
         stats,
-    })
+    };
+    Ok((result, staged))
 }
 
-fn validate(scope: &AlgorithmScope, algorithm: &Algorithm) -> Result<(), GraphError> {
-    if scope.seeds.is_empty() {
+/// Rejects a request outside the bounded shape before any work.
+fn check_shape<S>(request: &Request<'_, S>) -> Result<(), GraphError> {
+    let seeds = request.seeds.len() as u64;
+    if seeds == 0 {
         return Err(GraphError::InvalidQuery("an algorithm scope needs a seed"));
     }
-    if scope.seeds.len() as u64 > MAX_SEEDS {
+    if seeds > MAX_SEEDS {
         return Err(GraphError::LimitExceedsCeiling {
             limit: "seeds",
-            requested: scope.seeds.len() as u64,
+            requested: seeds,
             ceiling: MAX_SEEDS,
         });
     }
-    scope.seeds.iter().try_for_each(validate_selector)?;
-    if let Some(types) = &scope.types {
+    if let Some(types) = request.types {
         if types.is_empty() {
             return Err(GraphError::InvalidQuery(
                 "a relationship type scope must not be empty",
             ));
         }
-        types
-            .iter()
-            .try_for_each(|kind| validate_relationship_type(kind))?;
+        if types.len() as u64 > MAX_SCOPE_TYPES {
+            return Err(GraphError::LimitExceedsCeiling {
+                limit: "relationship_types",
+                requested: types.len() as u64,
+                ceiling: MAX_SCOPE_TYPES,
+            });
+        }
     }
-    if let Some(labels) = &scope.labels {
+    if let Some(labels) = request.labels {
         if labels.is_empty() {
             return Err(GraphError::InvalidQuery("a label scope must not be empty"));
         }
-        validate_labels(labels)?;
-    }
-    validate_conditions(&scope.edge_conditions)?;
-    if let Algorithm::WeightedShortestPath {
-        source,
-        destination,
-        weight_property,
-    } = algorithm
-    {
-        validate_selector(source)?;
-        validate_selector(destination)?;
-        if weight_property
-            .as_ref()
-            .is_some_and(|name| name.is_empty() || name.len() > MAX_FIELD_NAME_BYTES)
-        {
-            return Err(GraphError::InvalidQuery(
-                "a weight property name must have 1..=256 bytes",
-            ));
+        if labels.len() > MAX_LABELS {
+            return Err(GraphError::TooManyLabels);
         }
+    }
+    if request
+        .path
+        .as_ref()
+        .and_then(|path| path.weight_property)
+        .is_some_and(|name| name.is_empty() || name.len() > MAX_FIELD_NAME_BYTES)
+    {
+        return Err(GraphError::InvalidQuery(
+            "a weight property name must have 1..=256 bytes",
+        ));
     }
     Ok(())
 }
 
-fn validate_selector(selector: &NodeSelector) -> Result<(), GraphError> {
-    match selector {
-        NodeSelector::Id(_) => Ok(()),
-        NodeSelector::Key(key) => validate_node_key(key),
+/// Applies the output caps to a finished output: degree rows are cut to
+/// `max_output_nodes`; a path over the node, edge or path cap is withheld.
+/// The flag reports a cut.
+fn cap(output: AlgorithmOutput, limits: &GraphLimits) -> (Option<AlgorithmOutput>, bool) {
+    match output {
+        AlgorithmOutput::Degree(mut rows) if rows.len() as u64 > limits.max_output_nodes => {
+            rows.truncate(limits.max_output_nodes as usize);
+            (Some(AlgorithmOutput::Degree(rows)), true)
+        }
+        AlgorithmOutput::WeightedShortestPath(WeightedPathOutcome::Found(path))
+            if limits.max_output_paths == 0
+                || path.nodes.len() as u64 > limits.max_output_nodes
+                || path.edges.len() as u64 > limits.max_output_edges =>
+        {
+            (None, true)
+        }
+        output => (Some(output), false),
     }
+}
+
+/// A request's validated, resolved and normalized items.
+struct Prepared<'s> {
+    conditions: Cow<'s, [PropertyCondition]>,
+    types: Option<Vec<&'s str>>,
+    labels: Option<Vec<&'s str>>,
+    seeds: Vec<NodeId>,
+    endpoints: Option<(NodeId, NodeId)>,
+}
+
+impl<'s> Prepared<'s> {
+    /// Types, labels, seeds and endpoints in that order, one vertex unit
+    /// per item plus the sorts; every buffer is reserved first.
+    fn new<S: Seed>(
+        graph: &Graph,
+        request: &Request<'s, S>,
+        limits: &GraphLimits,
+        expired_at: Option<u64>,
+        conditions: Cow<'s, [PropertyCondition]>,
+        meter: &mut Meter<'_>,
+    ) -> Result<Self, Halt> {
+        let types = match request.types {
+            None => None,
+            Some(types) => Some(names(types, validate_relationship_type, meter)?),
+        };
+        let labels = match request.labels {
+            None => None,
+            Some(labels) => Some(names(labels, validate_label, meter)?),
+        };
+        let raw = request.seeds.len();
+        meter.reserve(raw, size_of::<NodeId>())?;
+        let mut seeds = Vec::with_capacity(raw);
+        for seed in request.seeds {
+            meter.vertex()?;
+            let node = resolve(graph, seed.selector(), expired_at)?;
+            if labels
+                .as_deref()
+                .is_some_and(|labels| !carries(node, labels))
+            {
+                return Err(
+                    GraphError::InvalidQuery("every seed must carry every scope label").into(),
+                );
+            }
+            seeds.push(node.id);
+        }
+        meter.vertices(sort_cost(raw))?;
+        seeds.sort_unstable();
+        seeds.dedup();
+        if seeds.len() as u64 > limits.max_visited_nodes {
+            return Err(GraphError::InvalidQuery("distinct seeds exceed max_visited_nodes").into());
+        }
+        let endpoints = match &request.path {
+            None => None,
+            Some(path) => {
+                meter.vertex()?;
+                let source = resolve(graph, path.source.selector(), expired_at)?.id;
+                if seeds.binary_search(&source).is_err() {
+                    return Err(GraphError::InvalidQuery("the path source must be a seed").into());
+                }
+                meter.vertex()?;
+                let destination = resolve(graph, path.destination.selector(), expired_at)?.id;
+                Some((source, destination))
+            }
+        };
+        Ok(Self {
+            conditions,
+            types,
+            labels,
+            seeds,
+            endpoints,
+        })
+    }
+}
+
+/// Validates, sorts and deduplicates relationship types or labels, one
+/// vertex unit each plus the sort.
+fn names<'s>(
+    items: &'s [String],
+    validate: fn(&str) -> Result<(), GraphError>,
+    meter: &mut Meter<'_>,
+) -> Result<Vec<&'s str>, Halt> {
+    meter.reserve(items.len(), size_of::<&str>())?;
+    let mut names = Vec::with_capacity(items.len());
+    for item in items {
+        meter.vertex()?;
+        validate(item)?;
+        names.push(item.as_str());
+    }
+    meter.vertices(sort_cost(names.len()))?;
+    names.sort_unstable();
+    names.dedup();
+    Ok(names)
 }
 
 /// The visible node `selector` names; a due node does not resolve.
 fn resolve<'g>(
     graph: &'g Graph,
-    selector: &NodeSelector,
+    selector: Selector<'_>,
     expired_at: Option<u64>,
 ) -> Result<&'g GraphNode, GraphError> {
-    let missing = || match selector {
-        NodeSelector::Id(id) => GraphError::NodeNotFound(*id),
-        NodeSelector::Key(key) => GraphError::UnknownNodeKey(key.clone()),
-    };
     let node = match selector {
-        NodeSelector::Id(id) => graph.node(*id),
-        NodeSelector::Key(key) => graph.node_by_key(key),
+        Selector::Id(id) => graph.node(id),
+        Selector::Key(key) => {
+            validate_node_key(key)?;
+            graph.node_by_key(key)
+        }
+    };
+    match node {
+        Some(node) if expired_at.is_none_or(|now| !graph.node_expired(node.id, now)) => Ok(node),
+        _ => Err(match selector {
+            Selector::Id(id) => GraphError::NodeNotFound(id),
+            Selector::Key(key) => GraphError::UnknownNodeKey(key.to_owned()),
+        }),
     }
-    .ok_or_else(missing)?;
-    if expired_at.is_some_and(|now| graph.node_expired(node.id, now)) {
-        return Err(missing());
-    }
-    Ok(node)
+}
+
+/// Whether `node` carries every label of the sorted `labels`.
+fn carries(node: &GraphNode, labels: &[&str]) -> bool {
+    labels.iter().all(|label| node.labels.contains(*label))
 }
 
 /// Comparisons charged for sorting `count` items: `count * bit_length(count)`.
@@ -542,6 +753,20 @@ fn arc_count(projection: &Projection, direction: Direction) -> usize {
     }
 }
 
+/// Appends `item`, first doubling a full buffer (at least 4 slots) into a
+/// new allocation reserved at its full capacity; the old one stays charged.
+fn push<T>(items: &mut Vec<T>, item: T, meter: &mut Meter<'_>) -> Result<(), AlgorithmTruncation> {
+    if items.len() == items.capacity() {
+        let capacity = items.capacity().saturating_mul(2).max(4);
+        meter.reserve(capacity, size_of::<T>())?;
+        let mut grown = Vec::with_capacity(capacity);
+        grown.append(items);
+        *items = grown;
+    }
+    items.push(item);
+    Ok(())
+}
+
 /// Why a run stopped before it finished.
 enum Halt {
     Truncated(AlgorithmTruncation),
@@ -566,10 +791,12 @@ impl From<GraphError> for Halt {
     }
 }
 
-/// Edge, vertex and scratch budgets with one deadline and cancellation
-/// check before work, before every 64th charged operation (edge and vertex
-/// units together) and before returning.
-struct Meter<'a> {
+/// The budgets of one run: edge units, vertex units and scratch bytes,
+/// with one deadline and cancellation check before any work, before every
+/// 64th charged operation (edge and vertex units together) and before
+/// returning. A caller's condition conversion and staging (see
+/// [`run_with`]) charge the same meter.
+pub struct Meter<'a> {
     context: &'a ExecutionContext<'a>,
     started: u64,
     deadline_ms: u64,
@@ -636,7 +863,7 @@ impl<'a> Meter<'a> {
     }
 
     /// One `max_vertex_operations` unit.
-    fn vertex(&mut self) -> Result<(), AlgorithmTruncation> {
+    pub fn vertex(&mut self) -> Result<(), AlgorithmTruncation> {
         if self.vertices >= self.vertex_budget {
             return Err(AlgorithmTruncation::VertexLimit);
         }
@@ -645,12 +872,13 @@ impl<'a> Meter<'a> {
         Ok(())
     }
 
-    fn vertices(&mut self, count: u64) -> Result<(), AlgorithmTruncation> {
+    /// `count` vertex units, one at a time.
+    pub fn vertices(&mut self, count: u64) -> Result<(), AlgorithmTruncation> {
         (0..count).try_for_each(|_| self.vertex())
     }
 
     /// Reserves `count` items of `bytes` each before they are allocated.
-    fn reserve(&mut self, count: usize, bytes: usize) -> Result<(), AlgorithmTruncation> {
+    pub fn reserve(&mut self, count: usize, bytes: usize) -> Result<(), AlgorithmTruncation> {
         let total = (count as u64).saturating_mul(bytes as u64);
         match self.scratch.checked_add(total) {
             Some(scratch) if scratch <= self.scratch_budget => {
@@ -672,12 +900,20 @@ impl<'a> Meter<'a> {
     }
 }
 
-/// The scope of one run with the TTL clock (`None` when nothing is due).
+/// The prepared scope of one run with the TTL clock (`None` when nothing
+/// is due).
 struct Local<'a> {
     graph: &'a Graph,
-    scope: &'a AlgorithmScope,
+    direction: Direction,
+    /// Sorted, deduplicated relationship types; `None` is any.
+    types: Option<&'a [&'a str]>,
+    /// Sorted, deduplicated labels; `None` is any.
+    labels: Option<&'a [&'a str]>,
+    conditions: &'a [PropertyCondition],
     limits: &'a GraphLimits,
     expired_at: Option<u64>,
+    /// Edge 0 for typed scans, which probe strictly after `(type, 0)`.
+    edge_zero: Option<&'a GraphEdge>,
 }
 
 impl Local<'_> {
@@ -686,11 +922,7 @@ impl Local<'_> {
         self.graph.node(id).is_some_and(|node| {
             self.expired_at
                 .is_none_or(|now| !self.graph.node_expired(id, now))
-                && self
-                    .scope
-                    .labels
-                    .as_ref()
-                    .is_none_or(|labels| labels.is_subset(&node.labels))
+                && self.labels.is_none_or(|labels| carries(node, labels))
         })
     }
 
@@ -699,82 +931,135 @@ impl Local<'_> {
     fn eligible_edge(&self, edge: &GraphEdge) -> bool {
         self.expired_at
             .is_none_or(|now| !self.graph.edge_expired(edge, now))
-            && conditions_match(&edge.properties, &self.scope.edge_conditions)
+            && conditions_match(&edge.properties, self.conditions)
     }
 
     /// Calls `visit` with every adjacency entry of `node` in the scope's
-    /// direction and types, charging one edge unit each under the per-node
-    /// cap. An error from `visit` stops the scan.
+    /// direction and types, in (type, edge ID) order, charging one edge
+    /// unit per entry under the per-node cap. A typed scope probes each
+    /// type with one lazy range lookup charged one vertex unit, whether or
+    /// not the type occurs. An error from `visit` stops the scan.
     fn scan(
         &self,
         node: NodeId,
         meter: &mut Meter<'_>,
         mut visit: impl FnMut(&GraphEdge, &mut Meter<'_>) -> Result<(), Halt>,
     ) -> Result<(), Halt> {
-        for (examined, (_, id)) in self
-            .graph
-            .adjacency(node, self.scope.direction, self.scope.types.as_ref(), None)
-            .enumerate()
-        {
-            if examined as u64 >= self.limits.max_edges_per_node {
-                return Err(AlgorithmTruncation::DegreeLimit {
-                    node_ids: vec![node],
-                }
-                .into());
+        let mut examined = 0;
+        let Some(types) = self.types else {
+            for (_, id) in self.graph.adjacency(node, self.direction, None, None) {
+                self.step(node, id, &mut examined, meter, &mut visit)?;
             }
-            meter.edge()?;
-            let edge = self.graph.edge(id).ok_or(GraphError::InvariantViolation(
-                "adjacency names a missing edge",
-            ))?;
-            visit(edge, meter)?;
+            return Ok(());
+        };
+        for &kind in types {
+            meter.vertex()?;
+            // The lazy probe starts strictly after (kind, 0); edge 0, the
+            // only entry it skips, is read directly.
+            if let Some(first) = self
+                .edge_zero
+                .filter(|edge| edge.relationship == kind && self.touches(edge, node))
+            {
+                self.step(node, first.id, &mut examined, meter, &mut visit)?;
+            }
+            for (_, id) in self
+                .graph
+                .adjacency(node, self.direction, None, Some((kind, EdgeId(0))))
+                .take_while(|(found, _)| *found == kind)
+            {
+                self.step(node, id, &mut examined, meter, &mut visit)?;
+            }
         }
         Ok(())
     }
 
-    /// Breadth-first discovery from the ascending seeds up to `max_hops`,
-    /// then a rescan of every admitted node that retains each eligible edge
-    /// between admitted nodes once.
-    fn extract(&self, seeds: &[NodeId], meter: &mut Meter<'_>) -> Result<Projection, Halt> {
-        let mut admitted = BTreeSet::new();
-        let mut queue = VecDeque::new();
-        for &seed in seeds {
-            meter.reserve(1, NODE_BYTES)?;
-            meter.vertex()?;
-            admitted.insert(seed);
-            queue.push_back((seed, 0));
+    /// Whether `node`'s adjacency in the scope's direction holds `edge`.
+    fn touches(&self, edge: &GraphEdge, node: NodeId) -> bool {
+        match self.direction {
+            Direction::Out => edge.source == node,
+            Direction::In => edge.destination == node,
+            Direction::Both => edge.source == node || edge.destination == node,
         }
-        while let Some((node, depth)) = queue.pop_front() {
-            if depth >= self.limits.max_hops {
+    }
+
+    /// One adjacency entry of `node`: the per-node cap, one edge unit and
+    /// `visit`.
+    fn step(
+        &self,
+        node: NodeId,
+        id: EdgeId,
+        examined: &mut u64,
+        meter: &mut Meter<'_>,
+        visit: &mut impl FnMut(&GraphEdge, &mut Meter<'_>) -> Result<(), Halt>,
+    ) -> Result<(), Halt> {
+        if *examined >= self.limits.max_edges_per_node {
+            return Err(AlgorithmTruncation::DegreeLimit {
+                node_ids: vec![node],
+            }
+            .into());
+        }
+        meter.edge()?;
+        *examined += 1;
+        let edge = self.graph.edge(id).ok_or(GraphError::InvariantViolation(
+            "adjacency names a missing edge",
+        ))?;
+        visit(edge, meter)
+    }
+
+    /// Level-synchronous breadth-first discovery from the seeds up to
+    /// `max_hops`, then a rescan of every admitted node that retains each
+    /// eligible edge between admitted nodes once.
+    ///
+    /// Each level scans its nodes in ascending order and collects the
+    /// eligible new nodes they reach; at the level's end the collection is
+    /// sorted, deduplicated, checked against `max_visited_nodes` and merged
+    /// into the ascending admitted set, which then answers membership by
+    /// binary search.
+    fn extract(&self, seeds: &[NodeId], meter: &mut Meter<'_>) -> Result<Projection, Halt> {
+        meter.reserve(seeds.len(), size_of::<NodeId>())?;
+        meter.vertices(seeds.len() as u64)?;
+        let mut admitted = Vec::with_capacity(seeds.len());
+        admitted.extend_from_slice(seeds);
+        let mut frontier = Vec::new();
+        for depth in 0..self.limits.max_hops {
+            let level = if depth == 0 { seeds } else { &frontier[..] };
+            if level.is_empty() {
                 break;
             }
-            meter.vertex()?;
-            self.scan(node, meter, |edge, meter| {
-                if !self.eligible_edge(edge) {
-                    return Ok(());
-                }
-                let next = other_end(edge, node);
-                if admitted.contains(&next) || !self.eligible_node(next) {
-                    return Ok(());
-                }
-                if admitted.len() as u64 >= self.limits.max_visited_nodes {
-                    return Err(AlgorithmTruncation::VisitedLimit.into());
-                }
-                meter.reserve(1, NODE_BYTES)?;
+            let mut found = Vec::new();
+            for &node in level {
                 meter.vertex()?;
-                admitted.insert(next);
-                queue.push_back((next, depth + 1));
-                Ok(())
-            })?;
+                self.scan(node, meter, |edge, meter| {
+                    if !self.eligible_edge(edge) {
+                        return Ok(());
+                    }
+                    let next = other_end(edge, node);
+                    if found.last() == Some(&next)
+                        || admitted.binary_search(&next).is_ok()
+                        || !self.eligible_node(next)
+                    {
+                        return Ok(());
+                    }
+                    Ok(push(&mut found, next, meter)?)
+                })?;
+            }
+            meter.vertices(sort_cost(found.len()))?;
+            found.sort_unstable();
+            found.dedup();
+            if (admitted.len() + found.len()) as u64 > self.limits.max_visited_nodes {
+                return Err(AlgorithmTruncation::VisitedLimit.into());
+            }
+            admitted = merge(&admitted, &found, meter)?;
+            frontier = found;
         }
-        drop(queue);
-        meter.vertices(sort_cost(admitted.len()))?;
-        let nodes: Vec<NodeId> = admitted.into_iter().collect();
+        drop(frontier);
+        let nodes = admitted;
         let mut edges = Vec::new();
         for (position, &node) in nodes.iter().enumerate() {
             meter.vertex()?;
             self.scan(node, meter, |edge, meter| {
                 // Both meets every edge from each end; keep it at its source.
-                if self.scope.direction == Direction::Both && edge.source != node {
+                if self.direction == Direction::Both && edge.source != node {
                     return Ok(());
                 }
                 if !self.eligible_edge(edge) {
@@ -783,24 +1068,45 @@ impl Local<'_> {
                 let Ok(other) = nodes.binary_search(&other_end(edge, node)) else {
                     return Ok(());
                 };
-                meter.reserve(1, size_of::<ProjectedEdge>())?;
                 let (source, destination) = if edge.source == node {
                     (position, other)
                 } else {
                     (other, position)
                 };
-                edges.push(ProjectedEdge {
+                let projected = ProjectedEdge {
                     id: edge.id,
                     source,
                     destination,
-                });
-                Ok(())
+                };
+                Ok(push(&mut edges, projected, meter)?)
             })?;
         }
         meter.vertices(sort_cost(edges.len()))?;
         edges.sort_unstable_by_key(|edge| edge.id);
         Ok(Projection { nodes, edges })
     }
+}
+
+/// The ascending union of two disjoint ascending node lists in a new
+/// buffer, one vertex unit per node.
+fn merge(left: &[NodeId], right: &[NodeId], meter: &mut Meter<'_>) -> Result<Vec<NodeId>, Halt> {
+    let total = left.len() + right.len();
+    meter.reserve(total, size_of::<NodeId>())?;
+    meter.vertices(total as u64)?;
+    let mut merged = Vec::with_capacity(total);
+    let (mut i, mut j) = (0, 0);
+    while i < left.len() && j < right.len() {
+        if left[i] < right[j] {
+            merged.push(left[i]);
+            i += 1;
+        } else {
+            merged.push(right[j]);
+            j += 1;
+        }
+    }
+    merged.extend_from_slice(&left[i..]);
+    merged.extend_from_slice(&right[j..]);
+    Ok(merged)
 }
 
 /// Raw degrees over the retained physical edges: `In` reverses endpoints,
@@ -814,16 +1120,13 @@ fn degree(
     let count = projection.nodes.len();
     meter.reserve(count, size_of::<DegreeRow>())?;
     meter.vertices(count as u64)?;
-    let mut rows: Vec<DegreeRow> = projection
-        .nodes
-        .iter()
-        .map(|&node| DegreeRow {
-            node,
-            in_degree: 0,
-            out_degree: 0,
-            incident_degree: 0,
-        })
-        .collect();
+    let mut rows = Vec::with_capacity(count);
+    rows.extend(projection.nodes.iter().map(|&node| DegreeRow {
+        node,
+        in_degree: 0,
+        out_degree: 0,
+        incident_degree: 0,
+    }));
     for edge in &projection.edges {
         meter.edge()?;
         let (tail, head) = orient(edge, direction);
@@ -870,7 +1173,7 @@ impl Local<'_> {
         (source, destination): (NodeId, NodeId),
         meter: &mut Meter<'_>,
     ) -> Result<WeightedPathOutcome, Halt> {
-        let direction = self.scope.direction;
+        let direction = self.direction;
         let count = projection.nodes.len();
         let edges = &projection.edges;
         meter.reserve(edges.len(), size_of::<Weight>())?;
@@ -922,7 +1225,8 @@ impl Local<'_> {
         let total = offsets[count];
         meter.reserve(total, size_of::<Step>())?;
         meter.reserve(count, size_of::<usize>())?;
-        let mut cursor = offsets[..count].to_vec();
+        let mut cursor = Vec::with_capacity(count);
+        cursor.extend_from_slice(&offsets[..count]);
         let empty = Step {
             head: 0,
             edge: EdgeId(0),
@@ -1002,8 +1306,10 @@ impl Local<'_> {
             }
         };
 
+        // The walk back to the source, then the path's node and edge IDs.
         let hops = winner % layers;
         meter.vertices(hops as u64 + 1)?;
+        meter.reserve(hops + 1, size_of::<usize>())?;
         meter.reserve(2 * hops + 1, size_of::<u64>())?;
         let mut positions = Vec::with_capacity(hops + 1);
         let mut state = winner;
@@ -1017,14 +1323,14 @@ impl Local<'_> {
         let cost = fixed
             .to_f64(search.cost(winner))
             .ok_or(AlgorithmError::NumericOverflow)?;
+        let mut path_nodes = Vec::with_capacity(hops + 1);
+        path_nodes.extend(positions.iter().rev().map(|&position| nodes[position]));
+        let mut path_edges = Vec::with_capacity(hops);
+        path_edges.extend_from_slice(&search.sequences[winner][..hops]);
         Ok(WeightedPathOutcome::Found(WeightedPath {
             cost,
-            nodes: positions
-                .iter()
-                .rev()
-                .map(|&position| nodes[position])
-                .collect(),
-            edges: search.sequences[winner][..hops].to_vec(),
+            nodes: path_nodes,
+            edges: path_edges,
         }))
     }
 }
