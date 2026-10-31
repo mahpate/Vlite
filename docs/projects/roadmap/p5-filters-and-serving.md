@@ -225,6 +225,17 @@ No P5 file naming, tags, manifest dialect, or CSR layout. Open: finalize signatu
 
 ## Verification and release plan
 
+The independent standard-library
+[`filter_visibility_oracle.py`](../../../tests/filter_visibility_oracle.py)
+checks hand-authored
+[`golden.json`](../../../tests/fixtures/filter_visibility/golden.json).
+Its six cases cover typed equality/inclusive ranges, conservative segment
+pruning, latest-revision overlays, deletes/resurrection and explicit TTL clocks.
+Geo radius is tested only as unknown pruning, not final radius filtering.
+CI runs the checker with negative schema/answer self-tests. This is reference
+coverage, not an implemented segment accelerator, engine differential test,
+ANN recall guarantee or performance qualification.
+
 | Test family | Required assertion |
 |---|---|
 | Differential | Indexed/unindexed strict results equal brute-force oracle IDs, distances, and order |

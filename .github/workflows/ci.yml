@@ -26,11 +26,12 @@ jobs:
         with:
           python-version: "3.11"
       - run: python tests/ci_workflows.py
-      - name: Verify compact precision, graph algorithm and temporal golden oracles
+      - name: Verify compact precision, graph, temporal and filter golden oracles
         run: |
           python tests/compact_float16_oracle.py --self-test
           python tests/graph_algorithm_oracle.py --self-test
           python tests/temporal_interval_oracle.py --self-test
+          python tests/filter_visibility_oracle.py --self-test
       - id: route
         run: python scripts/ci_policy.py route
 
