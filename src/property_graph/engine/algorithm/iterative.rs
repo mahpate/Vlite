@@ -1,10 +1,14 @@
 //! Iterative algorithms over an extracted projection (Gap 5 S3): PageRank
 //! by synchronous full steps and label propagation by in-place sweeps.
 //!
-//! Both reserve every buffer, charge every setup pass and prepay their
-//! result rows before the first step, so a step never allocates. A step
-//! interrupted by a budget, the deadline or cancellation is discarded: the
-//! result keeps the last full step, or nothing before the first one.
+//! Both reserve every buffer before the first step, so a step never
+//! allocates, and charge every pass as it runs: at most 64 operations run
+//! between deadline and cancellation checks. A step stages its result rows
+//! (and label propagation its canonical community IDs) in the same charged
+//! per-node operations into a candidate buffer that it commits only when it
+//! finishes. A step interrupted by a budget, the deadline or cancellation
+//! is discarded: the result keeps the last full step's staged rows, or
+//! nothing before the first one, and no work follows the step.
 
 use super::{
     AlgorithmError, AlgorithmOutput, AlgorithmTruncation, CommunityAssignment, Direction, EdgeId,
@@ -12,6 +16,33 @@ use super::{
     PageRankOutput, Projection, PropertyValue, Seed, classify, orient, resolve, sort_cost,
 };
 use std::mem::size_of;
+
+#[cfg(test)]
+thread_local! {
+    /// Staging work done on this thread: one per charged unit that writes
+    /// a result row or a canonical label (tests only).
+    pub(super) static STAGED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Records one unit of staging work (a no-op outside tests).
+fn staged() {
+    #[cfg(test)]
+    STAGED.with(|count| count.set(count.get() + 1));
+}
+
+/// `count` copies of `value`, one vertex unit each as it is written.
+fn filled<T: Clone>(
+    count: usize,
+    value: T,
+    meter: &mut Meter<'_>,
+) -> Result<Vec<T>, AlgorithmTruncation> {
+    let mut items = Vec::with_capacity(count);
+    for _ in 0..count {
+        meter.vertex()?;
+        items.push(value.clone());
+    }
+    Ok(items)
+}
 
 /// A resolved personalization: distinct seeds ascending with their masses
 /// as given, and the masses' sum in that order.
@@ -126,7 +157,7 @@ impl Local<'_> {
     /// dangling mass (nodes with no out-weight) ascending; every arc by
     /// edge ID adding `r[tail] * (w / out[tail])` to its head; then each
     /// node's `(1 - d) * p + d * (arcs + dangling * p)` and its absolute
-    /// change ascending.
+    /// change ascending, staging the node's row in the same unit.
     pub(super) fn page_rank(
         &self,
         projection: &Projection,
@@ -139,9 +170,8 @@ impl Local<'_> {
         let both = direction == Direction::Both;
         meter.reserve(edges.len(), size_of::<f64>())?;
         meter.reserve(count, size_of::<f64>())?;
-        meter.vertices(count as u64)?;
         let mut weights = Vec::with_capacity(edges.len());
-        let mut sums = vec![0.0f64; count];
+        let mut sums = filled(count, 0.0f64, meter)?;
         for edge in edges {
             meter.edge()?;
             let weight = match rank.weight_property {
@@ -163,11 +193,10 @@ impl Local<'_> {
         }
 
         meter.reserve(count, size_of::<f64>())?;
-        meter.vertices(count as u64)?;
         let teleport = match rank.teleport {
-            None => vec![1.0 / count as f64; count],
+            None => filled(count, 1.0 / count as f64, meter)?,
             Some(teleport) => {
-                let mut values = vec![0.0; count];
+                let mut values = filled(count, 0.0, meter)?;
                 for &(node, mass) in &teleport.masses {
                     meter.vertex()?;
                     let at = nodes.binary_search(&node).map_err(|_| {
@@ -179,19 +208,23 @@ impl Local<'_> {
             }
         };
         meter.reserve(count, size_of::<f64>())?;
-        meter.vertices(count as u64)?;
-        let mut ranks = teleport.clone();
+        let mut ranks = Vec::with_capacity(count);
+        for &jump in &teleport {
+            meter.vertex()?;
+            ranks.push(jump);
+        }
         meter.reserve(count, size_of::<f64>())?;
-        meter.vertices(count as u64)?;
-        let mut next = vec![0.0f64; count];
+        let mut next = filled(count, 0.0f64, meter)?;
+        // The committed rows and the candidate rows of the running step.
         let (rows, cut) = kept_rows(count, self.limits.max_output_nodes);
-        meter.reserve(rows, size_of::<NodeScore>())?;
-        meter.vertices(rows as u64)?;
+        meter.reserve(rows.saturating_mul(2), size_of::<NodeScore>())?;
         let mut scores = Vec::with_capacity(rows);
+        let mut candidate = Vec::with_capacity(rows);
 
         let damping = rank.damping;
         let mut residual = 0.0;
         let (iterations, stop) = iterate(rank.max_iterations, meter, |meter| {
+            candidate.clear();
             let mut dangling = 0.0;
             for (slot, (&sum, &value)) in next.iter_mut().zip(sums.iter().zip(&ranks)) {
                 meter.vertex()?;
@@ -214,26 +247,28 @@ impl Local<'_> {
                     spread(head, tail, weight, meter)?;
                 }
             }
+            // A node's unit also stages its row.
             let mut change = 0.0;
-            for ((slot, &old), &jump) in next.iter_mut().zip(&ranks).zip(&teleport) {
+            for (at, ((slot, &old), &jump)) in
+                next.iter_mut().zip(&ranks).zip(&teleport).enumerate()
+            {
                 meter.vertex()?;
                 let value = (1.0 - damping) * jump + damping * (*slot + dangling * jump);
                 change += (value - old).abs();
                 *slot = value;
+                if at < rows {
+                    staged();
+                    candidate.push(NodeScore {
+                        node_id: nodes[at].0,
+                        score: value,
+                    });
+                }
             }
             std::mem::swap(&mut ranks, &mut next);
+            std::mem::swap(&mut scores, &mut candidate);
             residual = change;
             Ok(change <= rank.tolerance)
         })?;
-        scores.extend(
-            nodes[..rows]
-                .iter()
-                .zip(&ranks)
-                .map(|(node, &score)| NodeScore {
-                    node_id: node.0,
-                    score,
-                }),
-        );
         Ok(Iterated {
             output: AlgorithmOutput::PageRank(PageRankOutput {
                 scores,
@@ -274,7 +309,8 @@ impl Local<'_> {
 /// ID. A sweep visits nodes ascending; a node reads its smaller neighbors'
 /// labels from this sweep and the others' from the last one, counts them,
 /// and keeps its label when it ties for the most frequent (or it has no
-/// neighbors), else takes the smallest most frequent label.
+/// neighbors), else takes the smallest most frequent label; the same unit
+/// stages its row with the smallest node ID holding that label.
 pub(super) fn label_propagation(
     projection: &Projection,
     max_iterations: u64,
@@ -295,37 +331,48 @@ pub(super) fn label_propagation(
     }
     meter.vertices(sort_cost(pairs.len()))?;
     pairs.sort_unstable();
-    for _ in 0..pairs.len() {
+    let mut kept = 0;
+    for at in 0..pairs.len() {
         meter.edge()?;
+        if kept == 0 || pairs[at] != pairs[kept - 1] {
+            pairs[kept] = pairs[at];
+            kept += 1;
+        }
     }
-    pairs.dedup();
+    pairs.truncate(kept);
     meter.reserve(count + 1, size_of::<usize>())?;
-    meter.vertices(count as u64 + 1)?;
-    let mut offsets = vec![0usize; count + 1];
+    let mut offsets = filled(count + 1, 0usize, meter)?;
     for &(node, _) in &pairs {
         meter.edge()?;
         offsets[node + 1] += 1;
     }
-    meter.vertices(count as u64)?;
     for at in 0..count {
+        meter.vertex()?;
         offsets[at + 1] += offsets[at];
     }
 
     meter.reserve(count.saturating_mul(2), size_of::<usize>())?;
-    meter.vertices(2 * count as u64)?;
-    let mut previous: Vec<usize> = (0..count).collect();
-    let mut current = previous.clone();
+    let mut previous = Vec::with_capacity(count);
+    for node in 0..count {
+        meter.vertex()?;
+        previous.push(node);
+    }
+    let mut current = filled(count, 0usize, meter)?;
     meter.reserve(count, size_of::<(u64, u64)>())?;
-    meter.vertices(count as u64)?;
-    let mut votes = vec![(0u64, 0u64); count];
+    let mut votes = filled(count, (0u64, 0u64), meter)?;
+    // The sweep that last saw each label and its first position then.
+    meter.reserve(count, size_of::<(u64, usize)>())?;
+    let mut firsts = filled(count, (0u64, 0usize), meter)?;
+    // The committed rows and the candidate rows of the running sweep.
     let (rows, cut) = kept_rows(count, max_output_nodes);
-    meter.reserve(rows, size_of::<CommunityAssignment>())?;
-    meter.vertices(2 * count as u64 + rows as u64)?;
+    meter.reserve(rows.saturating_mul(2), size_of::<CommunityAssignment>())?;
     let mut assignments = Vec::with_capacity(rows);
+    let mut candidate = Vec::with_capacity(rows);
 
     let mut attempt = 0u64;
     let (sweeps, stop) = iterate(max_iterations, meter, |meter| {
         attempt += 1;
+        candidate.clear();
         let mut unchanged = true;
         for node in 0..count {
             meter.vertex()?;
@@ -356,24 +403,25 @@ pub(super) fn label_propagation(
             let label = if most == 0 || held == most { own } else { best };
             unchanged &= label == own;
             current[node] = label;
+            // The node's unit also canonicalizes its label: nodes run
+            // ascending, so a label's first position this sweep is final
+            // once any node holding it is reached.
+            staged();
+            let first = &mut firsts[label];
+            if first.0 != attempt {
+                *first = (attempt, node);
+            }
+            if node < rows {
+                candidate.push(CommunityAssignment {
+                    node_id: nodes[node].0,
+                    community_id: nodes[first.1].0,
+                });
+            }
         }
         std::mem::swap(&mut previous, &mut current);
+        std::mem::swap(&mut assignments, &mut candidate);
         Ok(unchanged)
     })?;
-    // The first position of every label of the last full sweep.
-    let first = &mut current;
-    first.fill(usize::MAX);
-    for (node, &label) in previous.iter().enumerate() {
-        if first[label] == usize::MAX {
-            first[label] = node;
-        }
-    }
-    assignments.extend(nodes[..rows].iter().zip(&previous).map(|(node, &label)| {
-        CommunityAssignment {
-            node_id: node.0,
-            community_id: nodes[first[label]].0,
-        }
-    }));
     Ok(Iterated {
         output: AlgorithmOutput::LabelPropagation(LabelPropagationOutput {
             assignments,

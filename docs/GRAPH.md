@@ -180,7 +180,9 @@ expose it. Nothing is stored and nothing writes.
   its `community_id`, the smallest node ID with the same label.
 - **Iterations.** Both run at most `max_iterations` full steps or sweeps.
   They build the request echo and reserve every buffer, their rows
-  included, before the first one, and never return a partial step. A run
+  included, before the first one, and never return a partial step. Each
+  step stages its rows (and canonical community IDs) within its charged
+  per-node work, so no unchecked work follows it. A run
   stopped after a full step (by the cap, as `IterationLimit`, or by a
   budget, the deadline or cancellation) returns the last full step and the
   echo with `complete` and `computation_complete` false; a run stopped

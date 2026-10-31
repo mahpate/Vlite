@@ -401,10 +401,13 @@ The community ID is the smallest node ID holding the label in the last full assi
 
 Setup charges one unit per edge and per node for weights, sums, finiteness, teleport and state vectors.
 Label propagation charges pair collection and deduplication per pair, the sort, offsets and state.
-Every buffer (weights, sums, teleport, ranks, next, rows; or pairs, offsets, labels, votes, rows) is reserved at capacity first.
-The request echo is staged and the result rows are reserved and prepaid before the first step.
+Every buffer (weights, sums, teleport, ranks, next, committed and candidate rows; or pairs, offsets, labels, votes, first positions, committed and candidate rows) is reserved at capacity first.
+Every setup pass, fills included, charges each unit as it runs, so at most 64 operations run between checks; only sorts (`sort_cost`) are charged before they run.
+The request echo is staged before the first step; rows are no longer prepaid.
 A PageRank step charges 2n vertex units and one edge unit per arc; a sweep n vertex units and one edge unit per neighbor entry.
-Nothing allocates or is charged after the last full step except the final deadline and cancellation check.
+A PageRank node's final-pass unit also writes its candidate row; a sweep's node unit also records its label's first position this sweep (final, as nodes run ascending) and writes its candidate row with that canonical community ID.
+A step commits its state and candidate rows together; nothing is staged, allocated or charged after the last full step except the final deadline and cancellation check.
+Versus the first S3 commit: PageRank drops the rows prepay (−rows vertex units) and reserves a second rows buffer (+16·rows bytes); label propagation drops the 2n+rows canonicalization prepay but fills first positions (net −(n+rows) vertex units) and reserves +16n + 16·rows bytes. Per-step costs are unchanged.
 A stop inside the first step returns `output: None` and `request: None`.
 A later stop discards the interrupted step and returns the last full one with the echo, `complete` and `computation_complete` false.
 A converged run whose final check fails keeps its output but lists Deadline or Cancelled.

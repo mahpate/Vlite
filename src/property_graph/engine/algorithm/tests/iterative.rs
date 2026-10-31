@@ -860,6 +860,109 @@ fn the_deadline_and_cancellation_keep_only_full_steps() {
     }
 }
 
+/// A path n0→n1→…→n{count-1} of unweighted `R` edges.
+fn chain(count: usize) -> TestGraph {
+    let names: Vec<String> = (0..count).map(|index| format!("n{index}")).collect();
+    let keys: Vec<&str> = names.iter().map(String::as_str).collect();
+    let edges: Vec<_> = keys
+        .windows(2)
+        .map(|pair| (pair[0], pair[1], None))
+        .collect();
+    small(&keys, &edges)
+}
+
+#[test]
+fn interrupted_staging_is_checked_and_keeps_the_last_full_step() {
+    use super::super::iterative::STAGED;
+    let staged = || STAGED.with(Cell::get);
+    let reset = || STAGED.with(|count| count.set(0));
+    let caps = iterations(100);
+    // 300 nodes: the default output cap keeps 100 rows.
+    for db in [chain(300), isolated(300).0] {
+        let graph = db.graph();
+        let all = everything(graph, Direction::Out);
+        for algorithm in [rank(0.5, None), Algorithm::LabelPropagation] {
+            reset();
+            let full = run_at(graph, &all, &algorithm, &hops(0), &caps, 0).unwrap();
+            let total = staged();
+            assert!(full.computation_complete && full.scope_complete);
+            assert_eq!(full.truncation, vec![AlgorithmTruncation::OutputLimit]);
+            let rows = match &full.output {
+                Some(AlgorithmOutput::PageRank(output)) => output.scores.len(),
+                Some(AlgorithmOutput::LabelPropagation(output)) => output.assignments.len(),
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(rows, 100);
+            reset();
+            run_at(graph, &all, &algorithm, &hops(0), &iterations(1), 0).unwrap();
+            let first = staged();
+            assert!(first > 64 && total >= first);
+
+            let mut points: BTreeSet<u64> = (1..=total).step_by(29).collect();
+            for at in [
+                1,
+                63,
+                64,
+                65,
+                first / 2,
+                first,
+                first + 1,
+                first + 64,
+                total,
+            ] {
+                points.insert(at.clamp(1, total));
+            }
+            let mut kept = BTreeSet::new();
+            for inject in points {
+                for cancel in [false, true] {
+                    // The deadline passes, or the flag is set, once staging
+                    // work `inject` has run; the clock is read only by checks.
+                    let flag = AtomicBool::new(false);
+                    let clock = || {
+                        if staged() < inject {
+                            return 0;
+                        }
+                        if cancel {
+                            flag.store(true, AtomicOrdering::Relaxed);
+                            0
+                        } else {
+                            1_000
+                        }
+                    };
+                    reset();
+                    let result = clocked(graph, &all, &algorithm, &caps, &clock, Some(&flag));
+                    let after = staged() - inject;
+                    assert!(
+                        after <= 64,
+                        "{after} staging units ran unchecked at {inject}"
+                    );
+                    let reason = if cancel {
+                        AlgorithmTruncation::Cancelled
+                    } else {
+                        AlgorithmTruncation::Deadline
+                    };
+                    assert_eq!(result.truncation, vec![reason]);
+                    assert!(!result.computation_complete && result.scope_complete);
+                    // Nothing before the first full step, else exactly the
+                    // last full step.
+                    kept.insert(result.output.as_ref().map(|_| steps(&result)));
+                    if result.output.is_some() {
+                        let k = steps(&result);
+                        assert!(k <= steps(&full));
+                        let capped =
+                            run_at(graph, &all, &algorithm, &hops(0), &iterations(k), 0).unwrap();
+                        assert_eq!(result.output, capped.output);
+                    }
+                }
+            }
+            assert!(kept.contains(&None), "{kept:?}");
+            if steps(&full) > 1 {
+                assert!(kept.contains(&Some(1)), "{kept:?}");
+            }
+        }
+    }
+}
+
 #[test]
 fn output_caps_cut_rows_of_iterative_results() {
     let db = slow_graph();
