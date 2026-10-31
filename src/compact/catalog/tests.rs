@@ -103,7 +103,8 @@ fn split(bytes: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
     let (header, mut rest) = bytes.split_at(32);
     let mut frames = Vec::new();
     while !rest.is_empty() {
-        let (frame, tail) = rest.split_at(PREFIX_SIZE + u32_at(rest, 28) as usize + FOOTER_SIZE);
+        let body = format::plain_body_len(rest[4], u32_at(rest, 24), u32_at(rest, 28));
+        let (frame, tail) = rest.split_at(PREFIX_SIZE + body + FOOTER_SIZE);
         frames.push(frame.to_vec());
         rest = tail;
     }
@@ -128,12 +129,33 @@ fn sealed(header: &[u8], frames: &[Vec<u8>]) -> Vec<u8> {
     bytes
 }
 
+/// The plaintext `log` with every frame sealed under `key()`, as an
+/// encrypted store writes it. The frame prefixes, and so the image end
+/// digest, are unchanged.
+fn encrypted(log: &[u8]) -> Vec<u8> {
+    let (header, frames) = split(log);
+    let cipher = Cipher::create(&key()).unwrap();
+    let mut bytes = format::header_v5_flags(
+        u32_at(&header, 12) as usize,
+        u64_at(&header, 16),
+        u16_at(&header, 24),
+        u16_at(&header, 26) | FLAG_ENCRYPTED,
+        Some(&cipher),
+    );
+    for frame in &frames {
+        bytes.extend(cipher.seal_frame(frame).unwrap());
+    }
+    bytes
+}
+
 /// `frame` after `edit` changed its prefix or body (body bytes start at
 /// `PREFIX_SIZE`), with its length, checksums and footer refitted.
 fn refit(frame: &[u8], edit: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
     let mut bytes = frame[..frame.len() - FOOTER_SIZE].to_vec();
     edit(&mut bytes);
-    let length = (bytes.len() - PREFIX_SIZE) as u32;
+    // An op-1 body also holds its `count` vector components.
+    let vector = format::plain_body_len(bytes[4], u32_at(&bytes, 24), 0);
+    let length = (bytes.len() - PREFIX_SIZE - vector) as u32;
     bytes[28..32].copy_from_slice(&length.to_le_bytes());
     let prefix = format::crc32(&bytes[..32]);
     bytes[32..36].copy_from_slice(&prefix.to_le_bytes());

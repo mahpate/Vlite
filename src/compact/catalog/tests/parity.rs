@@ -21,25 +21,6 @@ fn with_create(image: Vec<u8>, floor: u64) -> Vec<u8> {
     log
 }
 
-/// The plaintext `log` with every frame sealed under `key()`, as an
-/// encrypted store writes it. The frame prefixes, and so the image end
-/// digest, are unchanged.
-fn encrypted(log: &[u8]) -> Vec<u8> {
-    let (header, frames) = split(log);
-    let cipher = Cipher::create(&key()).unwrap();
-    let mut bytes = format::header_v5_flags(
-        u32_at(&header, 12) as usize,
-        u64_at(&header, 16),
-        u16_at(&header, 24),
-        u16_at(&header, 26) | FLAG_ENCRYPTED,
-        Some(&cipher),
-    );
-    for frame in &frames {
-        bytes.extend(cipher.seal_frame(frame).unwrap());
-    }
-    bytes
-}
-
 /// Outcomes of full replay, the change feed and log export of `log` from
 /// `floor`. A reader that accepts it returns exactly the suffix create.
 fn readers(log: &[u8], key: Option<&EncryptionKey>, floor: u64) -> [String; 3] {

@@ -1,10 +1,12 @@
 //! Float16 dense values in populated precision stores (review 9ebcbeff,
-//! HIGH). Until commit-time canonicalization, a float16 collection holds
-//! only values that a complete image or ordinary frames already store
-//! exactly in float16: replay verifies every primary and named dense value
-//! bit for bit (never rounding it) and refuses any other as corruption,
-//! and every write that would add a dense value is refused before it
-//! commits. Float32 collections keep every finite value unchanged.
+//! HIGH, and its transport finding). Until commit-time canonicalization, a
+//! float16 collection holds only values that a complete image or ordinary
+//! frames already store exactly in float16: full replay, the change feed
+//! and log export each verify every primary and named dense value bit for
+//! bit (never rounding it) and refuse any other as corruption before they
+//! return anything, and every write that would add a dense value is
+//! refused before it commits. Float32 collections keep every finite value
+//! unchanged.
 
 use super::*;
 use crate::DistanceMetric;
@@ -119,12 +121,30 @@ fn exact_bits() -> BTreeSet<u32> {
     EXACT.iter().map(|value| value.to_bits()).collect()
 }
 
-fn replay_verifies_float16_values(key: Option<&EncryptionKey>) {
+/// Outcomes of full replay, the change feed from `floor` and log export
+/// after `floor` of `log`.
+fn readers(log: &[u8], key: Option<&EncryptionKey>, floor: u64) -> [String; 3] {
+    let cursor = FeedCursor {
+        lineage: LINEAGE,
+        sequence: floor,
+    };
+    let feed = crate::changes::read_changes(&mut Cursor::new(log), key, None, &cursor, 16);
+    let export = logops::read_segment(&mut Cursor::new(log), key, None, floor, 1 << 20);
+    [outcome(load(log, key)), outcome(feed), outcome(export)]
+}
+
+fn each(outcome: &str) -> [String; 3] {
+    std::array::from_fn(|_| outcome.to_owned())
+}
+
+fn readers_verify_float16_values(key: Option<&EncryptionKey>) {
     let _gate = Activation::on();
     let [full, half] = populated(key, EXACT, EXACT);
+    let floor = load(&full, key).unwrap().history_floor;
     let loaded = load(&half, key).unwrap();
     assert_eq!(loaded.collections[&1].precision, Some(F16));
     assert_eq!(dense_bits(&loaded), exact_bits());
+    assert_eq!(readers(&half, key, floor), each("ok"));
     if key.is_none() {
         // The image restates record 1 in a record block and its named
         // vectors in an op-10 frame.
@@ -133,11 +153,11 @@ fn replay_verifies_float16_values(key: Option<&EncryptionKey>) {
         assert!(ops.contains(&14) && ops.contains(&10), "{ops:?}");
     }
     // An image that restates any other value is corrupt, as float16 and
-    // only as float16.
+    // only as float16, to every reader.
     for vector in INEXACT {
         for [full, half] in [populated(key, vector, EXACT), populated(key, EXACT, vector)] {
-            assert_eq!(outcome(load(&full, key)), "ok");
-            assert_eq!(outcome(load(&half, key)), "corrupt", "{vector:?}");
+            assert_eq!(readers(&full, key, floor), each("ok"));
+            assert_eq!(readers(&half, key, floor), each("corrupt"), "{vector:?}");
         }
     }
     // Ordinary frames after the image, written by a float32 `half`.
@@ -153,23 +173,113 @@ fn replay_verifies_float16_values(key: Option<&EncryptionKey>) {
             assert!(log.starts_with(&full));
             let suffix = &log[full.len()..];
             assert_eq!(suffix[4], operation, "{path}");
-            assert_eq!(outcome(load(&log, key)), "ok");
+            assert_eq!(readers(&log, key, floor), each("ok"), "{path}");
             let mut log = half.clone();
             log.extend_from_slice(suffix);
-            let replayed = load(&log, key);
-            assert_eq!(outcome(replayed), expected, "{path} {vector:?}");
+            assert_eq!(
+                readers(&log, key, floor),
+                each(expected),
+                "{path} {vector:?}"
+            );
             if expected == "ok" {
                 let loaded = load(&log, key).unwrap();
                 assert_eq!(dense_bits(&loaded), exact_bits(), "{path}");
+                let cursor = FeedCursor {
+                    lineage: LINEAGE,
+                    sequence: floor,
+                };
+                let (batch, _) =
+                    crate::changes::read_changes(&mut Cursor::new(&log), key, None, &cursor, 16)
+                        .unwrap();
+                assert!(!batch.changes.is_empty(), "{path}");
+                assert!(
+                    batch
+                        .changes
+                        .iter()
+                        .all(|change| change.sequence == floor + 1)
+                );
+                let (segment, _) =
+                    logops::read_segment(&mut Cursor::new(&log), key, None, floor, 1 << 20)
+                        .unwrap();
+                assert_eq!(segment.frames, suffix, "{path}");
             }
         }
     }
 }
 
 #[test]
-fn replay_verifies_float16_values_bit_for_bit() {
-    replay_verifies_float16_values(None);
-    replay_verifies_float16_values(Some(&key()));
+fn readers_verify_float16_values_bit_for_bit() {
+    readers_verify_float16_values(None);
+    readers_verify_float16_values(Some(&key()));
+}
+
+/// `base` followed by `frames`.
+fn with(base: &[u8], frames: &[&[u8]]) -> Vec<u8> {
+    let mut log = base.to_vec();
+    for frame in frames {
+        log.extend_from_slice(frame);
+    }
+    log
+}
+
+/// The frames that `write` commits to the plaintext store `log`.
+fn committed(log: Vec<u8>, write: impl FnOnce(&mut Database) -> Result<()>) -> Vec<u8> {
+    let mut db = Database::open_from_bytes(log.clone(), None).unwrap();
+    write(&mut db).unwrap();
+    db.to_bytes().unwrap()[log.len()..].to_vec()
+}
+
+#[test]
+fn readers_follow_precision_through_creates_and_drops() {
+    let _gate = Activation::on();
+    let [full, half] = populated(None, EXACT, EXACT);
+    let floor = load(&full, None).unwrap().history_floor;
+    let create = |at: u64, id: u16, name: &str, precision| {
+        let settings = CollectionSettings::default();
+        format::precise_create_frame(floor + at, id, name, 4, &settings, precision)
+    };
+    let put = |log: Vec<u8>, name: &str, vector: [f32; 4]| {
+        committed(log, |db| {
+            db.collection_mut(name)?.put(1, &vector, b"p").map(drop)
+        })
+    };
+    // `later` (ID 9) created after the image, as float32 and as float16,
+    // and record 1 put into it at the next sequence.
+    let [later32, later16] = [F32, F16].map(|precision| create(1, 9, "later", precision));
+    let into_later = |vector| put(with(&full, &[&later32]), "later", vector);
+    let [exact, inexact, overflow] = [EXACT, INEXACT[0], INEXACT[1]].map(into_later);
+    // `later` dropped empty, `again` (ID 10, float32) created and 0.1 put
+    // into it; and the same with `later`'s ID reused instead, which a
+    // reader that forgot the float16 `later` would take for float32.
+    let dropped = committed(with(&full, &[&later32]), |db| db.drop_collection("later"));
+    let again = create(3, 10, "again", F32);
+    let into_again = put(
+        with(&full, &[&later32, &dropped, &again]),
+        "again",
+        INEXACT[0],
+    );
+    let reused = create(3, 9, "later", F32);
+    let into_reused = refit(&into_again, |bytes| {
+        bytes[5..7].copy_from_slice(&9u16.to_le_bytes())
+    });
+    let cases: [(&[&[u8]], &str); 6] = [
+        (&[&later16, &exact], "ok"),
+        (&[&later16, &inexact], "corrupt"),
+        (&[&later16, &overflow], "corrupt"),
+        (&[&later32, &inexact], "ok"),
+        (&[&later16, &dropped, &again, &into_again], "ok"),
+        (&[&later16, &dropped, &reused, &into_reused], "corrupt"),
+    ];
+    for (at, (frames, expected)) in cases.into_iter().enumerate() {
+        let log = with(&half, frames);
+        assert_eq!(readers(&log, None, floor), each(expected), "{at}");
+        let sealed = encrypted(&log);
+        assert_eq!(
+            readers(&sealed, Some(&key()), floor),
+            each(expected),
+            "{at}"
+        );
+    }
 }
 
 /// The observable state of `half` that a refused write must not change.

@@ -23,7 +23,7 @@ use crate::format::{
 };
 use crate::property_graph::engine::{GraphBody, GraphEntry};
 use crate::{Error, Result};
-use catalog::{KIND_CATALOG, KIND_IMPORTS, KIND_REVISIONS};
+use catalog::{KIND_CATALOG, KIND_IMPORTS, KIND_REVISIONS, Precision};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -346,6 +346,15 @@ pub(crate) enum Supplement {
     },
 }
 
+/// A live collection of a precision log: its name, dimensions and stored
+/// precision, which the catalog gives the collections an image restates
+/// and op 17 the ones created after it.
+struct Live {
+    name: String,
+    dimensions: usize,
+    precision: Option<Precision>,
+}
+
 /// Checks the frames of a `FLAG_COMPACT` image in log order: every frame
 /// prefix (`prefix`) before its body is read, each verified op-16 body
 /// (`block`), and `end` where the log or the scan ends.
@@ -361,10 +370,13 @@ pub(crate) struct ImageCheck {
     floor: Option<u64>,
     /// Collections created before the table; `default` always exists.
     collections: BTreeSet<u16>,
-    /// In a precision image, the name and dimensions of each of them, and
+    /// In a precision log, each live collection: those restated before the
+    /// table, then those that frames after the image create or drop; and
     /// the highest collection ID the log has used (the header floor or a
-    /// restated ID), which its catalog and import registry must match.
-    described: BTreeMap<u16, (String, usize)>,
+    /// restated or created ID). The catalog and import registry must match
+    /// the restated ones, and every dense value written into one must be
+    /// exactly a value of its precision.
+    described: BTreeMap<u16, Live>,
     collection_high: u16,
     entries: Option<Table>,
     /// The run of blocks being read (owner, kind, next partition), and runs
@@ -399,7 +411,14 @@ impl ImageCheck {
             coverage: None,
             floor: None,
             collections: BTreeSet::from([0]),
-            described: BTreeMap::from([(0, ("default".to_string(), dimensions))]),
+            described: BTreeMap::from([(
+                0,
+                Live {
+                    name: "default".to_string(),
+                    dimensions,
+                    precision: None,
+                },
+            )]),
             collection_high: collection_floor,
             entries: None,
             run: None,
@@ -562,21 +581,32 @@ impl ImageCheck {
     }
 
     /// Checks the verified (and decrypted) body of any frame whose prefix
-    /// `prefix` accepted, for readers that do not replay the image: op-16
-    /// blocks (`block`), and in a precision image the collection creates
+    /// `prefix` accepted, for readers that do not replay the log: op-16
+    /// blocks (`block`); and in a precision log the collection creates
     /// (`created`) and graph snapshots (`snapshot`) that its catalog,
-    /// import registry and revision runs must match. Full replay decodes
-    /// those frames itself and calls the same checks.
+    /// import registry and revision runs must match, the drops after it,
+    /// and every dense value a frame writes, which must be exactly a value
+    /// of its collection's precision (`format::check_frame_dense`). Full
+    /// replay decodes those frames itself and makes the same checks.
     pub(crate) fn frame(&mut self, frame: &RawFrame, offset: u64) -> Result<Option<Supplement>> {
         let body = frame.body();
         match frame.operation {
             OP_COMPACT_BLOCK => self.block(frame.collection, frame.id, frame.count, body, offset),
             // The prefix check admits op 5 in a precision log only in its
-            // image, before the table.
+            // image, before the table, and op 17 only after the image.
             5 if self.precise => {
                 let (name, dimensions, _) = crate::format::decode_create(body, offset)?;
-                self.created(frame.id as u16, name, dimensions, offset)
+                self.created(frame.id as u16, name, dimensions, None, offset)
                     .map(|()| None)
+            }
+            OP_COLLECTION_PRECISE => {
+                let (precision, name, dimensions, _) = crate::format::decode_precise(body, offset)?;
+                self.created(frame.id as u16, name, dimensions, Some(precision), offset)
+                    .map(|()| None)
+            }
+            6 if self.precise => {
+                self.described.remove(&(frame.id as u16));
+                Ok(None)
             }
             OP_GRAPH_SNAPSHOT if self.precise => {
                 let snapshot = crate::property_graph::frame::decode_frame(
@@ -588,33 +618,56 @@ impl ImageCheck {
                 )?;
                 self.snapshot(&snapshot, offset).map(|()| None)
             }
+            _ if self.precise => {
+                let floor = self.floor.expect("frames follow the advance");
+                crate::format::check_frame_dense(frame, self.version, floor, offset, |id| {
+                    self.described
+                        .get(&id)
+                        .map(|live| (live.dimensions, live.precision))
+                        .ok_or_else(|| corrupt(offset, "record references unknown collection"))
+                })
+                .map(|()| None)
+            }
             _ => Ok(None),
         }
     }
 
-    /// Notes a collection that a precision image restates (op 5, which
-    /// `prefix` admitted): IDs ascend and at most `MAX_COLLECTIONS` live.
+    /// Notes a collection of a precision log: one its image restates (op 5,
+    /// which `prefix` admitted), whose `precision` the catalog then gives,
+    /// in ascending ID order; or one created after the image (op 17) under
+    /// an ID the log never used. At most `MAX_COLLECTIONS` live.
     pub(crate) fn created(
         &mut self,
         id: u16,
         name: String,
         dimensions: usize,
+        precision: Option<Precision>,
         offset: u64,
     ) -> Result<()> {
         if !self.precise {
             return Ok(());
         }
-        if self
-            .described
-            .last_key_value()
-            .is_some_and(|(last, _)| *last >= id)
-        {
+        let reused = match precision {
+            None => self
+                .described
+                .last_key_value()
+                .is_some_and(|(last, _)| *last >= id),
+            Some(_) => id <= self.collection_high,
+        };
+        if reused {
             return Err(corrupt(offset, "collection ID reused"));
         }
         if self.described.len() >= MAX_COLLECTIONS {
             return Err(corrupt(offset, "too many live collections"));
         }
-        self.described.insert(id, (name, dimensions));
+        self.described.insert(
+            id,
+            Live {
+                name,
+                dimensions,
+                precision,
+            },
+        );
         self.collection_high = self.collection_high.max(id);
         Ok(())
     }
@@ -750,10 +803,14 @@ impl ImageCheck {
                 if entries.iter().any(|entry| {
                     self.described
                         .get(&entry.collection)
-                        .map(|(_, dimensions)| *dimensions)
+                        .map(|live| live.dimensions)
                         != Some(entry.dimensions)
                 }) {
                     return Err(corrupt(offset, "precision catalog dimensions mismatch"));
+                }
+                for entry in &entries {
+                    let live = self.described.get_mut(&entry.collection);
+                    live.expect("listed above").precision = Some(entry.precision);
                 }
                 Ok(Supplement::Catalog(entries))
             }
@@ -766,7 +823,7 @@ impl ImageCheck {
                     let bound = if state.collection_dropped {
                         collection != 0 && collection <= self.collection_high && live.is_none()
                     } else {
-                        live.is_some_and(|(name, _)| name == registry.collection_name(job))
+                        live.is_some_and(|live| live.name == registry.collection_name(job))
                     };
                     if !bound {
                         return Err(corrupt(offset, "import job bound to an unknown collection"));

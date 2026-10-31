@@ -2123,7 +2123,7 @@ fn load_inner<R: Read + Seek>(
                 if operation == 5
                     && let Some(check) = check.as_mut()
                 {
-                    check.created(collection, name.clone(), dimensions, offset)?;
+                    check.created(collection, name.clone(), dimensions, None, offset)?;
                 }
                 let mut created = LoadedCollection::new(name, dimensions, settings);
                 created.settings_persisted = true;
@@ -2526,6 +2526,94 @@ pub(crate) fn check_dense(precision: Option<Precision>, vector: &[f32], offset: 
             offset,
             "dense vector not stored exactly in its precision",
         )),
+        _ => Ok(()),
+    }
+}
+
+/// Applies `check_dense` to every dense vector that the verified frame
+/// `frame` (at `offset`) of a `FLAG_PRECISION` log of `version` writes,
+/// decoded as replay decodes it: primary puts, batches and import chunks,
+/// named vectors, record blocks restating checkpoint `floor`, and graph
+/// vector entries. `target` gives a collection's dimensions and stored
+/// precision, or refuses one that is not live. Readers that do not replay
+/// (the change feed and log export) call this before they return the
+/// frame (P3a); replay checks the same values where it decodes them.
+pub(crate) fn check_frame_dense(
+    frame: &RawFrame,
+    version: u32,
+    floor: u64,
+    offset: u64,
+    target: impl Fn(u16) -> Result<(usize, Option<Precision>)>,
+) -> Result<()> {
+    let body = frame.body();
+    let puts = |batch: &[u8],
+                count: usize,
+                (dimensions, precision): (usize, Option<Precision>),
+                version: u32| {
+        let (operations, _) = decode_batch(batch, count, dimensions, offset, version)?;
+        operations.iter().try_for_each(|operation| match operation {
+            Mutation::Put { vector, .. } | Mutation::PutWithMetadata { vector, .. } => {
+                check_dense(precision, vector, offset)
+            }
+            Mutation::Delete { .. } => Ok(()),
+        })
+    };
+    match frame.operation {
+        1 => {
+            let (_, precision) = target(frame.collection)?;
+            let vector = decode_vector(&body[..frame.count as usize * 4], offset)?;
+            check_dense(precision, &vector, offset)
+        }
+        3 => puts(
+            body,
+            frame.count as usize,
+            target(frame.collection)?,
+            version,
+        ),
+        4 | 9 => {
+            let (dimensions, precision) = target(frame.collection)?;
+            let record = match frame.operation {
+                4 => decode_extended(body, dimensions, offset, version >= V5)?,
+                _ => {
+                    let body = body
+                        .get(9..)
+                        .ok_or_else(|| corrupt(offset, "invalid expiring record length"))?;
+                    decode_extended(body, dimensions, offset, true)?
+                }
+            };
+            check_dense(precision, &record.vector, offset)
+        }
+        10 => {
+            let (_, precision) = target(frame.collection)?;
+            let data = crate::vectors::VectorData::decode(body)
+                .map_err(|_| corrupt(offset, "invalid vector extension"))?;
+            data.records
+                .values()
+                .flat_map(|record| record.dense.values().flatten())
+                .try_for_each(|version| check_dense(precision, &version.vector, offset))
+        }
+        OP_RECORD_BLOCK => {
+            let (dimensions, precision) = target(frame.collection)?;
+            decode_block(&frame.plain, dimensions, floor)
+                .ok_or_else(|| corrupt(offset, "invalid record block"))?
+                .iter()
+                .try_for_each(|entry| check_dense(precision, &entry.record.vector, offset))
+        }
+        OP_GRAPH => {
+            let body = crate::property_graph::frame::decode_frame(
+                false,
+                frame.id,
+                frame.count,
+                body,
+                offset,
+            )?;
+            body.entries.iter().try_for_each(|entry| match entry {
+                crate::property_graph::engine::GraphEntry::VectorMutation { collection, entry } => {
+                    puts(entry, 1, target(*collection)?, V5)
+                }
+                _ => Ok(()),
+            })
+        }
         _ => Ok(()),
     }
 }
