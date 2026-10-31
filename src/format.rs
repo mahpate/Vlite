@@ -419,6 +419,8 @@ pub(crate) struct Loaded {
     /// its full history): sequences at or below it were restated, so change
     /// feeds and log segments cannot start before it.
     pub history_floor: u64,
+    /// Derived blocks of a `FLAG_COMPACT` image that this build skipped.
+    pub compact_skipped: Vec<crate::compact::Skipped>,
 }
 
 impl Loaded {
@@ -1314,6 +1316,38 @@ pub(crate) fn plain_body_len(operation: u8, count: u32, payload_len: u32) -> usi
     }
 }
 
+/// Whether a file of `version` with header `flags` may hold the operation of
+/// `prefix`, with its reserved bytes clear. Advance and time-anchor frames
+/// have their own checks and are not covered.
+pub(crate) fn frame_allowed(version: u32, flags: u16, prefix: &[u8]) -> bool {
+    let operation = prefix[4];
+    let allowed = match operation {
+        1 | 2 => true,
+        3 => version >= 2,
+        4 => version >= 3,
+        5..=7 => version >= V4,
+        8 => version >= V5,
+        9 | 10 => version >= V5,
+        // FLAG_GRAPH only passes the header check on v5.
+        OP_GRAPH => version >= V5 && flags & FLAG_GRAPH != 0,
+        OP_RECORD_BLOCK => version >= V5 && flags & FLAG_HISTORY != 0,
+        OP_GRAPH_SNAPSHOT => version >= V5 && flags & FLAG_HISTORY != 0 && flags & FLAG_GRAPH != 0,
+        // FLAG_COMPACT only passes the header check with FLAG_HISTORY.
+        OP_COMPACT_BLOCK => version >= V5 && flags & FLAG_COMPACT != 0,
+        _ => false,
+    };
+    let reserved_clear = if version >= V4
+        && matches!(
+            operation,
+            1..=4 | 8 | 9 | 10 | OP_RECORD_BLOCK | OP_COMPACT_BLOCK
+        ) {
+        prefix[7] == 0
+    } else {
+        prefix[5..8] == [0; 3]
+    };
+    allowed && reserved_clear
+}
+
 /// A structurally verified frame read from a log.
 pub(crate) struct RawFrame {
     pub operation: u8,
@@ -1341,6 +1375,17 @@ pub(crate) fn next_frame<R: Read + Seek>(
     header: &LogHeader,
     offset: u64,
 ) -> Result<Option<RawFrame>> {
+    next_checked_frame(file, header, offset, None)
+}
+
+/// `next_frame` that passes each prefix to the image check of a
+/// `FLAG_COMPACT` log before any of its body is read or allocated.
+pub(crate) fn next_checked_frame<R: Read + Seek>(
+    file: &mut R,
+    header: &LogHeader,
+    offset: u64,
+    check: Option<&mut crate::compact::ImageCheck>,
+) -> Result<Option<RawFrame>> {
     if header.length.saturating_sub(offset) < PREFIX_SIZE as u64 {
         return Ok(None);
     }
@@ -1352,6 +1397,9 @@ pub(crate) fn next_frame<R: Read + Seek>(
     }
     if crc32(&prefix[..32]) != u32_at(&prefix, 32) {
         return Err(corrupt(offset, "record header checksum mismatch"));
+    }
+    if let Some(check) = check {
+        check.prefix(&prefix, offset)?;
     }
     let operation = prefix[4];
     let count = u32_at(&prefix, 24);
@@ -1439,6 +1487,7 @@ fn load_inner<R: Read + Seek>(
         commit_times: Vec::new(),
         graph: (flags & FLAG_GRAPH != 0).then(crate::property_graph::engine::GraphState::new),
         history_floor: 0,
+        compact_skipped: Vec::new(),
     };
     let mut jobs: HashMap<u64, JobReplay> = HashMap::new();
     // Highest collection ID created by an op 5 in this log so far, and how
@@ -1456,7 +1505,7 @@ fn load_inner<R: Read + Seek>(
     // offset of their first frame.
     let mut blocks: Option<BlockRun> = None;
     let mut snapshot: Option<(u64, Vec<crate::property_graph::engine::GraphBody>)> = None;
-    let mut check = crate::compact::ImageCheck::new(flags);
+    let mut check = crate::compact::ImageCheck::new(version, flags);
     let mut disk = Vec::new();
     loop {
         let anchor_len = anchor.map_or(0, |(_, len)| len);
@@ -1473,9 +1522,6 @@ fn load_inner<R: Read + Seek>(
             if partial[..magic_len] != b"VREC"[..magic_len] {
                 return Err(corrupt(offset, "invalid trailing record magic"));
             }
-            if let Some(check) = &check {
-                check.torn(&partial, offset)?;
-            }
             loaded.incomplete_bytes = remaining + anchor_len;
             break;
         }
@@ -1486,6 +1532,9 @@ fn load_inner<R: Read + Seek>(
         }
         if crc32(&prefix[..32]) != u32_at(&prefix, 32) {
             return Err(corrupt(offset, "record header checksum mismatch"));
+        }
+        if let Some(check) = &mut check {
+            check.prefix(&prefix, offset)?;
         }
         let operation = prefix[4];
         if operation == OP_TIME_ANCHOR {
@@ -1537,9 +1586,6 @@ fn load_inner<R: Read + Seek>(
             disk.resize(length_on_disk as usize, 0);
             file.read_exact(&mut disk[PREFIX_SIZE..])?;
             verified_frame(&disk, cipher.as_ref(), floor, offset)?;
-            if let Some(check) = &mut check {
-                check.advance(floor, offset)?;
-            }
             loaded.sequence = floor;
             loaded.history_floor = floor;
             loaded.end += length_on_disk;
@@ -1549,33 +1595,7 @@ fn load_inner<R: Read + Seek>(
         if flags & FLAG_HISTORY != 0 && offset == start {
             return Err(corrupt(offset, "history image without an advance frame"));
         }
-        let allowed = match operation {
-            1 | 2 => true,
-            3 => version >= 2,
-            4 => version >= 3,
-            5..=7 => version >= V4,
-            8 => version >= V5,
-            9 | 10 => version >= V5,
-            // FLAG_GRAPH only passes the header check on v5.
-            OP_GRAPH => version >= V5 && flags & FLAG_GRAPH != 0,
-            OP_RECORD_BLOCK => version >= V5 && flags & FLAG_HISTORY != 0,
-            OP_GRAPH_SNAPSHOT => {
-                version >= V5 && flags & FLAG_HISTORY != 0 && flags & FLAG_GRAPH != 0
-            }
-            // FLAG_COMPACT only passes the header check with FLAG_HISTORY.
-            OP_COMPACT_BLOCK => version >= V5 && flags & FLAG_COMPACT != 0,
-            _ => false,
-        };
-        let reserved_clear = if version >= V4
-            && matches!(
-                operation,
-                1..=4 | 8 | 9 | 10 | OP_RECORD_BLOCK | OP_COMPACT_BLOCK
-            ) {
-            prefix[7] == 0
-        } else {
-            prefix[5..8] == [0; 3]
-        };
-        if !allowed || !reserved_clear {
+        if !frame_allowed(version, flags, &prefix) {
             return Err(corrupt(
                 offset,
                 "invalid operation or reserved record bytes",
@@ -1739,17 +1759,11 @@ fn load_inner<R: Read + Seek>(
             count * 4 + payload_len
         } else {
             // Ops 12 and 15 in graph builds; their prefix was validated
-            // above. Op 16 is bounded by the image check below.
+            // above. Op 16 was bounded by the image check.
             payload_len
         };
-        if let Some(check) = &mut check {
-            check.frame(operation, collection_id, sequence, id, body_len, offset)?;
-        }
         let frame_len = (PREFIX_SIZE + body_len + seal + FOOTER_SIZE) as u64;
         if remaining < frame_len {
-            if let Some(check) = &check {
-                check.torn(&prefix, offset)?;
-            }
             loaded.incomplete_bytes = remaining + anchor_len;
             break;
         }
@@ -1993,6 +2007,12 @@ fn load_inner<R: Read + Seek>(
             loaded.commit_times.push((sequence, timestamp));
         }
     }
+    // A compact image must be complete wherever the log ends, before any
+    // pending snapshot frame is applied.
+    if let Some(check) = &check {
+        check.end(loaded.end)?;
+        loaded.compact_skipped = check.skipped();
+    }
     if let Some(run) = blocks {
         run.apply(&mut loaded, cipher.as_ref())?;
     }
@@ -2004,9 +2024,6 @@ fn load_inner<R: Read + Seek>(
             first,
         )?;
         loaded.graph = Some(state);
-    }
-    if let Some(check) = &mut check {
-        check.finish(loaded.end)?;
     }
     Ok(loaded)
 }

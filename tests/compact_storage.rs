@@ -2,7 +2,8 @@
 //! `docs/projects/roadmap/compact-storage-contract.md`.
 //!
 //! `FLAG_COMPACT` (16) and op-16 blocks are accepted only behind a complete
-//! capability table and block envelope check. This build has no compact
+//! capability table and block envelope check, in an image closed by a
+//! matching end block. This build has no compact
 //! codec: a critical (or undefined) kind refuses the whole image with
 //! `UnsupportedFeature(16)` before anything is written, while an authentic,
 //! declared derived block is skipped. Images are encoded independently here
@@ -11,6 +12,7 @@
 use std::fs;
 use std::path::Path;
 
+use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 use vlite::changes::{ChangeKind, FeedCursor, read_log_changes};
 use vlite::maintenance::{self, RestoreTarget};
@@ -163,8 +165,12 @@ impl Block {
     }
 
     fn frame(&self, count: u32) -> Vec<u8> {
+        self.frame_at(FLOOR, count)
+    }
+
+    fn frame_at(&self, sequence: u64, count: u32) -> Vec<u8> {
         let id = u64::from(self.kind) | (u64::from(self.partition) << 16);
-        compact_frame(self.owner, FLOOR, id, count, &self.body())
+        compact_frame(self.owner, sequence, id, count, &self.body())
     }
 }
 
@@ -202,9 +208,47 @@ fn entry(id: u64, revision: u64, vector: [f32; 2], payload: &[u8]) -> Vec<u8> {
 }
 
 fn records() -> Vec<u8> {
+    records_at(FLOOR)
+}
+
+fn records_at(floor: u64) -> Vec<u8> {
     let mut body = entry(1, 2, [1.0, 0.0], b"a");
     body.extend_from_slice(&entry(2, 4, [0.0, 1.0], b"b"));
-    frame(OP_RECORD_BLOCK, 0, FLOOR, 0, 2, &body)
+    frame(OP_RECORD_BLOCK, 0, floor, 0, 2, &body)
+}
+
+/// The image end block over `frames` (advance first): their count and the
+/// SHA-256 of their 36-byte prefixes, in log order.
+fn end_frame(frames: &[Vec<u8>]) -> Vec<u8> {
+    let mut digest = Sha256::new();
+    for frame in frames {
+        digest.update(&frame[..36]);
+    }
+    let mut section = (frames.len() as u64).to_le_bytes().to_vec();
+    section.extend_from_slice(&digest.finalize());
+    let sequence = u64::from_le_bytes(frames[0][8..16].try_into().unwrap());
+    Block {
+        kind: 2,
+        version: 1,
+        flags: 1,
+        owner: 0,
+        partition: 0,
+        digest: 0,
+        sections: vec![(0, section)],
+    }
+    .frame_at(sequence, 1)
+}
+
+/// Recomputes both checksums of the plaintext frame at `at` after an edit.
+fn reseal(bytes: &mut [u8], at: usize) {
+    let checksum = crc32(&bytes[at..at + 32]);
+    bytes[at + 32..at + 36].copy_from_slice(&checksum.to_le_bytes());
+    let payload = u32::from_le_bytes(bytes[at + 28..at + 32].try_into().unwrap()) as usize;
+    let footer = at + 36 + payload;
+    if footer + 16 <= bytes.len() {
+        let checksum = crc32(&bytes[at..footer]);
+        bytes[footer + 4..footer + 8].copy_from_slice(&checksum.to_le_bytes());
+    }
 }
 
 fn derived_blocks() -> Vec<Block> {
@@ -225,6 +269,13 @@ fn image(flags: u16, frames: &[Vec<u8>]) -> Vec<u8> {
     bytes
 }
 
+/// A complete compact image: `frames` (advance first), then their end block.
+fn compact(frames: &[Vec<u8>]) -> Vec<u8> {
+    let mut frames = frames.to_vec();
+    frames.push(end_frame(&frames));
+    image(FLAG_HISTORY | FLAG_COMPACT, &frames)
+}
+
 /// The golden image: two restated records plus three derived blocks of two
 /// declared derived kinds (no codec in this build, so all are skipped).
 fn derived_image() -> Vec<u8> {
@@ -234,7 +285,7 @@ fn derived_image() -> Vec<u8> {
         records(),
     ];
     frames.extend(derived_blocks().iter().map(|block| block.frame(1)));
-    image(FLAG_HISTORY | FLAG_COMPACT, &frames)
+    compact(&frames)
 }
 
 /// The same checkpoint without compact blocks: what a legacy image holds.
@@ -249,15 +300,12 @@ fn image_with(kind: u16, flags: u16) -> Vec<u8> {
     if flags & 1 != 0 {
         block.digest = 0;
     }
-    image(
-        FLAG_HISTORY | FLAG_COMPACT,
-        &[
-            advance(),
-            table_frame(&[(kind, 1, flags)]),
-            records(),
-            block.frame(1),
-        ],
-    )
+    compact(&[
+        advance(),
+        table_frame(&[(kind, 1, flags)]),
+        records(),
+        block.frame(1),
+    ])
 }
 
 /// The `Corrupt` reason of a failed result (panics on anything else).
@@ -300,6 +348,44 @@ fn assert_golden_state(db: &Database) {
     assert_eq!(db.revision(2).unwrap(), Some(4));
 }
 
+/// Every reader, in memory and on a closed file, refuses `bytes` with
+/// `expected`; nothing is repaired, copied or applied.
+fn assert_refused_everywhere(bytes: &[u8], floor: u64, expected: &str) {
+    assert_corrupt(open(bytes), expected);
+    let root = tempdir().unwrap();
+    let path = root.path().join("image.vlite");
+    fs::write(&path, bytes).unwrap();
+    let follower_path = root.path().join("follower.vlite");
+    let legacy = image(
+        FLAG_HISTORY,
+        &[frame(OP_ADVANCE, 0, floor, 0, 0, &[]), records_at(floor)],
+    );
+    fs::write(&follower_path, &legacy).unwrap();
+    let mut follower = ReplicaFollower::open(&follower_path, None).unwrap();
+    let cursor = FeedCursor {
+        lineage: LINEAGE,
+        sequence: floor,
+    };
+    let backup = root.path().join("backup.vlite");
+    assert_corrupt(Database::open(&path), expected);
+    assert_corrupt(Database::open_read_only(&path), expected);
+    assert_corrupt(Database::discard_incomplete_tail(&path), expected);
+    assert_corrupt(ReplicaFollower::open(&path, None), expected);
+    assert_corrupt(maintenance::inspect(&path), expected);
+    assert_corrupt(maintenance::backup(&path, &backup), expected);
+    assert_corrupt(read_log_changes(&path, None, &cursor, 10), expected);
+    assert_corrupt(
+        maintenance::export_log_segment(&path, None, floor, 1 << 20),
+        expected,
+    );
+    assert_corrupt(follower.sync_from_log(&path, 1 << 20), expected);
+    assert_eq!(follower.applied_sequence(), floor);
+    drop(follower);
+    assert_eq!(fs::read(&follower_path).unwrap(), legacy);
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert!(!backup.exists());
+}
+
 #[test]
 fn golden_image_matches_independent_encoding_and_loads_like_its_legacy_form() {
     let bytes = derived_image();
@@ -340,31 +426,33 @@ fn compact_flag_needs_a_history_image_and_a_capability_table() {
         open(&header(FLAG_HISTORY | 32)),
         Err(Error::UnsupportedFeature(32))
     ));
-    // A compact header needs an advance frame and a table.
+    // A compact header needs an advance frame, a table and an end block.
     let flags = FLAG_HISTORY | FLAG_COMPACT;
-    assert_corrupt(
-        open(&header(flags)),
-        "compact image without a capability table",
-    );
+    assert_corrupt(open(&header(flags)), "incomplete compact checkpoint image");
     assert_corrupt(
         open(&image(flags, &[advance()])),
+        "incomplete compact checkpoint image",
+    );
+    assert_corrupt(
+        open(&compact(&[advance()])),
         "compact image without a capability table",
     );
     assert_corrupt(
-        open(&image(flags, &[advance(), records()])),
+        open(&compact(&[advance(), records()])),
         "checkpoint frame before the capability table",
     );
     // An empty table cannot carry the flag: the image holds no block.
     assert_corrupt(
-        open(&image(flags, &[advance(), table_frame(&[]), records()])),
+        open(&compact(&[advance(), table_frame(&[]), records()])),
         "invalid capability table",
     );
     // A table whose declared kinds never appear is incomplete.
     assert_corrupt(
-        open(&image(
-            flags,
-            &[advance(), table_frame(&[(0x02FF, 1, 0)]), records()],
-        )),
+        open(&compact(&[
+            advance(),
+            table_frame(&[(0x02FF, 1, 0)]),
+            records(),
+        ])),
         "capability table entry is unused",
     );
 }
@@ -408,12 +496,8 @@ fn op16_is_corrupt_without_the_flag_or_outside_the_checkpoint() {
 fn capability_tables_are_strict() {
     let flags = FLAG_HISTORY | FLAG_COMPACT;
     let block = Block::derived(0x02FF, 1, 0, &[b"payload"]);
-    let with_table = |table: Vec<u8>| {
-        open(&image(
-            flags,
-            &[advance(), table, records(), block.frame(1)],
-        ))
-    };
+    let with_table =
+        |table: Vec<u8>| open(&compact(&[advance(), table, records(), block.frame(1)]));
     let tweak = |change: &dyn Fn(&mut Block)| {
         let mut table = Block::table(&[(0x02FF, 1, 0)]);
         change(&mut table);
@@ -453,6 +537,7 @@ fn capability_tables_are_strict() {
     let invalid_entry: Vec<(&str, Vec<Entry>)> = vec![
         ("kind 0", vec![(0, 1, 0), (0x02FF, 1, 0)]),
         ("lists itself", vec![(1, 1, 1), (0x02FF, 1, 0)]),
+        ("lists the end block", vec![(2, 1, 1), (0x02FF, 1, 0)]),
         ("version 0", vec![(0x02FF, 0, 0)]),
         ("unknown flag bit", vec![(0x02FF, 1, 2)]),
         ("derived marked critical", vec![(0x02FF, 1, 1)]),
@@ -536,12 +621,11 @@ fn capability_tables_are_strict() {
 
 #[test]
 fn block_envelopes_are_checked_before_a_derived_block_is_skipped() {
-    let flags = FLAG_HISTORY | FLAG_COMPACT;
     let entries = [(0x02FF, 1, 0), (0x04FF, 2, 0)];
     let load = |blocks: Vec<Vec<u8>>| {
         let mut frames = vec![advance(), table_frame(&entries), records()];
         frames.extend(blocks);
-        open(&image(flags, &frames))
+        open(&compact(&frames))
     };
     let stats = derived_blocks()[2].frame(1);
     let base = || Block::derived(0x02FF, 1, 0, &[b"abcd", b"efgh"]);
@@ -674,7 +758,7 @@ fn unsupported_kinds_refuse_every_entry_point_before_writing() {
     let cases: Vec<(&str, Vec<u8>)> = vec![
         ("P3 source", image_with(0x0100, 1)),
         ("P4 graph", image_with(0x0300, 1)),
-        ("storage reserved", image_with(0x0002, 0)),
+        ("storage reserved", image_with(0x0003, 0)),
         ("unallocated", image_with(0x0500, 1)),
         ("test-only", image_with(0xF000, 0)),
     ];
@@ -734,14 +818,11 @@ fn unsupported_kinds_refuse_every_entry_point_before_writing() {
     assert_eq!(fs::read(&follower_path).unwrap(), legacy_image());
     // Structure is checked before support: a malformed table with a
     // critical entry is corrupt, not unsupported.
-    let malformed = image(
-        FLAG_HISTORY | FLAG_COMPACT,
-        &[
-            advance(),
-            table_frame(&[(0x0300, 1, 1), (0x0100, 1, 1)]),
-            records(),
-        ],
-    );
+    let malformed = compact(&[
+        advance(),
+        table_frame(&[(0x0300, 1, 1), (0x0100, 1, 1)]),
+        records(),
+    ]);
     assert_corrupt(
         open(&malformed),
         "unsorted or duplicate capability table entries",
@@ -750,9 +831,10 @@ fn unsupported_kinds_refuse_every_entry_point_before_writing() {
 
 #[test]
 fn torn_or_damaged_compact_images_are_never_repaired() {
+    const INCOMPLETE: &str = "incomplete compact checkpoint image";
     let golden = derived_image();
     for length in 32..golden.len() {
-        reason(open(&golden[..length]));
+        assert_corrupt(open(&golden[..length]), INCOMPLETE);
     }
     for at in 0..golden.len() {
         let mut bytes = golden.clone();
@@ -765,81 +847,69 @@ fn torn_or_damaged_compact_images_are_never_repaired() {
     for cut in [33, 100, 140, 300, golden.len() - 20, golden.len() - 1] {
         let torn = &golden[..cut];
         fs::write(&path, torn).unwrap();
-        assert_corrupt(Database::open(&path), "");
-        assert_corrupt(Database::discard_incomplete_tail(&path), "");
-        assert_corrupt(ReplicaFollower::open(&path, None), "");
+        assert_corrupt(Database::open(&path), INCOMPLETE);
+        assert_corrupt(Database::discard_incomplete_tail(&path), INCOMPLETE);
+        assert_corrupt(ReplicaFollower::open(&path, None), INCOMPLETE);
         assert_eq!(fs::read(&path).unwrap(), torn, "cut at {cut}");
     }
 
-    // Even a tear inside the prefix of a block whose kind is already in use
-    // (so every table entry is used) is corruption: a torn write keeps the
-    // frame's first bytes, and below 16 of them the image fails closed.
+    // Even after every table entry was used, a cut anywhere before the end
+    // of the end block (frame boundaries included) is corruption.
     let blocks = derived_blocks();
     let last = blocks[1].frame(1);
-    let run = image(
-        FLAG_HISTORY | FLAG_COMPACT,
-        &[
-            advance(),
-            table_frame(&[(0x02FF, 1, 0)]),
-            records(),
-            blocks[0].frame(1),
-            last.clone(),
-        ],
-    );
+    let frames = [
+        advance(),
+        table_frame(&[(0x02FF, 1, 0)]),
+        records(),
+        blocks[0].frame(1),
+        last.clone(),
+    ];
+    let run = compact(&frames);
     assert_golden_state(&open(&run).unwrap());
-    let start = run.len() - last.len();
-    for cut in start + 1..run.len() {
-        assert_corrupt(open(&run[..cut]), "torn compact checkpoint image");
+    let start = run.len() - end_frame(&frames).len() - last.len();
+    for cut in start..run.len() {
+        assert_corrupt(open(&run[..cut]), INCOMPLETE);
     }
-    for cut in [start + 10, start + 40] {
+    let cursor = FeedCursor {
+        lineage: LINEAGE,
+        sequence: FLOOR,
+    };
+    for cut in [
+        start,
+        start + 10,
+        start + 40,
+        start + last.len(),
+        run.len() - 1,
+    ] {
         fs::write(&path, &run[..cut]).unwrap();
-        let cursor = FeedCursor {
-            lineage: LINEAGE,
-            sequence: FLOOR,
-        };
-        assert_corrupt(
-            read_log_changes(&path, None, &cursor, 10),
-            "torn compact checkpoint image",
-        );
+        assert_corrupt(read_log_changes(&path, None, &cursor, 10), INCOMPLETE);
         assert_corrupt(
             maintenance::export_log_segment(&path, None, FLOOR, 1 << 20),
-            "torn compact checkpoint image",
+            INCOMPLETE,
         );
     }
 
-    // A log frame torn after a complete image is still an incomplete tail
-    // once its sequence shows it is not part of the image.
+    // After a complete image, any torn log frame is an incomplete tail,
+    // however short, and repair restores exactly the image.
     let mut primary = Database::open_from_bytes(golden.clone(), None).unwrap();
     primary.put(3, &[3.0, 3.0], b"c").unwrap();
     let full = primary.to_bytes().unwrap();
     assert!(full.len() > golden.len() + 36);
-    for cut in [golden.len() + 1, golden.len() + 15] {
-        fs::write(&path, &full[..cut]).unwrap();
-        assert_corrupt(Database::open(&path), "torn compact checkpoint image");
-        assert_corrupt(
-            Database::discard_incomplete_tail(&path),
-            "torn compact checkpoint image",
-        );
-        assert_corrupt(
-            read_log_changes(
-                &path,
-                None,
-                &FeedCursor {
-                    lineage: LINEAGE,
-                    sequence: FLOOR,
-                },
-                10,
-            ),
-            "torn compact checkpoint image",
-        );
-    }
-    for cut in [golden.len() + 16, golden.len() + 20, full.len() - 1] {
+    for cut in [
+        golden.len() + 1,
+        golden.len() + 15,
+        golden.len() + 16,
+        golden.len() + 40,
+        full.len() - 1,
+    ] {
         let torn = &full[..cut];
         fs::write(&path, torn).unwrap();
         assert!(
             matches!(Database::open(&path), Err(Error::IncompleteTail { .. })),
             "cut at {cut}"
         );
+        let batch = read_log_changes(&path, None, &cursor, 10).unwrap();
+        assert!(batch.changes.is_empty(), "cut at {cut}");
         let report = Database::discard_incomplete_tail(&path).unwrap();
         assert_eq!(report.discarded_bytes, (cut - golden.len()) as u64);
         assert_eq!(fs::read(&path).unwrap(), golden);
@@ -880,7 +950,7 @@ fn encrypted_compact_images_authenticate_every_block() {
             .iter()
             .filter(|frame| frame.2 == OP_COMPACT_BLOCK)
             .count(),
-        4
+        5
     );
 
     // A ciphertext change with recomputed checksums fails authentication.
@@ -898,8 +968,11 @@ fn encrypted_compact_images_authenticate_every_block() {
         );
     }
     // Truncation anywhere in the image is corruption, never a torn tail.
-    for cut in (32 + 64..bytes.len()).step_by(7) {
-        reason(Database::open_from_bytes(bytes[..cut].to_vec(), Some(&key)));
+    for cut in 32 + 64..bytes.len() {
+        assert_corrupt(
+            Database::open_from_bytes(bytes[..cut].to_vec(), Some(&key)),
+            "incomplete compact checkpoint image",
+        );
     }
     // And back to plaintext: the frames are carried unchanged.
     let clear = root.path().join("clear.vlite");
@@ -1059,4 +1132,297 @@ fn directory_checkpoints_rewrite_a_compact_image_faithfully() {
     assert_unsupported(maintenance::backup(&dir, root.path().join("packed")));
     assert!(!root.path().join("packed").exists());
     assert_eq!(fs::read(&image).unwrap(), image_with(0x0100, 1));
+}
+
+/// HOLD 1 on e27a4e0: at checkpoint S6, `docs` is created before the table
+/// and its only source frame is the last frame of the image.
+const S6: u64 = 6;
+
+fn s6_frames() -> Vec<Vec<u8>> {
+    let mut create = vec![4];
+    create.extend_from_slice(b"docs");
+    create.extend_from_slice(&2u32.to_le_bytes());
+    // Collection settings v1: L2, HNSW 16/100/42, no quantization, rerank 4,
+    // planner 4096/20000, no metadata indexes.
+    create.extend_from_slice(&1u16.to_le_bytes());
+    create.push(0);
+    create.extend_from_slice(&16u16.to_le_bytes());
+    create.extend_from_slice(&100u16.to_le_bytes());
+    create.extend_from_slice(&42u64.to_le_bytes());
+    create.extend_from_slice(&[0, 4]);
+    create.extend_from_slice(&4096u32.to_le_bytes());
+    create.extend_from_slice(&20_000u32.to_le_bytes());
+    create.extend_from_slice(&[0, 0]);
+    let mut docs = entry(1, 5, [1.0, 1.0], b"c");
+    docs.extend_from_slice(&entry(2, 6, [0.5, 0.5], b"d"));
+    vec![
+        frame(OP_ADVANCE, 0, S6, 0, 0, &[]),
+        frame(5, 0, S6, 1, 0, &create),
+        Block::table(&[(0x02FF, 1, 0)]).frame_at(S6, 1),
+        records_at(S6),
+        Block::derived(0x02FF, 1, 0, &[b"abcd"]).frame_at(S6, 1),
+        frame(OP_RECORD_BLOCK, 1, S6, 0, 2, &docs),
+    ]
+}
+
+#[test]
+fn a_compact_image_cut_at_any_frame_boundary_is_corrupt() {
+    let mut frames = s6_frames();
+    let source = frames[frames.len() - 1].len();
+    frames.push(end_frame(&frames));
+    let full = image(FLAG_HISTORY | FLAG_COMPACT, &frames);
+    // The reviewer's cut: at the start of the last source frame, after
+    // every table entry was used.
+    let cut = full.len() - frames[frames.len() - 1].len() - source;
+    assert_refused_everywhere(&full[..cut], S6, "incomplete compact checkpoint image");
+    // Every other frame boundary before the end block, too.
+    let mut boundary = 32;
+    for frame in &frames {
+        assert_corrupt(
+            open(&full[..boundary]),
+            "incomplete compact checkpoint image",
+        );
+        boundary += frame.len();
+    }
+    assert_eq!(boundary, full.len());
+    let db = open(&full).unwrap();
+    assert_eq!(db.len(), 2);
+    assert_eq!(db.collection("docs").unwrap().len(), 2);
+    drop(db);
+    // The same for the sealed image: re-encryption keeps every prefix, so
+    // the end block still matches.
+    let root = tempdir().unwrap();
+    let plain = root.path().join("plain.vlite");
+    fs::write(&plain, &full).unwrap();
+    let sealed = root.path().join("sealed.vlite");
+    let key = EncryptionKey::from_bytes([5; 32]);
+    maintenance::reencrypt(&plain, None, &sealed, Some(&key)).unwrap();
+    let bytes = fs::read(&sealed).unwrap();
+    let open_sealed = |bytes: &[u8]| Database::open_from_bytes(bytes.to_vec(), Some(&key));
+    assert_eq!(
+        open_sealed(&bytes)
+            .unwrap()
+            .collection("docs")
+            .unwrap()
+            .len(),
+        2
+    );
+    for (at, _, _) in sealed_frames(&bytes) {
+        assert_corrupt(
+            open_sealed(&bytes[..at]),
+            "incomplete compact checkpoint image",
+        );
+    }
+    let docs = sealed_frames(&bytes)[5].0;
+    fs::write(&sealed, &bytes[..docs]).unwrap();
+    assert_corrupt(
+        Database::open_encrypted(&sealed, &key),
+        "incomplete compact checkpoint image",
+    );
+    assert_corrupt(
+        Database::discard_incomplete_tail_encrypted(&sealed, &key),
+        "incomplete compact checkpoint image",
+    );
+    assert_eq!(fs::read(&sealed).unwrap(), &bytes[..docs]);
+}
+
+#[test]
+fn image_end_blocks_are_strict() {
+    let frames = vec![
+        advance(),
+        table_frame(&[(0x02FF, 1, 0)]),
+        records(),
+        Block::derived(0x02FF, 1, 0, &[b"abcd"]).frame(1),
+    ];
+    assert_golden_state(&open(&compact(&frames)).unwrap());
+    let with_end = |end: Vec<u8>| {
+        let mut all = frames.clone();
+        all.push(end);
+        open(&image(FLAG_HISTORY | FLAG_COMPACT, &all))
+    };
+    let end = || {
+        let mut section = (frames.len() as u64).to_le_bytes().to_vec();
+        let mut digest = Sha256::new();
+        for frame in &frames {
+            digest.update(&frame[..36]);
+        }
+        section.extend_from_slice(&digest.finalize());
+        Block {
+            kind: 2,
+            version: 1,
+            flags: 1,
+            owner: 0,
+            partition: 0,
+            digest: 0,
+            sections: vec![(0, section)],
+        }
+    };
+    assert_eq!(end().frame(1), end_frame(&frames));
+    const MISMATCH: &str = "compact image end does not match the image";
+    let tweak = |change: &dyn Fn(&mut Block)| {
+        let mut block = end();
+        change(&mut block);
+        block.frame(1)
+    };
+    assert_corrupt(with_end(tweak(&|end| end.sections[0].1[0] += 1)), MISMATCH);
+    assert_corrupt(with_end(tweak(&|end| end.sections[0].1[39] ^= 1)), MISMATCH);
+    for (case, end) in [
+        ("derived", tweak(&|end| end.flags = 0)),
+        (
+            "short",
+            tweak(&|end| {
+                end.sections[0].1.pop();
+            }),
+        ),
+        ("long", tweak(&|end| end.sections[0].1.push(0))),
+        (
+            "two sections",
+            tweak(&|end| end.sections.push((0, vec![0]))),
+        ),
+        ("padded", tweak(&|end| end.sections[0].0 = 8)),
+        ("count", end().frame(2)),
+        ("owner", {
+            let mut block = end();
+            block.owner = 1;
+            block.frame(1)
+        }),
+        ("partition", {
+            let mut block = end();
+            block.partition = 1;
+            block.frame(1)
+        }),
+    ] {
+        assert_eq!(reason(with_end(end)), "invalid compact image end", "{case}");
+    }
+    assert_corrupt(
+        with_end(tweak(&|end| end.digest = 1)),
+        "invalid compact block header",
+    );
+    // A later end block version is unsupported, once its envelope checks.
+    assert_unsupported(with_end(tweak(&|end| end.version = 2)));
+    // Every restated frame counts, in order: dropping a legacy record block
+    // or swapping two frames no longer matches.
+    let mut dropped = frames.clone();
+    dropped.remove(2);
+    let mut swapped = frames.clone();
+    swapped.swap(2, 3);
+    for mut altered in [dropped, swapped] {
+        altered.push(end_frame(&frames));
+        assert_corrupt(
+            open(&image(FLAG_HISTORY | FLAG_COMPACT, &altered)),
+            MISMATCH,
+        );
+    }
+    // The end block follows the table and closes the image exactly once.
+    assert_corrupt(
+        open(&image(
+            FLAG_HISTORY | FLAG_COMPACT,
+            &[advance(), end_frame(&[advance()])],
+        )),
+        "compact image without a capability table",
+    );
+    let mut twice = compact(&frames);
+    twice.extend_from_slice(&end_frame(&frames));
+    assert_corrupt(
+        open(&twice),
+        "restated frame after the compact checkpoint image",
+    );
+    let mut restated = compact(&frames);
+    restated.extend_from_slice(&records());
+    assert_corrupt(
+        open(&restated),
+        "restated frame after the compact checkpoint image",
+    );
+    // A later commit before the end block leaves the image incomplete.
+    let mut early = image(FLAG_HISTORY | FLAG_COMPACT, &frames);
+    early.extend_from_slice(&frame(2, 0, FLOOR + 1, 1, 0, &[]));
+    assert_refused_everywhere(&early, FLOOR, "incomplete compact checkpoint image");
+}
+
+#[test]
+fn compact_prefixes_are_checked_by_every_reader_before_a_body_is_read() {
+    let golden = derived_image();
+    let table = table_frame(&[(0x02FF, 1, 0), (0x04FF, 2, 0)]);
+    let derived_at = 32 + advance().len() + table.len() + records().len();
+    assert_eq!(derived_at, 336);
+    // A reserved prefix byte, with both checksums recomputed.
+    let mut reserved = golden.clone();
+    reserved[derived_at + 7] = 1;
+    reseal(&mut reserved, derived_at);
+    assert_refused_everywhere(
+        &reserved,
+        FLOOR,
+        "invalid operation or reserved record bytes",
+    );
+    // An advance frame with a nonzero ID.
+    let mut advance_id = golden.clone();
+    advance_id[32 + 16] = 1;
+    reseal(&mut advance_id, 32);
+    assert_refused_everywhere(&advance_id, FLOOR, "invalid advance frame");
+    // A time anchor inside the image: history images never carry them.
+    let mut anchored = golden[..derived_at].to_vec();
+    anchored.extend_from_slice(&frame(11, 0, FLOOR, 0, 0, &7u64.to_le_bytes()));
+    anchored.extend_from_slice(&golden[derived_at..]);
+    assert_refused_everywhere(
+        &anchored,
+        FLOOR,
+        "invalid operation or reserved record bytes",
+    );
+    // An oversized block is refused from its prefix alone: the body is never
+    // read or allocated (here it is not even present).
+    for length in [(64u32 << 20) + 1, 255 << 20] {
+        let mut huge = golden[..derived_at + 36].to_vec();
+        huge[derived_at + 28..derived_at + 32].copy_from_slice(&length.to_le_bytes());
+        reseal(&mut huge, derived_at);
+        assert_refused_everywhere(&huge, FLOOR, "invalid compact block length");
+    }
+}
+
+/// Skipped derived blocks are reported in the server's structured log
+/// (stderr and `/v1/admin/logs`), which states that nothing was rebuilt.
+#[cfg(feature = "server")]
+#[tokio::test]
+async fn skipped_derived_blocks_are_reported_without_claiming_a_rebuild() {
+    use http_body_util::BodyExt;
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+    use vlite::server::{BearerToken, ServerOptions, Service, configured_admin_router};
+
+    const ADMIN: &str = "compact_admin_secret_0123456789_ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    async fn reports(db: Database) -> Vec<(Value, Value)> {
+        let options = ServerOptions {
+            admin_token: Some(BearerToken::new(ADMIN).unwrap()),
+            ..ServerOptions::default()
+        };
+        let app = configured_admin_router(Service::new(db), options).unwrap();
+        let request = axum::http::Request::builder()
+            .uri("/v1/admin/logs?q=compact_block_skip&limit=1000")
+            .header("authorization", format!("Bearer {ADMIN}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 200);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let page: Value = serde_json::from_slice(&bytes).unwrap();
+        page["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| (entry["level"].clone(), entry["fields"].clone()))
+            .collect()
+    }
+    // A legacy image skips nothing.
+    assert!(reports(open(&legacy_image()).unwrap()).await.is_empty());
+    let skipped = |kind: u16, version: u16, blocks: u32| {
+        (
+            json!("warn"),
+            json!({"event": "compact_block_skip", "outcome": "unsupported_version",
+                "collection": 0, "kind": kind, "version": version, "blocks": blocks,
+                "rebuild": "none"}),
+        )
+    };
+    assert_eq!(
+        reports(open(&derived_image()).unwrap()).await,
+        [skipped(0x02FF, 1, 2), skipped(0x04FF, 2, 1)]
+    );
 }

@@ -227,8 +227,8 @@ fn scan<R: Read + Seek>(
     let mut anchor_ms: Option<u64> = None;
     let mut has_more = false;
     let mut graphs = crate::property_graph::feed::FeedGraphs::default();
-    let mut check = crate::compact::ImageCheck::new(header.flags);
-    while let Some(frame) = format::next_frame(file, header, offset)? {
+    let mut check = crate::compact::ImageCheck::new(header.version, header.flags);
+    while let Some(frame) = format::next_checked_frame(file, header, offset, check.as_mut())? {
         let at = offset;
         offset += frame.disk.len() as u64;
         if frame.operation == OP_TIME_ANCHOR {
@@ -247,22 +247,8 @@ fn scan<R: Read + Seek>(
                     floor: frame.sequence,
                 });
             }
-            if let Some(check) = &mut check {
-                check.advance(frame.sequence, at)?;
-            }
             head = frame.sequence;
             continue;
-        }
-        if let Some(check) = &mut check {
-            let body_len = frame.body().len();
-            check.frame(
-                frame.operation,
-                frame.collection,
-                frame.sequence,
-                frame.id,
-                body_len,
-                at,
-            )?;
         }
         head = head.max(frame.sequence);
         let committed_at = anchor_ms.take();
@@ -442,7 +428,11 @@ fn scan<R: Read + Seek>(
         }
         next = frame.sequence;
     }
-    crate::compact::end_scan(check, file, header, offset)?;
+    // The scan stopped at the end of the log, a frame that does not fit, or
+    // a full batch (only ever after the image).
+    if let Some(check) = &check {
+        check.end(offset)?;
+    }
     if after > head {
         return Err(Error::CursorAhead {
             cursor: after,

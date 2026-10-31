@@ -922,6 +922,8 @@ pub struct Database {
     /// The latest clock graph writes and checkpoints used (see
     /// `graph_now`).
     graph_clock: u64,
+    /// Derived blocks of a compact image skipped at open (none are rebuilt).
+    compact_skipped: Vec<compact::Skipped>,
 }
 
 /// Source of commit timestamps (milliseconds since the Unix epoch).
@@ -1378,6 +1380,7 @@ impl Database {
             read_only: false,
             graph: (flags & format::FLAG_GRAPH != 0).then(property_graph::engine::GraphState::new),
             graph_clock: 0,
+            compact_skipped: Vec::new(),
         })
     }
 
@@ -1429,6 +1432,13 @@ impl Database {
         self.read_only
     }
 
+    /// Derived blocks of a compact image that open skipped; the server
+    /// reports them (no embedded report exists before the decision 7 API).
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn compact_skipped(&self) -> &[compact::Skipped] {
+        &self.compact_skipped
+    }
+
     fn open_backed(mut file: LockedFile, key: Option<&EncryptionKey>) -> Result<Self> {
         let loaded = format::load_with(&mut file, key)?;
         if loaded.incomplete_bytes != 0 {
@@ -1467,6 +1477,7 @@ impl Database {
             read_only: false,
             graph: loaded.graph,
             graph_clock: 0,
+            compact_skipped: loaded.compact_skipped,
         })
     }
 

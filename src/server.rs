@@ -231,6 +231,18 @@ impl Service {
         let format_version = database.format_version();
         let lineage = database.lineage();
         let graph_enabled = database.is_graph_enabled();
+        // Derived compact blocks this build cannot decode were skipped at
+        // open; no compact-specific rebuild exists yet.
+        for skipped in database.compact_skipped() {
+            logs::stderr(
+                "warn",
+                "maintenance",
+                json!({"event":"compact_block_skip","outcome":"unsupported_version",
+                    "collection":skipped.collection,"kind":skipped.kind,
+                    "version":skipped.version,"blocks":skipped.blocks,"rebuild":"none"})
+                .to_string(),
+            );
+        }
         let etag_ident: Arc<str> = match lineage {
             Some(lineage) => format!("{lineage:016x}").into(),
             None => hex(&nonce).into(),
