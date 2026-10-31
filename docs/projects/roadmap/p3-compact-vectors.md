@@ -1,6 +1,9 @@
 # Speed P3: compact vectors
 
-**Status:** design, not implemented or performance-qualified. Builds on
+**Status:** design, not performance-qualified. P3a has started: float16
+conversion and the primary dense rows codec are implemented privately behind
+a test-only gate ([P3a progress](#p3a-progress-private-dense-rows-codec)); no
+setting, writer or reader enables them. Builds on
 [P2](p2-directory-store.md); goals are
 [F1/F3/S1/S2](../performance/storage-goals.md). The precision choice is resolved
 below; S1's conflicting default-size acceptance criterion is not waived.
@@ -174,8 +177,73 @@ with bit-pattern fixtures in
 [`float16-cases.json`](../../../tests/fixtures/compact/float16-cases.json).
 It checks signed zero, subnormal/normal transitions, nearest-even ties and
 overflow against Python's binary16 encoder. Its CI self-test rejects a
-deliberately corrupted expected bit. This validates the reference answers,
-not the future Rust codec: P3a must consume the same fixtures.
+deliberately corrupted expected bit. This validates the reference answers;
+the private Rust codec consumes all 80 fixtures (see below).
+
+## P3a progress: private dense rows codec
+
+Implemented in `src/compact/vectors.rs`, compiled for tests only. This is the
+first P3a step, not P3a completion or S1/S2/F1/F3 qualification. Release
+readers still refuse kind `0x0100`, like every source kind, with
+`UnsupportedFeature(FLAG_COMPACT)`. No writer emits it, and no public
+setting, error or format change exists yet.
+
+- **Conversion.** Float32 to binary16 rounds to nearest, ties to even, and
+  keeps signed zero and subnormals; magnitudes up to 2^-25 become signed
+  zero. Infinity and NaN are non-finite; finite magnitudes of 65,520 or more
+  would round to infinity and are refused as overflow. Binary16 to float32
+  is exact. All 80 shared fixtures pass, and every finite half and every tie
+  between neighbouring halves is checked exhaustively. Float32 keeps every
+  finite input bit and stays the default.
+- **Block.** Kind `0x0100` version 1 is critical. Each op-16 frame has ID
+  `0x0100 | partition << 16`, and its `count` is the row count. The shared
+  envelope has six little-endian sections. Each starts 64-byte aligned in
+  the file when the writer knows the offset; readers do not require this.
+
+  | # | Section | Contents |
+  |---|---|---|
+  | 0 | Descriptor | dimensions `u32`, precision `u8` (1 float32, 2 float16), 3 zero bytes |
+  | 1 | IDs | `u64` per row, strictly ascending |
+  | 2 | Revisions | `u64` per row, each in `1..=S` |
+  | 3 | Expiring rows | `u32` row numbers, strictly ascending, below `count` |
+  | 4 | Deadlines | `u64` per expiring row |
+  | 5 | Components | row-major float32 or float16, all finite |
+
+- **Bounds.** A block has 1 to 4,096 rows, and more than one only within
+  1 MiB of components. At 768 dimensions that is 341 float32 or 682 float16
+  rows; at 65,536 it is 4 or 8. Readers check the body length, frame,
+  envelope and version first; other versions are unsupported. They then
+  check the flags, section and row counts, the descriptor against the
+  collection, and every section length with checked arithmetic, all before
+  reading a value. Rows are borrowed from the verified body.
+- **Exactness.** The encoder refuses a component that is not already a
+  stored value, so a checkpoint never rounds, overflows or stores a
+  non-finite value. It also refuses wrong dimensions, unsorted IDs and
+  out-of-range row counts. Canonicalization belongs before commit.
+- **Scope.** A block owns IDs, revisions, expiry and the primary dense vector.
+  Payload, metadata, named and sparse vectors, model history and graph
+  attachments stay in their existing frames. These blocks alone never
+  reconstruct a collection.
+- **Tests.** The tests cover the shared fixtures and exhaustive ties,
+  bit-exact float32 round trips at all 64 alignments, and an independently
+  written float16 golden. They also cover malformed blocks, encoder
+  refusals, bounds, authentication before decoding encrypted blocks, and
+  release readers refusing an otherwise valid image.
+
+Remaining P3a work:
+
+1. The public precision setting, overflow error and creation/conversion API,
+   under separate review.
+2. Persisted settings and commit-time canonicalization, so immediate and
+   reopened reads agree.
+3. Carrying payload and metadata for compact checkpoints, so they hold every
+   record.
+4. A storage-owned writer, capability table acceptance, and replay,
+   maintenance and backup handling. The envelope writer moves into
+   `src/compact/mod.rs`.
+5. Explicit conversion, plus old/new format rejection.
+
+Named dense reuse and bounded access remain P3b.
 
 Major-release measurements retain the unchanged DO-005 host/quiet policy.
 F1 requires p50 <=1.0 ms at 100k x 768 and recall@10 >=0.95; F3 requires

@@ -21,6 +21,12 @@ use crate::{Error, Result};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// P3a dense rows codec. Preactivation: compiled for tests only, so no
+/// reader accepts its kind and no writer emits it until its write, read,
+/// replay and maintenance paths are qualified (contract decision 7).
+#[cfg(test)]
+mod vectors;
+
 /// Kind of the capability table, the first op-16 frame of an image.
 const KIND_TABLE: u16 = 1;
 /// Kind of the image end block, the last frame of an image.
@@ -536,12 +542,12 @@ mod tests {
     use std::io::Cursor;
 
     const LINEAGE: u64 = 0x5EED_0000_0000_0002;
-    const FLOOR: u64 = 4;
+    pub(super) const FLOOR: u64 = 4;
     const KIND: u16 = 0x0200;
     const VERSIONS: u16 = 17;
 
     /// A plaintext frame at the checkpoint `FLOOR`.
-    fn frame(owner: u16, id: u64, count: u32, body: &[u8]) -> Vec<u8> {
+    pub(super) fn frame(owner: u16, id: u64, count: u32, body: &[u8]) -> Vec<u8> {
         let mut bytes = b"VREC".to_vec();
         bytes.push(OP_COMPACT_BLOCK);
         bytes.extend_from_slice(&owner.to_le_bytes());
@@ -560,7 +566,7 @@ mod tests {
     }
 
     /// An op-16 frame whose block has one unpadded section.
-    fn block(
+    pub(super) fn block(
         kind: u16,
         version: u16,
         flags: u16,
