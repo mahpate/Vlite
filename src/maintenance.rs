@@ -212,7 +212,10 @@ pub fn backup_with_key(
 ///
 /// Pack a directory store back into one file with `backup`. Older formats
 /// (`UnsupportedVersion`; run `upgrade` first) and files with commit
-/// timestamps (`UnsupportedFeature`) are rejected.
+/// timestamps (`UnsupportedFeature`) are rejected. A failure before the
+/// destination's manifest is in place removes it again; on Unix, a
+/// directory-sync error after that returns `PublicationIndeterminate` and
+/// keeps the store.
 pub fn convert_to_directory(
     source_path: impl AsRef<Path>,
     destination: impl AsRef<Path>,
@@ -244,7 +247,9 @@ fn convert_inner(
     if loaded.flags & format::FLAG_TIMESTAMPS != 0 {
         return Err(Error::UnsupportedFeature(format::FLAG_TIMESTAMPS));
     }
-    crate::directory::create_converted(destination, &loaded)?;
+    let converted = crate::directory::create_converted(destination, &loaded)?;
+    converted.unlock()?;
+    drop(converted);
     drop(file);
     inspect_inner(destination, key)
 }
@@ -599,6 +604,21 @@ pub(crate) fn publish_with(
     key: Option<&EncryptionKey>,
     write: impl FnOnce(&mut File) -> Result<()>,
 ) -> Result<Inspection> {
+    publish_held(destination, key, write).map(|(report, _held)| report)
+}
+
+/// Publishes the complete, validated and synced output of `write` at
+/// `destination`, which must not exist, and returns it still holding the
+/// exclusive lock taken before its name became visible: nobody opens a
+/// store before its publisher is done with it. A failure before that leaves
+/// nothing behind; once the name is visible the file is never removed, and
+/// a failed directory sync (Unix; Windows offers none) is
+/// `PublicationIndeterminate`.
+pub(crate) fn publish_held(
+    destination: &Path,
+    key: Option<&EncryptionKey>,
+    write: impl FnOnce(&mut File) -> Result<()>,
+) -> Result<(Inspection, LockedFile)> {
     let parent = destination
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -610,12 +630,26 @@ pub(crate) fn publish_with(
     require_complete(&loaded)?;
     let report = inspection(&loaded);
     staging.as_file().sync_all()?;
+    match staging.as_file().try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => return Err(Error::Locked),
+        Err(std::fs::TryLockError::Error(error)) => return Err(Error::Io(error)),
+    }
+    #[cfg(test)]
+    failpoint::hit(failpoint::Stage::Staged)?;
     let published = staging
         .persist_noclobber(destination)
         .map_err(|error| Error::Io(error.error))?;
     // Keep the staged file's restrictive permissions and never recreate output
     // via a truncating open. A final name is visible only after a complete sync.
-    drop(published);
+    let held = LockedFile::disk(published);
+    #[cfg(test)]
+    failpoint::hit(failpoint::Stage::Visible).map_err(|source| {
+        Error::PublicationIndeterminate {
+            destination: destination.to_path_buf(),
+            source,
+        }
+    })?;
     #[cfg(unix)]
     File::open(parent)
         .and_then(|directory| directory.sync_all())
@@ -623,7 +657,54 @@ pub(crate) fn publish_with(
             destination: destination.to_path_buf(),
             source,
         })?;
-    Ok(report)
+    Ok((report, held))
+}
+
+/// Test failpoints of a publication (P3a qualification), per thread:
+/// `Staged` once the output is complete and synced but its final name
+/// (file or manifest) is not visible yet, `Visible` right after that name
+/// appeared, where the directory sync follows (none on Windows). A hook
+/// error fails the stage as that step's I/O error would.
+#[cfg(test)]
+pub(crate) mod failpoint {
+    use std::cell::RefCell;
+    use std::io;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Stage {
+        Staged,
+        Visible,
+    }
+
+    type Hook = Box<dyn FnMut(Stage) -> io::Result<()>>;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    /// Runs `hook` at every stage this thread reaches until the guard drops.
+    pub(crate) fn arm(hook: impl FnMut(Stage) -> io::Result<()> + 'static) -> Armed {
+        HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+        Armed
+    }
+
+    pub(crate) struct Armed;
+
+    impl Drop for Armed {
+        fn drop(&mut self) {
+            HOOK.with(|slot| slot.borrow_mut().take());
+        }
+    }
+
+    pub(crate) fn hit(stage: Stage) -> io::Result<()> {
+        // Taken out while it runs, so the hook may open stores itself.
+        let Some(mut hook) = HOOK.with(|slot| slot.borrow_mut().take()) else {
+            return Ok(());
+        };
+        let result = hook(stage);
+        HOOK.with(|slot| *slot.borrow_mut() = Some(hook));
+        result
+    }
 }
 
 /// Writes frames to a file, sealing them when the output is encrypted. In
@@ -673,8 +754,8 @@ pub(crate) fn write_v5(
         file,
         loaded,
         lineage,
-        now_ms,
-        now_ms,
+        Some(now_ms),
+        Some(now_ms),
         cipher,
         extra_flags,
         0,
@@ -691,7 +772,9 @@ pub(crate) fn write_v5(
 /// Without a floor, sequences restart at one and every record and graph body
 /// gets its own frame. Records expired at `now_ms` are dropped (S6), and so
 /// are graph nodes and edges due at `graph_now_ms` with every edge of a
-/// dropped node (Gap 3).
+/// dropped node (Gap 3). Without a clock nothing is dropped: a P3a
+/// preserving relocation keeps even records and graph entities that are
+/// already expired.
 ///
 /// With `FLAG_PRECISION` (P3a) the image is a compact one: after the
 /// collection frames come the capability table, the precision catalog and
@@ -703,8 +786,8 @@ pub(crate) fn write_v5_image(
     file: &mut dyn Write,
     loaded: &format::Loaded,
     lineage: u64,
-    now_ms: u64,
-    graph_now_ms: u64,
+    now_ms: Option<u64>,
+    graph_now_ms: Option<u64>,
     cipher: Option<&Cipher>,
     extra_flags: u16,
     floor: u64,
@@ -784,11 +867,13 @@ pub(crate) fn write_v5_image(
         output.write_all(&catalog::catalog_frame(floor, &entries))?;
         output.write_all(&catalog::imports_frame(floor, &registry)?)?;
     }
+    let expired =
+        |expiry: Option<u64>| expiry.is_some_and(|expiry| now_ms.is_some_and(|now| expiry <= now));
     for (&collection_id, collection) in &loaded.collections {
         let mut block = format::RecordBlock::new(collection_id);
         for (&id, record) in &collection.records {
             let expiry = collection.expiries.get(&id).copied();
-            if expiry.is_some_and(|expiry| expiry <= now_ms) {
+            if expired(expiry) {
                 continue;
             }
             if floor == 0 {
@@ -813,12 +898,8 @@ pub(crate) fn write_v5_image(
     }
     for (&collection_id, collection) in &loaded.collections {
         let mut data = collection.vectors.clone();
-        data.records.retain(|id, _| {
-            !collection
-                .expiries
-                .get(id)
-                .is_some_and(|expiry| *expiry <= now_ms)
-        });
+        data.records
+            .retain(|id, _| !expired(collection.expiries.get(id).copied()));
         let bytes = data.encode()?;
         output.write_all(&format::vector_frame(next(floor)?, collection_id, &bytes))?;
     }
@@ -906,8 +987,8 @@ mod tests {
             &mut output,
             &loaded,
             lineage,
-            0,
-            0,
+            Some(0),
+            Some(0),
             loaded.cipher.as_ref(),
             loaded.flags & format::FLAG_GRAPH,
             loaded.sequence,
@@ -1067,8 +1148,8 @@ mod tests {
             &mut output,
             &loaded,
             lineage,
-            0,
-            0,
+            Some(0),
+            Some(0),
             None,
             loaded.flags & format::FLAG_GRAPH,
             floor,
@@ -1181,10 +1262,14 @@ mod tests {
             )));
         }
         if let Some(state) = &loaded.graph {
-            crate::property_graph::frame::compacted_bodies(state, now_ms, |_, count, body| {
-                bytes.extend(seal(format::graph_frame(floor, 0, count, body)));
-                Ok(())
-            })
+            crate::property_graph::frame::compacted_bodies(
+                state,
+                Some(now_ms),
+                |_, count, body| {
+                    bytes.extend(seal(format::graph_frame(floor, 0, count, body)));
+                    Ok(())
+                },
+            )
             .unwrap();
         }
         bytes
@@ -1330,8 +1415,8 @@ mod tests {
             &mut output,
             &loaded,
             lineage,
-            now,
-            now,
+            Some(now),
+            Some(now),
             loaded.cipher.as_ref(),
             loaded.flags & format::FLAG_GRAPH,
             floor,

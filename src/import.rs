@@ -130,6 +130,7 @@ impl Registry {
     pub(crate) fn encode_image(&self) -> Result<(Vec<u8>, u32)> {
         if self.jobs.len() > MAX_OPEN_IMPORTS + MAX_CLOSED_IMPORTS
             || self.closed_order.len() > MAX_CLOSED_IMPORTS
+            || self.open_count() > MAX_OPEN_IMPORTS
         {
             return Err(format::corrupt(
                 0,
@@ -168,8 +169,10 @@ impl Registry {
     }
 
     /// Checks and decodes `encode_image` output whose block has frame
-    /// `count`: every field in range, jobs ascending and at most the high
-    /// water, closed IDs exactly the closed jobs, and the exact length.
+    /// `count`: every field in range, at most `MAX_OPEN_IMPORTS` open and
+    /// `MAX_CLOSED_IMPORTS` closed jobs (the bounds `import_chunk` and
+    /// eviction keep), jobs ascending and at most the high water, closed IDs
+    /// exactly the closed jobs, and the exact length.
     /// Bindings to collections are the loader's to check.
     pub(crate) fn decode_image(
         section: &[u8],
@@ -185,6 +188,7 @@ impl Registry {
         if jobs != count as usize
             || jobs > MAX_OPEN_IMPORTS + MAX_CLOSED_IMPORTS
             || closed > MAX_CLOSED_IMPORTS.min(jobs)
+            || jobs - closed > MAX_OPEN_IMPORTS
             || section.len() > MAX_IMAGE_SECTION
         {
             return Err(INVALID);

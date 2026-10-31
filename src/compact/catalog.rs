@@ -30,9 +30,11 @@ pub(crate) const KIND_IMPORTS: u16 = 4;
 /// Revisions of one graph's nodes and edges, owned by the graph: two
 /// sections, nodes then edges, each an entry count (`u32`), a zero `u32`
 /// and (ID, revision) `u64` pairs in ascending ID order. The run of one
-/// graph lists every node and then every edge of its snapshot, at most
-/// `MAX_REVISIONS` per block; only the last block is not full, and an empty
-/// graph has a single empty block. The frame count is the block's entries.
+/// graph covers every node and every edge of its snapshot exactly once,
+/// each class continuing in ascending ID order across the blocks, at most
+/// `MAX_REVISIONS` per block. The writer fills every block but the last;
+/// readers accept any non-empty block, and an empty graph has a single
+/// empty block. The frame count is the block's entries.
 pub(crate) const KIND_REVISIONS: u16 = 5;
 pub(crate) const MAX_REVISIONS: usize = 4096;
 

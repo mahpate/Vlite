@@ -1260,7 +1260,10 @@ impl Database {
     ///
     /// Directory stores are format V5 and may be encrypted; commit
     /// timestamps (`UnsupportedFeature`) and older formats
-    /// (`UnsupportedVersion`) are rejected.
+    /// (`UnsupportedVersion`) are rejected. A failure before the manifest
+    /// is in place removes the directory again; once it is, the store is
+    /// kept, and a failed directory sync (Unix) is
+    /// `PublicationIndeterminate`.
     pub fn create_directory(
         path: impl AsRef<Path>,
         dimensions: usize,
@@ -1369,7 +1372,12 @@ impl Database {
             fail_next_group_sync: false,
             collections: BTreeMap::from([(
                 0,
-                Collection::empty("default".into(), dimensions, CollectionSettings::default()),
+                Collection::empty(
+                    "default".into(),
+                    dimensions,
+                    CollectionSettings::default(),
+                    None,
+                ),
             )]),
             rebuild: None,
             imports: import::Registry::default(),
@@ -1935,6 +1943,7 @@ impl Database {
         }
         let state = self.state(collection);
         validate_vector(state.dimensions, vector)?;
+        self.ensure_dense_writable(collection)?;
         if payload.len() > MAX_PAYLOAD_BYTES {
             return Err(Error::PayloadTooLarge(payload.len()));
         }
@@ -1999,6 +2008,7 @@ impl Database {
         self.ensure_healthy()?;
         let state = self.state(collection);
         validate_vector(state.dimensions, vector)?;
+        self.ensure_dense_writable(collection)?;
         if payload.len() > MAX_PAYLOAD_BYTES {
             return Err(Error::PayloadTooLarge(payload.len()));
         }
@@ -2081,6 +2091,17 @@ impl Database {
         Ok(())
     }
 
+    /// Refuses a dense vector write into a float16 collection before any
+    /// commit (P3a): commit-time canonicalization is a later step, so such
+    /// a collection holds no dense data yet. Named dense vectors need a
+    /// live record and so stay refused too.
+    fn ensure_dense_writable(&self, collection: u16) -> Result<()> {
+        if self.state(collection).precision == Some(compact::catalog::Precision::Float16) {
+            return Err(Error::UnsupportedFeature(format::FLAG_PRECISION));
+        }
+        Ok(())
+    }
+
     /// Returns the encoded batch body length.
     fn validate_batch(&self, collection: u16, operations: &[Mutation]) -> Result<usize> {
         if operations.len() > MAX_BATCH_OPERATIONS {
@@ -2097,6 +2118,7 @@ impl Database {
                     ..
                 } => {
                     validate_vector(dimensions, vector)?;
+                    self.ensure_dense_writable(collection)?;
                     if payload.len() > MAX_PAYLOAD_BYTES {
                         return Err(Error::PayloadTooLarge(payload.len()));
                     }
@@ -2113,6 +2135,7 @@ impl Database {
                     vector, payload, ..
                 } => {
                     validate_vector(dimensions, vector)?;
+                    self.ensure_dense_writable(collection)?;
                     if payload.len() > MAX_PAYLOAD_BYTES {
                         return Err(Error::PayloadTooLarge(payload.len()));
                     }
@@ -2557,7 +2580,12 @@ impl Database {
         };
         self.commit_frame(sequence, &frame)?;
         self.collection_high = id;
-        let mut collection = Collection::empty(name.into(), spec.dimensions, spec.settings);
+        let mut collection = Collection::empty(
+            name.into(),
+            spec.dimensions,
+            spec.settings,
+            precise.then_some(precision),
+        );
         collection.settings_persisted = true;
         self.collections.insert(id, collection);
         Ok(self.info(id))

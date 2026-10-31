@@ -227,10 +227,11 @@ pub(crate) fn load_snapshot(
 /// Attachments are checked against live records, so these frames must
 /// follow the record frames. Nodes due at `now_ms` are dropped with
 /// their edges and attachments, and so are edges due at `now_ms`; a kept
-/// deadline follows its node or edge as an expiry entry.
+/// deadline follows its node or edge as an expiry entry. Without `now_ms`
+/// (a P3a preserving relocation) every node and edge is kept.
 pub(crate) fn compacted_bodies(
     state: &GraphState,
-    now_ms: u64,
+    now_ms: Option<u64>,
     mut emit: impl FnMut(GraphId, u32, &[u8]) -> Result<()>,
 ) -> Result<()> {
     let encode = |body: &GraphBody| {
@@ -320,24 +321,26 @@ pub(crate) fn compacted_bodies(
     Ok(())
 }
 
-/// The nodes of `graph` that a rewrite at `now_ms` keeps, in ID order.
-fn kept_nodes(graph: &Graph, now_ms: u64) -> impl Iterator<Item = &GraphNode> {
+/// The nodes of `graph` that a rewrite at `now_ms` (all without it) keeps,
+/// in ID order.
+fn kept_nodes(graph: &Graph, now_ms: Option<u64>) -> impl Iterator<Item = &GraphNode> {
     graph
         .nodes()
-        .filter(move |node| !graph.node_expired(node.id, now_ms))
+        .filter(move |node| !now_ms.is_some_and(|now| graph.node_expired(node.id, now)))
 }
 
-/// The edges of `graph` that a rewrite at `now_ms` keeps, in ID order.
-fn kept_edges(graph: &Graph, now_ms: u64) -> impl Iterator<Item = &GraphEdge> {
+/// The edges of `graph` that a rewrite at `now_ms` (all without it) keeps,
+/// in ID order.
+fn kept_edges(graph: &Graph, now_ms: Option<u64>) -> impl Iterator<Item = &GraphEdge> {
     graph
         .edges()
-        .filter(move |edge| !graph.edge_expired(edge, now_ms))
+        .filter(move |edge| !now_ms.is_some_and(|now| graph.edge_expired(edge, now)))
 }
 
 /// The (ID, revision) pairs of the nodes and of the edges of `graph` that
 /// `compacted_bodies` writes at `now_ms`, which a P3a precision image keeps
 /// in its revision blocks.
-pub(crate) fn kept_revisions(graph: &Graph, now_ms: u64) -> (Pairs, Pairs) {
+pub(crate) fn kept_revisions(graph: &Graph, now_ms: Option<u64>) -> (Pairs, Pairs) {
     (
         kept_nodes(graph, now_ms)
             .map(|node| (node.id.0, node.revision))

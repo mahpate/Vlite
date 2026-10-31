@@ -16,14 +16,19 @@ use crate::format::{
 };
 use crate::import::{ImportChunkOutcome, ImportState, InvalidRowPolicy};
 use crate::logops::{self, RestoreTarget};
+use crate::maintenance::failpoint::{self, Stage};
 use crate::property_graph::GraphOp;
 use crate::{
-    CollectionSettings, CollectionSpec, Database, EncryptionKey, Expected, Metadata, Mutation,
-    ReplicaFollower, maintenance,
+    CollectionSettings, CollectionSpec, CreateOptions, Database, EncryptionKey, Expected, Metadata,
+    Mutation, ReplicaFollower, maintenance,
 };
 use sha2::{Digest, Sha256};
+use std::cell::RefCell;
 use std::io::{Cursor, Write};
 use std::path::Path;
+use std::rc::Rc;
+
+mod goldens;
 
 const LINEAGE: u64 = 0x5EED_0000_0000_0032;
 /// A deadline far in the future (2100-01-01).
@@ -77,8 +82,8 @@ fn image_of(loaded: &Loaded) -> Vec<u8> {
         &mut bytes,
         loaded,
         loaded.lineage.unwrap(),
-        0,
-        0,
+        None,
+        None,
         loaded.cipher.as_ref(),
         loaded.flags & (FLAG_GRAPH | FLAG_PRECISION),
         loaded.sequence,
@@ -162,6 +167,47 @@ fn sections(frame: &[u8]) -> Vec<Vec<u8>> {
         .iter()
         .map(|section| section.to_vec())
         .collect()
+}
+
+/// Whether `frame` is an op-16 block of `kind`.
+fn is_block(frame: &[u8], kind: u16) -> bool {
+    frame[4] == 16 && u64_at(frame, 16) & 0xFFFF == u64::from(kind)
+}
+
+/// The image of `loaded` with the blocks of `kind` replaced by `blocks`
+/// at version `version`, which the capability table then declares.
+fn replaced(loaded: &Loaded, kind: u16, version: u16, blocks: Vec<Vec<u8>>) -> Vec<u8> {
+    let (header, mut frames) = split(&image_of(loaded));
+    frames.pop();
+    let at = frames
+        .iter()
+        .position(|frame| is_block(frame, kind))
+        .unwrap();
+    let count = frames.iter().filter(|frame| is_block(frame, kind)).count();
+    frames.splice(at..at + count, blocks);
+    if version != 1 {
+        let versioned = |bytes: &mut Vec<u8>| {
+            bytes[PREFIX_SIZE + 2..PREFIX_SIZE + 4].copy_from_slice(&version.to_le_bytes())
+        };
+        for frame in &mut frames {
+            if is_block(frame, kind) {
+                *frame = refit(frame, versioned);
+            }
+        }
+        let table = frames
+            .iter_mut()
+            .find(|frame| is_block(frame, KIND_TABLE))
+            .unwrap();
+        let mut section = sections(table).remove(0);
+        for entry in section.as_chunks_mut::<8>().0 {
+            if u16_at(entry, 0) == kind {
+                entry[2..4].copy_from_slice(&version.to_le_bytes());
+            }
+        }
+        let entries = (section.len() / 8) as u32;
+        *table = block_frame(u64_at(table, 8), KIND_TABLE, 0, 0, entries, &[&section]);
+    }
+    sealed(&header, &frames)
 }
 
 fn entries(list: &[(u16, Precision, usize)]) -> Vec<Entry> {
@@ -249,21 +295,26 @@ fn stored(path: &Path, key: Option<&EncryptionKey>) -> Loaded {
 }
 
 /// A new, empty precision store (test-only constructor): its complete
-/// initial image is validated before it is published or installed.
+/// initial image is validated before it is published or installed, and a
+/// file or directory is returned under the lock taken before it became
+/// visible.
 fn create_store(backing: Backing, path: &Path, key: Option<&EncryptionKey>) -> Database {
     let loaded = initial(key);
-    match backing {
-        Backing::Memory => Database::open_from_bytes(image_of(&loaded), key).unwrap(),
+    let held = match backing {
+        Backing::Memory => return Database::open_from_bytes(image_of(&loaded), key).unwrap(),
         Backing::File => {
             let image = image_of(&loaded);
-            maintenance::publish_with(path, key, |file| Ok(file.write_all(&image)?)).unwrap();
-            open_path(path, key).unwrap()
+            maintenance::publish_held(path, key, |file| Ok(file.write_all(&image)?))
+                .unwrap()
+                .1
         }
         Backing::Directory => {
-            crate::directory::create_converted(path, &loaded).unwrap();
-            open_path(path, key).unwrap()
+            crate::LockedFile::chain(crate::directory::create_converted(path, &loaded).unwrap())
         }
-    }
+    };
+    Database::open_backed(held, key)
+        .and_then(|db| db.with_durability(crate::Durability::default()))
+        .unwrap()
 }
 
 /// Closes `db` and returns its stored state and a reopened handle.
@@ -447,11 +498,17 @@ fn revision_runs_partition_canonically() {
     let full = pairs(4096);
     let one: Revs = &[(5000, 1)];
     assert_eq!(continued((&full, &[]), 3, (one, &[])), "ok");
-    assert_eq!(continued((&full[..10], &[]), 3, (one, &[])), "corrupt");
+    // Decision P: blocks need not be full, and each class continues in its
+    // own ascending order (the reference graph golden has counts 2 then 1).
+    assert_eq!(continued((&full[..10], &[]), 3, (one, &[])), "ok");
+    assert_eq!(continued((&[], &full), 3, (one, &[])), "ok");
+    assert_eq!(continued((&full[..2], &[]), 3, (&[], &full[..1])), "ok");
     assert_eq!(continued((&full, &[]), 4, (one, &[])), "corrupt");
     assert_eq!(continued((&full, &[]), 3, (&[], &[])), "corrupt");
     assert_eq!(continued((&full, &[]), 3, (&[(4096, 1)], &[])), "corrupt");
-    assert_eq!(continued((&[], &full), 3, (one, &[])), "corrupt");
+    assert_eq!(continued((&[], &full), 3, (&[], &full[..1])), "corrupt");
+    // Only an empty graph has an empty block, its only one.
+    assert_eq!(continued((&[], &[]), 3, (one, &[])), "corrupt");
     assert_eq!(
         outcome(run_check().revision_run(3, 1, one, &[], 0)),
         "corrupt"
@@ -613,7 +670,10 @@ fn release_builds_refuse_precision_stores() {
     let chain = directory.path().join("chain");
     let (plain, sealed) = {
         let _gate = Activation::on();
-        crate::directory::create_converted(&chain, &initial(None)).unwrap();
+        crate::directory::create_converted(&chain, &initial(None))
+            .unwrap()
+            .unlock()
+            .unwrap();
         (image_of(&initial(None)), image_of(&initial(Some(&key()))))
     };
     std::fs::write(&file, &plain).unwrap();
@@ -1163,26 +1223,35 @@ fn graph_revisions_survive_a_precision_image() {
     assert_eq!(observe(&restored).0[0].0, changed[0].1);
     assert_eq!(replaced(Vec::new()), corrupt);
     assert_eq!(replaced(rerun(graph + 1, &nodes, &edges)), corrupt);
-    // A short first block is not canonical even with every entry present.
-    let short = vec![
-        block_frame(
-            floor,
-            KIND_REVISIONS,
-            graph,
-            0,
-            4095,
-            &[&revision_section(&nodes[..4095]), &revision_section(&[])],
-        ),
-        block_frame(
-            floor,
-            KIND_REVISIONS,
-            graph,
-            1,
-            3,
-            &[&revision_section(&nodes[4095..]), &revision_section(&edges)],
-        ),
-    ];
-    assert_eq!(replaced(short), corrupt);
+    // Readers accept a block that is not full when the run still covers
+    // every entry exactly once, in order.
+    let short = |split: usize, next: u64| {
+        vec![
+            block_frame(
+                floor,
+                KIND_REVISIONS,
+                graph,
+                0,
+                split as u32,
+                &[&revision_section(&nodes[..split]), &revision_section(&[])],
+            ),
+            block_frame(
+                floor,
+                KIND_REVISIONS,
+                graph,
+                next,
+                (nodes.len() - split + edges.len()) as u32,
+                &[
+                    &revision_section(&nodes[split..]),
+                    &revision_section(&edges),
+                ],
+            ),
+        ]
+    };
+    assert_eq!(replaced(short(4095, 1)), "ok");
+    assert_eq!(replaced(short(2, 1)), "ok");
+    assert_eq!(replaced(short(1, 1)), corrupt);
+    assert_eq!(replaced(short(4095, 2)), corrupt);
     // A revision run right after the registry is out of order.
     let mut early = frames.clone();
     let run: Vec<_> = early.drain(runs[0]..=runs[1]).collect();
@@ -1288,6 +1357,115 @@ fn import_registry_restores_closed_jobs_and_its_high_water() {
     let mut fresh = image;
     fresh.extend(marker(10));
     assert_eq!(load(&fresh, None).unwrap().sequence, 5);
+}
+
+/// The registry section of `open` open `default` jobs (IDs `1..=open`,
+/// one chunk each) and no closed one.
+fn open_jobs_section(open: u64) -> Vec<u8> {
+    let mut section = open.to_le_bytes().to_vec();
+    section.extend_from_slice(&(open as u32).to_le_bytes());
+    section.extend_from_slice(&0u32.to_le_bytes());
+    for job in 1..=open {
+        section.extend_from_slice(&job.to_le_bytes());
+        // Collection 0, open, not dropped, a 7-byte name.
+        section.extend_from_slice(&[0, 0, 0, 0, 7, 0, 0, 0]);
+        for value in [1u64, 1, 0] {
+            section.extend_from_slice(&value.to_le_bytes());
+        }
+        section.extend_from_slice(&[1; 32]);
+        section.extend_from_slice(b"default");
+    }
+    section
+}
+
+/// One chunk (or, with `flags`, the close) of `job` in the default
+/// collection, framed at `sequence`.
+fn job_frame(sequence: u64, job: u64, flags: u32) -> Vec<u8> {
+    let closing = flags != 0;
+    let rows = if closing {
+        Vec::new()
+    } else {
+        vec![Mutation::Put {
+            id: job,
+            vector: vec![0.5; 2],
+            payload: Vec::new(),
+        }]
+    };
+    let marker = ImportMarker {
+        job,
+        chunk: 1,
+        rows_committed: rows.len() as u64,
+        rows_skipped: 0,
+        flags,
+        digest: if closing { [0; 32] } else { [1; 32] },
+    };
+    format::batch_frame_v4(sequence, 0, &rows, Some(&marker))
+}
+
+/// `import_chunk` never opens a 65th job (`TooManyImports`, the existing
+/// `MAX_OPEN_IMPORTS` bound); no registry image or precision suffix may
+/// hold more.
+#[test]
+fn import_registries_hold_at_most_64_open_jobs() {
+    let _gate = Activation::on();
+    let markers = |open: u64| -> Vec<LoadedImportMarker> {
+        (1..=open)
+            .map(|job| LoadedImportMarker::Marker {
+                collection: 0,
+                name: "default".into(),
+                marker: ImportMarker {
+                    job,
+                    chunk: 1,
+                    rows_committed: 1,
+                    rows_skipped: 0,
+                    flags: 0,
+                    digest: [1; 32],
+                },
+            })
+            .collect()
+    };
+    let full = Registry::from_markers(&markers(64));
+    assert_eq!(full.encode_image().unwrap(), (open_jobs_section(64), 64));
+    assert_eq!(Registry::decode_image(&open_jobs_section(64), 64), Ok(full));
+    assert!(Registry::from_markers(&markers(65)).encode_image().is_err());
+    assert_eq!(
+        Registry::decode_image(&open_jobs_section(65), 65),
+        Err("invalid import registry")
+    );
+
+    let loaded = initial(None);
+    let image = |open: u64| {
+        let section = open_jobs_section(open);
+        let block = block_frame(1, KIND_IMPORTS, 0, 0, open as u32, &[&section]);
+        replaced(&loaded, KIND_IMPORTS, 1, vec![block])
+    };
+    assert_eq!(outcome(load(&image(65), None)), "corrupt");
+    let full = image(64);
+    let mut db = Database::open_from_bytes(full.clone(), None).unwrap();
+    let put = [Mutation::Put {
+        id: 1,
+        vector: vec![0.5; 2],
+        payload: Vec::new(),
+    }];
+    assert!(matches!(
+        db.import_chunk(65, 1, &put, POLICY),
+        Err(Error::TooManyImports)
+    ));
+    db.finish_import(1).unwrap();
+    db.import_chunk(65, 1, &put, POLICY).unwrap();
+    assert_eq!(outcome(load(&db.to_bytes().unwrap(), None)), "ok");
+
+    // The suffix after the image keeps the bound: a 65th open job is
+    // corrupt, one after a close is not.
+    let mut over = full.clone();
+    over.extend(job_frame(2, 65, 0));
+    assert_eq!(outcome(load(&over, None)), "corrupt");
+    let mut closed = full;
+    closed.extend(job_frame(2, 1, format::MARKER_FINISHED));
+    closed.extend(job_frame(3, 65, 0));
+    assert_eq!(outcome(load(&closed, None)), "ok");
+    closed.extend(job_frame(4, 66, 0));
+    assert_eq!(outcome(load(&closed, None)), "corrupt");
 }
 
 // ---- Stores -------------------------------------------------------------
@@ -1425,6 +1603,118 @@ fn legacy_stores_create_only_float32_collections() {
     let loaded = stored(&path, None);
     assert_eq!(loaded.flags & FLAG_PRECISION, 0);
     assert_eq!(loaded.collections[&1].precision, None);
+}
+
+/// Outcomes of every dense write path into the empty collection `name`,
+/// and whether any of them committed.
+fn dense_writes(db: &mut Database, name: &str) -> (Vec<String>, bool) {
+    if db.graph("g").is_err() {
+        db.create_graph("g").unwrap();
+    }
+    let head = db.sequence;
+    let vector = vec![0.5; db.collection(name).unwrap().dimensions()];
+    let put = |id| Mutation::Put {
+        id,
+        vector: vector.clone(),
+        payload: Vec::new(),
+    };
+    let none = Metadata::new();
+    let mut outcomes = Vec::new();
+    let mut collection = db.collection_mut(name).unwrap();
+    outcomes.push(outcome(collection.put(1, &vector, b"")));
+    outcomes.push(outcome(
+        collection.put_with_metadata(2, &vector, b"", &none),
+    ));
+    outcomes.push(outcome(collection.put_with_expiry(
+        3,
+        &vector,
+        b"",
+        &none,
+        Some(FAR),
+    )));
+    outcomes.push(outcome(collection.write_batch(&[put(4)])));
+    outcomes.push(outcome(collection.write_batch(&[
+        Mutation::PutWithMetadata {
+            id: 5,
+            vector: vector.clone(),
+            payload: Vec::new(),
+            metadata: none.clone(),
+        },
+    ])));
+    for policy in [POLICY, InvalidRowPolicy::SkipInvalid] {
+        let job = db.next_import_job_id().unwrap();
+        let mut collection = db.collection_mut(name).unwrap();
+        outcomes.push(outcome(collection.import_chunk(job, 1, &[put(6)], policy)));
+    }
+    let vector_op = GraphOp::Vector {
+        collection: name.into(),
+        mutation: put(7),
+    };
+    outcomes.push(outcome(
+        db.graph_mut("g").unwrap().write_batch(&[vector_op]),
+    ));
+    (outcomes, db.sequence != head)
+}
+
+fn refused() -> (Vec<String>, bool) {
+    (vec!["unsupported 32".to_owned(); 8], false)
+}
+
+fn committed() -> (Vec<String>, bool) {
+    (vec!["ok".to_owned(); 8], true)
+}
+
+/// A collection's stored precision is fixed with it: op 17 installs it,
+/// settings replacement keeps it, drop removes it with the collection, and
+/// reopening restores it. Until commit-time canonicalization (a later P3a
+/// step), every dense write into a float16 collection is refused before
+/// any commit; float32 collections take them unchanged.
+fn runtime_precision(backing: Backing, key: Option<EncryptionKey>) {
+    let _gate = Activation::on();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("store");
+    let key = key.as_ref();
+    let mut db = create_store(backing, &path, key);
+    db.create_collection_as("half", spec(2), F16).unwrap();
+    db.create_collection_as("full", spec(2), F32).unwrap();
+    assert_eq!(dense_writes(&mut db, "half"), refused(), "{backing:?}");
+    let changed = CollectionSettings {
+        rerank_multiplier: 7,
+        ..CollectionSettings::default()
+    };
+    db.set_collection_settings("half", changed).unwrap();
+    assert_eq!(dense_writes(&mut db, "half"), refused());
+    // Deletes and metadata-only writes carry no dense vector.
+    let mut half = db.collection_mut("half").unwrap();
+    assert!(!half.delete(1).unwrap());
+    half.write_batch(&[Mutation::Delete { id: 1 }]).unwrap();
+    // A re-created name is a new collection with its own precision.
+    db.drop_collection("half").unwrap();
+    db.create_collection_as("half", spec(2), F32).unwrap();
+    db.create_collection_as("temp", spec(2), F16).unwrap();
+    assert_eq!(dense_writes(&mut db, "half"), committed());
+
+    let (_, mut db) = cycle(backing, &path, key, db);
+    assert_eq!(dense_writes(&mut db, "temp"), refused());
+    assert_eq!(dense_writes(&mut db, "full"), committed());
+}
+
+#[test]
+fn memory_precision_is_fixed_at_runtime() {
+    runtime_precision(Backing::Memory, None);
+    runtime_precision(Backing::Memory, Some(key()));
+}
+
+#[test]
+fn file_precision_is_fixed_at_runtime() {
+    runtime_precision(Backing::File, None);
+    runtime_precision(Backing::File, Some(key()));
+}
+
+#[test]
+fn directory_precision_is_fixed_at_runtime() {
+    runtime_precision(Backing::Directory, None);
+    runtime_precision(Backing::Directory, Some(key()));
 }
 
 /// A directory checkpoint keeps the catalog, every import job (open,
@@ -1624,8 +1914,8 @@ fn maintenance_keeps_or_refuses(key: Option<EncryptionKey>) {
     ));
     assert!(!destination("before").exists());
 
-    // Directory conversion checkpoints the catalog; like every checkpoint
-    // it drops records that are already expired.
+    // Directory conversion relocates the store under its lineage and keeps
+    // everything it retains, even a record that is already expired.
     let convert = || match key {
         Some(key) => maintenance::convert_to_directory_with_key(&source, destination("chain"), key),
         None => maintenance::convert_to_directory(&source, destination("chain")),
@@ -1633,7 +1923,7 @@ fn maintenance_keeps_or_refuses(key: Option<EncryptionKey>) {
     convert().unwrap();
     let converted = keyed(&destination("chain"), key);
     assert!(converted.collections[&0].records.contains_key(&1));
-    assert!(!converted.collections[&0].records.contains_key(&9));
+    assert_eq!(converted.collections[&0].expiries.get(&9), Some(&0));
     assert_eq!(converted.lineage, Some(LINEAGE));
     assert!(convert().is_err());
     keyed(&destination("chain"), key);
@@ -1684,14 +1974,312 @@ fn maintenance_keeps_the_catalog_or_refuses() {
     maintenance_keeps_or_refuses(Some(key()));
 }
 
+/// The graph `g` of `loaded`.
+fn graph_g(loaded: &Loaded) -> &crate::property_graph::engine::Graph {
+    loaded.graph.as_ref().unwrap().graph_by_name("g").unwrap()
+}
+
+/// Directory conversion of a precision file relocates the whole store
+/// under its lineage (Decision P preservation): records, deadlines (even
+/// already-expired ones), revisions, open and closed imports and the graph
+/// are kept exactly, and the source is untouched. The converted store's own
+/// checkpoints then apply ordinary TTL cleanup.
+fn conversion_preserves(key: Option<EncryptionKey>) {
+    let _gate = Activation::on();
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.vlite");
+    let chain = directory.path().join("chain");
+    let key = key.as_ref();
+    let none = Metadata::new();
+    let put = |id| {
+        vec![Mutation::Put {
+            id,
+            vector: vec![1.0, 0.0],
+            payload: Vec::new(),
+        }]
+    };
+    let mut db = create_store(Backing::File, &source, key);
+    db.put(1, &[1.0, 0.0], b"a").unwrap();
+    db.put_with_expiry(9, &[0.0, 1.0], b"z", &none, Some(0))
+        .unwrap();
+    db.put_with_expiry(8, &[0.5, 0.5], b"y", &none, Some(1))
+        .unwrap();
+    let finished = db.next_import_job_id().unwrap();
+    db.import_chunk(finished, 1, &put(2), POLICY).unwrap();
+    db.finish_import(finished).unwrap();
+    let open = db.next_import_job_id().unwrap();
+    db.import_chunk(open, 1, &put(3), POLICY).unwrap();
+    db.create_graph("g").unwrap();
+    {
+        let mut graph = db.graph_mut("g").unwrap();
+        graph.create_node("a", &[], &none).unwrap();
+        graph.create_node("b", &[], &none).unwrap();
+        graph
+            .create_edge(Some("e"), "a", "knows", "b", &none)
+            .unwrap();
+        graph
+            .upsert_node("a", &["x"], &none, Expected::Any)
+            .unwrap();
+        graph.set_node_expiry("b", Some(1), Expected::Any).unwrap();
+    }
+    db.close().unwrap();
+    let original = std::fs::read(&source).unwrap();
+    match key {
+        Some(key) => maintenance::convert_to_directory_with_key(&source, &chain, key),
+        None => maintenance::convert_to_directory(&source, &chain),
+    }
+    .unwrap();
+    assert_eq!(std::fs::read(&source).unwrap(), original);
+    let (from, to) = (stored(&source, key), stored(&chain, key));
+    let records = |loaded: &Loaded| {
+        loaded
+            .collections
+            .iter()
+            .map(|(&id, collection)| {
+                (
+                    id,
+                    collection.records.clone(),
+                    collection.expiries.clone(),
+                    collection.revisions.clone(),
+                    collection.precision,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(records(&to), records(&from));
+    assert_eq!(from.collections[&0].expiries.get(&9), Some(&0));
+    assert_eq!(
+        Registry::from_markers(&to.imports),
+        Registry::from_markers(&from.imports)
+    );
+    assert_eq!(graph_g(&from).node_count(), 2);
+    assert_eq!(to.graph, from.graph);
+    assert_eq!(
+        (to.sequence, to.lineage, to.flags),
+        (from.sequence, from.lineage, from.flags)
+    );
+
+    let mut db = open_path(&chain, key).unwrap();
+    let report = db.import_chunk(open, 2, &put(4), POLICY).unwrap();
+    assert_eq!(report.outcome, ImportChunkOutcome::Committed);
+    db.checkpoint().unwrap().unwrap();
+    db.close().unwrap();
+    let after = stored(&chain, key);
+    let kept = &after.collections[&0];
+    assert!(kept.records.contains_key(&1) && kept.records.contains_key(&4));
+    assert!(!kept.records.contains_key(&9) && !kept.records.contains_key(&8));
+    let graph = graph_g(&after);
+    assert!(graph.node_by_key("a").is_some() && graph.node_by_key("b").is_none());
+    assert_eq!(graph.edge_count(), 0);
+}
+
+#[test]
+fn directory_conversion_preserves_the_whole_store() {
+    conversion_preserves(None);
+    conversion_preserves(Some(key()));
+}
+
+/// Converting a legacy file keeps its ordinary cleanup of records that are
+/// already expired.
+#[test]
+fn legacy_directory_conversion_still_drops_expired_records() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("legacy.vlite");
+    let chain = directory.path().join("chain");
+    let mut db = Database::create(&source, 2).unwrap();
+    db.put(1, &[1.0, 0.0], b"a").unwrap();
+    db.put_with_expiry(9, &[0.0, 1.0], b"z", &Metadata::new(), Some(0))
+        .unwrap();
+    db.close().unwrap();
+    maintenance::convert_to_directory(&source, &chain).unwrap();
+    let converted = stored(&chain, None);
+    assert!(converted.collections[&0].records.contains_key(&1));
+    assert!(!converted.collections[&0].records.contains_key(&9));
+}
+
+// ---- Publication --------------------------------------------------------
+
+/// The entries of `directory`, sorted.
+fn listing(directory: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
+}
+
+/// A failpoint hook that fails `stage` with an I/O error.
+fn failing(stage: Stage) -> impl FnMut(Stage) -> std::io::Result<()> + 'static {
+    move |at| {
+        if at == stage {
+            return Err(std::io::Error::other(format!("{at:?} failpoint")));
+        }
+        Ok(())
+    }
+}
+
+/// A hook that records how a writer and a reader open `path` while the
+/// published name is visible, then fails that stage.
+fn probing(
+    path: &Path,
+    seen: &Rc<RefCell<Vec<String>>>,
+) -> impl FnMut(Stage) -> std::io::Result<()> + 'static {
+    let (path, seen) = (path.to_path_buf(), Rc::clone(seen));
+    move |stage| {
+        if stage != Stage::Visible {
+            return Ok(());
+        }
+        let mut seen = seen.borrow_mut();
+        seen.push(outcome(Database::open(&path)));
+        seen.push(outcome(Database::open_read_only(&path)));
+        Err(std::io::Error::other("visible failpoint"))
+    }
+}
+
+/// A file store is complete, synced and locked by its publisher before its
+/// final name appears. Failures before that leave nothing behind; after
+/// it, they are indeterminate and never remove the visible file.
+#[test]
+fn file_publication_locks_before_its_name_is_visible() {
+    let _gate = Activation::on();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("store.vlite");
+    let image = image_of(&initial(None));
+    let publish =
+        |bytes: &[u8]| maintenance::publish_with(&path, None, |file| Ok(file.write_all(bytes)?));
+    let failed = maintenance::publish_with(&path, None, |_| {
+        Err(std::io::Error::other("write failed").into())
+    });
+    assert!(failed.is_err());
+    assert!(publish(&image[..image.len() - 1]).is_err());
+    {
+        let _armed = failpoint::arm(failing(Stage::Staged));
+        assert!(matches!(publish(&image), Err(Error::Io(_))));
+    }
+    assert!(listing(directory.path()).is_empty());
+
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    {
+        let _armed = failpoint::arm(probing(&path, &seen));
+        let result = publish(&image);
+        assert!(
+            matches!(result, Err(Error::PublicationIndeterminate { .. })),
+            "{}",
+            outcome(result)
+        );
+    }
+    assert_eq!(*seen.borrow(), ["Locked", "Locked"]);
+    assert_eq!(listing(directory.path()), ["store.vlite"]);
+    assert_eq!(std::fs::read(&path).unwrap(), image);
+    open_path(&path, None).unwrap().close().unwrap();
+    // A published name is never replaced.
+    assert!(publish(&image).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), image);
+}
+
+/// A directory store is locked from its creation; it is visible once its
+/// manifest is. Failures before that remove the directory; after it, a
+/// failed directory sync is indeterminate and keeps the store.
+#[test]
+fn directory_publication_never_removes_a_visible_store() {
+    let _gate = Activation::on();
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.vlite");
+    let mut db = create_store(Backing::File, &source, None);
+    db.put(1, &[1.0, 0.0], b"a").unwrap();
+    db.close().unwrap();
+    let expected = stored(&source, None);
+    let convert =
+        |destination: &Path| maintenance::convert_to_directory(&source, destination).map(drop);
+    let create = |destination: &Path| {
+        Database::create_directory(destination, 2, CreateOptions::default()).map(drop)
+    };
+    type Publisher<'a> = &'a dyn Fn(&Path) -> Result<()>;
+    let publishers: [(&str, Publisher); 2] = [("converted", &convert), ("created", &create)];
+    for (name, publish) in publishers {
+        let destination = directory.path().join(name);
+        {
+            let _armed = failpoint::arm(failing(Stage::Staged));
+            assert!(publish(&destination).is_err(), "{name}");
+        }
+        assert!(!destination.exists(), "{name}");
+
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        {
+            let _armed = failpoint::arm(probing(&destination, &seen));
+            let result = publish(&destination);
+            assert!(
+                matches!(result, Err(Error::PublicationIndeterminate { .. })),
+                "{name}: {}",
+                outcome(result)
+            );
+        }
+        assert_eq!(*seen.borrow(), ["Locked", "Locked"], "{name}");
+        let reopened = Database::open(&destination).unwrap();
+        reopened.close().unwrap();
+        assert!(publish(&destination).is_err(), "{name}");
+    }
+    let converted = stored(&directory.path().join("converted"), None);
+    assert_eq!(
+        converted.collections[&0].revisions,
+        expected.collections[&0].revisions
+    );
+    assert_eq!(converted.sequence, expected.sequence);
+}
+
+/// Checkpoint manifests keep their established handling: a manifest whose
+/// directory sync failed is in place, so the checkpoint succeeds but keeps
+/// every file the previous manifest listed; a failed install keeps the
+/// state, and a later checkpoint succeeds.
+#[test]
+fn checkpoints_survive_manifest_failures() {
+    let _gate = Activation::on();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("store");
+    let mut db = create_store(Backing::Directory, &path, None);
+    db.put(1, &[1.0, 0.0], b"a").unwrap();
+    let before = listing(&path);
+    {
+        let _armed = failpoint::arm(failing(Stage::Visible));
+        db.checkpoint().unwrap().unwrap();
+    }
+    let after = listing(&path);
+    for name in &before {
+        assert!(after.contains(name), "{name} removed");
+    }
+    db.put(2, &[1.0, 0.0], b"b").unwrap();
+    let mut staged = 0;
+    {
+        let _armed = failpoint::arm(move |stage| {
+            staged += usize::from(stage == Stage::Staged);
+            if staged == 2 && stage == Stage::Staged {
+                return Err(std::io::Error::other("install failpoint"));
+            }
+            Ok(())
+        });
+        assert!(db.checkpoint().is_err());
+    }
+    db.put(3, &[1.0, 0.0], b"c").unwrap();
+    let floor = db.checkpoint().unwrap().unwrap();
+    let (loaded, db) = cycle(Backing::Directory, &path, None, db);
+    assert_eq!(loaded.history_floor, floor);
+    for id in 1..=3 {
+        assert!(loaded.collections[&0].records.contains_key(&id), "{id}");
+    }
+    db.close().unwrap();
+}
+
 #[test]
 fn feeds_exports_and_replicas_follow_precise_creates() {
     let _gate = Activation::on();
     let directory = tempfile::tempdir().unwrap();
     let primary = directory.path().join("primary.vlite");
     let base = directory.path().join("base.vlite");
+    let second = directory.path().join("second.vlite");
     create_store(Backing::File, &primary, None).close().unwrap();
     maintenance::backup(&primary, &base).unwrap();
+    maintenance::backup(&primary, &second).unwrap();
     let mut db = open_path(&primary, None).unwrap();
     db.create_collection_as("half", spec(3), F16).unwrap();
     db.put(1, &[1.0, 0.0], b"a").unwrap();
@@ -1748,4 +2336,10 @@ fn feeds_exports_and_replicas_follow_precise_creates() {
         std::fs::read(&base).unwrap(),
         std::fs::read(&primary).unwrap()
     );
+    // The replayed create installed the precision with the collection.
+    let mut follower = ReplicaFollower::open(&second, None).unwrap();
+    follower.apply(&segment).unwrap();
+    let mut db = follower.promote();
+    assert_eq!(dense_writes(&mut db, "half"), refused());
+    assert_eq!(dense_writes(&mut db, "default"), committed());
 }

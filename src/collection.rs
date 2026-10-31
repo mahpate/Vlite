@@ -136,6 +136,9 @@ pub(crate) struct Collection {
     pub dimensions: usize,
     pub settings: CollectionSettings,
     pub settings_persisted: bool,
+    /// Stored precision fixed at creation (P3a), in a `FLAG_PRECISION`
+    /// store only; installed and dropped with the collection.
+    pub precision: Option<crate::compact::catalog::Precision>,
     pub records: crate::records::RecordMap,
     /// Latest record-vector mutation covered by background catch-up.
     pub vector_sequence: u64,
@@ -161,6 +164,7 @@ impl Collection {
             dimensions: loaded.dimensions,
             settings: loaded.settings,
             settings_persisted: loaded.settings_persisted,
+            precision: loaded.precision,
             records: loaded.records,
             vector_sequence: 0,
             revisions: loaded.revisions,
@@ -175,8 +179,15 @@ impl Collection {
         collection
     }
 
-    pub(crate) fn empty(name: String, dimensions: usize, settings: CollectionSettings) -> Self {
-        Self::from_loaded(format::LoadedCollection::new(name, dimensions, settings))
+    pub(crate) fn empty(
+        name: String,
+        dimensions: usize,
+        settings: CollectionSettings,
+        precision: Option<crate::compact::catalog::Precision>,
+    ) -> Self {
+        let mut loaded = format::LoadedCollection::new(name, dimensions, settings);
+        loaded.precision = precision;
+        Self::from_loaded(loaded)
     }
 
     /// Exact top-k restricted to `candidates` when given (planner input for

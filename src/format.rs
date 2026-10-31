@@ -1162,9 +1162,13 @@ struct JobReplay {
     rows_skipped: u64,
 }
 
-/// Validates one marker against per-job log state (contiguity and closure).
+/// Validates one marker against per-job log state (contiguity and closure)
+/// and counts the jobs it leaves open. After a precision image, more than
+/// `MAX_OPEN_IMPORTS` open jobs is corruption: `import_chunk` never opens
+/// one more.
 fn replay_marker(
     jobs: &mut HashMap<u64, JobReplay>,
+    open: &mut usize,
     image_max_job: Option<u64>,
     collection: u16,
     marker: &ImportMarker,
@@ -1225,6 +1229,14 @@ fn replay_marker(
     ) else {
         return Err(corrupt(offset, "import row counts overflow"));
     };
+    match (previous.is_some(), closing) {
+        (false, false) => *open += 1,
+        (true, true) => *open -= 1,
+        _ => {}
+    }
+    if image_max_job.is_some() && *open > crate::import::MAX_OPEN_IMPORTS {
+        return Err(corrupt(offset, "too many open import jobs"));
+    }
     jobs.insert(
         marker.job,
         JobReplay {
@@ -1622,6 +1634,8 @@ fn load_inner<R: Read + Seek>(
         compact_skipped: Default::default(),
     };
     let mut jobs: HashMap<u64, JobReplay> = HashMap::new();
+    // Jobs in `jobs` that are still open.
+    let mut open_jobs = 0usize;
     // Highest collection ID created by an op 5 in this log so far, and how
     // many create frames and commit frames (excluding the advance) were seen.
     let mut created_high = 0u16;
@@ -1983,6 +1997,7 @@ fn load_inner<R: Read + Seek>(
                 if let Some(marker) = &marker {
                     replay_marker(
                         &mut jobs,
+                        &mut open_jobs,
                         image_max_job,
                         collection_id,
                         marker,
@@ -2143,6 +2158,7 @@ fn load_inner<R: Read + Seek>(
                     .expect("op 16 is only allowed with FLAG_COMPACT")
                     .block(collection_id, id, count as u32, body, offset)?;
                 if let Some(supplement) = supplement {
+                    let registry = matches!(supplement, crate::compact::Supplement::Imports(_));
                     apply_supplement(
                         &mut loaded,
                         &mut jobs,
@@ -2152,6 +2168,9 @@ fn load_inner<R: Read + Seek>(
                         supplement,
                         offset,
                     )?;
+                    if registry {
+                        open_jobs = jobs.values().filter(|job| !job.closed).count();
+                    }
                 }
             }
             _ => {

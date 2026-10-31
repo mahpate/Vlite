@@ -286,12 +286,13 @@ enum Stage {
 }
 
 /// The graph revision run being read: its graph, the last node and edge IDs
-/// so far, and whether its last block was full.
+/// so far, and whether its first block was empty (an empty graph's only
+/// block).
 struct RevisionRun {
     graph: u16,
     node: Option<u64>,
     edge: Option<u64>,
-    full: bool,
+    empty: bool,
 }
 
 /// What a block of a precision image restates, for the loader (P3a).
@@ -598,9 +599,10 @@ impl ImageCheck {
         }
     }
 
-    /// Continues the revision run of `graph`: blocks list its nodes and
-    /// then its edges in ascending ID order, every block but the last is
-    /// full, and only an empty graph has an empty block.
+    /// Continues the revision run of `graph`: across its blocks, in
+    /// partition order, nodes and edges each continue in ascending ID order
+    /// (Decision P). A block holds at most `MAX_REVISIONS` entries but need
+    /// not be full; only an empty graph has an empty block, its only one.
     fn revision_run(
         &mut self,
         graph: u16,
@@ -616,11 +618,11 @@ impl ImageCheck {
                 graph,
                 node: None,
                 edge: None,
-                full: false,
+                empty: entries == 0,
             })
         } else {
             match self.revisions.as_mut() {
-                Some(run) if run.graph == graph && run.full && entries != 0 => run,
+                Some(run) if run.graph == graph && !run.empty && entries != 0 => run,
                 _ => return Err(invalid()),
             }
         };
@@ -629,15 +631,11 @@ impl ImageCheck {
                 .first()
                 .is_none_or(|&(id, _)| last.is_none_or(|last| id > last))
         };
-        if !after(run.node, nodes)
-            || !after(run.edge, edges)
-            || (run.edge.is_some() && !nodes.is_empty())
-        {
+        if !after(run.node, nodes) || !after(run.edge, edges) {
             return Err(invalid());
         }
         run.node = nodes.last().map_or(run.node, |&(id, _)| Some(id));
         run.edge = edges.last().map_or(run.edge, |&(id, _)| Some(id));
-        run.full = entries == catalog::MAX_REVISIONS;
         Ok(())
     }
 

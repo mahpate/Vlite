@@ -685,7 +685,13 @@ impl Chain {
                 if loaded.incomplete_bytes != 0 || loaded.sequence != floor {
                     return Err(corrupt(loaded.end, "sealed log segments changed"));
                 }
-                build_image(&directory, &loaded, cipher.as_ref(), floor, graph_now_ms)
+                build_image(
+                    &directory,
+                    &loaded,
+                    cipher.as_ref(),
+                    floor,
+                    Some(graph_now_ms),
+                )
             })?;
         self.worker = Some(Worker { handle, sealed });
         Ok(())
@@ -765,24 +771,38 @@ impl Drop for Chain {
     }
 }
 
-/// Atomically replaces `directory/MANIFEST` (staged, synced, renamed).
-fn publish_manifest(directory: &Path, names: &[String]) -> Result<bool> {
+/// A synced manifest listing `names`, staged in `directory`.
+fn stage_manifest(directory: &Path, names: &[String]) -> Result<NamedTempFile> {
     let mut staging = NamedTempFile::new_in(directory)?;
     staging.write_all(&encode_manifest(names))?;
     staging.as_file().sync_all()?;
+    Ok(staging)
+}
+
+/// Atomically replaces `directory/MANIFEST` (staged, synced, renamed).
+fn publish_manifest(directory: &Path, names: &[String]) -> Result<bool> {
+    let staging = stage_manifest(directory, names)?;
+    #[cfg(test)]
+    crate::maintenance::failpoint::hit(crate::maintenance::failpoint::Stage::Staged)?;
     staging
         .persist(directory.join(MANIFEST))
         .map_err(|error| Error::Io(error.error))?;
+    #[cfg(test)]
+    if crate::maintenance::failpoint::hit(crate::maintenance::failpoint::Stage::Visible).is_err() {
+        return Ok(false);
+    }
     Ok(sync_directory(directory).is_ok())
 }
 
 /// Writes and validates a history image at `floor` in a staged file.
+/// Records expired now and graph entities due at `graph_now_ms` are left
+/// out; without that clock (a P3a preserving relocation) nothing is.
 fn build_image(
     directory: &Path,
     loaded: &format::Loaded,
     cipher: Option<&Cipher>,
     floor: u64,
-    graph_now_ms: u64,
+    graph_now_ms: Option<u64>,
 ) -> Result<Built> {
     let lineage = loaded
         .lineage
@@ -792,7 +812,7 @@ fn build_image(
         staging.as_file_mut(),
         loaded,
         lineage,
-        crate::current_time_ms(),
+        graph_now_ms.map(|_| crate::current_time_ms()),
         graph_now_ms,
         cipher,
         loaded.flags & (format::FLAG_GRAPH | format::FLAG_PRECISION),
@@ -857,25 +877,67 @@ pub(crate) fn open(directory: &Path, access: Access) -> Result<Chain> {
     })
 }
 
-/// Runs `fill` in a newly created directory that holds a locked `LOCK`
-/// file, removing the directory again if `fill` fails.
-fn create_locked(directory: &Path, fill: impl FnOnce(&File) -> Result<()>) -> Result<File> {
+/// Creates `directory` holding a locked `LOCK` file, lets `fill` write the
+/// store's files and return the names its manifest lists, then publishes
+/// that manifest and returns the store, still locked. Anything failing
+/// before the manifest is visible removes the directory again. Once it is
+/// visible the store is never removed: a failed directory sync (Unix;
+/// Windows offers none) is `PublicationIndeterminate`.
+fn create_locked(directory: &Path, fill: impl FnOnce() -> Result<Vec<String>>) -> Result<Chain> {
     fs::create_dir(directory)?;
-    let result = (|| -> Result<File> {
+    let staged = (|| -> Result<_> {
         let lock = OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
             .open(directory.join(LOCK))?;
         lock_file(&lock, false)?;
-        fill(&lock)?;
+        let names = fill()?;
+        let manifest = stage_manifest(directory, &names)?;
         sync_directory(directory)?;
-        Ok(lock)
+        #[cfg(test)]
+        crate::maintenance::failpoint::hit(crate::maintenance::failpoint::Stage::Staged)?;
+        Ok((lock, names, manifest))
     })();
-    if result.is_err() {
-        let _ = fs::remove_dir_all(directory);
-    }
-    result
+    let published = staged.and_then(|(lock, names, manifest)| {
+        manifest
+            .persist_noclobber(directory.join(MANIFEST))
+            .map(|_| (lock, names))
+            .map_err(|error| Error::Io(error.error))
+    });
+    let (lock, names) = match published {
+        Ok(published) => published,
+        Err(error) => {
+            let _ = fs::remove_dir_all(directory);
+            return Err(error);
+        }
+    };
+    let visible = || -> io::Result<()> {
+        #[cfg(test)]
+        crate::maintenance::failpoint::hit(crate::maintenance::failpoint::Stage::Visible)?;
+        sync_directory(directory)
+    };
+    visible().map_err(|source| Error::PublicationIndeterminate {
+        destination: directory.to_path_buf(),
+        source,
+    })?;
+    let (segments, layout) = open_segments(directory, &names, true)?;
+    let highest = names
+        .iter()
+        .filter_map(|name| parse_name(name))
+        .map(|(_, number)| number)
+        .max()
+        .unwrap_or(0);
+    Ok(Chain {
+        lock,
+        directory: directory.to_path_buf(),
+        access: Access::Write,
+        segments: Mutex::new(segments),
+        layout,
+        next_number: highest + 1,
+        threshold: Some(DEFAULT_CHECKPOINT_BYTES),
+        worker: None,
+    })
 }
 
 fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -891,35 +953,26 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
 
 /// Creates a new directory store whose first log starts with `header`.
 pub(crate) fn create(directory: &Path, header: &[u8]) -> Result<Chain> {
-    let lock = create_locked(directory, |_| {
+    create_locked(directory, || {
         write_new(&directory.join("wal-1.log"), header)?;
-        publish_manifest(directory, &["wal-1.log".to_owned()])?;
-        Ok(())
-    })?;
-    let names = vec!["wal-1.log".to_owned()];
-    let (segments, layout) = open_segments(directory, &names, true)?;
-    Ok(Chain {
-        lock,
-        directory: directory.to_path_buf(),
-        access: Access::Write,
-        segments: Mutex::new(segments),
-        layout,
-        next_number: 2,
-        threshold: Some(DEFAULT_CHECKPOINT_BYTES),
-        worker: None,
+        Ok(vec!["wal-1.log".to_owned()])
     })
 }
 
-/// Writes a new directory store holding `loaded`: a history image at its
-/// last commit plus an empty log (or only a log for an empty database).
-/// The lineage is kept, so change-feed cursors stay comparable.
-pub(crate) fn create_converted(directory: &Path, loaded: &format::Loaded) -> Result<()> {
+/// Writes a new directory store holding `loaded`, returned locked: a
+/// history image at its last commit plus an empty log (or only a log for an
+/// empty database). The lineage is kept, so change-feed cursors stay
+/// comparable. Records and graph entities already expired are left out,
+/// except from a P3a precision store, whose relocation keeps its whole
+/// state (Decision P).
+pub(crate) fn create_converted(directory: &Path, loaded: &format::Loaded) -> Result<Chain> {
     let lineage = loaded
         .lineage
         .ok_or(Error::UnsupportedVersion(loaded.version))?;
     let cipher = loaded.cipher.as_ref();
     let flags = loaded.flags & WAL_FLAGS;
-    let lock = create_locked(directory, |_| {
+    let graph_now_ms = (flags & format::FLAG_PRECISION == 0).then(crate::current_time_ms);
+    create_locked(directory, || {
         if loaded.sequence == 0 {
             let header = format::header_v5_flags(
                 loaded.dimensions,
@@ -929,32 +982,18 @@ pub(crate) fn create_converted(directory: &Path, loaded: &format::Loaded) -> Res
                 cipher,
             );
             write_new(&directory.join("wal-1.log"), &header)?;
-            publish_manifest(directory, &["wal-1.log".to_owned()])?;
-        } else {
-            let built = build_image(
-                directory,
-                loaded,
-                cipher,
-                loaded.sequence,
-                crate::current_time_ms(),
-            )?;
-            built
-                .image
-                .persist_noclobber(directory.join("image-1.vlite"))
-                .map_err(|error| Error::Io(error.error))?;
-            let header = format::header_v5_flags(loaded.dimensions, lineage, 0, flags, cipher);
-            write_new(&directory.join("wal-2.log"), &header)?;
-            publish_manifest(
-                directory,
-                &["image-1.vlite".to_owned(), "wal-2.log".to_owned()],
-            )?;
+            return Ok(vec!["wal-1.log".to_owned()]);
         }
-        Ok(())
-    })?;
-    lock.unlock()?;
-    Ok(())
+        let built = build_image(directory, loaded, cipher, loaded.sequence, graph_now_ms)?;
+        built
+            .image
+            .persist_noclobber(directory.join("image-1.vlite"))
+            .map_err(|error| Error::Io(error.error))?;
+        let header = format::header_v5_flags(loaded.dimensions, lineage, 0, flags, cipher);
+        write_new(&directory.join("wal-2.log"), &header)?;
+        Ok(vec!["image-1.vlite".to_owned(), "wal-2.log".to_owned()])
+    })
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
