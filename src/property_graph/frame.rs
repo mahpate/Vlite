@@ -10,12 +10,15 @@
 
 use std::collections::BTreeMap;
 
+use crate::compact::catalog::Pairs;
 use crate::format::{self, LoadedCollection};
 use crate::{Error, Mutation, Record, Result};
 
 use super::engine::codec::BODY_HEADER_BYTES;
 use super::engine::limits::{MAX_BATCH_BYTES, MAX_BATCH_ENTRIES};
-use super::engine::{self, GraphBody, GraphEntry, GraphState};
+use super::engine::{
+    self, Graph, GraphBody, GraphEdge, GraphEntry, GraphId, GraphNode, GraphState,
+};
 
 /// Encodes one vector mutation of `collection` as a graph-frame entry.
 pub(crate) fn vector_entry(collection: u16, mutation: &Mutation) -> GraphEntry {
@@ -219,7 +222,8 @@ pub(crate) fn load_snapshot(
 /// every node, every edge and
 /// every attachment, then a `GraphHighWater` entry with the graph's next node
 /// and edge IDs so deleted IDs are never reused. Bodies stay within the batch
-/// entry and byte limits; `emit` receives each body's entry count and bytes.
+/// entry and byte limits; `emit` receives each body's graph, entry count and
+/// bytes.
 /// Attachments are checked against live records, so these frames must
 /// follow the record frames. Nodes due at `now_ms` are dropped with
 /// their edges and attachments, and so are edges due at `now_ms`; a kept
@@ -227,7 +231,7 @@ pub(crate) fn load_snapshot(
 pub(crate) fn compacted_bodies(
     state: &GraphState,
     now_ms: u64,
-    mut emit: impl FnMut(u32, &[u8]) -> Result<()>,
+    mut emit: impl FnMut(GraphId, u32, &[u8]) -> Result<()>,
 ) -> Result<()> {
     let encode = |body: &GraphBody| {
         engine::encode_body(body).map_err(|_| corrupt(0, "graph state cannot be re-encoded"))
@@ -237,11 +241,7 @@ pub(crate) fn compacted_bodies(
         let create = GraphEntry::CreateGraph {
             name: graph.name().into(),
         };
-        let live_nodes = || {
-            graph
-                .nodes()
-                .filter(move |node| !graph.node_expired(node.id, now_ms))
-        };
+        let live_nodes = || kept_nodes(graph, now_ms);
         let nodes = live_nodes().flat_map(|node| {
             let expiry = graph
                 .node_expiry(node.id)
@@ -257,26 +257,23 @@ pub(crate) fn compacted_bodies(
             })
             .chain(expiry)
         });
-        let edges = graph
-            .edges()
-            .filter(|edge| !graph.edge_expired(edge, now_ms))
-            .flat_map(|edge| {
-                let expiry = graph
-                    .edge_expiry(edge.id)
-                    .map(|deadline| GraphEntry::EdgeExpiry {
-                        edge_id: edge.id,
-                        expires_at_ms: Some(deadline),
-                    });
-                std::iter::once(GraphEntry::PutEdge {
+        let edges = kept_edges(graph, now_ms).flat_map(|edge| {
+            let expiry = graph
+                .edge_expiry(edge.id)
+                .map(|deadline| GraphEntry::EdgeExpiry {
                     edge_id: edge.id,
-                    source: edge.source,
-                    destination: edge.destination,
-                    relationship: edge.relationship.clone(),
-                    key: edge.key.clone(),
-                    properties: edge.properties.clone(),
-                })
-                .chain(expiry)
-            });
+                    expires_at_ms: Some(deadline),
+                });
+            std::iter::once(GraphEntry::PutEdge {
+                edge_id: edge.id,
+                source: edge.source,
+                destination: edge.destination,
+                relationship: edge.relationship.clone(),
+                key: edge.key.clone(),
+                properties: edge.properties.clone(),
+            })
+            .chain(expiry)
+        });
         let attachments = live_nodes().flat_map(|node| {
             graph
                 .attachments(node.id)
@@ -311,16 +308,44 @@ pub(crate) fn compacted_bodies(
             };
             let len = encode(&single)?.len() - BODY_HEADER_BYTES;
             if body.entries.len() == MAX_BATCH_ENTRIES || used + len > MAX_BATCH_BYTES {
-                emit(body.entries.len() as u32, &encode(&body)?)?;
+                emit(graph_id, body.entries.len() as u32, &encode(&body)?)?;
                 body.entries.clear();
                 used = BODY_HEADER_BYTES;
             }
             used += len;
             body.entries.extend(single.entries);
         }
-        emit(body.entries.len() as u32, &encode(&body)?)?;
+        emit(graph_id, body.entries.len() as u32, &encode(&body)?)?;
     }
     Ok(())
+}
+
+/// The nodes of `graph` that a rewrite at `now_ms` keeps, in ID order.
+fn kept_nodes(graph: &Graph, now_ms: u64) -> impl Iterator<Item = &GraphNode> {
+    graph
+        .nodes()
+        .filter(move |node| !graph.node_expired(node.id, now_ms))
+}
+
+/// The edges of `graph` that a rewrite at `now_ms` keeps, in ID order.
+fn kept_edges(graph: &Graph, now_ms: u64) -> impl Iterator<Item = &GraphEdge> {
+    graph
+        .edges()
+        .filter(move |edge| !graph.edge_expired(edge, now_ms))
+}
+
+/// The (ID, revision) pairs of the nodes and of the edges of `graph` that
+/// `compacted_bodies` writes at `now_ms`, which a P3a precision image keeps
+/// in its revision blocks.
+pub(crate) fn kept_revisions(graph: &Graph, now_ms: u64) -> (Pairs, Pairs) {
+    (
+        kept_nodes(graph, now_ms)
+            .map(|node| (node.id.0, node.revision))
+            .collect(),
+        kept_edges(graph, now_ms)
+            .map(|edge| (edge.id.0, edge.revision))
+            .collect(),
+    )
 }
 
 pub(crate) fn mutation_id(mutation: &Mutation) -> u64 {

@@ -13,7 +13,8 @@
 //! vectors stay in other frames: these blocks alone never reconstruct a
 //! collection.
 
-use super::{CRITICAL, Envelope, HEADER_LEN, MAX_BODY, MIN_BODY};
+use super::catalog::Precision;
+use super::{CRITICAL, Envelope, MAX_BODY, MIN_BODY, envelope};
 use crate::format::{FLAG_COMPACT, corrupt, u16_at, u32_at, u64_at};
 use crate::{Error, MAX_DIMENSIONS, Result};
 
@@ -38,16 +39,6 @@ const SECTIONS: usize = 6;
 /// opens into about 1 MiB, like a P2 record block.
 const MAX_ROWS: usize = 4096;
 const BLOCK_COMPONENTS: usize = 1 << 20;
-const ALIGN: u64 = 64;
-
-/// Stored precision of a collection's dense vectors. float32 is the default
-/// and keeps every input bit; float16 is an explicit, lossy choice.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum Precision {
-    #[default]
-    Float32,
-    Float16,
-}
 
 /// Why a float32 value has no stored value in a precision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,21 +57,6 @@ impl Precision {
             Self::Float32 if value.is_finite() => Ok(value),
             Self::Float32 => Err(ComponentError::NonFinite),
             Self::Float16 => to_half(value).map(from_half),
-        }
-    }
-
-    fn code(self) -> u8 {
-        match self {
-            Self::Float32 => 1,
-            Self::Float16 => 2,
-        }
-    }
-
-    fn from_code(code: u8) -> Option<Self> {
-        match code {
-            1 => Some(Self::Float32),
-            2 => Some(Self::Float16),
-            _ => None,
         }
     }
 
@@ -244,39 +220,13 @@ pub(crate) fn encode(
         &deadlines,
         &components,
     ];
-    Ok(envelope(collection, partition, &sections, body_offset))
-}
-
-/// A critical version-1 block body for `KIND_DENSE` whose sections each
-/// start on a 64-byte file boundary, given the body's file offset.
-fn envelope(
-    collection: u16,
-    partition: u32,
-    sections: &[&[u8]; SECTIONS],
-    body_offset: u64,
-) -> Vec<u8> {
-    let mut body = Vec::new();
-    for field in [KIND_DENSE, VERSION, CRITICAL, SECTIONS as u16] {
-        body.extend_from_slice(&field.to_le_bytes());
-    }
-    let object = u64::from(collection) | u64::from(partition) << 16;
-    body.extend_from_slice(&object.to_le_bytes());
-    // No source digest; the first section's offset is filled in below.
-    body.resize(HEADER_LEN + 8 * SECTIONS, 0);
-    for (index, section) in sections.iter().enumerate() {
-        let padding = body_offset.wrapping_add(body.len() as u64).wrapping_neg() % ALIGN;
-        body.resize(body.len() + padding as usize, 0);
-        // A block is far below 4 GiB: `max_rows` bounds its components.
-        let start = (body.len() as u32).to_le_bytes();
-        let entry = HEADER_LEN + 8 * index;
-        body[entry..entry + 4].copy_from_slice(&start);
-        body[entry + 4..entry + 8].copy_from_slice(&(section.len() as u32).to_le_bytes());
-        if index == 0 {
-            body[24..28].copy_from_slice(&start);
-        }
-        body.extend_from_slice(section);
-    }
-    body
+    Ok(envelope(
+        KIND_DENSE,
+        collection,
+        u64::from(partition),
+        &sections,
+        Some(body_offset),
+    ))
 }
 
 /// The checked rows of a block, borrowed from its verified body.
@@ -448,7 +398,7 @@ pub(crate) fn check<'a>(
 mod tests {
     use super::*;
     use crate::compact::tests::{FLOOR, block, frame};
-    use crate::compact::{KIND_END, KIND_TABLE};
+    use crate::compact::{HEADER_LEN, KIND_END, KIND_TABLE};
     use crate::crypto::{Cipher, EncryptionKey, SEAL_OVERHEAD};
     use crate::format::{self, FLAG_HISTORY, FOOTER_SIZE, PREFIX_SIZE};
     use sha2::{Digest, Sha256};

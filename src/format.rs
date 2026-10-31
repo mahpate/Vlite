@@ -1,3 +1,4 @@
+use crate::compact::catalog::Precision;
 use crate::crypto::{Cipher, DESCRIPTOR_SIZE, Descriptor, EncryptionKey, SEAL_OVERHEAD};
 use crate::{
     CollectionSettings, DistanceMetric, Error, HnswConfig, MAX_BATCH_BYTES, MAX_BATCH_OPERATIONS,
@@ -58,6 +59,20 @@ pub(crate) const OP_GRAPH_SNAPSHOT: u8 = 15;
 /// Compact block: one block of a `FLAG_COMPACT` image at the checkpoint
 /// sequence, starting with the capability table (`crate::compact`).
 pub(crate) const OP_COMPACT_BLOCK: u8 = 16;
+/// Header flag (v5, P3a precision policy): the store fixes each collection's
+/// stored precision when the collection is created. Its log starts with a
+/// `FLAG_COMPACT` image whose precision catalog lists every live collection
+/// (`crate::compact::catalog`), and later collections are created with op
+/// 17. Builds without qualified support (`compact::precision_supported`)
+/// refuse it with `UnsupportedFeature(FLAG_PRECISION)`.
+pub(crate) const FLAG_PRECISION: u16 = 32;
+/// Precise collection create (P3a): a schema (`u16`, 1), the stored
+/// precision (`u8`: 1 float32, 2 float16) and five zero bytes, then an op-5
+/// body. Valid only after the image of a `FLAG_PRECISION` log, which
+/// creates collections with nothing else.
+pub(crate) const OP_COLLECTION_PRECISE: u8 = 17;
+const PRECISE_HEADER: usize = 8;
+const MAX_PRECISE_BODY: usize = PRECISE_HEADER + MAX_CREATE_BODY;
 /// Per-entry header of a record block: ID, revision, expiry flag, expiry and
 /// extended-body length.
 const BLOCK_ENTRY_HEADER: usize = 29;
@@ -309,6 +324,8 @@ pub(crate) enum LoadedImportMarker {
     /// A collection drop. Its ID is never reused, but jobs bound to the
     /// dropped collection keep only their history.
     CollectionDropped(u16),
+    /// The whole registry restated by a precision image (P3a).
+    Image(Box<crate::import::Registry>),
 }
 
 pub(crate) struct LoadedCollection {
@@ -316,6 +333,8 @@ pub(crate) struct LoadedCollection {
     pub name: String,
     pub dimensions: usize,
     pub settings: CollectionSettings,
+    /// Stored precision fixed at creation, in a `FLAG_PRECISION` log only.
+    pub precision: Option<Precision>,
     /// True once a create (op 5) or settings (op 7) frame stored the settings.
     pub settings_persisted: bool,
     pub records: crate::records::RecordMap,
@@ -332,6 +351,7 @@ impl LoadedCollection {
             name,
             dimensions,
             settings,
+            precision: None,
             settings_persisted: false,
             records: crate::records::RecordMap::new(),
             expiries: BTreeMap::new(),
@@ -833,11 +853,62 @@ pub(crate) fn collection_create_frame(
     settings: &CollectionSettings,
 ) -> Vec<u8> {
     let mut body = Vec::new();
+    push_create(&mut body, name, dimensions, settings);
+    wrap(5, 0, sequence, u64::from(id), 0, body.len() as u32, &body)
+}
+
+/// Precise create frame (op 17) of a named collection with its stored
+/// precision.
+pub(crate) fn precise_create_frame(
+    sequence: u64,
+    id: u16,
+    name: &str,
+    dimensions: usize,
+    settings: &CollectionSettings,
+    precision: Precision,
+) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(&1u16.to_le_bytes());
+    body.push(precision.code());
+    body.resize(PRECISE_HEADER, 0);
+    push_create(&mut body, name, dimensions, settings);
+    wrap(
+        OP_COLLECTION_PRECISE,
+        0,
+        sequence,
+        u64::from(id),
+        0,
+        body.len() as u32,
+        &body,
+    )
+}
+
+/// The op-5 create body.
+fn push_create(body: &mut Vec<u8>, name: &str, dimensions: usize, settings: &CollectionSettings) {
     body.push(name.len() as u8);
     body.extend_from_slice(name.as_bytes());
     body.extend_from_slice(&(dimensions as u32).to_le_bytes());
     body.extend_from_slice(&encode_settings(settings));
-    wrap(5, 0, sequence, u64::from(id), 0, body.len() as u32, &body)
+}
+
+/// Compact block frame (op 16): `id` holds the block kind and partition,
+/// `owner` its collection or graph.
+pub(crate) fn compact_block_frame(
+    sequence: u64,
+    owner: u16,
+    id: u64,
+    count: u32,
+    body: &[u8],
+) -> Vec<u8> {
+    wrap(
+        OP_COMPACT_BLOCK,
+        owner,
+        sequence,
+        id,
+        count,
+        body.len() as u32,
+        body,
+    )
 }
 
 pub(crate) fn collection_drop_frame(sequence: u64, id: u16) -> Vec<u8> {
@@ -1094,6 +1165,7 @@ struct JobReplay {
 /// Validates one marker against per-job log state (contiguity and closure).
 fn replay_marker(
     jobs: &mut HashMap<u64, JobReplay>,
+    image_max_job: Option<u64>,
     collection: u16,
     marker: &ImportMarker,
     data_entries: usize,
@@ -1105,6 +1177,11 @@ fn replay_marker(
         return Err(corrupt(offset, "invalid import marker flags"));
     }
     let previous = jobs.get(&marker.job).copied();
+    // A precision image keeps every job ID up to its high-water used, even
+    // jobs the registry no longer lists.
+    if previous.is_none() && image_max_job.is_some_and(|max| marker.job <= max) {
+        return Err(corrupt(offset, "import job ID reused"));
+    }
     if let Some(previous) = previous {
         if previous.closed {
             return Err(corrupt(offset, "import marker after job closed"));
@@ -1188,6 +1265,34 @@ pub(crate) fn decode_create(
     Ok((name, dimensions, settings))
 }
 
+/// Decodes an op-17 body whose length its prefix bounded: a schema or
+/// precision this build does not know is `UnsupportedFeature`.
+pub(crate) fn decode_precise(
+    body: &[u8],
+    offset: u64,
+) -> Result<(Precision, String, usize, CollectionSettings)> {
+    if u16_at(body, 0) != 1 {
+        return Err(Error::UnsupportedFeature(FLAG_PRECISION));
+    }
+    let precision =
+        Precision::from_code(body[2]).ok_or(Error::UnsupportedFeature(FLAG_PRECISION))?;
+    if body[3..PRECISE_HEADER] != [0; 5] {
+        return Err(corrupt(offset, "invalid precise collection create"));
+    }
+    let (name, dimensions, settings) = decode_create(&body[PRECISE_HEADER..], offset)?;
+    Ok((precision, name, dimensions, settings))
+}
+
+/// Whether an op-17 prefix creates a nonzero collection ID with no count,
+/// clear reserved bytes and a body of a precise header and an op-5 body.
+pub(crate) fn precise_prefix_valid(prefix: &[u8]) -> bool {
+    let body = u32_at(prefix, 28) as usize;
+    prefix[5..8] == [0; 3]
+        && (1..=u64::from(u16::MAX)).contains(&u64_at(prefix, 16))
+        && u32_at(prefix, 24) == 0
+        && (PRECISE_HEADER + 6..=MAX_PRECISE_BODY).contains(&body)
+}
+
 /// Parsed file header (plus encryption descriptor) of a log.
 pub(crate) struct LogHeader {
     pub version: u32,
@@ -1247,7 +1352,10 @@ pub(crate) fn read_log_header_with<R: Read + Seek>(
     let (lineage, collection_floor) = if version >= V4 {
         if version >= V5 {
             flags = u16_at(&bytes, 26);
-            let known_flags = KNOWN_FLAGS | GRAPH_READER_FLAGS;
+            let mut known_flags = KNOWN_FLAGS | GRAPH_READER_FLAGS;
+            if crate::compact::precision_supported() {
+                known_flags |= FLAG_PRECISION;
+            }
             if flags & !known_flags != 0 {
                 return Err(Error::UnsupportedFeature(flags & !known_flags));
             }
@@ -1256,6 +1364,9 @@ pub(crate) fn read_log_header_with<R: Read + Seek>(
             }
             if flags & FLAG_COMPACT != 0 && flags & FLAG_HISTORY == 0 {
                 return Err(corrupt(0, "compact flag without a history image"));
+            }
+            if flags & FLAG_PRECISION != 0 && flags & FLAG_COMPACT == 0 {
+                return Err(corrupt(0, "precision log without its catalog image"));
             }
         } else if bytes[26..28] != [0; 2] {
             return Err(corrupt(0, "nonzero reserved database header bytes"));
@@ -1335,6 +1446,7 @@ pub(crate) fn frame_allowed(version: u32, flags: u16, prefix: &[u8]) -> bool {
         OP_GRAPH_SNAPSHOT => version >= V5 && flags & FLAG_HISTORY != 0 && flags & FLAG_GRAPH != 0,
         // FLAG_COMPACT only passes the header check with FLAG_HISTORY.
         OP_COMPACT_BLOCK => version >= V5 && flags & FLAG_COMPACT != 0,
+        OP_COLLECTION_PRECISE => version >= V5 && flags & FLAG_PRECISION != 0,
         _ => false,
     };
     let reserved_clear = if version >= V4
@@ -1525,6 +1637,11 @@ fn load_inner<R: Read + Seek>(
     // offset of their first frame.
     let mut blocks: Option<BlockRun> = None;
     let mut snapshot: Option<(u64, Vec<crate::property_graph::engine::GraphBody>)> = None;
+    // A precision image's graph revision runs, one per snapshot graph in
+    // order, and the highest import job ID its registry restated (P3a).
+    let mut revisions: Vec<Revisions> = Vec::new();
+    let mut image_max_job: Option<u64> = None;
+    let precise = flags & FLAG_PRECISION != 0;
     let mut check = crate::compact::ImageCheck::new(version, flags);
     let mut disk = Vec::new();
     loop {
@@ -1624,18 +1741,14 @@ fn load_inner<R: Read + Seek>(
         let collection_id = u16_at(&prefix, 5);
         let sequence = u64_at(&prefix, 8);
         // A pending snapshot or run of record blocks ends at the first frame
-        // that does not continue it.
-        if operation != OP_GRAPH_SNAPSHOT
-            && let Some((first, bodies)) = snapshot.take()
-        {
-            let floor = loaded.history_floor;
-            let state = crate::property_graph::frame::load_snapshot(
-                &loaded.collections,
-                floor,
-                bodies,
-                first,
-            )?;
-            loaded.graph = Some(state);
+        // that does not continue it. In a precision image, each graph's
+        // revision blocks follow its snapshot frames.
+        let continues_snapshot = operation == OP_GRAPH_SNAPSHOT
+            || (precise
+                && operation == OP_COMPACT_BLOCK
+                && u64_at(&prefix, 16) as u16 == crate::compact::catalog::KIND_REVISIONS);
+        if !continues_snapshot && let Some((first, bodies)) = snapshot.take() {
+            load_graph_image(&mut loaded, first, bodies, &mut revisions, precise)?;
         }
         if blocks
             .as_ref()
@@ -1779,7 +1892,7 @@ fn load_inner<R: Read + Seek>(
             count * 4 + payload_len
         } else {
             // Ops 12 and 15 in graph builds; their prefix was validated
-            // above. Op 16 was bounded by the image check.
+            // above. Ops 16 and 17 were bounded by the image check.
             payload_len
         };
         let frame_len = (PREFIX_SIZE + body_len + seal + FOOTER_SIZE) as u64;
@@ -1868,7 +1981,14 @@ fn load_inner<R: Read + Seek>(
                 let (operations, marker) =
                     decode_batch(body, count, target_dimensions, offset, version)?;
                 if let Some(marker) = &marker {
-                    replay_marker(&mut jobs, collection_id, marker, operations.len(), offset)?;
+                    replay_marker(
+                        &mut jobs,
+                        image_max_job,
+                        collection_id,
+                        marker,
+                        operations.len(),
+                        offset,
+                    )?;
                 }
                 for operation in &operations {
                     match operation {
@@ -1929,15 +2049,22 @@ fn load_inner<R: Read + Seek>(
                     });
                 }
             }
-            5 => {
+            5 | OP_COLLECTION_PRECISE => {
                 let collection = id as u16;
-                let (name, dimensions, settings) = decode_create(body, offset)?;
+                let (precision, name, dimensions, settings) = if operation == 5 {
+                    let (name, dimensions, settings) = decode_create(body, offset)?;
+                    (None, name, dimensions, settings)
+                } else {
+                    let (precision, name, dimensions, settings) = decode_precise(body, offset)?;
+                    (Some(precision), name, dimensions, settings)
+                };
                 // Collection IDs are never reused within a lineage history:
                 // creates are strictly increasing, and an ID at or below the
                 // header floor is only valid in the leading run of create
                 // frames that compaction/upgrade write to restate live
-                // collections (every frame so far is such a create).
-                let restating = creates_seen == commits_seen;
+                // collections (every frame so far is such a create). An
+                // op 17 never restates.
+                let restating = operation == 5 && creates_seen == commits_seen;
                 if collection <= created_high
                     || (collection <= loaded.collection_floor && !restating)
                 {
@@ -1954,6 +2081,7 @@ fn load_inner<R: Read + Seek>(
                 }
                 let mut created = LoadedCollection::new(name, dimensions, settings);
                 created.settings_persisted = true;
+                created.precision = precision;
                 loaded.collections.insert(collection, created);
                 created_high = collection;
                 creates_seen += 1;
@@ -1997,15 +2125,35 @@ fn load_inner<R: Read + Seek>(
                     body,
                     offset,
                 )?;
-                snapshot
-                    .get_or_insert_with(|| (offset, Vec::new()))
-                    .1
-                    .push(body);
+                let bodies = &mut snapshot.get_or_insert_with(|| (offset, Vec::new())).1;
+                // A precision image lists each graph's revisions right after
+                // that graph's snapshot frames.
+                if precise
+                    && let Some(previous) = bodies.last().map(|body| body.graph_id.0)
+                    && (previous != body.graph_id.0)
+                        != (revisions.last().map(|run| run.graph) == Some(previous))
+                {
+                    return Err(corrupt(offset, "graph snapshot without its revisions"));
+                }
+                bodies.push(body);
             }
-            OP_COMPACT_BLOCK => check
-                .as_mut()
-                .expect("op 16 is only allowed with FLAG_COMPACT")
-                .block(collection_id, id, count as u32, body, offset)?,
+            OP_COMPACT_BLOCK => {
+                let supplement = check
+                    .as_mut()
+                    .expect("op 16 is only allowed with FLAG_COMPACT")
+                    .block(collection_id, id, count as u32, body, offset)?;
+                if let Some(supplement) = supplement {
+                    apply_supplement(
+                        &mut loaded,
+                        &mut jobs,
+                        &mut image_max_job,
+                        snapshot.as_ref().map(|(_, bodies)| bodies.as_slice()),
+                        &mut revisions,
+                        supplement,
+                        offset,
+                    )?;
+                }
+            }
             _ => {
                 let settings = decode_settings(body).map_err(|reason| corrupt(offset, reason))?;
                 let collection = loaded
@@ -2037,15 +2185,130 @@ fn load_inner<R: Read + Seek>(
         run.apply(&mut loaded, cipher.as_ref())?;
     }
     if let Some((first, bodies)) = snapshot {
-        let state = crate::property_graph::frame::load_snapshot(
-            &loaded.collections,
-            loaded.history_floor,
-            bodies,
-            first,
-        )?;
-        loaded.graph = Some(state);
+        load_graph_image(&mut loaded, first, bodies, &mut revisions, precise)?;
     }
     Ok(loaded)
+}
+
+/// Revisions of one graph's nodes and edges in a precision image (P3a).
+struct Revisions {
+    graph: u16,
+    nodes: crate::compact::catalog::Pairs,
+    edges: crate::compact::catalog::Pairs,
+}
+
+/// Loads the graph state of a checkpoint image from its snapshot `bodies`;
+/// a precision image restores the revisions its runs restated, one run per
+/// graph.
+fn load_graph_image(
+    loaded: &mut Loaded,
+    first: u64,
+    bodies: Vec<crate::property_graph::engine::GraphBody>,
+    revisions: &mut Vec<Revisions>,
+    precise: bool,
+) -> Result<()> {
+    let last = bodies.last().map(|body| body.graph_id.0);
+    if precise && revisions.last().map(|run| run.graph) != last {
+        return Err(corrupt(first, "graph snapshot without its revisions"));
+    }
+    let mut state = crate::property_graph::frame::load_snapshot(
+        &loaded.collections,
+        loaded.history_floor,
+        bodies,
+        first,
+    )?;
+    for run in revisions.drain(..) {
+        state
+            .restore_revisions(
+                crate::property_graph::engine::GraphId(run.graph),
+                &run.nodes,
+                &run.edges,
+            )
+            .map_err(|_| corrupt(first, "graph revisions do not match the snapshot"))?;
+    }
+    loaded.graph = Some(state);
+    Ok(())
+}
+
+/// Applies what a block of a precision image restates (P3a): collection
+/// precisions, the import registry with its job high-water, or a graph's
+/// revisions, which follow the snapshot frames `bodies` of that graph.
+fn apply_supplement(
+    loaded: &mut Loaded,
+    jobs: &mut HashMap<u64, JobReplay>,
+    image_max_job: &mut Option<u64>,
+    bodies: Option<&[crate::property_graph::engine::GraphBody]>,
+    revisions: &mut Vec<Revisions>,
+    supplement: crate::compact::Supplement,
+    offset: u64,
+) -> Result<()> {
+    use crate::compact::Supplement;
+    match supplement {
+        Supplement::Catalog(entries) => {
+            for entry in entries {
+                let target = collection_mut(loaded, entry.collection);
+                if target.dimensions != entry.dimensions {
+                    return Err(corrupt(offset, "precision catalog dimensions mismatch"));
+                }
+                target.precision = Some(entry.precision);
+            }
+        }
+        Supplement::Imports(registry) => {
+            for (job, state) in registry.jobs() {
+                let collection = state.collection;
+                let bound = if state.collection_dropped {
+                    collection != 0
+                        && collection <= loaded.collection_high
+                        && !loaded.collections.contains_key(&collection)
+                } else {
+                    loaded
+                        .collections
+                        .get(&collection)
+                        .is_some_and(|live| live.name == registry.collection_name(job))
+                };
+                if !bound {
+                    return Err(corrupt(offset, "import job bound to an unknown collection"));
+                }
+                jobs.insert(
+                    job,
+                    JobReplay {
+                        collection,
+                        last_chunk: state.last_chunk,
+                        closed: state.state != crate::import::ImportState::Open,
+                        rows_committed: state.rows_committed,
+                        rows_skipped: state.rows_skipped,
+                    },
+                );
+            }
+            *image_max_job = Some(registry.max_job());
+            loaded.imports.push(LoadedImportMarker::Image(registry));
+        }
+        Supplement::Revisions {
+            graph,
+            partition,
+            nodes,
+            edges,
+        } => {
+            if partition != 0 {
+                let run = revisions
+                    .last_mut()
+                    .expect("the image check continued the run");
+                run.nodes.extend(nodes);
+                run.edges.extend(edges);
+            } else if bodies.and_then(<[_]>::last).map(|body| body.graph_id.0) != Some(graph)
+                || revisions.last().is_some_and(|run| run.graph == graph)
+            {
+                return Err(corrupt(offset, "graph revisions without their snapshot"));
+            } else {
+                revisions.push(Revisions {
+                    graph,
+                    nodes,
+                    edges,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// One decoded record-block entry.

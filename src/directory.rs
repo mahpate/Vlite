@@ -34,7 +34,7 @@ const MANIFEST_MAGIC: &str = "vlite-manifest 1";
 /// Default size of the active log at which a commit starts a checkpoint.
 pub const DEFAULT_CHECKPOINT_BYTES: u64 = 64 << 20;
 /// Header flags a log segment may carry (it never holds history or stamps).
-const WAL_FLAGS: u16 = format::FLAG_GRAPH | format::FLAG_ENCRYPTED;
+const WAL_FLAGS: u16 = format::FLAG_GRAPH | format::FLAG_ENCRYPTED | format::FLAG_PRECISION;
 
 /// How a directory is opened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -672,9 +672,14 @@ impl Chain {
     ) -> Result<()> {
         let names: Vec<String> = self.names().into_iter().take(sealed).collect();
         let directory = self.directory.clone();
+        // The test-only precision gate is per thread.
+        #[cfg(test)]
+        let precision = crate::compact::precision_supported();
         let handle = thread::Builder::new()
             .name("vlite-checkpoint".into())
             .spawn(move || {
+                #[cfg(test)]
+                let _gate = crate::compact::Activation::set(precision);
                 let (mut segments, _) = open_segments(&directory, &names, false)?;
                 let loaded = format::load_known(&mut segments, cipher.as_ref())?;
                 if loaded.incomplete_bytes != 0 || loaded.sequence != floor {
@@ -790,7 +795,7 @@ fn build_image(
         crate::current_time_ms(),
         graph_now_ms,
         cipher,
-        loaded.flags & format::FLAG_GRAPH,
+        loaded.flags & (format::FLAG_GRAPH | format::FLAG_PRECISION),
         floor,
     )?;
     let check = format::load_known(staging.as_file_mut(), cipher)?;

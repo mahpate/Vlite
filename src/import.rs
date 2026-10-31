@@ -19,6 +19,12 @@ use crate::{Database, Error, MAX_BATCH_OPERATIONS, MAX_PAYLOAD_BYTES, Mutation, 
 pub const MAX_OPEN_IMPORTS: usize = 64;
 /// Closed jobs whose status remains queryable on one handle.
 pub const MAX_CLOSED_IMPORTS: usize = 1024;
+/// Bytes of one job in a P3a import registry block before its name.
+const IMAGE_ENTRY: usize = 72;
+/// Largest section of a P3a import registry block: every open and closed
+/// job with the longest name, and every closed ID.
+pub(crate) const MAX_IMAGE_SECTION: usize =
+    16 + (MAX_OPEN_IMPORTS + MAX_CLOSED_IMPORTS) * (IMAGE_ENTRY + 63) + MAX_CLOSED_IMPORTS * 8;
 
 /// How invalid rows in a chunk are handled. Encoded as the digest policy byte.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -83,7 +89,7 @@ pub(crate) struct JobState {
 
 /// In-memory registry of import jobs. Bounded: closed jobs beyond
 /// `MAX_CLOSED_IMPORTS` are forgotten oldest-first.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Registry {
     jobs: BTreeMap<u64, JobState>,
     /// Collection name at job creation, evicted together with the job.
@@ -106,9 +112,163 @@ impl Registry {
                 LoadedImportMarker::CollectionDropped(collection) => {
                     registry.collection_dropped(*collection);
                 }
+                // A precision image restates the whole registry first.
+                LoadedImportMarker::Image(image) => registry = (**image).clone(),
             }
         }
         registry
+    }
+
+    /// The registry as the section of a P3a import registry block, and its
+    /// job count: the highest job ID ever observed (`u64`), the number of
+    /// jobs (`u32`) and of closed jobs (`u32`); then each job in ascending
+    /// ID order: ID (`u64`), collection (`u16`), state (`u8`: 0 open,
+    /// 1 finished, 2 aborted), collection dropped (`u8`), name length
+    /// (`u8`), three zero bytes, last chunk, rows committed and rows
+    /// skipped (`u64` each), the last digest (32 bytes) and the name; last
+    /// the closed job IDs (`u64`), oldest first, in eviction order.
+    pub(crate) fn encode_image(&self) -> Result<(Vec<u8>, u32)> {
+        if self.jobs.len() > MAX_OPEN_IMPORTS + MAX_CLOSED_IMPORTS
+            || self.closed_order.len() > MAX_CLOSED_IMPORTS
+        {
+            return Err(format::corrupt(
+                0,
+                "import registry exceeds its image bounds",
+            ));
+        }
+        let mut section = Vec::with_capacity(
+            MAX_IMAGE_SECTION
+                .min(16 + self.jobs.len() * (IMAGE_ENTRY + 63) + self.closed_order.len() * 8),
+        );
+        section.extend_from_slice(&self.max_job.to_le_bytes());
+        section.extend_from_slice(&(self.jobs.len() as u32).to_le_bytes());
+        section.extend_from_slice(&(self.closed_order.len() as u32).to_le_bytes());
+        for (&job, state) in &self.jobs {
+            let name = self.collection_name(job);
+            section.extend_from_slice(&job.to_le_bytes());
+            section.extend_from_slice(&state.collection.to_le_bytes());
+            section.push(match state.state {
+                ImportState::Open => 0,
+                ImportState::Finished => 1,
+                ImportState::Aborted => 2,
+            });
+            section.push(u8::from(state.collection_dropped));
+            section.push(name.len() as u8);
+            section.extend_from_slice(&[0; 3]);
+            for value in [state.last_chunk, state.rows_committed, state.rows_skipped] {
+                section.extend_from_slice(&value.to_le_bytes());
+            }
+            section.extend_from_slice(&state.last_digest);
+            section.extend_from_slice(name.as_bytes());
+        }
+        for job in &self.closed_order {
+            section.extend_from_slice(&job.to_le_bytes());
+        }
+        Ok((section, self.jobs.len() as u32))
+    }
+
+    /// Checks and decodes `encode_image` output whose block has frame
+    /// `count`: every field in range, jobs ascending and at most the high
+    /// water, closed IDs exactly the closed jobs, and the exact length.
+    /// Bindings to collections are the loader's to check.
+    pub(crate) fn decode_image(
+        section: &[u8],
+        count: u32,
+    ) -> std::result::Result<Self, &'static str> {
+        const INVALID: &str = "invalid import registry";
+        if section.len() < 16 {
+            return Err(INVALID);
+        }
+        let max_job = format::u64_at(section, 0);
+        let jobs = format::u32_at(section, 8) as usize;
+        let closed = format::u32_at(section, 12) as usize;
+        if jobs != count as usize
+            || jobs > MAX_OPEN_IMPORTS + MAX_CLOSED_IMPORTS
+            || closed > MAX_CLOSED_IMPORTS.min(jobs)
+            || section.len() > MAX_IMAGE_SECTION
+        {
+            return Err(INVALID);
+        }
+        let mut registry = Self {
+            max_job,
+            ..Self::default()
+        };
+        let mut rest = &section[16..];
+        let mut previous = 0;
+        let mut closing = 0;
+        for _ in 0..jobs {
+            let (entry, tail) = rest.split_at_checked(IMAGE_ENTRY).ok_or(INVALID)?;
+            let job = format::u64_at(entry, 0);
+            let state = match entry[10] {
+                0 => ImportState::Open,
+                1 => ImportState::Finished,
+                2 => ImportState::Aborted,
+                _ => return Err(INVALID),
+            };
+            let dropped = entry[11];
+            let (name, tail) = tail
+                .split_at_checked(usize::from(entry[12]))
+                .ok_or(INVALID)?;
+            let name = std::str::from_utf8(name)
+                .ok()
+                .filter(|name| format::valid_collection_name(name))
+                .ok_or(INVALID)?;
+            let state = JobState {
+                collection: format::u16_at(entry, 8),
+                collection_dropped: dropped == 1,
+                state,
+                last_chunk: format::u64_at(entry, 16),
+                rows_committed: format::u64_at(entry, 24),
+                rows_skipped: format::u64_at(entry, 32),
+                last_digest: entry[40..72].try_into().expect("32 bytes"),
+            };
+            let open = state.state == ImportState::Open;
+            if job <= previous
+                || job > max_job
+                || dropped > 1
+                || (open && (state.collection_dropped || state.last_chunk == 0))
+                || (state.last_chunk == 0
+                    && (state.rows_committed != 0
+                        || state.rows_skipped != 0
+                        || state.last_digest != [0; 32]))
+                || entry[13..16] != [0; 3]
+            {
+                return Err(INVALID);
+            }
+            previous = job;
+            closing += usize::from(!open);
+            registry.jobs.insert(job, state);
+            registry.names.insert(job, name.to_owned());
+            rest = tail;
+        }
+        let (ids, rest) = rest.as_chunks::<8>();
+        if closing != closed || ids.len() != closed || !rest.is_empty() {
+            return Err(INVALID);
+        }
+        let mut listed = std::collections::BTreeSet::new();
+        for id in ids {
+            let job = u64::from_le_bytes(*id);
+            if registry
+                .jobs
+                .get(&job)
+                .is_none_or(|state| state.state == ImportState::Open)
+                || !listed.insert(job)
+            {
+                return Err(INVALID);
+            }
+            registry.closed_order.push_back(job);
+        }
+        Ok(registry)
+    }
+
+    /// Every job, open and closed, in ascending ID order.
+    pub(crate) fn jobs(&self) -> impl Iterator<Item = (u64, &JobState)> {
+        self.jobs.iter().map(|(&id, job)| (id, job))
+    }
+
+    /// Highest job ID ever observed.
+    pub(crate) fn max_job(&self) -> u64 {
+        self.max_job
     }
 
     /// Applies one already-validated (load) or just-committed marker.

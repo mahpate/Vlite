@@ -69,6 +69,36 @@ impl GraphState {
         Ok(state)
     }
 
+    /// Restores the original revisions of graph `graph`'s nodes and edges,
+    /// which its snapshot bodies loaded at the image sequence (P3a kind 5).
+    /// The (ID, revision) pairs list exactly its nodes and then its edges
+    /// in ascending ID order.
+    pub fn restore_revisions(
+        &mut self,
+        graph: GraphId,
+        nodes: &[(u64, u64)],
+        edges: &[(u64, u64)],
+    ) -> Result<(), GraphError> {
+        const MISMATCH: GraphError = GraphError::Corrupt("graph revisions do not match");
+        let graph = self.graphs.get_mut(&graph).ok_or(MISMATCH)?;
+        if graph.nodes.len() != nodes.len() || graph.edges.len() != edges.len() {
+            return Err(MISMATCH);
+        }
+        for (node, &(id, revision)) in graph.nodes.values_mut().zip(nodes) {
+            if node.id != NodeId(id) {
+                return Err(MISMATCH);
+            }
+            node.revision = revision;
+        }
+        for (edge, &(id, revision)) in graph.edges.values_mut().zip(edges) {
+            if edge.id != EdgeId(id) {
+                return Err(MISMATCH);
+            }
+            edge.revision = revision;
+        }
+        Ok(())
+    }
+
     fn created(
         &self,
         graph_id: GraphId,

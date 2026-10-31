@@ -2,16 +2,19 @@
 //!
 //! No function repairs sources, overwrites destinations, or replaces open files.
 
+use crate::compact::catalog;
 use crate::crypto::Cipher;
 pub use crate::logops::{
     LogSegment, RestoreReport, RestoreTarget, export_log_segment, reencrypt, restore_to,
 };
+use crate::property_graph::engine::GraphId;
 #[doc(no_inline)]
 pub use crate::property_graph::{
     GraphCounts, GraphInspection, GraphVerification, StripGraphReport, enable_graph, inspect_graph,
     strip_graph, verify_graph,
 };
 use crate::{Database, EncryptionKey, Error, LockedFile, Result, format, import, lock};
+use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -623,14 +626,25 @@ pub(crate) fn publish_with(
     Ok(report)
 }
 
-/// Writes frames to a file, sealing them when the output is encrypted.
+/// Writes frames to a file, sealing them when the output is encrypted. In
+/// a compact image it counts the frames and digests their prefixes for the
+/// end block.
 struct Sink<'a> {
-    file: &'a mut File,
+    file: &'a mut dyn Write,
     cipher: Option<&'a Cipher>,
+    image: Option<(u64, Sha256)>,
 }
 
 impl Sink<'_> {
     fn write_all(&mut self, frame: &[u8]) -> Result<()> {
+        if let Some((frames, digest)) = &mut self.image {
+            *frames += 1;
+            digest.update(&frame[..format::PREFIX_SIZE]);
+        }
+        self.write_raw(frame)
+    }
+
+    fn write_raw(&mut self, frame: &[u8]) -> Result<()> {
         match self.cipher {
             Some(cipher) => self.file.write_all(&cipher.seal_frame(frame)?)?,
             None => self.file.write_all(frame)?,
@@ -650,6 +664,11 @@ pub(crate) fn write_v5(
     cipher: Option<&Cipher>,
     extra_flags: u16,
 ) -> Result<()> {
+    // A rewrite restarts sequences without an image, where a precision
+    // store keeps its catalog (P3a): refused before any output.
+    if loaded.flags & format::FLAG_PRECISION != 0 {
+        return Err(Error::UnsupportedFeature(format::FLAG_PRECISION));
+    }
     write_v5_image(
         file,
         loaded,
@@ -673,9 +692,15 @@ pub(crate) fn write_v5(
 /// gets its own frame. Records expired at `now_ms` are dropped (S6), and so
 /// are graph nodes and edges due at `graph_now_ms` with every edge of a
 /// dropped node (Gap 3).
+///
+/// With `FLAG_PRECISION` (P3a) the image is a compact one: after the
+/// collection frames come the capability table, the precision catalog and
+/// the whole import registry (instead of open-job markers), and after each
+/// graph's snapshot frames its node and edge revisions; the end block
+/// closes it. It needs a floor.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn write_v5_image(
-    file: &mut File,
+    file: &mut dyn Write,
     loaded: &format::Loaded,
     lineage: u64,
     now_ms: u64,
@@ -700,6 +725,13 @@ pub(crate) fn write_v5_image(
     if floor != 0 {
         flags |= format::FLAG_HISTORY;
     }
+    let precise = extra_flags & format::FLAG_PRECISION != 0;
+    if precise {
+        if floor == 0 {
+            return Err(Error::UnsupportedFeature(format::FLAG_PRECISION));
+        }
+        flags |= format::FLAG_COMPACT;
+    }
     file.write_all(&format::header_v5_flags(
         loaded.dimensions,
         lineage,
@@ -707,7 +739,11 @@ pub(crate) fn write_v5_image(
         flags,
         cipher,
     ))?;
-    let mut output = Sink { file, cipher };
+    let mut output = Sink {
+        file,
+        cipher,
+        image: precise.then(|| (0, Sha256::new())),
+    };
     if floor != 0 {
         output.write_all(&format::advance_frame(floor))?;
     }
@@ -723,6 +759,30 @@ pub(crate) fn write_v5_image(
     let default = &loaded.collections[&0];
     if default.settings_persisted {
         output.write_all(&format::settings_frame(next(1)?, 0, &default.settings))?;
+    }
+    let graph = loaded
+        .graph
+        .as_ref()
+        .filter(|_| extra_flags & format::FLAG_GRAPH != 0);
+    let registry = import::Registry::from_markers(&loaded.imports);
+    if precise {
+        let entries = loaded
+            .collections
+            .iter()
+            .map(|(&collection, state)| {
+                Ok(catalog::Entry {
+                    collection,
+                    precision: state
+                        .precision
+                        .ok_or_else(|| format::corrupt(0, "collection without a precision"))?,
+                    dimensions: state.dimensions,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let graphs = graph.is_some_and(|state| state.graphs().next().is_some());
+        output.write_all(&catalog::table_frame(floor, graphs))?;
+        output.write_all(&catalog::catalog_frame(floor, &entries))?;
+        output.write_all(&catalog::imports_frame(floor, &registry)?)?;
     }
     for (&collection_id, collection) in &loaded.collections {
         let mut block = format::RecordBlock::new(collection_id);
@@ -762,8 +822,8 @@ pub(crate) fn write_v5_image(
         let bytes = data.encode()?;
         output.write_all(&format::vector_frame(next(floor)?, collection_id, &bytes))?;
     }
-    let registry = import::Registry::from_markers(&loaded.imports);
-    for (job, state) in registry.open_jobs() {
+    // A precision image restated the whole registry instead.
+    for (job, state) in registry.open_jobs().filter(|_| !precise) {
         let marker = import::snapshot_marker(job, state);
         output.write_all(&format::batch_frame_v4(
             next(floor)?,
@@ -772,16 +832,45 @@ pub(crate) fn write_v5_image(
             Some(&marker),
         ))?;
     }
-    if extra_flags & format::FLAG_GRAPH != 0
-        && let Some(state) = &loaded.graph
-    {
-        crate::property_graph::frame::compacted_bodies(state, graph_now_ms, |count, body| {
-            if floor != 0 {
-                output.write_all(&format::graph_snapshot_frame(floor, count, body))
-            } else {
-                output.write_all(&format::graph_frame(next(floor)?, 0, count, body))
-            }
-        })?;
+    if let Some(state) = graph {
+        // Each graph's revisions follow its snapshot frames in a precision
+        // image.
+        let revisions = |output: &mut Sink<'_>, graph: GraphId| {
+            let graph_state = state
+                .graph(graph)
+                .ok_or_else(|| format::corrupt(0, "graph state cannot be re-encoded"))?;
+            let (nodes, edges) =
+                crate::property_graph::frame::kept_revisions(graph_state, graph_now_ms);
+            catalog::revision_frames(floor, graph.0, &nodes, &edges, |frame| {
+                output.write_all(frame)
+            })
+        };
+        let mut current = None;
+        crate::property_graph::frame::compacted_bodies(
+            state,
+            graph_now_ms,
+            |graph, count, body| {
+                if precise && let Some(previous) = current.replace(graph).filter(|&id| id != graph)
+                {
+                    revisions(&mut output, previous)?;
+                }
+                if floor != 0 {
+                    output.write_all(&format::graph_snapshot_frame(floor, count, body))
+                } else {
+                    output.write_all(&format::graph_frame(next(floor)?, 0, count, body))
+                }
+            },
+        )?;
+        if precise && let Some(last) = current {
+            revisions(&mut output, last)?;
+        }
+    }
+    if let Some((frames, digest)) = output.image.take() {
+        output.write_raw(&crate::compact::end_frame(
+            floor,
+            frames,
+            digest.finalize().into(),
+        ))?;
     }
     Ok(())
 }
@@ -1092,7 +1181,7 @@ mod tests {
             )));
         }
         if let Some(state) = &loaded.graph {
-            crate::property_graph::frame::compacted_bodies(state, now_ms, |count, body| {
+            crate::property_graph::frame::compacted_bodies(state, now_ms, |_, count, body| {
                 bytes.extend(seal(format::graph_frame(floor, 0, count, body)));
                 Ok(())
             })

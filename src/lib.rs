@@ -2501,9 +2501,25 @@ impl Database {
         name: &str,
         spec: CollectionSpec,
     ) -> Result<CollectionInfo> {
+        self.create_collection_as(name, spec, compact::catalog::Precision::Float32)
+    }
+
+    /// `create_collection` with a stored precision (P3a). A precision store
+    /// records it with the create (op 17); every other store only holds
+    /// float32 collections (`UnsupportedFeature`).
+    pub(crate) fn create_collection_as(
+        &mut self,
+        name: &str,
+        spec: CollectionSpec,
+        precision: compact::catalog::Precision,
+    ) -> Result<CollectionInfo> {
         self.ensure_healthy()?;
         if self.version < format::V4 {
             return Err(Error::CollectionsRequireUpgrade);
+        }
+        let precise = self.flags & format::FLAG_PRECISION != 0;
+        if !precise && precision != compact::catalog::Precision::Float32 {
+            return Err(Error::UnsupportedFeature(format::FLAG_PRECISION));
         }
         if !format::valid_collection_name(name) {
             return Err(Error::InvalidCollectionName);
@@ -2527,8 +2543,18 @@ impl Database {
             .checked_add(1)
             .ok_or(Error::TooManyCollections)?;
         let sequence = self.next_sequence()?;
-        let frame =
-            format::collection_create_frame(sequence, id, name, spec.dimensions, &spec.settings);
+        let frame = if precise {
+            format::precise_create_frame(
+                sequence,
+                id,
+                name,
+                spec.dimensions,
+                &spec.settings,
+                precision,
+            )
+        } else {
+            format::collection_create_frame(sequence, id, name, spec.dimensions, &spec.settings)
+        };
         self.commit_frame(sequence, &frame)?;
         self.collection_high = id;
         let mut collection = Collection::empty(name.into(), spec.dimensions, spec.settings);

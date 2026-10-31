@@ -14,18 +14,67 @@
 //! bytes after a complete image can be a torn WAL tail.
 
 use crate::format::{
-    FLAG_COMPACT, OP_ADVANCE, OP_COMPACT_BLOCK, OP_GRAPH_SNAPSHOT, OP_RECORD_BLOCK, PREFIX_SIZE,
-    corrupt, frame_allowed, u16_at, u32_at, u64_at,
+    FLAG_COMPACT, FLAG_PRECISION, OP_ADVANCE, OP_COLLECTION_PRECISE, OP_COMPACT_BLOCK,
+    OP_GRAPH_SNAPSHOT, OP_RECORD_BLOCK, PREFIX_SIZE, corrupt, frame_allowed, u16_at, u32_at,
+    u64_at,
 };
 use crate::{Error, Result};
+use catalog::{KIND_CATALOG, KIND_IMPORTS, KIND_REVISIONS};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// P3a precision policy storage: the catalog, import registry and graph
+/// revision kinds of a `FLAG_PRECISION` image.
+pub(crate) mod catalog;
 /// P3a dense rows codec. Preactivation: compiled for tests only, so no
 /// reader accepts its kind and no writer emits it until its write, read,
 /// replay and maintenance paths are qualified (contract decision 7).
 #[cfg(test)]
 mod vectors;
+
+/// Whether this build reads and writes `FLAG_PRECISION` stores (P3a).
+/// Preactivation: release builds refuse them with
+/// `UnsupportedFeature(FLAG_PRECISION)`; only this crate's tests switch
+/// support on, per thread, with an `Activation`, until every write, read,
+/// replay and maintenance path is qualified.
+pub(crate) fn precision_supported() -> bool {
+    #[cfg(test)]
+    {
+        PRECISION.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static PRECISION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test-only switch of `precision_supported` on this thread, restored when
+/// dropped.
+#[cfg(test)]
+pub(crate) struct Activation(bool);
+
+#[cfg(test)]
+impl Activation {
+    pub(crate) fn on() -> Self {
+        Self::set(true)
+    }
+
+    pub(crate) fn set(supported: bool) -> Self {
+        Self(PRECISION.with(|cell| cell.replace(supported)))
+    }
+}
+
+#[cfg(test)]
+impl Drop for Activation {
+    fn drop(&mut self) {
+        PRECISION.with(|cell| cell.set(self.0));
+    }
+}
 
 /// Kind of the capability table, the first op-16 frame of an image.
 const KIND_TABLE: u16 = 1;
@@ -48,6 +97,71 @@ const MIN_BODY: usize = HEADER_LEN + 8;
 const MAX_BODY: usize = 64 << 20;
 /// Zero padding before a section only aligns it to 64 file bytes.
 const MAX_PADDING: usize = 63;
+const ALIGN: u64 = 64;
+
+/// A critical version-1 block body of `kind` for `owner` and `partition`
+/// with `sections` in order and no source digest. Given the body's file
+/// offset, each section starts on a 64-byte file boundary; without it
+/// there is no padding.
+fn envelope(
+    kind: u16,
+    owner: u16,
+    partition: u64,
+    sections: &[&[u8]],
+    body_offset: Option<u64>,
+) -> Vec<u8> {
+    let mut body = Vec::new();
+    for field in [kind, 1, CRITICAL, sections.len() as u16] {
+        body.extend_from_slice(&field.to_le_bytes());
+    }
+    let object = u64::from(owner) | partition << 16;
+    body.extend_from_slice(&object.to_le_bytes());
+    // No source digest; the first section's offset is filled in below.
+    body.resize(HEADER_LEN + 8 * sections.len(), 0);
+    for (index, section) in sections.iter().enumerate() {
+        if let Some(offset) = body_offset {
+            let padding = offset.wrapping_add(body.len() as u64).wrapping_neg() % ALIGN;
+            body.resize(body.len() + padding as usize, 0);
+        }
+        // Every block is far below 4 GiB (`MAX_BODY`).
+        let start = (body.len() as u32).to_le_bytes();
+        let entry = HEADER_LEN + 8 * index;
+        body[entry..entry + 4].copy_from_slice(&start);
+        body[entry + 4..entry + 8].copy_from_slice(&(section.len() as u32).to_le_bytes());
+        if index == 0 {
+            body[24..28].copy_from_slice(&start);
+        }
+        body.extend_from_slice(section);
+    }
+    body
+}
+
+/// An op-16 frame at `sequence` with an unpadded critical version-1 block.
+fn block_frame(
+    sequence: u64,
+    kind: u16,
+    owner: u16,
+    partition: u64,
+    count: u32,
+    sections: &[&[u8]],
+) -> Vec<u8> {
+    let body = envelope(kind, owner, partition, sections, None);
+    crate::format::compact_block_frame(
+        sequence,
+        owner,
+        u64::from(kind) | partition << 16,
+        count,
+        &body,
+    )
+}
+
+/// The image end block over `frames` image frames with prefix `digest`.
+pub(crate) fn end_frame(floor: u64, frames: u64, digest: [u8; 32]) -> Vec<u8> {
+    let mut section = Vec::with_capacity(END_SECTION);
+    section.extend_from_slice(&frames.to_le_bytes());
+    section.extend_from_slice(&digest);
+    block_frame(floor, KIND_END, 0, 0, 1, &[&section])
+}
 
 /// Criticality the registry fixes for `kind`, or `None` for kinds no build
 /// reads yet (storage-reserved, unallocated and test-only).
@@ -155,12 +269,53 @@ pub(crate) fn skip_report(skips: &Skips, reader: &'static str) -> Option<String>
 /// counted exactly without a set of them.
 type Table = BTreeMap<(u16, u16), (u16, Option<u16>)>;
 
+/// The parts of a `FLAG_PRECISION` image after its capability table, in
+/// order (P3a): the catalog, the import registry, record blocks, vector
+/// frames, then per graph its snapshot frames and revision run, derived
+/// blocks and the end block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stage {
+    Table,
+    Catalog,
+    Imports,
+    Records,
+    Vectors,
+    Snapshot,
+    Revisions,
+    Derived,
+}
+
+/// The graph revision run being read: its graph, the last node and edge IDs
+/// so far, and whether its last block was full.
+struct RevisionRun {
+    graph: u16,
+    node: Option<u64>,
+    edge: Option<u64>,
+    full: bool,
+}
+
+/// What a block of a precision image restates, for the loader (P3a).
+pub(crate) enum Supplement {
+    Catalog(Vec<catalog::Entry>),
+    Imports(Box<crate::import::Registry>),
+    Revisions {
+        graph: u16,
+        partition: u64,
+        nodes: catalog::Pairs,
+        edges: catalog::Pairs,
+    },
+}
+
 /// Checks the frames of a `FLAG_COMPACT` image in log order: every frame
 /// prefix (`prefix`) before its body is read, each verified op-16 body
 /// (`block`), and `end` where the log or the scan ends.
 pub(crate) struct ImageCheck {
     version: u32,
     flags: u16,
+    /// A `FLAG_PRECISION` image (P3a), its current part and revision run.
+    precise: bool,
+    stage: Stage,
+    revisions: Option<RevisionRun>,
     floor: Option<u64>,
     /// Collections created before the table; `default` always exists.
     collections: BTreeSet<u16>,
@@ -184,6 +339,9 @@ impl ImageCheck {
         (flags & FLAG_COMPACT != 0).then(|| Self {
             version,
             flags,
+            precise: flags & FLAG_PRECISION != 0,
+            stage: Stage::Table,
+            revisions: None,
             floor: None,
             collections: BTreeSet::from([0]),
             entries: None,
@@ -238,6 +396,18 @@ impl ImageCheck {
         {
             return Err(corrupt(offset, "snapshot frame outside a checkpoint image"));
         }
+        // A precision log creates collections only with op 17, and only
+        // after its image, which restates them with op 5 and its catalog.
+        if self.precise {
+            if operation == OP_COLLECTION_PRECISE
+                && (sequence <= floor || !crate::format::precise_prefix_valid(prefix))
+            {
+                return Err(corrupt(offset, "invalid precise collection create"));
+            }
+            if operation == 5 && sequence > floor {
+                return Err(corrupt(offset, "collection create without a precision"));
+            }
+        }
         if sequence > floor {
             return self.end(offset);
         }
@@ -267,7 +437,12 @@ impl ImageCheck {
                         "collection frame after the capability table",
                     ));
                 }
-                (true, _) => self.end_run(),
+                (true, _) => {
+                    self.end_run();
+                    if self.precise {
+                        self.next_stage(operation, 0, 0, offset)?;
+                    }
+                }
             }
             self.hash(prefix);
             return Ok(());
@@ -279,6 +454,16 @@ impl ImageCheck {
         let partition = id >> 16;
         if id >> 48 != 0 || kind == 0 {
             return Err(corrupt(offset, "invalid compact block prefix"));
+        }
+        if self.precise && self.entries.is_some() && kind != KIND_TABLE {
+            self.next_stage(OP_COMPACT_BLOCK, kind, partition, offset)?;
+            let storage = matches!(kind, KIND_CATALOG | KIND_IMPORTS | KIND_REVISIONS);
+            if (storage && body_len > catalog::max_body(kind))
+                || (matches!(kind, KIND_CATALOG | KIND_IMPORTS)
+                    && (collection != 0 || partition != 0))
+            {
+                return Err(corrupt(offset, "invalid precision image block"));
+            }
         }
         match (self.entries.is_some(), kind) {
             (false, KIND_TABLE) if collection != 0 || partition != 0 => {
@@ -320,7 +505,8 @@ impl ImageCheck {
     }
 
     /// Checks the verified (and decrypted) body of an op-16 frame whose
-    /// prefix `prefix` accepted.
+    /// prefix `prefix` accepted. A block of a precision image's own kinds
+    /// returns what it restates.
     pub(crate) fn block(
         &mut self,
         collection: u16,
@@ -328,12 +514,16 @@ impl ImageCheck {
         count: u32,
         body: &[u8],
         offset: u64,
-    ) -> Result<()> {
+    ) -> Result<Option<Supplement>> {
         let block = Envelope::parse(collection, id, body, offset)?;
         let kind = id as u16;
         match kind {
-            KIND_TABLE => return self.table(count, &block, offset),
-            KIND_END => return self.end_block(count, &block, body.len(), offset),
+            KIND_TABLE => return self.table(count, &block, offset).map(|()| None),
+            KIND_END => {
+                return self
+                    .end_block(count, &block, body.len(), offset)
+                    .map(|()| None);
+            }
             _ => {}
         }
         let Some(entries) = self.entries.as_mut() else {
@@ -345,12 +535,144 @@ impl ImageCheck {
             }
             _ => return Err(corrupt(offset, "undeclared compact block")),
         };
+        if self.precise && matches!(kind, KIND_CATALOG | KIND_IMPORTS | KIND_REVISIONS) {
+            return self
+                .supplement(kind, collection, id >> 16, count, &block, offset)
+                .map(Some);
+        }
         if matches!(kind >> 8, 0x01 | 0x02) && !self.collections.contains(&collection) {
             return Err(corrupt(offset, "compact block for unknown collection"));
         }
         // The table admits only derived kinds while no codec exists, so
         // this authentic, declared block is skipped, and reported.
         self.skips.add(collection, kind, block.version, first);
+        Ok(None)
+    }
+
+    /// Decodes a block of a precision image's own kinds. The catalog lists
+    /// exactly the collections restated before the table; revision runs
+    /// are canonical across their blocks.
+    fn supplement(
+        &mut self,
+        kind: u16,
+        owner: u16,
+        partition: u64,
+        count: u32,
+        block: &Envelope<'_>,
+        offset: u64,
+    ) -> Result<Supplement> {
+        let single = || match block.sections[..] {
+            [section] => Ok(section),
+            _ => Err(corrupt(offset, "invalid precision image block")),
+        };
+        match kind {
+            KIND_CATALOG => {
+                let entries = catalog::decode_catalog(single()?, count, offset)?;
+                if !entries
+                    .iter()
+                    .map(|entry| entry.collection)
+                    .eq(self.collections.iter().copied())
+                {
+                    return Err(corrupt(
+                        offset,
+                        "precision catalog does not list the collections",
+                    ));
+                }
+                Ok(Supplement::Catalog(entries))
+            }
+            KIND_IMPORTS => crate::import::Registry::decode_image(single()?, count)
+                .map(|registry| Supplement::Imports(Box::new(registry)))
+                .map_err(|reason| corrupt(offset, reason)),
+            _ => {
+                let floor = self.floor.expect("image blocks follow the advance");
+                let (nodes, edges) =
+                    catalog::decode_revisions(&block.sections, count, floor, offset)?;
+                self.revision_run(owner, partition, &nodes, &edges, offset)?;
+                Ok(Supplement::Revisions {
+                    graph: owner,
+                    partition,
+                    nodes,
+                    edges,
+                })
+            }
+        }
+    }
+
+    /// Continues the revision run of `graph`: blocks list its nodes and
+    /// then its edges in ascending ID order, every block but the last is
+    /// full, and only an empty graph has an empty block.
+    fn revision_run(
+        &mut self,
+        graph: u16,
+        partition: u64,
+        nodes: &[(u64, u64)],
+        edges: &[(u64, u64)],
+        offset: u64,
+    ) -> Result<()> {
+        let invalid = || corrupt(offset, "non-canonical graph revisions");
+        let entries = nodes.len() + edges.len();
+        let run = if partition == 0 {
+            self.revisions.insert(RevisionRun {
+                graph,
+                node: None,
+                edge: None,
+                full: false,
+            })
+        } else {
+            match self.revisions.as_mut() {
+                Some(run) if run.graph == graph && run.full && entries != 0 => run,
+                _ => return Err(invalid()),
+            }
+        };
+        let after = |last: Option<u64>, pairs: &[(u64, u64)]| {
+            pairs
+                .first()
+                .is_none_or(|&(id, _)| last.is_none_or(|last| id > last))
+        };
+        if !after(run.node, nodes)
+            || !after(run.edge, edges)
+            || (run.edge.is_some() && !nodes.is_empty())
+        {
+            return Err(invalid());
+        }
+        run.node = nodes.last().map_or(run.node, |&(id, _)| Some(id));
+        run.edge = edges.last().map_or(run.edge, |&(id, _)| Some(id));
+        run.full = entries == catalog::MAX_REVISIONS;
+        Ok(())
+    }
+
+    /// Moves a precision image to the part that a frame of `operation` (and
+    /// block `kind` and `partition`) belongs to; frames out of that order
+    /// are corruption.
+    fn next_stage(&mut self, operation: u8, kind: u16, partition: u64, offset: u64) -> Result<()> {
+        use Stage::{Catalog, Derived, Imports, Records, Revisions, Snapshot, Table, Vectors};
+        let stage = self.stage;
+        self.stage = match (operation, kind) {
+            (OP_COMPACT_BLOCK, KIND_CATALOG) if stage == Table => Catalog,
+            (OP_COMPACT_BLOCK, KIND_IMPORTS) if stage == Catalog => Imports,
+            (OP_RECORD_BLOCK, _) if matches!(stage, Imports | Records) => Records,
+            (10, _) if matches!(stage, Imports | Records | Vectors) => Vectors,
+            (OP_GRAPH_SNAPSHOT, _)
+                if matches!(stage, Imports | Records | Vectors | Snapshot | Revisions) =>
+            {
+                Snapshot
+            }
+            (OP_COMPACT_BLOCK, KIND_REVISIONS)
+                if (partition == 0 && stage == Snapshot)
+                    || (partition != 0 && stage == Revisions) =>
+            {
+                Revisions
+            }
+            (OP_COMPACT_BLOCK, KIND_CATALOG | KIND_IMPORTS | KIND_REVISIONS) => {
+                return Err(corrupt(offset, "precision image frame out of order"));
+            }
+            (OP_COMPACT_BLOCK, _)
+                if matches!(stage, Imports | Records | Vectors | Revisions | Derived) =>
+            {
+                Derived
+            }
+            _ => return Err(corrupt(offset, "precision image frame out of order")),
+        };
         Ok(())
     }
 
@@ -373,17 +695,26 @@ impl ImageCheck {
         let mut entries = BTreeMap::new();
         let mut previous = None;
         let mut readable = true;
+        // A precision image always has its catalog and import registry.
+        let mut storage = [false; 2];
         for entry in table {
             let (kind, version, flags) = (u16_at(entry, 0), u16_at(entry, 2), u16_at(entry, 4));
             let class = registered(kind);
+            let own = self.precise && matches!(kind, KIND_CATALOG | KIND_IMPORTS | KIND_REVISIONS);
             // The table lists neither itself nor the end block.
             if kind <= KIND_END
                 || version == 0
                 || flags & !CRITICAL != 0
                 || u16_at(entry, 6) != 0
                 || class.is_some_and(|critical| critical != (flags == CRITICAL))
+                || (own && flags != CRITICAL)
             {
                 return Err(corrupt(offset, "invalid capability table entry"));
+            }
+            match kind {
+                KIND_CATALOG => storage[0] = true,
+                KIND_IMPORTS => storage[1] = true,
+                _ => {}
             }
             if previous.is_some_and(|previous| previous >= (kind, version)) {
                 return Err(corrupt(
@@ -392,9 +723,16 @@ impl ImageCheck {
                 ));
             }
             previous = Some((kind, version));
-            // No codec exists yet: only declared derived kinds can be skipped.
-            readable &= class == Some(false);
+            // Besides a precision image's own kinds, no codec exists yet:
+            // only declared derived kinds can be skipped.
+            readable &= class == Some(false) || (own && version == 1);
             entries.insert((kind, version), (flags, None));
+        }
+        if self.precise && storage != [true; 2] {
+            return Err(corrupt(
+                offset,
+                "precision image without its catalog and import registry",
+            ));
         }
         if !readable {
             return Err(Error::UnsupportedFeature(FLAG_COMPACT));

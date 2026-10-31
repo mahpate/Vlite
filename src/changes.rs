@@ -369,8 +369,13 @@ fn scan<R: Read + Seek>(
                 ));
             }
             10 => events.push((name_of(&collections), ChangeKind::VectorsUpdated)),
-            5 => {
-                let (name, dimensions, settings) = format::decode_create(body, offset)?;
+            5 | format::OP_COLLECTION_PRECISE => {
+                let (name, dimensions, settings) = if frame.operation == 5 {
+                    format::decode_create(body, offset)?
+                } else {
+                    let (_, name, dimensions, settings) = format::decode_precise(body, offset)?;
+                    (name, dimensions, settings)
+                };
                 collections.insert(frame.id as u16, (name.clone(), dimensions));
                 events.push((
                     name,
@@ -407,7 +412,9 @@ fn scan<R: Read + Seek>(
             // Compact blocks restate the checkpoint too; they are checked,
             // and only exist behind FLAG_COMPACT.
             format::OP_COMPACT_BLOCK => match &mut check {
-                Some(check) => check.block(frame.collection, frame.id, frame.count, body, at)?,
+                Some(check) => {
+                    check.block(frame.collection, frame.id, frame.count, body, at)?;
+                }
                 None => return Err(corrupt()),
             },
             _ => return Err(corrupt()),
