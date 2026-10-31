@@ -44,6 +44,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod algorithm;
 pub mod codec;
 mod cursor;
 mod error;

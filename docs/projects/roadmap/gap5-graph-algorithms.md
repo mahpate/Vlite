@@ -1,8 +1,9 @@
 # Gap 5: bounded graph algorithms
 
-Status: implementation design; public/wire signatures still need surface review.
+Status: S1 and S2 are implemented in embedded Rust, unreleased; the public signatures await surface review.
+S3 to S5 remain design. Wire surfaces are out of scope until separately approved.
 Audit citations refer to base `d530b4c`; TTL integration is reconciled with `cf146fe`.
-Open means not verified or not decided. No implementation or performance gains are claimed.
+Open means not verified or not decided. No performance gains are claimed.
 
 ## Why revisit the deferral
 
@@ -205,7 +206,119 @@ Rows sort by node ID; path arrays remain in traversal order. Ranking is a caller
 Validate options before work; invalid inputs and numeric failures are typed errors, not truncations.
 Rust first; no writes, persisted scores, CALL syntax or new dependencies.
 REST, MCP and gRPC follow only through a separately approved OpenAPI change.
-This task does not edit `src\openapi.json`, any proto, code or tests.
+This design does not edit `src\openapi.json` or any proto.
+
+## Implemented S1 and S2 (unreleased)
+
+The kernel is `src\property_graph\engine\algorithm.rs` (std-only, also built by `vlite-graph`).
+The public adapter is `src\property_graph\algorithms.rs`, re-exported from `vlite::property_graph`.
+Names, error mapping and the decisions below are proposals pending public surface review.
+
+```rust
+impl GraphRef<'_> {
+    pub fn algorithm(
+        &self,
+        request: &GraphAlgorithmRequest,
+        options: &GraphAlgorithmOptions<'_>,
+    ) -> std::result::Result<GraphAlgorithmRead, GraphAlgorithmError>;
+}
+pub struct GraphAlgorithmRequest { pub scope: GraphAlgorithmScope, pub algorithm: GraphAlgorithm }
+pub struct GraphAlgorithmScope {
+    pub seeds: Vec<NodeSelector>,
+    pub direction: Direction,
+    pub relationship_types: RelationshipScope, // Any | Only(Vec<String>)
+    pub node_labels: LabelScope,               // Any | All(Vec<String>)
+    pub edge_conditions: Vec<Condition>,
+}
+#[non_exhaustive]
+pub enum GraphAlgorithm {
+    Degree,
+    WeightedShortestPath { source: NodeSelector, destination: NodeSelector, weight_property: Option<String> },
+}
+pub struct GraphAlgorithmOptions<'a> {
+    pub limits: GraphLimits,
+    pub algorithm_limits: GraphAlgorithmLimits, // #[non_exhaustive]: DEFAULT, then assign fields
+    pub cancel: Option<&'a AtomicBool>,
+}
+#[non_exhaustive]
+pub enum GraphAlgorithmError {
+    Read(Error),
+    MissingWeight { edge_id: u64 },
+    InvalidWeight { edge_id: u64, reason: &'static str },
+    NumericOverflow,
+}
+```
+
+Outputs are `#[non_exhaustive]`: `GraphAlgorithmRead`, `GraphAlgorithmOutput::{Degree(Vec<DegreeRow>), WeightedShortestPath(WeightedPathOutcome)}`,
+`WeightedPathOutcome::{Found(WeightedPath), NoPathWithinScopeAndHops}`, `GraphAlgorithmTruncation` and `GraphAlgorithmStats`.
+`GraphAlgorithmRead` holds output, complete, truncation, scope_complete, computation_complete,
+view_sequence, read_time_unix_ms, algorithm_version (1), the normalized request, max_hops and stats.
+Only implemented variants exist; S3 and S4 add variants, caps and quality fields later.
+Existing types, fields, `Error` variants, `GraphRead` and ordinary read limits are unchanged.
+
+| Failure | Result |
+|---|---|
+| A read or algorithm limit above its ceiling; more than 10,000 seed selectors | `Read(GraphLimitExceedsCeiling)` |
+| A zero algorithm cap; no seed; an empty `Only` or `All` list; a seed lacking a scope label | `Read(InvalidQuery)` |
+| More distinct seeds than max_visited_nodes; a path source that is not a seed; a bad weight name | `Read(InvalidQuery)` |
+| An invalid edge condition | `Read(InvalidFilter)` |
+| A missing, due or other-graph seed or path endpoint | `Read(GraphNodeNotFound)` |
+| A retained edge lacking the weight / holding a bad one (smallest edge ID) | `MissingWeight` / `InvalidWeight` |
+| A winning cost above `f64::MAX` | `NumericOverflow` |
+
+Checks run in order: read limits, algorithm caps, conditions, scope shape, then seed resolution.
+`Read` reuses the ordinary read mapping of `GraphError` to `Error`, so codes match other reads.
+Work limits and cancellation are truncations (`Ok`, `complete == false`), never errors.
+
+### Metering as implemented
+
+One meter charges edge units (`max_edges_examined`), vertex operations and scratch bytes.
+It reads the monotonic deadline clock once at start and checks cancellation, then the deadline.
+Each charge first tests its budget, then checks cancellation and deadline when the combined count reaches a multiple of 64.
+A final check runs before output caps; failing it returns no output.
+Seed resolution is validated before the meter starts and charged after it: one vertex operation per selector, plus two for path endpoints, plus sort steps.
+Sort steps cost n times the bit length of n vertex operations.
+Discovery charges one vertex per seed and per expanded node, one edge unit per adjacency entry and one vertex per admission.
+`max_edges_per_node` is checked before each entry (DegreeLimit); admitting more than max_visited_nodes is VisitedLimit.
+The rescan charges one vertex per admitted node and one edge unit per entry again; Both retains an edge at its stored source.
+Degree charges one vertex per node and one edge unit per retained edge.
+Paths charge one edge unit per retained edge for weight validation, one per arc placed and one per relaxation.
+They charge one vertex per node prefix, per state initialized, per heap push, pop and improvement, and per path node.
+Every buffer reserves its estimated bytes before allocation; reservations accumulate, so they bound the peak.
+`arcs` counts computational arcs: one per retained edge for Out and In, two per non-loop edge and one per loop for Both.
+
+### Numeric rules as implemented
+
+Weights convert exactly to (mantissa, exponent); negative zero becomes zero.
+Path costs are exact fixed-point sums sized for the hop bound, compared exactly and rounded once to the nearest f64, ties to even.
+The result is therefore independent of addition order and platform.
+States are (node, hops) for hops 0..=H with an indexed heap of at most (H+1)*V entries.
+The winner is the smallest (cost, hops, edge-ID sequence); a costlier prefix with fewer hops stays in its own state.
+A visible destination outside the projection gives NoPathWithinScopeAndHops after a complete run.
+
+### Decisions to confirm in review
+
+1. `output: None` represents Exhausted; there is no separate Exhausted variant, and `complete` has no `truncated` twin.
+2. The first truncation stops all work, so at most one reason is reported.
+3. Degree OutputLimit returns the first max_output_nodes rows; a path above any output cap is withheld.
+4. NoPathWithinScopeAndHops is returned even when max_output_paths is 0.
+5. The doc's NumericError is `NumericOverflow`; exact sums make overflow possible only in the final rounding.
+6. There is no projection option: nothing returns properties, so options hold limits, caps and cancellation only.
+7. The rescan follows the requested direction; Both examines each adjacency entry from both endpoints.
+8. A due or missing destination fails as GraphNodeNotFound; a visible one outside the scope gives no path.
+9. `GraphAlgorithmLimits` is `#[non_exhaustive]` so S3/S4 caps can be added without a break.
+10. Unpinned handles sample the TTL clock per call, as ordinary reads do; `with_clock` pins it.
+
+### Coverage
+
+The engine has 15 unit tests, run by both `vlite` and `vlite-graph`.
+They check exact budgets at and below need, fake-clock deadlines in edge-free loops, a naive oracle and replay.
+They also check split commits and reinsertion in descending ID order (new IDs must ascend).
+The adapter has 10 tests over the public API, including TTL equality, filters, weights, caps, typed errors and non-mutation.
+Each suite was written first and failed (0 of 15, 0 of 10) before the implementation passed.
+All 21 golden cases check S1 scope node and edge IDs exactly, plus degrees derived from the oracle's scope.
+The 8 weighted_shortest_path cases check outcomes, costs and path IDs exactly.
+PageRank, label propagation and betweenness golden values are not exercised by Rust code yet.
 
 ## GraphRAG and competitors
 
@@ -249,13 +362,14 @@ exhaustive paths, exact-rational stationary PageRank and full-sample centrality.
 CI also verifies rejection of corrupted answers and duplicate JSON keys.
 Stationary PageRank scores are not fabricated iteration counts; future Rust
 tests must independently establish convergence and compare within tolerance.
-These fixtures do not yet test engine code, TTL, authorization or work limits.
-Deliver S1: scoped adapter, visibility hook, unified meter and result contract with exhaustion oracles.
-Deliver S2: degree and hop-constrained Dijkstra. Deliver S3: PageRank and deterministic label propagation.
+Rust tests consume them for S1 and S2 (see Coverage); TTL and work limits have their own Rust tests.
+Authorization stays untested until a serving slice exists.
+Delivered S1: scoped adapter, visibility hook, unified meter and result contract with exhaustion oracles.
+Delivered S2: degree and hop-constrained Dijkstra. Deliver S3: PageRank and deterministic label propagation.
 Deliver S4: seeded sampled betweenness. Deliver S5: separately approved serving contracts and documentation.
 Each slice must pass its oracle before the next. CSR must pass identical adapter fixtures later.
 Risks: rescans consume budgets; dense graphs may yield no values. Cancellation is cooperative.
 Risks: the read borrow may delay writes; boundary scores are local, not global estimates.
 The added caps are the initial implementation limits, not larger graph budgets.
-Open: public type names/error mapping, offline/admin execution, cross-platform
-reproducibility and the remaining competitor evidence.
+Open: review of the implemented public names and error mapping, offline/admin execution,
+cross-platform reproducibility of S3/S4 floats and the remaining competitor evidence.

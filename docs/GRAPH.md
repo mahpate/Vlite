@@ -126,6 +126,54 @@ shortest-path search reports `exhausted`, never an uncertified "no path".
 - **Query text.** A small read-only language that maps to one typed read; see
   [GRAPH-QUERY.md](GRAPH-QUERY.md).
 
+## Bounded local algorithms (Rust, unreleased)
+
+`GraphRef::algorithm(&request, &options)` runs one algorithm on one explicit
+local scope (Gap 5 slices S1 and S2). It is in the embedded Rust API only and
+its signatures are still under review; REST, gRPC, MCP, query text, the CLI
+and the bindings do not expose it. Nothing is stored and nothing writes.
+
+- **Scope** (`GraphAlgorithmScope`): seeds of this graph (resolved,
+  deduplicated, sorted; each must be visible and carry every scope label), a
+  direction, `RelationshipScope::Any` or `Only(types)`, `LabelScope::Any` or
+  `All(labels)`, and edge conditions with record-filter semantics.
+  Breadth-first discovery admits eligible nodes up to `max_hops` from the
+  seeds, then a rescan keeps every eligible edge between admitted nodes.
+  Excluded nodes never bridge the scope. One TTL clock decides visibility,
+  exactly as for other reads.
+- **Degree** (`GraphAlgorithm::Degree`): raw in, out and incident degree per
+  scoped node over retained physical edges, ascending by node ID. Parallel
+  edges count separately; a self-loop adds one to each count; `In` reverses
+  endpoints.
+- **Weighted shortest path** (`GraphAlgorithm::WeightedShortestPath`): the
+  cheapest path of at most `max_hops` edges from a seed to a visible node.
+  Ties go to fewer hops, then to the smallest edge-ID sequence. With
+  `weight_property` every retained edge must hold a nonnegative integer up
+  to 2^53 or a finite nonnegative float (`MissingWeight` / `InvalidWeight`
+  name the smallest bad edge ID); without it every edge weighs 1. Costs are
+  exact sums rounded once to f64; a winning cost above `f64::MAX` is
+  `NumericOverflow`. `NoPathWithinScopeAndHops` is returned only after a
+  complete search.
+- **Budgets.** Extraction, rescans, rejected edges, weight validation and the
+  computation share `max_edges_examined`, the deadline and cancellation,
+  plus two algorithm caps; cancellation and the deadline are checked before
+  any work, before every 64th charged operation and before returning. A run
+  that stops before its computation finishes returns `output: None` with its
+  reason (`complete: false`), never an analysis of a partial scope. Output
+  caps apply afterwards: degree rows are cut to `max_output_nodes`; a path
+  over a cap is withheld.
+
+| Algorithm cap | Default | Ceiling |
+|---------------|---------|---------|
+| `max_vertex_operations` | 100,000 | 1,000,000 |
+| `max_scratch_bytes` | 64 MiB | 256 MiB |
+
+Results echo `view_sequence`, `read_time_unix_ms`, `algorithm_version`, the
+normalized request and work statistics. There are no cursors, no attachment
+or payload access and no whole-graph mode. PageRank, label propagation and
+sampled betweenness are planned; see the
+[Gap 5 design](projects/roadmap/gap5-graph-algorithms.md).
+
 ## Surfaces
 
 | Surface | What it offers |

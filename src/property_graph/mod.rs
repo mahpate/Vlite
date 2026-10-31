@@ -36,6 +36,12 @@
 //! `UniqueTriple` relationships idempotently, and
 //! [`GraphRef::observed_schema`] summarizes declared and observed shapes
 //! within a scan budget.
+//!
+//! Algorithms (Gap 5, S1 and S2): [`GraphRef::algorithm`] extracts one
+//! explicit bounded local scope ([`GraphAlgorithmScope`]) and runs raw degree
+//! or a hop-constrained weighted shortest path on it under one meter
+//! ([`GraphLimits`] plus [`GraphAlgorithmLimits`]); an incomplete run returns
+//! no analytic output.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -46,6 +52,8 @@ use crate::{Database, Error, Expected, Metadata, Mutation, Result, format};
 // unused in this build.
 #[allow(dead_code, unused_imports)]
 pub(crate) mod engine;
+
+mod algorithms;
 
 // Some conversions (for example `Precondition` → `Expected`) are only used
 // by tests.
@@ -58,6 +66,12 @@ mod maintain;
 mod read;
 mod retrieve;
 
+pub use algorithms::{
+    DegreeRow, GraphAlgorithm, GraphAlgorithmError, GraphAlgorithmLimits, GraphAlgorithmOptions,
+    GraphAlgorithmOutput, GraphAlgorithmRead, GraphAlgorithmRequest, GraphAlgorithmScope,
+    GraphAlgorithmStats, GraphAlgorithmTruncation, LabelScope, RelationshipScope, WeightedPath,
+    WeightedPathOutcome,
+};
 pub use change::GraphChange;
 pub use engine::schema::{
     GraphSchema, LabelDefinition, Multiplicity, ObservedEndpoint, ObservedLabel, ObservedProperty,
