@@ -130,6 +130,8 @@ collection ID u16, precision u8 (1/2), reserved u8=0, dimensions u32.
 IDs strictly ascending; exactly all live collections, including ID 0; dimensions must match header/op-5 declarations. No omitted-collection defaulting in opted-in
 images. Section length=8+8N; envelope first offset=40+p, section table
 `(40+p,8+8N)`, p in 0..63 zero bytes for advisory alignment; body ends there.
+Unknown catalog opt-in or precision values return `UnsupportedFeature(32)`,
+as for op 17; reserved bytes and invalid structure or coverage are corrupt.
 Frame at floor S follows the capability table and precedes source records.
 Table entry bytes for it are `03 00 01 00 01 00 00 00`. Even a rowless catalog is a real critical block, so the accepted nonempty-table,
 at-least-one-block and image-end requirements are not weakened.
@@ -147,7 +149,7 @@ job count u32, closed count u32; then ascending-job entries:
 job u64, collection u16, state u8 (0=open,1=finished,2=aborted), dropped u8
 (0/1), name length u8, three zeros, last chunk u64, committed u64, skipped u64,
 digest [32], name bytes; then closed-order job IDs u64 oldest first.
-Fixed entry size=72 before name. Frame count=job count; zero is valid. Cap at 1,088 jobs, 1,024 closed, names 1..63 and 155,088 section bytes;
+Fixed entry size=72 before name. Frame count=job count; zero is valid. Cap at 1,088 jobs, 64 open, 1,024 closed, names 1..63 and 155,088 section bytes;
 validate counts/lengths, unique IDs <=max-job, exact closed membership, and
 live bindings or historical dropped bindings before installation.
 Conversion refuses open jobs as reviewed; checkpoints preserve them. This stores the bounded observable registry and allocation high-water, not
@@ -228,6 +230,16 @@ failed truncate/sync poisons; do not present it as proof of primary append rollb
 All original source files remain untouched on conversion, restoration and rotation; only explicitly selected dense components lose precision in the new destination.
 
 ## One owner and bounded qualification
+
+The independent [byte reference checker](../../../tests/precision_catalog_oracle.py)
+uses [hand-authored payload fixtures](../../../tests/fixtures/compact/precision-catalog-cases.json)
+for op-17 plaintext bodies and raw kind-3/4/5 sections. Run
+`python tests/precision_catalog_oracle.py --self-test` for accepted/rejected
+bytes, exact capacity boundaries, truncated prefixes and malformed fixture
+checks. The op-17 cases deliberately cover only the existing 27-byte default
+settings-v1 encoding. Context supplies collection bindings, retained graph
+entities and the checkpoint floor; this is not framing, encryption,
+publication, recovery or production qualification.
 
 **One storage owner** owns this entire shared-format slice: envelope writer, registry/catalog codecs/check/apply in `src/compact/mod.rs`; header/op-17 bounded
 decode and replay in `src/format.rs`; immutable loaded/collection state and
