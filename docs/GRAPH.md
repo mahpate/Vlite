@@ -129,8 +129,8 @@ shortest-path search reports `exhausted`, never an uncertified "no path".
 ## Bounded local algorithms (Rust, unreleased)
 
 `GraphRef::algorithm(&request, &options)` runs one algorithm on one explicit
-local scope (Gap 5 slices S1 and S2). It is in the embedded Rust API only and
-its signatures are still under review; REST, gRPC, MCP, query text, the CLI
+local scope (Gap 5 slices S1 and S2). Its embedded Rust surface is reviewed
+and accepted, but unreleased; REST, gRPC, MCP, query text, the CLI
 and the bindings do not expose it. Nothing is stored and nothing writes.
 
 - **Scope** (`GraphAlgorithmScope`): up to 10,000 seed selectors of this

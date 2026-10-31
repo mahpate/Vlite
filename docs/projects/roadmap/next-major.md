@@ -103,13 +103,18 @@ Local numbers below show direction only (see rules).
   and properties, and deterministic parallel import. It preserves graph TTL
   and attachment rules. Implementation and S3/S4/F6 qualification remain
   outstanding; the byte budgets are estimates, not measured results.
+- **Gap 5, bounded algorithms:** S1 and S2 are implemented and reviewed in
+  the embedded Rust API, but unreleased ([plan](gap5-graph-algorithms.md)).
+  They provide TTL-aware local scopes, degree counts and hop-constrained
+  weighted paths under shared work and memory limits. Incomplete extraction
+  or computation returns no analytic values. PageRank, label propagation,
+  sampled betweenness, CSR parity and serving exposure remain separate work.
 - **Parallel designs:** [temporal graphs](gap4-temporal-graph.md),
-  [bounded algorithms](gap5-graph-algorithms.md),
   [filters](p5-filters-and-serving.md) and
   [serving](serving-contract.md) now have implementation boundaries and
   acceptance matrices. They are plans, not shipped capabilities. Temporal
-  validity retains closed intervals but does not restore TTL-deleted data;
-  algorithms operate on bounded local projections. Exact filtered search
+  validity retains closed intervals but does not restore TTL-deleted data.
+  Exact filtered search
   keeps its oracle; approximate search does not acquire an exact top-k
   guarantee. Serving schemas remain proposals, not approved wire changes.
 

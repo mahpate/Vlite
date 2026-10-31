@@ -1,6 +1,8 @@
 # Gap 5: bounded graph algorithms
 
-Status: S1 and S2 are implemented in embedded Rust, unreleased; the public signatures await surface review.
+Status: S1 and S2 are implemented and independently reviewed in embedded Rust, unreleased.
+The surface and budget corrections in `1202f3cc` are accepted; integration
+`9ad5b63a` adds exact-sum reference cases and the API-reference entry.
 S3 to S5 remain design. Wire surfaces are out of scope until separately approved.
 Audit citations refer to base `d530b4c`; TTL integration is reconciled with `cf146fe`.
 Open means not verified or not decided. No performance gains are claimed.
@@ -312,7 +314,7 @@ Goldens cover the large-integer hop tie, binary64 versus decimal-rational weight
 and distinct exact costs that round to the same f64; only the winner is rounded.
 A visible destination outside the projection gives NoPathWithinScopeAndHops after a complete run.
 
-### Decisions to confirm in review
+### Accepted S1/S2 decisions
 
 1. `output: None` represents Exhausted; there is no separate Exhausted variant, and `complete` has no `truncated` twin.
 2. The first truncation stops all work, so at most one reason is reported.
@@ -324,7 +326,7 @@ A visible destination outside the projection gives NoPathWithinScopeAndHops afte
 8. A due or missing destination fails as GraphNodeNotFound; a visible one outside the scope gives no path.
 9. `GraphAlgorithmLimits` is `#[non_exhaustive]` so S3/S4 caps can be added without a break.
 10. Unpinned handles sample the TTL clock per call, as ordinary reads do; `with_clock` pins it.
-11. Proposed correction: `request` is `Option`, echoed only when computation_complete; a stop never forces a request clone.
+11. `request` is `Option`, echoed only when computation_complete; a stop never forces a request clone.
 12. `Only` lists hold at most 256 entries and `All` lists at most 8, counted before deduplication.
 13. Item errors surface in metered order (types, labels, seeds, endpoints); cancellation or exhaustion first returns `Ok`.
 
@@ -393,5 +395,5 @@ Each slice must pass its oracle before the next. CSR must pass identical adapter
 Risks: rescans consume budgets; dense graphs may yield no values. Cancellation is cooperative.
 Risks: the read borrow may delay writes; boundary scores are local, not global estimates.
 The added caps are the initial implementation limits, not larger graph budgets.
-Open: review of the implemented public names and error mapping, offline/admin execution,
+Open: offline/admin execution,
 cross-platform reproducibility of S3/S4 floats and the remaining competitor evidence.
