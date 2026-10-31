@@ -1,0 +1,240 @@
+{
+  "schema": "vlite.temporal-interval-golden",
+  "version": 1,
+  "series": [
+    {
+      "name": "finite-negative-touching-gap-and-own-properties",
+      "segments": [
+        {"valid_from": -10, "valid_to": -5, "properties": {"role": "past", "nested": {"value": 1}}},
+        {"valid_from": -5, "valid_to": 0, "properties": {"role": "next", "removed": false}},
+        {"valid_from": 5, "valid_to": 8, "properties": {"role": "latest"}}
+      ],
+      "edge": {"retained": true, "expires_at_ms": null},
+      "source": {"retained": true, "expires_at_ms": null},
+      "target": {"retained": true, "expires_at_ms": null},
+      "queries": [
+        {"T": -11, "C": 0, "expected": null},
+        {"T": -10, "C": 100, "expected": {"valid_from": -10, "valid_to": -5, "properties": {"role": "past", "nested": {"value": 1}}}},
+        {"T": -6, "C": 0, "expected": {"valid_from": -10, "valid_to": -5, "properties": {"role": "past", "nested": {"value": 1}}}},
+        {"T": -5, "C": 100, "expected": {"valid_from": -5, "valid_to": 0, "properties": {"role": "next", "removed": false}}},
+        {"T": -1, "C": 0, "expected": {"valid_from": -5, "valid_to": 0, "properties": {"role": "next", "removed": false}}},
+        {"T": 0, "C": 0, "expected": null},
+        {"T": 4, "C": 100, "expected": null},
+        {"T": 5, "C": 0, "expected": {"valid_from": 5, "valid_to": 8, "properties": {"role": "latest"}}},
+        {"T": 7, "C": 100, "expected": {"valid_from": 5, "valid_to": 8, "properties": {"role": "latest"}}},
+        {"T": 8, "C": 0, "expected": null},
+        {"T": 9223372036854775807, "C": 0, "expected": null}
+      ]
+    },
+    {
+      "name": "null-open-at-i64-extremes-without-sentinels",
+      "segments": [
+        {"valid_from": null, "valid_to": -9223372036854775808, "properties": {"side": "below-min"}},
+        {"valid_from": -9223372036854775808, "valid_to": -9223372036854775807, "properties": {"side": "min"}},
+        {"valid_from": 9223372036854775806, "valid_to": 9223372036854775807, "properties": {"side": "before-max"}},
+        {"valid_from": 9223372036854775807, "valid_to": null, "properties": {"side": "max-and-open"}}
+      ],
+      "edge": {"retained": true, "expires_at_ms": null},
+      "source": {"retained": true, "expires_at_ms": null},
+      "target": {"retained": true, "expires_at_ms": null},
+      "queries": [
+        {"T": -9223372036854775808, "C": 0, "expected": {"valid_from": -9223372036854775808, "valid_to": -9223372036854775807, "properties": {"side": "min"}}},
+        {"T": -9223372036854775807, "C": 0, "expected": null},
+        {"T": 9223372036854775805, "C": 0, "expected": null},
+        {"T": 9223372036854775806, "C": 0, "expected": {"valid_from": 9223372036854775806, "valid_to": 9223372036854775807, "properties": {"side": "before-max"}}},
+        {"T": 9223372036854775807, "C": 9223372036854775808, "expected": {"valid_from": 9223372036854775807, "valid_to": null, "properties": {"side": "max-and-open"}}}
+      ]
+    },
+    {
+      "name": "open-start-and-open-end",
+      "segments": [
+        {"valid_from": null, "valid_to": -2, "properties": {"part": "start"}},
+        {"valid_from": 2, "valid_to": null, "properties": {"part": "end"}}
+      ],
+      "edge": {"retained": true, "expires_at_ms": null},
+      "source": {"retained": true, "expires_at_ms": null},
+      "target": {"retained": true, "expires_at_ms": null},
+      "queries": [
+        {"T": -9223372036854775808, "C": 0, "expected": {"valid_from": null, "valid_to": -2, "properties": {"part": "start"}}},
+        {"T": -3, "C": 0, "expected": {"valid_from": null, "valid_to": -2, "properties": {"part": "start"}}},
+        {"T": -2, "C": 0, "expected": null},
+        {"T": 1, "C": 0, "expected": null},
+        {"T": 2, "C": 0, "expected": {"valid_from": 2, "valid_to": null, "properties": {"part": "end"}}},
+        {"T": 9223372036854775807, "C": 0, "expected": {"valid_from": 2, "valid_to": null, "properties": {"part": "end"}}}
+      ]
+    },
+    {
+      "name": "all-time",
+      "segments": [{"valid_from": null, "valid_to": null, "properties": {}}],
+      "edge": {"retained": true, "expires_at_ms": null},
+      "source": {"retained": true, "expires_at_ms": null},
+      "target": {"retained": true, "expires_at_ms": null},
+      "queries": [
+        {"T": -9223372036854775808, "C": 0, "expected": {"valid_from": null, "valid_to": null, "properties": {}}},
+        {"T": 0, "C": 9223372036854775808, "expected": {"valid_from": null, "valid_to": null, "properties": {}}},
+        {"T": 9223372036854775807, "C": 0, "expected": {"valid_from": null, "valid_to": null, "properties": {}}}
+      ]
+    },
+    {
+      "name": "adjacent-identical-properties-stay-distinct",
+      "segments": [
+        {"valid_from": 0, "valid_to": 1, "properties": {"same": true}},
+        {"valid_from": 1, "valid_to": 2, "properties": {"same": true}}
+      ],
+      "edge": {"retained": true, "expires_at_ms": null},
+      "source": {"retained": true, "expires_at_ms": null},
+      "target": {"retained": true, "expires_at_ms": null},
+      "queries": [
+        {"T": 0, "C": 100, "expected": {"valid_from": 0, "valid_to": 1, "properties": {"same": true}}},
+        {"T": 1, "C": 100, "expected": {"valid_from": 1, "valid_to": 2, "properties": {"same": true}}},
+        {"T": 2, "C": 100, "expected": null}
+      ]
+    },
+    {
+      "name": "empty-retained-series",
+      "segments": [],
+      "edge": {"retained": true, "expires_at_ms": null},
+      "source": {"retained": true, "expires_at_ms": null},
+      "target": {"retained": true, "expires_at_ms": null},
+      "queries": [
+        {"T": -9223372036854775808, "C": 0, "expected": null},
+        {"T": 0, "C": 500, "expected": null},
+        {"T": 9223372036854775807, "C": 0, "expected": null}
+      ]
+    },
+    {
+      "name": "edge-expiry-independent-of-validity",
+      "segments": [{"valid_from": 100, "valid_to": 200, "properties": {"fact": "retained-past"}}],
+      "edge": {"retained": true, "expires_at_ms": 500},
+      "source": {"retained": true, "expires_at_ms": null},
+      "target": {"retained": true, "expires_at_ms": null},
+      "queries": [
+        {"T": 150, "C": 499, "expected": {"valid_from": 100, "valid_to": 200, "properties": {"fact": "retained-past"}}},
+        {"T": 150, "C": 500, "expected": null},
+        {"T": 150, "C": 501, "expected": null},
+        {"T": 150, "C": 0, "expected": {"valid_from": 100, "valid_to": 200, "properties": {"fact": "retained-past"}}},
+        {"T": 200, "C": 150, "expected": null},
+        {"T": 99, "C": 150, "expected": null}
+      ]
+    },
+    {
+      "name": "source-expiry-hides-history",
+      "segments": [{"valid_from": null, "valid_to": null, "properties": {"endpoint": "source"}}],
+      "edge": {"retained": true, "expires_at_ms": 900},
+      "source": {"retained": true, "expires_at_ms": 500},
+      "target": {"retained": true, "expires_at_ms": 800},
+      "queries": [
+        {"T": -100, "C": 499, "expected": {"valid_from": null, "valid_to": null, "properties": {"endpoint": "source"}}},
+        {"T": -100, "C": 500, "expected": null},
+        {"T": -100, "C": 501, "expected": null},
+        {"T": 9223372036854775807, "C": 499, "expected": {"valid_from": null, "valid_to": null, "properties": {"endpoint": "source"}}}
+      ]
+    },
+    {
+      "name": "target-expiry-hides-history",
+      "segments": [{"valid_from": null, "valid_to": null, "properties": {"endpoint": "target"}}],
+      "edge": {"retained": true, "expires_at_ms": 900},
+      "source": {"retained": true, "expires_at_ms": 800},
+      "target": {"retained": true, "expires_at_ms": 500},
+      "queries": [
+        {"T": -100, "C": 499, "expected": {"valid_from": null, "valid_to": null, "properties": {"endpoint": "target"}}},
+        {"T": -100, "C": 500, "expected": null},
+        {"T": -100, "C": 501, "expected": null}
+      ]
+    },
+    {
+      "name": "zero-expiry-is-not-absent",
+      "segments": [{"valid_from": null, "valid_to": null, "properties": {}}],
+      "edge": {"retained": true, "expires_at_ms": 0},
+      "source": {"retained": true, "expires_at_ms": null},
+      "target": {"retained": true, "expires_at_ms": null},
+      "queries": [
+        {"T": -1, "C": 0, "expected": null},
+        {"T": -1, "C": 1, "expected": null}
+      ]
+    },
+    {
+      "name": "purged-edge-cannot-resurrect",
+      "segments": [{"valid_from": 100, "valid_to": 200, "properties": {"fact": "removed"}}],
+      "edge": {"retained": false, "expires_at_ms": 500},
+      "source": {"retained": true, "expires_at_ms": null},
+      "target": {"retained": true, "expires_at_ms": null},
+      "queries": [
+        {"T": 150, "C": 499, "expected": null},
+        {"T": 150, "C": 500, "expected": null},
+        {"T": 150, "C": 501, "expected": null},
+        {"T": 150, "C": 0, "expected": null}
+      ]
+    },
+    {
+      "name": "purged-source-cannot-resurrect",
+      "segments": [{"valid_from": null, "valid_to": null, "properties": {}}],
+      "edge": {"retained": true, "expires_at_ms": null},
+      "source": {"retained": false, "expires_at_ms": 500},
+      "target": {"retained": true, "expires_at_ms": null},
+      "queries": [
+        {"T": -100, "C": 499, "expected": null},
+        {"T": -100, "C": 500, "expected": null},
+        {"T": -100, "C": 501, "expected": null}
+      ]
+    },
+    {
+      "name": "purged-target-cannot-resurrect",
+      "segments": [{"valid_from": null, "valid_to": null, "properties": {}}],
+      "edge": {"retained": true, "expires_at_ms": null},
+      "source": {"retained": true, "expires_at_ms": null},
+      "target": {"retained": false, "expires_at_ms": 500},
+      "queries": [
+        {"T": -100, "C": 499, "expected": null},
+        {"T": -100, "C": 500, "expected": null},
+        {"T": -100, "C": 501, "expected": null}
+      ]
+    }
+  ],
+  "invalid_series": [
+    {"name": "not-an-array", "segments": {}, "expected_error": "series_type"},
+    {"name": "not-a-segment", "segments": [null], "expected_error": "segment_fields"},
+    {"name": "missing-bound", "segments": [{"valid_from": 0, "properties": {}}], "expected_error": "segment_fields"},
+    {"name": "extra-field", "segments": [{"valid_from": 0, "valid_to": 1, "properties": {}, "extra": 0}], "expected_error": "segment_fields"},
+    {"name": "missing-properties", "segments": [{"valid_from": 0, "valid_to": 1}], "expected_error": "segment_fields"},
+    {"name": "non-object-properties", "segments": [{"valid_from": 0, "valid_to": 1, "properties": []}], "expected_error": "properties"},
+    {"name": "zero-length", "segments": [{"valid_from": 0, "valid_to": 0, "properties": {}}], "expected_error": "bounds"},
+    {"name": "inverted", "segments": [{"valid_from": 1, "valid_to": -1, "properties": {}}], "expected_error": "bounds"},
+    {"name": "equal-min", "segments": [{"valid_from": -9223372036854775808, "valid_to": -9223372036854775808, "properties": {}}], "expected_error": "bounds"},
+    {"name": "equal-max", "segments": [{"valid_from": 9223372036854775807, "valid_to": 9223372036854775807, "properties": {}}], "expected_error": "bounds"},
+    {"name": "underflow", "segments": [{"valid_from": -9223372036854775809, "valid_to": null, "properties": {}}], "expected_error": "timestamp"},
+    {"name": "overflow", "segments": [{"valid_from": null, "valid_to": 9223372036854775808, "properties": {}}], "expected_error": "timestamp"},
+    {"name": "bool-start", "segments": [{"valid_from": false, "valid_to": 1, "properties": {}}], "expected_error": "timestamp"},
+    {"name": "bool-end", "segments": [{"valid_from": 0, "valid_to": true, "properties": {}}], "expected_error": "timestamp"},
+    {"name": "float-start", "segments": [{"valid_from": 0.0, "valid_to": 1, "properties": {}}], "expected_error": "timestamp"},
+    {"name": "string-end", "segments": [{"valid_from": 0, "valid_to": "1", "properties": {}}], "expected_error": "timestamp"},
+    {"name": "unsorted-disjoint", "segments": [{"valid_from": 5, "valid_to": 6, "properties": {}}, {"valid_from": 0, "valid_to": 1, "properties": {}}], "expected_error": "order"},
+    {"name": "overlap-same-properties", "segments": [{"valid_from": 0, "valid_to": 2, "properties": {}}, {"valid_from": 1, "valid_to": 3, "properties": {}}], "expected_error": "overlap"},
+    {"name": "contained-overlap", "segments": [{"valid_from": 0, "valid_to": 10, "properties": {"v": 1}}, {"valid_from": 2, "valid_to": 3, "properties": {"v": 2}}], "expected_error": "overlap"},
+    {"name": "duplicate-interval", "segments": [{"valid_from": 0, "valid_to": 1, "properties": {}}, {"valid_from": 0, "valid_to": 1, "properties": {}}], "expected_error": "overlap"},
+    {"name": "open-end-overlap", "segments": [{"valid_from": 0, "valid_to": null, "properties": {}}, {"valid_from": 1, "valid_to": 2, "properties": {}}], "expected_error": "overlap"},
+    {"name": "open-start-not-first", "segments": [{"valid_from": 0, "valid_to": 1, "properties": {}}, {"valid_from": null, "valid_to": 2, "properties": {}}], "expected_error": "order"},
+    {"name": "two-open-starts", "segments": [{"valid_from": null, "valid_to": 0, "properties": {}}, {"valid_from": null, "valid_to": 1, "properties": {}}], "expected_error": "order"},
+    {"name": "all-time-overlap", "segments": [{"valid_from": null, "valid_to": null, "properties": {}}, {"valid_from": 0, "valid_to": 1, "properties": {}}], "expected_error": "overlap"}
+  ],
+  "limit_cases": [
+    {
+      "name": "accept-256-distinct-adjacent-segments",
+      "segment_count": 256,
+      "expected_error": null,
+      "queries": [
+        {"T": -1, "C": 0, "expected": null},
+        {"T": 0, "C": 0, "expected": {"valid_from": 0, "valid_to": 1, "properties": {"value": "same"}}},
+        {"T": 254, "C": 0, "expected": {"valid_from": 254, "valid_to": 255, "properties": {"value": "same"}}},
+        {"T": 255, "C": 0, "expected": {"valid_from": 255, "valid_to": 256, "properties": {"value": "same"}}},
+        {"T": 256, "C": 0, "expected": null}
+      ]
+    },
+    {
+      "name": "reject-257-segments",
+      "segment_count": 257,
+      "expected_error": "segment_limit",
+      "queries": []
+    }
+  ]
+}
