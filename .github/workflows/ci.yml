@@ -31,6 +31,7 @@ jobs:
           python tests/compact_float16_oracle.py --self-test
           python tests/precision_catalog_oracle.py --self-test
           python tests/graph_algorithm_oracle.py --self-test
+          python tests/graph_iteration_oracle.py --self-test
           python tests/temporal_interval_oracle.py --self-test
           python tests/filter_visibility_oracle.py --self-test
       - id: route

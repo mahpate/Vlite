@@ -1,0 +1,212 @@
+{
+  "schema": "vlite.graph-iteration-golden",
+  "version": 1,
+  "contract": {
+    "description": "Hand-authored finite-step PageRank and finite-sweep label propagation goldens for already-extracted tiny projections. Physical edges are stored directed arcs; LPA symmetrizes them. These supplement, not replace, stationary references.",
+    "bounds": "1..6 distinct u64 node IDs; <=12 physical edges with distinct u64 IDs; 1..100 iterations/sweeps. PageRank edges require explicit finite nonnegative binary64-compatible weights; integer weights <=2^53. LPA edges have no weights. PageRank seed_ids is a nonempty unique subset of the already-admitted nodes, used only to validate personalization, not to extract scope. Personalization IDs must be scoped seeds; unlisted nodes have zero teleport mass.",
+    "ordering": "Node visits and returned rows ascend by numeric ID, regardless of input order. Edges ascend by ID. PageRank is synchronous; LPA updates immediately within ascending-ID sweeps. Traces include only full steps/sweeps, including the full converging step/sweep.",
+    "reference": "PageRank interprets binary64 weights, damping, tolerance and positive personalization masses with Fraction.from_float, then computes exact rational steps from r=p. Each exported finite score and L1 residual is compared independently to the hand-reasoned expected value within the stated absolute tolerances. This is not bitwise equivalence with an iterative f64 runtime, nor a stationary solution used to infer iterations.",
+    "interruption": "synthetic_vertex_update_budget is null or 0..600; one unit per candidate vertex update, including isolates. It models interruption only, not VLite work accounting. A partial step/sweep is discarded. No full step/sweep means null scores/residual or assignments. A full final step/sweep can converge even at an exact cap/budget boundary; otherwise the cap is incomplete. Reasons are null, iteration_limit or synthetic_interruption.",
+    "exclusions": "No TTL/scope extraction, authorization, storage, real engine budgets/deadlines, allocator, production qualification, weighted LPA or numerical parity claims.",
+    "score_abs_tolerance": 1e-14,
+    "residual_abs_tolerance": 1e-14
+  },
+  "cases": [
+    {
+      "name": "pr_uniform_dangling_two_steps_capped",
+      "algorithm": "pagerank",
+      "purpose": "With p=(1/2,1/2), d=1/2 and 1->2, the synchronous first step is (3/8,5/8), L1=1/4; second is (13/32,19/32), L1=1/16. Tolerance 0.05 does not certify the capped second step.",
+      "nodes": [2, 1],
+      "edges": [{"id": 1, "source": 1, "target": 2, "weight": 1}],
+      "parameters": {"seed_ids": [1], "damping": 0.5, "tolerance": 0.05, "max_iterations": 2, "personalization": null},
+      "synthetic_vertex_update_budget": null,
+      "expected": {
+        "trace": [
+          {"scores": [{"node_id": 1, "score": 0.375}, {"node_id": 2, "score": 0.625}], "residual": 0.25},
+          {"scores": [{"node_id": 1, "score": 0.40625}, {"node_id": 2, "score": 0.59375}], "residual": 0.0625}
+        ],
+        "result": {"scores": [{"node_id": 1, "score": 0.40625}, {"node_id": 2, "score": 0.59375}], "residual": 0.0625, "completed_iterations": 2, "converged": false, "complete": false, "reason": "iteration_limit"}
+      }
+    },
+    {
+      "name": "pr_uniform_converges_exactly_on_cap",
+      "algorithm": "pagerank",
+      "purpose": "The same two full steps converge on the cap because final L1=1/16 equals tolerance. Budget four permits exactly two full two-vertex steps, not an interruption.",
+      "nodes": [1, 2],
+      "edges": [{"id": 1, "source": 1, "target": 2, "weight": 1}],
+      "parameters": {"seed_ids": [1], "damping": 0.5, "tolerance": 0.0625, "max_iterations": 2, "personalization": null},
+      "synthetic_vertex_update_budget": 4,
+      "expected": {
+        "trace": [
+          {"scores": [{"node_id": 1, "score": 0.375}, {"node_id": 2, "score": 0.625}], "residual": 0.25},
+          {"scores": [{"node_id": 1, "score": 0.40625}, {"node_id": 2, "score": 0.59375}], "residual": 0.0625}
+        ],
+        "result": {"scores": [{"node_id": 1, "score": 0.40625}, {"node_id": 2, "score": 0.59375}], "residual": 0.0625, "completed_iterations": 2, "converged": true, "complete": true, "reason": null}
+      }
+    },
+    {
+      "name": "pr_parallel_loop_synchronous",
+      "algorithm": "pagerank",
+      "purpose": "Node 1 sends 1/4 to itself and 3/4 to 2 through two weighted parallel arcs; 2 returns to 1. At d=1/2 the first vector is (9/16,7/16), second (69/128,59/128). Updating node 2 with new node-1 rank would instead give 59/128 in the FIRST step, exposing in-place errors.",
+      "nodes": [2, 1],
+      "edges": [
+        {"id": 4, "source": 2, "target": 1, "weight": 1},
+        {"id": 3, "source": 1, "target": 2, "weight": 0.5},
+        {"id": 1, "source": 1, "target": 1, "weight": 0.25},
+        {"id": 2, "source": 1, "target": 2, "weight": 0.25}
+      ],
+      "parameters": {"seed_ids": [1], "damping": 0.5, "tolerance": 0.01, "max_iterations": 2, "personalization": null},
+      "synthetic_vertex_update_budget": null,
+      "expected": {
+        "trace": [
+          {"scores": [{"node_id": 1, "score": 0.5625}, {"node_id": 2, "score": 0.4375}], "residual": 0.125},
+          {"scores": [{"node_id": 1, "score": 0.5390625}, {"node_id": 2, "score": 0.4609375}], "residual": 0.046875}
+        ],
+        "result": {"scores": [{"node_id": 1, "score": 0.5390625}, {"node_id": 2, "score": 0.4609375}], "residual": 0.046875, "completed_iterations": 2, "converged": false, "complete": false, "reason": "iteration_limit"}
+      }
+    },
+    {
+      "name": "pr_personalized_dangling_two_steps",
+      "algorithm": "pagerank",
+      "purpose": "Mass seven on seed 1 normalizes to p=(1,0). For 1->2 and d=1/2, r1=(1/2,1/2) with L1=1, r2=(3/4,1/4) with L1=1/2; dangling redistribution is to p, not uniform.",
+      "nodes": [1, 2],
+      "edges": [{"id": 1, "source": 1, "target": 2, "weight": 1}],
+      "parameters": {"seed_ids": [1], "damping": 0.5, "tolerance": 0.125, "max_iterations": 2, "personalization": [{"node_id": 1, "mass": 7}]},
+      "synthetic_vertex_update_budget": null,
+      "expected": {
+        "trace": [
+          {"scores": [{"node_id": 1, "score": 0.5}, {"node_id": 2, "score": 0.5}], "residual": 1},
+          {"scores": [{"node_id": 1, "score": 0.75}, {"node_id": 2, "score": 0.25}], "residual": 0.5}
+        ],
+        "result": {"scores": [{"node_id": 1, "score": 0.75}, {"node_id": 2, "score": 0.25}], "residual": 0.5, "completed_iterations": 2, "converged": false, "complete": false, "reason": "iteration_limit"}
+      }
+    },
+    {
+      "name": "pr_zero_arcs_personalized_converging_first_step",
+      "algorithm": "pagerank",
+      "purpose": "Zero outgoing arc and negative-zero loop leave both nodes dangling. Normalized masses 1:3 give p=(1/4,3/4), preserved in the first full step even with binary64 damping 0.85. Residual zero certifies convergence on cap one.",
+      "nodes": [2, 1],
+      "edges": [{"id": 1, "source": 1, "target": 2, "weight": 0}, {"id": 2, "source": 2, "target": 2, "weight": -0.0}],
+      "parameters": {"seed_ids": [2, 1], "damping": 0.85, "tolerance": 1e-10, "max_iterations": 1, "personalization": [{"node_id": 2, "mass": 3}, {"node_id": 1, "mass": 1}]},
+      "synthetic_vertex_update_budget": null,
+      "expected": {
+        "trace": [{"scores": [{"node_id": 1, "score": 0.25}, {"node_id": 2, "score": 0.75}], "residual": 0}],
+        "result": {"scores": [{"node_id": 1, "score": 0.25}, {"node_id": 2, "score": 0.75}], "residual": 0, "completed_iterations": 1, "converged": true, "complete": true, "reason": null}
+      }
+    },
+    {
+      "name": "pr_interrupted_before_first_full_step",
+      "algorithm": "pagerank",
+      "purpose": "One vertex update computes candidate rank 1=1/2, but cannot finish the two-vertex first step. Initial p must not leak as returned scores; residual and scores are absent.",
+      "nodes": [1, 2],
+      "edges": [{"id": 1, "source": 1, "target": 2, "weight": 1}],
+      "parameters": {"seed_ids": [1], "damping": 0.5, "tolerance": 0.125, "max_iterations": 3, "personalization": [{"node_id": 1, "mass": 7}]},
+      "synthetic_vertex_update_budget": 1,
+      "expected": {"trace": [], "result": {"scores": null, "residual": null, "completed_iterations": 0, "converged": false, "complete": false, "reason": "synthetic_interruption"}}
+    },
+    {
+      "name": "pr_interrupted_partial_second_step",
+      "algorithm": "pagerank",
+      "purpose": "Three updates complete r1=(1/2,1/2), then compute candidate node 1=3/4. Discard that partial second step and return only r1 and its residual 1.",
+      "nodes": [1, 2],
+      "edges": [{"id": 1, "source": 1, "target": 2, "weight": 1}],
+      "parameters": {"seed_ids": [1], "damping": 0.5, "tolerance": 0.125, "max_iterations": 3, "personalization": [{"node_id": 1, "mass": 7}]},
+      "synthetic_vertex_update_budget": 3,
+      "expected": {
+        "trace": [{"scores": [{"node_id": 1, "score": 0.5}, {"node_id": 2, "score": 0.5}], "residual": 1}],
+        "result": {"scores": [{"node_id": 1, "score": 0.5}, {"node_id": 2, "score": 0.5}], "residual": 1, "completed_iterations": 1, "converged": false, "complete": false, "reason": "synthetic_interruption"}
+      }
+    },
+    {
+      "name": "lpa_tie_keep_collapsed_capped",
+      "algorithm": "label_propagation",
+      "purpose": "Visits 1->4, 2->3; node 3 keeps tied current 3 and node 4 keeps tied current 4 despite smaller 3. Duplicate/reversed 3-4 edges collapse, loops vanish, isolate 5 stays. One changed sweep is incomplete; raw labels 4 and 3 canonicalize to 1 and 2.",
+      "nodes": [5, 4, 2, 1, 3],
+      "edges": [
+        {"id": 1, "source": 1, "target": 4}, {"id": 2, "source": 2, "target": 3},
+        {"id": 3, "source": 3, "target": 4}, {"id": 4, "source": 3, "target": 4},
+        {"id": 5, "source": 4, "target": 3}, {"id": 6, "source": 4, "target": 4},
+        {"id": 7, "source": 5, "target": 5}
+      ],
+      "parameters": {"max_sweeps": 1},
+      "synthetic_vertex_update_budget": null,
+      "expected": {
+        "trace": [[{"node_id": 1, "label": 4}, {"node_id": 2, "label": 3}, {"node_id": 3, "label": 3}, {"node_id": 4, "label": 4}, {"node_id": 5, "label": 5}]],
+        "result": {"assignments": [{"node_id": 1, "label": 4, "community_id": 1}, {"node_id": 2, "label": 3, "community_id": 2}, {"node_id": 3, "label": 3, "community_id": 2}, {"node_id": 4, "label": 4, "community_id": 1}, {"node_id": 5, "label": 5, "community_id": 5}], "completed_sweeps": 1, "converged": false, "complete": false, "reason": "iteration_limit"}
+      }
+    },
+    {
+      "name": "lpa_tie_keep_converges_on_cap",
+      "algorithm": "label_propagation",
+      "purpose": "Same collapsed graph: sweep two changes no labels, certifying convergence exactly on cap two and synthetic budget ten. An already stable-looking first partition alone was not convergence.",
+      "nodes": [1, 2, 3, 4, 5],
+      "edges": [
+        {"id": 1, "source": 1, "target": 4}, {"id": 2, "source": 2, "target": 3},
+        {"id": 3, "source": 3, "target": 4}, {"id": 4, "source": 3, "target": 4},
+        {"id": 5, "source": 4, "target": 3}, {"id": 6, "source": 4, "target": 4},
+        {"id": 7, "source": 5, "target": 5}
+      ],
+      "parameters": {"max_sweeps": 2},
+      "synthetic_vertex_update_budget": 10,
+      "expected": {
+        "trace": [
+          [{"node_id": 1, "label": 4}, {"node_id": 2, "label": 3}, {"node_id": 3, "label": 3}, {"node_id": 4, "label": 4}, {"node_id": 5, "label": 5}],
+          [{"node_id": 1, "label": 4}, {"node_id": 2, "label": 3}, {"node_id": 3, "label": 3}, {"node_id": 4, "label": 4}, {"node_id": 5, "label": 5}]
+        ],
+        "result": {"assignments": [{"node_id": 1, "label": 4, "community_id": 1}, {"node_id": 2, "label": 3, "community_id": 2}, {"node_id": 3, "label": 3, "community_id": 2}, {"node_id": 4, "label": 4, "community_id": 1}, {"node_id": 5, "label": 5, "community_id": 5}], "completed_sweeps": 2, "converged": true, "complete": true, "reason": null}
+      }
+    },
+    {
+      "name": "lpa_smallest_tie_immediate_three_sweeps",
+      "algorithm": "label_propagation",
+      "purpose": "Node 1 picks smallest tied neighbor label 3 rather than 4; node 2 picks 5. Immediate updates make node 3 retain 3, node 4 pick 3, node 5 adopt majority 3. First labels (3,5,3,3,3), second all 3 after node 2 changes, third unchanged certifies convergence.",
+      "nodes": [5, 4, 3, 2, 1],
+      "edges": [
+        {"id": 1, "source": 1, "target": 3}, {"id": 2, "source": 1, "target": 4},
+        {"id": 3, "source": 2, "target": 5}, {"id": 4, "source": 3, "target": 5},
+        {"id": 5, "source": 4, "target": 5}
+      ],
+      "parameters": {"max_sweeps": 3},
+      "synthetic_vertex_update_budget": null,
+      "expected": {
+        "trace": [
+          [{"node_id": 1, "label": 3}, {"node_id": 2, "label": 5}, {"node_id": 3, "label": 3}, {"node_id": 4, "label": 3}, {"node_id": 5, "label": 3}],
+          [{"node_id": 1, "label": 3}, {"node_id": 2, "label": 3}, {"node_id": 3, "label": 3}, {"node_id": 4, "label": 3}, {"node_id": 5, "label": 3}],
+          [{"node_id": 1, "label": 3}, {"node_id": 2, "label": 3}, {"node_id": 3, "label": 3}, {"node_id": 4, "label": 3}, {"node_id": 5, "label": 3}]
+        ],
+        "result": {"assignments": [{"node_id": 1, "label": 3, "community_id": 1}, {"node_id": 2, "label": 3, "community_id": 1}, {"node_id": 3, "label": 3, "community_id": 1}, {"node_id": 4, "label": 3, "community_id": 1}, {"node_id": 5, "label": 3, "community_id": 1}], "completed_sweeps": 3, "converged": true, "complete": true, "reason": null}
+      }
+    },
+    {
+      "name": "lpa_interrupted_before_first_full_sweep",
+      "algorithm": "label_propagation",
+      "purpose": "Budget one updates node 1 to label 3 but cannot finish the first sweep. Neither initial nor partial assignments may be returned.",
+      "nodes": [1, 2, 3, 4, 5],
+      "edges": [
+        {"id": 1, "source": 1, "target": 3}, {"id": 2, "source": 1, "target": 4},
+        {"id": 3, "source": 2, "target": 5}, {"id": 4, "source": 3, "target": 5},
+        {"id": 5, "source": 4, "target": 5}
+      ],
+      "parameters": {"max_sweeps": 3},
+      "synthetic_vertex_update_budget": 1,
+      "expected": {"trace": [], "result": {"assignments": null, "completed_sweeps": 0, "converged": false, "complete": false, "reason": "synthetic_interruption"}}
+    },
+    {
+      "name": "lpa_partial_second_sweep_rolls_back_changed_label",
+      "algorithm": "label_propagation",
+      "purpose": "Budget seven completes first labels (3,5,3,3,3), then visits nodes 1 and 2 in sweep two; node 2 changes to 3. Discard the partial sweep: node 2 must still return label 5/community 2, not merge into community 1.",
+      "nodes": [5, 2, 4, 1, 3],
+      "edges": [
+        {"id": 1, "source": 1, "target": 3}, {"id": 2, "source": 1, "target": 4},
+        {"id": 3, "source": 2, "target": 5}, {"id": 4, "source": 3, "target": 5},
+        {"id": 5, "source": 4, "target": 5}
+      ],
+      "parameters": {"max_sweeps": 3},
+      "synthetic_vertex_update_budget": 7,
+      "expected": {
+        "trace": [[{"node_id": 1, "label": 3}, {"node_id": 2, "label": 5}, {"node_id": 3, "label": 3}, {"node_id": 4, "label": 3}, {"node_id": 5, "label": 3}]],
+        "result": {"assignments": [{"node_id": 1, "label": 3, "community_id": 1}, {"node_id": 2, "label": 5, "community_id": 2}, {"node_id": 3, "label": 3, "community_id": 1}, {"node_id": 4, "label": 3, "community_id": 1}, {"node_id": 5, "label": 3, "community_id": 1}], "completed_sweeps": 1, "converged": false, "complete": false, "reason": "synthetic_interruption"}
+      }
+    }
+  ]
+}
