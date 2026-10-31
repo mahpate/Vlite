@@ -63,9 +63,11 @@ pub(crate) fn check_prefix(
 
 /// Decodes the checksum-verified body of an op-12 frame, or of an op-15
 /// snapshot frame when `snapshot`: its prefix passes [`check_prefix`] and
-/// the body decodes with exactly `id` reclaims. Full replay and the change
-/// feed decode graph frames only through this, so they accept the same
-/// frames.
+/// the body decodes with exactly `id` reclaims. A snapshot body holds only
+/// the entries a checkpoint restates ([`restated`]); their order and
+/// coverage are checked where the snapshot loads. Full replay, the change
+/// feed and the precision image check decode graph frames only through
+/// this, so they accept the same frames.
 pub(crate) fn decode_frame(
     snapshot: bool,
     id: u64,
@@ -82,7 +84,32 @@ pub(crate) fn decode_frame(
     engine::decode_body(body, count)
         .ok()
         .filter(|body| reclaim_count(body) == id)
+        .filter(|body| !snapshot || body.entries.iter().all(restated))
         .ok_or_else(|| corrupt(offset, reason))
+}
+
+/// Whether `entry` is one a checkpoint restates in a snapshot body
+/// ([`GraphState::from_snapshot`] loads no others): graph creates and
+/// schemas, nodes and edges with their deadlines, attachments and
+/// high-waters. Never a vector mutation, removal, patch or cleared deadline.
+fn restated(entry: &GraphEntry) -> bool {
+    matches!(
+        entry,
+        GraphEntry::CreateGraph { .. }
+            | GraphEntry::PutSchema { .. }
+            | GraphEntry::PutNode { .. }
+            | GraphEntry::PutEdge { .. }
+            | GraphEntry::NodeExpiry {
+                expires_at_ms: Some(_),
+                ..
+            }
+            | GraphEntry::EdgeExpiry {
+                expires_at_ms: Some(_),
+                ..
+            }
+            | GraphEntry::Attach { .. }
+            | GraphEntry::GraphHighWater { .. }
+    )
 }
 
 /// Replays one checksum-verified op-12 body committed at `sequence` (frame at

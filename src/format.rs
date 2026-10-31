@@ -1060,7 +1060,9 @@ pub(crate) fn decode_batch(
     offset: u64,
     version: u32,
 ) -> Result<(Vec<Mutation>, Option<ImportMarker>)> {
-    let mut operations = Vec::with_capacity(count);
+    // Every entry has a 16-byte header, so the body bounds the entries
+    // whatever `count` claims.
+    let mut operations = Vec::with_capacity(count.min(body.len() / 16));
     let mut marker = None;
     let mut position = 0usize;
     for index in 0..count {
@@ -1444,6 +1446,106 @@ pub(crate) fn plain_body_len(operation: u8, count: u32, payload_len: u32) -> usi
         2 => 0,
         _ => payload_len as usize,
     }
+}
+
+/// Checks the fields of a frame prefix of an operation that `frame_allowed`
+/// admits in a log of `version`: its ID, count and payload length against
+/// the operation's limits, with `dimensions` those of the collection that
+/// an operation writing records targets. Returns the body length. Replay
+/// and the readers that check a precision log without replaying it share
+/// these limits, before any of the body is decoded or allocated: every
+/// count that sizes a decode is bounded here. Graph frames (ops 12, 15)
+/// have `property_graph::frame::check_prefix`; op 16 and op 17 prefixes
+/// are bounded by the compact image check.
+pub(crate) fn checked_body_len(
+    version: u32,
+    operation: u8,
+    id: u64,
+    count: usize,
+    payload_len: usize,
+    dimensions: usize,
+    offset: u64,
+) -> Result<usize> {
+    let invalid = |reason| Err(corrupt(offset, reason));
+    match operation {
+        3 => {
+            let (max_count, max_bytes) = if version >= V4 {
+                (
+                    MAX_BATCH_OPERATIONS + 1,
+                    MAX_BATCH_BYTES + IMPORT_SNAPSHOT_ENTRY,
+                )
+            } else {
+                (MAX_BATCH_OPERATIONS, MAX_BATCH_BYTES)
+            };
+            if id != 0
+                || !(1..=max_count).contains(&count)
+                || payload_len > max_bytes
+                || payload_len < count * 16
+            {
+                return invalid("invalid batch count, reserved ID or body length");
+            }
+        }
+        4 => {
+            if count != dimensions
+                || payload_len > MAX_EXTENDED_BODY
+                || payload_len < dimensions * 4 + 8
+            {
+                return invalid("invalid extended record length");
+            }
+        }
+        5..=7 => {
+            let valid = count == 0
+                && id <= u64::from(u16::MAX)
+                && match operation {
+                    5 => id != 0 && (6..=MAX_CREATE_BODY).contains(&payload_len),
+                    6 => id != 0 && payload_len == 0,
+                    _ => payload_len <= MAX_SETTINGS_BLOB,
+                };
+            if !valid {
+                return invalid("invalid collection frame fields");
+            }
+        }
+        10 => {
+            if count != 0 || id != 0 || payload_len > crate::MAX_BATCH_BYTES {
+                return invalid("invalid vector extension length");
+            }
+        }
+        8 => {
+            if count != 0 || !(4..=crate::MAX_METADATA_BYTES).contains(&payload_len) {
+                return invalid("invalid metadata-only update length");
+            }
+        }
+        9 => {
+            if version < V5
+                || count != dimensions
+                || payload_len > MAX_EXTENDED_BODY + 9
+                || payload_len < dimensions * 4 + 17
+            {
+                return invalid("invalid expiring record length");
+            }
+        }
+        OP_RECORD_BLOCK => {
+            let min_entry = BLOCK_ENTRY_HEADER + dimensions * 4 + 8;
+            if id != 0
+                || !(1..=MAX_BLOCK_RECORDS).contains(&count)
+                || payload_len > MAX_RECORD_BLOCK
+                || payload_len < count * min_entry
+            {
+                return invalid("invalid record block");
+            }
+        }
+        0..=2 => {
+            if (operation == 1 && count != dimensions)
+                || (operation == 2 && (count != 0 || payload_len != 0))
+                || payload_len > MAX_PAYLOAD_BYTES
+            {
+                return invalid("invalid vector or payload length");
+            }
+            return Ok(count * 4 + payload_len);
+        }
+        _ => {}
+    }
+    Ok(payload_len)
 }
 
 /// Whether a file of `version` with header `flags` may hold the operation of
@@ -1830,91 +1932,20 @@ fn load_inner<R: Read + Seek>(
             } else {
                 0
             };
-        let body_len = if operation == 3 {
-            let (max_count, max_bytes) = if version >= V4 {
-                (
-                    MAX_BATCH_OPERATIONS + 1,
-                    MAX_BATCH_BYTES + IMPORT_SNAPSHOT_ENTRY,
-                )
-            } else {
-                (MAX_BATCH_OPERATIONS, MAX_BATCH_BYTES)
-            };
-            if id != 0
-                || !(1..=max_count).contains(&count)
-                || payload_len > max_bytes
-                || payload_len < count * 16
-            {
-                return Err(corrupt(
-                    offset,
-                    "invalid batch count, reserved ID or body length",
-                ));
-            }
-            payload_len
-        } else if operation == 4 {
-            if count != target_dimensions
-                || payload_len > MAX_EXTENDED_BODY
-                || payload_len < target_dimensions * 4 + 8
-            {
-                return Err(corrupt(offset, "invalid extended record length"));
-            }
-            payload_len
-        } else if (5..=7).contains(&operation) {
-            let valid = count == 0
-                && id <= u64::from(u16::MAX)
-                && match operation {
-                    5 => id != 0 && (6..=MAX_CREATE_BODY).contains(&payload_len),
-                    6 => id != 0 && payload_len == 0,
-                    _ => payload_len <= MAX_SETTINGS_BLOB,
-                };
-            if !valid {
-                return Err(corrupt(offset, "invalid collection frame fields"));
-            }
-            payload_len
-        } else if operation == 10 {
-            if count != 0 || id != 0 || payload_len > crate::MAX_BATCH_BYTES {
-                return Err(corrupt(offset, "invalid vector extension length"));
-            }
-            payload_len
-        } else if operation == 8 {
-            if count != 0 || !(4..=crate::MAX_METADATA_BYTES).contains(&payload_len) {
-                return Err(corrupt(offset, "invalid metadata-only update length"));
-            }
-            payload_len
-        } else if operation == 9 {
-            if version < V5
-                || count != target_dimensions
-                || payload_len > MAX_EXTENDED_BODY + 9
-                || payload_len < target_dimensions * 4 + 17
-            {
-                return Err(corrupt(offset, "invalid expiring record length"));
-            }
-            payload_len
-        } else if operation == OP_RECORD_BLOCK {
-            // Records are restated before every graph frame, so no
-            // attachment can refer to them yet.
-            let min_entry = BLOCK_ENTRY_HEADER + target_dimensions * 4 + 8;
-            if id != 0
-                || !(1..=MAX_BLOCK_RECORDS).contains(&count)
-                || payload_len > MAX_RECORD_BLOCK
-                || payload_len < count * min_entry
-                || graph_started
-            {
-                return Err(corrupt(offset, "invalid record block"));
-            }
-            payload_len
-        } else if operation <= 2 {
-            if (operation == 1 && count != target_dimensions)
-                || (operation == 2 && (count != 0 || payload_len != 0))
-                || payload_len > MAX_PAYLOAD_BYTES
-            {
-                return Err(corrupt(offset, "invalid vector or payload length"));
-            }
-            count * 4 + payload_len
-        } else {
-            // Ops 12 and 15 in graph builds; their prefix was validated
-            // above. Ops 16 and 17 were bounded by the image check.
-            payload_len
-        };
+        // Records are restated before every graph frame, so no attachment
+        // can refer to them yet.
+        if operation == OP_RECORD_BLOCK && graph_started {
+            return Err(corrupt(offset, "invalid record block"));
+        }
+        let body_len = checked_body_len(
+            version,
+            operation,
+            id,
+            count,
+            payload_len,
+            target_dimensions,
+            offset,
+        )?;
         let frame_len = (PREFIX_SIZE + body_len + seal + FOOTER_SIZE) as u64;
         if remaining < frame_len {
             loaded.incomplete_bytes = remaining + anchor_len;
@@ -2464,7 +2495,10 @@ fn extend_ascending<V>(map: &mut BTreeMap<u64, V>, entries: impl Iterator<Item =
 fn decode_block(frame: &[u8], dimensions: usize, floor: u64) -> Option<Vec<BlockEntry>> {
     let count = u32_at(frame, 24) as usize;
     let body = &frame[PREFIX_SIZE..frame.len() - FOOTER_SIZE];
-    let mut entries: Vec<BlockEntry> = Vec::with_capacity(count);
+    // Every entry has its header, so the body bounds the entries whatever
+    // `count` claims.
+    let mut entries: Vec<BlockEntry> =
+        Vec::with_capacity(count.min(body.len() / BLOCK_ENTRY_HEADER));
     let mut at = 0;
     for _ in 0..count {
         let header = body.get(at..at + BLOCK_ENTRY_HEADER)?;
@@ -2534,17 +2568,42 @@ pub(crate) fn check_dense(precision: Option<Precision>, vector: &[f32], offset: 
 /// `frame` (at `offset`) of a `FLAG_PRECISION` log of `version` writes,
 /// decoded as replay decodes it: primary puts, batches and import chunks,
 /// named vectors, record blocks restating checkpoint `floor`, and graph
-/// vector entries. `target` gives a collection's dimensions and stored
-/// precision, or refuses one that is not live. Readers that do not replay
-/// (the change feed and log export) call this before they return the
-/// frame (P3a); replay checks the same values where it decodes them.
+/// vector entries. `target` gives a live collection's dimensions and stored
+/// precision. As replay does, it first refuses a frame that writes into a
+/// collection that is not live or whose prefix fields exceed its
+/// operation's limits (`checked_body_len`), so no count is decoded or
+/// allocated beyond them. Readers that do not replay (the change feed and
+/// log export) call this before they return the frame (P3a); replay checks
+/// the same values where it decodes them.
 pub(crate) fn check_frame_dense(
     frame: &RawFrame,
     version: u32,
     floor: u64,
     offset: u64,
-    target: impl Fn(u16) -> Result<(usize, Option<Precision>)>,
+    target: impl Fn(u16) -> Option<(usize, Option<Precision>)>,
 ) -> Result<()> {
+    let operation = frame.operation;
+    let count = frame.count as usize;
+    let (dimensions, precision) = match operation {
+        1..=4 | 9 | OP_RECORD_BLOCK => target(frame.collection)
+            .ok_or_else(|| corrupt(offset, "record references unknown collection"))?,
+        8 | 10 => target(frame.collection)
+            .map(|(_, precision)| (0, precision))
+            .ok_or_else(|| corrupt(offset, "metadata update references unknown collection"))?,
+        _ => (0, None),
+    };
+    if matches!(operation, 1..=10 | OP_RECORD_BLOCK) {
+        let payload_len = u32_at(&frame.plain, 28) as usize;
+        checked_body_len(
+            version,
+            operation,
+            frame.id,
+            count,
+            payload_len,
+            dimensions,
+            offset,
+        )?;
+    }
     let body = frame.body();
     let puts = |batch: &[u8],
                 count: usize,
@@ -2558,47 +2617,31 @@ pub(crate) fn check_frame_dense(
             Mutation::Delete { .. } => Ok(()),
         })
     };
-    match frame.operation {
-        1 => {
-            let (_, precision) = target(frame.collection)?;
-            let vector = decode_vector(&body[..frame.count as usize * 4], offset)?;
-            check_dense(precision, &vector, offset)
-        }
-        3 => puts(
-            body,
-            frame.count as usize,
-            target(frame.collection)?,
-            version,
+    match operation {
+        1 => check_dense(
+            precision,
+            &decode_vector(&body[..count * 4], offset)?,
+            offset,
         ),
-        4 | 9 => {
-            let (dimensions, precision) = target(frame.collection)?;
-            let record = match frame.operation {
-                4 => decode_extended(body, dimensions, offset, version >= V5)?,
-                _ => {
-                    let body = body
-                        .get(9..)
-                        .ok_or_else(|| corrupt(offset, "invalid expiring record length"))?;
-                    decode_extended(body, dimensions, offset, true)?
-                }
-            };
+        3 => puts(body, count, (dimensions, precision), version),
+        4 => {
+            let record = decode_extended(body, dimensions, offset, version >= V5)?;
             check_dense(precision, &record.vector, offset)
         }
-        10 => {
-            let (_, precision) = target(frame.collection)?;
-            let data = crate::vectors::VectorData::decode(body)
-                .map_err(|_| corrupt(offset, "invalid vector extension"))?;
-            data.records
-                .values()
-                .flat_map(|record| record.dense.values().flatten())
-                .try_for_each(|version| check_dense(precision, &version.vector, offset))
+        9 => {
+            let record = decode_extended(&body[9..], dimensions, offset, true)?;
+            check_dense(precision, &record.vector, offset)
         }
-        OP_RECORD_BLOCK => {
-            let (dimensions, precision) = target(frame.collection)?;
-            decode_block(&frame.plain, dimensions, floor)
-                .ok_or_else(|| corrupt(offset, "invalid record block"))?
-                .iter()
-                .try_for_each(|entry| check_dense(precision, &entry.record.vector, offset))
-        }
+        10 => crate::vectors::VectorData::decode(body)
+            .map_err(|_| corrupt(offset, "invalid vector extension"))?
+            .records
+            .values()
+            .flat_map(|record| record.dense.values().flatten())
+            .try_for_each(|version| check_dense(precision, &version.vector, offset)),
+        OP_RECORD_BLOCK => decode_block(&frame.plain, dimensions, floor)
+            .ok_or_else(|| corrupt(offset, "invalid record block"))?
+            .iter()
+            .try_for_each(|entry| check_dense(precision, &entry.record.vector, offset)),
         OP_GRAPH => {
             let body = crate::property_graph::frame::decode_frame(
                 false,
@@ -2609,7 +2652,11 @@ pub(crate) fn check_frame_dense(
             )?;
             body.entries.iter().try_for_each(|entry| match entry {
                 crate::property_graph::engine::GraphEntry::VectorMutation { collection, entry } => {
-                    puts(entry, 1, target(*collection)?, V5)
+                    let target = target(*collection).ok_or_else(|| {
+                        corrupt(offset, "graph vector entry references unknown collection")
+                    })?;
+                    // One entry, as replay decodes it.
+                    puts(entry, 1, target, V5)
                 }
                 _ => Ok(()),
             })
@@ -3367,5 +3414,108 @@ mod tests {
         refresh_header_checksum(&mut legacy);
         legacy.extend_from_slice(&original);
         assert!(matches!(load_bytes(&legacy), Err(Error::Corrupt { .. })));
+    }
+
+    /// `checked_body_len` of a frame prefix in a v5 log, for a collection
+    /// of two dimensions, as its body length or corruption reason.
+    fn limits(
+        operation: u8,
+        id: u64,
+        count: usize,
+        payload_len: usize,
+    ) -> std::result::Result<usize, String> {
+        checked_body_len(V5, operation, id, count, payload_len, 2, 0).map_err(|error| match error {
+            Error::Corrupt { reason, .. } => reason.to_owned(),
+            other => format!("{other:?}"),
+        })
+    }
+
+    #[test]
+    fn frame_limits_bound_every_count_that_sizes_a_decode() {
+        // Replay, the change feed and log export refuse these prefixes
+        // before any body is decoded (P3a review on 37eecbda), whatever the
+        // body: a count no limit admits, or more entries than the payload
+        // length holds. Only arithmetic on the prefix fields runs here.
+        let huge = u32::MAX as usize;
+        let batch = "invalid batch count, reserved ID or body length";
+        let block = "invalid record block";
+        let entry = BLOCK_ENTRY_HEADER + 2 * 4 + 8;
+        let refused = [
+            (3, 0, huge, 16, batch),
+            (3, 0, huge, 0, batch),
+            (
+                3,
+                0,
+                MAX_BATCH_OPERATIONS + 2,
+                (MAX_BATCH_OPERATIONS + 2) * 16,
+                batch,
+            ),
+            (
+                3,
+                0,
+                MAX_BATCH_OPERATIONS + 1,
+                MAX_BATCH_OPERATIONS * 16,
+                batch,
+            ),
+            (3, 1, 1, 16, batch),
+            (OP_RECORD_BLOCK, 0, huge, entry, block),
+            (OP_RECORD_BLOCK, 0, huge, 0, block),
+            (
+                OP_RECORD_BLOCK,
+                0,
+                MAX_BLOCK_RECORDS + 1,
+                MAX_RECORD_BLOCK,
+                block,
+            ),
+            (OP_RECORD_BLOCK, 0, MAX_BLOCK_RECORDS, entry, block),
+            (OP_RECORD_BLOCK, 1, 1, entry, block),
+            (1, 1, huge, 0, "invalid vector or payload length"),
+            (2, 1, huge, 0, "invalid vector or payload length"),
+            (4, 1, huge, 16, "invalid extended record length"),
+            (9, 1, huge, 25, "invalid expiring record length"),
+            (9, 1, 2, 16, "invalid expiring record length"),
+            (8, 1, huge, 4, "invalid metadata-only update length"),
+            (10, 0, huge, 0, "invalid vector extension length"),
+            (5, 1, huge, 6, "invalid collection frame fields"),
+            (6, 1, huge, 0, "invalid collection frame fields"),
+            (6, 0x1_0001, 0, 0, "invalid collection frame fields"),
+            (7, 1, huge, 0, "invalid collection frame fields"),
+        ];
+        for (operation, id, count, payload_len, reason) in refused {
+            assert_eq!(
+                limits(operation, id, count, payload_len),
+                Err(reason.to_owned()),
+                "op {operation} count {count} length {payload_len}"
+            );
+        }
+        // The largest batch, import chunk and record block pass, and so does
+        // the shortest body each count admits.
+        let admitted = [
+            (3, 0, MAX_BATCH_OPERATIONS, MAX_BATCH_BYTES, MAX_BATCH_BYTES),
+            (
+                3,
+                0,
+                MAX_BATCH_OPERATIONS + 1,
+                MAX_BATCH_BYTES + IMPORT_SNAPSHOT_ENTRY,
+                MAX_BATCH_BYTES + IMPORT_SNAPSHOT_ENTRY,
+            ),
+            (3, 0, 1, 16, 16),
+            (
+                OP_RECORD_BLOCK,
+                0,
+                MAX_BLOCK_RECORDS,
+                MAX_BLOCK_RECORDS * entry,
+                MAX_BLOCK_RECORDS * entry,
+            ),
+            (1, 1, 2, 3, 11),
+            (9, 1, 2, 25, 25),
+        ];
+        for (operation, id, count, payload_len, body_len) in admitted {
+            assert_eq!(
+                limits(operation, id, count, payload_len),
+                Ok(body_len),
+                "op {operation} count {count} length {payload_len}"
+            );
+        }
     }
 }

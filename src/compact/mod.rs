@@ -585,28 +585,20 @@ impl ImageCheck {
     /// blocks (`block`); and in a precision log the collection creates
     /// (`created`) and graph snapshots (`snapshot`) that its catalog,
     /// import registry and revision runs must match, the drops after it,
-    /// and every dense value a frame writes, which must be exactly a value
-    /// of its collection's precision (`format::check_frame_dense`). Full
-    /// replay decodes those frames itself and makes the same checks.
+    /// and, as replay checks them before it decodes a body, every other
+    /// frame's count, ID, length and target collection, then every dense
+    /// value it writes, which must be exactly a value of its collection's
+    /// precision (`format::check_frame_dense`). Full replay decodes those
+    /// frames itself and makes the same checks.
     pub(crate) fn frame(&mut self, frame: &RawFrame, offset: u64) -> Result<Option<Supplement>> {
         let body = frame.body();
         match frame.operation {
             OP_COMPACT_BLOCK => self.block(frame.collection, frame.id, frame.count, body, offset),
-            // The prefix check admits op 5 in a precision log only in its
-            // image, before the table, and op 17 only after the image.
-            5 if self.precise => {
-                let (name, dimensions, _) = crate::format::decode_create(body, offset)?;
-                self.created(frame.id as u16, name, dimensions, None, offset)
-                    .map(|()| None)
-            }
+            // The prefix check admits op 17 only after the image.
             OP_COLLECTION_PRECISE => {
                 let (precision, name, dimensions, _) = crate::format::decode_precise(body, offset)?;
                 self.created(frame.id as u16, name, dimensions, Some(precision), offset)
                     .map(|()| None)
-            }
-            6 if self.precise => {
-                self.described.remove(&(frame.id as u16));
-                Ok(None)
             }
             OP_GRAPH_SNAPSHOT if self.precise => {
                 let snapshot = crate::property_graph::frame::decode_frame(
@@ -624,9 +616,21 @@ impl ImageCheck {
                     self.described
                         .get(&id)
                         .map(|live| (live.dimensions, live.precision))
-                        .ok_or_else(|| corrupt(offset, "record references unknown collection"))
-                })
-                .map(|()| None)
+                })?;
+                // The ID of a create or drop that passed is a collection ID.
+                match frame.operation {
+                    // The prefix check admits op 5 in a precision log only
+                    // in its image, before the table.
+                    5 => {
+                        let (name, dimensions, _) = crate::format::decode_create(body, offset)?;
+                        self.created(frame.id as u16, name, dimensions, None, offset)?;
+                    }
+                    6 => {
+                        self.described.remove(&(frame.id as u16));
+                    }
+                    _ => {}
+                }
+                Ok(None)
             }
             _ => Ok(None),
         }

@@ -29,6 +29,7 @@ use std::path::Path;
 use std::rc::Rc;
 
 mod goldens;
+mod limits;
 mod parity;
 mod populated;
 
