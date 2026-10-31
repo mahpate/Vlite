@@ -964,6 +964,121 @@ fn interrupted_staging_is_checked_and_keeps_the_last_full_step() {
 }
 
 #[test]
+fn setup_sorts_are_checked_and_return_nothing() {
+    use super::super::iterative::{SORTED, STAGED};
+    let sorted = || SORTED.with(Cell::get);
+    let db = chain(300);
+    let graph = db.graph();
+    let all = everything(graph, Direction::Out);
+    // Every node personalized, in a scrambled order.
+    let names: Vec<String> = (0..300).map(|at| format!("n{}", at * 7 % 300)).collect();
+    let masses: Vec<(&str, f64)> = names
+        .iter()
+        .enumerate()
+        .map(|(at, name)| (name.as_str(), 1.0 + at as f64))
+        .collect();
+    let caps = iterations(100);
+    // Label propagation sorts 598 neighbor entries, PageRank 300 masses.
+    for algorithm in [
+        Algorithm::LabelPropagation,
+        personalized(0.1, &masses, None),
+    ] {
+        SORTED.with(|count| count.set(0));
+        let full = run_at(graph, &all, &algorithm, &hops(0), &caps, 0).unwrap();
+        assert!(
+            full.computation_complete && full.output.is_some(),
+            "{:?}",
+            full.truncation
+        );
+        let total = sorted();
+        assert!(total > 300, "{total}");
+        let mut points: BTreeSet<u64> = (1..=total).step_by(97).collect();
+        points.extend([1, 2, 64, 65, total - 64, total]);
+        for inject in points {
+            for cancel in [false, true] {
+                // The deadline passes, or the flag is set, once sort work
+                // `inject` has run; the clock is read only by checks.
+                let flag = AtomicBool::new(false);
+                let clock = || {
+                    if sorted() < inject {
+                        return 0;
+                    }
+                    if cancel {
+                        flag.store(true, AtomicOrdering::Relaxed);
+                        0
+                    } else {
+                        1_000
+                    }
+                };
+                SORTED.with(|count| count.set(0));
+                STAGED.with(|count| count.set(0));
+                let result = clocked(graph, &all, &algorithm, &caps, &clock, Some(&flag));
+                let after = sorted() - inject;
+                assert!(after <= 64, "{after} sort units ran unchecked at {inject}");
+                let reason = if cancel {
+                    AlgorithmTruncation::Cancelled
+                } else {
+                    AlgorithmTruncation::Deadline
+                };
+                assert_eq!(result.truncation, vec![reason]);
+                // Stopped in setup: no step ran and nothing is returned.
+                assert!(result.output.is_none() && !result.computation_complete);
+                assert_eq!(STAGED.with(Cell::get), 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn checked_sort_is_stable_and_costs_exactly_its_sort_cost() {
+    use super::super::iterative::sort_by;
+    let clock = || 0;
+    let context = ExecutionContext::new(VIEW, &clock);
+    let mut rng = Rng::new(5);
+    let sizes = (0..=70).chain([127, 128, 129, 598, 1_000]);
+    for count in sizes {
+        // Keys with many ties, tagged by input position.
+        let items: Vec<(u64, usize)> = (0..count).map(|at| (rng.below(9), at)).collect();
+        let (mut meter, begin) = Meter::start(&context, &hops(0), &CAPS);
+        begin.unwrap();
+        let mut sorted = items.clone();
+        sort_by(&mut sorted, |a, b| a.0 < b.0, &mut meter).unwrap();
+        let mut expected = items.clone();
+        expected.sort_by_key(|item| item.0);
+        assert_eq!(sorted, expected, "{count}");
+        assert_eq!(meter.vertices, sort_cost(count), "{count}");
+        assert_eq!(meter.edges, 0);
+        assert_eq!(
+            meter.scratch,
+            (count * std::mem::size_of::<(u64, usize)>()) as u64
+        );
+    }
+    // The buffer is reserved before it is allocated or any unit charged.
+    let caps = GraphAlgorithmLimits {
+        max_scratch_bytes: 16 * 99,
+        ..CAPS
+    };
+    let (mut meter, _) = Meter::start(&context, &hops(0), &caps);
+    let mut items: Vec<(u64, usize)> = (0..100).map(|at| (0, at)).collect();
+    assert_eq!(
+        sort_by(&mut items, |a, b| a.0 < b.0, &mut meter),
+        Err(AlgorithmTruncation::MemoryLimit)
+    );
+    assert_eq!((meter.vertices, meter.scratch), (0, 0));
+    // A vertex budget stops the sort at the exact unit.
+    let caps = GraphAlgorithmLimits {
+        max_vertex_operations: 77,
+        ..CAPS
+    };
+    let (mut meter, _) = Meter::start(&context, &hops(0), &caps);
+    assert_eq!(
+        sort_by(&mut items, |a, b| a.0 < b.0, &mut meter),
+        Err(AlgorithmTruncation::VertexLimit)
+    );
+    assert_eq!(meter.vertices, 77);
+}
+
+#[test]
 fn output_caps_cut_rows_of_iterative_results() {
     let db = slow_graph();
     let graph = db.graph();

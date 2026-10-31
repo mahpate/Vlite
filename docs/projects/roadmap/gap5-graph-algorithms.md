@@ -401,8 +401,9 @@ The community ID is the smallest node ID holding the label in the last full assi
 
 Setup charges one unit per edge and per node for weights, sums, finiteness, teleport and state vectors.
 Label propagation charges pair collection and deduplication per pair, the sort, offsets and state.
-Every buffer (weights, sums, teleport, ranks, next, committed and candidate rows; or pairs, offsets, labels, votes, first positions, committed and candidate rows) is reserved at capacity first.
-Every setup pass, fills included, charges each unit as it runs, so at most 64 operations run between checks; only sorts (`sort_cost`) are charged before they run.
+Every buffer (weights, sums, teleport, ranks, next, committed and candidate rows; or pairs, sort buffer, offsets, labels, votes, first positions, committed and candidate rows) is reserved at capacity first.
+Every setup pass, fills and sorts included, charges each unit as it runs, so at most 64 operations run between checks.
+S3's sorts (personalization masses by node, neighbor entries) are a stable bottom-up merge sort: an n-item buffer is reserved before allocation, each pass moves every item once with at most one comparison per vertex unit, and the `sort_cost(n)` units beyond the ceil(log2 n) passes are charged after them, so vertex units are unchanged; scratch grows by the buffer (16 bytes per mass or neighbor entry).
 The request echo is staged before the first step; rows are no longer prepaid.
 A PageRank step charges 2n vertex units and one edge unit per arc; a sweep n vertex units and one edge unit per neighbor entry.
 A PageRank node's final-pass unit also writes its candidate row; a sweep's node unit also records its label's first position this sweep (final, as nodes run ascending) and writes its candidate row with that canonical community ID.

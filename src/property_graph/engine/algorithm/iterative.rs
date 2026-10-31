@@ -22,12 +22,64 @@ thread_local! {
     /// Staging work done on this thread: one per charged unit that writes
     /// a result row or a canonical label (tests only).
     pub(super) static STAGED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Sort work done on this thread: one per element comparison or move
+    /// (tests only).
+    pub(super) static SORTED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Records one unit of staging work (a no-op outside tests).
 fn staged() {
     #[cfg(test)]
     STAGED.with(|count| count.set(count.get() + 1));
+}
+
+/// Records one unit of sort work (a no-op outside tests).
+fn sorted() {
+    #[cfg(test)]
+    SORTED.with(|count| count.set(count.get() + 1));
+}
+
+/// Sorts `items` ascending by `less`, stably (ties keep their order), by a
+/// bottom-up merge sort. A buffer of `items.len()` items is reserved before
+/// it is allocated. Each pass moves every item once, with at most one
+/// comparison, for one vertex unit; the `sort_cost` units beyond the
+/// `ceil(log2 n)` passes are charged after them, so a sort costs exactly
+/// `sort_cost(n)` units, each checked as it runs.
+pub(super) fn sort_by<T: Copy>(
+    items: &mut Vec<T>,
+    less: impl Fn(&T, &T) -> bool,
+    meter: &mut Meter<'_>,
+) -> Result<(), AlgorithmTruncation> {
+    let count = items.len();
+    meter.reserve(count, size_of::<T>())?;
+    let mut buffer = Vec::with_capacity(count);
+    let mut moved = 0u64;
+    let mut width = 1usize;
+    while width < count {
+        buffer.clear();
+        let mut low = 0;
+        while low < count {
+            let middle = low + width.min(count - low);
+            let high = middle + width.min(count - middle);
+            let (mut left, mut right) = (low, middle);
+            while left < middle || right < high {
+                meter.vertex()?;
+                sorted();
+                if right < high && (left == middle || less(&items[right], &items[left])) {
+                    buffer.push(items[right]);
+                    right += 1;
+                } else {
+                    buffer.push(items[left]);
+                    left += 1;
+                }
+                moved += 1;
+            }
+            low = high;
+        }
+        std::mem::swap(items, &mut buffer);
+        width = width.saturating_mul(2);
+    }
+    meter.vertices(sort_cost(count) - moved)
 }
 
 /// `count` copies of `value`, one vertex unit each as it is written.
@@ -78,8 +130,7 @@ pub(super) fn teleport<S: Seed>(
         }
         masses.push((node, *mass));
     }
-    meter.vertices(sort_cost(masses.len()))?;
-    masses.sort_unstable_by_key(|entry| entry.0);
+    sort_by(&mut masses, |a, b| a.0 < b.0, meter)?;
     let mut total = 0.0;
     for (at, &(node, mass)) in masses.iter().enumerate() {
         meter.vertex()?;
@@ -329,8 +380,7 @@ pub(super) fn label_propagation(
             pairs.push((edge.destination, edge.source));
         }
     }
-    meter.vertices(sort_cost(pairs.len()))?;
-    pairs.sort_unstable();
+    sort_by(&mut pairs, |a, b| a < b, meter)?;
     let mut kept = 0;
     for at in 0..pairs.len() {
         meter.edge()?;
