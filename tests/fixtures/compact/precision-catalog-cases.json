@@ -1,0 +1,626 @@
+{
+  "schema": "vlite.precision-catalog-golden",
+  "version": 1,
+  "scope": "Reference bytes only: op17 plaintext body and kind3/4/5 raw sections; no framing, checksums, encryption, image terminators, WAL recovery, public APIs or transport.",
+  "cases": [
+    {
+      "name": "op17-named-f16-default-settings",
+      "kind": "op17",
+      "input": {
+        "body_hex": "01000200000000000468616c6603000000010000100064002a00000000000000000400100000204e00000000"
+      },
+      "context": {"collection_id": 2},
+      "expected": {
+        "schema": 1, "precision": 2, "name": "half", "dimensions": 3,
+        "settings_length": 27,
+        "settings": {
+          "version": 1, "metric": 0, "m": 16, "ef_construction": 100,
+          "seed": 42, "quantization": 0, "rerank_multiplier": 4,
+          "exact_max_candidates": 4096, "exact_max_selectivity_ppm": 20000,
+          "metadata_indexes": [], "text_fields": []
+        }
+      }
+    },
+    {
+      "name": "op17-named-f32-default-settings",
+      "kind": "op17",
+      "input": {
+        "body_hex": "01000100000000000466756c6c02000000010000100064002a00000000000000000400100000204e00000000"
+      },
+      "context": {"collection_id": 65535},
+      "expected": {
+        "schema": 1, "precision": 1, "name": "full", "dimensions": 2,
+        "settings_length": 27,
+        "settings": {
+          "version": 1, "metric": 0, "m": 16, "ef_construction": 100,
+          "seed": 42, "quantization": 0, "rerank_multiplier": 4,
+          "exact_max_candidates": 4096, "exact_max_selectivity_ppm": 20000,
+          "metadata_indexes": [], "text_fields": []
+        }
+      }
+    },
+    {
+      "name": "catalog-rowless-default-f16",
+      "kind": "catalog",
+      "input": {
+        "schema_version": 1, "frame_count": 1,
+        "section_hex": "01000000000000000000020003000000"
+      },
+      "context": {"live_collections": [{"id": 0, "name": "default", "dimensions": 3}]},
+      "expected": {"opt_in": 1, "entries": [{"id": 0, "precision": 2, "dimensions": 3}]}
+    },
+    {
+      "name": "catalog-mixed-default-f32-named-f16",
+      "kind": "catalog",
+      "input": {
+        "schema_version": 1, "frame_count": 2,
+        "section_hex": "010000000000000000000100020000000200020003000000"
+      },
+      "context": {
+        "live_collections": [
+          {"id": 0, "name": "default", "dimensions": 2},
+          {"id": 2, "name": "half", "dimensions": 3}
+        ]
+      },
+      "expected": {
+        "opt_in": 1,
+        "entries": [
+          {"id": 0, "precision": 1, "dimensions": 2},
+          {"id": 2, "precision": 2, "dimensions": 3}
+        ]
+      }
+    },
+    {
+      "name": "imports-empty-retained-max-job",
+      "kind": "imports",
+      "input": {
+        "schema_version": 1, "frame_count": 0,
+        "section_hex": "2a000000000000000000000000000000"
+      },
+      "context": {"live_collections": [{"id": 0, "name": "default"}], "dropped_bindings": []},
+      "expected": {"max_job": 42, "jobs": [], "closed_order": []}
+    },
+    {
+      "name": "imports-finished-dropped-and-aborted-closed-order",
+      "kind": "imports",
+      "input": {
+        "schema_version": 1, "frame_count": 2,
+        "section_hex": "0c00000000000000 02000000 02000000\n0700000000000000 0200 01 01 03 000000 0300000000000000 0200000001000000 0500000000000000 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f 6f6c64\n0900000000000000 0000 02 00 07 000000 0000000000000000 0000000000000000 0000000000000000 0000000000000000000000000000000000000000000000000000000000000000 64656661756c74\n0900000000000000 0700000000000000"
+      },
+      "context": {
+        "live_collections": [{"id": 0, "name": "default"}],
+        "dropped_bindings": [{"id": 2, "name": "old"}]
+      },
+      "expected": {
+        "max_job": 12,
+        "jobs": [
+          {
+            "job": 7, "collection": 2, "state": 1, "dropped": 1, "name": "old",
+            "last_chunk": 3, "committed": 4294967298, "skipped": 5,
+            "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+          },
+          {
+            "job": 9, "collection": 0, "state": 2, "dropped": 0, "name": "default",
+            "last_chunk": 0, "committed": 0, "skipped": 0,
+            "digest_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+          }
+        ],
+        "closed_order": [9, 7]
+      }
+    },
+    {
+      "name": "imports-open-checkpoint",
+      "kind": "imports",
+      "input": {
+        "schema_version": 1, "frame_count": 1,
+        "section_hex": "0300000000000000 01000000 00000000\n0200000000000000 0000 00 00 07 000000 0100000000000000 0200000000000000 0000000000000000 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 64656661756c74"
+      },
+      "context": {"live_collections": [{"id": 0, "name": "default"}], "dropped_bindings": []},
+      "expected": {
+        "max_job": 3,
+        "jobs": [
+          {
+            "job": 2, "collection": 0, "state": 0, "dropped": 0, "name": "default",
+            "last_chunk": 1, "committed": 2, "skipped": 0,
+            "digest_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "closed_order": []
+      }
+    },
+    {
+      "name": "graph-original-revisions-partitioned",
+      "kind": "graph",
+      "input": {
+        "schema_version": 1,
+        "partitions": [
+          {
+            "partition": 0, "frame_count": 2,
+            "nodes_hex": "010000000000000001000000000000000200000000000000",
+            "edges_hex": "010000000000000002000000000000000400000000000000"
+          },
+          {
+            "partition": 1, "frame_count": 1,
+            "nodes_hex": "010000000000000003000000000000000700000000000000",
+            "edges_hex": "0000000000000000"
+          }
+        ]
+      },
+      "context": {"floor": 10, "retained_nodes": [1, 3], "retained_edges": [2]},
+      "expected": {
+        "partitions": [
+          {"partition": 0, "nodes": [{"id": 1, "revision": 2}], "edges": [{"id": 2, "revision": 4}]},
+          {"partition": 1, "nodes": [{"id": 3, "revision": 7}], "edges": []}
+        ]
+      }
+    },
+    {
+      "name": "graph-zero-entity-ids-are-retained",
+      "kind": "graph",
+      "input": {
+        "schema_version": 1,
+        "partitions": [
+          {
+            "partition": 0, "frame_count": 2,
+            "nodes_hex": "0100000000000000 0000000000000000 0100000000000000",
+            "edges_hex": "0100000000000000 0000000000000000 0200000000000000"
+          }
+        ]
+      },
+      "context": {"floor": 9, "retained_nodes": [0], "retained_edges": [0]},
+      "expected": {
+        "partitions": [
+          {"partition": 0, "nodes": [{"id": 0, "revision": 1}], "edges": [{"id": 0, "revision": 2}]}
+        ]
+      }
+    },
+    {
+      "name": "graph-empty-single-zero-block",
+      "kind": "graph",
+      "input": {
+        "schema_version": 1,
+        "partitions": [
+          {"partition": 0, "frame_count": 0, "nodes_hex": "0000000000000000", "edges_hex": "0000000000000000"}
+        ]
+      },
+      "context": {"floor": 1, "retained_nodes": [], "retained_edges": []},
+      "expected": {"partitions": [{"partition": 0, "nodes": [], "edges": []}]}
+    }
+  ],
+  "invalid_cases": [
+    {
+      "name": "op17-reserved", "base": "op17-named-f16-default-settings",
+      "edits": [{"target": "body", "offset": 7, "hex": "01"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "op17-unknown-schema", "base": "op17-named-f16-default-settings",
+      "edits": [{"target": "body", "offset": 0, "hex": "0200"}],
+      "input_override": {}, "context_override": null, "error": "unsupported"
+    },
+    {
+      "name": "op17-unknown-precision", "base": "op17-named-f16-default-settings",
+      "edits": [{"target": "body", "offset": 2, "hex": "03"}],
+      "input_override": {}, "context_override": null, "error": "unsupported"
+    },
+    {
+      "name": "op17-zero-name", "base": "op17-named-f16-default-settings",
+      "edits": [{"target": "body", "offset": 8, "hex": "00"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "op17-name-overflow", "base": "op17-named-f16-default-settings",
+      "edits": [{"target": "body", "offset": 8, "hex": "ff"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "op17-invalid-name-byte", "base": "op17-named-f16-default-settings",
+      "edits": [{"target": "body", "offset": 9, "hex": "ff"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "op17-zero-dimensions", "base": "op17-named-f16-default-settings",
+      "edits": [{"target": "body", "offset": 13, "hex": "00000000"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "op17-dimensions-overflow", "base": "op17-named-f16-default-settings",
+      "edits": [{"target": "body", "offset": 13, "hex": "ffffffff"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "op17-settings-version-is-not-precision-version", "base": "op17-named-f16-default-settings",
+      "edits": [{"target": "body", "offset": 17, "hex": "0200"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "op17-settings-index-count-not-default", "base": "op17-named-f16-default-settings",
+      "edits": [{"target": "body", "offset": 42, "hex": "11"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "op17-settings-text-count-not-default", "base": "op17-named-f16-default-settings",
+      "edits": [{"target": "body", "offset": 43, "hex": "09"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "op17-short-settings", "base": "op17-named-f16-default-settings",
+      "edits": [{"target": "body", "length": 43}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "op17-trailing-settings", "base": "op17-named-f16-default-settings",
+      "edits": [{"target": "body", "offset": 44, "hex": "00"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "catalog-unsupported-version", "base": "catalog-rowless-default-f16",
+      "edits": [], "input_override": {"schema_version": 2}, "context_override": null, "error": "unsupported"
+    },
+    {
+      "name": "catalog-unknown-precision", "base": "catalog-rowless-default-f16",
+      "edits": [{"target": "section", "offset": 10, "hex": "00"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "catalog-header-reserved", "base": "catalog-rowless-default-f16",
+      "edits": [{"target": "section", "offset": 4, "hex": "01"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "catalog-entry-reserved", "base": "catalog-rowless-default-f16",
+      "edits": [{"target": "section", "offset": 11, "hex": "01"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "catalog-opt-in-zero", "base": "catalog-rowless-default-f16",
+      "edits": [{"target": "section", "offset": 0, "hex": "00000000"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "catalog-zero-count", "base": "catalog-rowless-default-f16",
+      "edits": [], "input_override": {"frame_count": 0}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "catalog-count-overflow-before-allocation", "base": "catalog-rowless-default-f16",
+      "edits": [], "input_override": {"frame_count": 4294967295}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "catalog-count-65", "base": "catalog-rowless-default-f16",
+      "edits": [], "input_override": {"frame_count": 65}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "catalog-length-count", "base": "catalog-mixed-default-f32-named-f16",
+      "edits": [], "input_override": {"frame_count": 1}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "catalog-duplicate-id", "base": "catalog-mixed-default-f32-named-f16",
+      "edits": [{"target": "section", "offset": 16, "hex": "0000"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "catalog-unsorted-ids", "base": "catalog-mixed-default-f32-named-f16",
+      "edits": [{"target": "section", "offset": 8, "hex": "0300"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "catalog-omitted-live-collection", "base": "catalog-rowless-default-f16",
+      "edits": [], "input_override": {},
+      "context_override": {
+        "live_collections": [{"id": 0, "name": "default", "dimensions": 3}, {"id": 2, "name": "half", "dimensions": 3}]
+      },
+      "error": "malformed"
+    },
+    {
+      "name": "catalog-omitted-default-id", "base": "catalog-rowless-default-f16",
+      "edits": [{"target": "section", "offset": 8, "hex": "0200"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "catalog-dimensions-mismatch", "base": "catalog-rowless-default-f16",
+      "edits": [{"target": "section", "offset": 12, "hex": "04000000"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "catalog-truncated-entry", "base": "catalog-rowless-default-f16",
+      "edits": [{"target": "section", "length": 15}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "catalog-trailing-byte", "base": "catalog-rowless-default-f16",
+      "edits": [{"target": "section", "offset": 16, "hex": "00"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "imports-unsupported-version", "base": "imports-empty-retained-max-job",
+      "edits": [], "input_override": {"schema_version": 2}, "context_override": null, "error": "unsupported"
+    },
+    {
+      "name": "imports-frame-count-mismatch", "base": "imports-empty-retained-max-job",
+      "edits": [], "input_override": {"frame_count": 1}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "imports-frame-count-overflow-before-allocation", "base": "imports-empty-retained-max-job",
+      "edits": [], "input_override": {"frame_count": 4294967295}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "imports-job-count-overflow-before-allocation", "base": "imports-empty-retained-max-job",
+      "edits": [{"target": "section", "offset": 8, "hex": "ffffffff"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "imports-job-count-1089", "base": "imports-empty-retained-max-job",
+      "edits": [{"target": "section", "offset": 8, "hex": "41040000"}],
+      "input_override": {"frame_count": 1089}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "imports-closed-count-1025", "base": "imports-empty-retained-max-job",
+      "edits": [{"target": "section", "offset": 12, "hex": "01040000"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "imports-closed-count-overflow-before-allocation", "base": "imports-empty-retained-max-job",
+      "edits": [{"target": "section", "offset": 12, "hex": "ffffffff"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "imports-max-job-mismatch", "base": "imports-finished-dropped-and-aborted-closed-order",
+      "edits": [{"target": "section", "offset": 0, "hex": "0800000000000000"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "imports-zero-job", "base": "imports-finished-dropped-and-aborted-closed-order",
+      "edits": [{"target": "section", "offset": 16, "hex": "0000000000000000"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "imports-duplicate-job", "base": "imports-finished-dropped-and-aborted-closed-order",
+      "edits": [{"target": "section", "offset": 91, "hex": "0700000000000000"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "imports-unsorted-job", "base": "imports-finished-dropped-and-aborted-closed-order",
+      "edits": [{"target": "section", "offset": 91, "hex": "0600000000000000"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "imports-reserved", "base": "imports-finished-dropped-and-aborted-closed-order",
+      "edits": [{"target": "section", "offset": 31, "hex": "01"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "imports-state-enum", "base": "imports-finished-dropped-and-aborted-closed-order",
+      "edits": [{"target": "section", "offset": 26, "hex": "03"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "imports-dropped-enum", "base": "imports-finished-dropped-and-aborted-closed-order",
+      "edits": [{"target": "section", "offset": 27, "hex": "02"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "imports-zero-name", "base": "imports-finished-dropped-and-aborted-closed-order",
+      "edits": [{"target": "section", "offset": 28, "hex": "00"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "imports-name-overflow", "base": "imports-finished-dropped-and-aborted-closed-order",
+      "edits": [{"target": "section", "offset": 28, "hex": "ff"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "imports-drop-binding-mismatch", "base": "imports-finished-dropped-and-aborted-closed-order",
+      "edits": [{"target": "section", "offset": 27, "hex": "00"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "imports-unknown-historical-binding", "base": "imports-finished-dropped-and-aborted-closed-order",
+      "edits": [], "input_override": {},
+      "context_override": {"live_collections": [{"id": 0, "name": "default"}], "dropped_bindings": []},
+      "error": "malformed"
+    },
+    {
+      "name": "imports-live-name-mismatch", "base": "imports-open-checkpoint",
+      "edits": [{"target": "section", "offset": 88, "hex": "78"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "imports-dropped-open-job", "base": "imports-finished-dropped-and-aborted-closed-order",
+      "edits": [{"target": "section", "offset": 26, "hex": "00"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "imports-closed-order-duplicate", "base": "imports-finished-dropped-and-aborted-closed-order",
+      "edits": [{"target": "section", "offset": 178, "hex": "0900000000000000"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "imports-closed-order-unknown-member", "base": "imports-finished-dropped-and-aborted-closed-order",
+      "edits": [{"target": "section", "offset": 170, "hex": "0800000000000000"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "imports-omitted-closed-member", "base": "imports-finished-dropped-and-aborted-closed-order",
+      "edits": [{"target": "section", "offset": 12, "hex": "01000000"}, {"target": "section", "length": 178}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "imports-open-in-closed-order", "base": "imports-open-checkpoint",
+      "edits": [{"target": "section", "offset": 12, "hex": "01000000"}, {"target": "section", "offset": 95, "hex": "0200000000000000"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "imports-truncated-digest-name-order", "base": "imports-finished-dropped-and-aborted-closed-order",
+      "edits": [{"target": "section", "length": 177}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "imports-trailing-byte", "base": "imports-empty-retained-max-job",
+      "edits": [{"target": "section", "offset": 16, "hex": "00"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "graph-unsupported-version", "base": "graph-original-revisions-partitioned",
+      "edits": [], "input_override": {"schema_version": 2}, "context_override": null, "error": "unsupported"
+    },
+    {
+      "name": "graph-node-reserved", "base": "graph-original-revisions-partitioned",
+      "edits": [{"target": "0.nodes", "offset": 4, "hex": "01"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "graph-edge-reserved", "base": "graph-original-revisions-partitioned",
+      "edits": [{"target": "0.edges", "offset": 7, "hex": "01"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "graph-count-overflow-before-allocation", "base": "graph-original-revisions-partitioned",
+      "edits": [{"target": "0.nodes", "offset": 0, "hex": "ffffffff"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "graph-count-4097", "base": "graph-original-revisions-partitioned",
+      "edits": [{"target": "0.nodes", "offset": 0, "hex": "01100000"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "graph-length-count", "base": "graph-original-revisions-partitioned",
+      "edits": [{"target": "0.nodes", "offset": 0, "hex": "00000000"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "graph-node-revision-zero", "base": "graph-original-revisions-partitioned",
+      "edits": [{"target": "0.nodes", "offset": 16, "hex": "0000000000000000"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "graph-node-revision-above-floor", "base": "graph-original-revisions-partitioned",
+      "edits": [{"target": "0.nodes", "offset": 16, "hex": "0b00000000000000"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "graph-edge-revision-zero", "base": "graph-original-revisions-partitioned",
+      "edits": [{"target": "0.edges", "offset": 16, "hex": "0000000000000000"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "graph-edge-revision-overflow", "base": "graph-original-revisions-partitioned",
+      "edits": [{"target": "0.edges", "offset": 16, "hex": "ffffffffffffffff"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "graph-duplicate-node-across-partitions", "base": "graph-original-revisions-partitioned",
+      "edits": [{"target": "1.nodes", "offset": 8, "hex": "0100000000000000"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "graph-node-id-coverage-mismatch", "base": "graph-original-revisions-partitioned",
+      "edits": [{"target": "0.nodes", "offset": 8, "hex": "0000000000000000"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "graph-duplicate-node-within-partition", "base": "graph-zero-entity-ids-are-retained",
+      "edits": [],
+      "input_override": {
+        "partitions": [
+          {
+            "partition": 0, "frame_count": 3,
+            "nodes_hex": "0200000000000000 0000000000000000 0100000000000000 0000000000000000 0200000000000000",
+            "edges_hex": "0100000000000000 0000000000000000 0200000000000000"
+          }
+        ]
+      },
+      "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "graph-duplicate-edge-within-partition", "base": "graph-zero-entity-ids-are-retained",
+      "edits": [],
+      "input_override": {
+        "partitions": [
+          {
+            "partition": 0, "frame_count": 3,
+            "nodes_hex": "0100000000000000 0000000000000000 0100000000000000",
+            "edges_hex": "0200000000000000 0000000000000000 0200000000000000 0000000000000000 0300000000000000"
+          }
+        ]
+      },
+      "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "graph-unsorted-nodes-within-partition", "base": "graph-zero-entity-ids-are-retained",
+      "edits": [],
+      "input_override": {
+        "partitions": [
+          {
+            "partition": 0, "frame_count": 3,
+            "nodes_hex": "0200000000000000 0100000000000000 0100000000000000 0000000000000000 0200000000000000",
+            "edges_hex": "0100000000000000 0000000000000000 0200000000000000"
+          }
+        ]
+      },
+      "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "graph-extra-node", "base": "graph-original-revisions-partitioned",
+      "edits": [{"target": "1.nodes", "offset": 8, "hex": "0400000000000000"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "graph-omitted-retained-node", "base": "graph-original-revisions-partitioned",
+      "edits": [], "input_override": {},
+      "context_override": {"floor": 10, "retained_nodes": [1, 3, 5], "retained_edges": [2]},
+      "error": "malformed"
+    },
+    {
+      "name": "graph-edge-coverage-mismatch", "base": "graph-original-revisions-partitioned",
+      "edits": [], "input_override": {},
+      "context_override": {"floor": 10, "retained_nodes": [1, 3], "retained_edges": []},
+      "error": "malformed"
+    },
+    {
+      "name": "graph-truncated-node-revision", "base": "graph-original-revisions-partitioned",
+      "edits": [{"target": "1.nodes", "length": 23}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "graph-trailing-edge-byte", "base": "graph-original-revisions-partitioned",
+      "edits": [{"target": "1.edges", "offset": 8, "hex": "00"}],
+      "input_override": {}, "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "graph-partition-starts-at-one", "base": "graph-empty-single-zero-block",
+      "edits": [],
+      "input_override": {
+        "partitions": [{"partition": 1, "frame_count": 0, "nodes_hex": "0000000000000000", "edges_hex": "0000000000000000"}]
+      },
+      "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "graph-frame-count-overflow", "base": "graph-empty-single-zero-block",
+      "edits": [],
+      "input_override": {
+        "partitions": [{"partition": 0, "frame_count": 4294967295, "nodes_hex": "0000000000000000", "edges_hex": "0000000000000000"}]
+      },
+      "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "graph-frame-count-mismatch", "base": "graph-empty-single-zero-block",
+      "edits": [],
+      "input_override": {
+        "partitions": [{"partition": 0, "frame_count": 1, "nodes_hex": "0000000000000000", "edges_hex": "0000000000000000"}]
+      },
+      "context_override": null, "error": "malformed"
+    },
+    {
+      "name": "graph-two-empty-blocks", "base": "graph-empty-single-zero-block",
+      "edits": [],
+      "input_override": {
+        "partitions": [
+          {"partition": 0, "frame_count": 0, "nodes_hex": "0000000000000000", "edges_hex": "0000000000000000"},
+          {"partition": 1, "frame_count": 0, "nodes_hex": "0000000000000000", "edges_hex": "0000000000000000"}
+        ]
+      },
+      "context_override": null, "error": "malformed"
+    }
+  ]
+}
