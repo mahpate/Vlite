@@ -242,6 +242,16 @@ VLite deliberately separates validity closure from destructive TTL retention.
 | Limits | Accept 256 segments and 4,096 user ops at byte bounds, including legal internal reclaims; reject 257, 4,097 user ops and byte overflow atomically |
 | Feed/surfaces | Commit-ordered correction payloads; no validity-boundary event; unsupported serving refuses explicitly |
 
+The independent [interval oracle](../../../tests/temporal_interval_oracle.py)
+checks [hand-authored fixtures](../../../tests/fixtures/temporal_intervals/golden.json)
+for half-open bounds, gaps, touching segments, per-segment properties, the
+256-segment cap and TTL visibility at an independent clock. It includes
+retention flags to model why purged data cannot reappear. Run
+`python tests/temporal_interval_oracle.py --self-test` for the reference cases
+and malformed-fixture checks; CI runs the same command. These are mathematical
+references, not engine coverage for mutations, revisions, storage, traversal,
+cursors, authorization or work budgets.
+
 ## 9. Delivery and remaining decisions
 | Slice | Exit |
 |---|---|
@@ -254,4 +264,5 @@ VLite deliberately separates validity closure from destructive TTL retention.
 Main risks are unbounded history growth, misleading historical evidence and correction races.
 Open: capability allocation, exact Rust names/errors, versioned feed changes and real memory cost.
 Open: privacy erasure across retained logs/backups and future temporal-node demand.
-No implementation, tests, benchmark campaign or API approval is part of this document.
+Engine implementation, engine acceptance tests, benchmark campaigns and API
+approval remain outstanding; the reference fixtures do not satisfy those gates.
