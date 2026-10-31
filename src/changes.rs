@@ -229,10 +229,20 @@ fn scan<R: Read + Seek>(
     let mut anchor_ms: Option<u64> = None;
     let mut has_more = false;
     let mut graphs = crate::property_graph::feed::FeedGraphs::default();
-    let mut check = crate::compact::ImageCheck::new(header.version, header.flags);
+    let mut check = crate::compact::ImageCheck::new(
+        header.version,
+        header.flags,
+        header.dimensions,
+        header.collection_floor,
+    );
     while let Some(frame) = format::next_checked_frame(file, header, offset, check.as_mut())? {
         let at = offset;
         offset += frame.disk.len() as u64;
+        // A compact image's blocks, and in a precision image the frames
+        // they restate context for, are checked as full replay checks them.
+        if let Some(check) = &mut check {
+            check.frame(&frame, at)?;
+        }
         if frame.operation == OP_TIME_ANCHOR {
             anchor_ms = frame
                 .plain
@@ -409,14 +419,9 @@ fn scan<R: Read + Seek>(
             // Record blocks restate records at the checkpoint: no change is
             // after the cursor, and no later frame needs their contents.
             format::OP_RECORD_BLOCK => {}
-            // Compact blocks restate the checkpoint too; they are checked,
-            // and only exist behind FLAG_COMPACT.
-            format::OP_COMPACT_BLOCK => match &mut check {
-                Some(check) => {
-                    check.block(frame.collection, frame.id, frame.count, body, at)?;
-                }
-                None => return Err(corrupt()),
-            },
+            // Compact blocks restate the checkpoint too; they were checked
+            // above, and only exist behind FLAG_COMPACT.
+            format::OP_COMPACT_BLOCK if check.is_some() => {}
             _ => return Err(corrupt()),
         }
         if frame.sequence <= after {

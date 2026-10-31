@@ -4,8 +4,11 @@
 //! collection frames, the capability table, legacy and op-16 frames, and
 //! last the image end block, which counts and digests the prefix of every
 //! frame before it. Every reader checks each prefix here before reading its
-//! body, and each op-16 body once it is verified. Slice 0 has no block codec:
-//! a critical or unassigned kind refuses the whole image with
+//! body, and each op-16 body once it is verified; in a `FLAG_PRECISION`
+//! image also the collection creates and graph snapshots that its catalog,
+//! import registry and revision blocks must match (P3a), so full replay,
+//! the change feed and segment export accept the same images. Slice 0 has
+//! no block codec: a critical or unassigned kind refuses the whole image with
 //! `UnsupportedFeature(FLAG_COMPACT)` once the table is fully validated, and
 //! an authentic block of a declared derived kind is skipped and counted.
 //! A reader that validated a complete image reports the skipped blocks in
@@ -14,10 +17,11 @@
 //! bytes after a complete image can be a torn WAL tail.
 
 use crate::format::{
-    FLAG_COMPACT, FLAG_PRECISION, OP_ADVANCE, OP_COLLECTION_PRECISE, OP_COMPACT_BLOCK,
-    OP_GRAPH_SNAPSHOT, OP_RECORD_BLOCK, PREFIX_SIZE, corrupt, frame_allowed, u16_at, u32_at,
-    u64_at,
+    FLAG_COMPACT, FLAG_PRECISION, MAX_COLLECTIONS, OP_ADVANCE, OP_COLLECTION_PRECISE,
+    OP_COMPACT_BLOCK, OP_GRAPH_SNAPSHOT, OP_RECORD_BLOCK, PREFIX_SIZE, RawFrame, corrupt,
+    frame_allowed, u16_at, u32_at, u64_at,
 };
+use crate::property_graph::engine::{GraphBody, GraphEntry};
 use crate::{Error, Result};
 use catalog::{KIND_CATALOG, KIND_IMPORTS, KIND_REVISIONS};
 use sha2::{Digest, Sha256};
@@ -26,6 +30,9 @@ use std::collections::{BTreeMap, BTreeSet};
 /// P3a precision policy storage: the catalog, import registry and graph
 /// revision kinds of a `FLAG_PRECISION` image.
 pub(crate) mod catalog;
+/// P3a canonical float16 conversion, shared by the dense rows codec and
+/// the replay check of float16 collections.
+pub(crate) mod half;
 /// P3a dense rows codec. Preactivation: compiled for tests only, so no
 /// reader accepts its kind and no writer emits it until its write, read,
 /// replay and maintenance paths are qualified (contract decision 7).
@@ -295,6 +302,38 @@ struct RevisionRun {
     empty: bool,
 }
 
+/// The node and edge IDs one graph's snapshot frames put, or that its
+/// revision run lists, counted and digested in ascending order.
+#[derive(Default)]
+struct Ids {
+    count: u64,
+    digest: Sha256,
+}
+
+impl Ids {
+    fn add(&mut self, id: u64) {
+        self.count += 1;
+        self.digest.update(id.to_le_bytes());
+    }
+
+    fn matches(&self, other: &Self) -> bool {
+        self.count == other.count
+            && self.digest.clone().finalize() == other.digest.clone().finalize()
+    }
+}
+
+/// How far a precision image restated one graph (P3a, Decision P): the
+/// nodes and edges of its snapshot frames, and whether its revision run
+/// began and what it listed so far. The run must list exactly those nodes
+/// and edges, which bounded state checks without holding the snapshot.
+struct Coverage {
+    graph: u16,
+    listed: bool,
+    /// Nodes and edges put by the snapshot, then listed by the run.
+    snapshot: [Ids; 2],
+    revisions: [Ids; 2],
+}
+
 /// What a block of a precision image restates, for the loader (P3a).
 pub(crate) enum Supplement {
     Catalog(Vec<catalog::Entry>),
@@ -313,13 +352,20 @@ pub(crate) enum Supplement {
 pub(crate) struct ImageCheck {
     version: u32,
     flags: u16,
-    /// A `FLAG_PRECISION` image (P3a), its current part and revision run.
+    /// A `FLAG_PRECISION` image (P3a), its current part, revision run and
+    /// the coverage of the graph being restated.
     precise: bool,
     stage: Stage,
     revisions: Option<RevisionRun>,
+    coverage: Option<Coverage>,
     floor: Option<u64>,
     /// Collections created before the table; `default` always exists.
     collections: BTreeSet<u16>,
+    /// In a precision image, the name and dimensions of each of them, and
+    /// the highest collection ID the log has used (the header floor or a
+    /// restated ID), which its catalog and import registry must match.
+    described: BTreeMap<u16, (String, usize)>,
+    collection_high: u16,
     entries: Option<Table>,
     /// The run of blocks being read (owner, kind, next partition), and runs
     /// that ended and may not resume.
@@ -336,15 +382,25 @@ pub(crate) struct ImageCheck {
 }
 
 impl ImageCheck {
-    pub(crate) fn new(version: u32, flags: u16) -> Option<Self> {
+    /// A check for a log whose header has `version`, `flags`, default
+    /// collection `dimensions` and `collection_floor`, if it is compact.
+    pub(crate) fn new(
+        version: u32,
+        flags: u16,
+        dimensions: usize,
+        collection_floor: u16,
+    ) -> Option<Self> {
         (flags & FLAG_COMPACT != 0).then(|| Self {
             version,
             flags,
             precise: flags & FLAG_PRECISION != 0,
             stage: Stage::Table,
             revisions: None,
+            coverage: None,
             floor: None,
             collections: BTreeSet::from([0]),
+            described: BTreeMap::from([(0, ("default".to_string(), dimensions))]),
+            collection_high: collection_floor,
             entries: None,
             run: None,
             ended: BTreeSet::new(),
@@ -505,6 +561,115 @@ impl ImageCheck {
         Ok(())
     }
 
+    /// Checks the verified (and decrypted) body of any frame whose prefix
+    /// `prefix` accepted, for readers that do not replay the image: op-16
+    /// blocks (`block`), and in a precision image the collection creates
+    /// (`created`) and graph snapshots (`snapshot`) that its catalog,
+    /// import registry and revision runs must match. Full replay decodes
+    /// those frames itself and calls the same checks.
+    pub(crate) fn frame(&mut self, frame: &RawFrame, offset: u64) -> Result<Option<Supplement>> {
+        let body = frame.body();
+        match frame.operation {
+            OP_COMPACT_BLOCK => self.block(frame.collection, frame.id, frame.count, body, offset),
+            // The prefix check admits op 5 in a precision log only in its
+            // image, before the table.
+            5 if self.precise => {
+                let (name, dimensions, _) = crate::format::decode_create(body, offset)?;
+                self.created(frame.id as u16, name, dimensions, offset)
+                    .map(|()| None)
+            }
+            OP_GRAPH_SNAPSHOT if self.precise => {
+                let snapshot = crate::property_graph::frame::decode_frame(
+                    true,
+                    frame.id,
+                    frame.count,
+                    body,
+                    offset,
+                )?;
+                self.snapshot(&snapshot, offset).map(|()| None)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Notes a collection that a precision image restates (op 5, which
+    /// `prefix` admitted): IDs ascend and at most `MAX_COLLECTIONS` live.
+    pub(crate) fn created(
+        &mut self,
+        id: u16,
+        name: String,
+        dimensions: usize,
+        offset: u64,
+    ) -> Result<()> {
+        if !self.precise {
+            return Ok(());
+        }
+        if self
+            .described
+            .last_key_value()
+            .is_some_and(|(last, _)| *last >= id)
+        {
+            return Err(corrupt(offset, "collection ID reused"));
+        }
+        if self.described.len() >= MAX_COLLECTIONS {
+            return Err(corrupt(offset, "too many live collections"));
+        }
+        self.described.insert(id, (name, dimensions));
+        self.collection_high = self.collection_high.max(id);
+        Ok(())
+    }
+
+    /// Notes a verified graph snapshot body of a precision image: each
+    /// graph's snapshot frames are followed by its revision run, which
+    /// lists exactly the nodes and edges they put, before the next graph's.
+    pub(crate) fn snapshot(&mut self, body: &GraphBody, offset: u64) -> Result<()> {
+        if !self.precise {
+            return Ok(());
+        }
+        let graph = body.graph_id.0;
+        if self
+            .coverage
+            .as_ref()
+            .is_none_or(|coverage| coverage.graph != graph)
+        {
+            self.covered(offset)?;
+            self.coverage = Some(Coverage {
+                graph,
+                listed: false,
+                snapshot: Default::default(),
+                revisions: Default::default(),
+            });
+        }
+        let coverage = self.coverage.as_mut().expect("started above");
+        if coverage.listed {
+            return Err(corrupt(offset, "graph snapshot after its revisions"));
+        }
+        for entry in &body.entries {
+            match entry {
+                GraphEntry::PutNode { node_id, .. } => coverage.snapshot[0].add(node_id.0),
+                GraphEntry::PutEdge { edge_id, .. } => coverage.snapshot[1].add(edge_id.0),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Ends the coverage of the graph being restated, if any: its revision
+    /// run must have listed exactly its snapshot's nodes and edges.
+    fn covered(&mut self, offset: u64) -> Result<()> {
+        match self.coverage.take() {
+            Some(coverage) if !coverage.listed => {
+                Err(corrupt(offset, "graph snapshot without its revisions"))
+            }
+            Some(coverage)
+                if !(0..2).all(|at| coverage.snapshot[at].matches(&coverage.revisions[at])) =>
+            {
+                Err(corrupt(offset, "graph revisions do not match the snapshot"))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Checks the verified (and decrypted) body of an op-16 frame whose
     /// prefix `prefix` accepted. A block of a precision image's own kinds
     /// returns what it restates.
@@ -551,8 +716,11 @@ impl ImageCheck {
     }
 
     /// Decodes a block of a precision image's own kinds. The catalog lists
-    /// exactly the collections restated before the table; revision runs
-    /// are canonical across their blocks.
+    /// exactly the collections restated before the table, with their
+    /// dimensions; the registry binds each job to a restated collection by
+    /// name, or a dropped job to a collection ID used before and not live;
+    /// revision runs are canonical across their blocks and cover their
+    /// graph's snapshot.
     fn supplement(
         &mut self,
         kind: u16,
@@ -579,15 +747,52 @@ impl ImageCheck {
                         "precision catalog does not list the collections",
                     ));
                 }
+                if entries.iter().any(|entry| {
+                    self.described
+                        .get(&entry.collection)
+                        .map(|(_, dimensions)| *dimensions)
+                        != Some(entry.dimensions)
+                }) {
+                    return Err(corrupt(offset, "precision catalog dimensions mismatch"));
+                }
                 Ok(Supplement::Catalog(entries))
             }
-            KIND_IMPORTS => crate::import::Registry::decode_image(single()?, count)
-                .map(|registry| Supplement::Imports(Box::new(registry)))
-                .map_err(|reason| corrupt(offset, reason)),
+            KIND_IMPORTS => {
+                let registry = crate::import::Registry::decode_image(single()?, count)
+                    .map_err(|reason| corrupt(offset, reason))?;
+                for (job, state) in registry.jobs() {
+                    let collection = state.collection;
+                    let live = self.described.get(&collection);
+                    let bound = if state.collection_dropped {
+                        collection != 0 && collection <= self.collection_high && live.is_none()
+                    } else {
+                        live.is_some_and(|(name, _)| name == registry.collection_name(job))
+                    };
+                    if !bound {
+                        return Err(corrupt(offset, "import job bound to an unknown collection"));
+                    }
+                }
+                Ok(Supplement::Imports(Box::new(registry)))
+            }
             _ => {
                 let floor = self.floor.expect("image blocks follow the advance");
                 let (nodes, edges) =
                     catalog::decode_revisions(&block.sections, count, floor, offset)?;
+                let coverage = match self.coverage.as_mut() {
+                    Some(coverage)
+                        if coverage.graph == owner && coverage.listed == (partition != 0) =>
+                    {
+                        coverage
+                    }
+                    _ => return Err(corrupt(offset, "graph revisions without their snapshot")),
+                };
+                coverage.listed = true;
+                for &(id, _) in &nodes {
+                    coverage.revisions[0].add(id);
+                }
+                for &(id, _) in &edges {
+                    coverage.revisions[1].add(id);
+                }
                 self.revision_run(owner, partition, &nodes, &edges, offset)?;
                 Ok(Supplement::Revisions {
                     graph: owner,
@@ -773,6 +978,7 @@ impl ImageCheck {
         if entries.values().any(|(_, owner)| owner.is_none()) {
             return Err(corrupt(offset, "capability table entry is unused"));
         }
+        self.covered(offset)?;
         self.done = true;
         Ok(())
     }
@@ -998,7 +1204,13 @@ mod tests {
         let bytes = image();
         let mut file = Cursor::new(bytes.clone());
         let header = format::read_log_header(&mut file, None).unwrap();
-        let mut check = ImageCheck::new(header.version, header.flags).unwrap();
+        let mut check = ImageCheck::new(
+            header.version,
+            header.flags,
+            header.dimensions,
+            header.collection_floor,
+        )
+        .unwrap();
         let mut offset = header.start;
         while let Some(frame) =
             format::next_checked_frame(&mut file, &header, offset, Some(&mut check)).unwrap()

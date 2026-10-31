@@ -360,6 +360,12 @@ impl LoadedCollection {
         }
     }
 
+    /// Refuses a dense vector replayed into this collection unless its
+    /// precision stores it exactly (`check_dense`).
+    pub(crate) fn check_dense(&self, vector: &[f32], offset: u64) -> Result<()> {
+        check_dense(self.precision, vector, offset)
+    }
+
     pub(crate) fn put(
         &mut self,
         id: u64,
@@ -1656,7 +1662,7 @@ fn load_inner<R: Read + Seek>(
     let mut revisions: Vec<Revisions> = Vec::new();
     let mut image_max_job: Option<u64> = None;
     let precise = flags & FLAG_PRECISION != 0;
-    let mut check = crate::compact::ImageCheck::new(version, flags);
+    let mut check = crate::compact::ImageCheck::new(version, flags, dimensions, collection_floor);
     let mut disk = Vec::new();
     loop {
         let anchor_len = anchor.map_or(0, |(_, len)| len);
@@ -1762,7 +1768,7 @@ fn load_inner<R: Read + Seek>(
                 && operation == OP_COMPACT_BLOCK
                 && u64_at(&prefix, 16) as u16 == crate::compact::catalog::KIND_REVISIONS);
         if !continues_snapshot && let Some((first, bodies)) = snapshot.take() {
-            load_graph_image(&mut loaded, first, bodies, &mut revisions, precise)?;
+            load_graph_image(&mut loaded, first, bodies, &mut revisions)?;
         }
         if blocks
             .as_ref()
@@ -1946,21 +1952,32 @@ fn load_inner<R: Read + Seek>(
                         "vector extension references missing record",
                     ));
                 }
+                for version in data
+                    .records
+                    .values()
+                    .flat_map(|record| record.dense.values().flatten())
+                {
+                    target.check_dense(&version.vector, offset)?;
+                }
                 target.vectors = data;
             }
             1 => {
                 let vector = decode_vector(&body[..count * 4], offset)?;
+                let target = collection_mut(&mut loaded, collection_id);
+                target.check_dense(&vector, offset)?;
                 let record = Record {
                     vector,
                     payload: body[count * 4..].to_vec(),
                     metadata: crate::Metadata::new(),
                 };
-                collection_mut(&mut loaded, collection_id).put(id, record, sequence, None);
+                target.put(id, record, sequence, None);
                 touch_attached(&mut loaded, collection_id, id, sequence);
             }
             4 => {
                 let record = decode_extended(body, target_dimensions, offset, version >= V5)?;
-                collection_mut(&mut loaded, collection_id).put(id, record, sequence, None);
+                let target = collection_mut(&mut loaded, collection_id);
+                target.check_dense(&record.vector, offset)?;
+                target.put(id, record, sequence, None);
                 touch_attached(&mut loaded, collection_id, id, sequence);
             }
             9 => {
@@ -1977,7 +1994,9 @@ fn load_inner<R: Read + Seek>(
                     offset,
                 )?;
                 let record = decode_extended(&body[9..], target_dimensions, offset, true)?;
-                collection_mut(&mut loaded, collection_id).put(id, record, sequence, expiry);
+                let target = collection_mut(&mut loaded, collection_id);
+                target.check_dense(&record.vector, offset)?;
+                target.put(id, record, sequence, expiry);
                 touch_attached(&mut loaded, collection_id, id, sequence);
             }
             8 => {
@@ -1994,6 +2013,13 @@ fn load_inner<R: Read + Seek>(
             3 => {
                 let (operations, marker) =
                     decode_batch(body, count, target_dimensions, offset, version)?;
+                for operation in &operations {
+                    if let Mutation::Put { vector, .. } | Mutation::PutWithMetadata { vector, .. } =
+                        operation
+                    {
+                        loaded.collections[&collection_id].check_dense(vector, offset)?;
+                    }
+                }
                 if let Some(marker) = &marker {
                     replay_marker(
                         &mut jobs,
@@ -2094,6 +2120,11 @@ fn load_inner<R: Read + Seek>(
                 if loaded.collections.len() >= MAX_COLLECTIONS {
                     return Err(corrupt(offset, "too many live collections"));
                 }
+                if operation == 5
+                    && let Some(check) = check.as_mut()
+                {
+                    check.created(collection, name.clone(), dimensions, offset)?;
+                }
                 let mut created = LoadedCollection::new(name, dimensions, settings);
                 created.settings_persisted = true;
                 created.precision = precision;
@@ -2140,17 +2171,16 @@ fn load_inner<R: Read + Seek>(
                     body,
                     offset,
                 )?;
-                let bodies = &mut snapshot.get_or_insert_with(|| (offset, Vec::new())).1;
                 // A precision image lists each graph's revisions right after
-                // that graph's snapshot frames.
-                if precise
-                    && let Some(previous) = bodies.last().map(|body| body.graph_id.0)
-                    && (previous != body.graph_id.0)
-                        != (revisions.last().map(|run| run.graph) == Some(previous))
-                {
-                    return Err(corrupt(offset, "graph snapshot without its revisions"));
+                // that graph's snapshot frames, covering exactly its nodes
+                // and edges, which every reader checks alike.
+                if let Some(check) = check.as_mut() {
+                    check.snapshot(&body, offset)?;
                 }
-                bodies.push(body);
+                snapshot
+                    .get_or_insert_with(|| (offset, Vec::new()))
+                    .1
+                    .push(body);
             }
             OP_COMPACT_BLOCK => {
                 let supplement = check
@@ -2163,11 +2193,9 @@ fn load_inner<R: Read + Seek>(
                         &mut loaded,
                         &mut jobs,
                         &mut image_max_job,
-                        snapshot.as_ref().map(|(_, bodies)| bodies.as_slice()),
                         &mut revisions,
                         supplement,
-                        offset,
-                    )?;
+                    );
                     if registry {
                         open_jobs = jobs.values().filter(|job| !job.closed).count();
                     }
@@ -2204,7 +2232,7 @@ fn load_inner<R: Read + Seek>(
         run.apply(&mut loaded, cipher.as_ref())?;
     }
     if let Some((first, bodies)) = snapshot {
-        load_graph_image(&mut loaded, first, bodies, &mut revisions, precise)?;
+        load_graph_image(&mut loaded, first, bodies, &mut revisions)?;
     }
     Ok(loaded)
 }
@@ -2218,18 +2246,14 @@ struct Revisions {
 
 /// Loads the graph state of a checkpoint image from its snapshot `bodies`;
 /// a precision image restores the revisions its runs restated, one run per
-/// graph.
+/// graph, which the image check matched to the snapshot (a graph whose run
+/// is missing fails that check by the end block).
 fn load_graph_image(
     loaded: &mut Loaded,
     first: u64,
     bodies: Vec<crate::property_graph::engine::GraphBody>,
     revisions: &mut Vec<Revisions>,
-    precise: bool,
 ) -> Result<()> {
-    let last = bodies.last().map(|body| body.graph_id.0);
-    if precise && revisions.last().map(|run| run.graph) != last {
-        return Err(corrupt(first, "graph snapshot without its revisions"));
-    }
     let mut state = crate::property_graph::frame::load_snapshot(
         &loaded.collections,
         loaded.history_floor,
@@ -2249,49 +2273,30 @@ fn load_graph_image(
     Ok(())
 }
 
-/// Applies what a block of a precision image restates (P3a): collection
-/// precisions, the import registry with its job high-water, or a graph's
-/// revisions, which follow the snapshot frames `bodies` of that graph.
+/// Applies what a block of a precision image restates (P3a), which the
+/// image check validated against the restated collections and graph
+/// snapshots: collection precisions, the import registry with its job
+/// high-water, or a graph's revisions.
 fn apply_supplement(
     loaded: &mut Loaded,
     jobs: &mut HashMap<u64, JobReplay>,
     image_max_job: &mut Option<u64>,
-    bodies: Option<&[crate::property_graph::engine::GraphBody]>,
     revisions: &mut Vec<Revisions>,
     supplement: crate::compact::Supplement,
-    offset: u64,
-) -> Result<()> {
+) {
     use crate::compact::Supplement;
     match supplement {
         Supplement::Catalog(entries) => {
             for entry in entries {
-                let target = collection_mut(loaded, entry.collection);
-                if target.dimensions != entry.dimensions {
-                    return Err(corrupt(offset, "precision catalog dimensions mismatch"));
-                }
-                target.precision = Some(entry.precision);
+                collection_mut(loaded, entry.collection).precision = Some(entry.precision);
             }
         }
         Supplement::Imports(registry) => {
             for (job, state) in registry.jobs() {
-                let collection = state.collection;
-                let bound = if state.collection_dropped {
-                    collection != 0
-                        && collection <= loaded.collection_high
-                        && !loaded.collections.contains_key(&collection)
-                } else {
-                    loaded
-                        .collections
-                        .get(&collection)
-                        .is_some_and(|live| live.name == registry.collection_name(job))
-                };
-                if !bound {
-                    return Err(corrupt(offset, "import job bound to an unknown collection"));
-                }
                 jobs.insert(
                     job,
                     JobReplay {
-                        collection,
+                        collection: state.collection,
                         last_chunk: state.last_chunk,
                         closed: state.state != crate::import::ImportState::Open,
                         rows_committed: state.rows_committed,
@@ -2314,10 +2319,6 @@ fn apply_supplement(
                     .expect("the image check continued the run");
                 run.nodes.extend(nodes);
                 run.edges.extend(edges);
-            } else if bodies.and_then(<[_]>::last).map(|body| body.graph_id.0) != Some(graph)
-                || revisions.last().is_some_and(|run| run.graph == graph)
-            {
-                return Err(corrupt(offset, "graph revisions without their snapshot"));
             } else {
                 revisions.push(Revisions {
                     graph,
@@ -2327,7 +2328,6 @@ fn apply_supplement(
             }
         }
     }
-    Ok(())
 }
 
 /// One decoded record-block entry.
@@ -2350,6 +2350,8 @@ const BLOCK_BATCH_BYTES: usize = 64 << 20;
 struct BlockRun {
     collection: u16,
     dimensions: usize,
+    /// The collection's stored precision, which every vector must hold.
+    precision: Option<Precision>,
     /// The checkpoint sequence the blocks restate.
     floor: u64,
     /// Complete frames not yet verified: offset and on-disk bytes.
@@ -2366,6 +2368,7 @@ impl BlockRun {
         Self {
             collection,
             dimensions: target.dimensions,
+            precision: target.precision,
             floor: loaded.history_floor,
             frames: Vec::new(),
             frame_bytes: 0,
@@ -2388,11 +2391,15 @@ impl BlockRun {
     fn decode(&mut self, cipher: Option<&Cipher>) -> Result<()> {
         let frames = std::mem::take(&mut self.frames);
         self.frame_bytes = 0;
-        let (dimensions, floor) = (self.dimensions, self.floor);
+        let (dimensions, floor, precision) = (self.dimensions, self.floor, self.precision);
         let decode = |(offset, disk): &(u64, Vec<u8>)| {
             let frame = verified_frame(disk, cipher, floor, *offset)?;
-            decode_block(&frame, dimensions, floor)
-                .ok_or_else(|| corrupt(*offset, "invalid record block"))
+            let block = decode_block(&frame, dimensions, floor)
+                .ok_or_else(|| corrupt(*offset, "invalid record block"))?;
+            for entry in &block {
+                check_dense(precision, &entry.record.vector, *offset)?;
+            }
+            Ok(block)
         };
         #[cfg(not(target_arch = "wasm32"))]
         let decoded: Vec<Vec<BlockEntry>> = {
@@ -2507,6 +2514,19 @@ pub(crate) fn verified_frame<'a>(
             .open_frame(disk)
             .map(std::borrow::Cow::Owned)
             .ok_or_else(|| corrupt(offset, "frame authentication failed")),
+    }
+}
+
+/// Refuses a replayed dense vector unless `precision` stores every component
+/// exactly (P3a: a float16 collection holds only canonical float16 values,
+/// which replay checks but never rounds).
+pub(crate) fn check_dense(precision: Option<Precision>, vector: &[f32], offset: u64) -> Result<()> {
+    match precision {
+        Some(precision) if !precision.holds(vector) => Err(corrupt(
+            offset,
+            "dense vector not stored exactly in its precision",
+        )),
+        _ => Ok(()),
     }
 }
 

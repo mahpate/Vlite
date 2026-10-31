@@ -2092,9 +2092,10 @@ impl Database {
     }
 
     /// Refuses a dense vector write into a float16 collection before any
-    /// commit (P3a): commit-time canonicalization is a later step, so such
-    /// a collection holds no dense data yet. Named dense vectors need a
-    /// live record and so stay refused too.
+    /// commit (P3a): commit-time canonicalization is a later step, so no
+    /// primary vector, named version or re-embedding batch is written to
+    /// it. Dense values it already holds came from a store image and replay
+    /// checked each is exactly a float16 value.
     fn ensure_dense_writable(&self, collection: u16) -> Result<()> {
         if self.state(collection).precision == Some(compact::catalog::Precision::Float16) {
             return Err(Error::UnsupportedFeature(format::FLAG_PRECISION));

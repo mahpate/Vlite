@@ -29,6 +29,8 @@ use std::path::Path;
 use std::rc::Rc;
 
 mod goldens;
+mod parity;
+mod populated;
 
 const LINEAGE: u64 = 0x5EED_0000_0000_0032;
 /// A deadline far in the future (2100-01-01).
@@ -275,6 +277,26 @@ fn registry_section() -> Vec<u8> {
     section
 }
 
+/// A registry section with one job (ID 1) bound to `collection` named
+/// `name`: open (`state` 0) or closed, the collection `dropped` or live.
+fn binding_section(collection: u16, dropped: u8, state: u8, name: &str) -> Vec<u8> {
+    let mut section = 1u64.to_le_bytes().to_vec();
+    section.extend_from_slice(&1u32.to_le_bytes());
+    section.extend_from_slice(&u32::from(state != 0).to_le_bytes());
+    section.extend_from_slice(&1u64.to_le_bytes());
+    section.extend_from_slice(&collection.to_le_bytes());
+    section.extend_from_slice(&[state, dropped, name.len() as u8, 0, 0, 0]);
+    for value in [1u64, 1, 0] {
+        section.extend_from_slice(&value.to_le_bytes());
+    }
+    section.extend_from_slice(&[1; 32]);
+    section.extend_from_slice(name.as_bytes());
+    if state != 0 {
+        section.extend_from_slice(&1u64.to_le_bytes());
+    }
+    section
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Backing {
     Memory,
@@ -459,7 +481,7 @@ fn revision_sections_round_trip_and_reject_damage() {
 
 fn run_check() -> ImageCheck {
     let flags = FLAG_HISTORY | FLAG_COMPACT | FLAG_PRECISION | FLAG_GRAPH;
-    let mut check = ImageCheck::new(format::V5, flags).unwrap();
+    let mut check = ImageCheck::new(format::V5, flags, 2, 0).unwrap();
     check.floor = Some(1);
     check
 }
@@ -1097,21 +1119,10 @@ fn precision_images_need_one_exact_catalog_and_registry() {
     assert_eq!(with(4, imports(&[0; 15], 0)), corrupt);
     assert_eq!(with(4, imports(&[0; 16], 0)), "ok");
     let bound = |collection: u16, dropped: u8, state: u8, name: &str| {
-        let mut section = 1u64.to_le_bytes().to_vec();
-        section.extend_from_slice(&1u32.to_le_bytes());
-        section.extend_from_slice(&u32::from(state != 0).to_le_bytes());
-        section.extend_from_slice(&1u64.to_le_bytes());
-        section.extend_from_slice(&collection.to_le_bytes());
-        section.extend_from_slice(&[state, dropped, name.len() as u8, 0, 0, 0]);
-        for value in [1u64, 1, 0] {
-            section.extend_from_slice(&value.to_le_bytes());
-        }
-        section.extend_from_slice(&[1; 32]);
-        section.extend_from_slice(name.as_bytes());
-        if state != 0 {
-            section.extend_from_slice(&1u64.to_le_bytes());
-        }
-        with(4, imports(&section, 1))
+        with(
+            4,
+            imports(&binding_section(collection, dropped, state, name), 1),
+        )
     };
     assert_eq!(bound(1, 0, 0, "half"), "ok");
     assert_eq!(bound(0, 0, 1, "default"), "ok");

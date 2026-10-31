@@ -111,19 +111,21 @@ pub(crate) fn replay(
     for entry in &body.entries {
         match entry {
             GraphEntry::VectorMutation { collection, entry } => {
-                let dimensions = collections
-                    .get(collection)
-                    .ok_or_else(|| {
-                        corrupt(offset, "graph vector entry references unknown collection")
-                    })?
-                    .dimensions;
+                let target = collections.get(collection).ok_or_else(|| {
+                    corrupt(offset, "graph vector entry references unknown collection")
+                })?;
                 let (mut decoded, marker) =
-                    format::decode_batch(entry, 1, dimensions, offset, format::V5)?;
+                    format::decode_batch(entry, 1, target.dimensions, offset, format::V5)?;
                 // The engine envelope admits only ops 1, 2 and 4.
                 debug_assert!(marker.is_none() && decoded.len() == 1);
                 let mutation = decoded
                     .pop()
                     .ok_or_else(|| corrupt(offset, "invalid graph vector entry"))?;
+                if let Mutation::Put { vector, .. } | Mutation::PutWithMetadata { vector, .. } =
+                    &mutation
+                {
+                    target.check_dense(vector, offset)?;
+                }
                 touched.push((*collection, mutation_id(&mutation)));
                 mutations.push((*collection, mutation));
             }

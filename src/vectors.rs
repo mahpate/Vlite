@@ -608,6 +608,26 @@ pub struct DenseSparseQuery {
     pub k: usize,
     pub fusion: crate::hybrid::FusionOptions,
 }
+/// Whether `next` holds a named dense version that `current` does not hold
+/// bit for bit under the same record, name and version.
+fn adds_dense(current: &VectorData, next: &VectorData) -> bool {
+    next.records.iter().any(|(id, record)| {
+        record.dense.iter().any(|(n, versions)| {
+            let held = current.records.get(id).and_then(|r| r.dense.get(n));
+            versions.iter().any(|v| {
+                !held.is_some_and(|vs| {
+                    vs.iter().any(|h| {
+                        h.version == v.version
+                            && h.vector
+                                .iter()
+                                .map(|x| x.to_bits())
+                                .eq(v.vector.iter().map(|x| x.to_bits()))
+                    })
+                })
+            })
+        })
+    })
+}
 impl CollectionMut<'_> {
     fn commit_vectors(&mut self, data: VectorData) -> Result<()> {
         self.db.ensure_healthy()?;
@@ -615,6 +635,14 @@ impl CollectionMut<'_> {
             return Err(Error::InvalidQuery(
                 "named and sparse vectors require format v5",
             ));
+        }
+        // P3a: a float16 collection takes no dense value it does not already
+        // hold until commit-time canonicalization exists, so named versions
+        // and re-embedding batches are refused before anything changes.
+        // Specs, jobs, pruning and sparse vectors (always float32) commit.
+        let current = self.db.state(self.id);
+        if current.precision.is_some() && adds_dense(&current.vectors, &data) {
+            self.db.ensure_dense_writable(self.id)?;
         }
         let bytes = data.encode()?;
         let seq = self

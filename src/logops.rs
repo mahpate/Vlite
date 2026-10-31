@@ -338,7 +338,12 @@ pub(crate) fn read_segment<R: Read + Seek>(
     let mut last = after_sequence;
     let mut pending_anchor: Option<RawFrame> = None;
     let mut full = false;
-    let mut check = crate::compact::ImageCheck::new(header.version, header.flags);
+    let mut check = crate::compact::ImageCheck::new(
+        header.version,
+        header.flags,
+        header.dimensions,
+        header.collection_floor,
+    );
     while let Some(frame) = format::next_checked_frame(file, &header, offset, check.as_mut())? {
         let at = offset;
         offset += frame.disk.len() as u64;
@@ -357,11 +362,19 @@ pub(crate) fn read_segment<R: Read + Seek>(
             head = frame.sequence;
             continue;
         }
-        if frame.operation == format::OP_COMPACT_BLOCK {
-            check
-                .as_mut()
-                .ok_or_else(|| format::corrupt(at, "invalid operation or reserved record bytes"))?
-                .block(frame.collection, frame.id, frame.count, frame.body(), at)?;
+        // A compact image's blocks, and in a precision image the frames
+        // they restate context for, are checked as full replay checks them.
+        match check.as_mut() {
+            Some(check) => {
+                check.frame(&frame, at)?;
+            }
+            None if frame.operation == format::OP_COMPACT_BLOCK => {
+                return Err(format::corrupt(
+                    at,
+                    "invalid operation or reserved record bytes",
+                ));
+            }
+            None => {}
         }
         head = head.max(frame.sequence);
         let anchor = pending_anchor.take();
