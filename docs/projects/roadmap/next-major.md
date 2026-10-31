@@ -106,9 +106,12 @@ Local numbers below show direction only (see rules).
 - **Gap 5, bounded algorithms:** S1 and S2 are implemented and reviewed in
   the embedded Rust API, but unreleased ([plan](gap5-graph-algorithms.md)).
   They provide TTL-aware local scopes, degree counts and hop-constrained
-  weighted paths under shared work and memory limits. Incomplete extraction
-  or computation returns no analytic values. PageRank, label propagation,
-  sampled betweenness, CSR parity and serving exposure remain separate work.
+  weighted paths under shared work and memory limits. For those algorithms,
+  incomplete extraction or computation returns no analytic values. S3
+  PageRank and deterministic label propagation are implemented and under
+  independent review, also unreleased. Their incomplete results may retain
+  the last full iteration or sweep, never a partial one. Sampled betweenness,
+  CSR parity and serving exposure remain separate work.
 - **Parallel designs:** [temporal graphs](gap4-temporal-graph.md),
   [filters](p5-filters-and-serving.md) and
   [serving](serving-contract.md) now have implementation boundaries and

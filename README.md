@@ -198,7 +198,7 @@ are on the [releases page](https://github.com/mahpate/Vlite/releases).
 - HNSW is approximate and supports L2 and cosine only.
 - Replicas are file-shipped. There is no networked replication.
 - Deleted records use disk space until you compact to a new file.
-- Graphs: nodes and edges cannot expire, there are no point-in-time reads,
+- Released graph APIs: nodes and edges cannot expire, there are no point-in-time reads,
   weighted paths or graph algorithms, query text is read-only, and gRPC has
   no graph service. Traversal stops at 4 hops and 10,000 visited nodes.
 - Durability depends on the OS and storage honoring sync. It is not a
@@ -209,6 +209,12 @@ are on the [releases page](https://github.com/mahpate/Vlite/releases).
   it on restart.
 
 ## What's next
+
+The [next-major roadmap](docs/projects/roadmap/next-major.md) tracks unreleased
+development. Its embedded Rust degree counts and bounded weighted paths are
+implemented and reviewed; PageRank and label propagation are implemented but
+still under independent review. These are not released capabilities or new
+REST/gRPC graph endpoints.
 
 These plans are proposals under review, not commitments:
 
