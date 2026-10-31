@@ -6,7 +6,7 @@
     "score_abs_tolerance": 1e-8,
     "mass_abs_tolerance": 1e-12,
     "residual_abs_tolerance": 1e-12,
-    "ordering": "Output rows and scope ID sets ascend by numeric ID, never by score or public ID. Path arrays preserve traversal order. Path candidates compare exact f64 cost, hops, then numeric edge-ID tuple. Betweenness selected/completed sources preserve SplitMix64-v1 sampling order, NOT node-ID order.",
+    "ordering": "Output rows and scope ID sets ascend by numeric ID, never by score or public ID. Path arrays preserve traversal order. Path candidates compare exact sums of the input binary64 values, hops, then numeric edge-ID tuple; round only the winning cost once to binary64 (nearest, ties to even). JSON fractional weights denote binary64 inputs, not exact decimal rationals; integer weights must be in 0..2^53. Betweenness selected/completed sources preserve SplitMix64-v1 sampling order, NOT node-ID order.",
     "bounds": "1..6 nodes, at most 12 physical edges, H=0..4; walks of length 0..H and simple paths are exhaustively enumerated, not benchmarked. Scope filters are all-label conjunction and explicit relationship inclusion (or any). Seeds are deduplicated; out/in/both arcs are projected before induction.",
     "pagerank_reference": "stationary_scores solve (I-d*T^transpose)r=(1-d)p with exact rational arithmetic, including dangling redistribution to p. They are NOT an iterative result or a claimed iteration count. Future Rust tests run the supplied tolerance=1e-10 and max_iterations=100, require converged=true, completed-step L1 change <= tolerance and unit mass within 1e-12, and compare the last full vector to stationary_scores within 1e-8. fixed_point_l1_residual describes the stationary reference only.",
     "exclusions": "No Rust engine coverage, invalid-input API assertions, TTL/storage/authorization, resource exhaustion, partial sweeps/sources, partial sampling, or cross-platform bitwise equality claims. No edge-property condition filters are modeled."
@@ -37,6 +37,63 @@
       ],
       "parameters": {"scope": {"seeds": [1], "max_hops": 2, "direction": "out", "node_labels": "any", "relationship_types": ["r"]}, "source": 1, "target": 3, "weight_policy": "explicit"},
       "expected": {"scope_node_ids": [1, 2, 3], "scope_edge_ids": [10, 20, 30], "output": {"status": "found", "path": {"cost": 2, "hops": 2, "edge_ids": [10, 20], "node_ids": [1, 2, 3]}}}
+    },
+    {
+      "name": "weighted_exact_sum_before_hop_tie",
+      "algorithm": "weighted_shortest_path",
+      "purpose": "Adding 2^53, 1, 1 exactly ties the direct binary64 weight 2^53+2; the direct edge wins on fewer hops. Per-edge rounding loses both unit contributions.",
+      "nodes": [
+        {"id": 1, "public_id": "start", "labels": []},
+        {"id": 2, "public_id": "via-a", "labels": []},
+        {"id": 3, "public_id": "via-b", "labels": []},
+        {"id": 4, "public_id": "finish", "labels": []}
+      ],
+      "edges": [
+        {"id": 1, "public_id": "large", "source": 1, "target": 2, "relationship": "r", "weight": 9007199254740992},
+        {"id": 2, "public_id": "unit-a", "source": 2, "target": 3, "relationship": "r", "weight": 1},
+        {"id": 3, "public_id": "unit-b", "source": 3, "target": 4, "relationship": "r", "weight": 1},
+        {"id": 90, "public_id": "direct", "source": 1, "target": 4, "relationship": "r", "weight": 9007199254740994.0}
+      ],
+      "parameters": {"scope": {"seeds": [1], "max_hops": 3, "direction": "out", "node_labels": "any", "relationship_types": "any"}, "source": 1, "target": 4, "weight_policy": "explicit"},
+      "expected": {"scope_node_ids": [1, 2, 3, 4], "scope_edge_ids": [1, 2, 3, 90], "output": {"status": "found", "path": {"cost": 9007199254740994.0, "hops": 1, "edge_ids": [90], "node_ids": [1, 4]}}}
+    },
+    {
+      "name": "weighted_binary64_not_decimal_sum",
+      "algorithm": "weighted_shortest_path",
+      "purpose": "The exact binary64 sum of 0.1 and 0.2 exceeds binary64 0.3. Treating the JSON spellings as decimal rationals would tie and incorrectly prefer edge tuple [1,2].",
+      "nodes": [
+        {"id": 1, "public_id": "start", "labels": []},
+        {"id": 2, "public_id": "decimal-via", "labels": []},
+        {"id": 3, "public_id": "binary-via", "labels": []},
+        {"id": 4, "public_id": "finish", "labels": []}
+      ],
+      "edges": [
+        {"id": 1, "public_id": "tenth", "source": 1, "target": 2, "relationship": "r", "weight": 0.1},
+        {"id": 2, "public_id": "fifth", "source": 2, "target": 4, "relationship": "r", "weight": 0.2},
+        {"id": 8, "public_id": "three-tenths", "source": 1, "target": 3, "relationship": "r", "weight": 0.3},
+        {"id": 9, "public_id": "zero", "source": 3, "target": 4, "relationship": "r", "weight": 0}
+      ],
+      "parameters": {"scope": {"seeds": [1], "max_hops": 2, "direction": "out", "node_labels": "any", "relationship_types": "any"}, "source": 1, "target": 4, "weight_policy": "explicit"},
+      "expected": {"scope_node_ids": [1, 2, 3, 4], "scope_edge_ids": [1, 2, 8, 9], "output": {"status": "found", "path": {"cost": 0.3, "hops": 2, "edge_ids": [8, 9], "node_ids": [1, 3, 4]}}}
+    },
+    {
+      "name": "weighted_exact_rank_before_final_rounding",
+      "algorithm": "weighted_shortest_path",
+      "purpose": "Both candidate totals round to 1.0, but 1+2^-54 is greater than 1 exactly. Cost must decide before the lexicographic edge tuple.",
+      "nodes": [
+        {"id": 1, "public_id": "start", "labels": []},
+        {"id": 2, "public_id": "larger-via", "labels": []},
+        {"id": 3, "public_id": "smaller-via", "labels": []},
+        {"id": 4, "public_id": "finish", "labels": []}
+      ],
+      "edges": [
+        {"id": 1, "public_id": "one-a", "source": 1, "target": 2, "relationship": "r", "weight": 1},
+        {"id": 2, "public_id": "quarter-ulp", "source": 2, "target": 4, "relationship": "r", "weight": 5.551115123125783e-17},
+        {"id": 8, "public_id": "one-b", "source": 1, "target": 3, "relationship": "r", "weight": 1},
+        {"id": 9, "public_id": "zero", "source": 3, "target": 4, "relationship": "r", "weight": 0}
+      ],
+      "parameters": {"scope": {"seeds": [1], "max_hops": 2, "direction": "out", "node_labels": "any", "relationship_types": "any"}, "source": 1, "target": 4, "weight_policy": "explicit"},
+      "expected": {"scope_node_ids": [1, 2, 3, 4], "scope_edge_ids": [1, 2, 8, 9], "output": {"status": "found", "path": {"cost": 1.0, "hops": 2, "edge_ids": [8, 9], "node_ids": [1, 3, 4]}}}
     },
     {
       "name": "weighted_hops_before_edge_ids",

@@ -5,6 +5,7 @@ arguments resolve beside this script, independent of the working directory.
 PageRank expectations are stationary solutions, not invented iteration counts:
 future iterative tests compare scores within score_abs_tolerance, and separately
 require convergence with the requested L1 tolerance before max_iterations.
+Path ranking sums the exact binary64 inputs and rounds only the winning cost.
 """
 
 import argparse
@@ -142,15 +143,19 @@ def shortest_path(case, nodes, arcs):
         for u, v, edge_id, weight in arcs:
             if u == node:
                 # Enumerate walks, including repeated vertices and zero cycles.
-                value = 1.0 if parameters["weight_policy"] == "unit" else float(weight)
+                value = Fraction(1) if parameters["weight_policy"] == "unit" else Fraction.from_float(float(weight))
                 walk(v, cost + value, edge_ids + (edge_id,), node_ids + (v,))
 
-    walk(source, 0.0, (), (source,))
+    walk(source, Fraction(0), (), (source,))
     if not candidates:
         return {"status": "no_path_within_scope_and_hops", "path": None}
     cost, hops, edge_ids, node_ids = min(candidates, key=lambda item: item[:3])
+    try:
+        rounded_cost = float(cost)
+    except OverflowError as error:
+        raise ValueError("winning path cost exceeds finite binary64") from error
     return {"status": "found", "path": {
-        "cost": cost, "hops": hops, "edge_ids": list(edge_ids), "node_ids": list(node_ids),
+        "cost": rounded_cost, "hops": hops, "edge_ids": list(edge_ids), "node_ids": list(node_ids),
     }}
 
 

@@ -307,7 +307,9 @@ The result is therefore independent of addition order and platform.
 States are (node, hops) for hops 0..=H with an indexed heap of at most (H+1)*V entries.
 The winner is the smallest (cost, hops, edge-ID sequence); a costlier prefix with fewer hops stays in its own state.
 Example: a direct edge of 2^53+2 and a path of 2^53, 1 and 1 tie exactly, so the direct edge wins on hops.
-`tests/graph_algorithm_oracle.py` rounds each addition and picks the 3-edge path there; its update is pending (parent-owned).
+`tests/graph_algorithm_oracle.py` independently sums the binary64 inputs with exact rational arithmetic.
+Goldens cover the large-integer hop tie, binary64 versus decimal-rational weights,
+and distinct exact costs that round to the same f64; only the winner is rounded.
 A visible destination outside the projection gives NoPathWithinScopeAndHops after a complete run.
 
 ### Decisions to confirm in review
@@ -336,8 +338,8 @@ The adapter has 12 tests over the public API, including TTL equality, filters, w
 Each suite was written first and failed (0 of 15, 0 of 10) before the implementation passed.
 Review regressions also failed first: buffer growth (4,097 self-loops held 196,656 bytes against 98,416 reserved),
 preparation under a pre-set cancellation, absent-type probes (1,800 vertex units for 25,600 probes) and adapter staging.
-All 21 golden cases check S1 scope node and edge IDs exactly, plus degrees derived from the oracle's scope.
-The 8 weighted_shortest_path cases check outcomes, costs and path IDs exactly.
+All 24 golden cases check S1 scope node and edge IDs exactly, plus degrees derived from the oracle's scope.
+The 11 weighted_shortest_path cases check outcomes, costs and path IDs exactly.
 PageRank, label propagation and betweenness golden values are not exercised by Rust code yet.
 
 ## GraphRAG and competitors

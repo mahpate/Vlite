@@ -2,8 +2,8 @@
 //!
 //! Golden cases come from `tests/fixtures/graph_algorithms/golden.json`,
 //! checked independently by `tests/graph_algorithm_oracle.py`. Every one of
-//! the 21 cases checks the S1 projection (its expected scope node and edge
-//! IDs) and the degrees derived from that expected scope; the 8
+//! the 24 cases checks the S1 projection (its expected scope node and edge
+//! IDs) and the degrees derived from that expected scope; the 11
 //! `weighted_shortest_path` cases also check the S2 path outcome. PageRank,
 //! label propagation and betweenness outputs belong to later slices and are
 //! not claimed. The remaining tests cover the public request and result
@@ -34,7 +34,7 @@ fn cases() -> Vec<Value> {
     assert_eq!(golden["schema"], "vlite.graph-algorithm-golden");
     assert_eq!(golden["version"], 1);
     let cases = golden["cases"].as_array().unwrap().clone();
-    assert_eq!(cases.len(), 21);
+    assert_eq!(cases.len(), 24);
     cases
 }
 
@@ -344,7 +344,7 @@ fn golden_scopes_and_paths_match_the_oracle_on_exact_ids() {
             paths += 1;
         }
     }
-    assert_eq!((scopes, paths), (21, 8));
+    assert_eq!((scopes, paths), (24, 11));
 }
 
 /// Fixture-to-database node and edge IDs of one case.
@@ -427,7 +427,7 @@ fn golden_cases_through_the_public_api() {
             paths += 1;
         }
     }
-    assert_eq!(paths, 8);
+    assert_eq!(paths, 11);
 }
 
 // Hand-built graphs through the public API.
