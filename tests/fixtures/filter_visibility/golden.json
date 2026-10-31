@@ -1,0 +1,216 @@
+{
+  "schema": "vlite.filter-visibility-golden",
+  "version": 1,
+  "cases": [
+    {
+      "name": "typed-boundaries",
+      "purpose": "Typed equality, inclusive bounds, missing fields, signed zero and UTF-8; physical extrema remain exact i64.",
+      "segments": [
+        {
+          "name": "mixed",
+          "rows": [
+            {"id": 0, "revision": 0, "deleted": false, "expires_at": null, "metadata": {"n": {"type": "integer", "value": "1"}}},
+            {"id": 1, "revision": 1, "deleted": false, "expires_at": null, "metadata": {"n": {"type": "float", "value": 1.0}}},
+            {"id": 2, "revision": 1, "deleted": false, "expires_at": null, "metadata": {"n": {"type": "boolean", "value": true}}},
+            {"id": 3, "revision": 1, "deleted": false, "expires_at": null, "metadata": {"n": {"type": "string", "value": "1"}}},
+            {"id": 4, "revision": 1, "deleted": false, "expires_at": null, "metadata": {"n": {"type": "float", "value": -0.0}}},
+            {"id": 5, "revision": 1, "deleted": false, "expires_at": null, "metadata": {"n": {"type": "float", "value": 0.0}}},
+            {"id": 6, "revision": 1, "deleted": false, "expires_at": null, "metadata": {}},
+            {"id": 7, "revision": 1, "deleted": false, "expires_at": null, "metadata": {"n": {"type": "integer", "value": "-9223372036854775808"}, "word": {"type": "string", "value": "café"}}},
+            {"id": 8, "revision": 1, "deleted": false, "expires_at": null, "metadata": {"n": {"type": "integer", "value": "9223372036854775807"}}},
+            {"id": 9, "revision": 1, "deleted": false, "expires_at": null, "metadata": {"n": {"type": "boolean", "value": false}}}
+          ],
+          "summary": {
+            "coverage": "complete",
+            "fields": {
+              "n": [
+                {"type": "integer", "min": "-9223372036854775808", "max": "9223372036854775807"},
+                {"type": "float", "min": -0.0, "max": 1.0},
+                {"type": "boolean", "values": [false, true]},
+                {"type": "string", "values": ["1"]}
+              ],
+              "word": [{"type": "string", "values": ["café"]}]
+            }
+          }
+        },
+        {"name": "empty", "rows": [], "summary": {"coverage": "complete", "fields": {}}}
+      ],
+      "overlay": [],
+      "queries": [
+        {"name": "integer-not-float-bool-or-text", "clock": 0, "conditions": [{"op": "eq", "field": "n", "value": {"type": "integer", "value": "1"}}],
+         "expected": {"visible_ids": [0,1,2,3,4,5,6,7,8,9], "candidate_ids": [0,1,2,3,4,5,6,7,8,9], "matching_ids": [0], "pruning": [{"segment": "mixed", "status": "keep"}, {"segment": "empty", "status": "prune"}]}},
+        {"name": "float-not-integer", "clock": 0, "conditions": [{"op": "eq", "field": "n", "value": {"type": "float", "value": 1.0}}],
+         "expected": {"visible_ids": [0,1,2,3,4,5,6,7,8,9], "candidate_ids": [0,1,2,3,4,5,6,7,8,9], "matching_ids": [1], "pruning": [{"segment": "mixed", "status": "keep"}, {"segment": "empty", "status": "prune"}]}},
+        {"name": "boolean-not-integer", "clock": 0, "conditions": [{"op": "eq", "field": "n", "value": {"type": "boolean", "value": true}}],
+         "expected": {"visible_ids": [0,1,2,3,4,5,6,7,8,9], "candidate_ids": [0,1,2,3,4,5,6,7,8,9], "matching_ids": [2], "pruning": [{"segment": "mixed", "status": "keep"}, {"segment": "empty", "status": "prune"}]}},
+        {"name": "text-not-numeric", "clock": 0, "conditions": [{"op": "eq", "field": "n", "value": {"type": "string", "value": "1"}}],
+         "expected": {"visible_ids": [0,1,2,3,4,5,6,7,8,9], "candidate_ids": [0,1,2,3,4,5,6,7,8,9], "matching_ids": [3], "pruning": [{"segment": "mixed", "status": "keep"}, {"segment": "empty", "status": "prune"}]}},
+        {"name": "positive-zero-equality", "clock": 0, "conditions": [{"op": "eq", "field": "n", "value": {"type": "float", "value": 0.0}}],
+         "expected": {"visible_ids": [0,1,2,3,4,5,6,7,8,9], "candidate_ids": [0,1,2,3,4,5,6,7,8,9], "matching_ids": [4,5], "pruning": [{"segment": "mixed", "status": "keep"}, {"segment": "empty", "status": "prune"}]}},
+        {"name": "negative-zero-equality", "clock": 0, "conditions": [{"op": "eq", "field": "n", "value": {"type": "float", "value": -0.0}}],
+         "expected": {"visible_ids": [0,1,2,3,4,5,6,7,8,9], "candidate_ids": [0,1,2,3,4,5,6,7,8,9], "matching_ids": [4,5], "pruning": [{"segment": "mixed", "status": "keep"}, {"segment": "empty", "status": "prune"}]}},
+        {"name": "equal-integer-inclusive-bounds", "clock": 0, "conditions": [{"op": "range", "field": "n", "min": {"type": "integer", "value": "1"}, "max": {"type": "integer", "value": "1"}}],
+         "expected": {"visible_ids": [0,1,2,3,4,5,6,7,8,9], "candidate_ids": [0,1,2,3,4,5,6,7,8,9], "matching_ids": [0], "pruning": [{"segment": "mixed", "status": "keep"}, {"segment": "empty", "status": "prune"}]}},
+        {"name": "equal-float-inclusive-bounds", "clock": 0, "conditions": [{"op": "range", "field": "n", "min": {"type": "float", "value": 1.0}, "max": {"type": "float", "value": 1.0}}],
+         "expected": {"visible_ids": [0,1,2,3,4,5,6,7,8,9], "candidate_ids": [0,1,2,3,4,5,6,7,8,9], "matching_ids": [1], "pruning": [{"segment": "mixed", "status": "keep"}, {"segment": "empty", "status": "prune"}]}},
+        {"name": "zero-inclusive-both-signs", "clock": 0, "conditions": [{"op": "range", "field": "n", "min": {"type": "float", "value": -0.0}, "max": {"type": "float", "value": 0.0}}],
+         "expected": {"visible_ids": [0,1,2,3,4,5,6,7,8,9], "candidate_ids": [0,1,2,3,4,5,6,7,8,9], "matching_ids": [4,5], "pruning": [{"segment": "mixed", "status": "keep"}, {"segment": "empty", "status": "prune"}]}},
+        {"name": "one-sided-i64-minimum", "clock": 0, "conditions": [{"op": "range", "field": "n", "min": null, "max": {"type": "integer", "value": "-9223372036854775808"}}],
+         "expected": {"visible_ids": [0,1,2,3,4,5,6,7,8,9], "candidate_ids": [0,1,2,3,4,5,6,7,8,9], "matching_ids": [7], "pruning": [{"segment": "mixed", "status": "keep"}, {"segment": "empty", "status": "prune"}]}},
+        {"name": "one-sided-i64-maximum", "clock": 0, "conditions": [{"op": "range", "field": "n", "min": {"type": "integer", "value": "9223372036854775807"}, "max": null}],
+         "expected": {"visible_ids": [0,1,2,3,4,5,6,7,8,9], "candidate_ids": [0,1,2,3,4,5,6,7,8,9], "matching_ids": [8], "pruning": [{"segment": "mixed", "status": "keep"}, {"segment": "empty", "status": "prune"}]}},
+        {"name": "utf8-equality-and-missing", "clock": 0, "conditions": [{"op": "eq", "field": "word", "value": {"type": "string", "value": "café"}}],
+         "expected": {"visible_ids": [0,1,2,3,4,5,6,7,8,9], "candidate_ids": [0,1,2,3,4,5,6,7,8,9], "matching_ids": [7], "pruning": [{"segment": "mixed", "status": "keep"}, {"segment": "empty", "status": "prune"}]}},
+        {"name": "missing-field-equality", "clock": 0, "conditions": [{"op": "eq", "field": "absent", "value": {"type": "boolean", "value": false}}],
+         "expected": {"visible_ids": [0,1,2,3,4,5,6,7,8,9], "candidate_ids": [], "matching_ids": [], "pruning": [{"segment": "mixed", "status": "prune"}, {"segment": "empty", "status": "prune"}]}},
+        {"name": "missing-field-range", "clock": 0, "conditions": [{"op": "range", "field": "absent", "min": {"type": "float", "value": 0.0}, "max": null}],
+         "expected": {"visible_ids": [0,1,2,3,4,5,6,7,8,9], "candidate_ids": [], "matching_ids": [], "pruning": [{"segment": "mixed", "status": "prune"}, {"segment": "empty", "status": "prune"}]}},
+        {"name": "empty-conjunction", "clock": 18446744073709551615, "conditions": [],
+         "expected": {"visible_ids": [0,1,2,3,4,5,6,7,8,9], "candidate_ids": [0,1,2,3,4,5,6,7,8,9], "matching_ids": [0,1,2,3,4,5,6,7,8,9], "pruning": [{"segment": "mixed", "status": "keep"}, {"segment": "empty", "status": "prune"}]}}
+      ],
+      "pruning_probes": []
+    },
+    {
+      "name": "summary-supersets",
+      "purpose": "Disjoint bounds prune; stale and unknown never prune; independent field supersets must be rechecked.",
+      "segments": [
+        {"name": "low", "rows": [
+          {"id": 10, "revision": 1, "deleted": false, "expires_at": null, "metadata": {"n": {"type": "integer", "value": "0"}, "color": {"type": "string", "value": "red"}}},
+          {"id": 11, "revision": 1, "deleted": false, "expires_at": null, "metadata": {"n": {"type": "integer", "value": "2"}, "color": {"type": "string", "value": "blue"}}}
+        ], "summary": {"coverage": "complete", "fields": {"n": [{"type": "integer", "min": "0", "max": "2"}], "color": [{"type": "string", "values": ["blue","red"]}]}}},
+        {"name": "boundary", "rows": [
+          {"id": 12, "revision": 1, "deleted": false, "expires_at": null, "metadata": {"n": {"type": "integer", "value": "5"}, "color": {"type": "string", "value": "blue"}}},
+          {"id": 13, "revision": 1, "deleted": false, "expires_at": null, "metadata": {"n": {"type": "integer", "value": "9"}, "color": {"type": "string", "value": "red"}}}
+        ], "summary": {"coverage": "complete", "fields": {"n": [{"type": "integer", "min": "5", "max": "9"}], "color": [{"type": "string", "values": ["blue","red"]}]}}},
+        {"name": "float-only", "rows": [
+          {"id": 14, "revision": 1, "deleted": false, "expires_at": null, "metadata": {"n": {"type": "float", "value": 5.0}, "color": {"type": "string", "value": "red"}}}
+        ], "summary": {"coverage": "complete", "fields": {"n": [{"type": "float", "min": 5.0, "max": 5.0}], "color": [{"type": "string", "values": ["red"]}]}}},
+        {"name": "stale", "rows": [
+          {"id": 15, "revision": 1, "deleted": false, "expires_at": null, "metadata": {"n": {"type": "integer", "value": "5"}, "color": {"type": "string", "value": "red"}}}
+        ], "summary": {"coverage": "stale", "fields": {"n": [{"type": "integer", "min": "100", "max": "100"}]}}},
+        {"name": "unknown", "rows": [
+          {"id": 16, "revision": 1, "deleted": false, "expires_at": null, "metadata": {"n": {"type": "integer", "value": "6"}}}
+        ], "summary": {"coverage": "unknown", "fields": {}}}
+      ],
+      "overlay": [],
+      "queries": [
+        {"name": "inclusive-touching-interval", "clock": 100, "conditions": [{"op": "range", "field": "n", "min": {"type": "integer", "value": "2"}, "max": {"type": "integer", "value": "5"}}],
+         "expected": {"visible_ids": [10,11,12,13,14,15,16], "candidate_ids": [10,11,12,13,15,16], "matching_ids": [11,12,15], "pruning": [{"segment": "low", "status": "keep"}, {"segment": "boundary", "status": "keep"}, {"segment": "float-only", "status": "prune"}, {"segment": "stale", "status": "unknown"}, {"segment": "unknown", "status": "unknown"}]}},
+        {"name": "conjunction-requires-row-recheck", "clock": 100, "conditions": [{"op": "range", "field": "n", "min": {"type": "integer", "value": "5"}, "max": {"type": "integer", "value": "5"}}, {"op": "eq", "field": "color", "value": {"type": "string", "value": "red"}}],
+         "expected": {"visible_ids": [10,11,12,13,14,15,16], "candidate_ids": [12,13,15,16], "matching_ids": [15], "pruning": [{"segment": "low", "status": "prune"}, {"segment": "boundary", "status": "keep"}, {"segment": "float-only", "status": "prune"}, {"segment": "stale", "status": "unknown"}, {"segment": "unknown", "status": "unknown"}]}},
+        {"name": "numeric-summary-hole-is-not-empty", "clock": 100, "conditions": [{"op": "eq", "field": "n", "value": {"type": "integer", "value": "7"}}],
+         "expected": {"visible_ids": [10,11,12,13,14,15,16], "candidate_ids": [12,13,15,16], "matching_ids": [], "pruning": [{"segment": "low", "status": "prune"}, {"segment": "boundary", "status": "keep"}, {"segment": "float-only", "status": "prune"}, {"segment": "stale", "status": "unknown"}, {"segment": "unknown", "status": "unknown"}]}},
+        {"name": "disjoint-but-unknown-retained", "clock": 100, "conditions": [{"op": "range", "field": "n", "min": {"type": "integer", "value": "50"}, "max": {"type": "integer", "value": "60"}}],
+         "expected": {"visible_ids": [10,11,12,13,14,15,16], "candidate_ids": [15,16], "matching_ids": [], "pruning": [{"segment": "low", "status": "prune"}, {"segment": "boundary", "status": "prune"}, {"segment": "float-only", "status": "prune"}, {"segment": "stale", "status": "unknown"}, {"segment": "unknown", "status": "unknown"}]}}
+      ],
+      "pruning_probes": []
+    },
+    {
+      "name": "latest-overlay-and-ttl",
+      "purpose": "Creates, replacements, metadata/deletion/expiry edits and resurrection suppress old IDs before predicates and TTL.",
+      "segments": [
+        {"name": "old", "rows": [
+          {"id": 20, "revision": 1, "deleted": false, "expires_at": null, "metadata": {"state": {"type": "string", "value": "yes"}}},
+          {"id": 21, "revision": 1, "deleted": false, "expires_at": null, "metadata": {"state": {"type": "string", "value": "yes"}}},
+          {"id": 22, "revision": 1, "deleted": false, "expires_at": null, "metadata": {"state": {"type": "string", "value": "yes"}}},
+          {"id": 23, "revision": 1, "deleted": false, "expires_at": 100, "metadata": {"state": {"type": "string", "value": "yes"}}},
+          {"id": 24, "revision": 1, "deleted": false, "expires_at": 100, "metadata": {"state": {"type": "string", "value": "yes"}}},
+          {"id": 25, "revision": 1, "deleted": false, "expires_at": 99, "metadata": {"state": {"type": "string", "value": "yes"}}},
+          {"id": 26, "revision": 1, "deleted": false, "expires_at": 101, "metadata": {"state": {"type": "string", "value": "yes"}}},
+          {"id": 27, "revision": 1, "deleted": false, "expires_at": null, "metadata": {"state": {"type": "string", "value": "yes"}}},
+          {"id": 28, "revision": 1, "deleted": false, "expires_at": null, "metadata": {"state": {"type": "string", "value": "no"}}},
+          {"id": 29, "revision": 1, "deleted": true, "expires_at": null, "metadata": {"state": {"type": "string", "value": "yes"}}},
+          {"id": 30, "revision": 1, "deleted": false, "expires_at": 0, "metadata": {"state": {"type": "string", "value": "yes"}}},
+          {"id": 34, "revision": 1, "deleted": false, "expires_at": 100, "metadata": {"state": {"type": "string", "value": "yes"}}}
+        ], "summary": {"coverage": "complete", "fields": {"state": [{"type": "string", "values": ["no","yes"]}]}}},
+        {"name": "new-sealed", "rows": [
+          {"id": 20, "revision": 2, "deleted": false, "expires_at": null, "metadata": {"state": {"type": "string", "value": "no"}}},
+          {"id": 28, "revision": 2, "deleted": false, "expires_at": null, "metadata": {"state": {"type": "string", "value": "yes"}}},
+          {"id": 29, "revision": 2, "deleted": true, "expires_at": null, "metadata": {}}
+        ], "summary": {"coverage": "complete", "fields": {"state": [{"type": "string", "values": ["no","yes"]}]}}}
+      ],
+      "overlay": [
+        {"id": 21, "revision": 3, "deleted": true, "expires_at": null, "metadata": {}},
+        {"id": 22, "revision": 4, "deleted": false, "expires_at": 100, "metadata": {"state": {"type": "string", "value": "yes"}}},
+        {"id": 23, "revision": 5, "deleted": false, "expires_at": 200, "metadata": {"state": {"type": "string", "value": "yes"}}},
+        {"id": 27, "revision": 6, "deleted": false, "expires_at": null, "metadata": {}},
+        {"id": 31, "revision": 7, "deleted": false, "expires_at": null, "metadata": {"state": {"type": "string", "value": "yes"}}},
+        {"id": 21, "revision": 8, "deleted": false, "expires_at": null, "metadata": {"state": {"type": "string", "value": "yes"}}},
+        {"id": 32, "revision": 9, "deleted": false, "expires_at": 18446744073709551615, "metadata": {"state": {"type": "string", "value": "yes"}}},
+        {"id": 33, "revision": 10, "deleted": false, "expires_at": null, "metadata": {"state": {"type": "string", "value": "new"}}},
+        {"id": 34, "revision": 11, "deleted": false, "expires_at": null, "metadata": {"state": {"type": "string", "value": "yes"}}},
+        {"id": 18446744073709551615, "revision": 18446744073709551615, "deleted": false, "expires_at": null, "metadata": {"state": {"type": "string", "value": "yes"}}}
+      ],
+      "queries": [
+        {"name": "ttl-one-tick-before", "clock": 99, "conditions": [{"op": "eq", "field": "state", "value": {"type": "string", "value": "yes"}}],
+         "expected": {"visible_ids": [20,21,22,23,24,26,27,28,31,32,33,34,18446744073709551615], "candidate_ids": [20,21,22,23,24,26,27,28,31,32,33,34,18446744073709551615], "matching_ids": [21,22,23,24,26,28,31,32,34,18446744073709551615], "pruning": [{"segment": "old", "status": "keep"}, {"segment": "new-sealed", "status": "keep"}]}},
+        {"name": "ttl-equality-no-fallback", "clock": 100, "conditions": [{"op": "eq", "field": "state", "value": {"type": "string", "value": "yes"}}],
+         "expected": {"visible_ids": [20,21,23,26,27,28,31,32,33,34,18446744073709551615], "candidate_ids": [20,21,23,26,27,28,31,32,33,34,18446744073709551615], "matching_ids": [21,23,26,28,31,32,34,18446744073709551615], "pruning": [{"segment": "old", "status": "keep"}, {"segment": "new-sealed", "status": "keep"}]}},
+        {"name": "extension-eventually-expires", "clock": 200, "conditions": [],
+         "expected": {"visible_ids": [20,21,27,28,31,32,33,34,18446744073709551615], "candidate_ids": [20,21,27,28,31,32,33,34,18446744073709551615], "matching_ids": [20,21,27,28,31,32,33,34,18446744073709551615], "pruning": [{"segment": "old", "status": "keep"}, {"segment": "new-sealed", "status": "keep"}]}},
+        {"name": "u64-expiry-equality", "clock": 18446744073709551615, "conditions": [],
+         "expected": {"visible_ids": [20,21,27,28,31,33,34,18446744073709551615], "candidate_ids": [20,21,27,28,31,33,34,18446744073709551615], "matching_ids": [20,21,27,28,31,33,34,18446744073709551615], "pruning": [{"segment": "old", "status": "keep"}, {"segment": "new-sealed", "status": "keep"}]}},
+        {"name": "pruned-segments-do-not-prune-overlay", "clock": 100, "conditions": [{"op": "eq", "field": "state", "value": {"type": "string", "value": "new"}}],
+         "expected": {"visible_ids": [20,21,23,26,27,28,31,32,33,34,18446744073709551615], "candidate_ids": [21,23,27,31,32,33,34,18446744073709551615], "matching_ids": [33], "pruning": [{"segment": "old", "status": "prune"}, {"segment": "new-sealed", "status": "prune"}]}}
+      ],
+      "pruning_probes": []
+    },
+    {
+      "name": "geo-pruning-only",
+      "purpose": "Geo equality uses normalized zero; radius has UNKNOWN pruning, never an index-derived final answer.",
+      "segments": [
+        {"name": "points", "rows": [
+          {"id": 40, "revision": 1, "deleted": false, "expires_at": null, "metadata": {"g": {"type": "geopoint", "value": {"latitude": -0.0, "longitude": 0.0}}, "ok": {"type": "boolean", "value": true}}},
+          {"id": 41, "revision": 1, "deleted": false, "expires_at": null, "metadata": {"g": {"type": "geopoint", "value": {"latitude": 0.0, "longitude": -0.0}}, "ok": {"type": "boolean", "value": false}}},
+          {"id": 42, "revision": 1, "deleted": false, "expires_at": null, "metadata": {"g": {"type": "geopoint", "value": {"latitude": 90.0, "longitude": 180.0}}}}
+        ], "summary": {"coverage": "complete", "fields": {"g": [{"type": "geopoint", "values": [{"latitude": 0.0, "longitude": 0.0}, {"latitude": 90.0, "longitude": 180.0}]}], "ok": [{"type": "boolean", "values": [false,true]}]}}},
+        {"name": "no-geo", "rows": [
+          {"id": 43, "revision": 1, "deleted": false, "expires_at": null, "metadata": {"ok": {"type": "boolean", "value": false}}}
+        ], "summary": {"coverage": "complete", "fields": {"ok": [{"type": "boolean", "values": [false]}]}}},
+        {"name": "empty", "rows": [], "summary": {"coverage": "unknown", "fields": {}}}
+      ],
+      "overlay": [],
+      "queries": [
+        {"name": "geo-zero-equality", "clock": 0, "conditions": [{"op": "eq", "field": "g", "value": {"type": "geopoint", "value": {"latitude": 0.0, "longitude": -0.0}}}],
+         "expected": {"visible_ids": [40,41,42,43], "candidate_ids": [40,41,42], "matching_ids": [40,41], "pruning": [{"segment": "points", "status": "keep"}, {"segment": "no-geo", "status": "prune"}, {"segment": "empty", "status": "prune"}]}},
+        {"name": "geo-equality-conjunction", "clock": 0, "conditions": [{"op": "eq", "field": "g", "value": {"type": "geopoint", "value": {"latitude": -0.0, "longitude": 0.0}}}, {"op": "eq", "field": "ok", "value": {"type": "boolean", "value": true}}],
+         "expected": {"visible_ids": [40,41,42,43], "candidate_ids": [40,41,42], "matching_ids": [40], "pruning": [{"segment": "points", "status": "keep"}, {"segment": "no-geo", "status": "prune"}, {"segment": "empty", "status": "prune"}]}}
+      ],
+      "pruning_probes": [
+        {"name": "radius-cannot-prune-even-missing-geo", "conditions": [{"op": "georadius", "field": "g", "latitude": 0.0, "longitude": 0.0, "radius_meters": 0.0}],
+         "expected": [{"segment": "points", "status": "unknown"}, {"segment": "no-geo", "status": "unknown"}, {"segment": "empty", "status": "prune"}]},
+        {"name": "radius-with-safe-boolean-pruning", "conditions": [{"op": "georadius", "field": "g", "latitude": 0.0, "longitude": 0.0, "radius_meters": 1.0}, {"op": "eq", "field": "ok", "value": {"type": "boolean", "value": true}}],
+         "expected": [{"segment": "points", "status": "unknown"}, {"segment": "no-geo", "status": "prune"}, {"segment": "empty", "status": "prune"}]}
+      ]
+    },
+    {
+      "name": "mutable-only",
+      "purpose": "Overlay-only new matching ID survives without sealed segments; higher revision metadata edit supersedes creation.",
+      "segments": [],
+      "overlay": [
+        {"id": 50, "revision": 1, "deleted": false, "expires_at": null, "metadata": {"n": {"type": "integer", "value": "1"}}},
+        {"id": 51, "revision": 2, "deleted": true, "expires_at": null, "metadata": {}},
+        {"id": 50, "revision": 3, "deleted": false, "expires_at": null, "metadata": {"n": {"type": "integer", "value": "2"}}},
+        {"id": 52, "revision": 4, "deleted": false, "expires_at": 10, "metadata": {"n": {"type": "integer", "value": "2"}}},
+        {"id": 51, "revision": 5, "deleted": false, "expires_at": null, "metadata": {"n": {"type": "integer", "value": "2"}}}
+      ],
+      "queries": [
+        {"name": "created-and-resurrected-matches", "clock": 10, "conditions": [{"op": "eq", "field": "n", "value": {"type": "integer", "value": "2"}}],
+         "expected": {"visible_ids": [50,51], "candidate_ids": [50,51], "matching_ids": [50,51], "pruning": []}},
+        {"name": "old-overlay-value-never-falls-back", "clock": 10, "conditions": [{"op": "eq", "field": "n", "value": {"type": "integer", "value": "1"}}],
+         "expected": {"visible_ids": [50,51], "candidate_ids": [50,51], "matching_ids": [], "pruning": []}}
+      ],
+      "pruning_probes": []
+    },
+    {
+      "name": "empty-snapshot",
+      "purpose": "Empty conjunction over an empty snapshot is empty, not an invented ID.",
+      "segments": [],
+      "overlay": [],
+      "queries": [
+        {"name": "nothing-visible", "clock": 0, "conditions": [], "expected": {"visible_ids": [], "candidate_ids": [], "matching_ids": [], "pruning": []}}
+      ],
+      "pruning_probes": []
+    }
+  ]
+}
