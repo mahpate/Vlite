@@ -1,7 +1,8 @@
 # P3 precision API: proposal for review
 
-**Status: PROPOSED, not approved or implemented.** This requests explicit Rust
-API review on the accepted compact foundation; it authorizes no writer.
+**Status: Design A accepted for implementation; public enablement is gated.**
+This records Rust surface review on the accepted compact foundation;
+it authorizes no production writer or API baseline change before qualification.
 The concurrent private numeric/column codec work does not approve this surface.
 
 ## Accepted goals versus proposed decisions
@@ -31,7 +32,7 @@ Recommend A: reuse existing backing-specific patterns without changing exhaustiv
 in mutable `CollectionSettings` (`src/collection.rs:27-50`): replacing settings
 with defaults must never convert float16 back to float32 or vice versa.
 
-## Exact PROPOSED signatures
+## Exact reviewed signatures (not enabled)
 
 `VectorPrecision` is defined in private `collection`, re-exported at crate root
 alongside current collection types (`src/lib.rs:48-51`). No existing type gains
@@ -219,12 +220,12 @@ conditional revisions; rejected invalid/overflow atomicity (no rows, revision, m
 graph change); TTL visibility/deadlines; snapshots; failure/crash publication;
 backup/restore/restore-to/reencryption and faithful maintenance or refusal;
 old/unsupported-reader rejection before replay/repair; source unchanged and new
-conversion lineage. Codec readiness, these integration gates and explicit API
-approval remain unresolved prerequisites; none is established by this document.
+conversion lineage. Production codec activation and these integration gates
+remain unresolved prerequisites; design approval does not establish them.
 
 ## Coordinator review
 
-Design A is the preferred additive shape, not authorization to ship its API.
+Design A is the accepted additive shape, not authorization to ship its API.
 Existing `FeedCursor` carries lineage, whereas numeric conditional-write
 revisions do not; the conversion contract above distinguishes them explicitly.
 Finite input that would become infinity in the selected precision is rejected
@@ -235,9 +236,9 @@ Private codec review accepted `4870875`. For kind `0x0100` version 1, the
 writer batching targets. Keep writer tuning within them; accepting larger
 blocks requires a separately reviewed codec version and compatibility tests.
 
-**HOLD public enablement and baseline changes** until a concrete, reviewed
-descriptor-publication design covers empty stores and post-floor named creates
-for every promised backing. It must spell out durable encoding, atomicity,
-recovery, feed/export/replica behavior and old-reader refusal; any necessary
-change to the accepted history-only compact contract requires a separate
-explicit decision. Do not disguise this missing prerequisite as API approval.
+The [publication design](p3-precision-publication.md) selects guarded create
+op 17, flag 32 and complete catalogs; compact op 16 remains history-only.
+**HOLD public enablement and baseline changes** until its implementation
+qualifies empty stores and post-floor named creates for every promised backing,
+including recovery, maintenance, feed/export/replica and old-reader refusal.
+The design review is complete; runtime qualification is not.

@@ -27,8 +27,9 @@ block directory, accessor traits, invariants and slice order. Not in scope:
 - **No benchmarks** before the major release. DO-005 runs once, under its
   unchanged quiet gate ([roadmap](next-major.md)).
 - **No codec algorithms.** Column, CSR, code and bitmap layouts stay in the
-  P3, P4 and P5 designs. The WAL format, op-12 WAL writes and the manifest
-  format do not change.
+  P3, P4 and P5 designs. Existing WAL operations, op-12 bodies and the manifest
+  do not change. Section 9 separately reserves a guarded precision-create
+  operation; it does not move compact blocks into ordinary WAL.
 
 ## 2. Ownership
 
@@ -53,7 +54,8 @@ storage owner as a contract amendment.
 (`src/format.rs:17-33`, `src/property_graph/engine/codec.rs:29`). Writers
 set it only on `FLAG_HISTORY` checkpoint images that hold at least one block.
 Byte copies of such images keep it. WAL headers never carry it: the directory
-masks them to `GRAPH | ENCRYPTED` (`src/directory.rs:37`, `:348`). Older
+masks them to `GRAPH | ENCRYPTED` (`src/directory.rs:37`, `:348`). Section 9's
+precision amendment adds flag 32 to that mask only for opted-in stores. Older
 builds refuse an unknown flag with `UnsupportedFeature` before replay or tail
 repair (`src/format.rs:1237-1241`). This meets P3's "reject before replay".
 Compact-aware builds report `FLAG_COMPACT` without `FLAG_HISTORY` as
@@ -74,7 +76,7 @@ allocate kinds inside their own range without editing shared code:
 | Kinds | Owner | Use |
 |---|---|---|
 | `0x0000` | none | Invalid |
-| `0x0001-0x00FF` | Storage | `0x0001` capability table; `0x0002` image end; rest reserved |
+| `0x0001-0x00FF` | Storage | `0x0001` capability table; `0x0002` image end; section 9 reserves `0x0003` precision catalog, `0x0004` import registry, `0x0005` graph revisions; rest reserved |
 | `0x0100-0x01FF` | P3 | Source columns: IDs, revisions, expiry, dense f32/f16, named dense |
 | `0x0200-0x02FF` | P3 | Derived ANN: topology, codes, transform parameters |
 | `0x0300-0x03FF` | P4 | Graph base: ID maps, edge table, CSR, dictionaries, labels, properties, keys, attachments, deadlines |
@@ -323,7 +325,7 @@ hide an I/O or authentication error.
 | Replicas | Segments cannot start before an image's floor (`src/logops.rs:346-353`). A follower bootstraps from a backup copy (`src/replica.rs:85-88`), so it needs a compact-aware build |
 | Change feed | Restated blocks emit no events. Op 16 gets its own arm next to ops 14 and 15 (`src/changes.rs:394-403`) |
 | Determinism | Plaintext bodies are identical for any thread count, like the HNSW build (`src/hnsw.rs:39-43`). Encrypted bytes differ only by random nonces (`src/crypto.rs:328-329`) |
-| Mixing | An image may mix legacy and compact objects. One collection or graph uses exactly one form per image |
+| Mixing | An image may mix legacy and compact objects. One collection or graph uses exactly one base form per image; section 9 catalogs and revision supplements add state to that base, not a second copy of its vectors/graph |
 
 Emission order in an image: header, advance frame, collection and settings
 frames (ops 5 and 7, which readers accept only before the table), capability
@@ -332,6 +334,8 @@ for a legacy collection), derived blocks and statistics. Vector and import frame
 graph ascending an op-15 snapshot or P4 blocks, then graph statistics. Graph
 blocks load after every record, so P4 validates attachments there. The image
 end block comes last.
+For precision-policy images, section 9's catalog/import blocks precede record
+sources and each graph-revision run follows its corresponding graph snapshot.
 
 ## 7. Integration order and merge plan
 
@@ -404,3 +408,37 @@ These decisions authorize implementation, not performance or release claims.
 | 9 | Are P5 statistics critical? | No, derived and rebuildable |
 | 10 | Change feed: replacing op 15 loses the graph keys `src/changes.rs:394-399` reads. P4 does not cover this | P4 provides `graph_keys` through the registry |
 | 11 | S1 acceptance profile | Stays open and is not waived; decided before release |
+
+## 9. Precision-policy publication amendment
+
+The [publication design](p3-precision-publication.md) selects approach B:
+one guarded ordinary named-create operation plus complete immutable catalogs
+in history images. Decisions W and P there are accepted for private
+implementation; production acceptance and public opt-in remain qualification gates.
+
+- Reserve `FLAG_PRECISION = 32` for V5 without timestamps. Keep it in every
+  opted-in image and WAL header. An authoritative store begins with a complete
+  history image even when empty; an independent WAL is not a bootstrap image.
+- Reserve ordinary `OP_COLLECTION_PRECISE = 17` for atomic named creation,
+  immutable precision, dimensions and existing settings. It requires flag 32,
+  never appears in the restated prefix, and cannot change an existing policy.
+  Existing op 5 remains the history declaration; op 6 drops policy with its
+  collection. Ordinary creation/drop do not reset lineage or history floor.
+- Reserve critical v1 storage kinds `0x0003` (complete precision catalog),
+  `0x0004` (bounded import registry/high-water state) and `0x0005` (original
+  graph entity revisions). Their exact bytes, bounds and ordering are in
+  the publication design. Concrete check/apply/encode handlers are required.
+- Flag 16/op 16 remain history-only, with their capability table and whole-image
+  terminator unchanged. No manifest dialect, sidecar or op-12 schema change.
+  Every parser, feed/export/replica path and rewrite must preserve policy
+  and required source state, or refuse before modifying output.
+- Initially use legacy f32 source bodies containing canonical stored values
+  for both precisions. This is policy/recovery qualification, not smaller
+  storage or production registration of source kind `0x0100`.
+- Copy-out precision conversion preserves all retained state, including
+  deadline zero and currently expired values; ordinary TTL compaction keeps
+  its existing pruning semantics. Conversion explicitly requests preservation,
+  rather than passing a synthetic clock that would still drop deadline zero.
+- One storage owner implements the shared paths. Keep the public gate closed
+  through plain/encrypted file, directory and memory tests, failure injection,
+  unsupported-reader refusal and faithful maintenance/transport checks.
