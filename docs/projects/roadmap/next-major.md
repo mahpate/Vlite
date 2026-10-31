@@ -92,8 +92,12 @@ Local numbers below show direction only (see rules).
   float32 as the storage default and makes float16 explicit. It reuses the
   existing scalar-u8/reranking and ANN snapshot mechanisms, with columnar
   source access and compact persisted topology. A rotated one-bit codec is
-  an opt-in candidate, not an unmeasured new default. Implementation and
-  F1/F3/S1/S2 qualification remain outstanding.
+  an opt-in candidate, not an unmeasured new default. The private binary16
+  conversion and primary-dense codec are implemented and reviewed, behind
+  a test-only activation gate. The [API review](p3-precision-api.md) still
+  holds public enablement pending atomic precision-descriptor publication
+  and complete read/write/maintenance integration. No production compact
+  source writer is enabled; F1/F3/S1/S2 qualification remains outstanding.
 - **Speed P4, compact graph:** the [design](p4-compact-graph.md) is ready:
   immutable CSR checkpoint blocks, a bounded update overlay, encoded labels
   and properties, and deterministic parallel import. It preserves graph TTL
