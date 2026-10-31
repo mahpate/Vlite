@@ -419,8 +419,9 @@ pub(crate) struct Loaded {
     /// its full history): sequences at or below it were restated, so change
     /// feeds and log segments cannot start before it.
     pub history_floor: u64,
-    /// Derived blocks of a `FLAG_COMPACT` image that this build skipped.
-    pub compact_skipped: Vec<crate::compact::Skipped>,
+    /// Derived blocks of a `FLAG_COMPACT` image that this build skipped,
+    /// bounded to the report's groups.
+    pub compact_skipped: crate::compact::Skips,
 }
 
 impl Loaded {
@@ -1506,7 +1507,7 @@ fn load_inner<R: Read + Seek>(
         commit_times: Vec::new(),
         graph: (flags & FLAG_GRAPH != 0).then(crate::property_graph::engine::GraphState::new),
         history_floor: 0,
-        compact_skipped: Vec::new(),
+        compact_skipped: Default::default(),
     };
     let mut jobs: HashMap<u64, JobReplay> = HashMap::new();
     // Highest collection ID created by an op 5 in this log so far, and how
@@ -2028,9 +2029,9 @@ fn load_inner<R: Read + Seek>(
     }
     // A compact image must be complete wherever the log ends, before any
     // pending snapshot frame is applied.
-    if let Some(check) = &check {
+    if let Some(check) = check {
         check.end(loaded.end)?;
-        loaded.compact_skipped = check.skipped();
+        loaded.compact_skipped = check.into_skips();
     }
     if let Some(run) = blocks {
         run.apply(&mut loaded, cipher.as_ref())?;

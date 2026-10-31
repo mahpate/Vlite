@@ -922,8 +922,9 @@ pub struct Database {
     /// The latest clock graph writes and checkpoints used (see
     /// `graph_now`).
     graph_clock: u64,
-    /// Derived blocks of a compact image skipped at open (none are rebuilt).
-    compact_skipped: Vec<compact::Skipped>,
+    /// Derived blocks of a compact image skipped at open, bounded to the
+    /// report's groups (none are rebuilt).
+    compact_skipped: compact::Skips,
 }
 
 /// Source of commit timestamps (milliseconds since the Unix epoch).
@@ -1380,7 +1381,7 @@ impl Database {
             read_only: false,
             graph: (flags & format::FLAG_GRAPH != 0).then(property_graph::engine::GraphState::new),
             graph_clock: 0,
-            compact_skipped: Vec::new(),
+            compact_skipped: Default::default(),
         })
     }
 
@@ -1435,7 +1436,7 @@ impl Database {
     /// Derived blocks of a compact image that open skipped (and reported
     /// through `log`); the server also keeps the report in its admin log.
     #[cfg_attr(not(feature = "server"), allow(dead_code))]
-    pub(crate) fn compact_skipped(&self) -> &[compact::Skipped] {
+    pub(crate) fn compact_skipped(&self) -> &compact::Skips {
         &self.compact_skipped
     }
 

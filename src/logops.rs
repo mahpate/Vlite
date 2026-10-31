@@ -329,7 +329,7 @@ pub(crate) fn read_segment<R: Read + Seek>(
     known: Option<&crate::crypto::Cipher>,
     after_sequence: u64,
     max_bytes: usize,
-) -> Result<(LogSegment, Vec<crate::compact::Skipped>)> {
+) -> Result<(LogSegment, crate::compact::Skips)> {
     let header = format::read_log_header_with(file, key, known)?;
     let lineage = header.lineage.ok_or(Error::ChangeFeedRequiresUpgrade)?;
     let mut offset = header.start;
@@ -395,7 +395,9 @@ pub(crate) fn read_segment<R: Read + Seek>(
         head_sequence: head,
         frames,
     };
-    let skipped = check.map(|check| check.skipped()).unwrap_or_default();
+    let skipped = check
+        .map(crate::compact::ImageCheck::into_skips)
+        .unwrap_or_default();
     Ok((segment, skipped))
 }
 

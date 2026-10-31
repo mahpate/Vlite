@@ -192,7 +192,7 @@ pub(crate) fn read_changes<R: Read + Seek>(
     known: Option<&crate::crypto::Cipher>,
     cursor: &FeedCursor,
     max_events: usize,
-) -> Result<(ChangeBatch, Vec<crate::compact::Skipped>)> {
+) -> Result<(ChangeBatch, crate::compact::Skips)> {
     let header = format::read_log_header_with(file, key, known)?;
     let lineage = header.lineage.ok_or(Error::ChangeFeedRequiresUpgrade)?;
     if cursor.lineage != 0 && cursor.lineage != lineage {
@@ -219,7 +219,7 @@ fn scan<R: Read + Seek>(
     lineage: u64,
     after: u64,
     max_events: usize,
-) -> Result<(ChangeBatch, Vec<crate::compact::Skipped>)> {
+) -> Result<(ChangeBatch, crate::compact::Skips)> {
     let mut collections: BTreeMap<u16, (String, usize)> = BTreeMap::new();
     collections.insert(0, ("default".to_string(), header.dimensions));
     let mut offset = header.start;
@@ -450,7 +450,9 @@ fn scan<R: Read + Seek>(
         has_more,
         head,
     };
-    let skipped = check.map(|check| check.skipped()).unwrap_or_default();
+    let skipped = check
+        .map(crate::compact::ImageCheck::into_skips)
+        .unwrap_or_default();
     Ok((batch, skipped))
 }
 

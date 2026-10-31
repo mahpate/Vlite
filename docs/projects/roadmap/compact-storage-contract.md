@@ -100,10 +100,19 @@ skipped in one warning through the standard Rust `log` facade (crate `log`
 0.4, no new VLite API): level `warn`, target `vlite::compact`, and a
 message that is one JSON object, `{"event":"compact_block_skip",
 "outcome":"unknown_kind", "reader", "rebuild":"none", "blocks", "groups",
-"more_groups"}`. `blocks` is the total; `groups` lists at most 16
-`{"collection", "kind", "version", "blocks"}` entries in that order, and
-`more_groups` counts the rest, so the record stays bounded whatever the
-image holds. The outcome is `unknown_kind` because this build has no codec
+"more_groups"}`. `blocks` counts every skipped block. A group is one
+(owner, kind, codec version); `groups` lists the first 16 distinct groups
+in image order as `{"collection", "kind", "version", "blocks"}`, each with
+all of its blocks, and `more_groups` counts the other distinct groups.
+The state behind the record is bounded the same way while a reader scans,
+in what it returns and in what a handle keeps after open: two totals and at
+most 16 groups, never one entry per group. Distinct groups are counted
+exactly without a set of them: blocks of one owner and kind form one run
+that never resumes (section 4), so each capability table entry remembers
+the owner of the last block that used it, and a block starts a new group
+exactly when its entry last served a different owner or none. The table
+entries are needed for validation anyway, so counting adds no state per
+group. The outcome is `unknown_kind` because this build has no codec
 for any derived kind; `unsupported_version` is kept for a kind whose codec
 exists but lacks the block's version. `rebuild` is `none`: no
 compact-specific rebuild happens. The host chooses the logger and the sink;

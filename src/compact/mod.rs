@@ -63,33 +63,68 @@ pub(crate) struct Skipped {
     pub blocks: u64,
 }
 
-/// Groups listed in one skip report; the rest are only counted.
+/// Groups kept, and listed in one skip report; the rest are only counted.
 const REPORT_GROUPS: usize = 16;
+
+/// What an image skipped, in bounded space: every skipped block and every
+/// distinct (owner, kind, version) group are counted, and only the first
+/// `REPORT_GROUPS` groups in image order are kept, with their block counts.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Skips {
+    pub blocks: u64,
+    pub groups: u64,
+    pub listed: Vec<Skipped>,
+}
+
+impl Skips {
+    /// Counts one skipped block; `first` when it is the first of its group.
+    fn add(&mut self, collection: u16, kind: u16, version: u16, first: bool) {
+        self.blocks += 1;
+        if first {
+            self.groups += 1;
+            if self.listed.len() < REPORT_GROUPS {
+                if self.listed.is_empty() {
+                    self.listed.reserve_exact(REPORT_GROUPS);
+                }
+                self.listed.push(Skipped {
+                    collection,
+                    kind,
+                    version,
+                    blocks: 1,
+                });
+            }
+        } else if let Some(group) = self.listed.iter_mut().find(|group| {
+            (group.collection, group.kind, group.version) == (collection, kind, version)
+        }) {
+            group.blocks += 1;
+        }
+    }
+}
 
 /// Reports the derived blocks that `reader` skipped in an image it fully
 /// validated: one `warn` record for target `vlite::compact` through the
 /// `log` facade, whose logger and sink the host chooses. Nothing is logged
 /// when nothing was skipped.
-pub(crate) fn report(skipped: &[Skipped], reader: &'static str) {
-    if let Some(line) = skip_report(skipped, reader) {
+pub(crate) fn report(skips: &Skips, reader: &'static str) {
+    if let Some(line) = skip_report(skips, reader) {
         log::warn!(target: "vlite::compact", "{line}");
     }
 }
 
-/// The skip report as one bounded JSON object: totals, then at most
-/// `REPORT_GROUPS` groups. This build has no derived codec, so every skipped
-/// kind is unknown to it (`unknown_kind`); `unsupported_version` is left for
-/// a kind whose codec exists but lacks that version. Nothing is rebuilt.
-pub(crate) fn skip_report(skipped: &[Skipped], reader: &'static str) -> Option<String> {
+/// The skip report as one bounded JSON object: totals, then the kept groups.
+/// This build has no derived codec, so every skipped kind is unknown to it
+/// (`unknown_kind`); `unsupported_version` is left for a kind whose codec
+/// exists but lacks that version. Nothing is rebuilt.
+pub(crate) fn skip_report(skips: &Skips, reader: &'static str) -> Option<String> {
     use std::fmt::Write;
-    if skipped.is_empty() {
+    if skips.blocks == 0 {
         return None;
     }
-    let blocks: u64 = skipped.iter().map(|group| group.blocks).sum();
+    let blocks = skips.blocks;
     let mut line = format!(
         r#"{{"event":"compact_block_skip","outcome":"unknown_kind","reader":"{reader}","rebuild":"none","blocks":{blocks},"groups":["#
     );
-    for (index, group) in skipped.iter().take(REPORT_GROUPS).enumerate() {
+    for (index, group) in skips.listed.iter().enumerate() {
         let separator = if index == 0 { "" } else { "," };
         let Skipped {
             collection,
@@ -102,10 +137,17 @@ pub(crate) fn skip_report(skipped: &[Skipped], reader: &'static str) -> Option<S
             r#"{separator}{{"collection":{collection},"kind":{kind},"version":{version},"blocks":{blocks}}}"#
         );
     }
-    let more = skipped.len().saturating_sub(REPORT_GROUPS);
+    let more = skips.groups - skips.listed.len() as u64;
     let _ = write!(line, r#"],"more_groups":{more}}}"#);
     Some(line)
 }
+
+/// The capability table: (kind, version) to (flags, owner of the last block
+/// that used the entry). Blocks of one owner and kind form one run that
+/// never resumes, so a block whose entry last served another owner (or
+/// none) starts a new (owner, kind, version) group: distinct groups are
+/// counted exactly without a set of them.
+type Table = BTreeMap<(u16, u16), (u16, Option<u16>)>;
 
 /// Checks the frames of a `FLAG_COMPACT` image in log order: every frame
 /// prefix (`prefix`) before its body is read, each verified op-16 body
@@ -116,8 +158,7 @@ pub(crate) struct ImageCheck {
     floor: Option<u64>,
     /// Collections created before the table; `default` always exists.
     collections: BTreeSet<u16>,
-    /// The capability table: (kind, version) to (flags, used).
-    entries: Option<BTreeMap<(u16, u16), (u16, bool)>>,
+    entries: Option<Table>,
     /// The run of blocks being read (owner, kind, next partition), and runs
     /// that ended and may not resume.
     run: Option<(u16, u16, u64)>,
@@ -126,8 +167,8 @@ pub(crate) struct ImageCheck {
     /// SHA-256 of their prefixes.
     frames: u64,
     digest: Sha256,
-    /// Skipped derived blocks by (owner, kind, version).
-    skipped: BTreeMap<(u16, u16, u16), u64>,
+    /// Skipped derived blocks, bounded.
+    skips: Skips,
     /// The end block matched: the image is complete.
     done: bool,
 }
@@ -144,7 +185,7 @@ impl ImageCheck {
             ended: BTreeSet::new(),
             frames: 0,
             digest: Sha256::new(),
-            skipped: BTreeMap::new(),
+            skips: Skips::default(),
             done: false,
         })
     }
@@ -292,19 +333,18 @@ impl ImageCheck {
         let Some(entries) = self.entries.as_mut() else {
             return Err(corrupt(offset, "compact image without a capability table"));
         };
-        match entries.get_mut(&(kind, block.version)) {
-            Some((flags, used)) if *flags == block.flags => *used = true,
+        let first = match entries.get_mut(&(kind, block.version)) {
+            Some((flags, owner)) if *flags == block.flags => {
+                owner.replace(collection) != Some(collection)
+            }
             _ => return Err(corrupt(offset, "undeclared compact block")),
-        }
+        };
         if matches!(kind >> 8, 0x01 | 0x02) && !self.collections.contains(&collection) {
             return Err(corrupt(offset, "compact block for unknown collection"));
         }
         // The table admits only derived kinds while no codec exists, so
         // this authentic, declared block is skipped, and reported.
-        *self
-            .skipped
-            .entry((collection, kind, block.version))
-            .or_default() += 1;
+        self.skips.add(collection, kind, block.version, first);
         Ok(())
     }
 
@@ -348,7 +388,7 @@ impl ImageCheck {
             previous = Some((kind, version));
             // No codec exists yet: only declared derived kinds can be skipped.
             readable &= class == Some(false);
-            entries.insert((kind, version), (flags, false));
+            entries.insert((kind, version), (flags, None));
         }
         if !readable {
             return Err(Error::UnsupportedFeature(FLAG_COMPACT));
@@ -388,7 +428,7 @@ impl ImageCheck {
         let Some(entries) = &self.entries else {
             return Err(corrupt(offset, "compact image without a capability table"));
         };
-        if entries.values().any(|&(_, used)| !used) {
+        if entries.values().any(|(_, owner)| owner.is_none()) {
             return Err(corrupt(offset, "capability table entry is unused"));
         }
         self.done = true;
@@ -406,17 +446,9 @@ impl ImageCheck {
         Ok(())
     }
 
-    /// Skipped derived blocks, by owner, kind and codec version.
-    pub(crate) fn skipped(&self) -> Vec<Skipped> {
-        self.skipped
-            .iter()
-            .map(|(&(collection, kind, version), &blocks)| Skipped {
-                collection,
-                kind,
-                version,
-                blocks,
-            })
-            .collect()
+    /// The skipped derived blocks, once `end` accepted the image.
+    pub(crate) fn into_skips(self) -> Skips {
+        self.skips
     }
 
     fn hash(&mut self, prefix: &[u8; PREFIX_SIZE]) {
@@ -493,5 +525,198 @@ impl<'a> Envelope<'a> {
             flags,
             sections,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::changes::{FeedCursor, read_changes};
+    use crate::format::{self, FLAG_HISTORY};
+    use std::io::Cursor;
+
+    const LINEAGE: u64 = 0x5EED_0000_0000_0002;
+    const FLOOR: u64 = 4;
+    const KIND: u16 = 0x0200;
+    const VERSIONS: u16 = 17;
+
+    /// A plaintext frame at the checkpoint `FLOOR`.
+    fn frame(owner: u16, id: u64, count: u32, body: &[u8]) -> Vec<u8> {
+        let mut bytes = b"VREC".to_vec();
+        bytes.push(OP_COMPACT_BLOCK);
+        bytes.extend_from_slice(&owner.to_le_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(&FLOOR.to_le_bytes());
+        bytes.extend_from_slice(&id.to_le_bytes());
+        bytes.extend_from_slice(&count.to_le_bytes());
+        bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&format::crc32(&bytes).to_le_bytes());
+        bytes.extend_from_slice(body);
+        let checksum = format::crc32(&bytes);
+        bytes.extend_from_slice(b"VCMT");
+        bytes.extend_from_slice(&checksum.to_le_bytes());
+        bytes.extend_from_slice(&FLOOR.to_le_bytes());
+        bytes
+    }
+
+    /// An op-16 frame whose block has one unpadded section.
+    fn block(
+        kind: u16,
+        version: u16,
+        flags: u16,
+        owner: u16,
+        partition: u64,
+        count: u32,
+        section: &[u8],
+    ) -> Vec<u8> {
+        let start = (HEADER_LEN + 8) as u32;
+        let mut body = Vec::new();
+        for field in [kind, version, flags, 1] {
+            body.extend_from_slice(&field.to_le_bytes());
+        }
+        body.extend_from_slice(&(u64::from(owner) | partition << 16).to_le_bytes());
+        body.extend_from_slice(&0u64.to_le_bytes());
+        for field in [start, 0, start, section.len() as u32] {
+            body.extend_from_slice(&field.to_le_bytes());
+        }
+        body.extend_from_slice(section);
+        frame(owner, u64::from(kind) | partition << 16, count, &body)
+    }
+
+    /// Two owners, `default` and `docs`, each with one run of kind
+    /// `KIND` that holds every declared version in turn and then each again
+    /// in reverse: 68 blocks in 34 distinct (owner, kind, version) groups.
+    fn image() -> Vec<u8> {
+        let mut frames = vec![
+            format::advance_frame(FLOOR),
+            format::collection_create_frame(
+                FLOOR,
+                1,
+                "docs",
+                2,
+                &crate::CollectionSettings::default(),
+            ),
+        ];
+        let mut table = Vec::new();
+        for version in 1..=VERSIONS {
+            for field in [KIND, version, 0, 0] {
+                table.extend_from_slice(&field.to_le_bytes());
+            }
+        }
+        frames.push(block(
+            KIND_TABLE,
+            1,
+            CRITICAL,
+            0,
+            0,
+            u32::from(VERSIONS),
+            &table,
+        ));
+        for owner in [0, 1] {
+            let versions = (1..=VERSIONS).chain((1..=VERSIONS).rev());
+            for (partition, version) in (0..).zip(versions) {
+                frames.push(block(KIND, version, 0, owner, partition, 1, b"x"));
+            }
+        }
+        let mut digest = Sha256::new();
+        for frame in &frames {
+            digest.update(&frame[..PREFIX_SIZE]);
+        }
+        let mut end = (frames.len() as u64).to_le_bytes().to_vec();
+        end.extend_from_slice(&digest.finalize());
+        frames.push(block(KIND_END, 1, CRITICAL, 0, 0, 1, &end));
+        let mut bytes = format::header_v5_flags(2, LINEAGE, 0, FLAG_HISTORY | FLAG_COMPACT, None);
+        for frame in frames {
+            bytes.extend_from_slice(&frame);
+        }
+        bytes
+    }
+
+    /// The report: every block, the first 16 groups (owner 0, versions 1 to
+    /// 16, two blocks each) and the 18 other distinct groups, counted once.
+    const REPORT: &str = concat!(
+        r#"{"event":"compact_block_skip","outcome":"unknown_kind","reader":"load","rebuild":"none","blocks":68,"groups":["#,
+        r#"{"collection":0,"kind":512,"version":1,"blocks":2},{"collection":0,"kind":512,"version":2,"blocks":2},"#,
+        r#"{"collection":0,"kind":512,"version":3,"blocks":2},{"collection":0,"kind":512,"version":4,"blocks":2},"#,
+        r#"{"collection":0,"kind":512,"version":5,"blocks":2},{"collection":0,"kind":512,"version":6,"blocks":2},"#,
+        r#"{"collection":0,"kind":512,"version":7,"blocks":2},{"collection":0,"kind":512,"version":8,"blocks":2},"#,
+        r#"{"collection":0,"kind":512,"version":9,"blocks":2},{"collection":0,"kind":512,"version":10,"blocks":2},"#,
+        r#"{"collection":0,"kind":512,"version":11,"blocks":2},{"collection":0,"kind":512,"version":12,"blocks":2},"#,
+        r#"{"collection":0,"kind":512,"version":13,"blocks":2},{"collection":0,"kind":512,"version":14,"blocks":2},"#,
+        r#"{"collection":0,"kind":512,"version":15,"blocks":2},{"collection":0,"kind":512,"version":16,"blocks":2}"#,
+        r#"],"more_groups":18}"#,
+    );
+
+    /// Review of b95a0f3: the diagnostic state that a check builds, that
+    /// every reader returns and that a handle keeps stays within
+    /// `REPORT_GROUPS` groups throughout, while the report still counts
+    /// every block and every distinct group exactly once.
+    #[test]
+    fn skip_state_is_bounded_and_counts_distinct_groups_once() {
+        let bytes = image();
+        let mut file = Cursor::new(bytes.clone());
+        let header = format::read_log_header(&mut file, None).unwrap();
+        let mut check = ImageCheck::new(header.version, header.flags).unwrap();
+        let mut offset = header.start;
+        while let Some(frame) =
+            format::next_checked_frame(&mut file, &header, offset, Some(&mut check)).unwrap()
+        {
+            if frame.operation == OP_COMPACT_BLOCK {
+                check
+                    .block(
+                        frame.collection,
+                        frame.id,
+                        frame.count,
+                        frame.body(),
+                        offset,
+                    )
+                    .unwrap();
+            }
+            offset += frame.disk.len() as u64;
+            kept(&check.skips);
+        }
+        check.end(offset).unwrap();
+        assert_eq!((check.skips.blocks, check.skips.groups), (68, 34));
+
+        let bounded = |skips: &Skips| {
+            kept(skips);
+            assert_eq!(skips.listed.len(), REPORT_GROUPS);
+            assert_eq!(skip_report(skips, "load").as_deref(), Some(REPORT));
+        };
+        bounded(
+            &format::load(&mut Cursor::new(bytes.clone()))
+                .unwrap()
+                .compact_skipped,
+        );
+        let db = crate::Database::open_from_bytes(bytes.clone(), None).unwrap();
+        bounded(db.compact_skipped());
+        let cursor = FeedCursor {
+            lineage: LINEAGE,
+            sequence: FLOOR,
+        };
+        let (_, skips) =
+            read_changes(&mut Cursor::new(bytes.clone()), None, None, &cursor, 10).unwrap();
+        bounded(&skips);
+        let (_, skips) =
+            crate::logops::read_segment(&mut Cursor::new(bytes), None, None, FLOOR, 1 << 20)
+                .unwrap();
+        bounded(&skips);
+    }
+
+    /// The groups a summary keeps, and their storage, never exceed
+    /// `REPORT_GROUPS`, and every kept group was counted.
+    fn kept(skips: &Skips) {
+        assert!(
+            skips.listed.len() <= REPORT_GROUPS,
+            "{}",
+            skips.listed.len()
+        );
+        assert!(
+            skips.listed.capacity() <= REPORT_GROUPS,
+            "{}",
+            skips.listed.capacity()
+        );
+        assert!(skips.listed.len() as u64 <= skips.groups);
+        assert!(skips.groups <= skips.blocks);
     }
 }
