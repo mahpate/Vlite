@@ -602,7 +602,8 @@ pub(crate) fn publish_with(
         .unwrap_or_else(|| Path::new("."));
     let mut staging = NamedTempFile::new_in(parent)?;
     write(staging.as_file_mut())?;
-    let loaded = format::load_with(staging.as_file_mut(), key)?;
+    // Each writer loaded (and reported) its source first.
+    let loaded = format::reload_with(staging.as_file_mut(), key)?;
     require_complete(&loaded)?;
     let report = inspection(&loaded);
     staging.as_file().sync_all()?;

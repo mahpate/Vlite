@@ -232,16 +232,10 @@ impl Service {
         let lineage = database.lineage();
         let graph_enabled = database.is_graph_enabled();
         // Derived compact blocks this build cannot decode were skipped at
-        // open; no compact-specific rebuild exists yet.
-        for skipped in database.compact_skipped() {
-            logs::stderr(
-                "warn",
-                "maintenance",
-                json!({"event":"compact_block_skip","outcome":"unsupported_version",
-                    "collection":skipped.collection,"kind":skipped.kind,
-                    "version":skipped.version,"blocks":skipped.blocks,"rebuild":"none"})
-                .to_string(),
-            );
+        // open, which logged this record through `log` (the server installs
+        // no logger); keep it once in the admin log. Nothing is rebuilt.
+        if let Some(line) = crate::compact::skip_report(database.compact_skipped(), "load") {
+            logs::stderr("warn", "maintenance", line);
         }
         let etag_ident: Arc<str> = match lineage {
             Some(lineage) => format!("{lineage:016x}").into(),

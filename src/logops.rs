@@ -321,14 +321,15 @@ impl LogSegment {
 
 /// Cuts a segment of whole commits after `after_sequence` from an open log,
 /// stopping once at least `max_bytes` of frames were collected (always at
-/// least one commit when any are pending).
+/// least one commit when any are pending). Also returns the derived blocks a
+/// compact image skipped, which only independent readers report.
 pub(crate) fn read_segment<R: Read + Seek>(
     file: &mut R,
     key: Option<&EncryptionKey>,
     known: Option<&crate::crypto::Cipher>,
     after_sequence: u64,
     max_bytes: usize,
-) -> Result<LogSegment> {
+) -> Result<(LogSegment, Vec<crate::compact::Skipped>)> {
     let header = format::read_log_header_with(file, key, known)?;
     let lineage = header.lineage.ok_or(Error::ChangeFeedRequiresUpgrade)?;
     let mut offset = header.start;
@@ -386,14 +387,16 @@ pub(crate) fn read_segment<R: Read + Seek>(
             head,
         });
     }
-    Ok(LogSegment {
+    let segment = LogSegment {
         lineage,
         header: header.raw,
         base_sequence: after_sequence,
         last_sequence: last,
         head_sequence: head,
         frames,
-    })
+    };
+    let skipped = check.map(|check| check.skipped()).unwrap_or_default();
+    Ok((segment, skipped))
 }
 
 /// Cuts a log segment from a closed (or copied) log file. See `read_segment`.
@@ -404,5 +407,7 @@ pub fn export_log_segment(
     max_bytes: usize,
 ) -> Result<LogSegment> {
     let mut file = source(log_path.as_ref())?;
-    read_segment(&mut file, key, None, after_sequence, max_bytes)
+    let (segment, skipped) = read_segment(&mut file, key, None, after_sequence, max_bytes)?;
+    crate::compact::report(&skipped, "log_export");
+    Ok(segment)
 }

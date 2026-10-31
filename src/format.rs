@@ -1435,18 +1435,37 @@ pub(crate) fn load<R: Read + Seek>(file: &mut R) -> Result<Loaded> {
 }
 
 /// Full replay. It also accepts graph-enabled files
-/// and replays their op-12 frames into `Loaded::graph`.
+/// and replays their op-12 frames into `Loaded::graph`. Derived blocks a
+/// compact image skipped are reported (`compact::report`) once the whole
+/// replay succeeded.
 pub(crate) fn load_with<R: Read + Seek>(
+    file: &mut R,
+    key: Option<&EncryptionKey>,
+) -> Result<Loaded> {
+    reported(load_inner(file, key, None))
+}
+
+/// Like `load_with`, with an already-open cipher (`None` for plaintext logs)
+/// standing in for the key; the descriptor must match.
+pub(crate) fn load_known<R: Read + Seek>(file: &mut R, cipher: Option<&Cipher>) -> Result<Loaded> {
+    reported(load_inner(file, None, cipher))
+}
+
+/// `load_with` without the skip report, for a log whose image this handle
+/// or operation already reported: a handle's own log after it appended, or
+/// a copy written from a source that was just loaded.
+pub(crate) fn reload_with<R: Read + Seek>(
     file: &mut R,
     key: Option<&EncryptionKey>,
 ) -> Result<Loaded> {
     load_inner(file, key, None)
 }
 
-/// Like `load_with`, with an already-open cipher (`None` for plaintext logs)
-/// standing in for the key; the descriptor must match.
-pub(crate) fn load_known<R: Read + Seek>(file: &mut R, cipher: Option<&Cipher>) -> Result<Loaded> {
-    load_inner(file, None, cipher)
+fn reported(loaded: Result<Loaded>) -> Result<Loaded> {
+    if let Ok(loaded) = &loaded {
+        crate::compact::report(&loaded.compact_skipped, "load");
+    }
+    loaded
 }
 
 fn load_inner<R: Read + Seek>(

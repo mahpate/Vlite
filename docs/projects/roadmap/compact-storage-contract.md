@@ -94,15 +94,39 @@ treated as a cache miss.
 
 Reporting fixed by slice 0: no derived codec exists, so every authentic,
 declared derived block is skipped. Nothing is decoded or rebuilt from it;
-indexes are built from source data exactly as for a legacy image. Open
-counts the skipped blocks per owner, kind and codec version, and the server
-reports each group once at service start, in the same structured stderr
-JSON as `ann_snapshot_load` (also kept by `/v1/admin/logs`): level `warn`,
-target `maintenance`, `{"event":"compact_block_skip",
-"outcome":"unsupported_version", "collection", "kind", "version", "blocks",
-"rebuild":"none"}`. The library never prints, so embedded hosts and offline
-tools get no report until the decision 7 API review adds one. A skipped
-block never changes what is served.
+indexes are built from source data exactly as for a legacy image. A reader
+that validated a complete image (section 4) and succeeded reports what it
+skipped in one warning through the standard Rust `log` facade (crate `log`
+0.4, no new VLite API): level `warn`, target `vlite::compact`, and a
+message that is one JSON object, `{"event":"compact_block_skip",
+"outcome":"unknown_kind", "reader", "rebuild":"none", "blocks", "groups",
+"more_groups"}`. `blocks` is the total; `groups` lists at most 16
+`{"collection", "kind", "version", "blocks"}` entries in that order, and
+`more_groups` counts the rest, so the record stays bounded whatever the
+image holds. The outcome is `unknown_kind` because this build has no codec
+for any derived kind; `unsupported_version` is kept for a kind whose codec
+exists but lacks the block's version. `rebuild` is `none`: no
+compact-specific rebuild happens. The host chooses the logger and the sink;
+with none installed the record is dropped, and the library never prints.
+
+| `reader` | Calls |
+|---|---|
+| `load` | Every full replay: open (file, read-only, in-memory, encrypted), replica open, inspection, verification, tail repair, and the source of compact, upgrade, backup, restore, `restore_to`, re-encryption, graph enable or strip and directory conversion |
+| `change_feed` | `read_log_changes` |
+| `log_export` | `export_log_segment`, also through `ReplicaFollower::sync_from_log` |
+
+Each successful call logs once. Re-reads of a log whose image was already
+reported stay silent: a handle's own `changes_after` and `export_log`, its
+replica replay after appending a segment, and the validation of a copy
+written from a source that was just loaded. An image that is refused
+(corrupt, incomplete or unsupported), or whose load fails after the image
+check, is never reported. A complete image followed by a torn WAL tail is
+reported by the loader, and open then refuses the tail with
+`IncompleteTail`. The server also keeps the same record once at service
+start, in the same structured stderr JSON as `ann_snapshot_load` (also kept
+by `/v1/admin/logs`): level `warn`, target `maintenance`. It installs no
+`log` logger, so the record is not kept twice. A skipped block never
+changes what is served.
 
 **Version negotiation.** The capability table is the first op-16 frame of
 the image, appears exactly once, and has object, partition and digest zero.
@@ -340,7 +364,8 @@ not complete, and nothing before the first codec would use them:
 
 Background rebuild of a skipped derived kind arrives with its codec. Until
 then nothing is derived from a skipped block, so nothing stale can be
-served. An embedded or offline report needs the decision 7 API review.
+served. Skipped blocks are reported to the host's `log` logger and the
+server admin log as section 3 describes.
 
 Rules for avoiding conflicts:
 

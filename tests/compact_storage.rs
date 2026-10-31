@@ -1378,6 +1378,236 @@ fn compact_prefixes_are_checked_by_every_reader_before_a_body_is_read() {
     }
 }
 
+/// A test logger that keeps the `vlite` records of the calling thread only,
+/// so tests running in parallel never see each other's records. It is
+/// installed once for this test binary, where nothing else installs one.
+mod capture {
+    use log::{Level, LevelFilter, Log, Metadata, Record};
+    use std::cell::RefCell;
+    use std::sync::Once;
+
+    pub type Logged = Vec<(Level, String, String)>;
+
+    thread_local! {
+        static RECORDS: RefCell<Option<Logged>> = const { RefCell::new(None) };
+    }
+
+    struct Capture;
+
+    impl Log for Capture {
+        fn enabled(&self, metadata: &Metadata) -> bool {
+            metadata.target().starts_with("vlite")
+        }
+
+        fn log(&self, record: &Record) {
+            if self.enabled(record.metadata()) {
+                RECORDS.with(|records| {
+                    if let Some(records) = records.borrow_mut().as_mut() {
+                        records.push((
+                            record.level(),
+                            record.target().to_owned(),
+                            record.args().to_string(),
+                        ));
+                    }
+                });
+            }
+        }
+
+        fn flush(&self) {}
+    }
+
+    /// Runs `body` and returns it with what it logged on this thread.
+    pub fn logged<T>(body: impl FnOnce() -> T) -> (T, Logged) {
+        static INSTALL: Once = Once::new();
+        static LOGGER: Capture = Capture;
+        INSTALL.call_once(|| {
+            log::set_logger(&LOGGER).expect("the only logger in this test binary");
+            log::set_max_level(LevelFilter::Trace);
+        });
+        RECORDS.with(|records| *records.borrow_mut() = Some(Vec::new()));
+        let value = body();
+        let records = RECORDS.with(|records| records.borrow_mut().take());
+        (value, records.unwrap_or_default())
+    }
+}
+
+/// The groups of the golden image's skip report.
+const GOLDEN_GROUPS: &str = r#""blocks":3,"groups":[{"collection":0,"kind":767,"version":1,"blocks":2},{"collection":0,"kind":1279,"version":2,"blocks":1}],"more_groups":0"#;
+
+/// The one warning a reader logs for the golden image.
+fn golden_report(reader: &str) -> capture::Logged {
+    vec![(
+        log::Level::Warn,
+        "vlite::compact".to_owned(),
+        format!(
+            r#"{{"event":"compact_block_skip","outcome":"unknown_kind","reader":"{reader}","rebuild":"none",{GOLDEN_GROUPS}}}"#
+        ),
+    )]
+}
+
+/// HOLD 3 on e27a4e0, embedded and offline: a reader that validated a
+/// complete image reports its skipped derived blocks once, through the `log`
+/// facade to the host's logger, without the server and without claiming a
+/// rebuild. Refused images report nothing, and re-reads of a log whose
+/// image a handle or operation already reported do not repeat it.
+#[test]
+fn skipped_derived_blocks_are_reported_to_the_host_logger() {
+    use capture::logged;
+    let (db, records) = logged(|| open(&legacy_image()));
+    assert_golden_state(&db.unwrap());
+    assert!(records.is_empty(), "{records:?}");
+    let (db, records) = logged(|| open(&derived_image()));
+    assert_golden_state(&db.unwrap());
+    assert_eq!(records, golden_report("load"));
+
+    // Closed-file readers: open, inspection, feed, export, copies.
+    let root = tempdir().unwrap();
+    let path = root.path().join("image.vlite");
+    fs::write(&path, derived_image()).unwrap();
+    let cursor = FeedCursor {
+        lineage: LINEAGE,
+        sequence: FLOOR,
+    };
+    let backup = root.path().join("backup.vlite");
+    let sealed = root.path().join("sealed.vlite");
+    let key = EncryptionKey::from_bytes([5; 32]);
+    let readers: [(&str, &dyn Fn() -> vlite::Result<()>); 8] = [
+        ("load", &|| Database::open(&path).map(drop)),
+        ("load", &|| Database::open_read_only(&path).map(drop)),
+        ("load", &|| maintenance::inspect(&path).map(drop)),
+        ("load", &|| {
+            Database::discard_incomplete_tail(&path).map(drop)
+        }),
+        ("change_feed", &|| {
+            read_log_changes(&path, None, &cursor, 10).map(drop)
+        }),
+        ("log_export", &|| {
+            maintenance::export_log_segment(&path, None, FLOOR, 1 << 20).map(drop)
+        }),
+        // A copy is validated again before it is published; that check
+        // does not repeat the source's report.
+        ("load", &|| maintenance::backup(&path, &backup).map(drop)),
+        ("load", &|| {
+            maintenance::reencrypt(&path, None, &sealed, Some(&key)).map(drop)
+        }),
+    ];
+    for (reader, read) in readers {
+        let (result, records) = logged(read);
+        result.unwrap();
+        assert_eq!(records, golden_report(reader));
+    }
+    let (db, records) = logged(|| Database::open_encrypted(&sealed, &key));
+    assert_golden_state(&db.unwrap());
+    assert_eq!(records, golden_report("load"));
+
+    // A handle's own feed and export re-read the image its open reported.
+    let (db, records) = logged(|| Database::open(&path));
+    let mut db = db.unwrap();
+    assert_eq!(records, golden_report("load"));
+    let (result, records) = logged(|| {
+        db.put(3, &[3.0, 3.0], b"c")?;
+        db.changes_after(&cursor, 10)?;
+        db.export_log(FLOOR, 1 << 20).map(drop)
+    });
+    result.unwrap();
+    assert!(records.is_empty(), "{records:?}");
+    db.close().unwrap();
+
+    // A follower reports its own open and the primary log it reads, not the
+    // replay of its log after appending a segment.
+    let follower_path = root.path().join("follower.vlite");
+    fs::write(&follower_path, derived_image()).unwrap();
+    let (follower, records) = logged(|| ReplicaFollower::open(&follower_path, None));
+    let mut follower = follower.unwrap();
+    assert_eq!(records, golden_report("load"));
+    let (status, records) = logged(|| follower.sync_from_log(&path, 1 << 20));
+    assert_eq!(status.unwrap().applied_sequence, FLOOR + 1);
+    assert_eq!(records, golden_report("log_export"));
+    drop(follower);
+
+    // A complete image followed by a torn WAL tail is still a complete
+    // image: the loader reports it, and the open refuses the tail.
+    let mut torn = derived_image();
+    torn.extend_from_slice(&frame(2, 0, FLOOR + 1, 1, 0, &[])[..20]);
+    let (result, records) = logged(|| open(&torn));
+    assert!(matches!(result, Err(Error::IncompleteTail { .. })));
+    assert_eq!(records, golden_report("load"));
+
+    // One bounded record however many kinds were skipped.
+    let kinds: Vec<u16> = (0x0200..0x0214).collect();
+    let entries: Vec<Entry> = kinds.iter().map(|&kind| (kind, 1, 0)).collect();
+    let mut frames = vec![advance(), table_frame(&entries), records_at(FLOOR)];
+    frames.extend(
+        kinds
+            .iter()
+            .map(|&kind| Block::derived(kind, 1, 0, &[b"x"]).frame(1)),
+    );
+    let (db, records) = logged(|| open(&compact(&frames)));
+    assert_golden_state(&db.unwrap());
+    let groups: Vec<String> = kinds[..16]
+        .iter()
+        .map(|kind| format!(r#"{{"collection":0,"kind":{kind},"version":1,"blocks":1}}"#))
+        .collect();
+    assert_eq!(
+        records,
+        [(
+            log::Level::Warn,
+            "vlite::compact".to_owned(),
+            format!(
+                r#"{{"event":"compact_block_skip","outcome":"unknown_kind","reader":"load","rebuild":"none","blocks":20,"groups":[{}],"more_groups":4}}"#,
+                groups.join(",")
+            ),
+        )]
+    );
+
+    // Refused images report nothing from any reader.
+    let mut s6 = s6_frames();
+    s6.push(end_frame(&s6));
+    let full = image(FLAG_HISTORY | FLAG_COMPACT, &s6);
+    let cut = full.len() - s6[6].len() - s6[5].len();
+    let mut reserved = derived_image();
+    reserved[336 + 7] = 1;
+    reseal(&mut reserved, 336);
+    for (bytes, floor, expected) in [
+        (&full[..cut], S6, "incomplete compact checkpoint image"),
+        (
+            &reserved[..],
+            FLOOR,
+            "invalid operation or reserved record bytes",
+        ),
+    ] {
+        let ((), records) = logged(|| assert_refused_everywhere(bytes, floor, expected));
+        assert!(records.is_empty(), "{records:?}");
+    }
+    let critical = image_with(0x0100, 1);
+    let critical_path = root.path().join("critical.vlite");
+    fs::write(&critical_path, &critical).unwrap();
+    let ((), records) = logged(|| {
+        assert_unsupported(open(&critical));
+        assert_unsupported(read_log_changes(&critical_path, None, &cursor, 10));
+        assert_unsupported(maintenance::export_log_segment(
+            &critical_path,
+            None,
+            FLOOR,
+            1 << 20,
+        ));
+    });
+    assert!(records.is_empty(), "{records:?}");
+    // A complete image whose restated records fail to decode after the
+    // image check is refused without a report.
+    let mut unsorted = entry(2, 4, [0.0, 1.0], b"b");
+    unsorted.extend_from_slice(&entry(1, 2, [1.0, 0.0], b"a"));
+    let mut frames = vec![
+        advance(),
+        table_frame(&[(0x02FF, 1, 0), (0x04FF, 2, 0)]),
+        frame(OP_RECORD_BLOCK, 0, FLOOR, 0, 2, &unsorted),
+    ];
+    frames.extend(derived_blocks().iter().map(|block| block.frame(1)));
+    let (result, records) = logged(|| open(&compact(&frames)));
+    assert_corrupt(result, "invalid record block");
+    assert!(records.is_empty(), "{records:?}");
+}
+
 /// Skipped derived blocks are reported in the server's structured log
 /// (stderr and `/v1/admin/logs`), which states that nothing was rebuilt.
 #[cfg(feature = "server")]
@@ -1413,16 +1643,11 @@ async fn skipped_derived_blocks_are_reported_without_claiming_a_rebuild() {
     }
     // A legacy image skips nothing.
     assert!(reports(open(&legacy_image()).unwrap()).await.is_empty());
-    let skipped = |kind: u16, version: u16, blocks: u32| {
-        (
-            json!("warn"),
-            json!({"event": "compact_block_skip", "outcome": "unsupported_version",
-                "collection": 0, "kind": kind, "version": version, "blocks": blocks,
-                "rebuild": "none"}),
-        )
-    };
+    // The same single bounded record the library logs, kept once.
+    let expected: Value = serde_json::from_str(&golden_report("load")[0].2).unwrap();
+    assert_eq!(expected["outcome"], "unknown_kind");
     assert_eq!(
         reports(open(&derived_image()).unwrap()).await,
-        [skipped(0x02FF, 1, 2), skipped(0x04FF, 2, 1)]
+        [(json!("warn"), expected)]
     );
 }

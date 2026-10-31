@@ -1432,8 +1432,8 @@ impl Database {
         self.read_only
     }
 
-    /// Derived blocks of a compact image that open skipped; the server
-    /// reports them (no embedded report exists before the decision 7 API).
+    /// Derived blocks of a compact image that open skipped (and reported
+    /// through `log`); the server also keeps the report in its admin log.
     #[cfg_attr(not(feature = "server"), allow(dead_code))]
     pub(crate) fn compact_skipped(&self) -> &[compact::Skipped] {
         &self.compact_skipped
@@ -2339,7 +2339,9 @@ impl Database {
         // Periodic durability: never publish commits a crash could lose.
         self.sync()?;
         let mut file = &self.file;
+        // This handle's open reported any skipped compact blocks.
         changes::read_changes(&mut file, None, self.cipher.as_ref(), cursor, max_events)
+            .map(|(batch, _)| batch)
     }
 
     /// Cuts a log segment of commits after `after_sequence` for replication
@@ -2356,6 +2358,7 @@ impl Database {
             after_sequence,
             max_bytes,
         )
+        .map(|(segment, _)| segment)
     }
 
     /// Replica apply step: appends whole, already-authenticated commits to this
@@ -2375,7 +2378,8 @@ impl Database {
         let outcome = (|| -> Result<format::Loaded> {
             append_and_sync(&mut self.file, previous, bytes, |file| file.sync_all())?;
             self.file.seek(SeekFrom::Start(0))?;
-            let loaded = format::load_with(&mut self.file, key)?;
+            // Open reported the image; the appended commits skip nothing.
+            let loaded = format::reload_with(&mut self.file, key)?;
             if loaded.incomplete_bytes != 0
                 || loaded.sequence != expected_last
                 || loaded.lineage != self.lineage

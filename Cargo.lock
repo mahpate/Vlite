@@ -3197,6 +3197,7 @@ dependencies = [
  "csv",
  "getrandom 0.4.3",
  "http-body-util",
+ "log",
  "memmap2",
  "opentelemetry",
  "opentelemetry-otlp",

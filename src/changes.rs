@@ -184,13 +184,15 @@ pub struct ChangeBatch {
     pub head: u64,
 }
 
+/// Reads a batch, with the derived blocks a compact image skipped (reported
+/// by independent readers only; a handle's open already reported its own).
 pub(crate) fn read_changes<R: Read + Seek>(
     file: &mut R,
     key: Option<&EncryptionKey>,
     known: Option<&crate::crypto::Cipher>,
     cursor: &FeedCursor,
     max_events: usize,
-) -> Result<ChangeBatch> {
+) -> Result<(ChangeBatch, Vec<crate::compact::Skipped>)> {
     let header = format::read_log_header_with(file, key, known)?;
     let lineage = header.lineage.ok_or(Error::ChangeFeedRequiresUpgrade)?;
     if cursor.lineage != 0 && cursor.lineage != lineage {
@@ -217,7 +219,7 @@ fn scan<R: Read + Seek>(
     lineage: u64,
     after: u64,
     max_events: usize,
-) -> Result<ChangeBatch> {
+) -> Result<(ChangeBatch, Vec<crate::compact::Skipped>)> {
     let mut collections: BTreeMap<u16, (String, usize)> = BTreeMap::new();
     collections.insert(0, ("default".to_string(), header.dimensions));
     let mut offset = header.start;
@@ -439,7 +441,7 @@ fn scan<R: Read + Seek>(
             head,
         });
     }
-    Ok(ChangeBatch {
+    let batch = ChangeBatch {
         changes,
         next: FeedCursor {
             lineage,
@@ -447,7 +449,9 @@ fn scan<R: Read + Seek>(
         },
         has_more,
         head,
-    })
+    };
+    let skipped = check.map(|check| check.skipped()).unwrap_or_default();
+    Ok((batch, skipped))
 }
 
 /// Reads changes from a closed (or copied) log file without opening a
@@ -459,7 +463,9 @@ pub fn read_log_changes(
     max_events: usize,
 ) -> Result<ChangeBatch> {
     let mut file = std::fs::File::open(path.as_ref())?;
-    read_changes(&mut file, key, None, cursor, max_events)
+    let (batch, skipped) = read_changes(&mut file, key, None, cursor, max_events)?;
+    crate::compact::report(&skipped, "change_feed");
+    Ok(batch)
 }
 
 #[cfg(feature = "json")]

@@ -7,10 +7,11 @@
 //! body, and each op-16 body once it is verified. Slice 0 has no block codec:
 //! a critical or unassigned kind refuses the whole image with
 //! `UnsupportedFeature(FLAG_COMPACT)` once the table is fully validated, and
-//! an authentic block of a declared derived kind is skipped and counted for
-//! reporting. Every other irregularity is `Corrupt`, including a log that
-//! ends anywhere before the end block: only bytes after a complete image can
-//! be a torn WAL tail.
+//! an authentic block of a declared derived kind is skipped and counted.
+//! A reader that validated a complete image reports the skipped blocks in
+//! one bounded `log` warning (`report`). Every other irregularity is
+//! `Corrupt`, including a log that ends anywhere before the end block: only
+//! bytes after a complete image can be a torn WAL tail.
 
 use crate::format::{
     FLAG_COMPACT, OP_ADVANCE, OP_COMPACT_BLOCK, OP_GRAPH_SNAPSHOT, OP_RECORD_BLOCK, PREFIX_SIZE,
@@ -54,13 +55,56 @@ fn registered(kind: u16) -> Option<bool> {
 
 /// Authentic, declared derived blocks of one owner, kind and codec version
 /// that this build skipped: nothing was decoded or rebuilt from them.
-#[cfg_attr(not(feature = "server"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Skipped {
     pub collection: u16,
     pub kind: u16,
     pub version: u16,
     pub blocks: u64,
+}
+
+/// Groups listed in one skip report; the rest are only counted.
+const REPORT_GROUPS: usize = 16;
+
+/// Reports the derived blocks that `reader` skipped in an image it fully
+/// validated: one `warn` record for target `vlite::compact` through the
+/// `log` facade, whose logger and sink the host chooses. Nothing is logged
+/// when nothing was skipped.
+pub(crate) fn report(skipped: &[Skipped], reader: &'static str) {
+    if let Some(line) = skip_report(skipped, reader) {
+        log::warn!(target: "vlite::compact", "{line}");
+    }
+}
+
+/// The skip report as one bounded JSON object: totals, then at most
+/// `REPORT_GROUPS` groups. This build has no derived codec, so every skipped
+/// kind is unknown to it (`unknown_kind`); `unsupported_version` is left for
+/// a kind whose codec exists but lacks that version. Nothing is rebuilt.
+pub(crate) fn skip_report(skipped: &[Skipped], reader: &'static str) -> Option<String> {
+    use std::fmt::Write;
+    if skipped.is_empty() {
+        return None;
+    }
+    let blocks: u64 = skipped.iter().map(|group| group.blocks).sum();
+    let mut line = format!(
+        r#"{{"event":"compact_block_skip","outcome":"unknown_kind","reader":"{reader}","rebuild":"none","blocks":{blocks},"groups":["#
+    );
+    for (index, group) in skipped.iter().take(REPORT_GROUPS).enumerate() {
+        let separator = if index == 0 { "" } else { "," };
+        let Skipped {
+            collection,
+            kind,
+            version,
+            blocks,
+        } = group;
+        let _ = write!(
+            line,
+            r#"{separator}{{"collection":{collection},"kind":{kind},"version":{version},"blocks":{blocks}}}"#
+        );
+    }
+    let more = skipped.len().saturating_sub(REPORT_GROUPS);
+    let _ = write!(line, r#"],"more_groups":{more}}}"#);
+    Some(line)
 }
 
 /// Checks the frames of a `FLAG_COMPACT` image in log order: every frame
