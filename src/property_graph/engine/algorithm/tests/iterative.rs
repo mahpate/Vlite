@@ -1276,6 +1276,67 @@ fn shared_sorts_keep_degree_and_path_results_and_units() {
     }
 }
 
+/// The arc count is accumulated while extraction retains each edge: no
+/// graph-sized pass follows the final check, and loops, directions and
+/// early stops keep their arc counts.
+#[test]
+fn arcs_are_counted_during_extraction_not_after_the_final_check() {
+    use super::super::LATE;
+    let late = || LATE.with(Cell::get);
+    let names: Vec<String> = (0..300).map(|index| format!("n{index}")).collect();
+    let keys: Vec<&str> = names.iter().map(String::as_str).collect();
+    // A 299-edge chain plus a self-loop on every tenth node.
+    let mut edges: Vec<_> = keys
+        .windows(2)
+        .map(|pair| (pair[0], pair[1], None))
+        .collect();
+    edges.extend(keys.iter().step_by(10).map(|&node| (node, node, None)));
+    let db = small(&keys, &edges);
+    let graph = db.graph();
+    // Runs may stop at their iteration cap: arcs depend only on the scope.
+    let caps = iterations(20);
+    let wide = GraphLimits {
+        max_edges_examined: GraphLimits::CEILING.max_edges_examined,
+        ..hops(0)
+    };
+    for (direction, arcs) in [
+        (Direction::Both, 2 * 299 + 30),
+        (Direction::Out, 329),
+        (Direction::In, 329),
+    ] {
+        let all = everything(graph, direction);
+        for algorithm in [
+            Algorithm::LabelPropagation,
+            rank(0.5, None),
+            Algorithm::Degree,
+        ] {
+            LATE.with(|count| count.set(0));
+            let full = run_at(graph, &all, &algorithm, &wide, &caps, 0).unwrap();
+            assert!(full.scope_complete, "{:?}", full.truncation);
+            assert_eq!(
+                late(),
+                0,
+                "{direction:?} {algorithm:?}: projection edges visited after the final check"
+            );
+            assert_eq!(full.stats.arcs, arcs, "{direction:?} {algorithm:?}");
+            // An iterative run stopped after extraction keeps its scope and
+            // arc count; a run stopped during extraction has neither.
+            let mut limits = iterations(20);
+            limits.max_vertex_operations = full.stats.vertex_operations - 1;
+            LATE.with(|count| count.set(0));
+            let short = run_at(graph, &all, &algorithm, &wide, &limits, 0).unwrap();
+            assert_eq!(short.truncation, vec![AlgorithmTruncation::VertexLimit]);
+            assert!(short.scope_complete);
+            assert_eq!(short.stats.arcs, arcs);
+            assert_eq!(late(), 0);
+            let mut limits = iterations(20);
+            limits.max_vertex_operations = 300;
+            let early = run_at(graph, &all, &algorithm, &wide, &limits, 0).unwrap();
+            assert!(early.projection.is_none() && early.stats.arcs == 0);
+        }
+    }
+}
+
 #[test]
 fn checked_sort_is_stable_and_costs_exactly_its_sort_cost() {
     use super::super::{sort_by, sort_dedup};

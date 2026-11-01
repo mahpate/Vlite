@@ -308,6 +308,7 @@ so relocation runs under the 64-operation checks (vertex units grow by the moved
 Reservations accumulate and are never released, so old and simultaneously live buffers stay charged and the total bounds the peak.
 Uncharged: the result envelope (flags, stats, at most one truncation reason with at most one node ID), error values and allocator headers.
 `arcs` counts computational arcs: one per retained edge for Out and In, two per non-loop edge and one per loop for Both.
+Extraction counts them as it retains each edge, so no graph-sized pass follows the final check.
 
 ### Numeric rules as implemented
 

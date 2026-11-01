@@ -583,6 +583,7 @@ pub fn run_with<'s, S: Seed, T>(
     let (mut meter, begin) = Meter::start(context, limits, caps);
     let mut prepared = None;
     let mut projection = None;
+    let mut arcs = 0;
     let computed = begin.map_err(Halt::from).and_then(|()| {
         let conditions = conditions(&mut meter)?;
         let ready = prepared.insert(Prepared::new(
@@ -598,7 +599,9 @@ pub fn run_with<'s, S: Seed, T>(
             expired_at,
             edge_zero: ready.types.as_ref().and_then(|_| graph.edge(EdgeId(0))),
         };
-        let extracted = projection.insert(local.extract(&ready.seeds, &mut meter)?);
+        let (extracted, counted) = local.extract(&ready.seeds, &mut meter)?;
+        arcs = counted;
+        let extracted = projection.insert(extracted);
         let finished = |output| Finished {
             output,
             seeds: &ready.seeds,
@@ -700,9 +703,9 @@ pub fn run_with<'s, S: Seed, T>(
     let stats = AlgorithmStats {
         nodes_extracted: projection.as_ref().map_or(0, |p| p.nodes.len() as u64),
         edges_extracted: projection.as_ref().map_or(0, |p| p.edges.len() as u64),
-        arcs: projection
-            .as_ref()
-            .map_or(0, |p| arc_count(p, request.direction) as u64),
+        // Counted as extraction retained each edge: nothing graph-sized
+        // runs after the final check.
+        arcs,
         edges_examined: meter.edges,
         vertex_operations: meter.vertices,
         scratch_bytes: meter.scratch,
@@ -973,6 +976,24 @@ thread_local! {
 
 #[cfg(test)]
 thread_local! {
+    /// Whether this thread's latest run made its final check, and the
+    /// projection edges visited after it (tests only).
+    static FINISHED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static LATE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Records one visit to a projection edge (retaining it, or any pass over
+/// the retained edges); counted when it follows the final check (a no-op
+/// outside tests).
+fn visited() {
+    #[cfg(test)]
+    if FINISHED.with(std::cell::Cell::get) {
+        LATE.with(|count| count.set(count.get() + 1));
+    }
+}
+
+#[cfg(test)]
+thread_local! {
     /// Items a growing buffer moved to its new allocation (tests only).
     static MOVED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
@@ -1059,24 +1080,6 @@ fn merge_sort<T: Copy>(
     meter.vertices(sort_cost(count) - examined)
 }
 
-/// Computational arcs of a projection: two per non-loop edge for `Both`.
-fn arc_count(projection: &Projection, direction: Direction) -> usize {
-    match direction {
-        Direction::Both => projection
-            .edges
-            .iter()
-            .map(|edge| {
-                if edge.source == edge.destination {
-                    1
-                } else {
-                    2
-                }
-            })
-            .sum(),
-        Direction::Out | Direction::In => projection.edges.len(),
-    }
-}
-
 /// Appends `item`, first doubling a full buffer (at least 4 slots) into a
 /// new allocation reserved at its full capacity; the old one stays charged.
 /// Each moved item is charged one vertex unit as it moves.
@@ -1143,6 +1146,8 @@ impl<'a> Meter<'a> {
         limits: &GraphLimits,
         caps: &GraphAlgorithmLimits,
     ) -> (Self, Result<(), AlgorithmTruncation>) {
+        #[cfg(test)]
+        FINISHED.with(|finished| finished.set(false));
         let meter = Self {
             context,
             started: (context.clock)(),
@@ -1224,6 +1229,8 @@ impl<'a> Meter<'a> {
 
     /// The final clock read: elapsed time and the last check.
     fn finish(&self) -> (u64, Result<(), AlgorithmTruncation>) {
+        #[cfg(test)]
+        FINISHED.with(|finished| finished.set(true));
         let now = (self.context.clock)();
         (now.saturating_sub(self.started), self.check(now))
     }
@@ -1344,7 +1351,10 @@ impl Local<'_> {
     /// sorted, deduplicated, checked against `max_visited_nodes` and merged
     /// into the ascending admitted set, which then answers membership by
     /// binary search.
-    fn extract(&self, seeds: &[NodeId], meter: &mut Meter<'_>) -> Result<Projection, Halt> {
+    ///
+    /// Also returns the computational arcs, counted as each edge is
+    /// retained: two per non-loop edge for `Both`, else one.
+    fn extract(&self, seeds: &[NodeId], meter: &mut Meter<'_>) -> Result<(Projection, u64), Halt> {
         meter.reserve(seeds.len(), size_of::<NodeId>())?;
         let mut admitted = Vec::with_capacity(seeds.len());
         for &seed in seeds {
@@ -1384,6 +1394,7 @@ impl Local<'_> {
         drop(frontier);
         let nodes = admitted;
         let mut edges = Vec::new();
+        let mut arcs = 0u64;
         for (position, &node) in nodes.iter().enumerate() {
             meter.vertex()?;
             self.scan(node, meter, |edge, meter| {
@@ -1407,11 +1418,17 @@ impl Local<'_> {
                     source,
                     destination,
                 };
+                visited();
+                arcs += if self.direction == Direction::Both && source != destination {
+                    2
+                } else {
+                    1
+                };
                 Ok(push(&mut edges, projected, meter)?)
             })?;
         }
         sort_by(&mut edges, |a, b| a.id < b.id, meter)?;
-        Ok(Projection { nodes, edges })
+        Ok((Projection { nodes, edges }, arcs))
     }
 }
 
@@ -1454,6 +1471,7 @@ fn degree(
         incident_degree: 0,
     }));
     for edge in &projection.edges {
+        visited();
         meter.edge()?;
         let (tail, head) = orient(edge, direction);
         rows[tail].out_degree += 1;
@@ -1508,6 +1526,7 @@ impl Local<'_> {
         let mut offsets = vec![0usize; count + 1];
         let mut span = Span::default();
         for edge in edges {
+            visited();
             meter.edge()?;
             let weight = match weight_property {
                 None => UNIT,
@@ -1573,6 +1592,7 @@ impl Local<'_> {
                 Ok::<(), AlgorithmTruncation>(())
             };
         for (edge, &weight) in edges.iter().zip(&weights) {
+            visited();
             let (tail, head) = orient(edge, direction);
             place(tail, head, edge.id, weight, meter)?;
             if direction == Direction::Both && tail != head {
