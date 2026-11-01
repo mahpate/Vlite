@@ -172,6 +172,7 @@ impl Local<'_> {
         let mut weights = Vec::with_capacity(edges.len());
         let mut sums = filled(count, 0.0f64, meter)?;
         for edge in edges {
+            super::visited();
             meter.edge()?;
             let weight = match rank.weight_property {
                 None => 1.0,
@@ -240,6 +241,7 @@ impl Local<'_> {
                 Ok::<(), AlgorithmTruncation>(())
             };
             for (edge, &weight) in edges.iter().zip(&weights) {
+                super::visited();
                 let (tail, head) = orient(edge, direction);
                 spread(tail, head, weight, meter)?;
                 if both && tail != head {
@@ -322,6 +324,7 @@ pub(super) fn label_propagation(
     meter.reserve(capacity, size_of::<(usize, usize)>())?;
     let mut pairs = Vec::with_capacity(capacity);
     for edge in edges {
+        super::visited();
         meter.edge()?;
         if edge.source != edge.destination {
             pairs.push((edge.source, edge.destination));

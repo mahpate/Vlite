@@ -1001,6 +1001,7 @@ fn a_precision_image_keeps_series_and_revisions() {
         bytes
     };
     let mut db = Database::open_from_bytes(image(&loaded), None).unwrap();
+    let start = db.feed_cursor().unwrap();
     populate(&mut db);
     write(
         &mut db,
@@ -1021,11 +1022,49 @@ fn a_precision_image_keeps_series_and_revisions() {
         )
     };
     let before = observe(&db);
+    // A graph first created after the image has the file's capability.
+    let batch = db.temporal_changes_after(&start, 100).unwrap();
+    let temporal = batch
+        .changes
+        .iter()
+        .filter(|change| {
+            matches!(&change.kind, ChangeKind::GraphBatch { operations, .. }
+                if matches!(operations[..], [GraphChange::Temporal(_)]))
+        })
+        .count();
+    assert_eq!(temporal, 2);
     let loaded = format::load_with(&mut Cursor::new(db.to_bytes().unwrap()), None).unwrap();
     assert_eq!(
         loaded.flags & (FLAG_PRECISION | FLAG_TEMPORAL),
         FLAG_PRECISION | FLAG_TEMPORAL
     );
-    let reopened = Database::open_from_bytes(image(&loaded), None).unwrap();
+    let mut reopened = Database::open_from_bytes(image(&loaded), None).unwrap();
     assert_eq!(observe(&reopened), before);
+
+    // The feed checks the graph frames after a precision image as replay
+    // follows them (P3a), temporal ones included: it reports them, and the
+    // feeds without temporal changes refuse them as unsupported.
+    let head = reopened.feed_cursor().unwrap();
+    let r = revision(&reopened, "ab");
+    let s = write(
+        &mut reopened,
+        &[
+            close("ab", Some(10), None, 20, Expected::Revision(r)),
+            append("ab", seg(Some(20), None, 3), Expected::Revision(r)),
+            legacy("bd", 4),
+        ],
+    )
+    .unwrap()
+    .revision
+    .unwrap();
+    let batch = reopened.temporal_changes_after(&head, 10).unwrap();
+    assert_eq!(graph_batches(&batch)[0].0, s);
+    assert_eq!(graph_batches(&batch)[0].1.len(), 3);
+    assert!(matches!(
+        reopened.changes_after(&head, 10),
+        Err(Error::UnsupportedFeature(FLAG_TEMPORAL))
+    ));
+    let after = observe(&reopened);
+    let bytes = reopened.to_bytes().unwrap();
+    assert_eq!(observe(&Database::open_from_bytes(bytes, None).unwrap()), after);
 }

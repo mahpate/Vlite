@@ -1562,5 +1562,7 @@ impl Graph {
 mod snapshot;
 mod temporal;
 
+pub use snapshot::SnapshotBuilder;
+
 #[cfg(test)]
 mod tests;

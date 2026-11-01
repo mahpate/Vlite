@@ -28,7 +28,9 @@ struct Tracked {
     attachments: BTreeMap<(u64, u16), u64>,
 }
 
-/// Graph state the feed needs to name what each frame changed.
+/// Graph state the feed needs to name what each frame changed. The default
+/// tracks a log without the temporal capability.
+#[derive(Default)]
 pub(crate) struct FeedGraphs {
     graphs: BTreeMap<u16, Tracked>,
     /// Gap 4: the log header has the temporal capability.

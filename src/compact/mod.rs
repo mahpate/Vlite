@@ -21,7 +21,8 @@ use crate::format::{
     OP_COMPACT_BLOCK, OP_GRAPH_SNAPSHOT, OP_RECORD_BLOCK, PREFIX_SIZE, RawFrame, corrupt,
     frame_allowed, u16_at, u32_at, u64_at,
 };
-use crate::property_graph::engine::{GraphBody, GraphEntry};
+use crate::property_graph::engine::codec::OP_GRAPH;
+use crate::property_graph::engine::{GraphBody, GraphEntry, GraphState};
 use crate::{Error, Result};
 use catalog::{KIND_CATALOG, KIND_IMPORTS, KIND_REVISIONS, Precision};
 use sha2::{Digest, Sha256};
@@ -357,6 +358,44 @@ struct Live {
     records: BTreeMap<u64, bool>,
 }
 
+/// Whether a graph of `graph` attached `record` of `collection`, which
+/// replay may then neither delete nor expire.
+fn attached(graph: Option<&GraphState>, collection: u16, record: u64) -> bool {
+    graph.is_some_and(|graph| graph.attachment_owner(collection, record).is_some())
+}
+
+/// Graph frames and snapshots check and change the live records as they
+/// check and change replay's collections (`frame::replay`).
+impl crate::property_graph::frame::GraphRecords for BTreeMap<u16, Live> {
+    fn dimensions(&self, collection: u16) -> Option<usize> {
+        self.get(&collection).map(|live| live.dimensions)
+    }
+
+    fn check_dense(&self, collection: u16, vector: &[f32], offset: u64) -> Result<()> {
+        crate::format::check_dense(self[&collection].precision, vector, offset)
+    }
+
+    fn apply(&mut self, collection: u16, mutation: crate::Mutation, _sequence: u64) {
+        let records = &mut self
+            .get_mut(&collection)
+            .expect("collection checked while decoding")
+            .records;
+        match mutation {
+            crate::Mutation::Put { id, .. } | crate::Mutation::PutWithMetadata { id, .. } => {
+                records.insert(id, false);
+            }
+            crate::Mutation::Delete { id } => {
+                records.remove(&id);
+            }
+        }
+    }
+
+    fn lasting(&self, collection: u16, record: u64) -> bool {
+        self.get(&collection)
+            .is_some_and(|live| live.records.get(&record) == Some(&false))
+    }
+}
+
 /// Checks the frames of a `FLAG_COMPACT` image in log order: every frame
 /// prefix (`prefix`) before its body is read, each verified op-16 body
 /// (`block`), and `end` where the log or the scan ends.
@@ -381,10 +420,15 @@ pub(crate) struct ImageCheck {
     described: BTreeMap<u16, Live>,
     collection_high: u16,
     /// In a precision log, its import jobs, followed as replay follows
-    /// them; and the graph snapshot bodies read so far with the offset of
-    /// the first, loaded as replay loads them where the snapshot ends.
+    /// them; the graph snapshot of its image while it is read, loaded as
+    /// replay loads it, body by body, and checked where it ends; and the
+    /// graph state replay holds at the frame being checked (the snapshot's,
+    /// then followed through each graph frame after the image as replay
+    /// follows it), against which graph frames and record deletes and
+    /// expiries are checked.
     jobs: crate::format::ImportJobs,
-    pending: Option<(u64, Vec<GraphBody>)>,
+    pending: Option<crate::property_graph::frame::PendingSnapshot>,
+    graph: Option<GraphState>,
     entries: Option<Table>,
     /// The run of blocks being read (owner, kind, next partition), and runs
     /// that ended and may not resume.
@@ -430,6 +474,7 @@ impl ImageCheck {
             collection_high: collection_floor,
             jobs: Default::default(),
             pending: None,
+            graph: None,
             entries: None,
             run: None,
             ended: BTreeSet::new(),
@@ -590,6 +635,24 @@ impl ImageCheck {
         Ok(())
     }
 
+    /// Checks a frame prefix that `prefix` accepted, in a precision log, as
+    /// replay checks it before reading the body or treating a short final
+    /// frame as a torn tail (`format::check_frame_prefix`): a graph frame's
+    /// limits, the live collection a record or metadata frame targets, and
+    /// the operation's limits. The collections are those of the frames
+    /// before it, which `frame` followed.
+    pub(crate) fn limits(&self, prefix: &[u8; PREFIX_SIZE], offset: u64) -> Result<()> {
+        if !self.precise {
+            return Ok(());
+        }
+        crate::format::check_frame_prefix(prefix, self.version, offset, |id| {
+            self.described
+                .get(&id)
+                .map(|live| (live.dimensions, live.precision))
+        })
+        .map(drop)
+    }
+
     /// Checks the verified (and decrypted) body of any frame whose prefix
     /// `prefix` accepted, for readers that do not replay the log: op-16
     /// blocks (`block`); and in a precision log every frame as full replay
@@ -641,14 +704,39 @@ impl ImageCheck {
                 )?;
                 self.snapshot(&snapshot, offset)?;
                 self.pending
-                    .get_or_insert_with(|| (offset, Vec::new()))
-                    .1
+                    .get_or_insert_with(|| {
+                        crate::property_graph::frame::PendingSnapshot::new(frame.sequence, offset)
+                    })
                     .push(snapshot);
+                Ok(None)
+            }
+            // The prefix check admits graph frames in a precision log only
+            // after its image, where replay never restates them, and
+            // checked their limits.
+            OP_GRAPH if self.precise => {
+                // Gap 4: a graph state first made after the image has the
+                // file's temporal capability, as replay's has.
+                if self.graph.is_none() {
+                    let mut state = GraphState::new();
+                    crate::property_graph::temporal::adopt(&mut state, self.flags, offset)?;
+                    self.graph = Some(state);
+                }
+                crate::property_graph::frame::replay(
+                    self.graph.get_or_insert_with(GraphState::new),
+                    &mut self.described,
+                    frame.sequence,
+                    frame.id,
+                    frame.count,
+                    body,
+                    offset,
+                    false,
+                )?;
                 Ok(None)
             }
             _ if self.precise => {
                 let floor = self.floor.expect("frames follow the advance");
                 let described = &self.described;
+                let graph = self.graph.as_ref();
                 let writes = crate::format::check_frame_writes(
                     frame,
                     self.version,
@@ -664,6 +752,7 @@ impl ImageCheck {
                             .get(&id)
                             .is_some_and(|live| live.records.contains_key(&record))
                     },
+                    |collection, record| attached(graph, collection, record),
                 )?;
                 // The ID of a collection frame that passed is a collection
                 // ID.
@@ -705,6 +794,18 @@ impl ImageCheck {
                     self.jobs
                         .marker(frame.collection, marker, *entries, offset)?;
                 }
+                // A batch may not delete a record a graph attached, which
+                // replay refuses after the import marker.
+                if frame.operation == 3
+                    && writes.records.iter().any(|&(collection, record, put)| {
+                        put.is_none() && attached(self.graph.as_ref(), collection, record)
+                    })
+                {
+                    return Err(corrupt(
+                        offset,
+                        "graph attachment references a missing or expiring record",
+                    ));
+                }
                 for (collection, record, put) in writes.records {
                     let records = &mut self
                         .described
@@ -722,27 +823,21 @@ impl ImageCheck {
         }
     }
 
-    /// Loads the graph snapshot of a precision image read so far, if any,
-    /// as replay loads it (`frame::load_snapshot`): canonical, and attaching
-    /// only records that are live without an expiry. Replay keeps the
-    /// state; this check drops it.
+    /// Finishes loading the graph snapshot of a precision image read so
+    /// far, if any, as replay finishes it (`frame::PendingSnapshot`):
+    /// canonical, and attaching only records that are live without an
+    /// expiry. The state is kept, as replay keeps it, to check the graph
+    /// frames and record deletes and expiries after the image.
     fn load_snapshot(&mut self) -> Result<()> {
-        let Some((first, bodies)) = self.pending.take() else {
-            return Ok(());
-        };
-        let floor = self.floor.expect("snapshots follow the advance");
-        let described = &self.described;
-        crate::property_graph::frame::load_snapshot(
-            |collection, record| {
-                described
-                    .get(&collection)
-                    .is_some_and(|live| live.records.get(&record) == Some(&false))
-            },
-            floor,
-            bodies,
-            first,
-        )
-        .map(drop)
+        if let Some(pending) = self.pending.take() {
+            // Gap 4: the snapshot's state has the file's temporal
+            // capability, as replay's has (`format::load_graph_image`).
+            let first = pending.first();
+            let mut state = pending.finish(&self.described)?;
+            crate::property_graph::temporal::adopt(&mut state, self.flags, first)?;
+            self.graph = Some(state);
+        }
+        Ok(())
     }
 
     /// Notes a collection of a precision log: one its image restates (op 5,
