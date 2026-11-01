@@ -37,8 +37,9 @@ pub(crate) const BLOCK_ROWS: usize = 1024;
 /// bytes (16 per point); past that it only answers "possibly present".
 const MAX_DICTIONARY_VALUES: usize = 32;
 const MAX_DICTIONARY_BYTES: usize = 1024;
-/// Memory one collection's summaries may use, IDs and bitmap included.
-/// Past it the collection keeps scanning everything.
+/// Heap one collection's summaries may hold: names, IDs, bitmap, block
+/// summaries and overlay, at their allocated capacities (allocator overhead
+/// excluded). Past it the collection keeps scanning everything.
 const BUDGET_BYTES: usize = 64 << 20;
 /// Changes after which summaries are derived again: superseded rows plus
 /// overlaid IDs above `max(MIN_REBUILD_CHURN, rows / 4)`.
@@ -288,12 +289,14 @@ impl FieldSummary {
         }
     }
 
+    /// Heap bytes the field holds: its dictionaries at their capacities,
+    /// each string at its own.
     fn heap_bytes(&self) -> usize {
         let strings = match &self.strings {
-            Dictionary::Values(values) => values
-                .iter()
-                .map(|value| size_of::<String>() + value.capacity())
-                .sum(),
+            Dictionary::Values(values) => {
+                values.capacity() * size_of::<String>()
+                    + values.iter().map(String::capacity).sum::<usize>()
+            }
             Dictionary::Overflow => 0,
         };
         let points = match &self.points {
@@ -368,12 +371,14 @@ impl BlockSummary {
         status
     }
 
+    /// Heap bytes the block holds: its field list at its capacity and the
+    /// fields' dictionaries. The block itself is in the block list.
     fn heap_bytes(&self) -> usize {
-        size_of::<Self>()
+        self.fields.capacity() * size_of::<FieldSummary>()
             + self
                 .fields
                 .iter()
-                .map(|field| size_of::<FieldSummary>() + field.heap_bytes())
+                .map(FieldSummary::heap_bytes)
                 .sum::<usize>()
     }
 }
@@ -444,6 +449,9 @@ impl Segment {
 pub(crate) struct View {
     pub segments: Vec<Segment>,
     pub overlay: BTreeSet<u64>,
+    /// Bytes charged when the view was derived; the overlay is charged on
+    /// top by `overlay_bytes`.
+    pub bytes: usize,
 }
 
 impl View {
@@ -483,6 +491,25 @@ impl View {
         ids.extend(&self.overlay);
         (ids.len() <= cap).then_some((ids, pruned))
     }
+}
+
+/// Upper bound on the heap bytes of an overlay of `ids` IDs. std's B-tree
+/// nodes hold at most 11 keys and, below the root, at least 5; with `u64`
+/// keys a leaf takes 104 bytes and an internal node 200, so `n` keys take
+/// at most 24 n + 168 bytes (an emptied tree may keep its root leaf). The
+/// tests check the bound against the allocator.
+fn overlay_bytes(ids: usize) -> usize {
+    ids.saturating_mul(24).saturating_add(168)
+}
+
+/// Logs that summaries of `rows` records need at least `bytes`, over
+/// `budget`, and scans everything until churn allows another try.
+fn over_budget(rows: usize, bytes: usize, budget: usize) -> State {
+    log::warn!(
+        target: "vlite::filter",
+        r#"{{"event":"filter_summary_budget","outcome":"exact_scan","rows":{rows},"min_bytes":{bytes},"budget":{budget}}}"#
+    );
+    State::OverBudget { rows, pending: 0 }
 }
 
 /// Filter summaries of one collection over its declared index fields.
@@ -549,7 +576,11 @@ impl Summaries {
         if !prunable {
             return None;
         }
-        match self.state.get_or_init(|| self.derive(records)) {
+        let derive = || {
+            let rows = records.iter().map(|(&id, record)| (id, &record.metadata));
+            self.derive(records.len(), rows)
+        };
+        match self.state.get_or_init(derive) {
             State::Ready(view) => view
                 .candidates(conditions, cap)
                 .and_then(|(ids, pruned)| pruned.then_some(ids)),
@@ -557,34 +588,39 @@ impl Summaries {
         }
     }
 
-    /// One generation of `records` in ID order, or `OverBudget` (logged)
-    /// when its IDs, bitmap and summaries would pass `budget`.
-    fn derive(&self, records: &RecordMap) -> State {
-        let rows = records.len();
-        let over = |bytes: usize| {
-            log::warn!(
-                target: "vlite::filter",
-                r#"{{"event":"filter_summary_budget","outcome":"exact_scan","rows":{rows},"min_bytes":{bytes},"budget":{}}}"#,
-                self.budget
-            );
-            State::OverBudget { rows, pending: 0 }
-        };
-        let mut bytes = rows
-            .saturating_mul(8)
-            .saturating_add(rows.div_ceil(64).saturating_mul(8));
+    /// Heap bytes charged before any row is read: the covered names (one
+    /// `Arc` shared by every block), the IDs, the bitmap and the block and
+    /// segment lists of `rows` rows, all at the capacities `derive` uses.
+    fn fixed_bytes(&self, rows: usize) -> usize {
+        let names = 2 * size_of::<usize>()
+            + self.names.len() * size_of::<String>()
+            + self.names.iter().map(String::capacity).sum::<usize>();
+        [
+            names,
+            rows.saturating_mul(size_of::<u64>()),
+            rows.div_ceil(64).saturating_mul(size_of::<u64>()),
+            rows.div_ceil(BLOCK_ROWS)
+                .saturating_mul(size_of::<BlockSummary>()),
+            size_of::<Segment>(),
+        ]
+        .into_iter()
+        .fold(0, usize::saturating_add)
+    }
+
+    /// One generation of the `count` (public ID, metadata) `rows`, in
+    /// ascending ID order, or `OverBudget` (logged) when the heap it holds
+    /// would pass `budget`: the fixed bytes, then every block's.
+    fn derive<'a>(&self, count: usize, rows: impl Iterator<Item = (u64, &'a Metadata)>) -> State {
+        let over = |bytes| over_budget(count, bytes, self.budget);
+        let mut bytes = self.fixed_bytes(count);
         if bytes > self.budget {
             return over(bytes);
         }
-        let ids: Vec<u64> = records.keys().copied().collect();
-        let mut blocks = Vec::with_capacity(rows.div_ceil(BLOCK_ROWS));
-        let mut scan = records.iter();
+        let mut ids = Vec::with_capacity(count);
+        let mut blocks = Vec::with_capacity(count.div_ceil(BLOCK_ROWS));
+        let mut rows = rows.inspect(|&(id, _)| ids.push(id));
         loop {
-            let block = BlockSummary::build(
-                &self.names,
-                scan.by_ref()
-                    .take(BLOCK_ROWS)
-                    .map(|(&id, record)| (id, &record.metadata)),
-            );
+            let block = BlockSummary::build(&self.names, rows.by_ref().take(BLOCK_ROWS));
             if block.rows == 0 {
                 break;
             }
@@ -594,9 +630,12 @@ impl Summaries {
             }
             blocks.push(block);
         }
+        drop(rows);
+        debug_assert_eq!(ids.len(), count);
         State::Ready(View {
             segments: vec![Segment::new(ids, blocks)],
             overlay: BTreeSet::new(),
+            bytes,
         })
     }
 
@@ -604,7 +643,8 @@ impl Summaries {
     /// before the record is replaced. Changes to uncovered fields only keep
     /// the row in its block; others supersede it and overlay the latest
     /// revision. Past `threshold` the summaries are dropped and derived
-    /// again by the next query that can use them.
+    /// again by the next query that can use them; an overlay that would
+    /// pass `budget` first drops them as an over-budget derivation does.
     pub(crate) fn track(
         &mut self,
         id: u64,
@@ -642,6 +682,10 @@ impl Summaries {
                     .map(|segment| segment.superseded_rows)
                     .sum::<usize>()
                     + view.overlay.len();
+                let bytes = view.bytes.saturating_add(overlay_bytes(view.overlay.len()));
+                if churn <= threshold(rows) && bytes > self.budget {
+                    *state = over_budget(rows, bytes, self.budget);
+                }
                 churn > threshold(rows)
             }
             State::OverBudget { rows, pending } => {

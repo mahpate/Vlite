@@ -15,6 +15,8 @@ use crate::format::{self, FLAG_COMPACT, FLAG_HISTORY, PREFIX_SIZE};
 use crate::{Error, Record};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::collections::BTreeMap;
 
 fn int(value: i64) -> MetadataValue {
@@ -842,8 +844,8 @@ fn over_budget_summaries_scan_until_churn_allows_a_retry() {
         .collect();
     let mut summaries = Summaries::new(["n".to_owned()]);
     let one = [eq("n", int(4097))];
-    // Room for the IDs and the bitmap, but not for one block summary.
-    summaries.budget = 8 * rows as usize + (rows as usize).div_ceil(64) * 8;
+    // Room for the names, IDs, bitmap and lists, but not for one block.
+    summaries.budget = summaries.fixed_bytes(rows as usize);
     assert_eq!(summaries.candidates(&one, &records, usize::MAX), None);
     assert!(matches!(
         summaries.state.get(),
@@ -869,6 +871,430 @@ fn over_budget_summaries_scan_until_churn_allows_a_retry() {
     summaries.state = OnceLock::new();
     let ids = summaries.candidates(&one, &records, usize::MAX).unwrap();
     assert_eq!(ids, (4097..4097 + BLOCK_ROWS as u64).collect());
+}
+
+// ------------------------------------------------------- memory accounting
+
+/// The lib test binary's allocator: `System`, also counting the net heap
+/// bytes (requested sizes, as `Vec` and `String` capacities are) that the
+/// current thread allocates while `counted` runs. Other threads, and this
+/// one outside `counted`, are not counted.
+struct Counting;
+
+thread_local! {
+    static LIVE: Cell<Option<isize>> = const { Cell::new(None) };
+}
+
+fn count(delta: isize) {
+    let _ = LIVE.try_with(|live| {
+        if let Some(bytes) = live.get() {
+            live.set(Some(bytes + delta));
+        }
+    });
+}
+
+// Every call forwards to `System` with the caller's layout and only adds
+// bookkeeping on this thread, so `System`'s contract carries over.
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let pointer = unsafe { System.alloc(layout) };
+        if !pointer.is_null() {
+            count(layout.size() as isize);
+        }
+        pointer
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let pointer = unsafe { System.alloc_zeroed(layout) };
+        if !pointer.is_null() {
+            count(layout.size() as isize);
+        }
+        pointer
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        count(-(layout.size() as isize));
+        unsafe { System.dealloc(pointer, layout) }
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        let moved = unsafe { System.realloc(pointer, layout, size) };
+        if !moved.is_null() {
+            count(size as isize - layout.size() as isize);
+        }
+        moved
+    }
+}
+
+#[global_allocator]
+static COUNTING: Counting = Counting;
+
+/// Runs `body` and returns its value with the heap bytes it left allocated
+/// on this thread; `live` reads the running count inside `body`.
+fn counted<T>(body: impl FnOnce() -> T) -> (T, usize) {
+    LIVE.with(|live| assert_eq!(live.replace(Some(0)), None, "nested count"));
+    let value = body();
+    let bytes = LIVE.with(Cell::take).expect("counting");
+    (
+        value,
+        usize::try_from(bytes).expect("freed more than counted"),
+    )
+}
+
+fn live() -> usize {
+    usize::try_from(LIVE.with(Cell::get).expect("counting")).unwrap()
+}
+
+/// A logger keeping the `vlite` records of the threads inside `logged`
+/// only, so tests running in parallel never see each other's records. It is
+/// installed once for the lib test binary, where nothing else installs one.
+mod capture {
+    use log::{Level, LevelFilter, Log, Metadata, Record};
+    use std::cell::RefCell;
+    use std::sync::Once;
+
+    pub type Logged = Vec<(Level, String, String)>;
+
+    thread_local! {
+        static RECORDS: RefCell<Option<Logged>> = const { RefCell::new(None) };
+    }
+
+    struct Capture;
+
+    impl Log for Capture {
+        fn enabled(&self, metadata: &Metadata) -> bool {
+            metadata.target().starts_with("vlite")
+        }
+
+        fn log(&self, record: &Record) {
+            if self.enabled(record.metadata()) {
+                RECORDS.with(|records| {
+                    if let Some(records) = records.borrow_mut().as_mut() {
+                        records.push((
+                            record.level(),
+                            record.target().to_owned(),
+                            record.args().to_string(),
+                        ));
+                    }
+                });
+            }
+        }
+
+        fn flush(&self) {}
+    }
+
+    /// Runs `body` and returns it with what it logged on this thread.
+    pub fn logged<T>(body: impl FnOnce() -> T) -> (T, Logged) {
+        static INSTALL: Once = Once::new();
+        static LOGGER: Capture = Capture;
+        INSTALL.call_once(|| {
+            log::set_logger(&LOGGER).expect("the only logger in the lib test binary");
+            log::set_max_level(LevelFilter::Trace);
+        });
+        RECORDS.with(|records| *records.borrow_mut() = Some(Vec::new()));
+        let value = body();
+        let records = RECORDS.with(|records| records.borrow_mut().take());
+        (value, records.unwrap_or_default())
+    }
+}
+
+/// The one warning of summaries over `budget`.
+fn budget_warning(rows: usize, bytes: usize, budget: usize) -> capture::Logged {
+    vec![(
+        log::Level::Warn,
+        "vlite::filter".to_owned(),
+        format!(
+            r#"{{"event":"filter_summary_budget","outcome":"exact_scan","rows":{rows},"min_bytes":{bytes},"budget":{budget}}}"#
+        ),
+    )]
+}
+
+/// New summaries over `names` with the heap bytes they hold (the names).
+fn summaries_over(names: &[String]) -> (Summaries, usize) {
+    counted(|| Summaries::new(names.to_vec()))
+}
+
+/// Derives `rows`, checking that the bytes charged are exactly the heap
+/// the summaries hold: the names plus what derivation left allocated.
+fn derive_exactly<'a>(
+    names: &[String],
+    rows: impl ExactSizeIterator<Item = (u64, &'a Metadata)>,
+) -> (Summaries, usize) {
+    let (summaries, held) = summaries_over(names);
+    let count = rows.len();
+    let (state, derived) = counted(|| summaries.derive(count, rows));
+    let State::Ready(view) = &state else {
+        panic!("expected ready summaries, got {state:?}");
+    };
+    assert_eq!(view.bytes, held + derived, "{names:?} over {count} rows");
+    let bytes = view.bytes;
+    summaries.state.set(state).unwrap();
+    (summaries, bytes)
+}
+
+/// `rows` numbered from ID 0.
+fn numbered(rows: &[Metadata]) -> impl ExactSizeIterator<Item = (u64, &Metadata)> {
+    rows.iter().enumerate().map(|(id, row)| (id as u64, row))
+}
+
+/// The review's layout: 16 covered string fields `f00`..`f15`; every
+/// 1024-row block opens with 17 rows that set each field to one of 17
+/// one-byte values (`A`..`Q` in block 0, `a`..`q` after) and continues
+/// with empty rows, so each dictionary keeps 17 strings in room for 32.
+struct Dictionaries {
+    names: Vec<String>,
+    upper: Vec<Metadata>,
+    lower: Vec<Metadata>,
+    empty: Metadata,
+}
+
+impl Dictionaries {
+    fn new() -> Self {
+        let names: Vec<String> = (0..16).map(|field| format!("f{field:02}")).collect();
+        let opening = |first: u8| -> Vec<Metadata> {
+            (0..17)
+                .map(|offset| {
+                    let value = char::from(first + offset).to_string();
+                    names
+                        .iter()
+                        .map(|name| (name.clone(), text(&value)))
+                        .collect()
+                })
+                .collect()
+        };
+        Self {
+            upper: opening(b'A'),
+            lower: opening(b'a'),
+            names,
+            empty: Metadata::new(),
+        }
+    }
+
+    fn rows(&self, blocks: usize) -> impl ExactSizeIterator<Item = (u64, &Metadata)> + '_ {
+        (0..blocks * BLOCK_ROWS).map(move |row| {
+            let opening = if row < BLOCK_ROWS {
+                &self.upper
+            } else {
+                &self.lower
+            };
+            let index = row % BLOCK_ROWS;
+            (row as u64, opening.get(index).unwrap_or(&self.empty))
+        })
+    }
+}
+
+/// The bytes charged for summaries are the heap they hold, measured by the
+/// allocator: names, IDs, bitmap, block and segment lists, field lists and
+/// dictionaries at their capacities, strings at theirs.
+#[test]
+fn charged_bytes_are_the_measured_summary_heap() {
+    let layout = Dictionaries::new();
+    for blocks in [1, 2, 3] {
+        derive_exactly(&layout.names, layout.rows(blocks));
+    }
+    // A partial last block, and no rows at all.
+    derive_exactly(&layout.names, layout.rows(3).take(2 * BLOCK_ROWS + 5));
+    derive_exactly(&layout.names, layout.rows(0));
+
+    // Integers, floats, signed zero, booleans, points and strings.
+    let mut random = Random(0x9E37_79B9_7F4A_7C15);
+    let mixed: Vec<Metadata> = (0..2600)
+        .map(|id| random_metadata(&mut random, id))
+        .collect();
+    let names = ["a", "b", "c", "d", "uncovered"].map(String::from);
+    derive_exactly(&names, numbered(&mixed));
+
+    // Dictionaries that overflow by count, then by bytes, and fields that
+    // no row has.
+    let mut overflowing: Vec<Metadata> = (0..=MAX_DICTIONARY_VALUES)
+        .map(|index| {
+            metadata(&[
+                ("s", text(&format!("v{index:02}"))),
+                ("g", geo(index as f64, 0.0)),
+            ])
+        })
+        .collect();
+    overflowing.resize(BLOCK_ROWS, Metadata::new());
+    for length in [600, 500, 7] {
+        overflowing.push(metadata(&[("s", text(&"é".repeat(length)))]));
+    }
+    let names = ["g", "s", "t"].map(String::from);
+    derive_exactly(&names, numbered(&overflowing));
+    derive_exactly(&[], numbered(&overflowing));
+}
+
+/// Review regression: dictionaries partly filled (17 one-byte strings in
+/// room for 32) over 16 fields. At the real 64 MiB budget, the review's
+/// 3900 blocks (66,705,600 bytes counting initialized strings only, at
+/// least 89,169,600 held) and one block more than fits log one warning and
+/// fall back to the exact scan; the summaries that fit are derived and
+/// prune.
+#[test]
+fn near_budget_dictionaries_fall_back_to_an_exact_scan() {
+    let layout = Dictionaries::new();
+    let only_upper = [eq("f00", text("A"))];
+    let absent = [eq("f07", text("z"))];
+    let records = RecordMap::new();
+    // Derives `blocks` at the real budget, expecting the fallback; returns
+    // the bytes the warning reports.
+    let fall_back = |blocks: usize| {
+        let summaries = Summaries::new(layout.names.clone());
+        assert_eq!(summaries.budget, 64 << 20);
+        let rows = blocks * BLOCK_ROWS;
+        let (state, logged) = capture::logged(|| summaries.derive(rows, layout.rows(blocks)));
+        let State::OverBudget {
+            rows: over,
+            pending,
+        } = &state
+        else {
+            panic!("{blocks} blocks: summaries derived within the budget");
+        };
+        assert_eq!((*over, *pending), (rows, 0));
+        let [(_, _, message)] = &logged[..] else {
+            panic!("{blocks} blocks: {logged:?}");
+        };
+        let min_bytes = serde_json::from_str::<Value>(message).unwrap()["min_bytes"]
+            .as_u64()
+            .unwrap() as usize;
+        assert_eq!(logged, budget_warning(rows, min_bytes, BUDGET_BYTES));
+        summaries.state.set(state).unwrap();
+        assert_eq!(
+            summaries.candidates(&only_upper, &records, usize::MAX),
+            None
+        );
+        assert_eq!(summaries.candidates(&absent, &records, usize::MAX), None);
+        min_bytes
+    };
+    let review = fall_back(3900);
+
+    let (_, one) = derive_exactly(&layout.names, layout.rows(1));
+    let (_, two) = derive_exactly(&layout.names, layout.rows(2));
+    let per_block = two - one;
+    let fixed = one - per_block;
+    if cfg!(target_pointer_width = "64") {
+        // The review's figure: 89,169,600 bytes for 3900 blocks.
+        assert_eq!(per_block, 22_864);
+    }
+    assert!(review > BUDGET_BYTES && review - BUDGET_BYTES <= per_block);
+
+    // The most blocks whose summaries fit, within one block of 64 MiB.
+    let fit = (BUDGET_BYTES - fixed) / per_block;
+    if cfg!(target_pointer_width = "64") {
+        assert_eq!((fixed, fit), (528, 2935));
+    }
+    let (summaries, bytes) = derive_exactly(&layout.names, layout.rows(fit));
+    assert_eq!(bytes, fixed + fit * per_block);
+    assert!(bytes <= BUDGET_BYTES && BUDGET_BYTES - bytes < per_block);
+    assert_eq!(
+        summaries.candidates(&only_upper, &records, usize::MAX),
+        Some((0..BLOCK_ROWS as u64).collect())
+    );
+    assert_eq!(
+        summaries.candidates(&absent, &records, usize::MAX),
+        Some(BTreeSet::new())
+    );
+    drop(summaries);
+
+    let over = fall_back(fit + 1);
+    assert!(over > BUDGET_BYTES && over - BUDGET_BYTES <= per_block);
+}
+
+/// `overlay_bytes` bounds the heap of an overlay, measured by the
+/// allocator after every insertion and removal: ascending, descending,
+/// random, interleaved and draining.
+#[test]
+fn overlay_bytes_bound_the_overlay_heap() {
+    let mut random = Random(0x2545_F491_4F6C_DD1D);
+    let size = 20_000u64;
+    let random_ids: Vec<(bool, u64)> = (0..size).map(|_| (true, random.below(4 * size))).collect();
+    let interleaved: Vec<(bool, u64)> = (0..4 * size)
+        .map(|_| (random.below(3) != 0, random.below(size)))
+        .collect();
+    let mut drained: Vec<(bool, u64)> = (0..size).map(|id| (true, id)).collect();
+    let mut order: Vec<u64> = (0..size).collect();
+    for index in (1..order.len()).rev() {
+        order.swap(index, random.below(index as u64 + 1) as usize);
+    }
+    drained.extend(order.into_iter().map(|id| (false, id)));
+    let patterns: [Vec<(bool, u64)>; 5] = [
+        (0..size).map(|id| (true, id)).collect(),
+        (0..size).rev().map(|id| (true, id)).collect(),
+        random_ids,
+        interleaved,
+        drained,
+    ];
+    for (pattern, changes) in patterns.iter().enumerate() {
+        let ((), _) = counted(|| {
+            let mut overlay = BTreeSet::new();
+            for (step, &(insert, id)) in changes.iter().enumerate() {
+                if insert {
+                    overlay.insert(id);
+                } else {
+                    overlay.remove(&id);
+                }
+                let (held, bound) = (live(), overlay_bytes(overlay.len()));
+                assert!(
+                    held <= bound,
+                    "pattern {pattern} step {step}: {held} > {bound}"
+                );
+            }
+        });
+    }
+}
+
+/// Summaries count their overlay against the budget: an overlay that would
+/// pass it logs the warning and falls back to the exact scan until churn
+/// allows another try.
+#[test]
+fn overlay_growth_past_the_budget_falls_back_to_an_exact_scan() {
+    let mut records: RecordMap = (0..3000u64)
+        .map(|id| (id, record(&[("n", int(id as i64))])))
+        .collect();
+    let mut summaries = Summaries::new(["n".to_owned()]);
+    let five = [eq("n", int(5))];
+    assert_eq!(
+        superset(&summaries, &records, &five),
+        Some((0..BLOCK_ROWS as u64).collect())
+    );
+    let base = ready(&summaries).bytes;
+    // Room for two overlaid IDs.
+    summaries.budget = base + overlay_bytes(2);
+    let n = |value| Some(metadata(&[("n", int(value))]));
+    apply(&mut summaries, &mut records, 10, n(5000));
+    apply(&mut summaries, &mut records, 3000, n(5));
+    assert_eq!(churn(&summaries), (1, 2));
+    assert_eq!(
+        superset(&summaries, &records, &five),
+        Some((0..BLOCK_ROWS as u64).chain([3000]).collect())
+    );
+    // Removing an overlaid ID frees room for another.
+    apply(&mut summaries, &mut records, 3000, None);
+    apply(&mut summaries, &mut records, 3000, n(5));
+    assert_eq!(churn(&summaries), (1, 2));
+
+    let ((), logged) = capture::logged(|| apply(&mut summaries, &mut records, 3001, n(6)));
+    let bytes = base + overlay_bytes(3);
+    assert_eq!(logged, budget_warning(3000, bytes, summaries.budget));
+    assert!(matches!(
+        summaries.state.get(),
+        Some(State::OverBudget {
+            rows: 3000,
+            pending: 0
+        })
+    ));
+    assert_eq!(summaries.candidates(&five, &records, usize::MAX), None);
+
+    // Then churn as for summaries over budget at derivation.
+    for change in 0..MIN_REBUILD_CHURN as i64 {
+        apply(&mut summaries, &mut records, 7, n(-change - 1));
+    }
+    assert!(summaries.state.get().is_some());
+    apply(&mut summaries, &mut records, 7, n(7));
+    assert!(summaries.state.get().is_none());
+    // Derived again over 3002 rows: the last block now spans 5..=2999.
+    let ids = superset(&summaries, &records, &five).unwrap();
+    assert_eq!(ids, (0..1024).chain(2048..3002).collect());
+    assert_eq!(churn(&summaries), (0, 0));
 }
 
 // ------------------------------------------------------------ block codec
