@@ -3,9 +3,9 @@
 Status: S1 and S2 are implemented and independently reviewed in embedded Rust, unreleased.
 The surface and budget corrections in `1202f3cc` are accepted; integration
 `9ad5b63a` adds exact-sum reference cases and the API-reference entry.
-S3 (PageRank and label propagation) is implemented in embedded Rust, unreleased,
-and awaits independent review of its additive surface. S4 (sampled betweenness)
-is implemented in embedded Rust, unreleased and under review; S5 remains design.
+S3 (PageRank and label propagation) and S4 (sampled betweenness) are implemented,
+independently reviewed and integrated in embedded Rust, but unreleased.
+S5 remains design.
 Wire surfaces are out of scope until separately approved.
 Audit citations refer to base `d530b4c`; TTL integration is reconciled with `cf146fe`.
 Open means not verified or not decided. No performance gains are claimed.
@@ -217,7 +217,7 @@ This design does not edit `src\openapi.json` or any proto.
 
 The kernel is `src\property_graph\engine\algorithm.rs` (std-only, also built by `vlite-graph`).
 The public adapter is `src\property_graph\algorithms.rs`, re-exported from `vlite::property_graph`.
-Names, error mapping and the decisions below are proposals pending public surface review.
+Names, error mapping and the decisions below are accepted for the embedded Rust surface.
 
 ```rust
 impl GraphRef<'_> {
@@ -354,10 +354,10 @@ All 24 golden cases check S1 scope node and edge IDs exactly, plus degrees deriv
 The 11 weighted_shortest_path cases check outcomes, costs and path IDs exactly.
 Betweenness golden values were not exercised by S1/S2 Rust code; S3 and S4 coverage is listed below.
 
-## Implemented S3 (unreleased, under review)
+## Implemented S3 (reviewed, unreleased)
 
 PageRank and label propagation run on the same extracted projection, TTL clock and meter as S1 and S2.
-The additions below are additive and await independent review; nothing else in the surface changed.
+The additions below are additive and independently reviewed; nothing else in the surface changed.
 
 ```rust
 // GraphAlgorithm (new variants)
@@ -442,12 +442,12 @@ All 12 cases of `iterative-cases.json` (checked by `tests/graph_iteration_oracle
 Their synthetic interruptions map to the vertex budget that stops the same update; they are not engine budgets.
 The adapter also covers the echo, partial-result provenance, typed errors, the shared budget and non-mutation.
 Both suites were written first and failed to compile (61 errors, all missing S3 API) before the implementation passed.
-Remaining gates: independent review of this surface, the API-reference row, S4 betweenness, CSR parity and serving.
+The surface review and API-reference entry are complete. CSR parity and serving remain separate gates.
 
-## Implemented S4 (unreleased, under review)
+## Implemented S4 (reviewed, unreleased)
 
 Sampled betweenness runs on the same extracted projection, TTL clock, view sequence and meter as S1 to S3.
-The additions below are additive and await independent review; S1 to S3 semantics, budgets and `iterative.rs` are unchanged.
+The additions below are additive and independently reviewed; S1 to S3 semantics, budgets and `iterative.rs` are unchanged.
 
 ```rust
 // GraphAlgorithm (new variant)
@@ -579,7 +579,7 @@ and `interrupted_before_first` (0 sources) at all 36 that stop after extraction 
 its selection is checked against the uninterrupted read. The fake-clock deadline and cancellation tests above are unchanged.
 Temporary engine mutations each failed the consumer and were not committed:
 `Both` halved, ranking by seed plus ID, parallel arcs kept, and interrupted rows exposed.
-Remaining gates: independent review (this oracle wiring included), CSR parity and serving.
+Independent review includes this oracle wiring. CSR parity and serving remain separate gates.
 
 ## GraphRAG and competitors
 
@@ -626,8 +626,8 @@ tests must independently establish convergence and compare within tolerance.
 Rust tests consume them for S1 to S4 (see Coverage); TTL and work limits have their own Rust tests.
 Authorization stays untested until a serving slice exists.
 Delivered S1: scoped adapter, visibility hook, unified meter and result contract with exhaustion oracles.
-Delivered S2: degree and hop-constrained Dijkstra. Delivered S3 (under review): PageRank and deterministic label propagation.
-Implemented S4 (under review): seeded sampled betweenness. Deliver S5: separately approved serving contracts and documentation.
+Delivered S2: degree and hop-constrained Dijkstra. Reviewed S3: PageRank and deterministic label propagation.
+Reviewed S4: seeded sampled betweenness. All remain unreleased. Deliver S5: separately approved serving contracts and documentation.
 Each slice must pass its oracle before the next. CSR must pass identical adapter fixtures later.
 Risks: rescans consume budgets; dense graphs may yield no values. Cancellation is cooperative.
 Risks: the read borrow may delay writes; boundary scores are local, not global estimates.

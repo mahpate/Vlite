@@ -259,9 +259,10 @@ IDs/revisions, metadata, framing, encryption and steady-state WAL. Report
 temporary checkpoint duplication separately. No claimed gain, release gate,
 or S1 profile exception follows from the design estimates.
 
-## P3d progress: exact SIMD kernels (unreleased, under review)
+## P3d progress: exact SIMD kernels (reviewed, unreleased)
 
-Implemented in the crate-private `src/exact_kernels.rs`. This is the first
+Implemented, independently reviewed and integrated in the crate-private
+`src/exact_kernels.rs`. This is the first
 P3d step: verified exact kernels with runtime dispatch. It is not P3d
 completion, conversion/backup/restore/key-rotation coverage or a measured
 gain. No public API, setting, error, format or wire field changes.
@@ -295,7 +296,8 @@ gain. No public API, setting, error, format or wire field changes.
   the portable kernel keeps one scalar accumulator per row; that is SSE2 on
   x86_64 and scalar code elsewhere, including WebAssembly. There is no NEON
   kernel yet, so aarch64 uses the portable kernel. Tests force each kernel
-  per thread.
+  per thread. The override does not propagate to Rayon workers; they retain
+  runtime dispatch, so it does not prove forced-portable parallel execution.
 - **Paths.** Exact search, filtered exact search and candidate subsets,
   including the parallel scan. These also serve hybrid, planner and
   graph-attached record retrieval. HNSW exact re-scoring (unquantized and
@@ -309,7 +311,7 @@ gain. No public API, setting, error, format or wire field changes.
   `f32::MIN_POSITIVE`; infinities and NaN; cancellation; zero norms; and
   mismatched lengths. Rust does not fix NaN payloads, so any NaN matches a
   NaN. End-to-end tests run every exact, ANN, merge and rerank path above on
-  data with exact ties, under each kernel. Their IDs, distance bits, order
+  data with exact ties, with the per-thread dispatch limitation above. Their IDs, distance bits, order
   and statistics must match a full-sort oracle. Deliberate FMA, starting-sum
   and AVX2 reordering mutations each fail these tests. The
   `exact_kernel_fingerprint` example prints per-scenario result fingerprints

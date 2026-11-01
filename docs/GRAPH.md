@@ -129,11 +129,9 @@ shortest-path search reports `exhausted`, never an uncertified "no path".
 ## Bounded local algorithms (Rust, unreleased)
 
 `GraphRef::algorithm(&request, &options)` runs one algorithm on one explicit
-local scope (Gap 5 slices S1 to S4). Its S1 and S2 embedded Rust surface is
-reviewed and accepted; the S3 additions (PageRank, label propagation,
-`max_iterations` and `IterationLimit`) await the same review, and the S4
-addition (sampled betweenness and `max_sampled_sources`) is newer still and
-also under review. All of it is unreleased; REST, gRPC, MCP, query text,
+local scope (Gap 5 slices S1 to S4). Its embedded Rust surface is implemented,
+reviewed and accepted, including PageRank, label propagation and sampled
+betweenness. All of it is unreleased; REST, gRPC, MCP, query text,
 the CLI and the bindings do not expose it. Nothing is stored and nothing
 writes.
 
@@ -192,7 +190,7 @@ writes.
   when rows were also cut. Scores and communities describe the local
   scope only, never the whole graph.
 - **Sampled betweenness** (`GraphAlgorithm::Betweenness { sampling_seed }`,
-  unreleased, under review): unweighted Brandes over the scope's arcs
+  unreleased): unweighted Brandes over the scope's arcs
   (`Both` walks each edge both ways), with parallel arcs collapsed and
   self-loops ignored; every shortest path counts and endpoints are
   excluded. The scoped nodes are ranked by
