@@ -145,6 +145,8 @@ class Policy(unittest.TestCase):
             "compact_graph_oracle",
             "compact_graph_overlay_oracle",
             "compact_graph_property_oracle",
+            "compact_graph_label_oracle",
+            "compact_graph_attachment_oracle",
         ):
             command = f"python tests/{oracle}.py --self-test"
             self.assertIn(command, changes)

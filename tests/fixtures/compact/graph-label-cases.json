@@ -1,0 +1,284 @@
+{
+  "schema": "vlite.compact-graph-label-logical",
+  "version": 1,
+  "cases": [
+    {
+      "name": "empty-graph",
+      "purpose": "No dictionary or postings; valid unknown labels and cursor/limit boundaries remain empty.",
+      "nodes": [],
+      "queries": [
+        {"op": "scan", "label": "A"},
+        {"op": "scan", "label": "A", "after": 0},
+        {"op": "scan", "label": "A", "after": 18446744073709551615},
+        {"op": "all", "labels": ["A"], "limit": 1},
+        {"op": "all", "labels": ["A", "A"], "after": null},
+        {"op": "all", "labels": ["A", "B"], "after": 0, "limit": 2}
+      ],
+      "expected": {
+        "dictionary": [],
+        "node_map": [],
+        "postings": [],
+        "results": [[], [], [], [], [], []]
+      }
+    },
+    {
+      "name": "sparse-full-u64-case-order",
+      "purpose": "Full-u64 IDs without float rounding, unlabeled nodes, duplicate collapse, ASCII dictionary order and case-sensitive intersections.",
+      "nodes": [
+        {"id": 18446744073709551615, "labels": ["a", "_a", "A"]},
+        {"id": 42, "labels": ["Z9", "A"]},
+        {"id": 0, "labels": ["a", "9", "A", "A"]},
+        {"id": 7, "labels": []},
+        {"id": 9007199254740993, "labels": ["a", "A", "Z9", "_a", "9"]}
+      ],
+      "queries": [
+        {"op": "scan", "label": "A"},
+        {"op": "scan", "label": "a"},
+        {"op": "scan", "label": "A", "after": 0},
+        {"op": "scan", "label": "A", "after": 43},
+        {"op": "scan", "label": "A", "after": 9007199254740993},
+        {"op": "scan", "label": "A", "after": 18446744073709551615},
+        {"op": "scan", "label": "Missing"},
+        {"op": "scan", "label": "_a", "after": null},
+        {"op": "all", "labels": ["A", "a"]},
+        {"op": "all", "labels": ["a", "A", "A"], "after": 0, "limit": 1},
+        {"op": "all", "labels": ["A"], "limit": 2},
+        {"op": "all", "labels": ["A"], "after": 42, "limit": 2},
+        {"op": "all", "labels": ["A"], "after": 18446744073709551615, "limit": 1},
+        {"op": "all", "labels": ["A", "Missing"], "limit": 1},
+        {"op": "all", "labels": ["9", "A", "Z9", "_a", "a"], "limit": 9},
+        {"op": "all", "labels": ["9"], "after": 0, "limit": 18446744073709551616}
+      ],
+      "expected": {
+        "dictionary": ["9", "A", "Z9", "_a", "a"],
+        "node_map": [
+          {"id": 0, "ordinal": 0, "labels": [0, 1, 4]},
+          {"id": 7, "ordinal": 1, "labels": []},
+          {"id": 42, "ordinal": 2, "labels": [1, 2]},
+          {"id": 9007199254740993, "ordinal": 3, "labels": [0, 1, 2, 3, 4]},
+          {"id": 18446744073709551615, "ordinal": 4, "labels": [1, 3, 4]}
+        ],
+        "postings": [
+          {"label": "9", "code": 0, "ids": [0, 9007199254740993]},
+          {"label": "A", "code": 1, "ids": [0, 42, 9007199254740993, 18446744073709551615]},
+          {"label": "Z9", "code": 2, "ids": [42, 9007199254740993]},
+          {"label": "_a", "code": 3, "ids": [9007199254740993, 18446744073709551615]},
+          {"label": "a", "code": 4, "ids": [0, 9007199254740993, 18446744073709551615]}
+        ],
+        "results": [
+          [0, 42, 9007199254740993, 18446744073709551615],
+          [0, 9007199254740993, 18446744073709551615],
+          [42, 9007199254740993, 18446744073709551615],
+          [9007199254740993, 18446744073709551615],
+          [18446744073709551615],
+          [],
+          [],
+          [9007199254740993, 18446744073709551615],
+          [0, 9007199254740993, 18446744073709551615],
+          [9007199254740993],
+          [0, 42],
+          [9007199254740993, 18446744073709551615],
+          [],
+          [],
+          [9007199254740993],
+          [9007199254740993]
+        ]
+      }
+    },
+    {
+      "name": "eight-distinct-labels",
+      "purpose": "Exactly eight distinct labels with more than eight input entries and query entries; conjunction is not union.",
+      "nodes": [
+        {"id": 20, "labels": ["L7", "L6", "L5", "L4", "L3", "L2", "L1", "L0", "L7", "L0"]},
+        {"id": 5, "labels": ["L0", "L2", "L4", "L6"]},
+        {"id": 30, "labels": ["L7"]},
+        {"id": 10, "labels": []}
+      ],
+      "queries": [
+        {"op": "all", "labels": ["L7", "L6", "L5", "L4", "L3", "L2", "L1", "L0", "L7", "L0"]},
+        {"op": "all", "labels": ["L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7"], "after": 20, "limit": 1},
+        {"op": "scan", "label": "L7"},
+        {"op": "scan", "label": "L7", "after": 20},
+        {"op": "scan", "label": "L7", "after": 30},
+        {"op": "all", "labels": ["L0", "L2"], "limit": 1},
+        {"op": "all", "labels": ["L2", "L0", "L2"], "after": 5, "limit": 1},
+        {"op": "all", "labels": ["L0", "L7"]},
+        {"op": "all", "labels": ["L7"], "limit": 3},
+        {"op": "scan", "label": "L8", "after": 19}
+      ],
+      "expected": {
+        "dictionary": ["L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7"],
+        "node_map": [
+          {"id": 5, "ordinal": 0, "labels": [0, 2, 4, 6]},
+          {"id": 10, "ordinal": 1, "labels": []},
+          {"id": 20, "ordinal": 2, "labels": [0, 1, 2, 3, 4, 5, 6, 7]},
+          {"id": 30, "ordinal": 3, "labels": [7]}
+        ],
+        "postings": [
+          {"label": "L0", "code": 0, "ids": [5, 20]},
+          {"label": "L1", "code": 1, "ids": [20]},
+          {"label": "L2", "code": 2, "ids": [5, 20]},
+          {"label": "L3", "code": 3, "ids": [20]},
+          {"label": "L4", "code": 4, "ids": [5, 20]},
+          {"label": "L5", "code": 5, "ids": [20]},
+          {"label": "L6", "code": 6, "ids": [5, 20]},
+          {"label": "L7", "code": 7, "ids": [20, 30]}
+        ],
+        "results": [[20], [], [20, 30], [30], [], [5], [20], [20], [20, 30], []]
+      }
+    },
+    {
+      "name": "sixty-three-byte-label",
+      "purpose": "The 63-ASCII-byte boundary and case-sensitive long labels, with strict cursors and limit after intersection.",
+      "nodes": [
+        {"id": 99, "labels": ["LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL", "_"]},
+        {"id": 1, "labels": ["LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL"]},
+        {"id": 2, "labels": ["l"]}
+      ],
+      "queries": [
+        {"op": "scan", "label": "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL"},
+        {"op": "scan", "label": "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL", "after": 1},
+        {"op": "all", "labels": ["_", "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL"], "after": 2, "limit": 1},
+        {"op": "all", "labels": ["LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL"], "after": 99, "limit": 1},
+        {"op": "scan", "label": "lllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll"},
+        {"op": "all", "labels": ["l", "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL"], "limit": 1}
+      ],
+      "expected": {
+        "dictionary": ["LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL", "_", "l"],
+        "node_map": [
+          {"id": 1, "ordinal": 0, "labels": [0]},
+          {"id": 2, "ordinal": 1, "labels": [2]},
+          {"id": 99, "ordinal": 2, "labels": [0, 1]}
+        ],
+        "postings": [
+          {"label": "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL", "code": 0, "ids": [1, 99]},
+          {"label": "_", "code": 1, "ids": [99]},
+          {"label": "l", "code": 2, "ids": [2]}
+        ],
+        "results": [[1, 99], [99], [99], [], [], []]
+      }
+    }
+  ],
+  "malformed": [
+    {
+      "name": "illegal-character",
+      "input": {"nodes": [{"id": 0, "labels": ["a-b"]}], "queries": [{"op": "scan", "label": "A"}]},
+      "reason": "label: invalid ASCII identifier"
+    },
+    {
+      "name": "empty-label",
+      "input": {"nodes": [{"id": 0, "labels": [""]}], "queries": [{"op": "scan", "label": "A"}]},
+      "reason": "label: invalid ASCII identifier"
+    },
+    {
+      "name": "sixty-four-byte-label",
+      "input": {"nodes": [{"id": 0, "labels": ["LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL"]}], "queries": [{"op": "scan", "label": "A"}]},
+      "reason": "label: invalid ASCII identifier"
+    },
+    {
+      "name": "non-ascii-label",
+      "input": {"nodes": [{"id": 0, "labels": ["\u00e9"]}], "queries": [{"op": "scan", "label": "A"}]},
+      "reason": "label: invalid ASCII identifier"
+    },
+    {
+      "name": "nine-node-labels",
+      "input": {"nodes": [{"id": 0, "labels": ["L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8"]}], "queries": [{"op": "scan", "label": "A"}]},
+      "reason": "labels: at most 8 distinct labels"
+    },
+    {
+      "name": "duplicate-node-id",
+      "input": {"nodes": [{"id": 0, "labels": ["A"]}, {"id": 0, "labels": ["B"]}], "queries": [{"op": "scan", "label": "A"}]},
+      "reason": "duplicate node ID"
+    },
+    {
+      "name": "negative-node-id",
+      "input": {"nodes": [{"id": -1, "labels": []}], "queries": [{"op": "scan", "label": "A"}]},
+      "reason": "node id: expected u64 integer"
+    },
+    {
+      "name": "overflow-node-id",
+      "input": {"nodes": [{"id": 18446744073709551616, "labels": []}], "queries": [{"op": "scan", "label": "A"}]},
+      "reason": "node id: expected u64 integer"
+    },
+    {
+      "name": "boolean-node-id",
+      "input": {"nodes": [{"id": true, "labels": []}], "queries": [{"op": "scan", "label": "A"}]},
+      "reason": "node id: expected u64 integer"
+    },
+    {
+      "name": "floating-node-id",
+      "input": {"nodes": [{"id": 1.0, "labels": []}], "queries": [{"op": "scan", "label": "A"}]},
+      "reason": "node id: expected u64 integer"
+    },
+    {
+      "name": "zero-query-labels",
+      "input": {"nodes": [], "queries": [{"op": "all", "labels": []}]},
+      "reason": "query labels: require 1..8 distinct labels"
+    },
+    {
+      "name": "nine-query-labels",
+      "input": {"nodes": [], "queries": [{"op": "all", "labels": ["L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8"]}]},
+      "reason": "query labels: require 1..8 distinct labels"
+    },
+    {
+      "name": "zero-limit",
+      "input": {"nodes": [], "queries": [{"op": "all", "labels": ["A"], "limit": 0}]},
+      "reason": "limit: expected positive integer"
+    },
+    {
+      "name": "unknown-query-field",
+      "input": {"nodes": [], "queries": [{"op": "all", "labels": ["A"], "offset": 0}]},
+      "reason": "query: unknown field"
+    },
+    {
+      "name": "invalid-scan-label",
+      "input": {"nodes": [], "queries": [{"op": "scan", "label": "A\n"}]},
+      "reason": "label: invalid ASCII identifier"
+    },
+    {
+      "name": "invalid-all-label",
+      "input": {"nodes": [], "queries": [{"op": "all", "labels": ["A", "bad label"]}]},
+      "reason": "label: invalid ASCII identifier"
+    },
+    {
+      "name": "negative-after",
+      "input": {"nodes": [], "queries": [{"op": "scan", "label": "A", "after": -1}]},
+      "reason": "after: expected u64 integer"
+    },
+    {
+      "name": "overflow-after",
+      "input": {"nodes": [], "queries": [{"op": "all", "labels": ["A"], "after": 18446744073709551616}]},
+      "reason": "after: expected u64 integer"
+    },
+    {
+      "name": "boolean-after",
+      "input": {"nodes": [], "queries": [{"op": "scan", "label": "A", "after": false}]},
+      "reason": "after: expected u64 integer"
+    },
+    {
+      "name": "boolean-limit",
+      "input": {"nodes": [], "queries": [{"op": "all", "labels": ["A"], "limit": true}]},
+      "reason": "limit: expected positive integer"
+    },
+    {
+      "name": "floating-limit",
+      "input": {"nodes": [], "queries": [{"op": "all", "labels": ["A"], "limit": 1.0}]},
+      "reason": "limit: expected positive integer"
+    },
+    {
+      "name": "null-limit",
+      "input": {"nodes": [], "queries": [{"op": "all", "labels": ["A"], "limit": null}]},
+      "reason": "limit: expected positive integer"
+    },
+    {
+      "name": "unknown-node-field",
+      "input": {"nodes": [{"id": 0, "labels": [], "deadline": 10}], "queries": [{"op": "scan", "label": "A"}]},
+      "reason": "node: unknown field"
+    },
+    {
+      "name": "labels-not-array",
+      "input": {"nodes": [{"id": 0, "labels": "A"}], "queries": [{"op": "scan", "label": "A"}]},
+      "reason": "labels: expected array"
+    }
+  ]
+}

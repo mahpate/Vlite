@@ -346,8 +346,15 @@ gain. No public API, setting, error, format or wire field changes.
   including the parallel scan. These also serve hybrid, planner and
   graph-attached record retrieval. HNSW exact re-scoring (unquantized and
   scalar-u8 rerank), the buffered-record merge, `ExactReranker` and
-  named-vector exact search use the kernels too. Approximate traversal
-  kernels are unchanged.
+  named-vector exact search use the kernels too. DiskANN scores each
+  expansion's neighbors in bounded batches, including upper-layer links,
+  then applies candidates in the original link order. Loads and visited
+  checks retain their order, so the beam, ties and cache statistics are
+  unchanged. A batch briefly holds up to eight decoded neighbors outside
+  the cache, so transient memory can exceed the cache budget by a few
+  node records. MMR pairwise scores and the GPU searcher's CPU f64 re-score
+  and CPU fallback also use the batch path. The GPU f32 pass and the
+  in-memory approximate traversal kernels are unchanged.
 - **Tests.** Every metric, with and without stored norms, is compared bit for
   bit with the oracle under each kernel. Coverage: dimensions 0 to 67, 128,
   384, 768 and 1,536; batches of 1 to 9 rows; seeded values over about 80
@@ -361,12 +368,17 @@ gain. No public API, setting, error, format or wire field changes.
   `exact_kernel_fingerprint` example prints per-scenario result fingerprints
   for comparing two revisions. An ignored local timing test checks direction
   only; it is not a measurement.
+  DiskANN, MMR and GPU CPU-path tests additionally compare with their
+  original one-pair oracle algorithms under forced portable and detected
+  AVX2 dispatch, including exact ties, signed zeros and subnormals at
+  dimensions 0 to 67, 128, 384 and 768 (end-to-end paths start at 1,
+  because public validation rejects 0). DiskANN compares cache accounting
+  with both a one-node and a full cache; invalid or unsupported public
+  cases are exercised through private scoring fixtures, not new APIs.
+  Stored and computed norms and reachable mismatched lengths are covered.
 
 Remaining P3d work:
 
-1. DiskANN traversal and maximal-marginal-relevance pairwise scoring still
-   score one pair at a time, and so does the CPU fallback of the GPU
-   reranker.
-2. A NEON kernel, once it can be tested on aarch64 hardware.
-3. Conversion, backup, restore and key-rotation coverage, DO-005
+1. A NEON kernel, once it can be tested on aarch64 hardware.
+2. Conversion, backup, restore and key-rotation coverage, DO-005
    measurements and major-release acceptance.

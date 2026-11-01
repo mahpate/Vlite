@@ -110,22 +110,27 @@ Local numbers below show direction only (see rules).
   [API review](p3-precision-api.md) still holds public enablement pending
   complete read/write/maintenance integration. The first exact-SIMD slice
   is implemented, reviewed and integrated, but unreleased: portable and AVX2
-  kernels preserve exact scoring, ordering and cutoff behavior. This does not
-  complete the remaining P3d lifecycle or performance qualification. No
+  kernels preserve exact scoring, ordering and cutoff behavior. DiskANN
+  neighbor scoring, MMR pairwise scoring and the GPU searcher's CPU
+  re-score now use the same batched exact path, with unchanged results and
+  cache statistics. This does not complete NEON, the remaining P3d
+  lifecycle or performance qualification. No
   production compact source writer is enabled; F1/F3/S1/S2 qualification
   remains outstanding.
 - **Speed P4, compact graph:** the [design](p4-compact-graph.md) is ready:
   immutable CSR checkpoint blocks, a bounded update overlay, encoded labels
   and properties, and deterministic parallel import. The private, test-only
-  source codec preserves IDs, keys, revisions, deadlines and ordinary typed
-  node/edge properties; its CSR is checked against the accepted logical
-  oracle. It refuses attachments, schema and temporal segments; shared
-  framing, checkpoint/read integration, label postings, columnar property
-  storage, mutation overlay, parallel import and S3/S4/F6 qualification
-  remain outstanding. Independently reviewed logical references cover
-  committed-overlay identity, non-reused IDs and expiry precedence, and typed
-  property snapshots with exact integer and float bits; they are test
-  evidence, not an implemented Rust overlay or byte format. The byte
+  source codec preserves IDs, keys, revisions, deadlines, ordinary typed
+  node/edge properties and label postings with private scan and intersection
+  checks; its CSR is checked against the accepted logical oracle. It refuses
+  attachments, schema and temporal segments; shared framing,
+  checkpoint/read integration, columnar property storage, mutation overlay,
+  parallel import and S3/S4/F6 qualification remain outstanding.
+  Independently reviewed logical references cover committed-overlay
+  identity, non-reused IDs and expiry precedence, typed property snapshots
+  with exact integer and float bits, label postings and scans, and
+  node-to-record attachments; they are
+  test evidence, not an implemented Rust overlay or byte format. The byte
   budgets are estimates, not measured results.
 - **Gap 5, bounded algorithms:** S1 and S2 are implemented and reviewed in
   the embedded Rust API, but unreleased ([plan](gap5-graph-algorithms.md)).

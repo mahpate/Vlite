@@ -12,10 +12,11 @@
 //! first constructs the ordinary in-memory HNSW graph, so *build* memory is the
 //! same as `build_hnsw`; only query-time memory is bounded.
 
+use crate::exact_kernels::{LANES, Scorer};
 use crate::hnsw::{self, HnswConfig};
 use crate::{
-    AnnOptions, Database, DistanceMetric, Error, Result, SearchHit, metric_distance,
-    validate_ann_metric, validate_metric_query,
+    AnnOptions, Database, DistanceMetric, Error, Result, SearchHit, validate_ann_metric,
+    validate_metric_query,
 };
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
@@ -552,9 +553,13 @@ impl DiskAnnIndex {
         Ok(())
     }
 
-    fn distance(&self, query: &[f32], query_norm: f64, node: &Node) -> f64 {
-        metric_distance(query, &node.vector, self.metric, query_norm, node.norm)
-            .expect("cosine graph contains only nonzero vectors")
+    fn distances(scorer: &Scorer<'_>, nodes: &[(u32, Arc<Node>)]) -> Vec<Option<f64>> {
+        let rows: Vec<_> = nodes
+            .iter()
+            .map(|(_, node)| node.vector.as_slice())
+            .collect();
+        let norms: Vec<_> = nodes.iter().map(|(_, node)| node.norm).collect();
+        scorer.score(&rows, Some(&norms))
     }
 
     /// Approximate k-nearest search. `ef_search` is raised to `k` when smaller.
@@ -575,9 +580,13 @@ impl DiskAnnIndex {
             return Ok(Vec::new());
         };
         let ef = ef_search.max(k);
+        let scorer = Scorer::new(query, self.metric, query_norm);
         let entry_node = self.load_node(entry)?;
-        let mut best = (self.distance(query, query_norm, entry_node.as_ref()), entry);
-        drop(entry_node);
+        let mut best = (
+            Self::distances(&scorer, &[(entry, entry_node)])[0]
+                .expect("cosine graph contains only nonzero vectors"),
+            entry,
+        );
         for layer in (1..=self.max_level).rev() {
             loop {
                 let previous = best;
@@ -585,11 +594,21 @@ impl DiskAnnIndex {
                     .upper
                     .get(&best.1)
                     .and_then(|layers| layers.get(layer - 1));
-                for &neighbor in links.map(Vec::as_slice).unwrap_or(&[]) {
-                    let node = self.load_node(neighbor)?;
-                    let candidate = (self.distance(query, query_norm, &node), neighbor);
-                    if cmp(candidate, best).is_lt() {
-                        best = candidate;
+                for neighbors in links.map(Vec::as_slice).unwrap_or(&[]).chunks(LANES) {
+                    let nodes: Vec<_> = neighbors
+                        .iter()
+                        .map(|&neighbor| Ok((neighbor, self.load_node(neighbor)?)))
+                        .collect::<Result<_>>()?;
+                    for ((neighbor, _), distance) in
+                        nodes.iter().zip(Self::distances(&scorer, &nodes))
+                    {
+                        let candidate = (
+                            distance.expect("cosine graph contains only nonzero vectors"),
+                            *neighbor,
+                        );
+                        if cmp(candidate, best).is_lt() {
+                            best = candidate;
+                        }
                     }
                 }
                 if best == previous {
@@ -607,17 +626,25 @@ impl DiskAnnIndex {
                 break;
             }
             let node = self.load_node(current.1)?;
-            for &neighbor in &node.neighbors {
-                if !visited.insert(neighbor) {
-                    continue;
+            for neighbors in node.neighbors.chunks(LANES) {
+                let mut nodes = Vec::with_capacity(neighbors.len());
+                for &neighbor in neighbors {
+                    if visited.insert(neighbor) {
+                        nodes.push((neighbor, self.load_node(neighbor)?));
+                    }
                 }
-                let loaded = self.load_node(neighbor)?;
-                let candidate = Ordered(self.distance(query, query_norm, &loaded), neighbor);
-                if nearest.len() < ef || candidate < *nearest.peek().expect("nonempty") {
-                    candidates.push(Reverse(candidate));
-                    nearest.push(candidate);
-                    if nearest.len() > ef {
-                        nearest.pop();
+                for ((neighbor, _), distance) in nodes.iter().zip(Self::distances(&scorer, &nodes))
+                {
+                    let candidate = Ordered(
+                        distance.expect("cosine graph contains only nonzero vectors"),
+                        *neighbor,
+                    );
+                    if nearest.len() < ef || candidate < *nearest.peek().expect("nonempty") {
+                        candidates.push(Reverse(candidate));
+                        nearest.push(candidate);
+                        if nearest.len() > ef {
+                            nearest.pop();
+                        }
                     }
                 }
             }
@@ -701,4 +728,231 @@ fn parse_upper(bytes: &[u8], node_count: usize) -> Result<HashMap<u32, Vec<Vec<u
         }
     }
     Ok(upper)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::exact_kernels::{Kernel, force_kernel};
+    use crate::{metric_distance, vector_norm};
+
+    // The original one-pair traversal, independent of the batched scoring path.
+    fn oracle(index: &DiskAnnIndex, query: &[f32], k: usize, ef_search: usize) -> Vec<SearchHit> {
+        let query_norm = validate_metric_query(query, index.metric).unwrap();
+        let distance = |node: &Node| {
+            metric_distance(query, &node.vector, index.metric, query_norm, node.norm).unwrap()
+        };
+        let entry = index.entry.unwrap();
+        let ef = ef_search.max(k);
+        let entry_node = index.load_node(entry).unwrap();
+        let mut best = (distance(&entry_node), entry);
+        drop(entry_node);
+        for layer in (1..=index.max_level).rev() {
+            loop {
+                let previous = best;
+                let links = index
+                    .upper
+                    .get(&best.1)
+                    .and_then(|layers| layers.get(layer - 1));
+                for &neighbor in links.map(Vec::as_slice).unwrap_or(&[]) {
+                    let node = index.load_node(neighbor).unwrap();
+                    let candidate = (distance(&node), neighbor);
+                    if cmp(candidate, best).is_lt() {
+                        best = candidate;
+                    }
+                }
+                if best == previous {
+                    break;
+                }
+            }
+        }
+        let start = Ordered(best.0, best.1);
+        let mut visited = HashSet::from([start.1]);
+        let mut candidates = BinaryHeap::from([Reverse(start)]);
+        let mut nearest = BinaryHeap::from([start]);
+        while let Some(Reverse(current)) = candidates.pop() {
+            if nearest.len() >= ef && current > *nearest.peek().unwrap() {
+                break;
+            }
+            let node = index.load_node(current.1).unwrap();
+            for &neighbor in &node.neighbors {
+                if !visited.insert(neighbor) {
+                    continue;
+                }
+                let loaded = index.load_node(neighbor).unwrap();
+                let candidate = Ordered(distance(&loaded), neighbor);
+                if nearest.len() < ef || candidate < *nearest.peek().unwrap() {
+                    candidates.push(Reverse(candidate));
+                    nearest.push(candidate);
+                    if nearest.len() > ef {
+                        nearest.pop();
+                    }
+                }
+            }
+        }
+        let mut found = nearest.into_vec();
+        found.sort_unstable();
+        let mut hits = Vec::new();
+        for candidate in found {
+            let node = index.load_node(candidate.1).unwrap();
+            hits.push(SearchHit {
+                id: node.id,
+                distance: candidate.0,
+            });
+        }
+        hits.sort_by(|a, b| a.distance.total_cmp(&b.distance).then(a.id.cmp(&b.id)));
+        hits.truncate(k);
+        hits
+    }
+
+    fn fixture(dimensions: usize, metric: DistanceMetric, capacity: usize) -> DiskAnnIndex {
+        let max_degree = 12;
+        let stride = 24 + 4 * max_degree + 4 * dimensions;
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(&[0; HEADER_SIZE as usize]).unwrap();
+        for index in 0..19usize {
+            let vector = row(dimensions, index % 7);
+            let mut bytes = vec![0; stride];
+            bytes[..8].copy_from_slice(&(100 + index as u64 * 3).to_le_bytes());
+            bytes[8..16].copy_from_slice(&vector_norm(&vector).to_le_bytes());
+            bytes[16..20].copy_from_slice(&(max_degree as u32).to_le_bytes());
+            for slot in 0..max_degree {
+                // Cycles, repeated links, batches wider than LANES and exact ties.
+                let neighbor = ((index + slot % 10) % 19) as u32;
+                bytes[20 + slot * 4..24 + slot * 4].copy_from_slice(&neighbor.to_le_bytes());
+            }
+            for (slot, value) in vector.iter().enumerate() {
+                let at = 20 + max_degree * 4 + slot * 4;
+                bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            }
+            let checksum = crate::format::crc32(&bytes[..stride - 4]);
+            bytes[stride - 4..].copy_from_slice(&checksum.to_le_bytes());
+            file.write_all(&bytes).unwrap();
+        }
+        DiskAnnIndex {
+            path: PathBuf::new(),
+            file: Mutex::new(file),
+            dimensions,
+            metric,
+            config: HnswConfig::default(),
+            node_count: 19,
+            entry: Some(18),
+            max_level: 1,
+            max_degree,
+            stride,
+            source: DiskAnnSource {
+                lineage: 0,
+                sequence: 0,
+                collection_id: 0,
+                live_records: 19,
+            },
+            upper: (0..19)
+                .map(|i| (i, vec![vec![18, 9, 7, 6, 5, 4, 3, 2, 1, 0, 0]]))
+                .collect(),
+            upper_bytes: 0,
+            capacity: stride * capacity,
+            cache: Mutex::new(Cache::default()),
+        }
+    }
+
+    fn row(dimensions: usize, variant: usize) -> Vec<f32> {
+        (0..dimensions)
+            .map(|dim| match dim % 9 {
+                0 => (variant + 1) as f32 * 0.125,
+                1 => -0.0,
+                2 => 0.0,
+                3 => f32::from_bits(1),
+                4 => -f32::from_bits(7),
+                5 => 32768.25,
+                6 => -0.00390625,
+                7 => -((variant + 1) as f32),
+                _ => 1.0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn exact_batch_traversal_matches_oracle_and_cache_statistics() {
+        let mut kernels = vec![Kernel::Portable];
+        if Kernel::detected() != Kernel::Portable {
+            kernels.push(Kernel::detected());
+        }
+        for kernel in kernels {
+            force_kernel(kernel, || {
+                for dims in (0..=67).chain([128, 384, 768]) {
+                    for metric in [
+                        DistanceMetric::SquaredL2,
+                        DistanceMetric::Cosine,
+                        DistanceMetric::InnerProduct,
+                    ] {
+                        if dims == 0 && metric == DistanceMetric::Cosine {
+                            continue;
+                        }
+                        let query = row(dims, 2);
+                        for capacity in [1, 19] {
+                            for (k, ef) in [(1, 1), (3, 4), (9, 12), (19, 30)] {
+                                let index = fixture(dims, metric, capacity);
+                                let expected = oracle(&index, &query, k, ef);
+                                let expected_memory = index.memory();
+                                *index.cache.lock().unwrap() = Cache::default();
+                                let actual = index.search(&query, k, ef).unwrap();
+                                let fingerprint = |hits: Vec<SearchHit>| {
+                                    hits.into_iter()
+                                        .map(|hit| (hit.id, hit.distance.to_bits()))
+                                        .collect::<Vec<_>>()
+                                };
+                                assert_eq!(
+                                    fingerprint(actual),
+                                    fingerprint(expected),
+                                    "{kernel:?} {metric:?} dims={dims} k={k} ef={ef}"
+                                );
+                                assert_eq!(
+                                    index.memory(),
+                                    expected_memory,
+                                    "{kernel:?} {metric:?} dims={dims} k={k} ef={ef}"
+                                );
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn exact_batch_node_scores_match_oracle_with_and_without_norms() {
+        let mut kernels = vec![Kernel::Portable];
+        if Kernel::detected() != Kernel::Portable {
+            kernels.push(Kernel::detected());
+        }
+        for kernel in kernels {
+            force_kernel(kernel, || {
+                for dims in (0..=67).chain([128, 384, 768]) {
+                    let query = row(dims, 2);
+                    let vectors: Vec<_> = (0..11)
+                        .map(|i| row(if i == 10 { dims + 1 } else { dims }, i % 7))
+                        .collect();
+                    let rows: Vec<_> = vectors.iter().map(Vec::as_slice).collect();
+                    let norms: Vec<_> = rows.iter().map(|row| vector_norm(row)).collect();
+                    for metric in [
+                        DistanceMetric::SquaredL2,
+                        DistanceMetric::Cosine,
+                        DistanceMetric::InnerProduct,
+                    ] {
+                        let query_norm = vector_norm(&query);
+                        let scorer = Scorer::new(&query, metric, query_norm);
+                        assert_eq!(scorer.kernel(), kernel);
+                        for stored in [None, Some(norms.as_slice())] {
+                            let actual = scorer.score(&rows, stored);
+                            for (i, value) in actual.iter().enumerate() {
+                                let expected =
+                                    metric_distance(&query, rows[i], metric, query_norm, norms[i]);
+                                assert_eq!(value.map(f64::to_bits), expected.map(f64::to_bits));
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    }
 }

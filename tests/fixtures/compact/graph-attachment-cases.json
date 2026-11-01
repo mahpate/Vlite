@@ -1,0 +1,437 @@
+{
+  "schema": "vlite.compact-graph-attachment-logical",
+  "version": 1,
+  "cases": [
+    {
+      "name": "canonical-u64-extremes",
+      "purpose": "Full u64 graph/node/record IDs, collection 0/65535, and shared record numbers in distinct collections.",
+      "input": {
+        "mode": "snapshot",
+        "snapshot": {
+          "graphs": [
+            {"graph": 0, "nodes": [0, 18446744073709551615], "attachments": [
+              {"node": 0, "collection": 0, "record": 18446744073709551615},
+              {"node": 0, "collection": 65535, "record": 18446744073709551615},
+              {"node": 18446744073709551615, "collection": 0, "record": 0}
+            ]},
+            {"graph": 18446744073709551615, "nodes": [0], "attachments": [
+              {"node": 0, "collection": 65535, "record": 0}
+            ]}
+          ],
+          "owners": [
+            {"collection": 0, "record": 0, "graph": 0, "node": 18446744073709551615},
+            {"collection": 0, "record": 18446744073709551615, "graph": 0, "node": 0},
+            {"collection": 65535, "record": 0, "graph": 18446744073709551615, "node": 0},
+            {"collection": 65535, "record": 18446744073709551615, "graph": 0, "node": 0}
+          ]
+        },
+        "batches": []
+      },
+      "expected": {
+        "snapshot": {
+          "graphs": [
+            {"graph": 0, "nodes": [0, 18446744073709551615], "attachments": [
+              {"node": 0, "collection": 0, "record": 18446744073709551615},
+              {"node": 0, "collection": 65535, "record": 18446744073709551615},
+              {"node": 18446744073709551615, "collection": 0, "record": 0}
+            ]},
+            {"graph": 18446744073709551615, "nodes": [0], "attachments": [
+              {"node": 0, "collection": 65535, "record": 0}
+            ]}
+          ],
+          "owners": [
+            {"collection": 0, "record": 0, "graph": 0, "node": 18446744073709551615},
+            {"collection": 0, "record": 18446744073709551615, "graph": 0, "node": 0},
+            {"collection": 65535, "record": 0, "graph": 18446744073709551615, "node": 0},
+            {"collection": 65535, "record": 18446744073709551615, "graph": 0, "node": 0}
+          ]
+        },
+        "outcomes": []
+      }
+    },
+    {
+      "name": "cross-graph-conflict",
+      "purpose": "A conflict reports the owning graph/node, not the requesting graph/node.",
+      "input": {
+        "mode": "batches",
+        "snapshot": {
+          "graphs": [
+            {"graph": 7, "nodes": [0], "attachments": [{"node": 0, "collection": 1, "record": 10}]},
+            {"graph": 9, "nodes": [2], "attachments": []}
+          ],
+          "owners": [{"collection": 1, "record": 10, "graph": 7, "node": 0}]
+        },
+        "batches": [{"graph": 9, "ops": [{"op": "attach", "node": 2, "collection": 1, "record": 10}]}]
+      },
+      "expected": {
+        "snapshot": {
+          "graphs": [
+            {"graph": 7, "nodes": [0], "attachments": [{"node": 0, "collection": 1, "record": 10}]},
+            {"graph": 9, "nodes": [2], "attachments": []}
+          ],
+          "owners": [{"collection": 1, "record": 10, "graph": 7, "node": 0}]
+        },
+        "outcomes": [{"status": "error", "error": "RecordAlreadyAttached", "collection": 1, "record": 10, "graph": 7, "node": 0}]
+      }
+    },
+    {
+      "name": "detach-then-attach",
+      "purpose": "Detaching releases a record immediately to another node in the same batch.",
+      "input": {
+        "mode": "batches",
+        "snapshot": {
+          "graphs": [{"graph": 0, "nodes": [0, 1], "attachments": [{"node": 0, "collection": 1, "record": 10}]}],
+          "owners": [{"collection": 1, "record": 10, "graph": 0, "node": 0}]
+        },
+        "batches": [{"graph": 0, "ops": [
+          {"op": "detach", "node": 0, "collection": 1},
+          {"op": "attach", "node": 1, "collection": 1, "record": 10}
+        ]}]
+      },
+      "expected": {
+        "snapshot": {
+          "graphs": [{"graph": 0, "nodes": [0, 1], "attachments": [{"node": 1, "collection": 1, "record": 10}]}],
+          "owners": [{"collection": 1, "record": 10, "graph": 0, "node": 1}]
+        },
+        "outcomes": [{"status": "ok"}]
+      }
+    },
+    {
+      "name": "replace-keeps-attachments",
+      "purpose": "Put on an existing node retains attachments; duplicate same-record attach is still an error.",
+      "input": {
+        "mode": "batches",
+        "snapshot": {
+          "graphs": [{"graph": 1, "nodes": [0], "attachments": [{"node": 0, "collection": 65535, "record": 0}]}],
+          "owners": [{"collection": 65535, "record": 0, "graph": 1, "node": 0}]
+        },
+        "batches": [
+          {"graph": 1, "ops": [{"op": "put_node", "node": 0}]},
+          {"graph": 1, "ops": [{"op": "attach", "node": 0, "collection": 65535, "record": 0}]}
+        ]
+      },
+      "expected": {
+        "snapshot": {
+          "graphs": [{"graph": 1, "nodes": [0], "attachments": [{"node": 0, "collection": 65535, "record": 0}]}],
+          "owners": [{"collection": 65535, "record": 0, "graph": 1, "node": 0}]
+        },
+        "outcomes": [
+          {"status": "ok"},
+          {"status": "error", "error": "NodeAlreadyAttached", "node": 0, "collection": 65535}
+        ]
+      }
+    },
+    {
+      "name": "delete-frees-across-graphs",
+      "purpose": "Deletion releases all collections; a later graph can claim both records.",
+      "input": {
+        "mode": "batches",
+        "snapshot": {
+          "graphs": [
+            {"graph": 0, "nodes": [0], "attachments": [
+              {"node": 0, "collection": 0, "record": 5},
+              {"node": 0, "collection": 65535, "record": 5}
+            ]},
+            {"graph": 1, "nodes": [], "attachments": []}
+          ],
+          "owners": [
+            {"collection": 0, "record": 5, "graph": 0, "node": 0},
+            {"collection": 65535, "record": 5, "graph": 0, "node": 0}
+          ]
+        },
+        "batches": [
+          {"graph": 0, "ops": [{"op": "delete_node", "node": 0}]},
+          {"graph": 1, "ops": [
+            {"op": "put_node", "node": 18446744073709551615},
+            {"op": "attach", "node": 18446744073709551615, "collection": 65535, "record": 5},
+            {"op": "attach", "node": 18446744073709551615, "collection": 0, "record": 5}
+          ]}
+        ]
+      },
+      "expected": {
+        "snapshot": {
+          "graphs": [
+            {"graph": 0, "nodes": [], "attachments": []},
+            {"graph": 1, "nodes": [18446744073709551615], "attachments": [
+              {"node": 18446744073709551615, "collection": 0, "record": 5},
+              {"node": 18446744073709551615, "collection": 65535, "record": 5}
+            ]}
+          ],
+          "owners": [
+            {"collection": 0, "record": 5, "graph": 1, "node": 18446744073709551615},
+            {"collection": 65535, "record": 5, "graph": 1, "node": 18446744073709551615}
+          ]
+        },
+        "outcomes": [{"status": "ok"}, {"status": "ok"}]
+      }
+    },
+    {
+      "name": "rollback-maps-and-owners",
+      "purpose": "Failed tentative detach/attach/delete/create restores maps, nodes and global owners, and skips trailing operations.",
+      "input": {
+        "mode": "batches",
+        "snapshot": {
+          "graphs": [
+            {"graph": 0, "nodes": [0, 1], "attachments": [{"node": 0, "collection": 1, "record": 10}]},
+            {"graph": 1, "nodes": [0], "attachments": []}
+          ],
+          "owners": [{"collection": 1, "record": 10, "graph": 0, "node": 0}]
+        },
+        "batches": [
+          {"graph": 0, "ops": [
+            {"op": "detach", "node": 0, "collection": 1},
+            {"op": "attach", "node": 1, "collection": 1, "record": 10},
+            {"op": "put_node", "node": 2},
+            {"op": "delete_node", "node": 0},
+            {"op": "detach", "node": 1, "collection": 2},
+            {"op": "delete_node", "node": 1}
+          ]},
+          {"graph": 1, "ops": [{"op": "attach", "node": 0, "collection": 1, "record": 10}]},
+          {"graph": 0, "ops": [
+            {"op": "attach", "node": 1, "collection": 2, "record": 20},
+            {"op": "delete_node", "node": 99}
+          ]},
+          {"graph": 1, "ops": [{"op": "attach", "node": 0, "collection": 2, "record": 20}]}
+        ]
+      },
+      "expected": {
+        "snapshot": {
+          "graphs": [
+            {"graph": 0, "nodes": [0, 1], "attachments": [{"node": 0, "collection": 1, "record": 10}]},
+            {"graph": 1, "nodes": [0], "attachments": [{"node": 0, "collection": 2, "record": 20}]}
+          ],
+          "owners": [
+            {"collection": 1, "record": 10, "graph": 0, "node": 0},
+            {"collection": 2, "record": 20, "graph": 1, "node": 0}
+          ]
+        },
+        "outcomes": [
+          {"status": "error", "error": "AttachmentNotFound", "node": 1, "collection": 2},
+          {"status": "error", "error": "RecordAlreadyAttached", "collection": 1, "record": 10, "graph": 0, "node": 0},
+          {"status": "error", "error": "NodeNotFound", "node": 99},
+          {"status": "ok"}
+        ]
+      }
+    },
+    {
+      "name": "error-precedence-and-node-cycle",
+      "purpose": "Missing node wins over record conflicts; occupied node/collection wins over global conflicts; delete/create is logical, not allocator admission.",
+      "input": {
+        "mode": "batches",
+        "snapshot": {
+          "graphs": [{"graph": 0, "nodes": [0, 1], "attachments": [
+            {"node": 0, "collection": 0, "record": 10},
+            {"node": 1, "collection": 0, "record": 11}
+          ]}],
+          "owners": [
+            {"collection": 0, "record": 10, "graph": 0, "node": 0},
+            {"collection": 0, "record": 11, "graph": 0, "node": 1}
+          ]
+        },
+        "batches": [
+          {"graph": 0, "ops": [{"op": "attach", "node": 9, "collection": 0, "record": 10}]},
+          {"graph": 0, "ops": [{"op": "attach", "node": 0, "collection": 0, "record": 11}]},
+          {"graph": 0, "ops": [{"op": "detach", "node": 9, "collection": 0}]},
+          {"graph": 0, "ops": [
+            {"op": "delete_node", "node": 0},
+            {"op": "put_node", "node": 0},
+            {"op": "attach", "node": 0, "collection": 65535, "record": 18446744073709551615}
+          ]}
+        ]
+      },
+      "expected": {
+        "snapshot": {
+          "graphs": [{"graph": 0, "nodes": [0, 1], "attachments": [
+            {"node": 0, "collection": 65535, "record": 18446744073709551615},
+            {"node": 1, "collection": 0, "record": 11}
+          ]}],
+          "owners": [
+            {"collection": 0, "record": 11, "graph": 0, "node": 1},
+            {"collection": 65535, "record": 18446744073709551615, "graph": 0, "node": 0}
+          ]
+        },
+        "outcomes": [
+          {"status": "error", "error": "NodeNotFound", "node": 9},
+          {"status": "error", "error": "NodeAlreadyAttached", "node": 0, "collection": 0},
+          {"status": "error", "error": "NodeNotFound", "node": 9},
+          {"status": "ok"}
+        ]
+      }
+    }
+  ],
+  "invalid_cases": [
+    {
+      "name": "unsorted-graphs",
+      "input": {"mode": "snapshot", "snapshot": {"graphs": [
+        {"graph": 1, "nodes": [], "attachments": []},
+        {"graph": 0, "nodes": [], "attachments": []}
+      ], "owners": []}, "batches": []},
+      "error": "noncanonical order"
+    },
+    {
+      "name": "unsorted-nodes",
+      "input": {"mode": "snapshot", "snapshot": {"graphs": [
+        {"graph": 0, "nodes": [1, 0], "attachments": []}
+      ], "owners": []}, "batches": []},
+      "error": "noncanonical order"
+    },
+    {
+      "name": "unsorted-attachments",
+      "input": {"mode": "snapshot", "snapshot": {"graphs": [
+        {"graph": 0, "nodes": [0], "attachments": [
+          {"node": 0, "collection": 2, "record": 20},
+          {"node": 0, "collection": 1, "record": 10}
+        ]}
+      ], "owners": []}, "batches": []},
+      "error": "noncanonical order"
+    },
+    {
+      "name": "unsorted-owners",
+      "input": {"mode": "snapshot", "snapshot": {"graphs": [
+        {"graph": 0, "nodes": [0], "attachments": [
+          {"node": 0, "collection": 1, "record": 10},
+          {"node": 0, "collection": 2, "record": 20}
+        ]}
+      ], "owners": [
+        {"collection": 2, "record": 20, "graph": 0, "node": 0},
+        {"collection": 1, "record": 10, "graph": 0, "node": 0}
+      ]}, "batches": []},
+      "error": "noncanonical order"
+    },
+    {
+      "name": "duplicate-graph",
+      "input": {"mode": "batches", "snapshot": {"graphs": [
+        {"graph": 0, "nodes": [], "attachments": []},
+        {"graph": 0, "nodes": [], "attachments": []}
+      ], "owners": []}, "batches": []},
+      "error": "duplicate graph"
+    },
+    {
+      "name": "duplicate-node",
+      "input": {"mode": "batches", "snapshot": {"graphs": [
+        {"graph": 0, "nodes": [0, 0], "attachments": []}
+      ], "owners": []}, "batches": []},
+      "error": "duplicate node"
+    },
+    {
+      "name": "duplicate-node-collection",
+      "input": {"mode": "batches", "snapshot": {"graphs": [
+        {"graph": 0, "nodes": [0], "attachments": [
+          {"node": 0, "collection": 1, "record": 10},
+          {"node": 0, "collection": 1, "record": 11}
+        ]}
+      ], "owners": []}, "batches": []},
+      "error": "duplicate node collection"
+    },
+    {
+      "name": "dangling-node",
+      "input": {"mode": "snapshot", "snapshot": {"graphs": [
+        {"graph": 0, "nodes": [], "attachments": [{"node": 0, "collection": 1, "record": 10}]}
+      ], "owners": []}, "batches": []},
+      "error": "dangling attachment"
+    },
+    {
+      "name": "cross-graph-owner-conflict",
+      "input": {"mode": "snapshot", "snapshot": {"graphs": [
+        {"graph": 0, "nodes": [0], "attachments": [{"node": 0, "collection": 1, "record": 10}]},
+        {"graph": 1, "nodes": [0], "attachments": [{"node": 0, "collection": 1, "record": 10}]}
+      ], "owners": [{"collection": 1, "record": 10, "graph": 0, "node": 0}]}, "batches": []},
+      "error": "owner conflict"
+    },
+    {
+      "name": "owner-index-missing",
+      "input": {"mode": "snapshot", "snapshot": {"graphs": [
+        {"graph": 0, "nodes": [0], "attachments": [{"node": 0, "collection": 1, "record": 10}]}
+      ], "owners": []}, "batches": []},
+      "error": "owner index differs"
+    },
+    {
+      "name": "owner-index-wrong-node",
+      "input": {"mode": "snapshot", "snapshot": {"graphs": [
+        {"graph": 0, "nodes": [0, 1], "attachments": [{"node": 0, "collection": 1, "record": 10}]}
+      ], "owners": [{"collection": 1, "record": 10, "graph": 0, "node": 1}]}, "batches": []},
+      "error": "owner index differs"
+    },
+    {
+      "name": "duplicate-owner-index",
+      "input": {"mode": "batches", "snapshot": {"graphs": [], "owners": [
+        {"collection": 1, "record": 10, "graph": 0, "node": 0},
+        {"collection": 1, "record": 10, "graph": 1, "node": 0}
+      ]}, "batches": []},
+      "error": "duplicate owner"
+    },
+    {
+      "name": "bool-graph",
+      "input": {"mode": "snapshot", "snapshot": {"graphs": [
+        {"graph": true, "nodes": [], "attachments": []}
+      ], "owners": []}, "batches": []},
+      "error": "expected integer"
+    },
+    {
+      "name": "negative-node",
+      "input": {"mode": "snapshot", "snapshot": {"graphs": [
+        {"graph": 0, "nodes": [-1], "attachments": []}
+      ], "owners": []}, "batches": []},
+      "error": "expected integer"
+    },
+    {
+      "name": "record-overflow",
+      "input": {"mode": "snapshot", "snapshot": {"graphs": [
+        {"graph": 0, "nodes": [0], "attachments": [{"node": 0, "collection": 1, "record": 18446744073709551616}]}
+      ], "owners": []}, "batches": []},
+      "error": "expected integer"
+    },
+    {
+      "name": "collection-overflow",
+      "input": {"mode": "batches", "snapshot": {"graphs": [
+        {"graph": 0, "nodes": [0], "attachments": []}
+      ], "owners": []}, "batches": [
+        {"graph": 0, "ops": [{"op": "attach", "node": 0, "collection": 65536, "record": 0}]}
+      ]},
+      "error": "expected integer"
+    },
+    {
+      "name": "unknown-batch-graph",
+      "input": {"mode": "batches", "snapshot": {"graphs": [], "owners": []}, "batches": [
+        {"graph": 0, "ops": [{"op": "put_node", "node": 0}]}
+      ]},
+      "error": "unknown batch graph"
+    },
+    {
+      "name": "snapshot-with-batch",
+      "input": {"mode": "snapshot", "snapshot": {"graphs": [
+        {"graph": 0, "nodes": [], "attachments": []}
+      ], "owners": []}, "batches": [{"graph": 0, "ops": []}]},
+      "error": "snapshot mode requires empty batches"
+    },
+    {
+      "name": "unknown-operation",
+      "input": {"mode": "batches", "snapshot": {"graphs": [
+        {"graph": 0, "nodes": [], "attachments": []}
+      ], "owners": []}, "batches": [{"graph": 0, "ops": [{"op": "Attach", "node": 0}]}]},
+      "error": "unknown operation"
+    },
+    {
+      "name": "missing-attach-record",
+      "input": {"mode": "batches", "snapshot": {"graphs": [
+        {"graph": 0, "nodes": [0], "attachments": []}
+      ], "owners": []}, "batches": [{"graph": 0, "ops": [{"op": "attach", "node": 0, "collection": 1}]}]},
+      "error": "expected keys"
+    },
+    {
+      "name": "invalid-trailing-op-after-semantic-failure",
+      "input": {"mode": "batches", "snapshot": {"graphs": [
+        {"graph": 0, "nodes": [], "attachments": []}
+      ], "owners": []}, "batches": [{"graph": 0, "ops": [
+        {"op": "delete_node", "node": 99},
+        {"op": "put_node", "node": false}
+      ]}]},
+      "error": "expected integer"
+    },
+    {
+      "name": "extra-expiry-field",
+      "input": {"mode": "snapshot", "snapshot": {"graphs": [], "owners": []}, "batches": [], "clock": 0},
+      "error": "expected keys"
+    }
+  ]
+}

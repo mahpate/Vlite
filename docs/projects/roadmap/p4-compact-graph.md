@@ -143,22 +143,31 @@ The private codec slices implemented so far are in
 sequence and ID high-water marks; sorted public node/edge IDs and checked
 32-bit dense ordinals; node/edge keys and revisions; labels, relationship
 strings and sparse deadlines; bidirectional CSR; and ordinary node/edge
-property maps. Property names are dictionary-coded in UTF-8 byte order, while
+property maps and label postings. Each label dictionary code carries ascending
+dense node ordinals, checked against the per-node label codes in both directions.
+Decoded label scans emit ascending public IDs strictly above an optional cursor,
+without expiry filtering, matching the engine label index. A private intersection
+query supports 1..8 distinct labels, an exclusive cursor and a positive limit;
+duplicate query labels collapse and unknown labels return no matches.
+Property names are dictionary-coded in UTF-8 byte order, while
 per-record typed values preserve strings, signed integers, finite float/GeoPoint
 bits, and booleans. Each map retains the engine's existing field, string and
 byte limits; this is a correctness format, not a columnar compression or size
-claim. The versioned private payload magic is `VLGCSR02`; old `VLGCSR01` bytes
-are refused, not reinterpreted. Its decoder rejects
+claim. The versioned private payload magic is `VLGCSR03`; old `VLGCSR01` and
+`VLGCSR02` bytes are refused, not reinterpreted. Its decoder rejects
 noncanonical dictionaries/IDs, invalid endpoints or codes, incorrect row
 ordering, missing or duplicate CSR membership, overflow, truncation and
-trailing bytes. It also checks high-water marks against live IDs, revisions
+trailing bytes, noncanonical label posting codes/ordinals, and missing or extra
+posting membership. It also checks high-water marks against live IDs, revisions
 against graph sequence, and unique present node keys and edge keys in their
 separate namespaces. Logical visibility uses `deadline <= clock` as expired,
 hides edges incident to expired nodes, and emits the existing
 `(relationship, edge ID)` adjacency order; the accepted
 `graph-csr-cases.json` remains the oracle. Its full-u64 logical-only fixture
 uses placeholder lifecycle metadata and exercises CSR construction directly,
-not the persisted codec.
+not the persisted codec. Label access tests likewise cover 0 and `u64::MAX`
+logically without accepting impossible persisted high-water metadata. A generated
+engine graph checks decoded scan/intersection parity, including retained deadlines.
 
 The independently reviewed `tests/compact_graph_overlay_oracle.py` and
 `graph-overlay-cases.json` model committed-state projections, not an ordered
@@ -178,14 +187,29 @@ malformed fixtures, shuffles and mutation rejections. It is not a serializer,
 on-disk layout or Rust parity proof, and it models no topology, overlay, TTL,
 schema, attachments, revisions or temporal state.
 
+The independently reviewed `tests/compact_graph_label_oracle.py` and
+`graph-label-cases.json` model label dictionaries, sorted per-node code sets,
+ascending postings, exclusive-cursor label scans and bounded all-label
+intersections, including IDs 0 and `u64::MAX`. CI runs the reference, its
+malformed fixtures, shuffles and mutation rejections. It is not a byte format
+or Rust parity proof, and models no expiry, properties, edges, keys or overlay.
+
+The independently reviewed `tests/compact_graph_attachment_oracle.py` and
+`graph-attachment-cases.json` model node-to-record attachments: at most one
+record per node and collection, one owner per collection record, attach/detach
+error precedence, retention on node replacement, release on deletion and
+all-or-nothing batch rollback. CI runs the reference, its malformed fixtures,
+shuffles and mutation rejections. It is test evidence for the planned encoding,
+not a byte format; the codec still refuses attachments.
+
 This codec is not wired to the checkpoint block registry, shared framing,
 checkpoint reads or production builds. It refuses attachments, declared
 schema and temporal segments rather than dropping them. It does not encode
-label postings, schema/property indexes or temporal history; those sources
+schema/property indexes or temporal history; those sources
 therefore remain unsupported. No changes were made to op-12/op-15, public
 APIs, or `src/openapi.json`. The remaining P4 slices are shared block
 dispatch/publication, compact-base access in reads, mutation overlay and
-checkpoint integration, label postings and columnar property storage,
+checkpoint integration and columnar property storage,
 attachment/schema/temporal encoding or faithful refusal in each path, parallel
 import, and all performance and cross-platform qualification.
 
@@ -204,8 +228,9 @@ work, with cold/warm caches and WAL sizes disclosed. P2's 64 MiB threshold alone
 does not guarantee 300 ms. Full verification and decryption remain linear;
 do not hide work after the timer. F4's separate <=50 ms goal is unchanged.
 
-**Validation:** the private codec and logical references have independent review
-and local correctness checks, and run in the cross-platform CI matrix.
+**Validation:** the private codec slices and logical references have independent
+review and local correctness checks; earlier slices passed the cross-platform CI
+matrix, and each new slice is held to that matrix after integration.
 Remaining implementation and performance qualification are outstanding.
 DO-005 remains deferred to the major release under its
 unchanged quiet-host gate (mean background CPU <=10%; no half-second sample

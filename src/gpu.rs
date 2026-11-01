@@ -35,6 +35,14 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 /// Rows scored per dispatch; bounds GPU buffer sizes.
 const CHUNK_FLOATS: usize = 16 * 1024 * 1024;
 
+fn cpu_rescore(query: &[f32], rows: &[&[f32]]) -> Vec<f64> {
+    crate::exact_kernels::Scorer::new(query, crate::DistanceMetric::SquaredL2, 0.0)
+        .score(rows, None)
+        .into_iter()
+        .map(|distance| distance.expect("squared L2 always has a distance"))
+        .collect()
+}
+
 /// A compute device for exact search. Construct with [`GpuExactSearcher::new`].
 pub struct GpuExactSearcher {
     device: wgpu::Device,
@@ -112,21 +120,15 @@ impl GpuExactSearcher {
         }
         scored.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
         let keep = k.saturating_mul(4).saturating_add(32).min(scored.len());
+        let rows: Vec<&[f32]> = scored[..keep]
+            .iter()
+            .map(|&(_, id)| state.records[&id].vector.as_slice())
+            .collect();
+        let distances = cpu_rescore(query, &rows);
         let mut hits: Vec<SearchHit> = scored[..keep]
             .iter()
-            .map(|&(_, id)| {
-                let record = &state.records[&id];
-                let distance = record
-                    .vector
-                    .iter()
-                    .zip(query)
-                    .map(|(&a, &b)| {
-                        let d = f64::from(a) - f64::from(b);
-                        d * d
-                    })
-                    .sum();
-                SearchHit { id, distance }
-            })
+            .zip(distances)
+            .map(|(&(_, id), distance)| SearchHit { id, distance })
             .collect();
         hits.sort_by(|a, b| a.distance.total_cmp(&b.distance).then(a.id.cmp(&b.id)));
         hits.truncate(k);
@@ -243,5 +245,138 @@ impl GpuExactSearcher {
         drop(data);
         readback.unmap();
         Ok(distances)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::exact_kernels::{self, Kernel};
+    use crate::{CreateOptions, DistanceMetric, metric_distance};
+
+    fn kernels() -> Vec<Kernel> {
+        let mut kernels = vec![Kernel::Portable];
+        #[cfg(target_arch = "x86_64")]
+        if std::arch::is_x86_feature_detected!("avx2") {
+            kernels.push(Kernel::Avx2);
+        }
+        kernels
+    }
+
+    fn oracle(query: &[f32], rows: &[&[f32]]) -> Vec<f64> {
+        rows.iter()
+            .map(|row| metric_distance(row, query, DistanceMetric::SquaredL2, 0.0, 0.0).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn gpu_cpu_rescore_matches_the_original_fold_for_supported_sizes() {
+        let dimensions = (0..=67).chain([128, 384, 768]);
+        for kernel in kernels() {
+            exact_kernels::force_kernel(kernel, || {
+                for dims in dimensions.clone() {
+                    let query: Vec<f32> = (0..dims)
+                        .map(|i| match i % 6 {
+                            0 => -0.0,
+                            1 => f32::from_bits(1),
+                            2 => f32::MAX,
+                            3 => f32::MIN_POSITIVE,
+                            4 => -0.25,
+                            _ => 1.0,
+                        })
+                        .collect();
+                    let rows: Vec<Vec<f32>> = (0..9)
+                        .map(|row| {
+                            query
+                                .iter()
+                                .enumerate()
+                                .map(|(i, value)| match (i + row) % 5 {
+                                    0 => -*value,
+                                    1 => 0.0,
+                                    2 => f32::from_bits(1),
+                                    3 => f32::MAX,
+                                    _ => *value,
+                                })
+                                .collect()
+                        })
+                        .collect();
+                    let refs: Vec<&[f32]> = rows.iter().map(Vec::as_slice).collect();
+                    let actual = cpu_rescore(&query, &refs);
+                    let expected = oracle(&query, &refs);
+                    assert_eq!(
+                        actual.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                        expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                        "{kernel:?} dimension {dims}"
+                    );
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn cpu_fallback_without_a_gpu_matches_the_old_oracle_order_and_bits() {
+        for kernel in kernels() {
+            exact_kernels::force_kernel(kernel, || {
+                for dims in (1..=67).chain([128, 384, 768]) {
+                    let mut database =
+                        Database::create_in_memory(dims, CreateOptions::default()).unwrap();
+                    let query: Vec<_> = (0..dims)
+                        .map(|dim| match dim % 5 {
+                            0 => 0.0,
+                            1 => -0.0,
+                            2 => f32::from_bits(1),
+                            3 => 2.0,
+                            _ => -1.0,
+                        })
+                        .collect();
+                    let rows: Vec<_> = [19, 9, 13, 3, 15, 5, 11, 1, 17, 7, 21]
+                        .into_iter()
+                        .map(|id| {
+                            let row = if id == 3 || id == 9 {
+                                query.clone()
+                            } else {
+                                query.iter().map(|value| *value + (id % 4) as f32).collect()
+                            };
+                            (id, row)
+                        })
+                        .collect();
+                    for (id, row) in &rows {
+                        database.put(*id, row, b"").unwrap();
+                    }
+                    let mut oracle_hits: Vec<_> = rows
+                        .iter()
+                        .map(|(id, row)| SearchHit {
+                            id: *id,
+                            distance: metric_distance(
+                                row,
+                                &query,
+                                DistanceMetric::SquaredL2,
+                                0.0,
+                                0.0,
+                            )
+                            .unwrap(),
+                        })
+                        .collect();
+                    oracle_hits
+                        .sort_by(|a, b| a.distance.total_cmp(&b.distance).then(a.id.cmp(&b.id)));
+                    for k in [0, 1, 3, rows.len(), rows.len() + 1] {
+                        let actual =
+                            GpuExactSearcher::search_or_cpu(None, &database, &query, k).unwrap();
+                        assert_eq!(
+                            actual
+                                .iter()
+                                .map(|hit| (hit.id, hit.distance.to_bits()))
+                                .collect::<Vec<_>>(),
+                            oracle_hits
+                                .iter()
+                                .take(k)
+                                .map(|hit| (hit.id, hit.distance.to_bits()))
+                                .collect::<Vec<_>>(),
+                            "{kernel:?} dims={dims} k={k}"
+                        );
+                    }
+                }
+            });
+        }
     }
 }

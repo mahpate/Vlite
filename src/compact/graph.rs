@@ -9,7 +9,7 @@ use crate::property_graph::engine::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-const MAGIC: &[u8; 8] = b"VLGCSR02";
+const MAGIC: &[u8; 8] = b"VLGCSR03";
 const MAX_BYTES: usize = 64 << 20;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,10 +74,60 @@ struct CompactGraph {
     labels: Vec<String>,
     relationships: Vec<String>,
     property_names: Vec<String>,
+    label_postings: Vec<Vec<u32>>,
     node_ordinals: BTreeMap<u64, u32>,
     edge_rows: Vec<EdgeRow>,
     out: Csr,
     incoming: Csr,
+}
+
+impl CompactGraph {
+    fn postings(&self, label: &str) -> &[u32] {
+        self.labels
+            .binary_search_by(|candidate| candidate.as_str().cmp(label))
+            .map_or(&[], |code| self.label_postings[code].as_slice())
+    }
+
+    fn label_scan(&self, label: &str, after: Option<u64>) -> impl Iterator<Item = u64> + '_ {
+        let postings = self.postings(label);
+        let start = after.map_or(0, |id| {
+            postings.partition_point(|ordinal| self.source.nodes[*ordinal as usize].id <= id)
+        });
+        postings[start..]
+            .iter()
+            .map(|ordinal| self.source.nodes[*ordinal as usize].id)
+    }
+
+    fn label_intersection(
+        &self,
+        labels: &[&str],
+        after: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<u64>, CodecError> {
+        let mut distinct = BTreeSet::new();
+        for label in labels {
+            crate::property_graph::engine::model::validate_label(label)
+                .map_err(|_| CodecError::Corrupt)?;
+            distinct.insert(*label);
+            if distinct.len() > 8 {
+                return Err(CodecError::Corrupt);
+            }
+        }
+        if distinct.is_empty() || limit == 0 {
+            return Err(CodecError::Corrupt);
+        }
+        let lists: Vec<_> = distinct.iter().map(|label| self.postings(label)).collect();
+        let smallest = lists.iter().min_by_key(|list| list.len()).unwrap();
+        let start = after.map_or(0, |id| {
+            smallest.partition_point(|ordinal| self.source.nodes[*ordinal as usize].id <= id)
+        });
+        Ok(smallest[start..]
+            .iter()
+            .filter(|ordinal| lists.iter().all(|list| list.binary_search(ordinal).is_ok()))
+            .take(limit)
+            .map(|ordinal| self.source.nodes[*ordinal as usize].id)
+            .collect())
+    }
 }
 
 impl GraphSource {
@@ -199,6 +249,14 @@ fn encode(source: &GraphSource) -> Result<Vec<u8>, CodecError> {
     }
     put_csr(&mut out, &graph.out)?;
     put_csr(&mut out, &graph.incoming)?;
+    put_count(&mut out, graph.label_postings.len())?;
+    for (code, ordinals) in graph.label_postings.iter().enumerate() {
+        put_count(&mut out, code)?;
+        put_count(&mut out, ordinals.len())?;
+        for ordinal in ordinals {
+            put_u32(&mut out, *ordinal)?;
+        }
+    }
     if out.len() > MAX_BYTES {
         return Err(CodecError::Corrupt);
     }
@@ -312,10 +370,11 @@ fn decode(bytes: &[u8]) -> Result<CompactGraph, CodecError> {
     }
     let out = reader.csr()?;
     let incoming = reader.csr()?;
+    let label_postings = reader.label_postings(labels.len(), node_count)?;
     if !reader.is_empty() {
         return Err(CodecError::Corrupt);
     }
-    let graph = build(GraphSource {
+    let mut graph = build(GraphSource {
         graph_id,
         name,
         sequence,
@@ -330,9 +389,11 @@ fn decode(bytes: &[u8]) -> Result<CompactGraph, CodecError> {
         || graph.property_names != property_names
         || graph.out != out
         || graph.incoming != incoming
+        || graph.label_postings != label_postings
     {
         return Err(CodecError::Corrupt);
     }
+    graph.label_postings = label_postings;
     Ok(graph)
 }
 
@@ -427,6 +488,15 @@ fn build_inner(
         label_set.extend(node.labels.iter().cloned());
     }
     let labels: Vec<_> = label_set.into_iter().collect();
+    let mut label_postings = vec![Vec::new(); labels.len()];
+    for (ordinal, node) in source.nodes.iter().enumerate() {
+        for label in &node.labels {
+            let code = labels
+                .binary_search(label)
+                .map_err(|_| CodecError::Corrupt)?;
+            label_postings[code].push(u32::try_from(ordinal).map_err(|_| CodecError::Corrupt)?);
+        }
+    }
     let mut relationship_set = BTreeSet::new();
     for edge in &source.edges {
         if !node_ordinals.contains_key(&edge.source) || !node_ordinals.contains_key(&edge.target) {
@@ -485,6 +555,7 @@ fn build_inner(
         labels,
         relationships,
         property_names,
+        label_postings,
         node_ordinals,
         edge_rows,
         out,
@@ -788,6 +859,45 @@ impl<'a> Reader<'a> {
         Ok(Csr { offsets, edges })
     }
 
+    fn label_postings(
+        &mut self,
+        label_count: usize,
+        node_count: usize,
+    ) -> Result<Vec<Vec<u32>>, CodecError> {
+        let count = self.entries(8)?;
+        if count != label_count {
+            return Err(CodecError::Corrupt);
+        }
+        let mut postings = Vec::new();
+        postings
+            .try_reserve_exact(count)
+            .map_err(|_| CodecError::Corrupt)?;
+        for code in 0..count {
+            if usize::try_from(self.u32()?).map_err(|_| CodecError::Corrupt)? != code {
+                return Err(CodecError::Corrupt);
+            }
+            let members = self.entries(4)?;
+            if members == 0 || members > node_count {
+                return Err(CodecError::Corrupt);
+            }
+            let mut ordinals = Vec::new();
+            ordinals
+                .try_reserve_exact(members)
+                .map_err(|_| CodecError::Corrupt)?;
+            for _ in 0..members {
+                let ordinal = self.u32()?;
+                if usize::try_from(ordinal).map_err(|_| CodecError::Corrupt)? >= node_count
+                    || ordinals.last().is_some_and(|previous| *previous >= ordinal)
+                {
+                    return Err(CodecError::Corrupt);
+                }
+                ordinals.push(ordinal);
+            }
+            postings.push(ordinals);
+        }
+        Ok(postings)
+    }
+
     fn is_empty(&self) -> bool {
         self.at == self.bytes.len()
     }
@@ -968,6 +1078,209 @@ mod tests {
     use std::collections::BTreeSet;
 
     #[test]
+    fn label_postings_round_trip_and_queries_preserve_order_and_deadlines() {
+        let mut source = fixture_graph(&json!({
+            "nodes": [
+                {"id": 50, "labels": ["B", "A"]},
+                {"id": 0, "labels": ["A"]},
+                {"id": 7, "labels": ["A", "B"]},
+                {"id": 12, "labels": []}
+            ], "edges": []
+        }));
+        source.nodes[0].deadline = Some(0);
+        let graph = decode(&encode(&source).unwrap()).unwrap();
+        assert_eq!(graph.label_postings, vec![vec![0, 1, 3], vec![1, 3]]);
+        assert_eq!(graph.label_scan("A", None).collect::<Vec<_>>(), [0, 7, 50]);
+        assert_eq!(graph.label_scan("A", Some(0)).collect::<Vec<_>>(), [7, 50]);
+        assert_eq!(graph.label_scan("missing", None).count(), 0);
+        assert_eq!(graph.label_scan("A", Some(u64::MAX)).count(), 0);
+        assert_eq!(
+            graph.label_intersection(&["B", "A", "A"], None, 1),
+            Ok(vec![7])
+        );
+        assert_eq!(
+            graph.label_intersection(&["A", "B"], Some(7), 10),
+            Ok(vec![50])
+        );
+        assert_eq!(
+            graph.label_intersection(&["A", "missing"], None, 10),
+            Ok(vec![])
+        );
+        assert_eq!(
+            graph.label_intersection(&[], None, 10),
+            Err(CodecError::Corrupt)
+        );
+        assert_eq!(
+            graph.label_intersection(&["A"], None, 0),
+            Err(CodecError::Corrupt)
+        );
+        assert_eq!(
+            graph.label_intersection(&["A", "B", "C", "D", "E", "F", "G", "H", "I"], None, 1),
+            Err(CodecError::Corrupt)
+        );
+        source.nodes.reverse();
+        assert_eq!(encode(&source).unwrap(), encode(&graph.source).unwrap());
+        let empty =
+            decode(&encode(&fixture_graph(&json!({"nodes": [], "edges": []}))).unwrap()).unwrap();
+        assert!(empty.label_postings.is_empty());
+
+        source.nodes.push(SourceNode {
+            id: u64::MAX,
+            labels: vec!["A".into(), "B".into()],
+            ..source.nodes[0].clone()
+        });
+        let logical = build_inner(source.clone(), false).unwrap();
+        assert_eq!(
+            logical.label_scan("A", Some(50)).collect::<Vec<_>>(),
+            [u64::MAX]
+        );
+        assert_eq!(
+            logical.label_intersection(&["A", "B"], Some(50), 10),
+            Ok(vec![u64::MAX])
+        );
+        assert_eq!(logical.label_scan("A", Some(u64::MAX)).count(), 0);
+        assert_eq!(
+            logical.label_scan("A", None).collect::<Vec<_>>(),
+            [0, 7, 50, u64::MAX]
+        );
+        assert_eq!(
+            logical.label_intersection(&["A", "B"], Some(u64::MAX), 10),
+            Ok(vec![])
+        );
+        assert_eq!(encode(&source), Err(CodecError::Corrupt));
+    }
+
+    #[test]
+    fn decoder_rejects_label_posting_corruption_and_old_versions() {
+        let source = fixture_graph(&json!({
+            "nodes": [
+                {"id": 0, "labels": ["A"]},
+                {"id": 7, "labels": ["A", "B"]},
+                {"id": 9, "labels": ["B"]}
+            ], "edges": []
+        }));
+        let bytes = encode(&source).unwrap();
+        // Two explicit (code, count, ordinals) rows, preceded by row count.
+        let start = bytes.len() - 36;
+        assert_eq!(
+            u32::from_le_bytes(bytes[start..start + 4].try_into().unwrap()),
+            2
+        );
+        for (offset, value) in [
+            (start, u32::MAX),
+            (start + 4, 2),        // out-of-range code
+            (start + 20, 0),       // duplicate code
+            (start + 4, 1),        // unsorted codes
+            (start + 8, u32::MAX), // excessive count
+            (start + 16, 0),       // duplicate ordinal
+            (start + 12, 2),       // descending ordinals
+            (start + 16, 3),       // out-of-range ordinal
+            (start + 16, 2),       // canonical but wrong membership (extra/missing)
+        ] {
+            let mut corrupt = bytes.clone();
+            corrupt[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            assert_eq!(
+                decode(&corrupt),
+                Err(CodecError::Corrupt),
+                "offset {offset}, value {value}"
+            );
+        }
+        let mut missing = bytes.clone();
+        missing[start + 8..start + 12].copy_from_slice(&1u32.to_le_bytes());
+        missing.drain(start + 16..start + 20);
+        assert_eq!(decode(&missing), Err(CodecError::Corrupt));
+        let mut extra = bytes.clone();
+        extra[start + 8..start + 12].copy_from_slice(&3u32.to_le_bytes());
+        extra.splice(start + 20..start + 20, 2u32.to_le_bytes());
+        assert_eq!(decode(&extra), Err(CodecError::Corrupt));
+        let mut omitted_label = bytes.clone();
+        omitted_label[start..start + 4].copy_from_slice(&1u32.to_le_bytes());
+        omitted_label.truncate(start + 20);
+        assert_eq!(decode(&omitted_label), Err(CodecError::Corrupt));
+        for end in start..bytes.len() {
+            assert_eq!(decode(&bytes[..end]), Err(CodecError::Corrupt));
+        }
+        for magic in [b"VLGCSR01", b"VLGCSR02"] {
+            let mut old = bytes.clone();
+            old[..8].copy_from_slice(magic);
+            assert_eq!(decode(&old), Err(CodecError::Corrupt));
+        }
+    }
+
+    #[test]
+    fn decoded_label_postings_match_generated_engine_index() {
+        let mut state = GraphState::new();
+        state
+            .apply(
+                1,
+                &GraphBody {
+                    graph_id: GraphId(0),
+                    entries: vec![GraphEntry::CreateGraph {
+                        name: "labels".into(),
+                    }],
+                },
+            )
+            .unwrap();
+        let mut entries = Vec::new();
+        for index in 0..256u64 {
+            let labels = (0..8)
+                .filter(|bit| index & (1 << bit) != 0)
+                .map(|bit| format!("L{bit}"))
+                .collect();
+            entries.push(GraphEntry::PutNode {
+                node_id: NodeId(index * 17),
+                key: format!("node-{index}"),
+                labels,
+                properties: Default::default(),
+            });
+            if index % 3 == 0 {
+                entries.push(GraphEntry::NodeExpiry {
+                    node_id: NodeId(index * 17),
+                    expires_at_ms: Some(0),
+                });
+            }
+        }
+        state
+            .apply(
+                2,
+                &GraphBody {
+                    graph_id: GraphId(0),
+                    entries,
+                },
+            )
+            .unwrap();
+        let engine = state.graph(GraphId(0)).unwrap();
+        let graph = decode(&encode(&GraphSource::from_graph(engine).unwrap()).unwrap()).unwrap();
+        assert_eq!(
+            graph.label_intersection(&["L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7"], None, 10),
+            Ok(vec![255 * 17])
+        );
+        for label in ["L0", "L1", "L7", "unknown"] {
+            for after in [None, Some(0), Some(50), Some(2160), Some(u64::MAX)] {
+                assert_eq!(
+                    graph.label_scan(label, after).collect::<Vec<_>>(),
+                    engine
+                        .label_scan(label, after.map(NodeId))
+                        .map(|id| id.0)
+                        .collect::<Vec<_>>()
+                );
+                for limit in [1, 5, usize::MAX] {
+                    let expected = engine
+                        .label_scan(label, after.map(NodeId))
+                        .filter(|id| engine.nodes_with_label("L2").any(|other| other == *id))
+                        .take(limit)
+                        .map(|id| id.0)
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        graph.label_intersection(&[label, "L2"], after, limit),
+                        Ok(expected)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn csr_codec_matches_the_accepted_logical_oracle() {
         let fixture: Value = serde_json::from_str(include_str!(
             "../../tests/fixtures/compact/graph-csr-cases.json"
@@ -1028,7 +1341,8 @@ mod tests {
         assert_eq!(decode(&truncated), Err(CodecError::Corrupt));
 
         let mut invalid_membership = bytes.clone();
-        *invalid_membership.last_mut().unwrap() = 1;
+        let incoming_member_end = invalid_membership.len() - 4;
+        invalid_membership[incoming_member_end - 1] = 1;
         assert_eq!(decode(&invalid_membership), Err(CodecError::Corrupt));
 
         let mut trailing = bytes;
