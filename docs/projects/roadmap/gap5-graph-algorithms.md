@@ -528,6 +528,10 @@ Output caps cut score rows after the computation, which still runs over every sc
 8. `estimated` is `k < n`; a completed sample smaller than the scope is complete but estimated.
 9. `stats.arcs` keeps its S1 to S3 meaning (before collapse), not betweenness' distinct arcs.
 10. The site API rows carry no `data-api` keys, like the S3 type rows: `tests/api_reference.py` keys only methods and functions.
+11. `samples` 0 and a scope with no visible node stay errors (`InvalidQuery`; `GraphNodeNotFound` or `InvalidQuery`), not a no-scores read; the oracle's 3 such cases are asserted as rejections.
+12. Node ID `u64::MAX` cannot be stored (`IdSpaceExhausted`), so the oracle case using it is read on IDs XOR 2^63, which keeps their order and every `seed XOR id`; an edge ID `u64::MAX` takes the next free edge ID, since betweenness reports no edge IDs.
+13. The oracle's `interrupt_after_sources` maps to vertex-budget stops at actual charged units, with no test hook or knob: deadline and cancellation checks every 64 units cannot target a chosen source in graphs this small.
+14. Oracle scores match within 1e-12 relative to max(1, |expected|), and zero exactly; the normalization is checked separately from the exact raw sums.
 
 ### S4 coverage
 
@@ -539,10 +543,43 @@ the interrupted source discarded, k equal to the completed sources, no output at
 2^1024 shortest paths as `NumericOverflow`, and extraction-time arc counts and growth-copy checks on the betweenness route.
 Random scopes (300 seeds, full and partial samples) match a definitional pair-dependency oracle within 1e-9.
 The adapter adds 6 tests: the 4 betweenness goldens on exact IDs and through a database file, the echo and non-mutation,
-typed errors, partial-result provenance, and checked echo copies.
-`check_case` compares a read with a case in the golden betweenness shape, so a separately validated fixture can reuse it.
+typed errors, partial-result provenance, and checked echo copies; 3 more consume the independent oracle below.
 Both suites were written first and failed to compile (18 errors, all missing S4 API) before the implementation passed.
-Remaining gates: independent review, the separately authored betweenness reference oracle, CSR parity and serving.
+
+### S4 independent oracle
+
+[`graph_betweenness_oracle.py`](../../../tests/graph_betweenness_oracle.py) checks
+[`betweenness-cases.json`](../../../tests/fixtures/graph_algorithms/betweenness-cases.json) (23 cases, 7 SplitMix64 vectors) with exact fractions and no Rust.
+It was authored and validated independently and is imported unchanged.
+Adapter tests match all 7 vectors, show `u64::MAX` unstorable as a node or edge ID, and classify and check every case:
+
+| Cases | Count | Treatment |
+|---|---|---|
+| Read on the fixture's node IDs | 19 | Checked as below; `sparse_ids_xor_seed` stores its edge ID `u64::MAX` as the next free ID. |
+| `max_seed_path` (node ID `u64::MAX`) | 1 | Read on node IDs and seed XOR 2^63 (all IDs are at least 2^63), mapped back. |
+| `zero_requested_samples`, `one_node_no_sources` | 2 | `samples` 0: `max_sampled_sources` 0 is `Read(InvalidQuery)`; zero limits fail, never clamp. |
+| `empty_visible_graph` | 1 | No visible node: the due seed is `Read(GraphNodeNotFound)`, no seed `Read(InvalidQuery)`. |
+
+Each rejected case also asserts the fixture's answer (no sources, k = 0, no scores) that no read can return.
+Graphs are stored in ascending ID order, the only order the store accepts, with expired nodes and edges due at the read's TTL clock.
+Every visible node is a seed within two hops, so the scope is the visible graph; the reversed seed list gives the same output and echo.
+A read checks n, the visible edge count, rows ascending by ID, the selected and completed sources in rank order
+(the selection also ranked by the test's own SplitMix64), k and the status:
+exact and complete_estimated are complete, partial_estimated stops on `VertexLimit`, and no_scores returns no output and no echo.
+Each score must lie within 1e-12 relative to max(1, |expected|) of `f64_repr`, itself checked equal to the exact fraction rounded once;
+a zero must be exactly 0. Separately, `(n / k) * raw_sum / ((n - 1) * (n - 2))` from the exact raw sums checks the normalization.
+All 134 checked rows were bit-identical to the once-rounded values, which the test does not require.
+
+Interruption uses actual checkpoints, not a hook: every vertex budget from 1 to one below the full run's stops at its next charged unit,
+in extraction, setup, or a source's search, dependencies or commit. Over the budgets of every read case k never decreases,
+reaches each proper prefix of the selection and is 0 exactly when there is neither output nor echo.
+A stop at k >= 1 returns the full selection, the completed prefix, the echo and, bit for bit, the scores of an uninterrupted k-source read;
+the full budget completes. `interrupted_path` (2 sources) is checked against the fixture at all 14 budgets stopping inside source 3,
+and `interrupted_before_first` (0 sources) at all 36 that stop after extraction but before the first source completes;
+its selection is checked against the uninterrupted read. The fake-clock deadline and cancellation tests above are unchanged.
+Temporary engine mutations each failed the consumer and were not committed:
+`Both` halved, ranking by seed plus ID, parallel arcs kept, and interrupted rows exposed.
+Remaining gates: independent review (this oracle wiring included), CSR parity and serving.
 
 ## GraphRAG and competitors
 

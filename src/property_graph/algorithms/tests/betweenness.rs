@@ -1,11 +1,19 @@
-//! Adapter tests of sampled betweenness (Gap 5 S4): the golden betweenness
-//! cases on exact IDs and through a database file, the request echo, typed
-//! errors, partial-result provenance and non-mutation.
+//! Adapter tests of sampled betweenness (Gap 5 S4): the 4 golden
+//! betweenness cases of `golden.json` on exact IDs and through a database
+//! file, the request echo, typed errors, partial-result provenance and
+//! non-mutation.
 //!
-//! [`check_case`] compares one read with a case in the shape of the golden
-//! betweenness cases, so a separately authored fixture of more cases can
-//! reuse it.
+//! The 23 cases of the independent oracle fixture `betweenness-cases.json`
+//! (exact fractions from `tests/graph_betweenness_oracle.py`) are read on
+//! their sparse node IDs at a TTL clock that hides their expired nodes and
+//! edges: 19 directly, `max_seed_path` (node ID `u64::MAX`, which the
+//! store cannot hold) on order- and hash-preserving mapped IDs, and the 3
+//! cases outside the public domain (`samples` 0, no visible node) are shown
+//! rejected. Scores match the once-rounded fractions within a relative
+//! 1e-12, and their raw sums separately check the normalization. The
+//! oracle's interruptions are vertex-budget stops, swept over every budget.
 
+use super::super::super::engine::GraphError;
 use super::*;
 
 fn sampled(sampling_seed: u64) -> GraphAlgorithm {
@@ -57,8 +65,9 @@ fn case_request(
     (request, options)
 }
 
-/// Checks `read` against a betweenness case whose node `id` is `node(id)`
-/// here: the scope node and edge counts, every score within `tolerance`,
+/// Checks `read` against a `golden.json` betweenness case whose node `id`
+/// is `node(id)` here: the scope node and edge counts, every score within
+/// `tolerance`,
 /// the completed source count and the estimated flag. The sampled sources
 /// are compared exactly when `node` keeps IDs, since sampling ranks by ID;
 /// otherwise they must be the case's scope ranked by the mapped IDs.
@@ -422,4 +431,558 @@ fn betweenness_echo_copies_are_checked_and_return_nothing() {
             assert!(!read.complete && !read.computation_complete);
         }
     }
+}
+
+// The independent betweenness oracle: `betweenness-cases.json`, checked by
+// `tests/graph_betweenness_oracle.py` with exact fractions and no Rust.
+
+const ORACLE: &str =
+    include_str!("../../../../tests/fixtures/graph_algorithms/betweenness-cases.json");
+
+/// The TTL clock of oracle reads; expired fixture nodes and edges are due
+/// at it.
+const ORACLE_NOW: u64 = 1_000;
+
+/// A score matches the oracle's exact fraction rounded once to binary64
+/// within this tolerance relative to the larger of 1 and that value; the
+/// engine rounds at every step, so equal bits are not required. A zero
+/// fraction must be exactly 0.
+const RELATIVE: f64 = 1e-12;
+
+/// XOR with the top bit maps IDs of at least 2^63 below `u64::MAX`, keeping
+/// their order and, with the seed mapped alike, every `seed XOR id`.
+const TOP: u64 = 1 << 63;
+
+fn oracle_cases() -> Vec<Value> {
+    let fixture: Value = serde_json::from_str(ORACLE).unwrap();
+    assert_eq!(fixture["schema"], "vlite.graph-betweenness-golden");
+    assert_eq!(fixture["version"], 1);
+    let cases = fixture["cases"].as_array().unwrap().clone();
+    assert_eq!(cases.len(), 23);
+    cases
+}
+
+fn number(value: &Value) -> u64 {
+    value.as_u64().unwrap()
+}
+
+fn expired(item: &Value) -> bool {
+    item.get("expired")
+        .is_some_and(|flag| flag.as_bool().unwrap())
+}
+
+fn oracle_direction(case: &Value) -> Direction {
+    match case["direction"].as_str().unwrap() {
+        "Out" => Direction::Out,
+        "In" => Direction::In,
+        "Both" => Direction::Both,
+        other => panic!("unknown direction {other}"),
+    }
+}
+
+/// A case's graph on its node IDs XOR `mask`, read at `ORACLE_NOW`: nodes
+/// keyed `n{id}` and edges of type `R`, each put in ascending ID order (the
+/// only order the store accepts), the expired ones due at the clock. The
+/// store cannot hold ID `u64::MAX` (see
+/// `oracle_ids_outside_the_store_are_rejected`), so an edge with it, always
+/// the last, takes the next free ID: betweenness reports no edge IDs.
+/// Returns the graph, the visible nodes in fixture order and the number of
+/// visible edges.
+fn oracle_graph(case: &Value, mask: u64) -> (GraphState, Vec<u64>, u64) {
+    let mut state = GraphState::new();
+    let create = GraphBody {
+        graph_id: G,
+        entries: vec![GraphEntry::CreateGraph { name: "g".into() }],
+    };
+    state.apply(1, &create).unwrap();
+    let mut nodes: Vec<(u64, bool)> = case["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| (number(&node["id"]) ^ mask, expired(node)))
+        .collect();
+    let visible: Vec<u64> = nodes
+        .iter()
+        .filter(|node| !node.1)
+        .map(|node| node.0)
+        .collect();
+    nodes.sort_unstable();
+    let mut edges: Vec<(u64, u64, u64, bool)> = case["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|edge| {
+            (
+                number(&edge["id"]),
+                number(&edge["source"]) ^ mask,
+                number(&edge["target"]) ^ mask,
+                expired(edge),
+            )
+        })
+        .collect();
+    edges.sort_unstable();
+    let mut entries: Vec<GraphEntry> = nodes
+        .iter()
+        .map(|&(id, _)| GraphEntry::PutNode {
+            node_id: NodeId(id),
+            key: format!("n{id}"),
+            labels: BTreeSet::new(),
+            properties: Properties::new(),
+        })
+        .collect();
+    let mut expiries: Vec<GraphEntry> = nodes
+        .iter()
+        .filter(|node| node.1)
+        .map(|&(id, _)| GraphEntry::NodeExpiry {
+            node_id: NodeId(id),
+            expires_at_ms: Some(ORACLE_NOW),
+        })
+        .collect();
+    let (mut next, mut shown) = (0, 0);
+    for (id, source, target, gone) in edges {
+        let id = if id == u64::MAX { next } else { id };
+        next = id + 1;
+        entries.push(GraphEntry::PutEdge {
+            edge_id: EdgeId(id),
+            source: NodeId(source),
+            destination: NodeId(target),
+            relationship: "R".into(),
+            key: None,
+            properties: Properties::new(),
+        });
+        if gone {
+            expiries.push(GraphEntry::EdgeExpiry {
+                edge_id: EdgeId(id),
+                expires_at_ms: Some(ORACLE_NOW),
+            });
+        } else if visible.contains(&source) && visible.contains(&target) {
+            shown += 1;
+        }
+    }
+    entries.extend(expiries);
+    let body = GraphBody {
+        graph_id: G,
+        entries,
+    };
+    state.apply(2, &body).unwrap();
+    (state, visible, shown)
+}
+
+/// A read of `case` from `seeds` (in this order) at `ORACLE_NOW` within two
+/// hops, with `samples` as `max_sampled_sources` and `max_vertex_operations`
+/// `budget`, if any. Every scoped node is a seed, so the scope is exactly
+/// the visible nodes and every edge between them.
+fn oracle_read(
+    graph: &Graph,
+    case: &Value,
+    (seeds, seed): (&[u64], u64),
+    samples: u64,
+    budget: Option<u64>,
+) -> GraphAlgorithmRead {
+    let selectors = seeds.iter().copied().map(NodeSelector::Id).collect();
+    let request = between(selectors, oracle_direction(case), seed);
+    let mut options = hops(2);
+    options.algorithm_limits.max_sampled_sources = samples;
+    if let Some(budget) = budget {
+        options.algorithm_limits.max_vertex_operations = budget;
+    }
+    run(graph, 2, ORACLE_NOW, &request, &options, &|| 0).unwrap()
+}
+
+/// An oracle fraction `p/q` rounded once to binary64: both parts are below
+/// 2^53 here, so the quotient is one correctly rounded division.
+fn fraction(exact: &Value) -> f64 {
+    let (p, q) = exact.as_str().unwrap().split_once('/').unwrap();
+    let (p, q): (u64, u64) = (p.parse().unwrap(), q.parse().unwrap());
+    assert!(p < 1 << 53 && 0 < q && q < 1 << 53, "{exact}");
+    p as f64 / q as f64
+}
+
+fn near(actual: f64, wanted: f64) -> bool {
+    (actual - wanted).abs() <= RELATIVE * wanted.abs().max(1.0)
+}
+
+fn score_bits(output: &BetweennessOutput) -> Vec<(u64, u64)> {
+    output
+        .scores
+        .iter()
+        .map(|row| (row.node_id, row.score.to_bits()))
+        .collect()
+}
+
+/// Checks a read of `case`, on its node IDs XOR `mask`, whose extraction
+/// finished: the scope node count, `edges` visible edges, the status, the
+/// selected and completed sources in rank order, k, rows ascending by ID,
+/// and each score against the oracle's once-rounded fraction and against
+/// its raw dependency sum normalized here as `(n / k) * sum / ((n - 1) *
+/// (n - 2))`, both within [`RELATIVE`], a zero fraction exactly.
+fn check_oracle(case: &Value, read: &GraphAlgorithmRead, mask: u64, edges: u64) {
+    let name = case["id"].as_str().unwrap();
+    let expected = &case["expected"];
+    let (n, k) = (number(&expected["n"]), number(&expected["k"]));
+    assert!(read.scope_complete, "{name}");
+    assert_eq!(read.stats.nodes_extracted, n, "{name}");
+    assert_eq!(read.stats.edges_extracted, edges, "{name}");
+    let status = expected["status"].as_str().unwrap();
+    if status == "no_scores" {
+        assert_eq!(k, 0, "{name}");
+        assert!(expected["scores"].is_null(), "{name}");
+        assert!(ids(&expected["completed"]).is_empty(), "{name}");
+        assert_eq!((&read.output, &read.request), (&None, &None), "{name}");
+        assert_eq!(read.truncation.len(), 1, "{name}");
+        assert!(!read.computation_complete, "{name}");
+        return;
+    }
+    let output = sources(read);
+    assert!(read.request.is_some(), "{name}");
+    assert_eq!(
+        unmask(&output.selected_sources, mask),
+        ids(&expected["selected"]),
+        "{name}"
+    );
+    assert_eq!(
+        unmask(&output.completed_sources, mask),
+        ids(&expected["completed"]),
+        "{name}"
+    );
+    assert_eq!(output.completed_source_count, k, "{name}");
+    match status {
+        "exact" => {
+            assert_eq!(k, n, "{name}");
+            assert!(read.complete && read.computation_complete && !output.estimated);
+        }
+        "complete_estimated" => {
+            assert!(read.complete && read.computation_complete && output.estimated);
+        }
+        "partial_estimated" => {
+            assert_eq!(
+                read.truncation,
+                vec![GraphAlgorithmTruncation::VertexLimit],
+                "{name}"
+            );
+            assert!(!read.complete && !read.computation_complete && output.estimated);
+        }
+        other => panic!("{name}: unknown status {other}"),
+    }
+    let rows = expected["scores"].as_array().unwrap();
+    let sums = expected["raw_sums"].as_array().unwrap();
+    assert_eq!((output.scores.len(), sums.len()), (rows.len(), rows.len()));
+    assert!(
+        output
+            .scores
+            .windows(2)
+            .all(|pair| pair[0].node_id < pair[1].node_id),
+        "{name}"
+    );
+    for ((actual, row), sum) in output.scores.iter().zip(rows).zip(sums) {
+        let id = number(&row["node_id"]);
+        assert_eq!((actual.node_id ^ mask, number(&sum["node_id"])), (id, id));
+        let wanted: f64 = row["f64_repr"].as_str().unwrap().parse().unwrap();
+        assert_eq!(
+            wanted.to_bits(),
+            fraction(&row["exact"]).to_bits(),
+            "{name}"
+        );
+        let normalized = if n > 2 {
+            n as f64 / k as f64 * fraction(&sum["exact"]) / ((n - 1) * (n - 2)) as f64
+        } else {
+            0.0
+        };
+        let score = actual.score;
+        assert!(
+            near(score, wanted) && near(score, normalized),
+            "{name}: node {id} scored {score}, not {wanted} or {normalized}"
+        );
+        if wanted == 0.0 {
+            assert_eq!(score, 0.0, "{name}: node {id}");
+        }
+    }
+}
+
+/// Runs `case` under every vertex budget below the full read's, which stops
+/// it at that budget's next unit: in extraction, setup, or a source's
+/// search, dependencies or commit. The completed count never drops, reaches
+/// every proper prefix of the selection, and is 0 exactly when nothing is
+/// returned. A later stop returns the full selection, the completed prefix,
+/// the echo and, bit for bit, the scores of an uninterrupted read of that
+/// many sources: the interrupted source is discarded entirely. The full
+/// budget completes. Returns the stopped reads in budget order.
+fn sweep(
+    graph: &Graph,
+    case: &Value,
+    seeds: (&[u64], u64),
+    samples: u64,
+    full: &GraphAlgorithmRead,
+) -> Vec<GraphAlgorithmRead> {
+    let name = case["id"].as_str().unwrap();
+    let total = full.stats.vertex_operations;
+    let selected = &sources(full).selected_sources;
+    let (mut reads, mut reached) = (Vec::new(), BTreeSet::new());
+    for budget in 1..total {
+        let read = oracle_read(graph, case, seeds, samples, Some(budget));
+        assert_eq!(
+            read.truncation,
+            vec![GraphAlgorithmTruncation::VertexLimit],
+            "{name} at {budget}"
+        );
+        assert!(!read.complete && !read.computation_complete);
+        let k = completed(&read);
+        if k == 0 {
+            assert_eq!((&read.output, &read.request), (&None, &None));
+        } else {
+            let output = sources(&read);
+            assert!(
+                read.scope_complete && output.estimated,
+                "{name} at {budget}"
+            );
+            assert_eq!(&output.selected_sources, selected, "{name} at {budget}");
+            assert_eq!(output.completed_sources, selected[..k as usize]);
+            assert_eq!(read.request, full.request);
+            let prefix = oracle_read(graph, case, seeds, k, None);
+            assert!(prefix.complete);
+            assert_eq!(score_bits(output), score_bits(sources(&prefix)), "{name}");
+        }
+        assert!(
+            k >= reached.last().copied().unwrap_or(0),
+            "{name} at {budget}"
+        );
+        reached.insert(k);
+        reads.push(read);
+    }
+    let prefixes: BTreeSet<u64> = (0..selected.len() as u64).collect();
+    assert_eq!(reached, prefixes, "{name}");
+    let read = oracle_read(graph, case, seeds, samples, Some(total));
+    assert!(read.complete, "{name}");
+    assert_eq!(read.output, full.output, "{name}");
+    reads
+}
+
+fn completed(read: &GraphAlgorithmRead) -> u64 {
+    read.output
+        .as_ref()
+        .map_or(0, |_| sources(read).completed_source_count)
+}
+
+/// `samples` 0 is outside the public domain: zero work limits fail rather
+/// than clamp, so `max_sampled_sources` 0 is `InvalidQuery` before any
+/// work, where the oracle answers no sources and no scores.
+fn zero_samples_are_rejected(case: &Value, graph: &Graph, seeds: &[u64]) {
+    let expected = &case["expected"];
+    assert_eq!(expected["status"], "no_scores");
+    assert_eq!(number(&expected["k"]), 0);
+    assert!(expected["scores"].is_null());
+    assert!(ids(&expected["selected"]).is_empty() && ids(&expected["completed"]).is_empty());
+    assert_eq!(number(&expected["n"]), seeds.len() as u64);
+    let selectors = seeds.iter().copied().map(NodeSelector::Id).collect();
+    let request = between(selectors, oracle_direction(case), number(&case["seed"]));
+    let mut options = hops(2);
+    options.algorithm_limits.max_sampled_sources = 0;
+    assert_eq!(
+        invalid_query(run(graph, 2, ORACLE_NOW, &request, &options, &|| 0)),
+        "max_sampled_sources must be at least 1"
+    );
+}
+
+/// No visible node is outside the public domain: a scope needs a seed and
+/// a due seed is not found, so no read has n = 0, where the oracle answers
+/// no sources and no scores.
+fn empty_scopes_are_rejected(case: &Value, graph: &Graph) {
+    let expected = &case["expected"];
+    assert_eq!(expected["status"], "no_scores");
+    assert_eq!((number(&expected["n"]), number(&expected["k"])), (0, 0));
+    assert!(expected["scores"].is_null());
+    assert!(ids(&expected["selected"]).is_empty());
+    let (direction, seed) = (oracle_direction(case), number(&case["seed"]));
+    let read = |seeds| {
+        run(
+            graph,
+            2,
+            ORACLE_NOW,
+            &between(seeds, direction, seed),
+            &hops(2),
+            &|| 0,
+        )
+    };
+    for node in case["nodes"].as_array().unwrap() {
+        assert!(expired(node));
+        assert!(matches!(
+            read_error(read(vec![NodeSelector::Id(number(&node["id"]))])),
+            Error::GraphNodeNotFound
+        ));
+    }
+    assert_eq!(
+        invalid_query(read(Vec::new())),
+        "an algorithm scope needs a seed"
+    );
+}
+
+#[test]
+fn oracle_splitmix64_vectors_match() {
+    let fixture: Value = serde_json::from_str(ORACLE).unwrap();
+    let vectors = fixture["splitmix64_vectors"].as_array().unwrap();
+    assert_eq!(vectors.len(), 7);
+    for vector in vectors {
+        let hex = vector["output"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("0x")
+            .unwrap();
+        let input = number(&vector["input"]);
+        assert_eq!(mix(input), u64::from_str_radix(hex, 16).unwrap(), "{input}");
+    }
+}
+
+/// The store takes a node or edge ID only by moving its next free ID past
+/// it, so `u64::MAX` is out of reach; the oracle cases using it are stored
+/// as [`oracle_graph`] describes.
+#[test]
+fn oracle_ids_outside_the_store_are_rejected() {
+    let put = |entries: Vec<GraphEntry>| {
+        let mut state = GraphState::new();
+        let create = GraphBody {
+            graph_id: G,
+            entries: vec![GraphEntry::CreateGraph { name: "g".into() }],
+        };
+        state.apply(1, &create).unwrap();
+        state.apply(
+            2,
+            &GraphBody {
+                graph_id: G,
+                entries,
+            },
+        )
+    };
+    let node = |id| GraphEntry::PutNode {
+        node_id: NodeId(id),
+        key: format!("n{id}"),
+        labels: BTreeSet::new(),
+        properties: Properties::new(),
+    };
+    assert!(matches!(
+        put(vec![node(u64::MAX)]),
+        Err(GraphError::IdSpaceExhausted)
+    ));
+    let edge = GraphEntry::PutEdge {
+        edge_id: EdgeId(u64::MAX),
+        source: NodeId(0),
+        destination: NodeId(1),
+        relationship: "R".into(),
+        key: None,
+        properties: Properties::new(),
+    };
+    assert!(matches!(
+        put(vec![node(0), node(1), edge]),
+        Err(GraphError::IdSpaceExhausted)
+    ));
+    assert!(put(vec![node(u64::MAX - 1)]).is_ok());
+}
+
+/// Every oracle case: 19 read on their node IDs, one (`max_seed_path`, with
+/// node ID `u64::MAX`) on IDs XOR 2^63, which keeps the order and every
+/// `seed XOR id`, with the seed mapped alike; and three outside the public
+/// domain shown rejected. Each read case also reads the same from its
+/// seeds reversed, ranks its fixture selection by [`mix`] and passes
+/// [`sweep`]. An interrupted case is checked at every budget that stops it
+/// after its `interrupt_after_sources` completed sources.
+#[test]
+fn oracle_betweenness_cases_match() {
+    let mut classes: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    let mut stops = Vec::new();
+    for case in oracle_cases() {
+        let name = case["id"].as_str().unwrap().to_owned();
+        let expected = &case["expected"];
+        let (samples, n) = (number(&case["samples"]), number(&expected["n"]));
+        let all = case["nodes"].as_array().unwrap().iter();
+        let mask = if all.clone().any(|node| number(&node["id"]) == u64::MAX) {
+            assert!(all.clone().all(|node| number(&node["id"]) >= TOP));
+            TOP
+        } else {
+            0
+        };
+        let (state, seeds, edges) = oracle_graph(&case, mask);
+        let graph = state.graph(G).unwrap();
+        assert_eq!(seeds.len() as u64, n, "{name}");
+        let class = if samples == 0 {
+            zero_samples_are_rejected(&case, graph, &seeds);
+            "rejected: samples 0"
+        } else if n == 0 {
+            empty_scopes_are_rejected(&case, graph);
+            "rejected: no visible node"
+        } else {
+            let seed = number(&case["seed"]);
+            let mut ranked: Vec<u64> = seeds.iter().map(|id| id ^ mask).collect();
+            ranked.sort_by_key(|&id| (mix(seed ^ id), id));
+            ranked.truncate(samples.min(n) as usize);
+            assert_eq!(ranked, ids(&expected["selected"]), "{name}");
+
+            let at = (&seeds[..], seed ^ mask);
+            let full = oracle_read(graph, &case, at, samples, None);
+            let reversed: Vec<u64> = seeds.iter().rev().copied().collect();
+            let again = oracle_read(graph, &case, (&reversed, seed ^ mask), samples, None);
+            assert_eq!(
+                (&again.output, &again.request, &again.truncation),
+                (&full.output, &full.request, &full.truncation),
+                "{name}"
+            );
+            assert!(full.complete, "{name}");
+            let reads = sweep(graph, &case, at, samples, &full);
+            if let Some(after) = case.get("interrupt_after_sources") {
+                let after = number(after);
+                assert_eq!(
+                    ids(&expected["selected"]),
+                    unmask(&sources(&full).selected_sources, mask),
+                    "{name}"
+                );
+                let mut count = 0;
+                for read in reads {
+                    if read.scope_complete && completed(&read) == after {
+                        check_oracle(&case, &read, mask, edges);
+                        count += 1;
+                    }
+                }
+                assert!(count > 0, "{name}");
+                stops.push((name.clone(), after, count));
+            } else {
+                check_oracle(&case, &full, mask, edges);
+            }
+            if mask == 0 {
+                "read"
+            } else {
+                "read on mapped IDs"
+            }
+        };
+        classes.entry(class).or_default().push(name);
+    }
+    let counts: Vec<(&str, usize)> = classes
+        .iter()
+        .map(|(class, names)| (*class, names.len()))
+        .collect();
+    assert_eq!(
+        counts,
+        [
+            ("read", 19),
+            ("read on mapped IDs", 1),
+            ("rejected: no visible node", 1),
+            ("rejected: samples 0", 2),
+        ]
+    );
+    assert_eq!(classes["read on mapped IDs"], ["max_seed_path"]);
+    assert_eq!(
+        classes["rejected: no visible node"],
+        ["empty_visible_graph"]
+    );
+    assert_eq!(
+        classes["rejected: samples 0"],
+        ["zero_requested_samples", "one_node_no_sources"]
+    );
+    let interrupted: Vec<(&str, u64)> = stops.iter().map(|stop| (&*stop.0, stop.1)).collect();
+    assert_eq!(
+        interrupted,
+        [("interrupted_path", 2), ("interrupted_before_first", 0)]
+    );
+    println!("interrupted oracle reads checked: {stops:?}");
+}
+
+fn unmask(list: &[u64], mask: u64) -> Vec<u64> {
+    list.iter().map(|id| id ^ mask).collect()
 }
