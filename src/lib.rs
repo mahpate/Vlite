@@ -3455,14 +3455,20 @@ impl Database {
         metadata::validate_filter(conditions)?;
         let query_norm = validate_metric_query(query, metric)?;
         // Declared metadata indexes narrow the scan to a re-verified superset;
-        // exact ordering makes the result identical to a full scan.
-        let lookup = state
-            .metadata_indexes
-            .lookup(conditions, state.records.len() / 2);
+        // exact ordering makes the result identical to a full scan. Without
+        // postings, block summaries of the declared fields may still skip
+        // blocks that cannot match (P5).
+        let cap = state.records.len() / 2;
+        let lookup = state.metadata_indexes.lookup(conditions, cap);
         let candidates = lookup.and_then(|lookup| lookup.ids);
         if let Some(ids) = &candidates {
             stats.index_candidates = stats.index_candidates.saturating_add(ids.len() as u64);
         }
+        let candidates = candidates.or_else(|| {
+            state
+                .metadata_indexes
+                .summary_candidates(conditions, &state.records, cap)
+        });
         Ok(state.exact_search_candidates(
             query,
             query_norm,

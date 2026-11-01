@@ -61,6 +61,9 @@ pub struct MetadataIndexSpec {
 #[derive(Debug, Default)]
 pub(crate) struct MetadataIndexes {
     fields: BTreeMap<String, FieldIndex>,
+    /// P5 block summaries over the declared fields: narrow exact filtered
+    /// scans that postings cannot, never changing their results.
+    summaries: crate::compact::stats::Summaries,
 }
 
 /// Result of a metadata-index lookup over a conjunction of conditions.
@@ -316,6 +319,8 @@ impl MetadataIndexes {
         records: &crate::records::RecordMap,
     ) {
         self.fields.clear();
+        self.summaries =
+            crate::compact::stats::Summaries::new(specs.iter().map(|spec| spec.field.clone()));
         for spec in specs {
             let index = self.fields.entry(spec.field.clone()).or_default();
             if matches!(
@@ -346,6 +351,7 @@ impl MetadataIndexes {
         previous: Option<&Metadata>,
         current: Option<&Metadata>,
     ) {
+        self.summaries.track(id, previous, current);
         for (field, index) in &mut self.fields {
             let old = previous.and_then(|metadata| metadata.get(field));
             let new = current.and_then(|metadata| metadata.get(field));
@@ -400,6 +406,18 @@ impl MetadataIndexes {
             field,
             ids: Some(ids),
         })
+    }
+
+    /// A re-verified candidate superset from block summaries of the declared
+    /// fields, when they prune at least one block and leave at most `cap`
+    /// IDs; `None` means scan every record.
+    pub(crate) fn summary_candidates(
+        &self,
+        conditions: &[Condition],
+        records: &crate::records::RecordMap,
+        cap: usize,
+    ) -> Option<BTreeSet<u64>> {
+        self.summaries.candidates(conditions, records, cap)
     }
 }
 

@@ -80,7 +80,7 @@ allocate kinds inside their own range without editing shared code:
 | `0x0100-0x01FF` | P3 | Source columns: IDs, revisions, expiry, dense f32/f16, named dense |
 | `0x0200-0x02FF` | P3 | Derived ANN: topology, codes, transform parameters |
 | `0x0300-0x03FF` | P4 | Graph base: ID maps, edge table, CSR, dictionaries, labels, properties, keys, attachments, deadlines |
-| `0x0400-0x04FF` | P5 | Derived statistics, bitmaps, filter indexes |
+| `0x0400-0x04FF` | P5 | Derived statistics, bitmaps, filter indexes; `0x0400` filter block summary v1 ([P5](p5-filters-and-serving.md#implemented-step-2-unreleased-under-review), test-only codec); rest reserved |
 | `0x0500-0xEFFF` | none | Reserved; allocated only by amending this contract |
 | `0xF000-0xFFFF` | Tests | Test-only; release builds reject them |
 
