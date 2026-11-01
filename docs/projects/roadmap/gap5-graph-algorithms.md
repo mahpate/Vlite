@@ -4,7 +4,8 @@ Status: S1 and S2 are implemented and independently reviewed in embedded Rust, u
 The surface and budget corrections in `1202f3cc` are accepted; integration
 `9ad5b63a` adds exact-sum reference cases and the API-reference entry.
 S3 (PageRank and label propagation) is implemented in embedded Rust, unreleased,
-and awaits independent review of its additive surface; S4 and S5 remain design.
+and awaits independent review of its additive surface. S4 (sampled betweenness)
+is implemented in embedded Rust, unreleased and under review; S5 remains design.
 Wire surfaces are out of scope until separately approved.
 Audit citations refer to base `d530b4c`; TTL integration is reconciled with `cf146fe`.
 Open means not verified or not decided. No performance gains are claimed.
@@ -351,7 +352,7 @@ Review regressions also failed first: buffer growth (4,097 self-loops held 196,6
 preparation under a pre-set cancellation, absent-type probes (1,800 vertex units for 25,600 probes) and adapter staging.
 All 24 golden cases check S1 scope node and edge IDs exactly, plus degrees derived from the oracle's scope.
 The 11 weighted_shortest_path cases check outcomes, costs and path IDs exactly.
-Betweenness golden values are not exercised by Rust code yet; S3 coverage is listed below.
+Betweenness golden values were not exercised by S1/S2 Rust code; S3 and S4 coverage is listed below.
 
 ## Implemented S3 (unreleased, under review)
 
@@ -443,6 +444,106 @@ The adapter also covers the echo, partial-result provenance, typed errors, the s
 Both suites were written first and failed to compile (61 errors, all missing S3 API) before the implementation passed.
 Remaining gates: independent review of this surface, the API-reference row, S4 betweenness, CSR parity and serving.
 
+## Implemented S4 (unreleased, under review)
+
+Sampled betweenness runs on the same extracted projection, TTL clock, view sequence and meter as S1 to S3.
+The additions below are additive and await independent review; S1 to S3 semantics, budgets and `iterative.rs` are unchanged.
+
+```rust
+// GraphAlgorithm (new variant)
+Betweenness { sampling_seed: u64 },
+
+// GraphAlgorithmOutput (new variant)
+Betweenness(BetweennessOutput),
+
+#[non_exhaustive] pub struct BetweennessOutput {
+    pub scores: Vec<NodeScore>,        // ascending node ID, at most max_output_nodes rows
+    pub selected_sources: Vec<u64>,    // min(max_sampled_sources, n) IDs in sampling order
+    pub completed_sources: Vec<u64>,   // the prefix whose searches finished
+    pub completed_source_count: u64,   // k = completed_sources.len() >= 1
+    pub estimated: bool,               // k < n
+}
+
+// GraphAlgorithmLimits (new field): max_sampled_sources, default 16, ceiling 64, at least 1.
+```
+
+No `Error`, `GraphAlgorithmError` or `GraphAlgorithmTruncation` variant is added.
+`max_sampled_sources` 0 is `Read(InvalidQuery)` ("max_sampled_sources must be at least 1"); above 64 is `Read(GraphLimitExceedsCeiling)`.
+`NumericOverflow` also covers a non-finite shortest-path count or dependency; its generic text is unchanged.
+
+### S4 semantics as implemented
+
+Arcs follow `orient`: Out keeps stored orientation, In reverses it, Both adds each reverse arc.
+Self-loops are dropped and parallel arcs collapse (sorted and deduplicated); arcs are offset by tail.
+Every scoped node is ranked by `(SplitMix64(sampling_seed XOR node_id), node_id)`; the first `m = min(max_sampled_sources, n)` are the sources.
+SplitMix64 is v1 with wrapping arithmetic; `SplitMix64(0) = 0xE220A8397B1DCDAF`.
+SplitMix64 is a bijection and XOR with one seed is injective, so distinct nodes never tie and the ID tiebreak is kept only as specified.
+Each source runs a breadth-first search over the whole projection (no further hop bound), adding a predecessor's path count to every successor one level deeper.
+Dependencies accumulate in reverse search order: `delta(v) = sum over successors w of sigma(v) / sigma(w) * (1 + delta(w))`, summed in ascending arc order.
+Endpoints never score: the source's own dependency is not accumulated and targets contribute only through `1 + delta(w)`.
+A completed source adds every node's dependency to its total in ascending node order.
+For `n > 2`, a row is `(n / k) * total / ((n - 1) * (n - 2))`, with `n / k` formed first; Both uses the same ordered-pair formula, not halved.
+For `n <= 2` every row is 0. The scope size `n` counts isolated and unreachable nodes.
+Completing the selected sample is `complete` and `computation_complete` though `estimated` when `m < n`; only `m = n` is exact.
+Path counts and dependencies are binary64; a non-finite value is `NumericOverflow`, never saturated, even after earlier sources completed.
+
+### S4 metering and partial results
+
+Setup reserves and builds, in this order (which is also the order of `MemoryLimit` stops):
+
+| Step | Vertex units | Edge units | Scratch bytes |
+|---|---|---|---|
+| Arcs: one per retained edge, reverse added for Both | | e | 16e (32e for Both), capacity |
+| Arc sort with duplicate removal (shared checked merge sort) | sort_cost(a) | | 16a |
+| Offsets: n + 1 fills, one count per distinct arc, n prefix sums | (n + 1) + n | d | 8(n + 1) |
+| Hashes: one per node, then their sort | n + sort_cost(n) | | 16n + 16n |
+| Selected copies (completed list reserved alongside) | m | | 8 · 2m |
+| Search state fill (distance, paths, dependency) | n | | 24n |
+| Queue | | | 8n |
+| Totals fill | n | | 8n |
+| Committed and candidate rows | | | 16 · 2 · rows |
+| Each source s | r + (r − 1) + n | c + (c − own) | 0 |
+
+Here e retained edges, a non-loop arcs before collapse, d distinct arcs, m selected sources, rows = min(n, max_output_nodes),
+r nodes reached from s, c distinct arcs scanned from them and own the source's distinct out-arcs; `sort_cost(x) = x · bit_length(x)`.
+A source charges a vertex unit per pop and an edge unit per arc scanned, the same again for every reached node but the source,
+then one vertex unit per scoped node that adds its dependency to its total, resets its state and writes its candidate row.
+Every unit is charged as it runs, so at most 64 operations run between deadline and cancellation checks; nothing is allocated after setup.
+The request echo is staged before setup, as for S3.
+A stop inside the first source (a budget, the deadline or cancellation) returns `output: None` and `request: None`.
+A later stop discards the interrupted source and returns the completed sources' rows, `selected_sources` in full,
+`completed_sources`, `k` and the echo, with `complete` and `computation_complete` false and the one stopping reason.
+The interrupted source may have partly updated the totals, but no row from it is staged and no source runs after it.
+Output caps cut score rows after the computation, which still runs over every scoped node; the source lists are never cut.
+
+### Proposed S4 decisions for review
+
+1. The sample size is the algorithm cap `max_sampled_sources` (default 16, ceiling 64), not a request field; like `max_iterations` it is not echoed. Golden `samples` maps to it.
+2. Shortest paths run over the whole extracted projection; `max_hops` bounds only the scope.
+3. `selected_sources` and `completed_sources` (at most 64 IDs each) are not cut by output caps; `completed_source_count` repeats `completed_sources.len()` as the spec's k.
+4. Evaluation order is fixed: totals sum completed sources in sampling order, dependencies sum successors in ascending arc order, and a row is `(n / k) * total / ((n - 1) * (n - 2))`.
+5. One totals vector plus double-buffered rows; a stop never exposes the interrupted source because nothing reads the totals after it.
+6. `MemoryLimit` precedence is the setup order above; every buffer, rows included, is reserved before the first source.
+7. A non-finite dependency is also checked (defensive: ratios are at most 1), and numeric failure is an error even after completed sources.
+8. `estimated` is `k < n`; a completed sample smaller than the scope is complete but estimated.
+9. `stats.arcs` keeps its S1 to S3 meaning (before collapse), not betweenness' distinct arcs.
+10. The site API rows carry no `data-api` keys, like the S3 type rows: `tests/api_reference.py` keys only methods and functions.
+
+### S4 coverage
+
+The engine adds 16 tests: hand-checked path, star, diamond (two shortest paths), Both versus Out, parallel arcs, self-loops,
+disconnected parts with isolates, n <= 2, SplitMix64 vectors, the sampling order of fixed IDs, partial-sample scaling, seed and input-order determinism,
+the documented accounting exactly, every vertex, edge, scratch and source-cap budget at its boundary,
+fake-clock deadlines and cancellation over 3 scopes (at most 64 counted pops, scans, dependency, commit, fill and sort units after each trigger,
+the interrupted source discarded, k equal to the completed sources, no output at k = 0), output caps, the TTL clock,
+2^1024 shortest paths as `NumericOverflow`, and extraction-time arc counts and growth-copy checks on the betweenness route.
+Random scopes (300 seeds, full and partial samples) match a definitional pair-dependency oracle within 1e-9.
+The adapter adds 6 tests: the 4 betweenness goldens on exact IDs and through a database file, the echo and non-mutation,
+typed errors, partial-result provenance, and checked echo copies.
+`check_case` compares a read with a case in the golden betweenness shape, so a separately validated fixture can reuse it.
+Both suites were written first and failed to compile (18 errors, all missing S4 API) before the implementation passed.
+Remaining gates: independent review, the separately authored betweenness reference oracle, CSR parity and serving.
+
 ## GraphRAG and competitors
 
 Community assignments can group already stored evidence for application-produced summaries.
@@ -485,11 +586,11 @@ exhaustive paths, exact-rational stationary PageRank and full-sample centrality.
 CI also verifies rejection of corrupted answers and duplicate JSON keys.
 Stationary PageRank scores are not fabricated iteration counts; future Rust
 tests must independently establish convergence and compare within tolerance.
-Rust tests consume them for S1 to S3 (see Coverage); TTL and work limits have their own Rust tests.
+Rust tests consume them for S1 to S4 (see Coverage); TTL and work limits have their own Rust tests.
 Authorization stays untested until a serving slice exists.
 Delivered S1: scoped adapter, visibility hook, unified meter and result contract with exhaustion oracles.
 Delivered S2: degree and hop-constrained Dijkstra. Delivered S3 (under review): PageRank and deterministic label propagation.
-Deliver S4: seeded sampled betweenness. Deliver S5: separately approved serving contracts and documentation.
+Implemented S4 (under review): seeded sampled betweenness. Deliver S5: separately approved serving contracts and documentation.
 Each slice must pass its oracle before the next. CSR must pass identical adapter fixtures later.
 Risks: rescans consume budgets; dense graphs may yield no values. Cancellation is cooperative.
 Risks: the read borrow may delay writes; boundary scores are local, not global estimates.

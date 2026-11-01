@@ -60,10 +60,15 @@ fn check(result: &AlgorithmResult, now_ms: u64) {
     assert_eq!(result.scope_complete, result.projection.is_some());
     assert!(result.scope_complete || !result.computation_complete);
     if !result.computation_complete {
-        // Only iterative outputs may be partial: their last full step.
+        // Only iterative outputs may be partial: their last full step, or
+        // the sources betweenness completed.
         match &result.output {
             None => {}
-            Some(AlgorithmOutput::PageRank(_) | AlgorithmOutput::LabelPropagation(_)) => {
+            Some(
+                AlgorithmOutput::PageRank(_)
+                | AlgorithmOutput::LabelPropagation(_)
+                | AlgorithmOutput::Betweenness(_),
+            ) => {
                 assert!(result.scope_complete && !result.truncation.is_empty());
             }
             Some(other) => panic!("partial output {other:?}"),
@@ -80,6 +85,20 @@ fn check(result: &AlgorithmResult, now_ms: u64) {
         Some(AlgorithmOutput::LabelPropagation(output)) => {
             assert!(output.sweeps >= 1);
             Some(output.assignments.iter().map(|row| row.node_id).collect())
+        }
+        Some(AlgorithmOutput::Betweenness(output)) => {
+            let k = output.completed_source_count;
+            assert!(k >= 1);
+            assert_eq!(output.completed_sources.len() as u64, k);
+            assert!(
+                output
+                    .selected_sources
+                    .starts_with(&output.completed_sources)
+            );
+            assert!(output.selected_sources.len() as u64 <= result.stats.nodes_extracted);
+            assert_eq!(output.estimated, k < result.stats.nodes_extracted);
+            assert!(output.scores.iter().all(|row| row.score.is_finite()));
+            Some(output.scores.iter().map(|row| row.node_id).collect())
         }
         _ => None,
     };
@@ -133,6 +152,11 @@ fn held_bytes(result: &AlgorithmResult) -> u64 {
         }
         Some(AlgorithmOutput::LabelPropagation(output)) => {
             output.assignments.capacity() * size_of::<CommunityAssignment>()
+        }
+        Some(AlgorithmOutput::Betweenness(output)) => {
+            output.scores.capacity() * size_of::<NodeScore>()
+                + (output.selected_sources.capacity() + output.completed_sources.capacity())
+                    * size_of::<u64>()
         }
         _ => 0,
     };
@@ -2015,4 +2039,5 @@ fn exact_cost_ties_go_to_fewer_hops() {
     }
 }
 
+mod betweenness;
 mod iterative;

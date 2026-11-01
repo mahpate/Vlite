@@ -1,4 +1,4 @@
-//! Bounded local graph algorithms (Gap 5 slices S1 to S3).
+//! Bounded local graph algorithms (Gap 5 slices S1 to S4).
 //!
 //! [`run_with`] (and [`run`], its owned-request form) extracts one explicit
 //! local scope and runs one algorithm on it:
@@ -43,13 +43,17 @@
 //!   request first, reserve every buffer and prepay their rows before their
 //!   first full step; a stop after it (a budget, the deadline, cancellation
 //!   or `max_iterations`) returns the last full step, marked incomplete,
-//!   and discards the interrupted one.
+//!   and discards the interrupted one. Sampled betweenness does the same
+//!   per source: a stop after its first completed source returns the
+//!   completed sources' scores and discards the interrupted source.
 //!
 //! Algorithms: [`Algorithm::Degree`] (raw degrees over retained physical
 //! edges), [`Algorithm::WeightedShortestPath`] (Dijkstra over
 //! (node, hops) states with exact sums), [`Algorithm::PageRank`] and
 //! [`Algorithm::LabelPropagation`] (synchronous and in-place sweeps over the
-//! extracted projection, see the `iterative` module).
+//! extracted projection, see the `iterative` module), and
+//! [`Algorithm::Betweenness`] (seeded sampled Brandes, see the
+//! `betweenness` module).
 
 use super::error::GraphError;
 use super::filter::{conditions_match, validate_conditions};
@@ -105,6 +109,10 @@ pub struct GraphAlgorithmLimits {
     /// [`AlgorithmTruncation::IterationLimit`]; the other algorithms ignore
     /// it.
     pub max_iterations: u64,
+    /// Sources sampled by [`Algorithm::Betweenness`] (default 16, ceiling
+    /// 64): the first `min(max_sampled_sources, n)` scoped nodes in
+    /// sampling order. The other algorithms ignore it.
+    pub max_sampled_sources: u64,
 }
 
 impl GraphAlgorithmLimits {
@@ -112,12 +120,14 @@ impl GraphAlgorithmLimits {
         max_vertex_operations: 100_000,
         max_scratch_bytes: 64 << 20,
         max_iterations: 20,
+        max_sampled_sources: 16,
     };
 
     pub const CEILING: Self = Self {
         max_vertex_operations: 1_000_000,
         max_scratch_bytes: 256 << 20,
         max_iterations: 100,
+        max_sampled_sources: 64,
     };
 
     /// Rejects the first cap above its ceiling, then zero caps.
@@ -127,6 +137,7 @@ impl GraphAlgorithmLimits {
                 ("max_vertex_operations", limits.max_vertex_operations),
                 ("max_scratch_bytes", limits.max_scratch_bytes),
                 ("max_iterations", limits.max_iterations),
+                ("max_sampled_sources", limits.max_sampled_sources),
             ]
         };
         for ((limit, requested), (_, ceiling)) in
@@ -153,6 +164,11 @@ impl GraphAlgorithmLimits {
         if self.max_iterations == 0 {
             return Err(GraphError::InvalidQuery(
                 "max_iterations must be at least 1",
+            ));
+        }
+        if self.max_sampled_sources == 0 {
+            return Err(GraphError::InvalidQuery(
+                "max_sampled_sources must be at least 1",
             ));
         }
         Ok(())
@@ -218,6 +234,14 @@ pub enum Algorithm {
     /// otherwise taking the smallest such label. A sweep without changes
     /// converges.
     LabelPropagation,
+    /// Sampled betweenness by unweighted Brandes over the computational
+    /// arcs, with parallel arcs collapsed and self-loops ignored. Sources
+    /// are the first `max_sampled_sources` scoped nodes ranked by
+    /// `(SplitMix64(sampling_seed XOR id), id)`; every shortest path
+    /// counts, endpoints excluded. With `n` scoped nodes and `k` completed
+    /// sources, a score is `(n / k) * dependency / ((n - 1) * (n - 2))`
+    /// (zero for `n <= 2`).
+    Betweenness { sampling_seed: u64 },
 }
 
 /// A node selector borrowed from a caller's request.
@@ -267,6 +291,7 @@ pub enum Job<'s, S> {
     Path(PathRequest<'s, S>),
     PageRank(RankRequest<'s, S>),
     LabelPropagation,
+    Betweenness { sampling_seed: u64 },
 }
 
 /// A borrowed request: one local scope and the algorithm to run on it.
@@ -284,8 +309,8 @@ pub struct Request<'s, S> {
 
 /// A run handed to the caller's staging step (see [`run_with`]): the capped
 /// output (`None` when an output cap withheld a path, and always for the
-/// iterative algorithms, which stage before they compute) and the
-/// normalized request.
+/// iterative algorithms and betweenness, which stage before they compute)
+/// and the normalized request.
 #[derive(Debug)]
 pub struct Finished<'r> {
     pub output: Option<&'r AlgorithmOutput>,
@@ -365,6 +390,7 @@ pub enum AlgorithmOutput {
     WeightedShortestPath(WeightedPathOutcome),
     PageRank(PageRankOutput),
     LabelPropagation(LabelPropagationOutput),
+    Betweenness(BetweennessOutput),
 }
 
 /// One node's PageRank score.
@@ -409,6 +435,24 @@ pub struct LabelPropagationOutput {
     pub converged: bool,
 }
 
+/// Sampled betweenness over the completed sources.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct BetweennessOutput {
+    /// Ascending by node ID; at most `max_output_nodes` rows.
+    pub scores: Vec<NodeScore>,
+    /// The `min(max_sampled_sources, n)` sampled sources in sampling order.
+    pub selected_sources: Vec<u64>,
+    /// The prefix of `selected_sources` whose searches finished; only
+    /// these contribute.
+    pub completed_sources: Vec<u64>,
+    /// The length of `completed_sources` (at least 1).
+    pub completed_source_count: u64,
+    /// Fewer sources than scoped nodes completed, so the scores estimate
+    /// exact betweenness.
+    pub estimated: bool,
+}
+
 /// Work done by one run. Only `elapsed_ms` depends on timing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AlgorithmStats {
@@ -448,7 +492,9 @@ pub struct Projection {
 /// The result of [`run`] and [`run_with`]. `complete` is true exactly when
 /// `truncation` is empty; `output` is `None` whenever preparation,
 /// extraction, computation or staging stopped, except that an iterative
-/// algorithm stopped after its first full step keeps the last full step.
+/// algorithm stopped after its first full step keeps the last full step,
+/// and betweenness stopped after its first completed source keeps the
+/// completed sources' scores.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AlgorithmResult {
     pub output: Option<AlgorithmOutput>,
@@ -458,7 +504,7 @@ pub struct AlgorithmResult {
     pub scope_complete: bool,
     /// The computation and staging finished and passed the final deadline
     /// and cancellation check (output caps aside); an iterative algorithm
-    /// also converged.
+    /// also converged, and betweenness completed every selected source.
     pub computation_complete: bool,
     pub view_sequence: u64,
     /// The TTL clock every visibility decision used.
@@ -486,8 +532,9 @@ pub enum AlgorithmError {
     /// A retained edge's weight is not a finite nonnegative number within
     /// the exact integer range.
     InvalidWeight { edge: EdgeId, reason: &'static str },
-    /// The winning path cost, a node's PageRank out-weight or the
-    /// personalization total exceeds the largest finite f64.
+    /// The winning path cost, a node's PageRank out-weight, the
+    /// personalization total, or a betweenness shortest-path count or
+    /// dependency exceeds the largest finite f64.
     NumericOverflow,
 }
 
@@ -539,6 +586,9 @@ pub fn run(
                 weight_property: weight_property.as_deref(),
             }),
             Algorithm::LabelPropagation => Job::LabelPropagation,
+            Algorithm::Betweenness { sampling_seed } => Job::Betweenness {
+                sampling_seed: *sampling_seed,
+            },
         },
     };
     let conditions = |_: &mut Meter<'_>| Ok(Cow::Borrowed(&scope.edge_conditions[..]));
@@ -654,6 +704,18 @@ pub fn run_with<'s, S: Seed, T>(
                 )?;
                 (iterated, staged)
             }
+            Job::Betweenness { sampling_seed } => {
+                let staged = stage(&finished(None), &mut meter)?;
+                let sampled = betweenness::betweenness(
+                    extracted,
+                    request.direction,
+                    *sampling_seed,
+                    caps.max_sampled_sources,
+                    limits.max_output_nodes,
+                    &mut meter,
+                )?;
+                (sampled, staged)
+            }
         };
         let (iterative::Iterated { output, cut, stop }, staged) = iterated;
         Ok(Computed {
@@ -763,7 +825,7 @@ fn check_shape<S>(request: &Request<'_, S>) -> Result<(), GraphError> {
         }
     }
     let weight = match &request.job {
-        Job::Degree | Job::LabelPropagation => None,
+        Job::Degree | Job::LabelPropagation | Job::Betweenness { .. } => None,
         Job::Path(path) => path.weight_property,
         Job::PageRank(rank) => {
             let open = |value: f64| value > 0.0 && value < 1.0;
@@ -1959,6 +2021,7 @@ fn any_below(cost: &[u64], index: usize) -> bool {
     cost[..limb].iter().any(|limb| *limb != 0) || cost[limb] & ((1u64 << bit) - 1) != 0
 }
 
+mod betweenness;
 mod iterative;
 
 #[cfg(test)]

@@ -129,11 +129,13 @@ shortest-path search reports `exhausted`, never an uncertified "no path".
 ## Bounded local algorithms (Rust, unreleased)
 
 `GraphRef::algorithm(&request, &options)` runs one algorithm on one explicit
-local scope (Gap 5 slices S1 to S3). Its S1 and S2 embedded Rust surface is
+local scope (Gap 5 slices S1 to S4). Its S1 and S2 embedded Rust surface is
 reviewed and accepted; the S3 additions (PageRank, label propagation,
-`max_iterations` and `IterationLimit`) await the same review. All of it is
-unreleased; REST, gRPC, MCP, query text, the CLI and the bindings do not
-expose it. Nothing is stored and nothing writes.
+`max_iterations` and `IterationLimit`) await the same review, and the S4
+addition (sampled betweenness and `max_sampled_sources`) is newer still and
+also under review. All of it is unreleased; REST, gRPC, MCP, query text,
+the CLI and the bindings do not expose it. Nothing is stored and nothing
+writes.
 
 - **Scope** (`GraphAlgorithmScope`): up to 10,000 seed selectors of this
   graph (resolved, deduplicated, sorted; each must be visible and carry every
@@ -189,6 +191,23 @@ expose it. Nothing is stored and nothing writes.
   before it returns nothing. Only the stopping reason is listed, even
   when rows were also cut. Scores and communities describe the local
   scope only, never the whole graph.
+- **Sampled betweenness** (`GraphAlgorithm::Betweenness { sampling_seed }`,
+  unreleased, under review): unweighted Brandes over the scope's arcs
+  (`Both` walks each edge both ways), with parallel arcs collapsed and
+  self-loops ignored; every shortest path counts and endpoints are
+  excluded. The scoped nodes are ranked by
+  `(SplitMix64(sampling_seed XOR node_id), node_id)` and the first
+  `min(max_sampled_sources, n)` are the sources. For `n > 2` a node scores
+  `(n / k) * (sum of its dependencies) / ((n - 1) * (n - 2))` over the `k`
+  completed sources, the same formula for `Both`; for `n <= 2` every score
+  is 0. The output lists `selected_sources`, the `completed_sources` prefix,
+  `completed_source_count` and `estimated` (fewer sources than scoped nodes
+  completed); only sampling every node is exact, and there is no confidence
+  interval. Setup reserves every buffer and stages the echo before the
+  first source. A source interrupted by a budget, the deadline or
+  cancellation is discarded: after one completed source the run returns
+  the completed sources' scores, marked incomplete; before it, nothing. A
+  path count or dependency beyond `f64::MAX` is `NumericOverflow`.
 - **Budgets.** Only the limits and list lengths are checked before work.
   Condition conversion, seed, endpoint and personalization resolution,
   relationship-type probes that find nothing, extraction, rescans, rejected
@@ -210,11 +229,12 @@ expose it. Nothing is stored and nothing writes.
 | `max_vertex_operations` | 100,000 | 1,000,000 |
 | `max_scratch_bytes` | 64 MiB | 256 MiB |
 | `max_iterations` | 20 | 100 |
+| `max_sampled_sources` (unreleased S4) | 16 | 64 |
 
 Results echo `view_sequence`, `read_time_unix_ms`, `algorithm_version`, the
 normalized request (with every output) and work statistics. There are no cursors, no attachment
-or payload access and no whole-graph mode. Sampled betweenness is planned;
-see the [Gap 5 design](projects/roadmap/gap5-graph-algorithms.md).
+or payload access and no whole-graph mode. See the
+[Gap 5 design](projects/roadmap/gap5-graph-algorithms.md).
 
 ## Surfaces
 

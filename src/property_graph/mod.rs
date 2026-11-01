@@ -69,10 +69,11 @@ mod read;
 mod retrieve;
 
 pub use algorithms::{
-    CommunityAssignment, DegreeRow, GraphAlgorithm, GraphAlgorithmError, GraphAlgorithmLimits,
-    GraphAlgorithmOptions, GraphAlgorithmOutput, GraphAlgorithmRead, GraphAlgorithmRequest,
-    GraphAlgorithmScope, GraphAlgorithmStats, GraphAlgorithmTruncation, LabelPropagationOutput,
-    LabelScope, NodeScore, PageRankOutput, RelationshipScope, WeightedPath, WeightedPathOutcome,
+    BetweennessOutput, CommunityAssignment, DegreeRow, GraphAlgorithm, GraphAlgorithmError,
+    GraphAlgorithmLimits, GraphAlgorithmOptions, GraphAlgorithmOutput, GraphAlgorithmRead,
+    GraphAlgorithmRequest, GraphAlgorithmScope, GraphAlgorithmStats, GraphAlgorithmTruncation,
+    LabelPropagationOutput, LabelScope, NodeScore, PageRankOutput, RelationshipScope, WeightedPath,
+    WeightedPathOutcome,
 };
 pub use change::GraphChange;
 pub use engine::schema::{
