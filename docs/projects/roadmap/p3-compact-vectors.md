@@ -336,12 +336,19 @@ gain. No public API, setting, error, format or wire field changes.
   multiplication commutes, so scoring row-first returns the same bits. A row
   whose length differs from the query is scored by the oracle itself.
 - **Dispatch.** Detected once per process. x86_64 with AVX2 uses two groups
-  of four f64 lanes, transposing rows four dimensions at a time. Otherwise
-  the portable kernel keeps one scalar accumulator per row; that is SSE2 on
-  x86_64 and scalar code elsewhere, including WebAssembly. There is no NEON
-  kernel yet, so aarch64 uses the portable kernel. Tests force each kernel
-  per thread. The override does not propagate to Rayon workers; they retain
-  runtime dispatch, so it does not prove forced-portable parallel execution.
+  of four f64 lanes, transposing rows four dimensions at a time. Aarch64
+  selects baseline NEON unconditionally: four groups of two f64 lanes,
+  each lane accumulating one row in dimension order with separate multiply
+  and add instructions. Otherwise the portable kernel keeps one scalar
+  accumulator per row; that is SSE2 on x86_64 and scalar code elsewhere,
+  including WebAssembly. Native aarch64 CI matrix jobs validate NEON
+  bit-identity against the oracle; local Windows x86 checks do not execute
+  or compile that kernel, and native validation remains an acceptance gate.
+  Tests force portable and NEON on aarch64 (portable and available AVX2 on
+  x86_64), including a finite squared-L2 witness that distinguishes FMA
+  from separate multiply/add. The override does not propagate to Rayon
+  workers; they retain runtime dispatch, so it does not prove
+  forced-portable parallel execution.
 - **Paths.** Exact search, filtered exact search and candidate subsets,
   including the parallel scan. These also serve hybrid, planner and
   graph-attached record retrieval. HNSW exact re-scoring (unquantized and
@@ -379,6 +386,6 @@ gain. No public API, setting, error, format or wire field changes.
 
 Remaining P3d work:
 
-1. A NEON kernel, once it can be tested on aarch64 hardware.
+1. Native aarch64 CI acceptance of the NEON kernel.
 2. Conversion, backup, restore and key-rotation coverage, DO-005
    measurements and major-release acceptance.

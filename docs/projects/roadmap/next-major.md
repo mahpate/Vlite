@@ -113,8 +113,9 @@ Local numbers below show direction only (see rules).
   kernels preserve exact scoring, ordering and cutoff behavior. DiskANN
   neighbor scoring, MMR pairwise scoring and the GPU searcher's CPU
   re-score now use the same batched exact path, with unchanged results and
-  cache statistics. This does not complete NEON, the remaining P3d
-  lifecycle or performance qualification. No
+  cache statistics. The NEON kernel is implemented and independently reviewed;
+  native ARM CI acceptance, the remaining P3d lifecycle and performance
+  qualification are still outstanding. No
   production compact source writer is enabled; F1/F3/S1/S2 qualification
   remains outstanding.
 - **Speed P4, compact graph:** the [design](p4-compact-graph.md) is ready:

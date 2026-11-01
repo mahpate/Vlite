@@ -12,9 +12,9 @@
 //! metric step is the oracle's scalar code. Rows whose length differs from
 //! the query are scored by the oracle itself.
 //!
-//! Dispatch is detected once: AVX2 on x86_64 when the CPU has it, otherwise
-//! the portable kernel (SSE2 scalar on x86_64, scalar elsewhere, including
-//! WebAssembly). Neither kernel enables FMA.
+//! Dispatch is detected once: AVX2 on x86_64 when the CPU has it, baseline
+//! NEON on aarch64, otherwise the portable kernel (SSE2 scalar on x86_64,
+//! scalar elsewhere, including WebAssembly). No kernel uses FMA.
 
 use crate::DistanceMetric;
 
@@ -35,10 +35,17 @@ type Sums = ([f64; LANES], [f64; LANES]);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kernel {
     /// One scalar accumulator per row.
+    #[cfg_attr(
+        target_arch = "aarch64",
+        allow(dead_code, reason = "selected only by test overrides on aarch64")
+    )]
     Portable,
     /// Four rows per 256-bit vector of f64 accumulators.
     #[cfg(target_arch = "x86_64")]
     Avx2,
+    /// Two rows per 128-bit vector of f64 accumulators.
+    #[cfg(target_arch = "aarch64")]
+    Neon,
 }
 
 impl Kernel {
@@ -48,7 +55,14 @@ impl Kernel {
         if avx2::available() {
             return Self::Avx2;
         }
-        Self::Portable
+        #[cfg(target_arch = "aarch64")]
+        {
+            Self::Neon
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            Self::Portable
+        }
     }
 }
 
@@ -169,6 +183,9 @@ impl<'q> Scorer<'q> {
             #[cfg(target_arch = "x86_64")]
             // SAFETY: `Kernel::Avx2` is only selected after AVX2 was detected.
             Kernel::Avx2 => unsafe { avx2::sums::<KIND>(&self.wide, rows, cutoff) },
+            #[cfg(target_arch = "aarch64")]
+            // SAFETY: NEON is baseline on aarch64.
+            Kernel::Neon => unsafe { neon::sums::<KIND>(&self.wide, rows, cutoff) },
             Kernel::Portable => portable_sums::<KIND>(&self.wide, rows, cutoff),
         }
     }
@@ -337,6 +354,73 @@ mod avx2 {
     }
 }
 
+#[cfg(target_arch = "aarch64")]
+mod neon {
+    use super::{BLOCK, DOT, LANES, SQUARED_L2, Sums, seed};
+    use core::arch::aarch64::{
+        float64x2_t, vaddq_f64, vdupq_n_f64, vld1q_f64, vmulq_f64, vst1q_f64, vsubq_f64,
+    };
+
+    const WIDTH: usize = 2;
+    const GROUPS: usize = LANES / WIDTH;
+
+    #[target_feature(enable = "neon")]
+    fn store(groups: &[float64x2_t; GROUPS]) -> [f64; LANES] {
+        let mut lanes = [0.0; LANES];
+        for (group, &values) in groups.iter().enumerate() {
+            // SAFETY: each destination has two writable f64s; unaligned stores are allowed.
+            unsafe { vst1q_f64(lanes[group * WIDTH..].as_mut_ptr(), values) };
+        }
+        lanes
+    }
+
+    /// Each lane owns one row for every dimension. No horizontal reduction,
+    /// fused multiply-add or scalar tail changes the sequential f64 fold.
+    #[target_feature(enable = "neon")]
+    pub(super) fn sums<const KIND: u8>(
+        query: &[f64],
+        rows: &[&[f32]; LANES],
+        cutoff: f64,
+    ) -> Option<Sums> {
+        let dims = query.len();
+        let rows = rows.map(|row| &row[..dims]);
+        let mut sums = [vdupq_n_f64(seed()); GROUPS];
+        let mut squares = sums;
+        for (dim, &query) in query.iter().enumerate() {
+            let query = vdupq_n_f64(query);
+            for group in 0..GROUPS {
+                let values = [
+                    f64::from(rows[group * WIDTH][dim]),
+                    f64::from(rows[group * WIDTH + 1][dim]),
+                ];
+                // SAFETY: `values` holds two readable f64s; unaligned loads are allowed.
+                let row = unsafe { vld1q_f64(values.as_ptr()) };
+                if KIND == SQUARED_L2 {
+                    let difference = vsubq_f64(row, query);
+                    let term = vmulq_f64(difference, difference);
+                    sums[group] = vaddq_f64(sums[group], term);
+                } else {
+                    let term = vmulq_f64(row, query);
+                    sums[group] = vaddq_f64(sums[group], term);
+                    if KIND != DOT {
+                        let square = vmulq_f64(row, row);
+                        squares[group] = vaddq_f64(squares[group], square);
+                    }
+                }
+            }
+            let done = dim + 1;
+            if KIND == SQUARED_L2
+                && done % BLOCK == 0
+                && done < dims
+                && store(&sums).iter().all(|&sum| sum > cutoff)
+            {
+                return None;
+            }
+        }
+        Some((store(&sums), store(&squares)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,6 +447,8 @@ mod tests {
         } else {
             eprintln!("AVX2 unavailable: only the portable kernel is exercised");
         }
+        #[cfg(target_arch = "aarch64")]
+        kernels.push(Kernel::Neon);
         kernels
     }
 
@@ -466,6 +552,27 @@ mod tests {
                 }
             }
         });
+    }
+
+    #[test]
+    fn squared_l2_rejects_fused_multiply_add_for_every_kernel() {
+        let mut rng = Rng(0xf64);
+        let witness = (0..4096).find_map(|_| {
+            let query: Vec<_> = (0..4).map(|_| rng.wide()).collect();
+            let row: Vec<_> = (0..4).map(|_| rng.wide()).collect();
+            let expected =
+                metric_distance(&row, &query, DistanceMetric::SquaredL2, 0.0, 0.0).unwrap();
+            let fused = row.iter().zip(&query).fold(seed(), |sum, (&row, &query)| {
+                let difference = f64::from(row) - f64::from(query);
+                difference.mul_add(difference, sum)
+            });
+            (expected.to_bits() != fused.to_bits()).then_some((query, row))
+        });
+        let (query, row) = witness.expect("seeded finite inputs must distinguish FMA from mul/add");
+        for kernel in kernels() {
+            // Nine identical rows exercise every vector lane and the following batch.
+            check(kernel, &query, &vec![row.clone(); LANES + 1], "FMA witness");
+        }
     }
 
     #[test]
@@ -642,7 +749,9 @@ mod tests {
         } else {
             Kernel::Portable
         };
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(target_arch = "aarch64")]
+        let expected = Kernel::Neon;
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         let expected = Kernel::Portable;
         assert_eq!(Kernel::detected(), expected);
         assert_eq!(

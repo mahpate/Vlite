@@ -260,6 +260,8 @@ mod tests {
         if std::arch::is_x86_feature_detected!("avx2") {
             kernels.push(Kernel::Avx2);
         }
+        #[cfg(target_arch = "aarch64")]
+        kernels.push(Kernel::Neon);
         kernels
     }
 
