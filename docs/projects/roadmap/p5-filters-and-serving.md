@@ -224,10 +224,12 @@ S5 remains a P5 slice. If deferred, mark it unmet and obtain a roadmap decision;
 
 No P5 file naming, tags, manifest dialect, or CSR layout. Open: finalize signatures and failure classes with the storage contract.
 
-## Implemented step 2 (unreleased, under review)
+## Implemented step 2 (unreleased, reviewed)
 
-Delivery step 2 and the exact-planner half of step 3 are implemented in embedded Rust on base `6e26f68`
-and await independent review. There is no API, wire, OpenAPI, proto, `Error` or file-format change, and nothing is persisted.
+Delivery step 2 and the exact-planner half of step 3 are implemented, independently reviewed and integrated
+at `de2fbcd0`, including retained-capacity accounting and shared precision/P5 test instrumentation.
+Acceptance covers this bounded slice, not persisted writer integration, ANN optimization or release qualification.
+There is no API, wire, OpenAPI, proto, `Error` or file-format change, and nothing is persisted.
 
 - **Summaries.** `src/compact/stats.rs` keeps one generation per collection that declares metadata indexes,
   over the declared fields only. Each block of 1024 live records in ID order records its first and last public ID,
@@ -274,10 +276,11 @@ and await independent review. There is no API, wire, OpenAPI, proto, `Error` or 
   budget, 16 fields of 17 one-byte strings each fit 2935 blocks and prune; one block more, or the 3900 blocks that
   initialized-only string accounting would have admitted, warn and scan.
 
-Open for review: block size, the half-records cap, the churn threshold and the budget (allocator overhead
-uncounted; the overlay bound follows std's B-tree node layout, checked by the tests); release notes for lower
-`records_scanned`; a well-formed block with a matching digest but wrong summary is not detectable without
-recomputation; persisted blocks, partition-to-block binding and multi-generation layouts wait for writer wiring.
+The block size, half-records cap, churn threshold and retained-heap budget are accepted for this slice
+(allocator overhead uncounted; the overlay bound follows std's B-tree node layout, checked by the tests).
+Release notes must call out lower `records_scanned`. A well-formed block with a matching digest but wrong
+summary is not detectable without recomputation; persisted blocks, partition-to-block binding and
+multi-generation layouts wait for writer wiring.
 
 ## Verification and release plan
 
@@ -290,7 +293,7 @@ pruning, latest-revision overlays, deletes/resurrection and explicit TTL clocks.
 Geo radius is tested only as unknown pruning, not final radius filtering.
 CI runs the checker with negative schema/answer self-tests. The checker is
 reference coverage; the engine differential tests of step 2 are listed
-[above](#implemented-step-2-unreleased-under-review). Neither is an ANN recall
+[above](#implemented-step-2-unreleased-reviewed). Neither is an ANN recall
 guarantee or performance qualification.
 
 | Test family | Required assertion |

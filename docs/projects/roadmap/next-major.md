@@ -119,14 +119,20 @@ Local numbers below show direction only (see rules).
   and integrated with independent reference fixtures; interrupted computation
   retains only completed sources. S4 is also unreleased. CSR parity and serving
   exposure remain separate work.
-- **Parallel designs:** [temporal graphs](gap4-temporal-graph.md),
-  [filters](p5-filters-and-serving.md) and
+- **Speed P5, filters:** safe in-memory summaries and visibility tracking,
+  including exact-planner fallback, are implemented, independently reviewed
+  and integrated, but unreleased ([plan](p5-filters-and-serving.md)).
+  Exact results retain full predicate and expiry checks. The per-collection
+  64 MiB limit covers retained allocator-requested summary heap, not RSS,
+  peak or whole-query memory; exhaustion falls back to an exact scan.
+  Persisted writer integration, ANN optimization, compression, serving and
+  F7/F8/S5 qualification remain outstanding.
+- **Parallel designs:** [temporal graphs](gap4-temporal-graph.md) and
   [serving](serving-contract.md) now have implementation boundaries and
   acceptance matrices. They are plans, not shipped capabilities. Temporal
   validity retains closed intervals but does not restore TTL-deleted data.
-  Exact filtered search
-  keeps its oracle; approximate search does not acquire an exact top-k
-  guarantee. Serving schemas remain proposals, not approved wire changes.
+  Approximate search does not acquire an exact top-k guarantee.
+  Serving schemas remain proposals, not approved wire changes.
 - **Further design proposals:** [agent memory](gap1-agent-memory.md) defines
   the embedded operations and their prerequisites; [scale-out](scale-out.md)
   compares branching, object storage and replication. Both received source
