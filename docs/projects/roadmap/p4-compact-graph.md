@@ -1,7 +1,8 @@
 # Speed P4: compact graph
 
-**Status:** approved design; the first private codec slice is implemented and
-test-only. Full P4 implementation and measured results remain outstanding.
+**Status:** approved design; private test-only CSR and ordinary typed-property
+codec slices are implemented. Full P4 implementation and measured results
+remain outstanding.
 Depends on [P2](p2-directory-store.md); exits remain
 [S3/S4/F6](../performance/storage-goals.md): **<=24 B/edge disk,
 <=100 B/edge resident, >=1M edges/s bulk load, <=300 ms reopen at 1M edges**.
@@ -137,11 +138,17 @@ is 24 base + 20 indexes + 20 overlay + 16 caches + 20 other overhead.
 Report import/merge peaks and crypto scratch separately.
 Existing `graph_memory` heap counts alone cannot establish S4.
 
-The first private codec slice is implemented in
+The private codec slices implemented so far are in
 `src/compact/graph.rs` behind `cfg(test)`. It preserves graph ID/name, graph
 sequence and ID high-water marks; sorted public node/edge IDs and checked
 32-bit dense ordinals; node/edge keys and revisions; labels, relationship
-strings and sparse deadlines; and bidirectional CSR. Its decoder rejects
+strings and sparse deadlines; bidirectional CSR; and ordinary node/edge
+property maps. Property names are dictionary-coded in UTF-8 byte order, while
+per-record typed values preserve strings, signed integers, finite float/GeoPoint
+bits, and booleans. Each map retains the engine's existing field, string and
+byte limits; this is a correctness format, not a columnar compression or size
+claim. The versioned private payload magic is `VLGCSR02`; old `VLGCSR01` bytes
+are refused, not reinterpreted. Its decoder rejects
 noncanonical dictionaries/IDs, invalid endpoints or codes, incorrect row
 ordering, missing or duplicate CSR membership, overflow, truncation and
 trailing bytes. It also checks high-water marks against live IDs, revisions
@@ -162,16 +169,25 @@ CI runs the reference and its malformed-fixture checks. Write-time expiry,
 keys, full graph revisions, properties, schema, attachments and temporal state
 remain outside this logical reference; it cannot establish full engine parity.
 
+The independently reviewed `tests/compact_graph_property_oracle.py` and
+`graph-property-cases.json` model typed node/edge property snapshots: the five
+existing value types, UTF-8 byte-ordered unique names, last-insert-wins
+insertion, exact float/GeoPoint bit patterns, coordinate ranges and the
+existing field, name, string and aggregate limits. CI runs the reference, its
+malformed fixtures, shuffles and mutation rejections. It is not a serializer,
+on-disk layout or Rust parity proof, and it models no topology, overlay, TTL,
+schema, attachments, revisions or temporal state.
+
 This codec is not wired to the checkpoint block registry, shared framing,
-checkpoint reads or production builds. It refuses nonempty properties,
-attachments, declared schema and temporal segments rather than dropping them.
-It does not encode label-posting/property indexes or temporal history; those
-sources therefore remain unsupported. No changes were made to op-12/op-15,
-public APIs, or `src/openapi.json`. The remaining P4 slices are shared block
+checkpoint reads or production builds. It refuses attachments, declared
+schema and temporal segments rather than dropping them. It does not encode
+label postings, schema/property indexes or temporal history; those sources
+therefore remain unsupported. No changes were made to op-12/op-15, public
+APIs, or `src/openapi.json`. The remaining P4 slices are shared block
 dispatch/publication, compact-base access in reads, mutation overlay and
-checkpoint integration, attachment/property/schema/temporal encoding or
-faithful refusal in each path, parallel import, and all performance and
-cross-platform qualification.
+checkpoint integration, label postings and columnar property storage,
+attachment/schema/temporal encoding or faithful refusal in each path, parallel
+import, and all performance and cross-platform qualification.
 
 Next roll out opt-in checkpoint reads, mutation/TTL integration, then parallel
 import; enable defaults only after acceptance.
@@ -189,7 +205,7 @@ does not guarantee 300 ms. Full verification and decryption remain linear;
 do not hide work after the timer. F4's separate <=50 ms goal is unchanged.
 
 **Validation:** the private codec and logical references have independent review
-and local correctness checks; the codec also passed full cross-platform CI.
+and local correctness checks, and run in the cross-platform CI matrix.
 Remaining implementation and performance qualification are outstanding.
 DO-005 remains deferred to the major release under its
 unchanged quiet-host gate (mean background CPU <=10%; no half-second sample

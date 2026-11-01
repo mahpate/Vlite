@@ -1,0 +1,190 @@
+{
+  "schema": "vlite.compact-graph-properties",
+  "version": 1,
+  "cases": [
+    {
+      "name": "empty-maps",
+      "purpose": "Empty node and edge maps; shared u64 IDs are independent between entity kinds.",
+      "input": {
+        "mode": "snapshot",
+        "nodes": [{"id": 18446744073709551615, "properties": []}, {"id": 0, "properties": []}],
+        "edges": [{"id": 18446744073709551615, "properties": []}, {"id": 0, "properties": []}]
+      },
+      "expected": {
+        "nodes": [{"id": 0, "properties": []}, {"id": 18446744073709551615, "properties": []}],
+        "edges": [{"id": 0, "properties": []}, {"id": 18446744073709551615, "properties": []}]
+      }
+    },
+    {
+      "name": "mixed-node-and-edge",
+      "purpose": "Five types on both entity kinds; shared names, type-changing last-wins, Unicode without normalization, empty values, exact i64 extrema and integers beyond f64 exactness. Geo corners are -90/+180 and +90/-180.",
+      "input": {
+        "mode": "insertions",
+        "nodes": [
+          {"id": 7, "properties": [
+            {"name": "z", "type": "String", "value": "old"},
+            {"name": "flag", "type": "Boolean", "value": false},
+            {"name": "i64_min", "type": "Integer", "value": -9223372036854775808},
+            {"name": "geo", "type": "GeoPoint", "latitude_bits": "c056800000000000", "longitude_bits": "4066800000000000"},
+            {"name": "exact", "type": "Float", "bits": "3ff8000000000000"},
+            {"name": "\u00e9", "type": "String", "value": "\u96ea\ud83d\ude42"},
+            {"name": "empty", "type": "String", "value": ""},
+            {"name": "i64_max", "type": "Integer", "value": 9223372036854775807},
+            {"name": "e\u0301", "type": "String", "value": "not normalized"},
+            {"name": "z", "type": "Integer", "value": 9007199254740993}
+          ]},
+          {"id": 19, "properties": []}
+        ],
+        "edges": [
+          {"id": 7, "properties": [
+            {"name": "i64_max", "type": "Integer", "value": 9223372036854775807},
+            {"name": "flag", "type": "Boolean", "value": true},
+            {"name": "geo", "type": "GeoPoint", "latitude_bits": "4056800000000000", "longitude_bits": "c066800000000000"},
+            {"name": "exact", "type": "Float", "bits": "3fb999999999999a"},
+            {"name": "empty", "type": "String", "value": ""},
+            {"name": "\u00e9", "type": "String", "value": "caf\u00e9"},
+            {"name": "i64_min", "type": "Integer", "value": -9223372036854775808}
+          ]},
+          {"id": 19, "properties": []}
+        ]
+      },
+      "expected": {
+        "nodes": [
+          {"id": 7, "properties": [
+            {"name": "empty", "type": "String", "value": ""},
+            {"name": "exact", "type": "Float", "bits": "3ff8000000000000"},
+            {"name": "e\u0301", "type": "String", "value": "not normalized"},
+            {"name": "flag", "type": "Boolean", "value": false},
+            {"name": "geo", "type": "GeoPoint", "latitude_bits": "c056800000000000", "longitude_bits": "4066800000000000"},
+            {"name": "i64_max", "type": "Integer", "value": 9223372036854775807},
+            {"name": "i64_min", "type": "Integer", "value": -9223372036854775808},
+            {"name": "z", "type": "Integer", "value": 9007199254740993},
+            {"name": "\u00e9", "type": "String", "value": "\u96ea\ud83d\ude42"}
+          ]},
+          {"id": 19, "properties": []}
+        ],
+        "edges": [
+          {"id": 7, "properties": [
+            {"name": "empty", "type": "String", "value": ""},
+            {"name": "exact", "type": "Float", "bits": "3fb999999999999a"},
+            {"name": "flag", "type": "Boolean", "value": true},
+            {"name": "geo", "type": "GeoPoint", "latitude_bits": "4056800000000000", "longitude_bits": "c066800000000000"},
+            {"name": "i64_max", "type": "Integer", "value": 9223372036854775807},
+            {"name": "i64_min", "type": "Integer", "value": -9223372036854775808},
+            {"name": "\u00e9", "type": "String", "value": "caf\u00e9"}
+          ]},
+          {"id": 19, "properties": []}
+        ]
+      }
+    },
+    {
+      "name": "exact-ieee-bits",
+      "purpose": "Independent bit-pattern goldens: +0 and -0 differ; minimum positive/negative and maximum subnormal, minimum normal, maximum finite; coordinate signed zeros and subnormals remain exact.",
+      "input": {
+        "mode": "snapshot",
+        "nodes": [{"id": 1, "properties": [
+          {"name": "a_plus_zero", "type": "Float", "bits": "0000000000000000"},
+          {"name": "b_minus_zero", "type": "Float", "bits": "8000000000000000"},
+          {"name": "c_min_subnormal", "type": "Float", "bits": "0000000000000001"},
+          {"name": "d_neg_subnormal", "type": "Float", "bits": "8000000000000001"},
+          {"name": "e_max_subnormal", "type": "Float", "bits": "000fffffffffffff"},
+          {"name": "f_min_normal", "type": "Float", "bits": "0010000000000000"},
+          {"name": "g_max_finite", "type": "Float", "bits": "7fefffffffffffff"},
+          {"name": "h_geo", "type": "GeoPoint", "latitude_bits": "8000000000000000", "longitude_bits": "0000000000000001"}
+        ]}],
+        "edges": [{"id": 1, "properties": [
+          {"name": "a_plus_zero", "type": "Float", "bits": "0000000000000000"},
+          {"name": "b_minus_zero", "type": "Float", "bits": "8000000000000000"},
+          {"name": "c_min_subnormal", "type": "Float", "bits": "0000000000000001"},
+          {"name": "d_neg_subnormal", "type": "Float", "bits": "8000000000000001"},
+          {"name": "e_max_subnormal", "type": "Float", "bits": "000fffffffffffff"},
+          {"name": "f_min_normal", "type": "Float", "bits": "0010000000000000"},
+          {"name": "g_max_finite", "type": "Float", "bits": "7fefffffffffffff"},
+          {"name": "h_geo", "type": "GeoPoint", "latitude_bits": "8000000000000001", "longitude_bits": "8000000000000000"}
+        ]}]
+      },
+      "expected": {
+        "nodes": [{"id": 1, "properties": [
+          {"name": "a_plus_zero", "type": "Float", "bits": "0000000000000000"},
+          {"name": "b_minus_zero", "type": "Float", "bits": "8000000000000000"},
+          {"name": "c_min_subnormal", "type": "Float", "bits": "0000000000000001"},
+          {"name": "d_neg_subnormal", "type": "Float", "bits": "8000000000000001"},
+          {"name": "e_max_subnormal", "type": "Float", "bits": "000fffffffffffff"},
+          {"name": "f_min_normal", "type": "Float", "bits": "0010000000000000"},
+          {"name": "g_max_finite", "type": "Float", "bits": "7fefffffffffffff"},
+          {"name": "h_geo", "type": "GeoPoint", "latitude_bits": "8000000000000000", "longitude_bits": "0000000000000001"}
+        ]}],
+        "edges": [{"id": 1, "properties": [
+          {"name": "a_plus_zero", "type": "Float", "bits": "0000000000000000"},
+          {"name": "b_minus_zero", "type": "Float", "bits": "8000000000000000"},
+          {"name": "c_min_subnormal", "type": "Float", "bits": "0000000000000001"},
+          {"name": "d_neg_subnormal", "type": "Float", "bits": "8000000000000001"},
+          {"name": "e_max_subnormal", "type": "Float", "bits": "000fffffffffffff"},
+          {"name": "f_min_normal", "type": "Float", "bits": "0010000000000000"},
+          {"name": "g_max_finite", "type": "Float", "bits": "7fefffffffffffff"},
+          {"name": "h_geo", "type": "GeoPoint", "latitude_bits": "8000000000000001", "longitude_bits": "8000000000000000"}
+        ]}]
+      }
+    }
+  ],
+  "invalid_cases": [
+    {
+      "name": "duplicate-canonical-name",
+      "input": {"mode": "snapshot", "nodes": [{"id": 1, "properties": [
+        {"name": "x", "type": "Boolean", "value": false},
+        {"name": "x", "type": "Boolean", "value": true}
+      ]}], "edges": []},
+      "error": "canonical names must be strictly sorted and unique"
+    },
+    {
+      "name": "unsorted-canonical-name",
+      "input": {"mode": "snapshot", "nodes": [], "edges": [{"id": 1, "properties": [
+        {"name": "z", "type": "Integer", "value": 0},
+        {"name": "a", "type": "Integer", "value": 1}
+      ]}]},
+      "error": "canonical names must be strictly sorted and unique"
+    },
+    {
+      "name": "nonfinite-float",
+      "input": {"mode": "insertions", "nodes": [{"id": 1, "properties": [
+        {"name": "x", "type": "Float", "bits": "7ff8000000000000"}
+      ]}], "edges": []},
+      "error": "float must be finite"
+    },
+    {
+      "name": "latitude-outside-range",
+      "input": {"mode": "snapshot", "nodes": [], "edges": [{"id": 1, "properties": [
+        {"name": "x", "type": "GeoPoint", "latitude_bits": "4056800000000001", "longitude_bits": "0000000000000000"}
+      ]}]},
+      "error": "coordinate out of range"
+    },
+    {
+      "name": "empty-property-name",
+      "input": {"mode": "insertions", "nodes": [{"id": 1, "properties": [
+        {"name": "", "type": "String", "value": ""}
+      ]}], "edges": []},
+      "error": "UTF-8 byte length outside [1, 256]"
+    },
+    {
+      "name": "boolean-is-not-integer",
+      "input": {"mode": "snapshot", "nodes": [], "edges": [{"id": 1, "properties": [
+        {"name": "x", "type": "Integer", "value": false}
+      ]}]},
+      "error": "expected integer"
+    },
+    {
+      "name": "null-is-not-property-value",
+      "input": {"mode": "snapshot", "nodes": [{"id": 1, "properties": [
+        {"name": "x", "type": "Null", "value": null}
+      ]}], "edges": []},
+      "error": "unknown property type"
+    },
+    {
+      "name": "duplicate-edge-id",
+      "input": {"mode": "snapshot", "nodes": [], "edges": [
+        {"id": 1, "properties": []}, {"id": 1, "properties": []}
+      ]},
+      "error": "duplicate entity ID"
+    }
+  ]
+}

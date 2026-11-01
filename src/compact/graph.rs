@@ -4,10 +4,12 @@
 //! framing. It owns only the graph-domain representation; the shared storage
 //! owner must wire any future block dispatch.
 
-use crate::property_graph::engine::{Graph, GraphEdge, GraphNode};
+use crate::property_graph::engine::{
+    Graph, GraphEdge, GraphNode, Properties, PropertyValue, properties,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
-const MAGIC: &[u8; 8] = b"VLGCSR01";
+const MAGIC: &[u8; 8] = b"VLGCSR02";
 const MAX_BYTES: usize = 64 << 20;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -16,18 +18,18 @@ enum CodecError {
     UnsupportedSource(&'static str),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 struct SourceNode {
     id: u64,
     key: Option<String>,
     labels: Vec<String>,
     revision: u64,
     deadline: Option<u64>,
-    has_properties: bool,
+    properties: Properties,
     has_attachments: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 struct SourceEdge {
     id: u64,
     source: u64,
@@ -36,11 +38,11 @@ struct SourceEdge {
     key: Option<String>,
     revision: u64,
     deadline: Option<u64>,
-    has_properties: bool,
+    properties: Properties,
     is_temporal: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 struct GraphSource {
     graph_id: u16,
     name: String,
@@ -66,11 +68,12 @@ struct Csr {
     edges: Vec<u32>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 struct CompactGraph {
     source: GraphSource,
     labels: Vec<String>,
     relationships: Vec<String>,
+    property_names: Vec<String>,
     node_ordinals: BTreeMap<u64, u32>,
     edge_rows: Vec<EdgeRow>,
     out: Csr,
@@ -84,9 +87,6 @@ impl GraphSource {
         }
         let mut nodes = Vec::new();
         for node in graph.nodes() {
-            if !node.properties.is_empty() {
-                return Err(CodecError::UnsupportedSource("properties"));
-            }
             let has_attachments = graph.attachments(node.id).next().is_some();
             nodes.push(source_node(
                 node,
@@ -96,9 +96,6 @@ impl GraphSource {
         }
         let mut edges = Vec::new();
         for edge in graph.edges() {
-            if !edge.properties.is_empty() {
-                return Err(CodecError::UnsupportedSource("properties"));
-            }
             if graph.segments(edge.id).is_some() {
                 return Err(CodecError::UnsupportedSource("temporal segments"));
             }
@@ -124,7 +121,7 @@ fn source_node(node: &GraphNode, deadline: Option<u64>, has_attachments: bool) -
         labels: node.labels.iter().cloned().collect(),
         revision: node.revision,
         deadline,
-        has_properties: !node.properties.is_empty(),
+        properties: node.properties.clone(),
         has_attachments,
     }
 }
@@ -138,7 +135,7 @@ fn source_edge(edge: &GraphEdge, deadline: Option<u64>, is_temporal: bool) -> So
         key: edge.key.clone(),
         revision: edge.revision,
         deadline,
-        has_properties: !edge.properties.is_empty(),
+        properties: edge.properties.clone(),
         is_temporal,
     }
 }
@@ -154,6 +151,7 @@ fn encode(source: &GraphSource) -> Result<Vec<u8>, CodecError> {
     put_u64(&mut out, graph.source.next_edge_id)?;
     put_strings(&mut out, &graph.labels)?;
     put_strings(&mut out, &graph.relationships)?;
+    put_strings(&mut out, &graph.property_names)?;
     put_count(&mut out, graph.source.nodes.len())?;
     for node in &graph.source.nodes {
         put_u64(&mut out, node.id)?;
@@ -177,6 +175,7 @@ fn encode(source: &GraphSource) -> Result<Vec<u8>, CodecError> {
                 u32::try_from(code).map_err(|_| CodecError::Corrupt)?,
             )?;
         }
+        put_properties(&mut out, &node.properties, &graph.property_names)?;
     }
     put_count(&mut out, graph.edge_rows.len())?;
     for edge in &graph.edge_rows {
@@ -192,6 +191,11 @@ fn encode(source: &GraphSource) -> Result<Vec<u8>, CodecError> {
         put_optional_string(&mut out, graph.source.edges[key].key.as_deref())?;
         put_u64(&mut out, graph.source.edges[key].revision)?;
         put_optional_u64(&mut out, graph.source.edges[key].deadline)?;
+        put_properties(
+            &mut out,
+            &graph.source.edges[key].properties,
+            &graph.property_names,
+        )?;
     }
     put_csr(&mut out, &graph.out)?;
     put_csr(&mut out, &graph.incoming)?;
@@ -214,8 +218,9 @@ fn decode(bytes: &[u8]) -> Result<CompactGraph, CodecError> {
     let sequence = reader.u64()?;
     let next_node_id = reader.u64()?;
     let next_edge_id = reader.u64()?;
-    let labels = reader.strings()?;
-    let relationships = reader.strings()?;
+    let labels = reader.strings(63)?;
+    let relationships = reader.strings(63)?;
+    let property_names = reader.strings(256)?;
     let node_count = reader.entries(22)?;
     let mut nodes = Vec::new();
     nodes
@@ -245,13 +250,14 @@ fn decode(bytes: &[u8]) -> Result<CompactGraph, CodecError> {
                     .clone(),
             );
         }
+        let properties = reader.properties(&property_names)?;
         nodes.push(SourceNode {
             id,
             key,
             labels: node_labels,
             revision,
             deadline,
-            has_properties: false,
+            properties,
             has_attachments: false,
         });
     }
@@ -274,6 +280,7 @@ fn decode(bytes: &[u8]) -> Result<CompactGraph, CodecError> {
         let key = reader.optional_string()?;
         let revision = reader.u64()?;
         let deadline = reader.optional_u64()?;
+        let properties = reader.properties(&property_names)?;
         let source = nodes
             .get(usize::try_from(source).map_err(|_| CodecError::Corrupt)?)
             .ok_or(CodecError::Corrupt)?
@@ -293,7 +300,7 @@ fn decode(bytes: &[u8]) -> Result<CompactGraph, CodecError> {
             key,
             revision,
             deadline,
-            has_properties: false,
+            properties,
             is_temporal: false,
         });
     }
@@ -320,6 +327,7 @@ fn decode(bytes: &[u8]) -> Result<CompactGraph, CodecError> {
     })?;
     if graph.labels != labels
         || graph.relationships != relationships
+        || graph.property_names != property_names
         || graph.out != out
         || graph.incoming != incoming
     {
@@ -339,10 +347,14 @@ fn build_inner(
     if source.has_schema {
         return Err(CodecError::UnsupportedSource("schema"));
     }
-    if source.nodes.iter().any(|node| node.has_properties)
-        || source.edges.iter().any(|edge| edge.has_properties)
-    {
-        return Err(CodecError::UnsupportedSource("properties"));
+    let mut property_names = BTreeSet::new();
+    for node in &source.nodes {
+        properties::validate(&node.properties).map_err(|_| CodecError::Corrupt)?;
+        property_names.extend(node.properties.keys().cloned());
+    }
+    for edge in &source.edges {
+        properties::validate(&edge.properties).map_err(|_| CodecError::Corrupt)?;
+        property_names.extend(edge.properties.keys().cloned());
     }
     if source.nodes.iter().any(|node| node.has_attachments) {
         return Err(CodecError::UnsupportedSource("attachments"));
@@ -432,6 +444,7 @@ fn build_inner(
         return Err(CodecError::Corrupt);
     }
     let relationships: Vec<_> = relationship_set.into_iter().collect();
+    let property_names: Vec<_> = property_names.into_iter().collect();
     let mut edge_keys = BTreeSet::new();
     if source.edges.iter().any(|edge| {
         edge.key
@@ -471,6 +484,7 @@ fn build_inner(
         source,
         labels,
         relationships,
+        property_names,
         node_ordinals,
         edge_rows,
         out,
@@ -511,6 +525,44 @@ fn put_csr(out: &mut Vec<u8>, csr: &Csr) -> Result<(), CodecError> {
     put_count(out, csr.edges.len())?;
     for edge in &csr.edges {
         put_u32(out, *edge)?;
+    }
+    Ok(())
+}
+
+fn put_properties(
+    out: &mut Vec<u8>,
+    values: &Properties,
+    dictionary: &[String],
+) -> Result<(), CodecError> {
+    put_count(out, values.len())?;
+    for (name, value) in values.iter() {
+        let code = dictionary
+            .binary_search(name)
+            .map_err(|_| CodecError::Corrupt)?;
+        put_u32(out, u32::try_from(code).map_err(|_| CodecError::Corrupt)?)?;
+        match value {
+            PropertyValue::String(value) => {
+                put_bytes(out, &[1])?;
+                put_string(out, value)?;
+            }
+            PropertyValue::Integer(value) => {
+                put_bytes(out, &[2])?;
+                put_bytes(out, &value.to_le_bytes())?;
+            }
+            PropertyValue::Float(value) => {
+                put_bytes(out, &[3])?;
+                put_bytes(out, &value.to_le_bytes())?;
+            }
+            PropertyValue::Boolean(value) => put_bytes(out, &[4, u8::from(*value)])?,
+            PropertyValue::GeoPoint {
+                latitude,
+                longitude,
+            } => {
+                put_bytes(out, &[5])?;
+                put_bytes(out, &latitude.to_le_bytes())?;
+                put_bytes(out, &longitude.to_le_bytes())?;
+            }
+        }
     }
     Ok(())
 }
@@ -640,14 +692,14 @@ impl<'a> Reader<'a> {
         String::from_utf8(owned).map_err(|_| CodecError::Corrupt)
     }
 
-    fn strings(&mut self) -> Result<Vec<String>, CodecError> {
+    fn strings(&mut self, max_len: usize) -> Result<Vec<String>, CodecError> {
         let count = self.entries(4)?;
         let mut strings = Vec::new();
         strings
             .try_reserve_exact(count)
             .map_err(|_| CodecError::Corrupt)?;
         for _ in 0..count {
-            strings.push(self.string(63)?);
+            strings.push(self.string(max_len)?);
         }
         if strings
             .windows(2)
@@ -672,6 +724,48 @@ impl<'a> Reader<'a> {
             1 => Ok(Some(self.u64()?)),
             _ => Err(CodecError::Corrupt),
         }
+    }
+
+    fn properties(&mut self, dictionary: &[String]) -> Result<Properties, CodecError> {
+        let count = self.entries(5)?;
+        if count > 64 {
+            return Err(CodecError::Corrupt);
+        }
+        let mut properties = Properties::new();
+        let mut previous = None;
+        for _ in 0..count {
+            let code = self.u32()?;
+            if previous.is_some_and(|prior| code <= prior) {
+                return Err(CodecError::Corrupt);
+            }
+            previous = Some(code);
+            let name = dictionary
+                .get(usize::try_from(code).map_err(|_| CodecError::Corrupt)?)
+                .ok_or(CodecError::Corrupt)?
+                .clone();
+            let value = match self.u8()? {
+                1 => PropertyValue::String(self.string(4_096)?),
+                2 => PropertyValue::Integer(i64::from_le_bytes(self.array()?)),
+                3 => PropertyValue::Float(f64::from_le_bytes(self.array()?)),
+                4 => match self.u8()? {
+                    0 => PropertyValue::Boolean(false),
+                    1 => PropertyValue::Boolean(true),
+                    _ => return Err(CodecError::Corrupt),
+                },
+                5 => PropertyValue::GeoPoint {
+                    latitude: f64::from_le_bytes(self.array()?),
+                    longitude: f64::from_le_bytes(self.array()?),
+                },
+                _ => return Err(CodecError::Corrupt),
+            };
+            properties.insert(name, value);
+        }
+        properties::validate(&properties).map_err(|_| CodecError::Corrupt)?;
+        Ok(properties)
+    }
+
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], CodecError> {
+        self.take(N)?.try_into().map_err(|_| CodecError::Corrupt)
     }
 
     fn csr(&mut self) -> Result<Csr, CodecError> {
@@ -985,15 +1079,207 @@ mod tests {
     }
 
     #[test]
-    fn graph_source_refuses_fields_not_yet_encoded() {
-        let mut graph = fixture_graph(&json!({"nodes": [{"id": 1, "labels": []}], "edges": []}));
-        graph.nodes[0].has_properties = true;
+    fn typed_properties_round_trip_in_nodes_and_edges_with_exact_float_bits() {
+        let node_properties = Properties::from([
+            ("bool".into(), PropertyValue::Boolean(false)),
+            ("float".into(), PropertyValue::Float(-0.0)),
+            (
+                "geo".into(),
+                PropertyValue::GeoPoint {
+                    latitude: -0.0,
+                    longitude: 0.0,
+                },
+            ),
+            ("integer".into(), PropertyValue::Integer(i64::MIN)),
+            ("string".into(), PropertyValue::String("typed λ".into())),
+        ]);
+        let edge_properties = Properties::from([
+            ("bool".into(), PropertyValue::Boolean(true)),
+            ("float".into(), PropertyValue::Float(1.25)),
+            (
+                "geo".into(),
+                PropertyValue::GeoPoint {
+                    latitude: 90.0,
+                    longitude: -180.0,
+                },
+            ),
+            ("integer".into(), PropertyValue::Integer(i64::MAX)),
+            ("string".into(), PropertyValue::String(String::new())),
+        ]);
+        let mut state = GraphState::new();
+        state
+            .apply(
+                7,
+                &GraphBody {
+                    graph_id: GraphId(0),
+                    entries: vec![
+                        GraphEntry::CreateGraph { name: "g".into() },
+                        GraphEntry::PutNode {
+                            node_id: NodeId(1),
+                            key: "n1".into(),
+                            labels: BTreeSet::new(),
+                            properties: node_properties,
+                        },
+                        GraphEntry::PutNode {
+                            node_id: NodeId(2),
+                            key: "n2".into(),
+                            labels: BTreeSet::new(),
+                            properties: Properties::new(),
+                        },
+                        GraphEntry::PutEdge {
+                            edge_id: crate::property_graph::engine::EdgeId(3),
+                            source: NodeId(1),
+                            destination: NodeId(2),
+                            relationship: "r".into(),
+                            key: None,
+                            properties: edge_properties,
+                        },
+                    ],
+                },
+            )
+            .unwrap();
+        let source = GraphSource::from_graph(state.graph(GraphId(0)).unwrap()).unwrap();
+
+        let restored = decode(&encode(&source).unwrap()).unwrap();
+        assert_eq!(restored.source, source);
         assert_eq!(
-            encode(&graph),
-            Err(CodecError::UnsupportedSource("properties"))
+            match restored.source.nodes[0].properties.get("float").unwrap() {
+                PropertyValue::Float(value) => value.to_bits(),
+                value => panic!("expected float, got {value:?}"),
+            },
+            (-0.0f64).to_bits()
+        );
+        assert_eq!(
+            match restored.source.nodes[0].properties.get("geo").unwrap() {
+                PropertyValue::GeoPoint {
+                    latitude,
+                    longitude,
+                } => (latitude.to_bits(), longitude.to_bits()),
+                value => panic!("expected geo point, got {value:?}"),
+            },
+            ((-0.0f64).to_bits(), 0.0f64.to_bits())
+        );
+    }
+
+    #[test]
+    fn property_dictionary_output_is_deterministic_and_empty_maps_round_trip() {
+        let mut source = fixture_graph(&json!({
+            "nodes": [{"id": 1, "labels": []}, {"id": 2, "labels": []}],
+            "edges": [{"id": 3, "source": 1, "target": 2, "relationship": "r"}],
+        }));
+        source.nodes[0].properties = Properties::from([
+            ("z".into(), PropertyValue::Integer(1)),
+            ("a".into(), PropertyValue::Integer(2)),
+        ]);
+        source.edges[0].properties = Properties::new();
+        let expected = encode(&source).unwrap();
+        let mut shuffled = source.clone();
+        shuffled.nodes.reverse();
+        shuffled.edges.reverse();
+        assert_eq!(encode(&shuffled).unwrap(), expected);
+        let decoded = decode(&expected).unwrap();
+        assert_eq!(decoded.source.nodes[1].properties, Properties::new());
+        assert_eq!(decoded.source.edges[0].properties, Properties::new());
+        assert_eq!(encode(&decoded.source).unwrap(), expected);
+    }
+
+    #[test]
+    fn decoder_rejects_bad_property_dictionaries_references_tags_and_values() {
+        let mut source = fixture_graph(&json!({
+            "nodes": [{"id": 1, "labels": []}],
+            "edges": [],
+        }));
+        source.nodes[0].properties = Properties::from([
+            ("a".into(), PropertyValue::Integer(1)),
+            ("b".into(), PropertyValue::Boolean(true)),
+            ("c".into(), PropertyValue::Float(1.0)),
+        ]);
+        let bytes = encode(&source).unwrap();
+        let (dictionary, entries) = property_offsets(&bytes, 0);
+
+        let mut duplicate_dictionary = bytes.clone();
+        duplicate_dictionary[dictionary[1].1] = b'a';
+        assert_eq!(decode(&duplicate_dictionary), Err(CodecError::Corrupt));
+
+        let mut duplicate_reference = bytes.clone();
+        duplicate_reference[entries[1].0..entries[1].0 + 4]
+            .copy_from_slice(&entries[0].2.to_le_bytes());
+        assert_eq!(decode(&duplicate_reference), Err(CodecError::Corrupt));
+
+        let mut unsorted_references = bytes.clone();
+        unsorted_references[entries[0].0..entries[0].0 + 4].copy_from_slice(&2u32.to_le_bytes());
+        unsorted_references[entries[1].0..entries[1].0 + 4].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(decode(&unsorted_references), Err(CodecError::Corrupt));
+
+        let mut unknown_reference = bytes.clone();
+        unknown_reference[entries[0].0..entries[0].0 + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(decode(&unknown_reference), Err(CodecError::Corrupt));
+
+        let mut unknown_tag = bytes.clone();
+        unknown_tag[entries[0].1] = 99;
+        assert_eq!(decode(&unknown_tag), Err(CodecError::Corrupt));
+
+        let mut invalid_boolean = bytes.clone();
+        invalid_boolean[entries[1].3] = 2;
+        assert_eq!(decode(&invalid_boolean), Err(CodecError::Corrupt));
+
+        let mut nonfinite_float = bytes.clone();
+        nonfinite_float[entries[2].3..entries[2].3 + 8]
+            .copy_from_slice(&f64::INFINITY.to_le_bytes());
+        assert_eq!(decode(&nonfinite_float), Err(CodecError::Corrupt));
+
+        let mut old_version = bytes;
+        old_version[..8].copy_from_slice(b"VLGCSR01");
+        assert_eq!(decode(&old_version), Err(CodecError::Corrupt));
+    }
+
+    #[test]
+    fn property_codec_enforces_existing_engine_field_and_value_limits() {
+        let mut source = fixture_graph(&json!({
+            "nodes": [{"id": 1, "labels": []}],
+            "edges": [],
+        }));
+        source.nodes[0].properties =
+            Properties::from([("text".into(), PropertyValue::String("x".repeat(4_096)))]);
+        let bytes = encode(&source).unwrap();
+        assert_eq!(
+            decode(&bytes).unwrap().source.nodes[0].properties,
+            source.nodes[0].properties
         );
 
-        graph.nodes[0].has_properties = false;
+        source.nodes[0].properties = (0..64)
+            .map(|index| (format!("p{index:02}"), PropertyValue::Integer(index)))
+            .collect();
+        let bytes = encode(&source).unwrap();
+        assert_eq!(
+            decode(&bytes).unwrap().source.nodes[0].properties,
+            source.nodes[0].properties
+        );
+
+        source.nodes[0].properties =
+            Properties::from([("x".repeat(256), PropertyValue::Boolean(true))]);
+        assert_eq!(
+            decode(&encode(&source).unwrap()).unwrap().source.nodes[0].properties,
+            source.nodes[0].properties
+        );
+
+        source.nodes[0].properties =
+            Properties::from([("text".into(), PropertyValue::String("x".repeat(4_097)))]);
+        assert_eq!(encode(&source), Err(CodecError::Corrupt));
+
+        source.nodes[0].properties = (0..65)
+            .map(|index| (format!("p{index:02}"), PropertyValue::Integer(index)))
+            .collect();
+        assert_eq!(encode(&source), Err(CodecError::Corrupt));
+
+        source.nodes[0].properties =
+            Properties::from([("x".repeat(257), PropertyValue::Boolean(true))]);
+        assert_eq!(encode(&source), Err(CodecError::Corrupt));
+    }
+
+    #[test]
+    fn graph_source_refuses_fields_not_yet_encoded() {
+        let mut graph = fixture_graph(&json!({"nodes": [{"id": 1, "labels": []}], "edges": []}));
         graph.nodes[0].has_attachments = true;
         assert_eq!(
             encode(&graph),
@@ -1013,7 +1299,7 @@ mod tests {
             key: None,
             revision: 0,
             deadline: None,
-            has_properties: false,
+            properties: Properties::new(),
             is_temporal: true,
         });
         assert_eq!(
@@ -1084,8 +1370,9 @@ mod tests {
         reader.u64().unwrap();
         reader.u64().unwrap();
         reader.u64().unwrap();
-        reader.strings().unwrap();
-        reader.strings().unwrap();
+        reader.strings(63).unwrap();
+        reader.strings(63).unwrap();
+        let property_names = reader.strings(256).unwrap();
         let node_count = reader.count().unwrap();
         let mut keys = Vec::new();
         for _ in 0..node_count {
@@ -1096,6 +1383,7 @@ mod tests {
             reader.optional_u64().unwrap();
             let label_count = reader.count().unwrap();
             reader.take(label_count * 4).unwrap();
+            reader.properties(&property_names).unwrap();
         }
         let edge_count = reader.count().unwrap();
         for _ in 0..edge_count {
@@ -1107,12 +1395,77 @@ mod tests {
             reader.optional_string().unwrap();
             reader.u64().unwrap();
             reader.optional_u64().unwrap();
+            reader.properties(&property_names).unwrap();
         }
         let key = keys[if nodes { ordinal } else { node_count + ordinal }];
         assert_eq!(bytes[key], 1, "key must be present");
         let len = u32::from_le_bytes(bytes[key + 1..key + 5].try_into().unwrap()) as usize;
         assert_eq!(len, value.len(), "replacement keeps the encoded width");
         bytes[key + 5..key + 5 + len].copy_from_slice(value.as_bytes());
+    }
+
+    type PropertyOffsets = (Vec<(String, usize)>, Vec<(usize, usize, u32, usize)>);
+
+    fn property_offsets(bytes: &[u8], node_ordinal: usize) -> PropertyOffsets {
+        let mut reader = Reader::new(bytes);
+        reader.take(MAGIC.len()).unwrap();
+        reader.u16().unwrap();
+        reader.string(63).unwrap();
+        reader.u64().unwrap();
+        reader.u64().unwrap();
+        reader.u64().unwrap();
+        reader.strings(63).unwrap();
+        reader.strings(63).unwrap();
+        let dictionary_count = reader.count().unwrap();
+        let mut dictionary = Vec::with_capacity(dictionary_count);
+        for _ in 0..dictionary_count {
+            let len = reader.count().unwrap();
+            let offset = reader.at;
+            let value = std::str::from_utf8(reader.take(len).unwrap())
+                .unwrap()
+                .to_owned();
+            dictionary.push((value, offset));
+        }
+        let node_count = reader.count().unwrap();
+        let mut selected = Vec::new();
+        for ordinal in 0..node_count {
+            reader.u64().unwrap();
+            reader.optional_string().unwrap();
+            reader.u64().unwrap();
+            reader.optional_u64().unwrap();
+            let label_count = reader.count().unwrap();
+            reader.take(label_count * 4).unwrap();
+            let count = reader.count().unwrap();
+            let mut entries = Vec::with_capacity(count);
+            for _ in 0..count {
+                let code_offset = reader.at;
+                let code = reader.u32().unwrap();
+                let tag_offset = reader.at;
+                let tag = reader.u8().unwrap();
+                let value_offset = reader.at;
+                match tag {
+                    1 => {
+                        let len = reader.count().unwrap();
+                        reader.take(len).unwrap();
+                    }
+                    2 | 3 => {
+                        reader.take(8).unwrap();
+                    }
+                    4 => {
+                        reader.take(1).unwrap();
+                    }
+                    5 => {
+                        reader.take(16).unwrap();
+                    }
+                    _ => panic!("unexpected tag in encoded test fixture"),
+                }
+                entries.push((code_offset, tag_offset, code, value_offset));
+            }
+            if ordinal == node_ordinal {
+                selected = entries;
+            }
+        }
+        (dictionary, selected)
     }
 
     fn fixture_graph(case: &Value) -> GraphSource {
@@ -1131,7 +1484,7 @@ mod tests {
                     .collect(),
                 revision: 0,
                 deadline: node.get("deadline").and_then(Value::as_u64),
-                has_properties: false,
+                properties: Properties::new(),
                 has_attachments: false,
             })
             .collect();
@@ -1147,7 +1500,7 @@ mod tests {
                 key: None,
                 revision: 0,
                 deadline: edge.get("deadline").and_then(Value::as_u64),
-                has_properties: false,
+                properties: Properties::new(),
                 is_temporal: false,
             })
             .collect();

@@ -35,6 +35,7 @@ jobs:
           python tests/graph_betweenness_oracle.py --self-test
           python tests/compact_graph_oracle.py --self-test
           python tests/compact_graph_overlay_oracle.py --self-test
+          python tests/compact_graph_property_oracle.py --self-test
           python tests/temporal_interval_oracle.py --self-test
           python tests/filter_visibility_oracle.py --self-test
       - id: route

@@ -141,7 +141,11 @@ class Policy(unittest.TestCase):
     def test_graph_oracles_run_before_ci_routing(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         changes = text.split("\n  changes:\n", 1)[1].split("\n  documentation:\n", 1)[0]
-        for oracle in ("compact_graph_oracle", "compact_graph_overlay_oracle"):
+        for oracle in (
+            "compact_graph_oracle",
+            "compact_graph_overlay_oracle",
+            "compact_graph_property_oracle",
+        ):
             command = f"python tests/{oracle}.py --self-test"
             self.assertIn(command, changes)
             self.assertLess(changes.index(command), changes.index("ci_policy.py route"))
