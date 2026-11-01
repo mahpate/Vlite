@@ -1817,6 +1817,10 @@ fn load_inner<R: Read + Seek>(
         history_floor: 0,
         compact_skipped: Default::default(),
     };
+    // Gap 4: a temporal file's graph state accepts temporal entries.
+    if let Some(state) = loaded.graph.as_mut() {
+        crate::property_graph::temporal::adopt(state, flags, start)?;
+    }
     // Import jobs replayed so far, with the job high-water a precision image
     // restated (P3a).
     let mut jobs = ImportJobs::default();
@@ -2349,6 +2353,8 @@ fn load_graph_image(
         bodies,
         first,
     )?;
+    // Gap 4: as replay, the snapshot state takes the file's capability.
+    crate::property_graph::temporal::adopt(&mut state, loaded.flags, first)?;
     for run in revisions.drain(..) {
         state
             .restore_revisions(

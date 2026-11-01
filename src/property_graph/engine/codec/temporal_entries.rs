@@ -197,6 +197,38 @@ pub(super) fn encode(entry: &TemporalEntry, bytes: &mut Vec<u8>) {
     }
 }
 
+/// Payload length of a `PutEdge` without its 8-byte edge ID.
+fn put_edge_len(
+    relationship: &str,
+    key: Option<&str>,
+    segments: &[Segment],
+) -> Result<usize, GraphError> {
+    Ok(16
+        + 1
+        + relationship.len()
+        + 2
+        + key.map_or(0, str::len)
+        + 2
+        + segments
+            .iter()
+            .map(segment_len)
+            .sum::<Result<usize, GraphError>>()?)
+}
+
+/// Gap 4: the series of a temporal edge must fit one `PutEdge` entry in one
+/// graph body, so a snapshot or compaction can always restate it.
+pub fn check_series_bytes(
+    relationship: &str,
+    key: Option<&str>,
+    segments: &[Segment],
+) -> Result<(), GraphError> {
+    let room = super::MAX_BATCH_BYTES - super::BODY_HEADER_BYTES - super::ENTRY_HEADER_BYTES;
+    match put_edge_len(relationship, key, segments) {
+        Ok(len) if 8 + len <= room => Ok(()),
+        _ => Err(GraphError::InvalidTemporal(temporal::reason::SERIES_BYTES)),
+    }
+}
+
 /// Exact payload length of a validated entry.
 pub(super) fn payload_len(entry: &TemporalEntry) -> Result<usize, GraphError> {
     Ok(8 + match entry {
@@ -205,17 +237,7 @@ pub(super) fn payload_len(entry: &TemporalEntry) -> Result<usize, GraphError> {
             key,
             segments,
             ..
-        } => {
-            16 + 1
-                + relationship.len()
-                + 2
-                + key.as_ref().map_or(0, String::len)
-                + 2
-                + segments
-                    .iter()
-                    .map(segment_len)
-                    .sum::<Result<usize, GraphError>>()?
-        }
+        } => put_edge_len(relationship, key.as_deref(), segments)?,
         TemporalEntry::AppendSegment { segment, .. } => segment_len(segment)?,
         TemporalEntry::ReplaceSegment {
             valid_from,

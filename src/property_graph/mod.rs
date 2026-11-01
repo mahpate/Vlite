@@ -75,7 +75,7 @@ pub use algorithms::{
     GraphAlgorithmScope, GraphAlgorithmStats, GraphAlgorithmTruncation, LabelPropagationOutput,
     LabelScope, NodeScore, PageRankOutput, RelationshipScope, WeightedPath, WeightedPathOutcome,
 };
-pub use change::GraphChange;
+pub use change::{GraphChange, TemporalChange};
 pub use engine::schema::{
     GraphSchema, LabelDefinition, Multiplicity, ObservedEndpoint, ObservedLabel, ObservedProperty,
     ObservedRelationship, ObservedSchema, PropertyDefinition, PropertyIndexKind, PropertyType,
@@ -96,6 +96,7 @@ pub use retrieve::{
     Evidence, EvidenceSpec, Expansion, Pivot, PivotHit, Retrieval, Retrieve, RetrieveStats,
     UnmappedPivots,
 };
+pub use temporal::{TemporalOp, TemporalSegment};
 
 #[cfg(test)]
 mod tests;
@@ -320,6 +321,8 @@ pub enum GraphOp {
         destination: String,
         properties: Metadata,
     },
+    /// Gap 4 (unreleased): a temporal-edge operation; see [`TemporalOp`].
+    Temporal(TemporalOp),
 }
 
 /// A node or edge written by a batch.
@@ -589,6 +592,7 @@ fn set(values: &[String]) -> BTreeSet<String> {
 enum Planned {
     Graph(GraphMutation),
     Vector(u16, Mutation),
+    Temporal(engine::TemporalMutation),
 }
 
 /// Op-12 prefix rule. The ID field, zero before graph expiry, counts the
@@ -724,6 +728,15 @@ impl Database {
             body.entries.len() as u32,
             &encoded,
         );
+        // Gap 4: the header gains the capability before the first temporal frame.
+        if self.flags & format::FLAG_TEMPORAL == 0
+            && body
+                .entries
+                .iter()
+                .any(|entry| matches!(entry, GraphEntry::Temporal(_)))
+        {
+            self.enable_temporal()?;
+        }
         self.commit_frame(sequence, &frame)?;
         if let Some(state) = self.graph.as_mut()
             && state.apply(sequence, body).is_err()
@@ -856,6 +869,7 @@ impl Database {
                 destination: destination.clone(),
                 properties: properties_from_metadata(properties)?,
             },
+            GraphOp::Temporal(op) => return temporal::mutation(op).map(Planned::Temporal),
         };
         Ok(Planned::Graph(mutation))
     }
@@ -874,7 +888,7 @@ impl Database {
         if ops.len() > MAX_BATCH_ENTRIES {
             return Err(Error::BatchTooLarge);
         }
-        let mut outcomes = Vec::with_capacity(ops.len());
+        let outcomes = Vec::with_capacity(ops.len());
         if ops.is_empty() {
             return Ok(GraphBatchResult {
                 revision: None,
@@ -885,6 +899,36 @@ impl Database {
             .iter()
             .map(|op| self.plan_input(op))
             .collect::<Result<Vec<_>>>()?;
+        // Gap 4: the batch may use the temporal capability, which its commit
+        // enables (`commit_graph`); a batch that does not commit any
+        // temporal entry leaves it disabled.
+        let enabling = planned
+            .iter()
+            .any(|item| matches!(item, Planned::Temporal(_)))
+            && !self.graphs()?.is_temporal();
+        if enabling {
+            self.check_temporal_enable()?;
+            self.graph
+                .as_mut()
+                .expect("checked above")
+                .set_temporal(true);
+        }
+        let result = self.commit_planned(graph_id, planned, outcomes);
+        if enabling
+            && self.flags & format::FLAG_TEMPORAL == 0
+            && let Some(state) = self.graph.as_mut()
+        {
+            state.set_temporal(false);
+        }
+        result
+    }
+
+    fn commit_planned(
+        &mut self,
+        graph_id: GraphId,
+        planned: Vec<Planned>,
+        mut outcomes: Vec<GraphOpOutcome>,
+    ) -> Result<GraphBatchResult> {
         let sequence = self.next_sequence()?;
         let now = self.graph_now();
         let collections = &self.collections;
@@ -963,6 +1007,21 @@ impl Database {
                         },
                         MutationOutcome::Schema => GraphOpOutcome::Schema,
                     }
+                }
+                Planned::Temporal(mutation) => {
+                    let MutationOutcome::Edge { id, created } =
+                        planner.temporal(&mutation).map_err(graph_error)?
+                    else {
+                        unreachable!("temporal mutations write edges")
+                    };
+                    GraphOpOutcome::Edge(GraphWrite {
+                        id: id.0,
+                        created,
+                        revision: planner
+                            .graph()
+                            .edge(id)
+                            .map_or(sequence, |edge| edge.revision),
+                    })
                 }
             };
             outcomes.push(outcome);

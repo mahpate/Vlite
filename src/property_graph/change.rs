@@ -66,4 +66,57 @@ pub enum GraphChange {
     SchemaUpdated {
         schema: super::GraphSchema,
     },
+    /// Gap 4 (unreleased): a change to a temporal edge's validity series.
+    /// Only [`Database::temporal_changes_after`](crate::Database::temporal_changes_after)
+    /// reports it; every other feed refuses temporal changes.
+    Temporal(TemporalChange),
+}
+
+/// Gap 4 (unreleased): one change to a temporal edge's validity series, in
+/// commit order (never at a validity boundary). Corrections name the old
+/// segment by its exact bounds and carry only the new values; the old
+/// properties are not repeated.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum TemporalChange {
+    /// A temporal edge was created with this series (`created`), or an
+    /// existing edge was made temporal with one all-time segment.
+    EdgePut {
+        id: u64,
+        key: Option<String>,
+        source: u64,
+        source_key: String,
+        relationship: String,
+        destination: u64,
+        destination_key: String,
+        segments: Vec<super::TemporalSegment>,
+        created: bool,
+    },
+    SegmentAppended {
+        id: u64,
+        key: Option<String>,
+        segment: super::TemporalSegment,
+    },
+    /// The segment with exactly the old bounds was replaced by `segment`.
+    SegmentReplaced {
+        id: u64,
+        key: Option<String>,
+        valid_from: Option<i64>,
+        valid_to: Option<i64>,
+        segment: super::TemporalSegment,
+    },
+    /// The segment with exactly the old bounds now ends at `at`.
+    SegmentClosed {
+        id: u64,
+        key: Option<String>,
+        valid_from: Option<i64>,
+        valid_to: Option<i64>,
+        at: i64,
+    },
+    SegmentRemoved {
+        id: u64,
+        key: Option<String>,
+        valid_from: Option<i64>,
+        valid_to: Option<i64>,
+    },
 }

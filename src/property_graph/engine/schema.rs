@@ -924,12 +924,23 @@ fn check_edge(graph: &Graph, edge: &GraphEdge, structure: bool) -> Result<(), Gr
     let Some(definition) = graph.schema().relationships.get(&edge.relationship) else {
         return Ok(());
     };
-    check_properties(
-        &edge.relationship,
-        &definition.properties,
-        &edge.properties,
-        |_, _, _| true,
-    )?;
+    // Gap 4: a temporal edge's properties are those of each of its segments.
+    match graph.segments(edge.id) {
+        Some(segments) => segments.iter().try_for_each(|segment| {
+            check_properties(
+                &edge.relationship,
+                &definition.properties,
+                &segment.properties,
+                |_, _, _| true,
+            )
+        })?,
+        None => check_properties(
+            &edge.relationship,
+            &definition.properties,
+            &edge.properties,
+            |_, _, _| true,
+        )?,
+    }
     if structure {
         check_endpoints(graph, edge)?;
         if definition.multiplicity == Multiplicity::UniqueTriple
@@ -964,6 +975,18 @@ pub(super) fn check_entry(graph: &Graph, entry: &GraphEntry) -> Result<(), Graph
                 .edge(*edge_id)
                 .ok_or(GraphError::InvariantViolation("applied edge is missing"))?;
             check_edge(graph, edge, matches!(entry, GraphEntry::PutEdge { .. }))
+        }
+        // Gap 4: a new or promoted series is checked like a new edge; a
+        // segment change only by property rules.
+        GraphEntry::Temporal(temporal) => {
+            let edge = graph
+                .edge(temporal.edge_id())
+                .ok_or(GraphError::InvariantViolation("applied edge is missing"))?;
+            check_edge(
+                graph,
+                edge,
+                matches!(temporal, super::codec::TemporalEntry::PutEdge { .. }),
+            )
         }
         GraphEntry::PutSchema { .. } => check_graph(graph),
         _ => Ok(()),

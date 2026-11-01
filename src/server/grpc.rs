@@ -767,6 +767,9 @@ fn graph_change_out(change: crate::changes::GraphChange) -> proto::GraphChangeOp
             out.schema_json = schema.to_json().to_string();
             Op::SchemaUpdated
         }
+        // Gap 4: the served feed (`changes_after`) refuses temporal entries,
+        // so this is never reached; the proto has no temporal operation.
+        GraphChange::Temporal(_) => Op::Unspecified,
     };
     out.op = op as i32;
     out

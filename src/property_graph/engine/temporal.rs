@@ -38,6 +38,10 @@ pub mod reason {
     pub const TEMPORAL_EDGE: &str =
         "temporal_edge: a temporal edge changes only through temporal operations";
     pub const SERIES_BYTES: &str = "series_bytes: the encoded series must fit one graph body";
+    pub const EXPECTED: &str =
+        "expected: temporal corrections and promotion need an expected revision";
+    pub const ALREADY_TEMPORAL: &str = "already_temporal: the edge already has validity segments";
+    pub const CAPABILITY: &str = "capability: the graph state does not have temporal edges enabled";
 }
 
 /// One validity segment: `[valid_from, valid_to)` and its properties.

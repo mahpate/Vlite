@@ -26,7 +26,7 @@ use super::schema::{self, GraphSchema};
 use std::collections::BTreeSet;
 
 mod temporal_entries;
-pub use temporal_entries::TemporalEntry;
+pub use temporal_entries::{TemporalEntry, check_series_bytes};
 
 /// DO-001: V5 header flag marking a graph-enabled file.
 pub const FLAG_GRAPH: u16 = 4;

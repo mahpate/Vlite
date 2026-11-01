@@ -16,7 +16,7 @@ use std::io::{Read, Seek};
 use std::path::Path;
 
 /// Re-exported from [`crate::property_graph`], where it is defined.
-pub use crate::property_graph::GraphChange;
+pub use crate::property_graph::{GraphChange, TemporalChange};
 
 /// Default and maximum events returned by one batch.
 pub const DEFAULT_FEED_BATCH: usize = 1000;
@@ -193,6 +193,19 @@ pub(crate) fn read_changes<R: Read + Seek>(
     cursor: &FeedCursor,
     max_events: usize,
 ) -> Result<(ChangeBatch, crate::compact::Skips)> {
+    read_changes_with(file, key, known, cursor, max_events, false)
+}
+
+/// [`read_changes`], reporting temporal graph entries if `temporal` (Gap 4)
+/// and refusing them otherwise.
+pub(crate) fn read_changes_with<R: Read + Seek>(
+    file: &mut R,
+    key: Option<&EncryptionKey>,
+    known: Option<&crate::crypto::Cipher>,
+    cursor: &FeedCursor,
+    max_events: usize,
+    temporal: bool,
+) -> Result<(ChangeBatch, crate::compact::Skips)> {
     let header = format::read_log_header_with(file, key, known)?;
     let lineage = header.lineage.ok_or(Error::ChangeFeedRequiresUpgrade)?;
     if cursor.lineage != 0 && cursor.lineage != lineage {
@@ -210,6 +223,7 @@ pub(crate) fn read_changes<R: Read + Seek>(
         lineage,
         cursor.sequence,
         max_events.clamp(1, MAX_FEED_BATCH),
+        temporal,
     )
 }
 
@@ -219,6 +233,7 @@ fn scan<R: Read + Seek>(
     lineage: u64,
     after: u64,
     max_events: usize,
+    temporal: bool,
 ) -> Result<(ChangeBatch, crate::compact::Skips)> {
     let mut collections: BTreeMap<u16, (String, usize)> = BTreeMap::new();
     collections.insert(0, ("default".to_string(), header.dimensions));
@@ -228,7 +243,7 @@ fn scan<R: Read + Seek>(
     let mut next = after;
     let mut anchor_ms: Option<u64> = None;
     let mut has_more = false;
-    let mut graphs = crate::property_graph::feed::FeedGraphs::default();
+    let mut graphs = crate::property_graph::feed::FeedGraphs::new(header.flags, temporal);
     let mut check = crate::compact::ImageCheck::new(
         header.version,
         header.flags,
@@ -555,6 +570,9 @@ impl GraphChange {
             GraphChange::SchemaUpdated { schema } => {
                 json!({"op": "schema_updated", "schema": schema.to_json()})
             }
+            // Gap 4: the served feeds (`changes_after`) refuse temporal
+            // entries, so no server reaches this; there is no JSON shape yet.
+            GraphChange::Temporal(_) => json!({"op": "unsupported_temporal"}),
         }
     }
 }

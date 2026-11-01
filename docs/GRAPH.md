@@ -216,6 +216,21 @@ normalized request (with every output) and work statistics. There are no cursors
 or payload access and no whole-graph mode. Sampled betweenness is planned;
 see the [Gap 5 design](projects/roadmap/gap5-graph-algorithms.md).
 
+## Temporal edges (Rust, unreleased)
+
+Gap 4 slices A and B add temporal edges. Each one has an ID, key, type and endpoints like any edge, plus an ordered series of at most 256 non-overlapping validity segments `[valid_from, valid_to)` in milliseconds. Each segment carries its own properties. Nothing is released yet: every build refuses temporal operations and temporal files with `UnsupportedFeature(64)` until temporal reads (slice C) exist. REST, gRPC, MCP, query text, the CLI, the bindings and the dashboard do not expose them.
+
+- **Writes.** `GraphOp::Temporal(TemporalOp)` operations sit in an ordinary batch: create, promote an ordinary edge, append, replace, close and remove a segment.
+  - Segments are addressed by their exact bounds.
+  - Promotion and every correction need `Expected::Revision`. Within one batch the check uses the revision from before the batch, so closing a fact and appending its successor is one atomic supersession.
+  - Ordinary patches of a temporal edge fail.
+  - Each temporal operation counts toward the 4,096-operation and 16 MiB batch limits. A failure rolls back the whole batch, including TTL cleanup.
+- **Format.** The first temporal write sets the required header flag 64 in the same commit. Older builds refuse such files, and legacy files are unchanged until then. Temporal entries use graph entry tags 65 to 69. Directory stores inherit the flag by conversion; they cannot enable it themselves.
+- **TTL.** Closing a segment keeps history. TTL destroys it: node expiry cascades to every incident edge, edge expiry removes the whole series, and nothing reclaimed comes back.
+- **Feed.** `Database::temporal_changes_after` reports `GraphChange::Temporal` changes in commit order. Every other feed refuses a log with temporal changes rather than omit them.
+
+See the [Gap 4 design](projects/roadmap/gap4-temporal-graph.md) for the contract, allocations and known gaps.
+
 ## Surfaces
 
 | Surface | What it offers |

@@ -9,6 +9,7 @@
 //! [`GraphState::apply_at`]; anything a canonical writer cannot produce is
 //! rejected.
 
+use super::super::codec::TemporalEntry;
 use super::*;
 
 /// How far the stream of the graph being loaded has progressed; entries
@@ -168,25 +169,7 @@ impl GraphState {
                 key,
                 properties,
             } if phase <= Phase::Edges => {
-                if graph
-                    .edges
-                    .last_key_value()
-                    .is_some_and(|(last, _)| *last >= edge_id)
-                {
-                    return Err(GraphError::EdgeIdUnavailable(edge_id));
-                }
-                for endpoint in [source, destination] {
-                    if !graph.nodes.contains_key(&endpoint) {
-                        return Err(GraphError::NodeNotFound(endpoint));
-                    }
-                }
-                if let Some(key) = &key
-                    && graph.edge_keys.contains_key(key)
-                {
-                    return Err(GraphError::EdgeKeyExists(key.clone()));
-                }
-                new_id(&mut graph.next_edge_id, edge_id.0)?;
-                graph.push_edge(GraphEdge {
+                graph.load_edge(GraphEdge {
                     id: edge_id,
                     key,
                     source,
@@ -194,7 +177,32 @@ impl GraphState {
                     destination,
                     properties,
                     revision: sequence,
-                });
+                })?;
+                Ok(Phase::Edges)
+            }
+            // Gap 4: a temporal edge restated with its whole series; it
+            // needs the capability, which a snapshot that has one implies.
+            GraphEntry::Temporal(TemporalEntry::PutEdge {
+                edge_id,
+                source,
+                destination,
+                relationship,
+                key,
+                segments,
+            }) if phase <= Phase::Edges => {
+                super::super::temporal::validate_series(&segments)?;
+                super::super::codec::check_series_bytes(&relationship, key.as_deref(), &segments)?;
+                graph.load_edge(GraphEdge {
+                    id: edge_id,
+                    key,
+                    source,
+                    relationship,
+                    destination,
+                    properties: Properties::new(),
+                    revision: sequence,
+                })?;
+                graph.segments.insert(edge_id, segments);
+                self.temporal = true;
                 Ok(Phase::Edges)
             }
             // Gap 3: a deadline directly follows the entity it belongs to.
@@ -291,6 +299,31 @@ impl GraphState {
 }
 
 impl Graph {
+    /// Adds a snapshot edge: IDs strictly ascending, live endpoints and a
+    /// unique key.
+    fn load_edge(&mut self, edge: GraphEdge) -> Result<(), GraphError> {
+        if self
+            .edges
+            .last_key_value()
+            .is_some_and(|(last, _)| *last >= edge.id)
+        {
+            return Err(GraphError::EdgeIdUnavailable(edge.id));
+        }
+        for endpoint in [edge.source, edge.destination] {
+            if !self.nodes.contains_key(&endpoint) {
+                return Err(GraphError::NodeNotFound(endpoint));
+            }
+        }
+        if let Some(key) = &edge.key
+            && self.edge_keys.contains_key(key)
+        {
+            return Err(GraphError::EdgeKeyExists(key.clone()));
+        }
+        new_id(&mut self.next_edge_id, edge.id.0)?;
+        self.push_edge(edge);
+        Ok(())
+    }
+
     /// [`Graph::insert_edge`] without keeping adjacency lists sorted; the
     /// caller sorts them once all edges are in.
     fn push_edge(&mut self, edge: GraphEdge) {
@@ -355,14 +388,7 @@ mod tests {
                 }
             }
             for edge in graph.edges() {
-                entries.push(GraphEntry::PutEdge {
-                    edge_id: edge.id,
-                    source: edge.source,
-                    destination: edge.destination,
-                    relationship: edge.relationship.clone(),
-                    key: edge.key.clone(),
-                    properties: edge.properties.clone(),
-                });
+                entries.push(graph.edge_snapshot_entry(edge));
                 if let Some(deadline) = graph.edge_expiry(edge.id) {
                     entries.push(GraphEntry::EdgeExpiry {
                         edge_id: edge.id,

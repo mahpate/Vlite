@@ -109,6 +109,8 @@ fn restated(entry: &GraphEntry) -> bool {
             }
             | GraphEntry::Attach { .. }
             | GraphEntry::GraphHighWater { .. }
+            // Gap 4: a temporal edge with its whole series.
+            | GraphEntry::Temporal(engine::codec::TemporalEntry::PutEdge { .. })
     )
 }
 
@@ -295,15 +297,8 @@ pub(crate) fn compacted_bodies(
                     edge_id: edge.id,
                     expires_at_ms: Some(deadline),
                 });
-            std::iter::once(GraphEntry::PutEdge {
-                edge_id: edge.id,
-                source: edge.source,
-                destination: edge.destination,
-                relationship: edge.relationship.clone(),
-                key: edge.key.clone(),
-                properties: edge.properties.clone(),
-            })
-            .chain(expiry)
+            // Gap 4: a temporal edge is restated with its whole series.
+            std::iter::once(graph.edge_snapshot_entry(edge)).chain(expiry)
         });
         let attachments = live_nodes().flat_map(|node| {
             graph

@@ -329,6 +329,127 @@ Coverage added in slice A:
   `UnsupportedFeature(64)` while support is off, opens when on, and is
   `Corrupt` without `FLAG_GRAPH`.
 
+### Slice B: Rust writes and storage
+
+Public Rust API, unreleased. Every build refuses it with
+`UnsupportedFeature(64)` until slice C ships.
+
+| Item | Meaning |
+|---|---|
+| `GraphOp::Temporal(TemporalOp)` | A temporal operation inside an ordinary graph batch |
+| `TemporalOp` (`#[non_exhaustive]`) | `CreateEdge`, `PromoteEdge`, `AppendSegment`, `ReplaceSegment`, `CloseSegment`, `RemoveSegment` |
+| `TemporalSegment` | `valid_from` and `valid_to` as `Option<i64>` milliseconds, plus `properties: Metadata` |
+| `GraphChange::Temporal(TemporalChange)` | A feed operation. `TemporalChange` (`#[non_exhaustive]`) has `EdgePut`, `SegmentAppended`, `SegmentReplaced`, `SegmentClosed` and `SegmentRemoved` |
+| `Database::temporal_changes_after` | The opt-in temporal change feed |
+
+Writes:
+
+- **Atomic batches.** Temporal operations are planned with the other operations of a batch. Vector mutations, computed TTL cleanup and temporal entries go into one frame.
+- **Limits.** Each temporal operation counts as one of the 4,096 user operations. The encoded 16 MiB body limit is checked before the append. Any failure rolls back the whole plan: tentative TTL cleanup, the vector mutations and the capability flag.
+- **Creating an edge.** `CreateEdge` needs live endpoints.
+  - If the key is already live on an identical temporal edge (same endpoints and type, bit-identical series), the edge is returned with `created = false`. Any other live edge with that key is `GraphKeyConflict`.
+  - Ordinary `CreateEdge`/`EnsureEdge` never treat a temporal edge as an identical retry.
+- **Promotion.** `PromoteEdge` turns an ordinary edge into a temporal one. It keeps the ID, key and endpoints, and the edge's properties become one all-time segment.
+- **Corrections.** Promotion and every correction need `Expected::Revision`; anything else is `InvalidQuery("expected: …")`.
+- **No-op close.** Closing a segment at its own finite end plans nothing. No frame is written and the revision does not change.
+- **Revisions.** Any real temporal entry sets the edge revision to the commit sequence.
+- **Other operations on temporal edges.**
+  - `PatchEdge` is `InvalidQuery("temporal_edge: …")`.
+  - `DeleteEdge` deletes the whole series.
+  - Node TTL hides and reclaims every incident edge, temporal ones included (Gap 3 cascade). Edge TTL reclaims the whole series.
+  - TTL-deleted data is never restored: a reused key gets a new edge ID with only its own series.
+- **Schema.** Relationship property rules apply to every segment. A new or promoted series is checked like a new edge (endpoint labels; `UniqueTriple` counts one logical series). The series must fit one graph body (`series_bytes`).
+- **Storage.** Segments are held per edge ID in `Graph::segments`, ordered, with binary-search lookup. Key maps and adjacency keep one entry per logical edge. A temporal edge's own `properties` are empty.
+
+Capability:
+
+- **Enabling.** The first committing batch that plans a temporal entry enables `FLAG_TEMPORAL`.
+  - Order: the frame is encoded and validated, then the 32-byte header is rewritten and synced, then the frame is appended.
+  - Rejected batches and no-ops leave the header unchanged.
+  - If the header write fails, the batch returns `CommitIndeterminate` and the handle is poisoned.
+- **Directory stores.** Their segments repeat the header flags, so they cannot enable the capability (`UnsupportedFeature(64)`). They inherit it through `convert_to_directory`. WAL segment headers (`WAL_FLAGS`) and checkpoint images carry the flag.
+- **Read-only handles** return `ReadOnly`.
+
+Persistence:
+
+- **Replay.** Replay applies tags 65..=69. A temporal entry in a file without flag 64 is `Corrupt`, both in replay and in every feed.
+- **Snapshots.** Compaction, directory checkpoints and P2b precision images restate a temporal edge as one tag-65 entry, at the ordinary edge's canonical position and followed by its expiry entry.
+  - The snapshot admission rule (`frame.rs` `restated`) and the image-check edge coverage (`compact/mod.rs`) admit it.
+  - Snapshot load restores the series.
+- **Flags across maintenance.** Compaction and upgrade carry `FLAG_TEMPORAL` with `FLAG_GRAPH`. ID high-water marks survive.
+- **Revisions.** Only precision images restore revisions (the P2b path, tested). Every other snapshot image handles a temporal edge's revision exactly as it handles an ordinary edge's.
+
+Feed and serving:
+
+- **Temporal feed.** `temporal_changes_after` reports `GraphChange::Temporal` entries at their log position, in commit order. A batch's `revision` is its commit sequence, and nothing is emitted at validity boundaries.
+  - `EdgePut` carries the endpoint keys and the full series; `created = false` marks a promotion.
+  - Corrections name the old segment by its exact bounds and carry only new values.
+- **Other feeds.** `changes_after`, `read_log_changes`, and therefore REST/gRPC/MCP feeds and webhooks, return `UnsupportedFeature(64)` for a log with temporal entries. This includes a compacted image whose snapshot holds them; they never omit temporal changes.
+- **Serving surfaces.** Every server, binding, CLI and MCP open uses the same gate, which is off outside this crate's tests. They refuse temporal files at open with `UnsupportedFeature(64)`.
+  - The new `to_json` arm (`{"op": "unsupported_temporal"}`) and gRPC arm (`Op::Unspecified`) are unreachable exhaustiveness markers.
+  - OpenAPI, proto, query text, the CLI and the dashboard are unchanged.
+
+Coverage added in slice B (all `cargo test --lib`):
+
+| Acceptance row | Tests |
+|---|---|
+| Identity/schema | `engine::state::temporal::tests` (put/promote identity, schema per segment, UniqueTriple per series, invariants); `engine::mutate::temporal::tests` (idempotent keyed create, promotion) |
+| Corrections | `writes::corrections_are_atomic_and_revision_checked_against_the_batch_start`, `mutate::temporal::tests::series_changes_require_the_exact_series_revision` |
+| Rollback | the same and `writes::limits_roll_back_the_whole_plan_including_tentative_ttl_cleanup` (vector, TTL cleanup, revisions and header unchanged) |
+| Limits | 4,096 ops accepted, 4,097 rejected; 256 segments accepted, 257 rejected; byte overflow rejected; one frame with TTL cleanup, temporal change and vector (`writes::limits_…`, `state::temporal::tests::segment_cap_and_series_bytes_are_enforced`) |
+| TTL | `writes::ttl_reclaims_whole_series_and_history_never_restores_them` (node cascade, edge-only expiry, compaction drops due series, key reuse gets a new ID, `verify_graph`) |
+| Reopen | `writes::the_first_temporal_write_enables_the_capability_with_its_frame`, `state::temporal::tests::snapshot_restates_series_and_equals_replay`; refusal when support is off |
+| Compaction / Directory checkpoint | `writes::temporal_state_survives_compaction_conversion_and_checkpoints`, `writes::a_precision_image_keeps_series_and_revisions` (P2b snapshot load) |
+| Encryption | `writes::encrypted_temporal_files_round_trip` |
+| Feed/surfaces | `writes::only_the_temporal_feed_reports_temporal_changes_in_commit_order`; old feeds refuse, before and after compaction; missing flag is `Corrupt` |
+| Format capability | `writes::builds_without_support_refuse_temporal_operations_and_change_nothing`, `writes::read_only_handles_refuse_and_a_failed_header_write_poisons`, legacy files unchanged without a temporal write |
+
+Fail-first evidence:
+
+| Suite | Result with the stated stub |
+|---|---|
+| Engine state (`apply_temporal` stubbed) | 8 of 9 failed |
+| Planner (`Planner::temporal` stubbed) | 5 of 5 failed |
+| Adapter (`mutation` always refusing) | 10 of 10 write tests failed |
+| Feed (temporal arm refusing) | the feed test failed with `UnsupportedFeature(64)` |
+
+Shared-file hooks, each marked `// Gap 4:`:
+
+| File | Slice | Hook |
+|---|---|---|
+| `src/format.rs` | A | flag constant |
+| `src/format.rs` | A | header gate |
+| `src/format.rs` | A | flag requires `FLAG_GRAPH` |
+| `src/format.rs` | B | `adopt` after replay in `load_inner` |
+| `src/format.rs` | B | `adopt` in `load_graph_image` |
+| `src/property_graph/frame.rs` | B | `restated` arm |
+| `src/property_graph/frame.rs` | B | `compacted_bodies` emits `edge_snapshot_entry` |
+| `src/compact/mod.rs` | B | `ImageCheck::snapshot` edge coverage arm |
+
+`engine/state/snapshot.rs` also gained a temporal `PutEdge` arm and the `Graph::load_edge` helper. These will conflict with the planned push-style snapshot builder refactor.
+
+Known gaps and follow-ups (not yet tested unless stated):
+
+1. **Replicas.** A primary that enables the capability changes its header flags, so replica followers stop with `ReplicaDiverged`. Temporal replication waits for serving.
+2. **Point-in-time restore.** Restoring from a base backup taken before enabling yields `InvalidRestoreTarget` (found by inspection, not tested).
+3. **Crash window.** A crash between the header write and the frame append leaves a capable file with no temporal edges. Builds without support then refuse it.
+4. **Batch-start revisions.** The revision check is batch-start only when temporal operations come first.
+   - If an ordinary operation already changed the same edge in the batch, the temporal precondition fails.
+   - An edge created in the same batch cannot be appended to; create it with its full series.
+5. **Ordinary reads.** They ignore validity and show temporal edges with empty properties until slice C. The gate hides this from users.
+6. **Feed gaps.** The feed does not report TTL deadlines or reclaims, as in Gap 3. No surface outside Rust reports temporal changes.
+7. **Measurement.** Memory per segment and production caps are not measured, and benchmarks are unchanged.
+
+Slice C still needs:
+
+- the shared visibility predicate (T and C)
+- as-of get, neighbors, traverse, shortest path, retrieve and query text
+- bounded timeline inspection
+- fixed-T/C cursors and budgets
+- the remaining acceptance rows: Bounds via reads, Multiple intervals, Reads, Paging/budgets, and TTL at C before, at and after expiry independently of T
+
+Turning the gate on for release builds also waits for slice C.
+
 ### Proposed decisions for review
 
 1. Capability and error: flag 64 with the existing `UnsupportedFeature(u16)`
@@ -348,3 +469,25 @@ Coverage added in slice A:
    series is restated in snapshots.
 5. Category-prefixed reason strings keep oracle categories testable without a
    public error enum.
+6. API shape: wrapper variants `GraphOp::Temporal(TemporalOp)` and
+   `GraphChange::Temporal(TemporalChange)`, with `#[non_exhaustive]` nested
+   enums, so later temporal operations do not break callers again. Because
+   `GraphChange` is exhaustive, the new variant is a next-major change.
+7. Promotion: a temporal `PutEdge` (tag 65) over an ordinary edge with the
+   same ID, endpoints, type and key turns it into a temporal edge. This
+   follows Graphiti, which adds validity to an existing fact edge instead of
+   copying it. Promoting an edge that is already temporal is
+   `already_temporal`.
+8. Batch revisions: inside one batch, a temporal precondition is checked
+   against the edge's revision before the batch. Supersession (close plus
+   append) is then one revision-checked unit, like a Datomic transaction
+   against one basis.
+9. Enabling order: the header is written and synced before the frame. An
+   old build can then never see temporal entries, at the cost of a benign
+   capable-but-empty file after a crash. Directory stores inherit the
+   capability only by conversion.
+10. Feed: rather than mixing temporal operations into existing feeds,
+    existing feeds refuse temporal logs and an opt-in Rust feed reports
+    them. This holds until a versioned feed extension and an approved
+    OpenAPI/proto diff exist (serving, slice E). Corrections carry the old
+    bounds and only the new values, never guessed old values.

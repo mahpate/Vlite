@@ -73,7 +73,7 @@ pub use model::{
     Direction, EdgeId, GraphEdge, GraphId, GraphNode, NodeId, Precondition, Properties,
     PropertyCondition, PropertyValue,
 };
-pub use mutate::{EdgeSelector, GraphMutation, MutationOutcome, Planner};
+pub use mutate::{EdgeSelector, GraphMutation, MutationOutcome, Planner, TemporalMutation};
 pub use query::{
     EdgeView, Explanation, GraphPath, GraphQuery, IndexChoice, NodeSelector, NodeView, PathOutcome,
     PropertyProjection, QueryOp, QueryOutput, QueryResult, QueryStats, TraversedNode,

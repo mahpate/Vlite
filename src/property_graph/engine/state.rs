@@ -14,6 +14,7 @@ use super::limits::{MAX_GRAPHS, MAX_LABELS};
 use super::model::{Direction, EdgeId, GraphEdge, GraphId, GraphNode, NodeId, Properties};
 use super::properties;
 use super::schema::{self, GraphSchema, PropertyIndex};
+use super::temporal::Segment;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, btree_set};
 use std::iter::Peekable;
@@ -123,7 +124,15 @@ pub struct Graph {
     node_expiry: Expiries<NodeId>,
     /// Edges' own deadlines.
     edge_expiry: Expiries<EdgeId>,
+    /// Gap 4: the validity segments of each temporal edge, in series order
+    /// (authoritative). A temporal edge keeps empty `properties`; key maps
+    /// and adjacency stay per logical edge. Empty for graphs without
+    /// temporal edges.
+    segments: BTreeMap<EdgeId, Vec<Segment>>,
 }
+
+/// An edge removed with its deadline and, for a temporal edge, its series.
+type DeletedEdge = (GraphEdge, Option<u64>, Option<Vec<Segment>>);
 
 fn remove_from<K: Ord, V: Ord>(map: &mut BTreeMap<K, BTreeSet<V>>, key: K, value: &V) {
     if let Some(set) = map.get_mut(&key) {
@@ -231,6 +240,7 @@ impl Graph {
             property_indexes: BTreeMap::new(),
             node_expiry: Expiries::new(),
             edge_expiry: Expiries::new(),
+            segments: BTreeMap::new(),
         }
     }
 
@@ -519,18 +529,23 @@ impl Graph {
         }
     }
 
-    /// Deletes an edge with its deadline.
+    /// Deletes an edge with its deadline and series.
     fn delete_edge(&mut self, id: EdgeId) -> Option<Undo> {
         let edge = self.remove_edge(id)?;
         let expiry = self.edge_expiry.set(id, None);
-        Some(Undo::DeleteEdge { edge, expiry })
+        let series = self.segments.remove(&id);
+        Some(Undo::DeleteEdge {
+            edge,
+            expiry,
+            series,
+        })
     }
 
-    /// Deletes existing edges with their deadlines, updating each adjacency
-    /// list once however many of its entries go (a reclaimed hub may take
-    /// thousands). Returns the edges and deadlines for
-    /// [`Graph::restore_edges`].
-    fn delete_edges(&mut self, ids: BTreeSet<EdgeId>) -> Vec<(GraphEdge, Option<u64>)> {
+    /// Deletes existing edges with their deadlines and series, updating
+    /// each adjacency list once however many of its entries go (a reclaimed
+    /// hub may take thousands). Returns what [`Graph::restore_edges`]
+    /// restores.
+    fn delete_edges(&mut self, ids: BTreeSet<EdgeId>) -> Vec<DeletedEdge> {
         let mut outgoing: BTreeMap<NodeId, Vec<AdjacencyEntry>> = BTreeMap::new();
         let mut incoming: BTreeMap<NodeId, Vec<AdjacencyEntry>> = BTreeMap::new();
         let mut deleted = Vec::with_capacity(ids.len());
@@ -542,7 +557,11 @@ impl Graph {
             let entry = (self.uncount_relationship(&edge.relationship), id);
             outgoing.entry(edge.source).or_default().push(entry.clone());
             incoming.entry(edge.destination).or_default().push(entry);
-            deleted.push((edge, self.edge_expiry.set(id, None)));
+            deleted.push((
+                edge,
+                self.edge_expiry.set(id, None),
+                self.segments.remove(&id),
+            ));
         }
         for (node, entries) in outgoing {
             remove_adjacencies(&mut self.out_edges, node, entries);
@@ -555,10 +574,10 @@ impl Graph {
 
     /// Restores edges removed by [`Graph::delete_edges`], updating each
     /// adjacency list once.
-    fn restore_edges(&mut self, deleted: Vec<(GraphEdge, Option<u64>)>) {
+    fn restore_edges(&mut self, deleted: Vec<DeletedEdge>) {
         let mut outgoing: BTreeMap<NodeId, Vec<AdjacencyEntry>> = BTreeMap::new();
         let mut incoming: BTreeMap<NodeId, Vec<AdjacencyEntry>> = BTreeMap::new();
-        for (edge, expiry) in deleted {
+        for (edge, expiry, series) in deleted {
             if let Some(key) = &edge.key {
                 self.edge_keys.insert(key.clone(), edge.id);
             }
@@ -566,6 +585,9 @@ impl Graph {
             outgoing.entry(edge.source).or_default().push(entry.clone());
             incoming.entry(edge.destination).or_default().push(entry);
             self.edge_expiry.set(edge.id, expiry);
+            if let Some(series) = series {
+                self.segments.insert(edge.id, series);
+            }
             self.edges.insert(edge.id, edge);
         }
         for (node, entries) in outgoing {
@@ -585,6 +607,7 @@ impl Graph {
         graph.schema = self.schema.clone();
         graph.node_expiry = self.node_expiry.rebuilt();
         graph.edge_expiry = self.edge_expiry.rebuilt();
+        graph.segments = self.segments.clone();
         self.nodes
             .values()
             .cloned()
@@ -705,6 +728,7 @@ pub(super) enum Undo {
     DeleteEdge {
         edge: GraphEdge,
         expiry: Option<u64>,
+        series: Option<Vec<Segment>>,
     },
     Attach {
         node: NodeId,
@@ -727,11 +751,13 @@ pub(super) enum Undo {
         revision: u64,
     },
     /// The deletions of one `Reclaim`: the hidden edges with their
-    /// deadlines, then the due nodes in apply order.
+    /// deadlines and series, then the due nodes in apply order.
     Reclaim {
-        edges: Vec<(GraphEdge, Option<u64>)>,
+        edges: Vec<DeletedEdge>,
         nodes: Vec<Undo>,
     },
+    /// Gap 4: the inverse of one temporal entry.
+    Temporal(temporal::TemporalUndo),
 }
 
 /// All named graphs of one graph-enabled file.
@@ -742,6 +768,9 @@ pub struct GraphState {
     /// high-water marks belong to each graph and start at 0.
     graphs: BTreeMap<GraphId, Graph>,
     last_sequence: u64,
+    /// Gap 4: whether temporal entries may be applied (the file's temporal
+    /// capability). Never cleared once set.
+    temporal: bool,
     // Derived indexes.
     names: BTreeMap<String, GraphId>,
     /// PD-012: `(collection, record)` → owning node, across all graphs.
@@ -947,6 +976,12 @@ impl GraphState {
                     Err(GraphError::GraphNotFound(graph_id))
                 };
             }
+            // Gap 4: only a file with the temporal capability holds them.
+            GraphEntry::Temporal(_) if !self.temporal => {
+                return Err(GraphError::Corrupt(
+                    "temporal entry without the temporal capability",
+                ));
+            }
             _ => {}
         }
         let graph = self
@@ -1100,6 +1135,12 @@ impl GraphState {
                 set,
                 unset,
             } => {
+                // Gap 4: a temporal edge's properties live in its segments.
+                if graph.segments.contains_key(edge_id) {
+                    return Err(GraphError::InvalidTemporal(
+                        super::temporal::reason::TEMPORAL_EDGE,
+                    ));
+                }
                 let edge = graph
                     .edges
                     .get_mut(edge_id)
@@ -1215,10 +1256,7 @@ impl GraphState {
                     .collect();
                 Undo::Reclaim { edges, nodes }
             }
-            // Gap 4 slice A defines the temporal entries; slice B applies them.
-            GraphEntry::Temporal(_) => {
-                return Err(GraphError::Corrupt("temporal entries are not applied yet"));
-            }
+            GraphEntry::Temporal(entry) => Undo::Temporal(graph.apply_temporal(sequence, entry)?),
         };
         Ok(Some(undo))
     }
@@ -1287,10 +1325,18 @@ impl GraphState {
             Undo::RestoreEdge(edge) => {
                 graph.edges.insert(edge.id, edge);
             }
-            Undo::DeleteEdge { edge, expiry } => {
+            Undo::DeleteEdge {
+                edge,
+                expiry,
+                series,
+            } => {
                 graph.edge_expiry.set(edge.id, expiry);
+                if let Some(series) = series {
+                    graph.segments.insert(edge.id, series);
+                }
                 graph.insert_edge(edge);
             }
+            Undo::Temporal(inverse) => graph.undo_temporal(inverse),
             Undo::Attach { node, collection } => {
                 let map = graph.attachments.get_mut(&node).expect("attachment");
                 let record = map.remove(&collection).expect("attachment");
@@ -1385,6 +1431,7 @@ impl GraphState {
             {
                 return Err(violation("dangling expiry"));
             }
+            graph.check_segments(self.temporal)?;
             if graph.rebuilt() != *graph {
                 return Err(violation("derived graph indexes differ from a rebuild"));
             }
@@ -1409,6 +1456,7 @@ impl GraphState {
         let Self {
             graphs,
             last_sequence: _,
+            temporal: _,
             names,
             attachment_owners,
         } = self;
@@ -1445,7 +1493,7 @@ pub enum MemoryComponent {
     /// properties.
     NodeRecords,
     /// Authoritative edge records, including each edge's key, relationship
-    /// type and properties.
+    /// type and properties, deadlines and temporal validity segments.
     EdgeRecords,
     /// Node → collection → record attachments.
     Attachments,
@@ -1482,6 +1530,7 @@ impl Graph {
             property_indexes,
             node_expiry,
             edge_expiry,
+            segments,
         } = self;
         drop(name);
         drop(schema);
@@ -1491,6 +1540,7 @@ impl Graph {
         released(MemoryComponent::NodeRecords);
         drop(edges);
         drop(edge_expiry);
+        drop(segments);
         released(MemoryComponent::EdgeRecords);
         drop(attachments);
         released(MemoryComponent::Attachments);
@@ -1510,6 +1560,7 @@ impl Graph {
 }
 
 mod snapshot;
+mod temporal;
 
 #[cfg(test)]
 mod tests;

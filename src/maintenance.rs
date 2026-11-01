@@ -388,8 +388,9 @@ fn compact_inner(
     let source = inspection(&loaded);
     let cipher = key.map(Cipher::create).transpose()?;
     // Graph-enabled sources keep `FLAG_GRAPH` and their graph state; like
-    // vector files, the rewrite carries no commit timestamps.
-    let graph_flags = loaded.flags & format::FLAG_GRAPH;
+    // vector files, the rewrite carries no commit timestamps. Gap 4: a
+    // temporal source keeps its capability with its temporal edges.
+    let graph_flags = loaded.flags & (format::FLAG_GRAPH | format::FLAG_TEMPORAL);
     let output = if loaded.version >= format::V4 {
         let lineage = format::new_lineage()?;
         publish_with(destination, key, |output| {
@@ -435,7 +436,8 @@ pub fn upgrade(
     let loaded = format::load(&mut file)?;
     require_complete(&loaded)?;
     let source = inspection(&loaded);
-    let graph_flags = loaded.flags & format::FLAG_GRAPH;
+    // Gap 4: like `compact`, a temporal source keeps its capability.
+    let graph_flags = loaded.flags & (format::FLAG_GRAPH | format::FLAG_TEMPORAL);
     let lineage = format::new_lineage()?;
     let output = publish(destination.as_ref(), |output| {
         if loaded.version >= format::V5 {

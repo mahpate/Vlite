@@ -186,6 +186,8 @@ fn oracle_fixture_matches_the_engine_model() {
 
 // --- Header capability ----------------------------------------------------
 
+mod writes;
+
 fn set_header_flags(path: &Path, flags: u16) {
     let mut bytes = fs::read(path).unwrap();
     bytes[26..28].copy_from_slice(&flags.to_le_bytes());

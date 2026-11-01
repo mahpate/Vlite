@@ -818,6 +818,12 @@ impl ImageCheck {
             match entry {
                 GraphEntry::PutNode { node_id, .. } => coverage.snapshot[0].add(node_id.0),
                 GraphEntry::PutEdge { edge_id, .. } => coverage.snapshot[1].add(edge_id.0),
+                // Gap 4: a temporal edge is restated as one entry too.
+                GraphEntry::Temporal(
+                    crate::property_graph::engine::codec::TemporalEntry::PutEdge {
+                        edge_id, ..
+                    },
+                ) => coverage.snapshot[1].add(edge_id.0),
                 _ => {}
             }
         }
