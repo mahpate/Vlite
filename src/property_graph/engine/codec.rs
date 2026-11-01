@@ -25,6 +25,9 @@ use super::properties;
 use super::schema::{self, GraphSchema};
 use std::collections::BTreeSet;
 
+mod temporal_entries;
+pub use temporal_entries::TemporalEntry;
+
 /// DO-001: V5 header flag marking a graph-enabled file.
 pub const FLAG_GRAPH: u16 = 4;
 /// DO-003: frame operation tag of a graph frame.
@@ -38,7 +41,8 @@ pub const ENTRY_HEADER_BYTES: usize = 8;
 
 /// Entry tags (closed set). Tag 12 carries a declared schema (EPIC-008; layout
 /// in [`super::schema`]). Tags 13..=15 (Gap 3) appear only in files that use
-/// graph expiry.
+/// graph expiry. Tags 65..=69 (Gap 4, [`TemporalEntry`]) appear only in files
+/// with the temporal capability flag.
 pub mod tag {
     pub const CREATE_GRAPH: u8 = 1;
     pub const DROP_GRAPH: u8 = 2;
@@ -56,6 +60,11 @@ pub mod tag {
     pub const EDGE_EXPIRY: u8 = 14;
     pub const RECLAIM: u8 = 15;
     pub const VECTOR_MUTATION: u8 = 64;
+    pub const TEMPORAL_PUT_EDGE: u8 = 65;
+    pub const TEMPORAL_APPEND_SEGMENT: u8 = 66;
+    pub const TEMPORAL_REPLACE_SEGMENT: u8 = 67;
+    pub const TEMPORAL_CLOSE_SEGMENT: u8 = 68;
+    pub const TEMPORAL_REMOVE_SEGMENT: u8 = 69;
 }
 
 /// One entry of a graph batch. Graph entries apply to the body's graph.
@@ -146,6 +155,8 @@ pub enum GraphEntry {
         collection: u16,
         entry: Vec<u8>,
     },
+    /// Gap 4: a temporal edge entry (tags 65..=69).
+    Temporal(TemporalEntry),
 }
 
 impl GraphEntry {
@@ -168,6 +179,7 @@ impl GraphEntry {
             Self::EdgeExpiry { .. } => tag::EDGE_EXPIRY,
             Self::Reclaim { .. } => tag::RECLAIM,
             Self::VectorMutation { .. } => tag::VECTOR_MUTATION,
+            Self::Temporal(entry) => entry.tag(),
         }
     }
 
@@ -235,6 +247,7 @@ impl GraphEntry {
             Self::PatchEdge { set, unset, .. } => validate_patch(set, unset),
             Self::PutSchema { schema } => schema.validate(),
             Self::VectorMutation { entry, .. } => validate_vector_entry(entry),
+            Self::Temporal(entry) => entry.validate(),
         }
     }
 }
@@ -478,6 +491,7 @@ fn encode_payload(entry: &GraphEntry, bytes: &mut Vec<u8>) {
             bytes.extend_from_slice(&[0, 0]);
             bytes.extend_from_slice(entry);
         }
+        GraphEntry::Temporal(entry) => temporal_entries::encode(entry, bytes),
     }
 }
 
@@ -547,6 +561,7 @@ fn payload_len(entry: &GraphEntry) -> Result<usize, GraphError> {
             .len()
             .checked_add(4)
             .ok_or(GraphError::BatchSize("more than 16777216 bytes"))?,
+        GraphEntry::Temporal(entry) => temporal_entries::payload_len(entry)?,
     })
 }
 
@@ -782,6 +797,9 @@ fn decode_payload(tag: u8, payload: &[u8]) -> Result<GraphEntry, GraphError> {
             let entry = r.take(r.bytes.len())?.to_vec();
             GraphEntry::VectorMutation { collection, entry }
         }
+        tag::TEMPORAL_PUT_EDGE..=tag::TEMPORAL_REMOVE_SEGMENT => {
+            GraphEntry::Temporal(temporal_entries::decode(tag, &mut r)?)
+        }
         other => return Err(GraphError::UnknownEntryTag(other)),
     };
     if !r.bytes.is_empty() {
@@ -851,6 +869,7 @@ pub fn decode_body(bytes: &[u8], count: u32) -> Result<GraphBody, GraphError> {
 #[cfg(test)]
 mod tests {
     use super::super::model::PropertyValue;
+    use super::super::temporal::{MAX_SEGMENTS, Segment, reason};
     use super::*;
 
     fn labels(values: &[&str]) -> BTreeSet<String> {
@@ -884,7 +903,7 @@ mod tests {
 
     /// One entry of every closed tag.
     fn every_entry() -> Vec<GraphEntry> {
-        vec![
+        let mut entries = vec![
             // Gap 3: a reclaim may open a body.
             GraphEntry::Reclaim {
                 at_ms: 1_700_000_000_000,
@@ -968,7 +987,67 @@ mod tests {
                 node_id: NodeId(11),
             },
             GraphEntry::DropGraph,
+        ];
+        entries.extend(temporal_entries());
+        entries
+    }
+
+    fn segment(valid_from: Option<i64>, valid_to: Option<i64>, value: i64) -> Segment {
+        Segment {
+            valid_from,
+            valid_to,
+            properties: Properties::from([("v".into(), PropertyValue::Integer(value))]),
+        }
+    }
+
+    /// Gap 4: one entry of every temporal tag, covering every bounds form.
+    fn temporal_entries() -> Vec<GraphEntry> {
+        [
+            TemporalEntry::PutEdge {
+                edge_id: EdgeId(30),
+                source: NodeId(10),
+                destination: NodeId(11),
+                relationship: "WORKS_AT".into(),
+                key: Some("employment-7".into()),
+                segments: vec![
+                    segment(None, Some(i64::MIN + 1), 0),
+                    segment(Some(100), Some(200), 1),
+                    segment(Some(300), None, 2),
+                ],
+            },
+            TemporalEntry::PutEdge {
+                edge_id: EdgeId(31),
+                source: NodeId(10),
+                destination: NodeId(10),
+                relationship: "R".into(),
+                key: None,
+                segments: Vec::new(),
+            },
+            TemporalEntry::AppendSegment {
+                edge_id: EdgeId(30),
+                segment: segment(Some(-5), Some(i64::MAX), 3),
+            },
+            TemporalEntry::ReplaceSegment {
+                edge_id: EdgeId(30),
+                valid_from: Some(100),
+                valid_to: Some(200),
+                segment: segment(None, None, 4),
+            },
+            TemporalEntry::CloseSegment {
+                edge_id: EdgeId(30),
+                valid_from: Some(300),
+                valid_to: None,
+                at: 400,
+            },
+            TemporalEntry::RemoveSegment {
+                edge_id: EdgeId(30),
+                valid_from: None,
+                valid_to: Some(-1),
+            },
         ]
+        .into_iter()
+        .map(GraphEntry::Temporal)
+        .collect()
     }
 
     fn body(entries: Vec<GraphEntry>) -> GraphBody {
@@ -1253,7 +1332,9 @@ mod tests {
         let tags: BTreeSet<u8> = entries.iter().map(GraphEntry::tag).collect();
         assert_eq!(
             tags,
-            BTreeSet::from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 64])
+            BTreeSet::from([
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 64, 65, 66, 67, 68, 69
+            ])
         );
         for entry in &entries {
             let encoded = encode_one(entry.clone());
@@ -1330,7 +1411,7 @@ mod tests {
 
     #[test]
     fn unknown_tags_are_rejected() {
-        for tag in (0..=255u8).filter(|t| !matches!(t, 1..=15 | 64)) {
+        for tag in (0..=255u8).filter(|t| !matches!(t, 1..=15 | 64..=69)) {
             assert_eq!(
                 decode_one(&raw(tag, &[])),
                 Err(GraphError::UnknownEntryTag(tag)),
@@ -1350,6 +1431,269 @@ mod tests {
                 "tag {tag}"
             );
         }
+        // Gap 4: and an empty temporal payload.
+        for tag in 65..=69 {
+            assert_eq!(
+                decode_one(&raw(tag, &[])),
+                Err(GraphError::Corrupt("truncated entry payload")),
+                "tag {tag}"
+            );
+        }
+    }
+
+    /// Properties whose encoding is exactly `MAX_PROPERTY_BYTES`.
+    fn max_properties() -> Properties {
+        let mut properties: Properties = (0..15)
+            .map(|i| (format!("f{i:02}"), PropertyValue::String("x".repeat(4096))))
+            .collect();
+        properties.insert("f15".into(), PropertyValue::String("x".repeat(3932)));
+        assert_eq!(properties::validate(&properties), Ok(MAX_PROPERTY_BYTES));
+        properties
+    }
+
+    /// Gap 4: payload layouts of tags 65..=69.
+    #[test]
+    fn temporal_golden_bytes() {
+        let p = |entry| encode_one(GraphEntry::Temporal(entry))[BODY_HEADER_BYTES..].to_vec();
+        let empty = Properties::new;
+        let mut put = vec![65, 0, 0, 0, 48, 0, 0, 0];
+        put.extend_from_slice(&3u64.to_le_bytes());
+        put.extend_from_slice(&1u64.to_le_bytes());
+        put.extend_from_slice(&2u64.to_le_bytes());
+        put.extend_from_slice(&[1, b'R', 1, 0, b'e', 1, 0, 0b01]);
+        put.extend_from_slice(&(-1i64).to_le_bytes());
+        put.extend_from_slice(&[4, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            p(TemporalEntry::PutEdge {
+                edge_id: EdgeId(3),
+                source: NodeId(1),
+                destination: NodeId(2),
+                relationship: "R".into(),
+                key: Some("e".into()),
+                segments: vec![Segment {
+                    valid_from: Some(-1),
+                    valid_to: None,
+                    properties: empty(),
+                }],
+            }),
+            put
+        );
+        let mut append = vec![66, 0, 0, 0, 25, 0, 0, 0];
+        append.extend_from_slice(&3u64.to_le_bytes());
+        append.push(0b10);
+        append.extend_from_slice(&7i64.to_le_bytes());
+        append.extend_from_slice(&[4, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            p(TemporalEntry::AppendSegment {
+                edge_id: EdgeId(3),
+                segment: Segment {
+                    valid_from: None,
+                    valid_to: Some(7),
+                    properties: empty(),
+                },
+            }),
+            append
+        );
+        let mut replace = vec![67, 0, 0, 0, 34, 0, 0, 0];
+        replace.extend_from_slice(&3u64.to_le_bytes());
+        replace.push(0b11);
+        replace.extend_from_slice(&1i64.to_le_bytes());
+        replace.extend_from_slice(&2i64.to_le_bytes());
+        replace.extend_from_slice(&[0, 4, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            p(TemporalEntry::ReplaceSegment {
+                edge_id: EdgeId(3),
+                valid_from: Some(1),
+                valid_to: Some(2),
+                segment: Segment {
+                    valid_from: None,
+                    valid_to: None,
+                    properties: empty(),
+                },
+            }),
+            replace
+        );
+        let mut close = vec![68, 0, 0, 0, 17, 0, 0, 0];
+        close.extend_from_slice(&3u64.to_le_bytes());
+        close.push(0);
+        close.extend_from_slice(&5i64.to_le_bytes());
+        assert_eq!(
+            p(TemporalEntry::CloseSegment {
+                edge_id: EdgeId(3),
+                valid_from: None,
+                valid_to: None,
+                at: 5,
+            }),
+            close
+        );
+        let mut remove = vec![69, 0, 0, 0, 17, 0, 0, 0];
+        remove.extend_from_slice(&3u64.to_le_bytes());
+        remove.push(0b01);
+        remove.extend_from_slice(&1i64.to_le_bytes());
+        assert_eq!(
+            p(TemporalEntry::RemoveSegment {
+                edge_id: EdgeId(3),
+                valid_from: Some(1),
+                valid_to: None,
+            }),
+            remove
+        );
+    }
+
+    /// Gap 4: bounds flags, segment counts, series rules, close points,
+    /// names and keys are checked on encode and decode, and temporal entries
+    /// count toward the entry and byte limits.
+    #[test]
+    fn temporal_payloads_are_strict_and_bounded() {
+        let mut close = 3u64.to_le_bytes().to_vec();
+        close.push(0b100);
+        close.extend_from_slice(&5i64.to_le_bytes());
+        assert_eq!(
+            decode_one(&raw(tag::TEMPORAL_CLOSE_SEGMENT, &close)),
+            Err(GraphError::Corrupt("invalid temporal bounds flags"))
+        );
+        let mut put = 3u64.to_le_bytes().to_vec();
+        put.extend_from_slice(&[0; 16]);
+        put.extend_from_slice(&[1, b'R', 0, 0]);
+        put.extend_from_slice(&257u16.to_le_bytes());
+        assert_eq!(
+            decode_one(&raw(tag::TEMPORAL_PUT_EDGE, &put)),
+            Err(GraphError::InvalidTemporal(reason::SEGMENT_LIMIT))
+        );
+        let edge = |segments| TemporalEntry::PutEdge {
+            edge_id: EdgeId(3),
+            source: NodeId(1),
+            destination: NodeId(2),
+            relationship: "R".into(),
+            key: None,
+            segments,
+        };
+        let invalid = |entry: TemporalEntry, error: GraphError| {
+            let entry = GraphEntry::Temporal(entry);
+            assert_eq!(entry.validate(), Err(error.clone()), "{entry:?}");
+            assert_eq!(encode_body(&body(vec![entry.clone()])), Err(error.clone()));
+            // A hand-encoded payload is rejected on decode too.
+            let mut payload = Vec::new();
+            encode_payload(&entry, &mut payload);
+            assert_eq!(decode_one(&raw(entry.tag(), &payload)), Err(error));
+        };
+        let s = |from, to| segment(from, to, 1);
+        invalid(
+            edge(vec![s(Some(1), Some(5)), s(Some(4), Some(9))]),
+            GraphError::InvalidTemporal(reason::OVERLAP),
+        );
+        invalid(
+            edge(vec![s(Some(5), Some(9)), s(None, Some(1))]),
+            GraphError::InvalidTemporal(reason::ORDER),
+        );
+        invalid(
+            TemporalEntry::AppendSegment {
+                edge_id: EdgeId(3),
+                segment: s(Some(2), Some(2)),
+            },
+            GraphError::InvalidTemporal(reason::BOUNDS),
+        );
+        invalid(
+            TemporalEntry::ReplaceSegment {
+                edge_id: EdgeId(3),
+                valid_from: Some(3),
+                valid_to: Some(1),
+                segment: s(None, None),
+            },
+            GraphError::InvalidTemporal(reason::BOUNDS),
+        );
+        invalid(
+            TemporalEntry::RemoveSegment {
+                edge_id: EdgeId(3),
+                valid_from: Some(3),
+                valid_to: Some(3),
+            },
+            GraphError::InvalidTemporal(reason::BOUNDS),
+        );
+        for (valid_from, valid_to, at) in [
+            (Some(1), Some(5), 1),
+            (Some(1), Some(5), 0),
+            (Some(1), Some(5), 6),
+            (None, Some(5), 7),
+            (Some(i64::MAX - 1), None, i64::MAX - 1),
+        ] {
+            invalid(
+                TemporalEntry::CloseSegment {
+                    edge_id: EdgeId(3),
+                    valid_from,
+                    valid_to,
+                    at,
+                },
+                GraphError::InvalidTemporal(reason::CLOSE),
+            );
+        }
+        // Closing at the finite end is a valid (no-op) entry.
+        let at_end = GraphEntry::Temporal(TemporalEntry::CloseSegment {
+            edge_id: EdgeId(3),
+            valid_from: Some(1),
+            valid_to: Some(5),
+            at: 5,
+        });
+        assert_eq!(at_end.validate(), Ok(()));
+        let mut bad_type = edge(Vec::new());
+        if let TemporalEntry::PutEdge { relationship, .. } = &mut bad_type {
+            *relationship = "a-b".into();
+        }
+        invalid(bad_type, GraphError::InvalidRelationshipType);
+        let mut bad_key = edge(Vec::new());
+        if let TemporalEntry::PutEdge { key, .. } = &mut bad_key {
+            *key = Some("k".repeat(257));
+        }
+        assert_eq!(
+            GraphEntry::Temporal(bad_key).validate(),
+            Err(GraphError::InvalidEdgeKey)
+        );
+
+        // 256 segments round-trip; temporal entries count toward 4096.
+        let full = edge(
+            (0..MAX_SEGMENTS as i64)
+                .map(|i| s(Some(i), Some(i + 1)))
+                .collect(),
+        );
+        let encoded = encode_one(GraphEntry::Temporal(full.clone()));
+        assert_eq!(
+            decode_one(&encoded).unwrap().entries,
+            [GraphEntry::Temporal(full.clone())]
+        );
+        let mut over = full.clone();
+        if let TemporalEntry::PutEdge { segments, .. } = &mut over {
+            segments.push(s(Some(1000), None));
+        }
+        invalid(over, GraphError::InvalidTemporal(reason::SEGMENT_LIMIT));
+        let close_at_end = || {
+            GraphEntry::Temporal(TemporalEntry::CloseSegment {
+                edge_id: EdgeId(3),
+                valid_from: None,
+                valid_to: Some(1),
+                at: 1,
+            })
+        };
+        let mut entries = vec![close_at_end(); MAX_BATCH_ENTRIES];
+        assert!(encode_body(&body(entries.clone())).is_ok());
+        entries.push(close_at_end());
+        assert_eq!(
+            encode_body(&body(entries)),
+            Err(GraphError::BatchSize("more than 4096 entries"))
+        );
+        // A series of 256 maximal segments cannot fit one body.
+        let big = edge(
+            (0..MAX_SEGMENTS as i64)
+                .map(|i| Segment {
+                    valid_from: Some(i),
+                    valid_to: Some(i + 1),
+                    properties: max_properties(),
+                })
+                .collect(),
+        );
+        assert_eq!(
+            encode_body(&body(vec![GraphEntry::Temporal(big)])),
+            Err(GraphError::BatchSize("more than 16777216 bytes"))
+        );
     }
 
     #[test]

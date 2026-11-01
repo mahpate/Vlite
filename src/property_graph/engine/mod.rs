@@ -59,6 +59,7 @@ pub mod property_map;
 mod query;
 pub mod schema;
 mod state;
+pub mod temporal;
 #[cfg(test)]
 mod testkit;
 mod traverse;

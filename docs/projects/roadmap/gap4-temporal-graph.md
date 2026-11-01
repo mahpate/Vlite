@@ -266,3 +266,85 @@ Open: capability allocation, exact Rust names/errors, versioned feed changes and
 Open: privacy erasure across retained logs/backups and future temporal-node demand.
 Engine implementation, engine acceptance tests, benchmark campaigns and API
 approval remain outstanding; the reference fixtures do not satisfy those gates.
+
+## Implemented slices A and B (unreleased, under review)
+
+Status: implemented in Rust behind a preactivation gate; not released and not
+accepted. Independent review is pending. Slice C (reads) is not started, so no
+user can observe validity yet and every release build refuses the capability.
+
+### Slice A: contract and format
+
+| Allocation | Value | Where |
+|---|---|---|
+| Header capability | `FLAG_TEMPORAL = 64`, required, v5 only, valid only with `FLAG_GRAPH` (else `Corrupt` at offset 0) | `src/format.rs` |
+| Unsupported builds | `Error::UnsupportedFeature(64)` from the header check, before any frame is read | `src/format.rs`, `src/property_graph/temporal.rs` |
+| Graph entry tags | 65 put temporal edge, 66 append segment, 67 replace segment, 68 close segment, 69 remove segment | `src/property_graph/engine/codec.rs` |
+| Engine model | ordered segments, 256-segment cap, binary-search lookup | `src/property_graph/engine/temporal.rs` |
+
+Flags 1, 2, 4, 8 (legacy), 16 (compact image, reserved) and 32 (precision)
+were in use; 64 is the first free bit. Tags 1..=15 and 64 (vector mutation)
+were in use; 65..=69 follow the maximum. Legacy edge ops (7, 8, 9, 14) keep
+their meaning and payload, and no temporal value ever travels in them.
+
+Wire format (all integers little-endian; every payload starts with `edge_id u64`):
+
+| Tag | Payload after `edge_id` |
+|---|---|
+| 65 | `source u64`, `destination u64`, `type_len u8` + type, `key_len u16` + key (0 = keyless), `count u16`, then `count` segments |
+| 66 | one segment |
+| 67 | the old segment's bounds, then the replacement segment |
+| 68 | the old segment's bounds, then `at i64` |
+| 69 | the old segment's bounds |
+
+Bounds are a flags byte (bit 0 `valid_from` present, bit 1 `valid_to`
+present; other bits are corrupt) followed by the present `i64` values. A
+segment is bounds plus `properties_len u32` and the ordinary property encoding.
+A count above 256 is rejected before allocation. Decoding validates the series
+(bounds, order, no overlap) and every property map, so a valid frame cannot
+carry an invalid series. Each temporal entry is one user operation of the
+4,096 cap, and its whole payload counts in the 16,777,216-byte body limit.
+
+Validation order matches the independent oracle: segment cap first, then per
+segment its properties, bounds (`from < to` when both are finite), order
+(starts ascend; an open start only first) and overlap (touching is allowed).
+Errors use the internal `GraphError::InvalidTemporal(reason)`; the reason
+starts with the oracle category (`bounds`, `order`, `overlap`,
+`segment_limit`, then slice B's `no_segment`, `close`, `not_temporal`,
+`temporal_edge`, `series_bytes`). The public API maps it to the existing
+`Error::InvalidQuery(reason)`; no public `Error` variant is added.
+
+Coverage added in slice A:
+
+- `engine::temporal` unit tests: bounds at from-1/from/to-1/to, open ends,
+  i64 extremes, negative epoch, gaps, touching segments, overlap, order, the
+  256/257 cap, insert/replace/remove/close leaving the series unchanged on error.
+- Codec: golden bytes for tags 65..=69, strict payloads (bad bounds flags,
+  trailing bytes, truncation, oversized counts, invalid series), round trips
+  and unknown tags still refused.
+- `property_graph::temporal` adapter tests consume
+  `tests/fixtures/temporal_intervals/golden.json` (every valid series, every
+  invalid series by category, both limit cases and TTL-clock queries) against
+  the engine model, and check that flag 64 is refused with
+  `UnsupportedFeature(64)` while support is off, opens when on, and is
+  `Corrupt` without `FLAG_GRAPH`.
+
+### Proposed decisions for review
+
+1. Capability and error: flag 64 with the existing `UnsupportedFeature(u16)`
+   carrying 64, not a new error. Like the P3a precision gate, release builds
+   refuse it until reads (slice C) qualify; only this crate's tests switch it
+   on per thread. Without that gate a release build would serve temporal
+   edges as empty current edges.
+2. Identity: one edge ID and optional key per series; source, destination and
+   type are fixed; no segment ID. A segment is addressed by its exact old
+   bounds plus `Expected::Revision` on the series, as the design proposes
+   (Graphiti stores validity per fact edge; XTDB and Datomic address history by
+   entity plus time, not by a version ID).
+3. Bounds type: `Option<i64>` milliseconds on the wire with a presence byte, so
+   no integer sentinel represents infinity.
+4. Segment cap: 256, enforced by the decoder, by every mutation and by the
+   oracle. A series must also fit one 16 MiB body (slice B), because the whole
+   series is restated in snapshots.
+5. Category-prefixed reason strings keep oracle categories testable without a
+   public error enum.

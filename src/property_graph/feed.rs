@@ -260,6 +260,11 @@ impl FeedGraphs {
                 | GraphEntry::EdgeExpiry { .. }
                 | GraphEntry::Reclaim { .. }
                 | GraphEntry::VectorMutation { .. } => continue,
+                // Gap 4 slice A: temporal entries are not reported until the
+                // temporal feed exists, so a feed never silently drops them.
+                GraphEntry::Temporal(_) => {
+                    return Err(Error::UnsupportedFeature(format::FLAG_TEMPORAL));
+                }
             };
             run.push(change);
         }

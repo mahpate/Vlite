@@ -173,7 +173,8 @@ pub(crate) fn graph_error(error: GraphError) -> Error {
         GraphError::CursorStale => Error::GraphCursorStale,
         GraphError::InvalidCursor(reason)
         | GraphError::InvalidQuery(reason)
-        | GraphError::InvalidSchema(reason) => Error::InvalidQuery(reason),
+        | GraphError::InvalidSchema(reason)
+        | GraphError::InvalidTemporal(reason) => Error::InvalidQuery(reason),
         GraphError::SchemaViolation {
             rule,
             element,

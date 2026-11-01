@@ -110,6 +110,9 @@ pub enum GraphError {
         element: String,
         property: Option<String>,
     },
+    /// Gap 4: a validity segment or temporal mutation breaks a rule. The
+    /// reason starts with its category (`super::temporal::reason`).
+    InvalidTemporal(&'static str),
 }
 
 impl fmt::Display for GraphError {
@@ -202,6 +205,7 @@ impl fmt::Display for GraphError {
                 element,
                 property: None,
             } => write!(f, "graph schema rule {rule} violated by {element}"),
+            Self::InvalidTemporal(reason) => write!(f, "invalid temporal edge: {reason}"),
         }
     }
 }

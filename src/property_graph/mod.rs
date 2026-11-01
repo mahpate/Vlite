@@ -67,6 +67,7 @@ pub(crate) mod frame;
 mod maintain;
 mod read;
 mod retrieve;
+pub(crate) mod temporal;
 
 pub use algorithms::{
     CommunityAssignment, DegreeRow, GraphAlgorithm, GraphAlgorithmError, GraphAlgorithmLimits,

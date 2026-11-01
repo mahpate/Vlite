@@ -66,6 +66,14 @@ pub(crate) const OP_COMPACT_BLOCK: u8 = 16;
 /// 17. Builds without qualified support (`compact::precision_supported`)
 /// refuse it with `UnsupportedFeature(FLAG_PRECISION)`.
 pub(crate) const FLAG_PRECISION: u16 = 32;
+// Gap 4: begin temporal capability flag.
+/// Header flag (v5, Gap 4 time-aware graph): the graph log holds temporal
+/// edge entries (graph entry tags 65..=69). Valid only with `FLAG_GRAPH`;
+/// set atomically with the first temporal write and never cleared. Builds
+/// without support (`property_graph::temporal::supported`) refuse it with
+/// `UnsupportedFeature(FLAG_TEMPORAL)` before loading anything.
+pub(crate) const FLAG_TEMPORAL: u16 = 64;
+// Gap 4: end temporal capability flag.
 /// Precise collection create (P3a): a schema (`u16`, 1), the stored
 /// precision (`u8`: 1 float32, 2 float16) and five zero bytes, then an op-5
 /// body. Valid only after the image of a `FLAG_PRECISION` log, which
@@ -1435,6 +1443,11 @@ pub(crate) fn read_log_header_with<R: Read + Seek>(
             if crate::compact::precision_supported() {
                 known_flags |= FLAG_PRECISION;
             }
+            // Gap 4: begin temporal capability gate.
+            if crate::property_graph::temporal::supported() {
+                known_flags |= FLAG_TEMPORAL;
+            }
+            // Gap 4: end temporal capability gate.
             if flags & !known_flags != 0 {
                 return Err(Error::UnsupportedFeature(flags & !known_flags));
             }
@@ -1446,6 +1459,10 @@ pub(crate) fn read_log_header_with<R: Read + Seek>(
             }
             if flags & FLAG_PRECISION != 0 && flags & FLAG_COMPACT == 0 {
                 return Err(corrupt(0, "precision log without its catalog image"));
+            }
+            // Gap 4: temporal entries live in graph frames only.
+            if flags & FLAG_TEMPORAL != 0 && flags & FLAG_GRAPH == 0 {
+                return Err(corrupt(0, "temporal flag without the graph flag"));
             }
         } else if bytes[26..28] != [0; 2] {
             return Err(corrupt(0, "nonzero reserved database header bytes"));

@@ -1215,6 +1215,10 @@ impl GraphState {
                     .collect();
                 Undo::Reclaim { edges, nodes }
             }
+            // Gap 4 slice A defines the temporal entries; slice B applies them.
+            GraphEntry::Temporal(_) => {
+                return Err(GraphError::Corrupt("temporal entries are not applied yet"));
+            }
         };
         Ok(Some(undo))
     }
