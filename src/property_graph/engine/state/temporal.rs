@@ -59,8 +59,14 @@ impl GraphState {
     /// Sets the temporal capability. The adapter enables it with the first
     /// temporal write and on load of a file that has it; it clears it only
     /// to undo a tentative enable before any temporal entry was applied.
-    pub fn set_temporal(&mut self, temporal: bool) {
+    /// A build without temporal support refuses to enable it
+    /// (`InvalidTemporal(CAPABILITY)`).
+    pub fn set_temporal(&mut self, temporal: bool) -> Result<(), GraphError> {
+        if temporal && !series::supported() {
+            return Err(GraphError::InvalidTemporal(reason::CAPABILITY));
+        }
         self.temporal = temporal;
+        Ok(())
     }
 }
 
@@ -73,11 +79,18 @@ impl Graph {
 
     /// The entry restating `edge` in a snapshot or compaction: the whole
     /// series as a temporal `PutEdge` for a temporal edge, else the legacy
-    /// `PutEdge`.
-    pub fn edge_snapshot_entry(&self, edge: &GraphEdge) -> GraphEntry {
+    /// `PutEdge`. A snapshot at `floor` keeps a temporal edge's revision
+    /// (within `1..=floor`); a compaction (`floor` zero) restarts sequences,
+    /// so the edge takes its new commit sequence, as every record does.
+    pub fn edge_snapshot_entry(&self, edge: &GraphEdge, floor: u64) -> GraphEntry {
         match self.segments.get(&edge.id) {
             Some(segments) => GraphEntry::Temporal(TemporalEntry::PutEdge {
                 edge_id: edge.id,
+                revision: if floor == 0 {
+                    0
+                } else {
+                    edge.revision.clamp(1, floor)
+                },
                 source: edge.source,
                 destination: edge.destination,
                 relationship: edge.relationship.clone(),
@@ -102,6 +115,7 @@ impl Graph {
     ) -> Result<TemporalUndo, GraphError> {
         if let TemporalEntry::PutEdge {
             edge_id,
+            revision,
             source,
             destination,
             relationship,
@@ -109,6 +123,11 @@ impl Graph {
             segments,
         } = entry
         {
+            // Only a snapshot restates a revision; it never goes through
+            // here.
+            if *revision != 0 {
+                return Err(GraphError::Corrupt("temporal revision outside a snapshot"));
+            }
             let edge = GraphEdge {
                 id: *edge_id,
                 key: key.clone(),
@@ -190,10 +209,9 @@ impl Graph {
                 }
             }
         };
-        if matches!(
-            entry,
-            TemporalEntry::AppendSegment { .. } | TemporalEntry::ReplaceSegment { .. }
-        ) {
+        // Every change but a removal can grow the series: a close of an
+        // open-ended segment adds its end.
+        if !matches!(entry, TemporalEntry::RemoveSegment { .. }) {
             let edge = &self.edges[&id];
             if let Err(error) =
                 check_series_bytes(&edge.relationship, edge.key.as_deref(), &self.segments[&id])

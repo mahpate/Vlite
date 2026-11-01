@@ -196,8 +196,8 @@ pub struct Planner<'a> {
     /// Entries other than reclaims, which do not count against the limit.
     counted: usize,
     undo: Vec<Undo>,
-    /// Gap 4: the revision each edge had before a temporal mutation of this
-    /// batch first changed it.
+    /// Gap 4: the revision each edge had when the batch started, recorded
+    /// before the first mutation of the batch changed it.
     temporal_revisions: BTreeMap<EdgeId, u64>,
 }
 
@@ -262,6 +262,20 @@ impl Planner<'_> {
             return Err(GraphError::BatchSize("more than 4096 entries"));
         }
         entry.validate()?;
+        // Gap 4: the revision an existing edge had when the batch started,
+        // before any mutation of the batch (ordinary or temporal) changes it.
+        let changed = match &entry {
+            GraphEntry::PutEdge { edge_id, .. }
+            | GraphEntry::PatchEdge { edge_id, .. }
+            | GraphEntry::EdgeExpiry { edge_id, .. } => Some(*edge_id),
+            GraphEntry::Temporal(entry) => Some(entry.edge_id()),
+            _ => None,
+        };
+        if let Some(edge) = changed.and_then(|id| self.graph().edge(id))
+            && edge.revision < self.sequence
+        {
+            self.temporal_revisions.insert(edge.id, edge.revision);
+        }
         if let Some(undo) = self
             .state
             .apply_entry(self.graph_id, self.sequence, &entry)?

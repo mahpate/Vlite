@@ -309,6 +309,7 @@ fn temporal_change(tracked: &mut Tracked, entry: TemporalEntry) -> TemporalChang
             relationship,
             key,
             segments,
+            ..
         } => {
             let created = tracked.edges.insert(edge_id.0, key.clone()).is_none();
             let node_key = |id: u64| tracked.nodes.get(&id).cloned().unwrap_or_default();

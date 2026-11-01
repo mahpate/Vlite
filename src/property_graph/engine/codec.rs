@@ -1005,6 +1005,7 @@ mod tests {
         [
             TemporalEntry::PutEdge {
                 edge_id: EdgeId(30),
+                revision: 7,
                 source: NodeId(10),
                 destination: NodeId(11),
                 relationship: "WORKS_AT".into(),
@@ -1017,6 +1018,7 @@ mod tests {
             },
             TemporalEntry::PutEdge {
                 edge_id: EdgeId(31),
+                revision: 0,
                 source: NodeId(10),
                 destination: NodeId(10),
                 relationship: "R".into(),
@@ -1456,8 +1458,9 @@ mod tests {
     fn temporal_golden_bytes() {
         let p = |entry| encode_one(GraphEntry::Temporal(entry))[BODY_HEADER_BYTES..].to_vec();
         let empty = Properties::new;
-        let mut put = vec![65, 0, 0, 0, 48, 0, 0, 0];
+        let mut put = vec![65, 0, 0, 0, 56, 0, 0, 0];
         put.extend_from_slice(&3u64.to_le_bytes());
+        put.extend_from_slice(&5u64.to_le_bytes());
         put.extend_from_slice(&1u64.to_le_bytes());
         put.extend_from_slice(&2u64.to_le_bytes());
         put.extend_from_slice(&[1, b'R', 1, 0, b'e', 1, 0, 0b01]);
@@ -1466,6 +1469,7 @@ mod tests {
         assert_eq!(
             p(TemporalEntry::PutEdge {
                 edge_id: EdgeId(3),
+                revision: 5,
                 source: NodeId(1),
                 destination: NodeId(2),
                 relationship: "R".into(),
@@ -1553,7 +1557,7 @@ mod tests {
             Err(GraphError::Corrupt("invalid temporal bounds flags"))
         );
         let mut put = 3u64.to_le_bytes().to_vec();
-        put.extend_from_slice(&[0; 16]);
+        put.extend_from_slice(&[0; 24]);
         put.extend_from_slice(&[1, b'R', 0, 0]);
         put.extend_from_slice(&257u16.to_le_bytes());
         assert_eq!(
@@ -1562,6 +1566,7 @@ mod tests {
         );
         let edge = |segments| TemporalEntry::PutEdge {
             edge_id: EdgeId(3),
+            revision: 0,
             source: NodeId(1),
             destination: NodeId(2),
             relationship: "R".into(),

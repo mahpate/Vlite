@@ -911,14 +911,15 @@ impl Database {
             self.graph
                 .as_mut()
                 .expect("checked above")
-                .set_temporal(true);
+                .set_temporal(true)
+                .map_err(|_| Error::UnsupportedFeature(format::FLAG_TEMPORAL))?;
         }
         let result = self.commit_planned(graph_id, planned, outcomes);
         if enabling
             && self.flags & format::FLAG_TEMPORAL == 0
             && let Some(state) = self.graph.as_mut()
         {
-            state.set_temporal(false);
+            state.set_temporal(false).expect("disabling cannot fail");
         }
         result
     }

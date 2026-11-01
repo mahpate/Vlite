@@ -188,7 +188,9 @@ pub(super) fn mutation(op: &TemporalOp) -> Result<TemporalMutation> {
 /// corrupt (`offset` is where its graph data starts).
 pub(crate) fn adopt(state: &mut GraphState, flags: u16, offset: u64) -> Result<()> {
     if flags & FLAG_TEMPORAL != 0 {
-        state.set_temporal(true);
+        state
+            .set_temporal(true)
+            .map_err(|_| Error::UnsupportedFeature(FLAG_TEMPORAL))?;
     } else if state.is_temporal() {
         return Err(format::corrupt(
             offset,

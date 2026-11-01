@@ -7,7 +7,8 @@
 //! applying every entry with per-entry undo, adjacency insertion and schema
 //! checks. The result equals replaying the same bodies with
 //! [`GraphState::apply_at`]; anything a canonical writer cannot produce is
-//! rejected.
+//! rejected. Gap 4: a temporal edge's `PutEdge` also restates its revision,
+//! which only a snapshot accepts, so the edge keeps it.
 
 use super::super::codec::TemporalEntry;
 use super::*;
@@ -215,16 +216,26 @@ impl GraphState {
                 })?;
                 Ok(Phase::Edges)
             }
-            // Gap 4: a temporal edge restated with its whole series; it
-            // needs the capability, which a snapshot that has one implies.
+            // Gap 4: a temporal edge restated with its whole series and its
+            // revision; it needs the capability, which a snapshot that has
+            // one implies in a build that supports it.
             GraphEntry::Temporal(TemporalEntry::PutEdge {
                 edge_id,
+                revision,
                 source,
                 destination,
                 relationship,
                 key,
                 segments,
             }) if phase <= Phase::Edges => {
+                if !super::super::temporal::supported() {
+                    return Err(GraphError::InvalidTemporal(
+                        super::super::temporal::reason::CAPABILITY,
+                    ));
+                }
+                if !(1..=sequence).contains(&revision) {
+                    return Err(NON_CANONICAL);
+                }
                 super::super::temporal::validate_series(&segments)?;
                 super::super::codec::check_series_bytes(&relationship, key.as_deref(), &segments)?;
                 graph.load_edge(GraphEdge {
@@ -234,7 +245,7 @@ impl GraphState {
                     relationship,
                     destination,
                     properties: Properties::new(),
-                    revision: sequence,
+                    revision,
                 })?;
                 graph.segments.insert(edge_id, segments);
                 self.temporal = true;
@@ -396,7 +407,9 @@ mod tests {
     use super::*;
 
     /// The canonical snapshot of `state` in bodies of at most `chunk`
-    /// entries, in the order the checkpoint image writer emits them.
+    /// entries, in the order the checkpoint image writer emits them. The
+    /// states here have no temporal edge, whose restated revision only a
+    /// snapshot (not replay) accepts.
     fn snapshot_bodies(state: &GraphState, chunk: usize) -> Vec<GraphBody> {
         let mut bodies = Vec::new();
         for graph in state.graphs() {
@@ -423,7 +436,7 @@ mod tests {
                 }
             }
             for edge in graph.edges() {
-                entries.push(graph.edge_snapshot_entry(edge));
+                entries.push(graph.edge_snapshot_entry(edge, 0));
                 if let Some(deadline) = graph.edge_expiry(edge.id) {
                     entries.push(GraphEntry::EdgeExpiry {
                         edge_id: edge.id,

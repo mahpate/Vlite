@@ -4,7 +4,7 @@
 //! state invariants.
 
 use super::super::super::codec::{decode_body, encode_body};
-use super::super::super::limits::MAX_PROPERTY_BYTES;
+use super::super::super::limits::{MAX_BATCH_BYTES, MAX_PROPERTY_BYTES};
 use super::super::super::model::PropertyValue;
 use super::super::super::schema::{
     Multiplicity, PropertyDefinition, PropertyType, RelationshipDefinition,
@@ -45,6 +45,7 @@ fn legacy_edge(id: u64, key: &str, properties: Properties) -> GraphEntry {
 fn temporal_edge(id: u64, key: &str, segments: Vec<Segment>) -> GraphEntry {
     GraphEntry::Temporal(TemporalEntry::PutEdge {
         edge_id: EdgeId(id),
+        revision: 0,
         source: NodeId(0),
         destination: NodeId(1),
         relationship: "R".into(),
@@ -109,8 +110,8 @@ impl Harness {
             replica: GraphState::new(),
             sequence: 0,
         };
-        harness.state.set_temporal(temporal);
-        harness.replica.set_temporal(temporal);
+        harness.state.set_temporal(temporal).unwrap();
+        harness.replica.set_temporal(temporal).unwrap();
         harness.ok(vec![
             GraphEntry::CreateGraph { name: "g".into() },
             put_node(0, "a"),
@@ -330,6 +331,7 @@ fn put_edge_creates_or_promotes_with_a_stable_identity() {
     let promoted = |segments| temporal_edge(0, "e", segments);
     let changed = GraphEntry::Temporal(TemporalEntry::PutEdge {
         edge_id: EdgeId(0),
+        revision: 0,
         source: NodeId(0),
         destination: NodeId(2),
         relationship: "R".into(),
@@ -366,6 +368,7 @@ fn put_edge_creates_or_promotes_with_a_stable_identity() {
     let new = |id, key: &str, source| {
         GraphEntry::Temporal(TemporalEntry::PutEdge {
             edge_id: EdgeId(id),
+            revision: 0,
             source: NodeId(source),
             destination: NodeId(1),
             relationship: "R".into(),
@@ -405,6 +408,7 @@ fn ttl_deletes_whole_series_and_rollback_restores_them() {
         ),
         GraphEntry::Temporal(TemporalEntry::PutEdge {
             edge_id: EdgeId(1),
+            revision: 0,
             source: NodeId(2),
             destination: NodeId(1),
             relationship: "R".into(),
@@ -525,6 +529,69 @@ fn segment_cap_and_series_bytes_are_enforced() {
     assert_eq!(h.series(1).len(), 255);
 }
 
+/// Closing an open-ended segment adds its end (8 bytes), so a close that
+/// would outgrow one graph body fails like an append, alone or after other
+/// changes of its batch, and changes nothing.
+#[test]
+fn closing_cannot_outgrow_the_series_bytes() {
+    let mut h = Harness::new();
+    let big = |i: i64| Segment {
+        valid_from: Some(i),
+        valid_to: Some(i + 1),
+        properties: max_properties(),
+    };
+    let series = |chars: usize| {
+        let mut properties: Properties = (0..chars / 4096)
+            .map(|f| (format!("f{f:02}"), PropertyValue::String("x".repeat(4096))))
+            .collect();
+        properties.insert(
+            "fzz".into(),
+            PropertyValue::String("x".repeat(chars % 4096)),
+        );
+        let mut series: Vec<Segment> = (0..255).map(big).collect();
+        series.push(Segment {
+            valid_from: Some(255),
+            valid_to: None,
+            properties,
+        });
+        series
+    };
+    // The largest open last segment that fits fills one graph body exactly.
+    let fits = |chars| check_series_bytes("R", Some("big"), &series(chars)).is_ok();
+    let (mut fit, mut over) = (0, MAX_PROPERTY_BYTES);
+    assert!(fits(fit) && !fits(over));
+    while over - fit > 1 {
+        let mid = (fit + over) / 2;
+        if fits(mid) { fit = mid } else { over = mid }
+    }
+    let full = series(fit);
+    let edge = temporal_edge(0, "big", full.clone());
+    let body = GraphBody {
+        graph_id: G,
+        entries: vec![edge.clone()],
+    };
+    assert_eq!(encode_body(&body).unwrap().len(), MAX_BATCH_BYTES);
+    h.ok(vec![edge]);
+    h.ok(vec![temporal_edge(1, "e", vec![seg(None, None, 1)])]);
+    let revision = h.revision(0);
+    for entries in [
+        vec![close(0, Some(255), None, 300)],
+        vec![close(1, None, None, 0), close(0, Some(255), None, 300)],
+    ] {
+        assert_eq!(h.err(entries), invalid(reason::SERIES_BYTES));
+    }
+    assert_eq!((h.series(0), h.revision(0)), (full.clone(), revision));
+    assert_eq!(h.series(1), vec![seg(None, None, 1)]);
+    // Removing a segment earlier in the batch makes room.
+    h.ok(vec![
+        remove(0, Some(0), Some(1)),
+        close(0, Some(255), None, 300),
+    ]);
+    let mut closed = full[1..].to_vec();
+    closed.last_mut().unwrap().valid_to = Some(300);
+    assert_eq!(h.series(0), closed);
+}
+
 #[test]
 fn schema_rules_apply_to_every_segment() {
     let mut h = Harness::new();
@@ -579,7 +646,7 @@ fn invariants_cover_the_series() {
         state.check_invariants().unwrap_err()
     };
     let mut legacy = h.state.clone();
-    legacy.set_temporal(false);
+    legacy.set_temporal(false).unwrap();
     assert_eq!(
         legacy.check_invariants(),
         Err(GraphError::InvariantViolation(
@@ -611,8 +678,10 @@ fn invariants_cover_the_series() {
     );
 }
 
-/// A snapshot restates each series in one temporal `PutEdge`, followed by
-/// its deadline; loading it equals replaying it and implies the capability.
+/// A snapshot restates each series and revision in one temporal `PutEdge`,
+/// followed by its deadline; loading it implies the capability and equals
+/// replaying it without the revisions, which only a snapshot restates, once
+/// they are restored.
 #[test]
 fn snapshot_restates_series_and_equals_replay() {
     let mut h = Harness::new();
@@ -629,7 +698,7 @@ fn snapshot_restates_series_and_equals_replay() {
     let mut entries = vec![GraphEntry::CreateGraph { name: "g".into() }];
     entries.extend([put_node(0, "a"), put_node(1, "b"), put_node(2, "c")]);
     for edge in graph.edges() {
-        entries.push(graph.edge_snapshot_entry(edge));
+        entries.push(graph.edge_snapshot_entry(edge, 50));
         if let Some(deadline) = graph.edge_expiry(edge.id) {
             entries.push(GraphEntry::EdgeExpiry {
                 edge_id: edge.id,
@@ -657,10 +726,38 @@ fn snapshot_restates_series_and_equals_replay() {
     assert!(loaded.is_temporal());
     loaded.check_invariants().unwrap();
     let mut replayed = GraphState::new();
-    replayed.set_temporal(true);
+    replayed.set_temporal(true).unwrap();
     for body in &bodies {
-        replayed.apply_at(50, body, true).unwrap();
+        assert_eq!(
+            replayed.clone().apply_at(50, body, true).is_err(),
+            body.entries.iter().any(|entry| matches!(
+                entry,
+                GraphEntry::Temporal(TemporalEntry::PutEdge { revision, .. }) if *revision != 0
+            ))
+        );
+        let mut body = body.clone();
+        for entry in &mut body.entries {
+            if let GraphEntry::Temporal(TemporalEntry::PutEdge { revision, .. }) = entry {
+                *revision = 0;
+            }
+        }
+        replayed.apply_at(50, &body, true).unwrap();
     }
+    let revisions = |state: &GraphState| {
+        let graph = state.graph(G).unwrap();
+        let nodes: Vec<(u64, u64)> = graph
+            .nodes()
+            .map(|node| (node.id.0, node.revision))
+            .collect();
+        let edges: Vec<(u64, u64)> = graph
+            .edges()
+            .map(|edge| (edge.id.0, edge.revision))
+            .collect();
+        (nodes, edges)
+    };
+    let (nodes, edges) = revisions(&loaded);
+    assert_eq!(edges, [(0, 50), (1, h.sequence), (2, h.sequence)]);
+    replayed.restore_revisions(G, &nodes, &edges).unwrap();
     assert_eq!(loaded, replayed);
     let graph = loaded.graph(G).unwrap();
     assert_eq!(graph.segments(EdgeId(1)), h.graph().segments(EdgeId(1)));
@@ -692,8 +789,82 @@ fn snapshot_restates_series_and_equals_replay() {
         )),
         GraphError::InvalidTemporal(_)
     ));
+    let restated = |id, revision| {
+        let mut edge = temporal_edge(id, "t", vec![]);
+        if let GraphEntry::Temporal(TemporalEntry::PutEdge { revision: r, .. }) = &mut edge {
+            *r = revision;
+        }
+        edge
+    };
     assert_eq!(
-        refused(temporal_edge(0, "t", vec![])),
+        refused(restated(0, 1)),
         GraphError::EdgeIdUnavailable(EdgeId(0))
     );
+    // The restated revision is within 1..=the snapshot sequence.
+    for revision in [0, 51] {
+        assert_eq!(
+            refused(restated(1, revision)),
+            GraphError::Corrupt("non-canonical graph snapshot")
+        );
+    }
+    assert!(
+        GraphState::from_snapshot(50, {
+            let mut entries = entries.clone();
+            entries[5] = restated(1, 50);
+            [GraphBody {
+                graph_id: G,
+                entries,
+            }]
+        })
+        .is_ok()
+    );
+}
+
+/// A snapshot restated at a later sequence keeps each temporal edge's
+/// revision, deadline or not, so its revision token survives a checkpoint.
+#[test]
+fn a_snapshot_keeps_temporal_revisions() {
+    let mut h = Harness::new();
+    h.ok(vec![temporal_edge(0, "t", vec![seg(None, None, 1)])]);
+    h.ok(vec![
+        temporal_edge(1, "u", vec![]),
+        GraphEntry::EdgeExpiry {
+            edge_id: EdgeId(1),
+            expires_at_ms: Some(900),
+        },
+    ]);
+    h.ok(vec![legacy_edge(2, "legacy", Properties::new())]);
+    let graph = h.graph();
+    let revisions: Vec<u64> = graph.edges().map(|edge| edge.revision).collect();
+    assert!(revisions[0] < revisions[1] && revisions[1] < revisions[2]);
+    let mut entries = vec![GraphEntry::CreateGraph { name: "g".into() }];
+    entries.extend([put_node(0, "a"), put_node(1, "b"), put_node(2, "c")]);
+    for edge in graph.edges() {
+        entries.push(graph.edge_snapshot_entry(edge, 50));
+        if let Some(deadline) = graph.edge_expiry(edge.id) {
+            entries.push(GraphEntry::EdgeExpiry {
+                edge_id: edge.id,
+                expires_at_ms: Some(deadline),
+            });
+        }
+    }
+    entries.push(GraphEntry::GraphHighWater {
+        next_node_id: 3,
+        next_edge_id: 3,
+    });
+    let body = GraphBody {
+        graph_id: G,
+        entries,
+    };
+    let encoded = encode_body(&body).unwrap();
+    let decoded = decode_body(&encoded, body.entries.len() as u32).unwrap();
+    let loaded = GraphState::from_snapshot(50, [decoded]).unwrap();
+    let kept: Vec<u64> = loaded
+        .graph(G)
+        .unwrap()
+        .edges()
+        .map(|edge| edge.revision)
+        .collect();
+    // Temporal edges keep theirs; a legacy edge takes the image sequence.
+    assert_eq!(kept, [revisions[0], revisions[1], 50]);
 }

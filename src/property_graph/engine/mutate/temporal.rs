@@ -95,6 +95,7 @@ impl Planner<'_> {
                 let edge = self.graph().edge(id).expect("checked above");
                 let entry = TemporalEntry::PutEdge {
                     edge_id: id,
+                    revision: 0,
                     source: edge.source,
                     destination: edge.destination,
                     relationship: edge.relationship.clone(),
@@ -181,11 +182,12 @@ impl Planner<'_> {
     }
 
     /// A live edge whose revision matches `expected`, which must name one.
-    /// The revision is the one the edge had before this batch if a temporal
-    /// mutation of the batch already changed it, so one batch can close a
-    /// segment and append its successor under the same revision check.
+    /// The revision is the one the edge had when the batch started, even if
+    /// an earlier mutation of the batch (of either kind) changed it, so one
+    /// batch can close a segment and append its successor under the same
+    /// revision check.
     fn revised_edge(
-        &mut self,
+        &self,
         edge: &EdgeSelector,
         expected: Precondition,
     ) -> Result<EdgeId, GraphError> {
@@ -206,17 +208,11 @@ impl Planner<'_> {
                 .unwrap_or(edge.revision)
         });
         check(expected, current)?;
-        let (id, revision) = match (found, edge) {
-            (Some(edge), _) => (edge.id, edge.revision),
-            (None, EdgeSelector::Id(id)) => return Err(GraphError::EdgeNotFound(*id)),
-            (None, EdgeSelector::Key(key)) => {
-                return Err(GraphError::UnknownEdgeKey(key.clone()));
-            }
-        };
-        if revision < self.sequence {
-            self.temporal_revisions.entry(id).or_insert(revision);
+        match (found, edge) {
+            (Some(edge), _) => Ok(edge.id),
+            (None, EdgeSelector::Id(id)) => Err(GraphError::EdgeNotFound(*id)),
+            (None, EdgeSelector::Key(key)) => Err(GraphError::UnknownEdgeKey(key.clone())),
         }
-        Ok(id)
     }
 
     fn create_temporal_edge(
@@ -231,6 +227,7 @@ impl Planner<'_> {
         let entry = |source, destination| {
             GraphEntry::Temporal(TemporalEntry::PutEdge {
                 edge_id: id,
+                revision: 0,
                 source,
                 destination,
                 relationship: relationship.into(),

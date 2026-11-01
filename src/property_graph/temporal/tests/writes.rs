@@ -7,7 +7,7 @@ use std::fs;
 use std::io::Cursor;
 use std::path::Path;
 
-use super::super::{Activation, FAIL_HEADER, segment_out};
+use super::super::{Activation, FAIL_HEADER, segment_in, segment_out};
 use super::{header_flags, set_header_flags};
 use crate::changes::{
     ChangeBatch, ChangeKind, FeedCursor, GraphChange, TemporalChange, read_log_changes,
@@ -15,6 +15,7 @@ use crate::changes::{
 use crate::format::{self, FLAG_ENCRYPTED, FLAG_GRAPH, FLAG_PRECISION, FLAG_TEMPORAL};
 use crate::maintenance;
 use crate::property_graph::engine::Graph;
+use crate::property_graph::engine::codec::check_series_bytes;
 use crate::property_graph::{
     EdgeRef, GraphBatchResult, GraphOp, GraphOpOutcome, GraphWrite, TemporalOp, TemporalSegment,
     verify_graph,
@@ -554,6 +555,135 @@ fn limits_roll_back_the_whole_plan_including_tentative_ttl_cleanup() {
     assert!(db.get(2).unwrap().is_some() && db.get(4).unwrap().is_some());
 }
 
+/// Segment `[from, to)` whose properties hold `chars` string bytes, in
+/// 4,096-byte values: 65,372 make the largest properties allowed.
+fn sized_segment(chars: usize, from: i64, to: Option<i64>) -> TemporalSegment {
+    let mut properties: Metadata = (0..chars / 4096)
+        .map(|f| (format!("f{f:02}"), MetadataValue::String("x".repeat(4096))))
+        .collect();
+    properties.insert(
+        "fzz".into(),
+        MetadataValue::String("x".repeat(chars % 4096)),
+    );
+    TemporalSegment {
+        valid_from: Some(from),
+        valid_to: to,
+        properties,
+    }
+}
+
+/// Closing an open-ended segment adds its end (8 bytes) to the series, so
+/// a close that would outgrow one graph body fails and rolls back its
+/// whole batch, the tentative TTL cleanup and vector mutation included.
+#[test]
+fn a_close_that_outgrows_the_series_bytes_rolls_back_its_batch() {
+    let _on = Activation::on();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.vlite");
+    let mut db = Database::create(&path, 2).unwrap();
+    populate(&mut db);
+    // 255 maximum-size segments and an open last one fill one graph body
+    // exactly.
+    let full: Vec<TemporalSegment> = (0..255)
+        .map(|i| sized_segment(65_372, i, Some(i + 1)))
+        .collect();
+    let prefix: Vec<_> = full.iter().map(|s| segment_in(s).unwrap()).collect();
+    let fits = |chars| {
+        segment_in(&sized_segment(chars, 255, None)).is_ok_and(|last| {
+            let mut series = prefix.clone();
+            series.push(last);
+            check_series_bytes("R", Some("ab"), &series).is_ok()
+        })
+    };
+    let (mut fit, mut over) = (0, 65_536);
+    while over - fit > 1 {
+        let mid = (fit + over) / 2;
+        if fits(mid) { fit = mid } else { over = mid }
+    }
+    drop(prefix);
+    write(&mut db, &[create("ab", full[..128].to_vec())]).unwrap();
+    let r = revision(&db, "ab");
+    let rest: Vec<GraphOp> = full[128..]
+        .iter()
+        .chain([&sized_segment(fit, 255, None)])
+        .map(|segment| append("ab", segment.clone(), Expected::Revision(r)))
+        .collect();
+    write(&mut db, &rest).unwrap();
+    assert_eq!(series(&db, "ab").len(), 256);
+    write(&mut db, &[legacy("bd", 1), expire_edge("bd")]).unwrap();
+    let (due, len, r) = (stored(&db), file_len(&path), revision(&db, "ab"));
+
+    let closing = close("ab", Some(255), None, 300, Expected::Revision(r));
+    assert!(matches!(
+        write(&mut db, &[put_vector(3), closing.clone()]),
+        Err(Error::InvalidQuery(_))
+    ));
+    assert_eq!(file_len(&path), len);
+    assert!(stored(&db) == due && revision(&db, "ab") == r);
+    assert!(db.get(3).unwrap().is_none());
+    // Removing a segment earlier in the batch makes room.
+    write(
+        &mut db,
+        &[
+            remove("ab", Some(0), Some(1), Expected::Revision(r)),
+            closing,
+        ],
+    )
+    .unwrap();
+    let closed = series(&db, "ab");
+    assert_eq!((closed.len(), closed[254].valid_to), (255, Some(300)));
+    let expected = stored(&db);
+    drop(db);
+    assert!(stored(&Database::open(&path).unwrap()) == expected);
+    verify_graph(&path, None).unwrap();
+}
+
+/// An ordinary mutation earlier in the batch does not change the revision
+/// a temporal correction checks; a deadline that falls due still deletes
+/// the edge before the correction.
+#[test]
+fn an_earlier_ordinary_mutation_keeps_the_batch_start_revision() {
+    let _on = Activation::on();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.vlite");
+    let mut db = Database::create(&path, 2).unwrap();
+    populate(&mut db);
+    write(&mut db, &[create("ab", vec![seg(Some(0), None, 1)])]).unwrap();
+    let r = revision(&db, "ab");
+    let expire = |at, expected| GraphOp::SetEdgeExpiry {
+        edge: edge("ab"),
+        expires_at_ms: Some(at),
+        expected: Expected::Revision(expected),
+    };
+    // 2100-01-01.
+    let result = write(
+        &mut db,
+        &[
+            expire(4_102_444_800_000, r),
+            append("ab", seg(None, Some(0), 0), Expected::Revision(r)),
+        ],
+    )
+    .unwrap();
+    let r = result.revision.unwrap();
+    assert_eq!(
+        series(&db, "ab"),
+        [seg(None, Some(0), 0), seg(Some(0), None, 1)]
+    );
+    assert_eq!(revision(&db, "ab"), r);
+    let before = stored(&db);
+    assert!(matches!(
+        write(
+            &mut db,
+            &[
+                expire(PAST, r),
+                append("ab", seg(Some(-9), Some(-5), 2), Expected::Revision(r)),
+            ]
+        ),
+        Err(Error::RevisionMismatch { current: None })
+    ));
+    assert_eq!(stored(&db), before);
+}
+
 #[test]
 fn ttl_reclaims_whole_series_and_history_never_restores_them() {
     let _on = Activation::on();
@@ -709,6 +839,49 @@ fn temporal_state_survives_compaction_conversion_and_checkpoints() {
     assert_eq!(stored(&db), before);
     assert!(!is_temporal(&db));
     write(&mut db, &[legacy("ab", 1)]).unwrap();
+}
+
+/// A temporal edge keeps its revision through directory conversion, a
+/// checkpoint image and reopening it (Speed P2b snapshot load), without
+/// precision: the image restates it, not the image sequence.
+#[test]
+fn temporal_revisions_survive_conversion_checkpoints_and_reopen() {
+    let _on = Activation::on();
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("s.vlite");
+    let mut db = Database::create(&source, 2).unwrap();
+    populate(&mut db);
+    write(&mut db, &[create("ab", vec![seg(None, None, 1)])]).unwrap();
+    let original = revision(&db, "ab");
+    // Later commits move the sequence past the edge's revision.
+    write(&mut db, &[legacy("bc", 1)]).unwrap();
+    write(&mut db, &[legacy("bd", 2)]).unwrap();
+    drop(db);
+
+    let store = dir.path().join("store");
+    maintenance::convert_to_directory(&source, &store).unwrap();
+    let mut db = Database::open(&store).unwrap();
+    db.set_checkpoint_threshold(None);
+    assert_eq!(revision(&db, "ab"), original);
+    write(&mut db, &[legacy("cd", 3)]).unwrap();
+    assert!(db.checkpoint().unwrap().is_some());
+    assert_eq!(revision(&db, "ab"), original);
+    drop(db);
+    let mut db = Database::open(&store).unwrap();
+    assert_eq!(revision(&db, "ab"), original);
+    // The token read before conversion still matches.
+    write(
+        &mut db,
+        &[close("ab", None, None, 10, Expected::Revision(original))],
+    )
+    .unwrap();
+    let corrected = revision(&db, "ab");
+    assert!(corrected > original);
+    write(&mut db, &[legacy("ca", 4)]).unwrap();
+    assert!(db.checkpoint().unwrap().is_some());
+    drop(db);
+    let db = Database::open(&store).unwrap();
+    assert_eq!(revision(&db, "ab"), corrected);
 }
 
 #[test]
@@ -1066,5 +1239,8 @@ fn a_precision_image_keeps_series_and_revisions() {
     ));
     let after = observe(&reopened);
     let bytes = reopened.to_bytes().unwrap();
-    assert_eq!(observe(&Database::open_from_bytes(bytes, None).unwrap()), after);
+    assert_eq!(
+        observe(&Database::open_from_bytes(bytes, None).unwrap()),
+        after
+    );
 }

@@ -23,6 +23,17 @@ use super::properties;
 /// validation and per-edge memory growth.
 pub const MAX_SEGMENTS: usize = 256;
 
+/// Gap 4: whether this build admits temporal edges. Until temporal reads
+/// exist (slice C) only test builds do: any other build refuses to give a
+/// state the capability ([`GraphState::set_temporal`]) or to load a
+/// snapshot holding a temporal edge, so it can neither plan nor apply a
+/// temporal entry.
+///
+/// [`GraphState::set_temporal`]: super::GraphState::set_temporal
+pub(crate) const fn supported() -> bool {
+    cfg!(test)
+}
+
 /// `GraphError::InvalidTemporal` reasons. Each starts with the category
 /// name used by the reference oracle (`bounds`, `order`, `overlap`,
 /// `segment_limit`) or by a temporal mutation.

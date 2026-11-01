@@ -7,11 +7,13 @@
 //! - `bounds`: `flags u8` (bit 0: `valid_from` present, bit 1: `valid_to`
 //!   present, other bits zero), then each present bound as `i64`.
 //! - `segment`: `bounds`, then `properties_len u32` and the properties.
-//! - 65 `PutEdge`: `edge_id u64`, `source u64`, `destination u64`,
-//!   `type_len u8`, type, `key_len u16`, key (empty: keyless),
-//!   `segment_count u16` (at most 256), then the segments in series order.
-//!   Creates or promotes the edge with its whole series, or restates it in
-//!   a snapshot.
+//! - 65 `PutEdge`: `edge_id u64`, `revision u64`, `source u64`,
+//!   `destination u64`, `type_len u8`, type, `key_len u16`, key (empty:
+//!   keyless), `segment_count u16` (at most 256), then the segments in
+//!   series order. Creates or promotes the edge with its whole series, or
+//!   restates it in a snapshot. `revision` is zero (the commit sequence) in
+//!   every op-12 body; an op-15 snapshot restates the edge's revision in
+//!   `1..=` its sequence.
 //! - 66 `AppendSegment`: `edge_id u64`, `segment`.
 //! - 67 `ReplaceSegment`: `edge_id u64`, old `bounds`, new `segment`.
 //! - 68 `CloseSegment`: `edge_id u64`, old `bounds`, `at i64`.
@@ -28,8 +30,11 @@ use super::{Reader, properties_len, put_properties, tag};
 pub enum TemporalEntry {
     /// Creates a temporal edge, or promotes the legacy edge with this ID
     /// (same endpoints, type and key) to one, with this whole series.
+    /// `revision` is zero except in a snapshot, which restates the edge's
+    /// revision.
     PutEdge {
         edge_id: EdgeId,
+        revision: u64,
         source: NodeId,
         destination: NodeId,
         relationship: String,
@@ -151,6 +156,7 @@ pub(super) fn encode(entry: &TemporalEntry, bytes: &mut Vec<u8>) {
     bytes.extend_from_slice(&entry.edge_id().0.to_le_bytes());
     match entry {
         TemporalEntry::PutEdge {
+            revision,
             source,
             destination,
             relationship,
@@ -158,6 +164,7 @@ pub(super) fn encode(entry: &TemporalEntry, bytes: &mut Vec<u8>) {
             segments,
             ..
         } => {
+            bytes.extend_from_slice(&revision.to_le_bytes());
             bytes.extend_from_slice(&source.0.to_le_bytes());
             bytes.extend_from_slice(&destination.0.to_le_bytes());
             bytes.push(relationship.len() as u8);
@@ -197,13 +204,14 @@ pub(super) fn encode(entry: &TemporalEntry, bytes: &mut Vec<u8>) {
     }
 }
 
-/// Payload length of a `PutEdge` without its 8-byte edge ID.
+/// Payload length of a `PutEdge` without its 8-byte edge ID (its revision
+/// included).
 fn put_edge_len(
     relationship: &str,
     key: Option<&str>,
     segments: &[Segment],
 ) -> Result<usize, GraphError> {
-    Ok(16
+    Ok(24
         + 1
         + relationship.len()
         + 2
@@ -295,6 +303,7 @@ pub(super) fn decode(tag: u8, r: &mut Reader<'_>) -> Result<TemporalEntry, Graph
     let edge_id = EdgeId(r.u64()?);
     Ok(match tag {
         tag::TEMPORAL_PUT_EDGE => {
+            let revision = r.u64()?;
             let source = NodeId(r.u64()?);
             let destination = NodeId(r.u64()?);
             let len = r.u8()? as usize;
@@ -310,6 +319,7 @@ pub(super) fn decode(tag: u8, r: &mut Reader<'_>) -> Result<TemporalEntry, Graph
                 .collect::<Result<_, _>>()?;
             TemporalEntry::PutEdge {
                 edge_id,
+                revision,
                 source,
                 destination,
                 relationship,

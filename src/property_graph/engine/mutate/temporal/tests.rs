@@ -102,7 +102,7 @@ impl Db {
             entries: vec![GraphEntry::CreateGraph { name: "g".into() }],
         };
         for state in [&mut db.state, &mut db.replica] {
-            state.set_temporal(true);
+            state.set_temporal(true).unwrap();
             state.apply(1, &create).unwrap();
         }
         db.ok(&[node("a"), node("b"), node("c")]);
@@ -435,4 +435,59 @@ fn temporal_mutations_count_toward_the_batch_limit_and_reclaim_first() {
         .unwrap();
     assert_eq!(db.series("f"), [seg(None, None, 2)]);
     assert_eq!(db.graph().edge_by_key("f").unwrap().id, EdgeId(2));
+}
+
+/// The revision a temporal mutation checks is the one the edge had when
+/// the batch started, even after an ordinary mutation of the same batch
+/// changed it; a deadline that falls due still deletes the edge first.
+#[test]
+fn the_batch_start_revision_survives_earlier_ordinary_mutations() {
+    let mut db = Db::new();
+    db.ok(&[
+        create("e", vec![seg(Some(0), None, 1)]),
+        legacy_edge("l", Properties::new()),
+    ]);
+    let (e, l) = (db.revision("e"), db.revision("l"));
+    let expire = |edge: &str, at: u64, expected: u64| {
+        Op::Graph(GraphMutation::SetEdgeExpiry {
+            edge: selector(edge),
+            expires_at_ms: Some(at),
+            expected: Precondition::Revision(expected),
+        })
+    };
+    let promote = Op::Temporal(TemporalMutation::Promote {
+        edge: selector("l"),
+        expected: Precondition::Revision(l),
+    });
+    db.ok(&[
+        expire("e", 1_000, e),
+        append("e", seg(None, Some(0), 0), Precondition::Revision(e)),
+        Op::Graph(GraphMutation::PatchEdge {
+            edge: selector("l"),
+            set: Properties::from([("w".into(), PropertyValue::Integer(1))]),
+            unset: BTreeSet::new(),
+            expected: Precondition::Revision(l),
+        }),
+        promote,
+    ]);
+    assert_eq!(
+        db.series("e"),
+        [seg(None, Some(0), 0), seg(Some(0), None, 1)]
+    );
+    assert_eq!(db.graph().edge_expiry(EdgeId(0)), Some(1_000));
+    assert_eq!(db.series("l").len(), 1);
+    let e = db.revision("e");
+    assert_eq!(db.revision("l"), e);
+    // A deadline due at the batch clock reclaims the edge before the next
+    // mutation, which then finds no edge.
+    assert_eq!(
+        db.run_at(
+            Some(2_000),
+            &[
+                expire("l", 1_500, e),
+                append("l", seg(Some(5), Some(6), 0), Precondition::Revision(e)),
+            ]
+        ),
+        Err(GraphError::PreconditionFailed { current: None })
+    );
 }

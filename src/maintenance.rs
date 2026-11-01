@@ -932,6 +932,7 @@ pub(crate) fn write_v5_image(
         crate::property_graph::frame::compacted_bodies(
             state,
             graph_now_ms,
+            floor,
             |graph, count, body| {
                 if precise && let Some(previous) = current.replace(graph).filter(|&id| id != graph)
                 {
@@ -1267,6 +1268,7 @@ mod tests {
             crate::property_graph::frame::compacted_bodies(
                 state,
                 Some(now_ms),
+                0,
                 |_, count, body| {
                     bytes.extend(seal(format::graph_frame(floor, 0, count, body)));
                     Ok(())

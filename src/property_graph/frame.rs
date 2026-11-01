@@ -331,10 +331,13 @@ impl PendingSnapshot {
 /// follow the record frames. Nodes due at `now_ms` are dropped with
 /// their edges and attachments, and so are edges due at `now_ms`; a kept
 /// deadline follows its node or edge as an expiry entry. Without `now_ms`
-/// (a P3a preserving relocation) every node and edge is kept.
+/// (a P3a preserving relocation) every node and edge is kept. Gap 4: a
+/// snapshot at `floor` restates each temporal edge's revision; a compacted
+/// file (`floor` zero) does not.
 pub(crate) fn compacted_bodies(
     state: &GraphState,
     now_ms: Option<u64>,
+    floor: u64,
     mut emit: impl FnMut(GraphId, u32, &[u8]) -> Result<()>,
 ) -> Result<()> {
     let encode = |body: &GraphBody| {
@@ -369,7 +372,7 @@ pub(crate) fn compacted_bodies(
                     expires_at_ms: Some(deadline),
                 });
             // Gap 4: a temporal edge is restated with its whole series.
-            std::iter::once(graph.edge_snapshot_entry(edge)).chain(expiry)
+            std::iter::once(graph.edge_snapshot_entry(edge, floor)).chain(expiry)
         });
         let attachments = live_nodes().flat_map(|node| {
             graph
