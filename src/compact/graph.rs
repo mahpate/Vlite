@@ -3,13 +3,25 @@
 //! This test-only module deliberately does not participate in checkpoint
 //! framing. It owns only the graph-domain representation; the shared storage
 //! owner must wire any future block dispatch.
+//!
+//! A graph's declared schema is stored losslessly as declarations only. The
+//! derived property indexes are not stored: a schema-bearing payload is
+//! loaded through the engine's own snapshot path, which validates the
+//! declarations, rebuilds the indexes and checks every declared rule.
 
+use crate::property_graph::engine::limits::{
+    MAX_BATCH_ENTRIES, MAX_FIELD_NAME_BYTES, MAX_LABEL_BYTES, MAX_RELATIONSHIP_TYPE_BYTES,
+    MAX_SCHEMA_DESCRIPTION_BYTES, MAX_SCHEMA_ENDPOINTS, MAX_SCHEMA_LABELS, MAX_SCHEMA_PROPERTIES,
+    MAX_SCHEMA_RELATIONSHIPS,
+};
 use crate::property_graph::engine::{
-    Graph, GraphEdge, GraphNode, Properties, PropertyValue, properties,
+    EdgeId, Graph, GraphBody, GraphEdge, GraphEntry, GraphId, GraphNode, GraphSchema, GraphState,
+    LabelDefinition, Multiplicity, NodeId, Properties, PropertyDefinition, PropertyIndexKind,
+    PropertyType, PropertyValue, RelationshipDefinition, SnapshotBuilder, properties,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-const MAGIC: &[u8; 8] = b"VLGCSR04";
+const MAGIC: &[u8; 8] = b"VLGCSR05";
 const MAX_BYTES: usize = 64 << 20;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,7 +61,7 @@ struct GraphSource {
     sequence: u64,
     next_node_id: u64,
     next_edge_id: u64,
-    has_schema: bool,
+    schema: GraphSchema,
     nodes: Vec<SourceNode>,
     edges: Vec<SourceEdge>,
 }
@@ -133,9 +145,6 @@ impl CompactGraph {
 
 impl GraphSource {
     fn from_graph(graph: &Graph) -> Result<Self, CodecError> {
-        if !graph.schema().is_empty() {
-            return Err(CodecError::UnsupportedSource("schema"));
-        }
         let mut nodes = Vec::new();
         for node in graph.nodes() {
             nodes.push(source_node(
@@ -157,11 +166,108 @@ impl GraphSource {
             sequence: graph.graph_sequence(),
             next_node_id: graph.next_node_id(),
             next_edge_id: graph.next_edge_id(),
-            has_schema: false,
+            schema: graph.schema().clone(),
             nodes,
             edges,
         })
     }
+}
+
+/// Loads `source` through the engine's snapshot path (`SnapshotBuilder`),
+/// which validates its schema, rebuilds the derived property indexes and
+/// checks every declared rule, then restores the source revisions. The
+/// engine requires node keys, so keyless sources are not representable.
+fn engine_state(source: &GraphSource) -> Result<GraphState, CodecError> {
+    let graph_id = GraphId(source.graph_id);
+    let mut builder = SnapshotBuilder::new(source.sequence);
+    let mut entries = Vec::new();
+    let mut emit = |entry: GraphEntry| {
+        entries.push(entry);
+        if entries.len() < MAX_BATCH_ENTRIES {
+            return Ok(());
+        }
+        builder
+            .push(GraphBody {
+                graph_id,
+                entries: std::mem::take(&mut entries),
+            })
+            .map_err(|_| CodecError::Corrupt)
+    };
+    emit(GraphEntry::CreateGraph {
+        name: source.name.clone(),
+    })?;
+    if !source.schema.is_empty() {
+        emit(GraphEntry::PutSchema {
+            schema: source.schema.clone(),
+        })?;
+    }
+    for node in &source.nodes {
+        let key = node
+            .key
+            .clone()
+            .ok_or(CodecError::UnsupportedSource("schema with keyless nodes"))?;
+        emit(GraphEntry::PutNode {
+            node_id: NodeId(node.id),
+            key,
+            labels: node.labels.iter().cloned().collect(),
+            properties: node.properties.clone(),
+        })?;
+        if let Some(deadline) = node.deadline {
+            emit(GraphEntry::NodeExpiry {
+                node_id: NodeId(node.id),
+                expires_at_ms: Some(deadline),
+            })?;
+        }
+    }
+    for edge in &source.edges {
+        emit(GraphEntry::PutEdge {
+            edge_id: EdgeId(edge.id),
+            source: NodeId(edge.source),
+            destination: NodeId(edge.target),
+            relationship: edge.relationship.clone(),
+            key: edge.key.clone(),
+            properties: edge.properties.clone(),
+        })?;
+        if let Some(deadline) = edge.deadline {
+            emit(GraphEntry::EdgeExpiry {
+                edge_id: EdgeId(edge.id),
+                expires_at_ms: Some(deadline),
+            })?;
+        }
+    }
+    for node in &source.nodes {
+        for (collection, record) in &node.attachments {
+            emit(GraphEntry::Attach {
+                node_id: NodeId(node.id),
+                collection: *collection,
+                record_id: *record,
+            })?;
+        }
+    }
+    emit(GraphEntry::GraphHighWater {
+        next_node_id: source.next_node_id,
+        next_edge_id: source.next_edge_id,
+    })?;
+    if !entries.is_empty() {
+        builder
+            .push(GraphBody { graph_id, entries })
+            .map_err(|_| CodecError::Corrupt)?;
+    }
+    let mut state = builder.finish().map_err(|_| CodecError::Corrupt)?;
+    let nodes: Vec<_> = source
+        .nodes
+        .iter()
+        .map(|node| (node.id, node.revision))
+        .collect();
+    let edges: Vec<_> = source
+        .edges
+        .iter()
+        .map(|edge| (edge.id, edge.revision))
+        .collect();
+    state
+        .restore_revisions(graph_id, &nodes, &edges)
+        .map_err(|_| CodecError::Corrupt)?;
+    Ok(state)
 }
 
 fn source_node(
@@ -203,6 +309,7 @@ fn encode(source: &GraphSource) -> Result<Vec<u8>, CodecError> {
     put_u64(&mut out, graph.source.sequence)?;
     put_u64(&mut out, graph.source.next_node_id)?;
     put_u64(&mut out, graph.source.next_edge_id)?;
+    put_schema(&mut out, &graph.source.schema)?;
     put_strings(&mut out, &graph.labels)?;
     put_strings(&mut out, &graph.relationships)?;
     put_strings(&mut out, &graph.property_names)?;
@@ -296,6 +403,7 @@ fn decode(bytes: &[u8]) -> Result<CompactGraph, CodecError> {
     let sequence = reader.u64()?;
     let next_node_id = reader.u64()?;
     let next_edge_id = reader.u64()?;
+    let schema = reader.schema()?;
     let labels = reader.strings(63)?;
     let relationships = reader.strings(63)?;
     let property_names = reader.strings(256)?;
@@ -402,7 +510,7 @@ fn decode(bytes: &[u8]) -> Result<CompactGraph, CodecError> {
         sequence,
         next_node_id,
         next_edge_id,
-        has_schema: false,
+        schema,
         nodes,
         edges,
     })?;
@@ -428,9 +536,7 @@ fn build_inner(
     mut source: GraphSource,
     validate_persisted_metadata: bool,
 ) -> Result<CompactGraph, CodecError> {
-    if source.has_schema {
-        return Err(CodecError::UnsupportedSource("schema"));
-    }
+    source.schema.validate().map_err(|_| CodecError::Corrupt)?;
     let mut property_names = BTreeSet::new();
     for node in &source.nodes {
         properties::validate(&node.properties).map_err(|_| CodecError::Corrupt)?;
@@ -581,6 +687,10 @@ fn build_inner(
     }
     let out = make_csr(out_rows)?;
     let incoming = make_csr(in_rows)?;
+    if !source.schema.is_empty() {
+        // Declared rules and the derived indexes stay owned by the engine.
+        engine_state(&source)?;
+    }
     Ok(CompactGraph {
         source,
         labels,
@@ -666,6 +776,60 @@ fn put_properties(
                 put_bytes(out, &longitude.to_le_bytes())?;
             }
         }
+    }
+    Ok(())
+}
+
+/// Writes declarations in map order without validating them; `build`
+/// validates every schema it accepts.
+fn put_schema(out: &mut Vec<u8>, schema: &GraphSchema) -> Result<(), CodecError> {
+    put_count(out, schema.labels.len())?;
+    for (name, label) in &schema.labels {
+        put_string(out, name)?;
+        put_string(out, &label.description)?;
+        put_property_definitions(out, &label.properties)?;
+    }
+    put_count(out, schema.relationships.len())?;
+    for (name, relationship) in &schema.relationships {
+        put_string(out, name)?;
+        put_string(out, &relationship.description)?;
+        let multiplicity = match relationship.multiplicity {
+            Multiplicity::Multi => 1,
+            Multiplicity::UniqueTriple => 2,
+        };
+        put_bytes(out, &[multiplicity])?;
+        put_count(out, relationship.endpoints.len())?;
+        for (source, destination) in &relationship.endpoints {
+            put_string(out, source)?;
+            put_string(out, destination)?;
+        }
+        put_property_definitions(out, &relationship.properties)?;
+    }
+    Ok(())
+}
+
+/// Type codes and flag bits match the engine's own schema payload.
+fn put_property_definitions(
+    out: &mut Vec<u8>,
+    properties: &BTreeMap<String, PropertyDefinition>,
+) -> Result<(), CodecError> {
+    put_count(out, properties.len())?;
+    for (name, definition) in properties {
+        put_string(out, name)?;
+        let value_type = match definition.value_type {
+            PropertyType::String => 1,
+            PropertyType::Integer => 2,
+            PropertyType::Float => 3,
+            PropertyType::Boolean => 4,
+            PropertyType::GeoPoint => 5,
+        };
+        let index = match definition.index {
+            None => 0,
+            Some(PropertyIndexKind::Exact) => 4,
+            Some(PropertyIndexKind::Range) => 8,
+        };
+        let flags = u8::from(definition.required) | (u8::from(definition.unique) << 1) | index;
+        put_bytes(out, &[value_type, flags])?;
     }
     Ok(())
 }
@@ -811,6 +975,121 @@ impl<'a> Reader<'a> {
             return Err(CodecError::Corrupt);
         }
         Ok(strings)
+    }
+
+    /// Declarations in strictly ascending order within the engine schema
+    /// limits; counts are checked against the remaining bytes before any
+    /// entry is read.
+    fn schema(&mut self) -> Result<GraphSchema, CodecError> {
+        let mut schema = GraphSchema::default();
+        let label_count = self.entries(12)?;
+        if label_count > MAX_SCHEMA_LABELS {
+            return Err(CodecError::Corrupt);
+        }
+        for _ in 0..label_count {
+            let name = self.string(MAX_LABEL_BYTES)?;
+            if schema
+                .labels
+                .last_key_value()
+                .is_some_and(|(last, _)| *last >= name)
+            {
+                return Err(CodecError::Corrupt);
+            }
+            let description = self.string(MAX_SCHEMA_DESCRIPTION_BYTES)?;
+            let properties = self.property_definitions()?;
+            schema.labels.insert(
+                name,
+                LabelDefinition {
+                    description,
+                    properties,
+                },
+            );
+        }
+        let relationship_count = self.entries(17)?;
+        if relationship_count > MAX_SCHEMA_RELATIONSHIPS {
+            return Err(CodecError::Corrupt);
+        }
+        for _ in 0..relationship_count {
+            let name = self.string(MAX_RELATIONSHIP_TYPE_BYTES)?;
+            if schema
+                .relationships
+                .last_key_value()
+                .is_some_and(|(last, _)| *last >= name)
+            {
+                return Err(CodecError::Corrupt);
+            }
+            let description = self.string(MAX_SCHEMA_DESCRIPTION_BYTES)?;
+            let multiplicity = match self.u8()? {
+                1 => Multiplicity::Multi,
+                2 => Multiplicity::UniqueTriple,
+                _ => return Err(CodecError::Corrupt),
+            };
+            let endpoint_count = self.entries(8)?;
+            if endpoint_count > MAX_SCHEMA_ENDPOINTS {
+                return Err(CodecError::Corrupt);
+            }
+            let mut endpoints = BTreeSet::new();
+            for _ in 0..endpoint_count {
+                let endpoint = (self.string(MAX_LABEL_BYTES)?, self.string(MAX_LABEL_BYTES)?);
+                if endpoints.last().is_some_and(|last| *last >= endpoint) {
+                    return Err(CodecError::Corrupt);
+                }
+                endpoints.insert(endpoint);
+            }
+            let properties = self.property_definitions()?;
+            schema.relationships.insert(
+                name,
+                RelationshipDefinition {
+                    description,
+                    endpoints,
+                    properties,
+                    multiplicity,
+                },
+            );
+        }
+        Ok(schema)
+    }
+
+    fn property_definitions(&mut self) -> Result<BTreeMap<String, PropertyDefinition>, CodecError> {
+        let count = self.entries(6)?;
+        if count > MAX_SCHEMA_PROPERTIES {
+            return Err(CodecError::Corrupt);
+        }
+        let mut properties = BTreeMap::new();
+        for _ in 0..count {
+            let name = self.string(MAX_FIELD_NAME_BYTES)?;
+            if properties
+                .last_key_value()
+                .is_some_and(|(last, _): (&String, _)| *last >= name)
+            {
+                return Err(CodecError::Corrupt);
+            }
+            let value_type = match self.u8()? {
+                1 => PropertyType::String,
+                2 => PropertyType::Integer,
+                3 => PropertyType::Float,
+                4 => PropertyType::Boolean,
+                5 => PropertyType::GeoPoint,
+                _ => return Err(CodecError::Corrupt),
+            };
+            let flags = self.u8()?;
+            let index = match flags & !3 {
+                0 => None,
+                4 => Some(PropertyIndexKind::Exact),
+                8 => Some(PropertyIndexKind::Range),
+                _ => return Err(CodecError::Corrupt),
+            };
+            properties.insert(
+                name,
+                PropertyDefinition {
+                    value_type,
+                    required: flags & 1 != 0,
+                    unique: flags & 2 != 0,
+                    index,
+                },
+            );
+        }
+        Ok(properties)
     }
 
     fn optional_string(&mut self) -> Result<Option<String>, CodecError> {
@@ -1130,7 +1409,17 @@ fn csr_value(csr: &Csr) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::property_graph::engine::{GraphBody, GraphEntry, GraphId, GraphState, NodeId};
+    use crate::property_graph::engine::limits::{
+        MAX_FIELD_NAME_BYTES, MAX_INDEXED_PROPERTIES, MAX_LABEL_BYTES, MAX_RELATIONSHIP_TYPE_BYTES,
+        MAX_SCHEMA_DESCRIPTION_BYTES, MAX_SCHEMA_ENDPOINTS, MAX_SCHEMA_LABELS,
+        MAX_SCHEMA_PROPERTIES, MAX_SCHEMA_RELATIONSHIPS,
+    };
+    use crate::property_graph::engine::{
+        EdgeId, ExecutionContext, GraphBody, GraphEntry, GraphError, GraphId, GraphLimits,
+        GraphQuery, GraphState, IndexChoice, LabelDefinition, Multiplicity, NodeId,
+        PropertyCondition, PropertyDefinition, PropertyIndexKind, PropertyProjection, PropertyType,
+        QueryOp, QueryOutput, QueryResult, RelationshipDefinition, execute,
+    };
     use serde_json::{Value, json};
     use std::collections::BTreeSet;
 
@@ -1309,7 +1598,7 @@ mod tests {
         let mut trailing = bytes.clone();
         trailing.push(0);
         assert_eq!(decode(&trailing), Err(CodecError::Corrupt));
-        for magic in [b"VLGCSR01", b"VLGCSR02", b"VLGCSR03"] {
+        for magic in [b"VLGCSR01", b"VLGCSR02", b"VLGCSR03", b"VLGCSR04"] {
             let mut old = bytes.clone();
             old[..8].copy_from_slice(magic);
             assert_eq!(decode(&old), Err(CodecError::Corrupt));
@@ -1442,7 +1731,7 @@ mod tests {
         for end in start..bytes.len() {
             assert_eq!(decode(&bytes[..end]), Err(CodecError::Corrupt));
         }
-        for magic in [b"VLGCSR01", b"VLGCSR02", b"VLGCSR03"] {
+        for magic in [b"VLGCSR01", b"VLGCSR02", b"VLGCSR03", b"VLGCSR04"] {
             let mut old = bytes.clone();
             old[..8].copy_from_slice(magic);
             assert_eq!(decode(&old), Err(CodecError::Corrupt));
@@ -1834,12 +2123,8 @@ mod tests {
     }
 
     #[test]
-    fn graph_source_refuses_fields_not_yet_encoded() {
+    fn graph_source_refuses_temporal_segments() {
         let mut graph = fixture_graph(&json!({"nodes": [{"id": 1, "labels": []}], "edges": []}));
-        graph.has_schema = true;
-        assert_eq!(encode(&graph), Err(CodecError::UnsupportedSource("schema")));
-
-        graph.has_schema = false;
         graph.edges.push(SourceEdge {
             id: 1,
             source: 1,
@@ -1919,6 +2204,7 @@ mod tests {
         reader.u64().unwrap();
         reader.u64().unwrap();
         reader.u64().unwrap();
+        reader.schema().unwrap();
         reader.strings(63).unwrap();
         reader.strings(63).unwrap();
         let property_names = reader.strings(256).unwrap();
@@ -1955,6 +2241,8 @@ mod tests {
 
     type PropertyOffsets = (Vec<(String, usize)>, Vec<(usize, usize, u32, usize)>);
 
+    type SourceMutation = fn(&mut GraphSource);
+
     fn property_offsets(bytes: &[u8], node_ordinal: usize) -> PropertyOffsets {
         let mut reader = Reader::new(bytes);
         reader.take(MAGIC.len()).unwrap();
@@ -1963,6 +2251,7 @@ mod tests {
         reader.u64().unwrap();
         reader.u64().unwrap();
         reader.u64().unwrap();
+        reader.schema().unwrap();
         reader.strings(63).unwrap();
         reader.strings(63).unwrap();
         let dictionary_count = reader.count().unwrap();
@@ -2083,9 +2372,1235 @@ mod tests {
             sequence: 0,
             next_node_id,
             next_edge_id,
-            has_schema: false,
+            schema: GraphSchema::default(),
             nodes,
             edges,
         }
+    }
+
+    #[test]
+    fn schema_declarations_round_trip_with_engine_index_and_rule_parity() {
+        let state = schema_state();
+        let graph = state.graph(GraphId(3)).unwrap();
+        let source = GraphSource::from_graph(graph).unwrap();
+        assert_eq!(source.schema, declared_schema());
+        let bytes = encode(&source).unwrap();
+        let decoded = decode(&bytes).unwrap();
+        assert_eq!(decoded.source, source);
+        assert_eq!(encode(&decoded.source).unwrap(), bytes);
+        let header = &decoded.source;
+        assert_eq!(
+            (
+                header.graph_id,
+                header.sequence,
+                header.next_node_id,
+                header.next_edge_id
+            ),
+            (3, 3, 100, 200)
+        );
+
+        // The derived property indexes are not stored: the engine snapshot
+        // loader rebuilds them, and the rebuilt graph equals the original
+        // field for field (indexes, schema, deadlines, attachments).
+        let rebuilt = engine_state(&decoded.source).unwrap();
+        let restored = rebuilt.graph(GraphId(3)).unwrap();
+        assert_eq!(restored, graph);
+        assert_eq!(rebuilt, state);
+
+        let cases = [
+            (
+                Some("Person"),
+                vec![equals("email", text("b@x"))],
+                vec![2],
+                IndexChoice::PropertyExactIndex,
+            ),
+            (
+                Some("Person"),
+                vec![equals("team", text("red"))],
+                vec![1, 2],
+                IndexChoice::PropertyExactIndex,
+            ),
+            (
+                Some("Person"),
+                vec![between("age", int(30), int(35))],
+                vec![1, 3],
+                IndexChoice::PropertyRangeIndex,
+            ),
+            (
+                Some("Person"),
+                vec![between("score", float(-1.0), float(0.0))],
+                vec![2, 3],
+                IndexChoice::PropertyRangeIndex,
+            ),
+            (
+                Some("Company"),
+                vec![equals("code", int(7))],
+                vec![4],
+                IndexChoice::PropertyExactIndex,
+            ),
+            (
+                Some("Company"),
+                vec![between("code", int(-5), int(10))],
+                vec![4, 6],
+                IndexChoice::PropertyRangeIndex,
+            ),
+            (
+                Some("Person"),
+                vec![equals("active", boolean(true))],
+                vec![1, 3],
+                IndexChoice::LabelIndexScan,
+            ),
+            (
+                None,
+                Vec::new(),
+                vec![1, 2, 3, 4, 5, 6],
+                IndexChoice::FullNodeScan,
+            ),
+        ];
+        for (label, conditions, expected, index) in cases {
+            for now_ms in [0, 55] {
+                for explain in [false, true] {
+                    let actual = find(restored, label, &conditions, now_ms, explain);
+                    assert_eq!(actual, find(graph, label, &conditions, now_ms, explain));
+                    match actual.output {
+                        QueryOutput::Explain(explanation) => {
+                            assert_eq!(explanation.indexes, vec![index]);
+                        }
+                        QueryOutput::Nodes(nodes) => {
+                            assert_eq!(actual.stats.indexes, vec![index]);
+                            if now_ms == 0 {
+                                let ids: Vec<_> = nodes.iter().map(|node| node.id.0).collect();
+                                assert_eq!(ids, expected);
+                            }
+                        }
+                        output => panic!("unexpected find_nodes output {output:?}"),
+                    }
+                }
+            }
+        }
+        let late = find(
+            restored,
+            Some("Person"),
+            &[between("age", int(30), int(35))],
+            55,
+            false,
+        );
+        assert!(
+            matches!(&late.output, QueryOutput::Nodes(nodes) if nodes.iter().map(|node| node.id.0).eq([1]))
+        );
+
+        let duplicate_email = put_node(
+            100,
+            "dup",
+            &["Person"],
+            props([("active", boolean(true)), ("email", text("b@x"))]),
+        );
+        let writes = [
+            (
+                vec![duplicate_email.clone()],
+                Err(violation("unique", "Person", Some("email"))),
+            ),
+            (
+                vec![put_node(
+                    100,
+                    "typed",
+                    &["Person"],
+                    props([
+                        ("active", boolean(true)),
+                        ("age", text("old")),
+                        ("email", text("d@x")),
+                    ]),
+                )],
+                Err(violation("type", "Person", Some("age"))),
+            ),
+            (
+                vec![put_node(
+                    100,
+                    "missing",
+                    &["Person"],
+                    props([("email", text("d@x"))]),
+                )],
+                Err(violation("required", "Person", Some("active"))),
+            ),
+            (
+                vec![put_node(
+                    100,
+                    "clash",
+                    &["Company"],
+                    props([("code", int(7))]),
+                )],
+                Err(violation("unique", "Company", Some("code"))),
+            ),
+            (
+                vec![put_edge(
+                    200,
+                    5,
+                    4,
+                    "WORKS_AT",
+                    None,
+                    props([("since", int(1))]),
+                )],
+                Err(violation("endpoints", "WORKS_AT", None)),
+            ),
+            (
+                vec![put_edge(
+                    200,
+                    1,
+                    4,
+                    "WORKS_AT",
+                    None,
+                    props([("since", int(1))]),
+                )],
+                Err(violation("unique_triple", "WORKS_AT", None)),
+            ),
+            (
+                vec![put_edge(200, 2, 6, "WORKS_AT", None, Properties::new())],
+                Err(violation("required", "WORKS_AT", Some("since"))),
+            ),
+            (
+                vec![put_edge(
+                    200,
+                    1,
+                    2,
+                    "KNOWS",
+                    None,
+                    props([("weight", int(1))]),
+                )],
+                Err(violation("type", "KNOWS", Some("weight"))),
+            ),
+            (
+                vec![
+                    put_node(
+                        100,
+                        "dave",
+                        &["Person"],
+                        props([("active", boolean(true)), ("email", text("d@x"))]),
+                    ),
+                    put_edge(200, 100, 6, "WORKS_AT", None, props([("since", int(2024))])),
+                ],
+                Ok(()),
+            ),
+        ];
+        for (entries, expected) in writes {
+            let body = GraphBody {
+                graph_id: GraphId(3),
+                entries,
+            };
+            let (mut original, mut reloaded) = (state.clone(), rebuilt.clone());
+            assert_eq!(original.apply(4, &body), expected);
+            assert_eq!(reloaded.apply(4, &body), expected);
+            assert_eq!(reloaded, original);
+        }
+
+        // Negative control: the same data without its declarations is a
+        // different engine state that accepts what the schema refuses.
+        let mut stripped = decoded.source.clone();
+        stripped.schema = GraphSchema::default();
+        let mut schemaless = engine_state(&stripped).unwrap();
+        assert_ne!(schemaless, state);
+        let body = GraphBody {
+            graph_id: GraphId(3),
+            entries: vec![duplicate_email],
+        };
+        assert_eq!(schemaless.apply(4, &body), Ok(()));
+    }
+
+    #[test]
+    fn schema_section_layout_is_canonical_and_declaration_order_independent() {
+        let state = schema_state();
+        let source = GraphSource::from_graph(state.graph(GraphId(3)).unwrap()).unwrap();
+        let declared = declared_schema();
+        let mut reversed = GraphSchema::default();
+        for (name, label) in declared.labels.iter().rev() {
+            reversed = reversed.label(name.clone(), label.clone());
+        }
+        for (name, relationship) in declared.relationships.iter().rev() {
+            reversed = reversed.relationship(name.clone(), relationship.clone());
+        }
+        let mut shuffled = source.clone();
+        shuffled.schema = reversed;
+        shuffled.nodes.reverse();
+        shuffled.edges.reverse();
+        assert_eq!(encode(&shuffled).unwrap(), encode(&source).unwrap());
+
+        let mut small = fixture_graph(&json!({"nodes": [], "edges": []}));
+        let empty = encode(&small).unwrap();
+        assert_eq!(&empty[schema_span(&empty)], &[0u8; 8]);
+        small.schema = GraphSchema::default()
+            .relationship(
+                "R",
+                RelationshipDefinition::new("r λ")
+                    .endpoint("B", "A")
+                    .endpoint("A", "B")
+                    .multiplicity(Multiplicity::UniqueTriple)
+                    .property(
+                        "w",
+                        PropertyDefinition::new(PropertyType::GeoPoint).required(),
+                    ),
+            )
+            .label(
+                "B",
+                LabelDefinition::new("")
+                    .property(
+                        "q",
+                        PropertyDefinition::new(PropertyType::Float)
+                            .index(PropertyIndexKind::Range),
+                    )
+                    .property(
+                        "p",
+                        PropertyDefinition::new(PropertyType::String)
+                            .required()
+                            .unique(),
+                    ),
+            )
+            .label(
+                "A",
+                LabelDefinition::new("a")
+                    .property(
+                        "x",
+                        PropertyDefinition::new(PropertyType::Boolean)
+                            .index(PropertyIndexKind::Exact),
+                    )
+                    .property("y", PropertyDefinition::new(PropertyType::Integer)),
+            );
+        let bytes = encode(&small).unwrap();
+        let expected = raw_schema(
+            &[
+                RawDefinition {
+                    description: b"a".to_vec(),
+                    properties: vec![(b"x".to_vec(), 4, 4), (b"y".to_vec(), 2, 0)],
+                    ..raw("A")
+                },
+                RawDefinition {
+                    properties: vec![(b"p".to_vec(), 1, 3), (b"q".to_vec(), 3, 8)],
+                    ..raw("B")
+                },
+            ],
+            &[RawDefinition {
+                description: "r λ".as_bytes().to_vec(),
+                multiplicity: 2,
+                endpoints: vec![
+                    (b"A".to_vec(), b"B".to_vec()),
+                    (b"B".to_vec(), b"A".to_vec()),
+                ],
+                properties: vec![(b"w".to_vec(), 5, 1)],
+                ..raw("R")
+            }],
+        );
+        assert_eq!(&bytes[schema_span(&bytes)], expected.as_slice());
+        assert_eq!(decode(&bytes).unwrap().source.schema, small.schema);
+    }
+
+    #[test]
+    fn decoder_rejects_malformed_schema_sections() {
+        let base = encode(&fixture_graph(&json!({"nodes": [], "edges": []}))).unwrap();
+        let valid = splice_schema(
+            &base,
+            &raw_schema(
+                &[
+                    RawDefinition {
+                        properties: vec![(b"p".to_vec(), 2, 0)],
+                        ..raw("A")
+                    },
+                    raw("B"),
+                ],
+                &[RawDefinition {
+                    endpoints: vec![(b"A".to_vec(), b"B".to_vec())],
+                    properties: vec![(b"w".to_vec(), 3, 1)],
+                    ..raw("R")
+                }],
+            ),
+        );
+        let decoded = decode(&valid).unwrap();
+        assert_eq!(
+            decoded.source.schema,
+            GraphSchema::default()
+                .label(
+                    "A",
+                    LabelDefinition::new("")
+                        .property("p", PropertyDefinition::new(PropertyType::Integer)),
+                )
+                .label("B", LabelDefinition::new(""))
+                .relationship(
+                    "R",
+                    RelationshipDefinition::new("")
+                        .endpoint("A", "B")
+                        .property("w", PropertyDefinition::new(PropertyType::Float).required(),),
+                )
+        );
+        assert_eq!(encode(&decoded.source).unwrap(), valid);
+
+        let label_property = |property: (Vec<u8>, u8, u8)| {
+            raw_schema(
+                &[RawDefinition {
+                    properties: vec![property],
+                    ..raw("A")
+                }],
+                &[],
+            )
+        };
+        let relationship = |definition: RawDefinition| raw_schema(&[], &[definition]);
+        let pair = |source: &[u8], destination: &[u8]| (source.to_vec(), destination.to_vec());
+        let mut cases = Vec::new();
+        for code in [0, 6, 255] {
+            cases.push(("unknown type", label_property((b"p".to_vec(), code, 0))));
+        }
+        for flags in [12, 13, 16, 0x80] {
+            cases.push(("unknown flags", label_property((b"p".to_vec(), 2, flags))));
+        }
+        cases.push((
+            "unknown relationship property type",
+            relationship(RawDefinition {
+                properties: vec![(b"w".to_vec(), 9, 0)],
+                ..raw("R")
+            }),
+        ));
+        for multiplicity in [0, 3, 255] {
+            cases.push((
+                "unknown multiplicity",
+                relationship(RawDefinition {
+                    multiplicity,
+                    ..raw("R")
+                }),
+            ));
+        }
+        cases.extend([
+            ("duplicate labels", raw_schema(&[raw("A"), raw("A")], &[])),
+            ("unsorted labels", raw_schema(&[raw("B"), raw("A")], &[])),
+            (
+                "duplicate relationships",
+                raw_schema(&[], &[raw("R"), raw("R")]),
+            ),
+            (
+                "unsorted relationships",
+                raw_schema(&[], &[raw("S"), raw("R")]),
+            ),
+            (
+                "duplicate endpoints",
+                relationship(RawDefinition {
+                    endpoints: vec![pair(b"A", b"B"), pair(b"A", b"B")],
+                    ..raw("R")
+                }),
+            ),
+            (
+                "unsorted endpoint sources",
+                relationship(RawDefinition {
+                    endpoints: vec![pair(b"B", b"A"), pair(b"A", b"B")],
+                    ..raw("R")
+                }),
+            ),
+            (
+                "unsorted endpoint destinations",
+                relationship(RawDefinition {
+                    endpoints: vec![pair(b"A", b"C"), pair(b"A", b"B")],
+                    ..raw("R")
+                }),
+            ),
+            (
+                "duplicate label properties",
+                raw_schema(
+                    &[RawDefinition {
+                        properties: vec![(b"p".to_vec(), 2, 0), (b"p".to_vec(), 2, 0)],
+                        ..raw("A")
+                    }],
+                    &[],
+                ),
+            ),
+            (
+                "unsorted label properties",
+                raw_schema(
+                    &[RawDefinition {
+                        properties: vec![(b"q".to_vec(), 2, 0), (b"p".to_vec(), 2, 0)],
+                        ..raw("A")
+                    }],
+                    &[],
+                ),
+            ),
+            (
+                "duplicate relationship properties",
+                relationship(RawDefinition {
+                    properties: vec![(b"w".to_vec(), 3, 0), (b"w".to_vec(), 3, 0)],
+                    ..raw("R")
+                }),
+            ),
+            (
+                "non-UTF-8 label",
+                raw_schema(
+                    &[RawDefinition {
+                        name: vec![0xff],
+                        ..raw("A")
+                    }],
+                    &[],
+                ),
+            ),
+        ]);
+        cases.extend([
+            (
+                "non-UTF-8 description",
+                raw_schema(
+                    &[RawDefinition {
+                        description: vec![0xc3],
+                        ..raw("A")
+                    }],
+                    &[],
+                ),
+            ),
+            (
+                "non-UTF-8 property name",
+                label_property((vec![0xff], 2, 0)),
+            ),
+            (
+                "non-UTF-8 relationship",
+                relationship(RawDefinition {
+                    name: vec![0xff],
+                    ..raw("R")
+                }),
+            ),
+            (
+                "non-UTF-8 endpoint",
+                relationship(RawDefinition {
+                    endpoints: vec![pair(b"A", &[0xff])],
+                    ..raw("R")
+                }),
+            ),
+            (
+                "label count overflow",
+                with_u32(raw_schema(&[], &[]), 0, u32::MAX),
+            ),
+            (
+                "relationship count overflow",
+                with_u32(raw_schema(&[], &[]), 4, u32::MAX),
+            ),
+            (
+                "label name length overflow",
+                with_u32(raw_schema(&[raw("A")], &[]), 4, u32::MAX),
+            ),
+            (
+                "description length overflow",
+                with_u32(raw_schema(&[raw("A")], &[]), 9, u32::MAX),
+            ),
+            (
+                "property count overflow",
+                with_u32(raw_schema(&[raw("A")], &[]), 13, u32::MAX),
+            ),
+            (
+                "property name length overflow",
+                with_u32(label_property((b"p".to_vec(), 2, 0)), 17, u32::MAX),
+            ),
+            (
+                "endpoint count overflow",
+                with_u32(relationship(raw("R")), 18, u32::MAX),
+            ),
+        ]);
+        for (what, section) in cases {
+            assert_eq!(
+                decode(&splice_schema(&base, &section)),
+                Err(CodecError::Corrupt),
+                "{what}"
+            );
+        }
+        for end in 0..valid.len() {
+            assert_eq!(decode(&valid[..end]), Err(CodecError::Corrupt), "{end}");
+        }
+        let mut trailing = valid;
+        trailing.push(0);
+        assert_eq!(decode(&trailing), Err(CodecError::Corrupt));
+    }
+
+    #[test]
+    fn schema_codec_enforces_existing_engine_schema_limits() {
+        let base = fixture_graph(&json!({"nodes": [], "edges": []}));
+        let base_bytes = encode(&base).unwrap();
+        let at_limit = limit_schema();
+        assert_eq!(at_limit.validate(), Ok(()));
+        let mut source = base.clone();
+        source.schema = at_limit.clone();
+        let bytes = encode(&source).unwrap();
+        let decoded = decode(&bytes).unwrap();
+        assert_eq!(decoded.source.schema, at_limit);
+        assert_eq!(encode(&decoded.source).unwrap(), bytes);
+
+        let long_label = "L".repeat(MAX_LABEL_BYTES);
+        let long_relationship = "R".repeat(MAX_RELATIONSHIP_TYPE_BYTES);
+        let over_limit = |change: &dyn Fn(&mut GraphSchema)| {
+            let mut schema = at_limit.clone();
+            change(&mut schema);
+            schema
+        };
+        let label = |name: &str, definition| GraphSchema::default().label(name, definition);
+        let relationship =
+            |name: &str, definition| GraphSchema::default().relationship(name, definition);
+        let property = PropertyDefinition::new;
+        let cases = [
+            (
+                "labels",
+                over_limit(&|schema| {
+                    schema
+                        .labels
+                        .insert("L256".into(), LabelDefinition::new(""));
+                }),
+            ),
+            (
+                "relationships",
+                over_limit(&|schema| {
+                    schema
+                        .relationships
+                        .insert("R256".into(), RelationshipDefinition::new(""));
+                }),
+            ),
+            (
+                "label properties",
+                over_limit(&|schema| {
+                    let wide = schema.labels.get_mut(&long_label).unwrap();
+                    wide.properties
+                        .insert("extra".into(), property(PropertyType::Boolean));
+                }),
+            ),
+            (
+                "relationship properties",
+                over_limit(&|schema| {
+                    let long = schema.relationships.get_mut(&long_relationship).unwrap();
+                    long.properties
+                        .insert("extra".into(), property(PropertyType::Boolean));
+                }),
+            ),
+            (
+                "indexed properties",
+                over_limit(&|schema| {
+                    let other = schema.labels.get_mut("L001").unwrap();
+                    other
+                        .properties
+                        .insert("x".into(), property(PropertyType::String).unique());
+                }),
+            ),
+            (
+                "endpoints",
+                over_limit(&|schema| {
+                    let long = schema.relationships.get_mut(&long_relationship).unwrap();
+                    long.endpoints.insert(("Z".into(), "Z".into()));
+                }),
+            ),
+            (
+                "label description",
+                label(
+                    "A",
+                    LabelDefinition::new("d".repeat(MAX_SCHEMA_DESCRIPTION_BYTES + 1)),
+                ),
+            ),
+            (
+                "relationship description",
+                relationship(
+                    "R",
+                    RelationshipDefinition::new("r".repeat(MAX_SCHEMA_DESCRIPTION_BYTES + 1)),
+                ),
+            ),
+            (
+                "label name",
+                label(&"L".repeat(MAX_LABEL_BYTES + 1), LabelDefinition::new("")),
+            ),
+            ("empty label name", label("", LabelDefinition::new(""))),
+            (
+                "label characters",
+                label("bad-label", LabelDefinition::new("")),
+            ),
+            (
+                "relationship name",
+                relationship(
+                    &"R".repeat(MAX_RELATIONSHIP_TYPE_BYTES + 1),
+                    RelationshipDefinition::new(""),
+                ),
+            ),
+            (
+                "relationship characters",
+                relationship("bad rel", RelationshipDefinition::new("")),
+            ),
+            (
+                "endpoint label",
+                relationship(
+                    "R",
+                    RelationshipDefinition::new("").endpoint("A", "L".repeat(MAX_LABEL_BYTES + 1)),
+                ),
+            ),
+            (
+                "endpoint characters",
+                relationship("R", RelationshipDefinition::new("").endpoint("a-b", "A")),
+            ),
+            (
+                "property name",
+                label(
+                    "A",
+                    LabelDefinition::new("").property(
+                        "p".repeat(MAX_FIELD_NAME_BYTES + 1),
+                        property(PropertyType::Boolean),
+                    ),
+                ),
+            ),
+            (
+                "empty property name",
+                label(
+                    "A",
+                    LabelDefinition::new("").property("", property(PropertyType::Boolean)),
+                ),
+            ),
+            (
+                "range index on a string",
+                label(
+                    "A",
+                    LabelDefinition::new("").property(
+                        "p",
+                        property(PropertyType::String).index(PropertyIndexKind::Range),
+                    ),
+                ),
+            ),
+            (
+                "unique relationship property",
+                relationship(
+                    "R",
+                    RelationshipDefinition::new("")
+                        .property("w", property(PropertyType::Integer).unique()),
+                ),
+            ),
+            (
+                "indexed relationship property",
+                relationship(
+                    "R",
+                    RelationshipDefinition::new("").property(
+                        "w",
+                        property(PropertyType::Integer).index(PropertyIndexKind::Exact),
+                    ),
+                ),
+            ),
+        ];
+        for (what, schema) in cases {
+            assert!(
+                schema.validate().is_err(),
+                "{what} must break an engine rule"
+            );
+            let mut invalid = base.clone();
+            invalid.schema = schema.clone();
+            assert_eq!(encode(&invalid), Err(CodecError::Corrupt), "{what}");
+            let crafted = splice_schema(&base_bytes, &schema_section(&schema));
+            assert_eq!(decode(&crafted), Err(CodecError::Corrupt), "{what}");
+        }
+    }
+
+    #[test]
+    fn schema_codec_refuses_data_violating_declared_rules_via_engine_checks() {
+        let state = schema_state();
+        let source = GraphSource::from_graph(state.graph(GraphId(3)).unwrap()).unwrap();
+        let section = schema_section(&source.schema);
+        let mutations: [(&str, SourceMutation); 9] = [
+            ("required node property", |source| {
+                source.nodes[0].properties.remove("active");
+            }),
+            ("unique node property", |source| {
+                source.nodes[1]
+                    .properties
+                    .insert("email".into(), text("a@x"));
+            }),
+            ("node property type", |source| {
+                source.nodes[0].properties.insert("age".into(), text("old"));
+            }),
+            ("unique range-indexed property", |source| {
+                source.nodes[5].properties.insert("code".into(), int(7));
+            }),
+            ("indexed property type", |source| {
+                source.nodes[3].properties.insert("code".into(), float(7.0));
+            }),
+            ("endpoints", |source| source.edges[0].source = 5),
+            ("unique triple", |source| source.edges[1].source = 1),
+            ("required edge property", |source| {
+                source.edges[0].properties = Properties::new();
+            }),
+            ("edge property type", |source| {
+                source.edges[2].properties.insert("weight".into(), int(1));
+            }),
+        ];
+        for (what, mutate) in mutations {
+            let mut invalid = source.clone();
+            mutate(&mut invalid);
+            assert_eq!(encode(&invalid), Err(CodecError::Corrupt), "{what}");
+            invalid.schema = GraphSchema::default();
+            let schemaless = encode(&invalid).unwrap();
+            assert_eq!(
+                decode(&splice_schema(&schemaless, &section)),
+                Err(CodecError::Corrupt),
+                "{what}"
+            );
+        }
+
+        let mut keyless = fixture_graph(&json!({
+            "nodes": [{"id": 1, "labels": ["Person"]}],
+            "edges": [],
+        }));
+        let schema = GraphSchema::default().label("Person", LabelDefinition::new(""));
+        let refused = CodecError::UnsupportedSource("schema with keyless nodes");
+        let schemaless = encode(&keyless).unwrap();
+        keyless.schema = schema.clone();
+        assert_eq!(encode(&keyless), Err(refused.clone()));
+        assert_eq!(
+            decode(&splice_schema(&schemaless, &schema_section(&schema))),
+            Err(refused)
+        );
+    }
+
+    #[test]
+    fn schema_engine_check_spans_multiple_snapshot_bodies() {
+        let count = MAX_BATCH_ENTRIES as u64 + 10;
+        let mut source = fixture_graph(&json!({"nodes": [], "edges": []}));
+        source.schema = GraphSchema::default().label(
+            "N",
+            LabelDefinition::new("").property(
+                "k",
+                PropertyDefinition::new(PropertyType::Integer)
+                    .required()
+                    .unique(),
+            ),
+        );
+        source.nodes = (0..count)
+            .map(|id| SourceNode {
+                id,
+                key: Some(format!("n{id}")),
+                labels: vec!["N".into()],
+                revision: 0,
+                deadline: None,
+                properties: props([("k", int(id as i64))]),
+                attachments: BTreeMap::new(),
+            })
+            .collect();
+        source.next_node_id = count;
+        let bytes = encode(&source).unwrap();
+        assert_eq!(decode(&bytes).unwrap().source, source);
+        let state = engine_state(&source).unwrap();
+        assert_eq!(
+            state.graph(GraphId(0)).unwrap().nodes().count(),
+            count as usize
+        );
+
+        // The clash sits past the first full body, so only a check over the
+        // whole multi-body load can see it.
+        source.nodes.last_mut().unwrap().properties = props([("k", int(1))]);
+        assert_eq!(encode(&source), Err(CodecError::Corrupt));
+    }
+
+    #[test]
+    fn decoder_refuses_prior_payload_versions() {
+        let source = fixture_graph(&json!({
+            "nodes": [{"id": 1, "labels": ["A"]}],
+            "edges": [],
+        }));
+        let bytes = encode(&source).unwrap();
+        assert_eq!(&bytes[..8], b"VLGCSR05");
+        for magic in [b"VLGCSR01", b"VLGCSR02", b"VLGCSR03", b"VLGCSR04"] {
+            let mut old = bytes.clone();
+            old[..8].copy_from_slice(magic);
+            assert_eq!(decode(&old), Err(CodecError::Corrupt));
+        }
+        // A genuine version 4 payload: the same bytes without the schema
+        // section, which version 4 did not have.
+        let span = schema_span(&bytes);
+        let mut version_4 = [&bytes[..span.start], &bytes[span.end..]].concat();
+        version_4[..8].copy_from_slice(b"VLGCSR04");
+        assert_eq!(decode(&version_4), Err(CodecError::Corrupt));
+        version_4[..8].copy_from_slice(MAGIC);
+        assert_eq!(decode(&version_4), Err(CodecError::Corrupt));
+    }
+
+    fn text(value: &str) -> PropertyValue {
+        PropertyValue::String(value.to_owned())
+    }
+
+    fn int(value: i64) -> PropertyValue {
+        PropertyValue::Integer(value)
+    }
+
+    fn float(value: f64) -> PropertyValue {
+        PropertyValue::Float(value)
+    }
+
+    fn boolean(value: bool) -> PropertyValue {
+        PropertyValue::Boolean(value)
+    }
+
+    fn props<const N: usize>(values: [(&str, PropertyValue); N]) -> Properties {
+        values
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value))
+            .collect()
+    }
+
+    fn put_node(id: u64, key: &str, labels: &[&str], properties: Properties) -> GraphEntry {
+        GraphEntry::PutNode {
+            node_id: NodeId(id),
+            key: key.to_owned(),
+            labels: labels.iter().map(|label| (*label).to_owned()).collect(),
+            properties,
+        }
+    }
+
+    fn put_edge(
+        id: u64,
+        source: u64,
+        destination: u64,
+        relationship: &str,
+        key: Option<&str>,
+        properties: Properties,
+    ) -> GraphEntry {
+        GraphEntry::PutEdge {
+            edge_id: EdgeId(id),
+            source: NodeId(source),
+            destination: NodeId(destination),
+            relationship: relationship.to_owned(),
+            key: key.map(str::to_owned),
+            properties,
+        }
+    }
+
+    fn equals(field: &str, value: PropertyValue) -> PropertyCondition {
+        PropertyCondition::Eq {
+            field: field.to_owned(),
+            value,
+        }
+    }
+
+    fn between(field: &str, min: PropertyValue, max: PropertyValue) -> PropertyCondition {
+        PropertyCondition::Range {
+            field: field.to_owned(),
+            min: Some(min),
+            max: Some(max),
+        }
+    }
+
+    fn violation(rule: &'static str, element: &str, property: Option<&str>) -> GraphError {
+        GraphError::SchemaViolation {
+            rule,
+            element: element.to_owned(),
+            property: property.map(str::to_owned),
+        }
+    }
+
+    /// Every declaration kind the engine schema supports: typed, required,
+    /// unique, exact- and range-indexed label properties, property-less and
+    /// never-carried labels, endpoint pairs, both multiplicities and typed
+    /// required relationship properties.
+    fn declared_schema() -> GraphSchema {
+        let property = PropertyDefinition::new;
+        GraphSchema::default()
+            .label(
+                "Person",
+                LabelDefinition::new("people λ")
+                    .property("email", property(PropertyType::String).required().unique())
+                    .property(
+                        "age",
+                        property(PropertyType::Integer).index(PropertyIndexKind::Range),
+                    )
+                    .property(
+                        "score",
+                        property(PropertyType::Float).index(PropertyIndexKind::Range),
+                    )
+                    .property(
+                        "team",
+                        property(PropertyType::String).index(PropertyIndexKind::Exact),
+                    )
+                    .property("active", property(PropertyType::Boolean).required())
+                    .property("home", property(PropertyType::GeoPoint)),
+            )
+            .label(
+                "Company",
+                LabelDefinition::new("").property(
+                    "code",
+                    property(PropertyType::Integer)
+                        .unique()
+                        .index(PropertyIndexKind::Range),
+                ),
+            )
+            .label("Archived", LabelDefinition::new("soft deleted"))
+            .label("Ghost", LabelDefinition::new("declared, never carried"))
+            .relationship(
+                "WORKS_AT",
+                RelationshipDefinition::new("employment")
+                    .endpoint("Person", "Company")
+                    .multiplicity(Multiplicity::UniqueTriple)
+                    .property("since", property(PropertyType::Integer).required()),
+            )
+            .relationship(
+                "KNOWS",
+                RelationshipDefinition::new("")
+                    .endpoint("Person", "Person")
+                    .endpoint("Company", "Person")
+                    .property("weight", property(PropertyType::Float)),
+            )
+            .relationship("UNUSED_REL", RelationshipDefinition::new("never used"))
+    }
+
+    /// A schema-bearing graph built only through engine writes: a node
+    /// re-put after creation, a deleted indexed node, deadlines, an
+    /// attachment, an undeclared relationship and raised high-water marks.
+    fn schema_state() -> GraphState {
+        let alice = |age| {
+            props([
+                ("active", boolean(true)),
+                ("age", int(age)),
+                ("email", text("a@x")),
+                (
+                    "home",
+                    PropertyValue::GeoPoint {
+                        latitude: 47.5,
+                        longitude: -122.25,
+                    },
+                ),
+                ("score", float(2.5)),
+                ("team", text("red")),
+            ])
+        };
+        let bodies = [
+            (
+                1,
+                vec![
+                    GraphEntry::CreateGraph {
+                        name: "people".into(),
+                    },
+                    GraphEntry::PutSchema {
+                        schema: declared_schema(),
+                    },
+                    put_node(1, "alice", &["Person"], alice(29)),
+                    put_node(
+                        2,
+                        "bob",
+                        &["Person"],
+                        props([
+                            ("active", boolean(false)),
+                            ("age", int(40)),
+                            ("email", text("b@x")),
+                            ("score", float(-0.0)),
+                            ("team", text("red")),
+                        ]),
+                    ),
+                    put_node(
+                        3,
+                        "carol",
+                        &["Archived", "Person"],
+                        props([
+                            ("active", boolean(true)),
+                            ("age", int(30)),
+                            ("email", text("c@x")),
+                            ("score", float(0.0)),
+                        ]),
+                    ),
+                    GraphEntry::NodeExpiry {
+                        node_id: NodeId(3),
+                        expires_at_ms: Some(50),
+                    },
+                    put_node(4, "acme", &["Company"], props([("code", int(7))])),
+                    put_node(5, "free", &[], props([("anything", text("goes"))])),
+                    put_node(
+                        6,
+                        "beta",
+                        &["Company"],
+                        props([("code", int(-3)), ("extra", boolean(true))]),
+                    ),
+                    put_node(
+                        7,
+                        "temp",
+                        &["Person"],
+                        props([
+                            ("active", boolean(true)),
+                            ("age", int(99)),
+                            ("email", text("t@x")),
+                        ]),
+                    ),
+                    put_edge(10, 1, 4, "WORKS_AT", None, props([("since", int(2020))])),
+                    put_edge(
+                        11,
+                        2,
+                        4,
+                        "WORKS_AT",
+                        Some("bob-acme"),
+                        props([("since", int(2021))]),
+                    ),
+                    put_edge(12, 1, 2, "KNOWS", None, props([("weight", float(0.5))])),
+                    GraphEntry::EdgeExpiry {
+                        edge_id: EdgeId(12),
+                        expires_at_ms: Some(60),
+                    },
+                    put_edge(13, 4, 3, "KNOWS", None, Properties::new()),
+                    put_edge(14, 5, 5, "LIKES", None, Properties::new()),
+                    GraphEntry::Attach {
+                        node_id: NodeId(1),
+                        collection: 3,
+                        record_id: 9,
+                    },
+                ],
+            ),
+            (2, vec![put_node(1, "alice", &["Person"], alice(31))]),
+            (
+                3,
+                vec![
+                    GraphEntry::DeleteNode { node_id: NodeId(7) },
+                    GraphEntry::GraphHighWater {
+                        next_node_id: 100,
+                        next_edge_id: 200,
+                    },
+                ],
+            ),
+        ];
+        let mut state = GraphState::new();
+        for (sequence, entries) in bodies {
+            state
+                .apply(
+                    sequence,
+                    &GraphBody {
+                        graph_id: GraphId(3),
+                        entries,
+                    },
+                )
+                .unwrap();
+        }
+        state
+    }
+
+    fn find(
+        graph: &Graph,
+        label: Option<&str>,
+        conditions: &[PropertyCondition],
+        now_ms: u64,
+        explain: bool,
+    ) -> QueryResult {
+        let clock = || 0;
+        let mut context = ExecutionContext::new(graph.graph_sequence(), &clock);
+        context.now_ms = now_ms;
+        let query = GraphQuery {
+            op: QueryOp::FindNodes {
+                label: label.map(str::to_owned),
+                conditions: conditions.to_vec(),
+                limit: None,
+                cursor: None,
+            },
+            projection: PropertyProjection::All,
+            explain,
+        };
+        execute(graph, &query, &GraphLimits::default(), &context).unwrap()
+    }
+
+    /// The byte range of the schema section of an encoded payload.
+    fn schema_span(bytes: &[u8]) -> std::ops::Range<usize> {
+        let mut reader = Reader::new(bytes);
+        reader.take(MAGIC.len()).unwrap();
+        reader.u16().unwrap();
+        reader.string(63).unwrap();
+        reader.u64().unwrap();
+        reader.u64().unwrap();
+        reader.u64().unwrap();
+        let start = reader.at;
+        reader.schema().unwrap();
+        start..reader.at
+    }
+
+    fn splice_schema(bytes: &[u8], section: &[u8]) -> Vec<u8> {
+        let span = schema_span(bytes);
+        [&bytes[..span.start], section, &bytes[span.end..]].concat()
+    }
+
+    fn schema_section(schema: &GraphSchema) -> Vec<u8> {
+        let mut section = Vec::new();
+        put_schema(&mut section, schema).unwrap();
+        section
+    }
+
+    /// One label or relationship written byte by byte, independently of
+    /// `put_schema`, so tests can pin the layout and craft malformed input.
+    struct RawDefinition {
+        name: Vec<u8>,
+        description: Vec<u8>,
+        multiplicity: u8,
+        endpoints: Vec<(Vec<u8>, Vec<u8>)>,
+        properties: Vec<(Vec<u8>, u8, u8)>,
+    }
+
+    fn raw(name: &str) -> RawDefinition {
+        RawDefinition {
+            name: name.as_bytes().to_vec(),
+            description: Vec::new(),
+            multiplicity: 1,
+            endpoints: Vec::new(),
+            properties: Vec::new(),
+        }
+    }
+
+    fn raw_schema(labels: &[RawDefinition], relationships: &[RawDefinition]) -> Vec<u8> {
+        fn count(out: &mut Vec<u8>, len: usize) {
+            out.extend_from_slice(&u32::try_from(len).unwrap().to_le_bytes());
+        }
+        fn bytes(out: &mut Vec<u8>, value: &[u8]) {
+            count(out, value.len());
+            out.extend_from_slice(value);
+        }
+        fn properties(out: &mut Vec<u8>, values: &[(Vec<u8>, u8, u8)]) {
+            count(out, values.len());
+            for (name, value_type, flags) in values {
+                bytes(out, name);
+                out.extend_from_slice(&[*value_type, *flags]);
+            }
+        }
+        let mut out = Vec::new();
+        count(&mut out, labels.len());
+        for label in labels {
+            bytes(&mut out, &label.name);
+            bytes(&mut out, &label.description);
+            properties(&mut out, &label.properties);
+        }
+        count(&mut out, relationships.len());
+        for relationship in relationships {
+            bytes(&mut out, &relationship.name);
+            bytes(&mut out, &relationship.description);
+            out.push(relationship.multiplicity);
+            count(&mut out, relationship.endpoints.len());
+            for (source, destination) in &relationship.endpoints {
+                bytes(&mut out, source);
+                bytes(&mut out, destination);
+            }
+            properties(&mut out, &relationship.properties);
+        }
+        out
+    }
+
+    fn with_u32(mut bytes: Vec<u8>, at: usize, value: u32) -> Vec<u8> {
+        bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        bytes
+    }
+
+    /// A schema at every engine schema limit at once.
+    fn limit_schema() -> GraphSchema {
+        let mut wide = LabelDefinition::new("d".repeat(MAX_SCHEMA_DESCRIPTION_BYTES));
+        for index in 0..MAX_SCHEMA_PROPERTIES {
+            let definition = PropertyDefinition::new(PropertyType::Integer);
+            let definition = match index {
+                index if index >= MAX_INDEXED_PROPERTIES => definition,
+                index if index % 3 == 0 => definition.unique(),
+                index if index % 3 == 1 => definition.index(PropertyIndexKind::Exact),
+                _ => definition.index(PropertyIndexKind::Range),
+            };
+            let name = format!("{}{index:02}", "p".repeat(MAX_FIELD_NAME_BYTES - 2));
+            wide = wide.property(name, definition);
+        }
+        let mut schema = GraphSchema::default().label("L".repeat(MAX_LABEL_BYTES), wide);
+        for index in 1..MAX_SCHEMA_LABELS {
+            schema = schema.label(format!("L{index:03}"), LabelDefinition::new(""));
+        }
+        let mut long = RelationshipDefinition::new("r".repeat(MAX_SCHEMA_DESCRIPTION_BYTES));
+        for index in 0..MAX_SCHEMA_ENDPOINTS {
+            long = long.endpoint(format!("S{index:02}"), "D".repeat(MAX_LABEL_BYTES));
+        }
+        for index in 0..MAX_SCHEMA_PROPERTIES {
+            long = long.property(
+                format!("w{index:02}"),
+                PropertyDefinition::new(PropertyType::Float).required(),
+            );
+        }
+        schema = schema.relationship("R".repeat(MAX_RELATIONSHIP_TYPE_BYTES), long);
+        for index in 1..MAX_SCHEMA_RELATIONSHIPS {
+            schema = schema.relationship(format!("R{index:03}"), RelationshipDefinition::new(""));
+        }
+        schema
     }
 }

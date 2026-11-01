@@ -1,8 +1,8 @@
 # Speed P4: compact graph
 
 **Status:** approved design; private test-only CSR, ordinary typed-property,
-label-posting and attachment codec slices are implemented. Full P4
-implementation and measured results remain outstanding.
+label-posting, attachment and schema-declaration codec slices are implemented.
+Full P4 implementation and measured results remain outstanding.
 Depends on [P2](p2-directory-store.md); exits remain
 [S3/S4/F6](../performance/storage-goals.md): **<=24 B/edge disk,
 <=100 B/edge resident, >=1M edges/s bulk load, <=300 ms reopen at 1M edges**.
@@ -159,8 +159,8 @@ Property names are dictionary-coded in UTF-8 byte order, while
 per-record typed values preserve strings, signed integers, finite float/GeoPoint
 bits, and booleans. Each map retains the engine's existing field, string and
 byte limits; this is a correctness format, not a columnar compression or size
-claim. The versioned private payload magic is `VLGCSR04`; old `VLGCSR01`,
-`VLGCSR02`, and `VLGCSR03` bytes are refused, not reinterpreted. Its decoder
+claim. The versioned private payload magic is `VLGCSR05`; old `VLGCSR01`
+through `VLGCSR04` bytes are refused, not reinterpreted. Its decoder
 rejects noncanonical dictionaries/IDs, invalid endpoints or codes, incorrect
 row ordering, missing or duplicate CSR membership, overflow, truncation and
 trailing bytes, noncanonical label posting codes/ordinals, and missing or extra
@@ -176,6 +176,28 @@ uses placeholder lifecycle metadata and exercises CSR construction directly,
 not the persisted codec. Label access tests likewise cover 0 and `u64::MAX`
 logically without accepting impossible persisted high-water metadata. A generated
 engine graph checks decoded scan/intersection parity, including retained deadlines.
+
+The schema-declaration slice stores the graph's existing `GraphSchema`
+losslessly after the high-water marks: label and relationship definitions
+with descriptions, typed property definitions (the engine's five types,
+required/unique flags and exact/range index kinds), relationship endpoints
+and multiplicity. Names, endpoints and properties are written in ascending
+order, so equal schemas encode identically. The decoder bounds every count
+and string by the remaining bytes and the existing schema limits, and it
+rejects unknown type, flag and multiplicity codes. It also rejects duplicate
+or unordered declarations, invalid UTF-8, overflow, truncation and trailing
+bytes. Every accepted schema must pass the engine's own `GraphSchema::validate`.
+Derived property indexes are not stored. A schema-bearing graph is loaded
+through the engine snapshot loader on encode and decode. That loader
+rebuilds the exact/range indexes and checks every declared type, required,
+unique, endpoint and unique-triple rule. Data that violates the schema is
+refused. Tests compare the rebuilt engine state with the original: the same
+state, the same index choices and results from engine queries, and the same
+accept/refuse outcome for later writes. A
+schema needs keyed nodes, so synthetic keyless sources with a schema are
+refused; engine nodes always have keys. This check reruns the full engine
+load and is not a compact index. The compact base does not serve or enforce
+schema rules by itself.
 
 The independently reviewed `tests/compact_graph_overlay_oracle.py` and
 `graph-overlay-cases.json` model committed-state projections, not an ordered
@@ -213,14 +235,17 @@ semantics, not a byte format or a proof of checkpoint-level owner uniqueness.
 This codec is not wired to the checkpoint block registry, shared framing,
 checkpoint reads or production builds. Cross-graph attachment-owner uniqueness
 is a checkpoint-level invariant; one graph codec cannot validate it. It refuses
-declared schema and temporal segments rather than dropping them. It does not
-encode schema/property indexes or temporal history; those sources therefore
-remain unsupported. No changes were made to op-12/op-15, public
+temporal segments rather than dropping them, and it does not encode temporal
+history, so temporal sources remain unsupported. It does not persist or serve
+property indexes; schema declarations are preserved and their indexes and rules
+are rebuilt and checked only through the engine snapshot loader. No changes
+were made to op-12/op-15, public
 APIs, or `src/openapi.json`. The remaining P4 slices are shared block
 dispatch/publication, compact-base access in reads, mutation overlay and
-checkpoint integration and columnar property storage, schema/temporal encoding
-or faithful refusal in each path, parallel import, and all performance and
-cross-platform qualification.
+checkpoint integration and columnar property storage, native compact index
+serving and schema enforcement, schema handling in each read, overlay and
+checkpoint path, temporal encoding or faithful refusal in each path,
+parallel import, and all performance and cross-platform qualification.
 
 Next roll out opt-in checkpoint reads, mutation/TTL integration, then parallel
 import; enable defaults only after acceptance.
