@@ -29,7 +29,7 @@ type Write<'a> = dyn Fn(&mut Database) -> Result<()> + 'a;
 type Entries<'a> = dyn Fn(&mut Vec<GraphEntry>) + 'a;
 
 /// `frame` committed at `sequence` instead.
-fn at(frame: &[u8], sequence: u64) -> Vec<u8> {
+pub(super) fn at(frame: &[u8], sequence: u64) -> Vec<u8> {
     refit(frame, |bytes| set_u64(bytes, 8, sequence))
 }
 
@@ -41,7 +41,7 @@ fn frames_of(bytes: &[u8]) -> Vec<Vec<u8>> {
 }
 
 /// Every named case whose readers do not all give its expected outcome.
-fn failures(cases: &[(&str, Vec<u8>, &str)], floor: u64) -> Vec<String> {
+pub(super) fn failures(cases: &[(&str, Vec<u8>, &str)], floor: u64) -> Vec<String> {
     mismatches(
         cases
             .iter()

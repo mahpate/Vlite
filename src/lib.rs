@@ -11,6 +11,7 @@ mod directory;
 pub use directory::DEFAULT_CHECKPOINT_BYTES;
 pub mod disk_ann;
 mod durability;
+mod exact_kernels;
 pub use durability::{DEFAULT_FLUSH_INTERVAL, Durability, MAX_FLUSH_INTERVAL, MIN_FLUSH_INTERVAL};
 #[cfg(feature = "gpu")]
 pub mod gpu;
@@ -40,6 +41,9 @@ mod rebuild;
 pub mod records;
 pub mod rerank;
 mod stats;
+/// The lib test binary's only global allocator and logger.
+#[cfg(test)]
+mod test_globals;
 pub mod text_index;
 pub mod vectors;
 pub use ann_snapshot::{
@@ -3733,8 +3737,12 @@ fn exact_scan<'a>(
     now_ms: u64,
     stats: &mut SearchStats,
 ) -> BinaryHeap<RankedHit> {
+    let scorer = exact_kernels::Scorer::new(query, metric, query_norm);
     let mut hits: BinaryHeap<RankedHit> = BinaryHeap::with_capacity(limit);
-    'records: for (&id, record) in scan {
+    let mut ids = [0; exact_kernels::LANES];
+    let mut rows: [&[f32]; exact_kernels::LANES] = [&[]; exact_kernels::LANES];
+    let mut pending = 0;
+    for (&id, record) in scan {
         stats.records_scanned += 1;
         if expiries.get(&id).is_some_and(|expires| *expires <= now_ms)
             || !metadata::matches(&record.metadata, conditions)
@@ -3742,45 +3750,42 @@ fn exact_scan<'a>(
             continue;
         }
         stats.distance_evaluations += 1;
-        let distance = if metric != DistanceMetric::SquaredL2 {
-            let norm = if metric == DistanceMetric::Cosine {
-                vector_norm(&record.vector)
-            } else {
-                0.0
-            };
-            let Some(distance) = metric_distance(&record.vector, query, metric, norm, query_norm)
-            else {
-                continue;
-            };
-            distance
-        } else if query.len() <= 32 {
-            record
-                .vector
-                .iter()
-                .zip(query)
-                .map(|(&a, &b)| {
-                    let difference = f64::from(a) - f64::from(b);
-                    difference * difference
-                })
-                .sum()
-        } else {
-            let cutoff = if hits.len() == limit {
-                hits.peek().expect("nonempty bounded heap").0.distance
-            } else {
-                f64::INFINITY
-            };
-            let mut distance = 0.0;
-            for (values, query) in record.vector.chunks(32).zip(query.chunks(32)) {
-                for (&a, &b) in values.iter().zip(query) {
-                    let difference = f64::from(a) - f64::from(b);
-                    distance += difference * difference;
-                }
-                // Nonnegative terms cannot bring a rejected candidate below the cutoff.
-                if distance > cutoff {
-                    continue 'records;
-                }
-            }
-            distance
+        ids[pending] = id;
+        rows[pending] = &record.vector;
+        pending += 1;
+        if pending == exact_kernels::LANES {
+            offer_scored(&scorer, &ids, &rows, limit, &mut hits);
+            pending = 0;
+        }
+    }
+    if pending > 0 {
+        offer_scored(&scorer, &ids[..pending], &rows[..pending], limit, &mut hits);
+    }
+    hits
+}
+
+/// Scores one batch of scanned rows and offers the hits to the bounded heap in
+/// scan order. `RankedHit` is a total order, so batching cannot change the
+/// kept set. A squared-L2 batch whose rows all exceed the current worst hit
+/// is dropped early; nonnegative terms cannot bring them back below it.
+fn offer_scored(
+    scorer: &exact_kernels::Scorer<'_>,
+    ids: &[u64],
+    rows: &[&[f32]],
+    limit: usize,
+    hits: &mut BinaryHeap<RankedHit>,
+) {
+    let cutoff = match hits.peek() {
+        Some(worst) if hits.len() == limit => worst.0.distance,
+        _ => f64::INFINITY,
+    };
+    let mut distances = [None; exact_kernels::LANES];
+    if !scorer.score_batch(rows, None, cutoff, &mut distances) {
+        return;
+    }
+    for (&id, distance) in ids.iter().zip(distances) {
+        let Some(distance) = distance else {
+            continue;
         };
         let hit = RankedHit(SearchHit { id, distance });
         if hits.len() < limit {
@@ -3791,7 +3796,6 @@ fn exact_scan<'a>(
             *worst = hit;
         }
     }
-    hits
 }
 
 fn append_and_sync<W: Write + Seek>(

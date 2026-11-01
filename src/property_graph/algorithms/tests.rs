@@ -1,4 +1,4 @@
-//! Adapter tests for bounded local algorithms (Gap 5 S1 to S3).
+//! Adapter tests for bounded local algorithms (Gap 5 S1 to S4).
 //!
 //! Golden cases come from `tests/fixtures/graph_algorithms/golden.json`,
 //! checked independently by `tests/graph_algorithm_oracle.py`. Every one of
@@ -7,8 +7,8 @@
 //! `weighted_shortest_path` cases also check the S2 path outcome. The S3
 //! PageRank and label propagation outputs, and the finite-step traces of
 //! `tests/fixtures/graph_algorithms/iterative-cases.json`, are checked in
-//! the `iterative` child module; betweenness outputs belong to a later
-//! slice and are not claimed. The remaining tests cover the public request
+//! the `iterative` child module, and the four S4 betweenness outputs in the
+//! `betweenness` child module. The remaining tests cover the public request
 //! and result mapping, typed errors, the TTL clock, budgets, cancellation,
 //! the deadline, output caps and non-mutation through a real database file.
 
@@ -1388,4 +1388,5 @@ fn exact_cost_ties_go_to_fewer_hops_through_the_public_api() {
     }
 }
 
+mod betweenness;
 mod iterative;

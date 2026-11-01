@@ -248,12 +248,14 @@ and await independent review. There is no API, wire, OpenAPI, proto, `Error` or 
   that deletes leave; other changes keep the row in its block. Expiry stays a per-row deadline checked at the
   query clock; expired rows stay summarized, which only weakens pruning. Declaration changes rebuild; churn above
   max(4096, rows / 4) drops the generation and the next query derives it again.
-- **Budget.** The heap one collection's summaries hold is limited to 64 MiB: covered names, IDs, bitmap,
-  block and segment lists, field lists and dictionaries at their allocated capacities (strings at theirs),
-  plus the overlay at 24 bytes per ID and 168 bytes (a bound on std's B-tree nodes). Allocator overhead is
-  not counted. A derivation charges the names, IDs, bitmap and lists before allocating them, then each block
-  as it is built. Past the budget, at derivation or as the overlay grows, the collection scans exactly, logs
-  one `warn` on target `vlite::filter` (`{"event":"filter_summary_budget","outcome":"exact_scan","rows",
+- **Budget.** 64 MiB limits the heap one collection's summaries retain, in allocator-requested bytes: covered
+  names, IDs, bitmap, block and segment lists, field lists and dictionaries at their allocated capacities (strings
+  at theirs), plus the overlay at 24 bytes per ID and 168 bytes (a bound on std's B-tree nodes). It is not a cap on
+  RSS, peak memory or a whole query: allocator overhead is not counted, a block is built before it is charged, and
+  a query's candidate set is separate and may pass half the records (by up to one block's IDs plus the overlay)
+  before the query falls back. A derivation charges the names, IDs, bitmap and lists before allocating them, then
+  each block as it is built. Past the budget, at derivation or as the overlay grows, the collection scans exactly,
+  logs one `warn` on target `vlite::filter` (`{"event":"filter_summary_budget","outcome":"exact_scan","rows",
   "min_bytes","budget"}`) and retries once churn passes the threshold.
 - **Derived block.** Kind `0x0400`, codec version 1, holds one block summary; `src/compact/stats/codec.rs` documents
   the layout. Flags are 0 (derived). The header's source field holds the first 8 bytes of a SHA-256 over the
@@ -266,10 +268,11 @@ and await independent review. There is no API, wire, OpenAPI, proto, `Error` or 
   absence; invalid filters; delete/reinsert; metadata and TTL edits; explicit clocks; a merge; declaration changes;
   reopen, replay, checkpoints, conversion, compaction, encryption and memory. Summary-only queries must scan at most
   half the records. `src/compact/stats/tests.rs` replays the six oracle cases and checks an independently written
-  byte-exact golden block, malformed, stale and newer-version blocks, budget exhaustion and loader skipping. A
-  counting test allocator checks that the bytes charged equal the heap the summaries hold, and that the overlay
-  bound holds. At the real 64 MiB budget, 16 fields of 17 one-byte strings each fit 2935 blocks and prune; one
-  block more, or the 3900 blocks that initialized-only string accounting would have admitted, warn and scan.
+  byte-exact golden block, malformed, stale and newer-version blocks, budget exhaustion and loader skipping. The
+  lib test binary's one counting allocator (`src/test_globals.rs`, shared with the precision peak tests) checks
+  that the bytes charged equal the heap the summaries retain, and that the overlay bound holds. At the real 64 MiB
+  budget, 16 fields of 17 one-byte strings each fit 2935 blocks and prune; one block more, or the 3900 blocks that
+  initialized-only string accounting would have admitted, warn and scan.
 
 Open for review: block size, the half-records cap, the churn threshold and the budget (allocator overhead
 uncounted; the overlay bound follows std's B-tree node layout, checked by the tests); release notes for lower

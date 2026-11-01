@@ -212,8 +212,8 @@ are on the [releases page](https://github.com/mahpate/Vlite/releases).
 
 The [next-major roadmap](docs/projects/roadmap/next-major.md) tracks unreleased
 development. Its embedded Rust degree counts and bounded weighted paths are
-implemented and reviewed; PageRank and label propagation are implemented but
-still under independent review. These are not released capabilities or new
+implemented and reviewed, as are PageRank, label propagation and sampled
+betweenness. These are not released capabilities or new
 REST/gRPC graph endpoints.
 
 These plans are proposals under review, not commitments:

@@ -1,4 +1,4 @@
-//! Bounded local graph algorithms on [`GraphRef`] (Gap 5 slices S1 to S3).
+//! Bounded local graph algorithms on [`GraphRef`] (Gap 5 slices S1 to S4).
 //!
 //! [`GraphRef::algorithm`] extracts one explicit local scope and runs one
 //! algorithm on it, within the read limits ([`GraphLimits`]) plus the
@@ -34,6 +34,11 @@
 //!   (by `max_iterations`, a budget, the deadline or cancellation) they
 //!   return the last full step with the echo, marked incomplete; stopped
 //!   before it, nothing.
+//! - Sampling: betweenness likewise builds its echo and reserves every
+//!   buffer before its first source, and never returns a partial source.
+//!   Stopped after one (by a budget, the deadline or cancellation) it
+//!   returns the completed sources' estimate with the echo, marked
+//!   incomplete; stopped before it, nothing.
 //! - Results ([`GraphAlgorithmRead`]): rows ascend by node ID, paths keep
 //!   traversal order, and the view sequence and TTL clock are echoed, with
 //!   the normalized request alongside every output. Output caps apply to
@@ -54,7 +59,8 @@ use super::GraphRef;
 use super::convert::graph_error;
 use super::engine::algorithm as kernel;
 pub use super::engine::algorithm::{
-    CommunityAssignment, GraphAlgorithmLimits, LabelPropagationOutput, NodeScore, PageRankOutput,
+    BetweennessOutput, CommunityAssignment, GraphAlgorithmLimits, LabelPropagationOutput,
+    NodeScore, PageRankOutput,
 };
 use super::engine::{ExecutionContext, Graph, NodeId, PropertyCondition, PropertyValue};
 use super::read::{Direction, GraphLimits, NodeSelector};
@@ -139,6 +145,16 @@ pub enum GraphAlgorithm {
     /// the smallest such label. A sweep without changes converges; at most
     /// `max_iterations` sweeps run.
     LabelPropagation,
+    /// Sampled betweenness: unweighted Brandes over the computational arcs
+    /// (`Both` walks each edge both ways), with parallel arcs collapsed and
+    /// self-loops ignored, counting every shortest path and excluding both
+    /// endpoints. The `min(max_sampled_sources, n)` sources are the scoped
+    /// nodes ranked by `(SplitMix64(sampling_seed XOR node ID), node ID)`.
+    /// For `n > 2` a node scores `(n / k) * D / ((n - 1) * (n - 2))`, where
+    /// `D` sums its dependencies over the `k` completed sources, the same
+    /// formula for `Both`; for `n <= 2` every score is 0. Only sampling all
+    /// `n` sources is exact.
+    Betweenness { sampling_seed: u64 },
 }
 
 /// A scope and the algorithm to run on it.
@@ -209,6 +225,8 @@ pub enum GraphAlgorithmOutput {
     PageRank(PageRankOutput),
     /// Communities of the last full sweep, ascending by node ID.
     LabelPropagation(LabelPropagationOutput),
+    /// Scores over the completed sources, ascending by node ID.
+    Betweenness(BetweennessOutput),
 }
 
 /// Why an algorithm result is incomplete. A result reports at most one
@@ -229,8 +247,9 @@ pub enum GraphAlgorithmTruncation {
     /// A buffer would exceed `max_scratch_bytes`.
     MemoryLimit,
     /// The finished output exceeds an output cap: degree, score and
-    /// community rows are cut to `max_output_nodes`; a path over the node,
-    /// edge or path cap is withheld.
+    /// community rows are cut to `max_output_nodes` (betweenness source
+    /// lists are never cut); a path over the node, edge or path cap is
+    /// withheld.
     OutputLimit,
     Deadline,
     Cancelled,
@@ -267,7 +286,9 @@ pub struct GraphAlgorithmRead {
     /// `None` when extraction or computation stopped (or a path exceeds an
     /// output cap); never an analysis of a partial scope. PageRank and
     /// label propagation stopped after their first full step keep the last
-    /// full step, with `complete` and `computation_complete` false.
+    /// full step, and betweenness stopped after its first completed source
+    /// keeps the completed sources' scores, with `complete` and
+    /// `computation_complete` false.
     pub output: Option<GraphAlgorithmOutput>,
     /// True exactly when `truncation` is empty.
     pub complete: bool,
@@ -275,7 +296,9 @@ pub struct GraphAlgorithmRead {
     /// Extraction finished. Local completeness never means global coverage.
     pub scope_complete: bool,
     /// The computation and the public result finished, output caps aside;
-    /// PageRank and label propagation also converged.
+    /// PageRank and label propagation also converged, and betweenness
+    /// completed every selected source (an estimate unless all were
+    /// sampled).
     pub computation_complete: bool,
     pub view_sequence: u64,
     /// The TTL clock every visibility decision used.
@@ -287,8 +310,8 @@ pub struct GraphAlgorithmRead {
     /// deduplicated, and for PageRank the effective damping and tolerance
     /// and the personalization as node IDs ascending with their masses as
     /// given. It is built under the run's budgets: `Some` when
-    /// `computation_complete` is true, and with every partial PageRank or
-    /// label propagation output.
+    /// `computation_complete` is true, and with every partial PageRank,
+    /// label propagation or betweenness output.
     pub request: Option<GraphAlgorithmRequest>,
     /// The hop bound used for the scope and paths.
     pub max_hops: u64,
@@ -310,8 +333,9 @@ pub enum GraphAlgorithmError {
     /// A retained edge's weight is negative, non-finite, an integer above
     /// 2^53 or not a number (the smallest such edge ID).
     InvalidWeight { edge_id: u64, reason: &'static str },
-    /// The winning path cost, a node's PageRank out-weight or the
-    /// personalization total exceeds the largest finite f64.
+    /// The winning path cost, a node's PageRank out-weight, the
+    /// personalization total, or a betweenness shortest-path count or
+    /// dependency exceeds the largest finite f64.
     NumericOverflow,
 }
 
@@ -480,6 +504,9 @@ fn borrowed(request: &GraphAlgorithmRequest) -> kernel::Request<'_, NodeSelector
                 weight_property: weight_property.as_deref(),
             }),
             GraphAlgorithm::LabelPropagation => kernel::Job::LabelPropagation,
+            GraphAlgorithm::Betweenness { sampling_seed } => kernel::Job::Betweenness {
+                sampling_seed: *sampling_seed,
+            },
         },
     }
 }
@@ -587,9 +614,9 @@ fn property_conditions(
 
 /// The public output and the normalized request echo, one vertex unit per
 /// row, ID, seed, name, condition and personalization entry, every buffer
-/// reserved first. The iterative algorithms stage before their first step,
-/// with no output: their rows are moved from the engine (see
-/// [`iterated`]).
+/// reserved first. The iterative and sampled algorithms stage before their
+/// first step or source, with no output: their rows are moved from the
+/// engine (see [`iterated`]).
 fn stage(
     request: &GraphAlgorithmRequest,
     finished: &kernel::Finished<'_>,
@@ -670,6 +697,9 @@ fn stage(
             }
         }
         (GraphAlgorithm::LabelPropagation, _) => GraphAlgorithm::LabelPropagation,
+        (GraphAlgorithm::Betweenness { sampling_seed }, _) => GraphAlgorithm::Betweenness {
+            sampling_seed: *sampling_seed,
+        },
     };
     let request = GraphAlgorithmRequest {
         scope: GraphAlgorithmScope {
@@ -755,20 +785,26 @@ fn public_output(
         ) => GraphAlgorithmOutput::WeightedShortestPath(
             WeightedPathOutcome::NoPathWithinScopeAndHops,
         ),
-        // Staged before the first step; never reached.
-        kernel::AlgorithmOutput::PageRank(_) | kernel::AlgorithmOutput::LabelPropagation(_) => {
+        // Staged before the first step or source; never reached.
+        kernel::AlgorithmOutput::PageRank(_)
+        | kernel::AlgorithmOutput::LabelPropagation(_)
+        | kernel::AlgorithmOutput::Betweenness(_) => {
             unreachable!("iterative outputs are moved, not staged")
         }
     })
 }
 
-/// The public form of an iterative output: the engine's rows, whose
-/// buffers the engine reserved and paid for before its first step.
+/// The public form of an iterative or sampled output: the engine's rows,
+/// whose buffers the engine reserved and paid for before its first step or
+/// source.
 fn iterated(output: kernel::AlgorithmOutput) -> Option<GraphAlgorithmOutput> {
     match output {
         kernel::AlgorithmOutput::PageRank(output) => Some(GraphAlgorithmOutput::PageRank(output)),
         kernel::AlgorithmOutput::LabelPropagation(output) => {
             Some(GraphAlgorithmOutput::LabelPropagation(output))
+        }
+        kernel::AlgorithmOutput::Betweenness(output) => {
+            Some(GraphAlgorithmOutput::Betweenness(output))
         }
         kernel::AlgorithmOutput::Degree(_) | kernel::AlgorithmOutput::WeightedShortestPath(_) => {
             None

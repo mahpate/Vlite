@@ -12,11 +12,10 @@ use super::*;
 use crate::compact::tests::{FLOOR, block, frame};
 use crate::compact::{CRITICAL, KIND_END, KIND_TABLE, envelope, skip_report};
 use crate::format::{self, FLAG_COMPACT, FLAG_HISTORY, PREFIX_SIZE};
+use crate::test_globals::{Logged, counted, live, logged};
 use crate::{Error, Record};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::collections::BTreeMap;
 
 fn int(value: i64) -> MetadataValue {
@@ -874,132 +873,11 @@ fn over_budget_summaries_scan_until_churn_allows_a_retry() {
 }
 
 // ------------------------------------------------------- memory accounting
-
-/// The lib test binary's allocator: `System`, also counting the net heap
-/// bytes (requested sizes, as `Vec` and `String` capacities are) that the
-/// current thread allocates while `counted` runs. Other threads, and this
-/// one outside `counted`, are not counted.
-struct Counting;
-
-thread_local! {
-    static LIVE: Cell<Option<isize>> = const { Cell::new(None) };
-}
-
-fn count(delta: isize) {
-    let _ = LIVE.try_with(|live| {
-        if let Some(bytes) = live.get() {
-            live.set(Some(bytes + delta));
-        }
-    });
-}
-
-// Every call forwards to `System` with the caller's layout and only adds
-// bookkeeping on this thread, so `System`'s contract carries over.
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() {
-            count(layout.size() as isize);
-        }
-        pointer
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc_zeroed(layout) };
-        if !pointer.is_null() {
-            count(layout.size() as isize);
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        count(-(layout.size() as isize));
-        unsafe { System.dealloc(pointer, layout) }
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        let moved = unsafe { System.realloc(pointer, layout, size) };
-        if !moved.is_null() {
-            count(size as isize - layout.size() as isize);
-        }
-        moved
-    }
-}
-
-#[global_allocator]
-static COUNTING: Counting = Counting;
-
-/// Runs `body` and returns its value with the heap bytes it left allocated
-/// on this thread; `live` reads the running count inside `body`.
-fn counted<T>(body: impl FnOnce() -> T) -> (T, usize) {
-    LIVE.with(|live| assert_eq!(live.replace(Some(0)), None, "nested count"));
-    let value = body();
-    let bytes = LIVE.with(Cell::take).expect("counting");
-    (
-        value,
-        usize::try_from(bytes).expect("freed more than counted"),
-    )
-}
-
-fn live() -> usize {
-    usize::try_from(LIVE.with(Cell::get).expect("counting")).unwrap()
-}
-
-/// A logger keeping the `vlite` records of the threads inside `logged`
-/// only, so tests running in parallel never see each other's records. It is
-/// installed once for the lib test binary, where nothing else installs one.
-mod capture {
-    use log::{Level, LevelFilter, Log, Metadata, Record};
-    use std::cell::RefCell;
-    use std::sync::Once;
-
-    pub type Logged = Vec<(Level, String, String)>;
-
-    thread_local! {
-        static RECORDS: RefCell<Option<Logged>> = const { RefCell::new(None) };
-    }
-
-    struct Capture;
-
-    impl Log for Capture {
-        fn enabled(&self, metadata: &Metadata) -> bool {
-            metadata.target().starts_with("vlite")
-        }
-
-        fn log(&self, record: &Record) {
-            if self.enabled(record.metadata()) {
-                RECORDS.with(|records| {
-                    if let Some(records) = records.borrow_mut().as_mut() {
-                        records.push((
-                            record.level(),
-                            record.target().to_owned(),
-                            record.args().to_string(),
-                        ));
-                    }
-                });
-            }
-        }
-
-        fn flush(&self) {}
-    }
-
-    /// Runs `body` and returns it with what it logged on this thread.
-    pub fn logged<T>(body: impl FnOnce() -> T) -> (T, Logged) {
-        static INSTALL: Once = Once::new();
-        static LOGGER: Capture = Capture;
-        INSTALL.call_once(|| {
-            log::set_logger(&LOGGER).expect("the only logger in the lib test binary");
-            log::set_max_level(LevelFilter::Trace);
-        });
-        RECORDS.with(|records| *records.borrow_mut() = Some(Vec::new()));
-        let value = body();
-        let records = RECORDS.with(|records| records.borrow_mut().take());
-        (value, records.unwrap_or_default())
-    }
-}
+// `counted` (crate::test_globals) measures this thread's net requested heap
+// bytes; `logged` captures this thread's warnings.
 
 /// The one warning of summaries over `budget`.
-fn budget_warning(rows: usize, bytes: usize, budget: usize) -> capture::Logged {
+fn budget_warning(rows: usize, bytes: usize, budget: usize) -> Logged {
     vec![(
         log::Level::Warn,
         "vlite::filter".to_owned(),
@@ -1141,7 +1019,7 @@ fn near_budget_dictionaries_fall_back_to_an_exact_scan() {
         let summaries = Summaries::new(layout.names.clone());
         assert_eq!(summaries.budget, 64 << 20);
         let rows = blocks * BLOCK_ROWS;
-        let (state, logged) = capture::logged(|| summaries.derive(rows, layout.rows(blocks)));
+        let (state, logged) = logged(|| summaries.derive(rows, layout.rows(blocks)));
         let State::OverBudget {
             rows: over,
             pending,
@@ -1272,7 +1150,7 @@ fn overlay_growth_past_the_budget_falls_back_to_an_exact_scan() {
     apply(&mut summaries, &mut records, 3000, n(5));
     assert_eq!(churn(&summaries), (1, 2));
 
-    let ((), logged) = capture::logged(|| apply(&mut summaries, &mut records, 3001, n(6)));
+    let ((), logged) = logged(|| apply(&mut summaries, &mut records, 3001, n(6)));
     let bytes = base + overlay_bytes(3);
     assert_eq!(logged, budget_warning(3000, bytes, summaries.budget));
     assert!(matches!(

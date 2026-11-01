@@ -83,4 +83,4 @@ pub use schema::{
     ObservedRelationship, ObservedSchema, PropertyDefinition, PropertyIndexKind, PropertyType,
     RelationshipDefinition, SchemaOrigin,
 };
-pub use state::{Adjacency, Graph, GraphState, MemoryComponent};
+pub use state::{Adjacency, Graph, GraphState, MemoryComponent, SnapshotBuilder};

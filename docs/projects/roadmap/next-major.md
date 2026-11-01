@@ -18,10 +18,10 @@
 | Gap 2: key-value API | Agent memory | Namespaced string keys, vector-free values, expiry, conditional writes | Pool claims, framework stores | S–M | Ready: Rust API first; OpenAPI diff reviewed before merge |
 | Gap 3: graph TTL | Agent memory | Expiring nodes and edges with no dangling edges | Replaces the pool's sweeper | M | Edge-expiry rule decided (cascade); lands with or after P2 |
 | [Gap 4: time-aware graph](gap4-temporal-graph.md) | Agent memory | `valid_from`/`valid_to` and "as of" reads | Fact history | M | Shared format owner; preserves accepted TTL rules |
-| Gap 1: agent memory API | Agent memory | remember, recall, consolidate, forget | Mem0/Zep-style layer | M | Gaps 2–4 |
+| [Gap 1: agent memory API](gap1-agent-memory.md) | Agent memory | remember, recall, consolidate, forget | Mem0/Zep-style layer | M | Gaps 2–4 |
 | Gaps 5–7 | Graph depth | [Bounded algorithms](gap5-graph-algorithms.md), Cypher subset with writes, GraphRAG ingestion | Graph parity | L | Algorithms can start independently of CSR; later adapter parity required |
 | [Gaps 8 and 12](serving-contract.md) | Serving | Managed embedding/custom-reranker providers, gRPC graph query/mutation parity | SDK reach | M | Wire/API approval; existing embedding, exact/MMR and graph feeds retained |
-| Gaps 9–11 | Scale-out | Network replication, object storage tier, branching | Cost and availability | L | Speed P2 |
+| [Gaps 9–11](scale-out.md) | Scale-out | Network replication, object storage tier, branching | Cost and availability | L | Speed P2 |
 
 ```mermaid
 flowchart LR
@@ -94,10 +94,15 @@ Local numbers below show direction only (see rules).
   source access and compact persisted topology. A rotated one-bit codec is
   an opt-in candidate, not an unmeasured new default. The private binary16
   conversion and primary-dense codec are implemented and reviewed, behind
-  a test-only activation gate. The [API review](p3-precision-api.md) still
-  holds public enablement pending atomic precision-descriptor publication
-  and complete read/write/maintenance integration. No production compact
-  source writer is enabled; F1/F3/S1/S2 qualification remains outstanding.
+  a test-only activation gate. Private precision-descriptor publication and
+  transport validation are also implemented and reviewed. The
+  [API review](p3-precision-api.md) still holds public enablement pending
+  complete read/write/maintenance integration. The first exact-SIMD slice
+  is implemented, reviewed and integrated, but unreleased: portable and AVX2
+  kernels preserve exact scoring, ordering and cutoff behavior. This does not
+  complete the remaining P3d lifecycle or performance qualification. No
+  production compact source writer is enabled; F1/F3/S1/S2 qualification
+  remains outstanding.
 - **Speed P4, compact graph:** the [design](p4-compact-graph.md) is ready:
   immutable CSR checkpoint blocks, a bounded update overlay, encoded labels
   and properties, and deterministic parallel import. It preserves graph TTL
@@ -108,10 +113,12 @@ Local numbers below show direction only (see rules).
   They provide TTL-aware local scopes, degree counts and hop-constrained
   weighted paths under shared work and memory limits. For those algorithms,
   incomplete extraction or computation returns no analytic values. S3
-  PageRank and deterministic label propagation are implemented and under
-  independent review, also unreleased. Their incomplete results may retain
-  the last full iteration or sweep, never a partial one. Sampled betweenness,
-  CSR parity and serving exposure remain separate work.
+  PageRank and deterministic label propagation are implemented and reviewed,
+  also unreleased. Their incomplete results may retain the last full iteration
+  or sweep, never a partial one. S4 sampled betweenness is implemented, reviewed
+  and integrated with independent reference fixtures; interrupted computation
+  retains only completed sources. S4 is also unreleased. CSR parity and serving
+  exposure remain separate work.
 - **Parallel designs:** [temporal graphs](gap4-temporal-graph.md),
   [filters](p5-filters-and-serving.md) and
   [serving](serving-contract.md) now have implementation boundaries and
@@ -120,6 +127,11 @@ Local numbers below show direction only (see rules).
   Exact filtered search
   keeps its oracle; approximate search does not acquire an exact top-k
   guarantee. Serving schemas remain proposals, not approved wire changes.
+- **Further design proposals:** [agent memory](gap1-agent-memory.md) defines
+  the embedded operations and their prerequisites; [scale-out](scale-out.md)
+  compares branching, object storage and replication. Both received source
+  and first-party-reference review. Neither is an implemented capability;
+  the proposed scale-out order still needs a decision.
 
 ## Rules for every item
 

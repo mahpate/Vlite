@@ -897,11 +897,11 @@ searchManyF32(vectors: Float32Array[], k: number, options?: Scope &amp; { filter
         <tr><td><code class="sig" data-api="rust:GraphRef::traverse">fn traverse(&amp;self, request: &amp;Traverse, options: &amp;ReadOptions&lt;'_&gt;) <span class="nw">-&gt;</span> Result&lt;GraphRead&lt;Traversal&gt;&gt;</code></td><td>See <code>Traverse</code>.</td></tr>
         <tr><td><code class="sig" data-api="rust:GraphRef::shortest_path">fn shortest_path(&amp;self, request: &amp;ShortestPath, options: &amp;ReadOptions&lt;'_&gt;) <span class="nw">-&gt;</span> Result&lt;GraphRead&lt;PathOutcome&gt;&gt;</code></td><td>See <code>ShortestPath</code>.</td></tr>
         <tr><td><code class="sig" data-api="rust:GraphRef::retrieve">fn retrieve(&amp;self, request: &amp;Retrieve, options: &amp;ReadOptions&lt;'_&gt;) <span class="nw">-&gt;</span> Result&lt;Retrieval&gt;</code></td><td>Hybrid retrieval in one consistent view: a pivot search over a collection, then mapping to attached nodes, bounded expansion and evidence records.</td></tr>
-        <tr><td><code class="sig" data-api="rust:GraphRef::algorithm">fn algorithm(&amp;self, request: &amp;GraphAlgorithmRequest, options: &amp;GraphAlgorithmOptions&lt;'_&gt;) <span class="nw">-&gt;</span> std::result::Result&lt;GraphAlgorithmRead, GraphAlgorithmError&gt;</code></td><td>Runs degree counts, hop-constrained weighted paths, PageRank or label propagation on an explicit local scope under shared work and memory limits. Incomplete extraction yields no values. Degree/path computation must finish before values are returned; <a href="#rust-graph-iterative">iterative algorithms</a> may return an earlier full step as incomplete. Unreleased; the iterative API is under review.</td></tr>
+        <tr><td><code class="sig" data-api="rust:GraphRef::algorithm">fn algorithm(&amp;self, request: &amp;GraphAlgorithmRequest, options: &amp;GraphAlgorithmOptions&lt;'_&gt;) <span class="nw">-&gt;</span> std::result::Result&lt;GraphAlgorithmRead, GraphAlgorithmError&gt;</code></td><td>Runs degree counts, hop-constrained weighted paths, PageRank, label propagation or <a href="#rust-graph-betweenness">sampled betweenness</a> on an explicit local scope under shared work and memory limits. Incomplete extraction yields no values. Degree/path computation must finish before values are returned; <a href="#rust-graph-iterative">iterative algorithms</a> may return an earlier full step and sampled betweenness its completed sources as incomplete. Implemented and reviewed, but unreleased.</td></tr>
       </tbody>
     </table>
     <h4 id="rust-graph-iterative">Iterative graph algorithms <span class="api-kind">unreleased</span></h4>
-    <p>These additions to <code>vlite::property_graph</code> are implemented but still under review. They use <code>GraphRef::algorithm</code>, one graph view and one expiry clock. Results describe the explicit local scope, not the whole graph.</p>
+    <p>These additions to <code>vlite::property_graph</code> are implemented and reviewed, but unreleased. They use <code>GraphRef::algorithm</code>, one graph view and one expiry clock. Results describe the explicit local scope, not the whole graph.</p>
     <table class="api-table cols-2">
       <thead><tr><th>Type or field</th><th>Meaning</th></tr></thead>
       <tbody>
@@ -913,6 +913,17 @@ searchManyF32(vectors: Float32Array[], k: number, options?: Scope &amp; { filter
       </tbody>
     </table>
     <p>Interrupted steps or sweeps are discarded; no values are returned before the first full one. Rows are ordered by node ID and subject to output limits. Inspect <code>GraphAlgorithmRead.complete</code> and <code>computation_complete</code>, not just <code>converged</code>: output limits or a final cancellation/deadline stop can still make a converged result incomplete.</p>
+    <h4 id="rust-graph-betweenness">Sampled betweenness <span class="api-kind">unreleased</span></h4>
+    <p>This addition to <code>vlite::property_graph</code> is implemented and reviewed, but unreleased. It uses <code>GraphRef::algorithm</code> with the same scope, view, expiry clock and limits. Scores describe the explicit local scope, not the whole graph.</p>
+    <table class="api-table cols-2">
+      <thead><tr><th>Type or field</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>GraphAlgorithm::Betweenness</code></td><td>Unweighted Brandes from sampled sources over directed arcs (both ways for <code>Both</code>), with parallel arcs collapsed and self-loops ignored. Every shortest path counts; endpoints are excluded. The required <code>sampling_seed</code> ranks scoped nodes by SplitMix64 of the seed XOR the node ID, then by ID. For more than two scoped nodes a score is <code>(n / k) * dependencies / ((n - 1) * (n - 2))</code> over the <code>k</code> completed sources; otherwise every score is 0.</td></tr>
+        <tr><td><code>GraphAlgorithmLimits::max_sampled_sources</code></td><td>Sources sampled: <code>min(max_sampled_sources, n)</code>; default 16, at least 1, at most 64. Only sampling every scoped node gives exact scores.</td></tr>
+        <tr><td><code>BetweennessOutput</code></td><td><code>scores</code> contains <code>node_id</code>/<code>score</code> rows (<code>NodeScore</code>); <code>selected_sources</code> lists the sampled sources in sampling order, <code>completed_sources</code> the prefix that finished, <code>completed_source_count</code> its length, and <code>estimated</code> is true when fewer sources than scoped nodes completed. There is no confidence interval.</td></tr>
+      </tbody>
+    </table>
+    <p>An interrupted source is discarded; no values are returned before the first completed source. A stop after it returns the completed sources' scores, marked incomplete. A path count or dependency beyond the largest finite f64 fails with <code>NumericOverflow</code>. Rows are ordered by node ID and subject to output limits; the source lists are not.</p>
     <h4 id="rust-graphmut">GraphMut <span class="api-kind">struct</span></h4>
     <p><code class="api-path">vlite::property_graph::GraphMut</code> Write handle to one live named graph, from <code>Database::graph_mut</code>. It borrows the database exclusively.</p>
     <table class="api-table cols-2">

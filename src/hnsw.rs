@@ -14,7 +14,8 @@ use std::{
 use crate::{
     AnnOptions, Condition, DistanceMetric, Error, Record, Result, SearchHit, SearchStats,
     ann_snapshot::{Parse, Source, corrupt},
-    metadata, metric_distance,
+    exact_kernels::Scorer,
+    metadata,
     quantize::{Quantization, ScalarU8},
     traversal_distance, vector_norm,
 };
@@ -931,24 +932,27 @@ impl Index {
                 return Vec::new();
             };
             let bound = kth.distance + kth.distance.abs() * 1e-4 + 1e-6;
-            let mut hits: Vec<SearchHit> = eligible
+            let taken: Vec<&Candidate> = eligible
                 .iter()
                 .enumerate()
                 .take_while(|(position, candidate)| *position < k || candidate.distance <= bound)
-                .map(|(_, candidate)| {
-                    let id = self.nodes[candidate.node].id;
-                    let vector = self.vector(candidate.node, records);
-                    SearchHit {
-                        id,
-                        distance: metric_distance(
-                            vector,
-                            query,
-                            self.metric,
-                            self.nodes[candidate.node].norm,
-                            query_norm,
-                        )
-                        .expect("cosine graph contains only nonzero vectors"),
-                    }
+                .map(|(_, candidate)| candidate)
+                .collect();
+            let rows: Vec<&[f32]> = taken
+                .iter()
+                .map(|candidate| self.vector(candidate.node, records))
+                .collect();
+            let norms: Vec<f64> = taken
+                .iter()
+                .map(|candidate| self.nodes[candidate.node].norm)
+                .collect();
+            let distances = Scorer::new(query, self.metric, query_norm).score(&rows, Some(&norms));
+            let mut hits: Vec<SearchHit> = taken
+                .iter()
+                .zip(distances)
+                .map(|(candidate, distance)| SearchHit {
+                    id: self.nodes[candidate.node].id,
+                    distance: distance.expect("cosine graph contains only nonzero vectors"),
                 })
                 .collect();
             stats.distance_evaluations =
@@ -961,22 +965,19 @@ impl Index {
             hits.truncate(k);
             return hits;
         }
-        let mut hits: Vec<SearchHit> = eligible
+        let ids: Vec<u64> = eligible
             .into_iter()
             .take(width)
-            .filter_map(|candidate| {
-                let id = self.nodes[candidate.node].id;
-                let vector = &records[&id].vector;
-                let norm = if self.metric == DistanceMetric::Cosine {
-                    vector_norm(vector)
-                } else {
-                    0.0
-                };
-                stats.reranked_candidates = stats.reranked_candidates.saturating_add(1);
-                stats.distance_evaluations = stats.distance_evaluations.saturating_add(1);
-                metric_distance(vector, query, self.metric, norm, query_norm)
-                    .map(|distance| SearchHit { id, distance })
-            })
+            .map(|candidate| self.nodes[candidate.node].id)
+            .collect();
+        let rows: Vec<&[f32]> = ids.iter().map(|id| &records[id].vector[..]).collect();
+        stats.reranked_candidates = stats.reranked_candidates.saturating_add(ids.len() as u64);
+        stats.distance_evaluations = stats.distance_evaluations.saturating_add(ids.len() as u64);
+        let distances = Scorer::new(query, self.metric, query_norm).score(&rows, None);
+        let mut hits: Vec<SearchHit> = ids
+            .into_iter()
+            .zip(distances)
+            .filter_map(|(id, distance)| distance.map(|distance| SearchHit { id, distance }))
             .collect();
         hits.sort_by(|a, b| {
             a.distance
@@ -1035,28 +1036,25 @@ impl Index {
         stats: &mut SearchStats,
     ) -> Vec<SearchHit> {
         let before = hits.len();
-        hits.extend(self.buffered.keys().filter_map(|&id| {
-            records
-                .get(&id)
-                .filter(|record| {
-                    !expiries.get(&id).is_some_and(|expiry| *expiry <= now_ms)
-                        && metadata::matches(&record.metadata, conditions)
-                })
-                .and_then(|record| {
-                    metric_distance(
-                        &record.vector,
-                        query,
-                        self.metric,
-                        if self.metric == DistanceMetric::Cosine {
-                            vector_norm(&record.vector)
-                        } else {
-                            0.0
-                        },
-                        query_norm,
-                    )
-                    .map(|distance| SearchHit { id, distance })
-                })
-        }));
+        let (ids, rows): (Vec<u64>, Vec<&[f32]>) = self
+            .buffered
+            .keys()
+            .filter_map(|&id| {
+                records
+                    .get(&id)
+                    .filter(|record| {
+                        !expiries.get(&id).is_some_and(|expiry| *expiry <= now_ms)
+                            && metadata::matches(&record.metadata, conditions)
+                    })
+                    .map(|record| (id, &record.vector[..]))
+            })
+            .unzip();
+        let distances = Scorer::new(query, self.metric, query_norm).score(&rows, None);
+        hits.extend(
+            ids.into_iter()
+                .zip(distances)
+                .filter_map(|(id, distance)| distance.map(|distance| SearchHit { id, distance })),
+        );
         let merged = (hits.len() - before) as u64;
         stats.buffered_records_merged = stats.buffered_records_merged.saturating_add(merged);
         stats.distance_evaluations = stats.distance_evaluations.saturating_add(merged);
@@ -1385,6 +1383,7 @@ mod selection_perf;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metric_distance;
 
     #[test]
     fn visited_membership_matches_hash_set_across_word_boundaries() {

@@ -24,6 +24,69 @@ enum Phase {
 
 const NON_CANONICAL: GraphError = GraphError::Corrupt("non-canonical graph snapshot");
 
+/// [`GraphState::from_snapshot`] one body at a time (P3a): each body
+/// pushed moves its entries into the state being built, so a reader of a
+/// snapshot spread over many frames holds the state built so far and the
+/// body it decoded, never every decoded body beside the state built from
+/// them. Pushing the bodies and finishing accepts and refuses exactly what
+/// loading them at once does. After an error the builder must be dropped.
+pub struct SnapshotBuilder {
+    state: GraphState,
+    /// The graph whose stream has not reached its `GraphHighWater` yet.
+    open: Option<(Graph, Phase)>,
+    sequence: u64,
+}
+
+impl SnapshotBuilder {
+    /// An empty snapshot restated at `sequence`.
+    pub fn new(sequence: u64) -> Self {
+        Self {
+            state: GraphState::new(),
+            open: None,
+            sequence,
+        }
+    }
+
+    /// Loads the next body of the snapshot.
+    pub fn push(&mut self, body: GraphBody) -> Result<(), GraphError> {
+        body.validate()?;
+        let (state, sequence) = (&mut self.state, self.sequence);
+        state.last_sequence = sequence;
+        let graph_id = body.graph_id;
+        for entry in body.entries {
+            match self.open.as_mut() {
+                None => {
+                    self.open = Some((state.created(graph_id, sequence, entry)?, Phase::Created))
+                }
+                Some((graph, phase)) => {
+                    if graph.id != graph_id {
+                        return Err(NON_CANONICAL);
+                    }
+                    if let GraphEntry::GraphHighWater {
+                        next_node_id,
+                        next_edge_id,
+                    } = entry
+                    {
+                        let (graph, _) = self.open.take().expect("graph is open");
+                        state.close(graph, next_node_id, next_edge_id)?;
+                    } else {
+                        *phase = state.load_entry(graph, *phase, sequence, entry)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The loaded state, once every graph closed with its high-water.
+    pub fn finish(self) -> Result<GraphState, GraphError> {
+        if self.open.is_some() {
+            return Err(NON_CANONICAL);
+        }
+        Ok(self.state)
+    }
+}
+
 impl GraphState {
     /// Builds the state described by canonical snapshot bodies restated at
     /// `sequence`: per graph in ascending ID order, `CreateGraph`, an
@@ -34,39 +97,11 @@ impl GraphState {
         sequence: u64,
         bodies: impl IntoIterator<Item = GraphBody>,
     ) -> Result<Self, GraphError> {
-        let mut state = Self::new();
-        let mut open: Option<(Graph, Phase)> = None;
+        let mut builder = SnapshotBuilder::new(sequence);
         for body in bodies {
-            body.validate()?;
-            state.last_sequence = sequence;
-            let graph_id = body.graph_id;
-            for entry in body.entries {
-                match open.as_mut() {
-                    None => {
-                        open = Some((state.created(graph_id, sequence, entry)?, Phase::Created))
-                    }
-                    Some((graph, phase)) => {
-                        if graph.id != graph_id {
-                            return Err(NON_CANONICAL);
-                        }
-                        if let GraphEntry::GraphHighWater {
-                            next_node_id,
-                            next_edge_id,
-                        } = entry
-                        {
-                            let (graph, _) = open.take().expect("graph is open");
-                            state.close(graph, next_node_id, next_edge_id)?;
-                        } else {
-                            *phase = state.load_entry(graph, *phase, sequence, entry)?;
-                        }
-                    }
-                }
-            }
+            builder.push(body)?;
         }
-        if open.is_some() {
-            return Err(NON_CANONICAL);
-        }
-        Ok(state)
+        builder.finish()
     }
 
     /// Restores the original revisions of graph `graph`'s nodes and edges,
@@ -536,6 +571,89 @@ mod tests {
     }
 
     const MAX_BATCH_ENTRIES_FOR_TESTS: usize = super::super::super::limits::MAX_BATCH_ENTRIES;
+
+    /// Loads `bodies` one at a time through a [`SnapshotBuilder`].
+    fn built(sequence: u64, bodies: Vec<GraphBody>) -> Result<GraphState, GraphError> {
+        let mut builder = SnapshotBuilder::new(sequence);
+        for body in bodies {
+            builder.push(body)?;
+        }
+        builder.finish()
+    }
+
+    /// `bodies` re-cut at the `cuts` entry counts: every body of a graph is
+    /// split after each multiple of the next cut, cycling through `cuts`.
+    fn recut(bodies: &[GraphBody], cuts: &[usize]) -> Vec<GraphBody> {
+        let mut out: Vec<GraphBody> = Vec::new();
+        let mut next = cuts.iter().copied().cycle();
+        for body in bodies {
+            let mut entries = body.entries.as_slice();
+            while !entries.is_empty() {
+                let take = next.next().unwrap().clamp(1, entries.len());
+                out.push(GraphBody {
+                    graph_id: body.graph_id,
+                    entries: entries[..take].to_vec(),
+                });
+                entries = &entries[take..];
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn snapshot_builder_equals_one_load_across_body_boundaries() {
+        let mut states: Vec<GraphState> = (0..12).map(|seed| random_graph(seed).state).collect();
+        let mut with_deadlines = GraphState::new();
+        add_schema_graph(&mut with_deadlines);
+        add_deadlines(&mut with_deadlines);
+        states.push(with_deadlines);
+        states.push(GraphState::new());
+        for state in states {
+            let whole = snapshot_bodies(&state, usize::MAX);
+            let floor = state.last_sequence() + 5;
+            let expected = GraphState::from_snapshot(floor, whole.clone()).unwrap();
+            assert_eq!(expected, replayed(floor, &whole));
+            for cuts in [&[1][..], &[2], &[3, 1, 7], &[5, 2], &[64]] {
+                let state = built(floor, recut(&whole, cuts)).unwrap();
+                assert_eq!(state, expected, "cuts {cuts:?}");
+                assert_eq!(state.last_sequence(), expected.last_sequence());
+            }
+        }
+        // A snapshot the one-shot load refuses is refused wherever its
+        // bodies are cut, and so is one that ends inside a graph.
+        let mut state = GraphState::new();
+        add_schema_graph(&mut state);
+        let canonical = snapshot_bodies(&state, usize::MAX);
+        let entries = canonical[0].entries.clone();
+        let edited = |edit: &dyn Fn(&mut Vec<GraphEntry>)| {
+            let mut entries = entries.clone();
+            edit(&mut entries);
+            vec![GraphBody {
+                graph_id: GraphId(1),
+                entries,
+            }]
+        };
+        let refused = [
+            edited(&|e| e.truncate(e.len() - 1)),
+            edited(&|e| e[3] = person(0, "bob", 27)),
+            edited(&|e| e.insert(5, GraphEntry::DeleteNode { node_id: NodeId(2) })),
+            edited(&|e| e.insert(3, e[1].clone())),
+            edited(&|e| {
+                let last = e.len() - 1;
+                e.insert(last + 1, person(20, "zed", 1));
+            }),
+        ];
+        for bodies in refused {
+            assert!(GraphState::from_snapshot(50, bodies.clone()).is_err());
+            for cut in 1..bodies[0].entries.len() {
+                assert!(built(50, recut(&bodies, &[cut])).is_err(), "cut {cut}");
+            }
+        }
+        assert_eq!(
+            built(50, Vec::new()).unwrap(),
+            GraphState::from_snapshot(50, []).unwrap()
+        );
+    }
 
     #[test]
     fn snapshot_rejects_inconsistent_or_non_canonical_bodies() {

@@ -258,3 +258,71 @@ For disk accounting, include source columns, persisted codes/topology,
 IDs/revisions, metadata, framing, encryption and steady-state WAL. Report
 temporary checkpoint duplication separately. No claimed gain, release gate,
 or S1 profile exception follows from the design estimates.
+
+## P3d progress: exact SIMD kernels (reviewed, unreleased)
+
+Implemented, independently reviewed and integrated in the crate-private
+`src/exact_kernels.rs`. This is the first
+P3d step: verified exact kernels with runtime dispatch. It is not P3d
+completion, conversion/backup/restore/key-rotation coverage or a measured
+gain. No public API, setting, error, format or wire field changes.
+
+- **Semantics.** `metric_distance` stays the unchanged oracle. A pass scores
+  up to eight rows against one query, and each row owns one f64 accumulator
+  lane that performs the oracle's operations in the oracle's order. Both
+  components are widened (exactly), then either subtracted and squared or
+  multiplied, and then added to the running sum. The sum starts from the
+  standard library's empty f64 sum (-0.0 on the current toolchain), so
+  zero-dimension rows match too. Multiplication and addition stay separate,
+  and no kernel enables FMA. Two widened float32 values multiply exactly in
+  f64, so FMA could not change inner-product, cosine or norm bits. A
+  squared-L2 difference can round, however, so FMA would change those bits.
+  The final metric step is the oracle's own scalar code: the inner-product
+  zero rule, the cosine zero-norm result and the clamp. Without a stored
+  norm, cosine folds the row's squares alongside the dot product, exactly as
+  `vector_norm` does.
+- **Order.** Exact scans still keep a bounded top-k ordered by distance
+  (`total_cmp`), then ID. That is a total order, so scoring in batches cannot
+  change the kept set or ties. Squared-L2 pruning drops a batch only when
+  every row's partial sum already exceeds the current k-th distance, since
+  nonnegative terms cannot bring it back. Statistics are unchanged.
+- **Operands.** The reranker and named-vector search used to call the oracle
+  query-first. Their vectors are validated finite. For finite values, a - b
+  is the exact negation of b - a under round-to-nearest-even, and
+  multiplication commutes, so scoring row-first returns the same bits. A row
+  whose length differs from the query is scored by the oracle itself.
+- **Dispatch.** Detected once per process. x86_64 with AVX2 uses two groups
+  of four f64 lanes, transposing rows four dimensions at a time. Otherwise
+  the portable kernel keeps one scalar accumulator per row; that is SSE2 on
+  x86_64 and scalar code elsewhere, including WebAssembly. There is no NEON
+  kernel yet, so aarch64 uses the portable kernel. Tests force each kernel
+  per thread. The override does not propagate to Rayon workers; they retain
+  runtime dispatch, so it does not prove forced-portable parallel execution.
+- **Paths.** Exact search, filtered exact search and candidate subsets,
+  including the parallel scan. These also serve hybrid, planner and
+  graph-attached record retrieval. HNSW exact re-scoring (unquantized and
+  scalar-u8 rerank), the buffered-record merge, `ExactReranker` and
+  named-vector exact search use the kernels too. Approximate traversal
+  kernels are unchanged.
+- **Tests.** Every metric, with and without stored norms, is compared bit for
+  bit with the oracle under each kernel. Coverage: dimensions 0 to 67, 128,
+  384, 768 and 1,536; batches of 1 to 9 rows; seeded values over about 80
+  binades; signed zeros and subnormals; `f32::MAX`, `f32::MIN` and
+  `f32::MIN_POSITIVE`; infinities and NaN; cancellation; zero norms; and
+  mismatched lengths. Rust does not fix NaN payloads, so any NaN matches a
+  NaN. End-to-end tests run every exact, ANN, merge and rerank path above on
+  data with exact ties, with the per-thread dispatch limitation above. Their IDs, distance bits, order
+  and statistics must match a full-sort oracle. Deliberate FMA, starting-sum
+  and AVX2 reordering mutations each fail these tests. The
+  `exact_kernel_fingerprint` example prints per-scenario result fingerprints
+  for comparing two revisions. An ignored local timing test checks direction
+  only; it is not a measurement.
+
+Remaining P3d work:
+
+1. DiskANN traversal and maximal-marginal-relevance pairwise scoring still
+   score one pair at a time, and so does the CPU fallback of the GPU
+   reranker.
+2. A NEON kernel, once it can be tested on aarch64 hardware.
+3. Conversion, backup, restore and key-rotation coverage, DO-005
+   measurements and major-release acceptance.

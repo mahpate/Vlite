@@ -1507,5 +1507,7 @@ impl Graph {
 
 mod snapshot;
 
+pub use snapshot::SnapshotBuilder;
+
 #[cfg(test)]
 mod tests;
