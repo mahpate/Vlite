@@ -1,0 +1,301 @@
+{
+  "schema": "vlite.temporal-read-logical",
+  "version": 1,
+  "cases": [
+    {
+      "name": "touching-gap-and-legacy",
+      "purpose": "Hand-authored half-open boundaries, gaps, null infinity, i64 extremes, and a legacy edge. All expected blocks are derived by hand, never by the oracle.",
+      "input": {
+        "nodes": [{"id": 0}, {"id": 1}, {"id": 2}],
+        "edges": [
+          {"id": 0, "source": 0, "target": 1, "relationship": "a", "segments": [{"from": null, "to": -10}, {"from": -10, "to": 0}, {"from": 0, "to": 10}, {"from": 10, "to": 20}]},
+          {"id": 5, "source": 0, "target": 2, "relationship": "b", "deadline": null},
+          {"id": 6, "source": 0, "target": 2, "relationship": "c", "segments": [{"from": 0, "to": 5}, {"from": 15, "to": 20}]}
+        ],
+        "queries": [
+          {"op": "neighbors", "node": 0, "direction": "out", "T": 10, "C": 5},
+          {"op": "neighbors", "node": 0, "direction": "out", "T": 5, "C": 5},
+          {"op": "neighbors", "node": 0, "direction": "out", "T": 15, "C": 5},
+          {"op": "neighbors", "node": 0, "direction": "out", "T": 20, "C": 5},
+          {"op": "neighbors", "node": 0, "direction": "out", "T": -10, "C": 5},
+          {"op": "neighbors", "node": 0, "direction": "out", "T": -9223372036854775808, "C": 5},
+          {"op": "neighbors", "node": 0, "direction": "out", "T": 9223372036854775807, "C": 18446744073709551615},
+          {"op": "neighbors", "node": 2, "direction": "in", "T": 10, "C": 5},
+          {"op": "neighbors", "node": 2, "direction": "both", "T": 10, "C": 5},
+          {"op": "traverse", "start": [0], "direction": "out", "T": 10, "C": 5, "max_hops": 1, "max_visited_nodes": 10, "max_edges_per_node": 10, "budget": 10}
+        ]
+      },
+      "expected": [
+        {"edges": [0, 5]},
+        {"edges": [0, 5]},
+        {"edges": [0, 5, 6]},
+        {"edges": [5]},
+        {"edges": [0, 5]},
+        {"edges": [0, 5]},
+        {"edges": [5]},
+        {"edges": [5]},
+        {"edges": [5]},
+        {"nodes": [{"id": 0, "depth": 0}, {"id": 1, "depth": 1}, {"id": 2, "depth": 1}], "edges": [0, 5], "paths": [{"nodes": [0, 1], "edges": [0]}, {"nodes": [0, 2], "edges": [5]}], "truncation": {"visited": false, "degree": [], "budget": false}, "edges_examined": 3, "nodes_visited": 3}
+      ]
+    },
+    {
+      "name": "ttl-is-independent-of-validity",
+      "purpose": "Endpoint expiry and edge deadline equality hide edges still valid at T. Empty temporal series never falls back to legacy.",
+      "input": {
+        "nodes": [{"id": 0}, {"id": 1, "deadline": 10}, {"id": 2, "deadline": null}, {"id": 3}],
+        "edges": [
+          {"id": 1, "source": 0, "target": 1, "relationship": "a", "segments": [{"from": 0, "to": 100}]},
+          {"id": 2, "source": 0, "target": 2, "relationship": "b", "deadline": 10, "segments": [{"from": 0, "to": 100}]},
+          {"id": 3, "source": 0, "target": 3, "relationship": "c", "deadline": 11, "segments": [{"from": 0, "to": 100}]},
+          {"id": 4, "source": 0, "target": 2, "relationship": "d"},
+          {"id": 5, "source": 0, "target": 3, "relationship": "e", "segments": []}
+        ],
+        "queries": [
+          {"op": "neighbors", "node": 0, "direction": "out", "T": 5, "C": 9},
+          {"op": "neighbors", "node": 0, "direction": "out", "T": 5, "C": 10},
+          {"op": "neighbors", "node": 0, "direction": "out", "T": 5, "C": 11},
+          {"op": "neighbors", "node": 0, "direction": "out", "T": 100, "C": 9},
+          {"op": "traverse", "start": [0], "direction": "out", "T": 5, "C": 10, "max_hops": 1, "max_visited_nodes": 10, "max_edges_per_node": 10, "budget": 10},
+          {"op": "shortest", "source": 0, "destination": 2, "direction": "out", "T": 5, "C": 10, "max_hops": 1, "max_visited_nodes": 10, "max_edges_per_node": 10, "budget": 10}
+        ]
+      },
+      "expected": [
+        {"edges": [1, 2, 3, 4]},
+        {"edges": [3, 4]},
+        {"edges": [4]},
+        {"edges": [4]},
+        {"nodes": [{"id": 0, "depth": 0}, {"id": 3, "depth": 1}, {"id": 2, "depth": 1}], "edges": [3, 4], "paths": [{"nodes": [0, 3], "edges": [3]}, {"nodes": [0, 2], "edges": [4]}], "truncation": {"visited": false, "degree": [], "budget": false}, "edges_examined": 5, "nodes_visited": 3},
+        {"outcome": "found", "path": {"nodes": [0, 2], "edges": [4]}, "truncation": {"visited": false, "degree": [], "budget": false}, "edges_examined": 5, "nodes_visited": 2}
+      ]
+    },
+    {
+      "name": "parallel-loops-and-both-merge",
+      "purpose": "Both merges directions rather than concatenating them, loops appear once, parallel edges remain distinct, IDs span zero to u64 max. Arrival does not bypass degree truncation.",
+      "input": {
+        "nodes": [{"id": 0}, {"id": 18446744073709551615}, {"id": 1}],
+        "edges": [
+          {"id": 18446744073709551615, "source": 0, "target": 18446744073709551615, "relationship": "b"},
+          {"id": 0, "source": 0, "target": 0, "relationship": "a"},
+          {"id": 8, "source": 18446744073709551615, "target": 0, "relationship": "a"},
+          {"id": 7, "source": 0, "target": 18446744073709551615, "relationship": "a", "segments": [{"from": 0, "to": 10}]},
+          {"id": 9, "source": 0, "target": 18446744073709551615, "relationship": "a"},
+          {"id": 10, "source": 1, "target": 0, "relationship": "b"},
+          {"id": 11, "source": 18446744073709551615, "target": 18446744073709551615, "relationship": "a"}
+        ],
+        "queries": [
+          {"op": "neighbors", "node": 0, "direction": "both", "T": 5, "C": 0},
+          {"op": "neighbors", "node": 0, "direction": "out", "T": 5, "C": 0},
+          {"op": "neighbors", "node": 0, "direction": "in", "T": 5, "C": 0},
+          {"op": "traverse", "start": [0], "direction": "both", "T": 5, "C": 0, "max_hops": 2, "max_visited_nodes": 10, "max_edges_per_node": 10, "budget": 20},
+          {"op": "shortest", "source": 0, "destination": 18446744073709551615, "direction": "both", "T": 5, "C": 0, "max_hops": 2, "max_visited_nodes": 10, "max_edges_per_node": 10, "budget": 20},
+          {"op": "shortest", "source": 0, "destination": 18446744073709551615, "direction": "both", "T": 5, "C": 0, "max_hops": 2, "max_visited_nodes": 10, "max_edges_per_node": 3, "budget": 20},
+          {"op": "traverse", "start": [0], "direction": "both", "T": 5, "C": 0, "max_hops": 2, "max_visited_nodes": 10, "max_edges_per_node": 3, "budget": 20},
+          {"op": "shortest", "source": 0, "destination": 1, "direction": "in", "T": 5, "C": 0, "max_hops": 1, "max_visited_nodes": 10, "max_edges_per_node": 10, "budget": 20}
+        ]
+      },
+      "expected": [
+        {"edges": [0, 7, 8, 9, 10, 18446744073709551615]},
+        {"edges": [0, 7, 9, 18446744073709551615]},
+        {"edges": [0, 8, 10]},
+        {"nodes": [{"id": 0, "depth": 0}, {"id": 18446744073709551615, "depth": 1}, {"id": 1, "depth": 1}], "edges": [0, 7, 8, 9, 10, 18446744073709551615, 11], "paths": [{"nodes": [0, 18446744073709551615], "edges": [7]}, {"nodes": [0, 1], "edges": [10]}], "truncation": {"visited": false, "degree": [], "budget": false}, "edges_examined": 12, "nodes_visited": 3},
+        {"outcome": "found", "path": {"nodes": [0, 18446744073709551615], "edges": [7]}, "truncation": {"visited": false, "degree": [], "budget": false}, "edges_examined": 6, "nodes_visited": 2},
+        {"outcome": "exhausted", "truncation": {"visited": false, "degree": [0], "budget": false}, "edges_examined": 3, "nodes_visited": 2},
+        {"nodes": [{"id": 0, "depth": 0}, {"id": 18446744073709551615, "depth": 1}], "edges": [0, 7, 8, 9], "paths": [{"nodes": [0, 18446744073709551615], "edges": [7]}], "truncation": {"visited": false, "degree": [0, 18446744073709551615], "budget": false}, "edges_examined": 6, "nodes_visited": 2},
+        {"outcome": "found", "path": {"nodes": [0, 1], "edges": [10]}, "truncation": {"visited": false, "degree": [], "budget": false}, "edges_examined": 3, "nodes_visited": 2}
+      ]
+    },
+    {
+      "name": "invalid-entry-charges-budget",
+      "purpose": "An invalid-at-T first entry consumes the last budget unit. Caps take precedence over budget, and exhausting exactly at adjacency end is complete. Zero hops is not truncation.",
+      "input": {
+        "nodes": [{"id": 0}, {"id": 1}, {"id": 2}],
+        "edges": [
+          {"id": 1, "source": 0, "target": 1, "relationship": "a", "segments": [{"from": 0, "to": 5}]},
+          {"id": 2, "source": 0, "target": 2, "relationship": "b"}
+        ],
+        "queries": [
+          {"op": "traverse", "start": [0], "direction": "out", "T": 10, "C": 0, "max_hops": 1, "max_visited_nodes": 10, "max_edges_per_node": 10, "budget": 1},
+          {"op": "shortest", "source": 0, "destination": 2, "direction": "out", "T": 10, "C": 0, "max_hops": 1, "max_visited_nodes": 10, "max_edges_per_node": 10, "budget": 1},
+          {"op": "shortest", "source": 0, "destination": 2, "direction": "out", "T": 10, "C": 0, "max_hops": 1, "max_visited_nodes": 10, "max_edges_per_node": 10, "budget": 2},
+          {"op": "traverse", "start": [0], "direction": "out", "T": 10, "C": 0, "max_hops": 1, "max_visited_nodes": 10, "max_edges_per_node": 1, "budget": 1},
+          {"op": "shortest", "source": 0, "destination": 2, "direction": "out", "T": 10, "C": 0, "max_hops": 1, "max_visited_nodes": 10, "max_edges_per_node": 1, "budget": 1},
+          {"op": "traverse", "start": [0], "direction": "out", "T": 10, "C": 0, "max_hops": 0, "max_visited_nodes": 1, "max_edges_per_node": 1, "budget": 1},
+          {"op": "shortest", "source": 0, "destination": 2, "direction": "out", "T": 10, "C": 0, "max_hops": 0, "max_visited_nodes": 1, "max_edges_per_node": 1, "budget": 1},
+          {"op": "shortest", "source": 0, "destination": 1, "direction": "out", "T": -1, "C": 0, "max_hops": 1, "max_visited_nodes": 1, "max_edges_per_node": 10, "budget": 2},
+          {"op": "shortest", "source": 0, "destination": 2, "direction": "out", "T": 10, "C": 0, "max_hops": 1, "max_visited_nodes": 1, "max_edges_per_node": 10, "budget": 2},
+          {"op": "traverse", "start": [0], "direction": "out", "T": 10, "C": 0, "max_hops": 1, "max_visited_nodes": 1, "max_edges_per_node": 10, "budget": 2}
+        ]
+      },
+      "expected": [
+        {"nodes": [{"id": 0, "depth": 0}], "edges": [], "paths": [], "truncation": {"visited": false, "degree": [], "budget": true}, "edges_examined": 1, "nodes_visited": 1},
+        {"outcome": "exhausted", "truncation": {"visited": false, "degree": [], "budget": true}, "edges_examined": 1, "nodes_visited": 1},
+        {"outcome": "found", "path": {"nodes": [0, 2], "edges": [2]}, "truncation": {"visited": false, "degree": [], "budget": false}, "edges_examined": 2, "nodes_visited": 2},
+        {"nodes": [{"id": 0, "depth": 0}], "edges": [], "paths": [], "truncation": {"visited": false, "degree": [0], "budget": false}, "edges_examined": 1, "nodes_visited": 1},
+        {"outcome": "exhausted", "truncation": {"visited": false, "degree": [0], "budget": false}, "edges_examined": 1, "nodes_visited": 1},
+        {"nodes": [{"id": 0, "depth": 0}], "edges": [], "paths": [], "truncation": {"visited": false, "degree": [], "budget": false}, "edges_examined": 0, "nodes_visited": 1},
+        {"outcome": "no_path", "truncation": {"visited": false, "degree": [], "budget": false}, "edges_examined": 0, "nodes_visited": 1},
+        {"outcome": "no_path", "truncation": {"visited": false, "degree": [], "budget": false}, "edges_examined": 2, "nodes_visited": 1},
+        {"outcome": "exhausted", "truncation": {"visited": true, "degree": [], "budget": false}, "edges_examined": 2, "nodes_visited": 1},
+        {"nodes": [{"id": 0, "depth": 0}], "edges": [], "paths": [], "truncation": {"visited": true, "degree": [], "budget": false}, "edges_examined": 2, "nodes_visited": 1}
+      ]
+    },
+    {
+      "name": "visited-seeding-and-last-layer",
+      "purpose": "First-occurrence start deduplication, incomplete seeding prevents expansion, visited limit stops before recording its edge, and shortest's destination counts while other last-layer nodes do not.",
+      "input": {
+        "nodes": [{"id": 0}, {"id": 1}, {"id": 2}, {"id": 3}],
+        "edges": [
+          {"id": 1, "source": 0, "target": 1, "relationship": "a"},
+          {"id": 2, "source": 0, "target": 2, "relationship": "b"},
+          {"id": 3, "source": 1, "target": 3, "relationship": "c"},
+          {"id": 4, "source": 2, "target": 3, "relationship": "d"}
+        ],
+        "queries": [
+          {"op": "traverse", "start": [2, 0, 2, 1], "direction": "out", "T": 0, "C": 0, "max_hops": 2, "max_visited_nodes": 2, "max_edges_per_node": 10, "budget": 10},
+          {"op": "traverse", "start": [0], "direction": "out", "T": 0, "C": 0, "max_hops": 2, "max_visited_nodes": 2, "max_edges_per_node": 10, "budget": 10},
+          {"op": "traverse", "start": [0], "direction": "out", "T": 0, "C": 0, "max_hops": 2, "max_visited_nodes": 3, "max_edges_per_node": 1, "budget": 10},
+          {"op": "shortest", "source": 0, "destination": 3, "direction": "out", "T": 0, "C": 0, "max_hops": 2, "max_visited_nodes": 2, "max_edges_per_node": 10, "budget": 10},
+          {"op": "shortest", "source": 0, "destination": 3, "direction": "out", "T": 0, "C": 0, "max_hops": 1, "max_visited_nodes": 1, "max_edges_per_node": 10, "budget": 10},
+          {"op": "shortest", "source": 0, "destination": 0, "direction": "out", "T": 0, "C": 0, "max_hops": 0, "max_visited_nodes": 1, "max_edges_per_node": 1, "budget": 1},
+          {"op": "shortest", "source": 0, "destination": 3, "direction": "out", "T": 0, "C": 0, "max_hops": 2, "max_visited_nodes": 3, "max_edges_per_node": 10, "budget": 10},
+          {"op": "shortest", "source": 0, "destination": 3, "direction": "out", "T": 0, "C": 0, "max_hops": 2, "max_visited_nodes": 4, "max_edges_per_node": 10, "budget": 10}
+        ]
+      },
+      "expected": [
+        {"nodes": [{"id": 2, "depth": 0}, {"id": 0, "depth": 0}], "edges": [], "paths": [], "truncation": {"visited": true, "degree": [], "budget": false}, "edges_examined": 0, "nodes_visited": 2},
+        {"nodes": [{"id": 0, "depth": 0}, {"id": 1, "depth": 1}], "edges": [1], "paths": [{"nodes": [0, 1], "edges": [1]}], "truncation": {"visited": true, "degree": [], "budget": false}, "edges_examined": 2, "nodes_visited": 2},
+        {"nodes": [{"id": 0, "depth": 0}, {"id": 1, "depth": 1}, {"id": 3, "depth": 2}], "edges": [1, 3], "paths": [{"nodes": [0, 1], "edges": [1]}, {"nodes": [0, 1, 3], "edges": [1, 3]}], "truncation": {"visited": false, "degree": [0], "budget": false}, "edges_examined": 2, "nodes_visited": 3},
+        {"outcome": "exhausted", "truncation": {"visited": true, "degree": [], "budget": false}, "edges_examined": 2, "nodes_visited": 2},
+        {"outcome": "no_path", "truncation": {"visited": false, "degree": [], "budget": false}, "edges_examined": 2, "nodes_visited": 1},
+        {"outcome": "found", "path": {"nodes": [0], "edges": []}, "truncation": {"visited": false, "degree": [], "budget": false}, "edges_examined": 0, "nodes_visited": 1},
+        {"outcome": "exhausted", "truncation": {"visited": true, "degree": [], "budget": false}, "edges_examined": 3, "nodes_visited": 3},
+        {"outcome": "found", "path": {"nodes": [0, 1, 3], "edges": [1, 3]}, "truncation": {"visited": false, "degree": [], "budget": false}, "edges_examined": 4, "nodes_visited": 4}
+      ]
+    },
+    {
+      "name": "invalid-shortcut-and-canonical-dag",
+      "purpose": "A shorter route is invalid at T. Discovery order is not canonical edge-ID order. Full arrival-layer examination can exhaust after finding a candidate path.",
+      "input": {
+        "nodes": [{"id": 0}, {"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}],
+        "edges": [
+          {"id": 90, "source": 0, "target": 4, "relationship": "a", "segments": [{"from": 0, "to": 5}]},
+          {"id": 8, "source": 0, "target": 1, "relationship": "a"},
+          {"id": 2, "source": 0, "target": 2, "relationship": "b"},
+          {"id": 7, "source": 1, "target": 4, "relationship": "a"},
+          {"id": 1, "source": 2, "target": 4, "relationship": "b"},
+          {"id": 6, "source": 1, "target": 3, "relationship": "c"},
+          {"id": 0, "source": 3, "target": 4, "relationship": "a", "segments": [{"from": 0, "to": 5}, {"from": 15, "to": 20}]}
+        ],
+        "queries": [
+          {"op": "shortest", "source": 0, "destination": 4, "direction": "out", "T": 10, "C": 0, "max_hops": 3, "max_visited_nodes": 10, "max_edges_per_node": 10, "budget": 10},
+          {"op": "traverse", "start": [0], "direction": "out", "T": 10, "C": 0, "max_hops": 2, "max_visited_nodes": 10, "max_edges_per_node": 10, "budget": 10},
+          {"op": "shortest", "source": 0, "destination": 4, "direction": "out", "T": 0, "C": 0, "max_hops": 3, "max_visited_nodes": 10, "max_edges_per_node": 10, "budget": 10},
+          {"op": "shortest", "source": 0, "destination": 4, "direction": "out", "T": 0, "C": 0, "max_hops": 3, "max_visited_nodes": 10, "max_edges_per_node": 2, "budget": 10},
+          {"op": "shortest", "source": 0, "destination": 4, "direction": "out", "T": 10, "C": 0, "max_hops": 3, "max_visited_nodes": 10, "max_edges_per_node": 10, "budget": 5},
+          {"op": "shortest", "source": 0, "destination": 4, "direction": "out", "T": 10, "C": 0, "max_hops": 1, "max_visited_nodes": 10, "max_edges_per_node": 10, "budget": 10}
+        ]
+      },
+      "expected": [
+        {"outcome": "found", "path": {"nodes": [0, 2, 4], "edges": [2, 1]}, "truncation": {"visited": false, "degree": [], "budget": false}, "edges_examined": 6, "nodes_visited": 4},
+        {"nodes": [{"id": 0, "depth": 0}, {"id": 1, "depth": 1}, {"id": 2, "depth": 1}, {"id": 4, "depth": 2}, {"id": 3, "depth": 2}], "edges": [8, 2, 7, 6, 1], "paths": [{"nodes": [0, 1], "edges": [8]}, {"nodes": [0, 2], "edges": [2]}, {"nodes": [0, 2, 4], "edges": [2, 1]}, {"nodes": [0, 1, 3], "edges": [8, 6]}], "truncation": {"visited": false, "degree": [], "budget": false}, "edges_examined": 6, "nodes_visited": 5},
+        {"outcome": "found", "path": {"nodes": [0, 4], "edges": [90]}, "truncation": {"visited": false, "degree": [], "budget": false}, "edges_examined": 3, "nodes_visited": 3},
+        {"outcome": "exhausted", "truncation": {"visited": false, "degree": [0], "budget": false}, "edges_examined": 2, "nodes_visited": 3},
+        {"outcome": "exhausted", "truncation": {"visited": false, "degree": [], "budget": true}, "edges_examined": 5, "nodes_visited": 4},
+        {"outcome": "no_path", "truncation": {"visited": false, "degree": [], "budget": false}, "edges_examined": 3, "nodes_visited": 1}
+      ]
+    },
+    {
+      "name": "no-path-splices-different-times",
+      "purpose": "Touching intervals on successive edges cannot be spliced into a path: one fixed T governs every hop. Before and after all finite segments there is no path.",
+      "input": {
+        "nodes": [{"id": 0}, {"id": 1}, {"id": 2}],
+        "edges": [
+          {"id": 1, "source": 0, "target": 1, "relationship": "a", "segments": [{"from": 0, "to": 10}]},
+          {"id": 2, "source": 1, "target": 2, "relationship": "a", "segments": [{"from": 10, "to": 20}]}
+        ],
+        "queries": [
+          {"op": "shortest", "source": 0, "destination": 2, "direction": "out", "T": 5, "C": 0, "max_hops": 2, "max_visited_nodes": 10, "max_edges_per_node": 10, "budget": 10},
+          {"op": "shortest", "source": 0, "destination": 2, "direction": "out", "T": 10, "C": 0, "max_hops": 2, "max_visited_nodes": 10, "max_edges_per_node": 10, "budget": 10},
+          {"op": "neighbors", "node": 1, "direction": "out", "T": 10, "C": 0},
+          {"op": "traverse", "start": [0], "direction": "out", "T": 5, "C": 0, "max_hops": 2, "max_visited_nodes": 10, "max_edges_per_node": 10, "budget": 10},
+          {"op": "shortest", "source": 0, "destination": 2, "direction": "out", "T": -1, "C": 0, "max_hops": 2, "max_visited_nodes": 10, "max_edges_per_node": 10, "budget": 10},
+          {"op": "shortest", "source": 0, "destination": 2, "direction": "out", "T": 20, "C": 0, "max_hops": 2, "max_visited_nodes": 10, "max_edges_per_node": 10, "budget": 10}
+        ]
+      },
+      "expected": [
+        {"outcome": "no_path", "truncation": {"visited": false, "degree": [], "budget": false}, "edges_examined": 2, "nodes_visited": 2},
+        {"outcome": "no_path", "truncation": {"visited": false, "degree": [], "budget": false}, "edges_examined": 1, "nodes_visited": 1},
+        {"edges": [2]},
+        {"nodes": [{"id": 0, "depth": 0}, {"id": 1, "depth": 1}], "edges": [1], "paths": [{"nodes": [0, 1], "edges": [1]}], "truncation": {"visited": false, "degree": [], "budget": false}, "edges_examined": 2, "nodes_visited": 2},
+        {"outcome": "no_path", "truncation": {"visited": false, "degree": [], "budget": false}, "edges_examined": 1, "nodes_visited": 1},
+        {"outcome": "no_path", "truncation": {"visited": false, "degree": [], "budget": false}, "edges_examined": 1, "nodes_visited": 1}
+      ]
+    },
+    {
+      "name": "canonical-multiple-starts",
+      "purpose": "Canonical predecessor can originate at a later start, and its edge-ID prefix propagates to deeper paths. Duplicate starts do not consume the visited cap.",
+      "input": {
+        "nodes": [{"id": 0}, {"id": 1}, {"id": 2}, {"id": 3}],
+        "edges": [
+          {"id": 10, "source": 0, "target": 2, "relationship": "a"},
+          {"id": 1, "source": 1, "target": 2, "relationship": "b"},
+          {"id": 2, "source": 2, "target": 3, "relationship": "a", "segments": [{"from": null, "to": null}]}
+        ],
+        "queries": [
+          {"op": "traverse", "start": [0, 1, 0], "direction": "out", "T": 0, "C": 0, "max_hops": 2, "max_visited_nodes": 4, "max_edges_per_node": 10, "budget": 10},
+          {"op": "traverse", "start": [0, 0], "direction": "out", "T": 0, "C": 0, "max_hops": 0, "max_visited_nodes": 1, "max_edges_per_node": 1, "budget": 1},
+          {"op": "traverse", "start": [0, 1, 0], "direction": "out", "T": 0, "C": 0, "max_hops": 2, "max_visited_nodes": 1, "max_edges_per_node": 10, "budget": 10},
+          {"op": "shortest", "source": 3, "destination": 0, "direction": "in", "T": 0, "C": 0, "max_hops": 2, "max_visited_nodes": 4, "max_edges_per_node": 10, "budget": 10}
+        ]
+      },
+      "expected": [
+        {"nodes": [{"id": 0, "depth": 0}, {"id": 1, "depth": 0}, {"id": 2, "depth": 1}, {"id": 3, "depth": 2}], "edges": [10, 1, 2], "paths": [{"nodes": [1, 2], "edges": [1]}, {"nodes": [1, 2, 3], "edges": [1, 2]}], "truncation": {"visited": false, "degree": [], "budget": false}, "edges_examined": 3, "nodes_visited": 4},
+        {"nodes": [{"id": 0, "depth": 0}], "edges": [], "paths": [], "truncation": {"visited": false, "degree": [], "budget": false}, "edges_examined": 0, "nodes_visited": 1},
+        {"nodes": [{"id": 0, "depth": 0}], "edges": [], "paths": [], "truncation": {"visited": true, "degree": [], "budget": false}, "edges_examined": 0, "nodes_visited": 1},
+        {"outcome": "found", "path": {"nodes": [3, 2, 0], "edges": [2, 10]}, "truncation": {"visited": false, "degree": [], "budget": false}, "edges_examined": 3, "nodes_visited": 3}
+      ]
+    }
+  ],
+  "malformed": [
+    {"name": "duplicate-json-key", "input_json": "{\"nodes\":[],\"nodes\":[],\"edges\":[],\"queries\":[]}", "expected_error": "duplicate JSON key 'nodes'"},
+    {"name": "float-json-number", "input_json": "{\"nodes\":[{\"id\":0.0}],\"edges\":[],\"queries\":[]}", "expected_error": "non-integer JSON number '0.0'"},
+    {"name": "nan-json-constant", "input_json": "{\"nodes\":[{\"id\":NaN}],\"edges\":[],\"queries\":[]}", "expected_error": "invalid JSON constant 'NaN'"},
+    {"name": "missing-root-key", "input_json": "{\"nodes\":[],\"edges\":[]}", "expected_error": "input: expected keys nodes edges queries (optional: )"},
+    {"name": "extra-root-key", "input_json": "{\"nodes\":[],\"edges\":[],\"queries\":[],\"extra\":0}", "expected_error": "input: expected keys nodes edges queries (optional: )"},
+    {"name": "nodes-not-array", "input_json": "{\"nodes\":{},\"edges\":[],\"queries\":[]}", "expected_error": "input.nodes: expected array"},
+    {"name": "boolean-id", "input_json": "{\"nodes\":[{\"id\":true}],\"edges\":[],\"queries\":[]}", "expected_error": "input.nodes[0].id: expected u64 integer"},
+    {"name": "negative-id", "input_json": "{\"nodes\":[{\"id\":-1}],\"edges\":[],\"queries\":[]}", "expected_error": "input.nodes[0].id: expected u64 integer"},
+    {"name": "id-overflow", "input_json": "{\"nodes\":[{\"id\":18446744073709551616}],\"edges\":[],\"queries\":[]}", "expected_error": "input.nodes[0].id: expected u64 integer"},
+    {"name": "duplicate-node-id", "input_json": "{\"nodes\":[{\"id\":0},{\"id\":0}],\"edges\":[],\"queries\":[]}", "expected_error": "input.nodes[1]: duplicate ID"},
+    {"name": "extra-node-field", "input_json": "{\"nodes\":[{\"id\":0,\"labels\":[]}],\"edges\":[],\"queries\":[]}", "expected_error": "input.nodes[0]: expected keys id (optional: deadline)"},
+    {"name": "negative-deadline", "input_json": "{\"nodes\":[{\"id\":0,\"deadline\":-1}],\"edges\":[],\"queries\":[]}", "expected_error": "input.nodes[0].deadline: expected u64 integer"},
+    {"name": "edge-unknown-endpoint", "input_json": "{\"nodes\":[{\"id\":0}],\"edges\":[{\"id\":1,\"source\":0,\"target\":1,\"relationship\":\"a\"}],\"queries\":[]}", "expected_error": "input.edges[0]: unknown endpoint"},
+    {"name": "edge-duplicate-id", "input_json": "{\"nodes\":[{\"id\":0}],\"edges\":[{\"id\":1,\"source\":0,\"target\":0,\"relationship\":\"a\"},{\"id\":1,\"source\":0,\"target\":0,\"relationship\":\"b\"}],\"queries\":[]}", "expected_error": "input.edges[1]: duplicate ID"},
+    {"name": "empty-relationship", "input_json": "{\"nodes\":[{\"id\":0}],\"edges\":[{\"id\":1,\"source\":0,\"target\":0,\"relationship\":\"\"}],\"queries\":[]}", "expected_error": "input.edges[0].relationship: expected nonempty UTF-8 string"},
+    {"name": "invalid-utf8-relationship", "input_json": "{\"nodes\":[{\"id\":0}],\"edges\":[{\"id\":1,\"source\":0,\"target\":0,\"relationship\":\"\\ud800\"}],\"queries\":[]}", "expected_error": "input.edges[0].relationship: invalid UTF-8 string"},
+    {"name": "null-segments-not-legacy", "input_json": "{\"nodes\":[{\"id\":0}],\"edges\":[{\"id\":1,\"source\":0,\"target\":0,\"relationship\":\"a\",\"segments\":null}],\"queries\":[]}", "expected_error": "input.edges[0].segments: expected array"},
+    {"name": "segment-missing-bound", "input_json": "{\"nodes\":[{\"id\":0}],\"edges\":[{\"id\":1,\"source\":0,\"target\":0,\"relationship\":\"a\",\"segments\":[{\"from\":0}]}],\"queries\":[]}", "expected_error": "input.edges[0].segments[0]: expected keys from to (optional: )"},
+    {"name": "boolean-bound", "input_json": "{\"nodes\":[{\"id\":0}],\"edges\":[{\"id\":1,\"source\":0,\"target\":0,\"relationship\":\"a\",\"segments\":[{\"from\":false,\"to\":1}]}],\"queries\":[]}", "expected_error": "input.edges[0].segments[0].from: expected i64 integer"},
+    {"name": "bound-overflow", "input_json": "{\"nodes\":[{\"id\":0}],\"edges\":[{\"id\":1,\"source\":0,\"target\":0,\"relationship\":\"a\",\"segments\":[{\"from\":0,\"to\":9223372036854775808}]}],\"queries\":[]}", "expected_error": "input.edges[0].segments[0].to: expected i64 integer"},
+    {"name": "zero-length-segment", "input_json": "{\"nodes\":[{\"id\":0}],\"edges\":[{\"id\":1,\"source\":0,\"target\":0,\"relationship\":\"a\",\"segments\":[{\"from\":1,\"to\":1}]}],\"queries\":[]}", "expected_error": "input.edges[0].segments[0]: from must precede to"},
+    {"name": "inverted-segment", "input_json": "{\"nodes\":[{\"id\":0}],\"edges\":[{\"id\":1,\"source\":0,\"target\":0,\"relationship\":\"a\",\"segments\":[{\"from\":2,\"to\":1}]}],\"queries\":[]}", "expected_error": "input.edges[0].segments[0]: from must precede to"},
+    {"name": "unsorted-segments", "input_json": "{\"nodes\":[{\"id\":0}],\"edges\":[{\"id\":1,\"source\":0,\"target\":0,\"relationship\":\"a\",\"segments\":[{\"from\":10,\"to\":20},{\"from\":0,\"to\":5}]}],\"queries\":[]}", "expected_error": "input.edges[0].segments[1]: segments must be sorted"},
+    {"name": "overlap-segments", "input_json": "{\"nodes\":[{\"id\":0}],\"edges\":[{\"id\":1,\"source\":0,\"target\":0,\"relationship\":\"a\",\"segments\":[{\"from\":0,\"to\":10},{\"from\":5,\"to\":20}]}],\"queries\":[]}", "expected_error": "input.edges[0].segments[1]: segments overlap"},
+    {"name": "infinity-overlap", "input_json": "{\"nodes\":[{\"id\":0}],\"edges\":[{\"id\":1,\"source\":0,\"target\":0,\"relationship\":\"a\",\"segments\":[{\"from\":null,\"to\":null},{\"from\":0,\"to\":1}]}],\"queries\":[]}", "expected_error": "input.edges[0].segments[1]: segments overlap"},
+    {"name": "second-negative-infinity", "input_json": "{\"nodes\":[{\"id\":0}],\"edges\":[{\"id\":1,\"source\":0,\"target\":0,\"relationship\":\"a\",\"segments\":[{\"from\":null,\"to\":0},{\"from\":null,\"to\":1}]}],\"queries\":[]}", "expected_error": "input.edges[0].segments[1]: segments must be sorted"},
+    {"name": "empty-queries", "input_json": "{\"nodes\":[],\"edges\":[],\"queries\":[]}", "expected_error": "input.queries: expected nonempty array"},
+    {"name": "unknown-op", "input_json": "{\"nodes\":[{\"id\":0}],\"edges\":[],\"queries\":[{\"op\":\"retrieve\"}]}", "expected_error": "input.queries[0]: invalid op"},
+    {"name": "missing-selector", "input_json": "{\"nodes\":[{\"id\":0}],\"edges\":[],\"queries\":[{\"op\":\"neighbors\",\"node\":0,\"direction\":\"out\",\"C\":0}]}", "expected_error": "input.queries[0]: expected keys op T C direction node (optional: )"},
+    {"name": "boolean-T", "input_json": "{\"nodes\":[{\"id\":0}],\"edges\":[],\"queries\":[{\"op\":\"neighbors\",\"node\":0,\"direction\":\"out\",\"T\":true,\"C\":0}]}", "expected_error": "input.queries[0].T: expected i64 integer"},
+    {"name": "T-underflow", "input_json": "{\"nodes\":[{\"id\":0}],\"edges\":[],\"queries\":[{\"op\":\"neighbors\",\"node\":0,\"direction\":\"out\",\"T\":-9223372036854775809,\"C\":0}]}", "expected_error": "input.queries[0].T: expected i64 integer"},
+    {"name": "negative-C", "input_json": "{\"nodes\":[{\"id\":0}],\"edges\":[],\"queries\":[{\"op\":\"neighbors\",\"node\":0,\"direction\":\"out\",\"T\":0,\"C\":-1}]}", "expected_error": "input.queries[0].C: expected u64 integer"},
+    {"name": "invalid-direction", "input_json": "{\"nodes\":[{\"id\":0}],\"edges\":[],\"queries\":[{\"op\":\"neighbors\",\"node\":0,\"direction\":\"sideways\",\"T\":0,\"C\":0}]}", "expected_error": "input.queries[0]: invalid direction"},
+    {"name": "unknown-anchor", "input_json": "{\"nodes\":[{\"id\":0}],\"edges\":[],\"queries\":[{\"op\":\"neighbors\",\"node\":1,\"direction\":\"out\",\"T\":0,\"C\":0}]}", "expected_error": "input.queries[0]: unknown anchor"},
+    {"name": "expired-anchor", "input_json": "{\"nodes\":[{\"id\":0,\"deadline\":0}],\"edges\":[],\"queries\":[{\"op\":\"neighbors\",\"node\":0,\"direction\":\"out\",\"T\":0,\"C\":0}]}", "expected_error": "input.queries[0]: anchor expired at C"},
+    {"name": "empty-start", "input_json": "{\"nodes\":[{\"id\":0}],\"edges\":[],\"queries\":[{\"op\":\"traverse\",\"start\":[],\"direction\":\"out\",\"T\":0,\"C\":0,\"max_hops\":1,\"max_visited_nodes\":1,\"max_edges_per_node\":1,\"budget\":1}]}", "expected_error": "input.queries[0].start: expected nonempty array"},
+    {"name": "hop-ceiling", "input_json": "{\"nodes\":[{\"id\":0}],\"edges\":[],\"queries\":[{\"op\":\"traverse\",\"start\":[0],\"direction\":\"out\",\"T\":0,\"C\":0,\"max_hops\":5,\"max_visited_nodes\":1,\"max_edges_per_node\":1,\"budget\":1}]}", "expected_error": "input.queries[0].max_hops: expected [0,4] integer"},
+    {"name": "zero-visited-cap", "input_json": "{\"nodes\":[{\"id\":0}],\"edges\":[],\"queries\":[{\"op\":\"traverse\",\"start\":[0],\"direction\":\"out\",\"T\":0,\"C\":0,\"max_hops\":1,\"max_visited_nodes\":0,\"max_edges_per_node\":1,\"budget\":1}]}", "expected_error": "input.queries[0].max_visited_nodes: expected [1,10000] integer"},
+    {"name": "boolean-degree-cap", "input_json": "{\"nodes\":[{\"id\":0}],\"edges\":[],\"queries\":[{\"op\":\"traverse\",\"start\":[0],\"direction\":\"out\",\"T\":0,\"C\":0,\"max_hops\":1,\"max_visited_nodes\":1,\"max_edges_per_node\":true,\"budget\":1}]}", "expected_error": "input.queries[0].max_edges_per_node: expected [1,10000] integer"},
+    {"name": "zero-budget", "input_json": "{\"nodes\":[{\"id\":0}],\"edges\":[],\"queries\":[{\"op\":\"shortest\",\"source\":0,\"destination\":0,\"direction\":\"out\",\"T\":0,\"C\":0,\"max_hops\":1,\"max_visited_nodes\":1,\"max_edges_per_node\":1,\"budget\":0}]}", "expected_error": "input.queries[0].budget: expected [1,100000] integer"}
+  ]
+}

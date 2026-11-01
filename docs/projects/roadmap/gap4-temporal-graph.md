@@ -262,6 +262,16 @@ and malformed-fixture checks; CI runs the same command. These are mathematical
 references, not engine coverage for mutations, revisions, storage, traversal,
 cursors, authorization or work budgets.
 
+The independently reviewed [temporal read reference](../../../tests/temporal_read_oracle.py)
+and [read fixtures](../../../tests/fixtures/temporal_intervals/read-cases.json)
+model neighbors, FIFO traversal and certified shortest paths at fixed T/C.
+They charge examined adjacency entries before visibility filtering and treat
+truncated shortest-path searches as exhausted, not certified results. CI runs
+`python tests/temporal_read_oracle.py --self-test`, including malformed inputs,
+shuffle trials and mutations. This is logical acceptance evidence, not a Rust
+implementation or proof of persistence, paging, property-filter or cancellation
+behavior. It does not complete slice C or open any activation gate.
+
 ## 9. Delivery and remaining decisions
 | Slice | Exit |
 |---|---|
