@@ -16,7 +16,7 @@ use crate::{Database, Error, Expected, Metadata, Result};
 
 use super::convert::{metadata_from_properties, precondition, properties_from_metadata};
 use super::engine::temporal::Segment;
-use super::engine::{GraphState, TemporalMutation};
+use super::engine::{GraphBody, GraphEntry, GraphState, TemporalMutation};
 use super::{EdgeRef, selector};
 
 mod activate;
@@ -190,6 +190,10 @@ pub(super) fn mutation(op: &TemporalOp) -> Result<TemporalMutation> {
     })
 }
 
+/// Why a graph frame or state that holds temporal entries is corrupt in a
+/// log without the temporal capability.
+const NO_CAPABILITY: &str = "temporal entry without the temporal capability";
+
 /// Gives a graph state loaded from a file with header `flags` the file's
 /// temporal capability; a state holding temporal edges without it is
 /// corrupt (`offset` is where its graph data starts).
@@ -199,12 +203,29 @@ pub(crate) fn adopt(state: &mut GraphState, flags: u16, offset: u64) -> Result<(
             .set_temporal(true)
             .map_err(|_| Error::UnsupportedFeature(FLAG_TEMPORAL))?;
     } else if state.is_temporal() {
-        return Err(format::corrupt(
-            offset,
-            "temporal entry without the temporal capability",
-        ));
+        return Err(format::corrupt(offset, NO_CAPABILITY));
     }
     Ok(())
+}
+
+/// Decodes a checksum-verified op-12 or op-15 `frame` at `offset` of a log
+/// with header `flags` as the readers that do not replay it check it (the
+/// feeds and non-precision log export): in its frame context
+/// ([`super::frame::decode_frame`]), and holding no temporal entry unless
+/// the log has the temporal capability, which replay enforces through
+/// [`adopt`] and the graph state.
+pub(crate) fn decode_logged(
+    flags: u16,
+    frame: &format::RawFrame,
+    offset: u64,
+) -> Result<GraphBody> {
+    let snapshot = (frame.operation == format::OP_GRAPH_SNAPSHOT).then_some(frame.sequence);
+    let body = super::frame::decode_frame(snapshot, frame.id, frame.count, frame.body(), offset)?;
+    let temporal = |entry: &GraphEntry| matches!(entry, GraphEntry::Temporal(_));
+    if flags & FLAG_TEMPORAL == 0 && body.entries.iter().any(temporal) {
+        return Err(format::corrupt(offset, NO_CAPABILITY));
+    }
+    Ok(body)
 }
 
 impl Database {

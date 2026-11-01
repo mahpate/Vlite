@@ -33,8 +33,8 @@ struct Tracked {
 #[derive(Default)]
 pub(crate) struct FeedGraphs {
     graphs: BTreeMap<u16, Tracked>,
-    /// Gap 4: the log header has the temporal capability.
-    capable: bool,
+    /// Gap 4: the log header's flags, for its temporal capability.
+    flags: u16,
     /// Gap 4: temporal entries are reported (the temporal feed); otherwise
     /// the feed refuses them rather than omit them.
     report: bool,
@@ -50,14 +50,14 @@ impl FeedGraphs {
     pub(crate) fn new(flags: u16, report: bool) -> Self {
         Self {
             graphs: BTreeMap::new(),
-            capable: flags & format::FLAG_TEMPORAL != 0,
+            flags,
             report,
         }
     }
     /// Decodes one checksum-verified op-12 or op-15 frame at `offset` into
     /// `(collection, kind)` events, by the rule full replay applies
-    /// ([`super::frame::decode_frame`]). `collections` maps collection IDs
-    /// to names and dimensions.
+    /// ([`super::temporal::decode_logged`]). `collections` maps collection
+    /// IDs to names and dimensions.
     pub(crate) fn frame(
         &mut self,
         frame: &format::RawFrame,
@@ -66,9 +66,7 @@ impl FeedGraphs {
     ) -> Result<Vec<(String, ChangeKind)>> {
         let corrupt = |reason| Error::Corrupt { offset, reason };
         let sequence = frame.sequence;
-        let snapshot = (frame.operation == format::OP_GRAPH_SNAPSHOT).then_some(sequence);
-        let body =
-            super::frame::decode_frame(snapshot, frame.id, frame.count, frame.body(), offset)?;
+        let body = super::temporal::decode_logged(self.flags, frame, offset)?;
         let graph_id = body.graph_id.0;
         let collection_name = |collection: u16| {
             collections
@@ -277,12 +275,10 @@ impl FeedGraphs {
                 | GraphEntry::EdgeExpiry { .. }
                 | GraphEntry::Reclaim { .. }
                 | GraphEntry::VectorMutation { .. } => continue,
-                // Gap 4: replay refuses temporal entries without the
-                // capability; other feeds refuse them rather than omit them.
+                // Gap 4: the decode refused temporal entries without the
+                // capability, as replay does; other feeds refuse them rather
+                // than omit them.
                 GraphEntry::Temporal(entry) => {
-                    if !self.capable {
-                        return Err(corrupt("temporal entry without the temporal capability"));
-                    }
                     if !self.report {
                         return Err(Error::UnsupportedFeature(format::FLAG_TEMPORAL));
                     }

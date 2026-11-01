@@ -374,6 +374,14 @@ pub(crate) fn read_segment<R: Read + Seek>(
                     "invalid operation or reserved record bytes",
                 ));
             }
+            // Gap 4: a graph frame passes the frame-context and capability
+            // checks the feeds share, even where the cursor or size cut
+            // below skips it; the decoded body is dropped per frame.
+            None if frame.operation == crate::property_graph::engine::codec::OP_GRAPH
+                || frame.operation == format::OP_GRAPH_SNAPSHOT =>
+            {
+                crate::property_graph::temporal::decode_logged(header.flags, &frame, at)?;
+            }
             None => {}
         }
         head = head.max(frame.sequence);
