@@ -62,7 +62,7 @@ Propose a hard cap of 256 segments per temporal edge; reject excess explicitly.
 This bounds binary search, correction validation and per-edge memory growth.
 Keep legacy edges as a separate, unchanged form with implicit all-time validity.
 Explicit promotion creates an all-time segment from their current properties.
-Promotion is conditional and enables the temporal format capability.
+Promotion is conditional and needs a file with the temporal format capability (§5).
 Do not silently reinterpret existing arbitrary properties named `valid_from` or `valid_to`.
 Expose validity as typed fields, outside ordinary metadata and projection.
 Temporal edge views carry the matching segment's bounds and properties.
@@ -161,7 +161,15 @@ Keep vector evidence retention separate; historical edges do not guarantee survi
 
 Add dedicated temporal entries behind a persisted, required format capability.
 Do not change the meaning or payload of legacy edge ops in place.
-Old files remain readable; enable the capability atomically with the first temporal write.
+Old files remain readable. Enable the capability by an explicit copy-out into a new
+temporal-enabled database with a new lineage; the source is never modified and its replicas
+are reseeded from the copy. A temporal write needs a file that already has the capability and
+is then an ordinary atomic append; no write enables it in place.
+(Amended by user decision during the slice A/B review, replacing "enable the capability
+atomically with the first temporal write". The decision covers this design and a gated,
+private implementation only: the conversion API stays gated until reviewed and qualified,
+and production activation is not approved. See
+[Activation publication (decided: copy-out)](#activation-publication-decided-copy-out).)
 Readers without the capability must refuse before publishing partial state.
 Open: allocate a separate temporal capability and precise unsupported-format error with the format owner.
 The [compact-storage flag](compact-storage-contract.md) guards checkpoint blocks,
@@ -270,11 +278,13 @@ approval remain outstanding; the reference fixtures do not satisfy those gates.
 ## Implemented slices A and B (unreleased, under review)
 
 Status: implemented in Rust behind a preactivation gate; not released and not
-accepted. The first independent review returned five blockers. Blockers 1, 3,
-4 and 5 are fixed and wait for re-review. Blocker 2 (activation publication)
-needs a product decision; see
-[Activation publication (decision needed)](#activation-publication-decision-needed). Slice C (reads) is not started, so no
-user can observe validity yet and every release build refuses the capability.
+accepted. The first independent review returned five blockers. Round 1 fixed
+blockers 1, 3, 4 and 5. Blocker 2 (activation publication) is resolved by
+the user-approved copy-out design, implemented as a gated, private path in
+round 2, which also fixes two medium findings from the static re-review (A,
+B); see [Review fixes, round 2](#review-fixes-round-2). Everything waits for
+independent execution review. Slice C (reads) is not started, so no user can
+observe validity yet and every release build refuses the capability.
 
 ### Slice A: contract and format
 
@@ -353,7 +363,7 @@ Public Rust API, unreleased. Every build refuses it with
 Writes:
 
 - **Atomic batches.** Temporal operations are planned with the other operations of a batch. Vector mutations, computed TTL cleanup and temporal entries go into one frame.
-- **Limits.** Each temporal operation counts as one of the 4,096 user operations. The encoded 16 MiB body limit is checked before the append. Every series change except a removal (create, promote, append, replace and close) also checks that the resulting series fits one graph body (`series_bytes`), because a close can grow a series by 8 bytes. Any failure rolls back the whole plan: tentative TTL cleanup, the vector mutations and the capability flag.
+- **Limits.** Each temporal operation counts as one of the 4,096 user operations. The encoded 16 MiB body limit is checked before the append. Every series change except a removal (create, promote, append, replace and close) also checks that the resulting series fits one graph body (`series_bytes`), because a close can grow a series by 8 bytes. Any failure rolls back the whole plan: tentative TTL cleanup and the vector mutations.
 - **Creating an edge.** `CreateEdge` needs live endpoints.
   - If the key is already live on an identical temporal edge (same endpoints and type, bit-identical series), the edge is returned with `created = false`. Any other live edge with that key is `GraphKeyConflict`.
   - Ordinary `CreateEdge`/`EnsureEdge` never treat a temporal edge as an identical retry.
@@ -373,12 +383,9 @@ Writes:
 
 Capability:
 
-- **Enabling.** The first committing batch that plans a temporal entry enables `FLAG_TEMPORAL`.
-  - Order: the frame is encoded and validated, then the 32-byte header is rewritten and synced, then the frame is appended.
-  - Rejected batches and no-ops leave the header unchanged.
-  - If the header write fails, the batch returns `CommitIndeterminate` and the handle is poisoned.
-  - This order is review blocker 2 and is not accepted. It is not atomic, and it breaks point-in-time restore and replicas; see [Activation publication (decision needed)](#activation-publication-decision-needed).
-- **Directory stores.** Their segments repeat the header flags, so they cannot enable the capability (`UnsupportedFeature(64)`). They inherit it through `convert_to_directory`. WAL segment headers (`WAL_FLAGS`) and checkpoint images carry the flag.
+- **Enabling (copy-out).** `property_graph::temporal::enable_temporal(source, destination, key)` (crate-private, behind the gate) copies a closed graph-enabled file or directory store into a new single file with `FLAG_TEMPORAL`. See [Activation publication (decided: copy-out)](#activation-publication-decided-copy-out).
+- **Refusal.** In a file without flag 64, or a build without support, a batch with any temporal operation returns `UnsupportedFeature(64)` before planning. This holds for valid, invalid and mixed batches, and nothing is written. No write enables the capability in place. In a capable file the first temporal write is an ordinary append that leaves the header unchanged.
+- **Directory stores.** They inherit the capability through `convert_to_directory` of a capable file. WAL segment headers (`WAL_FLAGS`) and checkpoint images carry the flag. `enable_temporal` also accepts a directory store as its source.
 - **Read-only handles** return `ReadOnly`.
 
 Persistence:
@@ -389,7 +396,11 @@ Persistence:
   - Snapshot load restores the series.
 - **Flags across maintenance.** Compaction and upgrade carry `FLAG_TEMPORAL` with `FLAG_GRAPH`. ID high-water marks survive.
 - **Revisions.** A snapshot at the same lineage restates each temporal edge's revision in its tag-65 entry: directory checkpoints, directory conversion and P2b precision images. This does not depend on precision; precision images also restore the same values through their revision frames.
-  - Compaction, upgrade, `enable_graph` and stripping start a new lineage whose sequences restart. They renumber temporal revisions, as they do records and ordinary edges, because an old revision could exceed the new sequence. Nothing is refused.
+  - Compaction and upgrade start a new lineage whose sequences restart. Under that existing new-lineage contract they renumber temporal revisions, as they do records and ordinary edges, because an old revision could exceed the new sequence. Nothing is refused. A same-lineage checkpoint never renumbers a temporal revision.
+  - `enable_graph` refuses a graph-enabled source, so it never meets temporal state. `strip_graph` removes all graph state, temporal state included, and drops flag 64.
+  - Copy-out activation copies every frame, so it keeps every revision.
+  - A tag-65 revision is checked in the frame context that replay, both feeds, log export and the precision image check share (`frame::decode_frame`): zero in op 12, `1..=` the snapshot sequence in op 15.
+  - In a precision image, the revision supplement must equal each temporal edge's restated revision. Replay (`restore_revisions`) and the image check (`Coverage`) both enforce this. Nodes and ordinary edges still take the supplement's revision.
   - Ordinary edges and nodes in non-precision checkpoints still take the checkpoint sequence. That predates Gap 4 and is out of its scope.
 
 Feed and serving:
@@ -411,12 +422,14 @@ Coverage added in slice B (all `cargo test --lib`):
 | Rollback | the same and `writes::limits_roll_back_the_whole_plan_including_tentative_ttl_cleanup` (vector, TTL cleanup, revisions and header unchanged) |
 | Limits | 4,096 ops accepted, 4,097 rejected; 256 segments accepted, 257 rejected; byte overflow rejected; one frame with TTL cleanup, temporal change and vector (`writes::limits_…`, `state::temporal::tests::segment_cap_and_series_bytes_are_enforced`) |
 | TTL | `writes::ttl_reclaims_whole_series_and_history_never_restores_them` (node cascade, edge-only expiry, compaction drops due series, key reuse gets a new ID, `verify_graph`) |
-| Reopen | `writes::the_first_temporal_write_enables_the_capability_with_its_frame`, `state::temporal::tests::snapshot_restates_series_and_equals_replay`; refusal when support is off |
+| Reopen | `writes::temporal_writes_need_a_file_copied_out_with_the_capability`, `state::temporal::tests::snapshot_restates_series_and_equals_replay`; refusal when support is off |
+| Activation (copy-out) | `activate::a_copy_keeps_every_frame_under_a_new_lineage_and_the_source_is_untouched`, `activate::activation_refuses_without_publishing_anything`, `activate::publication_faults_never_leave_a_partial_copy` (plain and encrypted), `activate::an_encrypted_copy_is_resealed_under_the_same_key`, `activate::backups_and_restore_continue_on_both_sides`, `activate::replicas_follow_their_own_lineage_and_reseed_from_the_copy`, `activate::a_directory_store_copies_out_to_a_single_temporal_file`, `activate::a_precision_image_copies_out_with_its_catalog` |
+| Revision context | `revisions::an_ordinary_frame_never_restates_a_revision`, `revisions::a_snapshot_revision_stays_within_its_sequence` (plain and encrypted), `revisions::a_precision_supplement_must_match_a_temporal_revision`, `state::temporal::tests::snapshot_restates_series_and_equals_replay` |
 | Revisions | `state::temporal::tests::a_snapshot_keeps_temporal_revisions`, `writes::temporal_revisions_survive_conversion_checkpoints_and_reopen` (conversion, checkpoint, reopen; compaction renumbers) |
 | Compaction / Directory checkpoint | `writes::temporal_state_survives_compaction_conversion_and_checkpoints`, `writes::a_precision_image_keeps_series_and_revisions` (P2b snapshot load) |
 | Encryption | `writes::encrypted_temporal_files_round_trip` |
 | Feed/surfaces | `writes::only_the_temporal_feed_reports_temporal_changes_in_commit_order`; old feeds refuse, before and after compaction; missing flag is `Corrupt` |
-| Format capability | `writes::builds_without_support_refuse_temporal_operations_and_change_nothing`, `writes::read_only_handles_refuse_and_a_failed_header_write_poisons`, legacy files unchanged without a temporal write |
+| Format capability | `writes::builds_without_support_refuse_temporal_operations_and_change_nothing`, `writes::read_only_handles_refuse_temporal_writes`, `writes::temporal_writes_need_a_file_copied_out_with_the_capability` (legacy files unchanged, refused batches write nothing) |
 | Standalone gate | `crates/vlite-graph/tests/temporal_gate.rs`: an ordinary build of the engine refuses `set_temporal(true)` and a snapshot holding a temporal edge |
 
 Fail-first evidence:
@@ -446,6 +459,13 @@ Shared-file hooks, each marked `// Gap 4:`:
 | `src/maintenance.rs` | B | compaction and upgrade carry `FLAG_TEMPORAL` |
 | `src/maintenance.rs` | review fix 3 | `write_v5_image` passes `floor` to `compacted_bodies`; its test image builder passes 0 |
 | `src/directory.rs` | B | `WAL_FLAGS` carries the flag; the checkpoint thread copies the test gate |
+| `src/property_graph/frame.rs` | round 2 (A) | `decode_frame(snapshot: Option<u64>, …)` (was `bool`) checks `TemporalEntry::fits` |
+| `src/property_graph/feed.rs` | round 2 (A) | passes the op-15 frame sequence to `decode_frame` |
+| `src/format.rs` | round 2 (A) | op-15 load passes `Some(sequence)` to `decode_frame` |
+| `src/compact/mod.rs` | round 2 (A) | `ImageCheck::frame` passes `Some(frame.sequence)` to `decode_frame` |
+| `src/compact/catalog/tests/peak.rs` | round 2 (A) | test call passes `Some(u64_at(frame, 8))` (precision owner's test) |
+| `src/compact/mod.rs` | round 2 (B) | `Coverage::temporal`: the snapshot's temporal `(edge, revision)` pairs, compared with the revision run |
+| `src/property_graph/mod.rs` | round 2 | `write_graph_batch` refuses temporal operations before planning; the `commit_graph` header hook is removed |
 
 The precision baseline `5080b28d` (`SnapshotBuilder`, `PendingSnapshot`,
 `GraphRecords`, `check_frame_writes`) is merged in `7ff7f20f`. In
@@ -455,9 +475,10 @@ the revision range, and restores the series.
 
 Known gaps and follow-ups (not yet tested unless stated):
 
-1. **Activation publication (blocker 2).** Replicas, point-in-time restore and the crash window are open; see [Activation publication (decision needed)](#activation-publication-decision-needed).
+1. **Activation surface.** Activation is a gated, crate-private copy-out. The public `maintenance::enable_temporal` is proposed, not added, and production activation is not approved. Replicas of the source must be reseeded from the copy, which starts its own backup chain.
 2. **Edges created in the batch.** An edge created earlier in the same batch has no batch-start revision, so it cannot be corrected in that batch; create it with its full series.
-3. **Revisions after compaction.** Compaction and upgrade renumber temporal revisions (see Persistence).
+3. **Revisions after compaction.** Compaction and upgrade renumber temporal revisions under the existing new-lineage contract (see Persistence).
+7. **Raw log export.** A non-precision log export ships frames without decoding them. A follower's replay refuses a bad tag-65 revision as `Corrupt` and stays unchanged; only the exporter does not refuse it.
 4. **Ordinary reads.** They ignore validity and show temporal edges with empty properties until slice C. The gate hides this from users.
 5. **Feed gaps.** The feed does not report TTL deadlines or reclaims, as in Gap 3. No surface outside Rust reports temporal changes.
 6. **Measurement.** Memory per segment and production caps are not measured, and benchmarks are unchanged.
@@ -505,9 +526,9 @@ Turning the gate on for release builds also waits for slice C.
    batch's first mutation of the edge of either kind. Supersession (close
    plus append) is then one revision-checked unit, like a Datomic
    transaction against one basis.
-9. Enabling order: superseded by review blocker 2. The interim code writes
-   and syncs the header before the frame; the replacement is the decision in
-   [Activation publication (decision needed)](#activation-publication-decision-needed).
+9. Enabling: an explicit copy-out into a new lineage (user-approved,
+   replacing first-write enabling); see
+   [Activation publication (decided: copy-out)](#activation-publication-decided-copy-out).
    Directory stores inherit the capability only by conversion.
 10. Feed: rather than mixing temporal operations into existing feeds,
     existing feeds refuse temporal logs and an opt-in Rust feed reports
@@ -524,37 +545,105 @@ Turning the gate on for release builds also waits for slice C.
     sequence"; only snapshots carry a nonzero value. Replay rejects a
     nonzero value, because a restated op-12 body followed by an expiry
     entry would otherwise diverge from replay.
-13. Revisions across new lineages: compaction, upgrade, `enable_graph` and
-    stripping renumber temporal revisions like every other revision.
-    Callers holding an `Expected::Revision` from before such a rewrite get
-    a precondition failure, as they already do for ordinary edges.
+13. Revisions across new lineages: compaction and upgrade renumber temporal
+    revisions like every other revision (the existing new-lineage
+    contract). Callers holding an `Expected::Revision` from before such a
+    rewrite get a precondition failure, as they already do for ordinary
+    edges. `enable_graph` never meets temporal state, and `strip_graph`
+    removes it. Copy-out activation and same-lineage checkpoints keep
+    revisions.
 14. Series bytes: every series change except a removal rechecks the
     whole-series byte limit, closing included. The check runs as each
     entry is applied, so a failure rolls back the whole batch through the
     ordinary undo log.
+15. Activation surface: the proposed public form is
+    `maintenance::enable_temporal(source, destination, key) ->
+    Result<Inspection>`, beside `enable_graph`. Until it is qualified it
+    is the crate-private `property_graph::temporal::enable_temporal`, which
+    builds without support refuse with `UnsupportedFeature(64)`. It has no
+    `site/api.html` row.
+16. Activation is not compaction: the copy keeps every frame (re-sealed
+    under the same key with a fresh salt when encrypted, like
+    `reencrypt`), not a rewritten image. Sequences, revisions, absolute
+    deadlines (due entities included), history, imports and precision
+    blocks are kept as they are.
+17. Revision context: `decode_frame` takes the op-15 sequence (`None` for
+    op 12), so every reader applies `revision_fits` to tag 65 the same
+    way. Replay and snapshot load reuse the same function.
 
-### Review fixes, round 1 (uncommitted review state)
+### Review fixes, round 1
 
 | Blocker | Fix | Fail-first evidence (before the fix) |
 |---|---|---|
 | 1, high: a close could outgrow the series byte limit | `apply_temporal` checks the series bytes after every entry except a removal, and undoes on failure | Engine `closing_cannot_outgrow_the_series_bytes`: `InvariantViolation("invalid series")` instead of `series_bytes`. Adapter `a_close_that_outgrows_the_series_bytes_rolls_back_its_batch`: the close was accepted |
-| 2, high: in-place activation is not atomic | Not changed; [decision needed](#activation-publication-decision-needed) | Probes listed in that section |
+| 2, high: in-place activation is not atomic | Resolved in round 2 by the user-approved copy-out activation; see [Activation publication (decided: copy-out)](#activation-publication-decided-copy-out) | Probes listed in that section |
 | 3, medium: non-precision snapshots reset revisions | Tag 65 restates the revision in checkpoint, conversion and P2b images; snapshot load restores it | Engine `a_snapshot_keeps_temporal_revisions`: `[50, 50, 50]` instead of `[2, 3, 50]`. Adapter `temporal_revisions_survive_conversion_checkpoints_and_reopen`: 9 instead of 7 after `convert_to_directory` |
 | 4, medium: the batch-start revision was captured lazily | `Planner::push` records an edge's revision before the batch's first mutation of it, of either kind | Planner `the_batch_start_revision_survives_earlier_ordinary_mutations`: `PreconditionFailed { current: Some(4) }`. Adapter `an_earlier_ordinary_mutation_keeps_the_batch_start_revision`: `RevisionMismatch { current: Some(8) }` |
 | 5, high: the standalone engine could enable temporal state | Engine gate (decision 11): `set_temporal(true)` and snapshot admission refuse outside test builds | `crates/vlite-graph/tests/temporal_gate.rs`: the ordinary-build snapshot load returned a temporal state, and `set_temporal(true)` succeeded |
 
-### Activation publication (decision needed)
+### Review fixes, round 2
 
-Review blocker 2 is open. Implementing the original contract ("enable the
-capability atomically with the first temporal write") safely needs a product
-decision, so the interim code is unchanged and no behavioural exception is
-taken.
+| Finding | Fix | Fail-first evidence (before the fix) |
+|---|---|---|
+| Blocker 2: activation publication | The user approved copy-out activation. `enable_temporal` publishes a new temporal-enabled file. The in-place header rewrite, its `FAIL_HEADER` failpoint and the `commit_graph` hook are removed. Temporal batches on files without flag 64 are refused before planning | With `enable_temporal` stubbed to refuse, 22 of 28 `property_graph::temporal` tests failed with `UnsupportedFeature(64)` |
+| A, medium: the feed decoded a nonzero op-12 revision | `decode_frame` checks `TemporalEntry::fits` with the frame's context, so replay, both feeds, log export and the image check refuse it alike | `an_ordinary_frame_never_restates_a_revision`: the temporal feed accepted an op-12 `PutEdge` with revision 1 (plain). `a_snapshot_revision_stays_within_its_sequence`: the feed accepted snapshot revision 0 |
+| B, medium: the precision supplement overwrote a temporal revision | `restore_revisions` requires equality for temporal edges. The image check's `Coverage` compares the snapshot's temporal revisions with the revision run | `a_precision_supplement_must_match_a_temporal_revision`: an image whose tag 65 says 7 and supplement says 8 opened. Engine `snapshot_restates_series_and_equals_replay`: `restore_revisions` returned `Ok(())`. With only the replay fix, the temporal feed still accepted the image (line 266) |
 
-Interim behaviour (`property_graph/temporal.rs`, `enable_temporal`): before
-appending the first temporal frame, the 32-byte header is rewritten in place
-with flag 64 and a new checksum, then synced. Evidence from scratch probes
-(single-file store, support on unless stated; the probes were not
-committed):
+Committed state of review round 1 is `bf63d83f`. Number allocations (flag
+64, tags 65 to 69) are unchanged.
+
+### Activation publication (decided: copy-out)
+
+Decision (user-directed, during the slice A/B review): replace automatic
+first-write activation with an explicit copy-out into a new temporal-enabled
+database with a new lineage. The original is untouched, and its replicas are
+reseeded from the copy. The decision approves this design and a gated,
+private implementation. It does not approve production activation, and the
+additive Rust conversion API stays gated until it is reviewed and qualified.
+
+Implemented (`property_graph/temporal/activate.rs`, crate-private
+`enable_temporal(source, destination, key)`):
+
+- It follows `logops::reencrypt`. The source is read under its exclusive
+  lock (`maintenance::source`), so an open source is `Locked`, and a
+  directory store is read as its logical stream. The source must load
+  completely: an incomplete tail is `IncompleteTail`, never repaired.
+- Its header must have `FLAG_GRAPH` (otherwise `GraphsNotEnabled`) and not
+  already flag 64 (otherwise `GraphInvalidOptions`).
+- The copy's header keeps the version, dimensions, collection floor and
+  flags, adds flag 64 and draws a new lineage. Every frame follows
+  unchanged. An encrypted source is resealed under the same key with a
+  fresh salt (its own cipher domain), so its plaintext frames are
+  identical.
+- Output goes through `maintenance::publish_with`. It is staged beside the
+  destination, reloaded and validated, synced and locked, then published
+  without overwrite. A failure before the name appears leaves nothing. A
+  failure after it is `PublicationIndeterminate` with a complete copy that
+  a retry never replaces.
+- Activation is not compaction. Retained logical content, absolute TTL
+  deadlines (due entities stay until a write reclaims them), revisions,
+  sequences, imports, precision and encryption are kept.
+- The old lineage is unaffected. Its backups and point-in-time restore keep
+  working. A backup of the source cannot anchor a restore of the copy
+  (`InvalidRestoreTarget`). A follower of the source keeps following it,
+  refuses a segment of the copy (`ReplicaDiverged`) and stays unchanged.
+  New followers are seeded from the copy.
+
+Tests (`property_graph::temporal::tests::activate`):
+
+- source bytes are unchanged and the copy's header differs only in lineage and flags;
+- refusals publish nothing: an existing destination, `Locked`, `NotEncrypted`, `GraphsNotEnabled`, `IncompleteTail`, the gate off, and an already temporal source;
+- staged-write faults, plain and encrypted: a partial header (16 bytes), a header with no frames, a torn first frame and a mid-log cut;
+- the `Staged` and `Visible` failpoints, and a no-clobber retry;
+- an encrypted reseal, with a missing key and a wrong key;
+- PITR on both lineages, with and without a base, including a cut at the activation sequence;
+- replica continuity and reseed;
+- a directory-store source;
+- a precision image source (catalog and flags kept).
+
+Evidence that led to the decision, from scratch probes of the former
+in-place header rewrite (single-file store, support on unless stated; the
+probes were not committed):
 
 | Probe | Result |
 |---|---|
@@ -580,9 +669,9 @@ Constraints from existing contracts:
 - Point-in-time restore proves lineage by byte prefix, from byte 0, and
   replicas compare headers. Any same-lineage header change breaks both.
 
-Alternatives, smallest first:
+Alternatives considered, smallest first (1 was chosen):
 
-1. **Copy-out activation (recommended).** Add
+1. **Copy-out activation (chosen).** Add
    `enable_temporal(source, destination, key)` beside `enable_graph`. It
    writes the source's graph image with flag 64 through `write_v5_image`
    and `publish_held`. The source is unchanged, and the output gets a new
@@ -599,8 +688,9 @@ Alternatives, smallest first:
      - The new file starts a new backup chain.
      - Replicas are reseeded, as after compaction.
      - Directory stores convert from the activated file.
-   - Cost: one new public function with its `site/api.html` row, about 10
-     tests, and no change to `format.rs`, `logops.rs` or `replica.rs`.
+   - Cost: one function (kept crate-private and gated until qualified; the
+     planned image rewrite became a frame-preserving copy, decision 16),
+     8 tests, and no change to `logops.rs` or `replica.rs`.
    - Contract change: the spec sentence becomes "enable the capability with
      an explicit copy-out step; the first temporal write requires it". An
      optional follow-up is a creation-time option.
@@ -635,9 +725,4 @@ Alternatives, smallest first:
    "readers without the capability must refuse before publishing partial
    state" with a precise error. Rejected.
 
-Once a mechanism is chosen, its tests will cover:
-
-- partial-header and header-then-frame faults, where they still exist;
-- end-to-end temporal restore across activation, with and without a base
-  backup;
-- replica behaviour across activation.
+The chosen mechanism's fault, restore and replica tests are listed above.
