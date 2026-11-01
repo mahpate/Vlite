@@ -32,6 +32,7 @@ mod goldens;
 mod limits;
 mod parity;
 mod populated;
+mod replayed;
 
 const LINEAGE: u64 = 0x5EED_0000_0000_0032;
 /// A deadline far in the future (2100-01-01).

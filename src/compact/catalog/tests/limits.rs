@@ -37,7 +37,7 @@ fn readers(log: &[u8], key: Option<&EncryptionKey>, floor: u64) -> [String; 3] {
 }
 
 /// `readers` of the plaintext `log` and of it encrypted.
-fn both(log: &[u8], floor: u64) -> [[String; 3]; 2] {
+pub(super) fn both(log: &[u8], floor: u64) -> [[String; 3]; 2] {
     [
         readers(log, None, floor),
         readers(&encrypted(log), Some(&key()), floor),
@@ -50,7 +50,7 @@ fn alike(reason: &str) -> [[String; 3]; 2] {
 
 /// Each named case whose readers' outcomes are not all its expected
 /// reason, with those outcomes.
-fn mismatches<'a>(
+pub(super) fn mismatches<'a>(
     cases: impl IntoIterator<Item = (&'a str, [[String; 3]; 2], &'a str)>,
 ) -> Vec<String> {
     cases
@@ -60,7 +60,7 @@ fn mismatches<'a>(
         .collect()
 }
 
-fn record(id: u64) -> Mutation {
+pub(super) fn record(id: u64) -> Mutation {
     Mutation::Put {
         id,
         vector: vec![0.5, 0.25],
@@ -70,7 +70,7 @@ fn record(id: u64) -> Mutation {
 
 /// A precision store whose float32 `c` (ID 1, two dimensions) holds
 /// records `1..=records`.
-fn store(records: u64) -> Database {
+pub(super) fn store(records: u64) -> Database {
     let mut db = Database::open_from_bytes(image_of(&initial(None)), None).unwrap();
     db.create_collection_as("c", spec(2), F32).unwrap();
     let ids: Vec<u64> = (1..=records).collect();
@@ -82,13 +82,13 @@ fn store(records: u64) -> Database {
 }
 
 /// The complete plaintext image of `db` at its head, which is its floor.
-fn imaged(db: &Database) -> (Vec<u8>, u64) {
+pub(super) fn imaged(db: &Database) -> (Vec<u8>, u64) {
     let loaded = load(&db.to_bytes().unwrap(), None).unwrap();
     (image_of(&loaded), loaded.sequence)
 }
 
 /// The frame that `write` commits after `log`.
-fn committed(log: &[u8], write: impl FnOnce(&mut Database) -> Result<()>) -> Vec<u8> {
+pub(super) fn committed(log: &[u8], write: impl FnOnce(&mut Database) -> Result<()>) -> Vec<u8> {
     let mut db = Database::open_from_bytes(log.to_vec(), None).unwrap();
     write(&mut db).unwrap();
     db.to_bytes().unwrap()[log.len()..].to_vec()
@@ -98,12 +98,12 @@ fn set_u32(bytes: &mut [u8], at: usize, value: u32) {
     bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
 }
 
-fn set_u64(bytes: &mut [u8], at: usize, value: u64) {
+pub(super) fn set_u64(bytes: &mut [u8], at: usize, value: u64) {
     bytes[at..at + 8].copy_from_slice(&value.to_le_bytes());
 }
 
 /// `base` followed by `frames`.
-fn with(base: &[u8], frames: &[&[u8]]) -> Vec<u8> {
+pub(super) fn with(base: &[u8], frames: &[&[u8]]) -> Vec<u8> {
     let mut log = base.to_vec();
     for frame in frames {
         log.extend_from_slice(frame);
@@ -112,7 +112,7 @@ fn with(base: &[u8], frames: &[&[u8]]) -> Vec<u8> {
 }
 
 /// `frame` with its body replaced by `body` holding `count` entries.
-fn rebodied(frame: &[u8], count: u32, body: &[u8]) -> Vec<u8> {
+pub(super) fn rebodied(frame: &[u8], count: u32, body: &[u8]) -> Vec<u8> {
     refit(frame, |bytes| {
         bytes.truncate(PREFIX_SIZE);
         bytes.extend_from_slice(body);
@@ -121,14 +121,14 @@ fn rebodied(frame: &[u8], count: u32, body: &[u8]) -> Vec<u8> {
 }
 
 /// The body of the plaintext `frame`.
-fn body(frame: &[u8]) -> &[u8] {
+pub(super) fn body(frame: &[u8]) -> &[u8] {
     &frame[PREFIX_SIZE..frame.len() - FOOTER_SIZE]
 }
 
 /// `store(2)` with float16 `h` (ID 2) and graph `g`: nodes `a` and `b`
 /// joined by edge `e`, each with a deadline, and `b` attached to record 1
 /// of `c`.
-fn graph_store() -> Database {
+pub(super) fn graph_store() -> Database {
     let mut db = store(2);
     db.create_collection_as("h", spec(2), F16).unwrap();
     db.create_graph("g").unwrap();

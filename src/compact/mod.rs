@@ -348,11 +348,13 @@ pub(crate) enum Supplement {
 
 /// A live collection of a precision log: its name, dimensions and stored
 /// precision, which the catalog gives the collections an image restates
-/// and op 17 the ones created after it.
+/// and op 17 the ones created after it; and its live records, each noted
+/// with whether it expires, as frames restate, write and delete them.
 struct Live {
     name: String,
     dimensions: usize,
     precision: Option<Precision>,
+    records: BTreeMap<u64, bool>,
 }
 
 /// Checks the frames of a `FLAG_COMPACT` image in log order: every frame
@@ -378,6 +380,11 @@ pub(crate) struct ImageCheck {
     /// exactly a value of its precision.
     described: BTreeMap<u16, Live>,
     collection_high: u16,
+    /// In a precision log, its import jobs, followed as replay follows
+    /// them; and the graph snapshot bodies read so far with the offset of
+    /// the first, loaded as replay loads them where the snapshot ends.
+    jobs: crate::format::ImportJobs,
+    pending: Option<(u64, Vec<GraphBody>)>,
     entries: Option<Table>,
     /// The run of blocks being read (owner, kind, next partition), and runs
     /// that ended and may not resume.
@@ -417,9 +424,12 @@ impl ImageCheck {
                     name: "default".to_string(),
                     dimensions,
                     precision: None,
+                    records: BTreeMap::new(),
                 },
             )]),
             collection_high: collection_floor,
+            jobs: Default::default(),
+            pending: None,
             entries: None,
             run: None,
             ended: BTreeSet::new(),
@@ -582,18 +592,39 @@ impl ImageCheck {
 
     /// Checks the verified (and decrypted) body of any frame whose prefix
     /// `prefix` accepted, for readers that do not replay the log: op-16
-    /// blocks (`block`); and in a precision log the collection creates
-    /// (`created`) and graph snapshots (`snapshot`) that its catalog,
-    /// import registry and revision runs must match, the drops after it,
-    /// and, as replay checks them before it decodes a body, every other
-    /// frame's count, ID, length and target collection, then every dense
-    /// value it writes, which must be exactly a value of its collection's
-    /// precision (`format::check_frame_dense`). Full replay decodes those
-    /// frames itself and makes the same checks.
+    /// blocks (`block`); and in a precision log every frame as full replay
+    /// checks it. The collection creates (`created`) and graph snapshots
+    /// (`snapshot`) must match its catalog, import registry and revision
+    /// runs, and each snapshot loads as replay loads it, with its
+    /// attachments checked against the live records, where it ends
+    /// (`load_snapshot`). Every other frame passes replay's checks of its
+    /// count, ID, length, target collection and body, and every dense value
+    /// it writes must be exactly a value of its collection's precision
+    /// (`format::check_frame_writes`); then the collections, records and
+    /// import jobs it changes are followed as replay follows them, so a
+    /// drop must name a live collection with no records or open import job,
+    /// settings a live collection, a record block records above the
+    /// collection's, and an import chunk must continue its job. Full replay
+    /// decodes those frames itself and makes the same checks.
     pub(crate) fn frame(&mut self, frame: &RawFrame, offset: u64) -> Result<Option<Supplement>> {
         let body = frame.body();
+        // In a precision image, each graph's revision blocks continue its
+        // snapshot frames.
+        if self.precise
+            && frame.operation != OP_GRAPH_SNAPSHOT
+            && (frame.operation != OP_COMPACT_BLOCK || frame.id as u16 != KIND_REVISIONS)
+        {
+            self.load_snapshot()?;
+        }
         match frame.operation {
-            OP_COMPACT_BLOCK => self.block(frame.collection, frame.id, frame.count, body, offset),
+            OP_COMPACT_BLOCK => {
+                let supplement =
+                    self.block(frame.collection, frame.id, frame.count, body, offset)?;
+                if let Some(Supplement::Imports(registry)) = &supplement {
+                    self.jobs.restate(registry);
+                }
+                Ok(supplement)
+            }
             // The prefix check admits op 17 only after the image.
             OP_COLLECTION_PRECISE => {
                 let (precision, name, dimensions, _) = crate::format::decode_precise(body, offset)?;
@@ -608,32 +639,110 @@ impl ImageCheck {
                     body,
                     offset,
                 )?;
-                self.snapshot(&snapshot, offset).map(|()| None)
+                self.snapshot(&snapshot, offset)?;
+                self.pending
+                    .get_or_insert_with(|| (offset, Vec::new()))
+                    .1
+                    .push(snapshot);
+                Ok(None)
             }
             _ if self.precise => {
                 let floor = self.floor.expect("frames follow the advance");
-                crate::format::check_frame_dense(frame, self.version, floor, offset, |id| {
-                    self.described
-                        .get(&id)
-                        .map(|live| (live.dimensions, live.precision))
-                })?;
-                // The ID of a create or drop that passed is a collection ID.
+                let described = &self.described;
+                let writes = crate::format::check_frame_writes(
+                    frame,
+                    self.version,
+                    floor,
+                    offset,
+                    |id| {
+                        described
+                            .get(&id)
+                            .map(|live| (live.dimensions, live.precision))
+                    },
+                    |id, record| {
+                        described
+                            .get(&id)
+                            .is_some_and(|live| live.records.contains_key(&record))
+                    },
+                )?;
+                // The ID of a collection frame that passed is a collection
+                // ID.
+                let collection = frame.id as u16;
                 match frame.operation {
                     // The prefix check admits op 5 in a precision log only
                     // in its image, before the table.
                     5 => {
                         let (name, dimensions, _) = crate::format::decode_create(body, offset)?;
-                        self.created(frame.id as u16, name, dimensions, None, offset)?;
+                        self.created(collection, name, dimensions, None, offset)?;
                     }
                     6 => {
-                        self.described.remove(&(frame.id as u16));
+                        let live = self
+                            .described
+                            .get(&collection)
+                            .ok_or_else(|| corrupt(offset, "drop of unknown collection"))?;
+                        if !live.records.is_empty() || self.jobs.open_in(collection) {
+                            return Err(corrupt(offset, "drop of non-empty collection"));
+                        }
+                        self.described.remove(&collection);
+                    }
+                    7 if !self.described.contains_key(&collection) => {
+                        return Err(corrupt(offset, "settings for unknown collection"));
+                    }
+                    // A record block restates records above every record
+                    // its collection holds.
+                    OP_RECORD_BLOCK => {
+                        let last = self.described[&frame.collection].records.last_key_value();
+                        if let (Some((_, first, _)), Some((last, _))) =
+                            (writes.records.first(), last)
+                            && first <= last
+                        {
+                            return Err(corrupt(offset, "invalid record block"));
+                        }
                     }
                     _ => {}
+                }
+                if let Some((marker, entries)) = &writes.marker {
+                    self.jobs
+                        .marker(frame.collection, marker, *entries, offset)?;
+                }
+                for (collection, record, put) in writes.records {
+                    let records = &mut self
+                        .described
+                        .get_mut(&collection)
+                        .expect("the frame check found the collection")
+                        .records;
+                    match put {
+                        Some(expires) => records.insert(record, expires),
+                        None => records.remove(&record),
+                    };
                 }
                 Ok(None)
             }
             _ => Ok(None),
         }
+    }
+
+    /// Loads the graph snapshot of a precision image read so far, if any,
+    /// as replay loads it (`frame::load_snapshot`): canonical, and attaching
+    /// only records that are live without an expiry. Replay keeps the
+    /// state; this check drops it.
+    fn load_snapshot(&mut self) -> Result<()> {
+        let Some((first, bodies)) = self.pending.take() else {
+            return Ok(());
+        };
+        let floor = self.floor.expect("snapshots follow the advance");
+        let described = &self.described;
+        crate::property_graph::frame::load_snapshot(
+            |collection, record| {
+                described
+                    .get(&collection)
+                    .is_some_and(|live| live.records.get(&record) == Some(&false))
+            },
+            floor,
+            bodies,
+            first,
+        )
+        .map(drop)
     }
 
     /// Notes a collection of a precision log: one its image restates (op 5,
@@ -661,6 +770,9 @@ impl ImageCheck {
         if reused {
             return Err(corrupt(offset, "collection ID reused"));
         }
+        if self.described.values().any(|live| live.name == name) {
+            return Err(corrupt(offset, "duplicate collection name"));
+        }
         if self.described.len() >= MAX_COLLECTIONS {
             return Err(corrupt(offset, "too many live collections"));
         }
@@ -670,6 +782,7 @@ impl ImageCheck {
                 name,
                 dimensions,
                 precision,
+                records: BTreeMap::new(),
             },
         );
         self.collection_high = self.collection_high.max(id);

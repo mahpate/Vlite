@@ -223,9 +223,12 @@ pub(crate) fn replay(
 /// bodies (Speed P2b), all restated at `sequence`; `offset` is the first
 /// snapshot frame. The bodies are exactly what [`compacted_bodies`] writes;
 /// loading them equals replaying them as op-12 frames, including the check
-/// that every attachment references a live record without expiry.
+/// that every attachment references a record that `live` reports present
+/// without expiry. Full replay and the image check of readers that do not
+/// replay a precision log (P3a) load snapshots only through this, so they
+/// accept the same ones.
 pub(crate) fn load_snapshot(
-    collections: &BTreeMap<u16, LoadedCollection>,
+    live: impl Fn(u16, u64) -> bool,
     sequence: u64,
     bodies: Vec<GraphBody>,
     offset: u64,
@@ -233,9 +236,7 @@ pub(crate) fn load_snapshot(
     let state = GraphState::from_snapshot(sequence, bodies)
         .map_err(|_| corrupt(offset, "invalid graph snapshot"))?;
     for (collection, record) in state.attached_records() {
-        if !collections.get(&collection).is_some_and(|target| {
-            target.records.contains_key(&record) && !target.expiries.contains_key(&record)
-        }) {
+        if !live(collection, record) {
             return Err(corrupt(
                 offset,
                 "graph attachment references a missing or expiring record",

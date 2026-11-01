@@ -1170,10 +1170,69 @@ struct JobReplay {
     rows_skipped: u64,
 }
 
-/// Validates one marker against per-job log state (contiguity and closure)
-/// and counts the jobs it leaves open. After a precision image, more than
-/// `MAX_OPEN_IMPORTS` open jobs is corruption: `import_chunk` never opens
-/// one more.
+/// The import jobs of a log as replay tracks them: each job's state, how
+/// many are open, and the job high-water a precision image restated. Full
+/// replay and the image check of readers that do not replay (P3a) follow
+/// the same markers with it.
+#[derive(Default)]
+pub(crate) struct ImportJobs {
+    jobs: HashMap<u64, JobReplay>,
+    open: usize,
+    image_max: Option<u64>,
+}
+
+impl ImportJobs {
+    /// Restates the jobs of a precision image's import `registry` and its
+    /// job high-water.
+    pub(crate) fn restate(&mut self, registry: &crate::import::Registry) {
+        for (job, state) in registry.jobs() {
+            self.jobs.insert(
+                job,
+                JobReplay {
+                    collection: state.collection,
+                    last_chunk: state.last_chunk,
+                    closed: state.state != crate::import::ImportState::Open,
+                    rows_committed: state.rows_committed,
+                    rows_skipped: state.rows_skipped,
+                },
+            );
+        }
+        self.image_max = Some(registry.max_job());
+        self.open = self.jobs.values().filter(|job| !job.closed).count();
+    }
+
+    /// Whether a job of `collection` is open.
+    pub(crate) fn open_in(&self, collection: u16) -> bool {
+        self.jobs
+            .values()
+            .any(|job| job.collection == collection && !job.closed)
+    }
+
+    /// Validates one marker of `collection`, beside `data_entries` batch
+    /// entries, against per-job log state (contiguity and closure) and
+    /// counts the jobs it leaves open. After a precision image, more than
+    /// `MAX_OPEN_IMPORTS` open jobs is corruption: `import_chunk` never
+    /// opens one more.
+    pub(crate) fn marker(
+        &mut self,
+        collection: u16,
+        marker: &ImportMarker,
+        data_entries: usize,
+        offset: u64,
+    ) -> Result<()> {
+        replay_marker(
+            &mut self.jobs,
+            &mut self.open,
+            self.image_max,
+            collection,
+            marker,
+            data_entries,
+            offset,
+        )
+    }
+}
+
+/// [`ImportJobs::marker`].
 fn replay_marker(
     jobs: &mut HashMap<u64, JobReplay>,
     open: &mut usize,
@@ -1741,9 +1800,9 @@ fn load_inner<R: Read + Seek>(
         history_floor: 0,
         compact_skipped: Default::default(),
     };
-    let mut jobs: HashMap<u64, JobReplay> = HashMap::new();
-    // Jobs in `jobs` that are still open.
-    let mut open_jobs = 0usize;
+    // Import jobs replayed so far, with the job high-water a precision image
+    // restated (P3a).
+    let mut jobs = ImportJobs::default();
     // Highest collection ID created by an op 5 in this log so far, and how
     // many create frames and commit frames (excluding the advance) were seen.
     let mut created_high = 0u16;
@@ -1760,9 +1819,8 @@ fn load_inner<R: Read + Seek>(
     let mut blocks: Option<BlockRun> = None;
     let mut snapshot: Option<(u64, Vec<crate::property_graph::engine::GraphBody>)> = None;
     // A precision image's graph revision runs, one per snapshot graph in
-    // order, and the highest import job ID its registry restated (P3a).
+    // order (P3a).
     let mut revisions: Vec<Revisions> = Vec::new();
-    let mut image_max_job: Option<u64> = None;
     let precise = flags & FLAG_PRECISION != 0;
     let mut check = crate::compact::ImageCheck::new(version, flags, dimensions, collection_floor);
     let mut disk = Vec::new();
@@ -2052,15 +2110,7 @@ fn load_inner<R: Read + Seek>(
                     }
                 }
                 if let Some(marker) = &marker {
-                    replay_marker(
-                        &mut jobs,
-                        &mut open_jobs,
-                        image_max_job,
-                        collection_id,
-                        marker,
-                        operations.len(),
-                        offset,
-                    )?;
+                    jobs.marker(collection_id, marker, operations.len(), offset)?;
                 }
                 for operation in &operations {
                     match operation {
@@ -2170,11 +2220,7 @@ fn load_inner<R: Read + Seek>(
                     .collections
                     .get(&collection)
                     .ok_or_else(|| corrupt(offset, "drop of unknown collection"))?;
-                if !existing.records.is_empty()
-                    || jobs
-                        .values()
-                        .any(|job| job.collection == collection && !job.closed)
-                {
+                if !existing.records.is_empty() || jobs.open_in(collection) {
                     return Err(corrupt(offset, "drop of non-empty collection"));
                 }
                 loaded.collections.remove(&collection);
@@ -2219,17 +2265,7 @@ fn load_inner<R: Read + Seek>(
                     .expect("op 16 is only allowed with FLAG_COMPACT")
                     .block(collection_id, id, count as u32, body, offset)?;
                 if let Some(supplement) = supplement {
-                    let registry = matches!(supplement, crate::compact::Supplement::Imports(_));
-                    apply_supplement(
-                        &mut loaded,
-                        &mut jobs,
-                        &mut image_max_job,
-                        &mut revisions,
-                        supplement,
-                    );
-                    if registry {
-                        open_jobs = jobs.values().filter(|job| !job.closed).count();
-                    }
+                    apply_supplement(&mut loaded, &mut jobs, &mut revisions, supplement);
                 }
             }
             _ => {
@@ -2285,8 +2321,13 @@ fn load_graph_image(
     bodies: Vec<crate::property_graph::engine::GraphBody>,
     revisions: &mut Vec<Revisions>,
 ) -> Result<()> {
+    let collections = &loaded.collections;
     let mut state = crate::property_graph::frame::load_snapshot(
-        &loaded.collections,
+        |collection, record| {
+            collections.get(&collection).is_some_and(|target| {
+                target.records.contains_key(&record) && !target.expiries.contains_key(&record)
+            })
+        },
         loaded.history_floor,
         bodies,
         first,
@@ -2310,8 +2351,7 @@ fn load_graph_image(
 /// high-water, or a graph's revisions.
 fn apply_supplement(
     loaded: &mut Loaded,
-    jobs: &mut HashMap<u64, JobReplay>,
-    image_max_job: &mut Option<u64>,
+    jobs: &mut ImportJobs,
     revisions: &mut Vec<Revisions>,
     supplement: crate::compact::Supplement,
 ) {
@@ -2323,19 +2363,7 @@ fn apply_supplement(
             }
         }
         Supplement::Imports(registry) => {
-            for (job, state) in registry.jobs() {
-                jobs.insert(
-                    job,
-                    JobReplay {
-                        collection: state.collection,
-                        last_chunk: state.last_chunk,
-                        closed: state.state != crate::import::ImportState::Open,
-                        rows_committed: state.rows_committed,
-                        rows_skipped: state.rows_skipped,
-                    },
-                );
-            }
-            *image_max_job = Some(registry.max_job());
+            jobs.restate(&registry);
             loaded.imports.push(LoadedImportMarker::Image(registry));
         }
         Supplement::Revisions {
@@ -2564,30 +2592,45 @@ pub(crate) fn check_dense(precision: Option<Precision>, vector: &[f32], offset: 
     }
 }
 
-/// Applies `check_dense` to every dense vector that the verified frame
-/// `frame` (at `offset`) of a `FLAG_PRECISION` log of `version` writes,
-/// decoded as replay decodes it: primary puts, batches and import chunks,
-/// named vectors, record blocks restating checkpoint `floor`, and graph
-/// vector entries. `target` gives a live collection's dimensions and stored
-/// precision. As replay does, it first refuses a frame that writes into a
-/// collection that is not live or whose prefix fields exceed its
+/// What a frame that [`check_frame_writes`] accepted writes, in the order
+/// replay applies it: each record it puts (`Some`, whether with an expiry)
+/// or deletes (`None`), and an import chunk's marker with the number of
+/// data entries beside it.
+#[derive(Default)]
+pub(crate) struct Writes {
+    pub(crate) records: Vec<(u16, u64, Option<bool>)>,
+    pub(crate) marker: Option<(ImportMarker, usize)>,
+}
+
+/// Checks the verified frame `frame` (at `offset`) of a `FLAG_PRECISION`
+/// log of `version` as replay checks it before applying it, for readers
+/// that do not replay (the change feed and log export, P3a), and returns
+/// what it writes. As replay does, it first refuses a frame that writes
+/// into a collection that is not live or whose prefix fields exceed its
 /// operation's limits (`checked_body_len`), so no count is decoded or
-/// allocated beyond them. Readers that do not replay (the change feed and
-/// log export) call this before they return the frame (P3a); replay checks
-/// the same values where it decodes them.
-pub(crate) fn check_frame_dense(
+/// allocated beyond them; then it decodes the body as replay decodes it:
+/// primary puts and deletes, batches and import chunks, settings, metadata
+/// updates of records that `exists`, expiry markers, named vectors of
+/// records that `exists`, record blocks restating checkpoint `floor`, and
+/// graph vector entries. Every dense vector must be stored exactly by its
+/// collection's precision (`check_dense`). `target` gives a live
+/// collection's dimensions and stored precision. Replay makes the same
+/// checks where it decodes these frames.
+pub(crate) fn check_frame_writes(
     frame: &RawFrame,
     version: u32,
     floor: u64,
     offset: u64,
     target: impl Fn(u16) -> Option<(usize, Option<Precision>)>,
-) -> Result<()> {
+    exists: impl Fn(u16, u64) -> bool,
+) -> Result<Writes> {
     let operation = frame.operation;
+    let collection = frame.collection;
     let count = frame.count as usize;
     let (dimensions, precision) = match operation {
-        1..=4 | 9 | OP_RECORD_BLOCK => target(frame.collection)
+        1..=4 | 9 | OP_RECORD_BLOCK => target(collection)
             .ok_or_else(|| corrupt(offset, "record references unknown collection"))?,
-        8 | 10 => target(frame.collection)
+        8 | 10 => target(collection)
             .map(|(_, precision)| (0, precision))
             .ok_or_else(|| corrupt(offset, "metadata update references unknown collection"))?,
         _ => (0, None),
@@ -2605,43 +2648,106 @@ pub(crate) fn check_frame_dense(
         )?;
     }
     let body = frame.body();
-    let puts = |batch: &[u8],
-                count: usize,
-                (dimensions, precision): (usize, Option<Precision>),
-                version: u32| {
-        let (operations, _) = decode_batch(batch, count, dimensions, offset, version)?;
-        operations.iter().try_for_each(|operation| match operation {
-            Mutation::Put { vector, .. } | Mutation::PutWithMetadata { vector, .. } => {
-                check_dense(precision, vector, offset)
+    let mut writes = Writes::default();
+    // Decodes `count` batch entries into `collection` and checks their
+    // vectors, as replay does.
+    let batch = |writes: &mut Writes,
+                 entries: &[u8],
+                 count: usize,
+                 collection: u16,
+                 (dimensions, precision): (usize, Option<Precision>),
+                 version: u32| {
+        let (operations, marker) = decode_batch(entries, count, dimensions, offset, version)?;
+        for operation in &operations {
+            if let Mutation::Put { vector, .. } | Mutation::PutWithMetadata { vector, .. } =
+                operation
+            {
+                check_dense(precision, vector, offset)?;
             }
-            Mutation::Delete { .. } => Ok(()),
-        })
+        }
+        if let Some(marker) = marker {
+            writes.marker = Some((marker, operations.len()));
+        }
+        writes
+            .records
+            .extend(operations.iter().map(|operation| match operation {
+                Mutation::Put { id, .. } | Mutation::PutWithMetadata { id, .. } => {
+                    (collection, *id, Some(false))
+                }
+                Mutation::Delete { id } => (collection, *id, None),
+            }));
+        Ok::<_, Error>(())
     };
     match operation {
-        1 => check_dense(
-            precision,
-            &decode_vector(&body[..count * 4], offset)?,
-            offset,
-        ),
-        3 => puts(body, count, (dimensions, precision), version),
+        1 => {
+            check_dense(
+                precision,
+                &decode_vector(&body[..count * 4], offset)?,
+                offset,
+            )?;
+            writes.records.push((collection, frame.id, Some(false)));
+        }
+        2 => writes.records.push((collection, frame.id, None)),
+        3 => batch(
+            &mut writes,
+            body,
+            count,
+            collection,
+            (dimensions, precision),
+            version,
+        )?,
         4 => {
             let record = decode_extended(body, dimensions, offset, version >= V5)?;
-            check_dense(precision, &record.vector, offset)
+            check_dense(precision, &record.vector, offset)?;
+            writes.records.push((collection, frame.id, Some(false)));
+        }
+        7 => {
+            decode_settings(body).map_err(|reason| corrupt(offset, reason))?;
+        }
+        8 => {
+            crate::metadata::decode(body)
+                .map_err(|_| corrupt(offset, "invalid metadata update"))?;
+            if !exists(collection, frame.id) {
+                return Err(corrupt(offset, "metadata update references missing record"));
+            }
         }
         9 => {
+            let expiry_flag = body[0];
+            if expiry_flag > 1 || (expiry_flag == 0 && u64_at(body, 1) != 0) {
+                return Err(corrupt(offset, "invalid expiry marker"));
+            }
             let record = decode_extended(&body[9..], dimensions, offset, true)?;
-            check_dense(precision, &record.vector, offset)
+            check_dense(precision, &record.vector, offset)?;
+            writes
+                .records
+                .push((collection, frame.id, Some(expiry_flag == 1)));
         }
-        10 => crate::vectors::VectorData::decode(body)
-            .map_err(|_| corrupt(offset, "invalid vector extension"))?
-            .records
-            .values()
-            .flat_map(|record| record.dense.values().flatten())
-            .try_for_each(|version| check_dense(precision, &version.vector, offset)),
-        OP_RECORD_BLOCK => decode_block(&frame.plain, dimensions, floor)
-            .ok_or_else(|| corrupt(offset, "invalid record block"))?
-            .iter()
-            .try_for_each(|entry| check_dense(precision, &entry.record.vector, offset)),
+        10 => {
+            let data = crate::vectors::VectorData::decode(body)
+                .map_err(|_| corrupt(offset, "invalid vector extension"))?;
+            if data.records.keys().any(|id| !exists(collection, *id)) {
+                return Err(corrupt(
+                    offset,
+                    "vector extension references missing record",
+                ));
+            }
+            data.records
+                .values()
+                .flat_map(|record| record.dense.values().flatten())
+                .try_for_each(|version| check_dense(precision, &version.vector, offset))?;
+        }
+        OP_RECORD_BLOCK => {
+            let block = decode_block(&frame.plain, dimensions, floor)
+                .ok_or_else(|| corrupt(offset, "invalid record block"))?;
+            for entry in &block {
+                check_dense(precision, &entry.record.vector, offset)?;
+            }
+            writes.records.extend(
+                block
+                    .iter()
+                    .map(|entry| (collection, entry.id, Some(entry.expiry.is_some()))),
+            );
+        }
         OP_GRAPH => {
             let body = crate::property_graph::frame::decode_frame(
                 false,
@@ -2650,19 +2756,23 @@ pub(crate) fn check_frame_dense(
                 body,
                 offset,
             )?;
-            body.entries.iter().try_for_each(|entry| match entry {
-                crate::property_graph::engine::GraphEntry::VectorMutation { collection, entry } => {
+            for entry in &body.entries {
+                if let crate::property_graph::engine::GraphEntry::VectorMutation {
+                    collection,
+                    entry,
+                } = entry
+                {
                     let target = target(*collection).ok_or_else(|| {
                         corrupt(offset, "graph vector entry references unknown collection")
                     })?;
                     // One entry, as replay decodes it.
-                    puts(entry, 1, target, V5)
+                    batch(&mut writes, entry, 1, *collection, target, V5)?;
                 }
-                _ => Ok(()),
-            })
+            }
         }
-        _ => Ok(()),
+        _ => {}
     }
+    Ok(writes)
 }
 
 fn collection_mut(loaded: &mut Loaded, id: u16) -> &mut LoadedCollection {
