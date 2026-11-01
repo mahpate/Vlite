@@ -28,23 +28,22 @@ impl Reranker for ExactReranker {
         crate::validate_dimensions(query.len())?;
         crate::validate_vector(query.len(), query)?;
         let norm = crate::validate_metric_query(query, self.metric)?;
-        let mut hits = Vec::new();
         let mut ids = std::collections::BTreeSet::new();
         for c in candidates {
             if !ids.insert(c.id) {
                 return Err(Error::InvalidQuery("duplicate rerank candidate"));
             }
             crate::validate_vector(query.len(), &c.vector)?;
-            if let Some(distance) = crate::metric_distance(
-                query,
-                &c.vector,
-                self.metric,
-                norm,
-                crate::vector_norm(&c.vector),
-            ) {
-                hits.push(SearchHit { id: c.id, distance });
-            }
         }
+        // Finite operands score identically in either order (exact_kernels).
+        let rows: Vec<&[f32]> = candidates.iter().map(|c| &c.vector[..]).collect();
+        let distances =
+            crate::exact_kernels::Scorer::new(query, self.metric, norm).score(&rows, None);
+        let mut hits: Vec<SearchHit> = candidates
+            .iter()
+            .zip(distances)
+            .filter_map(|(c, distance)| distance.map(|distance| SearchHit { id: c.id, distance }))
+            .collect();
         hits.sort_by(|a, b| a.distance.total_cmp(&b.distance).then(a.id.cmp(&b.id)));
         hits.truncate(limit);
         Ok(hits)
