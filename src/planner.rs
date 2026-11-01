@@ -165,7 +165,14 @@ impl<'a> CollectionRef<'a> {
                 }
                 None => {
                     plan.reason = no_ann_reason(metric, live);
-                    exact(&mut stats, None)
+                    // Still exact: block summaries (P5) may skip blocks
+                    // that cannot match; every candidate is re-verified.
+                    let ids = state.metadata_indexes.summary_candidates(
+                        conditions,
+                        &state.records,
+                        live / 2,
+                    );
+                    exact(&mut stats, ids.as_ref())
                 }
             }
         };

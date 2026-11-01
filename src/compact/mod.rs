@@ -34,6 +34,10 @@ pub(crate) mod catalog;
 /// P3a canonical float16 conversion, shared by the dense rows codec and
 /// the replay check of float16 collections.
 pub(crate) mod half;
+/// P5 filter summaries: per-block typed summaries, visibility bitmaps and
+/// conservative pruning of exact filtered scans, and the derived summary
+/// block codec (kind 0x0400, test-only until shared writer wiring).
+pub(crate) mod stats;
 /// P3a dense rows codec. Preactivation: compiled for tests only, so no
 /// reader accepts its kind and no writer emits it until its write, read,
 /// replay and maintenance paths are qualified (contract decision 7).

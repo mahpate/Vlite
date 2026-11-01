@@ -1,6 +1,7 @@
 //! The memory the change feed and log export hold to check a precision
 //! log as full replay checks it (the P3a review of 6e26f685), counted in
-//! requested heap bytes (`Layout::size`) by a test-only global allocator.
+//! requested heap bytes (`Layout::size`) on enrolled threads by the lib test
+//! binary's only global allocator (`crate::test_globals`).
 //! Beside the frame being read, the check holds replay's graph state for
 //! the prefix read, built by replay's own code (`SnapshotBuilder`, then
 //! `frame::replay`), the live record IDs of each collection, and
@@ -18,86 +19,11 @@ use super::limits::{committed, imaged, record, store, with};
 use super::*;
 use crate::changes::read_changes;
 use crate::property_graph::NodePatch;
+use crate::test_globals::{BLOCKS, ENROLLED, LIVE, MEASURING, MOST_BLOCKS, PEAK};
 use crate::{MAX_BATCH_OPERATIONS, MetadataValue};
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicIsize, Ordering::Relaxed};
-use std::sync::{Mutex, PoisonError};
-
-/// Counts the bytes and blocks that enrolled threads allocate and free;
-/// other threads, such as concurrent unrelated tests, are not counted.
-struct Counting;
-
-static LIVE: AtomicIsize = AtomicIsize::new(0);
-static PEAK: AtomicIsize = AtomicIsize::new(0);
-static BLOCKS: AtomicIsize = AtomicIsize::new(0);
-static MOST_BLOCKS: AtomicIsize = AtomicIsize::new(0);
-/// Serializes the measuring tests, which share the counters.
-static MEASURING: Mutex<()> = Mutex::new(());
-
-thread_local! {
-    static ENROLLED: Cell<bool> = const { Cell::new(false) };
-}
-
-fn added(size: usize) {
-    if ENROLLED.try_with(Cell::get).unwrap_or(false) {
-        let live = LIVE.fetch_add(size as isize, Relaxed) + size as isize;
-        PEAK.fetch_max(live, Relaxed);
-        let blocks = BLOCKS.fetch_add(1, Relaxed) + 1;
-        MOST_BLOCKS.fetch_max(blocks, Relaxed);
-    }
-}
-
-fn removed(size: usize) {
-    if ENROLLED.try_with(Cell::get).unwrap_or(false) {
-        LIVE.fetch_sub(size as isize, Relaxed);
-        BLOCKS.fetch_sub(1, Relaxed);
-    }
-}
-
-// SAFETY: every request goes unchanged to `System`, so `Counting` upholds
-// the `GlobalAlloc` contract exactly as `System` does. The bookkeeping
-// reads a const-initialized thread local without a destructor, which
-// never allocates, and updates atomics.
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: the caller's `alloc` contract, passed on unchanged.
-        let block = unsafe { System.alloc(layout) };
-        if !block.is_null() {
-            added(layout.size());
-        }
-        block
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: the caller's `alloc_zeroed` contract, passed on unchanged.
-        let block = unsafe { System.alloc_zeroed(layout) };
-        if !block.is_null() {
-            added(layout.size());
-        }
-        block
-    }
-
-    unsafe fn dealloc(&self, block: *mut u8, layout: Layout) {
-        // SAFETY: `block` was allocated by `System` with `layout`.
-        unsafe { System.dealloc(block, layout) };
-        removed(layout.size());
-    }
-
-    unsafe fn realloc(&self, block: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        // Both blocks count while the data may be copied.
-        added(size);
-        // SAFETY: `block` was allocated by `System` with `layout`, and the
-        // caller's `realloc` contract holds for `size`.
-        let moved = unsafe { System.realloc(block, layout, size) };
-        removed(if moved.is_null() { size } else { layout.size() });
-        moved
-    }
-}
-
-#[global_allocator]
-static COUNTING: Counting = Counting;
+use std::sync::PoisonError;
+use std::sync::atomic::Ordering::Relaxed;
 
 /// What a measured call allocated, above the live bytes and blocks when
 /// it started.

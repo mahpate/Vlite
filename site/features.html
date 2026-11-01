@@ -92,7 +92,7 @@
         <div class="table-scroll"><table><caption>Search acceleration and concurrent access</caption><thead><tr><th scope="col">Feature</th><th scope="col">Support and requirements</th></tr></thead><tbody>
           <tr><th scope="row">Rebuildable HNSW</th><td>Deterministic parallel construction that does not depend on thread count, vectorized distances, configurable graph and search budgets, and bounded mutation buffering.</td></tr>
           <tr><th scope="row">Scalar-u8 quantization</th><td>Compressed traversal codes with full-precision reranking of candidates. Original vectors stay in memory.</td></tr>
-          <tr><th scope="row">Metadata indexes</th><td>Equality and range indexes with full-filter rechecks; rebuilt on reopen and on settings changes.</td></tr>
+          <tr><th scope="row">Metadata indexes</th><td>Equality and range indexes with full-filter rechecks; rebuilt on reopen and on settings changes. <a href="docs/STORAGE-FEATURES.html#filter-block-summaries-unreleased">Unreleased: reviewed in-memory filter summaries</a> preserve exact results with budget-triggered scan fallback.</td></tr>
           <tr><th scope="row">ANN restart snapshots</th><td>An optional validated graph cache tied to the database state, from the server (<code>--ann-snapshot</code>), Rust, the C ABI and Python. Not available for encrypted databases.</td></tr>
           <tr><th scope="row">Disk ANN</th><td>An optional graph and vector sidecar with a bounded node cache. Builds still need in-memory HNSW capacity; no metadata or expiry filtering.</td></tr>
           <tr><th scope="row">Index quality and memory</th><td>Sampled recall against exact results, index identity and readiness, and component-level memory diagnostics.</td></tr>

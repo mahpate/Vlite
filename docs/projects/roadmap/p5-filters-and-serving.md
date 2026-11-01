@@ -1,6 +1,7 @@
 # P5: filters and serving
 
-Status: implementation design; wire changes remain proposals. No engine changes yet.
+Status: implementation design; wire changes remain proposals. Delivery step 2 and the exact-planner half of
+step 3 are implemented in embedded Rust, unreleased and under review ([below](#implemented-step-2-unreleased-under-review)).
 Audit citations refer to base `d530b4c`; integration decisions follow the shared contract.
 Open means not verified here or not yet decided.
 
@@ -22,7 +23,7 @@ The [P3 design](p3-compact-vectors.md) specifies guarded vector-column blocks,
 a bounded vector accessor and lazy, generation-owned borrowed records.
 The [P4 design](p4-compact-graph.md) specifies CSR checkpoint blocks.
 These are not implemented. The [shared contract](compact-storage-contract.md) owns format, tags, and directory code.
-P5 requests interfaces from that contract; it does not allocate tags or fork it.
+P5 requests interfaces from that contract; it allocates kinds only inside its own `0x0400-0x04FF` range and does not fork it.
 
 ## Today's filter path
 
@@ -223,6 +224,64 @@ S5 remains a P5 slice. If deferred, mark it unmet and obtain a roadmap decision;
 
 No P5 file naming, tags, manifest dialect, or CSR layout. Open: finalize signatures and failure classes with the storage contract.
 
+## Implemented step 2 (unreleased, reviewed)
+
+Delivery step 2 and the exact-planner half of step 3 are implemented, independently reviewed and integrated
+at `de2fbcd0`, including retained-capacity accounting and shared precision/P5 test instrumentation.
+Acceptance covers this bounded slice, not persisted writer integration, ANN optimization or release qualification.
+There is no API, wire, OpenAPI, proto, `Error` or file-format change, and nothing is persisted.
+
+- **Summaries.** `src/compact/stats.rs` keeps one generation per collection that declares metadata indexes,
+  over the declared fields only. Each block of 1024 live records in ID order records its first and last public ID,
+  its row count and, per field, per-type value counts (missing = rows minus their sum; null is zero), inclusive i64
+  and finite f64 min/max with signed zero normalized, the booleans seen, and string and GeoPoint equality
+  dictionaries of at most 32 values and 1024 value bytes (16 per point). A fuller dictionary answers "possibly present".
+- **Pruning.** A block is skipped only when one condition proves that no row can match: equality by type and value,
+  ranges only against the interval of their bounds' type. Geo radius, undeclared fields and bounds that validation
+  rejects are unknown and never prune. The remaining IDs are a superset; `exact_search` rechecks each with
+  `metadata::matches`, the latest record and its expiry at the query clock, and orders by distance, then ID.
+- **Where.** Exact filtered search (`Database::search_in_at`) uses summaries only when postings give no candidates;
+  `search_auto` uses them in its final `ExactScan` arm, with the same plan and reason. They are used only when a
+  block was pruned and at most half the live records remain. `index_candidates` still counts postings only;
+  `records_scanned` can be lower. Grouped search, recommend, facets, geo, snapshots and ANN are unchanged.
+- **Visibility.** The first filtered query that can use them derives the summaries from the loaded records
+  (single file or directory image plus replay, plain or encrypted, or memory). A committed change to a declared
+  field marks the row in the generation's dense superseded bitmap (by ordinal) and keeps its ID in an overlay
+  that deletes leave; other changes keep the row in its block. Expiry stays a per-row deadline checked at the
+  query clock; expired rows stay summarized, which only weakens pruning. Declaration changes rebuild; churn above
+  max(4096, rows / 4) drops the generation and the next query derives it again.
+- **Budget.** 64 MiB limits the heap one collection's summaries retain, in allocator-requested bytes: covered
+  names, IDs, bitmap, block and segment lists, field lists and dictionaries at their allocated capacities (strings
+  at theirs), plus the overlay at 24 bytes per ID and 168 bytes (a bound on std's B-tree nodes). It is not a cap on
+  RSS, peak memory or a whole query: allocator overhead is not counted, a block is built before it is charged, and
+  a query's candidate set is separate and may pass half the records (by up to one block's IDs plus the overlay)
+  before the query falls back. A derivation charges the names, IDs, bitmap and lists before allocating them, then
+  each block as it is built. Past the budget, at derivation or as the overlay grows, the collection scans exactly,
+  logs one `warn` on target `vlite::filter` (`{"event":"filter_summary_budget","outcome":"exact_scan","rows",
+  "min_bytes","budget"}`) and retries once churn passes the threshold.
+- **Derived block.** Kind `0x0400`, codec version 1, holds one block summary; `src/compact/stats/codec.rs` documents
+  the layout. Flags are 0 (derived). The header's source field holds the first 8 bytes of a SHA-256 over the
+  covered fields and each row's ID, revision and encoded metadata. A reader serves a block only when that digest,
+  the fields, the row count and the ID span match its rows. Stale or newer-version blocks are rebuilt from the rows;
+  structure or checksum failures are `Corrupt`. The codec is test-only until the shared writer wiring exists, so
+  loaders still skip the kind as `unknown_kind`. `0x0401` is proposed, not allocated, for persisted visibility bitmaps.
+- **Tests.** `tests/filter_summaries.rs` compares indexed, unindexed and brute-force IDs, distance bits and order
+  for three metrics; k 0, 7 and 10,000; ties; typed and extreme bounds; signed zero; UTF-8; booleans; geo as unknown;
+  absence; invalid filters; delete/reinsert; metadata and TTL edits; explicit clocks; a merge; declaration changes;
+  reopen, replay, checkpoints, conversion, compaction, encryption and memory. Summary-only queries must scan at most
+  half the records. `src/compact/stats/tests.rs` replays the six oracle cases and checks an independently written
+  byte-exact golden block, malformed, stale and newer-version blocks, budget exhaustion and loader skipping. The
+  lib test binary's one counting allocator (`src/test_globals.rs`, shared with the precision peak tests) checks
+  that the bytes charged equal the heap the summaries retain, and that the overlay bound holds. At the real 64 MiB
+  budget, 16 fields of 17 one-byte strings each fit 2935 blocks and prune; one block more, or the 3900 blocks that
+  initialized-only string accounting would have admitted, warn and scan.
+
+The block size, half-records cap, churn threshold and retained-heap budget are accepted for this slice
+(allocator overhead uncounted; the overlay bound follows std's B-tree node layout, checked by the tests).
+Release notes must call out lower `records_scanned`. A well-formed block with a matching digest but wrong
+summary is not detectable without recomputation; persisted blocks, partition-to-block binding and
+multi-generation layouts wait for writer wiring.
+
 ## Verification and release plan
 
 The independent standard-library
@@ -232,9 +291,10 @@ checks hand-authored
 Its six cases cover typed equality/inclusive ranges, conservative segment
 pruning, latest-revision overlays, deletes/resurrection and explicit TTL clocks.
 Geo radius is tested only as unknown pruning, not final radius filtering.
-CI runs the checker with negative schema/answer self-tests. This is reference
-coverage, not an implemented segment accelerator, engine differential test,
-ANN recall guarantee or performance qualification.
+CI runs the checker with negative schema/answer self-tests. The checker is
+reference coverage; the engine differential tests of step 2 are listed
+[above](#implemented-step-2-unreleased-reviewed). Neither is an ANN recall
+guarantee or performance qualification.
 
 | Test family | Required assertion |
 |---|---|

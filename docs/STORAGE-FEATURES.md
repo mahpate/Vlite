@@ -319,6 +319,16 @@ store/
   trims a torn tail of the active log only; damage elsewhere is reported as
   corruption.
 
+## Filter block summaries (unreleased)
+
+A collection with declared metadata indexes (`CollectionSettings::metadata_indexes`)
+also keeps in-memory summaries of each block of 1024 records over the declared
+fields. Exact filtered search and the exact scan of `search_auto` skip blocks
+whose summary proves that no record can match and recheck every other record,
+so hits, distances and order are unchanged; only `SearchStats::records_scanned`
+can be lower. Geo radius and undeclared fields never skip. Nothing is written
+to disk: summaries are derived again on first use after open.
+
 ## Limitations
 
 - A passphrase is only as strong as its entropy; tune `KdfParams` for your
