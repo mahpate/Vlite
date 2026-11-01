@@ -270,7 +270,10 @@ approval remain outstanding; the reference fixtures do not satisfy those gates.
 ## Implemented slices A and B (unreleased, under review)
 
 Status: implemented in Rust behind a preactivation gate; not released and not
-accepted. Independent review is pending. Slice C (reads) is not started, so no
+accepted. The first independent review returned five blockers. Blockers 1, 3,
+4 and 5 are fixed and wait for re-review. Blocker 2 (activation publication)
+needs a product decision; see
+[Activation publication (decision needed)](#activation-publication-decision-needed). Slice C (reads) is not started, so no
 user can observe validity yet and every release build refuses the capability.
 
 ### Slice A: contract and format
@@ -291,7 +294,7 @@ Wire format (all integers little-endian; every payload starts with `edge_id u64`
 
 | Tag | Payload after `edge_id` |
 |---|---|
-| 65 | `source u64`, `destination u64`, `type_len u8` + type, `key_len u16` + key (0 = keyless), `count u16`, then `count` segments |
+| 65 | `revision u64`, `source u64`, `destination u64`, `type_len u8` + type, `key_len u16` + key (0 = keyless), `count u16`, then `count` segments |
 | 66 | one segment |
 | 67 | the old segment's bounds, then the replacement segment |
 | 68 | the old segment's bounds, then `at i64` |
@@ -304,6 +307,11 @@ A count above 256 is rejected before allocation. Decoding validates the series
 (bounds, order, no overlap) and every property map, so a valid frame cannot
 carry an invalid series. Each temporal entry is one user operation of the
 4,096 cap, and its whole payload counts in the 16,777,216-byte body limit.
+
+The tag-65 `revision` is zero in every commit body (op 12), where the edge
+takes the commit sequence. Only a snapshot (op 15) restates a nonzero
+revision, in `1..=` the snapshot sequence. Replay rejects a nonzero value as
+`Corrupt`; snapshot load rejects a value outside that range as non-canonical.
 
 Validation order matches the independent oracle: segment cap first, then per
 segment its properties, bounds (`from < to` when both are finite), order
@@ -345,12 +353,14 @@ Public Rust API, unreleased. Every build refuses it with
 Writes:
 
 - **Atomic batches.** Temporal operations are planned with the other operations of a batch. Vector mutations, computed TTL cleanup and temporal entries go into one frame.
-- **Limits.** Each temporal operation counts as one of the 4,096 user operations. The encoded 16 MiB body limit is checked before the append. Any failure rolls back the whole plan: tentative TTL cleanup, the vector mutations and the capability flag.
+- **Limits.** Each temporal operation counts as one of the 4,096 user operations. The encoded 16 MiB body limit is checked before the append. Every series change except a removal (create, promote, append, replace and close) also checks that the resulting series fits one graph body (`series_bytes`), because a close can grow a series by 8 bytes. Any failure rolls back the whole plan: tentative TTL cleanup, the vector mutations and the capability flag.
 - **Creating an edge.** `CreateEdge` needs live endpoints.
   - If the key is already live on an identical temporal edge (same endpoints and type, bit-identical series), the edge is returned with `created = false`. Any other live edge with that key is `GraphKeyConflict`.
   - Ordinary `CreateEdge`/`EnsureEdge` never treat a temporal edge as an identical retry.
 - **Promotion.** `PromoteEdge` turns an ordinary edge into a temporal one. It keeps the ID, key and endpoints, and the edge's properties become one all-time segment.
 - **Corrections.** Promotion and every correction need `Expected::Revision`; anything else is `InvalidQuery("expected: …")`.
+  - The check uses the revision the edge had when the batch started. The planner records it before the batch's first mutation of the edge, ordinary (`PutEdge`, `PatchEdge`, expiry) or temporal.
+  - TTL deletion still wins: an edge deleted earlier in the batch is not found.
 - **No-op close.** Closing a segment at its own finite end plans nothing. No frame is written and the revision does not change.
 - **Revisions.** Any real temporal entry sets the edge revision to the commit sequence.
 - **Other operations on temporal edges.**
@@ -367,6 +377,7 @@ Capability:
   - Order: the frame is encoded and validated, then the 32-byte header is rewritten and synced, then the frame is appended.
   - Rejected batches and no-ops leave the header unchanged.
   - If the header write fails, the batch returns `CommitIndeterminate` and the handle is poisoned.
+  - This order is review blocker 2 and is not accepted. It is not atomic, and it breaks point-in-time restore and replicas; see [Activation publication (decision needed)](#activation-publication-decision-needed).
 - **Directory stores.** Their segments repeat the header flags, so they cannot enable the capability (`UnsupportedFeature(64)`). They inherit it through `convert_to_directory`. WAL segment headers (`WAL_FLAGS`) and checkpoint images carry the flag.
 - **Read-only handles** return `ReadOnly`.
 
@@ -377,7 +388,9 @@ Persistence:
   - The snapshot admission rule (`frame.rs` `restated`) and the image-check edge coverage (`compact/mod.rs`) admit it.
   - Snapshot load restores the series.
 - **Flags across maintenance.** Compaction and upgrade carry `FLAG_TEMPORAL` with `FLAG_GRAPH`. ID high-water marks survive.
-- **Revisions.** Only precision images restore revisions (the P2b path, tested). Every other snapshot image handles a temporal edge's revision exactly as it handles an ordinary edge's.
+- **Revisions.** A snapshot at the same lineage restates each temporal edge's revision in its tag-65 entry: directory checkpoints, directory conversion and P2b precision images. This does not depend on precision; precision images also restore the same values through their revision frames.
+  - Compaction, upgrade, `enable_graph` and stripping start a new lineage whose sequences restart. They renumber temporal revisions, as they do records and ordinary edges, because an old revision could exceed the new sequence. Nothing is refused.
+  - Ordinary edges and nodes in non-precision checkpoints still take the checkpoint sequence. That predates Gap 4 and is out of its scope.
 
 Feed and serving:
 
@@ -399,10 +412,12 @@ Coverage added in slice B (all `cargo test --lib`):
 | Limits | 4,096 ops accepted, 4,097 rejected; 256 segments accepted, 257 rejected; byte overflow rejected; one frame with TTL cleanup, temporal change and vector (`writes::limits_…`, `state::temporal::tests::segment_cap_and_series_bytes_are_enforced`) |
 | TTL | `writes::ttl_reclaims_whole_series_and_history_never_restores_them` (node cascade, edge-only expiry, compaction drops due series, key reuse gets a new ID, `verify_graph`) |
 | Reopen | `writes::the_first_temporal_write_enables_the_capability_with_its_frame`, `state::temporal::tests::snapshot_restates_series_and_equals_replay`; refusal when support is off |
+| Revisions | `state::temporal::tests::a_snapshot_keeps_temporal_revisions`, `writes::temporal_revisions_survive_conversion_checkpoints_and_reopen` (conversion, checkpoint, reopen; compaction renumbers) |
 | Compaction / Directory checkpoint | `writes::temporal_state_survives_compaction_conversion_and_checkpoints`, `writes::a_precision_image_keeps_series_and_revisions` (P2b snapshot load) |
 | Encryption | `writes::encrypted_temporal_files_round_trip` |
 | Feed/surfaces | `writes::only_the_temporal_feed_reports_temporal_changes_in_commit_order`; old feeds refuse, before and after compaction; missing flag is `Corrupt` |
 | Format capability | `writes::builds_without_support_refuse_temporal_operations_and_change_nothing`, `writes::read_only_handles_refuse_and_a_failed_header_write_poisons`, legacy files unchanged without a temporal write |
+| Standalone gate | `crates/vlite-graph/tests/temporal_gate.rs`: an ordinary build of the engine refuses `set_temporal(true)` and a snapshot holding a temporal edge |
 
 Fail-first evidence:
 
@@ -424,21 +439,28 @@ Shared-file hooks, each marked `// Gap 4:`:
 | `src/format.rs` | B | `adopt` in `load_graph_image` |
 | `src/property_graph/frame.rs` | B | `restated` arm |
 | `src/property_graph/frame.rs` | B | `compacted_bodies` emits `edge_snapshot_entry` |
+| `src/property_graph/frame.rs` | review fix 3 | `compacted_bodies` takes the image `floor` and passes it to `edge_snapshot_entry` |
 | `src/compact/mod.rs` | B | `ImageCheck::snapshot` edge coverage arm |
+| `src/compact/mod.rs` | merge `7ff7f20f` | `adopt` for a graph state first made after a precision image |
+| `src/compact/mod.rs` | merge `7ff7f20f` | `adopt` after `PendingSnapshot::finish` in `ImageCheck::load_snapshot` |
+| `src/maintenance.rs` | B | compaction and upgrade carry `FLAG_TEMPORAL` |
+| `src/maintenance.rs` | review fix 3 | `write_v5_image` passes `floor` to `compacted_bodies`; its test image builder passes 0 |
+| `src/directory.rs` | B | `WAL_FLAGS` carries the flag; the checkpoint thread copies the test gate |
 
-`engine/state/snapshot.rs` also gained a temporal `PutEdge` arm and the `Graph::load_edge` helper. These will conflict with the planned push-style snapshot builder refactor.
+The precision baseline `5080b28d` (`SnapshotBuilder`, `PendingSnapshot`,
+`GraphRecords`, `check_frame_writes`) is merged in `7ff7f20f`. In
+`engine/state/snapshot.rs`, the temporal arm of `SnapshotBuilder::load_entry`
+admits tag 65 at the ordinary edge's canonical position, checks the gate and
+the revision range, and restores the series.
 
 Known gaps and follow-ups (not yet tested unless stated):
 
-1. **Replicas.** A primary that enables the capability changes its header flags, so replica followers stop with `ReplicaDiverged`. Temporal replication waits for serving.
-2. **Point-in-time restore.** Restoring from a base backup taken before enabling yields `InvalidRestoreTarget` (found by inspection, not tested).
-3. **Crash window.** A crash between the header write and the frame append leaves a capable file with no temporal edges. Builds without support then refuse it.
-4. **Batch-start revisions.** The revision check is batch-start only when temporal operations come first.
-   - If an ordinary operation already changed the same edge in the batch, the temporal precondition fails.
-   - An edge created in the same batch cannot be appended to; create it with its full series.
-5. **Ordinary reads.** They ignore validity and show temporal edges with empty properties until slice C. The gate hides this from users.
-6. **Feed gaps.** The feed does not report TTL deadlines or reclaims, as in Gap 3. No surface outside Rust reports temporal changes.
-7. **Measurement.** Memory per segment and production caps are not measured, and benchmarks are unchanged.
+1. **Activation publication (blocker 2).** Replicas, point-in-time restore and the crash window are open; see [Activation publication (decision needed)](#activation-publication-decision-needed).
+2. **Edges created in the batch.** An edge created earlier in the same batch has no batch-start revision, so it cannot be corrected in that batch; create it with its full series.
+3. **Revisions after compaction.** Compaction and upgrade renumber temporal revisions (see Persistence).
+4. **Ordinary reads.** They ignore validity and show temporal edges with empty properties until slice C. The gate hides this from users.
+5. **Feed gaps.** The feed does not report TTL deadlines or reclaims, as in Gap 3. No surface outside Rust reports temporal changes.
+6. **Measurement.** Memory per segment and production caps are not measured, and benchmarks are unchanged.
 
 Slice C still needs:
 
@@ -479,15 +501,143 @@ Turning the gate on for release builds also waits for slice C.
    copying it. Promoting an edge that is already temporal is
    `already_temporal`.
 8. Batch revisions: inside one batch, a temporal precondition is checked
-   against the edge's revision before the batch. Supersession (close plus
-   append) is then one revision-checked unit, like a Datomic transaction
-   against one basis.
-9. Enabling order: the header is written and synced before the frame. An
-   old build can then never see temporal entries, at the cost of a benign
-   capable-but-empty file after a crash. Directory stores inherit the
-   capability only by conversion.
+   against the edge's revision before the batch, recorded before the
+   batch's first mutation of the edge of either kind. Supersession (close
+   plus append) is then one revision-checked unit, like a Datomic
+   transaction against one basis.
+9. Enabling order: superseded by review blocker 2. The interim code writes
+   and syncs the header before the frame; the replacement is the decision in
+   [Activation publication (decision needed)](#activation-publication-decision-needed).
+   Directory stores inherit the capability only by conversion.
 10. Feed: rather than mixing temporal operations into existing feeds,
     existing feeds refuse temporal logs and an opt-in Rust feed reports
     them. This holds until a versioned feed extension and an approved
     OpenAPI/proto diff exist (serving, slice E). Corrections carry the old
     bounds and only the new values, never guessed old values.
+11. Engine gate: the standalone engine (`vlite-graph`) admits temporal
+    state only in test builds (`engine::temporal::supported()`, which is
+    `cfg!(test)`). In any other build, `GraphState::set_temporal(true)`
+    fails and snapshot load refuses a tag-65 entry. Engine callers outside
+    `vlite` therefore cannot create temporal state before slice C either.
+12. Tag-65 revision: the revision is part of the payload of the unreleased
+    tag 65. No flag or tag allocation changes. Zero means "the commit
+    sequence"; only snapshots carry a nonzero value. Replay rejects a
+    nonzero value, because a restated op-12 body followed by an expiry
+    entry would otherwise diverge from replay.
+13. Revisions across new lineages: compaction, upgrade, `enable_graph` and
+    stripping renumber temporal revisions like every other revision.
+    Callers holding an `Expected::Revision` from before such a rewrite get
+    a precondition failure, as they already do for ordinary edges.
+14. Series bytes: every series change except a removal rechecks the
+    whole-series byte limit, closing included. The check runs as each
+    entry is applied, so a failure rolls back the whole batch through the
+    ordinary undo log.
+
+### Review fixes, round 1 (uncommitted review state)
+
+| Blocker | Fix | Fail-first evidence (before the fix) |
+|---|---|---|
+| 1, high: a close could outgrow the series byte limit | `apply_temporal` checks the series bytes after every entry except a removal, and undoes on failure | Engine `closing_cannot_outgrow_the_series_bytes`: `InvariantViolation("invalid series")` instead of `series_bytes`. Adapter `a_close_that_outgrows_the_series_bytes_rolls_back_its_batch`: the close was accepted |
+| 2, high: in-place activation is not atomic | Not changed; [decision needed](#activation-publication-decision-needed) | Probes listed in that section |
+| 3, medium: non-precision snapshots reset revisions | Tag 65 restates the revision in checkpoint, conversion and P2b images; snapshot load restores it | Engine `a_snapshot_keeps_temporal_revisions`: `[50, 50, 50]` instead of `[2, 3, 50]`. Adapter `temporal_revisions_survive_conversion_checkpoints_and_reopen`: 9 instead of 7 after `convert_to_directory` |
+| 4, medium: the batch-start revision was captured lazily | `Planner::push` records an edge's revision before the batch's first mutation of it, of either kind | Planner `the_batch_start_revision_survives_earlier_ordinary_mutations`: `PreconditionFailed { current: Some(4) }`. Adapter `an_earlier_ordinary_mutation_keeps_the_batch_start_revision`: `RevisionMismatch { current: Some(8) }` |
+| 5, high: the standalone engine could enable temporal state | Engine gate (decision 11): `set_temporal(true)` and snapshot admission refuse outside test builds | `crates/vlite-graph/tests/temporal_gate.rs`: the ordinary-build snapshot load returned a temporal state, and `set_temporal(true)` succeeded |
+
+### Activation publication (decision needed)
+
+Review blocker 2 is open. Implementing the original contract ("enable the
+capability atomically with the first temporal write") safely needs a product
+decision, so the interim code is unchanged and no behavioural exception is
+taken.
+
+Interim behaviour (`property_graph/temporal.rs`, `enable_temporal`): before
+appending the first temporal frame, the 32-byte header is rewritten in place
+with flag 64 and a new checksum, then synced. Evidence from scratch probes
+(single-file store, support on unless stated; the probes were not
+committed):
+
+| Probe | Result |
+|---|---|
+| Replica follower bootstrapped before activation applies the next segment | `ReplicaDiverged("segment header differs from follower")` |
+| `restore_to` with a base backup taken before activation | `InvalidRestoreTarget("base backup is not a prefix of the log")` |
+| `restore_to` without a base, cut before activation | the output still has flag 64 |
+| That output, opened by a build without support | `UnsupportedFeature(64)` |
+| Crash after the header sync, before the frame | opens as temporal with no temporal edge; a build without support refuses it with `UnsupportedFeature(64)` |
+| Torn header, either half (flags and checksum from different versions) | `Corrupt { offset: 0, reason: "database header checksum mismatch" }`, unrecoverable |
+
+Constraints from existing contracts:
+
+- Required flags so far are set when a store is created or by copy-out:
+  `enable_graph` (REQ-003) publishes a new file with a new lineage and never
+  modifies its source.
+- P3 Decision W states that flag 32 "is never added by in-place header
+  mutation". The P3 analysis rejected in-place activation because it needs
+  "platform-safe file replacement while locks/read generations remain
+  pinned".
+- The publication helpers (`maintenance::publish_held`, `publish_with`)
+  publish a validated, synced staged file under a new name and never
+  replace an existing one.
+- Point-in-time restore proves lineage by byte prefix, from byte 0, and
+  replicas compare headers. Any same-lineage header change breaks both.
+
+Alternatives, smallest first:
+
+1. **Copy-out activation (recommended).** Add
+   `enable_temporal(source, destination, key)` beside `enable_graph`. It
+   writes the source's graph image with flag 64 through `write_v5_image`
+   and `publish_held`. The source is unchanged, and the output gets a new
+   lineage.
+   - A temporal write to a file without flag 64 returns
+     `UnsupportedFeature(64)` before planning. The first temporal write is
+     then an ordinary atomic append, with no header write. The in-place
+     header code and its failpoint are removed.
+   - Semantics:
+     - Publication is atomic and already fault-tested (`Staged` and
+       `Visible` failpoints).
+     - Backups and point-in-time restore of the old lineage keep working
+       and restore pre-activation files.
+     - The new file starts a new backup chain.
+     - Replicas are reseeded, as after compaction.
+     - Directory stores convert from the activated file.
+   - Cost: one new public function with its `site/api.html` row, about 10
+     tests, and no change to `format.rs`, `logops.rs` or `replica.rs`.
+   - Contract change: the spec sentence becomes "enable the capability with
+     an explicit copy-out step; the first temporal write requires it". An
+     optional follow-up is a creation-time option.
+2. **In-place activation with defined recovery.** Keep "first write
+   enables" and make every window recoverable. This needs:
+   - In `format.rs`, a header whose checksum matches only with bit 64
+     toggled is read as the pre-activation header. A writable open repairs
+     it. Corruption detection weakens slightly for that one bit.
+   - A supporting writable open clears flag 64 when the log holds no
+     temporal entry, to close the crash window.
+   - In `logops.rs`, `is_prefix` ignores the activation difference.
+     `restore_to` writes the pre-activation header when the cut precedes
+     the first temporal entry.
+   - In `replica.rs` and `lib.rs`, followers accept the 0 to 64 transition
+     in the segment holding the first temporal frame and rewrite their own
+     header the same way.
+   - Fault tests for each torn state.
+
+   This changes the restore and replica contracts and contradicts the
+   Decision W principle. It also edits `format.rs`, which another owner is
+   changing concurrently.
+3. **Same-file replacement on first write.** Stage a full copy with the flag
+   and the frame, then rename it over the open file. This is the
+   file-replacement transaction engine that P3 declined: O(file) work per
+   activation, renaming over open and locked files on Windows, and pinned
+   read generations.
+   - With the same lineage, restore and replicas still break.
+   - With a new lineage, it behaves like alternative 1, but an ordinary
+     write silently invalidates backups and replicas.
+4. **No header flag; entries only.** Old builds would meet unknown tag 65
+   and report `Corrupt`, not `UnsupportedFeature(64)`. That contradicts
+   "readers without the capability must refuse before publishing partial
+   state" with a precise error. Rejected.
+
+Once a mechanism is chosen, its tests will cover:
+
+- partial-header and header-then-frame faults, where they still exist;
+- end-to-end temporal restore across activation, with and without a base
+  backup;
+- replica behaviour across activation.

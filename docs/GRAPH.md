@@ -222,10 +222,12 @@ Gap 4 slices A and B add temporal edges. Each one has an ID, key, type and endpo
 
 - **Writes.** `GraphOp::Temporal(TemporalOp)` operations sit in an ordinary batch: create, promote an ordinary edge, append, replace, close and remove a segment.
   - Segments are addressed by their exact bounds.
-  - Promotion and every correction need `Expected::Revision`. Within one batch the check uses the revision from before the batch, so closing a fact and appending its successor is one atomic supersession.
+  - Promotion and every correction need `Expected::Revision`. Within one batch the check uses the revision from before the batch, even after an earlier ordinary operation of the batch changed the edge, so closing a fact and appending its successor is one atomic supersession.
   - Ordinary patches of a temporal edge fail.
-  - Each temporal operation counts toward the 4,096-operation and 16 MiB batch limits. A failure rolls back the whole batch, including TTL cleanup.
-- **Format.** The first temporal write sets the required header flag 64 in the same commit. Older builds refuse such files, and legacy files are unchanged until then. Temporal entries use graph entry tags 65 to 69. Directory stores inherit the flag by conversion; they cannot enable it themselves.
+  - Each temporal operation counts toward the 4,096-operation and 16 MiB batch limits, and every change, closing included, must leave the series within one 16 MiB graph body. A failure rolls back the whole batch, including TTL cleanup.
+- **Format.** The first temporal write sets the required header flag 64. Older builds refuse such files, and legacy files are unchanged until then. Temporal entries use graph entry tags 65 to 69. Directory stores inherit the flag by conversion; they cannot enable it themselves.
+  - How the flag is published is under review. Today the header is rewritten before the first temporal frame is appended. That is not atomic, and it breaks point-in-time restore from older backups and existing replicas. See the design for the alternatives.
+  - Temporal edge revisions survive reopen, directory checkpoints, conversion and precision images. Compaction and upgrade start a new lineage and renumber them like every other revision.
 - **TTL.** Closing a segment keeps history. TTL destroys it: node expiry cascades to every incident edge, edge expiry removes the whole series, and nothing reclaimed comes back.
 - **Feed.** `Database::temporal_changes_after` reports `GraphChange::Temporal` changes in commit order. Every other feed refuses a log with temporal changes rather than omit them.
 
