@@ -230,12 +230,48 @@ setting, error or format change exists yet.
   refusals, bounds, authentication before decoding encrypted blocks, and
   release readers refusing an otherwise valid image.
 
+## P3a progress: commit-time canonicalization (private, unreleased)
+
+Implemented in `src/lib.rs` (`stored_vector`), reached only through a
+privately opted-in precision store. This is P3a item 2's canonicalization,
+not P3a completion. No public API, setting, error, format or wire field
+changes.
+
+- **Writes.** Every primary and named dense value written to a float16
+  collection is rounded by the accepted binary16 conversion during the
+  existing validation, before encoding. This covers single, conditional and
+  expiring puts, ordered batches (duplicates in order), import chunks, graph
+  vector entries, named versions, whole named vectors and re-embedding
+  batches. The log and the installed state hold the same values, so
+  immediate borrowed reads, exact scores and reopened stores agree bit for
+  bit; replay, the change feed and export still verify every value. Float32
+  collections, sparse values, metadata-only writes and query vectors are
+  unchanged, and float32 writes copy nothing extra.
+- **Refusal.** A value that rounds to float16 infinity is `NonFiniteVector`,
+  exactly where a non-finite value is: after a wrong width, before payload,
+  metadata and preconditions. Nothing commits: no record, revision, import
+  marker, expiry or graph change. Imports report it under the existing
+  reject and skip policies. A retry is identified by its raw submitted rows,
+  so different rows with the same float16 values are a different chunk.
+- **Tests.** `src/compact/catalog/tests/canonical.rs` writes the shared
+  goldens (ties, subnormals, signed zero, overflow) through every path into
+  float16 and float32 collections on memory, file and directory stores,
+  plain and encrypted, and compares immediate, checkpointed and reopened
+  bits and exact scores with the unchanged float32 oracle.
+- **Not included.** Public precision activation, production `0x0100`
+  writers and capability, the source-column writer, copy-out conversion,
+  faithful compaction and upgrade (still refused before output), and
+  lifecycle and production qualification. S1's default-size conflict and
+  DO-005 stay unwaived.
+
 Remaining P3a work:
 
 1. The public precision setting, overflow error and creation/conversion API,
    under separate review.
 2. Persisted settings and commit-time canonicalization, so immediate and
-   reopened reads agree.
+   reopened reads agree. Canonicalization is implemented privately
+   ([above](#p3a-progress-commit-time-canonicalization-private-unreleased));
+   it stays unreleased with item 1.
 3. Carrying payload and metadata for compact checkpoints, so they hold every
    record.
 4. A storage-owned writer, capability table acceptance, and replay,

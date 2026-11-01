@@ -1195,6 +1195,28 @@ fn validate_vector(dimensions: usize, vector: &[f32]) -> Result<()> {
     Ok(())
 }
 
+/// Validates the dense `vector` written to a collection of `precision` and
+/// returns the value it stores, before anything commits: `vector` itself,
+/// or in a float16 collection (P3a commit-time canonicalization) each
+/// component rounded by the one binary16 conversion, so the log, installed
+/// state and every reader hold the same bits. A component that rounds to
+/// float16 infinity is `NonFiniteVector`, exactly as a non-finite one is.
+fn stored_vector(
+    dimensions: usize,
+    precision: Option<compact::catalog::Precision>,
+    vector: &[f32],
+) -> Result<std::borrow::Cow<'_, [f32]>> {
+    validate_vector(dimensions, vector)?;
+    match precision {
+        Some(half @ compact::catalog::Precision::Float16) => vector
+            .iter()
+            .map(|&value| half.canonical(value).map_err(|_| Error::NonFiniteVector))
+            .collect::<Result<_>>()
+            .map(std::borrow::Cow::Owned),
+        _ => Ok(std::borrow::Cow::Borrowed(vector)),
+    }
+}
+
 fn validate_settings(settings: &CollectionSettings) -> Result<()> {
     settings
         .validate()
@@ -1943,8 +1965,7 @@ impl Database {
             return Err(Error::ExpiryRequiresUpgrade);
         }
         let state = self.state(collection);
-        validate_vector(state.dimensions, vector)?;
-        self.ensure_dense_writable(collection)?;
+        let vector = stored_vector(state.dimensions, state.precision, vector)?;
         if payload.len() > MAX_PAYLOAD_BYTES {
             return Err(Error::PayloadTooLarge(payload.len()));
         }
@@ -1957,7 +1978,7 @@ impl Database {
             return Err(Error::GraphAttachedRecordExpiry);
         }
         let record = Record {
-            vector: vector.to_vec(),
+            vector: vector.into_owned(),
             payload: payload.to_vec(),
             metadata: metadata.clone(),
         };
@@ -2008,8 +2029,7 @@ impl Database {
     ) -> Result<u64> {
         self.ensure_healthy()?;
         let state = self.state(collection);
-        validate_vector(state.dimensions, vector)?;
-        self.ensure_dense_writable(collection)?;
+        let vector = stored_vector(state.dimensions, state.precision, vector)?;
         if payload.len() > MAX_PAYLOAD_BYTES {
             return Err(Error::PayloadTooLarge(payload.len()));
         }
@@ -2022,7 +2042,7 @@ impl Database {
         }
         expected.check(state.revisions.get(&id).copied())?;
         let record = Record {
-            vector: vector.to_vec(),
+            vector: vector.into_owned(),
             payload: payload.to_vec(),
             metadata: metadata.clone(),
         };
@@ -2079,48 +2099,43 @@ impl Database {
         if self.version < 2 {
             return Err(Error::BatchRequiresUpgrade);
         }
-        let body_bytes = self.validate_batch(collection, operations)?;
-        self.ensure_no_attached_delete(collection, operations)?;
+        let (body_bytes, operations) = self.validate_batch(collection, operations)?;
+        self.ensure_no_attached_delete(collection, &operations)?;
         let sequence = self.next_sequence()?;
         let frame = if collection == 0 {
-            format::batch_frame(sequence, operations, body_bytes)
+            format::batch_frame(sequence, &operations, body_bytes)
         } else {
-            format::batch_frame_v4(sequence, collection, operations, None)
+            format::batch_frame_v4(sequence, collection, &operations, None)
         };
         self.commit_frame(sequence, &frame)?;
-        self.apply_batch(collection, operations, sequence);
+        self.apply_batch(collection, &operations, sequence);
         Ok(())
     }
 
-    /// Refuses a dense vector write into a float16 collection before any
-    /// commit (P3a): commit-time canonicalization is a later step, so no
-    /// primary vector, named version or re-embedding batch is written to
-    /// it. Dense values it already holds came from a store image and replay
-    /// checked each is exactly a float16 value.
-    fn ensure_dense_writable(&self, collection: u16) -> Result<()> {
-        if self.state(collection).precision == Some(compact::catalog::Precision::Float16) {
-            return Err(Error::UnsupportedFeature(format::FLAG_PRECISION));
-        }
-        Ok(())
-    }
-
-    /// Returns the encoded batch body length.
-    fn validate_batch(&self, collection: u16, operations: &[Mutation]) -> Result<usize> {
+    /// Validates a batch and returns its encoded body length with the
+    /// operations as the collection stores them: borrowed unchanged, or
+    /// with each dense vector of a float16 collection rounded
+    /// (`stored_vector`).
+    fn validate_batch<'a>(
+        &self,
+        collection: u16,
+        operations: &'a [Mutation],
+    ) -> Result<(usize, std::borrow::Cow<'a, [Mutation]>)> {
         if operations.len() > MAX_BATCH_OPERATIONS {
             return Err(Error::BatchTooLarge);
         }
-        let dimensions = self.state(collection).dimensions;
+        let state = self.state(collection);
+        let mut stored = std::borrow::Cow::Borrowed(operations);
         let mut body_bytes = 0usize;
-        for operation in operations {
-            let bytes = match operation {
+        for (at, operation) in operations.iter().enumerate() {
+            let (bytes, canonical) = match operation {
                 Mutation::PutWithMetadata {
                     vector,
                     payload,
                     metadata,
                     ..
                 } => {
-                    validate_vector(dimensions, vector)?;
-                    self.ensure_dense_writable(collection)?;
+                    let vector = stored_vector(state.dimensions, state.precision, vector)?;
                     if payload.len() > MAX_PAYLOAD_BYTES {
                         return Err(Error::PayloadTooLarge(payload.len()));
                     }
@@ -2131,26 +2146,32 @@ impl Database {
                     if self.version < 3 {
                         return Err(Error::MetadataRequiresUpgrade);
                     }
-                    16 + vector.len() * 4 + 4 + payload.len() + metadata_bytes
+                    let bytes = 16 + vector.len() * 4 + 4 + payload.len() + metadata_bytes;
+                    (bytes, Some(vector))
                 }
                 Mutation::Put {
                     vector, payload, ..
                 } => {
-                    validate_vector(dimensions, vector)?;
-                    self.ensure_dense_writable(collection)?;
+                    let vector = stored_vector(state.dimensions, state.precision, vector)?;
                     if payload.len() > MAX_PAYLOAD_BYTES {
                         return Err(Error::PayloadTooLarge(payload.len()));
                     }
-                    16 + vector.len() * 4 + payload.len()
+                    (16 + vector.len() * 4 + payload.len(), Some(vector))
                 }
-                Mutation::Delete { .. } => 16,
+                Mutation::Delete { .. } => (16, None),
             };
             body_bytes = body_bytes.checked_add(bytes).ok_or(Error::BatchTooLarge)?;
             if body_bytes > MAX_BATCH_BYTES {
                 return Err(Error::BatchTooLarge);
             }
+            if let Some(std::borrow::Cow::Owned(rounded)) = canonical
+                && let Mutation::Put { vector, .. } | Mutation::PutWithMetadata { vector, .. } =
+                    &mut stored.to_mut()[at]
+            {
+                *vector = rounded;
+            }
         }
-        Ok(body_bytes)
+        Ok((body_bytes, stored))
     }
 
     fn apply_batch(&mut self, collection: u16, operations: &[Mutation], sequence: u64) {
@@ -2200,11 +2221,11 @@ impl Database {
         if self.version < format::V4 {
             return Err(Error::ImportsRequireUpgrade);
         }
-        self.validate_batch(collection, operations)?;
+        let (_, operations) = self.validate_batch(collection, operations)?;
         let sequence = self.next_sequence()?;
-        let frame = format::batch_frame_v4(sequence, collection, operations, Some(marker));
+        let frame = format::batch_frame_v4(sequence, collection, &operations, Some(marker));
         self.commit_frame(sequence, &frame)?;
-        self.apply_batch(collection, operations, sequence);
+        self.apply_batch(collection, &operations, sequence);
         let name = &self.collections[&collection].name;
         self.imports.apply(collection, name, marker);
         Ok(sequence)

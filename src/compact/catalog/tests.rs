@@ -28,6 +28,7 @@ use std::io::{Cursor, Write};
 use std::path::Path;
 use std::rc::Rc;
 
+mod canonical;
 mod goldens;
 mod limits;
 mod parity;
@@ -1693,19 +1694,15 @@ fn dense_writes(db: &mut Database, name: &str) -> (Vec<String>, bool) {
     (outcomes, db.sequence != head)
 }
 
-fn refused() -> (Vec<String>, bool) {
-    (vec!["unsupported 32".to_owned(); 8], false)
-}
-
 fn committed() -> (Vec<String>, bool) {
     (vec!["ok".to_owned(); 8], true)
 }
 
 /// A collection's stored precision is fixed with it: op 17 installs it,
 /// settings replacement keeps it, drop removes it with the collection, and
-/// reopening restores it. Until commit-time canonicalization (a later P3a
-/// step), every dense write into a float16 collection is refused before
-/// any commit; float32 collections take them unchanged.
+/// reopening restores it. Every dense write path commits into float16 and
+/// float32 collections alike, a float16 one storing each value rounded
+/// before its commit (`tests/canonical.rs`).
 fn runtime_precision(backing: Backing, key: Option<EncryptionKey>) {
     let _gate = Activation::on();
     let directory = tempfile::tempdir().unwrap();
@@ -1714,25 +1711,44 @@ fn runtime_precision(backing: Backing, key: Option<EncryptionKey>) {
     let mut db = create_store(backing, &path, key);
     db.create_collection_as("half", spec(2), F16).unwrap();
     db.create_collection_as("full", spec(2), F32).unwrap();
-    assert_eq!(dense_writes(&mut db, "half"), refused(), "{backing:?}");
+    let first_job = db.next_import_job_id().unwrap();
+    assert_eq!(dense_writes(&mut db, "half"), committed(), "{backing:?}");
     let changed = CollectionSettings {
         rerank_multiplier: 7,
         ..CollectionSettings::default()
     };
     db.set_collection_settings("half", changed).unwrap();
-    assert_eq!(dense_writes(&mut db, "half"), refused());
+    assert_eq!(dense_writes(&mut db, "half"), committed());
+    let jobs = first_job..db.next_import_job_id().unwrap();
     // Deletes and metadata-only writes carry no dense vector.
     let mut half = db.collection_mut("half").unwrap();
-    assert!(!half.delete(1).unwrap());
+    half.update_metadata(2, &Metadata::new()).unwrap();
+    assert!(half.delete(1).unwrap());
     half.write_batch(&[Mutation::Delete { id: 1 }]).unwrap();
+    // Only an empty collection without open imports is dropped.
+    for id in 2..=7 {
+        assert!(half.delete(id).unwrap());
+    }
+    for job in jobs {
+        half.abort_import(job).unwrap();
+    }
     // A re-created name is a new collection with its own precision.
     db.drop_collection("half").unwrap();
     db.create_collection_as("half", spec(2), F32).unwrap();
     db.create_collection_as("temp", spec(2), F16).unwrap();
     assert_eq!(dense_writes(&mut db, "half"), committed());
 
-    let (_, mut db) = cycle(backing, &path, key, db);
-    assert_eq!(dense_writes(&mut db, "temp"), refused());
+    let (loaded, mut db) = cycle(backing, &path, key, db);
+    assert_eq!(
+        precisions(&loaded),
+        listed(&[
+            (0, "default", F32),
+            (2, "full", F32),
+            (3, "half", F32),
+            (4, "temp", F16)
+        ])
+    );
+    assert_eq!(dense_writes(&mut db, "temp"), committed());
     assert_eq!(dense_writes(&mut db, "full"), committed());
 }
 
@@ -1765,8 +1781,6 @@ fn checkpoint_preserves(key: Option<EncryptionKey>) {
     let mut db = create_store(Backing::Directory, &path, key);
     db.create_collection_as("half", spec(2), F16).unwrap();
     db.create_collection("gone", spec(2)).unwrap();
-    // The float16 collection holds no records: commit-time canonicalization
-    // is a later step.
     let put = |id| {
         vec![Mutation::Put {
             id,
@@ -2377,6 +2391,6 @@ fn feeds_exports_and_replicas_follow_precise_creates() {
     let mut follower = ReplicaFollower::open(&second, None).unwrap();
     follower.apply(&segment).unwrap();
     let mut db = follower.promote();
-    assert_eq!(dense_writes(&mut db, "half"), refused());
+    assert_eq!(dense_writes(&mut db, "half"), committed());
     assert_eq!(dense_writes(&mut db, "default"), committed());
 }

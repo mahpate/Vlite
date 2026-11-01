@@ -455,8 +455,16 @@ fn invalid_code(error: &Error) -> &'static str {
     }
 }
 
-/// The same per-row checks `write_batch` applies, including v5-only geo values.
-fn validate_row(dimensions: usize, operation: &Mutation, version: u32) -> Result<()> {
+/// The same per-row checks `write_batch` applies, including v5-only geo
+/// values and a float16 collection's refusal of values that round to
+/// infinity. Rows are rounded only when the chunk commits; the digest is
+/// over the rows as submitted.
+fn validate_row(
+    dimensions: usize,
+    precision: Option<crate::compact::catalog::Precision>,
+    operation: &Mutation,
+    version: u32,
+) -> Result<()> {
     let (vector, payload, metadata) = match operation {
         Mutation::Put {
             vector, payload, ..
@@ -469,7 +477,7 @@ fn validate_row(dimensions: usize, operation: &Mutation, version: u32) -> Result
         } => (vector, payload, Some(metadata)),
         Mutation::Delete { .. } => return Ok(()),
     };
-    crate::validate_vector(dimensions, vector)?;
+    crate::stored_vector(dimensions, precision, vector)?;
     if payload.len() > MAX_PAYLOAD_BYTES {
         return Err(Error::PayloadTooLarge(payload.len()));
     }
@@ -631,12 +639,13 @@ impl Database {
         if operations.len() > MAX_BATCH_OPERATIONS {
             return Err(Error::BatchTooLarge);
         }
-        let dimensions = self.state(collection).dimensions;
+        let state = self.state(collection);
+        let (dimensions, precision) = (state.dimensions, state.precision);
         let mut valid = Vec::with_capacity(operations.len());
         let mut invalid = Vec::new();
         let mut invalid_rows = 0u32;
         for (row, operation) in operations.iter().enumerate() {
-            let result = validate_row(dimensions, operation, self.version);
+            let result = validate_row(dimensions, precision, operation, self.version);
             if let Err(error) = &result {
                 invalid_rows += 1;
                 if invalid.len() < MAX_REPORTED_INVALID_ROWS {

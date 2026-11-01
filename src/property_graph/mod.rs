@@ -841,8 +841,10 @@ impl Database {
                 mutation,
             } => {
                 let collection = self.resolve(collection)?;
-                self.validate_batch(collection, std::slice::from_ref(mutation))?;
-                return Ok(Planned::Vector(collection, mutation.clone()));
+                let (_, stored) =
+                    self.validate_batch(collection, std::slice::from_ref(mutation))?;
+                let mutation = stored.into_owned().remove(0);
+                return Ok(Planned::Vector(collection, mutation));
             }
             GraphOp::PutSchema { schema } => GraphMutation::PutSchema(schema.clone()),
             GraphOp::EnsureEdge {

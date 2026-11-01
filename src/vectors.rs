@@ -112,7 +112,10 @@ impl VectorData {
         }
     }
 
-    fn validate(&self) -> Result<()> {
+    /// Checks the whole data set; a dense value must also have a stored
+    /// value in `precision` (`crate::stored_vector`), which a float16
+    /// collection's writes pass and encoding and decoding do not.
+    fn validate(&self, precision: Option<crate::compact::catalog::Precision>) -> Result<()> {
         if self.specs.len() > 32 || self.jobs.len() > 32 {
             return Err(invalid());
         }
@@ -139,7 +142,7 @@ impl VectorData {
                     if !seen.insert(&v.version) {
                         return Err(invalid());
                     }
-                    crate::validate_vector(s.dimensions, &v.vector)?;
+                    crate::stored_vector(s.dimensions, precision, &v.vector)?;
                 }
             }
             for (n, v) in &r.sparse {
@@ -156,7 +159,7 @@ impl VectorData {
         Ok(())
     }
     pub(crate) fn encode(&self) -> Result<Vec<u8>> {
-        self.validate()?;
+        self.validate(None)?;
         let mut w = Writer(Vec::new());
         w.u(1);
         w.u(self.specs.len() as u64);
@@ -295,7 +298,7 @@ impl VectorData {
         if !r.0.is_empty() {
             return Err(invalid());
         }
-        data.validate()?;
+        data.validate(None)?;
         Ok(data)
     }
     fn prune(&mut self, n: &str) {
@@ -606,26 +609,6 @@ pub struct DenseSparseQuery {
     pub k: usize,
     pub fusion: crate::hybrid::FusionOptions,
 }
-/// Whether `next` holds a named dense version that `current` does not hold
-/// bit for bit under the same record, name and version.
-fn adds_dense(current: &VectorData, next: &VectorData) -> bool {
-    next.records.iter().any(|(id, record)| {
-        record.dense.iter().any(|(n, versions)| {
-            let held = current.records.get(id).and_then(|r| r.dense.get(n));
-            versions.iter().any(|v| {
-                !held.is_some_and(|vs| {
-                    vs.iter().any(|h| {
-                        h.version == v.version
-                            && h.vector
-                                .iter()
-                                .map(|x| x.to_bits())
-                                .eq(v.vector.iter().map(|x| x.to_bits()))
-                    })
-                })
-            })
-        })
-    })
-}
 impl CollectionMut<'_> {
     fn commit_vectors(&mut self, data: VectorData) -> Result<()> {
         self.db.ensure_healthy()?;
@@ -633,14 +616,6 @@ impl CollectionMut<'_> {
             return Err(Error::InvalidQuery(
                 "named and sparse vectors require format v5",
             ));
-        }
-        // P3a: a float16 collection takes no dense value it does not already
-        // hold until commit-time canonicalization exists, so named versions
-        // and re-embedding batches are refused before anything changes.
-        // Specs, jobs, pruning and sparse vectors (always float32) commit.
-        let current = self.db.state(self.id);
-        if current.precision.is_some() && adds_dense(&current.vectors, &data) {
-            self.db.ensure_dense_writable(self.id)?;
         }
         let bytes = data.encode()?;
         let seq = self
@@ -670,9 +645,22 @@ impl CollectionMut<'_> {
         if self.view().get(id)?.is_none() {
             return Err(invalid());
         }
+        let precision = self.db.state(self.id).precision;
         let mut data = self.db.state(self.id).vectors.clone();
         data.records.insert(id, vectors);
-        data.validate()?;
+        data.validate(precision)?;
+        // The record's dense values as the collection stores them.
+        let record = data.records.get_mut(&id).ok_or_else(invalid)?;
+        for (n, versions) in &mut record.dense {
+            let dimensions = data.specs[n].dimensions;
+            for version in versions {
+                let rounded = match crate::stored_vector(dimensions, precision, &version.vector)? {
+                    std::borrow::Cow::Owned(rounded) => rounded,
+                    std::borrow::Cow::Borrowed(_) => continue,
+                };
+                version.vector = rounded;
+            }
+        }
         let names: Vec<_> = data.specs.keys().cloned().collect();
         for n in names {
             data.prune(&n);
@@ -691,9 +679,14 @@ impl CollectionMut<'_> {
             return Err(invalid());
         }
         name(version)?;
+        let precision = self.db.state(self.id).precision;
         let mut data = self.db.state(self.id).vectors.clone();
         let spec = data.specs.get(n).ok_or_else(invalid)?;
-        crate::validate_vector(spec.dimensions, &vector)?;
+        let rounded = match crate::stored_vector(spec.dimensions, precision, &vector)? {
+            std::borrow::Cow::Owned(rounded) => Some(rounded),
+            std::borrow::Cow::Borrowed(_) => None,
+        };
+        let vector = rounded.unwrap_or(vector);
         let vs = data
             .records
             .entry(id)
@@ -767,6 +760,7 @@ impl CollectionMut<'_> {
         if batch.is_empty() || batch.len() > crate::MAX_BATCH_OPERATIONS {
             return Err(invalid());
         }
+        let precision = self.db.state(self.id).precision;
         let mut data = self.db.state(self.id).vectors.clone();
         let target = data.jobs.get(n).ok_or_else(invalid)?.target_version.clone();
         let dim = data.specs[n].dimensions;
@@ -775,7 +769,7 @@ impl CollectionMut<'_> {
             if !seen.insert(*id) || self.view().get(*id)?.is_none() {
                 return Err(invalid());
             }
-            crate::validate_vector(dim, vector)?;
+            let vector = crate::stored_vector(dim, precision, vector)?.into_owned();
             let vs = data
                 .records
                 .entry(*id)
@@ -786,7 +780,7 @@ impl CollectionMut<'_> {
             vs.retain(|v| v.version != target);
             vs.push(VersionedVector {
                 version: target.clone(),
-                vector: vector.clone(),
+                vector,
             });
         }
         let j = data.jobs.get_mut(n).ok_or_else(invalid)?;

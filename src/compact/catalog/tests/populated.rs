@@ -1,11 +1,10 @@
 //! Float16 dense values in populated precision stores (review 9ebcbeff,
-//! HIGH, and its transport finding). Until commit-time canonicalization, a
-//! float16 collection holds only values that a complete image or ordinary
-//! frames already store exactly in float16: full replay, the change feed
-//! and log export each verify every primary and named dense value bit for
-//! bit (never rounding it) and refuse any other as corruption before they
-//! return anything, and every write that would add a dense value is
-//! refused before it commits. Float32 collections keep every finite value
+//! HIGH, and its transport finding). A float16 collection holds only
+//! float16 values: full replay, the change feed and log export each verify
+//! every primary and named dense value bit for bit (never rounding it) and
+//! refuse any other as corruption before they return anything, and every
+//! write rounds its dense values to float16 before it commits
+//! (`tests/canonical.rs`). Float32 collections keep every finite value
 //! unchanged.
 
 use super::*;
@@ -294,9 +293,32 @@ fn observe(db: &Database) -> (u64, Vec<u8>, Option<RecordVectors>, Option<String
     )
 }
 
-fn float16_writes_refuse_dense_values(key: Option<&EncryptionKey>) {
+/// Applies `vector` as record 1's re-embedding of `n`, checked against its
+/// current revision or unchecked.
+fn reembed(db: &mut Database, checked: bool, vector: [f32; 4]) -> Result<()> {
+    let revision = db.collection("half")?.revision(1)?.unwrap();
+    let mut half = db.collection_mut("half")?;
+    match checked {
+        true => half.apply_reembed_batch_checked(
+            "n",
+            &[ReembedUpdate {
+                id: 1,
+                revision,
+                vector: vector.to_vec(),
+            }],
+        ),
+        false => half.apply_reembed_batch("n", &[(1, vector.to_vec())]),
+    }
+}
+
+/// Every dense write into a populated float16 `half` commits its input's
+/// float16 value, which full replay, the change feed and log export then
+/// verify; an input that rounds to float16 infinity is `NonFiniteVector`
+/// on every path and commits nothing.
+fn float16_writes_store_dense_values(key: Option<&EncryptionKey>) {
     let _gate = Activation::on();
-    let [_, half] = populated(key, EXACT, EXACT);
+    let [full, half] = populated(key, EXACT, EXACT);
+    let floor = load(&full, key).unwrap().history_floor;
     let mut db = Database::open_from_bytes(half, key).unwrap();
     // Starting a re-embedding stores no dense value.
     db.collection_mut("half")
@@ -305,38 +327,54 @@ fn float16_writes_refuse_dense_values(key: Option<&EncryptionKey>) {
         .unwrap();
     let before = observe(&db);
     for path in 0..PATHS.len() {
-        for vector in [EXACT, INEXACT[0]] {
-            assert_eq!(
-                outcome(write(&mut db, path, &vector)),
-                "unsupported 32",
-                "{path} {vector:?}"
-            );
+        if path == 5 {
+            // RejectChunk reports the row and commits nothing.
+            let job = db.next_import_job_id().unwrap();
+            let row = Mutation::Put {
+                id: 2,
+                vector: INEXACT[1].to_vec(),
+                payload: b"p".to_vec(),
+            };
+            let mut half = db.collection_mut("half").unwrap();
+            let report = half.import_chunk(job, 1, &[row], POLICY).unwrap();
+            assert_eq!(report.outcome, ImportChunkOutcome::Rejected);
+            assert_eq!(report.invalid[0].code, "non_finite_vector");
+            continue;
         }
+        assert_eq!(
+            outcome(write(&mut db, path, &INEXACT[1])),
+            "NonFiniteVector",
+            "{path}"
+        );
     }
-    let revision = db
-        .collection("half")
-        .unwrap()
-        .reembed_pending_checked("n", 1)
-        .unwrap()[0]
-        .revision;
-    let mut half = db.collection_mut("half").unwrap();
-    assert_eq!(
-        outcome(half.apply_reembed_batch("n", &[(1, EXACT.to_vec())])),
-        "unsupported 32"
-    );
-    let update = ReembedUpdate {
-        id: 1,
-        revision,
-        vector: EXACT.to_vec(),
-    };
-    assert_eq!(
-        outcome(half.apply_reembed_batch_checked("n", &[update])),
-        "unsupported 32"
-    );
+    for checked in [true, false] {
+        let refused = reembed(&mut db, checked, INEXACT[1]);
+        assert_eq!(outcome(refused), "NonFiniteVector");
+    }
     assert_eq!(observe(&db), before);
 
-    // Writes that add no dense value still commit: sparse values (float32
-    // in every collection), declarations and history pruning.
+    let mut stored = exact_bits();
+    stored.extend([INEXACT[0][0], 0.0].map(|value| F16.canonical(value).unwrap().to_bits()));
+    for path in 0..PATHS.len() {
+        for vector in [EXACT, INEXACT[0]] {
+            write(&mut db, path, &vector).unwrap();
+            let log = db.to_bytes().unwrap();
+            assert_eq!(readers(&log, key, floor), each("ok"), "{path} {vector:?}");
+            let bits = dense_bits(&load(&log, key).unwrap());
+            assert!(bits.is_subset(&stored), "{path} {vector:?} {bits:x?}");
+        }
+    }
+    for checked in [true, false] {
+        reembed(&mut db, checked, INEXACT[0]).unwrap();
+        reembed(&mut db, checked, EXACT).unwrap();
+    }
+    let log = db.to_bytes().unwrap();
+    assert_eq!(readers(&log, key, floor), each("ok"));
+    assert_eq!(dense_bits(&load(&log, key).unwrap()), stored);
+
+    // Writes that add no dense value commit as before: sparse values
+    // (float32 in every collection), declarations and history pruning.
+    let head = db.sequence;
     let mut half = db.collection_mut("half").unwrap();
     let mut vectors = half.view().record_vectors(1).unwrap().unwrap().clone();
     vectors.sparse.insert("s".into(), vec![(3, 0.1)]);
@@ -349,9 +387,9 @@ fn float16_writes_refuse_dense_values(key: Option<&EncryptionKey>) {
     };
     half.configure_vector("m", spec).unwrap();
     half.prune_vector_history("n", 0).unwrap();
-    assert_eq!(db.sequence, before.0 + 3);
+    assert_eq!(db.sequence, head + 3);
     let loaded = load(&db.to_bytes().unwrap(), key).unwrap();
-    assert_eq!(dense_bits(&loaded), exact_bits());
+    assert!(dense_bits(&loaded).is_subset(&stored));
     assert_eq!(
         loaded.collections[&1].vectors.records[&1].sparse["s"],
         [(3, 0.1)]
@@ -359,7 +397,7 @@ fn float16_writes_refuse_dense_values(key: Option<&EncryptionKey>) {
 }
 
 #[test]
-fn float16_collections_refuse_every_dense_write() {
-    float16_writes_refuse_dense_values(None);
-    float16_writes_refuse_dense_values(Some(&key()));
+fn float16_collections_store_every_dense_write() {
+    float16_writes_store_dense_values(None);
+    float16_writes_store_dense_values(Some(&key()));
 }
