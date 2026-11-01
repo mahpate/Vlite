@@ -87,6 +87,15 @@ impl TemporalEntry {
         }
     }
 
+    /// Whether the entry fits its frame: a `PutEdge` restates a revision
+    /// only in a snapshot at sequence `snapshot` (see [`revision_fits`]).
+    pub fn fits(&self, snapshot: Option<u64>) -> bool {
+        match self {
+            Self::PutEdge { revision, .. } => revision_fits(*revision, snapshot),
+            _ => true,
+        }
+    }
+
     /// Checks every rule that does not depend on state.
     pub fn validate(&self) -> Result<(), GraphError> {
         match self {
@@ -124,6 +133,17 @@ impl TemporalEntry {
                 ..
             } => temporal::check_bounds(*valid_from, *valid_to),
         }
+    }
+}
+
+/// Whether a `PutEdge` may carry `revision`: zero (the commit sequence) in
+/// an op-12 frame (`snapshot` is `None`), `1..=` the sequence of an op-15
+/// snapshot. Every reader decodes frames with this check, and replay and
+/// snapshot loading apply it again.
+pub fn revision_fits(revision: u64, snapshot: Option<u64>) -> bool {
+    match snapshot {
+        None => revision == 0,
+        Some(sequence) => (1..=sequence).contains(&revision),
     }
 }
 

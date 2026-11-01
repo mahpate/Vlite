@@ -62,21 +62,21 @@ pub(crate) fn check_prefix(
 }
 
 /// Decodes the checksum-verified body of an op-12 frame, or of an op-15
-/// snapshot frame when `snapshot`: its prefix passes [`check_prefix`] and
-/// the body decodes with exactly `id` reclaims. A snapshot body holds only
-/// the entries a checkpoint restates ([`restated`]); their order and
-/// coverage are checked where the snapshot loads. Full replay, the change
-/// feed and the precision image check decode graph frames only through
-/// this, so they accept the same frames.
+/// snapshot frame at sequence `snapshot`: its prefix passes
+/// [`check_prefix`] and the body decodes with exactly `id` reclaims. A
+/// snapshot body holds only the entries a checkpoint restates
+/// ([`restated`]); their order and coverage are checked where the snapshot
+/// loads. Full replay, the change feed and the precision image check
+/// decode graph frames only through this, so they accept the same frames.
 pub(crate) fn decode_frame(
-    snapshot: bool,
+    snapshot: Option<u64>,
     id: u64,
     count: u32,
     body: &[u8],
     offset: u64,
 ) -> Result<GraphBody> {
-    check_prefix(snapshot, id, count as usize, body.len(), offset)?;
-    let reason = if snapshot {
+    check_prefix(snapshot.is_some(), id, count as usize, body.len(), offset)?;
+    let reason = if snapshot.is_some() {
         "invalid graph snapshot"
     } else {
         "invalid graph frame body"
@@ -84,7 +84,15 @@ pub(crate) fn decode_frame(
     engine::decode_body(body, count)
         .ok()
         .filter(|body| reclaim_count(body) == id)
-        .filter(|body| !snapshot || body.entries.iter().all(restated))
+        .filter(|body| snapshot.is_none() || body.entries.iter().all(restated))
+        // Gap 4: a temporal `PutEdge` restates a revision only in a
+        // snapshot, within `1..=` its sequence.
+        .filter(|body| {
+            body.entries.iter().all(|entry| match entry {
+                GraphEntry::Temporal(entry) => entry.fits(snapshot),
+                _ => true,
+            })
+        })
         .ok_or_else(|| corrupt(offset, reason))
 }
 
@@ -208,7 +216,7 @@ pub(crate) fn replay(
     offset: u64,
     restated: bool,
 ) -> Result<()> {
-    let body = decode_frame(false, id, count, body, offset)?;
+    let body = decode_frame(None, id, count, body, offset)?;
     let mut mutations = Vec::new();
     let mut touched = Vec::new();
     for entry in &body.entries {

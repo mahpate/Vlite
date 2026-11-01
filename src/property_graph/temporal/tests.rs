@@ -187,6 +187,7 @@ fn oracle_fixture_matches_the_engine_model() {
 // --- Header capability ----------------------------------------------------
 
 mod activate;
+mod revisions;
 mod writes;
 
 fn set_header_flags(path: &Path, flags: u16) {

@@ -125,7 +125,7 @@ impl Graph {
         {
             // Only a snapshot restates a revision; it never goes through
             // here.
-            if *revision != 0 {
+            if !super::super::codec::revision_fits(*revision, None) {
                 return Err(GraphError::Corrupt("temporal revision outside a snapshot"));
             }
             let edge = GraphEdge {

@@ -66,7 +66,7 @@ impl FeedGraphs {
     ) -> Result<Vec<(String, ChangeKind)>> {
         let corrupt = |reason| Error::Corrupt { offset, reason };
         let sequence = frame.sequence;
-        let snapshot = frame.operation == format::OP_GRAPH_SNAPSHOT;
+        let snapshot = (frame.operation == format::OP_GRAPH_SNAPSHOT).then_some(sequence);
         let body =
             super::frame::decode_frame(snapshot, frame.id, frame.count, frame.body(), offset)?;
         let graph_id = body.graph_id.0;

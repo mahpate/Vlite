@@ -757,8 +757,41 @@ fn snapshot_restates_series_and_equals_replay() {
     };
     let (nodes, edges) = revisions(&loaded);
     assert_eq!(edges, [(0, 50), (1, h.sequence), (2, h.sequence)]);
+    // A temporal edge's own entry restates its revision; a supplement must
+    // equal it rather than overwrite it (review round 2, B).
+    const MISMATCH: GraphError = GraphError::Corrupt("graph revisions do not match");
+    assert_eq!(
+        replayed.clone().restore_revisions(G, &nodes, &edges),
+        Err(MISMATCH)
+    );
+    for edge in replayed.graphs.get_mut(&G).unwrap().edges.values_mut() {
+        if edge.id != EdgeId(0) {
+            edge.revision = h.sequence;
+        }
+    }
     replayed.restore_revisions(G, &nodes, &edges).unwrap();
     assert_eq!(loaded, replayed);
+    for edge in [1, 2] {
+        for revision in [h.sequence - 1, h.sequence + 1] {
+            let mut conflicting = edges.clone();
+            conflicting[edge].1 = revision;
+            assert_eq!(
+                loaded.clone().restore_revisions(G, &nodes, &conflicting),
+                Err(MISMATCH)
+            );
+        }
+    }
+    // Nodes and ordinary edges still take the supplement's revision.
+    let mut ordinary = edges.clone();
+    ordinary[0].1 = 7;
+    let mut restored = loaded.clone();
+    restored
+        .restore_revisions(G, &[(0, 3), (1, 4), (2, 5)], &ordinary)
+        .unwrap();
+    assert_eq!(
+        revisions(&restored),
+        (vec![(0, 3), (1, 4), (2, 5)], ordinary)
+    );
     let graph = loaded.graph(G).unwrap();
     assert_eq!(graph.segments(EdgeId(1)), h.graph().segments(EdgeId(1)));
     assert_eq!(graph.segments(EdgeId(2)), Some(&[][..]));

@@ -2291,7 +2291,7 @@ fn load_inner<R: Read + Seek>(
             )?,
             OP_GRAPH_SNAPSHOT => {
                 let body = crate::property_graph::frame::decode_frame(
-                    true,
+                    Some(sequence),
                     id,
                     count as u32,
                     body,

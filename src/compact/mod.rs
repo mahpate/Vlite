@@ -333,6 +333,10 @@ struct Coverage {
     /// Nodes and edges put by the snapshot, then listed by the run.
     snapshot: [Ids; 2],
     revisions: [Ids; 2],
+    /// Gap 4: the temporal edges the snapshot restated with their
+    /// revisions, in ID order, until the run lists them: each must list
+    /// the same revision.
+    temporal: std::collections::VecDeque<(u64, u64)>,
 }
 
 /// What a block of a precision image restates, for the loader (P3a).
@@ -696,7 +700,7 @@ impl ImageCheck {
             }
             OP_GRAPH_SNAPSHOT if self.precise => {
                 let snapshot = crate::property_graph::frame::decode_frame(
-                    true,
+                    Some(frame.sequence),
                     frame.id,
                     frame.count,
                     body,
@@ -903,6 +907,7 @@ impl ImageCheck {
                 listed: false,
                 snapshot: Default::default(),
                 revisions: Default::default(),
+                temporal: Default::default(),
             });
         }
         let coverage = self.coverage.as_mut().expect("started above");
@@ -916,9 +921,14 @@ impl ImageCheck {
                 // Gap 4: a temporal edge is restated as one entry too.
                 GraphEntry::Temporal(
                     crate::property_graph::engine::codec::TemporalEntry::PutEdge {
-                        edge_id, ..
+                        edge_id,
+                        revision,
+                        ..
                     },
-                ) => coverage.snapshot[1].add(edge_id.0),
+                ) => {
+                    coverage.snapshot[1].add(edge_id.0);
+                    coverage.temporal.push_back((edge_id.0, *revision));
+                }
                 _ => {}
             }
         }
@@ -1065,8 +1075,19 @@ impl ImageCheck {
                 for &(id, _) in &nodes {
                     coverage.revisions[0].add(id);
                 }
-                for &(id, _) in &edges {
+                for &(id, revision) in &edges {
                     coverage.revisions[1].add(id);
+                    // Gap 4: replay keeps a temporal edge's restated
+                    // revision, which its pair must equal.
+                    let temporal = &mut coverage.temporal;
+                    while temporal.front().is_some_and(|&(edge, _)| edge < id) {
+                        temporal.pop_front();
+                    }
+                    if temporal.front().is_some_and(|&(edge, _)| edge == id)
+                        && temporal.pop_front() != Some((id, revision))
+                    {
+                        return Err(corrupt(offset, "graph revisions do not match the snapshot"));
+                    }
                 }
                 self.revision_run(owner, partition, &nodes, &edges, offset)?;
                 Ok(Supplement::Revisions {

@@ -318,7 +318,7 @@ fn decoded(image: &[u8]) -> (Vec<Use>, isize) {
         for frame in &snapshots {
             let (body, used) = measured(|| {
                 crate::property_graph::frame::decode_frame(
-                    true,
+                    Some(u64_at(frame, 8)),
                     u64_at(frame, 16),
                     u32_at(frame, 24),
                     super::limits::body(frame),

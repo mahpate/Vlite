@@ -109,7 +109,8 @@ impl GraphState {
     /// Restores the original revisions of graph `graph`'s nodes and edges,
     /// which its snapshot bodies loaded at the image sequence (P3a kind 5).
     /// The (ID, revision) pairs list exactly its nodes and then its edges
-    /// in ascending ID order.
+    /// in ascending ID order. A temporal edge keeps the revision its own
+    /// entry restated, which must equal its pair's (Gap 4).
     pub fn restore_revisions(
         &mut self,
         graph: GraphId,
@@ -130,6 +131,15 @@ impl GraphState {
         for (edge, &(id, revision)) in graph.edges.values_mut().zip(edges) {
             if edge.id != EdgeId(id) {
                 return Err(MISMATCH);
+            }
+            // Gap 4: a temporal edge's own snapshot entry restated its
+            // revision, which the supplement must match (the image check
+            // compares them alike).
+            if graph.segments.contains_key(&edge.id) {
+                if edge.revision != revision {
+                    return Err(MISMATCH);
+                }
+                continue;
             }
             edge.revision = revision;
         }
@@ -233,7 +243,7 @@ impl GraphState {
                         super::super::temporal::reason::CAPABILITY,
                     ));
                 }
-                if !(1..=sequence).contains(&revision) {
+                if !super::super::codec::revision_fits(revision, Some(sequence)) {
                     return Err(NON_CANONICAL);
                 }
                 super::super::temporal::validate_series(&segments)?;
