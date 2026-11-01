@@ -286,9 +286,14 @@ It starts after the shape checks and before any per-item work: it reads the mono
 Each charge first tests its budget, then checks cancellation and deadline when the combined count reaches a multiple of 64.
 A final check runs after the public result is built; failing it returns no output and no request echo.
 Preparation charges one vertex per condition, type, label, seed selector and path endpoint, plus sort steps.
-Sort steps cost n times the bit length of n vertex operations.
-Discovery is level-synchronous: one vertex per seed copied and per expanded node, one edge unit per adjacency entry.
-Each level's new nodes are sorted (sort steps), checked against max_visited_nodes (VisitedLimit) and merged (one vertex per node).
+Sort steps cost n times the bit length of n vertex operations; deduplication runs inside the sort at no extra units.
+Every sort (types, labels, seeds, each level's new nodes, retained edges by ID, and S3's own) is one checked stable bottom-up merge sort:
+an n-item buffer is reserved before allocation (scratch grows by it), each pass moves every item once with at most one comparison and,
+in the last pass, one duplicate check per vertex unit, and the units beyond the ceil(log2 n) passes are charged after them.
+Each comparison or move therefore runs inside a charged unit and at most 64 run between checks; vertex and edge units, order and duplicates
+(the first of each equal run is kept; equal items are identical) are unchanged. A sort buffer can now reach `max_scratch_bytes` (MemoryLimit).
+Discovery is level-synchronous: one vertex per seed copied (charged as it is copied) and per expanded node, one edge unit per adjacency entry.
+Each level's new nodes are sorted (sort steps), checked against max_visited_nodes (VisitedLimit) and merged (one vertex per node, each charged as it is copied).
 `max_edges_per_node` is checked before each entry (DegreeLimit), across all types of a node.
 A typed scope probes each listed type of each scanned node with one lazy range lookup charged one vertex, found or not,
 so absent types are charged and the cancellation, deadline and vertex checks interrupt them.
@@ -403,7 +408,7 @@ Setup charges one unit per edge and per node for weights, sums, finiteness, tele
 Label propagation charges pair collection and deduplication per pair, the sort, offsets and state.
 Every buffer (weights, sums, teleport, ranks, next, committed and candidate rows; or pairs, sort buffer, offsets, labels, votes, first positions, committed and candidate rows) is reserved at capacity first.
 Every setup pass, fills and sorts included, charges each unit as it runs, so at most 64 operations run between checks.
-S3's sorts (personalization masses by node, neighbor entries) are a stable bottom-up merge sort: an n-item buffer is reserved before allocation, each pass moves every item once with at most one comparison per vertex unit, and the `sort_cost(n)` units beyond the ceil(log2 n) passes are charged after them, so vertex units are unchanged; scratch grows by the buffer (16 bytes per mass or neighbor entry).
+S3's sorts (personalization masses by node, neighbor entries) use the shared checked merge sort described under metering; scratch grows by its buffer (16 bytes per mass or neighbor entry).
 The request echo is staged before the first step; rows are no longer prepaid.
 A PageRank step charges 2n vertex units and one edge unit per arc; a sweep n vertex units and one edge unit per neighbor entry.
 A PageRank node's final-pass unit also writes its candidate row; a sweep's node unit also records its label's first position this sweep (final, as nodes run ascending) and writes its candidate row with that canonical community ID.

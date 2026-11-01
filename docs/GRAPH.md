@@ -197,7 +197,8 @@ expose it. Nothing is stored and nothing writes.
   `max_edges_examined`, the deadline and cancellation, plus the algorithm
   caps. Scratch bytes count every buffer at its allocated capacity, reserved
   before allocation. Cancellation and the deadline are checked before any
-  work, before every 64th charged operation and before returning. A run that
+  work, before every 64th charged operation (sorts, fills and copies
+  included) and before returning. A run that
   stops before the result is built returns `output: None` and
   `request: None` with its reason (`complete: false`), never an analysis of
   a partial scope; an invalid or missing item is reported only if the run

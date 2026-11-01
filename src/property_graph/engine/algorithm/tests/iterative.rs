@@ -965,7 +965,8 @@ fn interrupted_staging_is_checked_and_keeps_the_last_full_step() {
 
 #[test]
 fn setup_sorts_are_checked_and_return_nothing() {
-    use super::super::iterative::{SORTED, STAGED};
+    use super::super::SORTED;
+    use super::super::iterative::STAGED;
     let sorted = || SORTED.with(Cell::get);
     let db = chain(300);
     let graph = db.graph();
@@ -1030,8 +1031,155 @@ fn setup_sorts_are_checked_and_return_nothing() {
 }
 
 #[test]
+fn shared_preparation_sorts_are_checked_on_every_route() {
+    use super::super::SORTED;
+    use super::super::iterative::STAGED;
+    let sorted = || SORTED.with(Cell::get);
+    let hub = hub_graph(300, 300);
+    let (spread, _) = isolated(300);
+    let hub_seed = scope(&["hub"], Direction::Out);
+    // 200 absent relationship types, scrambled, and R.
+    let mut types: Vec<String> = (0..200).map(|at| format!("T{:03}", at * 7 % 200)).collect();
+    types.push("R".into());
+    let typed = AlgorithmScope {
+        types: Some(types),
+        ..hub_seed.clone()
+    };
+    let mut seeds = everything(spread.graph(), Direction::Out);
+    seeds.seeds.reverse();
+    // Each case makes one shared sort large: type names, seeds, or the
+    // nodes found by a hop and then the retained edges.
+    let cases = [
+        ("type names", &hub, typed, 0),
+        ("seeds", &spread, seeds, 0),
+        ("found nodes and edges", &hub, hub_seed, 1),
+    ];
+    let caps = iterations(100);
+    let zero = || 0;
+    for (name, db, scope, max_hops) in &cases {
+        let graph = db.graph();
+        let limits = GraphLimits {
+            deadline_ms: 10,
+            ..hops(*max_hops)
+        };
+        for algorithm in [
+            Algorithm::LabelPropagation,
+            rank(0.5, None),
+            Algorithm::Degree,
+        ] {
+            SORTED.with(|count| count.set(0));
+            let context = ExecutionContext::new(VIEW, &zero);
+            let full = run(graph, scope, &algorithm, &limits, &caps, &context).unwrap();
+            assert!(full.computation_complete, "{name}: {:?}", full.truncation);
+            let total = sorted();
+            assert!(total > 300, "{name}: {total}");
+            let mut points: BTreeSet<u64> = (1..=total).step_by(31).collect();
+            points.extend([1, 65, total / 2, total.saturating_sub(100).max(1), total]);
+            let tried = points.len() * 2;
+            let mut unchecked = Vec::new();
+            for inject in points {
+                for cancel in [false, true] {
+                    // The deadline passes, or the flag is set, once sort work
+                    // `inject` has run; the clock is read only by checks.
+                    let flag = AtomicBool::new(false);
+                    let clock = || {
+                        if sorted() < inject {
+                            return 0;
+                        }
+                        if cancel {
+                            flag.store(true, AtomicOrdering::Relaxed);
+                            0
+                        } else {
+                            1_000
+                        }
+                    };
+                    let context = ExecutionContext {
+                        cancel: Some(&flag),
+                        ..ExecutionContext::new(VIEW, &clock)
+                    };
+                    SORTED.with(|count| count.set(0));
+                    STAGED.with(|count| count.set(0));
+                    let result = run(graph, scope, &algorithm, &limits, &caps, &context).unwrap();
+                    let after = sorted() - inject;
+                    if after > 64 {
+                        unchecked.push((inject, after));
+                    }
+                    let reason = if cancel {
+                        AlgorithmTruncation::Cancelled
+                    } else {
+                        AlgorithmTruncation::Deadline
+                    };
+                    assert_eq!(result.truncation, vec![reason], "{name}");
+                    // Stopped in preparation or extraction: nothing returns.
+                    assert!(result.output.is_none() && !result.computation_complete);
+                    assert_eq!(STAGED.with(Cell::get), 0);
+                }
+            }
+            assert!(
+                unchecked.is_empty(),
+                "{name}, {algorithm:?}: {} of {tried} stops ran over 64 sort units unchecked \
+                 (point, units): {:?}",
+                unchecked.len(),
+                &unchecked[..unchecked.len().min(4)]
+            );
+        }
+    }
+}
+
+/// The checked shared sorts leave S1 and S2 results and their vertex and
+/// edge units unchanged; scratch grows by exactly the sort buffers. The
+/// pinned numbers and output fingerprints were taken before the change.
+#[test]
+fn shared_sorts_keep_degree_and_path_results_and_units() {
+    use std::hash::{Hash, Hasher};
+    let db = hub_graph(300, 600);
+    let graph = db.graph();
+    // Duplicate seeds and types, and a second lap of edges that finds each
+    // leaf twice, so every shared sort reorders or deduplicates.
+    let mut scope = scope(&["leaf5", "hub", "leaf5"], Direction::Both);
+    scope.types = Some(vec!["R".into(), "Z".into(), "R".into()]);
+    let cases = [
+        (
+            Algorithm::Degree,
+            vec![AlgorithmTruncation::OutputLimit],
+            (13_511, 2_402, 77_536),
+            6_439_977_615_206_466_389u64,
+        ),
+        (
+            path("hub", "leaf7", None),
+            Vec::new(),
+            (14_426, 4_202, 159_304),
+            12_300_556_673_456_602_824,
+        ),
+    ];
+    // The sort buffers: three raw seeds, three raw types, 598 raw found
+    // leaves (both laps but the seed leaf5) and 600 projected edges.
+    let buffers = 3 * 8 + 3 * 16 + 598 * 8 + 600 * size_of::<ProjectedEdge>() as u64;
+    for (algorithm, truncation, (vertices, edges, scratch), fingerprint) in cases {
+        let result = exec(graph, &scope, &algorithm, &hops(1));
+        assert_eq!(result.truncation, truncation, "{algorithm:?}");
+        let stats = &result.stats;
+        assert_eq!(
+            (
+                stats.vertex_operations,
+                stats.edges_examined,
+                stats.scratch_bytes
+            ),
+            (vertices, edges, scratch + buffers),
+            "{algorithm:?}"
+        );
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        format!("{:?}", result.output).hash(&mut hasher);
+        assert_eq!(hasher.finish(), fingerprint, "{algorithm:?}");
+        if let Some(AlgorithmOutput::WeightedShortestPath(outcome)) = &result.output {
+            assert!(format!("{outcome:?}").contains("edges: [EdgeId(6)]"));
+        }
+    }
+}
+
+#[test]
 fn checked_sort_is_stable_and_costs_exactly_its_sort_cost() {
-    use super::super::iterative::sort_by;
+    use super::super::{sort_by, sort_dedup};
     let clock = || 0;
     let context = ExecutionContext::new(VIEW, &clock);
     let mut rng = Rng::new(5);
@@ -1052,6 +1200,19 @@ fn checked_sort_is_stable_and_costs_exactly_its_sort_cost() {
             meter.scratch,
             (count * std::mem::size_of::<(u64, usize)>()) as u64
         );
+        // Sorting and deduplicating matches sort_unstable then dedup.
+        let mut keys: Vec<u64> = items
+            .iter()
+            .map(|item| item.0 * 1_000 + rng.below(3))
+            .collect();
+        let mut expected = keys.clone();
+        expected.sort_unstable();
+        expected.dedup();
+        let (mut meter, _) = Meter::start(&context, &hops(0), &CAPS);
+        sort_dedup(&mut keys, &mut meter).unwrap();
+        assert_eq!(keys, expected, "{count}");
+        assert_eq!(meter.vertices, sort_cost(count), "{count}");
+        assert_eq!(meter.scratch, (count * 8) as u64);
     }
     // The buffer is reserved before it is allocated or any unit charged.
     let caps = GraphAlgorithmLimits {

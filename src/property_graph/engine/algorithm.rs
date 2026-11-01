@@ -876,9 +876,7 @@ impl<'s> Prepared<'s> {
             }
             seeds.push(node.id);
         }
-        meter.vertices(sort_cost(raw))?;
-        seeds.sort_unstable();
-        seeds.dedup();
+        sort_dedup(&mut seeds, meter)?;
         if seeds.len() as u64 > limits.max_visited_nodes {
             return Err(GraphError::InvalidQuery("distinct seeds exceed max_visited_nodes").into());
         }
@@ -929,9 +927,7 @@ fn names<'s>(
         validate(item)?;
         names.push(item.as_str());
     }
-    meter.vertices(sort_cost(names.len()))?;
-    names.sort_unstable();
-    names.dedup();
+    sort_dedup(&mut names, meter)?;
     Ok(names)
 }
 
@@ -966,6 +962,89 @@ fn carries(node: &GraphNode, labels: &[&str]) -> bool {
 fn sort_cost(count: usize) -> u64 {
     let count = count as u64;
     count * u64::from(u64::BITS - count.leading_zeros())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Sort work done on this thread: one per element comparison or move,
+    /// duplicate checks included (tests only).
+    static SORTED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Records one unit of sort work (a no-op outside tests).
+fn sorted() {
+    #[cfg(test)]
+    SORTED.with(|count| count.set(count.get() + 1));
+}
+
+/// Sorts `items` ascending by `less`, stably (ties keep their order). See
+/// [`sort_dedup`].
+fn sort_by<T: Copy>(
+    items: &mut Vec<T>,
+    less: impl Fn(&T, &T) -> bool,
+    meter: &mut Meter<'_>,
+) -> Result<(), AlgorithmTruncation> {
+    merge_sort(items, less, |_, _| false, meter)
+}
+
+/// Sorts `items` ascending and keeps the first of each run of equal items,
+/// as `sort_unstable` then `dedup` would for a total order.
+fn sort_dedup<T: Copy + Ord>(
+    items: &mut Vec<T>,
+    meter: &mut Meter<'_>,
+) -> Result<(), AlgorithmTruncation> {
+    merge_sort(items, |a, b| a < b, |a, b| a == b, meter)
+}
+
+/// A stable bottom-up merge sort under the meter. A buffer of
+/// `items.len()` items is reserved before it is allocated. Each pass
+/// examines every item once, with at most two comparisons (the merge and,
+/// in the last pass, `same` against the last kept item, which drops it),
+/// for one vertex unit; the `sort_cost` units beyond the `ceil(log2 n)`
+/// passes are charged after them, so a sort costs exactly `sort_cost(n)`
+/// units, each checked as it runs.
+fn merge_sort<T: Copy>(
+    items: &mut Vec<T>,
+    less: impl Fn(&T, &T) -> bool,
+    same: impl Fn(&T, &T) -> bool,
+    meter: &mut Meter<'_>,
+) -> Result<(), AlgorithmTruncation> {
+    let count = items.len();
+    meter.reserve(count, size_of::<T>())?;
+    let mut buffer: Vec<T> = Vec::with_capacity(count);
+    let mut examined = 0u64;
+    let mut width = 1usize;
+    while width < count {
+        // The last pass merges one run of every item.
+        let last = width >= count - width;
+        buffer.clear();
+        let mut low = 0;
+        while low < count {
+            let middle = low + width.min(count - low);
+            let high = middle + width.min(count - middle);
+            let (mut left, mut right) = (low, middle);
+            while left < middle || right < high {
+                meter.vertex()?;
+                sorted();
+                let item = if right < high && (left == middle || less(&items[right], &items[left]))
+                {
+                    right += 1;
+                    items[right - 1]
+                } else {
+                    left += 1;
+                    items[left - 1]
+                };
+                if !(last && buffer.last().is_some_and(|kept| same(kept, &item))) {
+                    buffer.push(item);
+                }
+                examined += 1;
+            }
+            low = high;
+        }
+        std::mem::swap(items, &mut buffer);
+        width = width.saturating_mul(2);
+    }
+    meter.vertices(sort_cost(count) - examined)
 }
 
 /// Computational arcs of a projection: two per non-loop edge for `Both`.
@@ -1250,9 +1329,11 @@ impl Local<'_> {
     /// binary search.
     fn extract(&self, seeds: &[NodeId], meter: &mut Meter<'_>) -> Result<Projection, Halt> {
         meter.reserve(seeds.len(), size_of::<NodeId>())?;
-        meter.vertices(seeds.len() as u64)?;
         let mut admitted = Vec::with_capacity(seeds.len());
-        admitted.extend_from_slice(seeds);
+        for &seed in seeds {
+            meter.vertex()?;
+            admitted.push(seed);
+        }
         let mut frontier = Vec::new();
         for depth in 0..self.limits.max_hops {
             let level = if depth == 0 { seeds } else { &frontier[..] };
@@ -1276,9 +1357,7 @@ impl Local<'_> {
                     Ok(push(&mut found, next, meter)?)
                 })?;
             }
-            meter.vertices(sort_cost(found.len()))?;
-            found.sort_unstable();
-            found.dedup();
+            sort_dedup(&mut found, meter)?;
             if (admitted.len() + found.len()) as u64 > self.limits.max_visited_nodes {
                 return Err(AlgorithmTruncation::VisitedLimit.into());
             }
@@ -1314,8 +1393,7 @@ impl Local<'_> {
                 Ok(push(&mut edges, projected, meter)?)
             })?;
         }
-        meter.vertices(sort_cost(edges.len()))?;
-        edges.sort_unstable_by_key(|edge| edge.id);
+        sort_by(&mut edges, |a, b| a.id < b.id, meter)?;
         Ok(Projection { nodes, edges })
     }
 }
@@ -1325,11 +1403,11 @@ impl Local<'_> {
 fn merge(left: &[NodeId], right: &[NodeId], meter: &mut Meter<'_>) -> Result<Vec<NodeId>, Halt> {
     let total = left.len() + right.len();
     meter.reserve(total, size_of::<NodeId>())?;
-    meter.vertices(total as u64)?;
     let mut merged = Vec::with_capacity(total);
     let (mut i, mut j) = (0, 0);
-    while i < left.len() && j < right.len() {
-        if left[i] < right[j] {
+    while i < left.len() || j < right.len() {
+        meter.vertex()?;
+        if j == right.len() || (i < left.len() && left[i] < right[j]) {
             merged.push(left[i]);
             i += 1;
         } else {
@@ -1337,8 +1415,6 @@ fn merge(left: &[NodeId], right: &[NodeId], meter: &mut Meter<'_>) -> Result<Vec
             j += 1;
         }
     }
-    merged.extend_from_slice(&left[i..]);
-    merged.extend_from_slice(&right[j..]);
     Ok(merged)
 }
 

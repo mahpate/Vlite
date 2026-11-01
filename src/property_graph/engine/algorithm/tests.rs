@@ -1713,7 +1713,8 @@ fn results_are_deterministic_and_reads_do_not_mutate() {
             shuffled.seeds.push(NodeSelector::Id(a));
             let expected = exec(graph, &canonical, &algorithm, &hops(2));
             // Two extra raw selectors cost two resolutions, a longer sort
-            // and their slots; everything else is identical.
+            // and their slots in the seed list and the sort's buffer;
+            // everything else is identical.
             let mut reordered = exec(graph, &shuffled, &algorithm, &hops(2));
             assert_eq!(
                 reordered.stats.edges_examined,
@@ -1722,7 +1723,7 @@ fn results_are_deterministic_and_reads_do_not_mutate() {
             assert!(reordered.stats.vertex_operations > expected.stats.vertex_operations);
             assert_eq!(
                 reordered.stats.scratch_bytes,
-                expected.stats.scratch_bytes + 2 * 8
+                expected.stats.scratch_bytes + 2 * 2 * 8
             );
             reordered.stats = expected.stats;
             assert_eq!(reordered, expected);
