@@ -477,7 +477,7 @@ fn validate_row(
         } => (vector, payload, Some(metadata)),
         Mutation::Delete { .. } => return Ok(()),
     };
-    crate::stored_vector(dimensions, precision, vector)?;
+    crate::validate_stored(dimensions, precision, vector)?;
     if payload.len() > MAX_PAYLOAD_BYTES {
         return Err(Error::PayloadTooLarge(payload.len()));
     }

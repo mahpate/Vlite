@@ -8,7 +8,12 @@
 //! infinity is `NonFiniteVector` exactly where a non-finite value is, and
 //! commits nothing. Float32 collections, sparse values and query vectors
 //! keep every bit, and import retries are identified by their raw rows.
+//! Checking allocates nothing, so a refused float16 write allocates what
+//! the float32 one does, and a stored value is rounded in place in the
+//! copy float32 makes too; a batch makes one rounded copy of its rows only
+//! after all are checked (the review of 7f0ab774, counted by `peak.rs`).
 
+use super::peak::{Use, counting_on, held as size, measured};
 use super::*;
 use crate::import::ImportChunkReport;
 use crate::vectors::{RecordVectors, ReembedUpdate, VectorSpec, VersionedVector};
@@ -718,4 +723,234 @@ fn graph_batches(key: Option<EncryptionKey>) {
 fn float16_graph_batches_store_canonical_values() {
     graph_batches(None);
     graph_batches(Some(key()));
+}
+
+/// Twin memory stores, the same but for collection `c`'s precision,
+/// float16 then float32: each holds record 1, attached to node `x` of
+/// graph `g`, and named vector `n` re-embedding to `v2`.
+fn twins() -> [Database; 2] {
+    [F16, F32].map(|precision| {
+        let mut db = Database::open_from_bytes(image_of(&initial(None)), None).unwrap();
+        db.create_graph("g").unwrap();
+        db.create_collection_as("c", spec(2), precision).unwrap();
+        let mut c = db.collection_mut("c").unwrap();
+        c.put(1, &[0.5, 0.5], b"p").unwrap();
+        let named = VectorSpec {
+            dimensions: 2,
+            metric: DistanceMetric::SquaredL2,
+            active_version: "v1".into(),
+            history: 1,
+        };
+        c.configure_vector("n", named).unwrap();
+        c.begin_reembed("n", "v2").unwrap();
+        let attach = [
+            GraphOp::CreateNode {
+                key: "x".into(),
+                labels: Vec::new(),
+                properties: Metadata::new(),
+            },
+            GraphOp::Attach {
+                node: "x".into(),
+                collection: "c".into(),
+                record: 1,
+            },
+        ];
+        db.graph_mut("g").unwrap().write_batch(&attach).unwrap();
+        db
+    })
+}
+
+/// The value each twin refuses: one rounding to float16 infinity, and NaN.
+const REFUSED: [f32; 2] = [65520.0, f32::NAN];
+
+/// `write` on the float16 then the float32 twin (told which), measured:
+/// the same outcome, returned, and the same retained bytes, with a float16
+/// peak at most `extra` bytes above the float32 one.
+fn twinned(
+    twins: &mut [Database; 2],
+    case: &str,
+    extra: isize,
+    write: impl Fn(&mut Database, usize) -> Result<()>,
+) -> (String, [Use; 2]) {
+    let [half, full] = twins;
+    let (half_result, half_use) = measured(|| write(half, 0));
+    let (full_result, full_use) = measured(|| write(full, 1));
+    let report = format!("{case}: float16 {half_use:?}, float32 {full_use:?}, extra {extra}");
+    let (half_outcome, full_outcome) = (outcome(half_result), outcome(full_result));
+    assert_eq!(half_outcome, full_outcome, "{report}");
+    assert_eq!(half_use.retained, full_use.retained, "{report}");
+    assert!(half_use.peak <= full_use.peak + extra, "{report}");
+    (half_outcome, [half_use, full_use])
+}
+
+/// A large valid row: two dimensions and a 1 MiB payload.
+fn large(id: u64) -> Mutation {
+    Mutation::Put {
+        id,
+        vector: vec![0.1, 0.3],
+        payload: vec![7; MAX_PAYLOAD_BYTES],
+    }
+}
+
+/// A refused float16 batch allocates nothing, as the float32 one, and a
+/// refused import chunk what the float32 one does, however large the valid
+/// rows before the refusal: every row and the batch limits are checked, in
+/// order, before a rounded copy exists.
+#[test]
+fn float16_refused_batches_allocate_nothing() {
+    counting_on(1, || {
+        let mut twins = twins();
+        let heads = twins.each_ref().map(|db| db.sequence);
+        let prefix: Vec<Mutation> = (10..14).map(large).collect();
+        let after =
+            |last: Mutation| -> Vec<Mutation> { prefix.iter().cloned().chain([last]).collect() };
+        let wide = Mutation::Put {
+            id: 11,
+            vector: vec![0.5; 8 << 20],
+            payload: Vec::new(),
+        };
+        let oversized = Mutation::Put {
+            id: 14,
+            vector: vec![0.1, 0.3],
+            payload: vec![7; MAX_PAYLOAD_BYTES + 1],
+        };
+        // The rows of both twins, or of each.
+        let cases: [(&str, Vec<Vec<Mutation>>, &str); 5] = [
+            // 32 valid rows of 1 MiB exceed the 16 MiB batch limit.
+            (
+                "aggregate",
+                vec![(10..42).map(large).collect()],
+                "BatchTooLarge",
+            ),
+            // A valid row, then a 32 MiB vector of the wrong width.
+            (
+                "width",
+                vec![vec![put(10, &[0.1, 0.3]), wide]],
+                "DimensionMismatch { expected: 2, actual: 8388608 }",
+            ),
+            (
+                "payload",
+                vec![after(oversized)],
+                "PayloadTooLarge(1048577)",
+            ),
+            (
+                "value",
+                REFUSED.map(|value| after(put(14, &[0.1, value]))).into(),
+                "NonFiniteVector",
+            ),
+            // Deleting attached record 1.
+            (
+                "attached",
+                vec![after(Mutation::Delete { id: 1 })],
+                "GraphAttachedRecord",
+            ),
+        ];
+        for (case, rows, error) in &cases {
+            let rows = move |twin: usize| &rows[twin % rows.len()];
+            let (outcome, uses) = twinned(&mut twins, case, 0, |db, twin| {
+                db.collection_mut("c")?.write_batch(rows(twin))
+            });
+            assert_eq!(outcome, *error, "{case}");
+            assert_eq!(uses.map(|used| used.peak), [0, 0], "{case}: {uses:?}");
+            let (outcome, _) = twinned(&mut twins, case, 0, |db, twin| {
+                let job = db.next_import_job_id()?;
+                let mut c = db.collection_mut("c")?;
+                let report = c.import_chunk(job, 1, rows(twin), POLICY)?;
+                assert_eq!(report.outcome, ImportChunkOutcome::Rejected);
+                Ok(())
+            });
+            let rejected = ["aggregate", "attached"].contains(case);
+            assert_eq!(outcome, if rejected { *error } else { "ok" }, "{case}");
+        }
+        // Nothing committed: no record, revision or import job.
+        assert_eq!(twins.each_ref().map(|db| db.sequence), heads);
+        for db in &twins {
+            assert_eq!(db.collection("c").unwrap().len(), 1);
+            assert_eq!(db.next_import_job_id().unwrap(), 1);
+        }
+    });
+}
+
+/// A refused float16 write of one vector, primary or named, allocates
+/// what the float32 one does and keeps nothing.
+#[test]
+fn float16_refused_writes_allocate_as_float32() {
+    counting_on(1, || {
+        let mut twins = twins();
+        for path in (0..PRIMARY).filter(|path| !IMPORTS.contains(path)) {
+            let (outcome, _) = twinned(&mut twins, &format!("primary {path}"), 0, |db, twin| {
+                primary(db, "c", path, 20, &[0.1, REFUSED[twin]])
+            });
+            assert_eq!(outcome, "NonFiniteVector", "primary {path}");
+        }
+        for path in 0..NAMED {
+            let (outcome, _) = twinned(&mut twins, &format!("named {path}"), 0, |db, twin| {
+                named(db, "c", path, 1, &[0.1, REFUSED[twin]])
+            });
+            assert_eq!(outcome, "NonFiniteVector", "named {path}");
+        }
+    });
+}
+
+/// A float16 write allocates and keeps what the float32 one does: a value
+/// is rounded in place in the copy float32 makes too. A batch or import
+/// chunk also makes one rounded copy of its rows, after all are checked:
+/// for the largest valid batch of 1 MiB rows, 15 MiB and a few bytes.
+#[test]
+fn float16_writes_allocate_as_float32() {
+    counting_on(1, || {
+        let mut twins = twins();
+        let ok = [0.1, 0.3];
+        for path in 0..PRIMARY {
+            let id = 20 + path;
+            let row = match path {
+                5 => Mutation::PutWithMetadata {
+                    id,
+                    vector: ok.to_vec(),
+                    payload: b"p".to_vec(),
+                    metadata: tagged(id),
+                },
+                _ => put(id, &ok),
+            };
+            let copy = match path {
+                4..=7 => size(vec![row]),
+                _ => 0,
+            };
+            let case = format!("primary {path}");
+            let (outcome, _) = twinned(&mut twins, &case, copy, |db, _| {
+                primary(db, "c", path, id, &ok)
+            });
+            assert_eq!(outcome, "ok", "{case}");
+        }
+        for path in 0..NAMED {
+            let case = format!("named {path}");
+            let (outcome, _) = twinned(&mut twins, &case, 0, |db, _| named(db, "c", path, 1, &ok));
+            assert_eq!(outcome, "ok", "{case}");
+        }
+        let batch: Vec<Mutation> = (40..55).map(large).collect();
+        let copy = size(batch.clone());
+        assert!(copy < 15 * (MAX_PAYLOAD_BYTES as isize + 128), "{copy}");
+        let (outcome, _) = twinned(&mut twins, "batch", copy, |db, _| {
+            db.collection_mut("c")?.write_batch(&batch)
+        });
+        assert_eq!(outcome, "ok");
+        let chunk: Vec<Mutation> = (60..62).map(large).collect();
+        let (outcome, _) = twinned(&mut twins, "import", size(chunk.clone()), |db, _| {
+            let job = db.next_import_job_id()?;
+            let report = db
+                .collection_mut("c")?
+                .import_chunk(job, 1, &chunk, POLICY)?;
+            assert_eq!(report.outcome, ImportChunkOutcome::Committed);
+            Ok(())
+        });
+        assert_eq!(outcome, "ok");
+        for id in [20, 40, 61] {
+            let stored = |db: &Database| {
+                let record = db.collection("c").unwrap().get(id).unwrap().unwrap();
+                bits_of(&record.vector)
+            };
+            assert_eq!(stored(&twins[0]), [half(0.1), half(0.3)], "{id}");
+            assert_eq!(stored(&twins[1]), bits_of(&ok), "{id}");
+        }
+    });
 }

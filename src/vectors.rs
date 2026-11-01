@@ -112,9 +112,9 @@ impl VectorData {
         }
     }
 
-    /// Checks the whole data set; a dense value must also have a stored
-    /// value in `precision` (`crate::stored_vector`), which a float16
-    /// collection's writes pass and encoding and decoding do not.
+    /// Checks the whole data set; a dense value must also be one a
+    /// collection of `precision` stores (`crate::validate_stored`), which a
+    /// float16 collection's writes check and encoding and decoding do not.
     fn validate(&self, precision: Option<crate::compact::catalog::Precision>) -> Result<()> {
         if self.specs.len() > 32 || self.jobs.len() > 32 {
             return Err(invalid());
@@ -142,7 +142,7 @@ impl VectorData {
                     if !seen.insert(&v.version) {
                         return Err(invalid());
                     }
-                    crate::stored_vector(s.dimensions, precision, &v.vector)?;
+                    crate::validate_stored(s.dimensions, precision, &v.vector)?;
                 }
             }
             for (n, v) in &r.sparse {
@@ -649,17 +649,11 @@ impl CollectionMut<'_> {
         let mut data = self.db.state(self.id).vectors.clone();
         data.records.insert(id, vectors);
         data.validate(precision)?;
-        // The record's dense values as the collection stores them.
+        // The record's dense values, rounded in place as the collection
+        // stores them.
         let record = data.records.get_mut(&id).ok_or_else(invalid)?;
-        for (n, versions) in &mut record.dense {
-            let dimensions = data.specs[n].dimensions;
-            for version in versions {
-                let rounded = match crate::stored_vector(dimensions, precision, &version.vector)? {
-                    std::borrow::Cow::Owned(rounded) => rounded,
-                    std::borrow::Cow::Borrowed(_) => continue,
-                };
-                version.vector = rounded;
-            }
+        for version in record.dense.values_mut().flatten() {
+            crate::round_stored(precision, &mut version.vector)?;
         }
         let names: Vec<_> = data.specs.keys().cloned().collect();
         for n in names {
@@ -682,11 +676,9 @@ impl CollectionMut<'_> {
         let precision = self.db.state(self.id).precision;
         let mut data = self.db.state(self.id).vectors.clone();
         let spec = data.specs.get(n).ok_or_else(invalid)?;
-        let rounded = match crate::stored_vector(spec.dimensions, precision, &vector)? {
-            std::borrow::Cow::Owned(rounded) => Some(rounded),
-            std::borrow::Cow::Borrowed(_) => None,
-        };
-        let vector = rounded.unwrap_or(vector);
+        crate::validate_stored(spec.dimensions, precision, &vector)?;
+        let mut vector = vector;
+        crate::round_stored(precision, &mut vector)?;
         let vs = data
             .records
             .entry(id)
@@ -769,7 +761,9 @@ impl CollectionMut<'_> {
             if !seen.insert(*id) || self.view().get(*id)?.is_none() {
                 return Err(invalid());
             }
-            let vector = crate::stored_vector(dim, precision, vector)?.into_owned();
+            crate::validate_stored(dim, precision, vector)?;
+            let mut vector = vector.clone();
+            crate::round_stored(precision, &mut vector)?;
             let vs = data
                 .records
                 .entry(*id)

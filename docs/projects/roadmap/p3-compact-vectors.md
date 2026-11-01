@@ -232,17 +232,20 @@ setting, error or format change exists yet.
 
 ## P3a progress: commit-time canonicalization (private, unreleased)
 
-Implemented in `src/lib.rs` (`stored_vector`), reached only through a
-privately opted-in precision store. This is P3a item 2's canonicalization,
-not P3a completion. No public API, setting, error, format or wire field
-changes.
+Implemented in `src/lib.rs` (`validate_stored`, `round_stored`), reached
+only through a privately opted-in precision store. This is P3a item 2's
+canonicalization, not P3a completion. No public API, setting, error, format
+or wire field changes.
 
 - **Writes.** Every primary and named dense value written to a float16
-  collection is rounded by the accepted binary16 conversion during the
-  existing validation, before encoding. This covers single, conditional and
-  expiring puts, ordered batches (duplicates in order), import chunks, graph
-  vector entries, named versions, whole named vectors and re-embedding
-  batches. The log and the installed state hold the same values, so
+  collection is checked during the existing validation, allocating
+  nothing, and then rounded by the accepted binary16 conversion before
+  encoding: in place, in the copy a float32 write makes too, or for a batch
+  or import chunk in one copy made only after every row and the batch
+  limits pass. This covers single, conditional and expiring puts, ordered
+  batches (duplicates in order), import chunks, graph vector entries, named
+  versions, whole named vectors and re-embedding batches. The log and the
+  installed state hold the same values, so
   immediate borrowed reads, exact scores and reopened stores agree bit for
   bit; replay, the change feed and export still verify every value. Float32
   collections, sparse values, metadata-only writes and query vectors are
@@ -257,7 +260,10 @@ changes.
   goldens (ties, subnormals, signed zero, overflow) through every path into
   float16 and float32 collections on memory, file and directory stores,
   plain and encrypted, and compares immediate, checkpointed and reopened
-  bits and exact scores with the unchanged float32 oracle.
+  bits and exact scores with the unchanged float32 oracle. It also counts
+  heap bytes with the precision peak harness: a refused float16 batch
+  allocates nothing, however large its valid rows, and every other float16
+  write allocates and keeps what float32 does, plus one batch copy.
 - **Not included.** Public precision activation, production `0x0100`
   writers and capability, the source-column writer, copy-out conversion,
   faithful compaction and upgrade (still refused before output), and

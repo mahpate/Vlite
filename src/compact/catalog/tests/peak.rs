@@ -102,17 +102,17 @@ static COUNTING: Counting = Counting;
 /// What a measured call allocated, above the live bytes and blocks when
 /// it started.
 #[derive(Clone, Copy, Debug, Default)]
-struct Use {
+pub(super) struct Use {
     /// The most live bytes at any point.
-    peak: isize,
+    pub(super) peak: isize,
     /// The live bytes when it returned, its result included.
-    retained: isize,
+    pub(super) retained: isize,
     /// The most live blocks at any point.
     blocks: isize,
 }
 
 /// `f`'s result and what it allocated. Measurements nest.
-fn measured<T>(f: impl FnOnce() -> T) -> (T, Use) {
+pub(super) fn measured<T>(f: impl FnOnce() -> T) -> (T, Use) {
     let (live, blocks) = (LIVE.load(Relaxed), BLOCKS.load(Relaxed));
     let outer = (PEAK.swap(live, Relaxed), MOST_BLOCKS.swap(blocks, Relaxed));
     let value = f();
@@ -125,24 +125,45 @@ fn measured<T>(f: impl FnOnce() -> T) -> (T, Use) {
 }
 
 /// The live bytes `value` holds: what dropping it frees.
-fn held<T>(value: T) -> isize {
+pub(super) fn held<T>(value: T) -> isize {
     -measured(move || drop(value)).1.retained
 }
 
 /// `f` with the precision gate open, run on a counted thread of a rayon
 /// pool whose threads are all counted, so replay's parallel decoding is
 /// counted too; one measuring test at a time.
-fn counting<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+pub(super) fn counting<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    counting_on(4, f)
+}
+
+/// `counting` on a pool of `threads`. With one, no idle sibling counts
+/// what it allocates or frees while it looks for work, so a measurement of
+/// serial code, such as `canonical.rs`'s of float16 writes, is exact. The
+/// pool's threads have exited, freeing what they hold, before the next
+/// measuring test counts.
+pub(super) fn counting_on<T: Send>(threads: usize, f: impl FnOnce() -> T + Send) -> T {
     let _serial = MEASURING.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut spawned = Vec::new();
     let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(4)
-        .start_handler(|_| ENROLLED.with(|enrolled| enrolled.set(true)))
+        .num_threads(threads)
+        .spawn_handler(|thread| {
+            spawned.push(std::thread::Builder::new().spawn(move || {
+                ENROLLED.with(|enrolled| enrolled.set(true));
+                thread.run();
+            })?);
+            Ok(())
+        })
         .build()
         .unwrap();
-    pool.install(|| {
+    let value = pool.install(|| {
         let _gate = Activation::on();
         f()
-    })
+    });
+    drop(pool);
+    for thread in spawned {
+        thread.join().unwrap();
+    }
+    value
 }
 
 /// The bytes a `BTreeMap<u64, bool>` of `records` entries may hold: at

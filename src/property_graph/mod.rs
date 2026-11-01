@@ -841,9 +841,13 @@ impl Database {
                 mutation,
             } => {
                 let collection = self.resolve(collection)?;
-                let (_, stored) =
-                    self.validate_batch(collection, std::slice::from_ref(mutation))?;
-                let mutation = stored.into_owned().remove(0);
+                self.validate_batch(collection, std::slice::from_ref(mutation))?;
+                let mut mutation = mutation.clone();
+                if let Mutation::Put { vector, .. } | Mutation::PutWithMetadata { vector, .. } =
+                    &mut mutation
+                {
+                    crate::round_stored(self.state(collection).precision, vector)?;
+                }
                 return Ok(Planned::Vector(collection, mutation));
             }
             GraphOp::PutSchema { schema } => GraphMutation::PutSchema(schema.clone()),
