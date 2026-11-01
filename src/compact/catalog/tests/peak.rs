@@ -1,7 +1,8 @@
 //! The memory the change feed and log export hold to check a precision
 //! log as full replay checks it (the P3a review of 6e26f685), counted in
-//! requested heap bytes (`Layout::size`) on enrolled threads by the lib test
-//! binary's only global allocator (`crate::test_globals`).
+//! requested heap bytes (`Layout::size`) of the blocks that the threads of
+//! a measuring session allocate, by the lib test binary's only global
+//! allocator (`crate::test_globals`).
 //! Beside the frame being read, the check holds replay's graph state for
 //! the prefix read, built by replay's own code (`SnapshotBuilder`, then
 //! `frame::replay`), the live record IDs of each collection, and
@@ -19,10 +20,9 @@ use super::limits::{committed, imaged, record, store, with};
 use super::*;
 use crate::changes::read_changes;
 use crate::property_graph::NodePatch;
-use crate::test_globals::{BLOCKS, ENROLLED, LIVE, MEASURING, MOST_BLOCKS, PEAK};
+use crate::test_globals::{BLOCKS, LIVE, MOST_BLOCKS, PEAK, measuring};
 use crate::{MAX_BATCH_OPERATIONS, MetadataValue};
 use std::collections::BTreeMap;
-use std::sync::PoisonError;
 use std::sync::atomic::Ordering::Relaxed;
 
 /// What a measured call allocated, above the live bytes and blocks when
@@ -55,41 +55,31 @@ pub(super) fn held<T>(value: T) -> isize {
     -measured(move || drop(value)).1.retained
 }
 
-/// `f` with the precision gate open, run on a counted thread of a rayon
-/// pool whose threads are all counted, so replay's parallel decoding is
-/// counted too; one measuring test at a time.
+/// `f` with the precision gate open, run on a thread of a rayon pool whose
+/// threads all count for one measuring session, so replay's parallel
+/// decoding is counted too; one measuring test at a time.
 pub(super) fn counting<T: Send>(f: impl FnOnce() -> T + Send) -> T {
     counting_on(4, f)
 }
 
-/// `counting` on a pool of `threads`. With one, no idle sibling counts
-/// what it allocates or frees while it looks for work, so a measurement of
-/// serial code, such as `canonical.rs`'s of float16 writes, is exact. The
-/// pool's threads have exited, freeing what they hold, before the next
-/// measuring test counts.
+/// `counting` on a pool of `threads`. Each thread enrolls in a job, once
+/// it has started and joined crossbeam's epoch, which it does as it first
+/// looks for work, so neither counts. An idle thread of a larger pool may
+/// still allocate for the epoch as it looks for work, so a measurement of
+/// serial code that must be exact, such as `canonical.rs`'s of float16
+/// writes, uses one.
 pub(super) fn counting_on<T: Send>(threads: usize, f: impl FnOnce() -> T + Send) -> T {
-    let _serial = MEASURING.lock().unwrap_or_else(PoisonError::into_inner);
-    let mut spawned = Vec::new();
+    let open = measuring();
+    let session = open.session();
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
-        .spawn_handler(|thread| {
-            spawned.push(std::thread::Builder::new().spawn(move || {
-                ENROLLED.with(|enrolled| enrolled.set(true));
-                thread.run();
-            })?);
-            Ok(())
-        })
         .build()
         .unwrap();
-    let value = pool.install(|| {
+    pool.broadcast(|_| session.enroll());
+    pool.install(|| {
         let _gate = Activation::on();
         f()
-    });
-    drop(pool);
-    for thread in spawned {
-        thread.join().unwrap();
-    }
-    value
+    })
 }
 
 /// The bytes a `BTreeMap<u64, bool>` of `records` entries may hold: at
@@ -142,6 +132,102 @@ fn record_index_stays_within_its_node_bound() {
                 );
             }
         }
+    });
+}
+
+/// Freeing blocks the measuring session never counted, allocated by a
+/// thread not enrolled or counted by an earlier session, counts nothing.
+#[test]
+fn freeing_blocks_the_session_never_counted_counts_nothing() {
+    let before = vec![0u8; 1_000];
+    let earlier = counting_on(1, || vec![0u8; 2_000]);
+    counting_on(1, move || {
+        let ((), used) = measured(|| drop((before, earlier)));
+        assert_eq!((used.peak, used.retained), (0, 0));
+    });
+}
+
+/// A counted block that a thread not enrolled frees is no longer counted.
+#[test]
+fn a_counted_block_freed_on_another_thread_stops_counting() {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU8, Ordering::SeqCst};
+    const HANDED: u8 = 1;
+    const FREED: u8 = 2;
+    const DONE: u8 = 3;
+    struct Done<'a>(&'a AtomicU8);
+    impl Drop for Done<'_> {
+        fn drop(&mut self) {
+            self.0.store(DONE, SeqCst);
+        }
+    }
+    let (slot, state) = (Mutex::new(None::<Vec<u8>>), AtomicU8::new(0));
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            loop {
+                match state.load(SeqCst) {
+                    HANDED => {
+                        drop(slot.lock().unwrap().take());
+                        state.store(FREED, SeqCst);
+                    }
+                    DONE => break,
+                    _ => std::thread::yield_now(),
+                }
+            }
+        });
+        let _done = Done(&state);
+        counting_on(1, || {
+            let ((), used) = measured(|| {
+                *slot.lock().unwrap() = Some(vec![0u8; 4_000]);
+                state.store(HANDED, SeqCst);
+                while state.load(SeqCst) != FREED {
+                    std::thread::yield_now();
+                }
+            });
+            assert_eq!((used.peak, used.retained), (4_000, 0));
+        });
+    });
+}
+
+/// Rayon's workers pin crossbeam's process-wide epoch whenever they look
+/// for work, and a pin may run the deferred frees of garbage that other
+/// threads left, such as the epoch participant and last sealed bag of
+/// each thread that exited: frees of blocks this session never counted.
+/// Such frees by idle workers inside a measurement failed the record
+/// index bound (`f6a45564`'s CI); a window that frees nothing of its own
+/// must not see them.
+#[test]
+fn workers_freeing_other_threads_epoch_garbage_count_nothing() {
+    counting(|| {
+        // Threads never enrolled use the epoch and exit.
+        std::thread::spawn(|| {
+            for _ in 0..8 {
+                let mut threads = Vec::new();
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(4)
+                    .spawn_handler(|thread| {
+                        threads.push(std::thread::spawn(move || thread.run()));
+                        Ok(())
+                    })
+                    .build()
+                    .unwrap();
+                pool.broadcast(|_| ());
+                drop(pool);
+                for thread in threads {
+                    thread.join().unwrap();
+                }
+            }
+        })
+        .join()
+        .unwrap();
+        let ((), used) = measured(|| {
+            rayon::broadcast(|_| {
+                for _ in 0..512 {
+                    rayon::yield_now();
+                }
+            });
+        });
+        assert!(used.retained >= 0, "{used:?}");
     });
 }
 

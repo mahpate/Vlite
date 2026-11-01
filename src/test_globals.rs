@@ -6,34 +6,48 @@
 //! heap bytes (`Layout::size`, so allocator headers and size-class rounding
 //! are excluded):
 //!
-//! - **Enrolled threads** (`ENROLLED`) add to process-wide live and most
-//!   live bytes and blocks, so one measurement can span a thread pool; the
-//!   tests reading them hold `MEASURING`, one at a time. While a block is
+//! - **A measuring session** (`measuring`, one open at a time) counts the
+//!   blocks that its enrolled threads (`Session::enroll`) allocate while it
+//!   is open, from their allocation until any thread frees them, in
+//!   process-wide live and most live bytes and blocks, so one measurement
+//!   can span a thread pool. Each block keeps the session that counted it,
+//!   so freeing a block the open session did not count changes nothing,
+//!   and a thread enrolled in a closed session counts nothing: the
+//!   process-wide garbage of crossbeam's epoch, which rayon's workers free
+//!   whenever they look for work, and the workers of an earlier pool that
+//!   have yet to exit, never touch a measurement. While a block is
 //!   reallocated both blocks count. The precision peak tests
 //!   (`compact::catalog::tests::peak`) use these.
 //! - **A thread inside `counted`** adds to its own net count, which no
 //!   other thread touches, so such tests run beside any others. The filter
 //!   summary accounting tests (`compact::stats::tests`) use it.
 //!
-//! A thread may be in both; each count sees all of that thread's requests.
+//! A thread may be in both: `counted` sees all of its thread's requests,
+//! a session only its own blocks.
 
 use log::{Level, LevelFilter, Log, Metadata, Record};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::{AtomicIsize, Ordering::Relaxed};
-use std::sync::{Mutex, Once};
+use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering::Relaxed};
+use std::sync::{Mutex, MutexGuard, Once, PoisonError};
 
-/// Live bytes and blocks of enrolled threads, and the most at any point.
+/// Live bytes and blocks counted by the open session, and the most at any
+/// point.
 pub(crate) static LIVE: AtomicIsize = AtomicIsize::new(0);
 pub(crate) static PEAK: AtomicIsize = AtomicIsize::new(0);
 pub(crate) static BLOCKS: AtomicIsize = AtomicIsize::new(0);
 pub(crate) static MOST_BLOCKS: AtomicIsize = AtomicIsize::new(0);
-/// Serializes the measuring tests, which share the enrolled counters.
-pub(crate) static MEASURING: Mutex<()> = Mutex::new(());
+/// Serializes the measuring sessions, which share the counters above.
+static MEASURING: Mutex<()> = Mutex::new(());
+/// The open session's number. It advances as each session opens and as
+/// it closes, so no thread or block of a closed session matches it again;
+/// 0, before any, is no session.
+static SESSION: AtomicUsize = AtomicUsize::new(0);
 
 thread_local! {
-    /// This thread adds to `LIVE`, `PEAK`, `BLOCKS` and `MOST_BLOCKS`.
-    pub(crate) static ENROLLED: Cell<bool> = const { Cell::new(false) };
+    /// The session whose counters this thread's new blocks add to while it
+    /// is open; 0 for none.
+    static ENROLLED: Cell<usize> = const { Cell::new(0) };
     /// This thread's net bytes since `counted` began; `None` outside it.
     static NET: Cell<Option<isize>> = const { Cell::new(None) };
     /// This thread is inside `logged`.
@@ -42,8 +56,57 @@ thread_local! {
     static RECORDS: RefCell<Logged> = const { RefCell::new(Vec::new()) };
 }
 
-fn added(size: usize) {
-    if ENROLLED.try_with(Cell::get).unwrap_or(false) {
+/// An open measuring session; dropping it closes it.
+pub(crate) struct Measuring {
+    session: Session,
+    _serial: MutexGuard<'static, ()>,
+}
+
+/// Enrolls threads in a measuring session.
+#[derive(Clone, Copy)]
+pub(crate) struct Session(usize);
+
+/// Opens a measuring session once no other is open.
+pub(crate) fn measuring() -> Measuring {
+    let serial = MEASURING.lock().unwrap_or_else(PoisonError::into_inner);
+    let session = SESSION.fetch_add(1, Relaxed) + 1;
+    Measuring {
+        session: Session(session),
+        _serial: serial,
+    }
+}
+
+impl Measuring {
+    pub(crate) fn session(&self) -> Session {
+        self.session
+    }
+}
+
+impl Drop for Measuring {
+    fn drop(&mut self) {
+        SESSION.fetch_add(1, Relaxed);
+    }
+}
+
+impl Session {
+    /// Counts the blocks this thread allocates while the session is open.
+    pub(crate) fn enroll(self) {
+        ENROLLED.set(self.0);
+    }
+}
+
+/// The open session this thread's new blocks count for, or 0.
+fn counting() -> usize {
+    let session = ENROLLED.try_with(Cell::get).unwrap_or(0);
+    if session != 0 && session == SESSION.load(Relaxed) {
+        session
+    } else {
+        0
+    }
+}
+
+fn added(session: usize, size: usize) {
+    if session != 0 {
         let live = LIVE.fetch_add(size as isize, Relaxed) + size as isize;
         PEAK.fetch_max(live, Relaxed);
         let blocks = BLOCKS.fetch_add(1, Relaxed) + 1;
@@ -52,8 +115,8 @@ fn added(size: usize) {
     net(size as isize);
 }
 
-fn removed(size: usize) {
-    if ENROLLED.try_with(Cell::get).unwrap_or(false) {
+fn removed(session: usize, size: usize) {
+    if session != 0 && session == SESSION.load(Relaxed) {
         LIVE.fetch_sub(size as isize, Relaxed);
         BLOCKS.fetch_sub(1, Relaxed);
     }
@@ -68,45 +131,114 @@ fn net(delta: isize) {
     });
 }
 
+/// The bytes before each block: the session that counted it, 0 for none,
+/// in the `usize` just before it, padded to keep the block's alignment.
+fn prefix(layout: Layout) -> usize {
+    layout.align().max(size_of::<usize>())
+}
+
+/// What `System` serves for a block of `size` bytes after `prefix`.
+fn framed(size: usize, prefix: usize) -> Option<Layout> {
+    Layout::from_size_align(size.checked_add(prefix)?, prefix).ok()
+}
+
+/// The session of the block at `block`.
+///
+/// # Safety
+///
+/// `block` was served by `Counting`.
+unsafe fn session_of(block: *mut u8) -> *mut usize {
+    // SAFETY: a `usize`-aligned `usize` of the prefix precedes `block`.
+    unsafe { block.cast::<usize>().sub(1) }
+}
+
 struct Counting;
 
-// SAFETY: every request goes unchanged to `System`, so `Counting` upholds
-// the `GlobalAlloc` contract exactly as `System` does. The bookkeeping
-// reads const-initialized thread locals without destructors, which never
-// allocate, and updates atomics.
+impl Counting {
+    /// # Safety
+    ///
+    /// The caller's `alloc` contract for `layout`.
+    unsafe fn allocate(&self, layout: Layout, zeroed: bool) -> *mut u8 {
+        let prefix = prefix(layout);
+        let Some(framed) = framed(layout.size(), prefix) else {
+            return std::ptr::null_mut();
+        };
+        // SAFETY: `framed` has a nonzero size and a valid alignment.
+        let base = unsafe {
+            if zeroed {
+                System.alloc_zeroed(framed)
+            } else {
+                System.alloc(framed)
+            }
+        };
+        if base.is_null() {
+            return base;
+        }
+        let session = counting();
+        // SAFETY: the block starts `prefix` bytes into the served one, so
+        // `layout.size()` bytes follow it, and is aligned to `prefix`, a
+        // multiple of `layout.align()` and of `usize`'s.
+        unsafe {
+            let block = base.add(prefix);
+            session_of(block).write(session);
+            added(session, layout.size());
+            block
+        }
+    }
+}
+
+// SAFETY: `System` serves each block `prefix` bytes into a longer one
+// aligned to `prefix`, a multiple of the requested alignment, with the
+// requested size after it; `dealloc` and `realloc` derive the same prefix
+// and served layout from the caller's layout, so `System` gets back what it
+// served. The bookkeeping reads const-initialized thread locals without
+// destructors, which never allocate, and updates atomics.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: the caller's `alloc` contract, passed on unchanged.
-        let block = unsafe { System.alloc(layout) };
-        if !block.is_null() {
-            added(layout.size());
-        }
-        block
+        // SAFETY: the caller's `alloc` contract, passed on.
+        unsafe { self.allocate(layout, false) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: the caller's `alloc_zeroed` contract, passed on unchanged.
-        let block = unsafe { System.alloc_zeroed(layout) };
-        if !block.is_null() {
-            added(layout.size());
-        }
-        block
+        // SAFETY: the caller's `alloc_zeroed` contract, passed on.
+        unsafe { self.allocate(layout, true) }
     }
 
     unsafe fn dealloc(&self, block: *mut u8, layout: Layout) {
-        // SAFETY: `block` was allocated by `System` with `layout`.
-        unsafe { System.dealloc(block, layout) };
-        removed(layout.size());
+        let prefix = prefix(layout);
+        // SAFETY: `block` was served for `layout`, so `framed` accepted
+        // this layout and the session precedes it.
+        unsafe {
+            let session = session_of(block).read();
+            let framed = Layout::from_size_align_unchecked(layout.size() + prefix, prefix);
+            System.dealloc(block.sub(prefix), framed);
+            removed(session, layout.size());
+        }
     }
 
     unsafe fn realloc(&self, block: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        // Both blocks count while the data may be copied.
-        added(size);
-        // SAFETY: `block` was allocated by `System` with `layout`, and the
-        // caller's `realloc` contract holds for `size`.
-        let moved = unsafe { System.realloc(block, layout, size) };
-        removed(if moved.is_null() { size } else { layout.size() });
-        moved
+        let prefix = prefix(layout);
+        let Some(longer) = framed(size, prefix) else {
+            return std::ptr::null_mut();
+        };
+        // SAFETY: as in `dealloc`, `block` and its session follow `prefix`
+        // bytes of a block served for `framed`; `longer` is valid.
+        unsafe {
+            let earlier = session_of(block).read();
+            let served = Layout::from_size_align_unchecked(layout.size() + prefix, prefix);
+            let session = counting();
+            // Both blocks count while the data may be copied.
+            added(session, size);
+            let base = System.realloc(block.sub(prefix), served, longer.size());
+            if base.is_null() {
+                removed(session, size);
+                return base;
+            }
+            let moved = base.add(prefix);
+            session_of(moved).write(session);
+            removed(earlier, layout.size());
+            moved
+        }
     }
 }
 
@@ -172,7 +304,6 @@ pub(crate) fn logged<T>(body: impl FnOnce() -> T) -> (T, Logged) {
 
 mod tests {
     use super::*;
-    use std::sync::PoisonError;
     use std::sync::atomic::{AtomicU8, Ordering::SeqCst};
     use std::thread;
 
@@ -235,19 +366,17 @@ mod tests {
         assert_eq!(retained, 0);
     }
 
-    /// Enrolled counts include every enrolled thread, and the threads of a
-    /// pool that just finished may still allocate or free a little as they
-    /// exit; that stays well under the 1 MiB that both blocks of the
-    /// reallocation, or the other thread's block, would add.
+    /// A session counts both blocks of a reallocation by its enrolled
+    /// thread, exactly, and nothing else: not another thread's block.
     #[test]
     fn enrolled_threads_count_both_blocks_of_a_reallocation_and_nothing_else() {
-        const SLACK: isize = 64 << 10;
-        let _serial = MEASURING.lock().unwrap_or_else(PoisonError::into_inner);
+        let open = measuring();
+        let session = open.session();
         beside_other_thread(|hold| {
             thread::scope(|scope| {
                 scope
                     .spawn(|| {
-                        ENROLLED.set(true);
+                        session.enroll();
                         let live = LIVE.load(Relaxed);
                         let outer = PEAK.swap(live, Relaxed);
                         let (bytes, net) = counted(|| {
@@ -257,16 +386,54 @@ mod tests {
                         let peak = PEAK.fetch_max(outer, Relaxed) - live;
                         let retained = LIVE.load(Relaxed) - live;
                         drop(bytes);
-                        ENROLLED.set(false);
                         assert_eq!(net, 3 << 20);
-                        assert!((retained - (3 << 20)).abs() < SLACK, "{retained}");
-                        assert!((peak - (4 << 20)).abs() < SLACK, "{peak}");
+                        assert_eq!((peak, retained), (4 << 20, 3 << 20));
                     })
                     .join()
                     .unwrap();
             });
         });
     }
+
+    /// A thread enrolled for an earlier measurement, such as a worker of
+    /// its pool that has yet to exit, counts nothing in a later one: neither
+    /// what it allocates nor its frees of what it counted before.
+    #[test]
+    fn a_thread_enrolled_for_an_earlier_measurement_counts_nothing_later() {
+        const KEPT: u8 = 1;
+        const ASKED: u8 = 2;
+        const DONE: u8 = 3;
+        let state = AtomicU8::new(0);
+        let wait_for = |wanted: u8| {
+            while state.load(SeqCst) != wanted {
+                thread::yield_now();
+            }
+        };
+        let earlier = measuring();
+        let session = earlier.session();
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                session.enroll();
+                let kept = std::hint::black_box(vec![0u8; 2_000]);
+                state.store(KEPT, SeqCst);
+                wait_for(ASKED);
+                drop(std::hint::black_box(vec![0u8; 3_000]));
+                drop(kept);
+                state.store(DONE, SeqCst);
+            });
+            wait_for(KEPT);
+            drop(earlier);
+            let _later = measuring();
+            let live = LIVE.load(Relaxed);
+            let outer = PEAK.swap(live, Relaxed);
+            state.store(ASKED, SeqCst);
+            wait_for(DONE);
+            let peak = PEAK.fetch_max(outer, Relaxed) - live;
+            let retained = LIVE.load(Relaxed) - live;
+            assert_eq!((peak, retained), (0, 0));
+        });
+    }
+
     #[test]
     fn logged_keeps_its_own_threads_vlite_records() {
         let ((), records) = logged(|| {
