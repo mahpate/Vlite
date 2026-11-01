@@ -1,0 +1,397 @@
+{
+  "schema": "vlite.compact-graph-logical",
+  "version": 1,
+  "cases": [
+    {
+      "name": "empty",
+      "purpose": "No physical entities; empty CSR still has its zero sentinel.",
+      "nodes": [], "edges": [], "clock": 0,
+      "queries": [{"node": 0, "direction": "both", "relationship": null, "after": null, "limit": 10}],
+      "expected": {
+        "node_map": [], "relationships": [], "labels": [], "edge_table": [],
+        "out_csr": {"offsets": [0], "neighbors": []},
+        "in_csr": {"offsets": [0], "neighbors": []}, "adjacency": [[]]
+      }
+    },
+    {
+      "name": "single-node",
+      "purpose": "An isolated sparse public ID, explicit null deadline, and a missing query node.",
+      "nodes": [{"id": 42, "labels": ["A"], "deadline": null}], "edges": [], "clock": 0,
+      "queries": [
+        {"node": 42, "direction": "out", "relationship": null, "after": null, "limit": 10},
+        {"node": 43, "direction": "both", "relationship": null, "after": null, "limit": 10}
+      ],
+      "expected": {
+        "node_map": [{"id": 42, "ordinal": 0, "labels": [0]}],
+        "relationships": [], "labels": ["A"], "edge_table": [],
+        "out_csr": {"offsets": [0, 0], "neighbors": []},
+        "in_csr": {"offsets": [0, 0], "neighbors": []}, "adjacency": [[], []]
+      }
+    },
+    {
+      "name": "large-ids",
+      "purpose": "Exact sparse u64 IDs above 2^53 and at u64::MAX, never indexed by maximum ID.",
+      "nodes": [
+        {"id": 18446744073709551615, "labels": []},
+        {"id": 9007199254740993, "labels": []},
+        {"id": 0, "labels": []}
+      ],
+      "edges": [
+        {"id": 18446744073709551615, "source": 18446744073709551615, "target": 0, "relationship": "r"},
+        {"id": 9007199254740993, "source": 0, "target": 9007199254740993, "relationship": "r"}
+      ],
+      "clock": 0,
+      "queries": [
+        {"node": 0, "direction": "both", "relationship": null, "after": null, "limit": 10},
+        {"node": 0, "direction": "both", "relationship": null,
+         "after": {"relationship": "r", "edge": 9007199254740993}, "limit": 10}
+      ],
+      "expected": {
+        "node_map": [
+          {"id": 0, "ordinal": 0, "labels": []},
+          {"id": 9007199254740993, "ordinal": 1, "labels": []},
+          {"id": 18446744073709551615, "ordinal": 2, "labels": []}
+        ],
+        "relationships": ["r"], "labels": [],
+        "edge_table": [
+          {"id": 9007199254740993, "ordinal": 0, "source": 0, "target": 1, "relationship": 0},
+          {"id": 18446744073709551615, "ordinal": 1, "source": 2, "target": 0, "relationship": 0}
+        ],
+        "out_csr": {"offsets": [0, 1, 1, 2], "neighbors": [0, 1]},
+        "in_csr": {"offsets": [0, 1, 2, 2], "neighbors": [1, 0]},
+        "adjacency": [
+          [["r", 9007199254740993], ["r", 18446744073709551615]],
+          [["r", 18446744073709551615]]
+        ]
+      }
+    },
+    {
+      "name": "parallel-same",
+      "purpose": "Distinct same-type parallel edges preserve edge-ID order rather than import order.",
+      "nodes": [{"id": 20, "labels": []}, {"id": 10, "labels": []}],
+      "edges": [
+        {"id": 9, "source": 10, "target": 20, "relationship": "r"},
+        {"id": 2, "source": 10, "target": 20, "relationship": "r", "deadline": null}
+      ],
+      "clock": 0,
+      "queries": [
+        {"node": 10, "direction": "out", "relationship": null, "after": null, "limit": 10},
+        {"node": 20, "direction": "in", "relationship": null, "after": null, "limit": 10}
+      ],
+      "expected": {
+        "node_map": [{"id": 10, "ordinal": 0, "labels": []}, {"id": 20, "ordinal": 1, "labels": []}],
+        "relationships": ["r"], "labels": [],
+        "edge_table": [
+          {"id": 2, "ordinal": 0, "source": 0, "target": 1, "relationship": 0},
+          {"id": 9, "ordinal": 1, "source": 0, "target": 1, "relationship": 0}
+        ],
+        "out_csr": {"offsets": [0, 2, 2], "neighbors": [0, 1]},
+        "in_csr": {"offsets": [0, 0, 2], "neighbors": [0, 1]},
+        "adjacency": [[["r", 2], ["r", 9]], [["r", 2], ["r", 9]]]
+      }
+    },
+    {
+      "name": "parallel-different",
+      "purpose": "Relationship ordering precedes edge ID for parallel edges of different types.",
+      "nodes": [{"id": 10, "labels": []}, {"id": 20, "labels": []}],
+      "edges": [
+        {"id": 1, "source": 10, "target": 20, "relationship": "z"},
+        {"id": 8, "source": 10, "target": 20, "relationship": "a"},
+        {"id": 3, "source": 10, "target": 20, "relationship": "a"}
+      ],
+      "clock": 0,
+      "queries": [{"node": 10, "direction": "both", "relationship": null, "after": null, "limit": 10}],
+      "expected": {
+        "node_map": [{"id": 10, "ordinal": 0, "labels": []}, {"id": 20, "ordinal": 1, "labels": []}],
+        "relationships": ["a", "z"], "labels": [],
+        "edge_table": [
+          {"id": 1, "ordinal": 0, "source": 0, "target": 1, "relationship": 1},
+          {"id": 3, "ordinal": 1, "source": 0, "target": 1, "relationship": 0},
+          {"id": 8, "ordinal": 2, "source": 0, "target": 1, "relationship": 0}
+        ],
+        "out_csr": {"offsets": [0, 3, 3], "neighbors": [1, 2, 0]},
+        "in_csr": {"offsets": [0, 0, 3], "neighbors": [1, 2, 0]},
+        "adjacency": [[["a", 3], ["a", 8], ["z", 1]]]
+      }
+    },
+    {
+      "name": "self-loops",
+      "purpose": "Self-loop in each CSR, once in Both; incoming and outgoing nonloops merge by type.",
+      "nodes": [{"id": 5, "labels": []}, {"id": 9, "labels": []}],
+      "edges": [
+        {"id": 8, "source": 5, "target": 5, "relationship": "r"},
+        {"id": 1, "source": 5, "target": 9, "relationship": "r"},
+        {"id": 2, "source": 9, "target": 5, "relationship": "s"}
+      ],
+      "clock": 0,
+      "queries": [
+        {"node": 5, "direction": "out", "relationship": null, "after": null, "limit": 10},
+        {"node": 5, "direction": "in", "relationship": null, "after": null, "limit": 10},
+        {"node": 5, "direction": "both", "relationship": null, "after": null, "limit": 10},
+        {"node": 5, "direction": "both", "relationship": ["r"],
+         "after": {"relationship": "r", "edge": 1}, "limit": 1}
+      ],
+      "expected": {
+        "node_map": [{"id": 5, "ordinal": 0, "labels": []}, {"id": 9, "ordinal": 1, "labels": []}],
+        "relationships": ["r", "s"], "labels": [],
+        "edge_table": [
+          {"id": 1, "ordinal": 0, "source": 0, "target": 1, "relationship": 0},
+          {"id": 2, "ordinal": 1, "source": 1, "target": 0, "relationship": 1},
+          {"id": 8, "ordinal": 2, "source": 0, "target": 0, "relationship": 0}
+        ],
+        "out_csr": {"offsets": [0, 2, 3], "neighbors": [0, 2, 1]},
+        "in_csr": {"offsets": [0, 2, 3], "neighbors": [2, 1, 0]},
+        "adjacency": [
+          [["r", 1], ["r", 8]], [["r", 8], ["s", 2]],
+          [["r", 1], ["r", 8], ["s", 2]], [["r", 8]]
+        ]
+      }
+    },
+    {
+      "name": "unicode-relationships",
+      "purpose": "UTF-8 bytewise order, including combining versus composed strings and supplementary codepoints.",
+      "nodes": [{"id": 1, "labels": []}, {"id": 7, "labels": []}],
+      "edges": [
+        {"id": 1, "source": 1, "target": 7, "relationship": "\ud83d\ude00"},
+        {"id": 2, "source": 1, "target": 7, "relationship": "\u00e9"},
+        {"id": 3, "source": 1, "target": 7, "relationship": "\u4e2d"},
+        {"id": 4, "source": 1, "target": 7, "relationship": "e\u0301"},
+        {"id": 5, "source": 1, "target": 7, "relationship": "z"}
+      ],
+      "clock": 0,
+      "queries": [
+        {"node": 1, "direction": "out", "relationship": null, "after": null, "limit": 10},
+        {"node": 7, "direction": "in", "relationship": ["\ud83d\ude00", "\u00e9"],
+         "after": {"relationship": "\u00e9", "edge": 2}, "limit": 10}
+      ],
+      "expected": {
+        "node_map": [{"id": 1, "ordinal": 0, "labels": []}, {"id": 7, "ordinal": 1, "labels": []}],
+        "relationships": ["e\u0301", "z", "\u00e9", "\u4e2d", "\ud83d\ude00"], "labels": [],
+        "edge_table": [
+          {"id": 1, "ordinal": 0, "source": 0, "target": 1, "relationship": 4},
+          {"id": 2, "ordinal": 1, "source": 0, "target": 1, "relationship": 2},
+          {"id": 3, "ordinal": 2, "source": 0, "target": 1, "relationship": 3},
+          {"id": 4, "ordinal": 3, "source": 0, "target": 1, "relationship": 0},
+          {"id": 5, "ordinal": 4, "source": 0, "target": 1, "relationship": 1}
+        ],
+        "out_csr": {"offsets": [0, 5, 5], "neighbors": [3, 4, 1, 2, 0]},
+        "in_csr": {"offsets": [0, 0, 5], "neighbors": [3, 4, 1, 2, 0]},
+        "adjacency": [
+          [["e\u0301", 4], ["z", 5], ["\u00e9", 2], ["\u4e2d", 3], ["\ud83d\ude00", 1]],
+          [["\ud83d\ude00", 1]]
+        ]
+      }
+    },
+    {
+      "name": "filters",
+      "purpose": "Single/multiple type sets, absent types and empty filter differ from null.",
+      "nodes": [{"id": 1, "labels": []}, {"id": 2, "labels": []}],
+      "edges": [
+        {"id": 1, "source": 1, "target": 2, "relationship": "b"},
+        {"id": 2, "source": 1, "target": 2, "relationship": "a"},
+        {"id": 3, "source": 2, "target": 1, "relationship": "c"}
+      ],
+      "clock": 0,
+      "queries": [
+        {"node": 1, "direction": "both", "relationship": ["b"], "after": null, "limit": 10},
+        {"node": 1, "direction": "both", "relationship": ["c", "a"], "after": null, "limit": 10},
+        {"node": 1, "direction": "both", "relationship": [], "after": null, "limit": 10},
+        {"node": 1, "direction": "both", "relationship": ["missing"], "after": null, "limit": 10}
+      ],
+      "expected": {
+        "node_map": [{"id": 1, "ordinal": 0, "labels": []}, {"id": 2, "ordinal": 1, "labels": []}],
+        "relationships": ["a", "b", "c"], "labels": [],
+        "edge_table": [
+          {"id": 1, "ordinal": 0, "source": 0, "target": 1, "relationship": 1},
+          {"id": 2, "ordinal": 1, "source": 0, "target": 1, "relationship": 0},
+          {"id": 3, "ordinal": 2, "source": 1, "target": 0, "relationship": 2}
+        ],
+        "out_csr": {"offsets": [0, 2, 3], "neighbors": [1, 0, 2]},
+        "in_csr": {"offsets": [0, 1, 3], "neighbors": [2, 1, 0]},
+        "adjacency": [[["b", 1]], [["a", 2], ["c", 3]], [], []]
+      }
+    },
+    {
+      "name": "paging",
+      "purpose": "Exclusive tuple cursors cross types even when the next edge ID decreases; absent cursor types.",
+      "nodes": [{"id": 1, "labels": []}, {"id": 2, "labels": []}],
+      "edges": [
+        {"id": 20, "source": 1, "target": 2, "relationship": "a"},
+        {"id": 1, "source": 1, "target": 2, "relationship": "b"},
+        {"id": 10, "source": 1, "target": 2, "relationship": "a"},
+        {"id": 2, "source": 2, "target": 1, "relationship": "c"}
+      ],
+      "clock": 0,
+      "queries": [
+        {"node": 1, "direction": "both", "relationship": null, "after": null, "limit": 1},
+        {"node": 1, "direction": "both", "relationship": null,
+         "after": {"relationship": "a", "edge": 20}, "limit": 1},
+        {"node": 1, "direction": "both", "relationship": ["a", "b"],
+         "after": {"relationship": "a", "edge": 10}, "limit": 10},
+        {"node": 1, "direction": "both", "relationship": ["c", "b"],
+         "after": {"relationship": "a", "edge": 20}, "limit": 10},
+        {"node": 1, "direction": "both", "relationship": null,
+         "after": {"relationship": "aa", "edge": 18446744073709551615}, "limit": 10},
+        {"node": 1, "direction": "both", "relationship": ["a"],
+         "after": {"relationship": "a", "edge": 15}, "limit": 10},
+        {"node": 1, "direction": "both", "relationship": null,
+         "after": {"relationship": "c", "edge": 2}, "limit": 10}
+      ],
+      "expected": {
+        "node_map": [{"id": 1, "ordinal": 0, "labels": []}, {"id": 2, "ordinal": 1, "labels": []}],
+        "relationships": ["a", "b", "c"], "labels": [],
+        "edge_table": [
+          {"id": 1, "ordinal": 0, "source": 0, "target": 1, "relationship": 1},
+          {"id": 2, "ordinal": 1, "source": 1, "target": 0, "relationship": 2},
+          {"id": 10, "ordinal": 2, "source": 0, "target": 1, "relationship": 0},
+          {"id": 20, "ordinal": 3, "source": 0, "target": 1, "relationship": 0}
+        ],
+        "out_csr": {"offsets": [0, 3, 4], "neighbors": [2, 3, 0, 1]},
+        "in_csr": {"offsets": [0, 1, 4], "neighbors": [1, 2, 3, 0]},
+        "adjacency": [
+          [["a", 10]], [["b", 1]], [["a", 20], ["b", 1]], [["b", 1], ["c", 2]],
+          [["b", 1], ["c", 2]], [["a", 20]], []
+        ]
+      }
+    },
+    {
+      "name": "expired-node",
+      "purpose": "Due node cascades outgoing, incoming and self-loop edges, regardless of edge deadline.",
+      "nodes": [
+        {"id": 1, "labels": ["gone"], "deadline": 9},
+        {"id": 5, "labels": ["keep"]}, {"id": 9, "labels": ["keep"]}
+      ],
+      "edges": [
+        {"id": 1, "source": 5, "target": 1, "relationship": "r"},
+        {"id": 2, "source": 1, "target": 9, "relationship": "ghost", "deadline": 100},
+        {"id": 3, "source": 1, "target": 1, "relationship": "ghost"},
+        {"id": 4, "source": 5, "target": 9, "relationship": "s"}
+      ],
+      "clock": 10,
+      "queries": [
+        {"node": 5, "direction": "both", "relationship": null, "after": null, "limit": 10},
+        {"node": 1, "direction": "both", "relationship": null, "after": null, "limit": 10},
+        {"node": 9, "direction": "in", "relationship": null, "after": null, "limit": 10}
+      ],
+      "expected": {
+        "node_map": [{"id": 5, "ordinal": 0, "labels": [0]}, {"id": 9, "ordinal": 1, "labels": [0]}],
+        "relationships": ["s"], "labels": ["keep"],
+        "edge_table": [{"id": 4, "ordinal": 0, "source": 0, "target": 1, "relationship": 0}],
+        "out_csr": {"offsets": [0, 1, 1], "neighbors": [0]},
+        "in_csr": {"offsets": [0, 0, 1], "neighbors": [0]},
+        "adjacency": [[["s", 4]], [], [["s", 4]]]
+      }
+    },
+    {
+      "name": "expired-edge",
+      "purpose": "Only an edge's own deadline expires; endpoints and a live parallel edge remain.",
+      "nodes": [{"id": 1, "labels": ["n"]}, {"id": 2, "labels": ["n"], "deadline": 20}],
+      "edges": [
+        {"id": 2, "source": 1, "target": 2, "relationship": "r", "deadline": 9},
+        {"id": 3, "source": 1, "target": 2, "relationship": "r", "deadline": 11}
+      ],
+      "clock": 10,
+      "queries": [
+        {"node": 1, "direction": "out", "relationship": null, "after": null, "limit": 10},
+        {"node": 2, "direction": "in", "relationship": null, "after": null, "limit": 10}
+      ],
+      "expected": {
+        "node_map": [{"id": 1, "ordinal": 0, "labels": [0]}, {"id": 2, "ordinal": 1, "labels": [0]}],
+        "relationships": ["r"], "labels": ["n"],
+        "edge_table": [{"id": 3, "ordinal": 0, "source": 0, "target": 1, "relationship": 0}],
+        "out_csr": {"offsets": [0, 1, 1], "neighbors": [0]},
+        "in_csr": {"offsets": [0, 0, 1], "neighbors": [0]},
+        "adjacency": [[["r", 3]], [["r", 3]]]
+      }
+    },
+    {
+      "name": "deadline-equals-clock",
+      "purpose": "Equality is due for both node and edge (state.rs:80 uses deadline <= now_ms); clock+1 lives.",
+      "nodes": [
+        {"id": 1, "labels": ["dead"], "deadline": 10},
+        {"id": 2, "labels": []}, {"id": 3, "labels": [], "deadline": 11}
+      ],
+      "edges": [
+        {"id": 1, "source": 2, "target": 1, "relationship": "r"},
+        {"id": 2, "source": 1, "target": 3, "relationship": "r", "deadline": 11},
+        {"id": 3, "source": 2, "target": 3, "relationship": "r", "deadline": 10},
+        {"id": 4, "source": 2, "target": 3, "relationship": "r", "deadline": 11}
+      ],
+      "clock": 10,
+      "queries": [
+        {"node": 2, "direction": "both", "relationship": null, "after": null, "limit": 10},
+        {"node": 1, "direction": "both", "relationship": null, "after": null, "limit": 10}
+      ],
+      "expected": {
+        "node_map": [{"id": 2, "ordinal": 0, "labels": []}, {"id": 3, "ordinal": 1, "labels": []}],
+        "relationships": ["r"], "labels": [],
+        "edge_table": [{"id": 4, "ordinal": 0, "source": 0, "target": 1, "relationship": 0}],
+        "out_csr": {"offsets": [0, 1, 1], "neighbors": [0]},
+        "in_csr": {"offsets": [0, 0, 1], "neighbors": [0]}, "adjacency": [[["r", 4]], []]
+      }
+    },
+    {
+      "name": "label-order",
+      "purpose": "Label dictionary is bytewise, shared codes deduplicate across nodes; label sets sort by code.",
+      "nodes": [
+        {"id": 8, "labels": ["\u00e9", "a"]},
+        {"id": 2, "labels": ["\ud83d\ude00", "\u4e2d", "\u00e9", "z", "a", "e\u0301"]}
+      ],
+      "edges": [], "clock": 0,
+      "queries": [{"node": 2, "direction": "both", "relationship": null, "after": null, "limit": 10}],
+      "expected": {
+        "node_map": [
+          {"id": 2, "ordinal": 0, "labels": [0, 1, 2, 3, 4, 5]},
+          {"id": 8, "ordinal": 1, "labels": [0, 3]}
+        ],
+        "relationships": [], "labels": ["a", "e\u0301", "z", "\u00e9", "\u4e2d", "\ud83d\ude00"],
+        "edge_table": [], "out_csr": {"offsets": [0, 0, 0], "neighbors": []},
+        "in_csr": {"offsets": [0, 0, 0], "neighbors": []}, "adjacency": [[]]
+      }
+    },
+    {
+      "name": "limits-and-neighbor-order",
+      "purpose": "Limits zero/one/large; row order must not sort by destination node ID.",
+      "nodes": [{"id": 100, "labels": []}, {"id": 1, "labels": []}, {"id": 9, "labels": []}],
+      "edges": [
+        {"id": 9, "source": 1, "target": 9, "relationship": "b"},
+        {"id": 2, "source": 1, "target": 100, "relationship": "a"},
+        {"id": 3, "source": 1, "target": 1, "relationship": "b"}
+      ],
+      "clock": 0,
+      "queries": [
+        {"node": 1, "direction": "both", "relationship": null, "after": null, "limit": 0},
+        {"node": 1, "direction": "out", "relationship": null, "after": null, "limit": 1},
+        {"node": 1, "direction": "both", "relationship": null, "after": null, "limit": 18446744073709551615}
+      ],
+      "expected": {
+        "node_map": [
+          {"id": 1, "ordinal": 0, "labels": []}, {"id": 9, "ordinal": 1, "labels": []},
+          {"id": 100, "ordinal": 2, "labels": []}
+        ],
+        "relationships": ["a", "b"], "labels": [],
+        "edge_table": [
+          {"id": 2, "ordinal": 0, "source": 0, "target": 2, "relationship": 0},
+          {"id": 3, "ordinal": 1, "source": 0, "target": 0, "relationship": 1},
+          {"id": 9, "ordinal": 2, "source": 0, "target": 1, "relationship": 1}
+        ],
+        "out_csr": {"offsets": [0, 3, 3, 3], "neighbors": [0, 1, 2]},
+        "in_csr": {"offsets": [0, 1, 2, 3], "neighbors": [1, 2, 0]},
+        "adjacency": [[], [["a", 2]], [["a", 2], ["b", 3], ["b", 9]]]
+      }
+    },
+    {
+      "name": "zero-deadline",
+      "purpose": "Zero is a valid deadline and clock: equality removes all nodes and incident edges.",
+      "nodes": [{"id": 0, "labels": ["gone"], "deadline": 0}],
+      "edges": [{"id": 0, "source": 0, "target": 0, "relationship": "r"}],
+      "clock": 0,
+      "queries": [{"node": 0, "direction": "both", "relationship": null, "after": null, "limit": 10}],
+      "expected": {
+        "node_map": [], "relationships": [], "labels": [], "edge_table": [],
+        "out_csr": {"offsets": [0], "neighbors": []},
+        "in_csr": {"offsets": [0], "neighbors": []}, "adjacency": [[]]
+      }
+    }
+  ]
+}

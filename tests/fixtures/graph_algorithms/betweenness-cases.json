@@ -1,0 +1,356 @@
+{
+  "schema": "vlite.graph-betweenness-golden",
+  "version": 1,
+  "contract": {
+    "description": "Independent tiny exact-rational unweighted Brandes goldens for docs/projects/roadmap/gap5-graph-algorithms.md Centrality; no Rust engine is imported. Out uses stored arcs, In reverses them, Both is symmetric. Parallel arcs collapse, self-loops disappear, expired nodes hide incident edges, and expired edges hide only themselves.",
+    "ordering": "Node rows ascend by numeric u64 ID. Selected and completed sources retain ascending (SplitMix64-v1(seed XOR node_id), node_id) rank, not node-ID order. Physical insertion order has no effect.",
+    "arithmetic": "All sigma, dependencies, sums and normalization use fractions.Fraction. exact is canonical p/q including /1. f64_hex and f64_repr are float(Fraction).hex() and repr(float(Fraction)), not stepwise f64 engine reductions. For n>2 and k>0 score=(n/k)*raw_sum/((n-1)*(n-2)); Both has no additional /2. For n<=2 and k>0 scores are zero; k=0 takes precedence and scores is null.",
+    "interruption": "interrupt_after_sources limits committed whole sources to a prefix of selected; an interrupted next source is discarded entirely. k=completed count. k=0 is no_scores; k=n>0 is exact; k=min(samples,n)<n is complete_estimated; otherwise partial_estimated.",
+    "exclusions": "At most eight input nodes and 32 physical edges; sparse numeric IDs are supported. Expiration is an explicit snapshot flag, not a TTL clock, storage, authorization, work-budget or deadline integration test. No confidence intervals or binary64 overflow claims."
+  },
+  "splitmix64_vectors": [
+    {"input": 0, "output": "0xe220a8397b1dcdaf"},
+    {"input": 1, "output": "0x910a2dec89025cc1"},
+    {"input": 2, "output": "0x975835de1c9756ce"},
+    {"input": 3, "output": "0x1d0b14e4db018fed"},
+    {"input": 4, "output": "0x6e73e372e2338aca"},
+    {"input": 5, "output": "0x63033b0ca389c35a"},
+    {"input": 18446744073709551615, "output": "0xe4d971771b652c20"}
+  ],
+  "cases": [
+    {
+      "id": "path_five_both", "description": "Five-node symmetric path; full sampling gives central scores 1/2, 2/3, 1/2.",
+      "nodes": [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}, {"id": 5}],
+      "edges": [{"id": 1, "source": 1, "target": 2}, {"id": 2, "source": 2, "target": 3}, {"id": 3, "source": 3, "target": 4}, {"id": 4, "source": 4, "target": 5}],
+      "direction": "Both", "seed": 0, "samples": 5,
+      "expected": {
+        "selected": [3, 5, 4, 1, 2], "completed": [3, 5, 4, 1, 2], "k": 5, "n": 5, "status": "exact",
+        "raw_sums": [{"node_id": 1, "exact": "0/1"}, {"node_id": 2, "exact": "6/1"}, {"node_id": 3, "exact": "8/1"}, {"node_id": 4, "exact": "6/1"}, {"node_id": 5, "exact": "0/1"}],
+        "scores": [
+          {"node_id": 1, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"},
+          {"node_id": 2, "exact": "1/2", "f64_hex": "0x1.0000000000000p-1", "f64_repr": "0.5"},
+          {"node_id": 3, "exact": "2/3", "f64_hex": "0x1.5555555555555p-1", "f64_repr": "0.6666666666666666"},
+          {"node_id": 4, "exact": "1/2", "f64_hex": "0x1.0000000000000p-1", "f64_repr": "0.5"},
+          {"node_id": 5, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"}
+        ]
+      }
+    },
+    {
+      "id": "star_out", "description": "Outward star has no internal shortest-path vertices.",
+      "nodes": [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}],
+      "edges": [{"id": 1, "source": 1, "target": 2}, {"id": 2, "source": 1, "target": 3}, {"id": 3, "source": 1, "target": 4}],
+      "direction": "Out", "seed": 0, "samples": 4,
+      "expected": {
+        "selected": [3, 4, 1, 2], "completed": [3, 4, 1, 2], "k": 4, "n": 4, "status": "exact",
+        "raw_sums": [{"node_id": 1, "exact": "0/1"}, {"node_id": 2, "exact": "0/1"}, {"node_id": 3, "exact": "0/1"}, {"node_id": 4, "exact": "0/1"}],
+        "scores": [
+          {"node_id": 1, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"},
+          {"node_id": 2, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"},
+          {"node_id": 3, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"},
+          {"node_id": 4, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"}
+        ]
+      }
+    },
+    {
+      "id": "star_both", "description": "Symmetric star center is one, not one half.",
+      "nodes": [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}],
+      "edges": [{"id": 1, "source": 1, "target": 2}, {"id": 2, "source": 1, "target": 3}, {"id": 3, "source": 1, "target": 4}],
+      "direction": "Both", "seed": 0, "samples": 4,
+      "expected": {
+        "selected": [3, 4, 1, 2], "completed": [3, 4, 1, 2], "k": 4, "n": 4, "status": "exact",
+        "raw_sums": [{"node_id": 1, "exact": "6/1"}, {"node_id": 2, "exact": "0/1"}, {"node_id": 3, "exact": "0/1"}, {"node_id": 4, "exact": "0/1"}],
+        "scores": [
+          {"node_id": 1, "exact": "1/1", "f64_hex": "0x1.0000000000000p+0", "f64_repr": "1.0"},
+          {"node_id": 2, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"},
+          {"node_id": 3, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"},
+          {"node_id": 4, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"}
+        ]
+      }
+    },
+    {
+      "id": "diamond_sigma_two", "description": "Two equally short source-target paths split dependency equally; each intermediate raw sum is 1/2.",
+      "nodes": [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}],
+      "edges": [{"id": 1, "source": 1, "target": 2}, {"id": 2, "source": 1, "target": 3}, {"id": 3, "source": 2, "target": 4}, {"id": 4, "source": 3, "target": 4}],
+      "direction": "Out", "seed": 0, "samples": 4,
+      "expected": {
+        "selected": [3, 4, 1, 2], "completed": [3, 4, 1, 2], "k": 4, "n": 4, "status": "exact",
+        "raw_sums": [{"node_id": 1, "exact": "0/1"}, {"node_id": 2, "exact": "1/2"}, {"node_id": 3, "exact": "1/2"}, {"node_id": 4, "exact": "0/1"}],
+        "scores": [
+          {"node_id": 1, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"},
+          {"node_id": 2, "exact": "1/12", "f64_hex": "0x1.5555555555555p-4", "f64_repr": "0.08333333333333333"},
+          {"node_id": 3, "exact": "1/12", "f64_hex": "0x1.5555555555555p-4", "f64_repr": "0.08333333333333333"},
+          {"node_id": 4, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"}
+        ]
+      }
+    },
+    {
+      "id": "asymmetric_out", "description": "Partly branching asymmetric graph, sampled Out; reversing cannot be ignored.",
+      "nodes": [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}],
+      "edges": [{"id": 1, "source": 1, "target": 2}, {"id": 2, "source": 2, "target": 3}, {"id": 3, "source": 4, "target": 2}],
+      "direction": "Out", "seed": 0, "samples": 2,
+      "expected": {
+        "selected": [3, 4], "completed": [3, 4], "k": 2, "n": 4, "status": "complete_estimated",
+        "raw_sums": [{"node_id": 1, "exact": "0/1"}, {"node_id": 2, "exact": "1/1"}, {"node_id": 3, "exact": "0/1"}, {"node_id": 4, "exact": "0/1"}],
+        "scores": [
+          {"node_id": 1, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"},
+          {"node_id": 2, "exact": "1/3", "f64_hex": "0x1.5555555555555p-2", "f64_repr": "0.3333333333333333"},
+          {"node_id": 3, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"},
+          {"node_id": 4, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"}
+        ]
+      }
+    },
+    {
+      "id": "asymmetric_in", "description": "Same asymmetric graph and sources with all stored arcs reversed.",
+      "nodes": [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}],
+      "edges": [{"id": 1, "source": 1, "target": 2}, {"id": 2, "source": 2, "target": 3}, {"id": 3, "source": 4, "target": 2}],
+      "direction": "In", "seed": 0, "samples": 2,
+      "expected": {
+        "selected": [3, 4], "completed": [3, 4], "k": 2, "n": 4, "status": "complete_estimated",
+        "raw_sums": [{"node_id": 1, "exact": "0/1"}, {"node_id": 2, "exact": "2/1"}, {"node_id": 3, "exact": "0/1"}, {"node_id": 4, "exact": "0/1"}],
+        "scores": [
+          {"node_id": 1, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"},
+          {"node_id": 2, "exact": "2/3", "f64_hex": "0x1.5555555555555p-1", "f64_repr": "0.6666666666666666"},
+          {"node_id": 3, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"},
+          {"node_id": 4, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"}
+        ]
+      }
+    },
+    {
+      "id": "asymmetric_both", "description": "Same asymmetric graph becomes a symmetric star, with sampled n/k scaling.",
+      "nodes": [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}],
+      "edges": [{"id": 1, "source": 1, "target": 2}, {"id": 2, "source": 2, "target": 3}, {"id": 3, "source": 4, "target": 2}],
+      "direction": "Both", "seed": 0, "samples": 2,
+      "expected": {
+        "selected": [3, 4], "completed": [3, 4], "k": 2, "n": 4, "status": "complete_estimated",
+        "raw_sums": [{"node_id": 1, "exact": "0/1"}, {"node_id": 2, "exact": "4/1"}, {"node_id": 3, "exact": "0/1"}, {"node_id": 4, "exact": "0/1"}],
+        "scores": [
+          {"node_id": 1, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"},
+          {"node_id": 2, "exact": "4/3", "f64_hex": "0x1.5555555555555p+0", "f64_repr": "1.3333333333333333"},
+          {"node_id": 3, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"},
+          {"node_id": 4, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"}
+        ]
+      }
+    },
+    {
+      "id": "parallel_diamond", "description": "Duplicate arcs must not bias the diamond's equal shortest-path shares.",
+      "nodes": [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}],
+      "edges": [{"id": 5, "source": 1, "target": 2}, {"id": 1, "source": 1, "target": 2}, {"id": 2, "source": 1, "target": 3}, {"id": 3, "source": 2, "target": 4}, {"id": 4, "source": 3, "target": 4}],
+      "direction": "Out", "seed": 0, "samples": 4,
+      "expected": {
+        "selected": [3, 4, 1, 2], "completed": [3, 4, 1, 2], "k": 4, "n": 4, "status": "exact",
+        "raw_sums": [{"node_id": 1, "exact": "0/1"}, {"node_id": 2, "exact": "1/2"}, {"node_id": 3, "exact": "1/2"}, {"node_id": 4, "exact": "0/1"}],
+        "scores": [
+          {"node_id": 1, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"},
+          {"node_id": 2, "exact": "1/12", "f64_hex": "0x1.5555555555555p-4", "f64_repr": "0.08333333333333333"},
+          {"node_id": 3, "exact": "1/12", "f64_hex": "0x1.5555555555555p-4", "f64_repr": "0.08333333333333333"},
+          {"node_id": 4, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"}
+        ]
+      }
+    },
+    {
+      "id": "self_loops", "description": "Ignore loops at every vertex; directed three-node centrality golden remains one half.",
+      "nodes": [{"id": 1}, {"id": 2}, {"id": 3}],
+      "edges": [{"id": 1, "source": 1, "target": 2}, {"id": 2, "source": 2, "target": 3}, {"id": 3, "source": 1, "target": 1}, {"id": 4, "source": 2, "target": 2}, {"id": 5, "source": 3, "target": 3}],
+      "direction": "Out", "seed": 0, "samples": 3,
+      "expected": {
+        "selected": [3, 1, 2], "completed": [3, 1, 2], "k": 3, "n": 3, "status": "exact",
+        "raw_sums": [{"node_id": 1, "exact": "0/1"}, {"node_id": 2, "exact": "1/1"}, {"node_id": 3, "exact": "0/1"}],
+        "scores": [
+          {"node_id": 1, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"},
+          {"node_id": 2, "exact": "1/2", "f64_hex": "0x1.0000000000000p-1", "f64_repr": "0.5"},
+          {"node_id": 3, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"}
+        ]
+      }
+    },
+    {
+      "id": "disconnected", "description": "A directed three-node path plus two isolates normalizes over all five visible nodes.",
+      "nodes": [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}, {"id": 5}],
+      "edges": [{"id": 1, "source": 1, "target": 2}, {"id": 2, "source": 2, "target": 3}],
+      "direction": "Out", "seed": 0, "samples": 5,
+      "expected": {
+        "selected": [3, 5, 4, 1, 2], "completed": [3, 5, 4, 1, 2], "k": 5, "n": 5, "status": "exact",
+        "raw_sums": [{"node_id": 1, "exact": "0/1"}, {"node_id": 2, "exact": "1/1"}, {"node_id": 3, "exact": "0/1"}, {"node_id": 4, "exact": "0/1"}, {"node_id": 5, "exact": "0/1"}],
+        "scores": [
+          {"node_id": 1, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"},
+          {"node_id": 2, "exact": "1/12", "f64_hex": "0x1.5555555555555p-4", "f64_repr": "0.08333333333333333"},
+          {"node_id": 3, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"},
+          {"node_id": 4, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"},
+          {"node_id": 5, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"}
+        ]
+      }
+    },
+    {
+      "id": "one_node", "description": "One completed source gives an exact zero score without dividing by zero.",
+      "nodes": [{"id": 1}], "edges": [],
+      "direction": "Out", "seed": 0, "samples": 1,
+      "expected": {
+        "selected": [1], "completed": [1], "k": 1, "n": 1, "status": "exact",
+        "raw_sums": [{"node_id": 1, "exact": "0/1"}],
+        "scores": [{"node_id": 1, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"}]
+      }
+    },
+    {
+      "id": "two_nodes", "description": "Two visible nodes always score zero; oversized requested samples clamp to n.",
+      "nodes": [{"id": 1}, {"id": 2}],
+      "edges": [{"id": 1, "source": 1, "target": 2}],
+      "direction": "Both", "seed": 0, "samples": 9,
+      "expected": {
+        "selected": [1, 2], "completed": [1, 2], "k": 2, "n": 2, "status": "exact",
+        "raw_sums": [{"node_id": 1, "exact": "0/1"}, {"node_id": 2, "exact": "0/1"}],
+        "scores": [
+          {"node_id": 1, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"},
+          {"node_id": 2, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"}
+        ]
+      }
+    },
+    {
+      "id": "full_directed_golden", "description": "Authoritative A->B->C golden: full-sample B=1/2 and both endpoints zero.",
+      "nodes": [{"id": 1}, {"id": 2}, {"id": 3}],
+      "edges": [{"id": 1, "source": 1, "target": 2}, {"id": 2, "source": 2, "target": 3}],
+      "direction": "Out", "seed": 0, "samples": 3,
+      "expected": {
+        "selected": [3, 1, 2], "completed": [3, 1, 2], "k": 3, "n": 3, "status": "exact",
+        "raw_sums": [{"node_id": 1, "exact": "0/1"}, {"node_id": 2, "exact": "1/1"}, {"node_id": 3, "exact": "0/1"}],
+        "scores": [
+          {"node_id": 1, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"},
+          {"node_id": 2, "exact": "1/2", "f64_hex": "0x1.0000000000000p-1", "f64_repr": "0.5"},
+          {"node_id": 3, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"}
+        ]
+      }
+    },
+    {
+      "id": "sampled_path_scaling", "description": "One requested source out of five is complete_estimated; nonzero dependency is multiplied by five.",
+      "nodes": [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}, {"id": 5}],
+      "edges": [{"id": 1, "source": 1, "target": 2}, {"id": 2, "source": 2, "target": 3}, {"id": 3, "source": 3, "target": 4}, {"id": 4, "source": 4, "target": 5}],
+      "direction": "Both", "seed": 0, "samples": 1,
+      "expected": {
+        "selected": [3], "completed": [3], "k": 1, "n": 5, "status": "complete_estimated",
+        "raw_sums": [{"node_id": 1, "exact": "0/1"}, {"node_id": 2, "exact": "1/1"}, {"node_id": 3, "exact": "0/1"}, {"node_id": 4, "exact": "1/1"}, {"node_id": 5, "exact": "0/1"}],
+        "scores": [
+          {"node_id": 1, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"},
+          {"node_id": 2, "exact": "5/12", "f64_hex": "0x1.aaaaaaaaaaaabp-2", "f64_repr": "0.4166666666666667"},
+          {"node_id": 3, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"},
+          {"node_id": 4, "exact": "5/12", "f64_hex": "0x1.aaaaaaaaaaaabp-2", "f64_repr": "0.4166666666666667"},
+          {"node_id": 5, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"}
+        ]
+      }
+    },
+    {
+      "id": "interrupted_path", "description": "Request all five but commit only first two sources; discard the next source and scale by n/2.",
+      "nodes": [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}, {"id": 5}],
+      "edges": [{"id": 1, "source": 1, "target": 2}, {"id": 2, "source": 2, "target": 3}, {"id": 3, "source": 3, "target": 4}, {"id": 4, "source": 4, "target": 5}],
+      "direction": "Both", "seed": 0, "samples": 5, "interrupt_after_sources": 2,
+      "expected": {
+        "selected": [3, 5, 4, 1, 2], "completed": [3, 5], "k": 2, "n": 5, "status": "partial_estimated",
+        "raw_sums": [{"node_id": 1, "exact": "0/1"}, {"node_id": 2, "exact": "2/1"}, {"node_id": 3, "exact": "2/1"}, {"node_id": 4, "exact": "4/1"}, {"node_id": 5, "exact": "0/1"}],
+        "scores": [
+          {"node_id": 1, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"},
+          {"node_id": 2, "exact": "5/12", "f64_hex": "0x1.aaaaaaaaaaaabp-2", "f64_repr": "0.4166666666666667"},
+          {"node_id": 3, "exact": "5/12", "f64_hex": "0x1.aaaaaaaaaaaabp-2", "f64_repr": "0.4166666666666667"},
+          {"node_id": 4, "exact": "5/6", "f64_hex": "0x1.aaaaaaaaaaaabp-1", "f64_repr": "0.8333333333333334"},
+          {"node_id": 5, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"}
+        ]
+      }
+    },
+    {
+      "id": "interrupted_before_first", "description": "Selected sources exist but interruption discards the first; no scores, not zeros.",
+      "nodes": [{"id": 1}, {"id": 2}, {"id": 3}],
+      "edges": [{"id": 1, "source": 1, "target": 2}, {"id": 2, "source": 2, "target": 3}],
+      "direction": "Out", "seed": 0, "samples": 3, "interrupt_after_sources": 0,
+      "expected": {
+        "selected": [3, 1, 2], "completed": [], "k": 0, "n": 3, "status": "no_scores",
+        "raw_sums": [{"node_id": 1, "exact": "0/1"}, {"node_id": 2, "exact": "0/1"}, {"node_id": 3, "exact": "0/1"}],
+        "scores": null
+      }
+    },
+    {
+      "id": "zero_requested_samples", "description": "Requesting zero sources returns null scores and no_scores.",
+      "nodes": [{"id": 1}, {"id": 2}, {"id": 3}],
+      "edges": [{"id": 1, "source": 1, "target": 2}, {"id": 2, "source": 2, "target": 3}],
+      "direction": "Out", "seed": 0, "samples": 0,
+      "expected": {
+        "selected": [], "completed": [], "k": 0, "n": 3, "status": "no_scores",
+        "raw_sums": [{"node_id": 1, "exact": "0/1"}, {"node_id": 2, "exact": "0/1"}, {"node_id": 3, "exact": "0/1"}],
+        "scores": null
+      }
+    },
+    {
+      "id": "expired_node", "description": "Expired node 4 hides both incident edges; only visible 1->2->3 contributes and n is three.",
+      "nodes": [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4, "expired": true}],
+      "edges": [{"id": 1, "source": 1, "target": 2}, {"id": 2, "source": 2, "target": 3}, {"id": 3, "source": 1, "target": 4}, {"id": 4, "source": 4, "target": 3}],
+      "direction": "Out", "seed": 0, "samples": 4,
+      "expected": {
+        "selected": [3, 1, 2], "completed": [3, 1, 2], "k": 3, "n": 3, "status": "exact",
+        "raw_sums": [{"node_id": 1, "exact": "0/1"}, {"node_id": 2, "exact": "1/1"}, {"node_id": 3, "exact": "0/1"}],
+        "scores": [
+          {"node_id": 1, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"},
+          {"node_id": 2, "exact": "1/2", "f64_hex": "0x1.0000000000000p-1", "f64_repr": "0.5"},
+          {"node_id": 3, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"}
+        ]
+      }
+    },
+    {
+      "id": "expired_edge", "description": "Expired shortcut 1->3 hides alone, leaving all nodes and the two-hop golden.",
+      "nodes": [{"id": 1}, {"id": 2}, {"id": 3}],
+      "edges": [{"id": 1, "source": 1, "target": 2}, {"id": 2, "source": 2, "target": 3}, {"id": 3, "source": 1, "target": 3, "expired": true}],
+      "direction": "Out", "seed": 0, "samples": 3,
+      "expected": {
+        "selected": [3, 1, 2], "completed": [3, 1, 2], "k": 3, "n": 3, "status": "exact",
+        "raw_sums": [{"node_id": 1, "exact": "0/1"}, {"node_id": 2, "exact": "1/1"}, {"node_id": 3, "exact": "0/1"}],
+        "scores": [
+          {"node_id": 1, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"},
+          {"node_id": 2, "exact": "1/2", "f64_hex": "0x1.0000000000000p-1", "f64_repr": "0.5"},
+          {"node_id": 3, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"}
+        ]
+      }
+    },
+    {
+      "id": "sparse_ids_xor_seed", "description": "IDs include 2^40+3; seed=2^40+3 makes ranked XOR inputs 3,1,0. Large IDs are never truncated or used as dense indices.",
+      "nodes": [{"id": 1099511627779}, {"id": 1099511627778}, {"id": 1099511627776}],
+      "edges": [{"id": 18446744073709551615, "source": 1099511627776, "target": 1099511627778}, {"id": 1099511627779, "source": 1099511627778, "target": 1099511627779}],
+      "direction": "Both", "seed": 1099511627779, "samples": 2,
+      "expected": {
+        "selected": [1099511627776, 1099511627778], "completed": [1099511627776, 1099511627778], "k": 2, "n": 3, "status": "complete_estimated",
+        "raw_sums": [{"node_id": 1099511627776, "exact": "0/1"}, {"node_id": 1099511627778, "exact": "1/1"}, {"node_id": 1099511627779, "exact": "0/1"}],
+        "scores": [
+          {"node_id": 1099511627776, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"},
+          {"node_id": 1099511627778, "exact": "3/4", "f64_hex": "0x1.8000000000000p-1", "f64_repr": "0.75"},
+          {"node_id": 1099511627779, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"}
+        ]
+      }
+    },
+    {
+      "id": "max_seed_path", "description": "Seed u64 max and near-max IDs reduce XOR inputs to 3,1,0; insertion order is reversed and directed sampled scaling is 3/4.",
+      "nodes": [{"id": 18446744073709551615}, {"id": 18446744073709551614}, {"id": 18446744073709551612}],
+      "edges": [{"id": 2, "source": 18446744073709551614, "target": 18446744073709551615}, {"id": 1, "source": 18446744073709551612, "target": 18446744073709551614}],
+      "direction": "Out", "seed": 18446744073709551615, "samples": 2,
+      "expected": {
+        "selected": [18446744073709551612, 18446744073709551614], "completed": [18446744073709551612, 18446744073709551614], "k": 2, "n": 3, "status": "complete_estimated",
+        "raw_sums": [{"node_id": 18446744073709551612, "exact": "0/1"}, {"node_id": 18446744073709551614, "exact": "1/1"}, {"node_id": 18446744073709551615, "exact": "0/1"}],
+        "scores": [
+          {"node_id": 18446744073709551612, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"},
+          {"node_id": 18446744073709551614, "exact": "3/4", "f64_hex": "0x1.8000000000000p-1", "f64_repr": "0.75"},
+          {"node_id": 18446744073709551615, "exact": "0/1", "f64_hex": "0x0.0p+0", "f64_repr": "0.0"}
+        ]
+      }
+    },
+    {
+      "id": "one_node_no_sources", "description": "k=0 takes precedence over n<=2 zero-score rule.",
+      "nodes": [{"id": 1}], "edges": [],
+      "direction": "Both", "seed": 0, "samples": 0,
+      "expected": {
+        "selected": [], "completed": [], "k": 0, "n": 1, "status": "no_scores",
+        "raw_sums": [{"node_id": 1, "exact": "0/1"}], "scores": null
+      }
+    },
+    {
+      "id": "empty_visible_graph", "description": "All nodes expired gives n=k=0 and no_scores rather than exact.",
+      "nodes": [{"id": 1, "expired": true}], "edges": [],
+      "direction": "In", "seed": 0, "samples": 1,
+      "expected": {
+        "selected": [], "completed": [], "k": 0, "n": 0, "status": "no_scores",
+        "raw_sums": [], "scores": null
+      }
+    }
+  ]
+}
