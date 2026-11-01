@@ -234,6 +234,15 @@ normalized request (with every output) and work statistics. There are no cursors
 or payload access and no whole-graph mode. See the
 [Gap 5 design](projects/roadmap/gap5-graph-algorithms.md).
 
+## Compact graph storage (unreleased)
+
+The first private [P4 codec](projects/roadmap/p4-compact-graph.md) is implemented
+and independently reviewed, but test-only. It preserves IDs, keys, revisions,
+labels and deadlines in bidirectional CSR adjacency. Properties, attachments,
+declared schema and temporal segments are explicitly refused rather than lost.
+Production storage and APIs are unchanged; checkpoint integration, mutation
+overlays, parallel import and performance qualification remain outstanding.
+
 ## Temporal edges (Rust, unreleased)
 
 Gap 4 slices A and B are implemented, independently reviewed and integrated, but unreleased. Each temporal edge has an ID, key, type and endpoints like any edge, plus an ordered series of at most 256 non-overlapping validity segments `[valid_from, valid_to)` in milliseconds. Each segment carries its own properties. Production builds refuse temporal operations and temporal files with `UnsupportedFeature(64)`; temporal reads (slice C), public activation and production qualification remain outstanding. REST, gRPC, MCP, query text, the CLI, the bindings and the dashboard do not expose them.

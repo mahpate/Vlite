@@ -273,44 +273,70 @@ fn freeing_blocks_the_session_never_counted_counts_nothing() {
 }
 
 /// A counted block that a thread not enrolled frees is no longer counted.
+/// The block passes between the threads through an atomic pointer, not a
+/// lock: on macOS, the standard library's `Mutex` boxes its 64-byte
+/// `pthread_mutex_t` on its first lock, which the measured thread took,
+/// and keeps it until the mutex drops, so a lock here measured
+/// `(4064, 64)` (`b522054a`'s CI).
 #[test]
 fn a_counted_block_freed_on_another_thread_stops_counting() {
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicU8, Ordering::SeqCst};
-    const HANDED: u8 = 1;
-    const FREED: u8 = 2;
-    const DONE: u8 = 3;
-    struct Done<'a>(&'a AtomicU8);
+    use std::ptr::null_mut;
+    use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering::SeqCst};
+    struct Done<'a>(&'a AtomicBool);
     impl Drop for Done<'_> {
         fn drop(&mut self) {
-            self.0.store(DONE, SeqCst);
+            self.0.store(true, SeqCst);
         }
     }
-    let (slot, state) = (Mutex::new(None::<Vec<u8>>), AtomicU8::new(0));
+    let (slot, freed, done) = (
+        AtomicPtr::new(null_mut::<[u8; 4_000]>()),
+        AtomicBool::new(false),
+        AtomicBool::new(false),
+    );
     std::thread::scope(|scope| {
         scope.spawn(|| {
-            loop {
-                match state.load(SeqCst) {
-                    HANDED => {
-                        drop(slot.lock().unwrap().take());
-                        state.store(FREED, SeqCst);
-                    }
-                    DONE => break,
-                    _ => std::thread::yield_now(),
+            while !done.load(SeqCst) {
+                let block = slot.swap(null_mut(), SeqCst);
+                if block.is_null() {
+                    std::thread::yield_now();
+                } else {
+                    // SAFETY: `block` came from `Box::into_raw`, and the
+                    // swap took it from the slot, its only other holder.
+                    drop(unsafe { Box::from_raw(block) });
+                    freed.store(true, SeqCst);
                 }
             }
         });
-        let _done = Done(&state);
+        let _done = Done(&done);
         counting_on(1, || {
             let ((), used) = measured(|| {
-                *slot.lock().unwrap() = Some(vec![0u8; 4_000]);
-                state.store(HANDED, SeqCst);
-                while state.load(SeqCst) != FREED {
+                slot.store(Box::into_raw(Box::new([0u8; 4_000])), SeqCst);
+                while !freed.load(SeqCst) {
                     std::thread::yield_now();
                 }
             });
             assert_eq!((used.peak, used.retained), (4_000, 0));
         });
+    });
+}
+
+/// What the measured thread allocates for state built on its first use,
+/// such as macOS's boxed `pthread_mutex_t` above, counts in the window of
+/// that use and stays held while the state lives; a later use allocates
+/// nothing. A fixture must build such state before it measures.
+#[test]
+fn state_built_on_first_use_in_a_window_counts_there() {
+    use std::sync::OnceLock;
+    let lazy = OnceLock::<Box<[u8; 64]>>::new();
+    counting_on(1, || {
+        let first = || {
+            lazy.get_or_init(|| Box::new([0; 64]));
+            drop(vec![0u8; 4_000]);
+        };
+        let ((), used) = measured(first);
+        assert_eq!((used.peak, used.retained), (4_064, 64));
+        let ((), used) = measured(first);
+        assert_eq!((used.peak, used.retained), (4_000, 0));
     });
 }
 

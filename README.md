@@ -226,6 +226,11 @@ Private [precision writes](docs/projects/roadmap/p3-compact-vectors.md) and the
 are implemented and independently reviewed. Both remain gated: temporal reads,
 public activation and production qualification are still outstanding.
 
+The private [compact graph codec](docs/projects/roadmap/p4-compact-graph.md)
+is implemented and reviewed, but test-only. Production storage is unchanged;
+checkpoint integration, mutation overlays, parallel import and qualification
+remain outstanding.
+
 These plans are proposals under review, not commitments:
 
 - [Storage and speed goals](docs/projects/performance/storage-goals.md):
