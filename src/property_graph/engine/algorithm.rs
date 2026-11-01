@@ -971,6 +971,18 @@ thread_local! {
     static SORTED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Items a growing buffer moved to its new allocation (tests only).
+    static MOVED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Records one moved item (a no-op outside tests).
+fn moved() {
+    #[cfg(test)]
+    MOVED.with(|count| count.set(count.get() + 1));
+}
+
 /// Records one unit of sort work (a no-op outside tests).
 fn sorted() {
     #[cfg(test)]
@@ -1067,12 +1079,17 @@ fn arc_count(projection: &Projection, direction: Direction) -> usize {
 
 /// Appends `item`, first doubling a full buffer (at least 4 slots) into a
 /// new allocation reserved at its full capacity; the old one stays charged.
+/// Each moved item is charged one vertex unit as it moves.
 fn push<T>(items: &mut Vec<T>, item: T, meter: &mut Meter<'_>) -> Result<(), AlgorithmTruncation> {
     if items.len() == items.capacity() {
         let capacity = items.capacity().saturating_mul(2).max(4);
         meter.reserve(capacity, size_of::<T>())?;
         let mut grown = Vec::with_capacity(capacity);
-        grown.append(items);
+        for item in items.drain(..) {
+            meter.vertex()?;
+            moved();
+            grown.push(item);
+        }
         *items = grown;
     }
     items.push(item);

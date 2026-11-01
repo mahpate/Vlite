@@ -898,3 +898,90 @@ fn the_echo_and_every_step_share_one_budget() {
         assert_eq!(one.stats.scratch_bytes, read.stats.scratch_bytes);
     }
 }
+
+/// The request echo is copied under the meter: a stop injected while seed or
+/// personalization entries are being copied lands within 64 copies and
+/// returns neither output nor echo.
+#[test]
+fn echo_copies_are_checked_and_return_nothing() {
+    use super::super::ECHOED;
+    let echoed = || ECHOED.with(Cell::get);
+    let mut db = memory();
+    db.create_graph("p").unwrap();
+    // Scrambled keys, so the echo is the sorted, resolved seed list.
+    let names: Vec<String> = (0..300).map(|at| format!("n{}", at * 7 % 300)).collect();
+    for name in &names {
+        db.graph_mut("p")
+            .unwrap()
+            .create_node(name, &[], &Metadata::new())
+            .unwrap();
+    }
+    let graph = db.graph("p").unwrap().with_clock(crate::current_time_ms());
+    let seeds = || names.iter().map(|name| key(name)).collect::<Vec<_>>();
+    let masses = names.iter().map(|name| (key(name), 1.0)).collect();
+    // 300 seeds to echo, and for PageRank 300 personalization entries.
+    let requests = [
+        ("PageRank", rank(seeds(), Some(masses))),
+        ("LabelPropagation", propagate(seeds())),
+        ("Degree", degree(scope(seeds(), Direction::Out))),
+    ];
+    for (name, request) in requests {
+        let mut options = sweeps(0, 100);
+        options.limits.deadline_ms = 10;
+        ECHOED.with(|count| count.set(0));
+        let full = graph
+            .algorithm_with_clock(&request, &options, &|| 0)
+            .unwrap();
+        assert!(full.computation_complete && full.request.is_some());
+        let total = echoed();
+        assert!(total >= 300, "{total}");
+        let mut points: BTreeSet<u64> = (1..=total).step_by(23).collect();
+        points.extend([1, 2, 64, 65, 301, total]);
+        points.retain(|&point| point <= total);
+        let mut unchecked = Vec::new();
+        for inject in points {
+            for cancel in [false, true] {
+                // The deadline passes, or the flag is set, once `inject`
+                // entries are copied; the clock is read only by checks.
+                let flag = AtomicBool::new(false);
+                let clock = || {
+                    if echoed() < inject {
+                        return 0;
+                    }
+                    if cancel {
+                        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                        0
+                    } else {
+                        1_000
+                    }
+                };
+                let options = GraphAlgorithmOptions {
+                    cancel: Some(&flag),
+                    ..options.clone()
+                };
+                ECHOED.with(|count| count.set(0));
+                let read = graph
+                    .algorithm_with_clock(&request, &options, &clock)
+                    .unwrap();
+                let after = echoed() - inject;
+                if after > 64 {
+                    unchecked.push((inject, after));
+                }
+                let reason = if cancel {
+                    GraphAlgorithmTruncation::Cancelled
+                } else {
+                    GraphAlgorithmTruncation::Deadline
+                };
+                assert_eq!(read.truncation, vec![reason]);
+                assert_eq!((read.output, read.request), (None, None));
+                assert!(!read.complete && !read.computation_complete);
+            }
+        }
+        assert!(
+            unchecked.is_empty(),
+            "{name}: {} stops ran over 64 echo copies unchecked (point, copies): {:?}",
+            unchecked.len(),
+            &unchecked[..unchecked.len().min(4)]
+        );
+    }
+}

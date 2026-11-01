@@ -301,9 +301,10 @@ The rescan charges one vertex per admitted node and one edge unit per entry agai
 Degree charges one vertex per node and one edge unit per retained edge.
 Paths charge one edge unit per retained edge for weight validation, one per arc placed and one per relaxation.
 They charge one vertex per node prefix, per state initialized, per heap push, pop and improvement, and per path node.
-The adapter then converts the output and echoes the normalized request: one vertex per row, ID, seed, name and condition.
+The adapter then converts the output and echoes the normalized request: one vertex per row, ID, seed, name, condition and personalization entry, each charged as it is copied.
 Scratch counts every buffer at its allocated capacity, reserved before allocation, including the adapter's.
-A growing buffer doubles (at least 4 slots) into a new allocation reserved in full first.
+A growing buffer doubles (at least 4 slots) into a new allocation reserved in full first; each item it moves is charged one vertex as it moves,
+so relocation runs under the 64-operation checks (vertex units grow by the moved items: 4 + 8 + ... up to the last capacity below the final length).
 Reservations accumulate and are never released, so old and simultaneously live buffers stay charged and the total bounds the peak.
 Uncharged: the result envelope (flags, stats, at most one truncation reason with at most one node ID), error values and allocator headers.
 `arcs` counts computational arcs: one per retained edge for Out and In, two per non-loop edge and one per loop for Both.

@@ -601,9 +601,12 @@ fn stage(
     };
     let id = |node: NodeId| NodeSelector::Id(node.0);
     meter.reserve(finished.seeds.len(), size_of::<NodeSelector>())?;
-    meter.vertices(finished.seeds.len() as u64)?;
     let mut seeds = Vec::with_capacity(finished.seeds.len());
-    seeds.extend(finished.seeds.iter().map(|&node| id(node)));
+    for &node in finished.seeds {
+        meter.vertex()?;
+        echoed();
+        seeds.push(id(node));
+    }
     let relationship_types = match finished.types {
         None => RelationshipScope::Any,
         Some(types) => RelationshipScope::Only(strings(types, meter)?),
@@ -649,9 +652,12 @@ fn stage(
                 None => None,
                 Some(entries) => {
                     meter.reserve(entries.len(), size_of::<(NodeSelector, f64)>())?;
-                    meter.vertices(entries.len() as u64)?;
                     let mut echo = Vec::with_capacity(entries.len());
-                    echo.extend(entries.iter().map(|&(node, mass)| (id(node), mass)));
+                    for &(node, mass) in entries {
+                        meter.vertex()?;
+                        echoed();
+                        echo.push((id(node), mass));
+                    }
                     Some(echo)
                 }
             };
@@ -678,6 +684,18 @@ fn stage(
     Ok((output, request))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Seed and personalization entries copied into echoes (tests only).
+    static ECHOED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Records one copied echo entry (a no-op outside tests).
+fn echoed() {
+    #[cfg(test)]
+    ECHOED.with(|count| count.set(count.get() + 1));
+}
+
 /// Copies of sorted scope names, one vertex unit each.
 fn strings(
     names: &[&str],
@@ -701,24 +719,31 @@ fn public_output(
     Ok(match output {
         kernel::AlgorithmOutput::Degree(rows) => {
             meter.reserve(rows.len(), size_of::<DegreeRow>())?;
-            meter.vertices(rows.len() as u64)?;
             let mut public = Vec::with_capacity(rows.len());
-            public.extend(rows.iter().map(|row| DegreeRow {
-                node_id: row.node.0,
-                in_degree: row.in_degree,
-                out_degree: row.out_degree,
-                incident_degree: row.incident_degree,
-            }));
+            for row in rows {
+                meter.vertex()?;
+                public.push(DegreeRow {
+                    node_id: row.node.0,
+                    in_degree: row.in_degree,
+                    out_degree: row.out_degree,
+                    incident_degree: row.incident_degree,
+                });
+            }
             GraphAlgorithmOutput::Degree(public)
         }
         kernel::AlgorithmOutput::WeightedShortestPath(kernel::WeightedPathOutcome::Found(path)) => {
             let ids = path.nodes.len() + path.edges.len();
             meter.reserve(ids, size_of::<u64>())?;
-            meter.vertices(ids as u64)?;
             let mut node_ids = Vec::with_capacity(path.nodes.len());
-            node_ids.extend(path.nodes.iter().map(|node| node.0));
+            for node in &path.nodes {
+                meter.vertex()?;
+                node_ids.push(node.0);
+            }
             let mut edge_ids = Vec::with_capacity(path.edges.len());
-            edge_ids.extend(path.edges.iter().map(|edge| edge.0));
+            for edge in &path.edges {
+                meter.vertex()?;
+                edge_ids.push(edge.0);
+            }
             GraphAlgorithmOutput::WeightedShortestPath(WeightedPathOutcome::Found(WeightedPath {
                 cost: path.cost,
                 node_ids,

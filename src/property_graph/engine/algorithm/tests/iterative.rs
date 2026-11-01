@@ -963,6 +963,96 @@ fn interrupted_staging_is_checked_and_keeps_the_last_full_step() {
     }
 }
 
+/// The shared S3 preparation path checks growth relocations as they copy: a
+/// stop injected while a growing buffer moves its items (found nodes or
+/// retained edges) lands within 64 moves and returns nothing.
+#[test]
+fn growth_copies_are_checked_and_return_nothing() {
+    use super::super::MOVED;
+    use super::super::iterative::STAGED;
+    let moved = || MOVED.with(Cell::get);
+    let line = chain(300);
+    let hub = hub_graph(300, 300);
+    let all = everything(line.graph(), Direction::Out);
+    let hub_seed = scope(&["hub"], Direction::Out);
+    // 299 retained edges grow through 4..=256 slots; the hub's 300 found
+    // leaves and then its 300 edges grow the same way.
+    let cases = [
+        ("retained edges", &line, &all, 0),
+        ("found nodes and edges", &hub, &hub_seed, 1),
+    ];
+    let caps = iterations(100);
+    let zero = || 0;
+    for (name, db, scope, max_hops) in cases {
+        let graph = db.graph();
+        let limits = GraphLimits {
+            deadline_ms: 10,
+            ..hops(max_hops)
+        };
+        for algorithm in [
+            Algorithm::LabelPropagation,
+            rank(0.5, None),
+            Algorithm::Degree,
+        ] {
+            MOVED.with(|count| count.set(0));
+            let context = ExecutionContext::new(VIEW, &zero);
+            let full = run(graph, scope, &algorithm, &limits, &caps, &context).unwrap();
+            assert!(full.computation_complete, "{name}: {:?}", full.truncation);
+            let total = moved();
+            assert!(total >= 508, "{name}: {total}");
+            let mut points: BTreeSet<u64> = (1..=total).step_by(17).collect();
+            // The first item of the 128- and 256-item relocations.
+            points.extend([1, 65, 253, 509, total]);
+            points.retain(|&point| point <= total);
+            let mut unchecked = Vec::new();
+            for inject in points {
+                for cancel in [false, true] {
+                    // The deadline passes, or the flag is set, once `inject`
+                    // items have moved; the clock is read only by checks.
+                    let flag = AtomicBool::new(false);
+                    let clock = || {
+                        if moved() < inject {
+                            return 0;
+                        }
+                        if cancel {
+                            flag.store(true, AtomicOrdering::Relaxed);
+                            0
+                        } else {
+                            1_000
+                        }
+                    };
+                    let context = ExecutionContext {
+                        cancel: Some(&flag),
+                        ..ExecutionContext::new(VIEW, &clock)
+                    };
+                    MOVED.with(|count| count.set(0));
+                    STAGED.with(|count| count.set(0));
+                    let result = run(graph, scope, &algorithm, &limits, &caps, &context).unwrap();
+                    let after = moved() - inject;
+                    if after > 64 {
+                        unchecked.push((inject, after));
+                    }
+                    let reason = if cancel {
+                        AlgorithmTruncation::Cancelled
+                    } else {
+                        AlgorithmTruncation::Deadline
+                    };
+                    assert_eq!(result.truncation, vec![reason], "{name}");
+                    // Stopped in extraction: nothing returns.
+                    assert!(result.output.is_none() && !result.computation_complete);
+                    assert_eq!(STAGED.with(Cell::get), 0);
+                }
+            }
+            assert!(
+                unchecked.is_empty(),
+                "{name}, {algorithm:?}: {} stops ran over 64 moves unchecked (point, moves): {:?}",
+                unchecked.len(),
+                &unchecked[..unchecked.len().min(4)]
+            );
+        }
+    }
+}
+
 #[test]
 fn setup_sorts_are_checked_and_return_nothing() {
     use super::super::SORTED;
@@ -1126,9 +1216,10 @@ fn shared_preparation_sorts_are_checked_on_every_route() {
     }
 }
 
-/// The checked shared sorts leave S1 and S2 results and their vertex and
-/// edge units unchanged; scratch grows by exactly the sort buffers. The
-/// pinned numbers and output fingerprints were taken before the change.
+/// The checked shared sorts and growth copies leave S1 and S2 results and
+/// their edge units unchanged; scratch grows by exactly the sort buffers and
+/// vertex units by exactly the charged growth moves. The pinned numbers and
+/// output fingerprints were taken before either change.
 #[test]
 fn shared_sorts_keep_degree_and_path_results_and_units() {
     use std::hash::{Hash, Hasher};
@@ -1155,6 +1246,14 @@ fn shared_sorts_keep_degree_and_path_results_and_units() {
     // The sort buffers: three raw seeds, three raw types, 598 raw found
     // leaves (both laps but the seed leaf5) and 600 projected edges.
     let buffers = 3 * 8 + 3 * 16 + 598 * 8 + 600 * size_of::<ProjectedEdge>() as u64;
+    // Growth relocations, one vertex unit per moved item: 598 found leaves
+    // and then 600 edges each grow through 4..=1024 slots, moving
+    // 4 + 8 + ... + 512 items.
+    let moves = 2
+        * (4..=512)
+            .filter(|slots: &u64| slots.is_power_of_two())
+            .sum::<u64>();
+    assert_eq!(moves, 2_040);
     for (algorithm, truncation, (vertices, edges, scratch), fingerprint) in cases {
         let result = exec(graph, &scope, &algorithm, &hops(1));
         assert_eq!(result.truncation, truncation, "{algorithm:?}");
@@ -1165,7 +1264,7 @@ fn shared_sorts_keep_degree_and_path_results_and_units() {
                 stats.edges_examined,
                 stats.scratch_bytes
             ),
-            (vertices, edges, scratch + buffers),
+            (vertices + moves, edges, scratch + buffers),
             "{algorithm:?}"
         );
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
