@@ -93,9 +93,11 @@ Local numbers below show direction only (see rules).
   ([plan](gap4-temporal-graph.md)). They preserve atomic writes, TTL and
   revisions across replay, feeds, export and maintenance. Explicit copy-out
   leaves the source untouched and creates a new lineage requiring replica
-  reseeding. Temporal reads (slice C), public activation and production
-  qualification remain outstanding; production builds still refuse the
-  temporal capability.
+  reseeding. Private read slice C1 is implemented and independently reviewed:
+  fixed validity/TTL selectors govern ID/key reads, node scans, neighbors and
+  bounded timelines. C2 traversal, retrieval and paging, public activation and
+  production qualification remain outstanding; production builds still refuse
+  the temporal capability.
 - **Speed P3, compact vectors:** the [design](p3-compact-vectors.md) keeps
   float32 as the storage default and makes float16 explicit. It reuses the
   existing scalar-u8/reranking and ANN snapshot mechanisms, with columnar
@@ -113,8 +115,8 @@ Local numbers below show direction only (see rules).
   kernels preserve exact scoring, ordering and cutoff behavior. DiskANN
   neighbor scoring, MMR pairwise scoring and the GPU searcher's CPU
   re-score now use the same batched exact path, with unchanged results and
-  cache statistics. The NEON kernel is implemented and independently reviewed;
-  native ARM CI acceptance, the remaining P3d lifecycle and performance
+  cache statistics. The NEON kernel is implemented, independently reviewed
+  and qualified by native ARM CI. The remaining P3d lifecycle and performance
   qualification are still outstanding. No
   production compact source writer is enabled; F1/F3/S1/S2 qualification
   remains outstanding.

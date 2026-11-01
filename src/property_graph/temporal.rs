@@ -20,6 +20,7 @@ use super::engine::{GraphBody, GraphEntry, GraphState, TemporalMutation};
 use super::{EdgeRef, selector};
 
 mod activate;
+pub(super) mod read;
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use activate::enable_temporal;
 

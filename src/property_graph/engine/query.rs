@@ -348,6 +348,7 @@ pub(super) struct Exec<'g, 'c> {
     /// The read clock when something is due at it; `None` skips
     /// every expiry check.
     expired_at: Option<u64>,
+    temporal_clock: Option<(i64, u64)>,
 }
 
 fn project(properties: &Properties, projection: &PropertyProjection) -> Properties {
@@ -377,8 +378,23 @@ impl Exec<'_, '_> {
     /// Whether the edge, or an endpoint of it, is due at the read
     /// clock.
     pub(super) fn edge_hidden(&self, edge: &GraphEdge) -> bool {
+        if let Some((as_of, clock)) = self.temporal_clock {
+            return super::temporal_visibility::visible_edge(self.graph, edge, as_of, clock)
+                .is_none();
+        }
         self.expired_at
             .is_some_and(|now| self.graph.edge_expired(edge, now))
+    }
+
+    fn edge_properties<'a>(&'a self, edge: &'a GraphEdge) -> Result<&'a Properties, GraphError> {
+        if let Some((as_of, clock)) = self.temporal_clock {
+            return super::temporal_visibility::visible_edge(self.graph, edge, as_of, clock)
+                .map(|segment| segment.map_or(&edge.properties, |segment| &segment.properties))
+                .ok_or(GraphError::InvariantViolation(
+                    "hidden temporal edge projected during read",
+                ));
+        }
+        Ok(&edge.properties)
     }
 
     pub(super) fn edge_view(&self, edge: &GraphEdge) -> Result<EdgeView, GraphError> {
@@ -402,7 +418,7 @@ impl Exec<'_, '_> {
             source_key: source.key.clone(),
             target: edge.destination,
             target_key: target.key.clone(),
-            properties: project(&edge.properties, self.projection),
+            properties: project(self.edge_properties(edge)?, self.projection),
             revision: edge.revision,
             expires_at_ms: self.graph.edge_expiry(edge.id),
         })
@@ -840,6 +856,55 @@ pub fn execute(
     limits: &GraphLimits,
     context: &ExecutionContext<'_>,
 ) -> Result<QueryResult, GraphError> {
+    execute_with_selectors(graph, query, limits, context, None)
+}
+
+/// Private slice C1 executor; paged temporal continuation and the remaining
+/// operations are deliberately unavailable until slice C2.
+#[allow(dead_code)] // The standalone engine harness has no temporal read adapter.
+pub(crate) fn execute_as_of(
+    graph: &Graph,
+    query: &GraphQuery,
+    limits: &GraphLimits,
+    context: &ExecutionContext<'_>,
+    as_of_ms: i64,
+) -> Result<QueryResult, GraphError> {
+    if !super::temporal::supported() {
+        return Err(GraphError::InvalidTemporal(
+            super::temporal::reason::CAPABILITY,
+        ));
+    }
+    match &query.op {
+        QueryOp::GetNode { .. } | QueryOp::GetEdge { .. } => {}
+        QueryOp::FindNodes { cursor: None, .. } | QueryOp::Neighbors { cursor: None, .. } => {}
+        _ => {
+            return Err(GraphError::InvalidQuery(
+                "temporal operation awaits slice C2",
+            ));
+        }
+    }
+    if query.explain {
+        return Err(GraphError::InvalidQuery("temporal explain awaits slice C2"));
+    }
+    let mut result = execute_with_selectors(
+        graph,
+        query,
+        limits,
+        context,
+        Some((as_of_ms, context.now_ms)),
+    )?;
+    // Do not issue ordinary cursors that omit the fixed T/C identity.
+    result.cursor = None;
+    Ok(result)
+}
+
+fn execute_with_selectors(
+    graph: &Graph,
+    query: &GraphQuery,
+    limits: &GraphLimits,
+    context: &ExecutionContext<'_>,
+    temporal_clock: Option<(i64, u64)>,
+) -> Result<QueryResult, GraphError> {
     let expired_at = graph.has_due(context.now_ms).then_some(context.now_ms);
     let (plan, indexes) = prepare(graph, query, limits, expired_at)?;
     if query.explain {
@@ -872,6 +937,7 @@ pub fn execute(
         },
         projection: &query.projection,
         expired_at,
+        temporal_clock,
     };
     let (mut output, cursor) = match begin {
         Ok(()) => run(&mut exec, &plan)?,
@@ -1151,7 +1217,7 @@ fn neighbors(
         let Some(edge) = graph.edge(id).filter(|edge| !exec.edge_hidden(edge)) else {
             continue;
         };
-        if !conditions_match(&edge.properties, conditions) {
+        if !conditions_match(exec.edge_properties(edge)?, conditions) {
             continue;
         }
         edges.push(exec.edge_view(edge)?);

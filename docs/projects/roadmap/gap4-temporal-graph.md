@@ -498,17 +498,40 @@ Known gaps and follow-ups (not yet tested unless stated):
 1. **Activation surface.** Activation is a gated, crate-private copy-out. The public `maintenance::enable_temporal` is proposed, not added, and production activation is not approved. Replicas of the source must be reseeded from the copy, which starts its own backup chain.
 2. **Edges created in the batch.** An edge created earlier in the same batch has no batch-start revision, so it cannot be corrected in that batch; create it with its full series.
 3. **Revisions after compaction.** Compaction and upgrade renumber temporal revisions under the existing new-lineage contract (see Persistence).
-4. **Ordinary reads.** They ignore validity and show temporal edges with empty properties until slice C. The gate hides this from users.
+4. **Ordinary reads.** Private/gated slice C1 now applies default T=C to get, find nodes and neighbors on temporal files. Traverse, shortest path and explain reject temporal reads pending C2. No production temporal reads are enabled.
 5. **Feed gaps.** The feed does not report TTL deadlines or reclaims, as in Gap 3. No surface outside Rust reports temporal changes.
 6. **Measurement.** Memory per segment and production caps are not measured, and benchmarks are unchanged.
 
 Slice C still needs:
 
-- the shared visibility predicate (T and C)
-- as-of get, neighbors, traverse, shortest path, retrieve and query text
-- bounded timeline inspection
+- C2 traversal, shortest path, retrieve and query text, all inheriting fixed T/C
 - fixed-T/C cursors and budgets
-- the remaining acceptance rows: Bounds via reads, Multiple intervals, Reads, Paging/budgets, and TTL at C before, at and after expiry independently of T
+- the remaining C2 acceptance rows: complete Reads and Paging/budgets coverage
+
+Slice C1 (unreleased, private/gated) implements:
+
+- a shared edge visibility predicate: binary segment selection at signed T,
+  edge TTL and both endpoint TTLs at the independent clock C
+- crate-private as-of get by ID/key, node get, find nodes and neighbors; node
+  metadata remains current, and selected edge properties never fall back to
+  the latest segment
+- effective `as_of_ms`, `ttl_clock_ms` and `view_sequence` metadata in private
+  results; default T=C is checked for i64 overflow, while explicit T permits
+  the full unsigned TTL clock
+- timeline inspection with explicit segment-index bounds up to 256; validity
+  is ignored, but edge and endpoint TTLs are always enforced
+
+C1 deliberately rejects cursor inputs and does not issue continuation cursors.
+Partial first pages still report truncation and examined-entry counts. C2 must
+bind resolved T/C into cursors before continuation is admitted.
+
+C1 acceptance tests exercise oracle boundary cases through actual edge reads,
+gaps and touching intervals, 256-segment reads, rejected changes without
+mutation, TTL before/equal/after expiry independently of T (including both
+endpoints and post-purge non-resurrection), bounded timelines, and equal
+immediate/reopened plain and encrypted reads. A deliberate inclusive-upper-bound
+mutation fails the oracle-backed read test; restoring half-open selection passes.
+These tests qualify C1 only, not the remaining C2 operations or release activation.
 
 Turning the gate on for release builds also waits for slice C.
 

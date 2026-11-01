@@ -784,7 +784,18 @@ impl GraphRef<'_> {
             cancel: options.cancel,
             now_ms: self.now(),
         };
-        engine::execute(self.graph, &query, &options.limits, &context).map_err(graph_error)
+        if self.db.flags & crate::format::FLAG_TEMPORAL != 0 {
+            if !super::temporal::supported() {
+                return Err(crate::Error::UnsupportedFeature(
+                    crate::format::FLAG_TEMPORAL,
+                ));
+            }
+            let as_of = super::temporal::read::resolve_as_of(self.as_of_ms, context.now_ms)?;
+            engine::execute_as_of(self.graph, &query, &options.limits, &context, as_of)
+                .map_err(graph_error)
+        } else {
+            engine::execute(self.graph, &query, &options.limits, &context).map_err(graph_error)
+        }
     }
 
     fn read<T>(

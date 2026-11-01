@@ -144,6 +144,8 @@ pub struct GraphRef<'db> {
     /// The clock set by [`GraphRef::with_clock`]; `None` reads at the
     /// current time.
     now_ms: Option<u64>,
+    /// Private temporal validity selector; independent of the TTL clock.
+    as_of_ms: Option<i64>,
 }
 
 impl<'db> GraphRef<'db> {
@@ -702,6 +704,7 @@ impl Database {
             graph,
             view_sequence: self.sequence,
             now_ms: None,
+            as_of_ms: None,
         })
     }
 

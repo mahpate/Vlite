@@ -377,15 +377,17 @@ gain. No public API, setting, error, format or wire field changes.
   only; it is not a measurement.
   DiskANN, MMR and GPU CPU-path tests additionally compare with their
   original one-pair oracle algorithms under forced portable and detected
-  AVX2 dispatch, including exact ties, signed zeros and subnormals at
+  SIMD dispatch, including exact ties, signed zeros and subnormals at
   dimensions 0 to 67, 128, 384 and 768 (end-to-end paths start at 1,
   because public validation rejects 0). DiskANN compares cache accounting
   with both a one-node and a full cache; invalid or unsupported public
   cases are exercised through private scoring fixtures, not new APIs.
   Stored and computed norms and reachable mismatched lengths are covered.
 
-Remaining P3d work:
+Native aarch64 acceptance passed on Rust 1.89.0 and stable in
+[CI run 41318163085](https://github.com/mahpate/Vlite/actions/runs/41318163085)
+at `7e3e56a2`, together with the full CI matrix. This qualifies the NEON
+kernel, not the remaining lifecycle or performance goals.
 
-1. Native aarch64 CI acceptance of the NEON kernel.
-2. Conversion, backup, restore and key-rotation coverage, DO-005
-   measurements and major-release acceptance.
+Remaining P3d work: conversion, backup, restore and key-rotation coverage,
+DO-005 measurements and major-release acceptance.
