@@ -601,3 +601,189 @@ fn readers_refuse_huge_counts_before_decoding() {
     failed.extend(mismatches(images));
     assert!(failed.is_empty(), "{failed:#?}");
 }
+
+/// `readers` of the plaintext `log` and of it encrypted, each without its
+/// last `cut` bytes.
+fn torn(log: &[u8], floor: u64, cut: usize) -> [[String; 3]; 2] {
+    let sealed = encrypted(log);
+    [
+        readers(&log[..log.len() - cut], None, floor),
+        readers(&sealed[..sealed.len() - cut], Some(&key()), floor),
+    ]
+}
+
+#[test]
+fn readers_refuse_torn_frames_beyond_replay_limits_alike() {
+    // A log that ends inside its last frame has a torn tail, which every
+    // reader tolerates only where replay reads the frame's prefix as a
+    // frame it could hold: replay checks the prefix's count, ID, length
+    // and target collection before it looks for the rest. A checksummed
+    // prefix that replay refuses is refused by every reader, however much
+    // of its body, trailer or seal is missing. No body is read here.
+    let _gate = Activation::on();
+    let (image, floor) = imaged(&graph_store());
+    let tagged = Metadata::from([("k".to_owned(), MetadataValue::Integer(1))]);
+    // Record 1 of `c` is attached; record 2 is not.
+    let put = committed(&image, |db| {
+        db.collection_mut("c")?.put(3, &[0.5, 0.25], b"p").map(drop)
+    });
+    let batch = committed(&image, |db| {
+        db.collection_mut("c")?
+            .write_batch(&[Mutation::Delete { id: 2 }])
+    });
+    let delete = committed(&image, |db| db.collection_mut("c")?.delete(2).map(drop));
+    let extended = committed(&image, |db| {
+        db.collection_mut("c")?
+            .put_with_metadata(3, &[0.5, 0.25], b"p", &tagged)
+            .map(drop)
+    });
+    let expiring = committed(&image, |db| {
+        db.collection_mut("c")?
+            .put_with_expiry(3, &[0.5, 0.25], b"p", &tagged, Some(FAR))
+            .map(drop)
+    });
+    let update = committed(&image, |db| {
+        db.collection_mut("c")?
+            .update_metadata(2, &tagged)
+            .map(drop)
+    });
+    let named = committed(&image, |db| {
+        let spec = crate::vectors::VectorSpec {
+            dimensions: 2,
+            metric: crate::DistanceMetric::SquaredL2,
+            active_version: "v1".into(),
+            history: 1,
+        };
+        db.collection_mut("c")?.configure_vector("n", spec)
+    });
+    let settings = committed(&image, |db| {
+        db.set_collection_settings("c", CollectionSettings::default())
+            .map(drop)
+    });
+    let create = format::precise_create_frame(
+        floor + 1,
+        9,
+        "later",
+        2,
+        &CollectionSettings::default(),
+        F32,
+    );
+    let dropped = committed(&with(&image, &[&create]), |db| db.drop_collection("later"));
+    let edge = committed(&image, |db| {
+        db.graph_mut("g")?
+            .create_edge(Some("f"), "b", "knows", "a", &Metadata::new())
+            .map(drop)
+    });
+    let operations = [
+        &put, &batch, &delete, &extended, &expiring, &update, &named, &settings, &create, &dropped,
+        &edge,
+    ];
+    assert_eq!(
+        operations.map(|frame| frame[4]),
+        [1, 3, 2, 4, 9, 8, 10, 7, 17, 6, 12]
+    );
+    let elsewhere = |frame: &[u8]| refit(frame, |bytes| bytes[5..7].copy_from_slice(&[7, 0]));
+    let counted = |frame: &[u8], count: u32| refit(frame, |bytes| set_u32(bytes, 24, count));
+    // The final frame of each case is torn; the frames before it are whole.
+    let cases: [(&str, Vec<Vec<u8>>, &str); 24] = [
+        ("a put", vec![put.clone()], "ok"),
+        ("a batch", vec![batch.clone()], "ok"),
+        ("a delete", vec![delete.clone()], "ok"),
+        ("an extended record", vec![extended.clone()], "ok"),
+        ("an expiring record", vec![expiring.clone()], "ok"),
+        ("a metadata update", vec![update.clone()], "ok"),
+        ("named vectors", vec![named.clone()], "ok"),
+        ("settings", vec![settings.clone()], "ok"),
+        ("a create", vec![create.clone()], "ok"),
+        ("a drop", vec![create.clone(), dropped.clone()], "ok"),
+        ("a graph frame", vec![edge.clone()], "ok"),
+        (
+            "a put of other dimensions",
+            vec![refit(&put, |bytes| {
+                set_u32(bytes, 24, 3);
+                bytes.extend_from_slice(&[0; 4]);
+            })],
+            "invalid vector or payload length",
+        ),
+        (
+            "a put in an unknown collection",
+            vec![elsewhere(&put)],
+            "record references unknown collection",
+        ),
+        (
+            "a batch beyond the limit",
+            vec![counted(&batch, MAX_BATCH_OPERATIONS as u32 + 2)],
+            "invalid batch count, reserved ID or body length",
+        ),
+        (
+            "a batch shorter than its count",
+            vec![counted(&batch, 64)],
+            "invalid batch count, reserved ID or body length",
+        ),
+        (
+            "a delete with a count",
+            vec![counted(&delete, 1)],
+            "invalid vector or payload length",
+        ),
+        (
+            "an extended record of other dimensions",
+            vec![counted(&extended, 3)],
+            "invalid extended record length",
+        ),
+        (
+            "an expiring record of other dimensions",
+            vec![counted(&expiring, 3)],
+            "invalid expiring record length",
+        ),
+        (
+            "a metadata update shorter than its length field",
+            vec![refit(&update, |bytes| bytes.truncate(PREFIX_SIZE + 2))],
+            "invalid metadata-only update length",
+        ),
+        (
+            "a metadata update in an unknown collection",
+            vec![elsewhere(&update)],
+            "metadata update references unknown collection",
+        ),
+        (
+            "named vectors with a count",
+            vec![counted(&named, 1)],
+            "invalid vector extension length",
+        ),
+        (
+            "settings beyond the limit",
+            vec![refit(&settings, |bytes| {
+                bytes.resize(PREFIX_SIZE + format::MAX_SETTINGS_BLOB + 1, 0)
+            })],
+            "invalid collection frame fields",
+        ),
+        (
+            "a drop with a body",
+            vec![create.clone(), refit(&dropped, |bytes| bytes.push(0))],
+            "invalid collection frame fields",
+        ),
+        (
+            "a graph frame beyond the entry limit",
+            vec![counted(&edge, 4097)],
+            "invalid graph frame count, reserved ID or body length",
+        ),
+    ];
+    let mut failed = Vec::new();
+    for (name, frames, expected) in cases {
+        let after_prefix = frames.last().expect("a frame to tear").len() - PREFIX_SIZE;
+        let frames: Vec<&[u8]> = frames.iter().map(Vec::as_slice).collect();
+        let log = with(&image, &frames);
+        // A cut inside the trailer, in the middle of what follows the
+        // prefix, and right after the prefix of a plaintext frame (an
+        // encrypted frame keeps its seal's length more).
+        for cut in [1, after_prefix.div_ceil(2), after_prefix] {
+            let name = format!("{name}, {cut} bytes cut");
+            failed.extend(mismatches([(
+                name.as_str(),
+                torn(&log, floor, cut),
+                expected,
+            )]));
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+}

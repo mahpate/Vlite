@@ -1607,6 +1607,58 @@ pub(crate) fn checked_body_len(
     Ok(payload_len)
 }
 
+/// Checks the prefix of a frame that `frame_allowed` admits in a log of
+/// `version` as replay checks it before reading its body, and so before it
+/// treats a short final frame as a torn tail: a graph frame's limits
+/// (`property_graph::frame::check_prefix`), the live collection that a
+/// frame writing records or metadata targets, whose dimensions and stored
+/// precision `target` gives, and the operation's limits
+/// (`checked_body_len`). Returns the body length and the target's
+/// dimensions and precision (no dimensions for a metadata update or named
+/// vectors; neither for a frame with no target). Replay, the readers that
+/// check a precision log without replaying it
+/// (`compact::ImageCheck::limits`) and [`check_frame_writes`] share it, so
+/// they refuse the same prefixes whether or not the body follows.
+pub(crate) fn check_frame_prefix(
+    prefix: &[u8],
+    version: u32,
+    offset: u64,
+    target: impl Fn(u16) -> Option<(usize, Option<Precision>)>,
+) -> Result<(usize, usize, Option<Precision>)> {
+    let operation = prefix[4];
+    let collection = u16_at(prefix, 5);
+    let id = u64_at(prefix, 16);
+    let count = u32_at(prefix, 24) as usize;
+    let payload_len = u32_at(prefix, 28) as usize;
+    if matches!(operation, OP_GRAPH | OP_GRAPH_SNAPSHOT) {
+        crate::property_graph::frame::check_prefix(
+            operation == OP_GRAPH_SNAPSHOT,
+            id,
+            count,
+            payload_len,
+            offset,
+        )?;
+    }
+    let (dimensions, precision) = match operation {
+        1..=4 | 9 | OP_RECORD_BLOCK => target(collection)
+            .ok_or_else(|| corrupt(offset, "record references unknown collection"))?,
+        8 | 10 => target(collection)
+            .map(|(_, precision)| (0, precision))
+            .ok_or_else(|| corrupt(offset, "metadata update references unknown collection"))?,
+        _ => (0, None),
+    };
+    let body_len = checked_body_len(
+        version,
+        operation,
+        id,
+        count,
+        payload_len,
+        dimensions,
+        offset,
+    )?;
+    Ok((body_len, dimensions, precision))
+}
+
 /// Whether a file of `version` with header `flags` may hold the operation of
 /// `prefix`, with its reserved bytes clear. Advance and time-anchor frames
 /// have their own checks and are not covered.
@@ -1692,6 +1744,9 @@ pub(crate) fn next_checked_frame<R: Read + Seek>(
     }
     if let Some(check) = check {
         check.prefix(&prefix, offset)?;
+        // Replay refuses a prefix beyond its frame's limits before it
+        // treats a short final frame as a torn tail; so do these readers.
+        check.limits(&prefix, offset)?;
     }
     let operation = prefix[4];
     let count = u32_at(&prefix, 24);
@@ -1956,16 +2011,13 @@ fn load_inner<R: Read + Seek>(
         };
         let id = u64_at(&prefix, 16);
         let count = u32_at(&prefix, 24) as usize;
-        let payload_len = u32_at(&prefix, 28) as usize;
-        if matches!(operation, OP_GRAPH | OP_GRAPH_SNAPSHOT) {
-            crate::property_graph::frame::check_prefix(
-                operation == OP_GRAPH_SNAPSHOT,
-                id,
-                count,
-                payload_len,
-                offset,
-            )?;
-        }
+        let (body_len, target_dimensions, _) =
+            check_frame_prefix(&prefix, version, offset, |collection| {
+                loaded
+                    .collections
+                    .get(&collection)
+                    .map(|collection| (collection.dimensions, None))
+            })?;
         // A snapshot loads into an empty graph state: before any graph
         // frame, unless it continues the snapshot being read.
         let graph_started = loaded
@@ -1975,35 +2027,11 @@ fn load_inner<R: Read + Seek>(
         if operation == OP_GRAPH_SNAPSHOT && snapshot.is_none() && graph_started {
             return Err(corrupt(offset, "invalid graph snapshot"));
         }
-        let target_dimensions =
-            if operation <= 4 || operation == 9 || operation == OP_RECORD_BLOCK {
-                loaded
-                    .collections
-                    .get(&collection_id)
-                    .ok_or_else(|| corrupt(offset, "record references unknown collection"))?
-                    .dimensions
-            } else if operation == 8 || operation == 10 {
-                loaded.collections.get(&collection_id).ok_or_else(|| {
-                    corrupt(offset, "metadata update references unknown collection")
-                })?;
-                0
-            } else {
-                0
-            };
         // Records are restated before every graph frame, so no attachment
         // can refer to them yet.
         if operation == OP_RECORD_BLOCK && graph_started {
             return Err(corrupt(offset, "invalid record block"));
         }
-        let body_len = checked_body_len(
-            version,
-            operation,
-            id,
-            count,
-            payload_len,
-            target_dimensions,
-            offset,
-        )?;
         let frame_len = (PREFIX_SIZE + body_len + seal + FOOTER_SIZE) as u64;
         if remaining < frame_len {
             loaded.incomplete_bytes = remaining + anchor_len;
@@ -2605,10 +2633,10 @@ pub(crate) struct Writes {
 /// Checks the verified frame `frame` (at `offset`) of a `FLAG_PRECISION`
 /// log of `version` as replay checks it before applying it, for readers
 /// that do not replay (the change feed and log export, P3a), and returns
-/// what it writes. As replay does, it first refuses a frame that writes
-/// into a collection that is not live or whose prefix fields exceed its
-/// operation's limits (`checked_body_len`), so no count is decoded or
-/// allocated beyond them; then it decodes the body as replay decodes it:
+/// what it writes. As replay does, it first refuses a frame whose prefix
+/// targets a collection that is not live or exceeds its operation's limits
+/// ([`check_frame_prefix`]), so no count is decoded or allocated beyond
+/// them; then it decodes the body as replay decodes it:
 /// primary puts and deletes, batches and import chunks, settings, metadata
 /// updates of records that `exists`, expiry markers, named vectors of
 /// records that `exists`, record blocks restating checkpoint `floor`, and
@@ -2627,26 +2655,8 @@ pub(crate) fn check_frame_writes(
     let operation = frame.operation;
     let collection = frame.collection;
     let count = frame.count as usize;
-    let (dimensions, precision) = match operation {
-        1..=4 | 9 | OP_RECORD_BLOCK => target(collection)
-            .ok_or_else(|| corrupt(offset, "record references unknown collection"))?,
-        8 | 10 => target(collection)
-            .map(|(_, precision)| (0, precision))
-            .ok_or_else(|| corrupt(offset, "metadata update references unknown collection"))?,
-        _ => (0, None),
-    };
-    if matches!(operation, 1..=10 | OP_RECORD_BLOCK) {
-        let payload_len = u32_at(&frame.plain, 28) as usize;
-        checked_body_len(
-            version,
-            operation,
-            frame.id,
-            count,
-            payload_len,
-            dimensions,
-            offset,
-        )?;
-    }
+    let (_, dimensions, precision) =
+        check_frame_prefix(&frame.plain[..PREFIX_SIZE], version, offset, &target)?;
     let body = frame.body();
     let mut writes = Writes::default();
     // Decodes `count` batch entries into `collection` and checks their

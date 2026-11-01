@@ -590,6 +590,24 @@ impl ImageCheck {
         Ok(())
     }
 
+    /// Checks a frame prefix that `prefix` accepted, in a precision log, as
+    /// replay checks it before reading the body or treating a short final
+    /// frame as a torn tail (`format::check_frame_prefix`): a graph frame's
+    /// limits, the live collection a record or metadata frame targets, and
+    /// the operation's limits. The collections are those of the frames
+    /// before it, which `frame` followed.
+    pub(crate) fn limits(&self, prefix: &[u8; PREFIX_SIZE], offset: u64) -> Result<()> {
+        if !self.precise {
+            return Ok(());
+        }
+        crate::format::check_frame_prefix(prefix, self.version, offset, |id| {
+            self.described
+                .get(&id)
+                .map(|live| (live.dimensions, live.precision))
+        })
+        .map(drop)
+    }
+
     /// Checks the verified (and decrypted) body of any frame whose prefix
     /// `prefix` accepted, for readers that do not replay the log: op-16
     /// blocks (`block`); and in a precision log every frame as full replay
