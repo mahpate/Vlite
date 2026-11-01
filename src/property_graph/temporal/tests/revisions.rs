@@ -20,13 +20,13 @@ use crate::property_graph::engine::{GraphEntry, decode_body, encode_body};
 use crate::{CreateOptions, Database, EncryptionKey, Error, Expected, ReplicaFollower, Result};
 use crate::{logops, maintenance};
 
-fn key() -> EncryptionKey {
+pub(super) fn key() -> EncryptionKey {
     EncryptionKey::from_bytes([9; 32])
 }
 
 /// A temporal copy `t.vlite` in `dir` of a populated file encrypted under
 /// `key`.
-fn temporal_at(dir: &Path, key: Option<&EncryptionKey>) -> PathBuf {
+pub(super) fn temporal_at(dir: &Path, key: Option<&EncryptionKey>) -> PathBuf {
     let source = dir.join("s.vlite");
     let options = CreateOptions {
         encryption: key.cloned(),
@@ -40,7 +40,7 @@ fn temporal_at(dir: &Path, key: Option<&EncryptionKey>) -> PathBuf {
     path
 }
 
-fn open(path: &Path, key: Option<&EncryptionKey>) -> Database {
+pub(super) fn open(path: &Path, key: Option<&EncryptionKey>) -> Database {
     match key {
         Some(key) => Database::open_encrypted(path, key).unwrap(),
         None => Database::open(path).unwrap(),
@@ -50,7 +50,7 @@ fn open(path: &Path, key: Option<&EncryptionKey>) -> Database {
 /// Sets the revision of every tag-65 entry in the `operation` frames of
 /// the log `bytes` to `revision`, resealing the frames in place (same
 /// length); returns how many entries it set.
-fn set_revisions(
+pub(super) fn set_revisions(
     bytes: &mut [u8],
     key: Option<&EncryptionKey>,
     operation: u8,
@@ -91,7 +91,7 @@ fn set_revisions(
 
 /// The feed of the log `bytes` after `cursor`, with or without temporal
 /// changes.
-fn feed(
+pub(super) fn feed(
     bytes: &[u8],
     key: Option<&EncryptionKey>,
     cursor: &FeedCursor,
@@ -101,7 +101,7 @@ fn feed(
         .map(|(batch, _)| batch)
 }
 
-fn is_corrupt<T>(result: Result<T>) -> bool {
+pub(super) fn is_corrupt<T>(result: Result<T>) -> bool {
     matches!(result, Err(Error::Corrupt { .. }))
 }
 
@@ -247,7 +247,7 @@ fn snapshot_log(dir: &Path, key: Option<&EncryptionKey>) -> (Vec<u8>, FeedCursor
 }
 
 /// The log `bytes` with the temporal flag cleared from its header.
-fn without_capability(bytes: &[u8]) -> Vec<u8> {
+pub(super) fn without_capability(bytes: &[u8]) -> Vec<u8> {
     let mut bytes = bytes.to_vec();
     let flags = u16::from_le_bytes([bytes[26], bytes[27]]);
     assert_ne!(flags & FLAG_TEMPORAL, 0);

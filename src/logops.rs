@@ -374,15 +374,19 @@ pub(crate) fn read_segment<R: Read + Seek>(
                     "invalid operation or reserved record bytes",
                 ));
             }
-            // Gap 4: a graph frame passes the frame-context and capability
-            // checks the feeds share, even where the cursor or size cut
-            // below skips it; the decoded body is dropped per frame.
-            None if frame.operation == crate::property_graph::engine::codec::OP_GRAPH
-                || frame.operation == format::OP_GRAPH_SNAPSHOT =>
-            {
-                crate::property_graph::temporal::decode_logged(header.flags, &frame, at)?;
-            }
             None => {}
+        }
+        // Gap 4: a graph frame passes the frame-context and capability
+        // checks the feeds share, even where the cursor or size cut below
+        // skips it; the decoded body is dropped per frame. Only a precision
+        // image check (flag 32, which the header admits only with flag 16)
+        // replays graph frames with those checks itself; without precision
+        // a compact image check (flag 16) checks only the image's blocks.
+        if (frame.operation == crate::property_graph::engine::codec::OP_GRAPH
+            || frame.operation == format::OP_GRAPH_SNAPSHOT)
+            && header.flags & format::FLAG_PRECISION == 0
+        {
+            crate::property_graph::temporal::decode_logged(header.flags, &frame, at)?;
         }
         head = head.max(frame.sequence);
         let anchor = pending_anchor.take();

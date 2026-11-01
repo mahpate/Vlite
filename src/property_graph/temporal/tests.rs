@@ -187,6 +187,7 @@ fn oracle_fixture_matches_the_engine_model() {
 // --- Header capability ----------------------------------------------------
 
 mod activate;
+mod exports;
 mod revisions;
 mod writes;
 

@@ -284,7 +284,9 @@ the user-approved copy-out design, implemented as a gated, private path in
 round 2, which also fixes two medium findings from the static re-review (A,
 B); see [Review fixes, round 2](#review-fixes-round-2). Round 3 applies the
 same frame checks to non-precision log export; see
-[Review fixes, round 3](#review-fixes-round-3). Everything waits for
+[Review fixes, round 3](#review-fixes-round-3). Round 4 extends them to
+compact images without precision and audits every graph mode; see
+[Review fixes, round 4](#review-fixes-round-4). Everything waits for
 independent execution review. Slice C (reads) is not started, so no user can
 observe validity yet and every release build refuses the capability.
 
@@ -402,7 +404,7 @@ Persistence:
   - `enable_graph` refuses a graph-enabled source, so it never meets temporal state. `strip_graph` removes all graph state, temporal state included, and drops flag 64.
   - Copy-out activation copies every frame, so it keeps every revision.
   - A tag-65 revision is checked in the frame context that replay, both feeds, log export and the precision image check share (`frame::decode_frame`): zero in op 12, `1..=` the snapshot sequence in op 15.
-  - Readers that do not replay a frame (both feeds and non-precision log export) decode it through `temporal::decode_logged`. It also refuses a temporal entry in a log without flag 64, as replay does. Export checks every graph frame, including frames before its cursor or after its size cut.
+  - Readers that do not replay a frame (both feeds, and log export of any log without flag 32, compact or not) decode it through `temporal::decode_logged`. It also refuses a temporal entry in a log without flag 64, as replay does. Export checks every graph frame, including frames before its cursor or after its size cut.
   - In a precision image, the revision supplement must equal each temporal edge's restated revision. Replay (`restore_revisions`) and the image check (`Coverage`) both enforce this. Nodes and ordinary edges still take the supplement's revision.
   - Ordinary edges and nodes in non-precision checkpoints still take the checkpoint sequence. That predates Gap 4 and is out of its scope.
 
@@ -428,6 +430,7 @@ Coverage added in slice B (all `cargo test --lib`):
 | Reopen | `writes::temporal_writes_need_a_file_copied_out_with_the_capability`, `state::temporal::tests::snapshot_restates_series_and_equals_replay`; refusal when support is off |
 | Activation (copy-out) | `activate::a_copy_keeps_every_frame_under_a_new_lineage_and_the_source_is_untouched`, `activate::activation_refuses_without_publishing_anything`, `activate::publication_faults_never_leave_a_partial_copy` (plain and encrypted), `activate::an_encrypted_copy_is_resealed_under_the_same_key`, `activate::backups_and_restore_continue_on_both_sides`, `activate::replicas_follow_their_own_lineage_and_reseed_from_the_copy`, `activate::a_directory_store_copies_out_to_a_single_temporal_file`, `activate::a_precision_image_copies_out_with_its_catalog` |
 | Revision context | `revisions::an_ordinary_frame_never_restates_a_revision`, `revisions::a_snapshot_revision_stays_within_its_sequence`, `revisions::a_log_without_the_capability_holds_no_temporal_entry` (plain and encrypted; replay, both feeds, and closed and open log export at cursors before and after the bad frame, whole and size-cut), `revisions::a_precision_supplement_must_match_a_temporal_revision`, `state::temporal::tests::snapshot_restates_series_and_equals_replay` |
+| Graph modes | `exports::every_graph_mode_exports_only_valid_temporal_frames`: history, compact without precision, and precision images, plain and encrypted. Each corrupt case (op-12 revision 1, snapshot revision 0 or above its sequence, flag 64 cleared) is refused by replay, both feeds, and closed-file, open-log and `Database::export_log` export at four cursors, whole and cut at one byte (648 refusals). Valid logs export the same verbatim frames on all three paths |
 | Revisions | `state::temporal::tests::a_snapshot_keeps_temporal_revisions`, `writes::temporal_revisions_survive_conversion_checkpoints_and_reopen` (conversion, checkpoint, reopen; compaction renumbers) |
 | Compaction / Directory checkpoint | `writes::temporal_state_survives_compaction_conversion_and_checkpoints`, `writes::a_precision_image_keeps_series_and_revisions` (P2b snapshot load) |
 | Encryption | `writes::encrypted_temporal_files_round_trip` |
@@ -469,7 +472,7 @@ Shared-file hooks, each marked `// Gap 4:`:
 | `src/compact/catalog/tests/peak.rs` | round 2 (A) | test call passes `Some(u64_at(frame, 8))` (precision owner's test) |
 | `src/compact/mod.rs` | round 2 (B) | `Coverage::temporal`: the snapshot's temporal `(edge, revision)` pairs, compared with the revision run |
 | `src/property_graph/mod.rs` | round 2 | `write_graph_batch` refuses temporal operations before planning; the `commit_graph` header hook is removed |
-| `src/logops.rs` | round 3 (A) | `read_segment` decodes each op-12 and op-15 frame of a non-precision log with `temporal::decode_logged`, before the cursor and size cut |
+| `src/logops.rs` | round 3 (A), round 4 | `read_segment` decodes each op-12 and op-15 frame of a log without flag 32 with `temporal::decode_logged`, after any compact image check and before the cursor and size cut |
 | `src/property_graph/feed.rs` | round 3 (A) | `FeedGraphs::frame` decodes with `temporal::decode_logged`; its own capability check is removed (the `capable` field became `flags`) |
 
 The precision baseline `5080b28d` (`SnapshotBuilder`, `PendingSnapshot`,
@@ -574,11 +577,14 @@ Turning the gate on for release builds also waits for slice C.
 17. Revision context: `decode_frame` takes the op-15 sequence (`None` for
     op 12), so every reader applies `revision_fits` to tag 65 the same
     way. Replay and snapshot load reuse the same function. Readers that do
-    not replay a frame, both feeds and non-precision log export, decode it
-    through `temporal::decode_logged`, which adds the capability check that
-    replay applies through `adopt`. Export decodes every graph frame, even
-    before its cursor: a valid log exports byte-identically, and only a log
-    that replay and the feeds already refuse is newly refused.
+    not replay a frame, both feeds and log export of any log without flag
+    32 (compact or not), decode it through `temporal::decode_logged`, which
+    adds the capability check that replay applies through `adopt`. A
+    precision image check (flags 16 and 32) replays graph frames with the
+    same decoder and `adopt`, so precision export does not decode twice.
+    Export decodes every graph frame, even before its cursor: a valid log
+    exports byte-identically, and only a log that replay and the feeds
+    already refuse is newly refused.
 
 ### Review fixes, round 1
 
@@ -615,6 +621,38 @@ the end of the log. It now also decodes each graph frame and drops the
 body before the next one, so export memory stays bounded by one frame.
 Legacy logs with corrupt graph bodies are newly refused, as replay and the
 feeds already refused them. The committed state of round 2 is `a79a8939`.
+
+### Review fixes, round 4
+
+The execution re-review of `4ed8bca2` closed blockers 1 to 5 and finding B,
+and passed the non-compact matrix, but found finding A still open for
+compact images without precision.
+
+| Finding | Fix | Fail-first evidence (before the fix) |
+|---|---|---|
+| A, medium: log export skipped graph-frame checks in a compact image without precision (flag 16 without 32) | `ImageCheck` exists for every flag-16 log, but it replays graph frames only with flag 32; round 3 decoded them only without an image check. `read_segment` now runs any image check first, unchanged (table, derived blocks, partitions, end digest). Then it decodes each op-12 and op-15 frame with `temporal::decode_logged` whenever the header lacks flag 32. Precision export is unchanged and gains no second decode | `exports::every_graph_mode_exports_only_valid_temporal_frames` on `4ed8bca2`: 192 of 648 refusals missed. All were compact-without-precision exports: 2 keys, 4 corrupt cases, 4 cursors, 2 cuts and 3 export paths. Replay and both feeds refused every case in every mode, and history and precision exports refused every case. Valid logs exported identically on all three paths in every mode |
+
+Graph-mode audit of log export. The header refuses flag 16 without flag 8,
+flag 32 without flag 16, and flag 64 without the graph flag, so these are
+the graph modes a reader can meet. Each runs with or without flag 64 and
+with or without encryption:
+
+| Header | Image check | Graph-frame checks in export |
+|---|---|---|
+| no 16 (plain log or history image) | none | `decode_logged` (round 3) |
+| 16 without 32 (compact image) | blocks only | `decode_logged` after the image check (round 4) |
+| 16 and 32 (precision image) | replays graph frames | `ImageCheck::frame`: `decode_frame` with the frame context, `adopt` for the capability |
+
+Replay and the feeds decode every graph frame themselves in every mode.
+`Database::export_log`, `export_log_segment`, replicas and the server's
+log export all cut segments with `read_segment`. The fixture builds a
+compact image from a valid history image: a capability table with one
+declared derived kind after the collection frames, one derived block, and
+an end block over every image frame's prefix. Replay, the temporal feed
+and all three exports accept it before any mutation. The other feed refuses
+a temporal log at its first temporal entry with `UnsupportedFeature(64)`.
+For the corrupt op-12 case that is the image's valid entry, which comes
+first. The committed state of round 3 is `4ed8bca2`.
 
 ### Activation publication (decided: copy-out)
 
