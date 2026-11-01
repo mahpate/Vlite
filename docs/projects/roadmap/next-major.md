@@ -88,6 +88,14 @@ Local numbers below show direction only (see rules).
   remove expired entities as one computed entry, so the 4,096-operation
   limit is unaffected. Files that do not use expiry keep their encoding.
   REST, gRPC and MCP wait for the OpenAPI review.
+- **Gap 4, temporal graph:** private model and persistence slices A and B
+  are implemented, independently reviewed and integrated, but unreleased
+  ([plan](gap4-temporal-graph.md)). They preserve atomic writes, TTL and
+  revisions across replay, feeds, export and maintenance. Explicit copy-out
+  leaves the source untouched and creates a new lineage requiring replica
+  reseeding. Temporal reads (slice C), public activation and production
+  qualification remain outstanding; production builds still refuse the
+  temporal capability.
 - **Speed P3, compact vectors:** the [design](p3-compact-vectors.md) keeps
   float32 as the storage default and makes float16 explicit. It reuses the
   existing scalar-u8/reranking and ANN snapshot mechanisms, with columnar
@@ -95,7 +103,10 @@ Local numbers below show direction only (see rules).
   an opt-in candidate, not an unmeasured new default. The private binary16
   conversion and primary-dense codec are implemented and reviewed, behind
   a test-only activation gate. Private precision-descriptor publication and
-  transport validation are also implemented and reviewed. The
+  transport validation are also implemented and reviewed. Private commit-time
+  canonicalization is now independently reviewed and integrated: complete
+  batch validation precedes copying, and immediate and reopened values agree.
+  Float32 remains unchanged. The
   [API review](p3-precision-api.md) still holds public enablement pending
   complete read/write/maintenance integration. The first exact-SIMD slice
   is implemented, reviewed and integrated, but unreleased: portable and AVX2
@@ -127,12 +138,10 @@ Local numbers below show direction only (see rules).
   peak or whole-query memory; exhaustion falls back to an exact scan.
   Persisted writer integration, ANN optimization, compression, serving and
   F7/F8/S5 qualification remain outstanding.
-- **Parallel designs:** [temporal graphs](gap4-temporal-graph.md) and
-  [serving](serving-contract.md) now have implementation boundaries and
-  acceptance matrices. They are plans, not shipped capabilities. Temporal
-  validity retains closed intervals but does not restore TTL-deleted data.
-  Approximate search does not acquire an exact top-k guarantee.
-  Serving schemas remain proposals, not approved wire changes.
+- **Serving design:** [serving](serving-contract.md) has implementation
+  boundaries and acceptance matrices, not shipped capabilities. Approximate
+  search does not acquire an exact top-k guarantee. Serving schemas remain
+  proposals, not approved wire changes.
 - **Further design proposals:** [agent memory](gap1-agent-memory.md) defines
   the embedded operations and their prerequisites; [scale-out](scale-out.md)
   compares branching, object storage and replication. Both received source

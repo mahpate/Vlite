@@ -7,8 +7,10 @@
 //! applying every entry with per-entry undo, adjacency insertion and schema
 //! checks. The result equals replaying the same bodies with
 //! [`GraphState::apply_at`]; anything a canonical writer cannot produce is
-//! rejected.
+//! rejected. Gap 4: a temporal edge's `PutEdge` also restates its revision,
+//! which only a snapshot accepts, so the edge keeps it.
 
+use super::super::codec::TemporalEntry;
 use super::*;
 
 /// How far the stream of the graph being loaded has progressed; entries
@@ -107,7 +109,8 @@ impl GraphState {
     /// Restores the original revisions of graph `graph`'s nodes and edges,
     /// which its snapshot bodies loaded at the image sequence (P3a kind 5).
     /// The (ID, revision) pairs list exactly its nodes and then its edges
-    /// in ascending ID order.
+    /// in ascending ID order. A temporal edge keeps the revision its own
+    /// entry restated, which must equal its pair's (Gap 4).
     pub fn restore_revisions(
         &mut self,
         graph: GraphId,
@@ -128,6 +131,15 @@ impl GraphState {
         for (edge, &(id, revision)) in graph.edges.values_mut().zip(edges) {
             if edge.id != EdgeId(id) {
                 return Err(MISMATCH);
+            }
+            // Gap 4: a temporal edge's own snapshot entry restated its
+            // revision, which the supplement must match (the image check
+            // compares them alike).
+            if graph.segments.contains_key(&edge.id) {
+                if edge.revision != revision {
+                    return Err(MISMATCH);
+                }
+                continue;
             }
             edge.revision = revision;
         }
@@ -203,25 +215,7 @@ impl GraphState {
                 key,
                 properties,
             } if phase <= Phase::Edges => {
-                if graph
-                    .edges
-                    .last_key_value()
-                    .is_some_and(|(last, _)| *last >= edge_id)
-                {
-                    return Err(GraphError::EdgeIdUnavailable(edge_id));
-                }
-                for endpoint in [source, destination] {
-                    if !graph.nodes.contains_key(&endpoint) {
-                        return Err(GraphError::NodeNotFound(endpoint));
-                    }
-                }
-                if let Some(key) = &key
-                    && graph.edge_keys.contains_key(key)
-                {
-                    return Err(GraphError::EdgeKeyExists(key.clone()));
-                }
-                new_id(&mut graph.next_edge_id, edge_id.0)?;
-                graph.push_edge(GraphEdge {
+                graph.load_edge(GraphEdge {
                     id: edge_id,
                     key,
                     source,
@@ -229,7 +223,42 @@ impl GraphState {
                     destination,
                     properties,
                     revision: sequence,
-                });
+                })?;
+                Ok(Phase::Edges)
+            }
+            // Gap 4: a temporal edge restated with its whole series and its
+            // revision; it needs the capability, which a snapshot that has
+            // one implies in a build that supports it.
+            GraphEntry::Temporal(TemporalEntry::PutEdge {
+                edge_id,
+                revision,
+                source,
+                destination,
+                relationship,
+                key,
+                segments,
+            }) if phase <= Phase::Edges => {
+                if !super::super::temporal::supported() {
+                    return Err(GraphError::InvalidTemporal(
+                        super::super::temporal::reason::CAPABILITY,
+                    ));
+                }
+                if !super::super::codec::revision_fits(revision, Some(sequence)) {
+                    return Err(NON_CANONICAL);
+                }
+                super::super::temporal::validate_series(&segments)?;
+                super::super::codec::check_series_bytes(&relationship, key.as_deref(), &segments)?;
+                graph.load_edge(GraphEdge {
+                    id: edge_id,
+                    key,
+                    source,
+                    relationship,
+                    destination,
+                    properties: Properties::new(),
+                    revision,
+                })?;
+                graph.segments.insert(edge_id, segments);
+                self.temporal = true;
                 Ok(Phase::Edges)
             }
             // Gap 3: a deadline directly follows the entity it belongs to.
@@ -326,6 +355,31 @@ impl GraphState {
 }
 
 impl Graph {
+    /// Adds a snapshot edge: IDs strictly ascending, live endpoints and a
+    /// unique key.
+    fn load_edge(&mut self, edge: GraphEdge) -> Result<(), GraphError> {
+        if self
+            .edges
+            .last_key_value()
+            .is_some_and(|(last, _)| *last >= edge.id)
+        {
+            return Err(GraphError::EdgeIdUnavailable(edge.id));
+        }
+        for endpoint in [edge.source, edge.destination] {
+            if !self.nodes.contains_key(&endpoint) {
+                return Err(GraphError::NodeNotFound(endpoint));
+            }
+        }
+        if let Some(key) = &edge.key
+            && self.edge_keys.contains_key(key)
+        {
+            return Err(GraphError::EdgeKeyExists(key.clone()));
+        }
+        new_id(&mut self.next_edge_id, edge.id.0)?;
+        self.push_edge(edge);
+        Ok(())
+    }
+
     /// [`Graph::insert_edge`] without keeping adjacency lists sorted; the
     /// caller sorts them once all edges are in.
     fn push_edge(&mut self, edge: GraphEdge) {
@@ -363,7 +417,9 @@ mod tests {
     use super::*;
 
     /// The canonical snapshot of `state` in bodies of at most `chunk`
-    /// entries, in the order the checkpoint image writer emits them.
+    /// entries, in the order the checkpoint image writer emits them. The
+    /// states here have no temporal edge, whose restated revision only a
+    /// snapshot (not replay) accepts.
     fn snapshot_bodies(state: &GraphState, chunk: usize) -> Vec<GraphBody> {
         let mut bodies = Vec::new();
         for graph in state.graphs() {
@@ -390,14 +446,7 @@ mod tests {
                 }
             }
             for edge in graph.edges() {
-                entries.push(GraphEntry::PutEdge {
-                    edge_id: edge.id,
-                    source: edge.source,
-                    destination: edge.destination,
-                    relationship: edge.relationship.clone(),
-                    key: edge.key.clone(),
-                    properties: edge.properties.clone(),
-                });
+                entries.push(graph.edge_snapshot_entry(edge, 0));
                 if let Some(deadline) = graph.edge_expiry(edge.id) {
                     entries.push(GraphEntry::EdgeExpiry {
                         edge_id: edge.id,

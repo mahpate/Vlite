@@ -234,6 +234,25 @@ normalized request (with every output) and work statistics. There are no cursors
 or payload access and no whole-graph mode. See the
 [Gap 5 design](projects/roadmap/gap5-graph-algorithms.md).
 
+## Temporal edges (Rust, unreleased)
+
+Gap 4 slices A and B are implemented, independently reviewed and integrated, but unreleased. Each temporal edge has an ID, key, type and endpoints like any edge, plus an ordered series of at most 256 non-overlapping validity segments `[valid_from, valid_to)` in milliseconds. Each segment carries its own properties. Production builds refuse temporal operations and temporal files with `UnsupportedFeature(64)`; temporal reads (slice C), public activation and production qualification remain outstanding. REST, gRPC, MCP, query text, the CLI, the bindings and the dashboard do not expose them.
+
+- **Writes.** `GraphOp::Temporal(TemporalOp)` operations sit in an ordinary batch: create, promote an ordinary edge, append, replace, close and remove a segment.
+  - Segments are addressed by their exact bounds.
+  - Promotion and every correction need `Expected::Revision`. Within one batch the check uses the revision from before the batch, even after an earlier ordinary operation of the batch changed the edge, so closing a fact and appending its successor is one atomic supersession.
+  - Ordinary patches of a temporal edge fail.
+  - Each temporal operation counts toward the 4,096-operation and 16 MiB batch limits, and every change, closing included, must leave the series within one 16 MiB graph body. A failure rolls back the whole batch, including TTL cleanup.
+- **Format.** Temporal files carry the required header flag 64, and older builds refuse them. Temporal entries use graph entry tags 65 to 69.
+  - **Activation.** A store gains the flag only by an explicit copy-out into a new database with a new lineage. The source is never modified. Its backups and point-in-time restore keep working, and its replicas are reseeded from the copy. The copy keeps every frame, so content, absolute TTL deadlines, revisions, precision and encryption (under a fresh salt) are unchanged. This reviewed path remains crate-private and gated; public activation and production qualification are not approved.
+  - In a file without the flag, a batch with a temporal operation fails with `UnsupportedFeature(64)` before planning and writes nothing. No write enables the flag in place, so legacy files never change. Directory stores inherit the flag by conversion.
+  - Temporal edge revisions survive reopen, directory checkpoints, conversion, copy-out activation and precision images. In a precision image the revision supplement must match each temporal edge's restated revision. Compaction and upgrade start a new lineage and renumber them like every other revision. `strip_graph` removes temporal state with the rest of the graph.
+  - Every reader checks a temporal revision in its frame context: zero in ordinary graph frames, and between 1 and the snapshot sequence in snapshots. Replay, the feeds and log export also refuse a temporal entry in a file without flag 64 as corrupt. Log export checks every graph frame, with or without a compact image, including frames before its cursor.
+- **TTL.** Closing a segment keeps history. TTL destroys it: node expiry cascades to every incident edge, edge expiry removes the whole series, and nothing reclaimed comes back.
+- **Feed.** `Database::temporal_changes_after` reports `GraphChange::Temporal` changes in commit order. Every other feed refuses a log with temporal changes rather than omit them.
+
+See the [Gap 4 design](projects/roadmap/gap4-temporal-graph.md) for the contract, allocations and known gaps.
+
 ## Surfaces
 
 | Surface | What it offers |

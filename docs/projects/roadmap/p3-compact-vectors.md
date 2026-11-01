@@ -1,9 +1,10 @@
 # Speed P3: compact vectors
 
-**Status:** design, not performance-qualified. P3a has started: float16
-conversion and the primary dense rows codec are implemented privately behind
+**Status:** in progress, not performance-qualified. Private float16 conversion,
+the primary dense rows codec, descriptor publication and commit-time
+canonicalization are implemented, independently reviewed and integrated behind
 a test-only gate ([P3a progress](#p3a-progress-private-dense-rows-codec)); no
-setting, writer or reader enables them. Builds on
+production setting, writer or reader enables them. Builds on
 [P2](p2-directory-store.md); goals are
 [F1/F3/S1/S2](../performance/storage-goals.md). The precision choice is resolved
 below; S1's conflicting default-size acceptance criterion is not waived.
@@ -232,8 +233,9 @@ setting, error or format change exists yet.
 
 ## P3a progress: commit-time canonicalization (private, unreleased)
 
-Implemented in `src/lib.rs` (`validate_stored`, `round_stored`), reached
-only through a privately opted-in precision store. This is P3a item 2's
+Implemented, independently reviewed and integrated in `src/lib.rs`
+(`validate_stored`, `round_stored`), reached only through a privately opted-in
+precision store. This is P3a item 2's
 canonicalization, not P3a completion. No public API, setting, error, format
 or wire field changes.
 

@@ -221,6 +221,11 @@ is also implemented and reviewed, but unreleased: conservative in-memory pruning
 preserves exact results and falls back to scanning at its retained-heap budget.
 Persisted summaries and further ANN/serving work remain outstanding.
 
+Private [precision writes](docs/projects/roadmap/p3-compact-vectors.md) and the
+[temporal graph model and persistence](docs/projects/roadmap/gap4-temporal-graph.md)
+are implemented and independently reviewed. Both remain gated: temporal reads,
+public activation and production qualification are still outstanding.
+
 These plans are proposals under review, not commitments:
 
 - [Storage and speed goals](docs/projects/performance/storage-goals.md):

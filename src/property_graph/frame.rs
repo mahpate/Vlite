@@ -62,21 +62,21 @@ pub(crate) fn check_prefix(
 }
 
 /// Decodes the checksum-verified body of an op-12 frame, or of an op-15
-/// snapshot frame when `snapshot`: its prefix passes [`check_prefix`] and
-/// the body decodes with exactly `id` reclaims. A snapshot body holds only
-/// the entries a checkpoint restates ([`restated`]); their order and
-/// coverage are checked where the snapshot loads. Full replay, the change
-/// feed and the precision image check decode graph frames only through
-/// this, so they accept the same frames.
+/// snapshot frame at sequence `snapshot`: its prefix passes
+/// [`check_prefix`] and the body decodes with exactly `id` reclaims. A
+/// snapshot body holds only the entries a checkpoint restates
+/// ([`restated`]); their order and coverage are checked where the snapshot
+/// loads. Full replay, the change feed and the precision image check
+/// decode graph frames only through this, so they accept the same frames.
 pub(crate) fn decode_frame(
-    snapshot: bool,
+    snapshot: Option<u64>,
     id: u64,
     count: u32,
     body: &[u8],
     offset: u64,
 ) -> Result<GraphBody> {
-    check_prefix(snapshot, id, count as usize, body.len(), offset)?;
-    let reason = if snapshot {
+    check_prefix(snapshot.is_some(), id, count as usize, body.len(), offset)?;
+    let reason = if snapshot.is_some() {
         "invalid graph snapshot"
     } else {
         "invalid graph frame body"
@@ -84,7 +84,15 @@ pub(crate) fn decode_frame(
     engine::decode_body(body, count)
         .ok()
         .filter(|body| reclaim_count(body) == id)
-        .filter(|body| !snapshot || body.entries.iter().all(restated))
+        .filter(|body| snapshot.is_none() || body.entries.iter().all(restated))
+        // Gap 4: a temporal `PutEdge` restates a revision only in a
+        // snapshot, within `1..=` its sequence.
+        .filter(|body| {
+            body.entries.iter().all(|entry| match entry {
+                GraphEntry::Temporal(entry) => entry.fits(snapshot),
+                _ => true,
+            })
+        })
         .ok_or_else(|| corrupt(offset, reason))
 }
 
@@ -109,6 +117,8 @@ fn restated(entry: &GraphEntry) -> bool {
             }
             | GraphEntry::Attach { .. }
             | GraphEntry::GraphHighWater { .. }
+            // Gap 4: a temporal edge with its whole series.
+            | GraphEntry::Temporal(engine::codec::TemporalEntry::PutEdge { .. })
     )
 }
 
@@ -206,7 +216,7 @@ pub(crate) fn replay(
     offset: u64,
     restated: bool,
 ) -> Result<()> {
-    let body = decode_frame(false, id, count, body, offset)?;
+    let body = decode_frame(None, id, count, body, offset)?;
     let mut mutations = Vec::new();
     let mut touched = Vec::new();
     for entry in &body.entries {
@@ -329,10 +339,13 @@ impl PendingSnapshot {
 /// follow the record frames. Nodes due at `now_ms` are dropped with
 /// their edges and attachments, and so are edges due at `now_ms`; a kept
 /// deadline follows its node or edge as an expiry entry. Without `now_ms`
-/// (a P3a preserving relocation) every node and edge is kept.
+/// (a P3a preserving relocation) every node and edge is kept. Gap 4: a
+/// snapshot at `floor` restates each temporal edge's revision; a compacted
+/// file (`floor` zero) does not.
 pub(crate) fn compacted_bodies(
     state: &GraphState,
     now_ms: Option<u64>,
+    floor: u64,
     mut emit: impl FnMut(GraphId, u32, &[u8]) -> Result<()>,
 ) -> Result<()> {
     let encode = |body: &GraphBody| {
@@ -366,15 +379,8 @@ pub(crate) fn compacted_bodies(
                     edge_id: edge.id,
                     expires_at_ms: Some(deadline),
                 });
-            std::iter::once(GraphEntry::PutEdge {
-                edge_id: edge.id,
-                source: edge.source,
-                destination: edge.destination,
-                relationship: edge.relationship.clone(),
-                key: edge.key.clone(),
-                properties: edge.properties.clone(),
-            })
-            .chain(expiry)
+            // Gap 4: a temporal edge is restated with its whole series.
+            std::iter::once(graph.edge_snapshot_entry(edge, floor)).chain(expiry)
         });
         let attachments = live_nodes().flat_map(|node| {
             graph

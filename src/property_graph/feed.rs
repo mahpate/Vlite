@@ -11,11 +11,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::changes::{ChangeKind, GraphChange};
+use crate::changes::{ChangeKind, GraphChange, TemporalChange};
 use crate::{Error, Metadata, Mutation, Record, Result, format};
 
 use super::convert::metadata_from_properties;
 use super::engine::GraphEntry;
+use super::engine::codec::TemporalEntry;
+use super::temporal::segment_out;
 
 #[derive(Default)]
 struct Tracked {
@@ -26,10 +28,16 @@ struct Tracked {
     attachments: BTreeMap<(u64, u16), u64>,
 }
 
-/// Graph state the feed needs to name what each frame changed.
+/// Graph state the feed needs to name what each frame changed. The default
+/// tracks a log without the temporal capability.
 #[derive(Default)]
 pub(crate) struct FeedGraphs {
     graphs: BTreeMap<u16, Tracked>,
+    /// Gap 4: the log header's flags, for its temporal capability.
+    flags: u16,
+    /// Gap 4: temporal entries are reported (the temporal feed); otherwise
+    /// the feed refuses them rather than omit them.
+    report: bool,
 }
 
 fn labels(set: &BTreeSet<String>) -> Vec<String> {
@@ -37,10 +45,19 @@ fn labels(set: &BTreeSet<String>) -> Vec<String> {
 }
 
 impl FeedGraphs {
+    /// A tracker for a log with header `flags` that reports temporal
+    /// entries if `report`.
+    pub(crate) fn new(flags: u16, report: bool) -> Self {
+        Self {
+            graphs: BTreeMap::new(),
+            flags,
+            report,
+        }
+    }
     /// Decodes one checksum-verified op-12 or op-15 frame at `offset` into
     /// `(collection, kind)` events, by the rule full replay applies
-    /// ([`super::frame::decode_frame`]). `collections` maps collection IDs
-    /// to names and dimensions.
+    /// ([`super::temporal::decode_logged`]). `collections` maps collection
+    /// IDs to names and dimensions.
     pub(crate) fn frame(
         &mut self,
         frame: &format::RawFrame,
@@ -49,9 +66,7 @@ impl FeedGraphs {
     ) -> Result<Vec<(String, ChangeKind)>> {
         let corrupt = |reason| Error::Corrupt { offset, reason };
         let sequence = frame.sequence;
-        let snapshot = frame.operation == format::OP_GRAPH_SNAPSHOT;
-        let body =
-            super::frame::decode_frame(snapshot, frame.id, frame.count, frame.body(), offset)?;
+        let body = super::temporal::decode_logged(self.flags, frame, offset)?;
         let graph_id = body.graph_id.0;
         let collection_name = |collection: u16| {
             collections
@@ -260,10 +275,90 @@ impl FeedGraphs {
                 | GraphEntry::EdgeExpiry { .. }
                 | GraphEntry::Reclaim { .. }
                 | GraphEntry::VectorMutation { .. } => continue,
+                // Gap 4: the decode refused temporal entries without the
+                // capability, as replay does; other feeds refuse them rather
+                // than omit them.
+                GraphEntry::Temporal(entry) => {
+                    if !self.report {
+                        return Err(Error::UnsupportedFeature(format::FLAG_TEMPORAL));
+                    }
+                    GraphChange::Temporal(temporal_change(tracked, entry))
+                }
             };
             run.push(change);
         }
         flush(&mut run, &mut events, &self.graphs);
         Ok(events)
+    }
+}
+
+/// Names one temporal entry's edge and endpoints. Corrections carry the
+/// entry's bounds and new values only: the feed never reconstructs old
+/// segment values.
+fn temporal_change(tracked: &mut Tracked, entry: TemporalEntry) -> TemporalChange {
+    let key = |tracked: &Tracked, id: u64| tracked.edges.get(&id).cloned().flatten();
+    match entry {
+        TemporalEntry::PutEdge {
+            edge_id,
+            source,
+            destination,
+            relationship,
+            key,
+            segments,
+            ..
+        } => {
+            let created = tracked.edges.insert(edge_id.0, key.clone()).is_none();
+            let node_key = |id: u64| tracked.nodes.get(&id).cloned().unwrap_or_default();
+            TemporalChange::EdgePut {
+                id: edge_id.0,
+                key,
+                source: source.0,
+                source_key: node_key(source.0),
+                relationship,
+                destination: destination.0,
+                destination_key: node_key(destination.0),
+                segments: segments.iter().map(segment_out).collect(),
+                created,
+            }
+        }
+        TemporalEntry::AppendSegment { edge_id, segment } => TemporalChange::SegmentAppended {
+            id: edge_id.0,
+            key: key(tracked, edge_id.0),
+            segment: segment_out(&segment),
+        },
+        TemporalEntry::ReplaceSegment {
+            edge_id,
+            valid_from,
+            valid_to,
+            segment,
+        } => TemporalChange::SegmentReplaced {
+            id: edge_id.0,
+            key: key(tracked, edge_id.0),
+            valid_from,
+            valid_to,
+            segment: segment_out(&segment),
+        },
+        TemporalEntry::CloseSegment {
+            edge_id,
+            valid_from,
+            valid_to,
+            at,
+        } => TemporalChange::SegmentClosed {
+            id: edge_id.0,
+            key: key(tracked, edge_id.0),
+            valid_from,
+            valid_to,
+            at,
+        },
+        TemporalEntry::RemoveSegment {
+            edge_id,
+            valid_from,
+            valid_to,
+        } => TemporalChange::SegmentRemoved {
+            id: edge_id.0,
+            key: key(tracked, edge_id.0),
+            valid_from,
+            valid_to,
+        },
     }
 }

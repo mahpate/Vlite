@@ -24,7 +24,7 @@ use super::model::{
 };
 use super::schema::{GraphSchema, Multiplicity};
 use super::state::{Graph, GraphState, Undo};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Addresses an edge by internal ID or by edge key.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -196,6 +196,9 @@ pub struct Planner<'a> {
     /// Entries other than reclaims, which do not count against the limit.
     counted: usize,
     undo: Vec<Undo>,
+    /// Gap 4: the revision each edge had when the batch started, recorded
+    /// before the first mutation of the batch changed it.
+    temporal_revisions: BTreeMap<EdgeId, u64>,
 }
 
 impl GraphState {
@@ -218,6 +221,7 @@ impl GraphState {
             entries: Vec::new(),
             counted: 0,
             undo: Vec::new(),
+            temporal_revisions: BTreeMap::new(),
         })
     }
 }
@@ -258,6 +262,20 @@ impl Planner<'_> {
             return Err(GraphError::BatchSize("more than 4096 entries"));
         }
         entry.validate()?;
+        // Gap 4: the revision an existing edge had when the batch started,
+        // before any mutation of the batch (ordinary or temporal) changes it.
+        let changed = match &entry {
+            GraphEntry::PutEdge { edge_id, .. }
+            | GraphEntry::PatchEdge { edge_id, .. }
+            | GraphEntry::EdgeExpiry { edge_id, .. } => Some(*edge_id),
+            GraphEntry::Temporal(entry) => Some(entry.edge_id()),
+            _ => None,
+        };
+        if let Some(edge) = changed.and_then(|id| self.graph().edge(id))
+            && edge.revision < self.sequence
+        {
+            self.temporal_revisions.insert(edge.id, edge.revision);
+        }
         if let Some(undo) = self
             .state
             .apply_entry(self.graph_id, self.sequence, &entry)?
@@ -432,7 +450,9 @@ impl Planner<'_> {
                     let identical = existing.source == source
                         && existing.destination == destination
                         && existing.relationship == *relationship
-                        && same_properties(&existing.properties, properties);
+                        && same_properties(&existing.properties, properties)
+                        // Gap 4: a temporal edge is never an identical retry.
+                        && self.graph().segments(existing.id).is_none();
                     return if identical {
                         Ok(MutationOutcome::Edge {
                             id: existing.id,
@@ -500,7 +520,9 @@ impl Planner<'_> {
                     .next()
                     .and_then(|id| graph.edge(id))
                 {
-                    return if same_properties(&existing.properties, properties) {
+                    return if same_properties(&existing.properties, properties)
+                        && graph.segments(existing.id).is_none()
+                    {
                         Ok(MutationOutcome::Edge {
                             id: existing.id,
                             created: false,
@@ -614,3 +636,7 @@ impl Planner<'_> {
 
 #[cfg(test)]
 mod tests;
+
+// Gap 4: temporal-edge mutations.
+mod temporal;
+pub use temporal::TemporalMutation;
