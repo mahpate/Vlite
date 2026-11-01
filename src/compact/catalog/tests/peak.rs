@@ -64,10 +64,11 @@ pub(super) fn counting<T: Send>(f: impl FnOnce() -> T + Send) -> T {
 
 /// `counting` on a pool of `threads`. Each thread enrolls in a job, once
 /// it has started and joined crossbeam's epoch, which it does as it first
-/// looks for work, so neither counts. An idle thread of a larger pool may
-/// still allocate for the epoch as it looks for work, so a measurement of
-/// serial code that must be exact, such as `canonical.rs`'s of float16
-/// writes, uses one.
+/// looks for work, so neither counts. An idle thread of a larger pool
+/// still counts what crossbeam's epoch allocates as it looks for work,
+/// such as a 2072-byte node for its bag of deferred frees, so a
+/// measurement of serial code that must be exact, such as `serially`'s
+/// or `canonical.rs`'s of float16 writes, uses one.
 pub(super) fn counting_on<T: Send>(threads: usize, f: impl FnOnce() -> T + Send) -> T {
     let open = measuring();
     let session = open.session();
@@ -91,6 +92,28 @@ fn index_bound(records: usize) -> isize {
     ((128 * records + 755) / 5) as isize
 }
 
+/// The fewest bytes a `BTreeMap<u64, bool>` of `records` entries holds:
+/// a node of at least 112 bytes for every 11 entries.
+fn index_floor(records: usize) -> isize {
+    (112 * records.div_ceil(11)) as isize
+}
+
+/// `f` measured exactly, as serial code needs: `counting` on a pool of
+/// one thread, so no idle thread of the pool does crossbeam's epoch
+/// bookkeeping meanwhile.
+fn serially<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    counting_on(1, f)
+}
+
+/// The live bytes `value` holds, measured by a drop that, as any drop of
+/// it must, allocates nothing: a measurement that saw an allocation, or a
+/// negative hold, was not of `value` alone.
+fn held_alone<T>(value: T) -> isize {
+    let ((), used) = measured(move || drop(value));
+    assert_eq!(used.peak, 0, "dropping allocated: {used:?}");
+    -used.retained
+}
+
 /// Record `i` under a sparse ID, scattered over `0..2^62`.
 fn sparse(i: u64) -> u64 {
     i.wrapping_add(1).wrapping_mul(0x9E37_79B9_7F4A_7C15) & ((1 << 62) - 1)
@@ -98,7 +121,7 @@ fn sparse(i: u64) -> u64 {
 
 #[test]
 fn record_index_stays_within_its_node_bound() {
-    counting(|| {
+    serially(|| {
         let insert = |keys: &mut dyn Iterator<Item = u64>| {
             let mut index = BTreeMap::new();
             for key in keys {
@@ -125,14 +148,116 @@ fn record_index_stays_within_its_node_bound() {
             ];
             for (pattern, index) in indexes {
                 assert_eq!(index.len(), records);
-                let bytes = held(index);
+                let bytes = held_alone(index);
                 assert!(
-                    bytes <= index_bound(records),
+                    (index_floor(records)..=index_bound(records)).contains(&bytes),
                     "{pattern} {records}: {bytes} bytes"
                 );
             }
         }
     });
+}
+
+/// Idle threads of a counting pool search for work, pinning crossbeam's
+/// process-wide epoch, and every 128th pin collects: it unlinks the epoch
+/// participants of threads that exited, deferring their frees, and once
+/// its thread's bag of 64 deferred frees is full, allocates a 2072-byte
+/// queue node for the bag. A serial measurement, such as of the record
+/// index, sees only what it measures meanwhile, whichever threads, never
+/// enrolled, do the same (the review of 6db4d33d).
+#[test]
+fn serial_measurements_exclude_idle_workers_epoch_work() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+    /// Threads that each wait to search for work, then search until
+    /// stopped.
+    #[derive(Default)]
+    struct Searching {
+        started: AtomicUsize,
+        go: AtomicBool,
+        searches: AtomicUsize,
+        stop: AtomicBool,
+    }
+    impl Searching {
+        fn search(&self) {
+            self.started.fetch_add(1, SeqCst);
+            while !self.go.load(SeqCst) {
+                std::thread::yield_now();
+            }
+            while !self.stop.load(SeqCst) {
+                rayon::yield_now();
+                self.searches.fetch_add(1, SeqCst);
+            }
+        }
+
+        /// Once `threads` started: lets them search, `1_024` times each.
+        fn searched(&self, threads: usize) {
+            while self.started.load(SeqCst) < threads {
+                std::thread::yield_now();
+            }
+            self.go.store(true, SeqCst);
+            while self.searches.load(SeqCst) < 1_024 * threads {
+                std::thread::yield_now();
+            }
+        }
+    }
+    // The threads of another pool, never enrolled.
+    let others = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .unwrap();
+    let theirs = Arc::new(Searching::default());
+    others.spawn_broadcast({
+        let theirs = theirs.clone();
+        move |_| theirs.search()
+    });
+    serially(|| {
+        retire_epoch_participants(128);
+        let index = BTreeMap::from([(1u64, false)]);
+        // The idle threads of the counting pool, if any.
+        let (idle, ours) = (rayon::current_num_threads() - 1, Searching::default());
+        rayon::scope(|scope| {
+            for _ in 0..idle {
+                scope.spawn(|_| ours.search());
+            }
+            let ((), used) = measured(|| {
+                drop(index);
+                ours.searched(idle);
+                theirs.searched(others.current_num_threads());
+            });
+            ours.stop.store(true, SeqCst);
+            theirs.stop.store(true, SeqCst);
+            assert_eq!((used.peak, used.retained), (0, -112), "{used:?}");
+        });
+    });
+}
+
+/// Threads never enrolled join crossbeam's epoch, `participants` of them
+/// at once, and exit.
+fn retire_epoch_participants(participants: usize) {
+    std::thread::spawn(move || {
+        let mut threads = Vec::new();
+        let pools: Vec<_> = (0..participants.div_ceil(4))
+            .map(|_| {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(4)
+                    .spawn_handler(|thread| {
+                        threads.push(std::thread::spawn(move || thread.run()));
+                        Ok(())
+                    })
+                    .build()
+                    .unwrap();
+                pool.broadcast(|_| ());
+                pool
+            })
+            .collect();
+        drop(pools);
+        for thread in threads {
+            thread.join().unwrap();
+        }
+    })
+    .join()
+    .unwrap();
 }
 
 /// Freeing blocks the measuring session never counted, allocated by a

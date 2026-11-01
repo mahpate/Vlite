@@ -15,8 +15,12 @@
 //!   and a thread enrolled in a closed session counts nothing: the
 //!   process-wide garbage of crossbeam's epoch, which rayon's workers free
 //!   whenever they look for work, and the workers of an earlier pool that
-//!   have yet to exit, never touch a measurement. While a block is
-//!   reallocated both blocks count. The precision peak tests
+//!   have yet to exit, never touch a measurement. A session closes only
+//!   once the counter updates in flight for it have landed, so none lands
+//!   in a later one. While a block is reallocated both blocks count. What
+//!   an enrolled thread allocates for itself counts, even crossbeam's
+//!   bookkeeping as an idle worker looks for work, so a serial measurement
+//!   enrolls only the thread it measures. The precision peak tests
 //!   (`compact::catalog::tests::peak`) use these.
 //! - **A thread inside `counted`** adds to its own net count, which no
 //!   other thread touches, so such tests run beside any others. The filter
@@ -28,7 +32,9 @@
 use log::{Level, LevelFilter, Log, Metadata, Record};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{
+    AtomicBool, AtomicIsize, AtomicUsize, Ordering::Relaxed, Ordering::SeqCst,
+};
 use std::sync::{Mutex, MutexGuard, Once, PoisonError};
 
 /// Live bytes and blocks counted by the open session, and the most at any
@@ -43,6 +49,12 @@ static MEASURING: Mutex<()> = Mutex::new(());
 /// it closes, so no thread or block of a closed session matches it again;
 /// 0, before any, is no session.
 static SESSION: AtomicUsize = AtomicUsize::new(0);
+/// Updates of the counters in flight. A session closes only once none is,
+/// so every update that began for it lands before it closes and none lands
+/// after, in the counts of a later session.
+static UPDATING: AtomicUsize = AtomicUsize::new(0);
+/// A session is closing, waiting for the updates in flight.
+static CLOSING: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
     /// The session whose counters this thread's new blocks add to while it
@@ -69,7 +81,7 @@ pub(crate) struct Session(usize);
 /// Opens a measuring session once no other is open.
 pub(crate) fn measuring() -> Measuring {
     let serial = MEASURING.lock().unwrap_or_else(PoisonError::into_inner);
-    let session = SESSION.fetch_add(1, Relaxed) + 1;
+    let session = SESSION.fetch_add(1, SeqCst) + 1;
     Measuring {
         session: Session(session),
         _serial: serial,
@@ -83,8 +95,14 @@ impl Measuring {
 }
 
 impl Drop for Measuring {
+    /// Closes the session once the updates in flight for it have landed.
     fn drop(&mut self) {
-        SESSION.fetch_add(1, Relaxed);
+        SESSION.fetch_add(1, SeqCst);
+        CLOSING.store(true, SeqCst);
+        while UPDATING.load(SeqCst) != 0 {
+            std::thread::yield_now();
+        }
+        CLOSING.store(false, SeqCst);
     }
 }
 
@@ -105,21 +123,63 @@ fn counting() -> usize {
     }
 }
 
+/// A test's stop inside the allocator: the next update of the counters
+/// that a thread makes, once it has decided that the update counts, waits
+/// until the test releases it or a closing session waits for it, and
+/// reports when it has landed.
+struct Pause {
+    paused: AtomicBool,
+    released: AtomicBool,
+    landed: AtomicBool,
+}
+
+thread_local! {
+    /// The pause set on this thread, taken by its next counted update.
+    static PAUSE: Cell<Option<&'static Pause>> = const { Cell::new(None) };
+}
+
+fn paused() -> Option<&'static Pause> {
+    let pause = PAUSE.try_with(Cell::take).ok().flatten()?;
+    pause.paused.store(true, SeqCst);
+    while !pause.released.load(SeqCst) && !CLOSING.load(SeqCst) {
+        std::thread::yield_now();
+    }
+    Some(pause)
+}
+
+/// Makes `change` to the counters if `session` is open, in flight: either
+/// this sees the session closed and changes nothing, or the close sees it
+/// in flight and waits for it, as both are sequentially consistent.
+fn update(session: usize, change: impl FnOnce()) {
+    if session == 0 || session != SESSION.load(Relaxed) {
+        return;
+    }
+    UPDATING.fetch_add(1, SeqCst);
+    if session == SESSION.load(SeqCst) {
+        let pause = paused();
+        change();
+        if let Some(pause) = pause {
+            pause.landed.store(true, SeqCst);
+        }
+    }
+    UPDATING.fetch_sub(1, SeqCst);
+}
+
 fn added(session: usize, size: usize) {
-    if session != 0 {
+    update(session, || {
         let live = LIVE.fetch_add(size as isize, Relaxed) + size as isize;
         PEAK.fetch_max(live, Relaxed);
         let blocks = BLOCKS.fetch_add(1, Relaxed) + 1;
         MOST_BLOCKS.fetch_max(blocks, Relaxed);
-    }
+    });
     net(size as isize);
 }
 
 fn removed(session: usize, size: usize) {
-    if session != 0 && session == SESSION.load(Relaxed) {
+    update(session, || {
         LIVE.fetch_sub(size as isize, Relaxed);
         BLOCKS.fetch_sub(1, Relaxed);
-    }
+    });
     net(-(size as isize));
 }
 
@@ -192,7 +252,8 @@ impl Counting {
 // requested size after it; `dealloc` and `realloc` derive the same prefix
 // and served layout from the caller's layout, so `System` gets back what it
 // served. The bookkeeping reads const-initialized thread locals without
-// destructors, which never allocate, and updates atomics.
+// destructors, which never allocate, updates atomics and at most yields
+// the thread, which never allocates either, so it never reenters.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // SAFETY: the caller's `alloc` contract, passed on.
@@ -432,6 +493,155 @@ mod tests {
             let retained = LIVE.load(Relaxed) - live;
             assert_eq!((peak, retained), (0, 0));
         });
+    }
+
+    /// `body`'s value with the most live bytes and the live bytes it left,
+    /// above its start, as the open session counts them.
+    fn window<T>(body: impl FnOnce() -> T) -> (T, (isize, isize)) {
+        let live = LIVE.load(Relaxed);
+        let outer = PEAK.swap(live, Relaxed);
+        let value = body();
+        let peak = PEAK.fetch_max(outer, Relaxed) - live;
+        (value, (peak, LIVE.load(Relaxed) - live))
+    }
+
+    /// Releases a pause, should the test fail before it does.
+    struct Release(&'static Pause);
+
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.released.store(true, SeqCst);
+        }
+    }
+
+    /// A thread enrolled in a session stops in the middle of allocating,
+    /// freeing or growing a block, after deciding that its update of the
+    /// counters counts and before making it, while that session closes and
+    /// the next opens. The update must land in its own session, which
+    /// waits for it as it closes, and not in the next, which counts
+    /// exactly the block its own thread allocates.
+    #[test]
+    fn an_update_in_flight_as_its_session_closes_leaves_the_next_exact() {
+        static PAUSES: [Pause; 3] = [const {
+            Pause {
+                paused: AtomicBool::new(false),
+                released: AtomicBool::new(false),
+                landed: AtomicBool::new(false),
+            }
+        }; 3];
+        let steps = ["allocate", "free", "grow"];
+        let seen: Vec<_> = steps
+            .iter()
+            .zip(&PAUSES)
+            .map(|(&step, pause)| {
+                let first = measuring();
+                let session = first.session();
+                let done = AtomicBool::new(false);
+                thread::scope(|scope| {
+                    let _release = Release(pause);
+                    scope.spawn(|| {
+                        session.enroll();
+                        let block = match step {
+                            "allocate" => {
+                                PAUSE.set(Some(pause));
+                                std::hint::black_box(vec![0u8; 3_000])
+                            }
+                            "free" => {
+                                let block = std::hint::black_box(vec![0u8; 3_000]);
+                                PAUSE.set(Some(pause));
+                                drop(block);
+                                Vec::new()
+                            }
+                            _ => {
+                                let mut block = Vec::<u8>::with_capacity(1_000);
+                                PAUSE.set(Some(pause));
+                                block.reserve_exact(3_000);
+                                assert_eq!(block.capacity(), 3_000);
+                                block
+                            }
+                        };
+                        drop(block);
+                        done.store(true, SeqCst);
+                    });
+                    while !pause.paused.load(SeqCst) {
+                        thread::yield_now();
+                    }
+                    drop(first);
+                    let landed = pause.landed.load(SeqCst);
+                    let next = measuring();
+                    let session = next.session();
+                    let (kept, used) = window(|| {
+                        let kept = scope
+                            .spawn(move || {
+                                session.enroll();
+                                std::hint::black_box(vec![0u8; 1_000])
+                            })
+                            .join()
+                            .unwrap();
+                        pause.released.store(true, SeqCst);
+                        while !done.load(SeqCst) {
+                            thread::yield_now();
+                        }
+                        kept
+                    });
+                    drop(kept);
+                    (step, landed, used)
+                })
+            })
+            .collect();
+        // Each update landed as its session closed, which waited for it.
+        let expected: Vec<_> = steps
+            .iter()
+            .map(|&step| (step, true, (1_000, 1_000)))
+            .collect();
+        assert_eq!(seen, expected);
+    }
+
+    /// Threads keep allocating, growing and freeing blocks while enrolled
+    /// in sessions that open and close, each counting them until it closes
+    /// and followed by a session that enrolls no thread, so counts nothing.
+    #[test]
+    fn churning_threads_of_closing_sessions_change_no_later_session() {
+        const THREADS: usize = 8;
+        const ROUNDS: usize = 200;
+        let current = AtomicUsize::new(0);
+        let stop = AtomicBool::new(false);
+        let seen: Vec<(usize, (isize, isize))> = thread::scope(|scope| {
+            for _ in 0..THREADS {
+                scope.spawn(|| {
+                    while !stop.load(SeqCst) {
+                        Session(current.load(SeqCst)).enroll();
+                        let mut block = std::hint::black_box(vec![0u8; 1_000]);
+                        block.reserve_exact(3_000);
+                        drop(std::hint::black_box(block));
+                    }
+                });
+            }
+            let seen = (0..ROUNDS)
+                .map(|round| {
+                    let churned = measuring();
+                    let live = LIVE.load(Relaxed);
+                    PEAK.store(live, Relaxed);
+                    current.store(churned.session().0, SeqCst);
+                    // Until a thread has grown a block in it: both blocks.
+                    while PEAK.load(Relaxed) - live < 4_000 {
+                        thread::yield_now();
+                    }
+                    drop(churned);
+                    let _quiet = measuring();
+                    let ((), used) = window(|| {
+                        for _ in 0..64 {
+                            thread::yield_now();
+                        }
+                    });
+                    (round, used)
+                })
+                .filter(|(_, used)| *used != (0, 0))
+                .collect();
+            stop.store(true, SeqCst);
+            seen
+        });
+        assert_eq!(seen, [], "rounds that counted");
     }
 
     #[test]
