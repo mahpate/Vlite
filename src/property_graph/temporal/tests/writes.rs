@@ -1,13 +1,13 @@
 //! Gap 4 slice B: temporal writes and storage through the public batch API
-//! (capability enabling, atomic corrections, limits, TTL, persistence round
-//! trips, encryption and the temporal change feed). Series are read from
-//! the engine state: public temporal reads are slice C.
+//! (the capability a copy-out gives, atomic corrections, limits, TTL,
+//! persistence round trips, encryption and the temporal change feed).
+//! Series are read from the engine state: public temporal reads are slice C.
 
 use std::fs;
 use std::io::Cursor;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use super::super::{Activation, FAIL_HEADER, segment_in, segment_out};
+use super::super::{Activation, enable_temporal, segment_in, segment_out};
 use super::{header_flags, set_header_flags};
 use crate::changes::{
     ChangeBatch, ChangeKind, FeedCursor, GraphChange, TemporalChange, read_log_changes,
@@ -26,13 +26,13 @@ use crate::{
 };
 
 /// Expired at any wall-clock time the tests run.
-const PAST: u64 = 1;
+pub(super) const PAST: u64 = 1;
 
-fn props(value: i64) -> Metadata {
+pub(super) fn props(value: i64) -> Metadata {
     Metadata::from([("v".to_owned(), MetadataValue::Integer(value))])
 }
 
-fn seg(valid_from: Option<i64>, valid_to: Option<i64>, value: i64) -> TemporalSegment {
+pub(super) fn seg(valid_from: Option<i64>, valid_to: Option<i64>, value: i64) -> TemporalSegment {
     TemporalSegment {
         valid_from,
         valid_to,
@@ -40,7 +40,7 @@ fn seg(valid_from: Option<i64>, valid_to: Option<i64>, value: i64) -> TemporalSe
     }
 }
 
-fn edge(key: &str) -> EdgeRef {
+pub(super) fn edge(key: &str) -> EdgeRef {
     EdgeRef::Key(key.into())
 }
 
@@ -62,12 +62,12 @@ fn create_between(
 
 /// Temporal edge `key`, from the node named by its first character to the
 /// node named by its second.
-fn create(key: &str, segments: Vec<TemporalSegment>) -> GraphOp {
+pub(super) fn create(key: &str, segments: Vec<TemporalSegment>) -> GraphOp {
     let (source, destination) = key.split_at(1);
     create_between(Some(key), source, destination, segments)
 }
 
-fn legacy(key: &str, value: i64) -> GraphOp {
+pub(super) fn legacy(key: &str, value: i64) -> GraphOp {
     let (source, destination) = key.split_at(1);
     GraphOp::CreateEdge {
         key: Some(key.into()),
@@ -78,7 +78,13 @@ fn legacy(key: &str, value: i64) -> GraphOp {
     }
 }
 
-fn close(key: &str, from: Option<i64>, to: Option<i64>, at: i64, expected: Expected) -> GraphOp {
+pub(super) fn close(
+    key: &str,
+    from: Option<i64>,
+    to: Option<i64>,
+    at: i64,
+    expected: Expected,
+) -> GraphOp {
     GraphOp::Temporal(TemporalOp::CloseSegment {
         edge: edge(key),
         valid_from: from,
@@ -88,7 +94,7 @@ fn close(key: &str, from: Option<i64>, to: Option<i64>, at: i64, expected: Expec
     })
 }
 
-fn append(key: &str, segment: TemporalSegment, expected: Expected) -> GraphOp {
+pub(super) fn append(key: &str, segment: TemporalSegment, expected: Expected) -> GraphOp {
     GraphOp::Temporal(TemporalOp::AppendSegment {
         edge: edge(key),
         segment,
@@ -112,7 +118,7 @@ fn replace(
     })
 }
 
-fn remove(key: &str, from: Option<i64>, to: Option<i64>, expected: Expected) -> GraphOp {
+pub(super) fn remove(key: &str, from: Option<i64>, to: Option<i64>, expected: Expected) -> GraphOp {
     GraphOp::Temporal(TemporalOp::RemoveSegment {
         edge: edge(key),
         valid_from: from,
@@ -136,7 +142,7 @@ fn expire_node(key: &str) -> GraphOp {
     }
 }
 
-fn expire_edge(key: &str) -> GraphOp {
+pub(super) fn expire_edge(key: &str) -> GraphOp {
     GraphOp::SetEdgeExpiry {
         edge: edge(key),
         expires_at_ms: Some(PAST),
@@ -144,7 +150,7 @@ fn expire_edge(key: &str) -> GraphOp {
     }
 }
 
-fn put_vector(id: u64) -> GraphOp {
+pub(super) fn put_vector(id: u64) -> GraphOp {
     GraphOp::Vector {
         collection: "default".into(),
         mutation: Mutation::Put {
@@ -156,7 +162,7 @@ fn put_vector(id: u64) -> GraphOp {
 }
 
 /// Graph "g" with nodes a, b, c and d and the ordinary edge "ac" (v = 7).
-fn populate(db: &mut Database) {
+pub(super) fn populate(db: &mut Database) {
     db.create_graph("g").unwrap();
     let mut graph = db.graph_mut("g").unwrap();
     for key in ["a", "b", "c", "d"] {
@@ -167,19 +173,32 @@ fn populate(db: &mut Database) {
         .unwrap();
 }
 
-fn write(db: &mut Database, ops: &[GraphOp]) -> Result<GraphBatchResult> {
+/// Populates the new file `{name}.source` in `dir`, copies it out to
+/// `name` with the temporal capability and opens the copy.
+pub(super) fn temporal_db(dir: &Path, name: &str) -> (PathBuf, Database) {
+    let source = dir.join(format!("{name}.source"));
+    let mut db = Database::create(&source, 2).unwrap();
+    populate(&mut db);
+    db.close().unwrap();
+    let path = dir.join(name);
+    enable_temporal(&source, &path, None).unwrap();
+    let db = Database::open(&path).unwrap();
+    (path, db)
+}
+
+pub(super) fn write(db: &mut Database, ops: &[GraphOp]) -> Result<GraphBatchResult> {
     db.graph_mut("g")?.write_batch(ops)
 }
 
-fn graph(db: &Database) -> &Graph {
+pub(super) fn graph(db: &Database) -> &Graph {
     db.graph.as_ref().unwrap().graph_by_name("g").unwrap()
 }
 
 /// Every stored edge of graph "g", hidden ones not yet reclaimed included:
 /// key, ID and series (`None` for an ordinary edge).
-type Stored = Vec<(Option<String>, u64, Option<Vec<TemporalSegment>>)>;
+pub(super) type Stored = Vec<(Option<String>, u64, Option<Vec<TemporalSegment>>)>;
 
-fn stored(db: &Database) -> Stored {
+pub(super) fn stored(db: &Database) -> Stored {
     let graph = graph(db);
     graph
         .edges()
@@ -192,7 +211,7 @@ fn stored(db: &Database) -> Stored {
         .collect()
 }
 
-fn series(db: &Database, key: &str) -> Vec<TemporalSegment> {
+pub(super) fn series(db: &Database, key: &str) -> Vec<TemporalSegment> {
     let graph = graph(db);
     let edge = graph.edge_by_key(key).unwrap();
     graph
@@ -203,11 +222,11 @@ fn series(db: &Database, key: &str) -> Vec<TemporalSegment> {
         .collect()
 }
 
-fn revision(db: &Database, key: &str) -> u64 {
+pub(super) fn revision(db: &Database, key: &str) -> u64 {
     graph(db).edge_by_key(key).unwrap().revision
 }
 
-fn edge_id(db: &Database, key: &str) -> u64 {
+pub(super) fn edge_id(db: &Database, key: &str) -> u64 {
     graph(db).edge_by_key(key).unwrap().id.0
 }
 
@@ -215,17 +234,17 @@ fn node_id(db: &Database, key: &str) -> u64 {
     graph(db).node_by_key(key).unwrap().id.0
 }
 
-fn is_temporal(db: &Database) -> bool {
+pub(super) fn is_temporal(db: &Database) -> bool {
     db.graph.as_ref().unwrap().is_temporal()
 }
 
-fn file_len(path: &Path) -> u64 {
+pub(super) fn file_len(path: &Path) -> u64 {
     fs::metadata(path).unwrap().len()
 }
 
 /// The file's bytes, read while no handle holds its lock, and a reopened
 /// handle.
-fn bytes_of(db: Database, path: &Path) -> (Vec<u8>, Database) {
+pub(super) fn bytes_of(db: Database, path: &Path) -> (Vec<u8>, Database) {
     drop(db);
     let bytes = fs::read(path).unwrap();
     (bytes, Database::open(path).unwrap())
@@ -251,8 +270,13 @@ fn builds_without_support_refuse_temporal_operations_and_change_nothing() {
     assert_eq!(bytes_of(db, &path).0, before);
 }
 
+/// Writes never enable the capability (the user-approved copy-out
+/// decision): a file without it refuses every batch with a temporal
+/// operation before planning, unchanged; only a copy made by
+/// `enable_temporal` takes them, as plain appends that leave the header
+/// alone.
 #[test]
-fn the_first_temporal_write_enables_the_capability_with_its_frame() {
+fn temporal_writes_need_a_file_copied_out_with_the_capability() {
     let _on = Activation::on();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("t.vlite");
@@ -261,36 +285,33 @@ fn the_first_temporal_write_enables_the_capability_with_its_frame() {
     let legacy_flags = db.flags;
     assert_eq!(legacy_flags & FLAG_TEMPORAL, 0);
     let (before, mut db) = bytes_of(db, &path);
-    // Rejected batches with temporal operations change nothing, the header
-    // included: invalid series, unknown endpoints, and a later failure.
-    assert!(matches!(
-        write(&mut db, &[create("ab", vec![seg(Some(5), Some(1), 1)])]),
-        Err(Error::InvalidQuery(_))
-    ));
-    assert!(matches!(
-        write(&mut db, &[create("ax", Vec::new())]),
-        Err(Error::GraphNodeNotFound)
-    ));
-    assert!(matches!(
-        write(
-            &mut db,
-            &[
-                create("ab", vec![seg(None, None, 1)]),
-                GraphOp::DeleteNode {
-                    key: "zz".into(),
-                    expected: Expected::Any,
-                },
-            ]
-        ),
-        Err(Error::GraphNodeNotFound)
-    ));
+    // Valid, invalid and mixed batches alike.
+    for ops in [
+        vec![create("ab", vec![seg(None, Some(10), 1)])],
+        vec![create("ab", vec![seg(Some(5), Some(1), 1)])],
+        vec![create("ax", Vec::new())],
+        vec![put_vector(1), legacy("bc", 1), create("ab", Vec::new())],
+    ] {
+        assert!(matches!(
+            write(&mut db, &ops),
+            Err(Error::UnsupportedFeature(FLAG_TEMPORAL))
+        ));
+    }
     assert!(!is_temporal(&db));
     let (bytes, mut db) = bytes_of(db, &path);
     assert_eq!(bytes, before);
     // Ordinary writes never enable it.
     write(&mut db, &[legacy("bc", 1)]).unwrap();
     assert_eq!(db.flags, legacy_flags);
+    drop(db);
+    assert_eq!(header_flags(&path), legacy_flags);
 
+    let copy = dir.path().join("copy.vlite");
+    enable_temporal(&path, &copy, None).unwrap();
+    let (header, len) = (fs::read(&copy).unwrap()[..32].to_vec(), file_len(&copy));
+    let mut db = Database::open(&copy).unwrap();
+    assert_eq!(db.flags, legacy_flags | FLAG_TEMPORAL);
+    assert!(is_temporal(&db));
     let result = write(
         &mut db,
         &[create(
@@ -308,20 +329,20 @@ fn the_first_temporal_write_enables_the_capability_with_its_frame() {
             revision: result.revision.unwrap(),
         })]
     );
-    assert_eq!(db.flags, legacy_flags | FLAG_TEMPORAL);
-    assert!(is_temporal(&db));
     let expected = stored(&db);
+    let (bytes, db) = bytes_of(db, &copy);
+    assert_eq!(bytes[..32], header[..]);
+    assert!(bytes.len() as u64 > len);
     drop(db);
-    assert_eq!(header_flags(&path), legacy_flags | FLAG_TEMPORAL);
 
     {
         let _off = Activation::set(false);
         assert!(matches!(
-            Database::open(&path),
+            Database::open(&copy),
             Err(Error::UnsupportedFeature(FLAG_TEMPORAL))
         ));
     }
-    let db = Database::open(&path).unwrap();
+    let db = Database::open(&copy).unwrap();
     assert_eq!(stored(&db), expected);
     assert_eq!(
         series(&db, "ab"),
@@ -334,9 +355,7 @@ fn the_first_temporal_write_enables_the_capability_with_its_frame() {
 fn corrections_are_atomic_and_revision_checked_against_the_batch_start() {
     let _on = Activation::on();
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("t.vlite");
-    let mut db = Database::create(&path, 2).unwrap();
-    populate(&mut db);
+    let (path, mut db) = temporal_db(dir.path(), "t.vlite");
     write(&mut db, &[create("ab", vec![seg(None, None, 1)])]).unwrap();
     let r0 = revision(&db, "ab");
     let id = edge_id(&db, "ab");
@@ -483,14 +502,13 @@ fn large_segment() -> TemporalSegment {
 fn limits_roll_back_the_whole_plan_including_tentative_ttl_cleanup() {
     let _on = Activation::on();
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("t.vlite");
-    let mut db = Database::create(&path, 2).unwrap();
-    populate(&mut db);
+    let (path, mut db) = temporal_db(dir.path(), "t.vlite");
     // "bc" is due: the next committed write reclaims it.
     write(&mut db, &[legacy("bc", 1), expire_edge("bc")]).unwrap();
     let due = stored(&db);
     assert!(due.iter().any(|(key, ..)| key.as_deref() == Some("bc")));
     let flags = db.flags;
+    assert_eq!(flags & FLAG_TEMPORAL, FLAG_TEMPORAL);
     let len = file_len(&path);
 
     // The operation cap counts temporal operations.
@@ -503,15 +521,14 @@ fn limits_roll_back_the_whole_plan_including_tentative_ttl_cleanup() {
         .map(|_| create_between(None, "a", "b", vec![large_segment()]))
         .collect();
     assert!(matches!(write(&mut db, &heavy), Err(Error::BatchTooLarge)));
-    // Neither enabled the capability nor ran the tentative TTL cleanup.
+    // Neither wrote anything nor ran the tentative TTL cleanup.
     assert_eq!((db.flags, file_len(&path)), (flags, len));
     assert_eq!(stored(&db), due);
-    assert!(!is_temporal(&db));
 
     // The 257th segment of a series fails and rolls back its batch.
     let full: Vec<TemporalSegment> = (0..256).map(|i| seg(Some(i), Some(i + 1), 0)).collect();
     write(&mut db, &[put_vector(2), create("ab", full)]).unwrap();
-    assert_eq!(db.flags, flags | FLAG_TEMPORAL);
+    assert_eq!(db.flags, flags);
     // That write reclaimed "bc" in the same frame.
     let at_cap = stored(&db);
     assert!(!at_cap.iter().any(|(key, ..)| key.as_deref() == Some("bc")));
@@ -579,9 +596,7 @@ fn sized_segment(chars: usize, from: i64, to: Option<i64>) -> TemporalSegment {
 fn a_close_that_outgrows_the_series_bytes_rolls_back_its_batch() {
     let _on = Activation::on();
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("t.vlite");
-    let mut db = Database::create(&path, 2).unwrap();
-    populate(&mut db);
+    let (path, mut db) = temporal_db(dir.path(), "t.vlite");
     // 255 maximum-size segments and an open last one fill one graph body
     // exactly.
     let full: Vec<TemporalSegment> = (0..255)
@@ -645,9 +660,7 @@ fn a_close_that_outgrows_the_series_bytes_rolls_back_its_batch() {
 fn an_earlier_ordinary_mutation_keeps_the_batch_start_revision() {
     let _on = Activation::on();
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("t.vlite");
-    let mut db = Database::create(&path, 2).unwrap();
-    populate(&mut db);
+    let (_path, mut db) = temporal_db(dir.path(), "t.vlite");
     write(&mut db, &[create("ab", vec![seg(Some(0), None, 1)])]).unwrap();
     let r = revision(&db, "ab");
     let expire = |at, expected| GraphOp::SetEdgeExpiry {
@@ -688,9 +701,7 @@ fn an_earlier_ordinary_mutation_keeps_the_batch_start_revision() {
 fn ttl_reclaims_whole_series_and_history_never_restores_them() {
     let _on = Activation::on();
     let dir = tempfile::tempdir().unwrap();
-    let source = dir.path().join("s.vlite");
-    let mut db = Database::create(&source, 2).unwrap();
-    populate(&mut db);
+    let (source, mut db) = temporal_db(dir.path(), "s.vlite");
     write(
         &mut db,
         &[
@@ -752,9 +763,7 @@ fn ttl_reclaims_whole_series_and_history_never_restores_them() {
 fn temporal_state_survives_compaction_conversion_and_checkpoints() {
     let _on = Activation::on();
     let dir = tempfile::tempdir().unwrap();
-    let source = dir.path().join("s.vlite");
-    let mut db = Database::create(&source, 2).unwrap();
-    populate(&mut db);
+    let (source, mut db) = temporal_db(dir.path(), "s.vlite");
     let ac = revision(&db, "ac");
     write(
         &mut db,
@@ -827,7 +836,8 @@ fn temporal_state_survives_compaction_conversion_and_checkpoints() {
     );
     drop(db);
 
-    // A directory store cannot enable the capability itself.
+    // A directory store without the capability cannot take temporal
+    // writes either.
     let fresh = dir.path().join("fresh");
     let mut db = Database::create_directory(&fresh, 2, CreateOptions::default()).unwrap();
     populate(&mut db);
@@ -848,9 +858,7 @@ fn temporal_state_survives_compaction_conversion_and_checkpoints() {
 fn temporal_revisions_survive_conversion_checkpoints_and_reopen() {
     let _on = Activation::on();
     let dir = tempfile::tempdir().unwrap();
-    let source = dir.path().join("s.vlite");
-    let mut db = Database::create(&source, 2).unwrap();
-    populate(&mut db);
+    let (source, mut db) = temporal_db(dir.path(), "s.vlite");
     write(&mut db, &[create("ab", vec![seg(None, None, 1)])]).unwrap();
     let original = revision(&db, "ab");
     // Later commits move the sequence past the edge's revision.
@@ -888,14 +896,18 @@ fn temporal_revisions_survive_conversion_checkpoints_and_reopen() {
 fn encrypted_temporal_files_round_trip() {
     let _on = Activation::on();
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("e.vlite");
+    let source = dir.path().join("e.source");
     let key = EncryptionKey::from_bytes([7; 32]);
     let options = CreateOptions {
         encryption: Some(EncryptionKey::from_bytes([7; 32])),
         ..CreateOptions::default()
     };
-    let mut db = Database::create_with_options(&path, 2, options).unwrap();
+    let mut db = Database::create_with_options(&source, 2, options).unwrap();
     populate(&mut db);
+    db.close().unwrap();
+    let path = dir.path().join("e.vlite");
+    enable_temporal(&source, &path, Some(&key)).unwrap();
+    let mut db = Database::open_encrypted(&path, &key).unwrap();
     write(&mut db, &[create("ab", vec![seg(None, Some(10), 1)])]).unwrap();
     let expected = stored(&db);
     drop(db);
@@ -924,12 +936,10 @@ fn encrypted_temporal_files_round_trip() {
 }
 
 #[test]
-fn read_only_handles_refuse_and_a_failed_header_write_poisons() {
+fn read_only_handles_refuse_temporal_writes() {
     let _on = Activation::on();
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("t.vlite");
-    let mut db = Database::create(&path, 2).unwrap();
-    populate(&mut db);
+    let (path, db) = temporal_db(dir.path(), "t.vlite");
     drop(db);
     let before = fs::read(&path).unwrap();
     {
@@ -939,18 +949,7 @@ fn read_only_handles_refuse_and_a_failed_header_write_poisons() {
             .and_then(|mut graph| graph.write_batch(&[create("ab", Vec::new())]));
         assert!(matches!(result, Err(Error::ReadOnly)));
     }
-
-    let mut db = Database::open(&path).unwrap();
-    FAIL_HEADER.with(|fail| fail.set(true));
-    assert!(matches!(
-        write(&mut db, &[create("ab", vec![seg(None, None, 1)])]),
-        Err(Error::CommitIndeterminate(_))
-    ));
-    assert!(write(&mut db, &[legacy("bc", 1)]).is_err());
-    drop(db);
     assert_eq!(fs::read(&path).unwrap(), before);
-    let _off = Activation::set(false);
-    Database::open(&path).unwrap();
 }
 
 fn graph_batches(batch: &ChangeBatch) -> Vec<(u64, Vec<GraphChange>)> {
@@ -972,9 +971,7 @@ fn graph_batches(batch: &ChangeBatch) -> Vec<(u64, Vec<GraphChange>)> {
 fn only_the_temporal_feed_reports_temporal_changes_in_commit_order() {
     let _on = Activation::on();
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("t.vlite");
-    let mut db = Database::create(&path, 2).unwrap();
-    populate(&mut db);
+    let (path, mut db) = temporal_db(dir.path(), "t.vlite");
     let cursor = db.feed_cursor().unwrap();
     let s1 = write(&mut db, &[create("ab", vec![seg(None, None, 1)])])
         .unwrap()
@@ -1154,7 +1151,7 @@ fn a_precision_image_keeps_series_and_revisions() {
     let _on = Activation::on();
     let header = format::header_v5_flags(2, 0x5EED_0000_0000_0064, 0, FLAG_GRAPH, None);
     let mut loaded = format::load_with(&mut Cursor::new(header), None).unwrap();
-    loaded.flags |= FLAG_PRECISION;
+    loaded.flags |= FLAG_PRECISION | FLAG_TEMPORAL;
     loaded.sequence = 1;
     loaded.collections.get_mut(&0).unwrap().precision =
         Some(crate::compact::catalog::Precision::Float32);

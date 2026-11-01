@@ -1,8 +1,10 @@
 //! Gap 4: time-aware graph adapter.
 //!
 //! The temporal capability is a required header flag
-//! ([`crate::format::FLAG_TEMPORAL`]) set atomically with the first temporal
-//! write. Preactivation, like the P3a precision gate
+//! ([`crate::format::FLAG_TEMPORAL`]) that only an explicit copy-out sets
+//! (`enable_temporal`, user-approved decision): a new temporal-enabled
+//! database under a new lineage, the source untouched; no write enables it
+//! in place. Preactivation, like the P3a precision gate
 //! (`crate::compact::precision_supported`): release builds do not support it
 //! yet, so they refuse temporal files with `UnsupportedFeature(FLAG_TEMPORAL)`
 //! and reject temporal graph operations the same way. Only this crate's tests
@@ -16,6 +18,10 @@ use super::convert::{metadata_from_properties, precondition, properties_from_met
 use super::engine::temporal::Segment;
 use super::engine::{GraphState, TemporalMutation};
 use super::{EdgeRef, selector};
+
+mod activate;
+#[cfg_attr(not(test), allow(unused_imports))]
+pub(crate) use activate::enable_temporal;
 
 /// Gap 4 (unreleased): one validity segment of a temporal edge. The edge
 /// holds `properties` for validity times `valid_from <= t < valid_to`, in
@@ -37,10 +43,11 @@ pub struct TemporalSegment {
 /// `Expected::Revision` with the edge's revision, which covers the whole
 /// series; within one batch it is the revision the edge had before the
 /// batch, so closing a segment and appending its successor is one atomic,
-/// revision-checked supersession. Invalid input is `InvalidQuery`. The
-/// first temporal write enables the file's temporal capability, which
-/// builds without it refuse to open; directory stores cannot enable it
-/// (`UnsupportedFeature`), only inherit it by conversion. Not yet released:
+/// revision-checked supersession. Invalid input is `InvalidQuery`. A file
+/// takes them only once copied out with the temporal capability (which
+/// builds without it refuse to open); any other file refuses them with
+/// `UnsupportedFeature(64)` and stays unchanged, and directory stores only
+/// inherit the capability by conversion. Not yet released:
 /// every build refuses these operations with `UnsupportedFeature(64)`
 /// until temporal reads exist.
 #[derive(Clone, Debug, PartialEq)]
@@ -201,55 +208,6 @@ pub(crate) fn adopt(state: &mut GraphState, flags: u16, offset: u64) -> Result<(
 }
 
 impl Database {
-    /// Whether a batch may enable the temporal capability (see
-    /// [`Database::enable_temporal`]): a directory store's segments all
-    /// repeat the header flags, so it only inherits the capability by
-    /// conversion from a file that has it.
-    pub(super) fn check_temporal_enable(&self) -> Result<()> {
-        if self.file.is_chain() {
-            return Err(Error::UnsupportedFeature(FLAG_TEMPORAL));
-        }
-        Ok(())
-    }
-
-    /// Durably sets `FLAG_TEMPORAL` in the header before the first temporal
-    /// frame is appended, so no file holds temporal entries without it. The
-    /// header is rewritten in one write of its 32 bytes (flags and checksum
-    /// share a sector) and synced; a crash before the frame leaves a capable
-    /// file without temporal edges. A failure poisons the handle like a
-    /// failed append.
-    pub(super) fn enable_temporal(&mut self) -> Result<()> {
-        use std::io::{Read, Seek, SeekFrom, Write};
-        self.check_temporal_enable()?;
-        let flags = self.flags | FLAG_TEMPORAL;
-        let written = (|| -> std::io::Result<()> {
-            #[cfg(test)]
-            if FAIL_HEADER.with(|fail| fail.replace(false)) {
-                return Err(std::io::Error::other("injected header write failure"));
-            }
-            let mut header = [0u8; format::HEADER_SIZE as usize];
-            self.file.seek(SeekFrom::Start(0))?;
-            self.file.read_exact(&mut header)?;
-            if header[26..28] != self.flags.to_le_bytes()
-                || format::crc32(&header[..28]).to_le_bytes() != header[28..32]
-            {
-                return Err(std::io::Error::other("database header changed"));
-            }
-            header[26..28].copy_from_slice(&flags.to_le_bytes());
-            let checksum = format::crc32(&header[..28]);
-            header[28..32].copy_from_slice(&checksum.to_le_bytes());
-            self.file.seek(SeekFrom::Start(0))?;
-            self.file.write_all(&header)?;
-            self.file.sync_all()
-        })();
-        if let Err(error) = written {
-            self.poisoned = true;
-            return Err(Error::CommitIndeterminate(error));
-        }
-        self.flags = flags;
-        Ok(())
-    }
-
     /// Gap 4 (unreleased): [`Database::changes_after`] that also reports
     /// temporal-edge changes as
     /// [`GraphChange::Temporal`](crate::changes::GraphChange::Temporal), in
@@ -296,8 +254,6 @@ pub(crate) fn supported() -> bool {
 #[cfg(test)]
 thread_local! {
     static TEMPORAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Fails the next header rewrite of [`Database::enable_temporal`].
-    pub(crate) static FAIL_HEADER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Test-only switch of [`supported`] on this thread, restored when dropped.

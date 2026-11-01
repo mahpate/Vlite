@@ -728,15 +728,6 @@ impl Database {
             body.entries.len() as u32,
             &encoded,
         );
-        // Gap 4: the header gains the capability before the first temporal frame.
-        if self.flags & format::FLAG_TEMPORAL == 0
-            && body
-                .entries
-                .iter()
-                .any(|entry| matches!(entry, GraphEntry::Temporal(_)))
-        {
-            self.enable_temporal()?;
-        }
         self.commit_frame(sequence, &frame)?;
         if let Some(state) = self.graph.as_mut()
             && state.apply(sequence, body).is_err()
@@ -895,33 +886,19 @@ impl Database {
                 outcomes,
             });
         }
+        // Gap 4: only a file copied out with the temporal capability
+        // (`temporal::enable_temporal`) takes temporal operations; no write
+        // enables it in place.
+        if ops.iter().any(|op| matches!(op, GraphOp::Temporal(_)))
+            && (!temporal::supported() || self.flags & format::FLAG_TEMPORAL == 0)
+        {
+            return Err(Error::UnsupportedFeature(format::FLAG_TEMPORAL));
+        }
         let planned = ops
             .iter()
             .map(|op| self.plan_input(op))
             .collect::<Result<Vec<_>>>()?;
-        // Gap 4: the batch may use the temporal capability, which its commit
-        // enables (`commit_graph`); a batch that does not commit any
-        // temporal entry leaves it disabled.
-        let enabling = planned
-            .iter()
-            .any(|item| matches!(item, Planned::Temporal(_)))
-            && !self.graphs()?.is_temporal();
-        if enabling {
-            self.check_temporal_enable()?;
-            self.graph
-                .as_mut()
-                .expect("checked above")
-                .set_temporal(true)
-                .map_err(|_| Error::UnsupportedFeature(format::FLAG_TEMPORAL))?;
-        }
-        let result = self.commit_planned(graph_id, planned, outcomes);
-        if enabling
-            && self.flags & format::FLAG_TEMPORAL == 0
-            && let Some(state) = self.graph.as_mut()
-        {
-            state.set_temporal(false).expect("disabling cannot fail");
-        }
-        result
+        self.commit_planned(graph_id, planned, outcomes)
     }
 
     fn commit_planned(
