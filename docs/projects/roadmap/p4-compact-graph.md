@@ -1,8 +1,8 @@
 # Speed P4: compact graph
 
-**Status:** approved design; private test-only CSR and ordinary typed-property
-codec slices are implemented. Full P4 implementation and measured results
-remain outstanding.
+**Status:** approved design; private test-only CSR, ordinary typed-property,
+label-posting and attachment codec slices are implemented. Full P4
+implementation and measured results remain outstanding.
 Depends on [P2](p2-directory-store.md); exits remain
 [S3/S4/F6](../performance/storage-goals.md): **<=24 B/edge disk,
 <=100 B/edge resident, >=1M edges/s bulk load, <=300 ms reopen at 1M edges**.
@@ -143,8 +143,14 @@ The private codec slices implemented so far are in
 sequence and ID high-water marks; sorted public node/edge IDs and checked
 32-bit dense ordinals; node/edge keys and revisions; labels, relationship
 strings and sparse deadlines; bidirectional CSR; and ordinary node/edge
-property maps and label postings. Each label dictionary code carries ascending
-dense node ordinals, checked against the per-node label codes in both directions.
+property maps, label postings, and per-node attachment maps. Attachment rows
+are keyed by dense node ordinal and ordered by ordinal then collection; each
+node has at most one record per collection. Decode reconstructs the graph-local
+`(collection, record) -> node ID` owner index and rejects duplicate owners
+within this graph. Cross-graph owner uniqueness remains a checkpoint-level
+invariant and cannot be established from one graph block. Each label dictionary
+code carries ascending dense node ordinals, checked against the per-node label
+codes in both directions.
 Decoded label scans emit ascending public IDs strictly above an optional cursor,
 without expiry filtering, matching the engine label index. A private intersection
 query supports 1..8 distinct labels, an exclusive cursor and a positive limit;
@@ -153,15 +159,17 @@ Property names are dictionary-coded in UTF-8 byte order, while
 per-record typed values preserve strings, signed integers, finite float/GeoPoint
 bits, and booleans. Each map retains the engine's existing field, string and
 byte limits; this is a correctness format, not a columnar compression or size
-claim. The versioned private payload magic is `VLGCSR03`; old `VLGCSR01` and
-`VLGCSR02` bytes are refused, not reinterpreted. Its decoder rejects
-noncanonical dictionaries/IDs, invalid endpoints or codes, incorrect row
-ordering, missing or duplicate CSR membership, overflow, truncation and
+claim. The versioned private payload magic is `VLGCSR04`; old `VLGCSR01`,
+`VLGCSR02`, and `VLGCSR03` bytes are refused, not reinterpreted. Its decoder
+rejects noncanonical dictionaries/IDs, invalid endpoints or codes, incorrect
+row ordering, missing or duplicate CSR membership, overflow, truncation and
 trailing bytes, noncanonical label posting codes/ordinals, and missing or extra
-posting membership. It also checks high-water marks against live IDs, revisions
-against graph sequence, and unique present node keys and edge keys in their
-separate namespaces. Logical visibility uses `deadline <= clock` as expired,
-hides edges incident to expired nodes, and emits the existing
+posting membership. It rejects unordered/duplicate collections, invalid node
+ordinals and duplicate `(collection, record)` owners within this graph. It also
+checks high-water marks against live IDs, revisions against graph sequence,
+and unique present node keys and edge keys in their separate namespaces.
+Logical visibility uses `deadline <= clock` as expired, hides edges incident
+to expired nodes, and emits the existing
 `(relationship, edge ID)` adjacency order; the accepted
 `graph-csr-cases.json` remains the oracle. Its full-u64 logical-only fixture
 uses placeholder lifecycle metadata and exercises CSR construction directly,
@@ -199,19 +207,20 @@ The independently reviewed `tests/compact_graph_attachment_oracle.py` and
 record per node and collection, one owner per collection record, attach/detach
 error precedence, retention on node replacement, release on deletion and
 all-or-nothing batch rollback. CI runs the reference, its malformed fixtures,
-shuffles and mutation rejections. It is test evidence for the planned encoding,
-not a byte format; the codec still refuses attachments.
+shuffles and mutation rejections. It is logical test evidence for attachment
+semantics, not a byte format or a proof of checkpoint-level owner uniqueness.
 
 This codec is not wired to the checkpoint block registry, shared framing,
-checkpoint reads or production builds. It refuses attachments, declared
-schema and temporal segments rather than dropping them. It does not encode
-schema/property indexes or temporal history; those sources
-therefore remain unsupported. No changes were made to op-12/op-15, public
+checkpoint reads or production builds. Cross-graph attachment-owner uniqueness
+is a checkpoint-level invariant; one graph codec cannot validate it. It refuses
+declared schema and temporal segments rather than dropping them. It does not
+encode schema/property indexes or temporal history; those sources therefore
+remain unsupported. No changes were made to op-12/op-15, public
 APIs, or `src/openapi.json`. The remaining P4 slices are shared block
 dispatch/publication, compact-base access in reads, mutation overlay and
-checkpoint integration and columnar property storage,
-attachment/schema/temporal encoding or faithful refusal in each path, parallel
-import, and all performance and cross-platform qualification.
+checkpoint integration and columnar property storage, schema/temporal encoding
+or faithful refusal in each path, parallel import, and all performance and
+cross-platform qualification.
 
 Next roll out opt-in checkpoint reads, mutation/TTL integration, then parallel
 import; enable defaults only after acceptance.

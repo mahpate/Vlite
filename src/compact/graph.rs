@@ -9,7 +9,7 @@ use crate::property_graph::engine::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-const MAGIC: &[u8; 8] = b"VLGCSR03";
+const MAGIC: &[u8; 8] = b"VLGCSR04";
 const MAX_BYTES: usize = 64 << 20;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,7 +26,7 @@ struct SourceNode {
     revision: u64,
     deadline: Option<u64>,
     properties: Properties,
-    has_attachments: bool,
+    attachments: BTreeMap<u16, u64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -75,6 +75,7 @@ struct CompactGraph {
     relationships: Vec<String>,
     property_names: Vec<String>,
     label_postings: Vec<Vec<u32>>,
+    attachment_owners: BTreeMap<(u16, u64), u64>,
     node_ordinals: BTreeMap<u64, u32>,
     edge_rows: Vec<EdgeRow>,
     out: Csr,
@@ -137,11 +138,10 @@ impl GraphSource {
         }
         let mut nodes = Vec::new();
         for node in graph.nodes() {
-            let has_attachments = graph.attachments(node.id).next().is_some();
             nodes.push(source_node(
                 node,
                 graph.node_expiry(node.id),
-                has_attachments,
+                graph.attachments(node.id).collect(),
             ));
         }
         let mut edges = Vec::new();
@@ -164,7 +164,11 @@ impl GraphSource {
     }
 }
 
-fn source_node(node: &GraphNode, deadline: Option<u64>, has_attachments: bool) -> SourceNode {
+fn source_node(
+    node: &GraphNode,
+    deadline: Option<u64>,
+    attachments: BTreeMap<u16, u64>,
+) -> SourceNode {
     SourceNode {
         id: node.id.0,
         key: Some(node.key.clone()),
@@ -172,7 +176,7 @@ fn source_node(node: &GraphNode, deadline: Option<u64>, has_attachments: bool) -
         revision: node.revision,
         deadline,
         properties: node.properties.clone(),
-        has_attachments,
+        attachments,
     }
 }
 
@@ -257,6 +261,22 @@ fn encode(source: &GraphSource) -> Result<Vec<u8>, CodecError> {
             put_u32(&mut out, *ordinal)?;
         }
     }
+    let attachment_count = graph.source.nodes.iter().try_fold(0usize, |total, node| {
+        total
+            .checked_add(node.attachments.len())
+            .ok_or(CodecError::Corrupt)
+    })?;
+    put_count(&mut out, attachment_count)?;
+    for (ordinal, node) in graph.source.nodes.iter().enumerate() {
+        for (collection, record) in &node.attachments {
+            put_u32(
+                &mut out,
+                u32::try_from(ordinal).map_err(|_| CodecError::Corrupt)?,
+            )?;
+            put_u16(&mut out, *collection)?;
+            put_u64(&mut out, *record)?;
+        }
+    }
     if out.len() > MAX_BYTES {
         return Err(CodecError::Corrupt);
     }
@@ -309,6 +329,7 @@ fn decode(bytes: &[u8]) -> Result<CompactGraph, CodecError> {
             );
         }
         let properties = reader.properties(&property_names)?;
+        let attachments = BTreeMap::new();
         nodes.push(SourceNode {
             id,
             key,
@@ -316,7 +337,7 @@ fn decode(bytes: &[u8]) -> Result<CompactGraph, CodecError> {
             revision,
             deadline,
             properties,
-            has_attachments: false,
+            attachments,
         });
     }
     if nodes
@@ -371,6 +392,7 @@ fn decode(bytes: &[u8]) -> Result<CompactGraph, CodecError> {
     let out = reader.csr()?;
     let incoming = reader.csr()?;
     let label_postings = reader.label_postings(labels.len(), node_count)?;
+    let attachments = reader.attachments(&mut nodes)?;
     if !reader.is_empty() {
         return Err(CodecError::Corrupt);
     }
@@ -390,6 +412,7 @@ fn decode(bytes: &[u8]) -> Result<CompactGraph, CodecError> {
         || graph.out != out
         || graph.incoming != incoming
         || graph.label_postings != label_postings
+        || graph.attachment_owners != attachments
     {
         return Err(CodecError::Corrupt);
     }
@@ -416,9 +439,6 @@ fn build_inner(
     for edge in &source.edges {
         properties::validate(&edge.properties).map_err(|_| CodecError::Corrupt)?;
         property_names.extend(edge.properties.keys().cloned());
-    }
-    if source.nodes.iter().any(|node| node.has_attachments) {
-        return Err(CodecError::UnsupportedSource("attachments"));
     }
     if source.edges.iter().any(|edge| edge.is_temporal) {
         return Err(CodecError::UnsupportedSource("temporal segments"));
@@ -497,6 +517,17 @@ fn build_inner(
             label_postings[code].push(u32::try_from(ordinal).map_err(|_| CodecError::Corrupt)?);
         }
     }
+    let mut attachment_owners = BTreeMap::new();
+    for node in &source.nodes {
+        for (collection, record) in &node.attachments {
+            if attachment_owners
+                .insert((*collection, *record), node.id)
+                .is_some()
+            {
+                return Err(CodecError::Corrupt);
+            }
+        }
+    }
     let mut relationship_set = BTreeSet::new();
     for edge in &source.edges {
         if !node_ordinals.contains_key(&edge.source) || !node_ordinals.contains_key(&edge.target) {
@@ -556,6 +587,7 @@ fn build_inner(
         relationships,
         property_names,
         label_postings,
+        attachment_owners,
         node_ordinals,
         edge_rows,
         out,
@@ -898,6 +930,31 @@ impl<'a> Reader<'a> {
         Ok(postings)
     }
 
+    fn attachments(
+        &mut self,
+        nodes: &mut [SourceNode],
+    ) -> Result<BTreeMap<(u16, u64), u64>, CodecError> {
+        let count = self.entries(14)?;
+        let mut owners = BTreeMap::new();
+        let mut previous = None;
+        for _ in 0..count {
+            let ordinal = self.u32()?;
+            let ordinal_index = usize::try_from(ordinal).map_err(|_| CodecError::Corrupt)?;
+            let node = nodes.get_mut(ordinal_index).ok_or(CodecError::Corrupt)?;
+            let collection = self.u16()?;
+            let record = self.u64()?;
+            let key = (ordinal, collection);
+            if previous.is_some_and(|prior| prior >= key)
+                || node.attachments.insert(collection, record).is_some()
+                || owners.insert((collection, record), node.id).is_some()
+            {
+                return Err(CodecError::Corrupt);
+            }
+            previous = Some(key);
+        }
+        Ok(owners)
+    }
+
     fn is_empty(&self) -> bool {
         self.at == self.bytes.len()
     }
@@ -1078,6 +1135,188 @@ mod tests {
     use std::collections::BTreeSet;
 
     #[test]
+    fn attachments_round_trip_and_rebuild_the_owner_index() {
+        let mut source = fixture_graph(&json!({
+            "nodes": [{"id": 0, "labels": []}, {"id": 7, "labels": []}],
+            "edges": []
+        }));
+        source.nodes[0].attachments = BTreeMap::from([(0, u64::MAX), (u16::MAX, 0)]);
+        source.nodes[1].attachments = BTreeMap::from([(1, 42)]);
+        let restored = decode(&encode(&source).unwrap()).unwrap();
+        assert_eq!(restored.source, source);
+        assert_eq!(
+            restored.attachment_owners,
+            BTreeMap::from([((0, u64::MAX), 0), ((1, 42), 7), ((u16::MAX, 0), 0)])
+        );
+        assert_eq!(encode(&restored.source).unwrap(), encode(&source).unwrap());
+
+        let mut state = GraphState::new();
+        state
+            .apply(
+                1,
+                &GraphBody {
+                    graph_id: GraphId(0),
+                    entries: vec![
+                        GraphEntry::CreateGraph {
+                            name: "attachments".into(),
+                        },
+                        GraphEntry::PutNode {
+                            node_id: NodeId(1),
+                            key: "n1".into(),
+                            labels: BTreeSet::new(),
+                            properties: Properties::new(),
+                        },
+                        GraphEntry::PutNode {
+                            node_id: NodeId(2),
+                            key: "n2".into(),
+                            labels: BTreeSet::new(),
+                            properties: Properties::new(),
+                        },
+                        GraphEntry::Attach {
+                            node_id: NodeId(1),
+                            collection: u16::MAX,
+                            record_id: u64::MAX,
+                        },
+                        GraphEntry::Attach {
+                            node_id: NodeId(1),
+                            collection: 0,
+                            record_id: 0,
+                        },
+                    ],
+                },
+            )
+            .unwrap();
+        state
+            .apply(
+                2,
+                &GraphBody {
+                    graph_id: GraphId(0),
+                    entries: vec![GraphEntry::PutNode {
+                        node_id: NodeId(1),
+                        key: "n1".into(),
+                        labels: BTreeSet::new(),
+                        properties: Properties::new(),
+                    }],
+                },
+            )
+            .unwrap();
+        let graph = state.graph(GraphId(0)).unwrap();
+        let compact = decode(&encode(&GraphSource::from_graph(graph).unwrap()).unwrap()).unwrap();
+        assert_engine_attachment_parity(&compact, graph);
+        assert_eq!(
+            compact.attachment_owners,
+            BTreeMap::from([((0, 0), 1), ((u16::MAX, u64::MAX), 1)])
+        );
+        state
+            .apply(
+                3,
+                &GraphBody {
+                    graph_id: GraphId(0),
+                    entries: vec![
+                        GraphEntry::DeleteNode { node_id: NodeId(1) },
+                        GraphEntry::Attach {
+                            node_id: NodeId(2),
+                            collection: u16::MAX,
+                            record_id: u64::MAX,
+                        },
+                    ],
+                },
+            )
+            .unwrap();
+        let graph = state.graph(GraphId(0)).unwrap();
+        let compact = decode(&encode(&GraphSource::from_graph(graph).unwrap()).unwrap()).unwrap();
+        assert_engine_attachment_parity(&compact, graph);
+        assert_eq!(
+            compact.attachment_owners,
+            BTreeMap::from([((u16::MAX, u64::MAX), 2)])
+        );
+        assert_eq!(
+            compact.attachment_owners,
+            state
+                .attached_records()
+                .map(|(collection, record)| {
+                    (
+                        (collection, record),
+                        state.attachment_owner(collection, record).unwrap().1.0,
+                    )
+                })
+                .collect()
+        );
+        assert_eq!(
+            state.attachment_owner(u16::MAX, u64::MAX),
+            Some((GraphId(0), NodeId(2)))
+        );
+    }
+
+    fn assert_engine_attachment_parity(compact: &CompactGraph, graph: &Graph) {
+        let expected: BTreeMap<_, _> = graph
+            .nodes()
+            .map(|node| {
+                (
+                    node.id.0,
+                    graph.attachments(node.id).collect::<BTreeMap<_, _>>(),
+                )
+            })
+            .collect();
+        let actual: BTreeMap<_, _> = compact
+            .source
+            .nodes
+            .iter()
+            .map(|node| (node.id, node.attachments.clone()))
+            .collect();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn attachment_decoder_rejects_bad_ordinals_order_duplicates_and_bounds() {
+        let mut source = fixture_graph(&json!({
+            "nodes": [{"id": 0, "labels": []}, {"id": 7, "labels": []}],
+            "edges": []
+        }));
+        source.nodes[0].attachments = BTreeMap::from([(0, u64::MAX), (u16::MAX, 0)]);
+        source.nodes[1].attachments = BTreeMap::from([(1, 42)]);
+        let bytes = encode(&source).unwrap();
+        let start = bytes.len() - 4 - 14 * 3;
+        assert_eq!(
+            u32::from_le_bytes(bytes[start..start + 4].try_into().unwrap()),
+            3
+        );
+
+        let mut bad_ordinal = bytes.clone();
+        bad_ordinal[start + 4..start + 8].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(decode(&bad_ordinal), Err(CodecError::Corrupt));
+        let mut oversized_count = bytes.clone();
+        oversized_count[start..start + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(decode(&oversized_count), Err(CodecError::Corrupt));
+
+        let mut duplicate_collection = bytes.clone();
+        duplicate_collection[start + 18 + 4..start + 18 + 6].copy_from_slice(&0u16.to_le_bytes());
+        assert_eq!(decode(&duplicate_collection), Err(CodecError::Corrupt));
+        let mut unsorted_collection = bytes.clone();
+        unsorted_collection[start + 8..start + 10].copy_from_slice(&u16::MAX.to_le_bytes());
+        unsorted_collection[start + 18 + 4..start + 18 + 6].copy_from_slice(&0u16.to_le_bytes());
+        assert_eq!(decode(&unsorted_collection), Err(CodecError::Corrupt));
+        let mut unsorted_ordinal = bytes.clone();
+        unsorted_ordinal[start + 4..].rotate_right(14);
+        assert_eq!(decode(&unsorted_ordinal), Err(CodecError::Corrupt));
+        let mut duplicate_owner = bytes.clone();
+        duplicate_owner[start + 32 + 4..start + 32 + 6].copy_from_slice(&0u16.to_le_bytes());
+        duplicate_owner[start + 32 + 6..start + 32 + 14].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert_eq!(decode(&duplicate_owner), Err(CodecError::Corrupt));
+        for end in start..bytes.len() {
+            assert_eq!(decode(&bytes[..end]), Err(CodecError::Corrupt));
+        }
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert_eq!(decode(&trailing), Err(CodecError::Corrupt));
+        for magic in [b"VLGCSR01", b"VLGCSR02", b"VLGCSR03"] {
+            let mut old = bytes.clone();
+            old[..8].copy_from_slice(magic);
+            assert_eq!(decode(&old), Err(CodecError::Corrupt));
+        }
+    }
+
+    #[test]
     fn label_postings_round_trip_and_queries_preserve_order_and_deadlines() {
         let mut source = fixture_graph(&json!({
             "nodes": [
@@ -1161,7 +1400,7 @@ mod tests {
         }));
         let bytes = encode(&source).unwrap();
         // Two explicit (code, count, ordinals) rows, preceded by row count.
-        let start = bytes.len() - 36;
+        let start = bytes.len() - 4 - 36;
         assert_eq!(
             u32::from_le_bytes(bytes[start..start + 4].try_into().unwrap()),
             2
@@ -1170,7 +1409,6 @@ mod tests {
             (start, u32::MAX),
             (start + 4, 2),        // out-of-range code
             (start + 20, 0),       // duplicate code
-            (start + 4, 1),        // unsorted codes
             (start + 8, u32::MAX), // excessive count
             (start + 16, 0),       // duplicate ordinal
             (start + 12, 2),       // descending ordinals
@@ -1185,6 +1423,10 @@ mod tests {
                 "offset {offset}, value {value}"
             );
         }
+        let mut reversed_codes = bytes.clone();
+        reversed_codes[start + 4..start + 8].copy_from_slice(&1u32.to_le_bytes());
+        reversed_codes[start + 20..start + 24].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(decode(&reversed_codes), Err(CodecError::Corrupt));
         let mut missing = bytes.clone();
         missing[start + 8..start + 12].copy_from_slice(&1u32.to_le_bytes());
         missing.drain(start + 16..start + 20);
@@ -1200,7 +1442,7 @@ mod tests {
         for end in start..bytes.len() {
             assert_eq!(decode(&bytes[..end]), Err(CodecError::Corrupt));
         }
-        for magic in [b"VLGCSR01", b"VLGCSR02"] {
+        for magic in [b"VLGCSR01", b"VLGCSR02", b"VLGCSR03"] {
             let mut old = bytes.clone();
             old[..8].copy_from_slice(magic);
             assert_eq!(decode(&old), Err(CodecError::Corrupt));
@@ -1594,13 +1836,6 @@ mod tests {
     #[test]
     fn graph_source_refuses_fields_not_yet_encoded() {
         let mut graph = fixture_graph(&json!({"nodes": [{"id": 1, "labels": []}], "edges": []}));
-        graph.nodes[0].has_attachments = true;
-        assert_eq!(
-            encode(&graph),
-            Err(CodecError::UnsupportedSource("attachments"))
-        );
-
-        graph.nodes[0].has_attachments = false;
         graph.has_schema = true;
         assert_eq!(encode(&graph), Err(CodecError::UnsupportedSource("schema")));
 
@@ -1799,7 +2034,7 @@ mod tests {
                 revision: 0,
                 deadline: node.get("deadline").and_then(Value::as_u64),
                 properties: Properties::new(),
-                has_attachments: false,
+                attachments: BTreeMap::new(),
             })
             .collect();
         let edges: Vec<SourceEdge> = case["edges"]

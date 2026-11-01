@@ -121,9 +121,10 @@ Local numbers below show direction only (see rules).
   immutable CSR checkpoint blocks, a bounded update overlay, encoded labels
   and properties, and deterministic parallel import. The private, test-only
   source codec preserves IDs, keys, revisions, deadlines, ordinary typed
-  node/edge properties and label postings with private scan and intersection
-  checks; its CSR is checked against the accepted logical oracle. It refuses
-  attachments, schema and temporal segments; shared framing,
+  node/edge properties, label postings with private scan and intersection
+  checks, and per-node attachments with graph-local owner uniqueness; its CSR
+  is checked against the accepted logical oracle. It refuses
+  schema and temporal segments; cross-graph owner validation, shared framing,
   checkpoint/read integration, columnar property storage, mutation overlay,
   parallel import and S3/S4/F6 qualification remain outstanding.
   Independently reviewed logical references cover committed-overlay
