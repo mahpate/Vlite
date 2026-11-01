@@ -116,9 +116,12 @@ Local numbers below show direction only (see rules).
   remains outstanding.
 - **Speed P4, compact graph:** the [design](p4-compact-graph.md) is ready:
   immutable CSR checkpoint blocks, a bounded update overlay, encoded labels
-  and properties, and deterministic parallel import. It preserves graph TTL
-  and attachment rules. Implementation and S3/S4/F6 qualification remain
-  outstanding; the byte budgets are estimates, not measured results.
+  and properties, and deterministic parallel import. The first private,
+  test-only CSR source codec preserves IDs, keys, revisions and deadlines and
+  is checked against the accepted logical oracle. It refuses properties,
+  attachments, schema and temporal segments; shared framing, checkpoint/read
+  integration, mutation overlay, parallel import and S3/S4/F6 qualification
+  remain outstanding. The byte budgets are estimates, not measured results.
 - **Gap 5, bounded algorithms:** S1 and S2 are implemented and reviewed in
   the embedded Rust API, but unreleased ([plan](gap5-graph-algorithms.md)).
   They provide TTL-aware local scopes, degree counts and hop-constrained

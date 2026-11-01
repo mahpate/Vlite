@@ -31,6 +31,10 @@ use std::collections::{BTreeMap, BTreeSet};
 /// P3a precision policy storage: the catalog, import registry and graph
 /// revision kinds of a `FLAG_PRECISION` image.
 pub(crate) mod catalog;
+/// P4's private CSR source codec. It is not wired to checkpoint framing or
+/// enabled in normal builds.
+#[cfg(test)]
+pub(crate) mod graph;
 /// P3a canonical float16 conversion, shared by the dense rows codec and
 /// the replay check of float16 collections.
 pub(crate) mod half;

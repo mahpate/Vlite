@@ -1,6 +1,7 @@
 # Speed P4: compact graph
 
-**Status:** design for approved P4, not implementation or measured results.
+**Status:** approved design; the first private codec slice is implemented and
+test-only. Full P4 implementation and measured results remain outstanding.
 Depends on [P2](p2-directory-store.md); exits remain
 [S3/S4/F6](../performance/storage-goals.md): **<=24 B/edge disk,
 <=100 B/edge resident, >=1M edges/s bulk load, <=300 ms reopen at 1M edges**.
@@ -136,8 +137,30 @@ is 24 base + 20 indexes + 20 overlay + 16 caches + 20 other overhead.
 Report import/merge peaks and crypto scratch separately.
 Existing `graph_memory` heap counts alone cannot establish S4.
 
-Roll out codec/oracle tests, opt-in checkpoint reads, mutation/TTL integration,
-then parallel import; enable defaults only after acceptance.
+The first private codec slice is implemented in
+`src/compact/graph.rs` behind `cfg(test)`. It preserves graph ID/name, graph
+sequence and ID high-water marks; sorted public node/edge IDs and checked
+32-bit dense ordinals; node/edge keys and revisions; labels, relationship
+strings and sparse deadlines; and bidirectional CSR. Its decoder rejects
+noncanonical dictionaries/IDs, invalid endpoints or codes, incorrect row
+ordering, missing or duplicate CSR membership, overflow, truncation and
+trailing bytes. Logical visibility uses `deadline <= clock` as expired, hides
+edges incident to expired nodes, and emits the existing `(relationship, edge
+ID)` adjacency order; the accepted `graph-csr-cases.json` remains the oracle.
+
+This codec is not wired to the checkpoint block registry, shared framing,
+checkpoint reads or production builds. It refuses nonempty properties,
+attachments, declared schema and temporal segments rather than dropping them.
+It does not encode label-posting/property indexes or temporal history; those
+sources therefore remain unsupported. No changes were made to op-12/op-15,
+public APIs, or `src/openapi.json`. The remaining P4 slices are shared block
+dispatch/publication, compact-base access in reads, mutation overlay and
+checkpoint integration, attachment/property/schema/temporal encoding or
+faithful refusal in each path, parallel import, and all performance and
+cross-platform qualification.
+
+Next roll out opt-in checkpoint reads, mutation/TTL integration, then parallel
+import; enable defaults only after acceptance.
 Extend existing graph storage/recovery/integrity/surface and directory recovery
 matrices with old/new conversion, sparse IDs, parallel edges, self-loops, skew,
 properties, attachments, deadline boundaries, checkpoint races, corruption,
