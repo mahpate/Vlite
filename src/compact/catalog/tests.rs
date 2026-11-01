@@ -31,8 +31,10 @@ use std::rc::Rc;
 mod goldens;
 mod limits;
 mod parity;
+mod peak;
 mod populated;
 mod replayed;
+mod suffix;
 
 const LINEAGE: u64 = 0x5EED_0000_0000_0032;
 /// A deadline far in the future (2100-01-01).

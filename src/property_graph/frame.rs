@@ -17,7 +17,7 @@ use crate::{Error, Mutation, Record, Result};
 use super::engine::codec::BODY_HEADER_BYTES;
 use super::engine::limits::{MAX_BATCH_BYTES, MAX_BATCH_ENTRIES};
 use super::engine::{
-    self, Graph, GraphBody, GraphEdge, GraphEntry, GraphId, GraphNode, GraphState,
+    self, Graph, GraphBody, GraphEdge, GraphEntry, GraphId, GraphNode, GraphState, SnapshotBuilder,
 };
 
 /// Encodes one vector mutation of `collection` as a graph-frame entry.
@@ -112,63 +112,35 @@ fn restated(entry: &GraphEntry) -> bool {
     )
 }
 
-/// Replays one checksum-verified op-12 body committed at `sequence` (frame at
-/// `offset`). Every entry is decoded and validated first; then graph entries
-/// are applied atomically to `state` and vector entries, in body order, to
-/// `collections`. Afterwards every attachment the body touched (attached by
-/// an `Attach` entry or owning a record changed by a vector entry) must
-/// reference a live record without expiry. Any failure fails the open.
-/// `restated` bodies come from a checkpoint image and may repeat the last
-/// applied sequence. The body is decoded by [`decode_frame`], so the prefix
-/// `id` must count its reclaims.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn replay(
-    state: &mut GraphState,
-    collections: &mut BTreeMap<u16, LoadedCollection>,
-    sequence: u64,
-    id: u64,
-    count: u32,
-    body: &[u8],
-    offset: u64,
-    restated: bool,
-) -> Result<()> {
-    let body = decode_frame(false, id, count, body, offset)?;
-    let mut mutations = Vec::new();
-    let mut touched = Vec::new();
-    for entry in &body.entries {
-        match entry {
-            GraphEntry::VectorMutation { collection, entry } => {
-                let target = collections.get(collection).ok_or_else(|| {
-                    corrupt(offset, "graph vector entry references unknown collection")
-                })?;
-                let (mut decoded, marker) =
-                    format::decode_batch(entry, 1, target.dimensions, offset, format::V5)?;
-                // The engine envelope admits only ops 1, 2 and 4.
-                debug_assert!(marker.is_none() && decoded.len() == 1);
-                let mutation = decoded
-                    .pop()
-                    .ok_or_else(|| corrupt(offset, "invalid graph vector entry"))?;
-                if let Mutation::Put { vector, .. } | Mutation::PutWithMetadata { vector, .. } =
-                    &mutation
-                {
-                    target.check_dense(vector, offset)?;
-                }
-                touched.push((*collection, mutation_id(&mutation)));
-                mutations.push((*collection, mutation));
-            }
-            GraphEntry::Attach {
-                collection,
-                record_id,
-                ..
-            } => touched.push((*collection, *record_id)),
-            _ => {}
-        }
+/// The records that graph frames read and write (P3a): full replay's
+/// loaded collections, or the live records that the readers which do not
+/// replay a precision log follow (`compact::ImageCheck`). [`replay`] and
+/// [`PendingSnapshot::finish`] check and apply graph frames and snapshots
+/// to either alike, so those readers accept exactly what replay accepts.
+pub(crate) trait GraphRecords {
+    /// The dimensions of live collection `collection`.
+    fn dimensions(&self, collection: u16) -> Option<usize>;
+    /// Refuses a dense `vector` that live collection `collection` does not
+    /// store exactly (`format::check_dense`).
+    fn check_dense(&self, collection: u16, vector: &[f32], offset: u64) -> Result<()>;
+    /// Applies the put (without expiry) or delete of a graph vector entry
+    /// committed at `sequence` to live collection `collection`.
+    fn apply(&mut self, collection: u16, mutation: Mutation, sequence: u64);
+    /// Whether `record` of `collection` is live without expiry.
+    fn lasting(&self, collection: u16, record: u64) -> bool;
+}
+
+impl GraphRecords for BTreeMap<u16, LoadedCollection> {
+    fn dimensions(&self, collection: u16) -> Option<usize> {
+        self.get(&collection).map(|target| target.dimensions)
     }
-    state
-        .apply_at(sequence, &body, restated)
-        .map_err(|_| corrupt(offset, "graph frame violates graph state"))?;
-    for (collection, mutation) in mutations {
-        let target = collections
+
+    fn check_dense(&self, collection: u16, vector: &[f32], offset: u64) -> Result<()> {
+        self[&collection].check_dense(vector, offset)
+    }
+
+    fn apply(&mut self, collection: u16, mutation: Mutation, sequence: u64) {
+        let target = self
             .get_mut(&collection)
             .expect("collection checked while decoding");
         match mutation {
@@ -204,11 +176,77 @@ pub(crate) fn replay(
             Mutation::Delete { id } => target.delete(id),
         }
     }
+
+    fn lasting(&self, collection: u16, record: u64) -> bool {
+        self.get(&collection).is_some_and(|target| {
+            target.records.contains_key(&record) && !target.expiries.contains_key(&record)
+        })
+    }
+}
+
+/// Replays one checksum-verified op-12 body committed at `sequence` (frame at
+/// `offset`). Every entry is decoded and validated first; then graph entries
+/// are applied atomically to `state` and vector entries, in body order, to
+/// `records`. Afterwards every attachment the body touched (attached by
+/// an `Attach` entry or owning a record changed by a vector entry) must
+/// reference a live record without expiry. Any failure fails the open.
+/// `restated` bodies come from a checkpoint image and may repeat the last
+/// applied sequence. The body is decoded by [`decode_frame`], so the prefix
+/// `id` must count its reclaims. Full replay and the image check of readers
+/// that do not replay a precision log (P3a) apply graph frames only through
+/// this.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn replay(
+    state: &mut GraphState,
+    records: &mut impl GraphRecords,
+    sequence: u64,
+    id: u64,
+    count: u32,
+    body: &[u8],
+    offset: u64,
+    restated: bool,
+) -> Result<()> {
+    let body = decode_frame(false, id, count, body, offset)?;
+    let mut mutations = Vec::new();
+    let mut touched = Vec::new();
+    for entry in &body.entries {
+        match entry {
+            GraphEntry::VectorMutation { collection, entry } => {
+                let dimensions = records.dimensions(*collection).ok_or_else(|| {
+                    corrupt(offset, "graph vector entry references unknown collection")
+                })?;
+                let (mut decoded, marker) =
+                    format::decode_batch(entry, 1, dimensions, offset, format::V5)?;
+                // The engine envelope admits only ops 1, 2 and 4.
+                debug_assert!(marker.is_none() && decoded.len() == 1);
+                let mutation = decoded
+                    .pop()
+                    .ok_or_else(|| corrupt(offset, "invalid graph vector entry"))?;
+                if let Mutation::Put { vector, .. } | Mutation::PutWithMetadata { vector, .. } =
+                    &mutation
+                {
+                    records.check_dense(*collection, vector, offset)?;
+                }
+                touched.push((*collection, mutation_id(&mutation)));
+                mutations.push((*collection, mutation));
+            }
+            GraphEntry::Attach {
+                collection,
+                record_id,
+                ..
+            } => touched.push((*collection, *record_id)),
+            _ => {}
+        }
+    }
+    state
+        .apply_at(sequence, &body, restated)
+        .map_err(|_| corrupt(offset, "graph frame violates graph state"))?;
+    for (collection, mutation) in mutations {
+        records.apply(collection, mutation, sequence);
+    }
     for (collection, record) in touched {
         if state.attachment_owner(collection, record).is_some()
-            && !collections.get(&collection).is_some_and(|target| {
-                target.records.contains_key(&record) && !target.expiries.contains_key(&record)
-            })
+            && !records.lasting(collection, record)
         {
             return Err(corrupt(
                 offset,
@@ -219,31 +257,64 @@ pub(crate) fn replay(
     Ok(())
 }
 
-/// Builds the graph state of a checkpoint image from its op-15 snapshot
-/// bodies (Speed P2b), all restated at `sequence`; `offset` is the first
-/// snapshot frame. The bodies are exactly what [`compacted_bodies`] writes;
-/// loading them equals replaying them as op-12 frames, including the check
-/// that every attachment references a record that `live` reports present
-/// without expiry. Full replay and the image check of readers that do not
-/// replay a precision log (P3a) load snapshots only through this, so they
-/// accept the same ones.
-pub(crate) fn load_snapshot(
-    live: impl Fn(u16, u64) -> bool,
-    sequence: u64,
-    bodies: Vec<GraphBody>,
-    offset: u64,
-) -> Result<GraphState> {
-    let state = GraphState::from_snapshot(sequence, bodies)
-        .map_err(|_| corrupt(offset, "invalid graph snapshot"))?;
-    for (collection, record) in state.attached_records() {
-        if !live(collection, record) {
-            return Err(corrupt(
-                offset,
-                "graph attachment references a missing or expiring record",
-            ));
+/// The graph snapshot of a checkpoint image being read (Speed P2b, P3a):
+/// its op-15 bodies, all restated at one sequence, from the frame at
+/// `first` on. Each verified body loads as it is read
+/// ([`SnapshotBuilder`]), so a reader holds the state built so far and
+/// one decoded body, never every decoded body beside that state. The
+/// bodies are exactly what [`compacted_bodies`] writes; loading them
+/// equals replaying them as op-12 frames. Full replay and the image check
+/// of readers that do not replay a precision log load snapshots only
+/// through this, so they accept the same ones.
+pub(crate) struct PendingSnapshot {
+    first: u64,
+    /// `None` once a body was refused: the snapshot is refused where it
+    /// ends, as loading every body there refuses it, and later bodies are
+    /// only dropped.
+    builder: Option<SnapshotBuilder>,
+}
+
+impl PendingSnapshot {
+    /// A snapshot restated at `sequence` whose first frame is at `first`.
+    pub(crate) fn new(sequence: u64, first: u64) -> Self {
+        Self {
+            first,
+            builder: Some(SnapshotBuilder::new(sequence)),
         }
     }
-    Ok(state)
+
+    /// The offset of the snapshot's first frame.
+    pub(crate) fn first(&self) -> u64 {
+        self.first
+    }
+
+    /// Loads the next verified body ([`decode_frame`]).
+    pub(crate) fn push(&mut self, body: GraphBody) {
+        if let Some(builder) = self.builder.as_mut()
+            && builder.push(body).is_err()
+        {
+            self.builder = None;
+        }
+    }
+
+    /// The loaded state, where the snapshot ends: canonical, and every
+    /// attachment references a record that `records` holds live without
+    /// expiry.
+    pub(crate) fn finish(self, records: &impl GraphRecords) -> Result<GraphState> {
+        let state = self
+            .builder
+            .and_then(|builder| builder.finish().ok())
+            .ok_or_else(|| corrupt(self.first, "invalid graph snapshot"))?;
+        for (collection, record) in state.attached_records() {
+            if !records.lasting(collection, record) {
+                return Err(corrupt(
+                    self.first,
+                    "graph attachment references a missing or expiring record",
+                ));
+            }
+        }
+        Ok(state)
+    }
 }
 
 /// Writes `state` as the op-12 bodies of a compacted file (REQ-052), or the

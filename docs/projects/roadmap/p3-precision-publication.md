@@ -229,6 +229,118 @@ Replica append/reload rollback is a separate existing path (`src/lib.rs:2369-242
 failed truncate/sync poisons; do not present it as proof of primary append rollback.
 All original source files remain untouched on conversion, restoration and rotation; only explicitly selected dense components lose precision in the new destination.
 
+## Feed and export validation memory (private P3a)
+
+The change feed (`changes::scan`) and log export (`logops::read_segment`) check
+a precision log as full replay does, through `compact::ImageCheck`, without
+replaying records. That check refuses frame limits from the verified prefix
+before a body is read. It loads the image's graph snapshot with replay's
+`SnapshotBuilder`, one body at a time. It applies every graph frame after the
+image with replay's `frame::replay` (`GraphState::apply_at`). It refuses a
+delete or expiry (ops 2, 3, 9 and 12) of a record a graph attached, as replay
+does. Only memory is described here: the check is eager and linear, like
+replay. This contract is input-proportional. It gives no constant ceiling,
+no store-size cap and no bound by log bytes or by replay's own state.
+
+**Held between frames.** All sizes are requested heap bytes.
+
+- *G*, replay's graph state for the prefix read. It is built by replay's own
+  code from the same frames. While a snapshot loads, *G* is the state built
+  from the bodies read so far. Replay's revision restore and record touch
+  are skipped, because neither affects what `apply_at` accepts. So *G* is at
+  most replay's graph state; the tests measure it equal.
+- *R*, one `BTreeMap<u64, bool>` per live collection: each live record ID and
+  whether it expires. For *n* live records it holds at most
+  `25.6 n + 151` bytes. Standard-library nodes are 112 bytes, and 208 when
+  internal. Every non-root node holds at least five keys after both splits
+  and removals. So sparse IDs and churn do not inflate it.
+
+  A sorted vector would hold 16 bytes per record, and up to twice that with
+  its growth copy, so it is not provably smaller. It would also cost
+  O(*n*) per unordered insert. There is no overlay or rebasing buffer, so
+  those terms are zero.
+- *B*, bookkeeping that grows with neither records nor graph entries:
+  - at most `MAX_COLLECTIONS` collection names;
+  - replay's import-job state;
+  - ended runs;
+  - at most `REPORT_GROUPS` skip-report groups;
+  - coverage digests.
+
+**Per frame,** *F* is the sum of:
+
+- the on-disk and plaintext buffers, about 2 *L* for a frame of *L* bytes,
+  since plaintext is copied too;
+- replay's decoded representation of that frame. The decoders are shared,
+  and counts and lengths are refused before allocation;
+- the check's per-record write list and the `apply_at` undo log;
+- container growth, during which a reallocation holds the old and new
+  blocks.
+
+A snapshot body adds at most its decoded body beside *G*. Once the snapshot
+is loaded, only *G* remains, so no decoded body is retained.
+
+**Reader output,** *W*:
+
+- Export holds its segment: at most `max_bytes` plus one commit, and up to
+  twice that while growing.
+- The feed holds:
+  - the events of its page; one frame's events are never split;
+  - the existing `FeedGraphs` projection: node and edge keys and the
+    attachments of each graph;
+  - that projection's second decode of each graph frame, with the events it
+    discards for restated snapshot frames.
+
+The validation peak is then at most the largest *G* + Σ*R* + *B* over the
+prefixes read, plus the largest *F*, plus *W*. *G* grows with live graph
+entities, *R* with live records, *F* with the largest frame (within replay's
+frame limits and the 2^28-byte body cap), and *W* with the page or segment
+and the projection.
+
+The reopen peak, from full replay, is a separate figure. It is not a bound
+on these readers. Neither figure is exempt from S2/S4 accounting.
+
+The tests are `compact::catalog::tests::peak`, which uses a test-only counting
+allocator, and `compact::catalog::tests::suffix`, which checks parity. The
+peak test asserts each relation above per scenario, plaintext and encrypted:
+
+- every *R* is within its bound;
+- *G* is at most replay's;
+- *B* is at most 4 KiB;
+- snapshot loading peaks at most at the final *G* plus 2 *L* and the decoded
+  body of one frame, and keeps only *G*;
+- export stays within the check plus twice its output plus 4 KiB;
+- the feed stays within the check plus its projection, twice its output and
+  4 KiB.
+
+Debug-build plaintext figures, in bytes. Encrypted check, feed and export
+figures are within 0.1% of these. Encrypted reopen peaks were 1,824,622,
+8,259,592 and 3,701,148.
+
+| Scenario | Log | Reopen peak | Check peak | Feed peak | Export peak | *G* (= replay's) | *R* |
+|---|---|---|---|---|---|---|---|
+| Sparse IDs, record and node churn | 406,229 | 1,724,478 | 957,735 | 2,269,597 | 1,358,766 | 385,098 | 62,112 for 3,500 |
+| 2,000 labelled nodes, 2,499 edges, 64-byte properties | 1,871,578 | 6,962,525 | 8,255,141 | 12,823,363 | 8,255,964 | 4,777,174 | 0 |
+| 5,000 attachments, 3 snapshot bodies | 666,849 | 3,672,750 | 2,956,647 | 4,137,007 | 2,985,776 | 2,489,190 | 104,720 for 5,000 |
+
+Measured *F* per frame byte was at most 8.0 for op 3 and 17.5 for op 12. It
+was 4.5 for op 14, 5.7 for op 15 and 3.0 for op 16. These are
+measurements, not a proven constant: a small graph frame decodes to
+fixed-size entries and undo records.
+
+The check can exceed the reopen peak, as in the property scenario, because
+it holds a large snapshot frame twice. The counts exclude allocator headers
+and size-class rounding; add the per-block overhead times the most live
+blocks, which was 10,843, 78,626 and 20,020.
+
+**Remaining caveats:**
+
+- The *R* bound depends on the standard library's `BTreeMap` layout. The
+  guard test fails if a toolchain changes it.
+- The feed validates only up to the end of its page; export validates to
+  the end of the log.
+- This is private validation behavior, not performance qualification.
+  F4/S2/S4, production activation and public API remain separate gates.
+
 ## One owner and bounded qualification
 
 The independent [byte reference checker](../../../tests/precision_catalog_oracle.py)

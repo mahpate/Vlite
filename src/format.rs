@@ -1872,7 +1872,7 @@ fn load_inner<R: Read + Seek>(
     // of record blocks being read, and the graph snapshot bodies with the
     // offset of their first frame.
     let mut blocks: Option<BlockRun> = None;
-    let mut snapshot: Option<(u64, Vec<crate::property_graph::engine::GraphBody>)> = None;
+    let mut snapshot: Option<crate::property_graph::frame::PendingSnapshot> = None;
     // A precision image's graph revision runs, one per snapshot graph in
     // order (P3a).
     let mut revisions: Vec<Revisions> = Vec::new();
@@ -1982,8 +1982,8 @@ fn load_inner<R: Read + Seek>(
             || (precise
                 && operation == OP_COMPACT_BLOCK
                 && u64_at(&prefix, 16) as u16 == crate::compact::catalog::KIND_REVISIONS);
-        if !continues_snapshot && let Some((first, bodies)) = snapshot.take() {
-            load_graph_image(&mut loaded, first, bodies, &mut revisions)?;
+        if !continues_snapshot && let Some(pending) = snapshot.take() {
+            load_graph_image(&mut loaded, pending, &mut revisions)?;
         }
         if blocks
             .as_ref()
@@ -2283,8 +2283,9 @@ fn load_inner<R: Read + Seek>(
                     check.snapshot(&body, offset)?;
                 }
                 snapshot
-                    .get_or_insert_with(|| (offset, Vec::new()))
-                    .1
+                    .get_or_insert_with(|| {
+                        crate::property_graph::frame::PendingSnapshot::new(sequence, offset)
+                    })
                     .push(body);
             }
             OP_COMPACT_BLOCK => {
@@ -2326,8 +2327,8 @@ fn load_inner<R: Read + Seek>(
     if let Some(run) = blocks {
         run.apply(&mut loaded, cipher.as_ref())?;
     }
-    if let Some((first, bodies)) = snapshot {
-        load_graph_image(&mut loaded, first, bodies, &mut revisions)?;
+    if let Some(pending) = snapshot {
+        load_graph_image(&mut loaded, pending, &mut revisions)?;
     }
     Ok(loaded)
 }
@@ -2339,27 +2340,18 @@ struct Revisions {
     edges: crate::compact::catalog::Pairs,
 }
 
-/// Loads the graph state of a checkpoint image from its snapshot `bodies`;
-/// a precision image restores the revisions its runs restated, one run per
-/// graph, which the image check matched to the snapshot (a graph whose run
-/// is missing fails that check by the end block).
+/// Finishes loading the graph state of a checkpoint image from its
+/// `pending` snapshot; a precision image restores the revisions its runs
+/// restated, one run per graph, which the image check matched to the
+/// snapshot (a graph whose run is missing fails that check by the end
+/// block).
 fn load_graph_image(
     loaded: &mut Loaded,
-    first: u64,
-    bodies: Vec<crate::property_graph::engine::GraphBody>,
+    pending: crate::property_graph::frame::PendingSnapshot,
     revisions: &mut Vec<Revisions>,
 ) -> Result<()> {
-    let collections = &loaded.collections;
-    let mut state = crate::property_graph::frame::load_snapshot(
-        |collection, record| {
-            collections.get(&collection).is_some_and(|target| {
-                target.records.contains_key(&record) && !target.expiries.contains_key(&record)
-            })
-        },
-        loaded.history_floor,
-        bodies,
-        first,
-    )?;
+    let first = pending.first();
+    let mut state = pending.finish(&loaded.collections)?;
     for run in revisions.drain(..) {
         state
             .restore_revisions(
@@ -2639,11 +2631,14 @@ pub(crate) struct Writes {
 /// them; then it decodes the body as replay decodes it:
 /// primary puts and deletes, batches and import chunks, settings, metadata
 /// updates of records that `exists`, expiry markers, named vectors of
-/// records that `exists`, record blocks restating checkpoint `floor`, and
-/// graph vector entries. Every dense vector must be stored exactly by its
-/// collection's precision (`check_dense`). `target` gives a live
+/// records that `exists`, and record blocks restating checkpoint `floor`.
+/// Every dense vector must be stored exactly by its collection's precision
+/// (`check_dense`), and a primary delete or expiry marker may not remove
+/// or expire a record that a graph `attached`. `target` gives a live
 /// collection's dimensions and stored precision. Replay makes the same
-/// checks where it decodes these frames.
+/// checks, in the same order, where it decodes these frames; batch deletes
+/// of attached records are refused after the import marker, as replay
+/// refuses them, and graph frames replay through `frame::replay`.
 pub(crate) fn check_frame_writes(
     frame: &RawFrame,
     version: u32,
@@ -2651,6 +2646,7 @@ pub(crate) fn check_frame_writes(
     offset: u64,
     target: impl Fn(u16) -> Option<(usize, Option<Precision>)>,
     exists: impl Fn(u16, u64) -> bool,
+    attached: impl Fn(u16, u64) -> bool,
 ) -> Result<Writes> {
     let operation = frame.operation;
     let collection = frame.collection;
@@ -2659,34 +2655,14 @@ pub(crate) fn check_frame_writes(
         check_frame_prefix(&frame.plain[..PREFIX_SIZE], version, offset, &target)?;
     let body = frame.body();
     let mut writes = Writes::default();
-    // Decodes `count` batch entries into `collection` and checks their
-    // vectors, as replay does.
-    let batch = |writes: &mut Writes,
-                 entries: &[u8],
-                 count: usize,
-                 collection: u16,
-                 (dimensions, precision): (usize, Option<Precision>),
-                 version: u32| {
-        let (operations, marker) = decode_batch(entries, count, dimensions, offset, version)?;
-        for operation in &operations {
-            if let Mutation::Put { vector, .. } | Mutation::PutWithMetadata { vector, .. } =
-                operation
-            {
-                check_dense(precision, vector, offset)?;
-            }
+    let survives = |deleting_or_expiring: bool| {
+        if deleting_or_expiring && attached(collection, frame.id) {
+            return Err(corrupt(
+                offset,
+                "graph attachment references a missing or expiring record",
+            ));
         }
-        if let Some(marker) = marker {
-            writes.marker = Some((marker, operations.len()));
-        }
-        writes
-            .records
-            .extend(operations.iter().map(|operation| match operation {
-                Mutation::Put { id, .. } | Mutation::PutWithMetadata { id, .. } => {
-                    (collection, *id, Some(false))
-                }
-                Mutation::Delete { id } => (collection, *id, None),
-            }));
-        Ok::<_, Error>(())
+        Ok(())
     };
     match operation {
         1 => {
@@ -2697,15 +2673,31 @@ pub(crate) fn check_frame_writes(
             )?;
             writes.records.push((collection, frame.id, Some(false)));
         }
-        2 => writes.records.push((collection, frame.id, None)),
-        3 => batch(
-            &mut writes,
-            body,
-            count,
-            collection,
-            (dimensions, precision),
-            version,
-        )?,
+        2 => {
+            survives(true)?;
+            writes.records.push((collection, frame.id, None));
+        }
+        3 => {
+            let (operations, marker) = decode_batch(body, count, dimensions, offset, version)?;
+            for operation in &operations {
+                if let Mutation::Put { vector, .. } | Mutation::PutWithMetadata { vector, .. } =
+                    operation
+                {
+                    check_dense(precision, vector, offset)?;
+                }
+            }
+            if let Some(marker) = marker {
+                writes.marker = Some((marker, operations.len()));
+            }
+            writes
+                .records
+                .extend(operations.iter().map(|operation| match operation {
+                    Mutation::Put { id, .. } | Mutation::PutWithMetadata { id, .. } => {
+                        (collection, *id, Some(false))
+                    }
+                    Mutation::Delete { id } => (collection, *id, None),
+                }));
+        }
         4 => {
             let record = decode_extended(body, dimensions, offset, version >= V5)?;
             check_dense(precision, &record.vector, offset)?;
@@ -2726,6 +2718,7 @@ pub(crate) fn check_frame_writes(
             if expiry_flag > 1 || (expiry_flag == 0 && u64_at(body, 1) != 0) {
                 return Err(corrupt(offset, "invalid expiry marker"));
             }
+            survives(expiry_flag == 1)?;
             let record = decode_extended(&body[9..], dimensions, offset, true)?;
             check_dense(precision, &record.vector, offset)?;
             writes
@@ -2757,28 +2750,6 @@ pub(crate) fn check_frame_writes(
                     .iter()
                     .map(|entry| (collection, entry.id, Some(entry.expiry.is_some()))),
             );
-        }
-        OP_GRAPH => {
-            let body = crate::property_graph::frame::decode_frame(
-                false,
-                frame.id,
-                frame.count,
-                body,
-                offset,
-            )?;
-            for entry in &body.entries {
-                if let crate::property_graph::engine::GraphEntry::VectorMutation {
-                    collection,
-                    entry,
-                } = entry
-                {
-                    let target = target(*collection).ok_or_else(|| {
-                        corrupt(offset, "graph vector entry references unknown collection")
-                    })?;
-                    // One entry, as replay decodes it.
-                    batch(&mut writes, entry, 1, *collection, target, V5)?;
-                }
-            }
         }
         _ => {}
     }
