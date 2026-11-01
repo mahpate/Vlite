@@ -153,6 +153,15 @@ hides edges incident to expired nodes, and emits the existing
 uses placeholder lifecycle metadata and exercises CSR construction directly,
 not the persisted codec.
 
+The independently reviewed `tests/compact_graph_overlay_oracle.py` and
+`graph-overlay-cases.json` model committed-state projections, not an ordered
+write API or a Rust overlay implementation. They check immutable edge identity,
+retained allocation high-water marks and no ID reuse, newest-version precedence,
+deadline preservation or explicit removal, TTL cascade and ordered adjacency.
+CI runs the reference and its malformed-fixture checks. Write-time expiry,
+keys, full graph revisions, properties, schema, attachments and temporal state
+remain outside this logical reference; it cannot establish full engine parity.
+
 This codec is not wired to the checkpoint block registry, shared framing,
 checkpoint reads or production builds. It refuses nonempty properties,
 attachments, declared schema and temporal segments rather than dropping them.
@@ -179,7 +188,9 @@ work, with cold/warm caches and WAL sizes disclosed. P2's 64 MiB threshold alone
 does not guarantee 300 ms. Full verification and decryption remain linear;
 do not hide work after the timer. F4's separate <=50 ms goal is unchanged.
 
-**Validation:** design review only; implementation and performance qualification
-remain outstanding. DO-005 remains deferred to the major release under its
+**Validation:** the private codec and logical references have independent review
+and local correctness checks; the codec also passed full cross-platform CI.
+Remaining implementation and performance qualification are outstanding.
+DO-005 remains deferred to the major release under its
 unchanged quiet-host gate (mean background CPU <=10%; no half-second sample
 above 50%). `src/openapi.json`, benchmarks and dashboards remain unchanged.

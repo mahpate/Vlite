@@ -138,6 +138,14 @@ class Policy(unittest.TestCase):
         self.assertIn("cargo test --locked -p vlite-graph --doc", text)
         self.assertNotIn("cargo test --locked -p vlite-graph\n", text)
 
+    def test_graph_oracles_run_before_ci_routing(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        changes = text.split("\n  changes:\n", 1)[1].split("\n  documentation:\n", 1)[0]
+        for oracle in ("compact_graph_oracle", "compact_graph_overlay_oracle"):
+            command = f"python tests/{oracle}.py --self-test"
+            self.assertIn(command, changes)
+            self.assertLess(changes.index(command), changes.index("ci_policy.py route"))
+
     def test_client_ffi_builds_share_a_cached_target_directory(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         self.assertIn(". -> target/node-default", workflow)

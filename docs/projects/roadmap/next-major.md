@@ -121,7 +121,10 @@ Local numbers below show direction only (see rules).
   is checked against the accepted logical oracle. It refuses properties,
   attachments, schema and temporal segments; shared framing, checkpoint/read
   integration, mutation overlay, parallel import and S3/S4/F6 qualification
-  remain outstanding. The byte budgets are estimates, not measured results.
+  remain outstanding. An independently reviewed committed-overlay logical
+  reference now covers immutable edge identity, non-reused IDs and expiry
+  precedence; it is test evidence, not an implemented Rust overlay. The byte
+  budgets are estimates, not measured results.
 - **Gap 5, bounded algorithms:** S1 and S2 are implemented and reviewed in
   the embedded Rust API, but unreleased ([plan](gap5-graph-algorithms.md)).
   They provide TTL-aware local scopes, degree counts and hop-constrained

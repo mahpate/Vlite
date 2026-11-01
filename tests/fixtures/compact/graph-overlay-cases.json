@@ -1,0 +1,254 @@
+{
+  "schema": "vlite.compact-graph-overlay-logical",
+  "version": 1,
+  "cases": [
+    {
+      "name": "replacement-topology",
+      "purpose": "Unordered committed state projections allocate new IDs in ascending order per commit. Topology changes tombstone old edges and insert fresh higher IDs; overlay-only rows, parallel edges and a self-loop retain relationship-then-ID cursor ordering without stale membership.",
+      "base_sequence": 10,
+      "base": {
+        "next_node_id": 3,
+        "next_edge_id": 21,
+        "nodes": [{"id": 1, "labels": ["old"], "deadline": 50}, {"id": 2, "labels": ["n"]}],
+        "edges": [{"id": 20, "source": 1, "target": 2, "relationship": "z"}]
+      },
+      "overlays": [
+        {
+          "sequence": 13,
+          "nodes": [{"id": 1, "row": {"labels": ["new", "A"], "deadline": null}}],
+          "edges": [{"id": 26, "row": {"source": 3, "target": 2, "relationship": "a"}},
+                    {"id": 21, "row": null}]
+        },
+        {
+          "sequence": 11,
+          "nodes": [{"id": 3, "row": {"labels": ["overlay"]}},
+                    {"id": 1, "row": {"labels": ["middle"], "deadline": 50}}],
+          "edges": [{"id": 21, "row": {"source": 2, "target": 1, "relationship": "c"}},
+                    {"id": 20, "row": null},
+                    {"id": 22, "row": {"source": 3, "target": 3, "relationship": "z"}}]
+        },
+        {
+          "sequence": 12,
+          "nodes": [],
+          "edges": [{"id": 22, "row": null},
+                    {"id": 23, "row": {"source": 3, "target": 3, "relationship": "b"}},
+                    {"id": 24, "row": {"source": 3, "target": 2, "relationship": "b"}},
+                    {"id": 25, "row": {"source": 3, "target": 2, "relationship": "a"}}]
+        }
+      ],
+      "clock": 100,
+      "queries": [
+        {"node": 1, "direction": "both", "relationship": null, "after": null, "limit": 10},
+        {"node": 2, "direction": "in", "relationship": null, "after": null, "limit": 10},
+        {"node": 3, "direction": "both", "relationship": null, "after": null, "limit": 10},
+        {"node": 3, "direction": "out", "relationship": null, "after": {"relationship": "a", "edge": 26}, "limit": 1},
+        {"node": 3, "direction": "both", "relationship": ["b", "a"], "after": {"relationship": "a", "edge": 25}, "limit": 10},
+        {"node": 3, "direction": "both", "relationship": ["b"], "after": {"relationship": "aa", "edge": 18446744073709551615}, "limit": 10},
+        {"node": 3, "direction": "both", "relationship": [], "after": null, "limit": 10},
+        {"node": 3, "direction": "both", "relationship": null, "after": null, "limit": 0},
+        {"node": 3, "direction": "in", "relationship": null, "after": null, "limit": 10},
+        {"node": 999, "direction": "both", "relationship": null, "after": null, "limit": 10},
+        {"node": 2, "direction": "out", "relationship": null, "after": null, "limit": 10}
+      ],
+      "expected": {
+        "nodes": [
+          {"id": 1, "sequence": 13, "labels": ["A", "new"], "deadline": null},
+          {"id": 2, "sequence": 10, "labels": ["n"], "deadline": null},
+          {"id": 3, "sequence": 11, "labels": ["overlay"], "deadline": null}
+        ],
+        "edges": [
+          {"id": 23, "sequence": 12, "source": 3, "target": 3, "relationship": "b", "deadline": null},
+          {"id": 24, "sequence": 12, "source": 3, "target": 2, "relationship": "b", "deadline": null},
+          {"id": 25, "sequence": 12, "source": 3, "target": 2, "relationship": "a", "deadline": null},
+          {"id": 26, "sequence": 13, "source": 3, "target": 2, "relationship": "a", "deadline": null}
+        ],
+        "adjacency": [
+          [], [["a", 25], ["a", 26], ["b", 24]],
+          [["a", 25], ["a", 26], ["b", 23], ["b", 24]], [["b", 23]],
+          [["a", 26], ["b", 23], ["b", 24]], [["b", 23], ["b", 24]], [], [],
+          [["b", 23]], [], []
+        ]
+      }
+    },
+    {
+      "name": "tombstone-precedence",
+      "purpose": "Newest tombstones suppress base and intermediate rows, including an overlay-only node and edge. Topology replacements use fresh IDs; node and incident-edge removals are coherent and never lower allocation marks or permit deleted-ID reuse. Full write admission is not modeled.",
+      "base_sequence": 1,
+      "base": {
+        "next_node_id": 9,
+        "next_edge_id": 5,
+        "nodes": [{"id": 1, "labels": ["gone"]}, {"id": 2, "labels": []}, {"id": 8, "labels": ["old"]}],
+        "edges": [{"id": 3, "source": 1, "target": 2, "relationship": "r"},
+                  {"id": 4, "source": 2, "target": 2, "relationship": "old"}]
+      },
+      "overlays": [
+        {
+          "sequence": 4,
+          "nodes": [{"id": 1, "row": null}, {"id": 9, "row": null}],
+          "edges": [{"id": 5, "row": null}, {"id": 6, "row": null}, {"id": 7, "row": null}]
+        },
+        {
+          "sequence": 2,
+          "nodes": [{"id": 9, "row": {"labels": ["overlay"]}}],
+          "edges": [{"id": 3, "row": null},
+                    {"id": 5, "row": {"source": 2, "target": 1, "relationship": "changed"}},
+                    {"id": 6, "row": {"source": 9, "target": 2, "relationship": "overlay"}}]
+        },
+        {
+          "sequence": 3,
+          "nodes": [{"id": 8, "row": null}],
+          "edges": [{"id": 4, "row": null},
+                    {"id": 7, "row": {"source": 2, "target": 2, "relationship": "new"}}]
+        }
+      ],
+      "clock": 0,
+      "queries": [
+        {"node": 2, "direction": "both", "relationship": null, "after": null, "limit": 10},
+        {"node": 1, "direction": "both", "relationship": null, "after": null, "limit": 10},
+        {"node": 9, "direction": "both", "relationship": null, "after": null, "limit": 10},
+        {"node": 8, "direction": "both", "relationship": null, "after": null, "limit": 10}
+      ],
+      "expected": {
+        "nodes": [{"id": 2, "sequence": 1, "labels": [], "deadline": null}],
+        "edges": [],
+        "adjacency": [[], [], [], []]
+      }
+    },
+    {
+      "name": "latest-expiry-cascade",
+      "purpose": "Latest node/edge equality and past deadlines never reveal older live rows; expired base and overlay nodes mask incident base/overlay edges and loops. Same-ID edge updates preserve identity and can change deadlines. Explicit null clears expiry; omission retains clock+1 deadlines on existing rows.",
+      "base_sequence": 4,
+      "base": {
+        "next_node_id": 5,
+        "next_edge_id": 15,
+        "nodes": [{"id": 1, "labels": ["old"]}, {"id": 2, "labels": [], "deadline": 100},
+                  {"id": 3, "labels": [], "deadline": 101}, {"id": 4, "labels": ["base-due"], "deadline": 100}],
+        "edges": [
+          {"id": 1, "source": 1, "target": 2, "relationship": "base"},
+          {"id": 10, "source": 2, "target": 3, "relationship": "old", "deadline": 101},
+          {"id": 11, "source": 2, "target": 3, "relationship": "past"},
+          {"id": 12, "source": 2, "target": 3, "relationship": "kept", "deadline": 100},
+          {"id": 13, "source": 2, "target": 3, "relationship": "due", "deadline": 100},
+          {"id": 14, "source": 4, "target": 2, "relationship": "base-due"}
+        ]
+      },
+      "overlays": [
+        {
+          "sequence": 7,
+          "nodes": [{"id": 1, "row": {"labels": ["latest-due"], "deadline": 100}},
+                    {"id": 3, "row": {"labels": ["retained"]}}],
+          "edges": [{"id": 10, "row": {"source": 2, "target": 3, "relationship": "old", "deadline": 100}},
+                    {"id": 21, "row": {"source": 3, "target": 2, "relationship": "future"}}]
+        },
+        {
+          "sequence": 5,
+          "nodes": [{"id": 1, "row": {"labels": ["middle"]}},
+                    {"id": 2, "row": {"labels": ["clear"], "deadline": null}},
+                    {"id": 5, "row": {"labels": ["overlay-due"], "deadline": 99}}],
+          "edges": [
+            {"id": 15, "row": {"source": 2, "target": 1, "relationship": "overlay", "deadline": 101}},
+            {"id": 16, "row": {"source": 1, "target": 1, "relationship": "overlay"}},
+            {"id": 17, "row": {"source": 2, "target": 5, "relationship": "overlay"}},
+            {"id": 18, "row": {"source": 5, "target": 3, "relationship": "overlay", "deadline": 101}},
+            {"id": 19, "row": {"source": 5, "target": 5, "relationship": "overlay"}},
+            {"id": 20, "row": {"source": 2, "target": 4, "relationship": "overlay"}},
+            {"id": 10, "row": {"source": 2, "target": 3, "relationship": "old"}},
+            {"id": 11, "row": {"source": 2, "target": 3, "relationship": "past", "deadline": 99}},
+            {"id": 12, "row": {"source": 2, "target": 3, "relationship": "kept", "deadline": null}},
+            {"id": 21, "row": {"source": 3, "target": 2, "relationship": "future", "deadline": 101}}
+          ]
+        }
+      ],
+      "clock": 100,
+      "queries": [
+        {"node": 2, "direction": "both", "relationship": null, "after": null, "limit": 10},
+        {"node": 3, "direction": "both", "relationship": null, "after": null, "limit": 10},
+        {"node": 1, "direction": "both", "relationship": null, "after": null, "limit": 10},
+        {"node": 4, "direction": "both", "relationship": null, "after": null, "limit": 10},
+        {"node": 5, "direction": "both", "relationship": null, "after": null, "limit": 10},
+        {"node": 2, "direction": "out", "relationship": null, "after": null, "limit": 10}
+      ],
+      "expected": {
+        "nodes": [{"id": 2, "sequence": 5, "labels": ["clear"], "deadline": null},
+                  {"id": 3, "sequence": 7, "labels": ["retained"], "deadline": 101}],
+        "edges": [
+          {"id": 12, "sequence": 5, "source": 2, "target": 3, "relationship": "kept", "deadline": null},
+          {"id": 21, "sequence": 7, "source": 3, "target": 2, "relationship": "future", "deadline": 101}
+        ],
+        "adjacency": [[["future", 21], ["kept", 12]], [["future", 21], ["kept", 12]],
+                      [], [], [], [["kept", 12]]]
+      }
+    },
+    {
+      "name": "u64-clock-boundary",
+      "purpose": "Sparse zero, above-2^53 and u64::MAX-1 public IDs remain exact. Final fresh edge allocation reaches a retained u64::MAX mark without allocating that forbidden ID; maximum sequence, clock and deadline remain valid. Equal-deadline updates never fall back and preserve edge identity.",
+      "base_sequence": 18446744073709551612,
+      "base": {
+        "next_node_id": 18446744073709551615,
+        "next_edge_id": 1,
+        "nodes": [{"id": 0, "labels": []}, {"id": 9007199254740993, "labels": []},
+                  {"id": 18446744073709551614, "labels": []}],
+        "edges": [{"id": 0, "source": 0, "target": 18446744073709551614, "relationship": "due"}]
+      },
+      "overlays": [
+        {
+          "sequence": 18446744073709551615,
+          "nodes": [{"id": 18446744073709551614, "row": {"labels": ["due"], "deadline": 18446744073709551615}},
+                    {"id": 9007199254740993, "row": {"labels": ["large"]}}],
+          "edges": [{"id": 0, "row": {"source": 0, "target": 18446744073709551614, "relationship": "due", "deadline": 18446744073709551615}}]
+        },
+        {
+          "sequence": 18446744073709551613,
+          "nodes": [],
+          "edges": [{"id": 9007199254740993, "row": {"source": 0, "target": 9007199254740993, "relationship": "r"}},
+                    {"id": 18446744073709551614, "row": {"source": 9007199254740993, "target": 0, "relationship": "r"}}]
+        }
+      ],
+      "clock": 18446744073709551615,
+      "queries": [
+        {"node": 0, "direction": "both", "relationship": null, "after": null, "limit": 18446744073709551615},
+        {"node": 0, "direction": "both", "relationship": null, "after": {"relationship": "r", "edge": 9007199254740993}, "limit": 10},
+        {"node": 0, "direction": "both", "relationship": null, "after": {"relationship": "r", "edge": 18446744073709551614}, "limit": 10},
+        {"node": 18446744073709551614, "direction": "both", "relationship": null, "after": null, "limit": 10}
+      ],
+      "expected": {
+        "nodes": [{"id": 0, "sequence": 18446744073709551612, "labels": [], "deadline": null},
+                  {"id": 9007199254740993, "sequence": 18446744073709551615, "labels": ["large"], "deadline": null}],
+        "edges": [
+          {"id": 9007199254740993, "sequence": 18446744073709551613, "source": 0, "target": 9007199254740993, "relationship": "r", "deadline": null},
+          {"id": 18446744073709551614, "sequence": 18446744073709551613, "source": 9007199254740993, "target": 0, "relationship": "r", "deadline": null}
+        ],
+        "adjacency": [[["r", 9007199254740993], ["r", 18446744073709551614]], [["r", 18446744073709551614]], [], []]
+      }
+    },
+    {
+      "name": "zero-clock-overlay-only",
+      "purpose": "Empty immutable base populated only by committed overlays; zero deadline hides a latest node at clock zero despite an older immortal version, masking its loop and incoming edge. Omitted and null deadlines remain live.",
+      "base_sequence": 0,
+      "base": {"nodes": [], "edges": [], "next_node_id": 0, "next_edge_id": 0},
+      "overlays": [
+        {
+          "sequence": 1,
+          "nodes": [{"id": 0, "row": {"labels": ["old"]}}, {"id": 9, "row": {"labels": [], "deadline": null}}],
+          "edges": [{"id": 0, "row": {"source": 0, "target": 0, "relationship": "loop"}},
+                    {"id": 9, "row": {"source": 9, "target": 0, "relationship": "r"}}]
+        },
+        {
+          "sequence": 2,
+          "nodes": [{"id": 0, "row": {"labels": ["due"], "deadline": 0}}],
+          "edges": [{"id": 10, "row": {"source": 9, "target": 9, "relationship": "live", "deadline": 1}}]
+        }
+      ],
+      "clock": 0,
+      "queries": [
+        {"node": 0, "direction": "both", "relationship": null, "after": null, "limit": 10},
+        {"node": 9, "direction": "both", "relationship": null, "after": null, "limit": 10}
+      ],
+      "expected": {
+        "nodes": [{"id": 9, "sequence": 1, "labels": [], "deadline": null}],
+        "edges": [{"id": 10, "sequence": 2, "source": 9, "target": 9, "relationship": "live", "deadline": 1}],
+        "adjacency": [[], [["live", 10]]]
+      }
+    }
+  ]
+}
