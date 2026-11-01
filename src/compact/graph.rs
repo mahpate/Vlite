@@ -328,7 +328,14 @@ fn decode(bytes: &[u8]) -> Result<CompactGraph, CodecError> {
     Ok(graph)
 }
 
-fn build(mut source: GraphSource) -> Result<CompactGraph, CodecError> {
+fn build(source: GraphSource) -> Result<CompactGraph, CodecError> {
+    build_inner(source, true)
+}
+
+fn build_inner(
+    mut source: GraphSource,
+    validate_persisted_metadata: bool,
+) -> Result<CompactGraph, CodecError> {
     if source.has_schema {
         return Err(CodecError::UnsupportedSource("schema"));
     }
@@ -351,8 +358,30 @@ fn build(mut source: GraphSource) -> Result<CompactGraph, CodecError> {
     if source.graph_id >= 64 || !valid_graph_name(&source.name) {
         return Err(CodecError::Corrupt);
     }
+    if validate_persisted_metadata {
+        let last_node = source.nodes.iter().map(|node| node.id).max();
+        let last_edge = source.edges.iter().map(|edge| edge.id).max();
+        if last_node.is_some_and(|id| {
+            id.checked_add(1)
+                .is_none_or(|next| source.next_node_id < next)
+        }) || last_edge.is_some_and(|id| {
+            id.checked_add(1)
+                .is_none_or(|next| source.next_edge_id < next)
+        }) || source
+            .nodes
+            .iter()
+            .any(|node| node.revision > source.sequence)
+            || source
+                .edges
+                .iter()
+                .any(|edge| edge.revision > source.sequence)
+        {
+            return Err(CodecError::Corrupt);
+        }
+    }
     let mut node_ordinals = BTreeMap::new();
     let mut label_set = BTreeSet::new();
+    let mut node_keys = BTreeSet::new();
     for (ordinal, node) in source.nodes.iter_mut().enumerate() {
         if node_ordinals
             .insert(
@@ -360,6 +389,13 @@ fn build(mut source: GraphSource) -> Result<CompactGraph, CodecError> {
                 u32::try_from(ordinal).map_err(|_| CodecError::Corrupt)?,
             )
             .is_some()
+        {
+            return Err(CodecError::Corrupt);
+        }
+        if node
+            .key
+            .as_ref()
+            .is_some_and(|key| !node_keys.insert(key.as_str()))
         {
             return Err(CodecError::Corrupt);
         }
@@ -396,6 +432,14 @@ fn build(mut source: GraphSource) -> Result<CompactGraph, CodecError> {
         return Err(CodecError::Corrupt);
     }
     let relationships: Vec<_> = relationship_set.into_iter().collect();
+    let mut edge_keys = BTreeSet::new();
+    if source.edges.iter().any(|edge| {
+        edge.key
+            .as_ref()
+            .is_some_and(|key| !edge_keys.insert(key.as_str()))
+    }) {
+        return Err(CodecError::Corrupt);
+    }
     let relationship_codes: BTreeMap<_, _> = relationships
         .iter()
         .enumerate()
@@ -818,6 +862,11 @@ fn logical_value(graph: &CompactGraph, case: &serde_json::Value) -> serde_json::
 }
 
 #[cfg(test)]
+fn csr_value(csr: &Csr) -> serde_json::Value {
+    serde_json::json!({"offsets": csr.offsets, "neighbors": csr.edges})
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::property_graph::engine::{GraphBody, GraphEntry, GraphId, GraphState, NodeId};
@@ -831,13 +880,43 @@ mod tests {
         ))
         .unwrap();
         for case in fixture["cases"].as_array().unwrap() {
-            let source = fixture_graph(case);
-            let bytes = encode(&source).unwrap();
-            let decoded = decode(&bytes).unwrap();
+            let mut source = fixture_graph(case);
+            let clock = case["clock"].as_u64().unwrap();
+            source
+                .nodes
+                .retain(|node| node.deadline.is_none_or(|deadline| deadline > clock));
+            let live_node_ids: BTreeSet<_> = source.nodes.iter().map(|node| node.id).collect();
+            source.edges.retain(|edge| {
+                edge.deadline.is_none_or(|deadline| deadline > clock)
+                    && live_node_ids.contains(&edge.source)
+                    && live_node_ids.contains(&edge.target)
+            });
+            let graph = if source.nodes.iter().any(|node| node.id == u64::MAX)
+                || source.edges.iter().any(|edge| edge.id == u64::MAX)
+            {
+                // The logical oracle deliberately uses u64::MAX with placeholder
+                // high-water metadata. Exercise only its logical CSR shape;
+                // these rows cannot describe a valid persisted graph.
+                build_inner(source, false).unwrap()
+            } else {
+                decode(&encode(&source).unwrap()).unwrap()
+            };
             assert_eq!(
-                logical_value(&decoded, case),
+                logical_value(&graph, case),
                 case["expected"],
                 "{}",
+                case["name"]
+            );
+            assert_eq!(
+                csr_value(&graph.out),
+                case["expected"]["out_csr"],
+                "{} out CSR",
+                case["name"]
+            );
+            assert_eq!(
+                csr_value(&graph.incoming),
+                case["expected"]["in_csr"],
+                "{} in CSR",
                 case["name"]
             );
         }
@@ -861,6 +940,48 @@ mod tests {
         let mut trailing = bytes;
         trailing.push(0);
         assert_eq!(decode(&trailing), Err(CodecError::Corrupt));
+    }
+
+    #[test]
+    fn codec_rejects_high_water_below_live_id_and_revision_after_sequence() {
+        let source = identity_source();
+        let bytes = encode(&source).unwrap();
+
+        let mut stale_node_high_water = bytes.clone();
+        stale_node_high_water[23..31].copy_from_slice(&0u64.to_le_bytes());
+        assert_eq!(decode(&stale_node_high_water), Err(CodecError::Corrupt));
+
+        let mut stale_edge_high_water = bytes.clone();
+        stale_edge_high_water[31..39].copy_from_slice(&0u64.to_le_bytes());
+        assert_eq!(decode(&stale_edge_high_water), Err(CodecError::Corrupt));
+
+        let mut future_revision = bytes;
+        future_revision[15..23].copy_from_slice(&1u64.to_le_bytes());
+        assert_eq!(decode(&future_revision), Err(CodecError::Corrupt));
+    }
+
+    #[test]
+    fn decoder_rejects_duplicate_present_node_and_edge_keys() {
+        let mut source = fixture_graph(&json!({
+            "nodes": [{"id": 1, "labels": []}, {"id": 2, "labels": []}],
+            "edges": [
+                {"id": 3, "source": 1, "target": 2, "relationship": "r"},
+                {"id": 4, "source": 2, "target": 1, "relationship": "r"}
+            ],
+        }));
+        source.nodes[0].key = Some("a".into());
+        source.nodes[1].key = Some("b".into());
+        source.edges[0].key = Some("a".into());
+        source.edges[1].key = Some("b".into());
+        let bytes = encode(&source).unwrap();
+
+        let mut duplicate_node_key = bytes.clone();
+        replace_key(&mut duplicate_node_key, true, 1, "a");
+        assert_eq!(decode(&duplicate_node_key), Err(CodecError::Corrupt));
+
+        let mut duplicate_edge_key = bytes;
+        replace_key(&mut duplicate_edge_key, false, 1, "a");
+        assert_eq!(decode(&duplicate_edge_key), Err(CodecError::Corrupt));
     }
 
     #[test]
@@ -903,6 +1024,19 @@ mod tests {
 
     #[test]
     fn graph_source_preserves_identity_keys_revisions_and_deadlines() {
+        let source = identity_source();
+        let restored = decode(&encode(&source).unwrap()).unwrap();
+        assert_eq!(restored.source, source);
+        assert_eq!(restored.source.nodes[0].key.as_deref(), Some("node-3"));
+        assert_eq!(restored.source.edges[0].key.as_deref(), Some("edge-4"));
+        assert_eq!(restored.source.nodes[1].deadline, Some(50));
+        assert_eq!(restored.source.nodes[0].revision, 7);
+        assert_eq!(restored.source.edges[0].revision, 7);
+        assert_eq!(restored.source.next_node_id, 11);
+        assert_eq!(restored.source.next_edge_id, 5);
+    }
+
+    fn identity_source() -> GraphSource {
         let mut state = GraphState::new();
         state
             .apply(
@@ -939,20 +1073,50 @@ mod tests {
                 },
             )
             .unwrap();
-        let source = GraphSource::from_graph(state.graph(GraphId(0)).unwrap()).unwrap();
-        let restored = decode(&encode(&source).unwrap()).unwrap();
-        assert_eq!(restored.source, source);
-        assert_eq!(restored.source.nodes[0].key.as_deref(), Some("node-3"));
-        assert_eq!(restored.source.edges[0].key.as_deref(), Some("edge-4"));
-        assert_eq!(restored.source.nodes[1].deadline, Some(50));
-        assert_eq!(restored.source.nodes[0].revision, 7);
-        assert_eq!(restored.source.edges[0].revision, 7);
-        assert_eq!(restored.source.next_node_id, 11);
-        assert_eq!(restored.source.next_edge_id, 5);
+        GraphSource::from_graph(state.graph(GraphId(0)).unwrap()).unwrap()
+    }
+
+    fn replace_key(bytes: &mut [u8], nodes: bool, ordinal: usize, value: &str) {
+        let mut reader = Reader::new(bytes);
+        reader.take(MAGIC.len()).unwrap();
+        reader.u16().unwrap();
+        reader.string(63).unwrap();
+        reader.u64().unwrap();
+        reader.u64().unwrap();
+        reader.u64().unwrap();
+        reader.strings().unwrap();
+        reader.strings().unwrap();
+        let node_count = reader.count().unwrap();
+        let mut keys = Vec::new();
+        for _ in 0..node_count {
+            reader.u64().unwrap();
+            keys.push(reader.at);
+            reader.optional_string().unwrap();
+            reader.u64().unwrap();
+            reader.optional_u64().unwrap();
+            let label_count = reader.count().unwrap();
+            reader.take(label_count * 4).unwrap();
+        }
+        let edge_count = reader.count().unwrap();
+        for _ in 0..edge_count {
+            reader.u64().unwrap();
+            reader.u32().unwrap();
+            reader.u32().unwrap();
+            reader.u32().unwrap();
+            keys.push(reader.at);
+            reader.optional_string().unwrap();
+            reader.u64().unwrap();
+            reader.optional_u64().unwrap();
+        }
+        let key = keys[if nodes { ordinal } else { node_count + ordinal }];
+        assert_eq!(bytes[key], 1, "key must be present");
+        let len = u32::from_le_bytes(bytes[key + 1..key + 5].try_into().unwrap()) as usize;
+        assert_eq!(len, value.len(), "replacement keeps the encoded width");
+        bytes[key + 5..key + 5 + len].copy_from_slice(value.as_bytes());
     }
 
     fn fixture_graph(case: &Value) -> GraphSource {
-        let nodes = case["nodes"]
+        let nodes: Vec<SourceNode> = case["nodes"]
             .as_array()
             .unwrap()
             .iter()
@@ -971,7 +1135,7 @@ mod tests {
                 has_attachments: false,
             })
             .collect();
-        let edges = case["edges"]
+        let edges: Vec<SourceEdge> = case["edges"]
             .as_array()
             .unwrap()
             .iter()
@@ -987,12 +1151,36 @@ mod tests {
                 is_temporal: false,
             })
             .collect();
+        let next_node_id = nodes
+            .iter()
+            .map(|node: &SourceNode| node.id)
+            .max()
+            .and_then(|id| id.checked_add(1))
+            .unwrap_or_else(|| {
+                if nodes.iter().any(|node: &SourceNode| node.id == u64::MAX) {
+                    u64::MAX
+                } else {
+                    0
+                }
+            });
+        let next_edge_id = edges
+            .iter()
+            .map(|edge: &SourceEdge| edge.id)
+            .max()
+            .and_then(|id| id.checked_add(1))
+            .unwrap_or_else(|| {
+                if edges.iter().any(|edge: &SourceEdge| edge.id == u64::MAX) {
+                    u64::MAX
+                } else {
+                    0
+                }
+            });
         GraphSource {
             graph_id: 0,
             name: "fixture".to_owned(),
             sequence: 0,
-            next_node_id: 0,
-            next_edge_id: 0,
+            next_node_id,
+            next_edge_id,
             has_schema: false,
             nodes,
             edges,

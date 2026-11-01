@@ -144,9 +144,14 @@ sequence and ID high-water marks; sorted public node/edge IDs and checked
 strings and sparse deadlines; and bidirectional CSR. Its decoder rejects
 noncanonical dictionaries/IDs, invalid endpoints or codes, incorrect row
 ordering, missing or duplicate CSR membership, overflow, truncation and
-trailing bytes. Logical visibility uses `deadline <= clock` as expired, hides
-edges incident to expired nodes, and emits the existing `(relationship, edge
-ID)` adjacency order; the accepted `graph-csr-cases.json` remains the oracle.
+trailing bytes. It also checks high-water marks against live IDs, revisions
+against graph sequence, and unique present node keys and edge keys in their
+separate namespaces. Logical visibility uses `deadline <= clock` as expired,
+hides edges incident to expired nodes, and emits the existing
+`(relationship, edge ID)` adjacency order; the accepted
+`graph-csr-cases.json` remains the oracle. Its full-u64 logical-only fixture
+uses placeholder lifecycle metadata and exercises CSR construction directly,
+not the persisted codec.
 
 This codec is not wired to the checkpoint block registry, shared framing,
 checkpoint reads or production builds. It refuses nonempty properties,
