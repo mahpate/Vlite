@@ -224,7 +224,11 @@ Local numbers below show direction only (see rules).
 - **Serving design:** [serving](serving-contract.md) has implementation
   boundaries and acceptance matrices, not shipped capabilities. Approximate
   search does not acquire an exact top-k guarantee. Its schemas were approved
-  2026-11-02 and are not yet implemented.
+  2026-11-02 and are not yet implemented. The
+  [binary search results](serving-binary-results-contract.md) contract
+  specifies an opt-in HTTP protobuf representation with its negotiation,
+  bounds and independent oracle plan; it is a reviewed specification, not an
+  implemented capability.
 - **Further design proposals:** [agent memory](gap1-agent-memory.md) defines
   the embedded operations and their prerequisites; [scale-out](scale-out.md)
   compares branching, object storage and replication. Both received source
