@@ -91,6 +91,13 @@ These are proposed defaults, not measurements; current text/dimension checks are
 The registry currently holds its DNS permit inside the blocking task.
 Acquiring that permit in async context before `spawn_blocking` is a
 wiring-slice obligation, not implemented DNS admission or serving activation.
+Owner decision 60 (2026-11-02) permits one narrow testability exception to the
+tests-only follow-up: extract the existing DNS-result collection and sanitized
+error mapping into a private helper used by `SystemResolver`, with deterministic
+boundary tests. Preserve order, duplicates, ports and the existing overflow
+sentinel/consumption bound. This does not authorize DNS admission or permit
+relocation, address-policy, deadline, TLS, retry, public-API or dependency changes;
+the follow-up still needs independent acceptance and does not activate serving.
 Authorize `search` plus the collection binding before resolving aliases or making network calls.
 Current REST embedding already needs `search` (`src/server.rs:885-899`).
 Add no credential scope in this slice. Provider access is an additional admin-controlled allowlist.
