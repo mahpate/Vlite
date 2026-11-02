@@ -281,21 +281,23 @@ Remaining P3a work:
    ([above](#p3a-progress-commit-time-canonicalization-private-unreleased));
    it stays unreleased with item 1.
 3. Carrying payload and metadata for compact checkpoints, so they hold every
-   record. Implemented privately, pending independent acceptance
+   record. Implemented privately and independently accepted
    ([complete-record blocks](#p3a-progress-complete-record-checkpoints-private-unreleased));
    no production admission or writer is enabled.
 4. A storage-owned writer, capability table acceptance, and replay,
-   maintenance and backup handling. The envelope writer moves into
-   `src/compact/mod.rs`.
+   maintenance and backup handling. Implemented as a private candidate,
+   pending independent acceptance
+   ([storage wiring](#p3a-progress-storage-owned-writer-private-unreleased)).
 5. Explicit conversion, plus old/new format rejection.
 
 Named dense reuse and bounded access remain P3b.
 
 ## P3a progress: complete-record checkpoints (private, unreleased)
 
-Item 3's candidate is implemented in `src/compact/catalog/payload.rs`, compiled
-only for crate tests and enabled by a separate thread-local RAII gate, in
-addition to the private precision gate. Kind `0x0101`, version 1, critical,
+Item 3 is implemented and independently accepted. Its body codec remains in
+`src/compact/catalog/payload.rs`, compiled only for crate tests and enabled by
+a separate thread-local RAII gate, in addition to the private precision gate.
+Kind `0x0101`, version 1, critical,
 holds complete primary records rather than redefining `0x0100`. Its six
 little-endian envelope sections are:
 
@@ -350,9 +352,23 @@ Malformed-image tests exercise all three readers, a pre-publication failure
 retains the previous image plus committed WAL, and the precision peak harness
 bounds decoded-record heap and verifies malformed offsets allocate no records.
 
-This is not P3a item 4, production writer/capability registration, bounded source
-access, copy-out precision conversion, release activation or lifecycle
-qualification. Float32 defaults, S1's open decision and S1/S2/F1/F3 remain unchanged.
+## P3a progress: storage-owned writer (private, unreleased)
+
+Item 4 is implemented as a test-gated candidate, pending independent acceptance.
+`src/compact/mod.rs` owns complete-record framing, writer dispatch and capability
+table construction; `src/compact/catalog/payload.rs` retains only the six-section
+`0x0101` v1 body encoder and checker. The writer clamps original record revisions
+to `1..=floor`, matching op 14. Capability acceptance requires the private gates
+and exact supported kind/version; unsupported critical entries remain refused.
+
+Candidate tests cover capability acceptance/refusal and complete-record replay,
+backup, restore and re-encryption. Byte-copy paths retain guarded flags and source
+state; restore changes lineage, and re-encryption preserves canonical values
+with fresh encryption state. Maintenance still refuses unfaithful rewrites
+before output, under Decisions W/P. This is not production writer/capability
+qualification, bounded source access, item 5 conversion, item 1 public activation
+or lifecycle qualification. Float32 defaults, S1's open decision and S1/S2/F1/F3
+remain unchanged.
 
 Major-release measurements retain the unchanged DO-005 host/quiet policy.
 F1 requires p50 <=1.0 ms at 100k x 768 and recall@10 >=0.95; F3 requires

@@ -8,7 +8,9 @@
 
 use super::*;
 use crate::changes::{ChangeKind, FeedCursor};
-use crate::compact::{Activation, CRITICAL, Envelope, ImageCheck, KIND_END, KIND_TABLE, end_frame};
+use crate::compact::{
+    Activation, CRITICAL, Envelope, ImageCheck, KIND_END, KIND_TABLE, end_frame, table_frame,
+};
 use crate::crypto::Cipher;
 use crate::format::{
     self, FLAG_COMPACT, FLAG_ENCRYPTED, FLAG_GRAPH, FLAG_HISTORY, FLAG_TIMESTAMPS, FOOTER_SIZE,
@@ -36,6 +38,7 @@ mod payload;
 mod peak;
 mod populated;
 mod replayed;
+mod storage;
 mod suffix;
 
 const LINEAGE: u64 = 0x5EED_0000_0000_0032;

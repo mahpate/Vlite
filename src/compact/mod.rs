@@ -171,6 +171,125 @@ fn block_frame(
     )
 }
 
+/// Capabilities emitted by a precision image's storage writer.
+pub(crate) fn table_frame(floor: u64, graphs: bool) -> Vec<u8> {
+    table_frame_extra(floor, graphs, &[])
+}
+
+fn table_frame_extra(floor: u64, graphs: bool, extra: &[u16]) -> Vec<u8> {
+    let kinds = [KIND_CATALOG, KIND_IMPORTS, KIND_REVISIONS];
+    let listed = if graphs { &kinds[..] } else { &kinds[..2] };
+    let mut table = Vec::with_capacity(8 * (listed.len() + extra.len()));
+    for &kind in listed.iter().chain(extra) {
+        for field in [kind, 1, CRITICAL, 0] {
+            table.extend_from_slice(&field.to_le_bytes());
+        }
+    }
+    block_frame(
+        floor,
+        KIND_TABLE,
+        0,
+        0,
+        (listed.len() + extra.len()) as u32,
+        &[&table],
+    )
+}
+
+/// Declare the private source codec only when the image will emit a block.
+#[cfg(test)]
+pub(crate) fn records_table_frame(
+    floor: u64,
+    graphs: bool,
+    loaded: &crate::format::Loaded,
+    now: Option<u64>,
+) -> Vec<u8> {
+    let records = loaded.collections.values().any(|collection| {
+        collection.records.keys().any(|id| {
+            !collection
+                .expiries
+                .get(id)
+                .is_some_and(|expiry| now.is_some_and(|now| *expiry <= now))
+        })
+    });
+    table_frame_extra(
+        floor,
+        graphs,
+        if records {
+            &[catalog::payload::KIND]
+        } else {
+            &[]
+        },
+    )
+}
+
+/// Storage-owned framing and partitioning of private complete primary records.
+/// Named/sparse state and graph snapshots retain their existing image stages.
+#[cfg(test)]
+pub(crate) fn write_records(
+    owner: u16,
+    collection: &crate::format::LoadedCollection,
+    floor: u64,
+    now: Option<u64>,
+    mut emit: impl FnMut(&[u8]) -> Result<()>,
+) -> Result<()> {
+    use crate::format;
+    let layout = vectors::Layout {
+        dimensions: collection.dimensions,
+        precision: collection
+            .precision
+            .ok_or_else(|| corrupt(0, "missing precision"))?,
+    };
+    let mut rows = Vec::new();
+    let mut bytes = 0;
+    let mut partition = 0;
+    let flush = |rows: &mut Vec<_>, partition: u32, emit: &mut dyn FnMut(&[u8]) -> Result<()>| {
+        let body = catalog::payload::encode(owner, partition, layout, rows)?;
+        emit(&format::compact_block_frame(
+            floor,
+            owner,
+            u64::from(catalog::payload::KIND) | (u64::from(partition) << 16),
+            rows.len() as u32,
+            &body,
+        ))?;
+        rows.clear();
+        Ok::<(), Error>(())
+    };
+    for (&id, record) in &collection.records {
+        let expiry = collection.expiries.get(&id).copied();
+        if expiry.is_some_and(|expiry| now.is_some_and(|now| expiry <= now)) {
+            continue;
+        }
+        let revision = collection
+            .revisions
+            .get(&id)
+            .copied()
+            .ok_or_else(|| corrupt(0, "record without a revision"))?;
+        rows.push((
+            vectors::Row {
+                id,
+                revision: revision.clamp(1, floor),
+                expiry,
+                vector: &record.vector,
+            },
+            record,
+        ));
+        bytes += record.payload.len()
+            + crate::metadata::validate(&record.metadata)
+                .map_err(|_| corrupt(0, "invalid record metadata"))?;
+        if rows.len() == layout.max_rows() || bytes >= catalog::payload::TARGET {
+            flush(&mut rows, partition, &mut emit)?;
+            partition = partition
+                .checked_add(1)
+                .ok_or_else(|| corrupt(0, "too many record blocks"))?;
+            bytes = 0;
+        }
+    }
+    if !rows.is_empty() {
+        flush(&mut rows, partition, &mut emit)?;
+    }
+    Ok(())
+}
+
 /// The image end block over `frames` image frames with prefix `digest`.
 pub(crate) fn end_frame(floor: u64, frames: u64, digest: [u8; 32]) -> Vec<u8> {
     let mut section = Vec::with_capacity(END_SECTION);

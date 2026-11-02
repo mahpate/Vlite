@@ -865,18 +865,11 @@ pub(crate) fn write_v5_image(
             })
             .collect::<Result<Vec<_>>>()?;
         let graphs = graph.is_some_and(|state| state.graphs().next().is_some());
-        let table = catalog::table_frame(floor, graphs);
+        let table = crate::compact::table_frame(floor, graphs);
         // P3a: complete-record source blocks have a separate test-only gate.
         #[cfg(test)]
         let table = if crate::compact::catalog::payload::enabled() {
-            let records = loaded.collections.values().any(|c| {
-                c.records.keys().any(|id| {
-                    !c.expiries
-                        .get(id)
-                        .is_some_and(|expiry| now_ms.is_some_and(|now| *expiry <= now))
-                })
-            });
-            crate::compact::catalog::payload::table_frame(floor, graphs, records)
+            crate::compact::records_table_frame(floor, graphs, loaded, now_ms)
         } else {
             table
         };
@@ -890,13 +883,9 @@ pub(crate) fn write_v5_image(
         // P3a: the private complete-record codec replaces op 14 only in tests.
         #[cfg(test)]
         if precise && crate::compact::catalog::payload::enabled() {
-            crate::compact::catalog::payload::write_collection(
-                collection_id,
-                collection,
-                floor,
-                now_ms,
-                |frame| output.write_all(frame),
-            )?;
+            crate::compact::write_records(collection_id, collection, floor, now_ms, |frame| {
+                output.write_all(frame)
+            })?;
             continue;
         }
         let mut block = format::RecordBlock::new(collection_id);

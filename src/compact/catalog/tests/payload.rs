@@ -4,7 +4,7 @@ use crate::vectors::{RecordVectors, VectorSpec, VersionedVector};
 use crate::{DistanceMetric, MetadataValue};
 use std::collections::BTreeMap;
 
-fn populate(db: &mut Database) {
+pub(super) fn populate(db: &mut Database) {
     for (name, precision) in [("half", F16), ("full", F32)] {
         db.create_collection_as(name, spec(2), precision).unwrap();
         let mut c = db.collection_mut(name).unwrap();
@@ -83,7 +83,7 @@ fn populate(db: &mut Database) {
     g.attach("n", "full", 0).unwrap();
 }
 
-fn fingerprint(loaded: &Loaded) -> Vec<String> {
+pub(super) fn fingerprint(loaded: &Loaded) -> Vec<String> {
     let mut result: Vec<_> = loaded
         .collections
         .iter()
@@ -131,7 +131,7 @@ fn fingerprint(loaded: &Loaded) -> Vec<String> {
     result
 }
 
-fn snapshot(db: &mut Database, key: Option<&EncryptionKey>) -> Loaded {
+pub(super) fn snapshot(db: &mut Database, key: Option<&EncryptionKey>) -> Loaded {
     format::load_with(&mut db.file, key).unwrap()
 }
 
@@ -161,7 +161,7 @@ fn assert_visible(db: &Database, loaded: &Loaded) {
     }
 }
 
-fn assert_source_blocks(bytes: &[u8], key: Option<&EncryptionKey>) {
+pub(super) fn assert_source_blocks(bytes: &[u8], key: Option<&EncryptionKey>) {
     let mut source = Cursor::new(bytes);
     let header = format::read_log_header(&mut source, key).unwrap();
     let mut at = header.start;
@@ -559,4 +559,25 @@ fn complete_records_preserve_zero_expiry_without_clock_and_filter_with_clock() {
             .iter()
             .all(|entry| u16_at(entry, 0) != payload::KIND)
     );
+}
+
+#[test]
+fn complete_records_clamp_original_revisions_to_checkpoint_floor() {
+    let _precision = Activation::on();
+    let _records = Records::on();
+    let db = limits::store(5);
+    let mut before = load(&db.to_bytes().unwrap(), None).unwrap();
+    let floor = before.sequence;
+    let revisions = BTreeMap::from([(1, 0), (2, u64::MAX), (3, 1), (4, floor - 1), (5, floor)]);
+    before.collections.get_mut(&1).unwrap().revisions = revisions.clone();
+    let restored = load(&image_of(&before), None).unwrap();
+    assert_eq!(
+        restored.collections[&1].revisions,
+        revisions
+            .into_iter()
+            .map(|(id, revision)| (id, revision.clamp(1, floor)))
+            .collect()
+    );
+    assert_eq!(restored.sequence, floor);
+    assert_eq!(restored.history_floor, floor);
 }
