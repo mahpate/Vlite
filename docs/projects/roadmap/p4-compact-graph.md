@@ -257,20 +257,22 @@ or full query planning, and is not a Rust or checkpoint parity proof.
 
 This private, test-only codec is not wired to the checkpoint block registry,
 shared framing, checkpoint reads or production builds. VLGCSR06 round-trips
-retained temporal edges with 1–256 ordered, non-overlapping segments, optional
+retained temporal series with 0–256 ordered, non-overlapping segments, optional
 signed bounds, typed per-segment properties, and the edge's identity, revision
 and deadline; decoding reconstructs the equivalent tag-65 snapshot entry.
-Temporal data is stored in a separate section, leaving ordinary edge records on
-the existing VLGCSR path apart from the magic/version change. Empty temporal
-series are rejected. Cross-graph attachment-owner uniqueness is a
-checkpoint-level invariant; one graph codec cannot validate it. The codec does
-not persist or serve property indexes; schema declarations are preserved and
-their indexes and rules are rebuilt and checked only through the engine snapshot
-loader. No changes were made to op-12/op-15, public APIs, or
+Temporal data is stored in a separate section, whose membership distinguishes
+an empty series from an ordinary edge. Ordinary edge records remain on the
+existing VLGCSR path apart from the magic/version change. Cross-graph
+attachment-owner uniqueness is a checkpoint-level invariant; one graph codec
+cannot validate it. The codec does not persist or serve property indexes;
+schema declarations are preserved and their indexes and rules are rebuilt and
+checked only through the engine snapshot loader. No changes were made to
+op-12/op-15, public APIs, or
 `src/openapi.json`. Remaining P4 slices are temporal reads from CSR, shared
 framing and block dispatch/publication, checkpoint/read integration, mutation
-overlay, columnar property storage, native compact-index serving and schema
-enforcement, parallel import, and performance and cross-platform qualification.
+overlay, parallel import, and performance and cross-platform qualification.
+Columnar property storage, native compact-index serving and schema enforcement
+also remain outstanding.
 
 Next roll out opt-in checkpoint reads, mutation/TTL integration, then parallel
 import; enable defaults only after acceptance.

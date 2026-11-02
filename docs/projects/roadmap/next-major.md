@@ -133,14 +133,14 @@ Local numbers below show direction only (see rules).
   now round-trip losslessly, with engine snapshot loading checking conformance
   and rebuilding exact/range indexes. This does not persist or serve native
   compact indexes. The private codec now round-trips retained temporal edge
-  series with 1–256 segments, signed/open bounds, typed segment properties and
+  series with 0–256 segments, signed/open bounds, typed segment properties and
   the edge's identity, revision and deadline, rebuilding the equivalent
-  tag-65 snapshot entry; ordinary edge records retain their existing path
-  apart from the payload version. Empty temporal series remain unsupported.
-  Temporal reads from CSR, native schema enforcement, cross-graph owner
-  validation, shared framing, checkpoint/read integration, columnar property
-  storage, mutation overlay, parallel import and S3/S4/F6 qualification remain
-  outstanding.
+  tag-65 snapshot entry. Temporal-section membership distinguishes an empty
+  series from an ordinary edge. Ordinary edge records remain on the existing
+  path apart from the payload version. Temporal reads from CSR, shared framing,
+  checkpoint/read integration, mutation overlay, parallel import and S3/S4/F6
+  qualification remain outstanding. Native schema enforcement, cross-graph
+  owner validation and columnar property storage also remain outstanding.
   Independently reviewed logical references cover committed-overlay
   identity, non-reused IDs and expiry precedence, typed property snapshots
   with exact integer and float bits, label postings and scans, and

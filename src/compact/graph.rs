@@ -572,7 +572,7 @@ fn decode(bytes: &[u8]) -> Result<CompactGraph, CodecError> {
                 return Err(CodecError::Corrupt);
             }
             let segment_count = reader.entries(6)?;
-            if segment_count == 0 || segment_count > MAX_SEGMENTS {
+            if segment_count > MAX_SEGMENTS {
                 return Err(CodecError::Corrupt);
             }
             let mut segments = Vec::new();
@@ -640,7 +640,6 @@ fn build_inner(
         if let Some(segments) = &edge.segments {
             if !source.temporal_enabled
                 || !edge.properties.is_empty()
-                || segments.is_empty()
                 || segments.len() > MAX_SEGMENTS
             {
                 return Err(CodecError::Corrupt);
@@ -2331,46 +2330,6 @@ mod tests {
         GraphSource::from_graph(state.graph(GraphId(0)).unwrap()).unwrap()
     }
 
-    fn temporal_state_with_series(series: Vec<Segment>) -> GraphState {
-        let mut state = GraphState::new();
-        state.set_temporal(true).unwrap();
-        state
-            .apply(
-                1,
-                &GraphBody {
-                    graph_id: GraphId(0),
-                    entries: vec![
-                        GraphEntry::CreateGraph {
-                            name: "temporal".into(),
-                        },
-                        GraphEntry::PutNode {
-                            node_id: NodeId(0),
-                            key: "source".into(),
-                            labels: BTreeSet::new(),
-                            properties: Properties::new(),
-                        },
-                        GraphEntry::PutNode {
-                            node_id: NodeId(1),
-                            key: "target".into(),
-                            labels: BTreeSet::new(),
-                            properties: Properties::new(),
-                        },
-                        GraphEntry::Temporal(TemporalEntry::PutEdge {
-                            edge_id: EdgeId(0),
-                            revision: 0,
-                            source: NodeId(0),
-                            destination: NodeId(1),
-                            relationship: "rel".into(),
-                            key: Some("edge".into()),
-                            segments: series,
-                        }),
-                    ],
-                },
-            )
-            .unwrap();
-        state
-    }
-
     fn full_temporal_state() -> GraphState {
         let max_series = (0..MAX_SEGMENTS)
             .map(|index| {
@@ -2497,6 +2456,105 @@ mod tests {
                             expires_at_ms: Some(70),
                         },
                     ],
+                },
+            )
+            .unwrap();
+        state
+    }
+
+    fn temporal_state_with_removed_series() -> GraphState {
+        let mut state = GraphState::new();
+        state.set_temporal(true).unwrap();
+        state
+            .apply(
+                1,
+                &GraphBody {
+                    graph_id: GraphId(0),
+                    entries: vec![
+                        GraphEntry::CreateGraph {
+                            name: "temporal".into(),
+                        },
+                        GraphEntry::PutNode {
+                            node_id: NodeId(0),
+                            key: "source".into(),
+                            labels: BTreeSet::new(),
+                            properties: Properties::new(),
+                        },
+                        GraphEntry::PutNode {
+                            node_id: NodeId(1),
+                            key: "target".into(),
+                            labels: BTreeSet::new(),
+                            properties: Properties::new(),
+                        },
+                    ],
+                },
+            )
+            .unwrap();
+        state
+            .apply(
+                2,
+                &GraphBody {
+                    graph_id: GraphId(0),
+                    entries: vec![
+                        GraphEntry::PutEdge {
+                            edge_id: EdgeId(0),
+                            source: NodeId(0),
+                            destination: NodeId(1),
+                            relationship: "ordinary".into(),
+                            key: Some("ordinary".into()),
+                            properties: props([("weight", int(7))]),
+                        },
+                        GraphEntry::Temporal(TemporalEntry::PutEdge {
+                            edge_id: EdgeId(1),
+                            revision: 0,
+                            source: NodeId(0),
+                            destination: NodeId(1),
+                            relationship: "temporal".into(),
+                            key: Some("retained".into()),
+                            segments: vec![
+                                Segment {
+                                    valid_from: Some(0),
+                                    valid_to: Some(10),
+                                    properties: props([("state", text("retained"))]),
+                                },
+                                Segment {
+                                    valid_from: Some(10),
+                                    valid_to: Some(20),
+                                    properties: props([("state", text("touching"))]),
+                                },
+                            ],
+                        }),
+                        GraphEntry::Temporal(TemporalEntry::PutEdge {
+                            edge_id: EdgeId(2),
+                            revision: 0,
+                            source: NodeId(0),
+                            destination: NodeId(1),
+                            relationship: "temporal".into(),
+                            key: Some("emptied".into()),
+                            segments: vec![Segment {
+                                valid_from: Some(20),
+                                valid_to: Some(30),
+                                properties: props([("state", text("removed"))]),
+                            }],
+                        }),
+                        GraphEntry::EdgeExpiry {
+                            edge_id: EdgeId(2),
+                            expires_at_ms: Some(100),
+                        },
+                    ],
+                },
+            )
+            .unwrap();
+        state
+            .apply(
+                3,
+                &GraphBody {
+                    graph_id: GraphId(0),
+                    entries: vec![GraphEntry::Temporal(TemporalEntry::RemoveSegment {
+                        edge_id: EdgeId(2),
+                        valid_from: Some(20),
+                        valid_to: Some(30),
+                    })],
                 },
             )
             .unwrap();
@@ -2741,35 +2799,50 @@ mod tests {
 
     #[test]
     fn temporal_codec_rejects_noncanonical_and_malformed_series_sections() {
-        let state = temporal_state_with_series(vec![
-            Segment {
-                valid_from: Some(0),
-                valid_to: Some(10),
-                properties: Properties::new(),
-            },
-            Segment {
-                valid_from: Some(10),
-                valid_to: Some(20),
-                properties: Properties::new(),
-            },
-        ]);
+        let state = temporal_state_with_removed_series();
         let source = GraphSource::from_graph(state.graph(GraphId(0)).unwrap()).unwrap();
         let bytes = encode(&source).unwrap();
         let section = bytes
             .windows(TEMPORAL_SECTION.len())
             .position(|window| window == TEMPORAL_SECTION)
             .unwrap();
-        let series_count_at = section + 16;
-        let segment_start = section + 20;
-        let second_segment_start = segment_start + 22;
+        let property_names = build(source.clone()).unwrap().property_names;
+        let mut section_reader = Reader::new(&bytes[section..]);
+        section_reader.take(TEMPORAL_SECTION.len()).unwrap();
+        let series_count = section_reader.entries(8).unwrap();
+        assert_eq!(series_count, 2);
+        let mut series_offsets = Vec::new();
+        for _ in 0..series_count {
+            let ordinal_at = section + section_reader.at;
+            let ordinal = section_reader.u32().unwrap();
+            let segment_count_at = section + section_reader.at;
+            let segment_count = section_reader.entries(6).unwrap();
+            let mut segment_starts = Vec::new();
+            for _ in 0..segment_count {
+                segment_starts.push(section + section_reader.at);
+                section_reader.optional_i64().unwrap();
+                section_reader.optional_i64().unwrap();
+                section_reader.properties(&property_names).unwrap();
+            }
+            series_offsets.push((
+                ordinal_at,
+                ordinal,
+                segment_count_at,
+                segment_count,
+                segment_starts,
+            ));
+        }
+        assert!(section_reader.is_empty());
+        let (first_ordinal_at, first_ordinal, series_count_at, _, first_segments) =
+            &series_offsets[0];
+        let (second_ordinal_at, _, _, _, _) = &series_offsets[1];
+        let segment_start = first_segments[0];
+        let second_segment_start = first_segments[1];
+        let empty_series_ordinal_at = *second_ordinal_at;
         let mut mutations = Vec::new();
 
-        let mut zero_segments = bytes.clone();
-        zero_segments[series_count_at..series_count_at + 4].copy_from_slice(&0u32.to_le_bytes());
-        mutations.push(("zero segments", zero_segments));
-
         let mut too_many_segments = bytes.clone();
-        too_many_segments[series_count_at..series_count_at + 4]
+        too_many_segments[*series_count_at..*series_count_at + 4]
             .copy_from_slice(&257u32.to_le_bytes());
         mutations.push(("too many segments", too_many_segments));
 
@@ -2799,6 +2872,26 @@ mod tests {
         bad_section_marker[section] ^= 1;
         mutations.push(("invalid section marker", bad_section_marker));
 
+        let mut empty_series_on_edge_with_properties = bytes.clone();
+        empty_series_on_edge_with_properties[*first_ordinal_at..*first_ordinal_at + 4]
+            .copy_from_slice(&0u32.to_le_bytes());
+        empty_series_on_edge_with_properties[*series_count_at..*series_count_at + 4]
+            .copy_from_slice(&0u32.to_le_bytes());
+        mutations.push((
+            "empty temporal series assigned to edge with properties",
+            empty_series_on_edge_with_properties,
+        ));
+
+        let mut duplicate_ordinal = bytes.clone();
+        duplicate_ordinal[empty_series_ordinal_at..empty_series_ordinal_at + 4]
+            .copy_from_slice(&first_ordinal.to_le_bytes());
+        mutations.push(("duplicate temporal edge ordinal", duplicate_ordinal));
+
+        let mut descending_ordinal = bytes.clone();
+        descending_ordinal[empty_series_ordinal_at..empty_series_ordinal_at + 4]
+            .copy_from_slice(&0u32.to_le_bytes());
+        mutations.push(("descending temporal edge ordinal", descending_ordinal));
+
         for (what, corrupt) in mutations {
             assert_eq!(decode(&corrupt), Err(CodecError::Corrupt), "{what}");
         }
@@ -2814,17 +2907,42 @@ mod tests {
         assert_eq!(decode(&trailing), Err(CodecError::Corrupt));
 
         assert_eq!(
-            encode(
-                &GraphSource::from_graph(
-                    temporal_state_with_series(Vec::new())
-                        .graph(GraphId(0))
-                        .unwrap()
-                )
-                .unwrap()
-            ),
-            Err(CodecError::Corrupt),
-            "the private codec rejects an empty temporal series"
+            decode(&bytes).unwrap().source.edges[2].segments,
+            Some(Vec::new())
         );
+    }
+
+    #[test]
+    fn empty_temporal_series_round_trips_with_mixed_edges_and_matches_c1() {
+        let state = temporal_state_with_removed_series();
+        let graph = state.graph(GraphId(0)).unwrap();
+        let source = GraphSource::from_graph(graph).unwrap();
+        assert!(source.temporal_enabled);
+        assert!(source.edges[0].segments.is_none());
+        assert!(source.edges[1].segments.as_ref().unwrap().len() == 2);
+        assert_eq!(source.edges[2].segments, Some(Vec::new()));
+
+        let bytes = encode(&source).unwrap();
+        let decoded = decode(&bytes).unwrap();
+        assert_eq!(decoded.source, source);
+        assert_eq!(encode(&decoded.source).unwrap(), bytes);
+        let restored = engine_state(&decoded.source).unwrap();
+        assert_eq!(restored, state);
+
+        let restored_graph = restored.graph(GraphId(0)).unwrap();
+        for edge in graph.edges() {
+            assert_eq!(
+                graph.edge_snapshot_entry(edge, 3),
+                restored_graph.edge_snapshot_entry(restored_graph.edge(edge.id).unwrap(), 3)
+            );
+        }
+        for (as_of_ms, ttl_clock_ms) in [(5, 0), (15, 0), (25, 0), (25, 100)] {
+            assert_eq!(
+                temporal_neighbor_views(graph, as_of_ms, ttl_clock_ms),
+                temporal_neighbor_views(restored_graph, as_of_ms, ttl_clock_ms),
+                "T={as_of_ms}, C={ttl_clock_ms}"
+            );
+        }
     }
 
     #[test]
@@ -2838,7 +2956,6 @@ mod tests {
             if !case["edge"]["retained"].as_bool().unwrap()
                 || !case["source"]["retained"].as_bool().unwrap()
                 || !case["target"]["retained"].as_bool().unwrap()
-                || case["segments"].as_array().unwrap().is_empty()
             {
                 continue;
             }
