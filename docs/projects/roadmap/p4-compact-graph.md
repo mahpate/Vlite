@@ -171,8 +171,8 @@ Property names are dictionary-coded in UTF-8 byte order, while
 per-record typed values preserve strings, signed integers, finite float/GeoPoint
 bits, and booleans. Each map retains the engine's existing field, string and
 byte limits; this is a correctness format, not a columnar compression or size
-claim. The versioned private payload magic is `VLGCSR05`; old `VLGCSR01`
-through `VLGCSR04` bytes are refused, not reinterpreted. Its decoder
+claim. The versioned private payload magic is `VLGCSR06`; old `VLGCSR01`
+through `VLGCSR05` bytes are refused, not reinterpreted. Its decoder
 rejects noncanonical dictionaries/IDs, invalid endpoints or codes, incorrect
 row ordering, missing or duplicate CSR membership, overflow, truncation and
 trailing bytes, noncanonical label posting codes/ordinals, and missing or extra
@@ -255,20 +255,22 @@ violations in a deterministic order, not the engine's first-error precedence.
 It models no persisted bytes, TTL, temporal history, ordered writes, rollback
 or full query planning, and is not a Rust or checkpoint parity proof.
 
-This codec is not wired to the checkpoint block registry, shared framing,
-checkpoint reads or production builds. Cross-graph attachment-owner uniqueness
-is a checkpoint-level invariant; one graph codec cannot validate it. It refuses
-temporal segments rather than dropping them, and it does not encode temporal
-history, so temporal sources remain unsupported. It does not persist or serve
-property indexes; schema declarations are preserved and their indexes and rules
-are rebuilt and checked only through the engine snapshot loader. No changes
-were made to op-12/op-15, public
-APIs, or `src/openapi.json`. The remaining P4 slices are shared block
-dispatch/publication, compact-base access in reads, mutation overlay and
-checkpoint integration and columnar property storage, native compact index
-serving and schema enforcement, schema handling in each read, overlay and
-checkpoint path, temporal encoding or faithful refusal in each path,
-parallel import, and all performance and cross-platform qualification.
+This private, test-only codec is not wired to the checkpoint block registry,
+shared framing, checkpoint reads or production builds. VLGCSR06 round-trips
+retained temporal edges with 1–256 ordered, non-overlapping segments, optional
+signed bounds, typed per-segment properties, and the edge's identity, revision
+and deadline; decoding reconstructs the equivalent tag-65 snapshot entry.
+Temporal data is stored in a separate section, leaving ordinary edge records on
+the existing VLGCSR path apart from the magic/version change. Empty temporal
+series are rejected. Cross-graph attachment-owner uniqueness is a
+checkpoint-level invariant; one graph codec cannot validate it. The codec does
+not persist or serve property indexes; schema declarations are preserved and
+their indexes and rules are rebuilt and checked only through the engine snapshot
+loader. No changes were made to op-12/op-15, public APIs, or
+`src/openapi.json`. Remaining P4 slices are temporal reads from CSR, shared
+framing and block dispatch/publication, checkpoint/read integration, mutation
+overlay, columnar property storage, native compact-index serving and schema
+enforcement, parallel import, and performance and cross-platform qualification.
 
 Next roll out opt-in checkpoint reads, mutation/TTL integration, then parallel
 import; enable defaults only after acceptance.

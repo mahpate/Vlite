@@ -9,11 +9,13 @@
 //! loaded through the engine's own snapshot path, which validates the
 //! declarations, rebuilds the indexes and checks every declared rule.
 
+use crate::property_graph::engine::codec::TemporalEntry;
 use crate::property_graph::engine::limits::{
     MAX_BATCH_ENTRIES, MAX_FIELD_NAME_BYTES, MAX_LABEL_BYTES, MAX_RELATIONSHIP_TYPE_BYTES,
     MAX_SCHEMA_DESCRIPTION_BYTES, MAX_SCHEMA_ENDPOINTS, MAX_SCHEMA_LABELS, MAX_SCHEMA_PROPERTIES,
     MAX_SCHEMA_RELATIONSHIPS,
 };
+use crate::property_graph::engine::temporal::{MAX_SEGMENTS, Segment};
 use crate::property_graph::engine::{
     EdgeId, Graph, GraphBody, GraphEdge, GraphEntry, GraphId, GraphNode, GraphSchema, GraphState,
     LabelDefinition, Multiplicity, NodeId, Properties, PropertyDefinition, PropertyIndexKind,
@@ -21,7 +23,8 @@ use crate::property_graph::engine::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-const MAGIC: &[u8; 8] = b"VLGCSR05";
+const MAGIC: &[u8; 8] = b"VLGCSR06";
+const TEMPORAL_SECTION: &[u8; 8] = b"VLTEMP01";
 const MAX_BYTES: usize = 64 << 20;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,7 +54,7 @@ struct SourceEdge {
     revision: u64,
     deadline: Option<u64>,
     properties: Properties,
-    is_temporal: bool,
+    segments: Option<Vec<Segment>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -61,6 +64,7 @@ struct GraphSource {
     sequence: u64,
     next_node_id: u64,
     next_edge_id: u64,
+    temporal_enabled: bool,
     schema: GraphSchema,
     nodes: Vec<SourceNode>,
     edges: Vec<SourceEdge>,
@@ -154,11 +158,11 @@ impl GraphSource {
             ));
         }
         let mut edges = Vec::new();
+        let mut temporal_enabled = false;
         for edge in graph.edges() {
-            if graph.segments(edge.id).is_some() {
-                return Err(CodecError::UnsupportedSource("temporal segments"));
-            }
-            edges.push(source_edge(edge, graph.edge_expiry(edge.id), false));
+            let segments = graph.segments(edge.id);
+            temporal_enabled |= segments.is_some();
+            edges.push(source_edge(edge, graph.edge_expiry(edge.id), segments));
         }
         Ok(Self {
             graph_id: graph.id().0,
@@ -166,6 +170,7 @@ impl GraphSource {
             sequence: graph.graph_sequence(),
             next_node_id: graph.next_node_id(),
             next_edge_id: graph.next_edge_id(),
+            temporal_enabled,
             schema: graph.schema().clone(),
             nodes,
             edges,
@@ -220,14 +225,26 @@ fn engine_state(source: &GraphSource) -> Result<GraphState, CodecError> {
         }
     }
     for edge in &source.edges {
-        emit(GraphEntry::PutEdge {
-            edge_id: EdgeId(edge.id),
-            source: NodeId(edge.source),
-            destination: NodeId(edge.target),
-            relationship: edge.relationship.clone(),
-            key: edge.key.clone(),
-            properties: edge.properties.clone(),
-        })?;
+        if let Some(segments) = &edge.segments {
+            emit(GraphEntry::Temporal(TemporalEntry::PutEdge {
+                edge_id: EdgeId(edge.id),
+                revision: edge.revision,
+                source: NodeId(edge.source),
+                destination: NodeId(edge.target),
+                relationship: edge.relationship.clone(),
+                key: edge.key.clone(),
+                segments: segments.clone(),
+            }))?;
+        } else {
+            emit(GraphEntry::PutEdge {
+                edge_id: EdgeId(edge.id),
+                source: NodeId(edge.source),
+                destination: NodeId(edge.target),
+                relationship: edge.relationship.clone(),
+                key: edge.key.clone(),
+                properties: edge.properties.clone(),
+            })?;
+        }
         if let Some(deadline) = edge.deadline {
             emit(GraphEntry::EdgeExpiry {
                 edge_id: EdgeId(edge.id),
@@ -254,6 +271,9 @@ fn engine_state(source: &GraphSource) -> Result<GraphState, CodecError> {
             .map_err(|_| CodecError::Corrupt)?;
     }
     let mut state = builder.finish().map_err(|_| CodecError::Corrupt)?;
+    if source.temporal_enabled {
+        state.set_temporal(true).map_err(|_| CodecError::Corrupt)?;
+    }
     let nodes: Vec<_> = source
         .nodes
         .iter()
@@ -286,7 +306,11 @@ fn source_node(
     }
 }
 
-fn source_edge(edge: &GraphEdge, deadline: Option<u64>, is_temporal: bool) -> SourceEdge {
+fn source_edge(
+    edge: &GraphEdge,
+    deadline: Option<u64>,
+    segments: Option<&[Segment]>,
+) -> SourceEdge {
     SourceEdge {
         id: edge.id.0,
         source: edge.source.0,
@@ -296,7 +320,7 @@ fn source_edge(edge: &GraphEdge, deadline: Option<u64>, is_temporal: bool) -> So
         revision: edge.revision,
         deadline,
         properties: edge.properties.clone(),
-        is_temporal,
+        segments: segments.map(<[Segment]>::to_vec),
     }
 }
 
@@ -382,6 +406,31 @@ fn encode(source: &GraphSource) -> Result<Vec<u8>, CodecError> {
             )?;
             put_u16(&mut out, *collection)?;
             put_u64(&mut out, *record)?;
+        }
+    }
+    if graph.source.temporal_enabled {
+        put_bytes(&mut out, TEMPORAL_SECTION)?;
+        let temporal_count = graph
+            .source
+            .edges
+            .iter()
+            .filter(|edge| edge.segments.is_some())
+            .count();
+        put_count(&mut out, temporal_count)?;
+        for (ordinal, edge) in graph.source.edges.iter().enumerate() {
+            let Some(segments) = &edge.segments else {
+                continue;
+            };
+            put_u32(
+                &mut out,
+                u32::try_from(ordinal).map_err(|_| CodecError::Corrupt)?,
+            )?;
+            put_count(&mut out, segments.len())?;
+            for segment in segments {
+                put_optional_i64(&mut out, segment.valid_from)?;
+                put_optional_i64(&mut out, segment.valid_to)?;
+                put_properties(&mut out, &segment.properties, &graph.property_names)?;
+            }
         }
     }
     if out.len() > MAX_BYTES {
@@ -488,7 +537,7 @@ fn decode(bytes: &[u8]) -> Result<CompactGraph, CodecError> {
             revision,
             deadline,
             properties,
-            is_temporal: false,
+            segments: None,
         });
     }
     if edges
@@ -501,6 +550,47 @@ fn decode(bytes: &[u8]) -> Result<CompactGraph, CodecError> {
     let incoming = reader.csr()?;
     let label_postings = reader.label_postings(labels.len(), node_count)?;
     let attachments = reader.attachments(&mut nodes)?;
+    let temporal_enabled = if reader.is_empty() {
+        false
+    } else {
+        if reader.take(TEMPORAL_SECTION.len())? != TEMPORAL_SECTION {
+            return Err(CodecError::Corrupt);
+        }
+        let temporal_count = reader.entries(8)?;
+        if temporal_count > edges.len() {
+            return Err(CodecError::Corrupt);
+        }
+        let mut previous = None;
+        for _ in 0..temporal_count {
+            let ordinal = usize::try_from(reader.u32()?).map_err(|_| CodecError::Corrupt)?;
+            if previous.is_some_and(|prior| prior >= ordinal) {
+                return Err(CodecError::Corrupt);
+            }
+            previous = Some(ordinal);
+            let edge = edges.get_mut(ordinal).ok_or(CodecError::Corrupt)?;
+            if !edge.properties.is_empty() {
+                return Err(CodecError::Corrupt);
+            }
+            let segment_count = reader.entries(6)?;
+            if segment_count == 0 || segment_count > MAX_SEGMENTS {
+                return Err(CodecError::Corrupt);
+            }
+            let mut segments = Vec::new();
+            segments
+                .try_reserve_exact(segment_count)
+                .map_err(|_| CodecError::Corrupt)?;
+            for _ in 0..segment_count {
+                let segment = Segment {
+                    valid_from: reader.optional_i64()?,
+                    valid_to: reader.optional_i64()?,
+                    properties: reader.properties(&property_names)?,
+                };
+                segments.push(segment);
+            }
+            edge.segments = Some(segments);
+        }
+        true
+    };
     if !reader.is_empty() {
         return Err(CodecError::Corrupt);
     }
@@ -510,6 +600,7 @@ fn decode(bytes: &[u8]) -> Result<CompactGraph, CodecError> {
         sequence,
         next_node_id,
         next_edge_id,
+        temporal_enabled,
         schema,
         nodes,
         edges,
@@ -542,12 +633,24 @@ fn build_inner(
         properties::validate(&node.properties).map_err(|_| CodecError::Corrupt)?;
         property_names.extend(node.properties.keys().cloned());
     }
+    let mut has_temporal_series = false;
     for edge in &source.edges {
         properties::validate(&edge.properties).map_err(|_| CodecError::Corrupt)?;
         property_names.extend(edge.properties.keys().cloned());
-    }
-    if source.edges.iter().any(|edge| edge.is_temporal) {
-        return Err(CodecError::UnsupportedSource("temporal segments"));
+        if let Some(segments) = &edge.segments {
+            if !source.temporal_enabled
+                || !edge.properties.is_empty()
+                || segments.is_empty()
+                || segments.len() > MAX_SEGMENTS
+            {
+                return Err(CodecError::Corrupt);
+            }
+            has_temporal_series = true;
+            for segment in segments {
+                properties::validate(&segment.properties).map_err(|_| CodecError::Corrupt)?;
+                property_names.extend(segment.properties.keys().cloned());
+            }
+        }
     }
     source.nodes.sort_by_key(|node| node.id);
     source.edges.sort_by_key(|edge| edge.id);
@@ -687,7 +790,7 @@ fn build_inner(
     }
     let out = make_csr(out_rows)?;
     let incoming = make_csr(in_rows)?;
-    if !source.schema.is_empty() {
+    if !source.schema.is_empty() || has_temporal_series {
         // Declared rules and the derived indexes stay owned by the engine.
         engine_state(&source)?;
     }
@@ -862,6 +965,16 @@ fn put_optional_u64(out: &mut Vec<u8>, value: Option<u64>) -> Result<(), CodecEr
         Some(value) => {
             put_bytes(out, &[1])?;
             put_u64(out, value)
+        }
+        None => put_bytes(out, &[0]),
+    }
+}
+
+fn put_optional_i64(out: &mut Vec<u8>, value: Option<i64>) -> Result<(), CodecError> {
+    match value {
+        Some(value) => {
+            put_bytes(out, &[1])?;
+            put_bytes(out, &value.to_le_bytes())
         }
         None => put_bytes(out, &[0]),
     }
@@ -1104,6 +1217,14 @@ impl<'a> Reader<'a> {
         match self.u8()? {
             0 => Ok(None),
             1 => Ok(Some(self.u64()?)),
+            _ => Err(CodecError::Corrupt),
+        }
+    }
+
+    fn optional_i64(&mut self) -> Result<Option<i64>, CodecError> {
+        match self.u8()? {
+            0 => Ok(None),
+            1 => Ok(Some(i64::from_le_bytes(self.array()?))),
             _ => Err(CodecError::Corrupt),
         }
     }
@@ -1415,10 +1536,11 @@ mod tests {
         MAX_SCHEMA_PROPERTIES, MAX_SCHEMA_RELATIONSHIPS,
     };
     use crate::property_graph::engine::{
-        EdgeId, ExecutionContext, GraphBody, GraphEntry, GraphError, GraphId, GraphLimits,
-        GraphQuery, GraphState, IndexChoice, LabelDefinition, Multiplicity, NodeId,
-        PropertyCondition, PropertyDefinition, PropertyIndexKind, PropertyProjection, PropertyType,
-        QueryOp, QueryOutput, QueryResult, RelationshipDefinition, execute,
+        Direction, EdgeId, EdgeView, ExecutionContext, GraphBody, GraphEntry, GraphError, GraphId,
+        GraphLimits, GraphQuery, GraphState, IndexChoice, LabelDefinition, Multiplicity, NodeId,
+        NodeSelector, PropertyCondition, PropertyDefinition, PropertyIndexKind, PropertyProjection,
+        PropertyType, QueryOp, QueryOutput, QueryResult, RelationshipDefinition, execute,
+        execute_as_of,
     };
     use serde_json::{Value, json};
     use std::collections::BTreeSet;
@@ -1598,7 +1720,13 @@ mod tests {
         let mut trailing = bytes.clone();
         trailing.push(0);
         assert_eq!(decode(&trailing), Err(CodecError::Corrupt));
-        for magic in [b"VLGCSR01", b"VLGCSR02", b"VLGCSR03", b"VLGCSR04"] {
+        for magic in [
+            b"VLGCSR01",
+            b"VLGCSR02",
+            b"VLGCSR03",
+            b"VLGCSR04",
+            b"VLGCSR05",
+        ] {
             let mut old = bytes.clone();
             old[..8].copy_from_slice(magic);
             assert_eq!(decode(&old), Err(CodecError::Corrupt));
@@ -1731,7 +1859,13 @@ mod tests {
         for end in start..bytes.len() {
             assert_eq!(decode(&bytes[..end]), Err(CodecError::Corrupt));
         }
-        for magic in [b"VLGCSR01", b"VLGCSR02", b"VLGCSR03", b"VLGCSR04"] {
+        for magic in [
+            b"VLGCSR01",
+            b"VLGCSR02",
+            b"VLGCSR03",
+            b"VLGCSR04",
+            b"VLGCSR05",
+        ] {
             let mut old = bytes.clone();
             old[..8].copy_from_slice(magic);
             assert_eq!(decode(&old), Err(CodecError::Corrupt));
@@ -2123,7 +2257,7 @@ mod tests {
     }
 
     #[test]
-    fn graph_source_refuses_temporal_segments() {
+    fn temporal_series_requires_the_temporal_capability() {
         let mut graph = fixture_graph(&json!({"nodes": [{"id": 1, "labels": []}], "edges": []}));
         graph.edges.push(SourceEdge {
             id: 1,
@@ -2134,12 +2268,13 @@ mod tests {
             revision: 0,
             deadline: None,
             properties: Properties::new(),
-            is_temporal: true,
+            segments: Some(vec![Segment {
+                valid_from: Some(0),
+                valid_to: Some(1),
+                properties: Properties::new(),
+            }]),
         });
-        assert_eq!(
-            encode(&graph),
-            Err(CodecError::UnsupportedSource("temporal segments"))
-        );
+        assert_eq!(encode(&graph), Err(CodecError::Corrupt));
     }
 
     #[test]
@@ -2194,6 +2329,637 @@ mod tests {
             )
             .unwrap();
         GraphSource::from_graph(state.graph(GraphId(0)).unwrap()).unwrap()
+    }
+
+    fn temporal_state_with_series(series: Vec<Segment>) -> GraphState {
+        let mut state = GraphState::new();
+        state.set_temporal(true).unwrap();
+        state
+            .apply(
+                1,
+                &GraphBody {
+                    graph_id: GraphId(0),
+                    entries: vec![
+                        GraphEntry::CreateGraph {
+                            name: "temporal".into(),
+                        },
+                        GraphEntry::PutNode {
+                            node_id: NodeId(0),
+                            key: "source".into(),
+                            labels: BTreeSet::new(),
+                            properties: Properties::new(),
+                        },
+                        GraphEntry::PutNode {
+                            node_id: NodeId(1),
+                            key: "target".into(),
+                            labels: BTreeSet::new(),
+                            properties: Properties::new(),
+                        },
+                        GraphEntry::Temporal(TemporalEntry::PutEdge {
+                            edge_id: EdgeId(0),
+                            revision: 0,
+                            source: NodeId(0),
+                            destination: NodeId(1),
+                            relationship: "rel".into(),
+                            key: Some("edge".into()),
+                            segments: series,
+                        }),
+                    ],
+                },
+            )
+            .unwrap();
+        state
+    }
+
+    fn full_temporal_state() -> GraphState {
+        let max_series = (0..MAX_SEGMENTS)
+            .map(|index| {
+                let (valid_from, valid_to) = match index {
+                    0 => (None, Some(i64::MIN)),
+                    1 => (Some(i64::MIN), Some(i64::MIN + 1)),
+                    255 => (Some(i64::MAX - 1), Some(i64::MAX)),
+                    _ => {
+                        let start = i64::MIN + i64::try_from(index).unwrap() * 3;
+                        (Some(start), Some(start + 1))
+                    }
+                };
+                Segment {
+                    valid_from,
+                    valid_to,
+                    properties: props([
+                        ("ordinal", int(i64::try_from(index).unwrap())),
+                        ("source", text("series")),
+                    ]),
+                }
+            })
+            .collect();
+        let extreme_series = vec![
+            Segment {
+                valid_from: None,
+                valid_to: Some(i64::MIN),
+                properties: props([("position", text("below-min"))]),
+            },
+            Segment {
+                valid_from: Some(i64::MIN),
+                valid_to: Some(i64::MIN + 1),
+                properties: props([("position", text("min"))]),
+            },
+            Segment {
+                valid_from: Some(i64::MAX - 1),
+                valid_to: Some(i64::MAX),
+                properties: props([("position", text("before-max"))]),
+            },
+            Segment {
+                valid_from: Some(i64::MAX),
+                valid_to: None,
+                properties: props([("position", text("max-open"))]),
+            },
+        ];
+        let mut state = GraphState::new();
+        state.set_temporal(true).unwrap();
+        state
+            .apply(
+                1,
+                &GraphBody {
+                    graph_id: GraphId(0),
+                    entries: vec![
+                        GraphEntry::CreateGraph {
+                            name: "temporal".into(),
+                        },
+                        GraphEntry::PutNode {
+                            node_id: NodeId(0),
+                            key: "source".into(),
+                            labels: BTreeSet::new(),
+                            properties: Properties::new(),
+                        },
+                        GraphEntry::NodeExpiry {
+                            node_id: NodeId(0),
+                            expires_at_ms: Some(100),
+                        },
+                        GraphEntry::PutNode {
+                            node_id: NodeId(1),
+                            key: "target".into(),
+                            labels: BTreeSet::new(),
+                            properties: Properties::new(),
+                        },
+                        GraphEntry::NodeExpiry {
+                            node_id: NodeId(1),
+                            expires_at_ms: Some(80),
+                        },
+                        GraphEntry::PutNode {
+                            node_id: NodeId(2),
+                            key: "other".into(),
+                            labels: BTreeSet::new(),
+                            properties: Properties::new(),
+                        },
+                    ],
+                },
+            )
+            .unwrap();
+        state
+            .apply(
+                2,
+                &GraphBody {
+                    graph_id: GraphId(0),
+                    entries: vec![
+                        GraphEntry::PutEdge {
+                            edge_id: EdgeId(0),
+                            source: NodeId(0),
+                            destination: NodeId(2),
+                            relationship: "legacy".into(),
+                            key: Some("ordinary".into()),
+                            properties: props([("weight", int(7))]),
+                        },
+                        GraphEntry::Temporal(TemporalEntry::PutEdge {
+                            edge_id: EdgeId(1),
+                            revision: 0,
+                            source: NodeId(0),
+                            destination: NodeId(1),
+                            relationship: "temporal".into(),
+                            key: Some("full".into()),
+                            segments: max_series,
+                        }),
+                        GraphEntry::EdgeExpiry {
+                            edge_id: EdgeId(1),
+                            expires_at_ms: Some(90),
+                        },
+                        GraphEntry::Temporal(TemporalEntry::PutEdge {
+                            edge_id: EdgeId(2),
+                            revision: 0,
+                            source: NodeId(0),
+                            destination: NodeId(2),
+                            relationship: "temporal".into(),
+                            key: Some("extremes".into()),
+                            segments: extreme_series,
+                        }),
+                        GraphEntry::EdgeExpiry {
+                            edge_id: EdgeId(2),
+                            expires_at_ms: Some(70),
+                        },
+                    ],
+                },
+            )
+            .unwrap();
+        state
+    }
+
+    fn temporal_neighbor_views(graph: &Graph, as_of_ms: i64, ttl_clock_ms: u64) -> Vec<EdgeView> {
+        let query = GraphQuery::new(QueryOp::Neighbors {
+            node: NodeSelector::Id(NodeId(0)),
+            direction: Direction::Out,
+            types: None,
+            edge_conditions: Vec::new(),
+            limit: Some(20),
+            cursor: None,
+        });
+        temporal_query_edges(graph, &query, as_of_ms, ttl_clock_ms)
+    }
+
+    fn temporal_query_edges(
+        graph: &Graph,
+        query: &GraphQuery,
+        as_of_ms: i64,
+        ttl_clock_ms: u64,
+    ) -> Vec<EdgeView> {
+        let clock = || 0;
+        let mut context = ExecutionContext::new(graph.graph_sequence(), &clock);
+        context.now_ms = ttl_clock_ms;
+        let result = match execute_as_of(graph, query, &GraphLimits::default(), &context, as_of_ms)
+        {
+            Ok(result) => result,
+            Err(GraphError::NodeNotFound(_)) => return Vec::new(),
+            Err(error) => panic!("temporal neighbor query failed: {error}"),
+        };
+        let QueryOutput::Neighbors { edges, .. } = result.output else {
+            panic!("neighbors query returned the wrong output")
+        };
+        edges
+    }
+
+    fn read_case_state(case: &Value) -> GraphState {
+        let mut state = GraphState::new();
+        state.set_temporal(true).unwrap();
+        let mut entries = vec![GraphEntry::CreateGraph {
+            name: "readcase".into(),
+        }];
+        for node in case["input"]["nodes"].as_array().unwrap() {
+            let id = node["id"].as_u64().unwrap();
+            entries.push(GraphEntry::PutNode {
+                node_id: NodeId(id),
+                key: format!("n{id}"),
+                labels: BTreeSet::new(),
+                properties: Properties::new(),
+            });
+            if let Some(deadline) = node["deadline"].as_u64() {
+                entries.push(GraphEntry::NodeExpiry {
+                    node_id: NodeId(id),
+                    expires_at_ms: Some(deadline),
+                });
+            }
+        }
+        for edge in case["input"]["edges"].as_array().unwrap() {
+            let edge_id = EdgeId(edge["id"].as_u64().unwrap());
+            let source = NodeId(edge["source"].as_u64().unwrap());
+            let destination = NodeId(edge["target"].as_u64().unwrap());
+            let relationship = edge["relationship"].as_str().unwrap().to_owned();
+            let segments = edge.get("segments").and_then(Value::as_array);
+            if let Some(segments) = segments {
+                entries.push(GraphEntry::Temporal(TemporalEntry::PutEdge {
+                    edge_id,
+                    revision: 0,
+                    source,
+                    destination,
+                    relationship,
+                    key: None,
+                    segments: segments
+                        .iter()
+                        .map(|segment| Segment {
+                            valid_from: segment["from"].as_i64(),
+                            valid_to: segment["to"].as_i64(),
+                            properties: Properties::new(),
+                        })
+                        .collect(),
+                }));
+            } else {
+                entries.push(GraphEntry::PutEdge {
+                    edge_id,
+                    source,
+                    destination,
+                    relationship,
+                    key: None,
+                    properties: Properties::new(),
+                });
+            }
+            if let Some(deadline) = edge["deadline"].as_u64() {
+                entries.push(GraphEntry::EdgeExpiry {
+                    edge_id,
+                    expires_at_ms: Some(deadline),
+                });
+            }
+        }
+        state
+            .apply(
+                1,
+                &GraphBody {
+                    graph_id: GraphId(0),
+                    entries,
+                },
+            )
+            .unwrap_or_else(|error| panic!("{}: {error:?}", case["name"]));
+        state
+    }
+
+    fn golden_state(case: &Value) -> GraphState {
+        let mut state = GraphState::new();
+        state.set_temporal(true).unwrap();
+        let mut entries = vec![GraphEntry::CreateGraph {
+            name: "golden".into(),
+        }];
+        for (index, endpoint) in [case["source"].clone(), case["target"].clone()]
+            .into_iter()
+            .enumerate()
+        {
+            entries.push(GraphEntry::PutNode {
+                node_id: NodeId(u64::try_from(index).unwrap()),
+                key: format!("n{index}"),
+                labels: BTreeSet::new(),
+                properties: Properties::new(),
+            });
+            if let Some(deadline) = endpoint["expires_at_ms"].as_u64() {
+                entries.push(GraphEntry::NodeExpiry {
+                    node_id: NodeId(u64::try_from(index).unwrap()),
+                    expires_at_ms: Some(deadline),
+                });
+            }
+        }
+        let segments = case["segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|segment| Segment {
+                valid_from: segment["valid_from"].as_i64(),
+                valid_to: segment["valid_to"].as_i64(),
+                properties: json_properties(&segment["properties"]),
+            })
+            .collect();
+        entries.push(GraphEntry::Temporal(TemporalEntry::PutEdge {
+            edge_id: EdgeId(1),
+            revision: 0,
+            source: NodeId(0),
+            destination: NodeId(1),
+            relationship: "rel".into(),
+            key: Some("edge".into()),
+            segments,
+        }));
+        if let Some(deadline) = case["edge"]["expires_at_ms"].as_u64() {
+            entries.push(GraphEntry::EdgeExpiry {
+                edge_id: EdgeId(1),
+                expires_at_ms: Some(deadline),
+            });
+        }
+        state
+            .apply(
+                1,
+                &GraphBody {
+                    graph_id: GraphId(0),
+                    entries,
+                },
+            )
+            .unwrap();
+        state
+    }
+
+    fn json_properties(value: &Value) -> Properties {
+        value
+            .as_object()
+            .into_iter()
+            .flat_map(|fields| fields.iter())
+            .filter_map(|(name, value)| {
+                let value = if let Some(value) = value.as_str() {
+                    PropertyValue::String(value.to_owned())
+                } else if let Some(value) = value.as_bool() {
+                    PropertyValue::Boolean(value)
+                } else if let Some(value) = value.as_i64() {
+                    PropertyValue::Integer(value)
+                } else {
+                    PropertyValue::Float(value.as_f64()?)
+                };
+                Some((name.clone(), value))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn temporal_series_round_trip_preserves_snapshot_state_and_c1_ttl_visibility() {
+        let state = full_temporal_state();
+        let graph = state.graph(GraphId(0)).unwrap();
+        let source = GraphSource::from_graph(graph).unwrap();
+        assert!(source.temporal_enabled);
+        assert_eq!(
+            source.edges[1].segments.as_ref().unwrap().len(),
+            MAX_SEGMENTS
+        );
+        assert!(source.edges[0].segments.is_none());
+        assert!(source.edges[0].properties.contains_key("weight"));
+
+        let bytes = encode(&source).unwrap();
+        assert_eq!(&bytes[..8], b"VLGCSR06");
+        let decoded = decode(&bytes).unwrap();
+        assert_eq!(decoded.source, source);
+        assert_eq!(encode(&decoded.source).unwrap(), bytes);
+        let restored = engine_state(&decoded.source).unwrap();
+        assert_eq!(restored, state);
+
+        let restored_graph = restored.graph(GraphId(0)).unwrap();
+        for (as_of_ms, ttl_clock_ms, expected_ids) in [
+            (i64::MIN, 60, vec![0, 1, 2]),
+            (i64::MIN + 1, 60, vec![0]),
+            (i64::MIN + 6, 60, vec![0, 1]),
+            (i64::MIN + 6, 70, vec![0, 1]),
+            (i64::MAX, 60, vec![0, 2]),
+            (i64::MAX, 80, vec![0]),
+            (i64::MAX, 100, vec![]),
+        ] {
+            let expected: Vec<_> = temporal_neighbor_views(graph, as_of_ms, ttl_clock_ms)
+                .into_iter()
+                .map(|edge| edge.id.0)
+                .collect();
+            let actual: Vec<_> = temporal_neighbor_views(restored_graph, as_of_ms, ttl_clock_ms)
+                .into_iter()
+                .map(|edge| edge.id.0)
+                .collect();
+            assert_eq!(expected, expected_ids, "T={as_of_ms}, C={ttl_clock_ms}");
+            assert_eq!(actual, expected, "T={as_of_ms}, C={ttl_clock_ms}");
+        }
+
+        let views = temporal_neighbor_views(restored_graph, i64::MIN + 6, 60);
+        assert_eq!(
+            views[1].properties,
+            source.edges[1].segments.as_ref().unwrap()[2].properties
+        );
+    }
+
+    #[test]
+    fn temporal_codec_rejects_noncanonical_and_malformed_series_sections() {
+        let state = temporal_state_with_series(vec![
+            Segment {
+                valid_from: Some(0),
+                valid_to: Some(10),
+                properties: Properties::new(),
+            },
+            Segment {
+                valid_from: Some(10),
+                valid_to: Some(20),
+                properties: Properties::new(),
+            },
+        ]);
+        let source = GraphSource::from_graph(state.graph(GraphId(0)).unwrap()).unwrap();
+        let bytes = encode(&source).unwrap();
+        let section = bytes
+            .windows(TEMPORAL_SECTION.len())
+            .position(|window| window == TEMPORAL_SECTION)
+            .unwrap();
+        let series_count_at = section + 16;
+        let segment_start = section + 20;
+        let second_segment_start = segment_start + 22;
+        let mut mutations = Vec::new();
+
+        let mut zero_segments = bytes.clone();
+        zero_segments[series_count_at..series_count_at + 4].copy_from_slice(&0u32.to_le_bytes());
+        mutations.push(("zero segments", zero_segments));
+
+        let mut too_many_segments = bytes.clone();
+        too_many_segments[series_count_at..series_count_at + 4]
+            .copy_from_slice(&257u32.to_le_bytes());
+        mutations.push(("too many segments", too_many_segments));
+
+        let mut empty_interval = bytes.clone();
+        empty_interval[segment_start + 10..segment_start + 18].copy_from_slice(&0i64.to_le_bytes());
+        mutations.push(("empty interval", empty_interval));
+
+        let mut unsorted = bytes.clone();
+        unsorted[second_segment_start + 1..second_segment_start + 9]
+            .copy_from_slice(&(-1i64).to_le_bytes());
+        mutations.push(("unsorted intervals", unsorted));
+
+        let mut overlapping = bytes.clone();
+        overlapping[second_segment_start + 1..second_segment_start + 9]
+            .copy_from_slice(&5i64.to_le_bytes());
+        mutations.push(("overlapping intervals", overlapping));
+
+        let mut invalid_bound_marker = bytes.clone();
+        invalid_bound_marker[segment_start] = 2;
+        mutations.push(("invalid bound marker", invalid_bound_marker));
+
+        let mut invalid_edge_ordinal = bytes.clone();
+        invalid_edge_ordinal[section + 12..section + 16].copy_from_slice(&u32::MAX.to_le_bytes());
+        mutations.push(("invalid edge ordinal", invalid_edge_ordinal));
+
+        let mut bad_section_marker = bytes.clone();
+        bad_section_marker[section] ^= 1;
+        mutations.push(("invalid section marker", bad_section_marker));
+
+        for (what, corrupt) in mutations {
+            assert_eq!(decode(&corrupt), Err(CodecError::Corrupt), "{what}");
+        }
+        for end in section + 1..bytes.len() {
+            assert_eq!(
+                decode(&bytes[..end]),
+                Err(CodecError::Corrupt),
+                "truncated at {end}"
+            );
+        }
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert_eq!(decode(&trailing), Err(CodecError::Corrupt));
+
+        assert_eq!(
+            encode(
+                &GraphSource::from_graph(
+                    temporal_state_with_series(Vec::new())
+                        .graph(GraphId(0))
+                        .unwrap()
+                )
+                .unwrap()
+            ),
+            Err(CodecError::Corrupt),
+            "the private codec rejects an empty temporal series"
+        );
+    }
+
+    #[test]
+    fn temporal_interval_goldens_match_decoded_c1_reads_at_fixed_t_and_c() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/temporal_intervals/golden.json"
+        ))
+        .unwrap();
+        let mut covered = 0;
+        for case in fixture["series"].as_array().unwrap() {
+            if !case["edge"]["retained"].as_bool().unwrap()
+                || !case["source"]["retained"].as_bool().unwrap()
+                || !case["target"]["retained"].as_bool().unwrap()
+                || case["segments"].as_array().unwrap().is_empty()
+            {
+                continue;
+            }
+            covered += 1;
+            let state = golden_state(case);
+            let graph = state.graph(GraphId(0)).unwrap();
+            let source = GraphSource::from_graph(graph).unwrap();
+            let decoded = decode(&encode(&source).unwrap()).unwrap();
+            let restored = engine_state(&decoded.source).unwrap();
+            assert_eq!(restored, state, "{}", case["name"]);
+            let restored_graph = restored.graph(GraphId(0)).unwrap();
+
+            for query in case["queries"].as_array().unwrap() {
+                let as_of_ms = query["T"].as_i64().unwrap();
+                let ttl_clock_ms = query["C"].as_u64().unwrap();
+                let original = temporal_neighbor_views(graph, as_of_ms, ttl_clock_ms);
+                let actual = temporal_neighbor_views(restored_graph, as_of_ms, ttl_clock_ms);
+                assert_eq!(
+                    actual, original,
+                    "{} at T={as_of_ms}, C={ttl_clock_ms}",
+                    case["name"]
+                );
+                let expected = &query["expected"];
+                if expected.is_null() {
+                    assert!(
+                        actual.is_empty(),
+                        "{} at T={as_of_ms}, C={ttl_clock_ms}",
+                        case["name"]
+                    );
+                    continue;
+                }
+                assert_eq!(
+                    actual.len(),
+                    1,
+                    "{} at T={as_of_ms}, C={ttl_clock_ms}",
+                    case["name"]
+                );
+                assert_eq!(actual[0].id, EdgeId(1));
+                let segment = restored_graph
+                    .segments(EdgeId(1))
+                    .unwrap()
+                    .iter()
+                    .find(|segment| segment.contains(as_of_ms))
+                    .unwrap();
+                assert_eq!(segment.valid_from, expected["valid_from"].as_i64());
+                assert_eq!(segment.valid_to, expected["valid_to"].as_i64());
+                assert_eq!(segment.properties, json_properties(&expected["properties"]));
+            }
+        }
+        assert!(covered >= 8, "expected interval, boundary, and TTL goldens");
+    }
+
+    #[test]
+    fn temporal_read_case_neighbors_match_decoded_c1_reads() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/temporal_intervals/read-cases.json"
+        ))
+        .unwrap();
+        let case = &fixture["cases"][0];
+        let state = read_case_state(case);
+        let graph = state.graph(GraphId(0)).unwrap();
+        let source = GraphSource::from_graph(graph).unwrap();
+        let decoded = decode(&encode(&source).unwrap()).unwrap();
+        let restored = engine_state(&decoded.source).unwrap();
+        assert_eq!(restored, state);
+        let restored_graph = restored.graph(GraphId(0)).unwrap();
+        let mut covered = 0;
+
+        for (index, query) in case["input"]["queries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            if query["op"] != "neighbors" || query.get("after").and_then(Value::as_object).is_some()
+            {
+                continue;
+            }
+            let direction = match query["direction"].as_str().unwrap() {
+                "out" => Direction::Out,
+                "in" => Direction::In,
+                "both" => Direction::Both,
+                other => panic!("unknown read-case direction: {other}"),
+            };
+            let types = query["relationship"].as_array().map(|values| {
+                values
+                    .iter()
+                    .map(|value| value.as_str().unwrap().to_owned())
+                    .collect()
+            });
+            let graph_query = GraphQuery::new(QueryOp::Neighbors {
+                node: NodeSelector::Id(NodeId(query["node"].as_u64().unwrap())),
+                direction,
+                types,
+                edge_conditions: Vec::new(),
+                limit: query["limit"].as_u64(),
+                cursor: None,
+            });
+            let as_of_ms = query["T"].as_i64().unwrap();
+            let ttl_clock_ms = query["C"].as_u64().unwrap();
+            let expected = case["expected"][index]["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|id| id.as_u64().unwrap())
+                .collect::<Vec<_>>();
+            let original: Vec<_> =
+                temporal_query_edges(graph, &graph_query, as_of_ms, ttl_clock_ms)
+                    .into_iter()
+                    .map(|edge| edge.id.0)
+                    .collect();
+            let actual: Vec<_> =
+                temporal_query_edges(restored_graph, &graph_query, as_of_ms, ttl_clock_ms)
+                    .into_iter()
+                    .map(|edge| edge.id.0)
+                    .collect();
+            assert_eq!(original, expected, "read-case query {index}");
+            assert_eq!(actual, original, "read-case query {index}");
+            covered += 1;
+        }
+        assert!(covered >= 8);
     }
 
     fn replace_key(bytes: &mut [u8], nodes: bool, ordinal: usize, value: &str) {
@@ -2339,7 +3105,7 @@ mod tests {
                 revision: 0,
                 deadline: edge.get("deadline").and_then(Value::as_u64),
                 properties: Properties::new(),
-                is_temporal: false,
+                segments: None,
             })
             .collect();
         let next_node_id = nodes
@@ -2372,6 +3138,7 @@ mod tests {
             sequence: 0,
             next_node_id,
             next_edge_id,
+            temporal_enabled: false,
             schema: GraphSchema::default(),
             nodes,
             edges,
@@ -3190,8 +3957,14 @@ mod tests {
             "edges": [],
         }));
         let bytes = encode(&source).unwrap();
-        assert_eq!(&bytes[..8], b"VLGCSR05");
-        for magic in [b"VLGCSR01", b"VLGCSR02", b"VLGCSR03", b"VLGCSR04"] {
+        assert_eq!(&bytes[..8], b"VLGCSR06");
+        for magic in [
+            b"VLGCSR01",
+            b"VLGCSR02",
+            b"VLGCSR03",
+            b"VLGCSR04",
+            b"VLGCSR05",
+        ] {
             let mut old = bytes.clone();
             old[..8].copy_from_slice(magic);
             assert_eq!(decode(&old), Err(CodecError::Corrupt));
