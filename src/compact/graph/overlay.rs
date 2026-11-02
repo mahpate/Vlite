@@ -4,9 +4,13 @@
 use super::read::ReadEdge;
 use super::*;
 use crate::property_graph::engine::Direction;
+use std::sync::Arc;
+
+#[cfg(test)]
+mod snapshot_tests;
 
 #[derive(Clone, Copy, Debug)]
-enum Deadline {
+pub(super) enum Deadline {
     Preserve,
     Set(Option<u64>),
 }
@@ -20,21 +24,21 @@ impl Deadline {
     }
 }
 
-struct Change<T> {
-    id: u64,
-    row: Option<T>,
-    deadline: Deadline,
+pub(super) struct Change<T> {
+    pub(super) id: u64,
+    pub(super) row: Option<T>,
+    pub(super) deadline: Deadline,
 }
 
-struct Commit {
-    sequence: u64,
-    nodes: Vec<Change<SourceNode>>,
-    edges: Vec<Change<SourceEdge>>,
-    high_water: Option<(u64, u64)>,
+pub(super) struct Commit {
+    pub(super) sequence: u64,
+    pub(super) nodes: Vec<Change<SourceNode>>,
+    pub(super) edges: Vec<Change<SourceEdge>>,
+    pub(super) high_water: Option<(u64, u64)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum OverlayError {
+pub(super) enum OverlayError {
     Capacity { cap: usize, needed: usize },
     Sequence,
     DuplicateId,
@@ -54,7 +58,7 @@ struct Version<T> {
 }
 
 #[derive(Clone)]
-struct Overlay<'g> {
+pub(super) struct Overlay<'g> {
     base: &'g CompactGraph,
     cap: usize,
     sequence: u64,
@@ -69,8 +73,19 @@ struct Overlay<'g> {
     adjacency: BTreeMap<u64, BTreeSet<u64>>,
 }
 
+/// Owned committed deltas tied to the exact decoded base allocation.
+pub(super) struct OverlaySnapshot {
+    pub(super) base: Arc<CompactGraph>,
+    pub(super) sequence: u64,
+    pub(super) next_node_id: u64,
+    pub(super) next_edge_id: u64,
+    pub(super) nodes: BTreeMap<u64, Option<SourceNode>>,
+    pub(super) edges: BTreeMap<u64, Option<SourceEdge>>,
+    pub(super) adjacency: BTreeMap<u64, BTreeSet<u64>>,
+}
+
 impl<'g> Overlay<'g> {
-    fn new(base: &'g CompactGraph, cap: usize) -> Self {
+    pub(super) fn new(base: &'g CompactGraph, cap: usize) -> Self {
         Self {
             base,
             cap,
@@ -93,6 +108,33 @@ impl<'g> Overlay<'g> {
             edges: BTreeMap::new(),
             adjacency: BTreeMap::new(),
         }
+    }
+
+    pub(super) fn snapshot(
+        &self,
+        base: Arc<CompactGraph>,
+    ) -> Result<OverlaySnapshot, OverlayError> {
+        // Overlay borrows its base, so compare allocation addresses before pinning.
+        if !std::ptr::eq(self.base, base.as_ref()) {
+            return Err(OverlayError::Identity);
+        }
+        Ok(OverlaySnapshot {
+            base,
+            sequence: self.sequence,
+            next_node_id: self.next_node_id,
+            next_edge_id: self.next_edge_id,
+            nodes: self
+                .nodes
+                .iter()
+                .map(|(&id, version)| (id, version.row.clone()))
+                .collect(),
+            edges: self
+                .edges
+                .iter()
+                .map(|(&id, version)| (id, version.row.clone()))
+                .collect(),
+            adjacency: self.adjacency.clone(),
+        })
     }
 
     fn raw_node(&self, id: u64) -> Option<&SourceNode> {
@@ -278,7 +320,7 @@ impl<'g> Overlay<'g> {
             .map_err(OverlayError::Invalid)
     }
 
-    fn apply(&mut self, mut commit: Commit) -> Result<(), OverlayError> {
+    pub(super) fn apply(&mut self, mut commit: Commit) -> Result<(), OverlayError> {
         if commit.sequence <= self.sequence {
             return Err(OverlayError::Sequence);
         }
