@@ -266,8 +266,15 @@ physical graph nodes once per authorized scope plus the evidence collection size
 including unrelated/expired retained records; an over-cap plan rejects before scans.
 Each active leg reserves `min(leg depth, eligible owners)` candidate units before
 search, including duplicates and possible text nonmatches. Seeds charge separately;
-expansion caps output to remaining candidate capacity and shares graph node, edge,
-output and monotonic deadline limits across scopes. Vector components are reserved
+expansion uses the declared graph output caps independently of candidate capacity:
+depth-zero starts were already charged by their leg/seed and are not charged again.
+New returned candidates are charged before candidate materialization; graph traversal
+still meters every visited start and examined edge before work. Exact candidate caps
+therefore admit a seed plus one new neighbor at cap two and reject that union at cap
+one, without inflating graph ceilings. Canonical scope-tuple processing shares graph
+node, edge, output and monotonic deadline limits across scopes; reversing an exact
+scope allowlist does not change bounded partial hits, paths or exhaustion reasons.
+Visited and edge exhaustion retain their distinct reasons. Vector components are reserved
 before copies and reused for MMR; MMR reserves `n^3 * dimensions` similarity work
 before selection. These conservative bounds may refuse a plan that would ultimately
 produce fewer hits. Cancellation/deadline checks bracket bounded source, index,

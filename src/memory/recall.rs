@@ -706,7 +706,9 @@ impl MemoryRef<'_> {
         let mut output_nodes = 0;
         let mut output_edges = 0;
         let mut output_paths = 0;
-        for scope in &request.scopes {
+        let mut scopes = request.scopes.iter().collect::<Vec<_>>();
+        scopes.sort_by(|a, b| scope_cmp(a, b));
+        for scope in scopes {
             work.check()?;
             let start = candidates
                 .keys()
@@ -730,7 +732,12 @@ impl MemoryRef<'_> {
                 if !request.allow_partial {
                     return Err(RecallError::Budget("graph"));
                 }
-                truncation.push(TruncationReason::EdgeLimit);
+                if remaining_edges == 0 {
+                    truncation.push(TruncationReason::EdgeLimit);
+                }
+                if remaining_nodes == 0 {
+                    truncation.push(TruncationReason::VisitedLimit);
+                }
                 break;
             }
             let traversal = Traverse {
@@ -746,10 +753,6 @@ impl MemoryRef<'_> {
                 edge_filter: Vec::new(),
                 include_paths: true,
             };
-            let remaining_candidates = request.limits.candidates - work.stats.candidates_examined;
-            if remaining_candidates == 0 {
-                return Err(RecallError::Budget("candidates"));
-            }
             let options = ReadOptions {
                 limits: GraphLimits {
                     max_edges_examined: remaining_edges,
@@ -758,8 +761,7 @@ impl MemoryRef<'_> {
                         .limits
                         .graph
                         .max_output_nodes
-                        .saturating_sub(output_nodes)
-                        .min(remaining_candidates as u64),
+                        .saturating_sub(output_nodes),
                     max_output_edges: request
                         .limits
                         .graph
@@ -792,6 +794,11 @@ impl MemoryRef<'_> {
             }
             truncation.extend(read.truncation);
             for reached in read.output.nodes {
+                // Starts were charged by their discovery leg or explicit seed.
+                // Traversal work still charges them against graph limits.
+                if reached.depth == 0 {
+                    continue;
+                }
                 work.candidates(1)?;
                 if !eligible.contains_key(&reached.node.key) {
                     continue;
@@ -1653,5 +1660,274 @@ mod tests {
             recall(&db, &req),
             Err(RecallError::Budget("evidence_bytes"))
         ));
+    }
+
+    #[test]
+    fn expansion_candidate_boundary_excludes_already_charged_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("candidate-boundary.vlite"));
+        let now = crate::current_time_ms() + 30_000;
+        let scope = scope("tenant");
+        remember(&mut db, &scope, "a", None, now, None, 0.5, vec![]);
+        remember(
+            &mut db,
+            &scope,
+            "root",
+            Some(vec![1.0, 0.0]),
+            now,
+            None,
+            0.5,
+            vec!["a".into()],
+        );
+        let mut req = request(scope.clone(), now);
+        req.expand = true;
+        req.query.as_mut().unwrap().k = 1;
+        req.query.as_mut().unwrap().fusion.candidates = Some(1);
+        for from_query in [false, true] {
+            let mut case = req.clone();
+            if !from_query {
+                case.query = None;
+                case.seeds = vec![RecallSeed {
+                    scope: scope.clone(),
+                    id: "root".into(),
+                }];
+            }
+            case.limits.candidates = 2;
+            let out = recall(&db, &case).unwrap();
+            assert_eq!(out.hits.len(), 2, "query start: {from_query}");
+            assert_eq!(out.stats.candidates_examined, 2);
+            assert!(out.complete);
+            case.limits.candidates = 1;
+            assert!(matches!(
+                recall(&db, &case),
+                Err(RecallError::Budget("candidates"))
+            ));
+        }
+        // Both dense pivots are already charged; reaching one from the other
+        // does not examine a new candidate or consume a second output allowance.
+        remember(
+            &mut db,
+            &scope,
+            "b",
+            Some(vec![2.0, 0.0]),
+            now,
+            None,
+            0.5,
+            vec!["root".into()],
+        );
+        req.query.as_mut().unwrap().k = 2;
+        req.query.as_mut().unwrap().fusion.candidates = Some(2);
+        req.limits.graph.max_hops = 1;
+        req.limits.candidates = 3;
+        let out = recall(&db, &req).unwrap();
+        assert_eq!(out.hits.len(), 3);
+        assert_eq!(out.stats.candidates_examined, 3);
+    }
+
+    #[test]
+    fn expansion_scope_set_order_and_exhaustion_reasons_are_canonical() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("scope-order.vlite"));
+        let now = crate::current_time_ms() + 30_000;
+        let scopes = [scope("A"), scope("B")];
+        for scope in &scopes {
+            remember(&mut db, scope, "target", None, now, None, 0.5, vec![]);
+            remember(
+                &mut db,
+                scope,
+                "root",
+                None,
+                now,
+                None,
+                0.5,
+                vec!["target".into()],
+            );
+        }
+        let mut req = request(scopes[0].clone(), now);
+        req.scopes = scopes.to_vec();
+        req.query = None;
+        req.seeds = scopes
+            .iter()
+            .map(|scope| RecallSeed {
+                scope: scope.clone(),
+                id: "root".into(),
+            })
+            .collect();
+        req.expand = true;
+        req.allow_partial = true;
+        req.limits.graph.max_edges_examined = 1;
+        let first = recall(&db, &req).unwrap();
+        req.scopes.reverse();
+        assert_eq!(recall(&db, &req).unwrap(), first);
+        assert_eq!(first.truncation, [TruncationReason::EdgeLimit]);
+        assert!(
+            first
+                .hits
+                .iter()
+                .any(|hit| hit.ranking.candidate.scope == scopes[0]
+                    && hit.ranking.candidate.id == "target")
+        );
+        req.limits.graph.max_edges_examined = 10;
+        req.limits.graph.max_visited_nodes = 2;
+        let first = recall(&db, &req).unwrap();
+        req.scopes.reverse();
+        assert_eq!(recall(&db, &req).unwrap(), first);
+        assert_eq!(first.truncation, [TruncationReason::VisitedLimit]);
+    }
+
+    #[test]
+    fn body_projection_utf8_boundaries_never_split_scalars() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("utf8.vlite"));
+        let now = crate::current_time_ms() + 30_000;
+        let scope = scope("tenant");
+        let mut write = remember(&mut db, &scope, "initial", None, now, None, 0.5, vec![]);
+        let body = "a\u{20ac}\u{1f642}z";
+        for (id, content) in [("inline", body.to_owned()), ("chunked", body.repeat(600))] {
+            write.idempotency_key = id.into();
+            write.items[0].id = id.into();
+            write.items[0].content = content;
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .remember(&write)
+                .unwrap();
+            let mut req = request(scope.clone(), now);
+            req.query = None;
+            req.seeds = vec![RecallSeed {
+                scope: scope.clone(),
+                id: id.into(),
+            }];
+            for (cap, expected) in [
+                (0, ""),
+                (1, "a"),
+                (2, "a"),
+                (3, "a"),
+                (4, "a\u{20ac}"),
+                (5, "a\u{20ac}"),
+                (7, "a\u{20ac}"),
+                (8, "a\u{20ac}\u{1f642}"),
+                (9, body),
+            ] {
+                req.snippet_bytes = cap;
+                let out = recall(&db, &req).unwrap();
+                assert_eq!(out.hits[0].content, expected, "{id}, cap {cap}");
+                assert_eq!(out.stats.evidence_bytes, expected.len());
+                assert_eq!(
+                    out.hits[0].content_truncated,
+                    id == "chunked" || cap < body.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn text_top_n_filters_foreign_and_unrequested_kinds_before_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("text-filter.vlite"));
+        let now = crate::current_time_ms() + 30_000;
+        let visible = scope("visible");
+        for (scope, id) in [
+            (scope("foreign"), "foreign"),
+            (visible.clone(), "wrong-kind"),
+            (visible.clone(), "visible"),
+        ] {
+            remember(
+                &mut db,
+                &scope,
+                id,
+                Some(vec![1.0, 0.0]),
+                now,
+                None,
+                0.5,
+                vec![],
+            );
+            let text = if id == "visible" {
+                format!("needle {}", "filler ".repeat(100))
+            } else {
+                "needle needle".into()
+            };
+            db.graph_mut("memory")
+                .unwrap()
+                .write_batch(&[crate::property_graph::GraphOp::Vector {
+                    collection: "default".into(),
+                    mutation: Mutation::PutWithMetadata {
+                        id: evidence_record_id(id),
+                        vector: vec![1.0, 0.0],
+                        payload: id.as_bytes().to_vec(),
+                        metadata: Metadata::from([("text".into(), MetadataValue::String(text))]),
+                    },
+                }])
+                .unwrap();
+        }
+        let node = db
+            .graph("memory")
+            .unwrap()
+            .get_node(&memory_key(&visible.key(), "wrong-kind"))
+            .unwrap()
+            .output
+            .unwrap();
+        let mut properties = node.properties;
+        properties.insert("kind".into(), MetadataValue::String("unsupported".into()));
+        db.graph_mut("memory")
+            .unwrap()
+            .write_batch(&[crate::property_graph::GraphOp::UpsertNode {
+                key: node.key,
+                labels: node.labels.into_iter().collect(),
+                properties,
+                expected: crate::Expected::Revision(node.revision),
+            }])
+            .unwrap();
+        let index = &db.state(0).text_index;
+        let terms = BTreeSet::from(["needle".to_owned()]);
+        let top = index.search(&terms, 1, |_| true);
+        assert_ne!(
+            top[0].0,
+            evidence_record_id("visible"),
+            "fixture must displace authorized hit without prefilter"
+        );
+        let mut req = request(visible, now);
+        req.query = Some(HybridQuery::new(None, "needle", 1));
+        req.query.as_mut().unwrap().fusion.candidates = Some(1);
+        req.limits.candidates = 1;
+        // Mixed allowed kinds require the postfilter, not one-kind equality.
+        assert_eq!(ids(&recall(&db, &req).unwrap()), ["visible"]);
+        req.query.as_mut().unwrap().vector = Some(vec![1.0, 0.0]);
+        req.query.as_mut().unwrap().text.clear();
+        req.query.as_mut().unwrap().k = 3;
+        req.query.as_mut().unwrap().fusion.candidates = Some(3);
+        req.limits.candidates = 3;
+        assert_eq!(ids(&recall(&db, &req).unwrap()), ["visible"]);
+    }
+
+    #[test]
+    fn evidence_projection_and_snippet_ceiling_are_exact() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("evidence-cap.vlite"));
+        let now = crate::current_time_ms() + 30_000;
+        let scope = scope("tenant");
+        remember(
+            &mut db,
+            &scope,
+            "bytes",
+            Some(vec![1.0, 0.0]),
+            now,
+            None,
+            0.5,
+            vec![],
+        );
+        let mut req = request(scope, now);
+        for cap in [0, 1, 4, 5, 6, 4096] {
+            req.snippet_bytes = cap;
+            let out = recall(&db, &req).unwrap();
+            let hit = &out.hits[0];
+            assert_eq!(hit.evidence[0].snippet, &b"bytes"[..cap.min(5)]);
+            assert_eq!(hit.evidence[0].truncated, cap < 5);
+            assert_eq!(
+                out.stats.evidence_bytes,
+                cap.min(5) + cap.min("content bytes".len())
+            );
+        }
+        req.snippet_bytes = 4097;
+        assert!(matches!(recall(&db, &req), Err(RecallError::InvalidLimits)));
     }
 }
