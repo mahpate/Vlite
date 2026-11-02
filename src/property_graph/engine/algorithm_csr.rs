@@ -165,6 +165,7 @@ mod contract_tests {
                 );
             }
         }
+
         assert_eq!(source.node_by_key("missing"), None);
         for edge in graph.edges() {
             let actual = source.edge(edge.id).unwrap();
@@ -208,3 +209,7 @@ mod contract_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "algorithm_csr/tests.rs"]
+mod tests;
