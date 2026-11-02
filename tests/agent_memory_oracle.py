@@ -48,12 +48,9 @@ Fixture-local assumptions (not a Rust implementation/parity contract):
   Fixture-only edge creates ordinary entity edges, with globally unique edge IDs.
 * Logical plans charge receipt/node/reference operations, separate expiry/guard
   operations, record creation plus attachment, and forget edge/detach/record/node
-  deletes. Remember additionally charges physical outcome chunk nodes and UTF-8
-  content chunk nodes/HAS_CONTENT edges by default, including direct boundaries.
-  Only A2_LOGICAL_SETUPS' closed three (fixture, step) pairs retain logical-only
-  accounting: A2 re-base pending: setup exceeds the A1 physical cap. The self-test
-  guards the exact set, reason and unchanged A2 skip category. This is the only
-  operation-accounting distinction; no other mode or family-wide exemption exists.
+  deletes. Remember charges physical outcome chunk nodes and UTF-8 content chunk
+  nodes/HAS_CONTENT edges. Forget charges its outcome chunks and any content
+  chunks/edges deleted in the same graph frame. This is the only operation model.
   Expiry reclamation costs no user operations. No frame-size claim.
   Expiry immediately removes incident links/ownership, but retains orphan records.
 * State is a raw storage diagnostic (IDs can repeat across scopes); visible/get
@@ -84,16 +81,6 @@ import sys
 FIXTURE = Path(__file__).parent / "fixtures" / "agent_memory" / "golden.json"
 I64_MIN, I64_MAX, U64_MAX = -(2**63), 2**63 - 1, 2**64 - 1
 MAX_OPS, MAX_BODY = 4096, 16 * 1024 * 1024
-# Only these unreplayed A2 setup steps retain the original logical operation
-# accounting. All other steps and direct checks use physical A1 accounting.
-A2_LOGICAL_SETUPS = {
-    ("forget-outbound-reference-budget", 0):
-        "A2 re-base pending: setup exceeds the A1 physical cap",
-    ("forget-outbound-reference-over-budget", 1):
-        "A2 re-base pending: setup exceeds the A1 physical cap",
-    ("forget-separate-guard-over-budget", 1):
-        "A2 re-base pending: setup exceeds the A1 physical cap",
-}
 # Each semantic mutation names the golden (case, step) that must expose it and a
 # fragment of the resulting mismatch, so a kill for an unrelated reason fails.
 MUTATIONS = {
@@ -149,7 +136,7 @@ MUTATIONS = {
                           "got {'actions': [['created', '0', 1]"),
     "expiry_op_free": ("expiry-operation-budget", 0, "got {'actions': [['created', 'm', 1]]"),
     "guard_op_free": ("separate-merge-guard-budget", 1, "got {'actions': [['merged', 'm', 2]]"),
-    "outbound_reference_free": ("forget-outbound-reference-over-budget", 2,
+    "outbound_reference_free": ("forget-outbound-reference-over-budget", 3,
                                 "got {'deleted': ['n']"),
     "dedup_alias_allowed": ("dedup-alias-m-q-r", 1,
                             "got {'actions': [['noop', 'm', 1], ['created', 'r', 1]]"),
@@ -159,7 +146,7 @@ MUTATIONS = {
     "global_memory_ids": ("cross-scope-references", 1, "got {'actions': [['created', 'n', 1]]"),
     "observed_at_default": ("missing-caller-observation", 0,
                             "got {'actions': [['created', 'm', 1]]"),
-    "inbound_reference_free": ("forget-separate-guard-over-budget", 2, "got {'deleted': ['m']"),
+    "inbound_reference_free": ("forget-separate-guard-over-budget", 3, "got {'deleted': ['m']"),
     "incident_reference_double_count": ("forget-between-targets-counted-once", 2,
                                         "got {'error': 'OperationLimit'}"),
     "duplicate_bundle_ids_allowed": ("duplicate-bundle-id-rejected", 0,
@@ -216,6 +203,14 @@ def outcome_chunk_operations(actions):
         if action == "noop":
             size += len(str(index)) + 1 + 2 * len(memory_id.encode("utf-8"))
             size += 1 + len(str(revision)) + 1
+    return (size + 4095) // 4096
+
+
+def forget_outcome_chunk_operations(ids):
+    ordered = sorted(ids)
+    size = len("deleted:")
+    size += sum(2 * len(memory_id.encode("utf-8")) for memory_id in ordered)
+    size += max(0, len(ordered) - 1)
     return (size + 4095) // 4096
 
 
@@ -496,8 +491,7 @@ class Model:
                 self.memories[self.memory_key(scope, item["id"])] = memory
                 action = "created"
                 planned_ops += 1
-                if fixture_pair not in A2_LOGICAL_SETUPS:
-                    planned_ops += content_chunk_operations(item["content"])
+                planned_ops += content_chunk_operations(item["content"])
                 if item["expiry"] is not None and not self.is_mutant("expiry_op_free"):
                     planned_ops += 1
                 if item["expiry"] is not None and item["expiry"] <= clock:
@@ -528,7 +522,7 @@ class Model:
         # A provisional ID that deduplicated to another ID is not a new anchor.
         check(all(ref in self.memories for memory in self.memories.values()
                   for ref in memory["references"]), "MissingReference")
-        if fixture_pair not in A2_LOGICAL_SETUPS and not self.is_mutant("outcome_ops_free"):
+        if not self.is_mutant("outcome_ops_free"):
             planned_ops += outcome_chunk_operations(actions)
         check(planned_ops <= MAX_OPS or self.is_mutant("ops_unbounded"), "OperationLimit")
         self.scopes[self.scope_key(scope)] = scope
@@ -576,6 +570,12 @@ class Model:
                               for key, m in self.memories.items()
                               for ref in m["references"])
                           if self.is_mutant("incident_reference_double_count") else 0))
+        if not self.is_mutant("outcome_ops_free"):
+            planned_ops += forget_outcome_chunk_operations(ids)
+        if not self.is_mutant("content_delete_ops_free"):
+            planned_ops += sum(
+                content_chunk_operations(self.memories[key]["content"])
+                for key in keys)
         check(planned_ops <= MAX_OPS or self.is_mutant("ops_unbounded"), "OperationLimit")
         for memory_key in keys:
             memory = self.memories.pop(memory_key)
@@ -1198,28 +1198,7 @@ def boundary_checks():
     return count
 
 
-def check_closed_a2_setups(fixture):
-    expected = frozenset({
-        ("forget-outbound-reference-budget", 0),
-        ("forget-outbound-reference-over-budget", 1),
-        ("forget-separate-guard-over-budget", 1),
-    })
-    if set(A2_LOGICAL_SETUPS) != expected:
-        raise AssertionError("closed A2 setup exception set changed")
-    cases = {case["name"]: case for case in fixture["cases"]}
-    for (name, index), reason in A2_LOGICAL_SETUPS.items():
-        case = cases[name]
-        # Rust's unchanged A1 skip classifier skips every fixture with forget.
-        if not any(step["op"] == "forget" for step in case["steps"]):
-            raise AssertionError(f"{name} left the existing A2 skip category")
-        if case["steps"][index]["op"] != "remember":
-            raise AssertionError(f"{name} exception no longer names a remember setup")
-        if reason != "A2 re-base pending: setup exceeds the A1 physical cap":
-            raise AssertionError(f"{name} exception reason changed")
-
-
 def self_test(fixture):
-    check_closed_a2_setups(fixture)
     for case in fixture["cases"]:
         run_case(case)
     single = sum(verify_single_defect(case) for case in fixture["cases"])

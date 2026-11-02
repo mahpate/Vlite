@@ -286,6 +286,10 @@ fact series/history and removes unneeded anchors in one graph frame with a recei
 Respect all attachments, including ones outside the memory layer; a conflicting
 attachment prevents deletion, rather than being detached without authorization.
 Forget entity includes bounded incident-edge handling; never leave dangling edges.
+The private A2 candidate implements bounded exact-ID forget and graph-TTL expiry only;
+oversized erasure is rejected, not converted into a resumable job. Its acceptance
+requires shared/unshared evidence, outside-attachment, incident-edge, expiry-boundary,
+receipt-replay and reopen coverage.
 Oversized session/entity/scope erasure becomes a resumable, explicitly non-atomic job.
 First commit a scope/entity deletion barrier; every memory read/write checks it.
 Subsequent revision-guarded chunks detach/delete and advance a persisted graph job.
@@ -363,7 +367,7 @@ self-hosted configuration also depends on OpenAI and Qdrant.
 | Kinds and timestamps | All four kinds, vector-free evidence, finite importance, overflow and validity boundaries exercised / A,B |
 | Idempotency | Same digest returns original IDs; changed digest conflicts; retry after TTL follows advertised window / A |
 | Dedup/merge | No semantic merge; provenance merge is bounded and revision-checked; independent scopes stay distinct / A |
-| Atomicity/failure | Final-op failure changes no vectors/graph/receipt/TTL cleanup; sync ambiguity reconciles on reopen / A |
+| Atomicity/failure | Final-op failure changes no vectors/graph/receipt/TTL cleanup; sync ambiguity reconciles on reopen / A,A2 |
 | Fact exclusivity | Concurrent different destinations cannot overlap; multivalued slots remain legal / A,C |
 | Hybrid recall | Mandatory filters hold before discovery and output; unmapped, expired and unauthorized evidence excluded / B |
 | Time selectors | Fixed T/C and sequence; from/to boundary, corrected past, TTL equality and post-purge non-resurrection / B,C |
@@ -371,7 +375,7 @@ self-hosted configuration also depends on OpenAI and Qdrant.
 | Diversity/providers | Existing cosine MMR ties; hybrid/MMR rejects; duplicate/nonfinite/out-of-set custom results reject / B |
 | Work bounds | Caps at/either side, high-degree invalid edges, scan preflight, MMR components and cancellation charged / B |
 | Consolidation | Caller summary provenance, stale inputs, retry, source retention and atomic close/replacement / C |
-| Forget/TTL | Series history deleted, detach before vector delete, shared evidence retained, expired evidence never returned / A,C |
+| Forget/TTL | Small forget is one framed receipt operation; detach before vector delete, shared evidence retained, exact expiry boundary hides memory/evidence / A2; series and resumable erasure remain / C |
 | Large erasure | Barrier hides pending scope; chunk retry/crash, stale fence and restore reconciliation; no atomic-job claim / C |
 | Maintenance | Reopen, encryption, backup, compaction and directory checkpoint preserve live receipts, slots and jobs / A,C |
 | Serving gate | No schema drift now; later authorization, feature refusals and diagnostics agree on every approved surface / D |
@@ -393,31 +397,29 @@ TTL, temporal discovery, rerankers and the Rust recall implementation remain ope
 ### Private write reference
 
 The independently reviewed `tests/agent_memory_oracle.py` and
-`tests/fixtures/agent_memory/golden.json` are a bounded logical reference for slice
+`tests/fixtures/agent_memory/golden.json` are a bounded independent reference for slice
 A remember/forget: scope framing, receipts and idempotency, exact dedup, provenance,
 the 64-entry and 4,096-byte encoded provenance limits, expiry and operation budgets.
 Every rejected golden step declares one repairable
 defect; the self-test repairs it and checks injected second defects, so no golden
 depends on validation precedence. CI runs normal and optimized self-tests.
-Unspecified behaviour is labelled, e.g. `fixture: duplicate-bundle-ids-reject` and
-`fixture: empty-bundle-rejects`. Field/error names are fixture APIs, not Rust parity
-or approved contracts; no Rust implementation, durability or concurrency is claimed.
-The reference now charges A1 receipt/outcome/content chunk nodes and HAS_CONTENT
-edges by default, including direct boundary checks. Exactly three unreplayed A2
-setup steps retain the original logical operation accounting:
-`forget-outbound-reference-budget` step 0,
-`forget-outbound-reference-over-budget` step 1 and
-`forget-separate-guard-over-budget` step 1. Each is labelled
-`A2 re-base pending: setup exceeds the A1 physical cap`; executable guards pin the
-closed set and its A2 skip category. This closed list is the only distinction
-between the logical and physical operation models.
+Unspecified behavior is labelled, e.g. `fixture: duplicate-bundle-ids-reject` and
+`fixture: empty-bundle-rejects`. Field/error names are fixture APIs, not approved
+public contracts. Rust replays every representable golden; the remaining fixtures
+require an injectable hash collision or input values/types not representable by the
+typed Rust request.
+The oracle and Rust use one physical operation model: receipt and outcome chunk nodes,
+content chunk nodes and HAS_CONTENT edges, vector/attachment changes, incident-edge
+and node deletes, and expected-revision guards all count toward the graph batch cap.
+The A2 setup re-base removes the former closed exception list; there is no logical-only
+mode or family-wide exemption.
 
 ## 9. Delivery, risks and open decisions
 
 | Slice | Exit criteria |
 |---|---|
 | A1: crate-private core | Provisional graph binding, scope provisioning, entity/episodic remember, same-frame receipts, exact dedup, idempotency and budget/validation coverage; independently accepted and integrated, unreleased and not activated |
-| A2: follow-on | Small forget and expiry with atomic failure/reopen/expiry tests; fact support waits for Gap 4; A2 re-bases the closed list of A2 fixtures onto the physical A1 budget (multi-step setup) before its own acceptance |
+| A2: private candidate | Crate-private small forget and graph-TTL expiry with atomic failure, evidence, budget-boundary, receipt-replay and reopen tests; re-base the three oversized A2 golden setups into multi-step physical-cap writes; pending independent acceptance, unreleased and not activated. No facts, recall, resumable erasure, serving, public API or format change |
 | B: recall planner | Filtered hybrid plus bounded temporal expansion, owner retention checks, rank/explain fixtures and existing vector-only exact/MMR integration; scan/work/cancellation coverage; no exhaustive-history claim |
 | C: consolidation | Caller summaries, slot-guarded corrections, contradictions, stale-source reporting and resumable erasure barriers/fencing; crash/retry and maintenance tests pass |
 | D: serving after approval | Explicit OpenAPI and wire approval before edits; REST/gRPC/MCP/CLI scope/authorization, limits, feed and unsupported-capability parity; no external provider enabled by default |

@@ -182,6 +182,16 @@ impl GraphRef<'_> {
         self.graph.schema().clone()
     }
 
+    pub(crate) fn memory_node_attachments(&self, key: &str) -> Result<Vec<(u16, u64)>> {
+        let Some(node) = self.graph.node_by_key(key) else {
+            return Ok(Vec::new());
+        };
+        if self.graph.node_expired(node.id, self.now()) {
+            return Ok(Vec::new());
+        }
+        Ok(self.graph.attachments(node.id).collect())
+    }
+
     /// Declared and observed labels, relationship types, endpoints and
     /// properties (REQ-032). At most `budget` nodes and edges are scanned
     /// (PD-011: default 100,000, ceiling 1,000,000); `complete` is false
@@ -400,6 +410,14 @@ impl GraphMut<'_> {
     /// 16 MiB.
     pub fn write_batch(&mut self, ops: &[GraphOp]) -> Result<GraphBatchResult> {
         self.db.write_graph_batch(self.id, ops)
+    }
+
+    pub(crate) fn write_batch_at(
+        &mut self,
+        ops: &[GraphOp],
+        now_ms: u64,
+    ) -> Result<GraphBatchResult> {
+        self.db.write_graph_batch_at(self.id, ops, Some(now_ms))
     }
 
     fn single(&mut self, op: GraphOp) -> Result<(GraphOpOutcome, Option<u64>)> {
@@ -718,6 +736,25 @@ impl Database {
         Ok(GraphMut { db: self, id })
     }
 
+    pub(crate) fn memory_attachment_owner(
+        &self,
+        collection: &str,
+        record: u64,
+        now_ms: u64,
+    ) -> Result<Option<(String, String)>> {
+        let collection = self.resolve(collection)?;
+        let Some((graph_id, node_id)) = self.graphs()?.attachment_owner(collection, record) else {
+            return Ok(None);
+        };
+        let state = self.graphs()?;
+        let graph = state.graph(graph_id).ok_or(Error::GraphNotFound)?;
+        if graph.node_expired(node_id, now_ms) {
+            return Ok(None);
+        }
+        let node = graph.node(node_id).ok_or(Error::GraphNodeNotFound)?;
+        Ok(Some((graph.name().to_owned(), node.key.clone())))
+    }
+
     /// Validate, append one op-12 frame, then apply (PAT-001). `vectors` are
     /// the body's vector mutations in body order; they are applied to their
     /// collections after the graph state. Returns the commit sequence.
@@ -882,6 +919,15 @@ impl Database {
         graph_id: GraphId,
         ops: &[GraphOp],
     ) -> Result<GraphBatchResult> {
+        self.write_graph_batch_at(graph_id, ops, None)
+    }
+
+    fn write_graph_batch_at(
+        &mut self,
+        graph_id: GraphId,
+        ops: &[GraphOp],
+        now_ms: Option<u64>,
+    ) -> Result<GraphBatchResult> {
         self.graphs()?;
         if self.read_only {
             return Err(Error::ReadOnly);
@@ -908,7 +954,7 @@ impl Database {
             .iter()
             .map(|op| self.plan_input(op))
             .collect::<Result<Vec<_>>>()?;
-        self.commit_planned(graph_id, planned, outcomes)
+        self.commit_planned(graph_id, planned, outcomes, now_ms)
     }
 
     fn commit_planned(
@@ -916,9 +962,16 @@ impl Database {
         graph_id: GraphId,
         planned: Vec<Planned>,
         mut outcomes: Vec<GraphOpOutcome>,
+        requested_now_ms: Option<u64>,
     ) -> Result<GraphBatchResult> {
         let sequence = self.next_sequence()?;
-        let now = self.graph_now();
+        let now = match requested_now_ms {
+            Some(requested) => self
+                .graph_clock
+                .max(crate::current_time_ms())
+                .max(requested),
+            None => self.graph_now(),
+        };
         let collections = &self.collections;
         let state = self.graph.as_mut().ok_or(Error::GraphsNotEnabled)?;
         let mut planner = state.planner(sequence, graph_id).map_err(graph_error)?;
@@ -1027,6 +1080,7 @@ impl Database {
             });
         }
         let revision = self.commit_graph(&body, &vectors)?;
+        self.graph_clock = self.graph_clock.max(now);
         Ok(GraphBatchResult {
             revision: Some(revision),
             outcomes,

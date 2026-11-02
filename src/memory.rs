@@ -10,7 +10,10 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     Database, Error, Expected, Metadata, MetadataValue, Result as VliteResult,
-    property_graph::{FindNodes, GraphLimits, GraphOp, GraphRef, NodeView, ReadOptions},
+    property_graph::{
+        Direction, EdgeRef, FindNodes, GraphLimits, GraphOp, GraphRef, Neighbors, NodeSelector,
+        NodeView, ReadOptions,
+    },
 };
 
 #[cfg(test)]
@@ -40,6 +43,8 @@ pub(crate) enum MemoryError {
     InvalidKey,
     InvalidClock,
     InvalidReceiptWindow,
+    InvalidExpiry,
+    InvalidEvidence,
     DeadlineExceeded,
     InvalidBundle,
     DuplicateItem,
@@ -64,6 +69,9 @@ pub(crate) enum MemoryError {
     ExpectedRevisionRequired,
     RevisionConflict,
     RecordAlreadyAttached,
+    ForeignAttachment,
+    InvalidTarget,
+    DuplicateTarget,
     Storage(Error),
 }
 
@@ -71,6 +79,9 @@ impl From<Error> for MemoryError {
     fn from(error: Error) -> Self {
         match error {
             Error::BatchTooLarge => Self::BodyLimit,
+            Error::GraphRecordNotAttachable | Error::GraphAttachmentConflict => {
+                Self::RecordAlreadyAttached
+            }
             other => Self::Storage(other),
         }
     }
@@ -159,6 +170,15 @@ pub(crate) struct MemoryItem {
     pub references: Vec<String>,
     pub merge_into: Option<String>,
     pub expected_revision: Option<u64>,
+    pub expiry_ms: Option<u64>,
+    pub expiry_valid: bool,
+    pub evidence: Vec<MemoryEvidence>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MemoryEvidence {
+    pub id: String,
+    pub scope: MemoryScope,
 }
 
 #[derive(Clone, Debug)]
@@ -170,6 +190,30 @@ pub(crate) struct RememberRequest {
     pub deadline_ms: Option<u64>,
     pub allow_future_observations: bool,
     pub items: Vec<MemoryItem>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ForgetTarget {
+    pub id: String,
+    pub expected_revision: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ForgetRequest {
+    pub scope: MemoryScope,
+    pub idempotency_key: String,
+    pub receipt_window_ms: u64,
+    pub now_ms: u64,
+    pub deadline_ms: Option<u64>,
+    pub targets: Vec<ForgetTarget>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ForgetResult {
+    pub deleted: Vec<String>,
+    pub receipt_revision: u64,
+    pub commit_sequence: u64,
+    pub replayed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -267,6 +311,7 @@ impl<'db> MemoryMut<'db> {
         let scope_node = self
             .db
             .graph(&self.graph)?
+            .with_clock(request.now_ms)
             .get_node(&scope_key)?
             .output
             .ok_or(MemoryError::InvalidScope)?;
@@ -275,15 +320,34 @@ impl<'db> MemoryMut<'db> {
         }
         let receipt_key = receipt_key(&scope_key, &request.idempotency_key);
         let digest = request_digest(request, &normalized);
-        let receipt_read = self.db.graph(&self.graph)?.get_node(&receipt_key)?;
+        let receipt_read = self
+            .db
+            .graph(&self.graph)?
+            .with_clock(request.now_ms)
+            .get_node(&receipt_key)?;
         if let Some(receipt) = receipt_read.output {
-            verify_scope(&receipt, &scope_key)?;
-            let stored_digest = string_property(&receipt, "digest")?;
-            if stored_digest != digest {
-                return Err(MemoryError::IdempotencyConflict);
+            let expired = receipt
+                .properties
+                .get("expires_at_ms")
+                .and_then(|value| match value {
+                    MetadataValue::String(value) => value.parse::<u64>().ok(),
+                    _ => None,
+                })
+                .is_some_and(|expiry| request.now_ms >= expiry);
+            if expired {
+                // Expired receipts are replaced by the retry's new result below.
+            } else {
+                verify_scope(&receipt, &scope_key)?;
+                let stored_digest = string_property(&receipt, "digest")?;
+                if stored_digest != digest {
+                    return Err(MemoryError::IdempotencyConflict);
+                }
+                let outcome = decode_outcome(
+                    &self.db.graph(&self.graph)?.with_clock(request.now_ms),
+                    &receipt,
+                )?;
+                return decode_result(&outcome, receipt.revision, true, &normalized);
             }
-            let outcome = decode_outcome(&self.db.graph(&self.graph)?, &receipt)?;
-            return decode_result(&outcome, receipt.revision, true, &normalized);
         }
         if request
             .deadline_ms
@@ -299,9 +363,30 @@ impl<'db> MemoryMut<'db> {
             return Err(MemoryError::FutureObservation);
         }
 
-        let read = self.db.graph(&self.graph)?;
+        let read = self.db.graph(&self.graph)?.with_clock(request.now_ms);
+        if let Some(collection) = self.evidence_collection.as_deref() {
+            for evidence in normalized.iter().flat_map(|item| &item.evidence) {
+                if let Some((owner_graph, owner_key)) = self.db.memory_attachment_owner(
+                    collection,
+                    evidence_record_id(&evidence.id),
+                    request.now_ms,
+                )? && owner_graph == self.graph
+                    && let Some(owner) = read.get_node(&owner_key)?.output
+                    && owner.labels.contains(LABEL_MEMORY)
+                    && string_property(&owner, "scope")? != scope_key
+                {
+                    return Err(MemoryError::CrossScope);
+                }
+            }
+        }
         let mut existing = scan_memories(&read, &scope_key)?;
-        let planned = plan(request, &normalized, &scope_key, &mut existing)?;
+        let planned = plan(
+            request,
+            &normalized,
+            &scope_key,
+            self.evidence_collection.as_deref(),
+            &mut existing,
+        )?;
         if planned.encoded_request_bytes > MAX_BODY_BYTES {
             return Err(MemoryError::BodyLimit);
         }
@@ -313,14 +398,51 @@ impl<'db> MemoryMut<'db> {
         let mut receipt_properties = Metadata::new();
         receipt_properties.insert("scope".into(), MetadataValue::String(scope_key.clone()));
         receipt_properties.insert("digest".into(), MetadataValue::String(digest));
+        receipt_properties.insert(
+            "expires_at_ms".into(),
+            MetadataValue::String((request.now_ms + request.receipt_window_ms).to_string()),
+        );
         let mut ops = planned.ops;
-        let outcome_nodes = encode_outcome(&receipt_key, &outcome, &mut receipt_properties)?;
-        ops.extend(outcome_nodes);
-        ops.push(GraphOp::CreateNode {
-            key: receipt_key.clone(),
-            labels: vec![LABEL_RECEIPT.into()],
-            properties: receipt_properties,
-        });
+        let graph = self.db.graph(&self.graph)?.with_clock(request.now_ms);
+        for outcome_op in encode_outcome(&receipt_key, &outcome, &mut receipt_properties)? {
+            match outcome_op {
+                GraphOp::CreateNode {
+                    key,
+                    labels,
+                    properties,
+                } => {
+                    if let Some(node) = graph.get_node(&key)?.output {
+                        ops.push(GraphOp::UpsertNode {
+                            key,
+                            labels,
+                            properties,
+                            expected: Expected::Revision(node.revision),
+                        });
+                    } else {
+                        ops.push(GraphOp::CreateNode {
+                            key,
+                            labels,
+                            properties,
+                        });
+                    }
+                }
+                _ => unreachable!("outcome encoding only creates nodes"),
+            }
+        }
+        if let Some(receipt) = graph.get_node(&receipt_key)?.output {
+            ops.push(GraphOp::UpsertNode {
+                key: receipt_key.clone(),
+                labels: vec![LABEL_RECEIPT.into()],
+                properties: receipt_properties,
+                expected: Expected::Revision(receipt.revision),
+            });
+        } else {
+            ops.push(GraphOp::CreateNode {
+                key: receipt_key.clone(),
+                labels: vec![LABEL_RECEIPT.into()],
+                properties: receipt_properties,
+            });
+        }
         if ops.len() > MAX_OPS {
             return Err(MemoryError::OperationLimit);
         }
@@ -354,7 +476,10 @@ impl<'db> MemoryMut<'db> {
                 });
             }
         });
-        let batch = self.db.graph_mut(&self.graph)?.write_batch(&ops)?;
+        let batch = self
+            .db
+            .graph_mut(&self.graph)?
+            .write_batch_at(&ops, request.now_ms)?;
         let receipt_write = batch
             .outcomes
             .last()
@@ -367,6 +492,261 @@ impl<'db> MemoryMut<'db> {
             )))?;
         Ok(RememberResult {
             actions: planned.actions,
+            receipt_revision: receipt_write.revision,
+            commit_sequence: receipt_write.revision,
+            replayed: false,
+        })
+    }
+
+    pub(crate) fn forget(&mut self, request: &ForgetRequest) -> MemoryResult<ForgetResult> {
+        validate_forget_request(request)?;
+        let scope_key = request.scope.key();
+        let read = self.db.graph(&self.graph)?.with_clock(request.now_ms);
+        let scope_node = read
+            .get_node(&scope_key)?
+            .output
+            .ok_or(MemoryError::InvalidScope)?;
+        if string_property(&scope_node, "tuple")? != hex(&request.scope.encode()) {
+            return Err(MemoryError::DigestCollision);
+        }
+        let key = forget_receipt_key(&scope_key, &request.idempotency_key);
+        let digest = forget_request_digest(request);
+        let existing_receipt = read.get_node(&key)?.output;
+        if let Some(receipt) = &existing_receipt
+            && !receipt_expired(receipt, request.now_ms)
+        {
+            verify_scope(receipt, &scope_key)?;
+            if string_property(receipt, "digest")? != digest {
+                return Err(MemoryError::IdempotencyConflict);
+            }
+            let outcome = decode_outcome(&read, receipt)?;
+            return decode_forget_result(&outcome, receipt.revision, true, &request.targets);
+        }
+        if request
+            .deadline_ms
+            .is_some_and(|deadline| request.now_ms >= deadline)
+        {
+            return Err(MemoryError::DeadlineExceeded);
+        }
+
+        let memories = scan_memories(&read, &scope_key)?;
+        let mut targets = Vec::with_capacity(request.targets.len());
+        let mut target_keys = BTreeSet::new();
+        for target in &request.targets {
+            let memory = memories
+                .iter()
+                .find(|memory| memory.id == target.id)
+                .cloned()
+                .ok_or(MemoryError::MissingMemory)?;
+            if memory.memory_revision != target.expected_revision {
+                return Err(MemoryError::RevisionConflict);
+            }
+            target_keys.insert(memory.key.clone());
+            targets.push(memory);
+        }
+
+        let mut incident_edges = BTreeMap::new();
+        for memory in &targets {
+            let mut cursor = None;
+            loop {
+                let result = read.neighbors(
+                    &Neighbors {
+                        node: NodeSelector::key(&memory.key),
+                        direction: Direction::Both,
+                        types: None,
+                        edge_conditions: Vec::new(),
+                        limit: Some(GraphLimits::CEILING.max_output_edges),
+                        cursor,
+                    },
+                    &ReadOptions {
+                        limits: GraphLimits::CEILING,
+                        ..ReadOptions::default()
+                    },
+                )?;
+                for edge in result.output.edges {
+                    incident_edges.insert(edge.id, edge);
+                }
+                if incident_edges.len() > MAX_OPS {
+                    return Err(MemoryError::OperationLimit);
+                }
+                match result.cursor {
+                    Some(next) => cursor = Some(next),
+                    None if result.complete => break,
+                    None => return Err(MemoryError::OperationLimit),
+                }
+            }
+        }
+        if incident_edges.len() > MAX_OPS {
+            return Err(MemoryError::OperationLimit);
+        }
+
+        let mut owned_evidence = BTreeMap::<String, (String, u64)>::new();
+        let evidence_collection_id = self
+            .evidence_collection
+            .as_deref()
+            .map(|collection| self.db.resolve(collection))
+            .transpose()?;
+        for memory in &targets {
+            let attachments = read.memory_node_attachments(&memory.key)?;
+            if memory.evidence.is_empty() {
+                if !attachments.is_empty() {
+                    return Err(MemoryError::ForeignAttachment);
+                }
+                continue;
+            }
+            let evidence_collection_id =
+                evidence_collection_id.ok_or(MemoryError::InvalidEvidence)?;
+            if attachments
+                .iter()
+                .any(|(collection, _)| *collection != evidence_collection_id)
+            {
+                return Err(MemoryError::ForeignAttachment);
+            }
+            let attached_record = attachments
+                .iter()
+                .find(|(collection, _)| *collection == evidence_collection_id)
+                .map(|(_, record)| *record);
+            if memory.evidence.len() != 1 {
+                return Err(MemoryError::InvalidBundle);
+            }
+            let evidence_id = memory.evidence[0].clone();
+            let record = evidence_record_id(&evidence_id);
+            let evidence_collection = self
+                .evidence_collection
+                .as_deref()
+                .ok_or(MemoryError::InvalidEvidence)?;
+            let owner =
+                self.db
+                    .memory_attachment_owner(evidence_collection, record, request.now_ms)?;
+            if owner.as_ref() != Some(&(self.graph.clone(), memory.key.clone())) {
+                return Err(MemoryError::ForeignAttachment);
+            }
+            if attached_record != Some(record) {
+                return Err(MemoryError::InvalidBundle);
+            }
+            owned_evidence.insert(evidence_id, (memory.key.clone(), record));
+        }
+
+        let retained_evidence = retained_evidence_ids(&read, &memories, &target_keys, &scope_key)?;
+        let mut ops = Vec::new();
+        if !owned_evidence.is_empty() {
+            let evidence_collection = self
+                .evidence_collection
+                .as_deref()
+                .ok_or(MemoryError::InvalidEvidence)?;
+            for (evidence_id, (node, record)) in &owned_evidence {
+                ops.push(GraphOp::Detach {
+                    node: node.clone(),
+                    collection: evidence_collection.to_owned(),
+                });
+                if !retained_evidence.contains(evidence_id) {
+                    ops.push(GraphOp::Vector {
+                        collection: evidence_collection.to_owned(),
+                        mutation: crate::Mutation::Delete { id: *record },
+                    });
+                }
+            }
+        }
+        for edge in incident_edges.values() {
+            ops.push(GraphOp::DeleteEdge {
+                edge: EdgeRef::Id(edge.id),
+                expected: Expected::Revision(edge.revision),
+            });
+        }
+        for edge in incident_edges
+            .values()
+            .filter(|edge| edge.relationship == "HAS_CONTENT")
+        {
+            if !target_keys.contains(&edge.source_key) {
+                continue;
+            }
+            let node = read
+                .get_node(&edge.target_key)?
+                .output
+                .ok_or(MemoryError::InvalidBundle)?;
+            ops.push(GraphOp::DeleteNode {
+                key: node.key,
+                expected: Expected::Revision(node.revision),
+            });
+        }
+        for memory in &targets {
+            ops.push(GraphOp::DeleteNode {
+                key: memory.key.clone(),
+                expected: Expected::Revision(memory.graph_revision),
+            });
+        }
+
+        let deleted = request
+            .targets
+            .iter()
+            .map(|target| target.id.clone())
+            .collect::<Vec<_>>();
+        let encoded = encode_forget_result(&deleted);
+        let mut receipt_properties = Metadata::new();
+        receipt_properties.insert("scope".into(), MetadataValue::String(scope_key.clone()));
+        receipt_properties.insert("digest".into(), MetadataValue::String(digest));
+        receipt_properties.insert(
+            "expires_at_ms".into(),
+            MetadataValue::String((request.now_ms + request.receipt_window_ms).to_string()),
+        );
+        for outcome_op in encode_outcome(&key, &encoded, &mut receipt_properties)? {
+            let GraphOp::CreateNode {
+                key: chunk_key,
+                labels,
+                properties,
+            } = outcome_op
+            else {
+                unreachable!("outcome encoding only creates nodes")
+            };
+            if let Some(node) = read.get_node(&chunk_key)?.output {
+                ops.push(GraphOp::UpsertNode {
+                    key: chunk_key,
+                    labels,
+                    properties,
+                    expected: Expected::Revision(node.revision),
+                });
+            } else {
+                ops.push(GraphOp::CreateNode {
+                    key: chunk_key,
+                    labels,
+                    properties,
+                });
+            }
+        }
+        if let Some(receipt) = &existing_receipt {
+            ops.push(GraphOp::UpsertNode {
+                key: key.clone(),
+                labels: vec![LABEL_RECEIPT.into()],
+                properties: receipt_properties,
+                expected: Expected::Revision(receipt.revision),
+            });
+        } else {
+            ops.push(GraphOp::CreateNode {
+                key: key.clone(),
+                labels: vec![LABEL_RECEIPT.into()],
+                properties: receipt_properties,
+            });
+        }
+        let guard_operations = targets.len();
+        if ops.len() + guard_operations > MAX_OPS {
+            return Err(MemoryError::OperationLimit);
+        }
+        let batch = self
+            .db
+            .graph_mut(&self.graph)?
+            .write_batch_at(&ops, request.now_ms)?;
+        let receipt_write = batch
+            .outcomes
+            .last()
+            .and_then(|outcome| match outcome {
+                crate::property_graph::GraphOpOutcome::Node(write) => Some(*write),
+                _ => None,
+            })
+            .ok_or(MemoryError::Storage(Error::InvalidQuery(
+                "memory receipt was not written",
+            )))?;
+        Ok(ForgetResult {
+            deleted,
             receipt_revision: receipt_write.revision,
             commit_sequence: receipt_write.revision,
             replayed: false,
@@ -389,6 +769,8 @@ struct ExistingMemory {
     created_at_ms: i64,
     observed_at_ms: i64,
     reference_count: u64,
+    expiry_ms: Option<u64>,
+    evidence: Vec<String>,
 }
 
 struct Planned {
@@ -402,6 +784,7 @@ fn plan(
     request: &RememberRequest,
     items: &[NormalizedItem],
     scope_key: &str,
+    evidence_collection: Option<&str>,
     existing: &mut Vec<ExistingMemory>,
 ) -> MemoryResult<Planned> {
     let mut ops = Vec::new();
@@ -490,6 +873,15 @@ fn plan(
                 .reference_count
                 .checked_add(item.references.len() as u64)
                 .ok_or(MemoryError::OperationLimit)?;
+            let mut evidence = memory.evidence.clone();
+            for record in &item.evidence {
+                if !evidence.contains(&record.id) {
+                    if !evidence.is_empty() {
+                        return Err(MemoryError::RecordAlreadyAttached);
+                    }
+                    evidence.push(record.id.clone());
+                }
+            }
             let mut properties = memory_properties(MemoryProperties {
                 scope: scope_key,
                 id: &memory.id,
@@ -504,6 +896,7 @@ fn plan(
                 observed_at_ms: memory.observed_at_ms,
                 memory_revision: next_revision,
                 reference_count: next_reference_count,
+                evidence: &evidence,
             });
             if item.content.len() > MAX_STRING_VALUE_BYTES {
                 properties.remove("content");
@@ -534,6 +927,18 @@ fn plan(
                 persisted_upsert_indices.insert(memory.key.clone(), index);
             }
             planned_merge_operations += 2;
+            let current_evidence = memory.evidence.iter().collect::<BTreeSet<_>>();
+            for evidence in &item.evidence {
+                if !current_evidence.contains(&evidence.id) {
+                    ops.push(GraphOp::Attach {
+                        node: memory.key.clone(),
+                        collection: evidence_collection
+                            .ok_or(MemoryError::InvalidEvidence)?
+                            .to_owned(),
+                        record: evidence_record_id(&evidence.id),
+                    });
+                }
+            }
             actions.push(MemoryAction {
                 action: "merged",
                 id: memory.id.clone(),
@@ -555,6 +960,7 @@ fn plan(
             virtual_memory.provenance = merged;
             virtual_memory.memory_revision = next_revision;
             virtual_memory.reference_count = next_reference_count;
+            virtual_memory.evidence = evidence;
             continue;
         }
 
@@ -580,6 +986,11 @@ fn plan(
             observed_at_ms: item.observed_at_ms,
             memory_revision: 1,
             reference_count: item.references.len() as u64,
+            evidence: &item
+                .evidence
+                .iter()
+                .map(|value| value.id.clone())
+                .collect::<Vec<_>>(),
         });
         let node_index = ops.len();
         if item.content.len() <= MAX_STRING_VALUE_BYTES {
@@ -645,8 +1056,33 @@ fn plan(
             created_at_ms: request.now_ms as i64,
             observed_at_ms: item.observed_at_ms,
             reference_count: item.references.len() as u64,
+            expiry_ms: item.expiry_ms,
+            evidence: item.evidence.iter().map(|value| value.id.clone()).collect(),
         });
-        pending_references.push((item.id.clone(), key, 0, item.references.clone()));
+        pending_references.push((item.id.clone(), key.clone(), 0, item.references.clone()));
+        if let Some(expiry_ms) = item.expiry_ms {
+            ops.push(GraphOp::SetNodeExpiry {
+                key: memory_key(scope_key, &item.id),
+                expires_at_ms: Some(expiry_ms),
+                expected: Expected::Any,
+            });
+        }
+        if item
+            .expiry_ms
+            .is_some_and(|expiry| expiry <= request.now_ms)
+            && (!item.references.is_empty() || !item.evidence.is_empty())
+        {
+            return Err(MemoryError::MissingMemory);
+        }
+        for evidence in &item.evidence {
+            ops.push(GraphOp::Attach {
+                node: key.clone(),
+                collection: evidence_collection
+                    .ok_or(MemoryError::InvalidEvidence)?
+                    .to_owned(),
+                record: evidence_record_id(&evidence.id),
+            });
+        }
     }
     for (item_id, source_key, first_reference, references) in pending_references {
         if !created_ids.contains(item_id.as_str()) && !merged_ids.contains(item_id.as_str()) {
@@ -667,6 +1103,14 @@ fn plan(
                     .key
                     .clone()
             };
+            if existing.iter().any(|memory| {
+                memory.key == target_key
+                    && memory
+                        .expiry_ms
+                        .is_some_and(|expiry| expiry <= request.now_ms)
+            }) {
+                return Err(MemoryError::MissingReference);
+            }
             if !target_key.starts_with(&format!("mem:v1:{scope_key}:")) {
                 return Err(MemoryError::CrossScope);
             }
@@ -704,6 +1148,8 @@ struct NormalizedItem {
     references: Vec<String>,
     merge_into: Option<String>,
     expected_revision: Option<u64>,
+    expiry_ms: Option<u64>,
+    evidence: Vec<MemoryEvidence>,
 }
 
 fn validate_request(request: &RememberRequest) -> MemoryResult<Vec<NormalizedItem>> {
@@ -743,6 +1189,9 @@ fn validate_request(request: &RememberRequest) -> MemoryResult<Vec<NormalizedIte
         }
         if item.content.len() > MAX_BODY_BYTES {
             return Err(MemoryError::BodyLimit);
+        }
+        if !item.expiry_valid {
+            return Err(MemoryError::InvalidExpiry);
         }
         let importance = item.importance.unwrap_or(0.5);
         if !importance.is_finite() || !(0.0..=1.0).contains(&importance) {
@@ -785,6 +1234,15 @@ fn validate_request(request: &RememberRequest) -> MemoryResult<Vec<NormalizedIte
         if item.references.iter().any(|reference| !opaque(reference)) {
             return Err(MemoryError::InvalidReference);
         }
+        for evidence in &item.evidence {
+            if !opaque(&evidence.id) {
+                return Err(MemoryError::InvalidEvidence);
+            }
+            evidence.scope.validate()?;
+            if evidence.scope != request.scope {
+                return Err(MemoryError::CrossScope);
+            }
+        }
         if item.merge_into.is_some() != item.expected_revision.is_some() {
             return Err(MemoryError::ExpectedRevisionRequired);
         }
@@ -806,6 +1264,8 @@ fn validate_request(request: &RememberRequest) -> MemoryResult<Vec<NormalizedIte
             references: item.references.clone(),
             merge_into: item.merge_into.clone(),
             expected_revision: item.expected_revision,
+            expiry_ms: item.expiry_ms,
+            evidence: item.evidence.clone(),
         });
     }
     if encode_request(request, &normalized).len() > MAX_BODY_BYTES {
@@ -869,6 +1329,12 @@ fn existing_memory(node: &NodeView) -> MemoryResult<ExistingMemory> {
         reference_count: string_property(node, "reference_count")?
             .parse()
             .map_err(|_| MemoryError::InvalidBundle)?,
+        expiry_ms: node.expires_at_ms,
+        evidence: match node.properties.get("evidence") {
+            None => Vec::new(),
+            Some(MetadataValue::String(value)) => decode_evidence(value)?,
+            Some(_) => return Err(MemoryError::InvalidBundle),
+        },
     })
 }
 
@@ -886,6 +1352,7 @@ struct MemoryProperties<'a> {
     observed_at_ms: i64,
     memory_revision: u64,
     reference_count: u64,
+    evidence: &'a [String],
 }
 
 fn memory_properties(memory: MemoryProperties<'_>) -> Metadata {
@@ -927,7 +1394,35 @@ fn memory_properties(memory: MemoryProperties<'_>) -> Metadata {
         "reference_count".into(),
         MetadataValue::String(memory.reference_count.to_string()),
     );
+    properties.insert(
+        "evidence".into(),
+        MetadataValue::String(encode_evidence(memory.evidence)),
+    );
     properties
+}
+
+fn encode_evidence(evidence: &[String]) -> String {
+    let mut ids = evidence.to_vec();
+    ids.sort();
+    ids.dedup();
+    ids.iter()
+        .map(|id| hex(id.as_bytes()))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn decode_evidence(value: &str) -> MemoryResult<Vec<String>> {
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    value
+        .split(';')
+        .map(|id| String::from_utf8(unhex(id)?).map_err(|_| MemoryError::InvalidBundle))
+        .collect()
+}
+
+fn evidence_record_id(id: &str) -> u64 {
+    u64::from_be_bytes(Sha256::digest(id.as_bytes())[..8].try_into().unwrap())
 }
 
 fn string_property<'a>(node: &'a NodeView, name: &str) -> MemoryResult<&'a str> {
@@ -969,9 +1464,192 @@ fn memory_key(scope: &str, id: &str) -> String {
 }
 
 fn receipt_key(scope: &str, idempotency_key: &str) -> String {
-    let mut input = b"remember:v1\0".to_vec();
+    operation_receipt_key("remember", scope, idempotency_key)
+}
+
+fn forget_receipt_key(scope: &str, idempotency_key: &str) -> String {
+    operation_receipt_key("forget", scope, idempotency_key)
+}
+
+fn operation_receipt_key(operation: &str, scope: &str, idempotency_key: &str) -> String {
+    let mut input = format!("{operation}:v1\0").into_bytes();
     input.extend_from_slice(idempotency_key.as_bytes());
     format!("receipt:v1:{scope}:{}", hex(&Sha256::digest(input)))
+}
+
+fn receipt_expired(receipt: &NodeView, now_ms: u64) -> bool {
+    receipt
+        .properties
+        .get("expires_at_ms")
+        .and_then(|value| match value {
+            MetadataValue::String(value) => value.parse::<u64>().ok(),
+            _ => None,
+        })
+        .is_some_and(|expiry| now_ms >= expiry)
+}
+
+fn validate_forget_request(request: &ForgetRequest) -> MemoryResult<()> {
+    request.scope.validate()?;
+    if !opaque(&request.idempotency_key) {
+        return Err(MemoryError::InvalidKey);
+    }
+    if request.now_ms > i64::MAX as u64 {
+        return Err(MemoryError::InvalidClock);
+    }
+    if request.receipt_window_ms == 0
+        || request
+            .now_ms
+            .checked_add(request.receipt_window_ms)
+            .is_none()
+    {
+        return Err(MemoryError::InvalidReceiptWindow);
+    }
+    if request.targets.is_empty() || request.targets.len() > MAX_OPS {
+        return Err(if request.targets.is_empty() {
+            MemoryError::InvalidTarget
+        } else {
+            MemoryError::OperationLimit
+        });
+    }
+    let mut ids = BTreeSet::new();
+    for target in &request.targets {
+        if !opaque(&target.id) || target.expected_revision == 0 {
+            return Err(MemoryError::InvalidTarget);
+        }
+        if !ids.insert(target.id.as_str()) {
+            return Err(MemoryError::DuplicateTarget);
+        }
+    }
+    Ok(())
+}
+
+fn forget_request_digest(request: &ForgetRequest) -> String {
+    let mut output = String::new();
+    output.push_str("{\"key\":");
+    output.push_str(&json_string(&request.idempotency_key));
+    output.push_str(",\"receipt_window\":");
+    output.push_str(&request.receipt_window_ms.to_string());
+    output.push_str(",\"scope\":{\"agent\":");
+    output.push_str(&json_string(&request.scope.agent));
+    output.push_str(",\"session\":");
+    output.push_str(&option_json(request.scope.session.as_deref()));
+    output.push_str(",\"tenant\":");
+    output.push_str(&json_string(&request.scope.tenant));
+    output.push_str(",\"user\":");
+    output.push_str(&option_json(request.scope.user.as_deref()));
+    output.push_str("},\"targets\":[");
+    for (index, target) in request.targets.iter().enumerate() {
+        if index != 0 {
+            output.push(',');
+        }
+        output.push_str("{\"id\":");
+        output.push_str(&json_string(&target.id));
+        output.push_str(",\"revision\":");
+        output.push_str(&target.expected_revision.to_string());
+        output.push('}');
+    }
+    output.push_str("]}");
+    format!("v1:{}", hex(&Sha256::digest(output.as_bytes())))
+}
+
+fn encode_forget_result(deleted: &[String]) -> String {
+    let mut ids = deleted.to_vec();
+    ids.sort();
+    format!(
+        "deleted:{}",
+        ids.iter()
+            .map(|id| hex(id.as_bytes()))
+            .collect::<Vec<_>>()
+            .join(";")
+    )
+}
+
+fn decode_forget_result(
+    encoded: &str,
+    receipt_revision: u64,
+    replayed: bool,
+    targets: &[ForgetTarget],
+) -> MemoryResult<ForgetResult> {
+    let values = encoded
+        .strip_prefix("deleted:")
+        .ok_or(MemoryError::InvalidBundle)?;
+    let mut deleted = if values.is_empty() {
+        Vec::new()
+    } else {
+        values
+            .split(';')
+            .map(|value| String::from_utf8(unhex(value)?).map_err(|_| MemoryError::InvalidBundle))
+            .collect::<MemoryResult<Vec<_>>>()?
+    };
+    deleted.sort();
+    let mut expected = targets
+        .iter()
+        .map(|target| target.id.clone())
+        .collect::<Vec<_>>();
+    expected.sort();
+    if deleted != expected {
+        return Err(MemoryError::InvalidBundle);
+    }
+    Ok(ForgetResult {
+        deleted,
+        receipt_revision,
+        commit_sequence: receipt_revision,
+        replayed,
+    })
+}
+
+fn retained_evidence_ids(
+    graph: &GraphRef<'_>,
+    memories: &[ExistingMemory],
+    deleted_keys: &BTreeSet<String>,
+    scope: &str,
+) -> MemoryResult<BTreeSet<String>> {
+    let by_key = memories
+        .iter()
+        .map(|memory| (memory.key.as_str(), memory))
+        .collect::<BTreeMap<_, _>>();
+    let mut reachable = memories
+        .iter()
+        .filter(|memory| !deleted_keys.contains(&memory.key))
+        .map(|memory| memory.key.clone())
+        .collect::<BTreeSet<_>>();
+    let mut pending = reachable.iter().cloned().collect::<Vec<_>>();
+    while let Some(key) = pending.pop() {
+        let mut cursor = None;
+        loop {
+            let neighbors = graph.neighbors(
+                &Neighbors {
+                    node: NodeSelector::key(&key),
+                    direction: Direction::Out,
+                    types: Some(vec!["REFERENCES".into()]),
+                    edge_conditions: Vec::new(),
+                    limit: Some(GraphLimits::CEILING.max_output_nodes),
+                    cursor,
+                },
+                &ReadOptions {
+                    limits: GraphLimits::CEILING,
+                    ..ReadOptions::default()
+                },
+            )?;
+            for node in neighbors.output.nodes {
+                if by_key.get(node.key.as_str()).is_some_and(|memory| {
+                    memory.scope == scope && reachable.insert(node.key.clone())
+                }) {
+                    pending.push(node.key);
+                }
+            }
+            match neighbors.cursor {
+                Some(next) => cursor = Some(next),
+                None if neighbors.complete => break,
+                None => return Err(MemoryError::OperationLimit),
+            }
+        }
+    }
+    Ok(reachable
+        .iter()
+        .filter_map(|key| by_key.get(key.as_str()))
+        .flat_map(|memory| memory.evidence.iter().cloned())
+        .collect())
 }
 
 fn receipt_outcome_key(receipt_key: &str, index: usize) -> String {
@@ -1033,7 +1711,30 @@ fn encode_request(request: &RememberRequest, items: &[NormalizedItem]) -> Vec<u8
         }
         output.push_str("{\"content\":");
         output.push_str(&json_string(&item.content));
-        output.push_str(",\"evidence\":[],\"expiry\":null,\"id\":");
+        output.push_str(",\"evidence\":[");
+        for (evidence_index, evidence) in item.evidence.iter().enumerate() {
+            if evidence_index != 0 {
+                output.push(',');
+            }
+            output.push_str("{\"id\":");
+            output.push_str(&json_string(&evidence.id));
+            output.push_str(",\"scope\":{\"agent\":");
+            output.push_str(&json_string(&evidence.scope.agent));
+            output.push_str(",\"session\":");
+            output.push_str(&option_json(evidence.scope.session.as_deref()));
+            output.push_str(",\"tenant\":");
+            output.push_str(&json_string(&evidence.scope.tenant));
+            output.push_str(",\"user\":");
+            output.push_str(&option_json(evidence.scope.user.as_deref()));
+            output.push_str("}}");
+        }
+        output.push_str("],\"expiry\":");
+        output.push_str(
+            &item
+                .expiry_ms
+                .map_or_else(|| "null".into(), |expiry| expiry.to_string()),
+        );
+        output.push_str(",\"id\":");
         output.push_str(&json_string(&item.id));
         output.push_str(",\"importance\":");
         output.push_str(&float_json(item.importance));
@@ -1486,8 +2187,18 @@ mod tests {
                 references: Vec::new(),
                 merge_into: None,
                 expected_revision: None,
+                expiry_ms: None,
+                expiry_valid: true,
+                evidence: Vec::new(),
             }],
         }
+    }
+
+    fn timed_request(id: &str, key: &str, now_ms: u64) -> RememberRequest {
+        let mut request = request(id, key);
+        request.now_ms = now_ms;
+        request.items[0].observed_at_ms = Some(now_ms as i64);
+        request
     }
 
     fn remember(db: &mut Database, request: &RememberRequest) -> RememberResult {
@@ -1495,6 +2206,44 @@ mod tests {
             .unwrap()
             .remember(request)
             .unwrap()
+    }
+
+    fn seed_vector(db: &mut Database, id: &str) -> u64 {
+        let record = evidence_record_id(id);
+        db.graph_mut("memory")
+            .unwrap()
+            .write_batch(&[GraphOp::Vector {
+                collection: "default".into(),
+                mutation: crate::Mutation::Put {
+                    id: record,
+                    vector: vec![1.0, 0.0],
+                    payload: id.as_bytes().to_vec(),
+                },
+            }])
+            .unwrap();
+        record
+    }
+
+    fn forget_request(
+        scope: MemoryScope,
+        key: &str,
+        now_ms: u64,
+        targets: &[(&str, u64)],
+    ) -> ForgetRequest {
+        ForgetRequest {
+            scope,
+            idempotency_key: key.into(),
+            receipt_window_ms: 100,
+            now_ms,
+            deadline_ms: None,
+            targets: targets
+                .iter()
+                .map(|(id, expected_revision)| ForgetTarget {
+                    id: (*id).into(),
+                    expected_revision: *expected_revision,
+                })
+                .collect(),
+        }
     }
 
     fn node(db: &Database, key: &str) -> NodeView {
@@ -1642,6 +2391,521 @@ mod tests {
     }
 
     #[test]
+    fn forget_entity_and_episodic_shared_and_unshared_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("forget-evidence.vlite");
+        let mut db = database(&path);
+        let now = crate::current_time_ms() + 30_000;
+        let shared_record = seed_vector(&mut db, "shared-evidence");
+        let unshared_record = seed_vector(&mut db, "unshared-evidence");
+        let scope = MemoryScope {
+            tenant: "tenant".into(),
+            agent: "agent".into(),
+            user: Some("user".into()),
+            session: None,
+        };
+        provision(&mut db, &scope);
+
+        let mut entity = timed_request("entity", "entity-write", now);
+        entity.items[0].kind = MemoryKind::Entity;
+        entity.items[0].evidence.push(MemoryEvidence {
+            id: "shared-evidence".into(),
+            scope: scope.clone(),
+        });
+        MemoryMut::bind(&mut db, "memory", Some("default"))
+            .unwrap()
+            .remember(&entity)
+            .unwrap();
+
+        let mut referencer = timed_request("referencer", "referencer-write", now);
+        referencer.items[0].kind = MemoryKind::Entity;
+        referencer.items[0].content = "different content".into();
+        referencer.items[0].references.push("entity".into());
+        MemoryMut::bind(&mut db, "memory", Some("default"))
+            .unwrap()
+            .remember(&referencer)
+            .unwrap();
+
+        let mut episode = timed_request("episode", "episode-write", now);
+        episode.items[0].evidence.push(MemoryEvidence {
+            id: "unshared-evidence".into(),
+            scope: scope.clone(),
+        });
+        MemoryMut::bind(&mut db, "memory", Some("default"))
+            .unwrap()
+            .remember(&episode)
+            .unwrap();
+
+        let entity_key = memory_key(&scope.key(), "entity");
+        let episode_key = memory_key(&scope.key(), "episode");
+        let deleted_entity = MemoryMut::bind(&mut db, "memory", Some("default"))
+            .unwrap()
+            .forget(&forget_request(
+                scope.clone(),
+                "forget-entity",
+                now + 1,
+                &[("entity", 1)],
+            ))
+            .unwrap();
+        assert_eq!(deleted_entity.deleted, ["entity"]);
+        assert!(
+            db.graph("memory")
+                .unwrap()
+                .get_node(&entity_key)
+                .unwrap()
+                .output
+                .is_none()
+        );
+        assert!(db.get(shared_record).unwrap().is_some());
+        assert!(db.get(unshared_record).unwrap().is_some());
+
+        let deleted_episode = MemoryMut::bind(&mut db, "memory", Some("default"))
+            .unwrap()
+            .forget(&forget_request(
+                scope,
+                "forget-episode",
+                now + 2,
+                &[("episode", 1)],
+            ))
+            .unwrap();
+        assert_eq!(deleted_episode.deleted, ["episode"]);
+        assert!(
+            db.graph("memory")
+                .unwrap()
+                .get_node(&episode_key)
+                .unwrap()
+                .output
+                .is_none()
+        );
+        assert!(db.get(unshared_record).unwrap().is_none());
+        assert!(db.get(shared_record).unwrap().is_some());
+    }
+
+    #[test]
+    fn forget_rejects_foreign_attachment_without_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("foreign-attachment.vlite");
+        let mut db = database(&path);
+        let now = crate::current_time_ms() + 30_000;
+        let record = seed_vector(&mut db, "foreign-evidence");
+        let mut request = timed_request("memory", "write", now);
+        request.items[0].evidence.push(MemoryEvidence {
+            id: "foreign-evidence".into(),
+            scope: request.scope.clone(),
+        });
+        provision(&mut db, &request.scope);
+        MemoryMut::bind(&mut db, "memory", Some("default"))
+            .unwrap()
+            .remember(&request)
+            .unwrap();
+
+        let memory_key = memory_key(&request.scope.key(), "memory");
+        db.graph_mut("memory")
+            .unwrap()
+            .write_batch_at(
+                &[
+                    GraphOp::Detach {
+                        node: memory_key.clone(),
+                        collection: "default".into(),
+                    },
+                    GraphOp::CreateNode {
+                        key: "outside-owner".into(),
+                        labels: vec!["Outside".into()],
+                        properties: Metadata::new(),
+                    },
+                    GraphOp::Attach {
+                        node: "outside-owner".into(),
+                        collection: "default".into(),
+                        record,
+                    },
+                ],
+                now + 1,
+            )
+            .unwrap();
+
+        let before_sequence = db.sequence;
+        let before_end = db.end;
+        let before_memory = node(&db, &memory_key);
+        let result = MemoryMut::bind(&mut db, "memory", Some("default"))
+            .unwrap()
+            .forget(&forget_request(
+                request.scope.clone(),
+                "erase",
+                now + 2,
+                &[("memory", 1)],
+            ));
+        assert!(matches!(result, Err(MemoryError::ForeignAttachment)));
+        assert_eq!(db.sequence, before_sequence);
+        assert_eq!(db.end, before_end);
+        assert_eq!(node(&db, &memory_key).revision, before_memory.revision);
+        assert!(db.get(record).unwrap().is_some());
+        assert!(
+            db.graph("memory")
+                .unwrap()
+                .get_node(&forget_receipt_key(&request.scope.key(), "erase"))
+                .unwrap()
+                .output
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn expiry_at_clock_boundary_hides_memory_and_evidence_but_retains_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("expiry-boundary.vlite");
+        let mut db = database(&path);
+        let now = crate::current_time_ms() + 30_000;
+        let expires_at = now + 5;
+        let record = seed_vector(&mut db, "expiry-evidence");
+        let mut request = timed_request("expiring", "expiry-write", now);
+        request.items[0].kind = MemoryKind::Entity;
+        request.items[0].expiry_ms = Some(expires_at);
+        request.items[0].evidence.push(MemoryEvidence {
+            id: "expiry-evidence".into(),
+            scope: request.scope.clone(),
+        });
+        provision(&mut db, &request.scope);
+        MemoryMut::bind(&mut db, "memory", Some("default"))
+            .unwrap()
+            .remember(&request)
+            .unwrap();
+        let key = memory_key(&request.scope.key(), "expiring");
+        assert!(
+            db.graph("memory")
+                .unwrap()
+                .with_clock(expires_at - 1)
+                .get_node(&key)
+                .unwrap()
+                .output
+                .is_some()
+        );
+        assert_eq!(
+            db.graph("memory")
+                .unwrap()
+                .with_clock(expires_at - 1)
+                .memory_node_attachments(&key)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            db.graph("memory")
+                .unwrap()
+                .with_clock(expires_at)
+                .get_node(&key)
+                .unwrap()
+                .output
+                .is_none()
+        );
+        assert!(
+            db.graph("memory")
+                .unwrap()
+                .with_clock(expires_at)
+                .memory_node_attachments(&key)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(db.get(record).unwrap().is_some());
+
+        db.graph_mut("memory")
+            .unwrap()
+            .write_batch_at(
+                &[GraphOp::CreateNode {
+                    key: "expiry-reclaim-trigger".into(),
+                    labels: Vec::new(),
+                    properties: Metadata::new(),
+                }],
+                expires_at + 1,
+            )
+            .unwrap();
+        assert!(
+            db.graph("memory")
+                .unwrap()
+                .get_node(&key)
+                .unwrap()
+                .output
+                .is_none()
+        );
+        assert!(db.get(record).unwrap().is_some());
+        assert!(
+            db.graph("memory")
+                .unwrap()
+                .with_clock(expires_at + 1)
+                .memory_node_attachments(&key)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn forget_removes_incident_edges_and_content_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("forget-content.vlite");
+        let mut db = database(&path);
+        let now = crate::current_time_ms() + 30_000;
+        let mut target = timed_request("target", "target-write", now);
+        target.items[0].kind = MemoryKind::Entity;
+        target.items[0].content = "x".repeat(MAX_STRING_VALUE_BYTES + 1);
+        provision(&mut db, &target.scope);
+        MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .remember(&target)
+            .unwrap();
+        let mut retained = timed_request("retained", "retained-write", now);
+        retained.items[0].kind = MemoryKind::Entity;
+        MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .remember(&retained)
+            .unwrap();
+        let target_key = memory_key(&target.scope.key(), "target");
+        let retained_key = memory_key(&target.scope.key(), "retained");
+        db.graph_mut("memory")
+            .unwrap()
+            .write_batch_at(
+                &[GraphOp::CreateEdge {
+                    key: Some("fixture-incident-edge".into()),
+                    source: target_key.clone(),
+                    relationship: "FIXTURE_LINK".into(),
+                    destination: retained_key.clone(),
+                    properties: Metadata::new(),
+                }],
+                now + 1,
+            )
+            .unwrap();
+        assert_eq!(find_label(&db, LABEL_CONTENT).len(), 2);
+
+        MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .forget(&forget_request(
+                target.scope,
+                "erase-target",
+                now + 2,
+                &[("target", 1)],
+            ))
+            .unwrap();
+        assert!(find_label(&db, LABEL_CONTENT).is_empty());
+        assert!(
+            db.graph("memory")
+                .unwrap()
+                .get_edge_by_key("fixture-incident-edge")
+                .unwrap()
+                .output
+                .is_none()
+        );
+        assert!(
+            db.graph("memory")
+                .unwrap()
+                .get_node(&retained_key)
+                .unwrap()
+                .output
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn forget_receipt_replays_after_reopen_on_all_backends() {
+        let dir = tempfile::tempdir().unwrap();
+        let encryption_key = crate::EncryptionKey::from_bytes([9; 32]);
+        for (name, directory, encrypted) in [
+            ("plain.vlite", false, false),
+            ("encrypted.vlite", false, true),
+            ("plain-directory", true, false),
+            ("encrypted-directory", true, true),
+        ] {
+            let path = dir.path().join(name);
+            let options = crate::CreateOptions {
+                encryption: encrypted.then(|| encryption_key.clone()),
+                ..crate::CreateOptions::default()
+            };
+            let mut db = if directory {
+                Database::create_directory(&path, 2, options).unwrap()
+            } else {
+                Database::create_with_options(&path, 2, options).unwrap()
+            };
+            db.create_graph("memory").unwrap();
+            let now = crate::current_time_ms() + 30_000;
+            let request = timed_request("forgotten", "write", now);
+            provision(&mut db, &request.scope);
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .remember(&request)
+                .unwrap();
+            let forget =
+                forget_request(request.scope.clone(), "erase", now + 1, &[("forgotten", 1)]);
+            let result = MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .forget(&forget)
+                .unwrap();
+            drop(db);
+
+            let mut db = if encrypted {
+                Database::open_encrypted(&path, &encryption_key).unwrap()
+            } else {
+                Database::open(&path).unwrap()
+            };
+            let before = db.sequence;
+            let replay = MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .forget(&forget)
+                .unwrap();
+            assert!(replay.replayed, "{name}");
+            assert_eq!(replay.deleted, result.deleted, "{name}");
+            assert_eq!(replay.commit_sequence, result.commit_sequence, "{name}");
+            assert_eq!(db.sequence, before, "{name}");
+
+            let mut mismatch = forget.clone();
+            mismatch.targets[0].expected_revision = 2;
+            assert!(
+                matches!(
+                    MemoryMut::bind(&mut db, "memory", None)
+                        .unwrap()
+                        .forget(&mismatch),
+                    Err(MemoryError::IdempotencyConflict)
+                ),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn expiry_and_evidence_survive_reopen_on_all_backends() {
+        let dir = tempfile::tempdir().unwrap();
+        let encryption_key = crate::EncryptionKey::from_bytes([11; 32]);
+        for (name, directory, encrypted) in [
+            ("plain.vlite", false, false),
+            ("encrypted.vlite", false, true),
+            ("plain-directory", true, false),
+            ("encrypted-directory", true, true),
+        ] {
+            let path = dir.path().join(name);
+            let options = crate::CreateOptions {
+                encryption: encrypted.then(|| encryption_key.clone()),
+                ..crate::CreateOptions::default()
+            };
+            let mut db = if directory {
+                Database::create_directory(&path, 2, options).unwrap()
+            } else {
+                Database::create_with_options(&path, 2, options).unwrap()
+            };
+            db.create_graph("memory").unwrap();
+            let now = crate::current_time_ms() + 30_000;
+            let expires_at = now + 10_000;
+            let record = seed_vector(&mut db, "reopen-evidence");
+            let mut request = timed_request("expires", "expiry-reopen", now);
+            request.items[0].kind = MemoryKind::Entity;
+            request.items[0].expiry_ms = Some(expires_at);
+            request.items[0].evidence.push(MemoryEvidence {
+                id: "reopen-evidence".into(),
+                scope: request.scope.clone(),
+            });
+            provision(&mut db, &request.scope);
+            MemoryMut::bind(&mut db, "memory", Some("default"))
+                .unwrap()
+                .remember(&request)
+                .unwrap();
+            let key = memory_key(&request.scope.key(), "expires");
+            drop(db);
+
+            let mut db = if encrypted {
+                Database::open_encrypted(&path, &encryption_key).unwrap()
+            } else {
+                Database::open(&path).unwrap()
+            };
+            assert!(
+                db.graph("memory")
+                    .unwrap()
+                    .with_clock(expires_at - 1)
+                    .get_node(&key)
+                    .unwrap()
+                    .output
+                    .is_some(),
+                "{name}"
+            );
+            assert_eq!(
+                db.graph("memory")
+                    .unwrap()
+                    .with_clock(expires_at - 1)
+                    .memory_node_attachments(&key)
+                    .unwrap()
+                    .len(),
+                1,
+                "{name}"
+            );
+            assert!(
+                db.graph("memory")
+                    .unwrap()
+                    .with_clock(expires_at)
+                    .get_node(&key)
+                    .unwrap()
+                    .output
+                    .is_none(),
+                "{name}"
+            );
+            assert!(db.get(record).unwrap().is_some(), "{name}");
+            db.graph_mut("memory")
+                .unwrap()
+                .write_batch_at(
+                    &[GraphOp::CreateNode {
+                        key: "expiry-reopen-reclaim".into(),
+                        labels: Vec::new(),
+                        properties: Metadata::new(),
+                    }],
+                    expires_at + 1,
+                )
+                .unwrap();
+            assert!(db.get(record).unwrap().is_some(), "{name}");
+            assert!(
+                db.graph("memory")
+                    .unwrap()
+                    .with_clock(expires_at + 1)
+                    .memory_node_attachments(&key)
+                    .unwrap()
+                    .is_empty(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn corrupted_forget_outcome_is_invalid_without_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("forget-outcome.vlite");
+        let mut db = database(&path);
+        let now = crate::current_time_ms() + 30_000;
+        let request = timed_request("target", "write", now);
+        provision(&mut db, &request.scope);
+        MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .remember(&request)
+            .unwrap();
+        let forget = forget_request(request.scope.clone(), "erase", now + 1, &[("target", 1)]);
+        MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .forget(&forget)
+            .unwrap();
+
+        let receipt_key = forget_receipt_key(&request.scope.key(), "erase");
+        let outcome_key = receipt_outcome_key(&receipt_key, 0);
+        let outcome = node(&db, &outcome_key);
+        let mut properties = outcome.properties.clone();
+        properties.insert(
+            "outcome".into(),
+            MetadataValue::String(format!("deleted:{}", hex(b"other-target"))),
+        );
+        replace_properties(&mut db, outcome, properties);
+        let before_sequence = db.sequence;
+        let before_end = db.end;
+        assert!(matches!(
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .forget(&forget),
+            Err(MemoryError::InvalidBundle)
+        ));
+        assert_eq!(db.sequence, before_sequence);
+        assert_eq!(db.end, before_end);
+    }
+
+    #[test]
     fn receipt_chunk_count_tampering_is_invalid_without_writes() {
         for tamper in ["zero", "extra", "excessive"] {
             tampered_receipt_error(tamper);
@@ -1694,7 +2958,7 @@ mod tests {
             let normalized = validate_request(&req).unwrap();
             let mut existing =
                 scan_memories(&db.graph("memory").unwrap(), &req.scope.key()).unwrap();
-            let planned = plan(&req, &normalized, &req.scope.key(), &mut existing).unwrap();
+            let planned = plan(&req, &normalized, &req.scope.key(), None, &mut existing).unwrap();
             assert_eq!(planned.budget_operations, count * 2);
             assert_eq!(planned.ops.len(), 1);
             for op in planned.ops {
@@ -1816,7 +3080,7 @@ mod tests {
                 })
                 .collect();
             let normalized = validate_request(&req).unwrap();
-            let planned = plan(&req, &normalized, &req.scope.key(), &mut Vec::new()).unwrap();
+            let planned = plan(&req, &normalized, &req.scope.key(), None, &mut Vec::new()).unwrap();
             assert_eq!(planned.budget_operations, 4_094);
             assert_eq!(encode_actions(&planned.actions).len().div_ceil(4_096), 1);
             let sequence = db.sequence;
@@ -1873,7 +3137,7 @@ mod tests {
             })
             .collect();
         let normalized = validate_request(&req).unwrap();
-        let planned = plan(&req, &normalized, &req.scope.key(), &mut Vec::new()).unwrap();
+        let planned = plan(&req, &normalized, &req.scope.key(), None, &mut Vec::new()).unwrap();
         assert!(planned.encoded_request_bytes <= MAX_BODY_BYTES);
         assert!(planned.budget_operations + 2 < MAX_OPS);
         let sequence = db.sequence;
@@ -1961,8 +3225,14 @@ mod tests {
             let normalized = validate_request(&boundary).unwrap();
             let mut existing =
                 scan_memories(&db.graph("memory").unwrap(), &boundary.scope.key()).unwrap();
-            let planned =
-                plan(&boundary, &normalized, &boundary.scope.key(), &mut existing).unwrap();
+            let planned = plan(
+                &boundary,
+                &normalized,
+                &boundary.scope.key(),
+                None,
+                &mut existing,
+            )
+            .unwrap();
             let chunk_count = encode_actions(&planned.actions).len().div_ceil(4_096);
             assert_eq!(chunk_count, 540);
             assert_eq!(planned.budget_operations + 1 + chunk_count, MAX_OPS);
@@ -2172,6 +3442,9 @@ mod tests {
                 references: Vec::new(),
                 merge_into: None,
                 expected_revision: None,
+                expiry_ms: None,
+                expiry_valid: true,
+                evidence: Vec::new(),
             })
             .collect();
         assert!(matches!(
@@ -2566,6 +3839,9 @@ mod tests {
                 references: Vec::new(),
                 merge_into: None,
                 expected_revision: None,
+                expiry_ms: None,
+                expiry_valid: true,
+                evidence: Vec::new(),
             })
             .collect();
         MemoryMut::bind(&mut db, "memory", None)
@@ -2935,7 +4211,7 @@ mod tests {
         }
     }
 
-    fn fixture_request(value: &Value, clock: &Value) -> RememberRequest {
+    fn fixture_request(value: &Value, clock: &Value, clock_offset: u64) -> RememberRequest {
         let mut items = expanded(&value["items"])
             .as_array()
             .cloned()
@@ -2990,9 +4266,8 @@ mod tests {
                         .unwrap_or_default()
                         .into(),
                     kind,
-                    content: item
-                        .get("content")
-                        .and_then(Value::as_str)
+                    content: expanded(&item["content"])
+                        .as_str()
                         .unwrap_or_default()
                         .into(),
                     source: item
@@ -3001,7 +4276,10 @@ mod tests {
                         .unwrap_or_default()
                         .into(),
                     importance: item.get("importance").and_then(Value::as_f64),
-                    observed_at_ms: item.get("observed_at").and_then(Value::as_i64),
+                    observed_at_ms: item
+                        .get("observed_at")
+                        .and_then(Value::as_i64)
+                        .map(|value| value.saturating_add(clock_offset as i64)),
                     provenance,
                     references,
                     merge_into: item
@@ -3009,6 +4287,30 @@ mod tests {
                         .and_then(Value::as_str)
                         .map(str::to_owned),
                     expected_revision: item.get("expected_revision").and_then(Value::as_u64),
+                    expiry_ms: item
+                        .get("expiry")
+                        .and_then(Value::as_u64)
+                        .map(|value| value.saturating_add(clock_offset)),
+                    expiry_valid: item
+                        .get("expiry")
+                        .is_none_or(|value| value.is_null() || value.as_u64().is_some()),
+                    evidence: item
+                        .get("evidence")
+                        .and_then(Value::as_array)
+                        .map(|values| {
+                            values
+                                .iter()
+                                .map(|entry| MemoryEvidence {
+                                    id: entry
+                                        .get("id")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_owned(),
+                                    scope: fixture_scope(&entry["scope"]),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                 }
             })
             .collect();
@@ -3024,8 +4326,14 @@ mod tests {
                 .get("receipt_window")
                 .and_then(Value::as_u64)
                 .unwrap_or_default(),
-            now_ms: clock.as_u64().unwrap_or_default(),
-            deadline_ms: value.get("deadline").and_then(Value::as_u64),
+            now_ms: clock
+                .as_u64()
+                .unwrap_or_default()
+                .saturating_add(clock_offset),
+            deadline_ms: value
+                .get("deadline")
+                .and_then(Value::as_u64)
+                .map(|value| value.saturating_add(clock_offset)),
             allow_future_observations: value
                 .get("allow_future")
                 .and_then(Value::as_bool)
@@ -3034,59 +4342,132 @@ mod tests {
         }
     }
 
+    fn fixture_forget_request(value: &Value, clock: &Value, clock_offset: u64) -> ForgetRequest {
+        ForgetRequest {
+            scope: fixture_scope(&value["scope"]),
+            idempotency_key: value
+                .get("key")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .into(),
+            receipt_window_ms: value
+                .get("receipt_window")
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
+            now_ms: clock
+                .as_u64()
+                .unwrap_or_default()
+                .saturating_add(clock_offset),
+            deadline_ms: value
+                .get("deadline")
+                .and_then(Value::as_u64)
+                .map(|value| value.saturating_add(clock_offset)),
+            targets: value["targets"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|target| ForgetTarget {
+                    id: target["id"].as_str().unwrap_or_default().into(),
+                    expected_revision: target["revision"].as_u64().unwrap_or_default(),
+                })
+                .collect(),
+        }
+    }
+
+    fn fixture_evidence_ids(case: &Value) -> BTreeMap<u64, String> {
+        let mut records = BTreeMap::new();
+        for step in case["steps"].as_array().unwrap() {
+            if step["op"] != "remember" {
+                continue;
+            }
+            for item in expanded(&step["request"]["items"])
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                for evidence in item["evidence"].as_array().into_iter().flatten() {
+                    let id = evidence["id"].as_str().unwrap().to_owned();
+                    records.insert(evidence_record_id(&id), id);
+                }
+            }
+        }
+        records
+    }
+
+    fn seed_missing_fixture_evidence(
+        db: &mut Database,
+        request: &RememberRequest,
+        evidence_ids: &BTreeMap<u64, String>,
+        clock: u64,
+    ) {
+        let mut missing = BTreeSet::new();
+        for evidence in request.items.iter().flat_map(|item| &item.evidence) {
+            let record = evidence_record_id(&evidence.id);
+            if db.get(record).unwrap().is_none() {
+                missing.insert(record);
+            }
+        }
+        if missing.is_empty() {
+            return;
+        }
+        let ops = missing
+            .into_iter()
+            .map(|record| {
+                let id = evidence_ids
+                    .get(&record)
+                    .expect("fixture evidence map contains every referenced record");
+                GraphOp::Vector {
+                    collection: "default".into(),
+                    mutation: crate::Mutation::Put {
+                        id: record,
+                        vector: vec![1.0, 0.0],
+                        payload: id.as_bytes().to_vec(),
+                    },
+                }
+            })
+            .collect::<Vec<_>>();
+        db.graph_mut("memory")
+            .unwrap()
+            .write_batch_at(&ops, clock)
+            .unwrap();
+    }
+
+    fn fixture_time_near_ceiling(value: &Value) -> bool {
+        match value {
+            Value::Object(object) => object.iter().any(|(key, value)| {
+                (matches!(
+                    key.as_str(),
+                    "clock" | "deadline" | "expiry" | "observed_at"
+                ) && value
+                    .as_u64()
+                    .is_some_and(|time| time >= i64::MAX as u64 - 120_000))
+                    || fixture_time_near_ceiling(value)
+            }),
+            Value::Array(values) => values.iter().any(fixture_time_near_ceiling),
+            _ => false,
+        }
+    }
+
     fn fixture_skip_reason(case: &Value) -> Option<&'static str> {
         if case.get("force_collision").and_then(Value::as_bool) == Some(true) {
             return Some("fixture-only forced hash collision; no injectable production hash");
         }
-        let mut receipt_deadlines = BTreeMap::new();
         for step in case["steps"].as_array().unwrap() {
             match step["op"].as_str().unwrap() {
-                "forget" => return Some("A2 forget is outside slice A1"),
-                "visible" => return Some("expiry visibility is outside slice A1"),
-                "edge" => return Some("fixture-seeded ordinary graph edges are outside A1"),
-                "attach" => {
-                    return Some("fixture-seeded external attachment is not a Rust memory API");
-                }
+                "forget" | "visible" | "edge" | "attach" => {}
                 "remember" => {
                     let request = &step["request"];
-                    let key = request
-                        .get("key")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    let clock = step["clock"].as_u64().unwrap_or_default();
-                    if receipt_deadlines
-                        .get(key)
-                        .is_some_and(|deadline| clock >= *deadline)
-                    {
-                        return Some("receipt retention expiry is outside this A1 candidate");
-                    }
-                    let window = request
-                        .get("receipt_window")
-                        .and_then(Value::as_u64)
-                        .unwrap_or_default();
-                    receipt_deadlines
-                        .entry(key.to_owned())
-                        .or_insert_with(|| clock.saturating_add(window));
                     let expanded_items = expanded(&request["items"]);
                     for item in expanded_items.as_array().into_iter().flatten() {
-                        if item.get("expiry").is_some_and(|value| !value.is_null()) {
-                            return Some("A2 expiry writes are outside slice A1");
-                        }
-                        if item
-                            .get("evidence")
-                            .and_then(Value::as_array)
-                            .is_some_and(|values| !values.is_empty())
-                        {
-                            return Some(
-                                "fixture evidence IDs are opaque and lack seeded vector records",
-                            );
-                        }
                         if item.get("importance").is_some_and(Value::is_null) {
                             return Some(
                                 "explicit JSON null is not representable by typed Option<f64>",
                             );
                         }
-                        if item.get("content").is_some_and(|value| !value.is_string()) {
+                        if item
+                            .get("content")
+                            .is_some_and(|value| !value.is_string() && !is_string_repeat(value))
+                        {
                             return Some(
                                 "non-string JSON content is not representable by the Rust request type",
                             );
@@ -3108,12 +4489,20 @@ mod tests {
         None
     }
 
+    fn is_string_repeat(value: &Value) -> bool {
+        value
+            .as_object()
+            .is_some_and(|object| object.get("repeat").is_some_and(Value::is_string))
+    }
+
     fn fixture_error_name(error: &MemoryError) -> &'static str {
         match error {
             MemoryError::InvalidScope => "InvalidScope",
             MemoryError::InvalidKey => "InvalidKey",
             MemoryError::InvalidClock => "InvalidClock",
             MemoryError::InvalidReceiptWindow => "InvalidReceiptWindow",
+            MemoryError::InvalidExpiry => "InvalidExpiry",
+            MemoryError::InvalidEvidence => "InvalidEvidence",
             MemoryError::DeadlineExceeded => "DeadlineExceeded",
             MemoryError::InvalidBundle => "InvalidBundle",
             MemoryError::DuplicateItem => "DuplicateItem",
@@ -3138,6 +4527,9 @@ mod tests {
             MemoryError::ExpectedRevisionRequired => "ExpectedRevisionRequired",
             MemoryError::RevisionConflict => "RevisionConflict",
             MemoryError::RecordAlreadyAttached => "RecordAlreadyAttached",
+            MemoryError::ForeignAttachment => "ForeignAttachment",
+            MemoryError::InvalidTarget => "InvalidTarget",
+            MemoryError::DuplicateTarget => "DuplicateTarget",
             MemoryError::Storage(_) => "Storage",
         }
     }
@@ -3155,12 +4547,13 @@ mod tests {
         );
     }
 
-    fn compare_fixture_get(db: &Database, step: &Value, case_name: &str) {
+    fn compare_fixture_get(db: &Database, step: &Value, case_name: &str, clock_offset: u64) {
         let scope = fixture_scope(&step["scope"]);
         let key = memory_key(&scope.key(), step["id"].as_str().unwrap());
         let node = db
             .graph("memory")
             .unwrap()
+            .with_clock(step["clock"].as_u64().unwrap())
             .get_node(&key)
             .unwrap()
             .output
@@ -3173,10 +4566,18 @@ mod tests {
             let field = field.as_str().unwrap();
             let value = match field {
                 "importance" => json!(float_property(&node, "importance").unwrap()),
-                "created_at" => json!(integer_property(&node, "created_at_ms").unwrap()),
-                "updated_at" => json!(integer_property(&node, "updated_at_ms").unwrap()),
-                "observed_at" => json!(integer_property(&node, "observed_at_ms").unwrap()),
-                "expiry" => Value::Null,
+                "created_at" => {
+                    json!(integer_property(&node, "created_at_ms").unwrap() - clock_offset as i64)
+                }
+                "updated_at" => {
+                    json!(integer_property(&node, "updated_at_ms").unwrap() - clock_offset as i64)
+                }
+                "observed_at" => {
+                    json!(integer_property(&node, "observed_at_ms").unwrap() - clock_offset as i64)
+                }
+                "expiry" => node
+                    .expires_at_ms
+                    .map_or(Value::Null, |expiry| json!(expiry - clock_offset)),
                 "provenance_count" => json!(provenance_count),
                 "revision" => json!(
                     string_property(&node, "memory_revision")
@@ -3211,29 +4612,160 @@ mod tests {
         read.output
     }
 
-    fn compare_fixture_state(db: &Database, expected: &Value, case_name: &str) {
-        let memories = find_label(db, LABEL_MEMORY)
+    fn find_label_at(db: &Database, label: &str, clock: u64) -> Vec<NodeView> {
+        let read = db
+            .graph("memory")
+            .unwrap()
+            .with_clock(clock)
+            .find_nodes(
+                &FindNodes {
+                    label: Some(label.into()),
+                    limit: Some(1_000),
+                    ..FindNodes::default()
+                },
+                &ReadOptions {
+                    limits: GraphLimits::CEILING,
+                    ..ReadOptions::default()
+                },
+            )
+            .unwrap();
+        assert!(read.complete, "fixture state query must be complete");
+        read.output
+    }
+
+    fn compare_fixture_state(
+        db: &Database,
+        expected: &Value,
+        case_name: &str,
+        evidence_ids: &BTreeMap<u64, String>,
+        managed_evidence: &BTreeSet<u64>,
+        fixture_edges: &BTreeMap<String, (String, String)>,
+        logical_sequence: u64,
+    ) {
+        let graph = db.graph("memory").unwrap().with_clock(0);
+        let memories = find_label_at(db, LABEL_MEMORY, 0)
             .into_iter()
             .map(|node| string_property(&node, "id").unwrap().to_owned())
             .collect::<BTreeSet<_>>();
         let memories = memories.into_iter().collect::<Vec<_>>();
-        let receipt_count = find_label(db, LABEL_RECEIPT).len();
+        let receipt_count = find_label_at(db, LABEL_RECEIPT, 0).len();
+        let evidence = managed_evidence
+            .iter()
+            .filter_map(|record| {
+                db.get(*record)
+                    .ok()
+                    .flatten()
+                    .and_then(|_| evidence_ids.get(record).cloned())
+            })
+            .collect::<BTreeSet<_>>();
+        let edges = fixture_edges
+            .keys()
+            .filter(|key| graph.get_edge_by_key(key).unwrap().output.is_some())
+            .cloned()
+            .collect::<BTreeSet<_>>();
         assert_eq!(
             json!(memories),
             expected["memories"],
             "{case_name} memories"
         );
-        assert_eq!(json!([]), expected["evidence"], "{case_name} evidence");
-        assert_eq!(json!([]), expected["edges"], "{case_name} edges");
+        assert_eq!(
+            json!(evidence.into_iter().collect::<Vec<_>>()),
+            expected["evidence"],
+            "{case_name} evidence"
+        );
+        assert_eq!(
+            json!(edges.into_iter().collect::<Vec<_>>()),
+            expected["edges"],
+            "{case_name} edges"
+        );
         assert_eq!(
             json!(receipt_count),
             expected["receipts"],
             "{case_name} receipts"
         );
         assert_eq!(
-            json!(receipt_count),
+            json!(logical_sequence),
             expected["sequence"],
             "{case_name} logical sequence"
+        );
+    }
+
+    fn compare_fixture_visible(
+        db: &Database,
+        step: &Value,
+        case_name: &str,
+        evidence_ids: &BTreeMap<u64, String>,
+        fixture_edges: &BTreeMap<String, (String, String)>,
+        clock_offset: u64,
+    ) {
+        let clock = step["clock"].as_u64().unwrap().saturating_add(clock_offset);
+        let scope = fixture_scope(&step["scope"]).key();
+        let graph = db.graph("memory").unwrap().with_clock(clock);
+        let read = graph
+            .find_nodes(
+                &FindNodes {
+                    label: Some(LABEL_MEMORY.into()),
+                    conditions: vec![crate::Condition::Eq {
+                        field: "scope".into(),
+                        value: MetadataValue::String(scope),
+                    }],
+                    limit: Some(1_000),
+                    ..FindNodes::default()
+                },
+                &ReadOptions {
+                    limits: GraphLimits::CEILING,
+                    ..ReadOptions::default()
+                },
+            )
+            .unwrap();
+        assert!(read.complete, "{case_name}: visible query must be complete");
+        let nodes = read.output;
+        let memory_ids = nodes
+            .iter()
+            .map(|node| string_property(node, "id").unwrap().to_owned())
+            .collect::<BTreeSet<_>>();
+        let evidence = nodes
+            .iter()
+            .flat_map(|node| graph.memory_node_attachments(&node.key).unwrap())
+            .filter_map(|(_, record)| {
+                db.get(record)
+                    .ok()
+                    .flatten()
+                    .and_then(|_| evidence_ids.get(&record).cloned())
+            })
+            .collect::<BTreeSet<_>>();
+        let visible_ids = nodes
+            .iter()
+            .map(|node| {
+                (
+                    string_property(node, "id").unwrap().to_owned(),
+                    node.key.clone(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let edges = fixture_edges
+            .iter()
+            .filter(|(key, (source, destination))| {
+                visible_ids.contains_key(source)
+                    && visible_ids.contains_key(destination)
+                    && graph.get_edge_by_key(key).unwrap().output.is_some()
+            })
+            .map(|(key, _)| key.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            json!(memory_ids.into_iter().collect::<Vec<_>>()),
+            step["expect"]["memories"],
+            "{case_name} visible memories"
+        );
+        assert_eq!(
+            json!(evidence.into_iter().collect::<Vec<_>>()),
+            step["expect"]["evidence"],
+            "{case_name} visible evidence"
+        );
+        assert_eq!(
+            json!(edges.into_iter().collect::<Vec<_>>()),
+            step["expect"]["edges"],
+            "{case_name} visible edges"
         );
     }
 
@@ -3256,24 +4788,6 @@ mod tests {
         let fixture: Value =
             serde_json::from_str(include_str!("../tests/fixtures/agent_memory/golden.json"))
                 .unwrap();
-        for (name, step) in [
-            ("forget-outbound-reference-budget", 0),
-            ("forget-outbound-reference-over-budget", 1),
-            ("forget-separate-guard-over-budget", 1),
-        ] {
-            let case = fixture["cases"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|case| case["name"] == name)
-                .unwrap();
-            assert_eq!(case["steps"][step]["op"], "remember");
-            assert_eq!(
-                fixture_skip_reason(case),
-                Some("A2 forget is outside slice A1"),
-                "{name} must remain outside Rust replay"
-            );
-        }
         let mut replayed_cases = Vec::new();
         let mut skipped_cases = Vec::new();
         for case in fixture["cases"].as_array().unwrap() {
@@ -3285,9 +4799,24 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("memory-oracle.vlite");
             let mut db = database(&path);
+            let evidence_ids = fixture_evidence_ids(case);
+            let mut sequence_offset = db.sequence;
+            let mut logical_sequence = 0_u64;
+            let mut receipt_sequences = BTreeMap::<String, u64>::new();
+            let mut receipt_revisions = BTreeMap::<String, u64>::new();
             let mut provisioned = BTreeSet::new();
-            let mut provision_frames = 0_u64;
+            let mut managed_evidence = BTreeSet::<u64>::new();
+            let mut fixture_edges = BTreeMap::new();
+            let clock_offset = if fixture_time_near_ceiling(case) {
+                0
+            } else {
+                crate::current_time_ms().saturating_add(60_000)
+            };
+            let mut current_clock = clock_offset;
             for (index, step) in case["steps"].as_array().unwrap().iter().enumerate() {
+                if let Some(clock) = step.get("clock").and_then(Value::as_u64) {
+                    current_clock = clock.saturating_add(clock_offset);
+                }
                 match step["op"].as_str().unwrap() {
                     "scope_pair" => {
                         let left = fixture_scope(&step["left"]);
@@ -3305,18 +4834,35 @@ mod tests {
                         );
                     }
                     "remember" => {
-                        let request = fixture_request(&step["request"], &step["clock"]);
+                        let request =
+                            fixture_request(&step["request"], &step["clock"], clock_offset);
+                        let receipt_identity = format!(
+                            "remember:{}:{}",
+                            request.scope.key(),
+                            request.idempotency_key
+                        );
                         let validation = validate_request(&request);
+                        if validation.is_ok() {
+                            let before = db.sequence;
+                            seed_missing_fixture_evidence(
+                                &mut db,
+                                &request,
+                                &evidence_ids,
+                                current_clock,
+                            );
+                            sequence_offset += db.sequence - before;
+                        }
                         if validation.is_ok() && !provisioned.contains(&request.scope.key()) {
                             let before = db.sequence;
                             MemoryMut::bind(&mut db, "memory", None)
                                 .unwrap()
                                 .provision_scope(&request.scope)
                                 .unwrap();
-                            provision_frames += db.sequence - before;
+                            sequence_offset += db.sequence - before;
                             provisioned.insert(request.scope.key());
                         }
-                        let result = MemoryMut::bind(&mut db, "memory", None)
+                        let before = db.sequence;
+                        let result = MemoryMut::bind(&mut db, "memory", Some("default"))
                             .unwrap()
                             .remember(&request);
                         let expected = &step["expect"];
@@ -3335,23 +4881,208 @@ mod tests {
                                 expected_error,
                                 "{name} step {index}: {error:?}"
                             );
+                            assert_eq!(
+                                db.sequence, before,
+                                "{name} step {index} rejected remember appended a frame"
+                            );
                         } else {
                             let result = result
                                 .unwrap_or_else(|error| panic!("{name} step {index}: {error:?}"));
-                            compare_actions(&result, expected, name, index);
-                            assert_eq!(
-                                result.commit_sequence - 1 - provision_frames,
-                                expected["sequence"].as_u64().unwrap(),
-                                "{name} step {index} sequence"
+                            managed_evidence.extend(
+                                request
+                                    .items
+                                    .iter()
+                                    .flat_map(|item| &item.evidence)
+                                    .map(|evidence| evidence_record_id(&evidence.id)),
                             );
+                            compare_actions(&result, expected, name, index);
                             assert_eq!(
                                 result.commit_sequence, result.receipt_revision,
                                 "{name} step {index} receipt revision"
                             );
+                            if !result.replayed {
+                                logical_sequence += 1;
+                                assert_eq!(
+                                    result.commit_sequence - sequence_offset,
+                                    logical_sequence,
+                                    "{name} step {index} sequence"
+                                );
+                                receipt_sequences
+                                    .insert(receipt_identity.clone(), logical_sequence);
+                                receipt_revisions
+                                    .insert(receipt_identity.clone(), result.commit_sequence);
+                            }
+                            assert_eq!(
+                                receipt_sequences.get(&receipt_identity).copied(),
+                                expected["sequence"].as_u64(),
+                                "{name} step {index} original logical sequence"
+                            );
+                            assert_eq!(
+                                receipt_revisions.get(&receipt_identity).copied(),
+                                Some(result.commit_sequence),
+                                "{name} step {index} original receipt revision"
+                            );
                         }
                     }
-                    "get" => compare_fixture_get(&db, step, name),
-                    "state" => compare_fixture_state(&db, &step["expect"], name),
+                    "forget" => {
+                        let request =
+                            fixture_forget_request(&step["request"], &step["clock"], clock_offset);
+                        let receipt_identity =
+                            format!("forget:{}:{}", request.scope.key(), request.idempotency_key);
+                        let before = db.sequence;
+                        let result = MemoryMut::bind(&mut db, "memory", Some("default"))
+                            .unwrap()
+                            .forget(&request);
+                        let expected = &step["expect"];
+                        if let Some(expected_error) = expected.get("error").and_then(Value::as_str)
+                        {
+                            let error = match result {
+                                Err(error) => error,
+                                Ok(actual) => panic!(
+                                    "{name} step {index}: expected {expected_error}, got {actual:?}"
+                                ),
+                            };
+                            assert_eq!(
+                                fixture_error_name(&error),
+                                expected_error,
+                                "{name} step {index}: {error:?}"
+                            );
+                            assert_eq!(
+                                db.sequence, before,
+                                "{name} step {index} rejected forget appended a frame"
+                            );
+                        } else {
+                            let result = result
+                                .unwrap_or_else(|error| panic!("{name} step {index}: {error:?}"));
+                            managed_evidence.retain(|record| db.get(*record).unwrap().is_some());
+                            let mut deleted = result.deleted.clone();
+                            deleted.sort();
+                            assert_eq!(json!(deleted), expected["deleted"], "{name} step {index}");
+                            assert_eq!(
+                                result.commit_sequence, result.receipt_revision,
+                                "{name} step {index} receipt revision"
+                            );
+                            if !result.replayed {
+                                logical_sequence += 1;
+                                assert_eq!(
+                                    result.commit_sequence - sequence_offset,
+                                    logical_sequence,
+                                    "{name} step {index} sequence"
+                                );
+                                receipt_sequences
+                                    .insert(receipt_identity.clone(), logical_sequence);
+                                receipt_revisions
+                                    .insert(receipt_identity.clone(), result.commit_sequence);
+                            }
+                            assert_eq!(
+                                receipt_sequences.get(&receipt_identity).copied(),
+                                expected["sequence"].as_u64(),
+                                "{name} step {index} original logical sequence"
+                            );
+                            assert_eq!(
+                                receipt_revisions.get(&receipt_identity).copied(),
+                                Some(result.commit_sequence),
+                                "{name} step {index} original receipt revision"
+                            );
+                        }
+                    }
+                    "visible" => compare_fixture_visible(
+                        &db,
+                        step,
+                        name,
+                        &evidence_ids,
+                        &fixture_edges,
+                        clock_offset,
+                    ),
+                    "get" => compare_fixture_get(&db, step, name, clock_offset),
+                    "state" => compare_fixture_state(
+                        &db,
+                        &step["expect"],
+                        name,
+                        &evidence_ids,
+                        &managed_evidence,
+                        &fixture_edges,
+                        logical_sequence,
+                    ),
+                    "edge" => {
+                        let nodes = find_label_at(&db, LABEL_MEMORY, current_clock);
+                        let endpoint = |field: &str| {
+                            nodes
+                                .iter()
+                                .find(|node| string_property(node, "id").unwrap() == step[field])
+                                .map(|node| node.key.clone())
+                                .unwrap_or_else(|| {
+                                    panic!("{name} step {index}: missing {field} memory")
+                                })
+                        };
+                        let key = step["id"].as_str().unwrap().to_owned();
+                        let source = endpoint("from");
+                        let destination = endpoint("to");
+                        let before = db.sequence;
+                        db.graph_mut("memory")
+                            .unwrap()
+                            .write_batch_at(
+                                &[GraphOp::CreateEdge {
+                                    key: Some(key.clone()),
+                                    source: source.clone(),
+                                    relationship: "FIXTURE_EDGE".into(),
+                                    destination: destination.clone(),
+                                    properties: Metadata::new(),
+                                }],
+                                current_clock,
+                            )
+                            .unwrap();
+                        sequence_offset += db.sequence - before;
+                        fixture_edges.insert(
+                            key.clone(),
+                            (
+                                step["from"].as_str().unwrap().into(),
+                                step["to"].as_str().unwrap().into(),
+                            ),
+                        );
+                        assert_eq!(step["expect"]["edge"], key);
+                    }
+                    "attach" => {
+                        let evidence = step["evidence"].as_str().unwrap();
+                        let record = evidence_record_id(evidence);
+                        let owner = find_label_at(&db, LABEL_MEMORY, current_clock)
+                            .into_iter()
+                            .find(|node| {
+                                decode_evidence(
+                                    string_property(node, "evidence").unwrap_or_default(),
+                                )
+                                .is_ok_and(|ids| ids.iter().any(|id| id == evidence))
+                            })
+                            .unwrap_or_else(|| {
+                                panic!("{name} step {index}: evidence memory owner not found")
+                            });
+                        let outside = format!("fixture-outside:{evidence}");
+                        let before = db.sequence;
+                        db.graph_mut("memory")
+                            .unwrap()
+                            .write_batch_at(
+                                &[
+                                    GraphOp::Detach {
+                                        node: owner.key,
+                                        collection: "default".into(),
+                                    },
+                                    GraphOp::CreateNode {
+                                        key: outside.clone(),
+                                        labels: vec!["FixtureOutsideMemory".into()],
+                                        properties: Metadata::new(),
+                                    },
+                                    GraphOp::Attach {
+                                        node: outside,
+                                        collection: "default".into(),
+                                        record,
+                                    },
+                                ],
+                                current_clock,
+                            )
+                            .unwrap();
+                        sequence_offset += db.sequence - before;
+                        assert_eq!(step["expect"]["attached"], evidence);
+                    }
                     unexpected => panic!("{name}: unclassified oracle operation {unexpected}"),
                 }
             }
