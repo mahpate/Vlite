@@ -909,6 +909,10 @@ normal resident open, for plaintext and encrypted images. They cover point
 observations, raw bytes and clock independence, representative method-level
 refusals with unchanged bytes/sequence, mixed resident writes, gate-off
 refusal, enum lifetime and a snapshot fixture outliving its Database.
+The mixed fixture also preserves resident geo-validation error precedence
+on a poisoned handle; compact refusal does not reorder that resident path.
+Internal mutable-handle acquisition by ID also refuses compact records,
+including the server and default-collection ANN delegates.
 These fixtures are not evidence of loader installation or complete public
 method coverage. Slice 1b must add the exhaustive A-D public-method matrix,
 owned-source installation only after full image validation, late-image
