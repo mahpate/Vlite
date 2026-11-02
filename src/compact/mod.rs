@@ -1699,10 +1699,11 @@ impl<'a> Envelope<'a> {
         let mut sections = Vec::with_capacity(count);
         #[cfg(test)]
         let mut section_starts = [0; MAX_SECTIONS];
-        for index in 0..count {
-            let entry = HEADER_LEN + 8 * index;
-            let start = u32_at(body, entry) as usize;
-            let length = u32_at(body, entry + 4) as usize;
+        let table_end = end;
+        let entries = body[HEADER_LEN..table_end].as_chunks::<8>().0;
+        for (index, entry) in entries.iter().enumerate() {
+            let start = u32_at(entry, 0) as usize;
+            let length = u32_at(entry, 4) as usize;
             let stop = start
                 .checked_add(length)
                 .filter(|&stop| start >= end && stop <= body.len())

@@ -158,16 +158,26 @@ pub(crate) fn encode(
     Ok(bytes)
 }
 
-fn check_columns_inner<'a>(
+struct CheckOptions {
     owner: u16,
     id: u64,
     count: u32,
-    body: &'a [u8],
     layout: vectors::Layout,
     floor: u64,
     offset: u64,
     retain_source: bool,
-) -> Result<Columns<'a>> {
+}
+
+fn check_columns_inner<'a>(body: &'a [u8], options: CheckOptions) -> Result<Columns<'a>> {
+    let CheckOptions {
+        owner,
+        id,
+        count,
+        layout,
+        floor,
+        offset,
+        retain_source,
+    } = options;
     let invalid = || corrupt(offset, "invalid complete records block");
     if !(MIN_BODY..=MAX_BODY).contains(&body.len()) || id as u16 != KIND {
         return Err(invalid());
@@ -270,7 +280,18 @@ pub(crate) fn check_columns<'a>(
     floor: u64,
     offset: u64,
 ) -> Result<Columns<'a>> {
-    let columns = check_columns_inner(owner, id, count, body, layout, floor, offset, false)?;
+    let columns = check_columns_inner(
+        body,
+        CheckOptions {
+            owner,
+            id,
+            count,
+            layout,
+            floor,
+            offset,
+            retain_source: false,
+        },
+    )?;
     let invalid = || corrupt(offset, "invalid complete records block");
     for row in 0..columns.len() {
         crate::metadata::decode(columns.metadata(row)).map_err(|_| invalid())?;
@@ -287,7 +308,18 @@ pub(crate) fn check(
     floor: u64,
     offset: u64,
 ) -> Result<Vec<Entry>> {
-    let columns = check_columns_inner(owner, id, count, body, layout, floor, offset, false)?;
+    let columns = check_columns_inner(
+        body,
+        CheckOptions {
+            owner,
+            id,
+            count,
+            layout,
+            floor,
+            offset,
+            retain_source: false,
+        },
+    )?;
     entries(&columns, offset)
 }
 
@@ -300,7 +332,18 @@ pub(crate) fn check_with_source(
     floor: u64,
     offset: u64,
 ) -> Result<(Vec<Entry>, SourceBlock)> {
-    let columns = check_columns_inner(owner, id, count, body, layout, floor, offset, true)?;
+    let columns = check_columns_inner(
+        body,
+        CheckOptions {
+            owner,
+            id,
+            count,
+            layout,
+            floor,
+            offset,
+            retain_source: true,
+        },
+    )?;
     let entries = entries(&columns, offset)?;
     let source = columns
         .into_source()
