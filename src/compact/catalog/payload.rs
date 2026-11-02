@@ -4,6 +4,7 @@
 use super::super::{CRITICAL, Envelope, MIN_BODY, envelope, vectors};
 use crate::format::{self, corrupt, u32_at};
 use crate::{Error, MAX_METADATA_BYTES, MAX_PAYLOAD_BYTES, Record, Result};
+use std::ops::Range;
 
 pub(crate) const KIND: u16 = 0x0101;
 pub(crate) const TARGET: usize = 1 << 20;
@@ -50,6 +51,25 @@ pub(crate) struct Columns<'a> {
     payload_offsets: &'a [u8],
     metadata: &'a [u8],
     metadata_offsets: &'a [u8],
+    source: Option<SourceBlock>,
+}
+
+#[derive(Clone)]
+pub(crate) struct SourceRow {
+    pub id: u64,
+    pub revision: u64,
+    pub expiry: Option<u64>,
+    pub vector: Range<usize>,
+    pub payload: Range<usize>,
+    pub metadata: Range<usize>,
+}
+
+#[derive(Clone)]
+pub(crate) struct SourceBlock {
+    pub collection: u16,
+    pub frame_id: u64,
+    pub layout: vectors::Layout,
+    pub rows: Vec<SourceRow>,
 }
 
 impl Columns<'_> {
@@ -85,6 +105,10 @@ impl Columns<'_> {
     /// Requires `row < self.len()`.
     pub(crate) fn vector(&self, row: usize) -> impl Iterator<Item = f32> + '_ {
         self.rows.vector(row)
+    }
+
+    pub(crate) fn into_source(self) -> Option<SourceBlock> {
+        self.source
     }
 
     fn part(&self, offsets: &[u8], row: usize) -> std::ops::Range<usize> {
@@ -142,6 +166,7 @@ fn check_columns_inner<'a>(
     layout: vectors::Layout,
     floor: u64,
     offset: u64,
+    retain_source: bool,
 ) -> Result<Columns<'a>> {
     let invalid = || corrupt(offset, "invalid complete records block");
     if !(MIN_BODY..=MAX_BODY).contains(&body.len()) || id as u16 != KIND {
@@ -199,12 +224,40 @@ fn check_columns_inner<'a>(
     {
         return Err(invalid());
     }
+    let source = retain_source.then(|| {
+        let payload_data_start = block.section_starts[3] as usize;
+        let metadata_data_start = block.section_starts[5] as usize;
+        let vector_data_start = block.section_starts[1] as usize + rows.component_start();
+        let source_rows = (0..rows.len())
+            .map(|row| {
+                let at = 4 * row;
+                let vector = rows.component_range(row);
+                SourceRow {
+                    id: rows.id(row),
+                    revision: rows.revision(row),
+                    expiry: rows.expiry(row),
+                    vector: vector_data_start + vector.start..vector_data_start + vector.end,
+                    payload: payload_data_start + u32_at(po, at) as usize
+                        ..payload_data_start + u32_at(po, at + 4) as usize,
+                    metadata: metadata_data_start + u32_at(mo, at) as usize
+                        ..metadata_data_start + u32_at(mo, at + 4) as usize,
+                }
+            })
+            .collect();
+        SourceBlock {
+            collection: owner,
+            frame_id: id,
+            layout: rows.layout(),
+            rows: source_rows,
+        }
+    });
     Ok(Columns {
         rows,
         payloads,
         payload_offsets: po,
         metadata,
         metadata_offsets: mo,
+        source,
     })
 }
 
@@ -217,7 +270,7 @@ pub(crate) fn check_columns<'a>(
     floor: u64,
     offset: u64,
 ) -> Result<Columns<'a>> {
-    let columns = check_columns_inner(owner, id, count, body, layout, floor, offset)?;
+    let columns = check_columns_inner(owner, id, count, body, layout, floor, offset, false)?;
     let invalid = || corrupt(offset, "invalid complete records block");
     for row in 0..columns.len() {
         crate::metadata::decode(columns.metadata(row)).map_err(|_| invalid())?;
@@ -234,8 +287,29 @@ pub(crate) fn check(
     floor: u64,
     offset: u64,
 ) -> Result<Vec<Entry>> {
-    let columns = check_columns_inner(owner, id, count, body, layout, floor, offset)?;
-    (0..columns.len())
+    let columns = check_columns_inner(owner, id, count, body, layout, floor, offset, false)?;
+    entries(&columns, offset)
+}
+
+pub(crate) fn check_with_source(
+    owner: u16,
+    id: u64,
+    count: u32,
+    body: &[u8],
+    layout: vectors::Layout,
+    floor: u64,
+    offset: u64,
+) -> Result<(Vec<Entry>, SourceBlock)> {
+    let columns = check_columns_inner(owner, id, count, body, layout, floor, offset, true)?;
+    let entries = entries(&columns, offset)?;
+    let source = columns
+        .into_source()
+        .expect("source descriptors were requested");
+    Ok((entries, source))
+}
+
+fn entries(columns: &Columns<'_>, offset: u64) -> Result<Vec<Entry>> {
+    let entries = (0..columns.len())
         .map(|row| {
             let metadata = crate::metadata::decode(columns.metadata(row))
                 .map_err(|_| corrupt(offset, "invalid complete records block"))?;
@@ -250,5 +324,6 @@ pub(crate) fn check(
                 },
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    Ok(entries)
 }

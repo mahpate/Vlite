@@ -67,6 +67,28 @@ fn key() -> EncryptionKey {
     EncryptionKey::from_bytes([5; 32])
 }
 
+pub(crate) fn source_key() -> EncryptionKey {
+    key()
+}
+
+pub(crate) fn source_view_fixture(key: Option<&EncryptionKey>) -> (Vec<u8>, Loaded) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("source-view");
+    let mut db = create_store(Backing::Memory, &path, key);
+    payload::populate(&mut db);
+    let before = payload::snapshot(&mut db, key);
+    let image = image_of(&before);
+    let resident = load(&image, key).unwrap();
+    (image, resident)
+}
+
+pub(crate) fn source_empty_fixture(key: Option<&EncryptionKey>) -> (Vec<u8>, Loaded) {
+    let before = initial(key);
+    let image = image_of(&before);
+    let resident = load(&image, key).unwrap();
+    (image, resident)
+}
+
 fn spec(dimensions: usize) -> CollectionSpec {
     CollectionSpec {
         dimensions,

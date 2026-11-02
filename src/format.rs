@@ -456,6 +456,8 @@ pub(crate) struct Loaded {
     /// Derived blocks of a `FLAG_COMPACT` image that this build skipped,
     /// bounded to the report's groups.
     pub compact_skipped: crate::compact::Skips,
+    #[cfg(test)]
+    pub compact_generation: Option<std::sync::Arc<crate::compact::source::CompactGeneration>>,
 }
 
 impl Loaded {
@@ -1871,6 +1873,8 @@ fn load_inner<R: Read + Seek>(
         graph: (flags & FLAG_GRAPH != 0).then(crate::property_graph::engine::GraphState::new),
         history_floor: 0,
         compact_skipped: Default::default(),
+        #[cfg(test)]
+        compact_generation: None,
     };
     // Gap 4: a temporal file's graph state accepts temporal entries.
     if let Some(state) = loaded.graph.as_mut() {
@@ -1899,6 +1903,10 @@ fn load_inner<R: Read + Seek>(
     let mut revisions: Vec<Revisions> = Vec::new();
     let precise = flags & FLAG_PRECISION != 0;
     let mut check = crate::compact::ImageCheck::new(version, flags, dimensions, collection_floor);
+    #[cfg(test)]
+    let mut compact_source = crate::compact::source::Capture::default();
+    #[cfg(test)]
+    let compact_image = check.is_some();
     let mut disk = Vec::new();
     loop {
         let anchor_len = anchor.map_or(0, |(_, len)| len);
@@ -2320,6 +2328,12 @@ fn load_inner<R: Read + Seek>(
                     .as_mut()
                     .expect("op 16 is only allowed with FLAG_COMPACT")
                     .block(collection_id, id, count as u32, body, offset)?;
+                #[cfg(test)]
+                if crate::compact::source::enabled()
+                    && let Some(crate::compact::Supplement::Records { source, .. }) = &supplement
+                {
+                    compact_source.push(source.clone(), &disk, sequence, offset)?;
+                }
                 if let Some(supplement) = supplement {
                     // P3a: complete-record installation also checks prior source coverage.
                     apply_supplement(
@@ -2359,6 +2373,10 @@ fn load_inner<R: Read + Seek>(
     if let Some(check) = check {
         check.end(loaded.end)?;
         loaded.compact_skipped = check.into_skips();
+    }
+    #[cfg(test)]
+    if compact_image && crate::compact::source::enabled() {
+        loaded.compact_generation = Some(compact_source.finish(loaded.cipher.clone())?);
     }
     if let Some(run) = blocks {
         run.apply(&mut loaded, cipher.as_ref())?;
@@ -2425,6 +2443,7 @@ fn apply_supplement(
         Supplement::Records {
             collection,
             entries,
+            source: _,
         } => {
             let target = collection_mut(loaded, collection);
             if entries.first().is_some_and(|entry| {

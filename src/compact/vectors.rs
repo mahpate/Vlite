@@ -173,6 +173,8 @@ pub(crate) struct Rows<'a> {
     expiring: &'a [u8],
     deadlines: &'a [u8],
     components: &'a [u8],
+    #[cfg(test)]
+    component_start: usize,
 }
 
 impl<'a> Rows<'a> {
@@ -194,6 +196,21 @@ impl<'a> Rows<'a> {
             .binary_search_by_key(&row, |number| u32::from_le_bytes(*number) as usize)
             .ok()?;
         Some(u64_at(self.deadlines, 8 * index))
+    }
+
+    pub(crate) fn component_range(&self, row: usize) -> std::ops::Range<usize> {
+        let width = self.layout.precision.width();
+        let start = row * self.layout.dimensions * width;
+        start..start + self.layout.dimensions * width
+    }
+
+    pub(crate) fn layout(&self) -> Layout {
+        self.layout
+    }
+
+    #[cfg(test)]
+    pub(crate) fn component_start(&self) -> usize {
+        self.component_start
     }
 
     /// The stored components of `row`, as float32.
@@ -327,6 +344,8 @@ pub(crate) fn check<'a>(
         expiring,
         deadlines,
         components,
+        #[cfg(test)]
+        component_start: block.section_starts[5] as usize,
     })
 }
 

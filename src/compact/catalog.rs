@@ -233,10 +233,10 @@ pub(crate) fn revision_frames(
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 
 #[cfg(test)]
 pub(crate) mod payload;
 
 #[cfg(test)]
-mod column;
+pub(super) mod column;

@@ -38,6 +38,9 @@ pub(crate) mod graph;
 /// P3a canonical float16 conversion, shared by the dense rows codec and
 /// the replay check of float16 collections.
 pub(crate) mod half;
+/// P3b's authenticated, pinned point-read source; it remains test-only.
+#[cfg(test)]
+pub(crate) mod source;
 /// P5 filter summaries: per-block typed summaries, visibility bitmaps and
 /// conservative pruning of exact filtered scans, and the derived summary
 /// block codec (kind 0x0400, test-only until shared writer wiring).
@@ -544,6 +547,7 @@ pub(crate) enum Supplement {
     Records {
         collection: u16,
         entries: Vec<catalog::payload::Entry>,
+        source: catalog::payload::SourceBlock,
     },
     Catalog(Vec<catalog::Entry>),
     Imports(Box<crate::import::Registry>),
@@ -1231,7 +1235,7 @@ impl ImageCheck {
                     .precision
                     .ok_or_else(|| corrupt(offset, "missing precision"))?,
             };
-            let entries = catalog::payload::check(
+            let (entries, source) = catalog::payload::check_with_source(
                 collection,
                 id,
                 count,
@@ -1256,6 +1260,7 @@ impl ImageCheck {
             return Ok(Some(Supplement::Records {
                 collection,
                 entries,
+                source,
             }));
         }
         #[cfg(test)]
@@ -1658,6 +1663,8 @@ struct Envelope<'a> {
     version: u16,
     flags: u16,
     sections: Vec<&'a [u8]>,
+    #[cfg(test)]
+    section_starts: [u32; MAX_SECTIONS],
 }
 
 impl<'a> Envelope<'a> {
@@ -1690,6 +1697,8 @@ impl<'a> Envelope<'a> {
             return Err(invalid());
         }
         let mut sections = Vec::with_capacity(count);
+        #[cfg(test)]
+        let mut section_starts = [0; MAX_SECTIONS];
         for index in 0..count {
             let entry = HEADER_LEN + 8 * index;
             let start = u32_at(body, entry) as usize;
@@ -1705,6 +1714,10 @@ impl<'a> Envelope<'a> {
                 return Err(invalid());
             }
             sections.push(&body[start..stop]);
+            #[cfg(test)]
+            {
+                section_starts[index] = start as u32;
+            }
             end = stop;
         }
         if end != body.len() {
@@ -1714,6 +1727,8 @@ impl<'a> Envelope<'a> {
             version,
             flags,
             sections,
+            #[cfg(test)]
+            section_starts,
         })
     }
 }
