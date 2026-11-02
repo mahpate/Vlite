@@ -13,6 +13,7 @@ pub(crate) mod framing;
 mod import;
 mod overlay;
 mod read;
+mod view;
 
 use crate::property_graph::engine::codec::TemporalEntry;
 use crate::property_graph::engine::limits::{
@@ -90,7 +91,7 @@ struct Csr {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct CompactGraph {
+pub(crate) struct CompactGraph {
     source: GraphSource,
     labels: Vec<String>,
     relationships: Vec<String>,
