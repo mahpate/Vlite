@@ -426,10 +426,9 @@ field, so clients also verify the echoed set. Polling, streaming and webhooks
 share the decoder, filter and cursor rules in that proposal. The dispatcher
 persists progress per feature set; the legacy `webhooks.cursor` path and format
 (`src/server/webhooks.rs:42,81-87,405-450`) stay for the empty set.
-`FeedCursor` in `src/changes.rs` owns both `vlc1` for the empty set and `vlc2`,
-the single non-default feed token, for any non-empty set. The TTL slice lands
-`vlc2` once; temporal consumes it. It binds lineage, sequence, ordinal and the
-set; a cursor of another set is 409 `cursor_mode_mismatch` (decision (g)).
+The Rust cursor for the opt-in TTL feed is the additive `GraphFeedCursor`
+(which reads and writes v1 and v2 tokens); the legacy `FeedCursor` and its v1
+token remain unchanged.
 The former boolean feed proposal is **Withdrawn**: one shared set replaces it
 under wire conventions decision 8. Cursor strings stay opaque, and there is
 no silent restart from the beginning. Feed authorization is unchanged [AUTH].
@@ -1014,7 +1013,7 @@ them.
 | `gap2-rust-lease-ledger` (decisions (a)-(c); the P2 converter, `next-major.md:237-238`) | `src/kv.rs`, a new ledger module, `src/lib.rs` hooks, a `src/format.rs` section and capability flag, `src/maintenance.rs`, `src/logops.rs`, `src/directory.rs`, `src/replica.rs` | §11 durability, crash and maintenance rows; an older reader refuses the file; LEASE-001/002 |
 | `gap2-kv-serving` (none: get, put, delete and list exist [K2]) | `src/server.rs`, a new server KV adapter, `src/server/grpc.rs`, credential, tenant, audit and quota hooks, `src/bin/vlite-mcp.rs`, `src/bin/tool_support/graph_proxy.rs`, `src/bin/vlite-shell.rs`, the Python, JavaScript and .NET clients | KV oracle, wire goldens, CAS races, bounds, pagination, auth and parity; `vlite.v1.Kv` health, both caps and named descriptor entries with unique RPC short names (§7); KV-001/002, AUTH-001, SHIP-001 |
 | `gap2-lease-serving` (`gap2-kv-serving`, `gap2-rust-lease-ledger`) | the lease routes, RPCs, tools, CLI commands and client methods of §4, §7 and §9 | lease oracle, downstream-token model, crash and restore, quota and rate cases; LEASE-001/002, AUTH-001, SHIP-001 |
-| `gap3-rust-feed` (none) | `src/changes.rs` (`vlc2`, ordinals), `src/property_graph/feed.rs` (tracker for deadlines, endpoint IDs, attachments, expiry and reclaim replay) | replay oracle, default-feed byte goldens, chunk and cursor boundaries, maintenance and restart; FEED-001. [Rust TTL feed](gap3-ttl-feed.md): design candidate pending review. |
+| `gap3-rust-feed` (none) | `src/changes.rs` (`vlc2`, ordinals), `src/property_graph/feed.rs` (tracker for deadlines, endpoint IDs, attachments, expiry and reclaim replay) | replay oracle, default-feed byte goldens, chunk and cursor boundaries, maintenance and restart; FEED-001. [Rust TTL feed](gap3-ttl-feed.md): design accepted 2026-11-02. |
 | `gap3-feed-events` (`gap3-rust-feed`) | `src/server/features.rs`, `src/server/grpc.rs`, `src/server/webhooks.rs` (progress per feature set), feed authorization, feed encoders such as `bindings/c/src/features.rs` | server feed goldens, per-set webhook progress, feature-set echo, named descriptor additions for fields 3/4/5, 19-22 and both enums, `cursor_mode_mismatch`, filter parity; FEED-001, AUTH-001, SHIP-001 |
 | `gap3-ttl-serving` (`gap3-feed-events` and the Gap 12 `Graph` schema: the feed skips TTL entries today [F2], so TTL writes are not served before it can replay them) | `src/server/graph.rs`, `src/bin/tool_support/graph_json.rs`, `graph_mcp.rs`, `src/bin/vlite-graph-cli.rs`, the C ABI op parser, gRPC `Graph` additions and tag-400 arm, the clients and bindings | clock-boundary oracle, all projections, mixed create and TTL atomicity through `WriteGraphBatch`, wrapper parity, named tag-400 descriptor entry, missing and due preconditions, attachment invariant, >4096 cascade, auth, parity and client goldens; TTL-001/002, ATTACH-001, AUTH-001, SHIP-001 |
 
