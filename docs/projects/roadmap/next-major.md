@@ -303,7 +303,10 @@ accepted and integrated, with no production caller. This decoded
   `vlite-cypher-1` dialect, bounded atomic writes and unchanged legacy queries.
   Exact public APIs, new errors and serving remain separately gated. The
   [GraphRAG ingestion](gap7-graphrag-ingestion.md) design is source-reviewed
-  and awaits owner decisions. Neither design is implemented or active.
+  with thirteen embedded-design choices approved individually on 2026-11-02:
+  atomic default, explicit incremental progress, deterministic local extraction
+  and protected receipts. External extraction, purge mechanics and exact serving
+  remain gated. Neither design is implemented or active.
 
 ## Rules for every item
 

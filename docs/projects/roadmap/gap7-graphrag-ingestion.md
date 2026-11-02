@@ -1,10 +1,12 @@
 # Gap 7: GraphRAG ingestion
 
-Status: design for owner approval; nothing in this document is implemented.
+Status: embedded design choices approved individually on 2026-11-02;
+nothing in this document is implemented or qualified.
 This document is conformed to the [serving wire conventions proposal](serving-wire-conventions.md), whose owner decisions remain open.
 Scope: one source document becomes embedded chunks, resolved entities, directed
-relations and evidence in a graph-enabled database. All proposed defaults, Rust
-types, reserved schema and delivery boundaries require approval before code.
+relations and evidence in a graph-enabled database. Section 10 records the
+approved model, limits and delivery boundaries. External extraction, purge
+mechanics and exact serving surfaces retain their separate approval gates.
 Current facts below were verified in this checkout; older design citations are
 not substitutes for current code. No serving wire is approved by this document.
 
@@ -535,7 +537,7 @@ Include tenant/binding in every canonical key and resume token; reject foreign
 references before lookup to avoid existence probing. Embedded callers control the
 file and trusted configuration; tenant tags are not a hostile-file-access sandbox.
 
-Propose rejecting raw writes to reserved `G7*` objects, including creation,
+The owner approved rejecting raw writes to reserved `G7*` objects, including creation,
 modification and removal of receipts, shards and anchors, per option A of
 [wire conventions, decision 14](serving-wire-conventions.md#6-owner-decisions-23).
 Apply the rejection before mutation across raw graph/vector adapters and Gap 1
@@ -635,7 +637,12 @@ receipt design is prior art for the receipt pattern, not a callable memory core:
 
 ## 10. Owner decisions and open items
 
-| Decision | Options | Recommendation / gate |
+The owner approved all thirteen recommendations below individually on
+2026-11-02. Approval authorizes the embedded design under its stated
+dependencies, not implementation acceptance, public serving, provider egress,
+receipt-purge code or release. No current data or permissions were changed.
+
+| Decision | Options | Owner-approved choice / remaining gate |
 |---|---|---|
 | Commit unit | Reject oversized documents; explicit visible incremental mode; new staged-publication storage/read protocol | Default single-frame atomicity, opt-in visible incremental mode as specified; no hidden activation claim |
 | Identity/merge | Exact ASCII normalization; Unicode normalization; semantic merge | `ascii-key-v1`, immutable shared anchors and source-local assertions; later normalization requires new pipeline version |
@@ -644,7 +651,7 @@ receipt design is prior art for the receipt pattern, not a callable memory core:
 | Replacement/history | Delete old content; retain versions; temporal integration | Delete old source-owned text/evidence, retain shared anchors and compact receipts; history is separate scope |
 | Retention | Implicit TTL/eviction; explicit delete and receipt purge; Gap 1-style expiry window | Explicit guarded deletion; receipts, result shards and tombstones kept until explicit purge, no growth bound claimed; purge mechanics, size accounting and any retention window are decided before any purge code and reconciled with Gap 1 (receipt expiry only by explicit policy) and Gap 4; acknowledge log/backup erasure limits |
 | Error API | `InvalidQuery` static reasons; new typed ingestion/provider errors | `InvalidQuery` reasons first (section 6); a typed ingestion error or **any new public `Error` variant requires separate explicit approval** and a `site/api.html` row |
-| Reserved objects and raw writers | Reject raw writes to `G7*`; allow an explicit `raw_access` grant; accept forgeable receipts | Propose option A: reject raw writes to reserved `G7*` objects before mutation, as specified in section 7; retain stored-identity validation. Wire conventions, decision 14 (proposed). |
+| Reserved objects and raw writers | Reject raw writes to `G7*`; allow an explicit `raw_access` grant; accept forgeable receipts | Approved option A: reject raw writes to reserved `G7*` objects before mutation, as specified in section 7; retain stored-identity validation and no `raw_access` bypass. This selects the Gap 7 policy in wire conventions, decision 14; that note's other decisions remain separate. |
 | Serving | Reuse raw graph batch wire; new ingestion wire; embedded only | Embedded first; exact transport schemas, endpoints/RPC tags, resume payloads and errors need separate approval before `gap7-serving` |
 | Prepared-plan custody | Caller retains bundle; encrypted durable job spool | Caller-retained bounded bundle initially; losing it blocks resume, and recovery is abort from the ownership shards (ING-012) then re-ingest, never new inference |
 | Record-ID allocation | Planner-chosen candidate IDs absence-checked per frame; engine allocator; derived IDs | Planner-chosen IDs frozen in the plan and required absent under every frame's exclusive borrow (`ingestion record id conflict`); an engine allocator or derived IDs need separate approval (C16) |
@@ -656,6 +663,8 @@ independent frame-size reference review; how public transports carry a bounded
 prepared bundle without exceeding their approved request caps; receipt purge
 mechanics and size accounting, retention versus Gap 1 and Gap 4, and physical
 erasure runbooks.
-These are delivery gates, not permission to guess a wire, relax isolation or add
-a background service. No code, API, dependency or format change accompanies this
-design proposal.
+These remain delivery gates despite the design approvals, not permission to
+guess a wire, relax isolation, claim bounded receipt growth or add a background
+service. Any durable spool, semantic merge, allocator or resumable re-key
+alternative requires a separate proposal. No code, API, dependency or format
+change accompanies this decision record.
