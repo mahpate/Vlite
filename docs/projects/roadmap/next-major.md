@@ -228,13 +228,21 @@ Local numbers below show direction only (see rules).
   [binary search results](serving-binary-results-contract.md) contract
   specifies an opt-in HTTP protobuf representation with its negotiation,
   bounds and independent oracle plan; it is a reviewed specification, not an
-  implemented capability.
+  implemented capability. The
+  [graph algorithm serving](serving-graph-algorithms-contract.md) contract
+  proposes five named read operations over the local Gap 5 algorithms with
+  their limits and error mapping; it is a reviewed specification awaiting
+  owner decisions, not an implemented capability.
 - **Further design proposals:** [agent memory](gap1-agent-memory.md) defines
   the embedded operations and their prerequisites; [scale-out](scale-out.md)
   compares branching, object storage and replication. Both received source
   and first-party-reference review. Neither is an implemented capability;
   the scale-out order 11 → 10 → 9 was decided 2026-11-02; the track is
-  backlogged until the owner revisits it.
+  backlogged until the owner revisits it. The
+  [Cypher-style subset](gap6-cypher-subset.md) and
+  [GraphRAG ingestion](gap7-graphrag-ingestion.md) designs are source-reviewed
+  proposals for owner approval; their names, limits and wire changes are not
+  approved and nothing in them is implemented.
 
 ## Rules for every item
 
