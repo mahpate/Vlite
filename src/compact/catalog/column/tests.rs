@@ -268,6 +268,203 @@ fn cache_shape() {
 }
 
 #[test]
+fn cache_retry_after_shape_rejection() {
+    let first = dense_body(Precision::Float32, &[1, 2]);
+    let dense = check_dense(0x0100, &first, layout(Precision::Float32)).unwrap();
+    let (body, _) = record_body(Precision::Float32);
+    let other = check_record(&body, layout(Precision::Float32)).unwrap();
+    let mut cache = ScratchCache::new(1024);
+    let original = bits(dense.vector(&mut cache, 1, 0).unwrap());
+    let pointer = cache.entries[&1].values.as_ptr();
+    let clock = cache.clock;
+    assert_query(
+        other.vector(&mut cache, 1, 0),
+        "compact cache key has incompatible shape",
+    );
+    assert_eq!(cache.clock, clock);
+    assert_eq!(bits(dense.vector(&mut cache, 1, 0).unwrap()), original);
+    assert_eq!(
+        cache.entries[&1].values.as_ptr(),
+        pointer,
+        "original cache entry"
+    );
+    assert_eq!(cache.clock, clock + 1, "one successful hit");
+    assert_eq!(cache.entries[&1].last_used, clock + 1);
+}
+
+#[test]
+fn cache_shape_precedes_budget() {
+    let first = dense_body(Precision::Float32, &[1, 2]);
+    let dense = check_dense(0x0100, &first, layout(Precision::Float32)).unwrap();
+    let rows: Vec<_> = (10..20)
+        .map(|id| Row {
+            id,
+            revision: 1,
+            expiry: None,
+            vector: &[9.0, 8.0, 7.0],
+        })
+        .collect();
+    let body = vectors::encode(OWNER, 0, layout(Precision::Float32), &rows, 0).unwrap();
+    let large = DenseColumn::check(
+        OWNER,
+        0x0100,
+        10,
+        &body,
+        layout(Precision::Float32),
+        FLOOR,
+        0,
+    )
+    .unwrap();
+    let mut cache = ScratchCache::new(24);
+    dense.vector(&mut cache, 1, 0).unwrap();
+    let before = cache_state(&cache);
+    assert_query(
+        large.vector(&mut cache, 1, 5),
+        "compact cache key has incompatible shape",
+    );
+    assert_eq!(cache_state(&cache), before);
+}
+
+#[test]
+fn directory_nonzero_span_boundaries() {
+    for (first_id, last_id, rows) in [(5, 5, 2), (10, 11, 5), (10, 14, 6)] {
+        match BlockDirectory::new(vec![BlockRange {
+            first_id,
+            last_id,
+            rows,
+        }]) {
+            Err(Error::Corrupt { offset, reason }) => {
+                assert_eq!(offset, 0);
+                assert_eq!(reason, "compact column row count exceeds ID span");
+            }
+            Err(error) => panic!("expected ID span corruption, got {error:?}"),
+            Ok(_) => panic!("expected ID span corruption for {first_id}..={last_id}, {rows} rows"),
+        }
+    }
+    // Checked columns cannot have more rows than their strictly ascending ID span.
+    // Exercise both constructors at the largest reachable count for each range.
+    for ids in [vec![5], vec![10, 11, 12, 13, 14]] {
+        let expected = vec![BlockRange {
+            first_id: ids[0],
+            last_id: *ids.last().unwrap(),
+            rows: ids.len(),
+        }];
+        assert_eq!(
+            BlockDirectory::new(expected.clone()).unwrap().blocks,
+            expected
+        );
+        let rows: Vec<_> = ids
+            .iter()
+            .map(|&id| Row {
+                id,
+                revision: 1,
+                expiry: None,
+                vector: &[1.0, -0.0, 2.0],
+            })
+            .collect();
+        let body = vectors::encode(OWNER, 0, layout(Precision::Float32), &rows, 0).unwrap();
+        let dense = DenseColumn::check(
+            OWNER,
+            0x0100,
+            rows.len() as u32,
+            &body,
+            layout(Precision::Float32),
+            FLOOR,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            BlockDirectory::from_dense(&[dense]).unwrap().blocks,
+            expected
+        );
+        let record = Record {
+            vector: vec![1.0, -0.0, 2.0],
+            payload: vec![],
+            metadata: Metadata::new(),
+        };
+        let complete: Vec<_> = rows.iter().map(|&row| (row, &record)).collect();
+        let body = payload::encode(OWNER, 0, layout(Precision::Float32), &complete).unwrap();
+        let column = RecordColumn::check(
+            OWNER,
+            0x0101,
+            rows.len() as u32,
+            &body,
+            layout(Precision::Float32),
+            FLOOR,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            BlockDirectory::from_records(&[column]).unwrap().blocks,
+            expected
+        );
+    }
+}
+
+#[test]
+fn record_rejects_matching_unregistered_kind() {
+    let (body, _) = record_body(Precision::Float32);
+    assert!(check_record(&body, layout(Precision::Float32)).is_ok());
+    assert!(
+        payload::check(
+            OWNER,
+            0x0101,
+            3,
+            &body,
+            layout(Precision::Float32),
+            FLOOR,
+            7
+        )
+        .is_ok()
+    );
+    let mut forged = record_rebuild(&body, &sections(&body));
+    let kind = payload::KIND + 1;
+    forged[..2].copy_from_slice(&kind.to_le_bytes());
+    let id = u64::from(kind);
+    for result in [
+        RecordColumn::check(OWNER, id, 3, &forged, layout(Precision::Float32), FLOOR, 7)
+            .map(|_| ()),
+        payload::check(OWNER, id, 3, &forged, layout(Precision::Float32), FLOOR, 7).map(|_| ()),
+    ] {
+        match result {
+            Err(Error::Corrupt { offset, reason }) => {
+                assert_eq!(offset, 7);
+                assert_eq!(reason, "invalid complete records block");
+            }
+            Err(error) => panic!("expected wrong-kind corruption, got {error:?}"),
+            Ok(_) => panic!("accepted matching but unregistered record kind"),
+        }
+    }
+}
+
+#[test]
+fn nested_dense_version_is_unsupported() {
+    let (body, _) = record_body(Precision::Float32);
+    let mut parts = sections(&body);
+    assert!(check_record(&record_rebuild(&body, &parts), layout(Precision::Float32)).is_ok());
+    parts[1][2..4].copy_from_slice(&2u16.to_le_bytes());
+    let future = record_rebuild(&body, &parts);
+    for result in [
+        check_record(&future, layout(Precision::Float32)).map(|_| ()),
+        payload::check(
+            OWNER,
+            0x0101,
+            3,
+            &future,
+            layout(Precision::Float32),
+            FLOOR,
+            7,
+        )
+        .map(|_| ()),
+    ] {
+        assert!(matches!(
+            result,
+            Err(Error::UnsupportedFeature(format::FLAG_COMPACT))
+        ));
+    }
+}
+
+#[test]
 fn cache_boundaries() {
     for precision in [Precision::Float32, Precision::Float16] {
         let body = dense_body(precision, &[1, 2]);
@@ -683,9 +880,15 @@ fn independent_oracles() {
     assert_eq!(dense.id(0), legacy_dense.id(0));
     assert_eq!(dense.revision(0), legacy_dense.revision(0));
     assert_eq!(dense.expiry(0), legacy_dense.expiry(0));
+    assert_eq!(dense.id(0), 5);
+    assert_eq!(dense.revision(0), 2);
+    assert_eq!(dense.expiry(0), Some(0));
     assert_eq!(record.id(0), legacy[0].id);
     assert_eq!(record.revision(0), legacy[0].revision);
     assert_eq!(record.expiry(0), legacy[0].expiry);
+    assert_eq!(record.id(0), 5);
+    assert_eq!(record.revision(0), 2);
+    assert_eq!(record.expiry(0), Some(0));
     assert_eq!(record.payload(0), [0xaa, 0xbb]);
     assert_eq!(record.payload(0), legacy[0].record.payload);
     assert_eq!(record.metadata(0), metadata_bytes);
