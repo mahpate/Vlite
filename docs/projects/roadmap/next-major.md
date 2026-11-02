@@ -113,12 +113,12 @@ Local numbers below show direction only (see rules).
   with named/sparse histories and graph attachments preserved in the complete
   image. Item 4's storage-owned framing/writer, capability-table and
   replay/maintenance/backup wiring is test-gated and independently accepted,
-  not production qualification. Item 5's private, unreleased conversion
-  candidate copies selected precisions to absent file/directory stores,
-  plain or same-key encrypted, preserving retained state and numeric revisions
-  but resetting lineage/history; overflow, open imports and unsupported
-  sources refuse before output. Release rejection and S1/S2/DO-005 remain
-  unchanged, pending independent acceptance. The
+  not production qualification. Item 5's private conversion is independently
+  accepted and integrated, but unreleased: it copies selected precisions to
+  absent file/directory stores, plain or same-key encrypted, preserving
+  retained state and numeric revisions but resetting lineage/history;
+  overflow, open imports and unsupported sources refuse before output.
+  Release rejection and S1/S2/DO-005 remain unchanged. The
   [API review](p3-precision-api.md) still holds public enablement pending
   complete read/write/maintenance integration. The first exact-SIMD slice
   is implemented, reviewed and integrated, but unreleased: portable and AVX2

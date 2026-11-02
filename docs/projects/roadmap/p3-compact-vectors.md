@@ -289,9 +289,11 @@ Remaining P3a work:
    accepted
    ([storage wiring](#p3a-progress-storage-owned-writer-private-unreleased));
    no production writer or capability is enabled.
-5. Explicit conversion, plus old/new format rejection: a private, unreleased
-   candidate in `maintenance::convert_precision` and
-   `src/compact/catalog/tests/convert.rs`, pending independent acceptance.
+5. Explicit conversion, plus old/new format rejection: implemented privately
+   in `maintenance::convert_precision` and
+   `src/compact/catalog/tests/convert.rs`, independently accepted and
+   integrated, but unreleased. An independent mutation that skipped rounding
+   named dense versions failed three conversion tests until restored.
    Crate tests only, behind the existing precision gate: selected collections
    convert float32 to float16 (lossy) or widen exactly, using the commit-time
    binary16 routine. Complete V5 sources are exclusively locked read-only;
