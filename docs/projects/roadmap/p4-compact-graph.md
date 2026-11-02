@@ -275,7 +275,7 @@ indexes and activation remain outside this candidate.
 
 ## Columnar-fields design addendum (private candidate)
 
-The `p4-columnar-properties` slice will introduce a separate test-only packed
+The `p4-columnar-properties` slice introduces a separate test-only packed
 fields model, not replace the accepted decoded graph/view or change VLGCSR06.
 It is unreleased, gated off with `compact::graph`, and has no format registry,
 checkpoint/WAL/query or algorithm-source wiring. The accepted algorithm
@@ -297,7 +297,7 @@ or map per entity. Node/edge key namespaces stay separate; key identity/equality
 and graph-local record ownership retain existing admission. Segment properties
 use a separate flattened property table, with indexed per-edge ranges; timeline
 metadata stays with the unchanged source. Projection returns the existing owned
-`Properties` values (All/None/Fields), with allocations explicit at the projection
+`Properties` values (All/None/Only), with allocations explicit at the projection
 boundary. It cannot replace `NodeRef`'s borrowed Properties without another owner
 decision; this slice deliberately does not attempt that replacement.
 
@@ -306,7 +306,7 @@ limits and canonical IDs, presence, widths, lengths, offsets, UTF-8, numeric bit
 and dictionary codes. All byte counts are bounded by the existing 64 MiB
 private-source cap with checked arithmetic; external counts must be bounded by
 remaining bytes before allocation. Canonical round trips and independent
-hand-authored bytes will test selection and corruption refusals. Construction
+hand-authored bytes test selection and corruption refusals. Construction
 may materialize decoded rows and encoding candidates; these are explicit
 O(input plus candidates) scratch, not hidden first-read work or peak-memory
 qualification. Reads use binary name/ID/ordinal searches and bounded rank work;
@@ -329,6 +329,85 @@ The previous matrix plus graph_storage, graph_recovery and graph_compat is
 required before independent acceptance. Native compact-index serving, schema
 enforcement, packed topology, production publication and activation remain
 separate work.
+
+### Implemented fields candidate and hidden-cost boundary
+
+This is **a private, unreleased candidate pending independent acceptance** in
+`compact/graph/columns.rs` and `columns/fields.rs`, reached only through the
+existing `cfg(test)` graph module. Each property table has sorted u64 row IDs,
+one name/header per global property name and no retained per-row `Properties`.
+Its standalone canonical test bytes are `VLCOL001`, u32 row/column counts,
+u64 IDs, then columns: u16 name length/name, u8 presence kind, u32 present
+count, u32 presence length/bytes, u8 value kind/width and u32 value length/bytes.
+All multibyte scalars are little-endian. This is not a registered disk format.
+
+Sparse presence stores `4*P` bytes of u32 ordinals. Dense presence stores
+`8*W + 4*(W+1)` bytes of bits and prefix ranks, where `W=ceil(rows/64)`;
+sparse wins ties. Value kinds are 0 indexed tagged raw values, 1 ZigZag integers,
+2 exact f64 bits, 3 booleans, 4 exact GeoPoint bits and 5 string dictionaries.
+Packed integers/codes use minimal LSB-first widths (including zero width).
+Raw blocks have `(P+1)` u32 offsets and concatenated tagged values.
+String dictionaries contain sorted unique UTF-8 bytes with u32 offsets and
+packed codes. Selection compares the complete value payload including dictionary
+headers/offsets; raw wins ties. Admission rejects nonminimal widths, padding,
+unused dictionary entries and noncanonical selections by eager reconstruction.
+Parsed raw/dictionary offsets are retained alongside canonical bytes and are
+counted separately; payload bytes are not retained twice.
+
+Keys have contiguous bytes, per-row u32 offsets and sorted present-row ordinals,
+separately for nodes and edges. Attachment rows contain ascending
+`(u16 collection,u64 record)` pairs; a sorted graph-local owner array provides
+reverse lookup. Temporal properties use a flattened table plus per-edge u32
+segment offsets. None of these structures retains an entity-owned String or map.
+Owned `NodeView` and `EdgeView` constructors take explicit unpacked metadata and
+project keys/properties from packed bytes. A segment ordinal is explicit, not an
+implicit as-of clock. Retained expired rows are not filtered. Keyless private
+sources cannot produce a keyed public node/endpoint view and return the existing
+typed `UnsupportedSource` refusal.
+
+Row lookup is logarithmic in table rows; name lookup is logarithmic in global
+names. Dense presence rank reads one word/anchor; sparse rank is logarithmic in
+present rows. A packed scalar reads at most 64 bits. String/raw decoding and
+owned output copy the selected value bytes (existing string limit 4096 bytes).
+`All` scans every global name, even names absent from the requested row;
+`Only` probes requested names, while `None` returns an empty owned map.
+Key/owner lookup is logarithmic; attachment projection copies the selected row
+into the existing ordered map. No read constructs indexes, sorts, rebuilds
+tables or scans other rows. These are explicit projection costs, not a new
+borrowed `NodeRef` contract or native property-index serving.
+
+Construction is not a bounded-memory loader: existing source admission builds
+temporary decoded source/CSR state and an encoded image, and schema admission
+can materialize the resident engine and derived indexes. Table admission also
+holds decoded rows, raw/typed candidates and canonical re-encoding scratch.
+Restoration clones the supplied source shape, replaces every packed field and
+reruns existing admission. Topology, labels, schema, deadlines, revisions and
+segment timelines remain external. Full reconstructed engine-state equality,
+including derived indexes and later unique-property rejection, is correctness
+evidence only; the candidate does not serve or enforce those indexes directly.
+
+The deterministic informational shape has 1,000 nodes with eight-byte keys,
+10,000 edges with integer `w=id%100`, no edge keys, attachments or temporal
+segments, and external relationship `R`. Its fields-component payload ledger
+is **199,980 bytes**; counted retained fields are **200,297 bytes** on the tested
+x64 layout. Payload includes serialized tables, identity scalars, segment/key/
+attachment offsets, key ordinals and actual owner-array element sizes; it is
+not a combined wire image. Retained accounting adds fixed headers, name/header/
+presence/value arrays and parsed offsets using element size times length.
+Both exclude allocator metadata, topology, labels, schema, deadlines, revisions,
+segment timelines and construction/projection scratch. These fields-only
+subtotals are not total graph bytes, disk size, a compression claim or S3/S4
+qualification; the unchanged 24/100 B/edge targets still require the complete
+packed graph and all attributable costs.
+
+Three new hand-assembled hex fixtures pin integer packing, signed-zero float
+bits and a raw-string choice. Existing logical property fixtures/oracles remain
+unchanged. Named tests cover presence boundaries, all value variants, malformed
+counts/offsets/codes/padding, seeded projections, engine/schema/temporal parity,
+keys/owners and owned views with blanked source fields to exclude fallback.
+Real rebuilt mutations target rank anchors, signed integer/float bits, raw
+selection, dictionary codes, projection selection, key order, attachment IDs,
+canonical admission and bypassing packed fields in an owned node view.
 
 ## Mutations, expiry and attachments
 
@@ -632,8 +711,9 @@ Remaining P4 slices are block dispatch/publication beyond the accepted private
 framing, checkpoint/read integration, production mutation integration, full parallel
 import (property and schema admission, spilling and durable publication), and performance and
 cross-platform qualification.
-Columnar property storage, native compact-index serving and schema enforcement
-also remain outstanding.
+The standalone columnar-fields candidate above is not integrated serving:
+complete packed graph storage, native compact-index serving and schema
+enforcement also remain outstanding.
 
 Next roll out opt-in checkpoint reads, mutation/TTL integration, then parallel
 import; enable defaults only after acceptance.

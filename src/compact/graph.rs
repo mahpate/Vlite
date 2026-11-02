@@ -8,6 +8,7 @@
 //! loaded through the engine's own snapshot path, which validates the
 //! declarations, rebuilds the indexes and checks every declared rule.
 
+mod columns;
 pub(crate) mod framing;
 #[cfg(not(target_arch = "wasm32"))]
 mod import;
