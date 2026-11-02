@@ -285,9 +285,10 @@ Remaining P3a work:
    ([complete-record blocks](#p3a-progress-complete-record-checkpoints-private-unreleased));
    no production admission or writer is enabled.
 4. A storage-owned writer, capability table acceptance, and replay,
-   maintenance and backup handling. Implemented as a private candidate,
-   pending independent acceptance
-   ([storage wiring](#p3a-progress-storage-owned-writer-private-unreleased)).
+   maintenance and backup handling. Implemented privately and independently
+   accepted
+   ([storage wiring](#p3a-progress-storage-owned-writer-private-unreleased));
+   no production writer or capability is enabled.
 5. Explicit conversion, plus old/new format rejection.
 
 Named dense reuse and bounded access remain P3b.
@@ -354,14 +355,16 @@ bounds decoded-record heap and verifies malformed offsets allocate no records.
 
 ## P3a progress: storage-owned writer (private, unreleased)
 
-Item 4 is implemented as a test-gated candidate, pending independent acceptance.
+Item 4 is implemented behind test-only gates and independently accepted.
 `src/compact/mod.rs` owns complete-record framing, writer dispatch and capability
 table construction; `src/compact/catalog/payload.rs` retains only the six-section
 `0x0101` v1 body encoder and checker. The writer clamps original record revisions
 to `1..=floor`, matching op 14. Capability acceptance requires the private gates
 and exact supported kind/version; unsupported critical entries remain refused.
 
-Candidate tests cover capability acceptance/refusal and complete-record replay,
+Independent acceptance reran the compact, maintenance, storage and directory
+suites; removing the `0x0101` capability declaration fails every transport test.
+Tests cover capability acceptance/refusal and complete-record replay,
 backup, restore and re-encryption. Byte-copy paths retain guarded flags and source
 state; restore changes lineage, and re-encryption preserves canonical values
 with fresh encryption state. Maintenance still refuses unfaithful rewrites

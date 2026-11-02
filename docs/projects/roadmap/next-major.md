@@ -112,8 +112,8 @@ Local numbers below show direction only (see rules).
   independently accepted: payload/metadata sit beside unchanged dense columns,
   with named/sparse histories and graph attachments preserved in the complete
   image. Item 4's storage-owned framing/writer, capability-table and
-  replay/maintenance/backup wiring is a test-gated candidate pending independent
-  acceptance, not production qualification. The
+  replay/maintenance/backup wiring is test-gated and independently accepted,
+  not production qualification. The
   [API review](p3-precision-api.md) still holds public enablement pending
   complete read/write/maintenance integration. The first exact-SIMD slice
   is implemented, reviewed and integrated, but unreleased: portable and AVX2
