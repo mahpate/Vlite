@@ -5,6 +5,8 @@ use crate::property_graph::engine::{
     QueryOp, QueryOutput, execute, execute_as_of,
 };
 
+#[path = "algorithm_tests.rs"]
+mod algorithm_tests;
 #[path = "seeded.rs"]
 mod seeded;
 

@@ -5,10 +5,13 @@ use super::*;
 use crate::property_graph::engine::{Direction, PropertyProjection};
 use std::sync::Arc;
 
+mod algorithm;
+
 #[derive(Clone)]
 pub(crate) struct CompactGraphView {
     base: Arc<CompactGraph>,
     overlay: Option<Arc<OverlaySnapshot>>,
+    algorithm: Arc<algorithm::Index>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -44,17 +47,23 @@ pub(crate) struct ReadView<'g> {
 
 impl CompactGraphView {
     pub(crate) fn new(base: Arc<CompactGraph>) -> Self {
-        Self {
+        let mut view = Self {
             base,
             overlay: None,
-        }
+            algorithm: Arc::new(algorithm::Index::empty()),
+        };
+        view.algorithm = Arc::new(algorithm::Index::build(&view));
+        view
     }
 
     pub(super) fn with_overlay(snapshot: OverlaySnapshot) -> Self {
-        Self {
+        let mut view = Self {
             base: Arc::clone(&snapshot.base),
             overlay: Some(Arc::new(snapshot)),
-        }
+            algorithm: Arc::new(algorithm::Index::empty()),
+        };
+        view.algorithm = Arc::new(algorithm::Index::build(&view));
+        view
     }
 
     pub(crate) fn id(&self) -> GraphId {

@@ -1,7 +1,7 @@
 use super::*;
 
 // Seeds, xorshift and committed-history shape reused from overlay/seeded.rs.
-const SEEDS: [u64; 4] = [
+pub(super) const SEEDS: [u64; 4] = [
     0x4d59_5df4_d0f3_3173,
     0x1234_5678_9abc_def0,
     0x9e37_79b9_7f4a_7c15,
@@ -53,7 +53,7 @@ fn put_edge(id: u64, from: u64, to: u64, kind: &str, key: &str, random: &mut u64
     }
 }
 
-fn history(seed: u64) -> Vec<GraphState> {
+pub(super) fn history(seed: u64) -> Vec<GraphState> {
     let mut random = seed;
     let mut state = GraphState::new();
     state.set_temporal(true).unwrap();

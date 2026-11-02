@@ -28,6 +28,8 @@ Slice 2a adds a private, unreleased, test-only `CompactGraphView` candidate,
 pending independent acceptance. It has no GraphRef, query/executor, Database,
 checkpoint or WAL wiring and no production use. Property-index access is
 explicitly deferred as described below; serving cannot ship before it exists.
+The bounded algorithm key/adjacency accessors described below are a private,
+unreleased candidate pending independent acceptance and hidden-work review.
 Depends on [P2](p2-directory-store.md); exits remain
 [S3/S4/F6](../performance/storage-goals.md): **<=24 B/edge disk,
 <=100 B/edge resident, >=1M edges/s bulk load, <=300 ms reopen at 1M edges**.
@@ -175,6 +177,100 @@ deleted cursors, pinned old generations and framing-versus-payload decoding are
 checked separately. Named real rebuild mutations cover metadata, entities,
 scans, temporal selection, retention, adjacency, directed edge pairs and delta
 precedence; these are correctness checks, not executor qualification.
+
+## Private bounded algorithm-accessor candidate
+
+`view/algorithm.rs` adds two `pub(crate)` physical accessors, without changing
+the existing `ReadView` methods. `algorithm_node_by_key(key)` resolves the
+current indexed key to a borrowed `NodeRef`; deleted nodes and changed/removed
+old keys are absent, while retained expired nodes still answer.
+`algorithm_adjacency(node, direction, after)` returns a lazy iterator of
+`(&str, EdgeId)` in strict UTF-8 relationship-byte order then edge ID.
+It includes retained expired rows, edge zero and parallel edges, and merges
+self-loops once under `Both`. No TTL, label, property or temporal filtering
+precedes algorithm accounting. The exclusive tuple cursor is binary-positioned
+before return and is not borrowed by the iterator.
+
+Index construction is explicit in `CompactGraphView::new` and `with_overlay`,
+before admitting the pinned view to any algorithm source. These constructors
+walk the admitted generation and sort temporary arrays; they are not request
+or algorithm-run constructors. Cloning a prepared view shares its index Arc.
+The future CSR source must only borrow this prepared view in O(1) stack state:
+it must never construct a view, take an overlay snapshot or rebuild an index
+during a run. Nothing is built lazily by the first accessor call. Indexes pin
+the same immutable base/overlay generations as the view; later commits cannot
+invalidate their entries.
+
+The index owns four boxed arrays: ascending node rows `(u64 node, u32 out,
+u32 incoming)`, current keyed-node IDs sorted by resolved key, and outgoing
+and incoming effective edge IDs grouped by node then relationship/ID.
+Each side's end offset is the next node row's offset, or the array length.
+All tombstones are removed and replacements resolved at construction, not
+skipped during iteration. Raw row references are resolved by the existing
+bounded overlay B-tree/base-ID lookups; strings and properties are borrowed,
+not copied into indexes. Existing admitted u32 ordinal/count bounds justify
+the offset conversions. No new overlay-side membership structure is added:
+the existing accepted overlay/snapshot is unchanged, and all effective
+membership arrays are charged to the index line, not the overlay line.
+
+On the tested 64-bit target the retained incremental byte bound is
+`88 + 16*N + 8*K + 16*E <= 88 + 24*N + 16*E`, with `K <= N`.
+This counts element size times length for every boxed array, the 64-byte
+index header, 16 Arc counter bytes and the new 8-byte view Arc field; allocator
+metadata is excluded. Each additional view clone adds one 8-byte index Arc
+field, not another index allocation. `Index::bytes` and `projected_bytes`
+expose this accounting to tests. At `E=1,000,000`, `N=K=100,000`, the counted
+index is **18,400,088 bytes**, inside the provisional 20,000,000-byte index
+line. No incremental overlay-side bytes are added (0 per overlay edge).
+Temporary construction vectors hold O(N+E) node/key IDs, membership pairs
+and output rows alongside the pinned input; sorting is off the read path.
+This retained-index count does not qualify construction peaks or allocator
+overhead.
+
+Work bounds include backing resolution, not just cursor steps. Write `Rn`
+for O(log(1+overlay nodes) + log(1+base nodes)) ID resolution, `Re` for the
+corresponding edge bound, and `B` for compared key/relationship bytes.
+Key lookup performs O(log(1+K)) comparisons, costing
+O(log(1+K)*(Rn+B) + Rn), with no scan or allocation.
+Adjacency construction costs O(log(1+N)) row comparisons plus at most two
+O(log(1+degree)) tuple-positioning searches, each probe costing O(Re+B).
+Each `next()` resolves at most two effective entries and compares at most
+one tuple: O(Re+B), independent of the number of tombstones; cursor state
+is constant-sized. It never sorts, allocates degree-sized scratch or walks
+deleted/replaced base entries. Test visit counters count row/key comparisons,
+cursor probes and effective side entries; B-tree internals are covered by
+these separate logarithmic bounds, not misreported as single operations.
+The 10,000-edge/9,990-tombstone engine fixture permits at most 16 constructor
+visits and two visits per `next()`. A 4,096-key engine fixture permits at most
+14 comparisons for first/middle/last hits and misses.
+
+The synthetic byte test also reports **192,600,474 counted payload bytes**
+(192.600474 per edge) for the accepted **tests-only decoded read model** on
+the same shape: one-byte relationship strings, eight-byte node keys, no edge
+keys, empty Properties, no segments/labels/attachments, one relationship
+dictionary and a nine-byte graph name. It counts SourceNode/SourceEdge and
+EdgeRow elements, CSR arrays, owned string lengths, dictionary elements,
+node-ordinal key/value payload and the base header/Arc counters. Empty
+Properties and absent segments have only their already-counted row headers.
+Allocator metadata, capacity slack and internal B-tree node overhead are
+excluded, so this informational payload subtotal is not total heap residency.
+Neither it nor the incremental-index test establishes the total 100 B/edge
+resident target, the 24 B/edge disk target or S4 qualification. Those targets
+remain unchanged and are evaluated on the later packed/columnar form
+(`p4-columnar-properties`), not this decoded correctness model.
+
+Engine histories and independent literals cover all directions and tuple
+cursors, prefix/non-ASCII byte order, ID zero, loops, parallel edges, overlay
+addition/deletion/replacement, key reuse and pinned isolation. Engine writes
+currently disallow changing node keys and non-ASCII relationship identifiers;
+those representable private-source cases therefore use explicit snapshot
+deltas and independent golden results, not claimed engine write histories.
+Four existing seeded histories run at every base/tail split. Eight real
+rebuild mutations cover tombstone admission, inclusive cursors, duplicate
+loops, ID-first order, zero omission, stale base keys, premature TTL filtering
+and a linear tombstone walk; each fails a named test and passes restored.
+The CSR adapter, executor/loader wiring, generation publication, property
+indexes and activation remain outside this candidate.
 
 ## Mutations, expiry and attachments
 
