@@ -2,6 +2,7 @@
 
 **Status:** approved design; private test-only CSR, ordinary typed-property,
 label-posting, attachment and schema-declaration codec slices are implemented.
+Private decoded-CSR identity, adjacency, TTL and temporal reads are implemented.
 Full P4 implementation and measured results remain outstanding.
 Depends on [P2](p2-directory-store.md); exits remain
 [S3/S4/F6](../performance/storage-goals.md): **<=24 B/edge disk,
@@ -268,9 +269,21 @@ cannot validate it. The codec does not persist or serve property indexes;
 schema declarations are preserved and their indexes and rules are rebuilt and
 checked only through the engine snapshot loader. No changes were made to
 op-12/op-15, public APIs, or
-`src/openapi.json`. Remaining P4 slices are temporal reads from CSR, shared
-framing and block dispatch/publication, checkpoint/read integration, mutation
-overlay, parallel import, and performance and cross-platform qualification.
+`src/openapi.json`.
+
+Private reads in `src/compact/graph/read.rs` serve decoded nodes and edges by
+public ID or key and merge CSR adjacency in relationship/edge-ID order, keeping
+parallel edges distinct and self-loops single for `Both`. Reader-local lookup
+indexes are built once; reads do not rebuild engine state. TTL uses clock C for
+edges and both endpoints; temporal selection independently binary-searches the
+half-open series at signed T, hiding gaps and empty series and using only the
+selected segment's properties. Ordinary reads retain engine retention-only
+semantics. These test-only reads do not wire GraphRef or query execution to CSR,
+change VLGCSR06 bytes, or establish size/performance results.
+
+Remaining P4 slices are shared framing and block dispatch/publication,
+checkpoint/read integration, mutation overlay, parallel import, and performance
+and cross-platform qualification.
 Columnar property storage, native compact-index serving and schema enforcement
 also remain outstanding.
 

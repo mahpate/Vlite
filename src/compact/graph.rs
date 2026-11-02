@@ -9,6 +9,8 @@
 //! loaded through the engine's own snapshot path, which validates the
 //! declarations, rebuilds the indexes and checks every declared rule.
 
+mod read;
+
 use crate::property_graph::engine::codec::TemporalEntry;
 use crate::property_graph::engine::limits::{
     MAX_BATCH_ENTRIES, MAX_FIELD_NAME_BYTES, MAX_LABEL_BYTES, MAX_RELATIONSHIP_TYPE_BYTES,
@@ -2330,7 +2332,7 @@ mod tests {
         GraphSource::from_graph(state.graph(GraphId(0)).unwrap()).unwrap()
     }
 
-    fn full_temporal_state() -> GraphState {
+    pub(super) fn full_temporal_state() -> GraphState {
         let max_series = (0..MAX_SEGMENTS)
             .map(|index| {
                 let (valid_from, valid_to) = match index {
@@ -2462,7 +2464,7 @@ mod tests {
         state
     }
 
-    fn temporal_state_with_removed_series() -> GraphState {
+    pub(super) fn temporal_state_with_removed_series() -> GraphState {
         let mut state = GraphState::new();
         state.set_temporal(true).unwrap();
         state
@@ -2594,7 +2596,7 @@ mod tests {
         edges
     }
 
-    fn read_case_state(case: &Value) -> GraphState {
+    pub(super) fn read_case_state(case: &Value) -> GraphState {
         let mut state = GraphState::new();
         state.set_temporal(true).unwrap();
         let mut entries = vec![GraphEntry::CreateGraph {
@@ -2667,7 +2669,7 @@ mod tests {
         state
     }
 
-    fn golden_state(case: &Value) -> GraphState {
+    pub(super) fn golden_state(case: &Value) -> GraphState {
         let mut state = GraphState::new();
         state.set_temporal(true).unwrap();
         let mut entries = vec![GraphEntry::CreateGraph {
