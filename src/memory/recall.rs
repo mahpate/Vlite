@@ -315,6 +315,18 @@ fn scope_cmp(a: &MemoryScope, b: &MemoryScope) -> std::cmp::Ordering {
 }
 
 impl MemoryRef<'_> {
+    fn recall_collection(&self) -> crate::Result<Option<crate::CollectionRef<'_>>> {
+        let collection = self
+            .evidence_collection
+            .as_deref()
+            .map(|name| self.db.collection(name))
+            .transpose()?;
+        if let Some(collection) = collection {
+            self.db.state(collection.id()).records.resident()?;
+        }
+        Ok(collection)
+    }
+
     pub(super) fn recall(&self, request: &RecallRequest<'_>) -> RecallResult<RecallOutput> {
         let mut work = Work {
             request,
@@ -325,11 +337,7 @@ impl MemoryRef<'_> {
         let time = validate(request)?;
         self.db.ensure_healthy()?;
         let graph = self.db.graph(&self.graph)?.with_clock(request.clock_ms);
-        let collection = self
-            .evidence_collection
-            .as_deref()
-            .map(|name| self.db.collection(name))
-            .transpose()?;
+        let collection = self.recall_collection()?;
         let scan = graph
             .memory_scan_bound()
             .checked_mul(request.scopes.len())
@@ -1026,6 +1034,94 @@ mod tests {
             .iter()
             .map(|hit| hit.ranking.candidate.id.as_str())
             .collect()
+    }
+
+    #[test]
+    fn recall_collection_dispatch_refuses_compact_and_preserves_mixed_resident_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("dispatch.vlite"));
+        let now = crate::current_time_ms() + 30_000;
+        remember(
+            &mut db,
+            &scope("tenant"),
+            "evidence",
+            Some(vec![1.0, 0.0]),
+            now,
+            None,
+            1.0,
+            Vec::new(),
+        );
+        let req = request(scope("tenant"), now);
+        assert_eq!(ids(&recall(&db, &req).unwrap()), ["evidence"]);
+        let compact_id = db
+            .create_collection(
+                "compact",
+                crate::CollectionSpec {
+                    dimensions: 2,
+                    settings: crate::CollectionSettings::default(),
+                },
+            )
+            .unwrap()
+            .id;
+        let generation = crate::compact::source::Capture::default()
+            .finish(None)
+            .unwrap();
+        db.state_mut(compact_id).records = crate::records::CollectionRecords::Compact {
+            view: generation.view(compact_id),
+        };
+        let sequence = db.sequence;
+        let bytes = db.to_bytes();
+        // Isolate the evidence seam: public graph acquisition already refuses
+        // mixed handles in 1a, independently of the evidence target.
+        let binding = |collection: Option<&str>| MemoryRef {
+            db: &db,
+            graph: "memory".into(),
+            evidence_collection: collection.map(str::to_owned),
+        };
+        assert!(
+            matches!(
+                binding(Some("compact")).recall_collection(),
+                Err(crate::Error::UnsupportedFeature(
+                    crate::format::FLAG_COMPACT
+                ))
+            ),
+            "recall evidence acquisition must refuse a compact target"
+        );
+        let resident = binding(Some("default"));
+        let collection = resident
+            .recall_collection()
+            .expect("resident evidence acquisition must ignore unrelated compact collections")
+            .unwrap();
+        assert_eq!(collection.name(), "default");
+        let id = evidence_record_id("evidence");
+        assert_eq!(
+            collection.get_at(id, now).unwrap().unwrap().payload,
+            b"evidence",
+            "resident evidence must remain readable in a mixed handle"
+        );
+        let text = db.state(collection.id()).text_index.status();
+        assert!(text.available);
+        assert_eq!(text.declared_fields, 1);
+        assert_eq!(text.documents, 1);
+        assert!(binding(None).recall_collection().unwrap().is_none());
+        assert!(
+            matches!(
+                binding(Some("missing")).recall_collection(),
+                Err(crate::Error::CollectionNotFound)
+            ),
+            "missing evidence target must retain its resident error"
+        );
+        assert!(
+            matches!(
+                resident.recall(&req),
+                Err(RecallError::Storage(crate::Error::UnsupportedFeature(
+                    crate::format::FLAG_COMPACT
+                )))
+            ),
+            "full recall must retain the existing graph-acquisition refusal"
+        );
+        assert_eq!(db.sequence, sequence, "recall refusal sequence");
+        assert_eq!(db.to_bytes(), bytes, "recall refusal bytes");
     }
 
     #[test]
