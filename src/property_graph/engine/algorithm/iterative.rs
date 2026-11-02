@@ -12,8 +12,8 @@
 
 use super::{
     AlgorithmError, AlgorithmOutput, AlgorithmTruncation, CommunityAssignment, Direction, EdgeId,
-    Graph, GraphError, Halt, LabelPropagationOutput, Local, Meter, NodeId, NodeScore,
-    PageRankOutput, Projection, PropertyValue, Seed, classify, orient, resolve, sort_by,
+    GraphError, Halt, LabelPropagationOutput, Local, Meter, NodeId, NodeScore, PageRankOutput,
+    Projection, PropertyValue, Seed, Source, classify, orient, resolve, sort_by,
 };
 use std::mem::size_of;
 
@@ -54,8 +54,8 @@ pub(super) struct Teleport {
 /// Resolves, checks, sorts and sums personalization `entries`: one vertex
 /// unit per entry, then the sort and one unit per entry for the
 /// duplicate check and the sum. Every node must be a seed.
-pub(super) fn teleport<S: Seed>(
-    graph: &Graph,
+pub(super) fn teleport<S: Seed, A: Source>(
+    source: &A,
     entries: &[(S, f64)],
     seeds: &[NodeId],
     expired_at: Option<u64>,
@@ -65,7 +65,7 @@ pub(super) fn teleport<S: Seed>(
     let mut masses = Vec::with_capacity(entries.len());
     for (selector, mass) in entries {
         meter.vertex()?;
-        let node = resolve(graph, selector.selector(), expired_at)?.id;
+        let node = resolve(source, selector.selector(), expired_at)?;
         let positive = mass.is_finite() && *mass > 0.0;
         if !positive {
             return Err(GraphError::InvalidQuery(
@@ -146,7 +146,7 @@ fn kept_rows(count: usize, max_output_nodes: u64) -> (usize, bool) {
     }
 }
 
-impl Local<'_> {
+impl<A: Source> Local<'_, A> {
     /// PageRank over the computational arcs of `projection`.
     ///
     /// Setup validates every retained weight in edge-ID order, sums each
@@ -285,7 +285,7 @@ impl Local<'_> {
     /// The PageRank weight of retained edge `id`: a valid exact weight (see
     /// `classify`) as an f64, -0.0 read as 0.
     fn rank_weight(&self, id: EdgeId, field: &str) -> Result<f64, Halt> {
-        let stored = self.graph.edge(id).ok_or(GraphError::InvariantViolation(
+        let stored = self.source.edge(id).ok_or(GraphError::InvariantViolation(
             "a projected edge is missing",
         ))?;
         let value = stored

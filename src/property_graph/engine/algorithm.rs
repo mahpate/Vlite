@@ -60,16 +60,21 @@ use super::filter::{conditions_match, validate_conditions};
 use super::limits::{CHECK_INTERVAL, GraphLimits, MAX_FIELD_NAME_BYTES, MAX_LABELS};
 use super::meter::ExecutionContext;
 use super::model::{
-    Direction, EdgeId, GraphEdge, GraphNode, NodeId, PropertyCondition, PropertyValue,
-    validate_label, validate_node_key, validate_relationship_type,
+    Direction, EdgeId, NodeId, PropertyCondition, PropertyValue, validate_label, validate_node_key,
+    validate_relationship_type,
 };
 use super::query::NodeSelector;
 use super::state::Graph;
-use super::traverse::other_end;
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::mem::size_of;
 use std::sync::atomic::Ordering as AtomicOrdering;
+
+#[cfg(test)]
+use super::model::{GraphEdge, GraphNode};
+
+mod source;
+pub(crate) use source::{EdgeRef, Source};
 
 /// Version of the algorithm semantics reported with every result.
 pub const ALGORITHM_VERSION: u32 = 1;
@@ -626,10 +631,26 @@ pub fn run_with<'s, S: Seed, T>(
     conditions: impl FnOnce(&mut Meter<'_>) -> Result<Cow<'s, [PropertyCondition]>, AlgorithmTruncation>,
     stage: impl FnOnce(&Finished<'_>, &mut Meter<'_>) -> Result<T, AlgorithmTruncation>,
 ) -> Result<(AlgorithmResult, Option<T>), AlgorithmError> {
+    run_source_with(graph, request, limits, caps, context, conditions, stage)
+}
+
+/// Runs one algorithm over a source with the same bounded execution contract
+/// as [`run_with`].
+pub(crate) fn run_source_with<'s, A: Source, S: Seed, T>(
+    source: &A,
+    request: &Request<'s, S>,
+    limits: &GraphLimits,
+    caps: &GraphAlgorithmLimits,
+    context: &ExecutionContext<'_>,
+    conditions: impl FnOnce(&mut Meter<'_>) -> Result<Cow<'s, [PropertyCondition]>, AlgorithmTruncation>,
+    stage: impl FnOnce(&Finished<'_>, &mut Meter<'_>) -> Result<T, AlgorithmTruncation>,
+) -> Result<(AlgorithmResult, Option<T>), AlgorithmError> {
     limits.validate()?;
     caps.validate()?;
     check_shape(request)?;
-    let expired_at = graph.has_due(context.now_ms).then_some(context.now_ms);
+    let expired_at = source
+        .may_have_due(context.now_ms)
+        .then_some(context.now_ms);
     let (mut meter, begin) = Meter::start(context, limits, caps);
     let mut prepared = None;
     let mut projection = None;
@@ -637,17 +658,17 @@ pub fn run_with<'s, S: Seed, T>(
     let computed = begin.map_err(Halt::from).and_then(|()| {
         let conditions = conditions(&mut meter)?;
         let ready = prepared.insert(Prepared::new(
-            graph, request, limits, expired_at, conditions, &mut meter,
+            source, request, limits, expired_at, conditions, &mut meter,
         )?);
         let local = Local {
-            graph,
+            source,
             direction: request.direction,
             types: ready.types.as_deref(),
             labels: ready.labels.as_deref(),
             conditions: &ready.conditions,
             limits,
             expired_at,
-            edge_zero: ready.types.as_ref().and_then(|_| graph.edge(EdgeId(0))),
+            edge_zero: ready.types.as_ref().and_then(|_| source.edge(EdgeId(0))),
         };
         let (extracted, counted) = local.extract(&ready.seeds, &mut meter)?;
         arcs = counted;
@@ -909,8 +930,8 @@ impl<'s> Prepared<'s> {
     /// Types, labels, seeds, then the path endpoints or the
     /// personalization, one vertex unit per item plus the sorts; every
     /// buffer is reserved first.
-    fn new<S: Seed>(
-        graph: &Graph,
+    fn new<S: Seed, A: Source>(
+        source: &A,
         request: &Request<'s, S>,
         limits: &GraphLimits,
         expired_at: Option<u64>,
@@ -930,16 +951,16 @@ impl<'s> Prepared<'s> {
         let mut seeds = Vec::with_capacity(raw);
         for seed in request.seeds {
             meter.vertex()?;
-            let node = resolve(graph, seed.selector(), expired_at)?;
+            let node = resolve(source, seed.selector(), expired_at)?;
             if labels
                 .as_deref()
-                .is_some_and(|labels| !carries(node, labels))
+                .is_some_and(|labels| !source.carries(node, labels))
             {
                 return Err(
                     GraphError::InvalidQuery("every seed must carry every scope label").into(),
                 );
             }
-            seeds.push(node.id);
+            seeds.push(node);
         }
         sort_dedup(&mut seeds, meter)?;
         if seeds.len() as u64 > limits.max_visited_nodes {
@@ -948,13 +969,13 @@ impl<'s> Prepared<'s> {
         let endpoints = match &request.job {
             Job::Path(path) => {
                 meter.vertex()?;
-                let source = resolve(graph, path.source.selector(), expired_at)?.id;
-                if seeds.binary_search(&source).is_err() {
+                let source_id = resolve(source, path.source.selector(), expired_at)?;
+                if seeds.binary_search(&source_id).is_err() {
                     return Err(GraphError::InvalidQuery("the path source must be a seed").into());
                 }
                 meter.vertex()?;
-                let destination = resolve(graph, path.destination.selector(), expired_at)?.id;
-                Some((source, destination))
+                let destination = resolve(source, path.destination.selector(), expired_at)?;
+                Some((source_id, destination))
             }
             _ => None,
         };
@@ -963,7 +984,7 @@ impl<'s> Prepared<'s> {
                 personalization: Some(entries),
                 ..
             }) => Some(iterative::teleport(
-                graph, entries, &seeds, expired_at, meter,
+                source, entries, &seeds, expired_at, meter,
             )?),
             _ => None,
         };
@@ -997,30 +1018,25 @@ fn names<'s>(
 }
 
 /// The visible node `selector` names; a due node does not resolve.
-fn resolve<'g>(
-    graph: &'g Graph,
+fn resolve<A: Source>(
+    source: &A,
     selector: Selector<'_>,
     expired_at: Option<u64>,
-) -> Result<&'g GraphNode, GraphError> {
+) -> Result<NodeId, GraphError> {
     let node = match selector {
-        Selector::Id(id) => graph.node(id),
+        Selector::Id(id) => source.node(id),
         Selector::Key(key) => {
             validate_node_key(key)?;
-            graph.node_by_key(key)
+            source.node_by_key(key)
         }
     };
     match node {
-        Some(node) if expired_at.is_none_or(|now| !graph.node_expired(node.id, now)) => Ok(node),
+        Some(node) if expired_at.is_none_or(|now| !source.node_expired(node, now)) => Ok(node),
         _ => Err(match selector {
             Selector::Id(id) => GraphError::NodeNotFound(id),
             Selector::Key(key) => GraphError::UnknownNodeKey(key.to_owned()),
         }),
     }
-}
-
-/// Whether `node` carries every label of the sorted `labels`.
-fn carries(node: &GraphNode, labels: &[&str]) -> bool {
-    labels.iter().all(|label| node.labels.contains(*label))
 }
 
 /// Comparisons charged for sorting `count` items: `count * bit_length(count)`.
@@ -1300,8 +1316,8 @@ impl<'a> Meter<'a> {
 
 /// The prepared scope of one run with the TTL clock (`None` when nothing
 /// is due).
-struct Local<'a> {
-    graph: &'a Graph,
+struct Local<'a, A: Source> {
+    source: &'a A,
     direction: Direction,
     /// Sorted, deduplicated relationship types; `None` is any.
     types: Option<&'a [&'a str]>,
@@ -1311,25 +1327,27 @@ struct Local<'a> {
     limits: &'a GraphLimits,
     expired_at: Option<u64>,
     /// Edge 0 for typed scans, which probe strictly after `(type, 0)`.
-    edge_zero: Option<&'a GraphEdge>,
+    edge_zero: Option<EdgeRef<'a>>,
 }
 
-impl Local<'_> {
+impl<A: Source> Local<'_, A> {
     /// Visible and carrying every scope label.
     fn eligible_node(&self, id: NodeId) -> bool {
-        self.graph.node(id).is_some_and(|node| {
+        self.source.node(id).is_some_and(|_| {
             self.expired_at
-                .is_none_or(|now| !self.graph.node_expired(id, now))
-                && self.labels.is_none_or(|labels| carries(node, labels))
+                .is_none_or(|now| !self.source.node_expired(id, now))
+                && self
+                    .labels
+                    .is_none_or(|labels| self.source.carries(id, labels))
         })
     }
 
     /// Visible (with both endpoints) and matching every edge condition; the
     /// adjacency scan already applied the relationship types.
-    fn eligible_edge(&self, edge: &GraphEdge) -> bool {
+    fn eligible_edge(&self, edge: &EdgeRef<'_>) -> bool {
         self.expired_at
-            .is_none_or(|now| !self.graph.edge_expired(edge, now))
-            && conditions_match(&edge.properties, self.conditions)
+            .is_none_or(|now| !self.source.edge_expired(edge, now))
+            && conditions_match(edge.properties, self.conditions)
     }
 
     /// Calls `visit` with every adjacency entry of `node` in the scope's
@@ -1341,11 +1359,11 @@ impl Local<'_> {
         &self,
         node: NodeId,
         meter: &mut Meter<'_>,
-        mut visit: impl FnMut(&GraphEdge, &mut Meter<'_>) -> Result<(), Halt>,
+        mut visit: impl FnMut(&EdgeRef<'_>, &mut Meter<'_>) -> Result<(), Halt>,
     ) -> Result<(), Halt> {
         let mut examined = 0;
         let Some(types) = self.types else {
-            for (_, id) in self.graph.adjacency(node, self.direction, None, None) {
+            for (_, id) in self.source.adjacency(node, self.direction, None) {
                 self.step(node, id, &mut examined, meter, &mut visit)?;
             }
             return Ok(());
@@ -1361,8 +1379,8 @@ impl Local<'_> {
                 self.step(node, first.id, &mut examined, meter, &mut visit)?;
             }
             for (_, id) in self
-                .graph
-                .adjacency(node, self.direction, None, Some((kind, EdgeId(0))))
+                .source
+                .adjacency(node, self.direction, Some((kind, EdgeId(0))))
                 .take_while(|(found, _)| *found == kind)
             {
                 self.step(node, id, &mut examined, meter, &mut visit)?;
@@ -1372,7 +1390,7 @@ impl Local<'_> {
     }
 
     /// Whether `node`'s adjacency in the scope's direction holds `edge`.
-    fn touches(&self, edge: &GraphEdge, node: NodeId) -> bool {
+    fn touches(&self, edge: &EdgeRef<'_>, node: NodeId) -> bool {
         match self.direction {
             Direction::Out => edge.source == node,
             Direction::In => edge.destination == node,
@@ -1388,7 +1406,7 @@ impl Local<'_> {
         id: EdgeId,
         examined: &mut u64,
         meter: &mut Meter<'_>,
-        visit: &mut impl FnMut(&GraphEdge, &mut Meter<'_>) -> Result<(), Halt>,
+        visit: &mut impl FnMut(&EdgeRef<'_>, &mut Meter<'_>) -> Result<(), Halt>,
     ) -> Result<(), Halt> {
         if *examined >= self.limits.max_edges_per_node {
             return Err(AlgorithmTruncation::DegreeLimit {
@@ -1398,10 +1416,10 @@ impl Local<'_> {
         }
         meter.edge()?;
         *examined += 1;
-        let edge = self.graph.edge(id).ok_or(GraphError::InvariantViolation(
+        let edge = self.source.edge(id).ok_or(GraphError::InvariantViolation(
             "adjacency names a missing edge",
         ))?;
-        visit(edge, meter)
+        visit(&edge, meter)
     }
 
     /// Level-synchronous breadth-first discovery from the seeds up to
@@ -1436,7 +1454,11 @@ impl Local<'_> {
                     if !self.eligible_edge(edge) {
                         return Ok(());
                     }
-                    let next = other_end(edge, node);
+                    let next = if edge.source == node {
+                        edge.destination
+                    } else {
+                        edge.source
+                    };
                     if found.last() == Some(&next)
                         || admitted.binary_search(&next).is_ok()
                         || !self.eligible_node(next)
@@ -1467,7 +1489,12 @@ impl Local<'_> {
                 if !self.eligible_edge(edge) {
                     return Ok(());
                 }
-                let Ok(other) = nodes.binary_search(&other_end(edge, node)) else {
+                let next = if edge.source == node {
+                    edge.destination
+                } else {
+                    edge.source
+                };
+                let Ok(other) = nodes.binary_search(&next) else {
                     return Ok(());
                 };
                 let (source, destination) = if edge.source == node {
@@ -1564,7 +1591,7 @@ struct Step {
     shift: u32,
 }
 
-impl Local<'_> {
+impl<A: Source> Local<'_, A> {
     /// Dijkstra over (node, hops) states from `source` to `destination`.
     ///
     /// First every retained edge's weight is validated in ascending edge-ID
@@ -1593,12 +1620,12 @@ impl Local<'_> {
             let weight = match weight_property {
                 None => UNIT,
                 Some(field) => {
-                    let stored = self
-                        .graph
-                        .edge(edge.id)
-                        .ok_or(GraphError::InvariantViolation(
-                            "a projected edge is missing",
-                        ))?;
+                    let stored =
+                        self.source
+                            .edge(edge.id)
+                            .ok_or(GraphError::InvariantViolation(
+                                "a projected edge is missing",
+                            ))?;
                     let value = stored
                         .properties
                         .get(field)
