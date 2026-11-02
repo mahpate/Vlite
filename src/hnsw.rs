@@ -1128,7 +1128,7 @@ impl Index {
                 );
                 eligible = found;
                 exhausted = layer_exhausted;
-            } else if bitmap[entry / 64] & (1u64 << (entry % 64)) != 0 {
+            } else if used > 0 && bitmap[best.node / 64] & (1u64 << (best.node % 64)) != 0 {
                 eligible.push(best);
             }
         }

@@ -5440,6 +5440,82 @@ mod p5_filter_approximation_tests {
     }
 
     #[test]
+    fn descent_exhaustion_never_returns_ineligible_or_unscored_rows() {
+        let records: records::RecordMap = (0..2000u64)
+            .map(|id| {
+                (
+                    id,
+                    Record {
+                        vector: vec![id as f32 + 1.0, (id % 17) as f32 + 1.0],
+                        payload: Vec::new(),
+                        metadata: tag(if id % 5 == 0 { "rare" } else { "common" }),
+                    },
+                )
+            })
+            .collect();
+        let index = hnsw::Index::build(
+            &records,
+            HnswConfig::default(),
+            DistanceMetric::SquaredL2,
+            AnnOptions::default(),
+        );
+        let expiries = BTreeMap::new();
+        let mut violations = Vec::new();
+        let mut unscored_hits = 0;
+        for value in ["rare", "common"] {
+            let filter = eq_tag(value);
+            let candidate_ids: BTreeSet<u64> = records
+                .iter()
+                .filter(|(_, record)| metadata::matches(&record.metadata, &filter))
+                .map(|(&id, _)| id)
+                .collect();
+            for budget in 0..=96usize {
+                for q in 0..16u32 {
+                    let query = [q as f32 * 125.0 + 3.0, (q % 17) as f32 + 1.0];
+                    let mut stats = SearchStats::default();
+                    let (hits, report) = index
+                        .search_filtered_p5_with_expiry(
+                            &query,
+                            10,
+                            32,
+                            (4096, budget),
+                            AnnOptions::default(),
+                            &records,
+                            &expiries,
+                            0,
+                            &filter,
+                            &candidate_ids,
+                            &mut stats,
+                        )
+                        .unwrap();
+                    assert!(report.graph_nodes_visited <= budget as u64);
+                    if budget == 0 {
+                        unscored_hits += hits.len();
+                        assert_eq!(report.status, hnsw::P5ApproxStatus::BudgetExhausted);
+                        assert!(report.exact_completion_available);
+                    }
+                    for hit in hits {
+                        assert!(hit.distance.is_finite());
+                        if !metadata::matches(&records[&hit.id].metadata, &filter) {
+                            violations.push((value, budget, q, hit.id));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "ineligible rows returned: {} e.g. {:?}",
+            violations.len(),
+            &violations[..violations.len().min(5)]
+        );
+        assert_eq!(
+            unscored_hits, 0,
+            "zero-budget traversal returned graph hits"
+        );
+    }
+
+    #[test]
     fn encrypted_reopen_replays_visibility_and_rebuilds_derived_candidates() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("sealed.vlite");
