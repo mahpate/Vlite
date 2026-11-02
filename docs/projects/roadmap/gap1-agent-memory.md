@@ -1,9 +1,9 @@
 # Gap 1: agent memory
 
-Status: the crate-private A1 core (remember, receipts and one graph batch) and A2 (bounded
-exact-ID forget and graph-TTL expiry) are integrated after independent acceptance; they are
-unreleased, not activated and have no public API. Recall, consolidation, resumable erasure and
-serving are not implemented. Open decisions and serving approval
+Status: the crate-private A1 core (remember, receipts and one graph batch), A2 (bounded
+exact-ID forget and graph-TTL expiry) and B (bounded recall and ranking) are integrated
+after independent acceptance; they are unreleased, not activated and have no public API.
+Consolidation, resumable erasure and serving are not implemented. Open decisions and serving approval
 were granted 2026-11-02 (section 9). Provisional Rust names only; no public memory API or wire
 approval is claimed.
 Scope: embedded remember, recall, consolidate and forget over existing storage.
@@ -240,16 +240,16 @@ Budget exhaustion may return a marked partial result only when explicitly reques
 otherwise return a typed budget error. Cancellation is not an empty successful answer.
 No recall paging initially; later cursors must bind scope, policy, T/C and view sequence.
 
-### Private slice B candidate
+### Accepted private slice B
 
-The crate-private, unreleased recall candidate is pending independent acceptance;
+The crate-private, unreleased recall implementation is independently accepted and integrated;
 it adds no public surface, activation, format, dependency or default change.
 It reads retained entity/episodic memories under one borrowed database sequence,
 fixed validity T and TTL clock C. Existing temporal traversal is used only when
 the file already carries the independently gated Gap 4 capability; tests use its
 existing thread-local activation seam, not a production gate change.
 Facts, relation segments, contradiction status and historical anchor reconstruction
-remain outside this candidate, rather than being fabricated from current metadata.
+remain outside this slice, rather than being fabricated from current metadata.
 
 The supported plan is exact eligible-evidence enumeration, existing indexed BM25
 and RRF, optional scoped REFERENCES expansion, and candidate-only exact or cosine
@@ -290,6 +290,14 @@ Diagnostics identify exact enumeration, bounded expansion, fixed T/C/sequence,
 conservative charges and retained-history limitations; `complete` is not a claim
 of exhaustive semantic or historical recall. Plain/encrypted file and directory
 reopen tests compare the entire deterministic result and idempotent write replay.
+
+Independent acceptance included the library/feature, integration, native/WASM,
+oracle and API/document matrices, followed by isolated fail-first/restoration
+checks for candidate/output charging, canonical scope order, distinct exhaustion
+reasons, filtering and projection boundaries. The mixed-kind transit argument is
+limited to Entity/Episodic, the only currently accepted kinds; adding a kind in C
+requires revisiting mandatory transit filtering, not only filtering final hits.
+No unexecuted or storage-invariant-equivalent mutation is counted as a kill.
 
 ## 4. Consolidation, correction and contradictions
 
@@ -479,7 +487,7 @@ mode or family-wide exemption.
 |---|---|
 | A1: crate-private core | Provisional graph binding, scope provisioning, entity/episodic remember, same-frame receipts, exact dedup, idempotency and budget/validation coverage; independently accepted and integrated, unreleased and not activated |
 | A2: accepted private slice | Crate-private small forget and graph-TTL expiry with atomic failure, evidence, budget-boundary, receipt-replay, reopen and mutation coverage; the three oversized A2 golden setups now use multi-step physical-cap writes; independently accepted and integrated, unreleased and not activated. No facts, recall, resumable erasure, serving, public API or format change |
-| B: private recall candidate | Crate-private exact eligible-evidence/BM25/RRF plus bounded gated temporal expansion, owner retention checks, ranking fixtures and vector-only exact/MMR; preflight/work/cancellation and reopen coverage; pending independent acceptance, unreleased and inactive. Ready ANN/custom providers explicitly refused; no exhaustive-history claim |
+| B: accepted private recall | Crate-private exact eligible-evidence/BM25/RRF plus bounded gated temporal expansion, owner retention checks, ranking fixtures and vector-only exact/MMR; preflight/work/cancellation, reopen and mutation coverage; independently accepted and integrated, unreleased and inactive. Ready ANN/custom providers explicitly refused; no exhaustive-history claim |
 | C: consolidation | Caller summaries, slot-guarded corrections, contradictions, stale-source reporting and resumable erasure barriers/fencing; crash/retry and maintenance tests pass |
 | D: serving after approval | Explicit OpenAPI and wire approval before edits; REST/gRPC/MCP/CLI scope/authorization, limits, feed and unsupported-capability parity; no external provider enabled by default |
 

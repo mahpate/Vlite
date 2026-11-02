@@ -269,7 +269,7 @@ accepted and integrated, with no production caller. This decoded
   [agent memory serving](serving-memory-contract.md) and
   [graph gRPC](serving-graph-grpc-contract.md) contracts are likewise
   reviewed specifications awaiting owner decisions: the first aligns to the
-  private memory core and its A2 retention work, the second records today's
+  private memory core, A2 retention and accepted private B recall work, the second records today's
   gRPC behaviour apart from the proposed schema. Neither is implemented. The
   [KV and TTL serving](serving-kv-ttl-contract.md) contract specifies KV
   routes, fenced leases, and TTL and change-feed events; its lease ledger is a
@@ -298,8 +298,10 @@ accepted and integrated, with no production caller. This decoded
 - **Further design proposals:** [agent memory](gap1-agent-memory.md) defines
   the embedded operations and their prerequisites; [scale-out](scale-out.md)
   compares branching, object storage and replication. Both received source
-  and first-party-reference review. Neither is an implemented capability;
-  the scale-out order 11 → 10 → 9 was decided 2026-11-02; the track is
+  and first-party-reference review. Memory's private A1/A2/B slices are
+  independently accepted and integrated, but remain unreleased and inactive;
+  consolidation, resumable erasure and public serving remain outstanding.
+  Scale-out is not implemented. Its order 11 → 10 → 9 was decided 2026-11-02; the track is
   backlogged until the owner revisits it. The
   [Cypher-style subset](gap6-cypher-subset.md) has ten owner-approved
   private-implementation choices (2026-11-02): the explicitly non-conformant
