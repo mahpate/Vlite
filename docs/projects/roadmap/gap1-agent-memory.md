@@ -402,13 +402,22 @@ depends on validation precedence. CI runs normal and optimized self-tests.
 Unspecified behaviour is labelled, e.g. `fixture: duplicate-bundle-ids-reject` and
 `fixture: empty-bundle-rejects`. Field/error names are fixture APIs, not Rust parity
 or approved contracts; no Rust implementation, durability or concurrency is claimed.
+The reference now charges A1 receipt/outcome/content chunk nodes and HAS_CONTENT
+edges by default, including direct boundary checks. Exactly three unreplayed A2
+setup steps retain the original logical operation accounting:
+`forget-outbound-reference-budget` step 0,
+`forget-outbound-reference-over-budget` step 1 and
+`forget-separate-guard-over-budget` step 1. Each is labelled
+`A2 re-base pending: setup exceeds the A1 physical cap`; executable guards pin the
+closed set and its A2 skip category. This closed list is the only distinction
+between the logical and physical operation models.
 
 ## 9. Delivery, risks and open decisions
 
 | Slice | Exit criteria |
 |---|---|
 | A1: crate-private candidate | Provisional graph binding, scope provisioning, entity/episodic remember, same-frame receipts, exact dedup, idempotency and budget/validation coverage; unreleased and pending independent acceptance |
-| A2: follow-on | Small forget and expiry with atomic failure/reopen/expiry tests; fact support waits for Gap 4 |
+| A2: follow-on | Small forget and expiry with atomic failure/reopen/expiry tests; fact support waits for Gap 4; A2 re-bases the closed list of A2 fixtures onto the physical A1 budget (multi-step setup) before its own acceptance |
 | B: recall planner | Filtered hybrid plus bounded temporal expansion, owner retention checks, rank/explain fixtures and existing vector-only exact/MMR integration; scan/work/cancellation coverage; no exhaustive-history claim |
 | C: consolidation | Caller summaries, slot-guarded corrections, contradictions, stale-source reporting and resumable erasure barriers/fencing; crash/retry and maintenance tests pass |
 | D: serving after approval | Explicit OpenAPI and wire approval before edits; REST/gRPC/MCP/CLI scope/authorization, limits, feed and unsupported-capability parity; no external provider enabled by default |

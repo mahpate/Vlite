@@ -16,6 +16,9 @@ use crate::{
 #[cfg(test)]
 thread_local! {
     static FAIL_NEXT_WRITE_BATCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static BUMP_BEFORE_WRITE_BATCH: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    static BUMPED_BATCH_SEQUENCE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static BUMPED_BATCH_END: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 const LABEL_MEMORY: &str = "VliteMemory";
@@ -322,6 +325,25 @@ impl<'db> MemoryMut<'db> {
             return Err(MemoryError::OperationLimit);
         }
 
+        #[cfg(test)]
+        if let Some(key) = BUMP_BEFORE_WRITE_BATCH.with(|target| target.borrow_mut().take()) {
+            let node = self
+                .db
+                .graph(&self.graph)?
+                .get_node(&key)?
+                .output
+                .ok_or(MemoryError::MissingMemory)?;
+            self.db
+                .graph_mut(&self.graph)?
+                .write_batch(&[GraphOp::UpsertNode {
+                    key,
+                    labels: node.labels.into_iter().collect(),
+                    properties: node.properties,
+                    expected: Expected::Revision(node.revision),
+                }])?;
+            BUMPED_BATCH_SEQUENCE.with(|sequence| sequence.set(self.db.sequence));
+            BUMPED_BATCH_END.with(|end| end.set(self.db.end));
+        }
         #[cfg(test)]
         FAIL_NEXT_WRITE_BATCH.with(|fail| {
             if fail.replace(false) {
@@ -1468,6 +1490,505 @@ mod tests {
         }
     }
 
+    fn remember(db: &mut Database, request: &RememberRequest) -> RememberResult {
+        MemoryMut::bind(db, "memory", None)
+            .unwrap()
+            .remember(request)
+            .unwrap()
+    }
+
+    fn node(db: &Database, key: &str) -> NodeView {
+        db.graph("memory")
+            .unwrap()
+            .get_node(key)
+            .unwrap()
+            .output
+            .unwrap()
+    }
+
+    fn replace_properties(db: &mut Database, node: NodeView, properties: Metadata) {
+        db.graph_mut("memory")
+            .unwrap()
+            .write_batch(&[GraphOp::UpsertNode {
+                key: node.key,
+                labels: node.labels.into_iter().collect(),
+                properties,
+                expected: Expected::Revision(node.revision),
+            }])
+            .unwrap();
+    }
+
+    fn seed_long_noops(db: &mut Database, count: usize) -> RememberRequest {
+        let seed = request(&"c".repeat(256), "canonical");
+        provision(db, &seed.scope);
+        remember(db, &seed);
+        let key = memory_key(&seed.scope.key(), &seed.items[0].id);
+        let memory = node(db, &key);
+        let mut properties = memory.properties.clone();
+        properties.insert(
+            "memory_revision".into(),
+            MetadataValue::String(u64::MAX.to_string()),
+        );
+        replace_properties(db, memory, properties);
+        RememberRequest {
+            idempotency_key: "long-noops".into(),
+            items: (0..count)
+                .map(|index| MemoryItem {
+                    id: format!("alias-{index}"),
+                    ..seed.items[0].clone()
+                })
+                .collect(),
+            ..seed
+        }
+    }
+
+    fn tampered_receipt_error(tamper: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tampered.vlite");
+        let mut db = database(&path);
+        let req = seed_long_noops(&mut db, 20);
+        remember(&mut db, &req);
+        let receipt = node(&db, &receipt_key(&req.scope.key(), &req.idempotency_key));
+        let count = integer_property(&receipt, "outcome_chunks").unwrap();
+        assert!(count > 1);
+        let first = node(&db, &receipt_outcome_key(&receipt.key, 0));
+        match tamper {
+            "missing" => {
+                db.graph_mut("memory")
+                    .unwrap()
+                    .write_batch(&[GraphOp::DeleteNode {
+                        key: first.key,
+                        expected: Expected::Revision(first.revision),
+                    }])
+                    .unwrap();
+            }
+            "index" | "receipt_key" | "action_count" | "action_ids" => {
+                let mut properties = first.properties.clone();
+                match tamper {
+                    "index" => {
+                        properties.insert("index".into(), MetadataValue::Integer(1));
+                    }
+                    "receipt_key" => {
+                        let other = request("another-memory", "another-receipt");
+                        remember(&mut db, &other);
+                        properties.insert(
+                            "receipt_key".into(),
+                            MetadataValue::String(receipt_key(
+                                &other.scope.key(),
+                                &other.idempotency_key,
+                            )),
+                        );
+                    }
+                    "action_count" => {
+                        let outcome = string_property(&first, "outcome").unwrap();
+                        properties.insert(
+                            "outcome".into(),
+                            MetadataValue::String(outcome.replacen("20:", "19:", 1)),
+                        );
+                    }
+                    "action_ids" => {
+                        let outcome = string_property(&first, "outcome").unwrap();
+                        // A non-UTF-8 ID cannot be decoded into an action.
+                        properties.insert(
+                            "outcome".into(),
+                            MetadataValue::String(outcome.replacen("0:6363", "0:ff63", 1)),
+                        );
+                    }
+                    _ => unreachable!(),
+                }
+                replace_properties(&mut db, first, properties);
+            }
+            "zero" | "extra" | "excessive" => {
+                let mut properties = receipt.properties.clone();
+                let count = match tamper {
+                    "zero" => 0,
+                    "extra" => count + 1,
+                    "excessive" => 9_999,
+                    _ => unreachable!(),
+                };
+                properties.insert("outcome_chunks".into(), MetadataValue::Integer(count));
+                replace_properties(&mut db, receipt.clone(), properties);
+            }
+            _ => panic!("unknown tampering"),
+        }
+        let sequence = db.sequence;
+        drop(db);
+        let before = fs::read(&path).unwrap();
+        let mut db = Database::open(&path).unwrap();
+        if matches!(tamper, "zero" | "excessive") {
+            // Exercise the envelope validator directly as well: downstream parsing
+            // otherwise masks a missing zero-count check.
+            let receipt = node(&db, &receipt.key);
+            assert!(
+                matches!(
+                    decode_outcome(&db.graph("memory").unwrap(), &receipt),
+                    Err(MemoryError::InvalidBundle)
+                ),
+                "{tamper}"
+            );
+        }
+        assert!(
+            matches!(
+                MemoryMut::bind(&mut db, "memory", None)
+                    .unwrap()
+                    .remember(&req),
+                Err(MemoryError::InvalidBundle)
+            ),
+            "{tamper}"
+        );
+        assert_eq!(db.sequence, sequence);
+        drop(db);
+        assert_eq!(fs::read(path).unwrap(), before, "{tamper}");
+    }
+
+    #[test]
+    fn receipt_chunk_count_tampering_is_invalid_without_writes() {
+        for tamper in ["zero", "extra", "excessive"] {
+            tampered_receipt_error(tamper);
+        }
+    }
+
+    #[test]
+    fn receipt_chunk_index_tampering_is_invalid_without_writes() {
+        tampered_receipt_error("index");
+    }
+
+    #[test]
+    fn receipt_chunk_owner_tampering_is_invalid_without_writes() {
+        tampered_receipt_error("receipt_key");
+    }
+
+    #[test]
+    fn receipt_missing_chunk_and_action_tampering_is_invalid_without_writes() {
+        for tamper in ["missing", "action_count", "action_ids"] {
+            tampered_receipt_error(tamper);
+        }
+    }
+
+    fn merging_request(seed: &RememberRequest, key: &str) -> RememberRequest {
+        let mut req = seed.clone();
+        req.idempotency_key = key.into();
+        req.items = (0..2)
+            .map(|index| MemoryItem {
+                id: format!("merge-{index}"),
+                source: format!("new-source-{index}"),
+                merge_into: Some(seed.items[0].id.clone()),
+                expected_revision: Some(index + 1),
+                ..seed.items[0].clone()
+            })
+            .collect();
+        req
+    }
+
+    #[test]
+    fn planned_merges_guard_the_scanned_graph_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("guards.vlite"));
+        let seed = request("target", "seed");
+        provision(&mut db, &seed.scope);
+        remember(&mut db, &seed);
+        let graph_revision = node(&db, &memory_key(&seed.scope.key(), "target")).revision;
+        for count in [1, 2] {
+            let mut req = merging_request(&seed, "merge");
+            req.items.truncate(count);
+            let normalized = validate_request(&req).unwrap();
+            let mut existing =
+                scan_memories(&db.graph("memory").unwrap(), &req.scope.key()).unwrap();
+            let planned = plan(&req, &normalized, &req.scope.key(), &mut existing).unwrap();
+            assert_eq!(planned.budget_operations, count * 2);
+            assert_eq!(planned.ops.len(), 1);
+            for op in planned.ops {
+                assert!(matches!(op, GraphOp::UpsertNode {
+                    expected: Expected::Revision(revision), ..
+                } if revision == graph_revision));
+            }
+        }
+    }
+
+    #[test]
+    fn stale_plan_revision_fails_at_write_batch_without_a_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stale.vlite");
+        let mut db = database(&path);
+        let seed = request("target", "seed");
+        provision(&mut db, &seed.scope);
+        remember(&mut db, &seed);
+        let key = memory_key(&seed.scope.key(), "target");
+        let before = node(&db, &key);
+        let sequence = db.sequence;
+        let req = merging_request(&seed, "stale");
+        BUMP_BEFORE_WRITE_BATCH.with(|target| *target.borrow_mut() = Some(key.clone()));
+        let result = MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .remember(&req);
+        assert!(
+            matches!(result, Err(MemoryError::Storage(Error::RevisionMismatch {
+            current: Some(current)
+        })) if current == sequence + 1)
+        );
+        assert_eq!(
+            db.sequence,
+            sequence + 1,
+            "only the independent write committed"
+        );
+        assert_eq!(
+            db.sequence,
+            BUMPED_BATCH_SEQUENCE.with(std::cell::Cell::get)
+        );
+        assert_eq!(db.end, BUMPED_BATCH_END.with(std::cell::Cell::get));
+        let after = node(&db, &key);
+        assert_eq!(after.properties, before.properties);
+        assert_eq!(after.revision, sequence + 1);
+        assert!(
+            db.graph("memory")
+                .unwrap()
+                .get_node(&receipt_key(&seed.scope.key(), "stale"))
+                .unwrap()
+                .output
+                .is_none()
+        );
+        let end = db.end;
+        drop(db);
+        assert_eq!(fs::metadata(path).unwrap().len(), end);
+    }
+
+    #[test]
+    fn inline_content_boundary_is_inclusive_and_utf8_exact() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("inline.vlite"));
+        for (index, content) in [
+            "x".repeat(4_096),
+            "x".repeat(4_097),
+            format!("{}€", "x".repeat(4_093)),
+            format!("{}€", "x".repeat(4_094)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut req = request(&format!("boundary-{index}"), &format!("boundary-{index}"));
+            req.items[0].content = content.clone();
+            provision(&mut db, &req.scope);
+            remember(&mut db, &req);
+            let key = memory_key(&req.scope.key(), &req.items[0].id);
+            let memory = node(&db, &key);
+            if content.len() == 4_096 {
+                assert_eq!(string_property(&memory, "content").unwrap(), content);
+                assert!(
+                    db.graph("memory")
+                        .unwrap()
+                        .get_node(&content_key(&key, 0))
+                        .unwrap()
+                        .output
+                        .is_none()
+                );
+                assert!(
+                    db.graph("memory")
+                        .unwrap()
+                        .get_edge_by_key(&content_edge_key(&key, 0))
+                        .unwrap()
+                        .output
+                        .is_none()
+                );
+            } else {
+                assert_large_content_readback(&db, &req.scope, &req.items[0].id, &content);
+            }
+        }
+    }
+
+    #[test]
+    fn exact_operation_boundaries_charge_receipts_outcomes_and_content() {
+        let dir = tempfile::tempdir().unwrap();
+        for chunked in [false, true] {
+            let path = dir.path().join(format!("budget-{chunked}.vlite"));
+            let mut db = database(&path);
+            let mut req = request("m", "accepted");
+            provision(&mut db, &req.scope);
+            let accepted = if chunked { 4_090 } else { 4_094 };
+            req.items = (0..accepted)
+                .map(|index| MemoryItem {
+                    id: format!("m{index}"),
+                    content: if chunked && index == 0 {
+                        "x".repeat(4_097)
+                    } else {
+                        format!("content-{index}")
+                    },
+                    ..req.items[0].clone()
+                })
+                .collect();
+            let normalized = validate_request(&req).unwrap();
+            let planned = plan(&req, &normalized, &req.scope.key(), &mut Vec::new()).unwrap();
+            assert_eq!(planned.budget_operations, 4_094);
+            assert_eq!(encode_actions(&planned.actions).len().div_ceil(4_096), 1);
+            let sequence = db.sequence;
+            remember(&mut db, &req);
+            assert_eq!(db.sequence, sequence + 1);
+            drop(db);
+            let baseline = fs::read(&path).unwrap();
+            let mut db = Database::open(&path).unwrap();
+            // Use a fresh scope so every item is a create, not a deduplicated noop.
+            req.scope.agent = "other-agent".into();
+            provision(&mut db, &req.scope);
+            req.items.push(MemoryItem {
+                id: "extra".into(),
+                content: "extra".into(),
+                ..req.items[0].clone()
+            });
+            let sequence = db.sequence;
+            drop(db);
+            let rejected_before = fs::read(&path).unwrap();
+            assert!(
+                rejected_before.len() > baseline.len(),
+                "scope provisioning was independent"
+            );
+            let mut db = Database::open(&path).unwrap();
+            assert!(matches!(
+                MemoryMut::bind(&mut db, "memory", None)
+                    .unwrap()
+                    .remember(&req),
+                Err(MemoryError::OperationLimit)
+            ));
+            assert_eq!(db.sequence, sequence);
+            assert!(
+                scan_memories(&db.graph("memory").unwrap(), &req.scope.key())
+                    .unwrap()
+                    .is_empty()
+            );
+            drop(db);
+            assert_eq!(fs::read(path).unwrap(), rejected_before);
+        }
+    }
+
+    #[test]
+    fn oversized_physical_frame_is_rejected_without_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frame-budget.vlite");
+        let mut db = database(&path);
+        let mut req = request("m", "frame-budget");
+        provision(&mut db, &req.scope);
+        req.items = (0..3_800)
+            .map(|index| MemoryItem {
+                id: format!("m{index}"),
+                content: format!("{index:04}{}", "x".repeat(4_092)),
+                ..req.items[0].clone()
+            })
+            .collect();
+        let normalized = validate_request(&req).unwrap();
+        let planned = plan(&req, &normalized, &req.scope.key(), &mut Vec::new()).unwrap();
+        assert!(planned.encoded_request_bytes <= MAX_BODY_BYTES);
+        assert!(planned.budget_operations + 2 < MAX_OPS);
+        let sequence = db.sequence;
+        drop(db);
+        let before = fs::read(&path).unwrap();
+        let mut db = Database::open(&path).unwrap();
+        assert!(matches!(
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .remember(&req),
+            Err(MemoryError::BodyLimit)
+        ));
+        assert_eq!(db.sequence, sequence);
+        assert!(
+            scan_memories(&db.graph("memory").unwrap(), &req.scope.key())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            db.graph("memory")
+                .unwrap()
+                .get_node(&receipt_key(&req.scope.key(), &req.idempotency_key))
+                .unwrap()
+                .output
+                .is_none()
+        );
+        drop(db);
+        assert_eq!(fs::read(path).unwrap(), before);
+    }
+
+    #[test]
+    fn worst_case_noop_receipts_replay_on_all_backends_and_charge_outcome_ops() {
+        let dir = tempfile::tempdir().unwrap();
+        let encryption_key = crate::EncryptionKey::from_bytes([7; 32]);
+        for (name, directory, encrypted) in [
+            ("plain-file", false, false),
+            ("encrypted-file", false, true),
+            ("plain-directory", true, false),
+            ("encrypted-directory", true, true),
+        ] {
+            let path = dir.path().join(name);
+            let options = crate::CreateOptions {
+                encryption: encrypted.then(|| encryption_key.clone()),
+                ..crate::CreateOptions::default()
+            };
+            let mut db = if directory {
+                Database::create_directory(&path, 2, options).unwrap()
+            } else {
+                Database::create_with_options(&path, 2, options).unwrap()
+            };
+            db.create_graph("memory").unwrap();
+            let req = seed_long_noops(&mut db, MAX_OPS);
+            let sequence = db.sequence;
+            let result = remember(&mut db, &req);
+            assert_eq!(db.sequence, sequence + 1);
+            assert!(
+                result
+                    .actions
+                    .iter()
+                    .all(|action| action.id.len() == 256 && action.revision == u64::MAX)
+            );
+            let receipt = node(&db, &receipt_key(&req.scope.key(), &req.idempotency_key));
+            assert_eq!(integer_property(&receipt, "outcome_chunks").unwrap(), 540);
+            drop(db);
+            let mut db = if encrypted {
+                Database::open_encrypted(&path, &encryption_key).unwrap()
+            } else {
+                Database::open(&path).unwrap()
+            };
+            let sequence = db.sequence;
+            let replay = remember(&mut db, &req);
+            assert!(replay.replayed);
+            assert_eq!(replay.actions, result.actions);
+            assert_eq!(db.sequence, sequence);
+
+            let mut boundary = req.clone();
+            boundary.idempotency_key = "worst-budget".into();
+            boundary.items.pop();
+            let mut created = request("with-references", "unused").items.remove(0);
+            created.content = "different content".into();
+            created.references = vec![req.items[0].id.clone(); 3_554];
+            // References use the retained canonical ID, never a noop alias.
+            created.references.fill("c".repeat(256));
+            boundary.items.push(created);
+            let normalized = validate_request(&boundary).unwrap();
+            let mut existing =
+                scan_memories(&db.graph("memory").unwrap(), &boundary.scope.key()).unwrap();
+            let planned =
+                plan(&boundary, &normalized, &boundary.scope.key(), &mut existing).unwrap();
+            let chunk_count = encode_actions(&planned.actions).len().div_ceil(4_096);
+            assert_eq!(chunk_count, 540);
+            assert_eq!(planned.budget_operations + 1 + chunk_count, MAX_OPS);
+            remember(&mut db, &boundary);
+            let sequence = db.sequence;
+            let end = db.end;
+            boundary.idempotency_key = "worst-rejected".into();
+            boundary.items.last_mut().unwrap().id = "extra-reference".into();
+            boundary.items.last_mut().unwrap().content = "another different content".into();
+            boundary
+                .items
+                .last_mut()
+                .unwrap()
+                .references
+                .push("c".repeat(256));
+            assert!(matches!(
+                MemoryMut::bind(&mut db, "memory", None)
+                    .unwrap()
+                    .remember(&boundary),
+                Err(MemoryError::OperationLimit)
+            ));
+            assert_eq!(db.sequence, sequence);
+            assert_eq!(db.end, end);
+        }
+    }
+
     #[test]
     fn receipt_and_memory_are_written_in_one_graph_frame_and_replay() {
         let dir = tempfile::tempdir().unwrap();
@@ -1805,8 +2326,9 @@ mod tests {
         let memory = graph.get_node(&key).unwrap().output.unwrap();
         assert!(!memory.properties.contains_key("content"));
         let chunks = content_chunks(content).unwrap();
-        let expected_lengths = if content.len() == 4_098 && content.ends_with('€') {
-            vec![4_095, 3]
+        let expected_lengths = if matches!(content.len(), 4_097 | 4_098) && content.ends_with('€')
+        {
+            vec![content.len() - 3, 3]
         } else {
             content
                 .as_bytes()
@@ -2734,6 +3256,24 @@ mod tests {
         let fixture: Value =
             serde_json::from_str(include_str!("../tests/fixtures/agent_memory/golden.json"))
                 .unwrap();
+        for (name, step) in [
+            ("forget-outbound-reference-budget", 0),
+            ("forget-outbound-reference-over-budget", 1),
+            ("forget-separate-guard-over-budget", 1),
+        ] {
+            let case = fixture["cases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|case| case["name"] == name)
+                .unwrap();
+            assert_eq!(case["steps"][step]["op"], "remember");
+            assert_eq!(
+                fixture_skip_reason(case),
+                Some("A2 forget is outside slice A1"),
+                "{name} must remain outside Rust replay"
+            );
+        }
         let mut replayed_cases = Vec::new();
         let mut skipped_cases = Vec::new();
         for case in fixture["cases"].as_array().unwrap() {

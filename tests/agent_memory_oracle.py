@@ -48,7 +48,13 @@ Fixture-local assumptions (not a Rust implementation/parity contract):
   Fixture-only edge creates ordinary entity edges, with globally unique edge IDs.
 * Logical plans charge receipt/node/reference operations, separate expiry/guard
   operations, record creation plus attachment, and forget edge/detach/record/node
-  deletes. Expiry reclamation costs no user operations. No physical sizing claim.
+  deletes. Remember additionally charges physical outcome chunk nodes and UTF-8
+  content chunk nodes/HAS_CONTENT edges by default, including direct boundaries.
+  Only A2_LOGICAL_SETUPS' closed three (fixture, step) pairs retain logical-only
+  accounting: A2 re-base pending: setup exceeds the A1 physical cap. The self-test
+  guards the exact set, reason and unchanged A2 skip category. This is the only
+  operation-accounting distinction; no other mode or family-wide exemption exists.
+  Expiry reclamation costs no user operations. No frame-size claim.
   Expiry immediately removes incident links/ownership, but retains orphan records.
 * State is a raw storage diagnostic (IDs can repeat across scopes); visible/get
   are clock-filtered projections. Evidence visibility requires a live sole owner
@@ -78,6 +84,16 @@ import sys
 FIXTURE = Path(__file__).parent / "fixtures" / "agent_memory" / "golden.json"
 I64_MIN, I64_MAX, U64_MAX = -(2**63), 2**63 - 1, 2**64 - 1
 MAX_OPS, MAX_BODY = 4096, 16 * 1024 * 1024
+# Only these unreplayed A2 setup steps retain the original logical operation
+# accounting. All other steps and direct checks use physical A1 accounting.
+A2_LOGICAL_SETUPS = {
+    ("forget-outbound-reference-budget", 0):
+        "A2 re-base pending: setup exceeds the A1 physical cap",
+    ("forget-outbound-reference-over-budget", 1):
+        "A2 re-base pending: setup exceeds the A1 physical cap",
+    ("forget-separate-guard-over-budget", 1):
+        "A2 re-base pending: setup exceeds the A1 physical cap",
+}
 # Each semantic mutation names the golden (case, step) that must expose it and a
 # fragment of the resulting mismatch, so a kill for an unrelated reason fails.
 MUTATIONS = {
@@ -94,7 +110,7 @@ MUTATIONS = {
                                    "got {'actions': [['created', 'over-limit', 1]]"),
     "ops_unbounded": ("bundle-entry-cap-before-dedup", 0,
                       "got {'actions': [['created', 'm0', 1], ['noop', 'm0', 1]"),
-    "body_unbounded": ("body-budget", 0, "got {'actions': [['created', 'm', 1]]"),
+    "body_unbounded": ("body-budget", 0, "got {'error': 'OperationLimit'}"),
     "receipt_conflict_ignored": ("receipt-conflict", 1,
                                  "got {'actions': [['created', 'm', 1]], 'receipt': 1,"),
     "deadline_hashed": ("receipt-replay-no-ttl-extension", 1,
@@ -127,8 +143,10 @@ MUTATIONS = {
                             "got {'actions': [['created', 'm', 1], ['created', 'n', 1]]"),
     "multiple_records_allowed": ("owner-cannot-have-two-records-in-collection", 0,
                                  "got {'actions': [['created', 'm', 1]]"),
-    "receipt_op_free": ("operation-budget-4096-distinct-creates", 0,
+    "receipt_op_free": ("candidate-create-budget-rejected", 0,
                         "got {'actions': [['created', '0', 1]"),
+    "outcome_ops_free": ("candidate-create-budget-rejected", 0,
+                          "got {'actions': [['created', '0', 1]"),
     "expiry_op_free": ("expiry-operation-budget", 0, "got {'actions': [['created', 'm', 1]]"),
     "guard_op_free": ("separate-merge-guard-budget", 1, "got {'actions': [['merged', 'm', 2]]"),
     "outbound_reference_free": ("forget-outbound-reference-over-budget", 2,
@@ -188,6 +206,30 @@ def encoded_provenance_bytes(entries):
                 length = len(value.encode("utf-8"))
                 total += len(str(length)) + 1 + length + 1
     return total
+
+
+def outcome_chunk_operations(actions):
+    # Version-one packed actions: count:hex(two-bit action codes):noop entries.
+    # Count bytes independently of Rust serialization, including canonical IDs.
+    size = len(str(len(actions))) + 2 + 2 * ((len(actions) + 3) // 4)
+    for index, (action, memory_id, revision) in enumerate(actions):
+        if action == "noop":
+            size += len(str(index)) + 1 + 2 * len(memory_id.encode("utf-8"))
+            size += 1 + len(str(revision)) + 1
+    return (size + 4095) // 4096
+
+
+def content_chunk_operations(content):
+    if len(content.encode("utf-8")) <= 4096:
+        return 0
+    chunks, current = 1, 0
+    for character in content:
+        size = len(character.encode("utf-8"))
+        if current + size > 4096:
+            chunks += 1
+            current = 0
+        current += size
+    return 2 * chunks  # One node and one HAS_CONTENT edge per UTF-8 chunk.
 
 
 def scope_tuple(value, mutation=None):
@@ -390,7 +432,7 @@ class Model:
             return identity, request_digest, copy.deepcopy(previous["outcome"])
         return identity, request_digest, None
 
-    def remember(self, request, clock):
+    def remember(self, request, clock, fixture_pair=None):
         scope, window, items = self.validate_request("remember", request, clock)
         normalized = self.validate_items(scope, items, request, clock)
         if self.is_mutant("replay_reads_state"):
@@ -454,6 +496,8 @@ class Model:
                 self.memories[self.memory_key(scope, item["id"])] = memory
                 action = "created"
                 planned_ops += 1
+                if fixture_pair not in A2_LOGICAL_SETUPS:
+                    planned_ops += content_chunk_operations(item["content"])
                 if item["expiry"] is not None and not self.is_mutant("expiry_op_free"):
                     planned_ops += 1
                 if item["expiry"] is not None and item["expiry"] <= clock:
@@ -484,6 +528,8 @@ class Model:
         # A provisional ID that deduplicated to another ID is not a new anchor.
         check(all(ref in self.memories for memory in self.memories.values()
                   for ref in memory["references"]), "MissingReference")
+        if fixture_pair not in A2_LOGICAL_SETUPS and not self.is_mutant("outcome_ops_free"):
+            planned_ops += outcome_chunk_operations(actions)
         check(planned_ops <= MAX_OPS or self.is_mutant("ops_unbounded"), "OperationLimit")
         self.scopes[self.scope_key(scope)] = scope
         return self.commit(identity, request_digest, clock + window, {"actions": actions})
@@ -566,17 +612,18 @@ class Model:
             "digest": request_digest, "expiry": expiry, "outcome": copy.deepcopy(outcome)}
         return outcome
 
-    def mutate(self, operation, request, clock):
+    def mutate(self, operation, request, clock, fixture_pair=None):
         # A detached planner is the logical atomic boundary, not storage simulation.
         planned = self if self.is_mutant("non_atomic") else copy.deepcopy(self)
-        outcome = getattr(planned, operation)(request, clock)
+        outcome = (planned.remember(request, clock, fixture_pair)
+                   if operation == "remember" else planned.forget(request, clock))
         self.__dict__.update(planned.__dict__)
         return outcome
 
-    def execute(self, step):
+    def execute(self, step, fixture_pair=None):
         op = step["op"]
         if op in ("remember", "forget"):
-            return self.mutate(op, expand_request(step["request"]), step["clock"])
+            return self.mutate(op, expand_request(step["request"]), step["clock"], fixture_pair)
         if op == "scope_pair":
             left = scope_tuple(step["left"], self.mutation)
             right = scope_tuple(step["right"], self.mutation)
@@ -817,7 +864,7 @@ def run_case(case, mutation=None):
     for index, step in enumerate(case["steps"]):
         before = copy.deepcopy(model.__dict__)
         try:
-            actual = model.execute(step)
+            actual = model.execute(step, (case["name"], index))
         except ModelError as error:
             actual = {"error": str(error)}
             if model.__dict__ != before:
@@ -849,7 +896,7 @@ def verify_single_defect(case):
         model = Model(None, case.get("force_collision", False))
         for position, candidate in enumerate(steps):
             try:
-                actual = model.execute(candidate)
+                actual = model.execute(candidate, (case["name"], position))
             except ModelError as error:
                 actual = {"error": str(error)}
             if position < target:
@@ -1060,11 +1107,11 @@ def boundary_checks():
     model = Model()
     request = {"scope": scope, "key": "k", "receipt_window": 100,
                "items": [{**item, "id": str(i), "content": str(i)}
-                         for i in range(MAX_OPS - 1)]}
+                         for i in range(MAX_OPS - 2)]}
     result = model.mutate("remember", request, 10)
-    if (result["actions"] != [["created", str(i), 1] for i in range(MAX_OPS - 1)]
-            or len(model.memories) != MAX_OPS - 1):
-        raise AssertionError("4095 distinct creates plus receipt rejected")
+    if (result["actions"] != [["created", str(i), 1] for i in range(MAX_OPS - 2)]
+            or len(model.memories) != MAX_OPS - 2):
+        raise AssertionError("4094 distinct creates plus receipt and outcome rejected")
     request["items"].append({**item, "id": "extra", "content": "extra"})
     try:
         Model().mutate("remember", request, 10)
@@ -1072,7 +1119,7 @@ def boundary_checks():
         if str(error) != "OperationLimit":
             raise
     else:
-        raise AssertionError("4096 distinct creates plus receipt accepted")
+        raise AssertionError("4095 distinct creates plus receipt and outcome accepted")
     count += 2
     request["items"] = [{**item, "id": f"d{i}"} for i in range(MAX_OPS)]
     result = Model().mutate("remember", request, 10)
@@ -1098,7 +1145,13 @@ def boundary_checks():
     request["items"][0]["content"] = "x" * padding
     if len(canonical(request)) != MAX_BODY:
         raise AssertionError("body boundary setup is not exactly 16 MiB")
-    Model().mutate("remember", request, 10)
+    try:
+        Model().mutate("remember", request, 10)
+    except ModelError as error:
+        if str(error) != "OperationLimit":
+            raise
+    else:
+        raise AssertionError("16-MiB content ignored physical chunk operations")
     request["items"][0]["content"] += "x"
     try:
         Model().mutate("remember", request, 10)
@@ -1145,7 +1198,28 @@ def boundary_checks():
     return count
 
 
+def check_closed_a2_setups(fixture):
+    expected = frozenset({
+        ("forget-outbound-reference-budget", 0),
+        ("forget-outbound-reference-over-budget", 1),
+        ("forget-separate-guard-over-budget", 1),
+    })
+    if set(A2_LOGICAL_SETUPS) != expected:
+        raise AssertionError("closed A2 setup exception set changed")
+    cases = {case["name"]: case for case in fixture["cases"]}
+    for (name, index), reason in A2_LOGICAL_SETUPS.items():
+        case = cases[name]
+        # Rust's unchanged A1 skip classifier skips every fixture with forget.
+        if not any(step["op"] == "forget" for step in case["steps"]):
+            raise AssertionError(f"{name} left the existing A2 skip category")
+        if case["steps"][index]["op"] != "remember":
+            raise AssertionError(f"{name} exception no longer names a remember setup")
+        if reason != "A2 re-base pending: setup exceeds the A1 physical cap":
+            raise AssertionError(f"{name} exception reason changed")
+
+
 def self_test(fixture):
+    check_closed_a2_setups(fixture)
     for case in fixture["cases"]:
         run_case(case)
     single = sum(verify_single_defect(case) for case in fixture["cases"])
