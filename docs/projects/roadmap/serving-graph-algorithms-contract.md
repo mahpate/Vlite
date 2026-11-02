@@ -1,12 +1,15 @@
 # Gap 5 S5: bounded graph algorithm serving contract
 
-Status: candidate for independent acceptance, based on `00babff460c58b0d80f179de79cfcc3e50c0ce57`.
+Status: owner choices resolved (2026-11-02); exact-schema independent acceptance
+remains open. Source-audit base: `00babff460c58b0d80f179de79cfcc3e50c0ce57`.
 Design only; no serving implementation or schema activation is authorized by this file.
 S1-S4 are embedded, reviewed and unreleased [A1]. S5 needs separate acceptance.
 The [owner's wire decision](next-major.md#decided-2026-11-02) requires exact schemas
 and review before code. This candidate supplies those schemas, not a release gate waiver.
 Open means not decided or not verified. All unqualified requirements below are proposed.
-This document is conformed to the [serving wire conventions proposal](serving-wire-conventions.md), whose owner decisions remain open.
+The [shared wire conventions](serving-wire-conventions.md) are owner-approved.
+Feature-specific selections are recorded in section 10; their approval and the
+remaining conformance work do not replace independent implementation acceptance.
 
 ## 1. Scope and requirements
 
@@ -95,7 +98,8 @@ Absence means absent from the cited dispatcher/service, not from every possible 
 ## 3. Exact operation and JSON contract
 
 All five routes are `POST /v1/graphs/{graph}/algorithms/<suffix>`, use `graph_read`,
-and return HTTP 200 for a valid execution, including exhaustion.
+and return HTTP 200 for a valid execution, including nondeadline exhaustion.
+Deadline exhaustion returns the section 5 error, never a partial success envelope.
 Like existing graph reads, they do not enforce Content-Type: the body is a UTF-8
 JSON object; empty/all-whitespace bodies decode as `{}`, whose missing required
 scope yields 422 `invalid_json` (`src/server/graph.rs:344-366`). No 415 is added.
@@ -110,9 +114,15 @@ REST retains the existing graph-read cap (`src/server/graph.rs:79-80,184`).
 New CLI commands use this cap, leaving existing commands' caps unchanged.
 gRPC retains its service-wide 8 MiB request / 16 MiB response caps [W3];
 do not lower Graph's service cap, which also admits batches.
-Algorithm responses on all surfaces have a 16,777,216 encoded-byte ceiling:
-overflow fails explicitly as `invalid_input` rather than cutting serialized JSON.
-This is an output safety limit, not a measurement.
+The owner approved a 16,777,216-byte success-payload ceiling for these new
+algorithm operations only. Measure before compression or transport framing:
+compact UTF-8 envelope JSON for REST/CLI (excluding the CLI framing newline),
+the complete MCP tool-result object including both text and structuredContent
+(excluding the JSON-RPC envelope), and protobuf `encoded_len()` for gRPC.
+Overflow fails explicitly: REST/MCP/CLI use `invalid_input`; the gRPC adapter
+uses the shared `response_too_large` / RESOURCE_EXHAUSTED preflight.
+Never cut serialized data to fit. This is not a generic REST cap, allocation or
+process-memory bound; all existing nonalgorithm response behavior is unchanged.
 
 | REST suffix / operationId | `vlite.v1.Graph` unary method | MCP tool | CLI command |
 |---|---|---|---|
@@ -258,7 +268,7 @@ omitted uniform personalization); selectors in an echo contain ID strings only.
 Limits are not part of this embedded request echo; `max_hops` is reported separately [A3].
 
 `complete` iff `truncation` is empty; it has length 0 or 1. Reasons are
-`visited_limit|edge_limit|vertex_limit|memory_limit|output_limit|deadline|cancelled|iteration_limit`
+`visited_limit|edge_limit|vertex_limit|memory_limit|output_limit|cancelled|iteration_limit`
 or `{"degree_limit":{"node_ids":[U64String]}}` (one stopping node for this kernel).
 `scope_complete` certifies extraction, not global coverage. `computation_complete`
 certifies the whole computation, including convergence for iterative algorithms
@@ -268,8 +278,11 @@ Extraction interruption always returns null output and null echo. Degree/path
 interruption also withholds uncertified output; a path beyond an output cap is
 withheld even though computation finished. Iterative/sampled interruption after
 a full step/source retains its last full output and echo, with computation_complete=false;
-before the first it returns neither. A final deadline/cancellation check may
-retain an already committed iterative/sample output but makes it incomplete.
+before the first it returns neither. A final cancellation check may retain an
+already committed iterative/sample output but makes it incomplete. A deadline
+reported by the engine, including its final check, instead discards the entire
+result at the adapter and returns `deadline_exceeded`; no partial values or
+success envelope are serialized. Embedded algorithm behavior is unchanged.
 Echo may be present with null path output after OutputLimit: do not infer echo
 presence solely from output presence. Preserve the adapter's actual flags [A3, A6].
 
@@ -321,7 +334,7 @@ bounded by the shared examined-edge budget; Both may create two arcs per edge.
 | `limits.max_visited_nodes` | 1,000 / 10,000 | All, seeds included; `visited_limit` |
 | `limits.max_edges_examined` | 10,000 / 100,000 | All passes/arcs; `edge_limit` |
 | `limits.max_edges_per_node` | 1,000 / 10,000 | Extraction adjacency; `degree_limit` with stopping node ID |
-| `limits.deadline_ms` | 250 / 5,000 | All, monotonic execution clock; `deadline` |
+| `limits.deadline_ms` | 250 / 5,000 | All, monotonic execution clock; engine deadline becomes adapter `deadline_exceeded` |
 | `limits.max_output_nodes` | 100 / 1,000 | Degree/scores/assignments and found path nodes; `output_limit` |
 | `limits.max_output_edges` | 200 / 2,000 | Found path only; `output_limit` |
 | `limits.max_output_paths` | 20 / 100 | Found path only (one maximum result); `output_limit` |
@@ -358,8 +371,12 @@ Keep the embedded relative execution deadline, which starts at its meter, distin
 from an end-to-end client transport deadline. A client disconnect/cancellation or
 earlier client deadline sets the same cancellation flag; do not extend either
 deadline while waiting for a guard. A transport that has already expired cannot
-deliver a partial result. If the engine's own deadline expires while the transport
-is live, deliver HTTP 200 / gRPC OK / MCP isError=false with `deadline`.
+deliver a partial result. The owner selected no partial result at any deadline:
+if the engine reports its own deadline while the transport is live, discard the
+result and return HTTP 504 / gRPC DEADLINE_EXCEEDED with `deadline_exceeded`.
+MCP uses its existing failure wrapper and CLI its nonzero coded-error path.
+This intentionally differs from embedded partial-result behavior only at the
+new serving adapters; other budget-stop semantics and existing handlers are unchanged.
 If gRPC itself expires/cancels first, the call ends CANCELLED without an envelope
 or trailer, per [wire conventions section 2.2](serving-wire-conventions.md#22-one-reachable-family-oversize-deadline-cancel-busy);
 set the flag, stop work cooperatively and release the guard.
@@ -369,8 +386,8 @@ REST/gRPC slices must add a drop-guard flag around spawn_blocking work, survivin
 handler/future drop until the worker observes it. MCP currently ignores
 notifications/cancelled and reads stdio sequentially (`src/bin/vlite-mcp.rs:733,798-818`);
 its slice must add a reader thread and request-id-to-flag map to receive cancellation
-during a call, for local and proxied execution. A live channel returns the incomplete
-envelope normally. The CLI installs no signal handler: Ctrl+C ends the process,
+during a call, for local and proxied execution. A live channel may return an
+incomplete envelope for nondeadline stops only. The CLI installs no signal handler: Ctrl+C ends the process,
 without a result guarantee; uninterrupted runs use deadline_ms (ceiling 5,000 ms [A5]).
 Add no dependency, unsafe/FFI, cancellation route or job registry.
 
@@ -379,11 +396,12 @@ Add no dependency, unsafe/FFI, cancellation route or job registry.
 No new public `Error` variant. Adapt existing `GraphAlgorithmError` directly:
 Read delegates to existing Error mappings [E1]; MissingWeight/InvalidWeight/
 NumericOverflow retain their existing variants and display messages [A4].
-The adapter builds an `ApiError` for each of `graph_missing_weight`,
-`graph_invalid_weight` and `graph_numeric_overflow` from the corresponding
-existing `GraphAlgorithmError` variant, per
-[wire conventions section 7](serving-wire-conventions.md#7-per-document-conformance-checklist);
-these are not new engine variants.
+The owner selected the existing `invalid_input` code for all three weight/numeric
+failures (walkthrough 62), rather than introducing specialized adapter codes.
+Map the corresponding existing `GraphAlgorithmError` variants to HTTP 422 /
+gRPC INVALID_ARGUMENT; retain their existing sanitized display messages without
+requiring clients to distinguish a new code family. Existing nonalgorithm endpoint
+mappings remain unchanged.
 Graph-enabled checks and graph binding must precede node/edge information exposure.
 
 | Failure / exact REST code | HTTP | gRPC | MCP/CLI code |
@@ -398,10 +416,13 @@ Graph-enabled checks and graph binding must precede node/edge information exposu
 | `GraphNodeNotFound`: `graph_node_not_found` | 409 | FAILED_PRECONDITION | Same code |
 | `InvalidGraphName`: `invalid_graph_name` | 422 | INVALID_ARGUMENT | Same code |
 | `GraphLimitExceedsCeiling`: `graph_limit_exceeds_ceiling` | 422 | INVALID_ARGUMENT | Same code |
-| `InvalidQuery`, `InvalidFilter`, encoded response overflow: `invalid_input` | 422 | INVALID_ARGUMENT | Same code |
-| `MissingWeight {edge_id}`: `graph_missing_weight` | 422 | INVALID_ARGUMENT | Same code |
-| `InvalidWeight {edge_id,reason}`: `graph_invalid_weight` | 422 | INVALID_ARGUMENT | Same code |
-| `NumericOverflow`: `graph_numeric_overflow` | 422 | INVALID_ARGUMENT | Same code |
+| `InvalidQuery`, `InvalidFilter`: `invalid_input` | 422 | INVALID_ARGUMENT | Same code |
+| REST/MCP/CLI algorithm response overflow: `invalid_input` | 422 | n/a (next row) | Existing failure wrapper / nonzero coded error |
+| gRPC algorithm response overflow: `response_too_large` | Adapter-internal 413 only, not a REST mapping | RESOURCE_EXHAUSTED | n/a |
+| `MissingWeight {edge_id}`: `invalid_input` | 422 | INVALID_ARGUMENT | Same code |
+| `InvalidWeight {edge_id,reason}`: `invalid_input` | 422 | INVALID_ARGUMENT | Same code |
+| `NumericOverflow`: `invalid_input` | 422 | INVALID_ARGUMENT | Same code |
+| Engine/adapter deadline: `deadline_exceeded` | 504 | DEADLINE_EXCEEDED | Existing failure wrapper / nonzero coded error |
 | Existing admission: `rate_limited` | 429 | RESOURCE_EXHAUSTED | Proxy preserves code |
 | Existing admission: `busy` / `unavailable` | 503 | UNAVAILABLE | Proxy preserves code |
 | Unexpected internal failure: `internal_error` | 500 | INTERNAL | Same sanitized code |
@@ -429,7 +450,7 @@ Retain request IDs and Retry-After on existing admission errors, with no automat
 MCP tool failure preserves the existing wrapper [E3], not a new error object:
 
 ```json
-{"content":[{"type":"text","text":"graph_missing_weight: graph edge 7 has no weight property"}],"structuredContent":{"error":"graph_missing_weight: graph edge 7 has no weight property"},"isError":true}
+{"content":[{"type":"text","text":"invalid_input: graph edge 7 has no weight property"}],"structuredContent":{"error":"invalid_input: graph edge 7 has no weight property"},"isError":true}
 ```
 
 MCP success wraps the envelope as `structuredContent`, with compact envelope JSON
@@ -517,9 +538,10 @@ paths:
         '403': {description: forbidden_scope or tenant_suspended or tenant_unavailable, content: *errorContent}
         '409': {description: graphs_not_enabled or graph_not_found or graph_node_not_found, content: *errorContent}
         '413': {description: invalid_json - request exceeds 1048576 bytes, content: *errorContent}
-        '422': {description: invalid_json or invalid_input or invalid_graph_name or graph_limit_exceeds_ceiling or graph_missing_weight or graph_invalid_weight or graph_numeric_overflow, content: *errorContent}
+        '422': {description: invalid_json or invalid_input or invalid_graph_name or graph_limit_exceeds_ceiling, content: *errorContent}
         '429': {description: rate_limited, headers: {Retry-After: {schema: {type: integer, const: 1}}}, content: *errorContent}
         '503': {description: busy or unavailable, content: *errorContent}
+        '504': {description: deadline_exceeded - no partial result, content: *errorContent}
         '500': {description: internal_error, content: *errorContent}
   /v1/graphs/{graph}/algorithms/weighted-shortest-path:
     parameters: *graphPath
@@ -789,7 +811,7 @@ components:
       maxItems: 1
       items:
         oneOf:
-          - {type: string, enum: [visited_limit, edge_limit, vertex_limit, memory_limit, output_limit, deadline, cancelled, iteration_limit]}
+          - {type: string, enum: [visited_limit, edge_limit, vertex_limit, memory_limit, output_limit, cancelled, iteration_limit]}
           - type: object
             additionalProperties: false
             required: [degree_limit]
@@ -1057,7 +1079,8 @@ message GraphAlgorithmTruncation {
     VERTEX_LIMIT = 4;
     MEMORY_LIMIT = 5;
     OUTPUT_LIMIT = 6;
-    DEADLINE = 7;
+    reserved 7;
+    reserved "DEADLINE"; // Deadline exhaustion is an error, not this envelope.
     CANCELLED = 8;
     ITERATION_LIMIT = 9;
   }
@@ -1143,12 +1166,13 @@ iteration counts from stationary PageRank. No new oracle is delivered here.
 |---|---|
 | Wire schema | Every required/optional/null field, both selector forms, ID 0/u64 max, number vs decimal string, duplicate/unknown fields, unknown enum, malformed JSON, NaN/Inf, noncanonical strings, invalid oneofs; validate both OpenAPI and tool schemas |
 | MCP SDK compatibility | SDK-style callTool validation on success structuredContent and isError structuredContent; no outputSchema advertised; success envelope matches section 7, error wrapper remains accepted |
-| Body/size parity | Missing or non-JSON Content-Type still parses JSON; empty/whitespace body gives 422 invalid_json, never 415; compact re-serialized MCP arguments cap; decoded graph-read gRPC encoded_len cap gives INVALID_ARGUMENT/invalid_json per wire conventions decision 18 (proposed); unknown fields count only toward service frame cap, whose overflow gives native OUT_OF_RANGE without VLite trailer |
+| Body/size parity | Missing or non-JSON Content-Type still parses JSON; empty/whitespace body gives 422 invalid_json, never 415; compact re-serialized MCP arguments cap; decoded graph-read gRPC encoded_len cap gives INVALID_ARGUMENT/invalid_json per approved wire decision 18; unknown fields count only toward service frame cap, whose overflow gives native OUT_OF_RANGE without VLite trailer |
+| Response size | Exact 16,777,216-byte success payload and one byte above in each section 3 unit; count both MCP representations, not just its inner envelope. Over-cap REST/MCP/CLI fail invalid_input; gRPC fails response_too_large / RESOURCE_EXHAUSTED. No cut JSON, partial success or cursor state; removing the preflight or counting only one MCP representation must fail |
 | Defaults/ceilings | Each field omitted/default/ceiling/ceiling+1; zero H/output valid, zero work/caps invalid; inactive-algorithm caps still validated; raw list counts before dedup; UTF-8 boundary bytes |
 | Execution limits | Exact needed edge/vertex/scratch budget and one below; extraction vs compute vs serialization stops; per-node degree including rejected/repeated edges; zero output; path withheld vs certified NoPath; first reason alone |
 | Iteration/sample limits | Cap just before convergence and exactly on convergence; stop within first and later full steps/sources; output-prefix cuts never change computation or source lists; estimated complete sample vs partial estimate |
 | Cancellation | Pre-set flag; before/after 64-operation boundary; edge-free preparation/sort/fill loops; final check; REST/gRPC disconnect/drop guard; MCP notification received during local/proxy call through reader thread and request-id flag map; fake monotonic clock, not sleeps |
-| Transport deadline | Engine deadline while live channel gives incomplete OK; earlier client gRPC deadline or cancellation gives CANCELLED without trailer per wire conventions section 2.2; no response after expired channel, flag observed and read guard released |
+| Transport deadline | Engine deadline, including the final check after a complete step/source, discards all values and returns deadline_exceeded (HTTP 504 / gRPC DEADLINE_EXCEEDED / MCP failure / CLI nonzero), never incomplete OK; earlier client gRPC deadline or cancellation retains native failure without trailer per wire conventions section 2.2; no response after expired channel, flag observed and read guard released. Mutating the adapter to publish a deadline-marked result must fail |
 | Errors | Each section 5 row, existing display text, smallest bad edge ID; no new public Error variants, no leaking weight/key/property contents; old read errors unchanged |
 | Authorization | Missing/expired/revoked key, wrong lineage, read-only allowed, graph_write without graph_read denied, collection wildcard denied; out-of-binding nonexistent/existing graph indistinguishable; admin vs two tenant keys |
 | Tenant/lifecycle | Equal local graph/key/ID names in two tenants; physical names; suspended/deleted tenant; no cross-tenant seeds or existence leak; no vector/attachment reads; proxy must not fall back locally |
@@ -1176,7 +1200,7 @@ files onto preceding slices and owns only its five operations and matching rows.
 | `gap5-s5-serving` after accepted S1-S4 | This document only | Evidence checked at required base; all five exact schemas/bounds/errors; decisions enumerated; four requested doc checks pass; links resolve |
 | `gap5-s5-serving-json` after contract decisions | `src/bin/tool_support/graph_json.rs`, new focused serializer/adapter tests | Strict request decoding; ID/float fidelity; canonical envelope and nulls; existing errors adapted without new Error variants; all five oracle schemas and mutations |
 | `gap5-s5-serving-rest` after JSON | `src/server/graph.rs`, `src/openapi_graph.json`, `src/openapi.json`, new REST algorithm tests, REST rows in `site/api.html` | Five POST read classifications; graph/tenant authorization before lookup; one guard/clock; spawn_blocking drop-guard cancellation flag; exact overlay/error/limit parity |
-| `gap5-s5-serving-grpc` at step 8 after memory, REST and independently accepted Gap 12 Graph service/auth/typed-read slices | `proto/vlite/v1/vlite.proto`, `src/server/grpc.rs`, new graph-algorithm RPC adapter/tests, gRPC rows in `site/api.html` | Append five RPCs (section 7.2) to whatever Graph holds at step 8 per wire conventions section 1.1; own only those RPCs and matching parity/reference rows; compile descriptors/generated clients; freeze tags/reservations; decoded graph-read encoded_len cap/existing INVALID_ARGUMENT/invalid_json mapping per decision 18 (proposed) vs native OUT_OF_RANGE; spawn_blocking drop-guard flag; deadline/trailer parity; old/new compatibility |
+| `gap5-s5-serving-grpc` at step 8 after memory, REST and independently accepted Gap 12 Graph service/auth/typed-read slices | `proto/vlite/v1/vlite.proto`, `src/server/grpc.rs`, new graph-algorithm RPC adapter/tests, gRPC rows in `site/api.html` | Append five RPCs (section 7.2) to whatever Graph holds at step 8 per wire conventions section 1.1; own only those RPCs and matching parity/reference rows; compile descriptors/generated clients; freeze tags/reservations; decoded graph-read encoded_len cap/existing INVALID_ARGUMENT/invalid_json mapping per approved decision 18 vs native OUT_OF_RANGE; response_too_large preflight; spawn_blocking drop-guard flag; deadline/trailer parity without deadline partials; old/new compatibility |
 | `gap5-s5-serving-agents` after REST and JSON | `src/bin/tool_support/graph_mcp.rs`, `src/bin/tool_support/graph_proxy.rs`, reader thread/request-id flag map and cancellation dispatch in `src/bin/vlite-mcp.rs`, `src/bin/vlite-graph-cli.rs`, new MCP/CLI tests, MCP rows in `site/api.html` | Five tools and commands; explicit proxy routing, rejecting explain (no ordinary-read fallback); MCP reader-thread cancellation during calls; CLI no signal handler, deadline-bounded; MCP existing read-only/writable handle never mutated; proxy identity/no fallback; compact arguments byte cap; no outputSchema, SDK success/error validation; wrappers, exits, all five oracle results |
 | `gap5-s5-serving-parity` after all transports | New `tests/graph_algorithm_serving_oracle.py`, transport fixtures/tests, `docs/GRAPH.md`, matching existing README/site sections only when implementation is published | Python oracle + goldens + mutations; full cross-surface matrix; API-reference/doc checks; independent review; coordinator alone integrates |
 
@@ -1188,21 +1212,21 @@ activation, release criterion, storage qualification or benchmark gate is change
 
 ## 10. Owner decisions and open items
 
-These decisions concern the candidate, not an assertion of prior approval.
-Accept recommendations explicitly during independent acceptance before code.
+Explicit owner selections are recorded below. Unmarked recommendations remain
+open; design approval does not authorize activation or waive implementation acceptance.
 
 | Decision | Options and recommendation | Blocking scope |
 |---|---|---|
-| S5-D1: operation granularity | **Recommend five named read operations** as specified; alternative one tagged algorithm endpoint/tool/RPC. Five avoids algorithm-dependent permission/schema ambiguity; no extra algorithms implied. | All wire schemas |
-| S5-D2: specialized weight/numeric errors | **Recommend the three 422 adapter codes** in section 5 over existing GraphAlgorithmError; alternative collapse to invalid_input and lose machine distinction. No public Error variant required; any proposal for one needs separate owner approval. | Error adapter |
-| S5-D3: engine vs transport deadline | **Recommend live-channel partial OK and expired-channel native failure**, with cancellation flag and no partial-result guarantee after expiry. Alternative discard partial results at every deadline; that would diverge from embedded semantics. Do not reinterpret the embedded relative deadline as an end-to-end SLA. | REST/gRPC/MCP/CLI cancellation |
-| S5-D4: local authority | **Recommend existing local-file authority**, explicit non-tenanted local CLI/MCP, with server parity through proxied MCP. Alternative new remote CLI/credential policy is a separately scoped design, not an S5 shortcut. | Agent-surface acceptance |
-| S5-D5: new wire size bounds | **Recommend 1 MiB input / 16 MiB output** for these operations only, sharing graph-read input and gRPC output bounds; alternative smaller output cap needs explicit approval and overflow cases. Existing nonalgorithm defaults stay unchanged. **Withdrawn (ALG-only input scope):** superseded by the graph-read-wide input proposal in [wire conventions, decision 18](serving-wire-conventions.md#6-owner-decisions-23); recommend option B there, not an ALG-only rule. The output proposal is unchanged. Wire conventions, decision 18 (proposed) | Wire adapters |
-| S5-D6: proto ownership | **Recommend prefixed algorithm-owned messages**, tags/reservations in 7.2, appended methods to Gap 12 Graph; alternative reuse future shared graph types only after their exact schemas are accepted and this contract is amended. | gRPC slice |
+| S5-D1: operation granularity | **Owner-approved (2026-11-02, walkthrough 61): five named read operations** as specified, rather than one tagged algorithm endpoint/tool/RPC. Existing graph-read authority is retained; no extra algorithms or writes are implied. This selects the operation inventory, not the remaining error, cancellation or output-limit policies. | Operation inventory settled; remaining schemas and acceptance stay gated |
+| S5-D2: weight/numeric errors | **Owner-approved alternative (2026-11-02, walkthrough 62): use existing `invalid_input` for all three failures**, rather than the proposed specialized codes. Preserve HTTP 422 / gRPC INVALID_ARGUMENT and the existing GraphAlgorithmError variants/messages; no public Error variant or nonalgorithm mapping change. | Code choice settled; adapter parity remains required |
+| S5-D3: engine vs transport deadline | **Owner-approved alternative (2026-11-02, walkthrough 63): discard partial results at every deadline.** A reported engine deadline becomes the shared `deadline_exceeded` failure even on a live channel; native expired-channel behavior remains unchanged. Cancellation must still stop work cooperatively and release guards. This is an adapter policy, not an embedded algorithm change or end-to-end SLA; nondeadline stops are not newly prohibited. | Deadline policy settled; runtime cancellation/error parity still required |
+| S5-D4: local authority | **Owner-approved (2026-11-02, walkthrough 64): existing local-file authority**, explicitly non-tenanted local CLI/MCP, with credential/tenant/graph enforcement through server and proxied MCP. No local fallback after a proxy failure and no new remote CLI/credential policy. | Authority boundary settled; agent-surface parity remains required |
+| S5-D5: new wire size bounds | **Input decision carried forward:** graph-read-wide 1 MiB per approved [wire decision 18](serving-wire-conventions.md#6-owner-decisions-23), option B. **Output owner-approved (2026-11-02, walkthrough 65): 16 MiB per new algorithm success payload**, measured as section 3 defines, including the full MCP tool-result wrapper. REST/MCP/CLI use invalid_input; gRPC uses response_too_large. Existing nonalgorithm behavior stays unchanged; no generic REST or total-memory cap is implied. | Bounds settled; exact-boundary and adapter conformance remain required |
+| S5-D6: proto ownership | **Owner-approved (2026-11-02, walkthrough 66): prefixed algorithm-owned messages**, with five methods appended to Gap 12 Graph in the shared landing order, rather than coupling to unaccepted future shared types. Exact field/tag descriptors, compatibility and oracle review remain separate prerequisites; no additional service or core tag release. | Ownership settled; exact-schema acceptance still required |
 
 Open implementation items: independently accept Gap 12's exact Graph service
-messages and ledger IDs; approve the new adapter wire codes and cancellation
-plumbing; prove disconnects stop charged work and release guards on each runtime;
+messages and ledger IDs; implement and verify the selected cancellation and error
+policies; prove disconnects stop charged work and release guards on each runtime;
 validate expanded OpenAPI/MCP schemas against negative fixtures; prove generated
 proto presence and u64 fidelity. Cross-platform floating reproducibility beyond
 the oracle tolerances remains open in Gap 5. Offline analytics and new public

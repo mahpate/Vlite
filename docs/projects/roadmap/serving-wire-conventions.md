@@ -155,7 +155,7 @@ The gRPC column is what the shared mapper returns (`grpc.rs:181-196`). It keeps 
 | Count or shape bound (ops, `limit`, `k`, depth) | 422 `invalid_input`, the bound named per section 3 (`graph.rs:717-719`; `features.rs:109-110`) | INVALID_ARGUMENT | one code for every domain |
 | Response over 16 MiB | no cap exists (decision 3) | an `encoded_len()` preflight in the adapter returns `response_too_large`; without a preflight tonic returns OUT_OF_RANGE with no trailer (tonic `codec/encode.rs:187-189`) | never a truncated success (`docs/GRPC.md:159-160`); a feed or list page does not advance its cursor |
 | `grpc-timeout` expiry | n/a | CANCELLED with no trailer: tonic drops the handler (tonic `status.rs:644-645`, `transport/service/grpc_timeout.rs:89`) | accept it; no draft promises DEADLINE_EXCEEDED for it |
-| Engine or adapter deadline | typed graph read: 200 with `complete=false` and reason `deadline`; otherwise 504 `deadline_exceeded` | OK with partial; otherwise DEADLINE_EXCEEDED with trailer | only before the commit point; after it the result is committed or `commit_indeterminate` |
+| Engine or adapter deadline | existing typed graph read: 200 with `complete=false` and reason `deadline`; new ALG operations and other error paths: 504 `deadline_exceeded` | Existing typed reads retain partial OK; new ALG deadlines and other error paths use DEADLINE_EXCEEDED with trailer | ALG owner decision S5-D3 discards every deadline result, including a final check; no legacy handler change. For writes this is only before the commit point; after it the result is committed or `commit_indeterminate` |
 | Client cancel | no wire code | handler dropped; the spawned call keeps its permit (`grpc.rs:243-252`); a disconnect never rolls back a commit (`docs/GRPC.md:152-155`) | the 408/499 `*_cancelled` rows are dropped (audit label only); a `cancelled` partial reason exists only where the channel survives (MCP, CLI, embedded) |
 | Busy | 503 `busy`, `unavailable` | UNAVAILABLE (`grpc.rs:191,249-252`) | no domain busy codes; G7 busy admission uses `busy`, not `InvalidQuery` |
 | Credential limit | 429 with `Retry-After: 1` (`server.rs:1414-1419`) | RESOURCE_EXHAUSTED | existing |
@@ -359,10 +359,20 @@ Every document: for each new code, state its producer (an existing `Error` varia
 - Conforming: `package vlite.v1` (~84); 17 unary RPCs (~87-105); `u64` limits (~137); `collections:["*"]` (BASE:163).
 
 **ALG**
-- [ ] `read_time_unix_ms` (~241, 807, 823, 1075) becomes `ttl_clock_ms`.
-- [ ] The gRPC half of ~386 (`invalid_input` trailer on the 1 MiB read cap) becomes `invalid_json`; S5-D5 (~1186) becomes decision 18: the 1 MiB input is a graph-read rule, not an ALG-only rule.
-- [ ] Replace the absolute "17 to 22" Graph method count (~479, 1165) with "append five RPCs (~839-843) to whatever `Graph` holds at step 8", per the 1.1 manifest; the slice sits at step 8, after memory, and owns only its five RPCs and rows.
-- Conforming: `reserved 100 to 199` per message (~858-1080); the REST half of ~386 (`invalid_json` 413); partial vocabulary (~260, 781); expired channel (~356-362); tool-local `invalid_request` (~302, 385); MCP string failure with no `outputSchema` (~286, 424).
+- [x] Candidate documentation uses `ttl_clock_ms` instead of `read_time_unix_ms`.
+- [x] The gRPC read cap uses `invalid_json`; S5-D5 carries forward approved
+  decision 18's graph-read-wide 1 MiB rule rather than an ALG-only rule.
+- [x] Candidate documentation appends five RPCs to whatever `Graph` holds at
+  step 8, after memory, and owns only those RPCs and matching rows; it no longer
+  promises an absolute Graph method count.
+- Owner selections S5-D2/D3 (walkthrough 62/63): weight/numeric failures all use
+  `invalid_input`; new ALG deadlines always fail with `deadline_exceeded`, never
+  a partial success. Existing typed-read behavior is unchanged.
+- Owner selection S5-D5 (walkthrough 65): the new algorithm operations alone
+  cap success payloads at 16 MiB, counting both MCP representations. REST/MCP/CLI
+  use `invalid_input` for this operation limit; gRPC retains `response_too_large`.
+  This does not add a generic REST response layer or a process-memory guarantee.
+- Conforming: `reserved 100 to 199` per message (~858-1080); the REST half of ~386 (`invalid_json` 413); nondeadline partial vocabulary; expired channel (~356-362); tool-local `invalid_request` (~302, 385); MCP string failure with no `outputSchema` (~286, 424). Exact-schema and implementation conformance still require independent acceptance.
 
 **P5**
 - [ ] `HybridHit` (~169-176) per decision 17; no duplicate of any `vlite.v1` message.

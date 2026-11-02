@@ -238,7 +238,7 @@ accepted and integrated, with no production caller. This decoded
   or sweep, never a partial one. S4 sampled betweenness is implemented, reviewed
   and integrated with independent reference fixtures; interrupted computation
   retains only completed sources. S4 is also unreleased. CSR parity and serving
-  exposure remain separate work; the private, unreleased [CSR adapter](gap5-csr-adapter.md) has an accepted design. Its first slice, the resident source seam, is independently accepted and integrated (private, unreleased); with the P4 accessors now integrated, the CSR source slice is unblocked but not yet implemented.
+  exposure remain separate work; the private, unreleased [CSR adapter](gap5-csr-adapter.md) has an accepted design. Its first slice, the resident source seam, is independently accepted and integrated (private, unreleased); the CSR source/parity candidate is under follow-up for its assigned construction-order and budget evidence. The separately accepted P4 visit-counter seam supports that work; the candidate is not yet accepted.
 - **Speed P5, filters:** safe in-memory summaries and visibility tracking,
   including exact-planner fallback, are implemented, independently reviewed
   and integrated, but unreleased ([plan](p5-filters-and-serving.md)).
@@ -263,9 +263,10 @@ accepted and integrated, with no production caller. This decoded
   bounds and independent oracle plan; it is a reviewed specification, not an
   implemented capability. The
   [graph algorithm serving](serving-graph-algorithms-contract.md) contract
-  proposes five named read operations over the local Gap 5 algorithms with
-  their limits and error mapping; it is a reviewed specification awaiting
-  owner decisions, not an implemented capability. The
+  has resolved owner choices for five named read operations, including uniform
+  `invalid_input` weight/numeric failures, no deadline partials and a 16 MiB
+  operation-specific output cap. Exact-schema independent acceptance and
+  implementation remain outstanding; it is not an implemented capability. The
   [agent memory serving](serving-memory-contract.md) and
   [graph gRPC](serving-graph-grpc-contract.md) contracts are likewise
   reviewed specifications awaiting owner decisions: the first aligns to the
