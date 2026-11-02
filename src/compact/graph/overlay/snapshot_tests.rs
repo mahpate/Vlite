@@ -93,3 +93,66 @@ fn snapshot_rejects_equal_but_different_base_allocation() {
         Err(OverlayError::Identity)
     ));
 }
+
+#[test]
+fn deleted_overlay_edge_leaves_no_snapshot_adjacency_membership() {
+    let base = base();
+    let mut overlay = Overlay::new(&base, 8);
+    overlay
+        .apply(Commit {
+            sequence: 2,
+            nodes: vec![Change {
+                id: 7,
+                row: Some(SourceNode {
+                    id: 7,
+                    key: Some("node".into()),
+                    labels: Vec::new(),
+                    revision: 2,
+                    deadline: None,
+                    properties: Properties::new(),
+                    attachments: BTreeMap::new(),
+                }),
+                deadline: Deadline::Preserve,
+            }],
+            edges: vec![Change {
+                id: 8,
+                row: Some(SourceEdge {
+                    id: 8,
+                    source: 7,
+                    target: 7,
+                    relationship: "R".into(),
+                    key: None,
+                    revision: 2,
+                    deadline: None,
+                    properties: Properties::new(),
+                    segments: None,
+                }),
+                deadline: Deadline::Preserve,
+            }],
+            high_water: None,
+        })
+        .unwrap();
+    let created = overlay.snapshot(Arc::clone(&base)).unwrap();
+    assert_eq!(created.adjacency[&7], BTreeSet::from([8]));
+    overlay
+        .apply(Commit {
+            sequence: 3,
+            nodes: Vec::new(),
+            edges: vec![Change {
+                id: 8,
+                row: None,
+                deadline: Deadline::Preserve,
+            }],
+            high_water: None,
+        })
+        .unwrap();
+    let deleted = overlay.snapshot(Arc::clone(&base)).unwrap();
+    assert!(deleted.edges[&8].is_none());
+    assert!(
+        deleted
+            .adjacency
+            .values()
+            .all(|members| !members.contains(&8))
+    );
+    assert_eq!(created.adjacency[&7], BTreeSet::from([8]));
+}

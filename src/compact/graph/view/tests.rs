@@ -769,3 +769,167 @@ fn empty_graph_matches_engine() {
     );
     all(&base_view(&state), &state);
 }
+
+#[test]
+fn edge_only_deadline_drives_has_due_at_boundary() {
+    let mut state = GraphState::new();
+    apply(
+        &mut state,
+        1,
+        vec![
+            GraphEntry::CreateGraph {
+                name: "edge_deadline".into(),
+            },
+            GraphEntry::PutNode {
+                node_id: NodeId(0),
+                key: "node".into(),
+                labels: BTreeSet::new(),
+                properties: Properties::new(),
+            },
+            GraphEntry::PutEdge {
+                edge_id: EdgeId(0),
+                source: NodeId(0),
+                destination: NodeId(0),
+                relationship: "R".into(),
+                key: None,
+                properties: Properties::new(),
+            },
+            GraphEntry::EdgeExpiry {
+                edge_id: EdgeId(0),
+                expires_at_ms: Some(5),
+            },
+        ],
+    );
+    let graph = state.graph(G).unwrap();
+    assert!(
+        graph
+            .nodes()
+            .all(|node| graph.node_expiry(node.id).is_none())
+    );
+    let view = base_view(&state);
+    for (clock, expected) in [(4, false), (5, true), (6, true)] {
+        assert_eq!(graph.has_due(clock), expected);
+        assert_eq!(view.read(clock, None).has_due(), graph.has_due(clock));
+    }
+    assert!(!view.physical().has_due());
+}
+
+#[test]
+fn multiple_attachments_preserve_collection_order_and_multiplicity() {
+    let mut state = fixture();
+    let initial = source(&state);
+    let base = Arc::new(decode(&encode(&initial).unwrap()).unwrap());
+    let mut overlay = Overlay::new(&base, 8);
+    apply(
+        &mut state,
+        11,
+        vec![
+            GraphEntry::Attach {
+                node_id: NodeId(0),
+                collection: 1,
+                record_id: 5,
+            },
+            GraphEntry::Attach {
+                node_id: NodeId(0),
+                collection: 4,
+                record_id: 99,
+            },
+        ],
+    );
+    overlay
+        .apply(projection(&initial, &source(&state)))
+        .unwrap();
+    let layered = CompactGraphView::with_overlay(overlay.snapshot(Arc::clone(&base)).unwrap());
+    let decoded = base_view(&state);
+    let expected: Vec<_> = state.graph(G).unwrap().attachments(NodeId(0)).collect();
+    assert_eq!(expected, [(1, 5), (2, 71), (4, 99)]);
+    for view in [&layered, &decoded] {
+        assert_eq!(
+            view.read(0, None)
+                .attachments(NodeId(0))
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(
+            view.physical().attachments(NodeId(0)).collect::<Vec<_>>(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn merge_ids_handles_right_before_left_and_right_tail() {
+    assert_eq!(
+        merge_ids([10, 20].into_iter(), [5].into_iter()).collect::<Vec<_>>(),
+        [5, 10, 20]
+    );
+    assert_eq!(
+        merge_ids([10].into_iter(), [20, 30].into_iter()).collect::<Vec<_>>(),
+        [10, 20, 30]
+    );
+}
+
+#[test]
+fn overlay_tombstones_counts_sequence_and_high_waters_match_engine() {
+    let mut state = GraphState::new();
+    apply(
+        &mut state,
+        1,
+        vec![
+            GraphEntry::CreateGraph {
+                name: "overlay_metadata".into(),
+            },
+            GraphEntry::PutNode {
+                node_id: NodeId(10),
+                key: "deleted".into(),
+                labels: BTreeSet::new(),
+                properties: Properties::new(),
+            },
+        ],
+    );
+    let initial = source(&state);
+    let base = Arc::new(decode(&encode(&initial).unwrap()).unwrap());
+    let mut overlay = Overlay::new(&base, 8);
+    apply(
+        &mut state,
+        7,
+        vec![
+            GraphEntry::DeleteNode {
+                node_id: NodeId(10),
+            },
+            GraphEntry::PutNode {
+                node_id: NodeId(20),
+                key: "new".into(),
+                labels: BTreeSet::new(),
+                properties: Properties::new(),
+            },
+            GraphEntry::PutEdge {
+                edge_id: EdgeId(30),
+                source: NodeId(20),
+                destination: NodeId(20),
+                relationship: "R".into(),
+                key: None,
+                properties: Properties::new(),
+            },
+        ],
+    );
+    overlay
+        .apply(projection(&initial, &source(&state)))
+        .unwrap();
+    let view = CompactGraphView::with_overlay(overlay.snapshot(Arc::clone(&base)).unwrap());
+    let graph = state.graph(G).unwrap();
+    metadata(&view, graph);
+    assert_eq!(view.node_count(), 1);
+    assert_eq!(view.next_node_id(), 21);
+    assert_eq!(view.next_edge_id(), 31);
+    assert_eq!(view.graph_sequence(), 7);
+    assert!(view.physical().node(NodeId(10)).is_none());
+    assert!(view.read(0, None).node_by_key("deleted").is_none());
+    assert_eq!(
+        view.physical()
+            .nodes()
+            .map(|node| node.id)
+            .collect::<Vec<_>>(),
+        graph.nodes().map(|node| node.id).collect::<Vec<_>>()
+    );
+}
