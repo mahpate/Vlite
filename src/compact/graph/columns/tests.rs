@@ -537,6 +537,63 @@ fn owned_public_views_project_only_packed_fields_with_explicit_metadata() {
 }
 
 #[test]
+fn multi_edge_temporal_projection_preserves_offsets_across_empty_series() {
+    let original = state();
+    let mut source = GraphSource::from_graph(original.graph(GraphId(0)).unwrap()).unwrap();
+    for (edge, series) in
+        source
+            .edges
+            .iter_mut()
+            .zip([Some(vec!["first"]), Some(vec![]), Some(vec!["last"]), None])
+    {
+        edge.properties.clear();
+        edge.segments = series.map(|values| {
+            values
+                .into_iter()
+                .map(|value| Segment {
+                    valid_from: None,
+                    valid_to: None,
+                    properties: props(&[("s", PropertyValue::String(value.into()))]),
+                })
+                .collect()
+        });
+    }
+    assert_eq!(
+        source.edges.iter().map(|edge| edge.id).collect::<Vec<_>>(),
+        [0, 7, 19, 30]
+    );
+    let packed = PackedFields::build(&source).unwrap();
+    let projected = packed
+        .physical_edge_view(&source.edges[2], &PropertyProjection::All, Some(0))
+        .unwrap();
+    equal_bits(
+        &projected.properties,
+        &props(&[("s", PropertyValue::String("last".into()))]),
+    );
+    assert!(matches!(
+        packed.physical_edge_view(&source.edges[1], &PropertyProjection::All, Some(0)),
+        Err(CodecError::Corrupt)
+    ));
+    let mut shape = source.clone();
+    for segment in shape
+        .edges
+        .iter_mut()
+        .flat_map(|edge| edge.segments.iter_mut().flatten())
+    {
+        segment.properties.clear();
+    }
+    let restored = packed.restore(&shape).unwrap();
+    assert_eq!(restored, source);
+    assert_eq!(restored.edges[1].segments, Some(vec![]));
+    assert_eq!(restored.edges[3].segments, None);
+    assert_eq!(encode(&restored).unwrap(), encode(&source).unwrap());
+    assert_eq!(
+        engine_state(&restored).unwrap(),
+        engine_state(&source).unwrap()
+    );
+}
+
+#[test]
 fn engine_fields_schema_indexes_keys_owners_and_temporal_round_trip() {
     let original = state();
     let source = GraphSource::from_graph(original.graph(GraphId(0)).unwrap()).unwrap();
