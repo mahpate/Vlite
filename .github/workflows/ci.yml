@@ -47,6 +47,8 @@ jobs:
           python -O tests/memory_ranking_oracle.py --self-test
           python tests/agent_memory_oracle.py --self-test
           python -O tests/agent_memory_oracle.py --self-test
+          python tests/c1_consolidation_oracle.py --self-test
+          python -O tests/c1_consolidation_oracle.py --self-test
       - id: route
         run: python scripts/ci_policy.py route
 

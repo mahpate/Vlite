@@ -9,6 +9,11 @@ Sections 1-8 are the delivered text unchanged (original artifact SHA-256
 Private error names are semantic categories; their spelling follows the accepted
 P3b mapping (P3b slices 0 and 1a are integrated). Changes need a new freeze.
 
+The independent oracle `tests/c1_consolidation_oracle.py` (golden
+`tests/fixtures/agent_memory/c1_consolidation_golden.json`) is independently
+accepted and runs in CI under normal and `-O` Python. It is test-only evidence;
+the Rust implementation still needs separate authorization.
+
 Coordinator verification at `0cfcaa4f`:
 
 - Existing helpers in `src/memory.rs` match the text: `MemoryScope::encode` and
