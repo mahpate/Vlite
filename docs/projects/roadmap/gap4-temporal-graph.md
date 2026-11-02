@@ -503,9 +503,10 @@ Known gaps and follow-ups (not yet tested unless stated):
 5. **Feed gaps.** The feed does not report TTL deadlines or reclaims, as in Gap 3. No surface outside Rust reports temporal changes.
 6. **Measurement.** Memory per segment and production caps are not measured, and benchmarks are unchanged.
 
-Slice C2 implementation and acceptance coverage are complete for the private,
-unreleased gate. Release activation, serving approval, and production
-qualification remain outstanding; flag 64 stays closed in release builds.
+Slice C2 implementation and its acceptance evidence are a candidate for
+independent acceptance of the private, unreleased gate. Independent acceptance
+is pending. Release activation, serving approval, and production qualification
+remain outstanding; flag 64 stays closed in release builds.
 
 Slice C1 (unreleased, private/gated) implements:
 
@@ -533,8 +534,9 @@ plain and encrypted reads. C2 replays the retained read-cases oracle through
 real Rust neighbors, traverse, and shortest-path reads, and covers fixed-T/C
 continuation, stale graph detection, certified budget exhaustion, query-text
 explain selectors, retrieve expansion, and plain/encrypted reopen equality.
-These tests qualify the private C1/C2 read implementations only, not release
-activation, serving approval, or production behavior.
+These tests are candidate acceptance evidence for the private C1/C2 read
+implementations only, not release activation, serving approval, or production
+behavior; independent acceptance remains pending.
 
 Turning the gate on for release builds also waits for slice C.
 

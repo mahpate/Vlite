@@ -140,7 +140,7 @@ pub(super) fn traverse(
             let Some(edge) = graph.edge(id).filter(|edge| !exec.edge_hidden(edge)) else {
                 continue;
             };
-            if !conditions_match(&edge.properties, plan.edge_filter) {
+            if !conditions_match(exec.edge_properties(edge)?, plan.edge_filter) {
                 continue;
             }
             let next = other_end(edge, node);

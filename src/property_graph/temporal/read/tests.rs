@@ -1412,6 +1412,205 @@ fn temporal_query_text_explain_and_retrieve_inherit_the_read_view() {
 }
 
 #[test]
+fn temporal_edge_filters_use_the_selected_segment_in_all_traversals() {
+    let _on = Activation::on();
+    let dir = tempfile::tempdir().unwrap();
+    let (_path, mut db) = temporal_db(dir.path(), "edge-filter.vlite");
+    db.put(1, &[0.0, 0.0], b"pivot").unwrap();
+    db.graph_mut("g")
+        .unwrap()
+        .write_batch(&[
+            create_edge(
+                "ab",
+                "a",
+                "R",
+                "b",
+                vec![
+                    TemporalSegment {
+                        valid_from: Some(0),
+                        valid_to: Some(10),
+                        properties: Metadata::from([(
+                            "kind".into(),
+                            MetadataValue::String("old".into()),
+                        )]),
+                    },
+                    TemporalSegment {
+                        valid_from: Some(20),
+                        valid_to: Some(30),
+                        properties: Metadata::from([(
+                            "kind".into(),
+                            MetadataValue::String("new".into()),
+                        )]),
+                    },
+                ],
+            ),
+            GraphOp::Attach {
+                node: "a".into(),
+                collection: "default".into(),
+                record: 1,
+            },
+        ])
+        .unwrap();
+
+    let condition = |kind: &str| Condition::Eq {
+        field: "kind".into(),
+        value: MetadataValue::String(kind.into()),
+    };
+    let mut pivot = Pivot::new("default", 1);
+    pivot.vector = Some(vec![0.0, 0.0]);
+
+    for (as_of, matching, nonmatching) in [(5, "old", "new"), (25, "new", "old")] {
+        let view = db.graph("g").unwrap().as_of(as_of).unwrap().with_clock(0);
+        for (filter, expected_edges) in [(matching, vec!["ab"]), (nonmatching, vec![])] {
+            let request = Traverse {
+                edge_filter: vec![condition(filter)],
+                ..Traverse::new(vec![NodeSelector::key("a")])
+            };
+            let read = view.traverse(&request, &ReadOptions::default()).unwrap();
+            assert_eq!(
+                read.read
+                    .output
+                    .edges
+                    .iter()
+                    .map(|edge| edge.key.as_deref().unwrap())
+                    .collect::<Vec<_>>(),
+                expected_edges
+            );
+            assert_eq!(
+                read.read
+                    .output
+                    .edges
+                    .iter()
+                    .map(|edge| edge.properties.clone())
+                    .collect::<Vec<_>>(),
+                if expected_edges.is_empty() {
+                    vec![]
+                } else {
+                    vec![Metadata::from([(
+                        "kind".into(),
+                        MetadataValue::String(matching.into()),
+                    )])]
+                }
+            );
+            assert_eq!(read.read.stats.edges_examined, 1);
+
+            let text =
+                format!("MATCH (a KEY \"a\")-[r:R*1..1]->(b) WHERE r.kind = \"{filter}\" RETURN b");
+            let read = view
+                .query_text(&text, &Metadata::new(), &GraphLimits::DEFAULT)
+                .unwrap();
+            let GraphOutput::Traversal(traversal) = read.read.output else {
+                panic!("text query did not execute a traversal");
+            };
+            assert_eq!(
+                traversal
+                    .edges
+                    .iter()
+                    .map(|edge| edge.key.as_deref().unwrap())
+                    .collect::<Vec<_>>(),
+                expected_edges
+            );
+            assert_eq!(
+                traversal
+                    .edges
+                    .iter()
+                    .map(|edge| edge.properties.clone())
+                    .collect::<Vec<_>>(),
+                if expected_edges.is_empty() {
+                    vec![]
+                } else {
+                    vec![Metadata::from([(
+                        "kind".into(),
+                        MetadataValue::String(matching.into()),
+                    )])]
+                }
+            );
+            assert_eq!(read.read.stats.edges_examined, 1);
+
+            let retrieval = view
+                .retrieve(
+                    &Retrieve {
+                        pivot: pivot.clone(),
+                        expansion: Expansion {
+                            edge_filter: vec![condition(filter)],
+                            ..Expansion::default()
+                        },
+                        evidence: EvidenceSpec::default(),
+                    },
+                    &ReadOptions::default(),
+                )
+                .unwrap();
+            assert_eq!(
+                retrieval
+                    .retrieval
+                    .edges
+                    .iter()
+                    .map(|edge| edge.key.as_deref().unwrap())
+                    .collect::<Vec<_>>(),
+                expected_edges
+            );
+            assert_eq!(
+                retrieval
+                    .retrieval
+                    .edges
+                    .iter()
+                    .map(|edge| edge.properties.clone())
+                    .collect::<Vec<_>>(),
+                if expected_edges.is_empty() {
+                    vec![]
+                } else {
+                    vec![Metadata::from([(
+                        "kind".into(),
+                        MetadataValue::String(matching.into()),
+                    )])]
+                }
+            );
+            assert_eq!(retrieval.retrieval.stats.expansion.edges_examined, 1);
+        }
+    }
+
+    for as_of in [10, 15] {
+        let view = db.graph("g").unwrap().as_of(as_of).unwrap().with_clock(0);
+        for filter in ["old", "new"] {
+            let request = Traverse {
+                edge_filter: vec![condition(filter)],
+                ..Traverse::new(vec![NodeSelector::key("a")])
+            };
+            let read = view.traverse(&request, &ReadOptions::default()).unwrap();
+            assert!(read.read.output.edges.is_empty());
+            assert_eq!(read.read.stats.edges_examined, 1);
+
+            let text =
+                format!("MATCH (a KEY \"a\")-[r:R*1..1]->(b) WHERE r.kind = \"{filter}\" RETURN b");
+            let read = view
+                .query_text(&text, &Metadata::new(), &GraphLimits::DEFAULT)
+                .unwrap();
+            let GraphOutput::Traversal(traversal) = read.read.output else {
+                panic!("text query did not execute a traversal");
+            };
+            assert!(traversal.edges.is_empty());
+            assert_eq!(read.read.stats.edges_examined, 1);
+
+            let retrieval = view
+                .retrieve(
+                    &Retrieve {
+                        pivot: pivot.clone(),
+                        expansion: Expansion {
+                            edge_filter: vec![condition(filter)],
+                            ..Expansion::default()
+                        },
+                        evidence: EvidenceSpec::default(),
+                    },
+                    &ReadOptions::default(),
+                )
+                .unwrap();
+            assert!(retrieval.retrieval.edges.is_empty());
+            assert_eq!(retrieval.retrieval.stats.expansion.edges_examined, 1);
+        }
+    }
+}
+
+#[test]
 fn temporal_reads_are_gated_and_ordinary_graph_reads_remain_unchanged() {
     let _on = Activation::on();
     let dir = tempfile::tempdir().unwrap();

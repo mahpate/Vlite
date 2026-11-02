@@ -386,7 +386,10 @@ impl Exec<'_, '_> {
             .is_some_and(|now| self.graph.edge_expired(edge, now))
     }
 
-    fn edge_properties<'a>(&'a self, edge: &'a GraphEdge) -> Result<&'a Properties, GraphError> {
+    pub(super) fn edge_properties<'a>(
+        &'a self,
+        edge: &'a GraphEdge,
+    ) -> Result<&'a Properties, GraphError> {
         if let Some((as_of, clock)) = self.temporal_clock {
             return super::temporal_visibility::visible_edge(self.graph, edge, as_of, clock)
                 .map(|segment| segment.map_or(&edge.properties, |segment| &segment.properties))
