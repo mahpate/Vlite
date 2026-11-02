@@ -11,6 +11,7 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 mod import;
+mod overlay;
 mod read;
 
 use crate::property_graph::engine::codec::TemporalEntry;

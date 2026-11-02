@@ -319,9 +319,48 @@ engine, then changed the node TTL boundary from `<` to `<=`: the ID/key regressi
 failed by returning a node at its expiry, and passed after restoring the boundary.
 The integrated branch still requires its full CI qualification.
 
+The mutation overlay in `src/compact/graph/overlay.rs` is an unreleased,
+private, test-only candidate pending independent acceptance. It consumes full
+committed-state projection deltas in strictly increasing sequence order, not
+ordered user writes; stale/duplicate sequences are refused. Separate node/edge
+version maps retain tombstones and allocation high-water marks. Identity is
+immutable (including keys); fresh IDs must reach the retained mark and cannot
+allocate `u64::MAX`. Deadlines have explicit preserve/set/remove semantics.
+Merged ID/key, ordered adjacency and count reads use one caller-supplied clock,
+including endpoint-expiry cascade and temporal selection. Base key indexes are
+built once; reads do not rebuild CSR or engine state.
+
+The configurable entry cap counts distinct touched node plus edge IDs, including
+tombstones. Replacements reuse their slot; exceeding the cap returns typed
+`Capacity { cap, needed }` before changing state. Overlay adjacency has at most
+two memberships per live overlay edge. Admission is atomic and validates a
+materialized physical source through the existing VLGCSR06 codec, including
+properties, schema/temporal conformance and graph-local attachment ownership.
+Node removal requires incident edges to have been explicitly removed in the
+same or an earlier committed projection, including physically retained expired
+edges; this is stricter than a visibility-only removal and is not TTL
+reclamation. Full record payloads carry properties, attachments and temporal
+segments; they are not partial property patches. Schema/graph metadata is
+fixed by the base; temporal-section membership follows the resulting physical
+series, as in a direct engine source build. Invalid payloads return typed
+`Invalid(CodecError)`; missing rows, identity/ID reuse, sequence and high-water
+errors are also typed refusals.
+
+The private fold produces a new decoded VLGCSR06 base, retaining expired
+physical rows, deadlines, revisions and allocation marks. It neither reclaims
+TTL data nor publishes a replacement. Entry bounds are not total-memory or
+latency claims: admission/fold materialize and validate the source (the codec's
+64 MiB image bound still applies), with base, overlay, candidate and encoding
+scratch coexisting; counts scan the merged ID space and adjacency sorts its
+result. There is no spill, backpressure scheduler, write planner, vector-record
+existence check, cross-graph owner check, WAL/checkpoint/query wiring or
+production activation. Retained overlay goldens and deterministic engine-history
+comparisons are candidate evidence, not independent acceptance or performance
+qualification.
+
 Remaining P4 slices are shared framing and block dispatch/publication,
-checkpoint/read integration, mutation overlay, full parallel import (property and
-schema admission, spilling and durable publication), and performance and
+checkpoint/read integration, production mutation integration, full parallel
+import (property and schema admission, spilling and durable publication), and performance and
 cross-platform qualification.
 Columnar property storage, native compact-index serving and schema enforcement
 also remain outstanding.

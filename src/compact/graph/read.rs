@@ -13,9 +13,9 @@ struct CsrReader<'g> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct ReadEdge<'g> {
-    edge: &'g SourceEdge,
-    properties: &'g Properties,
+pub(super) struct ReadEdge<'g> {
+    pub(super) edge: &'g SourceEdge,
+    pub(super) properties: &'g Properties,
 }
 
 impl<'g> CsrReader<'g> {

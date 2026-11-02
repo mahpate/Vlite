@@ -173,8 +173,19 @@ Local numbers below show direction only (see rules).
   nodes-before-edges admission, in-memory bounded sorting runs and disjoint
   encoding match retained goldens and sequential bytes. Schema/property
   admission, disk spilling and durable publication are not implemented.
-  Shared framing, checkpoint/read integration, mutation overlay, full parallel
-  import and S3/S4/F6
+  An unreleased private, test-only mutation-overlay candidate is pending
+  independent acceptance: chronological committed projections, retained
+  tombstones/high-water marks, TTL-aware merged ID/key/adjacency/count reads
+  and a physical VLGCSR06 fold. Its configurable cap counts touched node/edge
+  IDs including tombstones, with typed atomic refusal at overflow; adjacency
+  adds at most two memberships per live overlay edge. Admission/fold use full
+  source/encoding scratch under the existing 64 MiB codec image bound, not a
+  total-memory bound. Base schema/graph metadata is fixed, payloads are full
+  records, and node removal requires explicit incident-edge removals even for
+  retained expired edges. No ordered write planner, TTL reclamation, record
+  existence/cross-graph owner validation or durable publication is included.
+  Shared framing, checkpoint/read integration, production mutation integration,
+  full parallel import and S3/S4/F6
   qualification remain outstanding. Native schema enforcement, cross-graph
   owner validation and columnar property storage also remain outstanding.
   Independently reviewed logical references cover committed-overlay
@@ -182,8 +193,8 @@ Local numbers below show direction only (see rules).
   with exact integer and float bits, label postings and scans, and
   node-to-record attachments. A reviewed schema reference covers declarations,
   snapshot conformance and single-condition exact/range lookups; these are
-  test evidence, not an implemented Rust overlay or byte format. The byte
-  budgets are estimates, not measured results.
+  logical test evidence, not an acceptance of the Rust candidate or a byte
+  format. The byte budgets are estimates, not measured results.
 - **Gap 5, bounded algorithms:** S1 and S2 are implemented and reviewed in
   the embedded Rust API, but unreleased ([plan](gap5-graph-algorithms.md)).
   They provide TTL-aware local scopes, degree counts and hop-constrained
