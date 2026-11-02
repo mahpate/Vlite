@@ -9,6 +9,8 @@
 //! loaded through the engine's own snapshot path, which validates the
 //! declarations, rebuilds the indexes and checks every declared rule.
 
+#[cfg(not(target_arch = "wasm32"))]
+mod import;
 mod read;
 
 use crate::property_graph::engine::codec::TemporalEntry;

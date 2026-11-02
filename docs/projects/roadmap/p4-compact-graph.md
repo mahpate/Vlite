@@ -2,6 +2,7 @@
 
 **Status:** approved design; private test-only CSR, ordinary typed-property,
 label-posting, attachment and schema-declaration codec slices are implemented.
+Private parallel import staging is a candidate pending independent acceptance.
 Private decoded-CSR identity, adjacency, TTL and temporal reads are implemented
 and independently accepted.
 Full P4 implementation and measured results remain outstanding.
@@ -106,7 +107,34 @@ nodes before edges into an empty ownership domain, assumes referenced records
 already exist without expiry, and retains physical deadlines without evaluating
 a write clock. It does not model interleaved writes, schema/property admission,
 worker-local spill buffers, actual concurrency or durable publication. This is
-reference coverage, not an implemented importer or performance qualification.
+reference coverage, not performance qualification.
+
+`src/compact/graph/import.rs` is a private test-only staging candidate, pending
+independent acceptance. Rayon partitions decode and validate logical JSON rows,
+then global ordered admission checks duplicate keys and attachment ownership
+before parallel endpoint resolution. IDs follow input order. Sorted dictionaries,
+worker-local bounded membership runs, tuple-ordered k-way merging and degree
+prefix sums construct the same CSR as sequential admission. Workers encode
+disjoint node/edge byte blocks; checked concatenation retains `VLGCSR06` bytes.
+Rust consumes all 19 retained goldens, sweeps worker/partition/layout/run choices,
+and compares seeded skew, hubs, self-loops, parallel edges, sparse/duplicate keys
+and attachments with sequential admission. Representable sources also compare
+with the engine/codec path; anonymous nodes require an explicit test-only key
+remap, not a claim of unchanged-source engine parity.
+
+The candidate admits nodes before edges into one new empty ownership domain.
+Its fixture graph has ID 0, name `import`, sequence/revisions 1 and count-based
+allocation marks; it is not an API for choosing graph lifecycle metadata.
+It assumes attached records exist without record expiry and preserves deadlines
+without clock filtering. Properties, schemas, edge keys, temporal series and
+other unrecognized fields are explicitly refused; full engine write admission,
+schema multiplicity and cross-graph ownership remain outstanding. Partitions
+are limited to 1..256, run size must be positive, ordinals are checked u32 and
+the assembled payload retains the codec's 64 MiB limit. Sorting buffers and
+node/edge encoding blocks are bounded by run size in entries, not bytes; input,
+staged rows, in-memory sorted runs and output coexist. There is no total-memory
+bound, disk spilling, durable publication, live replacement, production
+activation, or performance/size qualification.
 
 For online checkpoints, build against a sealed P2 prefix at floor `S`; later
 commits remain in the rotated WAL. Validate/fsync the temporary image, rename,

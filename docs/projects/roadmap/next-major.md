@@ -141,8 +141,13 @@ Local numbers below show direction only (see rules).
   series from an ordinary edge. Ordinary edge records remain on the existing
   path apart from the payload version. Private decoded-CSR ID/key and adjacency
   reads are independently accepted, including TTL and selected temporal
-  properties; production query execution is not wired to CSR. Shared framing,
-  checkpoint/read integration, mutation overlay, parallel import and S3/S4/F6
+  properties; production query execution is not wired to CSR. Private parallel
+  import staging is a candidate pending independent acceptance: logical
+  nodes-before-edges admission, in-memory bounded sorting runs and disjoint
+  encoding match retained goldens and sequential bytes. Schema/property
+  admission, disk spilling and durable publication are not implemented.
+  Shared framing, checkpoint/read integration, mutation overlay, full parallel
+  import and S3/S4/F6
   qualification remain outstanding. Native schema enforcement, cross-graph
   owner validation and columnar property storage also remain outstanding.
   Independently reviewed logical references cover committed-overlay
