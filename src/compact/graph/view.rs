@@ -7,6 +7,11 @@ use std::sync::Arc;
 
 mod algorithm;
 
+#[cfg(test)]
+pub(crate) fn algorithm_test_take_visits() -> usize {
+    algorithm::take_visits()
+}
+
 #[derive(Clone)]
 pub(crate) struct CompactGraphView {
     base: Arc<CompactGraph>,

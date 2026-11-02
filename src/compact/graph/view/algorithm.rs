@@ -30,6 +30,15 @@ pub(super) fn take_visits() -> usize {
     VISITS.with(|visits| visits.replace(0))
 }
 
+#[test]
+fn test_visit_seam_forwards_and_resets() {
+    super::algorithm_test_take_visits();
+    visit();
+    visit();
+    assert_eq!(super::algorithm_test_take_visits(), 2);
+    assert_eq!(super::algorithm_test_take_visits(), 0);
+}
+
 impl Index {
     pub(super) fn empty() -> Self {
         Self {
