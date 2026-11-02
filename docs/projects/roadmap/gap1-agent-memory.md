@@ -339,6 +339,17 @@ self-hosted configuration also depends on OpenAI and Qdrant.
 Use small deterministic fixtures and failure injection, not performance assertions.
 An independent interval/ranking oracle supplements but does not replace engine tests.
 
+### Private ranking reference
+
+The independently reviewed `tests/memory_ranking_oracle.py` and
+`tests/fixtures/agent_memory/ranking_golden.json` cover ranking over an already
+eligible, bounded union. CI runs normal and optimized Python self-tests, including
+default future-observation refusal, dense ranks, explicit decay half-life, scoped
+identity/segment ties, malformed inputs and intended-reason mutation checks.
+Exact rational scores, fixture limits and request/error names are labelled local
+assumptions, not Rust/f64 parity or approved public contracts. Retrieval, ownership,
+TTL, temporal discovery, rerankers and the Rust recall implementation remain open.
+
 ## 9. Delivery, risks and open decisions
 
 | Slice | Exit criteria |
