@@ -173,8 +173,8 @@ Local numbers below show direction only (see rules).
   nodes-before-edges admission, in-memory bounded sorting runs and disjoint
   encoding match retained goldens and sequential bytes. Schema/property
   admission, disk spilling and durable publication are not implemented.
-  An unreleased private, test-only mutation-overlay candidate is pending
-  independent acceptance: chronological committed projections, retained
+  An unreleased private, test-only mutation overlay is independently accepted
+  and integrated: chronological committed projections, retained
   tombstones/high-water marks, TTL-aware merged ID/key/adjacency/count reads
   and a physical VLGCSR06 fold. Its configurable cap counts touched node/edge
   IDs including tombstones, with typed atomic refusal at overflow; adjacency

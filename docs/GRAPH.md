@@ -236,12 +236,14 @@ or payload access and no whole-graph mode. See the
 
 ## Compact graph storage (unreleased)
 
-The first private [P4 codec](projects/roadmap/p4-compact-graph.md) is implemented
+The private [P4 codec](projects/roadmap/p4-compact-graph.md) is implemented
 and independently reviewed, but test-only. It preserves IDs, keys, revisions,
-labels and deadlines in bidirectional CSR adjacency. Properties, attachments,
-declared schema and temporal segments are explicitly refused rather than lost.
-Production storage and APIs are unchanged; checkpoint integration, mutation
-overlays, parallel import and performance qualification remain outstanding.
+labels, deadlines, typed properties, node attachments, declared schema and
+temporal edge series in bidirectional CSR adjacency, with private decoded reads,
+a mutation overlay, parallel import staging and checkpoint-block framing, all
+gated off. Production storage and APIs are unchanged; checkpoint reads,
+production mutation integration, full import, native indexes and performance
+qualification remain outstanding.
 
 ## Temporal edges (Rust, unreleased)
 

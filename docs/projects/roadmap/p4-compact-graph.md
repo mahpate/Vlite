@@ -5,7 +5,8 @@ label-posting, attachment and schema-declaration codec slices are implemented.
 Private parallel import staging is independently accepted and integrated, but
 unreleased.
 Private decoded-CSR identity, adjacency, TTL and temporal reads are implemented
-and independently accepted.
+and independently accepted. The private mutation overlay is independently
+accepted and integrated, unreleased and not wired into production.
 P4 slice 1b, a separate private, test-only graph-base checkpoint framing, is
 independently accepted and integrated but unreleased: critical kind `0x0300`,
 codec version 1, unchanged `VLGCSR06` payload, one block per graph, and a
@@ -335,8 +336,8 @@ engine, then changed the node TTL boundary from `<` to `<=`: the ID/key regressi
 failed by returning a node at its expiry, and passed after restoring the boundary.
 The integrated branch still requires its full CI qualification.
 
-The mutation overlay in `src/compact/graph/overlay.rs` is an unreleased,
-private, test-only candidate pending independent acceptance. It consumes full
+The mutation overlay in `src/compact/graph/overlay.rs` is private, test-only,
+independently accepted and integrated, and unreleased. It consumes full
 committed-state projection deltas in strictly increasing sequence order, not
 ordered user writes; stale/duplicate sequences are refused. Separate node/edge
 version maps retain tombstones and allocation high-water marks. Identity is
@@ -371,8 +372,7 @@ scratch coexisting; counts scan the merged ID space and adjacency sorts its
 result. There is no spill, backpressure scheduler, write planner, vector-record
 existence check, cross-graph owner check, WAL/checkpoint/query wiring or
 production activation. Retained overlay goldens and deterministic engine-history
-comparisons are candidate evidence, not independent acceptance or performance
-qualification.
+comparisons are accepted logical evidence, not performance qualification.
 
 Remaining P4 slices are block dispatch/publication beyond the accepted private
 framing, checkpoint/read integration, production mutation integration, full parallel
