@@ -1,16 +1,18 @@
 # Gap 6: bounded Cypher-style subset with writes
 
-Status: design for owner approval; nothing in this proposal is implemented.
+Status: private embedded design choices approved individually on 2026-11-02;
+nothing in this proposal is implemented or qualified.
 This document is conformed to the [serving wire conventions proposal](serving-wire-conventions.md), whose owner decisions remain open.
-Proposed names and limits below are contracts to approve, not shipped APIs.
+The dialect identity, semantics and limits below are approved design contracts,
+not shipped APIs. Exact public Rust and transport surfaces remain gated.
 Scope: one graph, bounded pattern reads and atomic graph writes in embedded Rust,
 then separately approved serving. No storage format change.
 The [next-major roadmap](next-major.md) includes Cypher with writes
 (`docs/projects/roadmap/next-major.md:22`). The
 [product gaps](../product-gaps/product-gaps.md) keep a general-purpose language out
-of scope (`docs/projects/product-gaps/product-gaps.md:51`) and approve openCypher
-with writes (`:118-119`); this design proposes a separate named, non-conformant
-dialect for that scope (section 11).
+of scope while including bounded graph queries with writes. The owner narrowed
+the earlier openCypher wording on 2026-11-02 to this separate named,
+non-conformant dialect (section 11).
 
 ## 1. Requirements and non-goals
 
@@ -694,7 +696,13 @@ side effect.
 
 ## 11. Owner decisions needed
 
-| Decision | Options | Recommendation |
+The owner approved all ten recommendations below individually on 2026-11-02.
+This authorizes private embedded implementation under the stated dependencies,
+not public API publication, new transport errors, serving activation or release.
+The exact public inventory and proposed wire/error changes remain separate
+approval gates; private engine completion is not public feature delivery.
+
+| Decision | Options | Owner-approved choice / remaining gate |
 |---|---|---|
 | Compatibility/name | Claim openCypher subset with compatibility exceptions; or versioned named VLite dialect | Approve `vlite-cypher-1` as a separate, named, non-conformant dialect with a published supported-scenario matrix; it narrows the approved "openCypher with writes" item (`docs/projects/product-gaps/product-gaps.md:118-119`). KEY identity, parameter-only values and idempotent keyed CREATE make an unqualified openCypher claim misleading. |
 | First-release REST writes | Embedded writes only; or separately authorized REST write-query endpoint alongside existing reads | Embedded first; REST writes only after the exact wire and threat/rollback tests pass. Never make existing read-only `/query` write-capable. |
@@ -707,5 +715,6 @@ side effect.
 | Write-statement deadline and scratch | Same values as reads (`deadline_ms` 250/5,000; Gap 5 scratch 64/256 MiB); or `write_deadline_ms` 100/1,000 and scratch 32/128 MiB in `SubsetLimits` (section 6) | Approve the lower values: a write statement holds the exclusive writer guard from before MATCH until append ends, and the guard hold time is recorded in the existing `write_guard` stats. Proposed representation: uint64 `write_deadline_ms`, with above-ceiling values rejected as in section 6. Wire conventions, decision 15 (proposed). |
 | Mutating-statement authorization | Require `graph_read` and `graph_write`; or `graph_write` alone | Require both: the statement reads through MATCH and RETURN, while the batch route needs only `graph_write` (`src/server/graph.rs:14-24`), so `graph_write` alone must not become a read path. |
 
-No implementation, API publication or compatibility claim follows from this
-document until the relevant owner decisions and slice acceptance are recorded.
+Every implementation slice still needs independent acceptance. Public API
+publication and serving require the remaining exact-surface approvals and
+qualification; no openCypher-conformance or release claim is authorized.

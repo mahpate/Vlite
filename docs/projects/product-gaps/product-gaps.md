@@ -115,7 +115,11 @@ Peer-pool gaps are tracked in the pool repository's `TODO.md` under
    change. Its embedded Rust API has landed
    ([property graphs](../../GRAPH.md#expiry-ttl)); REST, gRPC and MCP wait
    for the OpenAPI review.
-3. **Approved:** openCypher with writes (item 6) is in scope, with graph
-   depth (items 5–7).
+3. **Approved:** graph pattern queries with writes (item 6) are in scope,
+   with graph depth (items 5–7). On 2026-11-02 the owner narrowed the
+   openCypher wording to the versioned, explicitly non-conformant
+   [`vlite-cypher-1` dialect](../roadmap/gap6-cypher-subset.md), with a
+   published supported-scenario matrix. Private implementation comes first;
+   exact public APIs and serving still require their own approval.
 4. **Open:** which scale-out item (9, 10 or 11) comes first after the
    directory store.

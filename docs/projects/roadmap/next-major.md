@@ -298,10 +298,12 @@ accepted and integrated, with no production caller. This decoded
   and first-party-reference review. Neither is an implemented capability;
   the scale-out order 11 → 10 → 9 was decided 2026-11-02; the track is
   backlogged until the owner revisits it. The
-  [Cypher-style subset](gap6-cypher-subset.md) and
-  [GraphRAG ingestion](gap7-graphrag-ingestion.md) designs are source-reviewed
-  proposals for owner approval; their names, limits and wire changes are not
-  approved and nothing in them is implemented.
+  [Cypher-style subset](gap6-cypher-subset.md) has ten owner-approved
+  private-implementation choices (2026-11-02): the explicitly non-conformant
+  `vlite-cypher-1` dialect, bounded atomic writes and unchanged legacy queries.
+  Exact public APIs, new errors and serving remain separately gated. The
+  [GraphRAG ingestion](gap7-graphrag-ingestion.md) design is source-reviewed
+  and awaits owner decisions. Neither design is implemented or active.
 
 ## Rules for every item
 
