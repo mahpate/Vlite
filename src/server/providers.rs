@@ -210,11 +210,16 @@ struct SystemResolver;
 
 impl Resolver for SystemResolver {
     fn resolve(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, ProviderError> {
-        (host, port)
-            .to_socket_addrs()
-            .map(|addresses| addresses.take(MAX_ALLOWLIST_ADDRESSES + 1).collect())
-            .map_err(|_| ProviderError::Unavailable)
+        collect_resolved_addresses((host, port).to_socket_addrs())
     }
+}
+
+fn collect_resolved_addresses(
+    addresses: std::io::Result<impl Iterator<Item = SocketAddr>>,
+) -> Result<Vec<SocketAddr>, ProviderError> {
+    addresses
+        .map(|addresses| addresses.take(MAX_ALLOWLIST_ADDRESSES + 1).collect())
+        .map_err(|_| ProviderError::Unavailable)
 }
 
 fn check_addresses(

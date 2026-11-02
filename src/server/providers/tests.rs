@@ -1,4 +1,5 @@
 use super::*;
+mod collector;
 mod survivors;
 use std::{
     collections::VecDeque,
