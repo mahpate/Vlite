@@ -1,16 +1,30 @@
 # Gap 2: fenced-lease ledger design
 
-| Status | Phase 1 design only. No production code, public API, wire change, or release claim. Requires independent coordinator review before Phase 2. |
+| Status | design accepted 2026-11-02; Phase 2 gated. Docs only; no production code, public API, wire change, or release claim. |
 |---|---|
 | Slice | `gap2-rust-lease-ledger` |
 | Contract | [Serving KV and TTL contract](serving-kv-ttl-contract.md), sections 5 and 12 |
 | Scope | Embedded Rust storage feature; serving is a dependent slice |
 
-This design keeps the reviewed contract as the default. The few additions that
-need owner ratification are identified as decisions rather than silently
-changing that contract. Source anchors below refer to the current branch at
+The recorded rulings below are owner-visible planning defaults, not approval
+to implement. They explicitly identify the wording change against the
+reviewed contract; the coordinator owns contract cross-references.
+Source anchors below refer to the current branch at
 the time of this design; line numbers are anchors, not a promise about later
 rebases.
+
+### Recorded rulings (2026-11-02)
+
+| # | Ruling and one-line consequence |
+|---:|---|
+| 1 | Layout direction accepted: V5 flag `0x0080`, auxiliary op 18, existing VREC/VCMT CRC/AEAD framing, and explicit offline `maintenance::enable_lease_ledger` copy-out; no in-place or implicit enablement or create-time default. |
+| 2 | Guarantee limited to VLite-managed backup, restore, PITR, directory image restore/rollback, managed copy-out, tail repair and replica promotion, which stamp terminal `RecoveryRequired`; unmanaged filesystem copies/rollbacks are not claimed. This is an owner-visible wording change against contract section 5's copy/branch/rollback fails-closed language. |
+| 3 | The 4,096 distinct-row/file cap and 255-byte holder bound are accepted as proposals, surfaced for confirmation against future tenant quotas. |
+| 4 | Stamping opted-in ledger backups `RecoveryRequired` is accepted at design level; non-ledger backups remain byte-identical. |
+| 5 | Change feed remains fail-closed on op 18 (`Corrupt`); older header readers return `UnsupportedFeature(0x0080)`; no feed work belongs to this slice. |
+| 6 | Fallible `Replica::promote` is an owner-visible source-compatibility change requiring explicit owner approval as a Phase-2 prerequisite; no signature changes yet. |
+| 7 | Defer public domain inspection/reset and create-with-ledger; ordinary database operations continue under existing mode rules on `RecoveryRequired` files, leases refuse, holder stays explicit, and re-enrollment requires a fresh destination/domain plus downstream cutover. |
+| 8 | Phase 2 is not approved and serializes behind P3b and P4 in their shared format/database/maintenance/directory/replica conflict domain; no code starts under this design acceptance. |
 
 ## 1. Scope, claims, and non-goals
 
@@ -48,7 +62,7 @@ dependent on reconstructing current grants from memory. Do not treat
 `RecoveryRequired` as a substitute for the high-water: normal restart is
 recoverable in the same domain and must issue a strictly larger token.
 
-**Owner decision required.** The contract does not state a numeric ledger
+**Accepted proposal; quota confirmation pending.** The contract does not state a numeric ledger
 grant cap. This design proposes a 4,096 distinct-address hard per-file cap,
 including inactive entries, in addition to the contract's finite configured
 per-tenant quota (section 10, decision (k), lines 906-908 and 1056). The cap is a
@@ -139,7 +153,7 @@ All multibyte integers are little-endian. The fixed 64-byte body header is:
 zero for all file-wide kinds. Grant payload byte fields are bounded by the
 reviewed namespace/key constraints (`serving-kv-ttl-contract.md:164-185`);
 the proposed 255-byte holder bound is a storage bound and requires owner
-approval. The input holder is a stable, opaque, non-secret principal identifier, not a
+confirmation against future tenant quotas. The input holder is a stable, opaque, non-secret principal identifier, not a
 bearer token, credential, or arbitrary request body.
 
 The loader handles op 18 after prefix/body bounds and frame authentication but
@@ -207,7 +221,7 @@ capability miss.
 | Read-only open | Load the state but do not write the barrier. Lease methods return `LeaseUnavailable`; ordinary read-only database operations are unchanged. This check occurs after `read_only` is set, not in the shared loader. |
 | Directory read-shared open | No barrier write; lease operations are unavailable. |
 | Replica open | No barrier write while follower; lease operations are unavailable. `promote` stamps a recovery-required state before exposing a writable database (see section 7). |
-| Backup | For a ledger-enabled source, copy all ordinary bytes and append a synced `RecoveryRequired` op-18 frame to the destination; this preserves domain/high-water but makes the archive unusable for leases. Non-ledger backups remain byte-identical. This is an explicit owner decision because `backup_inner` currently promises a byte-identical copy (`src/maintenance.rs:193-208,371-388`). |
+| Backup | For a ledger-enabled source, copy all ordinary bytes and append a synced `RecoveryRequired` op-18 frame to the destination; this preserves domain/high-water but makes the archive unusable for leases. Non-ledger backups remain byte-identical. Accepted at design level as an opted-in exception to `backup_inner`'s current byte-identical copy behavior (`src/maintenance.rs:193-208,371-388`). |
 | In-memory / `Durability::None` | No durable lease service. Return `LeaseUnavailable`; never synthesize an acknowledged durable token in memory. `Durability::None` is only valid for in-memory handles (`src/durability.rs:32-44`, `src/lib.rs:1642-1665`). |
 
 An open of a lease-enabled file always invalidates grants written by the prior
@@ -460,16 +474,51 @@ of each collection's name/reuse lifecycle. It does not disclose holder
 identity on conflicts. An identity string is principal-bound, not transferable
 by scope alone, and no admin takeover is added.
 
-Every new public item requires a matching `site/api.html` row and
-`data-api` key in Phase 2, enforced by `tests/api_reference.py`. Proposed rows:
+### 5.4 REG-001 public API surface gate
 
-| Public item | Proposed API reference key |
-|---|---|
-| `Database::lease_store` | `rust:Database::lease_store` |
-| `LeaseStore` | `rust:LeaseStore` |
-| `LeaseStore::{acquire,renew,revoke}` | `rust:LeaseStore::acquire`, `rust:LeaseStore::renew`, `rust:LeaseStore::revoke` |
-| `LeaseAcquireRequest`, `LeaseRenewRequest`, `LeaseRevokeRequest`, `LeaseGrant`, `LeaseError` | `rust:LeaseAcquireRequest`, `rust:LeaseRenewRequest`, `rust:LeaseRevokeRequest`, `rust:LeaseGrant`, `rust:LeaseError` |
-| `maintenance::enable_lease_ledger` | `rust:maintenance::enable_lease_ledger` |
+The stable-toolchain CI job runs `python scripts/api_surface.py check`
+(`.github/workflows/ci.yml:114-116`). It builds
+`cargo doc --no-deps --offline --locked --quiet -p vlite --target-dir target/api-surface`
+and compares rustdoc's public item index to
+`tests/fixtures/api_surface/vlite-default.txt`. Only additions under
+`vlite::property_graph::` are auto-allowed; every other addition and every
+removal fails until the fixture is hand-edited. Never run the script's
+`baseline` command to accept this feature (`scripts/api_surface.py:1-24,60-64,110-130`).
+Neither command runs in this docs-only phase.
+
+The existing gate explicitly excludes inherent methods and fields
+(`scripts/api_surface.py:22-24`); the fixture has no method-line kind.
+Do not invent fixture lines for methods: their exact paths are listed below,
+with site coverage and REG-002 compile compatibility instead. Public lease
+types live in the already-public `vlite::kv` module, not at crate root;
+`src/lease_ledger.rs` remains private, with no public re-exports.
+
+| Exact public path | Exact REG-001 fixture line (or exclusion) | `site/api.html` data-api key |
+|---|---|---|
+| `vlite::Database::lease_store` | None: inherent method, not indexed | `rust:Database::lease_store` |
+| `vlite::kv::LeaseStore` | `structs vlite::kv::LeaseStore` | `rust:LeaseStore` |
+| `vlite::kv::LeaseStore::acquire` | None: inherent method, not indexed | `rust:LeaseStore::acquire` |
+| `vlite::kv::LeaseStore::renew` | None: inherent method, not indexed | `rust:LeaseStore::renew` |
+| `vlite::kv::LeaseStore::revoke` | None: inherent method, not indexed | `rust:LeaseStore::revoke` |
+| `vlite::kv::LeaseAcquireRequest` | `structs vlite::kv::LeaseAcquireRequest` | `rust:LeaseAcquireRequest` |
+| `vlite::kv::LeaseRenewRequest` | `structs vlite::kv::LeaseRenewRequest` | `rust:LeaseRenewRequest` |
+| `vlite::kv::LeaseRevokeRequest` | `structs vlite::kv::LeaseRevokeRequest` | `rust:LeaseRevokeRequest` |
+| `vlite::kv::LeaseGrant` | `structs vlite::kv::LeaseGrant` | `rust:LeaseGrant` |
+| `vlite::kv::LeaseError` | `enums vlite::kv::LeaseError` | `rust:LeaseError` |
+| `vlite::maintenance::enable_lease_ledger` | `functions vlite::maintenance::enable_lease_ledger` | `rust:fn:enable_lease_ledger` |
+
+Fixture kinds follow neighbouring `enums`, `functions`, and `structs` entries
+(`tests/fixtures/api_surface/vlite-default.txt:44-68,72-90,131-134`).
+The converter key corrects the earlier proposed
+`rust:maintenance::enable_lease_ledger`: the site scanner uses
+`rust:fn:<name>` for public free functions (`tests/api_reference.py:252-262`).
+Each Phase-2 commit must hand-add its applicable fixture lines and matching
+`api.html` rows in the same commit that introduces the item, never later.
+The type-only site keys above retain the proposed design identifiers, but
+the current `tests/api_reference.py` scanner enforces methods and free
+functions, not standalone type declarations, and rejects extra keys.
+Document types in rows without unsupported `data-api` attributes; emit the
+listed method/free-function keys exactly. Do not change either gate.
 
 Deferred public surface: `lease_domain()` inspection; any runtime
 reenrollment/reset operation; `Database::create_with_lease_ledger`; route,
@@ -557,7 +606,9 @@ and backup. High-water is likewise carried forward.
 | `Unavailable` | Fail with `LeaseUnavailable`. | The caller's read-only, shared, replica, memory, or durability-none open mode prevents serving. It is ephemeral and not persisted as a file recovery state. |
 
 `RecoveryRequired` deactivates every grant and persists the old domain and
-high-water for diagnosis; no token from it can be issued. The supported
+high-water for diagnosis; no token from it can be issued. Ordinary record/KV
+reads and writes remain subject to the existing handle-mode and durability
+rules; recovery state is not a blanket database read-only restriction. The supported
 operator path is a fresh output/domain plus explicit downstream re-enrollment
 before traffic is cut over. There is no automatic token-floor recovery,
 runtime admin endpoint, route, or in-place reset in this slice.
@@ -570,7 +621,7 @@ runtime admin endpoint, route, or in-place reset in this slice.
 | `maintenance::restore` | The restore writer already rewrites lineage at `src/maintenance.rs:397-450`. For ledger files, append `RecoveryRequired` under the copied ledger domain before staged output validation/publication. | Restored output refuses leases. |
 | `logops::restore_to` (PITR) | It already emits a fresh lineage and copies only frames through the cut (`src/logops.rs:99-185`). When source has ledger flag, append `RecoveryRequired` after the cut; it must not use a pre-cut high-water as authoritative. | PITR output refuses leases. |
 | Directory checkpoint image restore / manifest rollback through VLite | A supported restore/conversion path must stamp `RecoveryRequired` in the output before manifest publication. A normal checkpoint carries ledger state and is not itself a restore. `src/directory.rs:733-760,974-1014`. | Restored output refuses leases. |
-| VLite copy/branch operation | No generic branch API exists in this slice. Any future VLite-managed copy-out that creates an independently writable descendant must stamp `RecoveryRequired`; byte-identical `backup` remains an archive, and `restore` stamps. | Managed descendant refuses leases until fresh-domain operator procedure. |
+| VLite copy/branch operation | No generic branch API exists in this slice. Any future VLite-managed copy-out that creates an independently writable descendant must stamp `RecoveryRequired`; ledger-enabled backups also stamp, while non-ledger backups remain byte-identical. | Managed descendant refuses leases until fresh-domain operator procedure. |
 | Rollback through a supported VLite operation | Any operation that selects an earlier log/image must stamp `RecoveryRequired`; explicit tail repair of an incomplete lease tail does likewise. | Rolled-back output refuses leases. |
 | `Replica::promote` | `src/replica.rs:194-198` currently consumes the read-only follower directly. Before return, append and sync `RecoveryRequired`; failure returns error and must not expose the database as writable. | Promoted file refuses leases; replication lag can never be treated as a safe global floor. |
 
@@ -580,17 +631,18 @@ copied ledger is newer (`src/changes.rs:3-6`; `src/maintenance.rs:347`,
 `src/logops.rs:167-168`). Changing lineage alone therefore never clears or
 proves fencing recovery.
 
-**Limit of detection / owner decision.** A raw filesystem copy, external
+**Recorded guarantee scope (2026-11-02).** A raw filesystem copy, external
 rollback, or restoring an old directory manifest without calling a VLite
 operation is indistinguishable from the original bytes with only an
-in-file ledger. A VLite-managed backup can be stamped `RecoveryRequired`;
-this design recommends that special case despite the existing
-byte-identical-backup contract. Detecting arbitrary copies/rollbacks while
+in-file ledger. The accepted design stamps VLite-managed ledger backups
+`RecoveryRequired`, preserving byte identity only for non-ledger backups.
+Detecting arbitrary copies/rollbacks while
 preserving the same domain still requires an external non-rollback floor,
-which decision (c) explicitly rejected. The contract must clarify that scope
-or approve an external authority; no internal format trick can detect an
-unmanaged copy. This is a guarantee-level blocker if "copy/rollback" includes
-out-of-band filesystem actions.
+which decision (c) explicitly rejected. The owner-visible wording change
+against contract section 5's "copy/branch/rollback fails closed" is:
+"The fencing guarantee covers VLite-managed operations only; unmanaged
+out-of-band filesystem copies and rollbacks are not claimed." The coordinator
+integrates this cross-reference; this slice does not edit the contract.
 
 ## 8. Maintenance and lifecycle carry-forward
 
@@ -661,6 +713,7 @@ decoder to produce expected state.
 | Bounds / malformed | `lease_frame_rejects_bad_prefix_and_body`: op 18 without flag, bad reserved bytes, unknown kind/flags/version, length overflow, duplicate/out-of-order snapshot rows, invalid UTF-8/domain, zero token, bad deadline, and 2,049-byte body. |
 | Truncation | `lease_frame_truncation_is_not_a_commit`: truncate at every prefix/body/footer boundary; no partial frame is applied. Explicit tail repair on a flagged file makes lease use fail with recovery required. |
 | Older reader | `lease_flag_uses_existing_unsupported_feature_path`: run parser fixture without `FLAG_LEASE_LEDGER` support; expect exactly `UnsupportedFeature(0x0080)` before replay or repair. |
+| REG-001 / site surface | In each public-item-introducing Phase-2 commit, hand-add the exact section 5.4 fixture lines and site rows; run `python scripts/api_surface.py check` and `python tests/api_reference.py`. Prove removing a required fixture line fails REG-001 and removing a required method/free-function key fails site coverage. Methods have no REG-001 fixture entries; never regenerate the baseline. |
 | Crash injection | `lease_crash_points_never_reuse_token`: inject deterministic failures before append, after append/before sync, after reserve sync, after grant append, after grant sync/before response, renew/revoke sync, and startup barrier sync. Use the existing append/sync injection seam or a test-only sync closure; no sleeps. |
 | Encryption | `encrypted_lease_frames_round_trip_and_authenticate`: preserve ledger under encryption, fail modified ciphertext/tag, ensure holder/key fields are not plaintext on disk. |
 | Maintenance | `compaction_carries_domain_high_water_and_grants`, `upgrade_preserves_ledger_snapshot`, `reencrypt_preserves_encrypted_ledger`, `directory_conversion_carries_ledger`, `checkpoint_preserves_ledger_and_sequence`, `ledger_backup_stamps_recovery_required`, `legacy_backup_remains_byte_identical`, `restore_and_pitr_fail_closed`. |
@@ -693,20 +746,24 @@ assertion):
 
 ## 10. Phase-2 commits and shared-file serialization
 
-Commits remain local and independently acceptable. Do not parallelize edits to
-the shared loader/publication files while P3 compact vectors and the TTL feed
-design are changing them.
+Phase 2 remains gated, including isolated codec/test work. Once separately
+approved, commits remain local and independently acceptable. Shared storage
+integration serializes behind both P3b and P4; do not parallelize edits to
+their shared loader/publication files or race the TTL feed owner.
 
-| Order | Commit boundary | Files / functions | P3 dependency |
+| Order | Commit boundary | Files / functions | Dependency after separate Phase-2 approval |
 |---:|---|---|---|
-| 1 | Private codec and independent state oracle, no production hooks | New `src/lease_ledger.rs` types/codec/oracle tests; test-gated until capability is wired. | Can begin before P3 loader lands because the new file is isolated and does not edit shared files. |
+| 1 | Private codec and independent state oracle, no production hooks | New `src/lease_ledger.rs` types/codec/oracle tests; test-gated until capability is wired. | Isolated work only after separate Phase-2 approval; this design acceptance authorizes no early code. |
 | 2 | V5 capability and replay integration | `src/format.rs`: flag registry in `read_log_header_with`; `frame_allowed`, `checked_body_len`, `load_inner`, `Loaded`, op-18 replay and frame constructor. | Wait until P3's `src/format.rs` loader/generation change is merged or coordinate a single serialized integration commit. |
 | 3 | Database mode, durable hooks, opt-in API | `src/lib.rs`: `Database` ledger state, writable-open barrier sequencing around `open_backed`/`open_inner`, read-only and memory checks, dedicated append+sync path adjacent to `commit_frame_with_sync`; `src/kv.rs`: `LeaseStore` methods and public API. | Wait for P3 `src/lib.rs` generation integration; do not change unrelated hooks. |
 | 4 | Offline converter and compacted output | `src/maintenance.rs`: enablement converter, restore stamping, `write_v5`/`write_v5_image` snapshot; `src/logops.rs`: `reencrypt` and PITR carry/stamp. | Wait for P3 loader/image writer contract before writing op-18 post-image state. |
 | 5 | Directory, recovery, replica | `src/directory.rs`: `WAL_FLAGS`, `Layout::from_first`, `build_image`, `create_converted`, checkpoint sequence verification; `src/replica.rs`: apply capability and promotion barrier. | Wait for P3 `src/directory.rs` generation/checkpoint changes. |
-| 6 | Full acceptance and public-doc completion | ledger integration tests, targeted maintenance/replica tests, `site/api.html` exact rows, then contract/roadmap status cross-links by coordinator. | Run only after commits 2-5; no production enablement without independent acceptance. |
+| 6 | Full acceptance | ledger integration tests, targeted maintenance/replica tests, then contract/roadmap status cross-links by coordinator. Public fixture lines and site rows must already accompany their introducing commits 3-4 (section 5.4). | Run only after commits 2-5; no production enablement without independent acceptance. |
 
 **Serialization contract for shared ownership:**
+
+Every shared-file row below waits for both P3b and P4 in that conflict domain,
+in addition to the narrower function dependencies listed.
 
 | Shared surface | Required order |
 |---|---|
@@ -735,34 +792,34 @@ server surfaces. This plan preserves that boundary.
 | `FLAG_LEASE_LEDGER=0x0080` and op 18 are not currently registered. | Older builds will reject the unknown flag through the existing `UnsupportedFeature` path; new builds add prefix/replay support. |
 | `directory::WAL_FLAGS` omits any lease bit; checkpoint output carries only selected flags and currently expects `check.sequence == floor` (`src/directory.rs:31-37,827-850,974-1014`). | Add the bit and allow the sequence tail from post-image ledger snapshots while retaining the original history floor. |
 | `maintenance::compact`, `upgrade`, `restore` and `logops` rewrite flags/lineage and currently do not know a ledger (`src/maintenance.rs:397-610`; `src/logops.rs:25-185`). | Every writer must preserve frames and explicitly stamp restoration, not copy a flag alone. |
-| `Replica::promote` currently returns the follower `Database` directly (`src/replica.rs:194-198`). | Change it to a fallible, sync-before-return promotion when ledger flag is present. This is a source-compatible risk and needs signature review. |
+| `Replica::promote` currently returns the follower `Database` directly (`src/replica.rs:194-198`). | A fallible sync-before-return promotion is a source-compatibility change requiring explicit owner approval before Phase 2; no signature changes yet. |
 | `changes.rs` has no op-18 branch; unhandled operations return `Corrupt` (`src/changes.rs:301-468`). | Existing behavior is fail-closed, not silent skip. A future change-feed support decision must be coordinated with the separate feed owner. |
 | Raw filesystem copy/rollback has no in-file signal and no external floor is approved. | The claim can only cover VLite-managed operations unless decision (c) changes. |
 
-### 11.2 Questions for coordinator (recommended defaults)
+### 11.2 Recorded answers and remaining prerequisites
 
-| Question | Recommended default |
+| Question | Recorded answer / prerequisite |
 |---|---|
-| Does the numeric max of 4,096 distinct grant rows per file and holder bound 255 bytes fit the serving contract's quota model? | Approve both as hard storage bounds; require the later serving slice's configured per-tenant quota to be no larger than the file cap. |
-| Should a ledger-enabled change feed continue past internal lease commits? | For this slice, keep fail-closed behavior; do not edit `changes.rs`. Decide separately if continuous feed is an acceptance requirement. |
-| Does "copy/branch/rollback" mean only VLite-managed operations, or arbitrary filesystem actions? | Limit the guarantee to VLite-managed paths. Arbitrary copy/rollback requires the external non-rollback authority that decision (c) rejected. |
-| May `maintenance::backup` stop being byte-identical only for opted-in ledger files, so the backup is stamped `RecoveryRequired`? | Yes; preserve byte identity for every non-ledger file and stamp the opted-in archive to prevent it being opened as a second allocator. |
+| Does the numeric max of 4,096 distinct grant rows per file and holder bound 255 bytes fit the serving contract's quota model? | Accepted as proposals; confirmation against future tenant quotas remains pending. |
+| Should a ledger-enabled change feed continue past internal lease commits? | No in this slice: keep fail-closed behavior and do not edit `changes.rs`. |
+| Does "copy/branch/rollback" mean only VLite-managed operations, or arbitrary filesystem actions? | Accepted scope is VLite-managed paths only; unmanaged copies/rollbacks are explicitly not claimed. |
+| May `maintenance::backup` stop being byte-identical only for opted-in ledger files, so the backup is stamped `RecoveryRequired`? | Accepted at design level; preserve byte identity for every non-ledger file and stamp the opted-in archive. |
 | Is a read-only inspection method for `fence_domain` needed before serving? | Defer; the `LeaseGrant` returns the domain on successful acquire, and no public inspection surface is necessary for the ledger slice. |
 | Should writable `Database::open` itself fail when recovery state is required, or may ordinary records remain writable while lease operations refuse? | Keep ordinary database behavior unchanged; only lease operations fail with `FencingRecoveryRequired`, and the restored handle cannot serve leases. |
 | Is the public Rust holder argument acceptable, or should the embedded API use a single local owner identity? | Keep explicit `holder` in request types; it is required to test the contract's principal-bound semantics and is supplied by the serving adapter later. |
-| Should the public `Replica::promote` signature change from infallible to `Result<Database>`? | Make promotion fallible when a ledger is present; approve the API change before Phase 2. Returning a writable database without a durable recovery stamp is unsafe. |
+| Should the public `Replica::promote` signature change from infallible to `Result<Database>`? | Explicit owner approval of this source-compatibility change remains a Phase-2 prerequisite; design acceptance does not approve the signature change. |
 | How is downstream re-enrollment acknowledged after `RecoveryRequired`? | No in-place/runtime recovery API in this release. Create a fresh ledger-enabled destination/domain and explicitly re-enroll downstream resources before cutover; keep restored output blocked. |
 
 ## 12. Proposed status text for integration
 
-Do not edit either roadmap document in this slice. After this design is
-independently accepted, the coordinator may add these exact sentences.
+Do not edit either roadmap document in this slice. The coordinator may
+integrate these updated status sentences following design acceptance.
 
 **`serving-kv-ttl-contract.md` section 12, immediately after the `gap2-rust-lease-ledger` row:**
 
 > **Design status.** The `gap2-rust-lease-ledger` design is recorded in
-> [gap2-lease-ledger.md](gap2-lease-ledger.md); it is docs-only and awaits
-> independent owner acceptance before any code. Its format choice is V5
+> [gap2-lease-ledger.md](gap2-lease-ledger.md); design accepted 2026-11-02;
+> Phase 2 gated behind separate approval and P3b/P4 serialization. Its format choice is V5
 > capability flag `0x0080` plus op 18, with an explicit copy-out converter,
 > always-synced lease writes, and fail-closed VLite-managed recovery.
 
