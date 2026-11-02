@@ -4,8 +4,9 @@
 //! avoids alignment-dependent casts until a generation-pinned accessor exists.
 
 use super::payload;
+use crate::compact::catalog::Precision;
 use crate::compact::vectors::{self, Layout, Rows};
-use crate::format::{FLAG_COMPACT, corrupt};
+use crate::format::corrupt;
 use crate::{Error, Result};
 use std::collections::BTreeMap;
 
@@ -24,8 +25,7 @@ impl<'a> DenseColumn<'a> {
         floor: u64,
         offset: u64,
     ) -> Result<Self> {
-        let rows = vectors::check(collection, id, count, body, layout, floor, offset)
-            .map_err(|error| checked_error(error, offset, "invalid dense rows block"))?;
+        let rows = vectors::check(collection, id, count, body, layout, floor, offset)?;
         Ok(Self { rows, layout })
     }
 
@@ -33,14 +33,17 @@ impl<'a> DenseColumn<'a> {
         self.rows.len()
     }
 
+    /// Requires `row < self.len()`.
     pub(crate) fn id(&self, row: usize) -> u64 {
         self.rows.id(row)
     }
 
+    /// Requires `row < self.len()`.
     pub(crate) fn revision(&self, row: usize) -> u64 {
         self.rows.revision(row)
     }
 
+    /// Requires `row < self.len()`.
     pub(crate) fn expiry(&self, row: usize) -> Option<u64> {
         self.rows.expiry(row)
     }
@@ -65,7 +68,7 @@ impl<'a> DenseColumn<'a> {
             return Err(Error::InvalidQuery("compact column row is out of range"));
         }
         let decoded_bytes = decoded_bytes(row_count, dimensions)?;
-        cache.ensure(block, decoded_bytes, |values| {
+        cache.ensure(block, decoded_bytes, self.layout, |values| {
             for index in 0..row_count {
                 values.extend(self.rows.vector(index));
             }
@@ -92,8 +95,7 @@ impl<'a> RecordColumn<'a> {
         floor: u64,
         offset: u64,
     ) -> Result<Self> {
-        let rows = payload::check_columns(collection, id, count, body, layout, floor, offset)
-            .map_err(|error| checked_error(error, offset, "invalid complete records block"))?;
+        let rows = payload::check_columns(collection, id, count, body, layout, floor, offset)?;
         Ok(Self { rows, layout })
     }
 
@@ -101,14 +103,17 @@ impl<'a> RecordColumn<'a> {
         self.rows.len()
     }
 
+    /// Requires `row < self.len()`.
     pub(crate) fn id(&self, row: usize) -> u64 {
         self.rows.id(row)
     }
 
+    /// Requires `row < self.len()`.
     pub(crate) fn revision(&self, row: usize) -> u64 {
         self.rows.revision(row)
     }
 
+    /// Requires `row < self.len()`.
     pub(crate) fn expiry(&self, row: usize) -> Option<u64> {
         self.rows.expiry(row)
     }
@@ -117,10 +122,12 @@ impl<'a> RecordColumn<'a> {
         binary_search(self.rows.len(), id, |row| self.rows.id(row))
     }
 
+    /// Requires `row < self.len()`.
     pub(crate) fn payload(&self, row: usize) -> &[u8] {
         self.rows.payload(row)
     }
 
+    /// Requires `row < self.len()`.
     pub(crate) fn metadata(&self, row: usize) -> &[u8] {
         self.rows.metadata(row)
     }
@@ -137,7 +144,7 @@ impl<'a> RecordColumn<'a> {
             return Err(Error::InvalidQuery("compact column row is out of range"));
         }
         let decoded_bytes = decoded_bytes(row_count, dimensions)?;
-        cache.ensure(block, decoded_bytes, |values| {
+        cache.ensure(block, decoded_bytes, self.layout, |values| {
             for index in 0..row_count {
                 values.extend(self.rows.vector(index));
             }
@@ -168,13 +175,6 @@ fn binary_search(len: usize, id: u64, mut at: impl FnMut(usize) -> u64) -> Optio
     None
 }
 
-fn checked_error(error: Error, offset: u64, reason: &'static str) -> Error {
-    match error {
-        Error::UnsupportedFeature(FLAG_COMPACT) => corrupt(offset, reason),
-        other => other,
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct BlockRange {
     pub first_id: u64,
@@ -188,15 +188,26 @@ pub(crate) struct BlockDirectory {
 
 impl BlockDirectory {
     pub(crate) fn new(blocks: Vec<BlockRange>) -> Result<Self> {
-        let invalid = || corrupt(0, "compact column blocks overlap or are out of order");
+        for block in &blocks {
+            if block.rows == 0 {
+                return Err(corrupt(0, "compact column block has zero rows"));
+            }
+            if block.first_id > block.last_id {
+                return Err(corrupt(0, "compact column block has reversed ID range"));
+            }
+            // Comparing rows - 1 avoids overflow for the full u64 ID span.
+            if (block.rows - 1) as u128 > u128::from(block.last_id - block.first_id) {
+                return Err(corrupt(0, "compact column row count exceeds ID span"));
+            }
+        }
         if blocks
-            .iter()
-            .any(|block| block.rows == 0 || block.first_id > block.last_id)
-            || blocks
-                .windows(2)
-                .any(|pair| pair[0].last_id >= pair[1].first_id)
+            .windows(2)
+            .any(|pair| pair[0].last_id >= pair[1].first_id)
         {
-            return Err(invalid());
+            return Err(corrupt(
+                0,
+                "compact column blocks overlap or are out of order",
+            ));
         }
         Ok(Self { blocks })
     }
@@ -238,6 +249,9 @@ impl BlockDirectory {
 
 struct CachedBlock {
     values: Vec<f32>,
+    elements: usize,
+    dimensions: usize,
+    precision: Precision,
     last_used: u64,
 }
 
@@ -272,8 +286,21 @@ impl ScratchCache {
         &mut self,
         block: u64,
         decoded_bytes: usize,
+        layout: Layout,
         decode: impl FnOnce(&mut Vec<f32>),
     ) -> Result<()> {
+        let elements = decoded_bytes / std::mem::size_of::<f32>();
+        // Same-shape collisions still require a generation-aware engine key.
+        // Reject shape collisions before changing either the clock or LRU state.
+        if let Some(entry) = self.entries.get(&block)
+            && (entry.elements != elements
+                || entry.dimensions != layout.dimensions
+                || entry.precision != layout.precision)
+        {
+            return Err(Error::InvalidQuery(
+                "compact cache key has incompatible shape",
+            ));
+        }
         if decoded_bytes > self.budget_bytes {
             return Err(Error::InvalidQuery(
                 "compact scratch budget is smaller than one decoded block",
@@ -306,6 +333,9 @@ impl ScratchCache {
             block,
             CachedBlock {
                 values,
+                elements,
+                dimensions: layout.dimensions,
+                precision: layout.precision,
                 last_used: self.clock,
             },
         );

@@ -57,26 +57,32 @@ impl Columns<'_> {
         self.rows.len()
     }
 
+    /// Requires `row < self.len()`.
     pub(crate) fn id(&self, row: usize) -> u64 {
         self.rows.id(row)
     }
 
+    /// Requires `row < self.len()`.
     pub(crate) fn revision(&self, row: usize) -> u64 {
         self.rows.revision(row)
     }
 
+    /// Requires `row < self.len()`.
     pub(crate) fn expiry(&self, row: usize) -> Option<u64> {
         self.rows.expiry(row)
     }
 
+    /// Requires `row < self.len()`.
     pub(crate) fn payload(&self, row: usize) -> &[u8] {
         &self.payloads[self.part(self.payload_offsets, row)]
     }
 
+    /// Requires `row < self.len()`.
     pub(crate) fn metadata(&self, row: usize) -> &[u8] {
         &self.metadata[self.part(self.metadata_offsets, row)]
     }
 
+    /// Requires `row < self.len()`.
     pub(crate) fn vector(&self, row: usize) -> impl Iterator<Item = f32> + '_ {
         self.rows.vector(row)
     }

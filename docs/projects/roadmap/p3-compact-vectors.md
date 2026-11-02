@@ -22,7 +22,12 @@ into an explicit scratch cache for both precisions;
 the cache is byte-bounded to decoded float32 vector bytes, requires enough room
 for one decoded block, and evicts least-recently-used blocks by a logical
 counter with the block key as a deterministic tie-breaker. An undersized
-budget returns the existing `InvalidQuery` error. The accessor has no unsafe
+budget returns the existing `InvalidQuery` error. Cached shape mismatches (element count,
+dimensions or precision) return `InvalidQuery` without changing the cache.
+Same-shape key collisions remain the engine's responsibility: integration
+must use generation-aware keys. Unknown block versions retain the existing
+`UnsupportedFeature(FLAG_COMPACT)` refusal rather than being reclassified
+as corruption. The accessor has no unsafe
 vector alignment or casting; adding a safe aligned borrow is deferred. Its
 owned-versus-mapped parity test uses a test-only memory map with a documented
 safety condition. Accessors borrow only the caller-supplied verified body
