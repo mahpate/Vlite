@@ -3,7 +3,8 @@
 Status: implementation design; wire changes remain proposals. Delivery step 2 and the exact-planner half of
 step 3 are implemented in embedded Rust, independently reviewed and integrated, but unreleased
 ([below](#implemented-step-2-unreleased-reviewed)). The remaining explicit approximate filter-aware ANN
-half of step 3 is a private, unreleased slice; its status draft below does not assert implementation acceptance.
+half of step 3 is a private, gated slice, independently accepted and integrated but unreleased
+([below](#step-3-ann-status-private-accepted-unreleased)).
 Audit citations refer to base `d530b4c`; integration decisions follow the shared contract.
 Open means not verified here or not yet decided.
 
@@ -284,9 +285,9 @@ Release notes must call out lower `records_scanned`. A well-formed block with a 
 summary is not detectable without recomputation; persisted blocks, partition-to-block binding and
 multi-generation layouts wait for writer wiring.
 
-### Step 3 ANN status (private draft, unreleased)
+### Step 3 ANN status (private, accepted, unreleased)
 
-The remaining slice targets only explicit approximate filtered search: use safe candidate supersets
+The slice targets only explicit approximate filtered search: use safe candidate supersets
 to assist eligibility, retain nonmatching graph nodes as traversal bridges, and widen ef deterministically
 within bounded work. Recheck full predicates, latest-version visibility and expiry at one query clock;
 include buffered replacements and new matches, and suppress shadowed versions. Exact reranking of
@@ -296,8 +297,14 @@ Released behavior remains unchanged: no public activation, API, wire, format or 
 exact search retains exhaustive correctness and distance-then-ID ordering, and existing `auto` selection
 is not retuned by this slice. Missing or stale ANN, unsafe or unavailable acceleration, and exhausted
 budgets must retain a correctness-preserving exact fallback with diagnostics, not silently truncate
-candidates or label approximate work exact. Review and integration must verify these boundaries before
-this draft can be marked implemented.
+candidates or label approximate work exact.
+
+Independent acceptance verified these boundaries for the private gated path. Review found that budget
+exhaustion during descent could return the moved-to node after checking only the entry's eligibility,
+and that a zero-budget descent could return an unscored entry. The accepted correction requires a
+traversal-scored, eligible best node. Its regression covers both filter shapes, budgets 0-96 and
+16 queries over 2,000 records, and fails on either defect. This accepts private behavior only: no public
+activation, persisted ANN or recall qualification.
 
 Eligible-count/selectivity thresholds, ef widening and caps, traversal-work limits, and candidate,
 bitmap and scratch-memory budgets are provisional implementation choices, open for release qualification;

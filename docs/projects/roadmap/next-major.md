@@ -169,13 +169,13 @@ Local numbers below show direction only (see rules).
   Exact results retain full predicate and expiry checks. The per-collection
   64 MiB limit covers retained allocator-requested summary heap, not RSS,
   peak or whole-query memory; exhaustion falls back to an exact scan.
-  The remaining explicit approximate filter-aware ANN slice has a private,
-  unreleased status draft, not implementation acceptance: candidate-assisted
+  The explicit approximate filter-aware ANN slice is private and gated,
+  independently accepted and integrated but unreleased: candidate-assisted
   eligibility, nonmatching traversal bridges and bounded ef widening retain
   predicate/visibility checks and exact fallback, without exact top-k recall
   guarantees. Released exact results and `auto` selection remain unchanged.
   Thresholds and work/memory budgets are provisional and open for release
-  qualification. Persisted writer integration, ANN implementation acceptance,
+  qualification. Persisted writer integration, public activation,
   compression, serving and F7/F8/S5 qualification remain outstanding; no
   performance claim or change to DO-005 is made.
 - **Serving design:** [serving](serving-contract.md) has implementation
