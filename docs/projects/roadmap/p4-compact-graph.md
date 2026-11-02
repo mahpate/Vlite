@@ -13,6 +13,10 @@ total block-body cap. Multi-block graph partitioning is out of scope; both
 precision activation and the separate P4 test gate are required to write, and
 gate-off/release readers refuse the image. No performance or size claims are
 made. Full P4 implementation and measured results remain outstanding.
+The codec's own 64 MiB payload cap reports `invalid graph base source` before
+the envelope body-cap check, so the writer's `graph base block exceeds body cap`
+reason is reachable only with a lowered test-only `BodyLimit` or an otherwise
+valid encoded payload in the final 40-byte window of the codec cap.
 The private fix-round candidate carries the gate into directory checkpoint
 workers, shares writer/preflight/declaration admission, and rejects graph
 blocks without history/graph flags or with extra sections. Named regressions
