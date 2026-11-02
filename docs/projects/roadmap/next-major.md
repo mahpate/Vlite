@@ -93,11 +93,11 @@ Local numbers below show direction only (see rules).
   ([plan](gap4-temporal-graph.md)). They preserve atomic writes, TTL and
   revisions across replay, feeds, export and maintenance. Explicit copy-out
   leaves the source untouched and creates a new lineage requiring replica
-  reseeding. Private read slice C1 is implemented and independently reviewed:
-  fixed validity/TTL selectors govern ID/key reads, node scans, neighbors and
-  bounded timelines. C2 traversal, retrieval and paging, public activation and
-  production qualification remain outstanding; production builds still refuse
-  the temporal capability.
+  reseeding. Private read slices C1 and C2 are implemented and independently
+    reviewed: fixed validity/TTL selectors govern ID/key reads, node scans,
+    neighbors, bounded timelines, traversal, retrieval expansion and paging.
+    Public activation and production qualification remain outstanding;
+    production builds still refuse the temporal capability.
 - **Speed P3, compact vectors:** the [design](p3-compact-vectors.md) keeps
   float32 as the storage default and makes float16 explicit. It reuses the
   existing scalar-u8/reranking and ANN snapshot mechanisms, with columnar
