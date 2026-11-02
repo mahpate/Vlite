@@ -18,6 +18,10 @@ use std::path::Path;
 /// Re-exported from [`crate::property_graph`], where it is defined.
 pub use crate::property_graph::{GraphChange, GraphRemovalReason, GraphTtl, TemporalChange};
 
+// Gap 3: the TTL feed reader that numbers commits lands next.
+#[cfg_attr(not(test), allow(dead_code))]
+mod ttl_chunk;
+
 /// Default and maximum events returned by one batch.
 pub const DEFAULT_FEED_BATCH: usize = 1000;
 pub const MAX_FEED_BATCH: usize = 10_000;
@@ -378,16 +382,18 @@ impl std::fmt::Display for GraphFeedError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Engine(error) => error.fmt(f),
-            Self::CursorModeMismatch { .. } => {
-                f.write_str("cursor_mode_mismatch: cursor and requested graph_events differ")
-            }
+            Self::CursorModeMismatch { cursor, requested } => write!(
+                f,
+                "cursor_mode_mismatch: cursor graph_events {cursor:?} differ from requested {requested:?}"
+            ),
             Self::CursorBeforeHistory { cursor, floor } => write!(
                 f,
                 "cursor sequence {cursor} is before the history floor {floor}: a checkpoint restated earlier changes; take a snapshot and resume at {floor} or later"
             ),
-            Self::ResponseTooLarge { .. } => {
-                f.write_str("response_too_large: canonical event exceeds 16777216 bytes")
-            }
+            Self::ResponseTooLarge { bytes, limit } => write!(
+                f,
+                "response_too_large: canonical event of {bytes} bytes exceeds {limit} bytes"
+            ),
         }
     }
 }

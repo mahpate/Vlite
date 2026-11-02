@@ -581,23 +581,15 @@ fn ttl_cursor_goldens() {
         invalid(token);
     }
 
-    // The typed opt-in error.
+    // The typed opt-in error (its messages: `graph_feed_error_display`).
     let mismatch = GraphFeedError::CursorModeMismatch {
         cursor: empty,
         requested: ttl,
     };
-    assert_eq!(
-        mismatch.to_string(),
-        "cursor_mode_mismatch: cursor and requested graph_events differ"
-    );
     let too_large = GraphFeedError::ResponseTooLarge {
         bytes: 16_777_217,
         limit: 16_777_216,
     };
-    assert_eq!(
-        too_large.to_string(),
-        "response_too_large: canonical event exceeds 16777216 bytes"
-    );
     let floor = GraphFeedError::CursorBeforeHistory {
         cursor: 4,
         floor: 9,
@@ -614,4 +606,32 @@ fn ttl_cursor_goldens() {
     for error in [mismatch, too_large, floor] {
         assert!(error.source().is_none());
     }
+}
+
+/// Correction (a): both typed errors print their own fields.
+#[test]
+fn graph_feed_error_display() {
+    let (empty, ttl) = (GraphEventSet::Empty, GraphEventSet::Ttl);
+    let mismatch =
+        |cursor, requested| GraphFeedError::CursorModeMismatch { cursor, requested }.to_string();
+    assert_eq!(
+        mismatch(empty, ttl),
+        "cursor_mode_mismatch: cursor graph_events Empty differ from requested Ttl"
+    );
+    assert_eq!(
+        mismatch(ttl, empty),
+        "cursor_mode_mismatch: cursor graph_events Ttl differ from requested Empty"
+    );
+    let too_large = |bytes, limit| GraphFeedError::ResponseTooLarge { bytes, limit }.to_string();
+    assert_eq!(
+        too_large(16_777_217, 16_777_216),
+        "response_too_large: canonical event of 16777217 bytes exceeds 16777216 bytes"
+    );
+    assert_eq!(
+        too_large(usize::MAX, 9),
+        format!(
+            "response_too_large: canonical event of {} bytes exceeds 9 bytes",
+            usize::MAX
+        )
+    );
 }
