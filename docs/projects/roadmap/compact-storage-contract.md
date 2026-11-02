@@ -348,7 +348,7 @@ sources and each graph-revision run follows its corresponding graph snapshot.
 | 2. Shared wiring | Storage | Writers enabled per opted-in object, generation pinning, crash matrix | Extends `tests/directory_recovery_matrix.rs`, `tests/encryption.rs`, `tests/replica.rs` and `tests/graph_compat.rs` with compact images |
 | 3. Later slices | Each owner | P3b-d, P4 mutations and import, filter-aware ANN | The acceptance lists in the P3 and P4 designs |
 
-**Slice 1b status.** A private, unreleased P4 framing candidate uses critical
+**Slice 1b status.** The private, unreleased, independently accepted P4 framing slice uses critical
 kind `0x0300`, codec version 1, and carries the accepted `VLGCSR06` body
 unchanged. Its writer is behind both precision activation and a separate
 test-only P4 gate; gate-off and release readers refuse graph-base images with
@@ -359,7 +359,7 @@ route decoded graph bodies through the op-15 snapshot and revision validators.
 The private fix round propagates the gate into directory checkpoint workers,
 shares writer/preflight/declaration admission, and requires history/graph flags
 and exactly one payload section, with specific corruption reasons and named
-mutation regressions; it remains pending independent acceptance.
+mutation regressions.
 Tests compare op-15 state and reads, cover an independent golden, graph
 structure, properties, schema, attachments, deadlines, temporal series,
 encryption, directory checkpoints, precision conversion, byte-copy
@@ -367,8 +367,8 @@ backup/restore, re-encryption, change-feed parity and explicit refusal of
 pre-checkpoint replica export. Precision-store `compact` and graph strip/enable
 rewrites remain explicitly refused by their existing policy; no policy or
 release gate changes, production activation, performance claim or size claim
-are part of this candidate. Independent acceptance and the wider shared
-framing/publication qualification remain pending.
+are part of this slice. The wider shared framing/publication qualification
+remains pending.
 
 **Slice 0 status.** `src/compact/mod.rs` holds one concrete check, wired
 into the load loop (`src/format.rs`), the change feed (`src/changes.rs`)

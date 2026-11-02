@@ -144,15 +144,15 @@ Oversized bundles fail before append; callers may explicitly split independent m
 Offer `Durability::Full` or `sync()` for stronger acknowledgement requirements,
 without altering the database's configured durability behind the caller's back.
 
-The current A1 candidate is deliberately narrower than this proposal. Its
+The integrated A1 core is deliberately narrower than this proposal. Its
 crate-private `MemoryRef` / `MemoryMut` bindings require an existing graph and can
 validate an optional existing evidence collection; it currently writes only entity
 and episodic memory nodes, source/provenance properties, references and receipts.
 It does not attach vector records or provide public names, public errors, settings,
 recall, forget, expiry, facts or serving surfaces. Names and error mapping remain
-provisional until independent acceptance and public Rust API review.
+provisional until public Rust API review.
 
-Candidate limits are exact: a request has 1-4,096 items; opaque scope, identity,
+The A1 limits are exact: a request has 1-4,096 items; opaque scope, identity,
 source and idempotency keys are at most 256 UTF-8 bytes; provenance has at most 64
 entries and its length-prefixed UTF-8 encoding is at most 4,096 bytes. Each
 source/kind/URI/transformation field is at most 256 bytes. The separately encoded
@@ -416,7 +416,7 @@ between the logical and physical operation models.
 
 | Slice | Exit criteria |
 |---|---|
-| A1: crate-private candidate | Provisional graph binding, scope provisioning, entity/episodic remember, same-frame receipts, exact dedup, idempotency and budget/validation coverage; unreleased and pending independent acceptance |
+| A1: crate-private core | Provisional graph binding, scope provisioning, entity/episodic remember, same-frame receipts, exact dedup, idempotency and budget/validation coverage; independently accepted and integrated, unreleased and not activated |
 | A2: follow-on | Small forget and expiry with atomic failure/reopen/expiry tests; fact support waits for Gap 4; A2 re-bases the closed list of A2 fixtures onto the physical A1 budget (multi-step setup) before its own acceptance |
 | B: recall planner | Filtered hybrid plus bounded temporal expansion, owner retention checks, rank/explain fixtures and existing vector-only exact/MMR integration; scan/work/cancellation coverage; no exhaustive-history claim |
 | C: consolidation | Caller summaries, slot-guarded corrections, contradictions, stale-source reporting and resumable erasure barriers/fencing; crash/retry and maintenance tests pass |

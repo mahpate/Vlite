@@ -6,7 +6,7 @@ exact schema before code ([release decision](next-major.md#decided-2026-11-02)).
 This document requests that review; it activates nothing. All names, bounds,
 errors, fields and adapter methods below are proposed unless marked Current.
 Public Rust memory names remain proposed pending slice A API review. Core-facing
-shapes target the provisional, crate-private A1 candidate (Gap 1 section 2);
+shapes target the provisional, crate-private A1 core (Gap 1 section 2);
 "Core alignment" in section 3 lists what may still change.
 
 Authority: [Gap 1](gap1-agent-memory.md), read in full, especially sections 1-6
@@ -172,12 +172,12 @@ durability. No per-request durability switch; operators choose Full/sync policy
 as in Gap 1 section 2. Never retry a mutation automatically on network timeout,
 UNKNOWN or cancellation without receipt reconciliation.
 
-### Core alignment (A1 candidate)
+### Core alignment (A1 core)
 
 A1 is crate-private and provisional (Gap 1 section 2). If its contract changes,
 this table and the section 8 examples change with it.
 
-| Topic | A1 candidate behavior this contract relies on |
+| Topic | A1 core behavior this contract relies on |
 |---|---|
 | Request digest | Core-computed `v1:` + SHA-256 of fixed-order JSON; `deadline_ms` and the clock are excluded |
 | `content_digest` | `v1:` + 64 lowercase hex of SHA-256 over the JSON-quoted content string |

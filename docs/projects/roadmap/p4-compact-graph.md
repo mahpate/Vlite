@@ -6,10 +6,10 @@ Private parallel import staging is independently accepted and integrated, but
 unreleased.
 Private decoded-CSR identity, adjacency, TTL and temporal reads are implemented
 and independently accepted.
-P4 slice 1b has a separate private, test-only graph-base checkpoint-framing
-candidate pending independent acceptance: critical kind `0x0300`, codec
-version 1, unchanged `VLGCSR06` payload, one block per graph, and a 64 MiB
-total block-body cap. Multi-block graph partitioning is out of scope; both
+P4 slice 1b, a separate private, test-only graph-base checkpoint framing, is
+independently accepted and integrated but unreleased: critical kind `0x0300`,
+codec version 1, unchanged `VLGCSR06` payload, one block per graph, and a
+64 MiB total block-body cap. Multi-block graph partitioning is out of scope; both
 precision activation and the separate P4 test gate are required to write, and
 gate-off/release readers refuse the image. No performance or size claims are
 made. Full P4 implementation and measured results remain outstanding.
@@ -17,12 +17,12 @@ The codec's own 64 MiB payload cap reports `invalid graph base source` before
 the envelope body-cap check, so the writer's `graph base block exceeds body cap`
 reason is reachable only with a lowered test-only `BodyLimit` or an otherwise
 valid encoded payload in the final 40-byte window of the codec cap.
-The private fix-round candidate carries the gate into directory checkpoint
+The accepted fix round carries the gate into directory checkpoint
 workers, shares writer/preflight/declaration admission, and rejects graph
 blocks without history/graph flags or with extra sections. Named regressions
 cover multi-body snapshot/feed parity, expiry cascade, empty graph registries,
-exact body-cap boundaries, codec versions and mixed op-15/block rejection;
-independent acceptance remains pending.
+exact body-cap boundaries, codec versions and mixed op-15/block rejection.
+Checkpoint reads, production wiring and activation remain outstanding.
 Depends on [P2](p2-directory-store.md); exits remain
 [S3/S4/F6](../performance/storage-goals.md): **<=24 B/edge disk,
 <=100 B/edge resident, >=1M edges/s bulk load, <=300 ms reopen at 1M edges**.
@@ -374,8 +374,8 @@ production activation. Retained overlay goldens and deterministic engine-history
 comparisons are candidate evidence, not independent acceptance or performance
 qualification.
 
-Remaining P4 slices are shared framing and block dispatch/publication,
-checkpoint/read integration, production mutation integration, full parallel
+Remaining P4 slices are block dispatch/publication beyond the accepted private
+framing, checkpoint/read integration, production mutation integration, full parallel
 import (property and schema admission, spilling and durable publication), and performance and
 cross-platform qualification.
 Columnar property storage, native compact-index serving and schema enforcement

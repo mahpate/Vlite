@@ -184,13 +184,14 @@ Local numbers below show direction only (see rules).
   records, and node removal requires explicit incident-edge removals even for
   retained expired edges. No ordered write planner, TTL reclamation, record
   existence/cross-graph owner validation or durable publication is included.
-  Shared framing, checkpoint/read integration, production mutation integration,
+  Checkpoint/read integration, production mutation integration,
   full parallel import and S3/S4/F6
   qualification remain outstanding. Native schema enforcement, cross-graph
   owner validation and columnar property storage also remain outstanding.
-  P4 slice 1b has a private unreleased `0x0300` checkpoint-block candidate
-  using unchanged `VLGCSR06` bodies, one block per graph, a 64 MiB block-body
-  cap and no graph partitioning; it awaits independent acceptance.
+  P4 slice 1b, a private, test-only, independently accepted and integrated
+  `0x0300` checkpoint-block framing, uses unchanged `VLGCSR06` bodies, one
+  block per graph, a 64 MiB block-body cap and no graph partitioning; it is
+  unreleased and gated off, with no production activation.
   Independently reviewed logical references cover committed-overlay
   identity, non-reused IDs and expiry precedence, typed property snapshots
   with exact integer and float bits, label postings and scans, and
