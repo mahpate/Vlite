@@ -14,7 +14,7 @@ pub(crate) mod framing;
 mod import;
 mod overlay;
 mod read;
-mod view;
+pub(crate) mod view;
 
 use crate::property_graph::engine::codec::TemporalEntry;
 use crate::property_graph::engine::limits::{

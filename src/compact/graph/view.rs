@@ -6,6 +6,7 @@ use crate::property_graph::engine::{Direction, PropertyProjection};
 use std::sync::Arc;
 
 mod algorithm;
+pub(crate) mod history;
 
 #[cfg(test)]
 pub(crate) fn algorithm_test_take_visits() -> usize {
