@@ -304,6 +304,45 @@ fn ttl_chunk_boundaries() {
         assert_eq!(shape(&got), (events, ends), "event of {target} bytes");
     }
 
+    // Three operations exercise the comma retained before a later candidate.
+    let second = node_json(1, "b", 100, 150);
+    let base = event_json(
+        7,
+        None,
+        0,
+        "g",
+        &[first.clone(), second.clone(), node_json(2, "", 100, 150)],
+    )
+    .len();
+    for (target, events) in [
+        (CHUNK_BYTES, vec![(0, 3)]),
+        (CHUNK_BYTES + 1, vec![(0, 2), (1, 1)]),
+    ] {
+        let key = padded_key(target - base);
+        let text = event_json(
+            7,
+            None,
+            0,
+            "g",
+            &[first.clone(), second.clone(), node_json(2, &key, 100, 150)],
+        );
+        assert_eq!(text.len(), target);
+        let got = expanded(
+            vec![reclaim(vec![
+                node_delete(0, "a", 100, 150),
+                node_delete(1, "b", 100, 150),
+                node_delete(2, &key, 100, 150),
+            ])],
+            None,
+        );
+        let ends = (1..=events.len()).collect();
+        assert_eq!(
+            shape(&got),
+            (events, ends),
+            "three-operation event of {target} bytes"
+        );
+    }
+
     // Ordinal digits: nine events before, so the first reclaim is ordinal
     // 9 and the second 10. The same two operations fit at 9 (exactly 1 MiB)
     // and do not at 10 (one byte more).
