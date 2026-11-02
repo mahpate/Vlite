@@ -1,8 +1,10 @@
 """Independent, bounded LOGICAL reference for Gap 1 slice A (sections 1/2/5/6/9).
 
-No Rust parity, physical bytes, durability, concurrency, ranking, facts, temporal
-relations, consolidation, chunked erasure or backups are modeled. JSON UTF-8 size
-is a logical body budget, not an engine frame-size claim. IDs are caller supplied.
+No Rust parity, graph/frame physical bytes, durability, concurrency, ranking, facts,
+temporal relations, consolidation, chunked erasure or backups are modeled. The
+fixture-local length:value provenance encoding is counted against its 4,096-byte
+stored-property limit; JSON UTF-8 size is only a logical body budget, not an engine
+frame-size claim. IDs are caller supplied.
 Fixture-only attach/edge operations seed external attachments and ordinary graph
 edges; these are not relation memories or a proposed public API.
 
@@ -35,6 +37,7 @@ Fixture-local assumptions (not a Rust implementation/parity contract):
   once. A separate revision guard costs one operation for each changed existing
   node. Creation/update clocks are captured; observed_at must be caller data.
 * Provenance is an ordered list capped at 64; default is the source alone.
+  The fixture-local length:value/-; encoding is capped at 4,096 UTF-8 bytes.
   References are directed list entries (parallel entries count separately).
   Sharing uses references to the sole owner, never multiple attachments.
   Forward references resolve to retained caller IDs at the end of the plan.
@@ -87,6 +90,8 @@ MUTATIONS = {
     "importance_unbounded": ("importance-out-of-range-only", 0,
                              "got {'actions': [['created', 'm', 1]]"),
     "provenance_unbounded": ("provenance-cap", 0, "got {'actions': [['created', 'm', 1]]"),
+    "provenance_bytes_unbounded": ("provenance-encoded-size-limit", 1,
+                                   "got {'actions': [['created', 'over-limit', 1]]"),
     "ops_unbounded": ("bundle-entry-cap-before-dedup", 0,
                       "got {'actions': [['created', 'm0', 1], ['noop', 'm0', 1]"),
     "body_unbounded": ("body-budget", 0, "got {'actions': [['created', 'm', 1]]"),
@@ -168,6 +173,21 @@ def canonical(value, *, allow_nonfinite=False):
 
 def digest(value):
     return "v1:" + hashlib.sha256(canonical(value)).hexdigest()
+
+
+def encoded_provenance_bytes(entries):
+    total = 0
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        for field in ("source", "kind", "uri", "transformation"):
+            value = entry.get(field)
+            if value is None:
+                total += 2
+            elif isinstance(value, str):
+                length = len(value.encode("utf-8"))
+                total += len(str(length)) + 1 + length + 1
+    return total
 
 
 def scope_tuple(value, mutation=None):
@@ -283,6 +303,8 @@ class Model:
             check(isinstance(provenance, list), "InvalidProvenance")
             check(len(provenance) <= 64 or self.is_mutant("provenance_unbounded"),
                   "ProvenanceLimit")
+            check(encoded_provenance_bytes(provenance) <= 4096
+                  or self.is_mutant("provenance_bytes_unbounded"), "ProvenanceLimit")
             for entry in provenance:
                 check(isinstance(entry, dict) and {"source"} <= entry.keys()
                       and entry.keys() <= {"source", "kind", "uri", "transformation"}
@@ -405,8 +427,11 @@ class Model:
                 check(target["revision"] == item.get("expected_revision")
                       or self.is_mutant("revision_ignored") or self.is_mutant("merge_unguarded"),
                       "RevisionConflict")
-                check(len(target["provenance"]) + len(item["provenance"]) <= 64
+                combined_provenance = target["provenance"] + item["provenance"]
+                check(len(combined_provenance) <= 64
                       or self.is_mutant("provenance_unbounded"), "ProvenanceLimit")
+                check(encoded_provenance_bytes(combined_provenance) <= 4096
+                      or self.is_mutant("provenance_bytes_unbounded"), "ProvenanceLimit")
                 target["provenance"].extend(copy.deepcopy(item["provenance"]))
                 target["sources"].add(item["source"])
                 target["revision"] += 1

@@ -397,6 +397,45 @@
       {"op":"remember","clock":10,"request":{"scope":{"tenant":"t","agent":"a"},"key":"seed","receipt_window":100,"items":[{"id":"m","kind":"entity","content":"x","source":"s","observed_at":5,"evidence":[{"id":"e","scope":{"tenant":"t","agent":"a"}}]},{"id":"n","kind":"entity","content":"y","source":"s","observed_at":5,"references":["m"]}]},"expect":{"actions":[["created","m",1],["created","n",1]],"receipt":1,"sequence":1}},
       {"op":"forget","clock":11,"request":{"scope":{"tenant":"t","agent":"a"},"key":"erase","receipt_window":100,"targets":[{"id":"m","revision":1},{"id":"n","revision":1}]},"expect":{"deleted":["m","n"],"receipt":2,"sequence":2}},
       {"op":"state","expect":{"memories":[],"evidence":[],"edges":[],"receipts":2,"sequence":2}}
+    ]},
+    {"name":"merge-same-source-is-noop-before-revision-check","assumptions":["spec: Repeated source/content is a no-op before explicit merge revision validation.","fixture: Receipt counters advance once per accepted remember request; merge expected revisions use logical in-request state."],"steps":[
+      {"op":"remember","clock":10,"request":{"scope":{"tenant":"t","agent":"a"},"key":"seed","receipt_window":100,"items":[{"id":"m","kind":"entity","content":"x","source":"s","observed_at":10}]},"expect":{"actions":[["created","m",1]],"receipt":1,"sequence":1}},
+      {"op":"remember","clock":11,"request":{"scope":{"tenant":"t","agent":"a"},"key":"same-1","receipt_window":100,"items":[{"id":"alias","kind":"entity","content":"x","source":"s","merge_into":"m","expected_revision":1,"observed_at":11}]},"expect":{"actions":[["noop","m",1]],"receipt":2,"sequence":2}},
+      {"op":"remember","clock":12,"request":{"scope":{"tenant":"t","agent":"a"},"key":"same-2","receipt_window":100,"items":[{"id":"alias-2","kind":"entity","content":"x","source":"s","merge_into":"m","expected_revision":1,"observed_at":12}]},"expect":{"actions":[["noop","m",1]],"receipt":3,"sequence":3}},
+      {"op":"remember","clock":13,"request":{"scope":{"tenant":"t","agent":"a"},"key":"same-3","receipt_window":100,"items":[{"id":"alias-3","kind":"entity","content":"x","source":"s","merge_into":"m","expected_revision":2,"observed_at":13}]},"expect":{"actions":[["noop","m",1]],"receipt":4,"sequence":4}},
+      {"op":"state","expect":{"memories":["m"],"evidence":[],"edges":[],"receipts":4,"sequence":4}}
+    ]},
+    {"name":"merge-source-matching-different-memory-is-noop","assumptions":["spec: Exact dedup scans all in-scope memories before an explicit merge branch."],"steps":[
+      {"op":"remember","clock":10,"request":{"scope":{"tenant":"t","agent":"a"},"key":"first","receipt_window":100,"items":[{"id":"m","kind":"entity","content":"x","source":"s","observed_at":10}]},"expect":{"actions":[["created","m",1]],"receipt":1,"sequence":1}},
+      {"op":"remember","clock":11,"request":{"scope":{"tenant":"t","agent":"a"},"key":"second","receipt_window":100,"items":[{"id":"n","kind":"entity","content":"x","source":"s2","observed_at":11}]},"expect":{"actions":[["created","n",1]],"receipt":2,"sequence":2}},
+      {"op":"remember","clock":12,"request":{"scope":{"tenant":"t","agent":"a"},"key":"merge","receipt_window":100,"items":[{"id":"alias","kind":"entity","content":"x","source":"s2","merge_into":"m","expected_revision":1,"observed_at":12}]},"expect":{"actions":[["noop","n",1]],"receipt":3,"sequence":3}},
+      {"op":"state","expect":{"memories":["m","n"],"evidence":[],"edges":[],"receipts":3,"sequence":3}}
+    ]},
+    {"name":"merge-identity-conflict","assumptions":["spec: Explicit merge target must retain the same kind and content digest."],"steps":[
+      {"op":"remember","clock":10,"request":{"scope":{"tenant":"t","agent":"a"},"key":"seed","receipt_window":100,"items":[{"id":"m","kind":"entity","content":"x","source":"s","observed_at":10}]},"expect":{"actions":[["created","m",1]],"receipt":1,"sequence":1}},
+      {"op":"remember","clock":11,"request":{"scope":{"tenant":"t","agent":"a"},"key":"bad-merge","receipt_window":100,"items":[{"id":"alias","kind":"entity","content":"different","source":"s2","merge_into":"m","expected_revision":1,"observed_at":11}]},"expect":{"error":"MergeIdentityConflict"},"defect":{"tag":"merge-content-mismatch","path":["request","items",0,"content"],"set":"x"}},
+      {"op":"state","expect":{"memories":["m"],"evidence":[],"edges":[],"receipts":1,"sequence":1}}
+    ]},
+    {"name":"stateful-merges-same-target-coalesce","assumptions":["spec: Every merge charges one write and one revision guard; repeated same-target writes coalesce to one final graph upsert guarded by the original graph revision."],"steps":[
+      {"op":"remember","clock":10,"request":{"scope":{"tenant":"t","agent":"a"},"key":"seed","receipt_window":100,"items":[{"id":"m","kind":"entity","content":"x","source":"s","observed_at":10}]},"expect":{"actions":[["created","m",1]],"receipt":1,"sequence":1}},
+      {"op":"remember","clock":11,"request":{"scope":{"tenant":"t","agent":"a"},"key":"two-merges","receipt_window":100,"items":[{"id":"alias-1","kind":"entity","content":"x","source":"s2","merge_into":"m","expected_revision":1,"observed_at":11},{"id":"alias-2","kind":"entity","content":"x","source":"s3","merge_into":"m","expected_revision":1,"observed_at":11}]},"expect":{"error":"RevisionConflict"},"defect":{"tag":"second-stale-expected-revision","path":["request","items",1,"expected_revision"],"set":2}},
+      {"op":"state","expect":{"memories":["m"],"evidence":[],"edges":[],"receipts":1,"sequence":1}}
+    ]},
+    {"name":"stateful-merges-chain-and-dedup-updated-source","assumptions":["spec: Merge expected revisions observe prior operations in the request; an already-merged source/content pair is an exact no-op."],"steps":[
+      {"op":"remember","clock":10,"request":{"scope":{"tenant":"t","agent":"a"},"key":"seed","receipt_window":100,"items":[{"id":"m","kind":"entity","content":"x","source":"s","observed_at":10}]},"expect":{"actions":[["created","m",1]],"receipt":1,"sequence":1}},
+      {"op":"remember","clock":11,"request":{"scope":{"tenant":"t","agent":"a"},"key":"chain","receipt_window":100,"items":[{"id":"alias-1","kind":"entity","content":"x","source":"s2","merge_into":"m","expected_revision":1,"observed_at":11},{"id":"alias-2","kind":"entity","content":"x","source":"s3","merge_into":"m","expected_revision":2,"observed_at":11}]},"expect":{"actions":[["merged","m",2],["merged","m",3]],"receipt":2,"sequence":2}},
+      {"op":"get","clock":11,"scope":{"tenant":"t","agent":"a"},"id":"m","fields":["revision","provenance_count","updated_at"],"expect":{"revision":3,"provenance_count":3,"updated_at":11}},
+      {"op":"state","expect":{"memories":["m"],"evidence":[],"edges":[],"receipts":2,"sequence":2}}
+    ]},
+    {"name":"merge-into-created-memory-then-dedup-source","assumptions":["spec: Request planning sees earlier creates and merges; the persisted create is updated in the same graph batch."],"steps":[
+      {"op":"remember","clock":10,"request":{"scope":{"tenant":"t","agent":"a"},"key":"bundle","receipt_window":100,"items":[{"id":"m","kind":"entity","content":"x","source":"s","observed_at":10},{"id":"alias","kind":"entity","content":"x","source":"s2","merge_into":"m","expected_revision":1,"observed_at":10},{"id":"alias-2","kind":"entity","content":"x","source":"s2","observed_at":10}]},"expect":{"actions":[["created","m",1],["merged","m",2],["noop","m",2]],"receipt":1,"sequence":1}},
+      {"op":"get","clock":10,"scope":{"tenant":"t","agent":"a"},"id":"m","fields":["revision","provenance_count","updated_at"],"expect":{"revision":2,"provenance_count":2,"updated_at":10}},
+      {"op":"state","expect":{"memories":["m"],"evidence":[],"edges":[],"receipts":1,"sequence":1}}
+    ]},
+    {"name":"provenance-encoded-size-limit","assumptions":["spec: Provenance is limited to 64 entries AND 4096 encoded UTF-8 bytes in the stored property; encoding is length:value; or -; per field."],"steps":[
+      {"op":"remember","clock":10,"request":{"scope":{"tenant":"t","agent":"a"},"key":"exact-4096","receipt_window":100,"items":[{"id":"at-limit","kind":"episodic","content":"x","source":"s","provenance":{"repeat":{"source":"p","uri":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"},"count":64},"observed_at":10}]},"expect":{"actions":[["created","at-limit",1]],"receipt":1,"sequence":1}},
+      {"op":"remember","clock":11,"request":{"scope":{"tenant":"t","agent":"a"},"key":"over-4096","receipt_window":100,"items":[{"id":"over-limit","kind":"episodic","content":"y","source":"s","provenance":{"repeat":{"source":"p","uri":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"},"count":64},"observed_at":11}]},"expect":{"error":"ProvenanceLimit"},"defect":{"tag":"encoded-provenance-over-4096-bytes","path":["request","items",0,"provenance","repeat","uri"],"set":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}},
+      {"op":"state","expect":{"memories":["at-limit"],"evidence":[],"edges":[],"receipts":1,"sequence":1}}
     ]}
   ]
 }

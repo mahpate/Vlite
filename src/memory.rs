@@ -13,8 +13,14 @@ use crate::{
     property_graph::{FindNodes, GraphLimits, GraphOp, GraphRef, NodeView, ReadOptions},
 };
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_WRITE_BATCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 const LABEL_MEMORY: &str = "VliteMemory";
 const LABEL_RECEIPT: &str = "VliteMemoryReceipt";
+const LABEL_RECEIPT_OUTCOME: &str = "VliteMemoryReceiptOutcome";
 const LABEL_CONTENT: &str = "VliteMemoryContent";
 const LABEL_SCOPE: &str = "VliteMemoryScope";
 const MAX_OPS: usize = 4_096;
@@ -273,7 +279,7 @@ impl<'db> MemoryMut<'db> {
             if stored_digest != digest {
                 return Err(MemoryError::IdempotencyConflict);
             }
-            let outcome = decode_outcome(&receipt)?;
+            let outcome = decode_outcome(&self.db.graph(&self.graph)?, &receipt)?;
             return decode_result(&outcome, receipt.revision, true, &normalized);
         }
         if request
@@ -293,20 +299,22 @@ impl<'db> MemoryMut<'db> {
         let read = self.db.graph(&self.graph)?;
         let mut existing = scan_memories(&read, &scope_key)?;
         let planned = plan(request, &normalized, &scope_key, &mut existing)?;
-        if planned.budget_operations + 1 > MAX_OPS {
-            return Err(MemoryError::OperationLimit);
-        }
         if planned.encoded_request_bytes > MAX_BODY_BYTES {
             return Err(MemoryError::BodyLimit);
         }
         let outcome = encode_actions(&planned.actions);
+        let outcome_chunk_count = outcome.len().div_ceil(MAX_STRING_VALUE_BYTES);
+        if planned.budget_operations + 1 + outcome_chunk_count > MAX_OPS {
+            return Err(MemoryError::OperationLimit);
+        }
         let mut receipt_properties = Metadata::new();
-        receipt_properties.insert("scope".into(), MetadataValue::String(scope_key));
+        receipt_properties.insert("scope".into(), MetadataValue::String(scope_key.clone()));
         receipt_properties.insert("digest".into(), MetadataValue::String(digest));
-        encode_outcome(&outcome, &mut receipt_properties)?;
         let mut ops = planned.ops;
+        let outcome_nodes = encode_outcome(&receipt_key, &outcome, &mut receipt_properties)?;
+        ops.extend(outcome_nodes);
         ops.push(GraphOp::CreateNode {
-            key: receipt_key,
+            key: receipt_key.clone(),
             labels: vec![LABEL_RECEIPT.into()],
             properties: receipt_properties,
         });
@@ -314,6 +322,16 @@ impl<'db> MemoryMut<'db> {
             return Err(MemoryError::OperationLimit);
         }
 
+        #[cfg(test)]
+        FAIL_NEXT_WRITE_BATCH.with(|fail| {
+            if fail.replace(false) {
+                ops.push(GraphOp::CreateNode {
+                    key: scope_key.clone(),
+                    labels: vec![LABEL_SCOPE.into()],
+                    properties: Metadata::new(),
+                });
+            }
+        });
         let batch = self.db.graph_mut(&self.graph)?.write_batch(&ops)?;
         let receipt_write = batch
             .outcomes
@@ -375,11 +393,13 @@ fn plan(
     let mut canonical_ids = BTreeMap::new();
     let mut created_ids = BTreeSet::new();
     let mut merged_ids = BTreeSet::new();
-    let mut reference_bases = BTreeMap::new();
-    let mut revision_guards = 0usize;
+    let mut pending_references = Vec::new();
+    let mut created_node_indices = BTreeMap::new();
+    let mut persisted_upsert_indices = BTreeMap::new();
+    let mut planned_merge_operations = 0usize;
     for item in items {
         let digest = content_digest(&item.content);
-        let mut target = if let Some(target_id) = item.merge_into.as_deref() {
+        let merge_target = if let Some(target_id) = item.merge_into.as_deref() {
             Some(
                 existing
                     .iter()
@@ -388,81 +408,18 @@ fn plan(
                     .ok_or(MemoryError::MissingMemory)?,
             )
         } else {
-            existing
-                .iter()
-                .find(|memory| {
-                    memory.scope == scope_key
-                        && memory.kind == item.kind.label()
-                        && memory.digest == digest
-                        && memory.sources.iter().any(|source| source == &item.source)
-                })
-                .cloned()
+            None
         };
-        if let Some(memory) = target.take() {
-            if item.merge_into.is_some() {
-                if memory.kind != item.kind.label() || memory.digest != digest {
-                    return Err(MemoryError::MergeIdentityConflict);
-                }
-                let expected = item
-                    .expected_revision
-                    .ok_or(MemoryError::ExpectedRevisionRequired)?;
-                if expected != memory.memory_revision {
-                    return Err(MemoryError::RevisionConflict);
-                }
-                let mut merged = memory.provenance.clone();
-                merged.extend(item.provenance.clone());
-                if merged.len() > MAX_PROVENANCE
-                    || encode_provenance(&merged).len() > MAX_STRING_VALUE_BYTES
-                {
-                    return Err(MemoryError::ProvenanceLimit);
-                }
-                let mut sources = memory.sources.clone();
-                if !sources.contains(&item.source) {
-                    sources.push(item.source.clone());
-                }
-                if encode_sources(&sources).len() > MAX_STRING_VALUE_BYTES {
-                    return Err(MemoryError::ProvenanceLimit);
-                }
-                let next_revision = memory
-                    .memory_revision
-                    .checked_add(1)
-                    .ok_or(MemoryError::RevisionConflict)?;
-                let next_reference_count = memory
-                    .reference_count
-                    .checked_add(item.references.len() as u64)
-                    .ok_or(MemoryError::OperationLimit)?;
-                let properties = memory_properties(MemoryProperties {
-                    scope: scope_key,
-                    id: &memory.id,
-                    kind: &memory.kind,
-                    content: &item.content,
-                    digest: &digest,
-                    sources: &sources,
-                    provenance: &merged,
-                    importance: memory.importance,
-                    created_at_ms: memory.created_at_ms,
-                    updated_at_ms: request.now_ms as i64,
-                    observed_at_ms: memory.observed_at_ms,
-                    memory_revision: next_revision,
-                    reference_count: next_reference_count,
-                });
-                ops.push(GraphOp::UpsertNode {
-                    key: memory.key.clone(),
-                    labels: vec![LABEL_MEMORY.into()],
-                    properties,
-                    expected: Expected::Revision(memory.graph_revision),
-                });
-                revision_guards += 1;
-                actions.push(MemoryAction {
-                    action: "merged",
-                    id: memory.id,
-                    revision: next_revision,
-                });
-                canonical_ids.insert(item.id.as_str(), memory.key);
-                merged_ids.insert(item.id.as_str());
-                reference_bases.insert(item.id.as_str(), memory.reference_count);
-                continue;
-            }
+        let exact = existing
+            .iter()
+            .find(|memory| {
+                memory.scope == scope_key
+                    && memory.kind == item.kind.label()
+                    && memory.digest == digest
+                    && memory.sources.iter().any(|source| source == &item.source)
+            })
+            .cloned();
+        if let Some(memory) = exact {
             if existing
                 .iter()
                 .any(|candidate| candidate.id == item.id && candidate.key != memory.key)
@@ -477,6 +434,105 @@ fn plan(
             if item.id == memory.id {
                 canonical_ids.insert(item.id.as_str(), memory.key);
             }
+            continue;
+        }
+        if let Some(memory) = merge_target {
+            if memory.kind != item.kind.label() || memory.digest != digest {
+                return Err(MemoryError::MergeIdentityConflict);
+            }
+            let expected = item
+                .expected_revision
+                .ok_or(MemoryError::ExpectedRevisionRequired)?;
+            if expected != memory.memory_revision {
+                return Err(MemoryError::RevisionConflict);
+            }
+            let mut merged = memory.provenance.clone();
+            merged.extend(item.provenance.clone());
+            if merged.len() > MAX_PROVENANCE
+                || encode_provenance(&merged).len() > MAX_STRING_VALUE_BYTES
+            {
+                return Err(MemoryError::ProvenanceLimit);
+            }
+            let mut sources = memory.sources.clone();
+            if !sources.contains(&item.source) {
+                sources.push(item.source.clone());
+            }
+            if encode_sources(&sources).len() > MAX_STRING_VALUE_BYTES {
+                return Err(MemoryError::ProvenanceLimit);
+            }
+            let next_revision = memory
+                .memory_revision
+                .checked_add(1)
+                .ok_or(MemoryError::RevisionConflict)?;
+            let next_reference_count = memory
+                .reference_count
+                .checked_add(item.references.len() as u64)
+                .ok_or(MemoryError::OperationLimit)?;
+            let mut properties = memory_properties(MemoryProperties {
+                scope: scope_key,
+                id: &memory.id,
+                kind: &memory.kind,
+                content: &item.content,
+                digest: &digest,
+                sources: &sources,
+                provenance: &merged,
+                importance: memory.importance,
+                created_at_ms: memory.created_at_ms,
+                updated_at_ms: request.now_ms as i64,
+                observed_at_ms: memory.observed_at_ms,
+                memory_revision: next_revision,
+                reference_count: next_reference_count,
+            });
+            if item.content.len() > MAX_STRING_VALUE_BYTES {
+                properties.remove("content");
+            }
+            if let Some(&index) = created_node_indices.get(&memory.key) {
+                if let GraphOp::CreateNode {
+                    properties: created_properties,
+                    ..
+                } = &mut ops[index]
+                {
+                    *created_properties = properties;
+                }
+            } else if let Some(&index) = persisted_upsert_indices.get(&memory.key) {
+                ops[index] = GraphOp::UpsertNode {
+                    key: memory.key.clone(),
+                    labels: vec![LABEL_MEMORY.into()],
+                    properties,
+                    expected: Expected::Revision(memory.graph_revision),
+                };
+            } else {
+                let index = ops.len();
+                ops.push(GraphOp::UpsertNode {
+                    key: memory.key.clone(),
+                    labels: vec![LABEL_MEMORY.into()],
+                    properties,
+                    expected: Expected::Revision(memory.graph_revision),
+                });
+                persisted_upsert_indices.insert(memory.key.clone(), index);
+            }
+            planned_merge_operations += 2;
+            actions.push(MemoryAction {
+                action: "merged",
+                id: memory.id.clone(),
+                revision: next_revision,
+            });
+            canonical_ids.insert(item.id.as_str(), memory.key.clone());
+            merged_ids.insert(item.id.as_str());
+            pending_references.push((
+                item.id.clone(),
+                memory.key.clone(),
+                memory.reference_count,
+                item.references.clone(),
+            ));
+            let virtual_memory = existing
+                .iter_mut()
+                .find(|candidate| candidate.key == memory.key)
+                .ok_or(MemoryError::MissingMemory)?;
+            virtual_memory.sources = sources;
+            virtual_memory.provenance = merged;
+            virtual_memory.memory_revision = next_revision;
+            virtual_memory.reference_count = next_reference_count;
             continue;
         }
 
@@ -503,6 +559,7 @@ fn plan(
             memory_revision: 1,
             reference_count: item.references.len() as u64,
         });
+        let node_index = ops.len();
         if item.content.len() <= MAX_STRING_VALUE_BYTES {
             ops.push(GraphOp::CreateNode {
                 key: key.clone(),
@@ -523,6 +580,12 @@ fn plan(
                 let mut chunk_properties = Metadata::new();
                 chunk_properties
                     .insert("scope".into(), MetadataValue::String(scope_key.to_owned()));
+                chunk_properties.insert(
+                    "index".into(),
+                    MetadataValue::Integer(
+                        i64::try_from(index).map_err(|_| MemoryError::OperationLimit)?,
+                    ),
+                );
                 chunk_properties.insert("content".into(), MetadataValue::String(chunk));
                 ops.push(GraphOp::CreateNode {
                     key: chunk_key.clone(),
@@ -538,6 +601,7 @@ fn plan(
                 });
             }
         }
+        created_node_indices.insert(key.clone(), node_index);
         actions.push(MemoryAction {
             action: "created",
             id: item.id.clone(),
@@ -546,7 +610,7 @@ fn plan(
         created_ids.insert(item.id.as_str());
         canonical_ids.insert(item.id.as_str(), key.clone());
         existing.push(ExistingMemory {
-            key,
+            key: key.clone(),
             id: item.id.clone(),
             kind: item.kind.label().to_owned(),
             scope: scope_key.to_owned(),
@@ -560,22 +624,17 @@ fn plan(
             observed_at_ms: item.observed_at_ms,
             reference_count: item.references.len() as u64,
         });
+        pending_references.push((item.id.clone(), key, 0, item.references.clone()));
     }
-    for item in items {
-        let is_new = created_ids.contains(item.id.as_str());
-        let is_merged = merged_ids.contains(item.id.as_str());
-        if !is_new && !is_merged {
+    for (item_id, source_key, first_reference, references) in pending_references {
+        if !created_ids.contains(item_id.as_str()) && !merged_ids.contains(item_id.as_str()) {
             continue;
         }
         let source_key = canonical_ids
-            .get(item.id.as_str())
-            .ok_or(MemoryError::IdentityConflict)?
-            .clone();
-        let first_reference = reference_bases
-            .get(item.id.as_str())
-            .copied()
-            .unwrap_or_default();
-        for (reference_index, reference) in item.references.iter().enumerate() {
+            .get(item_id.as_str())
+            .cloned()
+            .unwrap_or(source_key);
+        for (reference_index, reference) in references.iter().enumerate() {
             let target_key = if let Some(key) = canonical_ids.get(reference.as_str()) {
                 key.clone()
             } else {
@@ -604,7 +663,7 @@ fn plan(
     }
     let encoded_request_bytes = encode_request(request, items).len();
     Ok(Planned {
-        budget_operations: ops.len() + revision_guards,
+        budget_operations: ops.len() + planned_merge_operations - persisted_upsert_indices.len(),
         ops,
         actions,
         encoded_request_bytes,
@@ -893,6 +952,13 @@ fn receipt_key(scope: &str, idempotency_key: &str) -> String {
     format!("receipt:v1:{scope}:{}", hex(&Sha256::digest(input)))
 }
 
+fn receipt_outcome_key(receipt_key: &str, index: usize) -> String {
+    format!(
+        "receipt-outcome:v1:{}:{index:04x}",
+        hex(&Sha256::digest(receipt_key))
+    )
+}
+
 fn content_key(memory_key: &str, index: usize) -> String {
     format!(
         "content:v1:{}:{index:04x}",
@@ -1029,7 +1095,11 @@ fn encode_actions(actions: &[MemoryAction]) -> String {
     format!("{}:{}:{}", actions.len(), hex(&packed), noops)
 }
 
-fn encode_outcome(outcome: &str, properties: &mut Metadata) -> MemoryResult<()> {
+fn encode_outcome(
+    receipt_key: &str,
+    outcome: &str,
+    properties: &mut Metadata,
+) -> MemoryResult<Vec<GraphOp>> {
     if outcome.len() > MAX_BODY_BYTES {
         return Err(MemoryError::BodyLimit);
     }
@@ -1041,20 +1111,31 @@ fn encode_outcome(outcome: &str, properties: &mut Metadata) -> MemoryResult<()> 
         "outcome_chunks".into(),
         MetadataValue::Integer(i64::try_from(chunks.len()).map_err(|_| MemoryError::BodyLimit)?),
     );
+    let mut ops = Vec::with_capacity(chunks.len());
     for (index, chunk) in chunks.iter().enumerate() {
-        properties.insert(
-            format!("outcome_{index:04}"),
-            MetadataValue::String(
-                std::str::from_utf8(chunk)
-                    .map_err(|_| MemoryError::InvalidBundle)?
-                    .to_owned(),
-            ),
+        let content = std::str::from_utf8(chunk)
+            .map_err(|_| MemoryError::InvalidBundle)?
+            .to_owned();
+        let mut chunk_properties = Metadata::new();
+        chunk_properties.insert(
+            "receipt_key".into(),
+            MetadataValue::String(receipt_key.to_owned()),
         );
+        chunk_properties.insert(
+            "index".into(),
+            MetadataValue::Integer(i64::try_from(index).map_err(|_| MemoryError::BodyLimit)?),
+        );
+        chunk_properties.insert("outcome".into(), MetadataValue::String(content));
+        ops.push(GraphOp::CreateNode {
+            key: receipt_outcome_key(receipt_key, index),
+            labels: vec![LABEL_RECEIPT_OUTCOME.into()],
+            properties: chunk_properties,
+        });
     }
-    Ok(())
+    Ok(ops)
 }
 
-fn decode_outcome(node: &NodeView) -> MemoryResult<String> {
+fn decode_outcome(graph: &GraphRef<'_>, node: &NodeView) -> MemoryResult<String> {
     let count = usize::try_from(integer_property(node, "outcome_chunks")?)
         .map_err(|_| MemoryError::InvalidBundle)?;
     if count == 0 || count > MAX_BODY_BYTES.div_ceil(MAX_STRING_VALUE_BYTES) {
@@ -1062,7 +1143,17 @@ fn decode_outcome(node: &NodeView) -> MemoryResult<String> {
     }
     let mut outcome = String::new();
     for index in 0..count {
-        outcome.push_str(string_property(node, &format!("outcome_{index:04}"))?);
+        let chunk_key = receipt_outcome_key(&node.key, index);
+        let chunk = graph
+            .get_node(&chunk_key)?
+            .output
+            .ok_or(MemoryError::InvalidBundle)?;
+        if string_property(&chunk, "receipt_key")? != node.key
+            || integer_property(&chunk, "index")? != index as i64
+        {
+            return Err(MemoryError::InvalidBundle);
+        }
+        outcome.push_str(string_property(&chunk, "outcome")?);
     }
     Ok(outcome)
 }
@@ -1331,7 +1422,7 @@ fn unhex(value: &str) -> MemoryResult<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::Database;
-    use crate::property_graph::{FindNodes, GraphLimits, ReadOptions};
+    use crate::property_graph::{FindNodes, GraphLimits, Neighbors, NodeSelector, ReadOptions};
     use serde_json::{Value, json};
     use std::collections::BTreeSet;
     use std::{fs, path::Path};
@@ -1652,44 +1743,286 @@ mod tests {
         let mut db = database(&path);
         let first = request("seed", "seed");
         provision(&mut db, &first.scope);
-        let mut items = Vec::new();
-        for index in 0..10 {
-            let target_id = format!("target-{index}-{}", "x".repeat(240));
-            let mut seeded = request(&target_id, &format!("seed-{index}"));
-            seeded.items[0].content = format!("content-{index}");
-            MemoryMut::bind(&mut db, "memory", None)
-                .unwrap()
-                .remember(&seeded)
-                .unwrap();
+        MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .remember(&first)
+            .unwrap();
 
-            let mut alias = seeded.items[0].clone();
-            alias.id = format!("alias-{index}-{}", "y".repeat(240));
-            items.push(alias);
+        for (case, count, id_len) in [("36-byte", 900, 36), ("256-byte", MAX_OPS, 256)] {
+            let items = (0..count)
+                .map(|index| {
+                    let prefix = format!("{index:04}-");
+                    let id = format!("{prefix}{}", "x".repeat(id_len - prefix.len()));
+                    MemoryItem {
+                        id,
+                        ..first.items[0].clone()
+                    }
+                })
+                .collect();
+            let retry = RememberRequest {
+                idempotency_key: format!("large-outcome-{case}"),
+                items,
+                ..first.clone()
+            };
+            let before = db.sequence;
+            let result = MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .remember(&retry)
+                .unwrap();
+            assert!(result.actions.iter().all(|action| action.action == "noop"));
+            assert_eq!(db.sequence, before + 1);
+            let receipt = db
+                .graph("memory")
+                .unwrap()
+                .get_node(&receipt_key(&retry.scope.key(), &retry.idempotency_key))
+                .unwrap()
+                .output
+                .unwrap();
+            assert!(integer_property(&receipt, "outcome_chunks").unwrap() > 1);
+            let outcome_nodes = find_label(&db, LABEL_RECEIPT_OUTCOME);
+            assert!(
+                outcome_nodes
+                    .iter()
+                    .any(|node| { string_property(node, "receipt_key").unwrap() == receipt.key })
+            );
+            if case == "256-byte" {
+                drop(db);
+                db = Database::open(&path).unwrap();
+            }
+            let replay = MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .remember(&retry)
+                .unwrap();
+            assert!(replay.replayed);
+            assert_eq!(replay.actions, result.actions);
+            assert_eq!(db.sequence, before + 1, "{case}");
         }
-        let retry = RememberRequest {
-            idempotency_key: "large-outcome".into(),
-            items,
-            ..first
+    }
+
+    fn assert_large_content_readback(db: &Database, scope: &MemoryScope, id: &str, content: &str) {
+        let graph = db.graph("memory").unwrap();
+        let key = memory_key(&scope.key(), id);
+        let memory = graph.get_node(&key).unwrap().output.unwrap();
+        assert!(!memory.properties.contains_key("content"));
+        let chunks = content_chunks(content).unwrap();
+        let expected_lengths = if content.len() == 4_098 && content.ends_with('€') {
+            vec![4_095, 3]
+        } else {
+            content
+                .as_bytes()
+                .chunks(MAX_STRING_VALUE_BYTES)
+                .map(<[u8]>::len)
+                .collect::<Vec<_>>()
         };
+        assert_eq!(
+            chunks.iter().map(String::len).collect::<Vec<_>>(),
+            expected_lengths
+        );
+        let mut rebuilt = String::new();
+        for (index, expected) in chunks.iter().enumerate() {
+            let chunk_key = content_key(&key, index);
+            let node = graph.get_node(&chunk_key).unwrap().output.unwrap();
+            assert_eq!(node.labels, BTreeSet::from([LABEL_CONTENT.to_owned()]));
+            assert_eq!(integer_property(&node, "index").ok(), Some(index as i64));
+            let actual = string_property(&node, "content").unwrap();
+            assert!(actual.len() <= MAX_STRING_VALUE_BYTES);
+            assert!(actual.is_char_boundary(actual.len()));
+            assert_eq!(actual, expected);
+            rebuilt.push_str(actual);
+
+            let edge_key = content_edge_key(&key, index);
+            let edge = graph.get_edge_by_key(&edge_key).unwrap().output.unwrap();
+            assert_eq!(edge.key.as_deref(), Some(edge_key.as_str()));
+            assert_eq!(edge.relationship, "HAS_CONTENT");
+            assert_eq!(edge.source_key, key);
+            assert_eq!(edge.target_key, chunk_key);
+        }
+        let neighbors = graph
+            .neighbors(
+                &Neighbors::new(NodeSelector::key(&key)),
+                &ReadOptions {
+                    limits: GraphLimits::CEILING,
+                    ..ReadOptions::default()
+                },
+            )
+            .unwrap()
+            .output;
+        assert_eq!(neighbors.edges.len(), chunks.len());
+        for (index, edge) in neighbors.edges.iter().enumerate() {
+            assert_eq!(
+                edge.key.as_deref(),
+                Some(content_edge_key(&key, index).as_str())
+            );
+            assert_eq!(edge.relationship, "HAS_CONTENT");
+        }
+        assert_eq!(rebuilt, content);
+        assert!(
+            graph
+                .get_node(&content_key(&key, chunks.len()))
+                .unwrap()
+                .output
+                .is_none()
+        );
+        assert!(
+            graph
+                .get_edge_by_key(&content_edge_key(&key, chunks.len()))
+                .unwrap()
+                .output
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn large_content_chunks_read_back_on_all_reopen_backends() {
+        let dir = tempfile::tempdir().unwrap();
+        let encryption_key = crate::EncryptionKey::from_bytes([7; 32]);
+        let contents = [
+            format!("{}€", "a".repeat(4_095)),
+            "b".repeat(8_192),
+            "c".repeat(8_193),
+        ];
+        assert_eq!(contents[0].len(), 4_098);
+        for (case, content) in contents.iter().enumerate() {
+            for (name, directory, encrypted) in [
+                ("plain-file", false, false),
+                ("encrypted-file", false, true),
+                ("plain-directory", true, false),
+                ("encrypted-directory", true, true),
+            ] {
+                let path = dir.path().join(format!("{name}-{case}"));
+                let options = crate::CreateOptions {
+                    encryption: encrypted.then(|| encryption_key.clone()),
+                    ..crate::CreateOptions::default()
+                };
+                let mut db = if directory {
+                    Database::create_directory(&path, 2, options).unwrap()
+                } else {
+                    Database::create_with_options(&path, 2, options).unwrap()
+                };
+                db.create_graph("memory").unwrap();
+                let req = request(&format!("large-{case}"), &format!("large-{case}"));
+                provision(&mut db, &req.scope);
+                let mut large = req.clone();
+                large.items[0].content = content.clone();
+                MemoryMut::bind(&mut db, "memory", None)
+                    .unwrap()
+                    .remember(&large)
+                    .unwrap();
+                assert_large_content_readback(&db, &large.scope, &large.items[0].id, content);
+                drop(db);
+
+                let db = if encrypted {
+                    Database::open_encrypted(&path, &encryption_key).unwrap()
+                } else {
+                    Database::open(&path).unwrap()
+                };
+                assert_large_content_readback(&db, &large.scope, &large.items[0].id, content);
+            }
+        }
+    }
+
+    #[test]
+    fn large_content_dedup_and_merge_preserve_chunk_nodes_and_edges() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.vlite");
+        let mut db = database(&path);
+        let mut created = request("large", "large-create");
+        created.items[0].content = "z".repeat(8_193);
+        provision(&mut db, &created.scope);
+        MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .remember(&created)
+            .unwrap();
+        let original_chunk_keys = content_chunks(&created.items[0].content)
+            .unwrap()
+            .iter()
+            .enumerate()
+            .map(|(index, _)| content_key(&memory_key(&created.scope.key(), "large"), index))
+            .collect::<Vec<_>>();
+        let original_edge_keys = (0..original_chunk_keys.len())
+            .map(|index| content_edge_key(&memory_key(&created.scope.key(), "large"), index))
+            .collect::<Vec<_>>();
+
+        let sequence_before = db.sequence;
+        let mut duplicate = created.clone();
+        duplicate.idempotency_key = "large-dedup".into();
+        duplicate.items[0].id = "alias".into();
         let result = MemoryMut::bind(&mut db, "memory", None)
             .unwrap()
-            .remember(&retry)
+            .remember(&duplicate)
             .unwrap();
-        assert!(result.actions.iter().all(|action| action.action == "noop"));
-        let receipt = db
-            .graph("memory")
-            .unwrap()
-            .get_node(&receipt_key(&retry.scope.key(), "large-outcome"))
-            .unwrap()
-            .output
-            .unwrap();
-        assert!(integer_property(&receipt, "outcome_chunks").unwrap() > 1);
+        assert_eq!(result.actions[0].action, "noop");
+        assert_eq!(
+            db.sequence,
+            sequence_before + 1,
+            "new receipt uses one frame"
+        );
+        let receipt_sequence = db.sequence;
         let replay = MemoryMut::bind(&mut db, "memory", None)
             .unwrap()
-            .remember(&retry)
+            .remember(&duplicate)
             .unwrap();
         assert!(replay.replayed);
-        assert_eq!(replay.actions, result.actions);
+        assert_eq!(
+            db.sequence, receipt_sequence,
+            "receipt replay is frame-free"
+        );
+
+        let mut merge = created.clone();
+        merge.idempotency_key = "large-merge".into();
+        merge.items[0].id = "merge-alias".into();
+        merge.items[0].source = "second-source".into();
+        merge.items[0].merge_into = Some("large".into());
+        merge.items[0].expected_revision = Some(1);
+        merge.items[0].provenance = vec![Provenance {
+            source: "second-source".into(),
+            kind: None,
+            uri: None,
+            transformation: None,
+        }];
+        MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .remember(&merge)
+            .unwrap();
+        let actual_chunks = content_chunks(&created.items[0].content)
+            .unwrap()
+            .iter()
+            .enumerate()
+            .map(|(index, _)| content_key(&memory_key(&created.scope.key(), "large"), index))
+            .collect::<Vec<_>>();
+        let actual_edges = (0..actual_chunks.len())
+            .map(|index| content_edge_key(&memory_key(&created.scope.key(), "large"), index))
+            .collect::<Vec<_>>();
+        assert_eq!(actual_chunks, original_chunk_keys);
+        assert_eq!(actual_edges, original_edge_keys);
+        assert_large_content_readback(&db, &created.scope, "large", &created.items[0].content);
+    }
+
+    #[test]
+    fn large_content_chunk_and_edge_ops_are_budgeted_before_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.vlite");
+        let mut db = database(&path);
+        let req = request("too-large", "too-many-content-ops");
+        provision(&mut db, &req.scope);
+        let sequence = db.sequence;
+        drop(db);
+        let baseline = fs::read(&path).unwrap();
+        let mut db = Database::open(&path).unwrap();
+        let mut oversized = req;
+        oversized.items[0].content = "x".repeat(MAX_STRING_VALUE_BYTES * 2_048);
+        assert!(matches!(
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .remember(&oversized),
+            Err(MemoryError::OperationLimit)
+        ));
+        assert_eq!(db.sequence, sequence);
+        assert!(find_label(&db, LABEL_MEMORY).is_empty());
+        assert!(find_label(&db, LABEL_CONTENT).is_empty());
+        assert!(find_label(&db, LABEL_RECEIPT).is_empty());
+        drop(db);
+        assert_eq!(fs::read(&path).unwrap(), baseline);
     }
 
     #[test]
@@ -1737,29 +2070,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("memory.vlite");
         let mut db = database(&path);
-        let mut request = request("m1", "atomic");
+        let request = request("m1", "atomic");
         provision(&mut db, &request.scope);
-        request.items.push(MemoryItem {
-            id: "m2".into(),
-            kind: MemoryKind::Episodic,
-            content: "later".into(),
-            source: "source-2".into(),
-            importance: Some(0.5),
-            observed_at_ms: Some(10),
-            provenance: Vec::new(),
-            references: vec!["missing".into()],
-            merge_into: None,
-            expected_revision: None,
-        });
+        let sequence = db.sequence;
         drop(db);
         let before = fs::read(&path).unwrap();
         let mut db = Database::open(&path).unwrap();
+        FAIL_NEXT_WRITE_BATCH.with(|fail| fail.set(true));
         assert!(matches!(
             MemoryMut::bind(&mut db, "memory", None)
                 .unwrap()
                 .remember(&request),
-            Err(MemoryError::MissingReference)
+            Err(MemoryError::Storage(Error::GraphKeyExists))
         ));
+        assert_eq!(db.sequence, sequence);
         let graph = db.graph("memory").unwrap();
         assert!(
             graph
@@ -1775,8 +2099,234 @@ mod tests {
                 .output
                 .is_none()
         );
+        assert!(
+            graph
+                .get_node(&memory_key(&request.scope.key(), "m1"))
+                .unwrap()
+                .output
+                .is_none()
+        );
         drop(db);
         assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn wrongly_seeded_scope_tuple_is_a_digest_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.vlite");
+        let mut db = database(&path);
+        let scope = request("m", "k").scope;
+        let mut properties = Metadata::new();
+        properties.insert("tuple".into(), MetadataValue::String("wrong-tuple".into()));
+        db.graph_mut("memory")
+            .unwrap()
+            .write_batch(&[GraphOp::CreateNode {
+                key: scope.key(),
+                labels: vec![LABEL_SCOPE.into()],
+                properties,
+            }])
+            .unwrap();
+        assert!(matches!(
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .provision_scope(&scope),
+            Err(MemoryError::DigestCollision)
+        ));
+    }
+
+    #[test]
+    fn provenance_encoded_property_limit_accepts_4096_and_rejects_4097_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.vlite");
+        let mut db = database(&path);
+        let mut accepted = request("at-limit", "at-limit");
+        accepted.items[0].provenance = (0..64)
+            .map(|_| Provenance {
+                source: "p".into(),
+                kind: None,
+                uri: Some("u".repeat(52)),
+                transformation: None,
+            })
+            .collect();
+        assert_eq!(
+            encode_provenance(&accepted.items[0].provenance).len(),
+            4_096
+        );
+        provision(&mut db, &accepted.scope);
+        MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .remember(&accepted)
+            .unwrap();
+        let sequence = db.sequence;
+        let mut rejected = accepted;
+        rejected.items[0].id = "over-limit".into();
+        rejected.idempotency_key = "over-limit".into();
+        rejected.items[0].provenance[0].uri = Some("u".repeat(53));
+        assert_eq!(
+            encode_provenance(&rejected.items[0].provenance).len(),
+            4_097
+        );
+        assert!(matches!(
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .remember(&rejected),
+            Err(MemoryError::ProvenanceLimit)
+        ));
+        assert_eq!(db.sequence, sequence);
+        assert!(
+            db.graph("memory")
+                .unwrap()
+                .get_node(&receipt_key(&rejected.scope.key(), "over-limit"))
+                .unwrap()
+                .output
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn merge_identity_conflict_is_preflighted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.vlite");
+        let mut db = database(&path);
+        let mut created = request("target", "seed");
+        created.items[0].kind = MemoryKind::Entity;
+        provision(&mut db, &created.scope);
+        MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .remember(&created)
+            .unwrap();
+        let sequence = db.sequence;
+        let mut merge = request("alias", "merge");
+        merge.scope = created.scope.clone();
+        merge.items[0].kind = MemoryKind::Entity;
+        merge.items[0].content = "different".into();
+        merge.items[0].merge_into = Some("target".into());
+        merge.items[0].expected_revision = Some(1);
+        assert!(matches!(
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .remember(&merge),
+            Err(MemoryError::MergeIdentityConflict)
+        ));
+        assert_eq!(db.sequence, sequence);
+        assert!(
+            db.graph("memory")
+                .unwrap()
+                .get_node(&receipt_key(&merge.scope.key(), "merge"))
+                .unwrap()
+                .output
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn merge_preserves_importance_creation_and_observation_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.vlite");
+        let mut db = database(&path);
+        let mut created = request("target", "seed");
+        created.items[0].kind = MemoryKind::Entity;
+        created.items[0].importance = Some(0.2);
+        created.items[0].observed_at_ms = Some(7);
+        provision(&mut db, &created.scope);
+        MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .remember(&created)
+            .unwrap();
+        let mut merge = request("alias", "merge");
+        merge.scope = created.scope.clone();
+        merge.now_ms = 20;
+        merge.items[0].kind = MemoryKind::Entity;
+        merge.items[0].source = "source-2".into();
+        merge.items[0].importance = Some(1.0);
+        merge.items[0].observed_at_ms = Some(19);
+        merge.items[0].merge_into = Some("target".into());
+        merge.items[0].expected_revision = Some(1);
+        MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .remember(&merge)
+            .unwrap();
+        let node = db
+            .graph("memory")
+            .unwrap()
+            .get_node(&memory_key(&created.scope.key(), "target"))
+            .unwrap()
+            .output
+            .unwrap();
+        assert_eq!(float_property(&node, "importance").unwrap(), 0.2);
+        assert_eq!(integer_property(&node, "created_at_ms").unwrap(), 10);
+        assert_eq!(integer_property(&node, "observed_at_ms").unwrap(), 7);
+        assert_eq!(integer_property(&node, "updated_at_ms").unwrap(), 20);
+    }
+
+    #[test]
+    fn reference_edge_indexes_continue_across_merges() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.vlite");
+        let mut db = database(&path);
+        let base = request("anchor", "anchor");
+        provision(&mut db, &base.scope);
+        MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .remember(&base)
+            .unwrap();
+        let mut target = request("target", "target");
+        target.scope = base.scope.clone();
+        target.items[0].content = "target-content".into();
+        MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .remember(&target)
+            .unwrap();
+        let mut create = request("memory", "create-memory");
+        create.scope = base.scope.clone();
+        create.items[0].kind = MemoryKind::Entity;
+        create.items[0].content = "shared-content".into();
+        create.items[0].references = vec!["anchor".into()];
+        MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .remember(&create)
+            .unwrap();
+        for (index, reference) in ["target", "target"].iter().enumerate() {
+            let mut merge = request(&format!("merge-{index}"), &format!("merge-{index}"));
+            merge.scope = base.scope.clone();
+            merge.items[0].kind = MemoryKind::Entity;
+            merge.items[0].content = "shared-content".into();
+            merge.items[0].source = format!("source-{index}");
+            merge.items[0].references = vec![(*reference).into()];
+            merge.items[0].merge_into = Some("memory".into());
+            merge.items[0].expected_revision = Some(index as u64 + 1);
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .remember(&merge)
+                .unwrap();
+        }
+        let source_key = memory_key(&base.scope.key(), "memory");
+        let anchor_key = memory_key(&base.scope.key(), "anchor");
+        let target_key = memory_key(&base.scope.key(), "target");
+        let first = db
+            .graph("memory")
+            .unwrap()
+            .get_edge_by_key(&reference_edge_key(&source_key, &anchor_key, 0))
+            .unwrap()
+            .output
+            .unwrap();
+        let second = db
+            .graph("memory")
+            .unwrap()
+            .get_edge_by_key(&reference_edge_key(&source_key, &target_key, 1))
+            .unwrap()
+            .output
+            .unwrap();
+        let third = db
+            .graph("memory")
+            .unwrap()
+            .get_edge_by_key(&reference_edge_key(&source_key, &target_key, 2))
+            .unwrap()
+            .output
+            .unwrap();
+        assert_eq!(first.source_key, source_key);
+        assert_eq!(second.source_key, source_key);
+        assert_eq!(third.source_key, source_key);
     }
 
     #[test]
@@ -2066,8 +2616,6 @@ mod tests {
             MemoryError::ExpectedRevisionRequired => "ExpectedRevisionRequired",
             MemoryError::RevisionConflict => "RevisionConflict",
             MemoryError::RecordAlreadyAttached => "RecordAlreadyAttached",
-            MemoryError::Storage(Error::RevisionMismatch { .. }) => "RevisionConflict",
-            MemoryError::Storage(Error::GraphKeyExists) => "IdentityConflict",
             MemoryError::Storage(_) => "Storage",
         }
     }
@@ -2164,6 +2712,20 @@ mod tests {
             json!(receipt_count),
             expected["sequence"],
             "{case_name} logical sequence"
+        );
+    }
+
+    #[test]
+    fn golden_storage_errors_keep_their_raw_classification() {
+        assert_eq!(
+            fixture_error_name(&MemoryError::Storage(Error::RevisionMismatch {
+                current: Some(1)
+            })),
+            "Storage"
+        );
+        assert_eq!(
+            fixture_error_name(&MemoryError::Storage(Error::GraphKeyExists)),
+            "Storage"
         );
     }
 

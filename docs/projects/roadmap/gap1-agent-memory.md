@@ -154,12 +154,19 @@ provisional until independent acceptance and public Rust API review.
 
 Candidate limits are exact: a request has 1-4,096 items; opaque scope, identity,
 source and idempotency keys are at most 256 UTF-8 bytes; provenance has at most 64
-entries, with each source/kind/URI/transformation field at most 256 bytes. A
-canonical request and the serialized graph frame are each limited to 16 MiB. The
-single graph batch is limited to 4,096 operations, counting one receipt operation
-and one budget unit for each expected-revision guard; no batch splitting is done.
-Individual stored string properties are at most 4,096 bytes and large memory
-content/outcomes are chunked within the same frame. A1 does not expire receipts.
+entries and its length-prefixed UTF-8 encoding is at most 4,096 bytes. Each
+source/kind/URI/transformation field is at most 256 bytes. The separately encoded
+`sources` property is also at most 4,096 bytes. A canonical request and the
+serialized graph frame are each limited to 16 MiB. The single graph batch is
+limited to 4,096 operations, counting receipt and outcome-chunk nodes, large
+content-chunk nodes and HAS_CONTENT edges; each merge also charges one logical
+write and one expected-revision guard even when same-target graph upserts coalesce.
+Individual stored string properties are at most 4,096 bytes. Large memory content
+and receipt outcomes use separate keyed graph nodes, with each chunk at most 4,096
+UTF-8 bytes, in the same frame. A1 does not expire receipts.
+The graph engine additionally caps each node at 64 property fields and 65,536
+encoded property bytes; the receipt and each outcome chunk remain separate small
+nodes so receipt outcomes cannot overflow a single node's metadata.
 
 Receipt creation is a keyed graph-node create in the same `GraphMut::write_batch`
 as all memory operations. Key absence is enforced by the graph create operation;
@@ -167,6 +174,11 @@ changed existing memory nodes use expected graph revisions. Matching key/digest
 replay returns the stored outcome and committed receipt revision; digest mismatch
 conflicts. Validation and budget failures are preflighted before the batch. These
 are candidate implementation notes, not a released contract or durability claim.
+Graph batch operations are applied in order and observe prior operations in the
+same batch. The candidate therefore plans against virtual in-request revisions,
+coalesces repeated updates to an existing node into one upsert guarded by its
+original graph revision, and updates a node created earlier in the request in its
+original create operation. Its logical operation budget still charges every merge.
 
 ## 3. Recall, time selectors and explanation
 
@@ -383,7 +395,8 @@ TTL, temporal discovery, rerankers and the Rust recall implementation remain ope
 The independently reviewed `tests/agent_memory_oracle.py` and
 `tests/fixtures/agent_memory/golden.json` are a bounded logical reference for slice
 A remember/forget: scope framing, receipts and idempotency, exact dedup, provenance,
-expiry and operation budgets. Every rejected golden step declares one repairable
+the 64-entry and 4,096-byte encoded provenance limits, expiry and operation budgets.
+Every rejected golden step declares one repairable
 defect; the self-test repairs it and checks injected second defects, so no golden
 depends on validation precedence. CI runs normal and optimized self-tests.
 Unspecified behaviour is labelled, e.g. `fixture: duplicate-bundle-ids-reject` and
