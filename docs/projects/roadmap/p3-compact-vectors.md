@@ -289,7 +289,21 @@ Remaining P3a work:
    accepted
    ([storage wiring](#p3a-progress-storage-owned-writer-private-unreleased));
    no production writer or capability is enabled.
-5. Explicit conversion, plus old/new format rejection.
+5. Explicit conversion, plus old/new format rejection: a private, unreleased
+   candidate in `maintenance::convert_precision` and
+   `src/compact/catalog/tests/convert.rs`, pending independent acceptance.
+   Crate tests only, behind the existing precision gate: selected collections
+   convert float32 to float16 (lossy) or widen exactly, using the commit-time
+   binary16 routine. Complete V5 sources are exclusively locked read-only;
+   unsupported flags, open imports and retained dense overflow refuse before
+   output. Absent file/directory destinations, plain or same-key encrypted,
+   get a complete flag-32 image with new lineage and head=floor=max(head,1).
+   Numeric revisions, allocation high-waters, closed imports, expired state,
+   named/sparse histories and graph attachments survive; old log history does
+   not. Old-lineage feeds/replication fail and replicas must re-bootstrap;
+   matching numeric revisions are not lineage-bound, so callers must reread.
+   Release readers still reject flag 32 and compact source kinds. No public
+   API, production writer/activation, P3b/P3c/P3d or S1/S2/DO-005 change.
 
 Named dense reuse and bounded access remain P3b.
 

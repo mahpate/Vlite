@@ -31,6 +31,7 @@ use std::path::Path;
 use std::rc::Rc;
 
 mod canonical;
+mod convert;
 mod goldens;
 mod limits;
 mod parity;

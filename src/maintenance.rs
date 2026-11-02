@@ -254,6 +254,120 @@ fn convert_inner(
     inspect_inner(destination, key)
 }
 
+/// Private P3a copy-out candidate. Selection is explicit by collection name;
+/// neither the precision intent nor this entry point exists in release builds.
+/// A new lineage invalidates feed/replica history, not numeric CAS revisions.
+#[cfg(test)]
+pub(crate) fn convert_precision(
+    source_path: &Path,
+    destination: &Path,
+    key: Option<&EncryptionKey>,
+    selected: &[(&str, catalog::Precision)],
+    directory: bool,
+) -> Result<Inspection> {
+    if !crate::compact::precision_supported() {
+        return Err(Error::UnsupportedFeature(format::FLAG_PRECISION));
+    }
+    let mut file = source(source_path)?;
+    let mut loaded = format::load_with(&mut file, key)?;
+    require_complete(&loaded)?;
+    if loaded.version != format::V5 {
+        return Err(Error::UnsupportedVersion(loaded.version));
+    }
+    let supported = format::FLAG_ENCRYPTED
+        | format::FLAG_GRAPH
+        | format::FLAG_HISTORY
+        | format::FLAG_COMPACT
+        | format::FLAG_PRECISION;
+    if loaded.flags & !supported != 0 {
+        return Err(Error::UnsupportedFeature(loaded.flags & !supported));
+    }
+    if import::Registry::from_markers(&loaded.imports)
+        .open_jobs()
+        .next()
+        .is_some()
+    {
+        return Err(Error::InvalidQuery(
+            "precision conversion requires closed imports",
+        ));
+    }
+    if selected.is_empty() {
+        return Err(Error::InvalidQuery(
+            "precision conversion requires a selection",
+        ));
+    }
+    let mut targets = std::collections::BTreeMap::new();
+    for &(name, precision) in selected {
+        let (&id, collection) = loaded
+            .collections
+            .iter()
+            .find(|(_, collection)| collection.name == name)
+            .ok_or(Error::CollectionNotFound)?;
+        if targets.insert(id, precision).is_some() {
+            return Err(Error::InvalidQuery(
+                "duplicate precision conversion selection",
+            ));
+        }
+        // Check all retained values, including expired rows and every named
+        // history/staged version, before modifying state or creating output.
+        for record in collection.records.values() {
+            crate::validate_stored(collection.dimensions, Some(precision), &record.vector)?;
+        }
+        for record in collection.vectors.records.values() {
+            for (name, versions) in &record.dense {
+                let dimensions = collection.vectors.specs[name].dimensions;
+                for version in versions {
+                    crate::validate_stored(dimensions, Some(precision), &version.vector)?;
+                }
+            }
+        }
+    }
+    for (&id, collection) in &mut loaded.collections {
+        let precision = targets
+            .get(&id)
+            .copied()
+            .unwrap_or(collection.precision.unwrap_or(catalog::Precision::Float32));
+        collection.precision = Some(precision);
+        if !targets.contains_key(&id) {
+            continue;
+        }
+        let ids: Vec<_> = collection.records.keys().copied().collect();
+        for id in ids {
+            crate::round_stored(
+                Some(precision),
+                &mut collection.records.get_mut(&id).unwrap().vector,
+            )?;
+        }
+        for record in collection.vectors.records.values_mut() {
+            for version in record.dense.values_mut().flatten() {
+                crate::round_stored(Some(precision), &mut version.vector)?;
+            }
+        }
+    }
+    loaded.lineage = Some(format::new_lineage()?);
+    loaded.sequence = loaded.sequence.max(1);
+    loaded.flags |= format::FLAG_PRECISION;
+    if directory {
+        let converted = crate::directory::create_converted(destination, &loaded)?;
+        converted.unlock()?;
+        drop(converted);
+        inspect_inner(destination, key)
+    } else {
+        publish_with(destination, key, |output| {
+            write_v5_image(
+                output,
+                &loaded,
+                loaded.lineage.unwrap(),
+                None,
+                None,
+                loaded.cipher.as_ref(),
+                loaded.flags & (format::FLAG_GRAPH | format::FLAG_PRECISION),
+                loaded.sequence,
+            )
+        })
+    }
+}
+
 fn backup_inner(
     source_path: &Path,
     destination: &Path,
