@@ -82,6 +82,18 @@ pub(crate) fn source_view_fixture(key: Option<&EncryptionKey>) -> (Vec<u8>, Load
     (image, resident)
 }
 
+pub(crate) fn source_default_fixture(key: Option<&EncryptionKey>) -> Vec<u8> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("source-default");
+    let mut db = create_store(Backing::Memory, &path, key);
+    payload::populate(&mut db);
+    db.put_with_expiry(0, &[0.1, -0.0], b"default", &Metadata::new(), Some(1234))
+        .unwrap();
+    db.put(1, &[2.0, 3.0], b"visible default").unwrap();
+    let before = payload::snapshot(&mut db, key);
+    image_of(&before)
+}
+
 pub(crate) fn source_empty_fixture(key: Option<&EncryptionKey>) -> (Vec<u8>, Loaded) {
     let before = initial(key);
     let image = image_of(&before);

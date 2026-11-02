@@ -2374,15 +2374,15 @@ fn load_inner<R: Read + Seek>(
         check.end(loaded.end)?;
         loaded.compact_skipped = check.into_skips();
     }
-    #[cfg(test)]
-    if compact_image && crate::compact::source::enabled() {
-        loaded.compact_generation = Some(compact_source.finish(loaded.cipher.clone())?);
-    }
     if let Some(run) = blocks {
         run.apply(&mut loaded, cipher.as_ref())?;
     }
     if let Some(pending) = snapshot {
         load_graph_image(&mut loaded, pending, &mut revisions)?;
+    }
+    #[cfg(test)]
+    if compact_image && crate::compact::source::enabled() {
+        loaded.compact_generation = Some(compact_source.finish(loaded.cipher.clone())?);
     }
     Ok(loaded)
 }

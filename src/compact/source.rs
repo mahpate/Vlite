@@ -200,6 +200,10 @@ pub(crate) struct CompactGeneration {
 }
 
 impl CompactGeneration {
+    pub(crate) fn has_collection(&self, collection: u16) -> bool {
+        self.collections.contains_key(&collection)
+    }
+
     fn new(backing: Backing, blocks: Vec<PendingBlock>, cipher: Option<Cipher>) -> Result<Self> {
         let mut by_collection: BTreeMap<u16, Vec<SourceFrame>> = BTreeMap::new();
         for block in blocks {
@@ -414,3 +418,7 @@ mod tests;
 
 #[cfg(test)]
 mod dispatch_tests;
+#[cfg(test)]
+mod install_tests;
+#[cfg(test)]
+mod method_tests;

@@ -16,7 +16,7 @@ impl Reranker for ProviderSentinel {
     }
 }
 
-fn gates() -> (
+pub(super) fn gates() -> (
     crate::compact::Activation,
     crate::compact::catalog::payload::Activation,
     crate::compact::source::Activation,
@@ -28,23 +28,19 @@ fn gates() -> (
     )
 }
 
-// Dispatch-only fixture: the loader still installs resident collections in 1a.
-// Inject the verified standalone views only after the normal open has completed.
-fn compact_dispatch_fixture(encrypted: bool) -> (Database, Database, Vec<u8>) {
+// The oracle uses the same validated image with only source installation off.
+pub(super) fn compact_dispatch_fixture(encrypted: bool) -> (Database, Database, Vec<u8>) {
     let key = encrypted.then(source_key);
-    let (image, loaded) = source_view_fixture(key.as_ref());
-    let oracle = Database::open_from_bytes(image.clone(), key.as_ref()).unwrap();
-    let mut candidate = Database::open_from_bytes(image.clone(), key.as_ref()).unwrap();
-    let generation = loaded.compact_generation.unwrap();
-    for (&id, collection) in &mut candidate.collections {
-        collection.records = CollectionRecords::Compact {
-            view: generation.view(id),
-        };
-    }
+    let (image, _) = source_view_fixture(key.as_ref());
+    let oracle = {
+        let _source = super::Activation::set(false);
+        Database::open_from_bytes(image.clone(), key.as_ref()).unwrap()
+    };
+    let candidate = Database::open_from_bytes(image.clone(), key.as_ref()).unwrap();
     (candidate, oracle, image)
 }
 
-fn point_parity(candidate: &Database, oracle: &Database) {
+pub(super) fn point_parity(candidate: &Database, oracle: &Database) {
     assert_eq!(
         candidate.collections().unwrap(),
         oracle.collections().unwrap()
@@ -117,7 +113,7 @@ fn point_parity(candidate: &Database, oracle: &Database) {
     }
 }
 
-fn unsupported<T>(result: Result<T>, method: &str) {
+pub(super) fn unsupported<T>(result: Result<T>, method: &str) {
     assert!(
         matches!(
             result,

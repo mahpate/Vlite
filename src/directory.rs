@@ -332,6 +332,10 @@ impl Layout {
             return Err(Error::UnsupportedVersion(version));
         }
         let flags = u16::from_le_bytes(first[26..28].try_into().expect("2 bytes"));
+        #[cfg(test)]
+        if crate::compact::source::enabled() && flags & format::FLAG_COMPACT != 0 {
+            return Err(Error::UnsupportedFeature(format::FLAG_COMPACT));
+        }
         if flags & format::FLAG_TIMESTAMPS != 0 {
             return Err(Error::UnsupportedFeature(format::FLAG_TIMESTAMPS));
         }

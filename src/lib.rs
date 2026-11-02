@@ -1439,13 +1439,13 @@ impl Database {
     /// Corrupt files and incomplete trailing writes are rejected, not truncated.
     /// Encrypted files need `open_encrypted`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::open_inner(path.as_ref(), None)?.with_durability(Durability::default())
+        Self::open_inner(path.as_ref(), None)?.with_open_durability()
     }
 
     /// Opens an encrypted database. A wrong key is `EncryptionKeyMismatch`
     /// (never garbage data); an unencrypted file is `NotEncrypted`.
     pub fn open_encrypted(path: impl AsRef<Path>, key: &EncryptionKey) -> Result<Self> {
-        Self::open_inner(path.as_ref(), Some(key))?.with_durability(Durability::default())
+        Self::open_inner(path.as_ref(), Some(key))?.with_open_durability()
     }
 
     fn open_inner(path: &Path, key: Option<&EncryptionKey>) -> Result<Self> {
@@ -1474,7 +1474,12 @@ impl Database {
     fn open_read_only_inner(path: &Path, key: Option<&EncryptionKey>) -> Result<Self> {
         let mut database = Self::open_backed(open_shared(path)?, key)?;
         database.read_only = true;
-        database.with_durability(Durability::default())
+        database.with_open_durability()
+    }
+
+    fn with_open_durability(mut self) -> Result<Self> {
+        self.set_durability_inner(Durability::default())?;
+        Ok(self)
     }
 
     /// Whether this handle came from `open_read_only`.
@@ -1497,6 +1502,20 @@ impl Database {
                 bytes: loaded.incomplete_bytes,
             });
         }
+        #[cfg(test)]
+        let compact_records = loaded
+            .compact_generation
+            .as_ref()
+            .is_some_and(|generation| {
+                loaded
+                    .collections
+                    .keys()
+                    .any(|&id| generation.has_collection(id))
+            });
+        #[cfg(test)]
+        if compact_records && loaded.sequence != loaded.history_floor {
+            return Err(Error::UnsupportedFeature(format::FLAG_COMPACT));
+        }
         let imports = import::Registry::from_markers(&loaded.imports);
         Ok(Self {
             flusher: None,
@@ -1516,7 +1535,23 @@ impl Database {
             collections: loaded
                 .collections
                 .into_iter()
-                .map(|(id, collection)| (id, Collection::from_loaded(collection)))
+                .map(|(id, collection)| {
+                    let collection = Collection::from_loaded(collection);
+                    #[cfg(test)]
+                    let collection = {
+                        let mut collection = collection;
+                        if let Some(generation) = &loaded.compact_generation
+                            && (generation.has_collection(id)
+                                || (compact_records && collection.records.is_empty()))
+                        {
+                            collection.records = records::CollectionRecords::Compact {
+                                view: generation.view(id),
+                            };
+                        }
+                        collection
+                    };
+                    (id, collection)
+                })
                 .collect(),
             rebuild: None,
             imports,
@@ -1553,6 +1588,10 @@ impl Database {
     fn discard_tail_inner(path: &Path, key: Option<&EncryptionKey>) -> Result<RepairReport> {
         let mut file = open_locked(path)?;
         let loaded = format::load_with(&mut file, key)?;
+        #[cfg(test)]
+        if compact::source::enabled() && loaded.flags & format::FLAG_COMPACT != 0 {
+            return Err(Error::UnsupportedFeature(format::FLAG_COMPACT));
+        }
         let report = RepairReport {
             discarded_bytes: loaded.incomplete_bytes,
             retained_commits: loaded.sequence,
@@ -1664,6 +1703,10 @@ impl Database {
         for state in self.collections.values() {
             state.records.resident()?;
         }
+        self.set_durability_inner(durability)
+    }
+
+    fn set_durability_inner(&mut self, durability: Durability) -> Result<()> {
         durability.validate()?;
         match (self.file.is_memory(), durability) {
             (true, Durability::None) | (false, Durability::Full | Durability::Periodic { .. }) => {}

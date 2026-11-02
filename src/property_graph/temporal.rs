@@ -242,6 +242,9 @@ impl Database {
         cursor: &crate::changes::FeedCursor,
         max_events: usize,
     ) -> Result<crate::changes::ChangeBatch> {
+        for state in self.collections.values() {
+            state.records.resident()?;
+        }
         if !supported() {
             return Err(Error::UnsupportedFeature(FLAG_TEMPORAL));
         }

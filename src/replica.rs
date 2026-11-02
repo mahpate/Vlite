@@ -102,6 +102,7 @@ impl ReplicaFollower {
             }
             other => other?,
         };
+        db.ensure_all_resident()?;
         if db.lineage.is_none() {
             return Err(Error::ChangeFeedRequiresUpgrade);
         }
