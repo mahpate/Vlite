@@ -3,8 +3,9 @@
 **Status:** in progress, not performance-qualified. Private float16 conversion,
 the primary dense rows codec, descriptor publication and commit-time
 canonicalization are implemented, independently reviewed and integrated behind
-a test-only gate ([P3a progress](#p3a-progress-private-dense-rows-codec)); no
-production setting, writer or reader enables them. Builds on
+a test-only gate ([P3a progress](#p3a-progress-private-dense-rows-codec)), as is
+the private P3b column accessor; no production setting, writer or reader
+enables them. Builds on
 [P2](p2-directory-store.md); goals are
 [F1/F3/S1/S2](../performance/storage-goals.md). The precision choice is resolved
 below; S1's conflicting default-size acceptance criterion is not waived.
@@ -12,8 +13,9 @@ Shared framing, capability allocation and rollout follow the
 [compact-storage contract](compact-storage-contract.md); source codecs remain
 disabled until their complete read, write and maintenance paths are qualified.
 
-**P3b column-access status:** a private, unreleased, test-only candidate is
-implemented in `src/compact/catalog/column.rs`, pending independent acceptance.
+**P3b column-access status:** a private, unreleased, test-only accessor is
+implemented in `src/compact/catalog/column.rs`, independently reviewed,
+mutation-checked and integrated; no production path calls it.
 It checks each dense or complete-record body once, validates metadata during
 the eager record-block check, exposes borrowed ID, revision, expiry, payload
 and encoded-metadata columns, and searches IDs within a block and across a
@@ -36,7 +38,7 @@ overlay. Engine integration
 still needs generation ownership/lifetime handling, overlay precedence and
 deletes/expiry, lazy generation-owned `Record` compatibility, snapshot
 retention accounting, authenticated I/O propagation, and end-to-end search,
-graph-attachment, maintenance and reopen wiring. This candidate makes no
+graph-attachment, maintenance and reopen wiring. This accessor makes no
 performance, size, or release-qualification claim.
 
 ## Precision decision
@@ -183,9 +185,10 @@ without their corresponding contract approval; `src/openapi.json` is frozen.
 1. **P3a, precision and codec:** float32-default/float16-opt-in settings,
    canonicalization, guarded vector blocks and explicit conversion. Keep the
    existing eager path as a compatibility oracle; do not claim S2 yet.
-2. **P3b, bounded source access:** column access, overlay integration, lazy
-   borrowed-record compatibility, snapshot/file lifetime handling and encrypted
-   reads. Exercise exact/filtered/hybrid and graph-attached record paths.
+2. **P3b, bounded source access:** the private column accessor is integrated
+   (see its status above). Engine integration remains: overlay integration,
+   lazy borrowed-record compatibility, snapshot/file lifetime handling and
+   encrypted reads. Exercise exact/filtered/hybrid and graph-attached record paths.
 3. **P3c, persisted compact ANN:** flattened topology, source-bound codes,
    background rebuild integration and the opt-in rotated-code prototype.
    Reuse existing scalar-u8 and index-cache behavior rather than duplicate it.
@@ -333,7 +336,8 @@ Remaining P3a work:
    Release readers still reject flag 32 and compact source kinds. No public
    API, production writer/activation, P3b/P3c/P3d or S1/S2/DO-005 change.
 
-Named dense reuse and bounded access remain P3b.
+Named dense reuse and engine-side bounded access remain P3b; only the private
+column accessor is integrated.
 
 ## P3a progress: complete-record checkpoints (private, unreleased)
 

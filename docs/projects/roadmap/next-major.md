@@ -140,6 +140,8 @@ Local numbers below show direction only (see rules).
   absent file/directory stores, plain or same-key encrypted, preserving
   retained state and numeric revisions but resetting lineage/history;
   overflow, open imports and unsupported sources refuse before output.
+  The private P3b column accessor is independently reviewed, mutation-checked
+  and integrated, with no production caller; engine integration remains.
   Release rejection and S1/S2/DO-005 remain unchanged. The
   [API review](p3-precision-api.md) still holds public enablement pending
   complete read/write/maintenance integration. The first exact-SIMD slice
