@@ -291,6 +291,18 @@
       "steps":[{"op":"digest","request":{"summary":{"content":{"$text":"x","bytes":16777217}}},"expect":{"error":"BodyLimit"},"defect":{"tag":"raw-cap","path":["steps",0,"request","summary","content","bytes"],"set":1}}]
     },
     {
+      "name":"summary-due-at-high-water",
+      "assumptions":["spec: graph high-water alone dominates C and wall at the captured commit clock; future summary expiry can already be due.","fixture: EndpointRefused is an explicit preappend hook, not a Rust error mapping."],
+      "setup":{"wall":0,"high_water":20},
+      "steps":[{"request":{"summary":{"expiry_ms":18}},"expect":{"error":"fixture:EndpointRefused"},"defect":{"tag":"high-water-summary-expiry","path":["steps",0,"request","summary","expiry_ms"],"set":21}}]
+    },
+    {
+      "name":"source-due-at-high-water",
+      "assumptions":["spec: graph high-water alone makes a selected source due before derived-edge endpoint validation.","fixture: EndpointRefused is an explicit preappend hook, not a Rust error mapping."],
+      "setup":{"wall":0,"high_water":20,"sources":[{"id":"m","expiry_ms":18}]},
+      "steps":[{"expect":{"error":"fixture:EndpointRefused"},"defect":{"tag":"high-water-source-expiry","path":["setup","high_water"],"set":17}}]
+    },
+    {
       "name":"commit-clock-crossing",
       "assumptions":["spec: captured commit=max(C,wall,high_water) can make a future TTL due; refuse before append.","fixture: EndpointRefused is an explicit hook, not a Rust error mapping."],
       "setup":{"wall":20,"high_water":15},
