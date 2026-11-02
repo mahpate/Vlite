@@ -311,6 +311,11 @@ Store the summary as an episodic derived memory with transformation identity and
 bounded source references; one receipt guards summary plus intended source changes.
 Exact retry returns that summary, not another summary of the same inputs.
 
+The first bounded step, C1 (one retained-source Episodic summary, receipt and
+replay), has a [frozen private contract](gap1-c1-consolidation-contract.md).
+It is not implemented; its independent oracle and implementation need separate
+authorization and acceptance.
+
 Correct facts through Gap 4 revision-checked replace/remove/close operations.
 Supersession closes the old series segment at c and creates/appends replacement at c
 in one graph batch, including replacement evidence and exclusive-slot guards.
