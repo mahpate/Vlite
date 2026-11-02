@@ -120,3 +120,41 @@ pub enum TemporalChange {
         valid_to: Option<i64>,
     },
 }
+
+/// Gap 3 (unreleased): why an expiry reclaim removed a node or edge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum GraphRemovalReason {
+    /// The entity's own deadline was the earliest deadline that applied
+    /// (including a tie with an endpoint's).
+    Expired,
+    /// An edge was removed because an endpoint node's earlier deadline made
+    /// that node expire.
+    NodeExpired,
+}
+
+/// Gap 3 (unreleased): the TTL annotation of one operation in a
+/// [`GraphEventSet::Ttl`](crate::changes::GraphEventSet::Ttl) feed, at the
+/// same index as the operation it annotates.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum GraphTtl {
+    /// A node or edge was written. `expires_at_ms` is the entity's own
+    /// deadline after the operation (`None` when it has none);
+    /// `expiry_changed` is true only for a logged deadline set or clear,
+    /// reported as an otherwise-empty patch.
+    Updated {
+        expires_at_ms: Option<u64>,
+        expiry_changed: bool,
+    },
+    /// A node or edge was deleted explicitly.
+    ExplicitRemoval,
+    /// A logged reclaim at `removed_at_ms` removed the node or edge.
+    /// `expires_at_ms` is the node's own deadline, or the edge's effective
+    /// deadline (the earliest of its own and its endpoints' deadlines).
+    ExpiryRemoval {
+        removal_reason: GraphRemovalReason,
+        expires_at_ms: u64,
+        removed_at_ms: u64,
+    },
+}

@@ -76,7 +76,7 @@ pub use algorithms::{
     LabelPropagationOutput, LabelScope, NodeScore, PageRankOutput, RelationshipScope, WeightedPath,
     WeightedPathOutcome,
 };
-pub use change::{GraphChange, TemporalChange};
+pub use change::{GraphChange, GraphRemovalReason, GraphTtl, TemporalChange};
 pub use engine::schema::{
     GraphSchema, LabelDefinition, Multiplicity, ObservedEndpoint, ObservedLabel, ObservedProperty,
     ObservedRelationship, ObservedSchema, PropertyDefinition, PropertyIndexKind, PropertyType,

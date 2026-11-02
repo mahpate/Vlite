@@ -57,6 +57,8 @@ enums vlite::Mutation
 enums vlite::PlanStrategy
 enums vlite::SettingsPersistence
 enums vlite::changes::ChangeKind
+enums vlite::changes::GraphEventSet
+enums vlite::changes::GraphFeedError
 enums vlite::hybrid::VectorLeg
 enums vlite::import::ImportChunkOutcome
 enums vlite::import::ImportState
@@ -116,6 +118,9 @@ structs vlite::SearchStats
 structs vlite::changes::Change
 structs vlite::changes::ChangeBatch
 structs vlite::changes::FeedCursor
+structs vlite::changes::GraphFeedBatch
+structs vlite::changes::GraphFeedChange
+structs vlite::changes::GraphFeedCursor
 structs vlite::disk_ann::DiskAnnIndex
 structs vlite::disk_ann::DiskAnnMemory
 structs vlite::disk_ann::DiskAnnOptions

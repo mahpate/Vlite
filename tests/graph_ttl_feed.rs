@@ -9,7 +9,8 @@ mod ttl_log;
 use tempfile::tempdir;
 use ttl_log::reclaim_fixture;
 use vlite::changes::{Change, ChangeBatch, ChangeKind, FeedCursor, GraphChange, read_log_changes};
-use vlite::{Database, Metadata, Record};
+use vlite::changes::{GraphEventSet, GraphFeedCursor, GraphFeedError};
+use vlite::{Database, Error, Metadata, Record};
 
 const LINEAGE: u64 = ttl_log::LINEAGE;
 
@@ -426,4 +427,191 @@ fn legacy_feed_bytes() {
             .changes,
     );
     db.close().unwrap();
+}
+
+/// Literal tokens; every checksum below was calculated independently of
+/// the crate (`zlib.crc32` of the ASCII text before the last dot).
+const V1_BEGINNING: &str = "vlc1.0000000000000000.0000000000000000.f81d6010";
+const V1_AT_14: &str = "vlc1.0123456789abcdef.000000000000000e.77659153";
+const TTL_BEGINNING: &str = "vlc2.0000000000000000.0000000000000000.ffffffff.ttl.5c639513";
+const TTL_AT_14: &str = "vlc2.0123456789abcdef.000000000000000e.ffffffff.ttl.d0e32b37";
+
+fn invalid(token: &str) {
+    match GraphFeedCursor::from_token(token) {
+        Err(Error::InvalidCursor(_)) => {}
+        other => panic!("{token}: {other:?}"),
+    }
+}
+
+#[test]
+fn ttl_cursor_goldens() {
+    let at_14 = FeedCursor {
+        lineage: LINEAGE,
+        sequence: 14,
+    };
+    let empty = GraphEventSet::Empty;
+    let ttl = GraphEventSet::Ttl;
+
+    // Emitted bytes: the Empty set is exactly the v1 token.
+    assert_eq!(GraphFeedCursor::beginning(empty).to_token(), V1_BEGINNING);
+    assert_eq!(GraphFeedCursor::beginning(ttl).to_token(), TTL_BEGINNING);
+    assert_eq!(
+        GraphFeedCursor::at_commit(at_14, empty).to_token(),
+        V1_AT_14
+    );
+    assert_eq!(GraphFeedCursor::at_commit(at_14, ttl).to_token(), TTL_AT_14);
+    assert_eq!(at_14.to_token(), V1_AT_14);
+
+    // Parsed values: v1 is Empty at a boundary, v2 carries set and ordinal.
+    let cases: [(&str, FeedCursor, Option<u32>, GraphEventSet); 8] = [
+        (V1_BEGINNING, FeedCursor::beginning(), None, empty),
+        (V1_AT_14, at_14, None, empty),
+        (TTL_BEGINNING, FeedCursor::beginning(), None, ttl),
+        (TTL_AT_14, at_14, None, ttl),
+        (
+            "vlc2.0123456789abcdef.000000000000000e.00000000.ttl.9824fa02",
+            at_14,
+            Some(0),
+            ttl,
+        ),
+        (
+            "vlc2.0123456789abcdef.000000000000000e.00000001.ttl.a544d3b2",
+            at_14,
+            Some(1),
+            ttl,
+        ),
+        (
+            "vlc2.0123456789abcdef.000000000000000e.fffffffe.ttl.974351e7",
+            at_14,
+            Some(0xffff_fffe),
+            ttl,
+        ),
+        (
+            "vlc2.ffffffffffffffff.ffffffffffffffff.fffffffe.ttl.58a2033b",
+            FeedCursor {
+                lineage: u64::MAX,
+                sequence: u64::MAX,
+            },
+            Some(0xffff_fffe),
+            ttl,
+        ),
+    ];
+    for (token, position, ordinal, set) in cases {
+        let cursor = GraphFeedCursor::from_token(token).unwrap();
+        assert_eq!(
+            (cursor.position(), cursor.ordinal(), cursor.graph_events()),
+            (position, ordinal, set),
+            "{token}"
+        );
+        assert_eq!(cursor.to_token(), token);
+    }
+    // A boundary at sequence zero of a known lineage is a valid position.
+    let bound =
+        GraphFeedCursor::from_token("vlc2.0123456789abcdef.0000000000000000.ffffffff.ttl.734b8ec7")
+            .unwrap();
+    assert_eq!((bound.position().sequence, bound.ordinal()), (0, None));
+
+    // Mismatch both ways: neither token form is ever read as the other set,
+    // the legacy parser rejects v2 rather than dropping its ordinal and set,
+    // and conversion is explicit at a commit boundary.
+    let v1 = GraphFeedCursor::from_token(V1_AT_14).unwrap();
+    let v2 = GraphFeedCursor::from_token(TTL_AT_14).unwrap();
+    assert_ne!(v1.graph_events(), ttl);
+    assert_ne!(v2.graph_events(), empty);
+    assert_ne!(v1, v2);
+    assert_eq!(v1.position(), v2.position());
+    assert!(matches!(
+        FeedCursor::from_token(TTL_AT_14),
+        Err(Error::InvalidCursor(_))
+    ));
+    assert_eq!(
+        GraphFeedCursor::at_commit(v1.position(), ttl).to_token(),
+        TTL_AT_14
+    );
+    assert_eq!(
+        GraphFeedCursor::at_commit(v2.position(), empty).to_token(),
+        V1_AT_14
+    );
+
+    // Checksummed but altered set: reserved, misspelled or not canonical.
+    for token in [
+        "vlc2.0123456789abcdef.000000000000000e.ffffffff.temporal.777998bc",
+        "vlc2.0123456789abcdef.000000000000000e.ffffffff.ttl+temporal.986957f3",
+        "vlc2.0123456789abcdef.000000000000000e.ffffffff.TTL.464469bd",
+        "vlc2.0123456789abcdef.000000000000000e.ffffffff.empty.7a451231",
+        "vlc2.0123456789abcdef.000000000000000e.ffffffff..17fe9608",
+        "vlc2.0123456789abcdef.000000000000000e.ffffffff.ttl+ttl.a0bcbdcc",
+        "vlc2.0123456789abcdef.000000000000000e.ffffffff.temporal+ttl.9ee09864",
+    ] {
+        invalid(token);
+    }
+    // Checksummed but malformed widths, case, sign or parts.
+    for token in [
+        "vlc2.0123456789ABCDEF.000000000000000e.ffffffff.ttl.48519288",
+        "vlc2.123456789abcdef.000000000000000e.ffffffff.ttl.7fd1015e",
+        "vlc2.00123456789abcdef.000000000000000e.ffffffff.ttl.e422c0e1",
+        "vlc2.0123456789abcdef.+00000000000000e.ffffffff.ttl.5dff08fc",
+        "vlc2.0123456789abcdef.000000000000000e.0000000.ttl.3b31dd94",
+        "vlc2.0123456789abcdef.000000000000000e.000000000.ttl.81ebd954",
+        "vlc2.0123456789abcdef.000000000000000e.FFFFFFFF.ttl.73448f93",
+        "vlc2.0123456789abcdef.000000000000000e.ffffffff.ttl.extra.e154cd7b",
+        "vlc2.0123456789abcdef.000000000000000e.ttl.1d1f4311",
+    ] {
+        invalid(token);
+    }
+    // Checksum: altered, upper-case, wrong width, missing.
+    for token in [
+        "vlc2.0123456789abcdef.000000000000000e.ffffffff.ttl.d0e32b36",
+        "vlc2.0123456789abcdef.000000000000000e.ffffffff.ttl.D0E32B37",
+        "vlc2.0123456789abcdef.000000000000000e.ffffffff.ttl.0d0e32b37",
+        "vlc2.0123456789abcdef.000000000000000e.ffffffff.ttl",
+        "vlc2.0123456789abcdef.000000000000000f.ffffffff.ttl.d0e32b37",
+        "",
+        "vlc3.0123456789abcdef.000000000000000e.ffffffff.ttl.d0e32b37",
+    ] {
+        invalid(token);
+    }
+    // Checksummed impossible positions: zero lineage past the beginning or
+    // inside a commit, and an ordinal inside sequence zero.
+    for token in [
+        "vlc2.0000000000000000.0000000000000001.ffffffff.ttl.c16c7465",
+        "vlc2.0000000000000000.0000000000000000.00000000.ttl.14a44426",
+        "vlc2.0123456789abcdef.0000000000000000.00000000.ttl.3b8c5ff2",
+    ] {
+        invalid(token);
+    }
+
+    // The typed opt-in error.
+    let mismatch = GraphFeedError::CursorModeMismatch {
+        cursor: empty,
+        requested: ttl,
+    };
+    assert_eq!(
+        mismatch.to_string(),
+        "cursor_mode_mismatch: cursor and requested graph_events differ"
+    );
+    let too_large = GraphFeedError::ResponseTooLarge {
+        bytes: 16_777_217,
+        limit: 16_777_216,
+    };
+    assert_eq!(
+        too_large.to_string(),
+        "response_too_large: canonical event exceeds 16777216 bytes"
+    );
+    let floor = GraphFeedError::CursorBeforeHistory {
+        cursor: 4,
+        floor: 9,
+    };
+    assert!(floor.to_string().contains("history floor 9"));
+    let engine = GraphFeedError::from(Error::InvalidCursor("malformed cursor token"));
+    assert!(matches!(
+        engine,
+        GraphFeedError::Engine(Error::InvalidCursor(_))
+    ));
+    assert_eq!(engine.to_string(), "invalid cursor: malformed cursor token");
+    use std::error::Error as _;
+    assert!(engine.source().is_some());
+    for error in [mismatch, too_large, floor] {
+        assert!(error.source().is_none());
+    }
 }

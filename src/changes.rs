@@ -16,7 +16,7 @@ use std::io::{Read, Seek};
 use std::path::Path;
 
 /// Re-exported from [`crate::property_graph`], where it is defined.
-pub use crate::property_graph::{GraphChange, TemporalChange};
+pub use crate::property_graph::{GraphChange, GraphRemovalReason, GraphTtl, TemporalChange};
 
 /// Default and maximum events returned by one batch.
 pub const DEFAULT_FEED_BATCH: usize = 1000;
@@ -182,6 +182,229 @@ pub struct ChangeBatch {
     pub has_more: bool,
     /// Last committed sequence at read time.
     pub head: u64,
+}
+
+/// Gap 3 (unreleased): the exact set of optional graph feed events a reader
+/// selects. A cursor is bound to one set; a different set is never accepted
+/// implicitly (convert with [`GraphFeedCursor::at_commit`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum GraphEventSet {
+    /// The legacy feed: no TTL events or annotations; v1 cursor tokens.
+    Empty,
+    /// Graph TTL events: logged deadline changes and expiry reclaims, with a
+    /// [`GraphTtl`] annotation per node or edge operation; v2 cursor tokens.
+    Ttl,
+}
+
+impl GraphEventSet {
+    /// The set's spelling inside a v2 token, `None` for the v1 `Empty` set.
+    const fn token_name(self) -> Option<&'static str> {
+        match self {
+            Self::Empty => None,
+            Self::Ttl => Some("ttl"),
+        }
+    }
+}
+
+/// Gap 3 (unreleased): a graph feed position bound to a [`GraphEventSet`].
+///
+/// Besides a commit boundary, a TTL cursor can stand inside one commit, after
+/// event `ordinal` of `position().sequence`, because a large expiry reclaim
+/// is delivered in several chunks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct GraphFeedCursor {
+    position: FeedCursor,
+    ordinal: Option<u32>,
+    graph_events: GraphEventSet,
+}
+
+/// Marks a commit boundary inside a v2 token.
+const BOUNDARY_ORDINAL: u32 = u32::MAX;
+
+impl GraphFeedCursor {
+    /// Reads every committed change in the current history with
+    /// `graph_events`.
+    pub const fn beginning(graph_events: GraphEventSet) -> Self {
+        Self::at_commit(FeedCursor::beginning(), graph_events)
+    }
+
+    /// The boundary after commit `position`, read with `graph_events`. This
+    /// is the explicit way to start a set from a legacy cursor or to switch
+    /// a boundary cursor to another set.
+    pub const fn at_commit(position: FeedCursor, graph_events: GraphEventSet) -> Self {
+        Self {
+            position,
+            ordinal: None,
+            graph_events,
+        }
+    }
+
+    /// The commit this cursor is in or after. Inside a commit (`ordinal()`
+    /// is `Some`) this drops the remaining events' position: do not use it
+    /// as a legacy resume cursor, or the commit's unread events are skipped.
+    pub const fn position(&self) -> FeedCursor {
+        self.position
+    }
+
+    /// `None` when all of `position().sequence` has been consumed;
+    /// `Some(n)` when its events through ordinal `n` have been consumed.
+    pub const fn ordinal(&self) -> Option<u32> {
+        self.ordinal
+    }
+
+    /// The event set this cursor is bound to.
+    pub const fn graph_events(&self) -> GraphEventSet {
+        self.graph_events
+    }
+
+    /// Parses a token from [`to_token`](Self::to_token): a `vlc1` token is
+    /// an `Empty` commit boundary (parsed as [`FeedCursor::from_token`]), a
+    /// `vlc2` token carries its set and ordinal. A malformed, altered or
+    /// impossible token is `Error::InvalidCursor`.
+    pub fn from_token(token: &str) -> Result<Self> {
+        if !token.starts_with("vlc2.") {
+            let position = FeedCursor::from_token(token)?;
+            return Ok(Self::at_commit(position, GraphEventSet::Empty));
+        }
+        let malformed = || Error::InvalidCursor("malformed cursor token");
+        let (body, crc) = token.rsplit_once('.').ok_or_else(malformed)?;
+        let parts: Vec<&str> = body.split('.').collect();
+        let [_, lineage, sequence, ordinal, set] = parts[..] else {
+            return Err(malformed());
+        };
+        let lineage = lower_hex(lineage, 16).ok_or_else(malformed)?;
+        let sequence = lower_hex(sequence, 16).ok_or_else(malformed)?;
+        let ordinal = lower_hex(ordinal, 8).ok_or_else(malformed)?;
+        let crc = lower_hex(crc, 8).ok_or_else(malformed)?;
+        if u64::from(format::crc32(body.as_bytes())) != crc {
+            return Err(Error::InvalidCursor("cursor token checksum mismatch"));
+        }
+        let graph_events = match set {
+            "ttl" => GraphEventSet::Ttl,
+            _ => return Err(Error::InvalidCursor("unsupported cursor event set")),
+        };
+        let ordinal = u32::try_from(ordinal).map_err(|_| malformed())?;
+        let ordinal = (ordinal != BOUNDARY_ORDINAL).then_some(ordinal);
+        if (lineage == 0 && (sequence != 0 || ordinal.is_some()))
+            || (ordinal.is_some() && sequence == 0)
+        {
+            return Err(Error::InvalidCursor("impossible cursor position"));
+        }
+        Ok(Self {
+            position: FeedCursor { lineage, sequence },
+            ordinal,
+            graph_events,
+        })
+    }
+
+    /// Opaque, checksummed text form. An `Empty` cursor is exactly its
+    /// position's v1 token; other sets use
+    /// `vlc2.<lineage>.<sequence>.<ordinal>.<set>.<crc>`.
+    pub fn to_token(&self) -> String {
+        let Some(set) = self.graph_events.token_name() else {
+            return self.position.to_token();
+        };
+        let body = format!(
+            "vlc2.{:016x}.{:016x}.{:08x}.{set}",
+            self.position.lineage,
+            self.position.sequence,
+            self.ordinal.unwrap_or(BOUNDARY_ORDINAL)
+        );
+        format!("{body}.{:08x}", format::crc32(body.as_bytes()))
+    }
+}
+
+/// Exactly `width` lower-case hex digits.
+fn lower_hex(text: &str, width: usize) -> Option<u64> {
+    if text.len() != width
+        || !text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
+    u64::from_str_radix(text, 16).ok()
+}
+
+/// Gap 3 (unreleased): one event of a graph feed with its annotations.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct GraphFeedChange {
+    /// The event, as the legacy feed reports it (TTL deadline changes and
+    /// reclaim removals appear as ordinary graph patches and deletes).
+    pub change: Change,
+    /// For a [`GraphEventSet::Ttl`] graph batch, one entry per operation of
+    /// `change` at the same index: `Some` for node and edge operations,
+    /// `None` for attachments and schema. Empty for every other event and
+    /// for the `Empty` set.
+    pub ttl: Vec<Option<GraphTtl>>,
+}
+
+/// Gap 3 (unreleased): a page of graph feed events.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct GraphFeedBatch {
+    pub changes: Vec<GraphFeedChange>,
+    /// Pass this to the next call; it may stand inside a commit.
+    pub next: GraphFeedCursor,
+    /// Another event exists after `next` in the scanned log.
+    pub has_more: bool,
+    /// Last committed sequence at read time.
+    pub head: u64,
+}
+
+/// Gap 3 (unreleased): why a graph feed read failed.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum GraphFeedError {
+    /// The read failed as the legacy feed does (lineage, ahead, corruption,
+    /// unsupported or invalid cursor).
+    Engine(Error),
+    /// The cursor is bound to a different event set than requested.
+    CursorModeMismatch {
+        cursor: GraphEventSet,
+        requested: GraphEventSet,
+    },
+    /// The cursor is before the history floor, or inside the commit at the
+    /// floor, which a checkpoint no longer restates event by event.
+    CursorBeforeHistory { cursor: u64, floor: u64 },
+    /// One event's canonical size exceeds the per-event limit; nothing was
+    /// delivered and the cursor does not advance.
+    ResponseTooLarge { bytes: usize, limit: usize },
+}
+
+impl std::fmt::Display for GraphFeedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Engine(error) => error.fmt(f),
+            Self::CursorModeMismatch { .. } => {
+                f.write_str("cursor_mode_mismatch: cursor and requested graph_events differ")
+            }
+            Self::CursorBeforeHistory { cursor, floor } => write!(
+                f,
+                "cursor sequence {cursor} is before the history floor {floor}: a checkpoint restated earlier changes; take a snapshot and resume at {floor} or later"
+            ),
+            Self::ResponseTooLarge { .. } => {
+                f.write_str("response_too_large: canonical event exceeds 16777216 bytes")
+            }
+        }
+    }
+}
+
+impl std::error::Error for GraphFeedError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Engine(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<Error> for GraphFeedError {
+    fn from(error: Error) -> Self {
+        Self::Engine(error)
+    }
 }
 
 /// Reads a batch, with the derived blocks a compact image skipped (reported
