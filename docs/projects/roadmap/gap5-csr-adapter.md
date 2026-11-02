@@ -1,7 +1,7 @@
 # Gap 5: private CSR algorithm parity adapter
 
-Status: **design accepted 2026-11-02; private and unreleased**.
-Phase 1 changed documentation only. Phase 2 commit 1 (resident seam) and its TTL-resolution tests are independently accepted and integrated. The P4 view and bounded key/adjacency accessors required by section (h) are now independently accepted and integrated, so commit 2 (CSR source) may start under section (g).
+Status: **commits 2–3 implemented locally; private, unreleased, and pending coordinator acceptance**.
+Phase 1 changed documentation only. Phase 2 commit 1 (resident seam) and its TTL-resolution tests and the P4 view/accessors are independently accepted and integrated. The coordinator-authorized test-only construction seam is present as commit 2a. Commit 2 adds the CSR source and source-contract tests; commit 3 adds parity evidence. Neither commit changes public selection or serving.
 Baseline: `49c77d6f8f2ed87d85b5a570e74457af248bcd45`.
 Candidate P4 view: `50190ded2834abe8efdb8902e629c744c833efff`, inspected through
 git objects only; not accepted, integrated or activated by this document.
@@ -262,55 +262,63 @@ new logical charges. Inject the same clock-check trace for each adapter,
 including cancellation at start/periodic/final checks. Real elapsed time and
 real-time source counts are explicitly not a bitwise reproducibility claim.
 
-## (f) Fixtures, counts and fail-first evidence required in phase 2
+## (f) Fixtures, counts and fail-first evidence
 
-Existing tests and fixtures remain byte-for-byte unchanged, not merely green.
-Read-only source counts at this baseline: 53 engine tests (20 base, 17 iterative,
-16 betweenness), and 29 public-adapter tests (12 base, 8 iterative, 9 betweenness).
-The older narrative counts in Gap 5 predate later sort/staging regressions.
-There is no `tests/graph_algorithms*.rs` suite at this baseline; tests live in
-`src/property_graph/engine/algorithm/tests{.rs,/**}` and
-`src/property_graph/algorithms/tests{.rs,/**}`.
+The original design baseline was 53 engine algorithm tests and 29 public-adapter
+tests. At the current tree, `cargo test --locked --offline --lib --all-features
+-- --list` reports 57 tests under `algorithm::tests` (including four accepted
+TTL guards), 2 resident-source tests, 29 public-adapter tests, 2 CSR
+source-contract tests, and 4 new parity tests. The 801-test library listing
+includes all modules. Commits 2–3 add no edits to pre-existing test, fixture, or
+oracle files; `git diff --stat` for commit 3 lists only the adapter module
+declaration and the new parity-test file.
 
-| Matrix | Required coverage / expected count |
+| Executed coverage | Evidence |
 |---|---|
-| Cross-product skeleton | 5 algorithms x 12 fixture families x 3 sources x 3 thread settings = **540 comparisons** per construction order; reverse-preserved-ID order doubles this to 1,080. Sources: resident, CSR base, CSR base+overlay. |
-| Twelve families | chain; weighted diamond/ties; dangling/isolates; parallel/loops/edge-zero; sparse IDs/types; labels/conditions; TTL boundaries; temporal ordinary-record semantics; overlay replacement/delete; high-degree/absent-types; invalid inputs/weights; exact budget/partial-output boundaries. |
-| Directions | Run Out/In/Both within every applicable matrix cell; all 540 cells must execute, including negative/error cases, no silent skip. Multiple requests and budget sweeps add cases, not reduce the skeleton. |
-| Golden scope/path | 24 `golden.json` scopes/degrees; 11 path cases, 6 stationary PageRanks, 3 LPA and 4 betweenness cases, preserving existing consumers. |
-| Finite iterations | 12 `iterative-cases.json` cases, 17 full steps/sweeps; compare independent expected scores within 1e-14 and exact communities; adapters mutually bit-identical. |
-| Sampled centrality | 23 `betweenness-cases.json` classifications, 7 SplitMix64 vectors; preserve 20 readable / 3 rejected classifications and existing max-ID remaps, not pretend all fixtures are directly storable. |
-| Caps | For each small case, every edge/vertex/scratch budget 1..full requirement plus full/full+1 when legal; zero/ceiling violations separately. Output/iteration/source caps and DegreeLimit boundaries too. |
-| Oracle independence | Hand-built retained record tables and expected ordered scopes/degrees; exhaustive paths and existing Python rational oracles. Never expected output solely from GraphSource::from_graph, encoder, overlay fold or resident execution. |
+| Fixture families | 12: chain; weighted diamond; dangling/isolates; parallel edges/loops/edge zero; sparse IDs/types; labels/conditions; TTL boundaries; temporal ordinary record; overlay replacement/delete; high degree/absent type; invalid inputs/weights; budget/partial output. |
+| Main parity matrix | 5 algorithms x 3 directions x 13 family/clock cases = 195 logical cases. Each compares resident results to both pinned CSR views (390 comparisons, 600 source executions). Overlay replacement/delete compares each resident state to its corresponding CSR state; other families also assert equality across the two pinned views. |
+| Result equality | Full `AlgorithmResult`/`AlgorithmError` equality, including values, scope, truncation, reasons, ordering and integer counters; floating outputs are additionally compared by `to_bits()`. Source-call and yielded-adjacency counts match after normalizing expiry-predicate calls, which are conservatively different for the two sources. |
+| Retained-record precondition | Fixture records compare physical IDs, keys, labels, properties and expiry values. The temporal case checks the ordinary physical record and confirms a stored segment while algorithm requests retain T=None. |
+| Independent expected values | A hand-built two-node directed cycle checks exact Degree, path, PageRank, label-propagation and betweenness outputs in Out/In/Both directions. |
+| Fixed stop schedules | Cancellation and deadline outcomes compare resident, base, and pinned-overlay executions for all five algorithms and three directions using a deterministic fake clock. |
+| Reverse update order | Nodes and ordinary edge updates are replayed in reverse while IDs are preserved; each algorithm/direction compares the canonical resident result with reverse-updated resident and CSR results. |
+| Harness concurrency | The parity matrix test passed with `--test-threads=1`, `2`, and `4`. These settings vary test-harness concurrency only; algorithm kernels remain serial, so this is not algorithm thread-count evidence. |
+| Existing oracle consumers | `graph_algorithm_oracle.py` checked 24 cases, `graph_iteration_oracle.py` checked 12 cases, and `graph_betweenness_oracle.py` checked 23 cases. Existing scripts and JSON fixtures remain unchanged. |
+| Validation matrix | `cargo fmt --check`, all-target/all-feature workspace clippy, default/all-feature property-graph tests (310 each), `vlite-graph` (201 unit + 2 integration), compact tests (244 each feature mode), no-default and wasm checks, all three Python oracles, API reference (840 items), release docs, content budget, and staged/unstaged diff checks exited 0. |
+| Planned but not covered exhaustively | The 540-comparison-per-construction-order skeleton, all budget-boundary sweeps, allocation/backing-record instrumentation, and the complete deliberate-mutation list below remain future evidence. The 390 comparisons do not constitute release qualification. |
 
-Retain `tests/graph_algorithm_oracle.py`, `graph_iteration_oracle.py` and
-`graph_betweenness_oracle.py` and their JSON unchanged. Existing oracle
-tolerances compare mathematical references, not adapter equality.
-Add tests in `engine/algorithm_csr/tests.rs`; root-only test inclusion above.
-Proposed named tests below are **not implemented or claimed to have failed**.
-For each mutation, run that named test, retain actual failing assertion evidence
-in the review report, restore implementation, rerun successfully; no mutation
-commits or production hooks.
+The executed fail-first mutation replaced the CSR adjacency direction with
+`Direction::Out`. The named parity-matrix test failed with exit 101 at
+`chain / algorithm 0 / Both / now 0`; its `assert_eq!` found different
+`edges_examined`, `vertex_operations`, and `scratch_bytes` counters even though
+that case's displayed Degree rows matched. Restoring the direction made the
+same command pass with exit 0:
 
-| Deliberate mutation | Named new test that must fail |
+```powershell
+cargo test --locked --offline --lib property_graph::algorithms::csr::tests::parity_matrix_matches_resident_base_and_pinned_overlay_sources -- --exact --nocapture
+```
+
+No mutation is committed. The other mutations below are planned probes only;
+they have not been claimed as killed. The current instrumentation counts source
+method calls and yielded adjacency entries, not physical backing-record visits,
+tombstone skips, or allocations, so it does not by itself establish bounded
+internal work.
+
+| Deliberate mutation not yet run | Intended regression test |
 |---|---|
 | Sort CSR row by neighbor ordinal, or reverse relationship dictionary | `csr_physical_order_and_typed_probes_match` |
 | Skip ID 0 in typed probe, or duplicate Both loop | `csr_edge_zero_parallel_and_loops_match` |
 | TTL `<` changed to `<=` visibility, or endpoint cascade omitted | `csr_ttl_equality_and_hidden_entry_charges_match` |
-| Use read-filtered adjacency instead of physical entries | `csr_ttl_equality_and_hidden_entry_charges_match` (exact EdgeLimit/DegreeLimit/counters) |
+| Use read-filtered adjacency instead of physical entries | `csr_ttl_equality_and_hidden_entry_charges_match` (exact counters/boundaries) |
 | Validate weights while extracting or choose relationship-order bad edge | `csr_weight_error_order_and_cancel_precedence_match` |
 | Select temporal segment at T=0 | `csr_temporal_records_keep_retention_only_semantics` |
-| Allocate degree-sized Vec before Meter | `csr_high_degree_scan_allocates_no_row_buffer` (allocation instrumentation plus cap boundary) |
-| Scan every node on key miss | `csr_key_misses_use_indexed_lookup` (test-only source-visit instrumentation) |
+| Allocate degree-sized Vec before Meter | `csr_high_degree_scan_allocates_no_row_buffer` |
+| Scan every node on key miss | `csr_key_misses_use_indexed_lookup` |
 | Ignore overlay tombstone/replacement or rebind snapshot mid-run | `csr_overlay_generation_stays_pinned` |
 | Keep parallel Brandes arcs, halve Both, change SplitMix input | `csr_betweenness_oracle_and_completed_prefix_match` |
 | Expose partial step/source or move final check | `csr_all_budget_boundaries_and_check_traces_match` |
 | Add one scratch reservation / type-probe charge | `csr_all_budget_boundaries_and_check_traces_match` |
 
-New instrumentation must detect backing-record visits, tombstone skips and
-allocations as well as result equality; an equal answer alone cannot prove
-bounded access. High-degree fixtures exceed the entry cap and a large excluded
-type prefix; all-deleted backing rows must not create an unmetered linear scan.
 Keep engine `every_budget_is_exact_and_stops_without_output` (:806),
 `absent_relationship_type_probes_are_charged_and_interruptible` (:1929),
 iterative `shared_sorts_keep_degree_and_path_results_and_units` (:1224), and
@@ -322,12 +330,13 @@ betweenness `every_budget_stops_at_its_boundary_and_keeps_only_full_sources`
 | Order | Files owned by algorithm slice | Exit before next commit |
 |---|---|---|
 | 1. Resident-only seam | `src/property_graph/engine/algorithm.rs`, `algorithm/source.rs`, `algorithm/iterative.rs` | Existing signatures, all 82 existing tests and oracle consumers unchanged; exact counters/float bits unchanged. No compact imports. |
-| Dependency, P4-owned | Accepted view, indexed physical key/adjacency accessors and generation construction/tests | Independently reviewed contract for bounded effective membership and snapshot pinning. Not part of algorithm commit. |
-| 2. CSR source | New `src/property_graph/engine/algorithm_csr.rs`; one test-only module declaration in `src/property_graph/algorithms.rs` | Base and overlay source contract tests first; no public selection/serving switch. |
-| 3. Parity evidence | New `src/property_graph/engine/algorithm_csr/tests.rs` and private instrumentation there | Full matrix, independent expected results, real fail-first evidence; existing fixtures/tests unchanged. |
-| 4. Documentation | This file and the two current status locations | Record actual evidence and residual limitations, no invented qualification. |
+| Dependency, P4-owned plus authorized test seam | Accepted view and indexed physical key/adjacency accessors; algorithm commit 2a adds only the approved test construction seam | Independently reviewed contract for bounded effective membership and snapshot pinning. No production view behavior is changed by commit 2a. |
+| 2. CSR source (commit `6386b86e`) | New `src/property_graph/engine/algorithm_csr.rs`; test-only module declaration in `src/property_graph/algorithms.rs` | Two base/overlay source-contract tests; no public selection/serving switch. |
+| 3. Parity evidence (commit `594d492e`) | Test-only module declaration in `algorithm_csr.rs`; new `algorithm_csr/tests.rs` | Four parity tests, 390 comparisons/600 source executions, independent cycle expectations, and one killed/restored adjacency-direction mutant; existing test/fixture/oracle files unchanged. |
+| 4. Documentation (this commit) | This file and the two current status locations | Record actual evidence and residual limitations, no invented qualification. |
 
-No ownership of compact overlay/view/framing, feed/change/memory, loader,
+Except the narrowly authorized test-only commit 2a, no ownership of compact
+overlay/view/framing, feed/change/memory, loader,
 format/records/directory, server, proto, OpenAPI, site, CLI or bindings.
 P4 must own even the two minimal accessors; algorithm code only consumes them.
 Risks: hidden-entry accounting, late weights, source lifetime leakage,
@@ -347,30 +356,38 @@ reviewed bounded key-lookup and adjacency accessor pair. If P4 cannot supply the
 implementation stays blocked; budgets are not expanded and rows are not materialized.
 No gate, policy or activation changes.
 
-| Open decision | Recommended default / consequence |
+Coordinator ownership amendment: separate commit 2a is authorized to expose
+`view` only under its existing `cfg(test)`, declare `view::history`, and add
+`view/history.rs::pinned_views` using the real encode/decode and overlay
+snapshot path for parity fixtures; it authorizes no other `src/compact/**`
+change and is present in the local history.
+
+| Approved decision | Approved default / consequence |
 |---|---|
-| Exact claim versus reclamation | Approve the retained-record equivalence precondition, not merely visible-graph equivalence. Otherwise strict budget/truncation parity is blocked; do not alter resident charges or checkpoint reclamation policy. |
+| Exact claim versus reclamation | Retained-record equivalence is the approved precondition, not merely visible-graph equivalence. Otherwise strict budget/truncation parity is blocked; do not alter resident charges or checkpoint reclamation policy. |
 | Real-clock byte identity | Compare fixed logical check schedules; exclude elapsed time as already documented. Unconditional real-time identity cannot be promised. |
-| Candidate view acceptance | Require separate P4 acceptance/integration and bounded accessor review before commit 2. Resident seam can proceed after this design is accepted. |
-| P4 physical access versus shared visibility wording | Confirm the internal accounting accessor is not a user-visible read; preserve expiry-before-return for ordinary reads and apply algorithm visibility after metering. No shared-contract edit is authorized here. |
-| Test-only inclusion ownership | Approve the single module declaration in `algorithms.rs` to keep compact imports out of the standalone engine; all adapter implementation remains in the new engine-directory file. |
-| Generation indexing | P4 supplies bounded key lookup and effective ordered adjacency, including tombstone-heavy rows, off the read path. If unavailable, block CSR implementation; do not expand algorithm budgets or materialize rows. |
+| Candidate view acceptance | Approved and integrated in P4; the view and bounded accessors prerequisite was satisfied before commit 2. This does not qualify or activate serving. |
+| P4 physical access versus shared visibility wording | The internal accounting accessors are crate-private, not user-visible reads; ordinary reads keep expiry-before-return and algorithm visibility is applied after metering. No shared-contract edit was authorized. |
+| Test-only inclusion ownership | Approved: the `algorithms.rs` test declaration keeps compact imports out of the standalone engine; adapter code stays under `src/property_graph/engine/`. Commit 2a separately supplies only the test construction seam described above. |
+| Generation indexing | P4 integrated bounded key lookup and effective ordered adjacency. This source consumes those accessors without expanding budgets or materializing rows. |
 | T selector | Preserve today's T=None algorithm behavior, including calls on an as-of GraphRef; historical analytics requires a separately reviewed API decision. |
 
 | Documentation / code mismatch found | Treatment in this candidate |
 |---|---|
 | Gap 5:37 requests a storage-neutral adapter; baseline has direct Graph reads | Proposed private Source, no claim of completion. |
 | Projection-only seam suggested by extraction shape | Refuted by seed/personalization resolution and late path/PageRank property reads, inventory above. |
-| Candidate view.rs:210 scans nodes for key; :336 scans for due; :355-400 allocates set/Vec and filters visibility | Cannot use directly for budget parity; require two P4 additions and conservative due hint. |
+| Candidate view.rs:210 scans nodes for key; :336 scans for due; :355-400 allocates set/Vec and filters visibility | Those candidate methods were not used; accepted P4 bounded accessors supersede key/adjacency reads. No test here measures backing-record visits or allocations. |
 | Shared contract:294-296 says deletes and expiry apply before a candidate leaves an accessor | Internal physical accounting needs coordinator confirmation; ordinary read accessor semantics stay untouched. |
 | Broad temporal read availability versus algorithm wrapper | `algorithms.rs:395-444` forwards C but not T; preserve physical ordinary-record properties, not segment-selected properties. |
 | Gap 5 coverage says 10 S3 engine / 7 adapter tests | Baseline source has 17 / 8 after later regressions; full counts above are source-inspected, not execution evidence. |
 | P4:309 says codec not wired to framing/checkpoint reads, while P4 opening status and compact contract:351-376 describe accepted guarded framing | Older paragraph is stale; this design relies on neither activation nor a production compact executor. |
 
-Unverified: proposed Rust signatures have not been compiled; matrix counts are
-planned executions, not passing results; bounded P4 accessors do not exist in
-the inspected candidate; candidate tests were read, not run; cross-platform
-float identity, runtime parity and memory/performance qualification are not
-established. Phase-1 validation is documentation checks only.
+Unverified: the full planned matrix, exhaustive budget sweeps, remaining
+fail-first mutations, backing-record/allocation bounds, cross-platform float
+identity, runtime parity and memory/performance qualification are not
+established. The source-call counters do not observe internal index or overlay
+work. The tests vary Cargo test-harness concurrency, not algorithm-level worker
+count. Phase 2 checks validate the implemented source and fixtures only; they
+do not establish serving, activation, or release qualification.
 All new test modules, test functions and instrumentation helpers are private;
 there is no new persisted request, fixture schema, format tag or public item.

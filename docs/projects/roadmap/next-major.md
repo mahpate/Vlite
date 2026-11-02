@@ -244,8 +244,8 @@ accepted and integrated, with no production caller. This decoded
   also unreleased. Their incomplete results may retain the last full iteration
   or sweep, never a partial one. S4 sampled betweenness is implemented, reviewed
   and integrated with independent reference fixtures; interrupted computation
-  retains only completed sources. S4 is also unreleased. CSR parity and serving
-  exposure remain separate work; the private, unreleased [CSR adapter](gap5-csr-adapter.md) has an accepted design. Its first slice, the resident source seam, is independently accepted and integrated (private, unreleased); the CSR source/parity candidate is under follow-up for its assigned construction-order and budget evidence. The separately accepted P4 visit-counter seam supports that work; the candidate is not yet accepted.
+  retains only completed sources. S4 is also unreleased. CSR activation and serving
+  exposure remain separate work; the private, unreleased [CSR adapter](gap5-csr-adapter.md) has an accepted design. Its resident seam, P4 view/accessors, test-only CSR source and parity evidence (390 result comparisons, 600 source executions) are independently accepted and integrated. This evidence is test-only; it is not qualification or activation.
 - **Speed P5, filters:** safe in-memory summaries and visibility tracking,
   including exact-planner fallback, are implemented, independently reviewed
   and integrated, but unreleased ([plan](p5-filters-and-serving.md)).
