@@ -241,7 +241,12 @@ Local numbers below show direction only (see rules).
   [KV and TTL serving](serving-kv-ttl-contract.md) contract specifies KV
   routes, fenced leases, and TTL and change-feed events; its lease ledger is a
   storage-format change that needs owner approval and P2. It is a reviewed
-  specification, not an implemented capability.
+  specification, not an implemented capability. The
+  [precision serving](serving-precision-contract.md) contract specifies the
+  per-collection float16 create and inspection surfaces on REST, gRPC, MCP and
+  the offline CLI; every explicit-precision request is refused while the
+  storage gate stays closed. It is a reviewed specification awaiting owner
+  decisions, not an implemented capability.
 - **Further design proposals:** [agent memory](gap1-agent-memory.md) defines
   the embedded operations and their prerequisites; [scale-out](scale-out.md)
   compares branching, object storage and replication. Both received source
