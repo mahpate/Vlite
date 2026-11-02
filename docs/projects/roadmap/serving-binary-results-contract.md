@@ -10,8 +10,8 @@ No policy, gate, default or release criterion changes here.
 ## 1. Scope and requirements
 
 Choose **protobuf over HTTP**, one bounded unary response, for P5 delivery
-item (5), approved binary serving. This resolves the choice in
-[P5 F7](p5-filters-and-serving.md#f7-binary-responses); it does not replace the
+item (5), approved binary serving. This specifies only the HTTP encoding choice in
+[P5 F7](p5-filters-and-serving.md#f7-binary-responses), not all of F7; it does not replace the
 [provider/graph serving contract](serving-contract.md).
 Only `POST /v1/search` and `POST /v1/collections/{collection}/search` participate.
 Non-goals: binary requests, Arrow, streaming batches, record projection,
@@ -23,14 +23,16 @@ No performance or encoded-size advantage is asserted.
 2. **BR-2:** use the identical authorized search execution and ordered results;
    never requery, rerank, round an ID or sort during serialization.
 3. **BR-3:** preserve vector distances, hybrid scores and optional leg values,
-   plus explain counters and nullable plan, without a JSON round-trip.
+   plus explain counters and nullable plan, without a JSON round-trip for supported
+   modes; reject custom rerank explicitly rather than drop its fields.
 4. **BR-4:** emit exactly one complete, versioned protobuf message under the
    limits below, or an explicit JSON error before committing success headers.
 5. **BR-5:** bounded independent decoders reject malformed/truncated responses;
    never return a prefix, partial hits, synthesized zeros for absent optionals,
    or an automatic JSON retry.
 6. **BR-6:** retain authorization, tenant isolation, admission, audit, metrics,
-   request IDs, expiry and cancellation semantics of the JSON path.
+   request IDs and expiry of the JSON path. Add no cancellation token or deadline;
+   a disconnect does not cancel the database worker.
 7. **BR-7:** HTTP clients remain JSON by default; embedded bindings, MCP and CLI
    gain no transport negotiation. Existing gRPC messages remain wire-compatible.
 8. **BR-8:** independently accepted oracle, encoder, HTTP and client slices
@@ -43,21 +45,24 @@ Evidence keys identify existing behavior only; proposed support follows in later
 | Key | Current behavior | Verified evidence |
 |---|---|---|
 | E1 | Both search handlers accept JSON and return `Json<Value>`; no Accept extractor or binary selection in this path | `src/server.rs:2740-2757,3058-3080` |
-| E2 | Vector hits expose decimal-string IDs and numeric distances; hybrid hits expose score, nullable distance/BM25 and leg ranks | `src/server.rs:2760-2789,3007-3016`; typed hybrid source: `src/hybrid.rs:85-98` |
-| E3 | Explain adds seven counters and plan (null without an auto plan); plan has optional estimate/index field | `src/server.rs:2719-2737,3072-3079`; `src/stats.rs:40-62` |
-| E4 | Search k ceiling is 10,000; rerank has separate validation; execution and observation are shared | `src/server.rs:61,2645-2667,2688-2690,3083-3109,3189-3225` |
-| E5 | gRPC Search uses shared search core; protobuf has uint64 IDs, double distances, separate hybrid hits | `src/server/grpc.rs:1066-1079,1118-1123,1159-1199`; `proto/vlite/v1/vlite.proto:263-295` |
-| E6 | OpenAPI legacy search documents JSON success; named search has a description-only 200 | `src/openapi.json:118,59` |
+| E2 | Vector hits expose decimal-string IDs and numeric distances; hybrid hits expose score, nullable distance/BM25 and leg ranks | `src/server.rs:2760-2789,3015-3025`; typed hybrid source: `src/hybrid.rs:85-98` |
+| E3 | Explain adds seven counters and plan (null without an auto plan); plan has optional estimate/index field | `src/server.rs:2718-2738,3072-3079`; `src/stats.rs:40-62` |
+| E4 | Search k ceiling is 10,000; rerank has separate validation; execution and observation are shared | `src/server.rs:61,2647-2672,2688-2690,3083-3109,3189-3225` |
+| E5 | gRPC Search uses shared search core; protobuf has uint64 IDs, double distances, separate hybrid hits | `src/server/grpc.rs:1066-1079,1118-1123,1159-1195`; `proto/vlite/v1/vlite.proto:263-292` |
+| E6 | OpenAPI legacy search documents JSON success; collection-route search has a description-only 200 | `src/openapi.json:118,59` |
 | E7 | HTTP JavaScript, .NET and Python transports ask for JSON and parse JSON | `clients/javascript/index.js:123-160`; `clients/dotnet/VLite.Client/Client.cs:54-92`; `clients/python/vlite_client/__init__.py:692-708` |
 | E8 | Node/Python embedded search calls the local operation bridge, not HTTP; MCP calls the database and emits JSON; shell prints JSON | `bindings/node/index.js:221-231`; `bindings/python/vlite_embedded/__init__.py:250-264`; `src/bin/vlite-mcp.rs:512-555`; `src/bin/vlite-shell.rs:197-219` |
 | E9 | HTTP auth/rate limits precede handlers; response carries request ID/no-store; request observation includes denial audit | `src/server.rs:1117-1183,1203-1298` |
 | E10 | Collection opening checks qualified name before existence, then lineage/ID binding; wildcard grants remain ownership-bounded | `src/server.rs:1751-1766`; `src/server/credentials.rs:141-169`; `src/server/tenants.rs:462-466` |
 | E11 | Errors use the JSON Error envelope and attach an ErrorCode for observation | `src/server.rs:1407-1422` |
+| E12 | Blocking database work retains its permit after client disconnect; search returns to the response adapter without a cancellation/deadline parameter | `src/server.rs:337-339,381-390,3084-3091,3071-3079` |
 
 Coverage is limited to these inspected surfaces, not an ecosystem-wide assertion.
 The current hybrid REST path materializes JSON values [E2]; implementation must
 retain typed hybrid hits until the final JSON or protobuf adapter. Preserve
 existing gRPC conversion and separate rerank defaults [E5], not silently unify them.
+The current gRPC candidate default is 4*k, versus REST max(k,50)
+(`src/server/grpc.rs:1083-1094`; `src/server.rs:2658-2662`).
 
 ## 3. HTTP negotiation and failure contract
 
@@ -79,17 +84,20 @@ before executing search or lazy index maintenance. Preserve existing failure
 precedence for invalid body/shape and forbidden collection. Share that preflight
 with execution, not a second query or an alternate authorization implementation.
 
-Combine repeated Accept fields as a comma-separated list. Maximum combined value:
-8,192 bytes and 64 ranges; exceeding either gives the 431 below.
+Combine repeated Accept fields as a comma-separated list. Negotiation parsing
+is bounded at 8,192 combined bytes and 64 ranges. For empty, malformed or
+oversized Accept, skip negotiation and serve JSON exactly as today [E1]:
+no new 400 or 431. This does not bypass existing HTTP-stack header limits,
+authentication, request validation, admission or search errors.
 Parse HTTP media ranges, quoted parameter values and qvalues (0..1, at most
-three decimal places); reject malformed syntax, duplicate q or duplicate media
-parameters with 400. Type/subtype and parameter names are case-insensitive.
-Omitted q means 1. An empty Accept list admits no representation; ignore empty
-comma-list elements, but reject malformed nonempty elements.
+three decimal places); malformed syntax, duplicate q or duplicate media
+parameters triggers that JSON behavior. Type/subtype and parameter names are
+case-insensitive. Omitted q means 1. Ignore empty comma-list elements; a list
+with no nonempty elements skips negotiation.
 No sniffing, filename, query argument or request-body format selector.
 
-- JSON candidate: `application/json`, `application/*` or `*/*`, with no media
-  parameters. Missing Accept is equivalent to `*/*`.
+- JSON candidate: `application/json`, `application/*` or `*/*`; media parameters
+  other than q are ignored. A missing Accept is `*/*`.
 - Binary candidate: only an explicit `application/vnd.vlite.search+protobuf`
   range, with no media parameter other than optional `version`.
   Absent version means 1; `version=1` and `version="1"` mean 1. All other
@@ -99,7 +107,7 @@ No sniffing, filename, query argument or request-body format selector.
   global wildcard); for binary choose explicit version=1 over versionless.
   At equal specificity use the lowest q among duplicates, including zero.
   A more-specific q=0 vetoes a wildcard. Binary never inherits a wildcard q.
-  Ignore unknown media parameters as nonmatching ranges; parameters after q
+  Only for binary, unknown media parameters make the range nonmatching; parameters after q
   are Accept extensions and do not select a schema.
 - Pick the candidate with highest effective q greater than zero. Ties choose
   JSON. If no candidate remains and a positive explicit binary range requests
@@ -110,6 +118,8 @@ No sniffing, filename, query argument or request-body format selector.
 | Accept value | Outcome |
 |---|---|
 | absent; `*/*`; `application/*` | JSON |
+| `application/json; charset=utf-8` | JSON |
+| empty; malformed (for example `application/json;q=bad`); over 8192 bytes or 64 ranges | Skip negotiation; current JSON behavior |
 | `application/vnd.vlite.search+protobuf` | Binary v1 |
 | `application/json, application/vnd.vlite.search+protobuf;version=1` | JSON tie |
 | `application/json;q=0.4, application/vnd.vlite.search+protobuf;version=1;q=0.9` | Binary v1 |
@@ -124,10 +134,9 @@ All errors, even when Accept excludes JSON, use
 
 | HTTP | CODE | MESSAGE |
 |---|---|---|
-| 400 | `invalid_accept` | `invalid Accept header` |
-| 431 | `accept_too_large` | `Accept exceeds 8192 bytes or 64 ranges` |
 | 406 | `unsupported_result_version` | `supported binary result version is 1` |
 | 406 | `not_acceptable` | `supported results are application/json and application/vnd.vlite.search+protobuf;version=1` |
+| 406 | `binary_unsupported_mode` | `binary results do not support this request mode` |
 | 422 | `binary_result_limit` | `binary result exceeds 10000 hits, 1048576 bytes or a 1024-byte plan string` |
 | 500 | `binary_result_invalid` | `search result cannot be encoded as binary version 1` |
 
@@ -195,7 +204,7 @@ message SearchResults {
 }
 ```
 
-The HTTP body starts at byte 0 with SearchResults, ends at exactly Content-Length,
+The HTTP body starts at byte 0 with SearchResults, ends at the body boundary,
 and has no outer header, magic, checksum, alignment padding, trailer or flags word.
 Version is required semantically and equals 1; kind is required and is 1 or 2.
 Reserved tags are unavailable, including for payload/metadata/vectors; they are
@@ -204,7 +213,7 @@ No tag or enum value may be reused with a different meaning.
 
 | Field encoding | Exact byte rule |
 |---|---|
-| Tag | Minimal unsigned varint of `(field_number << 3) | wire_type` |
+| Tag | Minimal unsigned varint of `(field_number << 3) \| wire_type` |
 | uint32/uint64/enum | Wire type 0; base-128 little-endian groups, high bit continuation; at most 5/10 bytes; final byte must fit the declared width |
 | double | Wire type 1; eight bytes IEEE-754 binary64, least-significant byte first; not native-endian casts |
 | string/message | Wire type 2; minimal varint byte length followed by exactly that many bytes; strings strict UTF-8 |
@@ -221,6 +230,15 @@ Preserve finite double bits, including signed zero.
 Hybrid ranks, when present, are positive uint32; presence of distance equals
 presence of vector_rank, and presence of bm25 equals presence of text_rank.
 Preserve absence as JSON null in the normalized response.
+
+Binary v1 carries no `rerank_score` or `ranking`; a binary-v1 request that selects
+custom rerank returns 406 `binary_unsupported_mode`
+("binary results do not support this request mode") before execution.
+These fields are approved future additions to JSON, not current implemented
+search fields (`docs/projects/roadmap/serving-contract.md:191,200-201,218`).
+Apply this rejection after selecting binary and before provider work; a JSON
+selection retains the separately approved custom-rerank contract. Never silently
+drop those fields or treat the unsupported mode as a parity success.
 
 Kind 1 allows only hits; kind 2 only hybrid_hits. Empty lists are legal, including
 k=0; kind reflects the requested result family even with no matches.
@@ -256,14 +274,21 @@ envelope is invalid (duplicate version/kind), never a second result set.
 These are a strict v1 profile over protobuf: a generic generated decoder alone
 is insufficient validation. Do not adopt its merge/last-field-wins behavior.
 Unknown fields require a new negotiated version, not speculative skipping.
+Decoders reject any violation of every invariant in this section, including
+nonfinite doubles, zero ranks, broken leg pairs, duplicate IDs, invalid strategy,
+empty reason and plan without stats; these checks are not encoder-only duties.
 
 Prepare/validate the full frame and release database borrows before 200.
-Retain existing admission, check cancellation before sizing, at least every
-64 hits during sizing/encoding, and immediately before headers. Disconnect
-discards the frame; no background retry. Do not introduce a new search deadline.
+Retain existing admission. No cancellation token or deadline exists (a disconnect
+only drops the response future) and v1 adds none [E12]. Encode after `search_core`
+returns, as JSON does; a dropped response future discards the frame. The blocking
+database worker may finish and retains its permit; do not claim it was cancelled.
 After headers, a socket failure terminates the body/connection; do not append
-JSON or send a success-shaped prefix. Clients require exactly N bytes, valid
-framing and expected representation before exposing any hit. HTTP truncation,
+JSON or send a success-shaped prefix. A present Content-Length must equal the
+body length; an absent one is accepted only if the body is <= 1,048,576 bytes
+and strictly framed. Clients enforce the byte cap while reading, regardless of
+header presence, and require valid framing and expected representation before
+exposing any hit. HTTP truncation,
 length mismatch or malformed frame is local `binary_result_decode`; a body over
 the cap is local `binary_result_limit`; unrecognized response media/version is
 local `unsupported_result_version`. These local codes carry no HTTP status
@@ -295,8 +320,14 @@ Offsets 2..3 select HYBRID; offsets 4..5 are present empty stats.
 Normalized JSON has empty hits, all seven counters equal to 0 and plan=null;
 it is not equivalent to A or to omitting stats.
 
+**D. One all-default vector hit, ID 0, distance +0.0 (6 bytes):**
+`08 01 10 01 1a 00`.
+The hit's scalar defaults are omitted, but its repeated message element is not:
+`1a 00` is a present empty VectorHit, not an empty hits list.
+Normalized JSON: `{"hits":[{"id":"0","distance":0.0}]}`, distance bits all zero.
+
 In the oracle slice, commit hand-authored `.hex` plus expected normalized `.json`
-pairs under `tests/fixtures/serving_binary/`, including A/B/C, maximum u64,
+pairs under `tests/fixtures/serving_binary/`, including A/B/C/D, maximum u64,
 signed zero, all hybrid optionals, absent versus present zero, UTF-8 index_field,
 all counters and each plan strategy. Expected numeric floats also record their
 64-bit hexadecimal representation so JSON parsing cannot hide bit drift.
@@ -316,10 +347,10 @@ the existing wire and result behavior; run old/new client compatibility checks.
 
 Only the later HTTP slice may edit `src/openapi.json`. Exact proposed delta:
 
-- At `/v1/search` post and `/v1/collections/{c}/search` post [E6], add optional
-  header parameter `Accept`, string, default `application/json`, with the
-  algorithm/examples from section 3. Keep path spelling `{c}` in OpenAPI.
-- Both 200 responses retain JSON; named 200 gains the same JSON response
+- At `/v1/search` post and `/v1/collections/{c}/search` post [E6], describe
+  section 3 negotiation in the 200 content map, not an Accept header parameter.
+  Keep path spelling `{c}` in OpenAPI.
+- Both 200 responses retain JSON; collection-route 200 gains the same JSON response
   schema as legacy. Add content key
   `application/vnd.vlite.search+protobuf;version=1` with
   `{"schema":{"type":"string","format":"binary"}}`; description names
@@ -328,8 +359,11 @@ Only the later HTTP slice may edit `src/openapi.json`. Exact proposed delta:
 - Both 200 responses document `Vary` (string, example `Accept`) and binary
   `Content-Length` (integer, minimum 4, maximum 1048576); length is required
   for binary only. Document binary no-content-encoding.
-- Add 406, 431 and 500 Error responses and extend 400/422 descriptions with
-  the exact codes/messages in section 3; retain every existing error mapping.
+- Add route-local 400, 406, 422 and 500 Error responses to both operations;
+  leave shared components unchanged. Keep existing body-validation 400/422
+  behavior and describe section 3 codes/messages only in route-local responses.
+  No new 431 response: oversized Accept skips negotiation under section 3.
+  Retain every existing error mapping.
   Document Vary and JSON error content, including when Accept excludes JSON.
   No new request properties, paths, security schemes or gRPC field allocations.
 
@@ -337,7 +371,7 @@ Only the later HTTP slice may edit `src/openapi.json`. Exact proposed delta:
 
 Reuse middleware and `search_core`, not a binary-specific engine entry point [E1, E4, E9].
 Search scope, read-only restrictions on lazy approximate builds and rerank
-validation stay identical (`src/server.rs:944-1020,2645-2690`).
+validation stay identical (`src/server.rs:944-1020,2647-2690`).
 Use existing expiry/snapshot behavior, never a post-search fetch for projection.
 Collection names remain local names at the API boundary, qualified once using
 the principal, then checked by name before resolution and lineage/ID after [E10].
@@ -373,18 +407,21 @@ JavaScript `search(request, {resultFormat = "json"} = {})` and
 `searchDetailed(request, {resultFormat = "json"} = {})`;
 Python `search(request, *, result_format="json")` and
 `search_detailed(request, *, result_format="json")`;
-.NET retain current overloads and add
-`SearchDetailedAsync(object request, SearchResultFormat resultFormat, CancellationToken cancellation = default)`,
+.NET retain current methods and add the distinctly named
+`SearchDetailedWithFormatAsync(object request, SearchResultFormat resultFormat, CancellationToken cancellation = default)`,
 with enum Json/BinaryV1. Leave .NET `SearchAsync` JSON-only: its existing
 `Hit.Distance` is nonnullable (`clients/dotnet/VLite.Client/Client.cs:27,159-162`),
 so it cannot preserve absent hybrid distances. A nullable typed-hit redesign
 is a separate compatibility decision, not a silent change in this slice.
+The distinct name preserves existing `SearchDetailedAsync(request, default)`
+calls without overload ambiguity.
 Scope these options to the two search routes, not the entire transport.
 Reject unknown option values locally. BinaryV1 sends only
 `Accept: application/vnd.vlite.search+protobuf;version=1`, not a JSON fallback.
 No automatic probe, downgrade, retry or change to auth/timeout/redirect policy.
 Check status first: non-2xx is the existing JSON error path; 2xx requires the
-requested content type/version, length and strict frame validation.
+requested content type/version and strict frame validation, with Content-Length
+handled as specified in section 4.
 
 Normalize to the existing public response shape, not generated protobuf objects:
 decimal-string IDs, hits array for search, hits/stats/nullable plan for detailed.
@@ -408,7 +445,7 @@ The future standard-library-only Python oracle
 `tests/serving_binary_oracle.py` independently reads tags, checked varints,
 little-endian doubles and bounded nested messages using `struct`, not generated
 protobuf bindings, Rust helpers or a production client decoder.
-Self-test must decode A/B/C to hand-authored expectations; prove that changing
+Self-test must decode A/B/C/D to hand-authored expectations; prove that changing
 an expected ID, double bits, nullability, kind or counter makes comparison fail;
 and reject deliberately malformed fixtures rather than accepting an empty answer.
 Run self-tests as part of the oracle invocation.
@@ -418,11 +455,15 @@ Run self-tests as part of the oracle invocation.
 | Goldens | Python accepts canonical manual fixtures; Rust produces identical bytes; supported SDKs normalize identically |
 | JSON parity | On a fixed clock/snapshot, same authorized execution supplies both encoders; compare ordered IDs, finite float bits, absent/null fields, counters and plan |
 | Modes | Exact, approximate, approximate_ready, auto, hybrid vector/text/both, exact/MMR rerank; preserve current validation and index errors |
+| Custom rerank | Binary selection returns 406 `binary_unsupported_mode` before search/provider work; JSON retains approved `rerank_score`/`ranking` behavior; no silent field loss |
 | Boundaries | k=0, 1, 10000 and 10001; empty matches; max u64; signed zero; exact byte cap and cap+1 via synthetic encoder values; per-string cap and cap+1 |
+| Empty element | D preserves one id=0, +0.0 hit via `1a 00`; distinguish empty list from present empty message, including JSON parity |
 | Negotiation | Every section 3 row; q=0 exclusions, duplicate ranges, repeated fields, quoted version, unsupported versions, malformed q, header/range ceilings |
 | Auth | Admin/read-only/scoped, missing/expired/revoked credential, wrong scope/lineage, recreated collection, other tenant, wildcard reach and legacy default |
+| Admission | Same credential 429/rate-limit and 503/busy behavior as JSON; no binary bypass or permit release on disconnect while database work continues |
+| Success headers | Content-Type/version, merged Vary, X-Request-ID, no-store, no Content-Encoding; server length equals body; client accepts absent length only with bounded strict framing |
 | Observation | JSON/binary success and failure increment matching counters/audits once; negotiation rejection has no search work; no sensitive log content |
-| Transport | Pre-header encode failure remains JSON; disconnect/deadline/cancel; short/long Content-Length, HTTP chunking inconsistent with contract, unexpected encoding/type/version; no partial output |
+| Transport | Pre-header encode failure remains JSON; client disconnect before and after headers; short/long or absent Content-Length, bounded chunked bodies, unexpected encoding/type/version; no partial output |
 | Compatibility | Old JSON clients/new server unchanged; binary client/old JSON-only server fails explicitly; old gRPC generated clients/new server unchanged |
 
 Mutation corpus: each byte truncation; flipped tag/type/version/kind; duplicate
@@ -450,7 +491,7 @@ integration. File ownership below is future work only.
 | P5-5A binary contract | None | This document only | Approve schema, negotiation, errors, bounds and owner decisions; confirm OpenAPI/proto unchanged |
 | P5-5B binary oracle | 5A | `tests/serving_binary_oracle.py`, `tests/fixtures/serving_binary/` | Manual bytes/answers, positive and negative self-tests, mutations and bounded decode independently checked |
 | P5-5C typed encoder | 5B | `proto/vlite/serving/v1/results.proto`, new `src/server/binary_results.rs`, `src/server.rs` typed Hits/refactor, `src/server/grpc.rs` adapter, required schema build wiring | Exact proposed schema; typed JSON parity; cap-before-allocation; oracle byte equality; unchanged gRPC wire/rerank behavior |
-| P5-5D HTTP opt-in | 5C | `src/server.rs` negotiation/adapter, `src/openapi.json`, new `tests/server_binary_results.rs` | Section 5 diff only; header/error table, auth/tenant/audit parity, no search on rejection, full-frame-before-headers and cancellation verified |
+| P5-5D HTTP opt-in | 5C | `src/server.rs` negotiation/adapter, `src/openapi.json`, new `tests/server_binary_results.rs` | Section 5 diff only; header/error table, auth/tenant/audit/admission parity, no search on rejection, full-frame-before-headers and client-disconnect behavior verified |
 | P5-5E HTTP clients | 5D | `clients/javascript/`, `clients/python/`, `clients/dotnet/` implementation/types/tests and their search docs | All three decoders cross-check oracle; exact IDs/presence; defaults and existing signatures preserved; explicit failure on old server |
 | P5-5F serving qualification | 5E | Serving parity/fuzz tests, directly related public API/security/client docs and `site/api.html` | Full matrix, compatibility, sanitized observation, published contract agrees with schema/OpenAPI; no default/gate change |
 
@@ -459,6 +500,19 @@ client set as completion of 5E. Coordinate schema build wiring with its owner;
 do not add an RPC or pull unrelated graph/provider APIs into the same candidate.
 Major-release measurement remains outside these slices and follows the existing
 roadmap; accepting a codec is not acceptance of F7 qualification.
+
+### Requirement-to-test traceability
+
+| Requirement | Section 8 tests / acceptance evidence | Ledger owner |
+|---|---|---|
+| BR-1 | Negotiation, Compatibility, Success headers | P5-5D, P5-5E |
+| BR-2 | JSON parity, Modes, Auth | P5-5C, P5-5D |
+| BR-3 | Goldens, JSON parity, Empty element, Custom rerank | P5-5B, P5-5C, P5-5E |
+| BR-4 | Boundaries, Success headers, Transport | P5-5C, P5-5D |
+| BR-5 | Goldens, mutation corpus/fuzz, Transport | P5-5B, P5-5E, P5-5F |
+| BR-6 | Auth, Admission, Observation, Transport | P5-5D, P5-5F |
+| BR-7 | Compatibility, Negotiation | P5-5C, P5-5E |
+| BR-8 | Independently accepted slice checklists and full matrix | P5-5A through P5-5F |
 
 ## 10. Owner decisions and open items
 
@@ -470,10 +524,16 @@ each decision rather than imply approval from this document.
 | Encoding | HTTP protobuf or Arrow | HTTP protobuf v1 as specified; defer Arrow/projection to a separately versioned design |
 | Schema identity | Extend existing gRPC SearchResponse or independent HTTP envelope | Independent `vlite.serving.v1.SearchResults`; no gRPC tag/default changes |
 | Negotiation | Strict binary opt-in or automatic binary preference | Strict opt-in with JSON ties/default and explicit 406 codes |
+| Remaining Accept rejection | Ignore all explicit exclusions as today or enforce approved unsupported-type/version rejection | Recommend section 3's 406 for well-formed unsupported/excluded representations; JSON media parameters ignored, empty/malformed/oversized Accept skips negotiation; no new Accept 400/431 |
+| Custom rerank | Extend binary v1 or reject unsupported mode explicitly | Recommend 406 `binary_unsupported_mode` before execution; do not drop approved JSON `rerank_score` or `ranking` |
 | Limits/failures | Full bounded unary error or partial/streamed output | 10000 hits, 1048576 total bytes, 1024 bytes per plan string; explicit 422/500; no prefix/fallback |
 | Decoder evolution | Permissive unknown-field merging or closed version profile | Closed canonical v1, new version for additions; keep generated decoders behind strict validation |
 | Client reach | Opt in all transports or three HTTP SDKs only | JavaScript/.NET/Python HTTP options above; embedded/MCP/CLI stay unchanged |
 | .NET typed hybrid output | Change nonnullable Hit or opt in detailed responses only | Detailed JsonElement binary support only; keep SearchAsync JSON-only until a separate typed compatibility decision |
+
+F7 gRPC auto/explain parity is not covered by P5-5A..5F and needs its own
+exact-schema design. The HTTP candidate does not defer or mark that approved
+work complete; its field/tag review and acceptance remain separate.
 
 Open implementation items: independently verify the canonical protobuf negative-zero
 behavior of the selected Rust generator; if it omits negative zero, encode that
