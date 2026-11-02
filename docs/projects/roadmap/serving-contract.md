@@ -404,6 +404,9 @@ to the live-handler slice.
 
 Delivery: first approve schemas, defaults and auth rules; then independently
 accept this shared admin provider registry and bounded adapters candidate.
+Accepted 2026-11-02 and integrated locally (`7ac5e088`..`d3fe69b8`, inert, no
+handler wiring): Windows and WSL matrices, six coordinator fault injections all
+caught, and an independent second-machine matrix (58 commands) passed.
 Next wire REST/gRPC embedding/custom ranking and Python types; then graph unary parity and generated clients.
 Last add parity/auth/compatibility tests and update API/MCP/security/graph references. No benchmark campaign is needed.
 Risks: external data disclosure, unsafe endpoint resolution, tenant secret mixing, lock-held inference and score confusion.
