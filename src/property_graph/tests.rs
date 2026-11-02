@@ -424,6 +424,146 @@ fn attachments_require_live_records_without_expiry() {
 }
 
 #[test]
+fn write_batch_at_never_uses_a_clock_behind_the_wall_clock() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = graph_db(&dir.path().join("batch-clock-wall-floor.vlite"));
+    let wall = crate::current_time_ms();
+    let requested = wall - 10_000;
+    let expiry = wall - 5_000;
+    db.graph_mut("g")
+        .unwrap()
+        .write_batch_at(
+            &[
+                node("expired"),
+                GraphOp::SetNodeExpiry {
+                    key: "expired".into(),
+                    expires_at_ms: Some(expiry),
+                    expected: Expected::Any,
+                },
+                node("reclaim-trigger"),
+            ],
+            requested,
+        )
+        .unwrap();
+    assert!(
+        db.graph("g")
+            .unwrap()
+            .with_clock(requested)
+            .get_node("expired")
+            .unwrap()
+            .output
+            .is_none()
+    );
+}
+
+#[test]
+fn write_batch_at_clock_never_regresses_below_graph_clock() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = graph_db(&dir.path().join("batch-clock-monotonic.vlite"));
+    let wall = crate::current_time_ms();
+    let high = wall + 60_000;
+    let lower = wall + 30_000;
+    let expiry = lower + 5;
+    db.graph_mut("g")
+        .unwrap()
+        .write_batch_at(&[node("high-water")], high)
+        .unwrap();
+    db.graph_mut("g")
+        .unwrap()
+        .write_batch_at(
+            &[
+                node("expired"),
+                GraphOp::SetNodeExpiry {
+                    key: "expired".into(),
+                    expires_at_ms: Some(expiry),
+                    expected: Expected::Any,
+                },
+                node("reclaim-trigger"),
+            ],
+            lower,
+        )
+        .unwrap();
+    assert!(
+        db.graph("g")
+            .unwrap()
+            .with_clock(lower)
+            .get_node("expired")
+            .unwrap()
+            .output
+            .is_none()
+    );
+}
+
+#[test]
+fn memory_attachment_owner_hides_expired_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = graph_db(&dir.path().join("expired-attachment-owner.vlite"));
+    let now = crate::current_time_ms() + 60_000;
+    let expiry = now + 10;
+    let record = 7;
+    db.graph_mut("g")
+        .unwrap()
+        .write_batch_at(
+            &[
+                put(record),
+                node("owner"),
+                GraphOp::SetNodeExpiry {
+                    key: "owner".into(),
+                    expires_at_ms: Some(expiry),
+                    expected: Expected::Any,
+                },
+                attach("owner", record),
+            ],
+            now,
+        )
+        .unwrap();
+    assert_eq!(
+        db.memory_attachment_owner("default", record, expiry - 1)
+            .unwrap(),
+        Some(("g".into(), "owner".into()))
+    );
+    assert_eq!(
+        db.memory_attachment_owner("default", record, expiry)
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn graph_clock_high_water_mark_survives_across_batches() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = graph_db(&dir.path().join("batch-clock-high-water.vlite"));
+    let wall = crate::current_time_ms();
+    let high = wall + 60_000;
+    let expiry = wall + 30_000;
+    db.graph_mut("g")
+        .unwrap()
+        .write_batch_at(&[node("high-water")], high)
+        .unwrap();
+    db.graph_mut("g")
+        .unwrap()
+        .write_batch(&[
+            node("expired"),
+            GraphOp::SetNodeExpiry {
+                key: "expired".into(),
+                expires_at_ms: Some(expiry),
+                expected: Expected::Any,
+            },
+            node("reclaim-trigger"),
+        ])
+        .unwrap();
+    assert!(
+        db.graph("g")
+            .unwrap()
+            .with_clock(wall)
+            .get_node("expired")
+            .unwrap()
+            .output
+            .is_none()
+    );
+}
+
+#[test]
 fn ordinary_writes_keep_attached_records_and_touch_the_owning_graph() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("hooks.vlite");

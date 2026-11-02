@@ -2201,6 +2201,12 @@ mod tests {
         request
     }
 
+    fn distinct_request(id: &str, key: &str) -> RememberRequest {
+        let mut request = request(id, key);
+        request.items[0].content = format!("content-{id}");
+        request
+    }
+
     fn remember(db: &mut Database, request: &RememberRequest) -> RememberResult {
         MemoryMut::bind(db, "memory", None)
             .unwrap()
@@ -2243,6 +2249,26 @@ mod tests {
                     expected_revision: *expected_revision,
                 })
                 .collect(),
+        }
+    }
+
+    fn assert_memory_unchanged(db: &Database, key: &str, sequence: u64, revision: Option<u64>) {
+        assert_eq!(db.sequence, sequence);
+        assert_eq!(
+            db.graph("memory")
+                .unwrap()
+                .get_node(key)
+                .unwrap()
+                .output
+                .map(|node| node.revision),
+            revision
+        );
+    }
+
+    fn memory_evidence(id: &str, scope: &MemoryScope) -> MemoryEvidence {
+        MemoryEvidence {
+            id: id.into(),
+            scope: scope.clone(),
         }
     }
 
@@ -4780,6 +4806,1041 @@ mod tests {
         assert_eq!(
             fixture_error_name(&MemoryError::Storage(Error::GraphKeyExists)),
             "Storage"
+        );
+    }
+
+    #[test]
+    fn forget_rejects_tampered_scope_tuple() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("forget-scope.vlite"));
+        let scope = request("m", "seed").scope;
+        provision(&mut db, &scope);
+        remember(&mut db, &request("m", "seed"));
+        let scope_node = node(&db, &scope.key());
+        let mut properties = scope_node.properties.clone();
+        properties.insert("tuple".into(), MetadataValue::String("wrong-tuple".into()));
+        replace_properties(&mut db, scope_node, properties);
+        let key = memory_key(&scope.key(), "m");
+        let revision = node(&db, &key).revision;
+        let sequence = db.sequence;
+        let result = MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .forget(&forget_request(scope, "erase", 10, &[("m", 1)]));
+        assert!(matches!(result, Err(MemoryError::DigestCollision)));
+        assert_memory_unchanged(&db, &key, sequence, Some(revision));
+    }
+
+    #[test]
+    fn forget_receipt_expires_at_window_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("forget-expiry.vlite"));
+        let seed_a = distinct_request("a", "seed");
+        let scope = seed_a.scope.clone();
+        provision(&mut db, &scope);
+        remember(&mut db, &seed_a);
+        remember(&mut db, &distinct_request("b", "seed-b"));
+        let forget_a = forget_request(scope.clone(), "erase-a", 10, &[("a", 1)]);
+        let first = MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .forget(&forget_a)
+            .unwrap();
+        assert!(!first.replayed);
+        let receipt_key = forget_receipt_key(&scope.key(), "erase-a");
+        let receipt = node(&db, &receipt_key);
+        assert_eq!(string_property(&receipt, "expires_at_ms").unwrap(), "110");
+        let mut replay_before_expiry = forget_a.clone();
+        replay_before_expiry.now_ms = 109;
+        assert!(
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .forget(&replay_before_expiry)
+                .unwrap()
+                .replayed
+        );
+        let sequence = db.sequence;
+        let mut replay_at_expiry = forget_a;
+        replay_at_expiry.now_ms = 110;
+        let result = MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .forget(&replay_at_expiry);
+        assert!(matches!(result, Err(MemoryError::MissingMemory)));
+        assert_memory_unchanged(
+            &db,
+            &memory_key(&scope.key(), "b"),
+            sequence,
+            Some(node(&db, &memory_key(&scope.key(), "b")).revision),
+        );
+
+        let forget_b = forget_request(scope.clone(), "erase-b", 11, &[("b", 1)]);
+        MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .forget(&forget_b)
+            .unwrap();
+        let mut before_boundary = forget_b.clone();
+        before_boundary.now_ms = 110;
+        assert!(
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .forget(&before_boundary)
+                .unwrap()
+                .replayed
+        );
+        let sequence = db.sequence;
+        let mut at_boundary = forget_b;
+        at_boundary.now_ms = 111;
+        assert!(matches!(
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .forget(&at_boundary),
+            Err(MemoryError::MissingMemory)
+        ));
+        assert_eq!(db.sequence, sequence);
+    }
+
+    #[test]
+    fn forget_honours_deadline_ms() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("forget-deadline.vlite"));
+        let seed = request("m", "seed");
+        provision(&mut db, &seed.scope);
+        remember(&mut db, &seed);
+        let key = memory_key(&seed.scope.key(), "m");
+        let revision = node(&db, &key).revision;
+        let mut expired = forget_request(seed.scope.clone(), "erase", 10, &[("m", 1)]);
+        expired.deadline_ms = Some(10);
+        let sequence = db.sequence;
+        assert!(matches!(
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .forget(&expired),
+            Err(MemoryError::DeadlineExceeded)
+        ));
+        assert_memory_unchanged(&db, &key, sequence, Some(revision));
+        expired.deadline_ms = Some(11);
+        assert!(
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .forget(&expired)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn forget_rejects_attachment_on_memory_without_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("forget-stray.vlite"));
+        let seed = request("m", "seed");
+        provision(&mut db, &seed.scope);
+        remember(&mut db, &seed);
+        let record = seed_vector(&mut db, "stray");
+        let key = memory_key(&seed.scope.key(), "m");
+        db.graph_mut("memory")
+            .unwrap()
+            .write_batch(&[GraphOp::Attach {
+                node: key.clone(),
+                collection: "default".into(),
+                record,
+            }])
+            .unwrap();
+        assert_eq!(
+            db.graph("memory")
+                .unwrap()
+                .memory_node_attachments(&key)
+                .unwrap()
+                .len(),
+            1
+        );
+        let revision = node(&db, &key).revision;
+        let sequence = db.sequence;
+        assert!(matches!(
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .forget(&forget_request(seed.scope, "erase", 10, &[("m", 1)])),
+            Err(MemoryError::ForeignAttachment)
+        ));
+        assert_memory_unchanged(&db, &key, sequence, Some(revision));
+        assert!(db.get(record).unwrap().is_some());
+    }
+
+    #[test]
+    fn forget_rejects_attachment_in_second_collection() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("forget-second-collection.vlite"));
+        db.create_collection(
+            "aux",
+            crate::CollectionSpec {
+                dimensions: 2,
+                settings: crate::CollectionSettings::default(),
+            },
+        )
+        .unwrap();
+        let seed = request("m", "seed");
+        provision(&mut db, &seed.scope);
+        seed_vector(&mut db, "e");
+        let mut with_evidence = seed.clone();
+        with_evidence.items[0]
+            .evidence
+            .push(memory_evidence("e", &seed.scope));
+        MemoryMut::bind(&mut db, "memory", Some("default"))
+            .unwrap()
+            .remember(&with_evidence)
+            .unwrap();
+        let key = memory_key(&seed.scope.key(), "m");
+        let extra_record = 99;
+        db.graph_mut("memory")
+            .unwrap()
+            .write_batch(&[
+                GraphOp::Vector {
+                    collection: "aux".into(),
+                    mutation: crate::Mutation::Put {
+                        id: extra_record,
+                        vector: vec![0.0, 1.0],
+                        payload: b"foreign".to_vec(),
+                    },
+                },
+                GraphOp::Attach {
+                    node: key.clone(),
+                    collection: "aux".into(),
+                    record: extra_record,
+                },
+            ])
+            .unwrap();
+        assert_eq!(
+            db.graph("memory")
+                .unwrap()
+                .memory_node_attachments(&key)
+                .unwrap()
+                .len(),
+            2
+        );
+        let revision = node(&db, &key).revision;
+        let sequence = db.sequence;
+        assert!(matches!(
+            MemoryMut::bind(&mut db, "memory", Some("default"))
+                .unwrap()
+                .forget(&forget_request(seed.scope, "erase", 10, &[("m", 1)])),
+            Err(MemoryError::ForeignAttachment)
+        ));
+        assert_memory_unchanged(&db, &key, sequence, Some(revision));
+        assert!(db.get(evidence_record_id("e")).unwrap().is_some());
+        assert!(
+            db.collection("aux")
+                .unwrap()
+                .get(extra_record)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn forget_rejects_multi_evidence_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("forget-multi-evidence.vlite"));
+        let seed = request("m", "seed");
+        provision(&mut db, &seed.scope);
+        seed_vector(&mut db, "e");
+        let mut with_evidence = seed.clone();
+        with_evidence.items[0]
+            .evidence
+            .push(memory_evidence("e", &seed.scope));
+        MemoryMut::bind(&mut db, "memory", Some("default"))
+            .unwrap()
+            .remember(&with_evidence)
+            .unwrap();
+        let key = memory_key(&seed.scope.key(), "m");
+        let mut memory = node(&db, &key);
+        let mut properties = memory.properties.clone();
+        properties.insert(
+            "evidence".into(),
+            MetadataValue::String(format!("{};{}", hex(b"e"), hex(b"e2"))),
+        );
+        replace_properties(&mut db, memory.clone(), properties);
+        memory = node(&db, &key);
+        let revision = memory.revision;
+        let sequence = db.sequence;
+        assert!(matches!(
+            MemoryMut::bind(&mut db, "memory", Some("default"))
+                .unwrap()
+                .forget(&forget_request(seed.scope, "erase", 10, &[("m", 1)])),
+            Err(MemoryError::InvalidBundle)
+        ));
+        assert_memory_unchanged(&db, &key, sequence, Some(revision));
+        assert!(db.get(evidence_record_id("e")).unwrap().is_some());
+    }
+
+    #[test]
+    fn forget_ignores_foreign_has_content_edge_into_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("forget-inbound-content.vlite"));
+        let seed = request("m", "seed");
+        provision(&mut db, &seed.scope);
+        remember(&mut db, &seed);
+        let key = memory_key(&seed.scope.key(), "m");
+        db.graph_mut("memory")
+            .unwrap()
+            .write_batch(&[
+                GraphOp::CreateNode {
+                    key: "outside".into(),
+                    labels: vec!["Outside".into()],
+                    properties: Metadata::new(),
+                },
+                GraphOp::CreateEdge {
+                    key: None,
+                    source: "outside".into(),
+                    relationship: "HAS_CONTENT".into(),
+                    destination: key.clone(),
+                    properties: Metadata::new(),
+                },
+            ])
+            .unwrap();
+        let result = MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .forget(&forget_request(seed.scope, "erase", 10, &[("m", 1)]))
+            .unwrap();
+        assert_eq!(result.deleted, vec!["m"]);
+        assert!(
+            db.graph("memory")
+                .unwrap()
+                .get_node(&key)
+                .unwrap()
+                .output
+                .is_none()
+        );
+        assert!(
+            db.graph("memory")
+                .unwrap()
+                .get_node("outside")
+                .unwrap()
+                .output
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn forget_deleted_order_matches_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("forget-order.vlite"));
+        let seed = distinct_request("a", "seed");
+        provision(&mut db, &seed.scope);
+        remember(&mut db, &seed);
+        remember(&mut db, &distinct_request("b", "seed-b"));
+        let forget = forget_request(seed.scope, "erase", 10, &[("b", 1), ("a", 1)]);
+        let first = MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .forget(&forget)
+            .unwrap();
+        assert_eq!(first.deleted, vec!["b", "a"]);
+        assert!(!first.replayed);
+        let replay = MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .forget(&forget)
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.deleted, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn forget_reuses_key_after_receipt_expiry() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("forget-reuse-key.vlite"));
+        let seed = distinct_request("a", "seed");
+        provision(&mut db, &seed.scope);
+        remember(&mut db, &seed);
+        remember(&mut db, &distinct_request("b", "seed-b"));
+        let first = forget_request(seed.scope.clone(), "reusable", 10, &[("a", 1)]);
+        MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .forget(&first)
+            .unwrap();
+        let receipt_key = forget_receipt_key(&seed.scope.key(), "reusable");
+        let old_receipt_revision = node(&db, &receipt_key).revision;
+        let second = forget_request(seed.scope.clone(), "reusable", 110, &[("b", 1)]);
+        let result = MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .forget(&second)
+            .unwrap();
+        assert!(!result.replayed);
+        assert_eq!(result.deleted, vec!["b"]);
+        let receipt = node(&db, &receipt_key);
+        assert!(receipt.revision > old_receipt_revision);
+        assert_ne!(
+            string_property(&receipt, "digest").unwrap(),
+            forget_request_digest(&first)
+        );
+        let replay = MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .forget(&forget_request(seed.scope, "reusable", 111, &[("b", 1)]))
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.deleted, vec!["b"]);
+    }
+
+    #[test]
+    fn forget_rejects_empty_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("forget-empty.vlite"));
+        let scope = request("m", "seed").scope;
+        provision(&mut db, &scope);
+        let sequence = db.sequence;
+        assert!(matches!(
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .forget(&forget_request(scope, "erase", 10, &[])),
+            Err(MemoryError::InvalidTarget)
+        ));
+        assert_eq!(db.sequence, sequence);
+    }
+
+    #[test]
+    fn forget_target_count_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("forget-target-count.vlite"));
+        let scope = request("m", "seed").scope;
+        provision(&mut db, &scope);
+        let too_many = (0..=MAX_OPS)
+            .map(|index| ForgetTarget {
+                id: format!("missing-{index}"),
+                expected_revision: 1,
+            })
+            .collect::<Vec<_>>();
+        let mut request = forget_request(scope.clone(), "too-many", 10, &[]);
+        request.targets = too_many;
+        let sequence = db.sequence;
+        assert!(matches!(
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .forget(&request),
+            Err(MemoryError::OperationLimit)
+        ));
+        assert_eq!(db.sequence, sequence);
+        request.targets.pop();
+        request.idempotency_key = "at-limit".into();
+        assert!(matches!(
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .forget(&request),
+            Err(MemoryError::MissingMemory)
+        ));
+        assert_eq!(db.sequence, sequence);
+    }
+
+    #[test]
+    fn forget_rejects_invalid_target_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("forget-invalid-id.vlite"));
+        let scope = request("m", "seed").scope;
+        provision(&mut db, &scope);
+        let sequence = db.sequence;
+        for id in ["", &"x".repeat(MAX_OPAQUE_BYTES + 1)] {
+            assert!(matches!(
+                MemoryMut::bind(&mut db, "memory", None)
+                    .unwrap()
+                    .forget(&forget_request(scope.clone(), "erase", 10, &[(id, 1)])),
+                Err(MemoryError::InvalidTarget)
+            ));
+            assert_eq!(db.sequence, sequence);
+        }
+    }
+
+    #[test]
+    fn forget_rejects_zero_expected_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("forget-zero-revision.vlite"));
+        let seed = request("m", "seed");
+        provision(&mut db, &seed.scope);
+        remember(&mut db, &seed);
+        let key = memory_key(&seed.scope.key(), "m");
+        let revision = node(&db, &key).revision;
+        let sequence = db.sequence;
+        assert!(matches!(
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .forget(&forget_request(seed.scope, "erase", 10, &[("m", 0)])),
+            Err(MemoryError::InvalidTarget)
+        ));
+        assert_memory_unchanged(&db, &key, sequence, Some(revision));
+    }
+
+    #[test]
+    fn forget_rejects_duplicate_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("forget-duplicate-target.vlite"));
+        let seed = request("m", "seed");
+        provision(&mut db, &seed.scope);
+        remember(&mut db, &seed);
+        let key = memory_key(&seed.scope.key(), "m");
+        let revision = node(&db, &key).revision;
+        let sequence = db.sequence;
+        assert!(matches!(
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .forget(&forget_request(
+                    seed.scope,
+                    "erase",
+                    10,
+                    &[("m", 1), ("m", 1)]
+                )),
+            Err(MemoryError::DuplicateTarget)
+        ));
+        assert_memory_unchanged(&db, &key, sequence, Some(revision));
+    }
+
+    #[test]
+    fn forget_replay_with_different_window_conflicts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("forget-window-conflict.vlite"));
+        let seed = request("m", "seed");
+        provision(&mut db, &seed.scope);
+        remember(&mut db, &seed);
+        let first = forget_request(seed.scope.clone(), "erase", 10, &[("m", 1)]);
+        MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .forget(&first)
+            .unwrap();
+        let receipt_key = forget_receipt_key(&seed.scope.key(), "erase");
+        let receipt_revision = node(&db, &receipt_key).revision;
+        let sequence = db.sequence;
+        let mut changed_window = first;
+        changed_window.now_ms = 11;
+        changed_window.receipt_window_ms = 200;
+        assert!(matches!(
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .forget(&changed_window),
+            Err(MemoryError::IdempotencyConflict)
+        ));
+        assert_memory_unchanged(&db, &receipt_key, sequence, Some(receipt_revision));
+    }
+
+    #[test]
+    fn forget_multi_target_replay_deleted_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("forget-sorted-replay.vlite"));
+        let seed = distinct_request("a", "seed");
+        provision(&mut db, &seed.scope);
+        remember(&mut db, &seed);
+        remember(&mut db, &distinct_request("b", "seed-b"));
+        let forget = forget_request(seed.scope, "erase", 10, &[("a", 1), ("b", 1)]);
+        assert_eq!(
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .forget(&forget)
+                .unwrap()
+                .deleted,
+            vec!["a", "b"]
+        );
+        let replay = MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .forget(&forget)
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.deleted, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn forget_transitively_referenced_targets_retain_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("forget-transitive-evidence.vlite"));
+        let mut d2 = distinct_request("d2", "d2");
+        provision(&mut db, &d2.scope);
+        seed_vector(&mut db, "e1");
+        d2.items[0].evidence.push(memory_evidence("e1", &d2.scope));
+        MemoryMut::bind(&mut db, "memory", Some("default"))
+            .unwrap()
+            .remember(&d2)
+            .unwrap();
+        let mut d1 = distinct_request("d1", "d1");
+        d1.items[0].references.push("d2".into());
+        remember(&mut db, &d1);
+        let mut survivor = distinct_request("s", "survivor");
+        survivor.items[0].references.push("d1".into());
+        remember(&mut db, &survivor);
+        let result = MemoryMut::bind(&mut db, "memory", Some("default"))
+            .unwrap()
+            .forget(&forget_request(
+                d2.scope.clone(),
+                "erase-chain",
+                10,
+                &[("d1", 1), ("d2", 1)],
+            ))
+            .unwrap();
+        assert_eq!(result.deleted, vec!["d1", "d2"]);
+        assert!(db.get(evidence_record_id("e1")).unwrap().is_some());
+        assert!(
+            db.graph("memory")
+                .unwrap()
+                .get_node(&memory_key(&d2.scope.key(), "s"))
+                .unwrap()
+                .output
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn forget_replay_rejects_foreign_scope_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("forget-foreign-receipt.vlite"));
+        let seed = request("m", "seed");
+        provision(&mut db, &seed.scope);
+        remember(&mut db, &seed);
+        let forget = forget_request(seed.scope.clone(), "erase", 10, &[("m", 1)]);
+        MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .forget(&forget)
+            .unwrap();
+        let receipt_key = forget_receipt_key(&seed.scope.key(), "erase");
+        let receipt = node(&db, &receipt_key);
+        let mut properties = receipt.properties.clone();
+        properties.insert(
+            "scope".into(),
+            MetadataValue::String("foreign-scope".into()),
+        );
+        replace_properties(&mut db, receipt, properties);
+        let revision = node(&db, &receipt_key).revision;
+        let sequence = db.sequence;
+        assert!(matches!(
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .forget(&forget),
+            Err(MemoryError::DigestCollision)
+        ));
+        assert_memory_unchanged(&db, &receipt_key, sequence, Some(revision));
+    }
+
+    #[test]
+    fn forget_write_reclaims_entities_expired_by_request_clock() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("forget-reclaims-expiry.vlite"));
+        let now = crate::current_time_ms() + 30_000;
+        let mut seed = distinct_request("x", "seed-x");
+        seed.now_ms = now;
+        seed.items[0].observed_at_ms = Some(now as i64);
+        let mut y = seed.items[0].clone();
+        y.id = "y".into();
+        y.content = "content-y".into();
+        y.expiry_ms = None;
+        seed.items[0].expiry_ms = Some(now + 10);
+        seed.items.push(y);
+        provision(&mut db, &seed.scope);
+        remember(&mut db, &seed);
+        let scope = seed.scope.clone();
+        MemoryMut::bind(&mut db, "memory", None)
+            .unwrap()
+            .forget(&forget_request(
+                scope.clone(),
+                "erase-y",
+                now + 100,
+                &[("y", 1)],
+            ))
+            .unwrap();
+        assert!(
+            db.graph("memory")
+                .unwrap()
+                .with_clock(0)
+                .get_node(&memory_key(&scope.key(), "x"))
+                .unwrap()
+                .output
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn forget_unprovisioned_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("forget-unprovisioned.vlite"));
+        let scope = request("m", "seed").scope;
+        let sequence = db.sequence;
+        assert!(matches!(
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .forget(&forget_request(scope, "erase", 10, &[("m", 1)])),
+            Err(MemoryError::InvalidScope)
+        ));
+        assert_eq!(db.sequence, sequence);
+    }
+
+    #[test]
+    fn forget_rejects_stale_expected_revision_after_merge() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("forget-stale-revision.vlite"));
+        let seed = request("m", "seed");
+        provision(&mut db, &seed.scope);
+        remember(&mut db, &seed);
+        let mut merge = request("m", "merge");
+        merge.items[0].merge_into = Some("m".into());
+        merge.items[0].expected_revision = Some(1);
+        merge.items[0].source = "another-source".into();
+        remember(&mut db, &merge);
+        let key = memory_key(&seed.scope.key(), "m");
+        let revision = node(&db, &key).revision;
+        let sequence = db.sequence;
+        assert!(matches!(
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .forget(&forget_request(
+                    seed.scope.clone(),
+                    "stale",
+                    12,
+                    &[("m", 1)]
+                )),
+            Err(MemoryError::RevisionConflict)
+        ));
+        assert_memory_unchanged(&db, &key, sequence, Some(revision));
+        assert!(
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .forget(&forget_request(seed.scope, "fresh", 12, &[("m", 2)]))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn forget_rejects_clock_beyond_i64_max() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("forget-invalid-clock.vlite"));
+        let seed = request("m", "seed");
+        provision(&mut db, &seed.scope);
+        remember(&mut db, &seed);
+        let key = memory_key(&seed.scope.key(), "m");
+        let revision = node(&db, &key).revision;
+        let sequence = db.sequence;
+        let mut invalid = forget_request(seed.scope, "erase", i64::MAX as u64 + 1, &[("m", 1)]);
+        invalid.receipt_window_ms = 1;
+        assert!(matches!(
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .forget(&invalid),
+            Err(MemoryError::InvalidClock)
+        ));
+        assert_memory_unchanged(&db, &key, sequence, Some(revision));
+    }
+
+    #[test]
+    fn forget_rejects_zero_receipt_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("forget-zero-window.vlite"));
+        let seed = request("m", "seed");
+        provision(&mut db, &seed.scope);
+        remember(&mut db, &seed);
+        let key = memory_key(&seed.scope.key(), "m");
+        let revision = node(&db, &key).revision;
+        let sequence = db.sequence;
+        let mut invalid = forget_request(seed.scope, "erase", 10, &[("m", 1)]);
+        invalid.receipt_window_ms = 0;
+        assert!(matches!(
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .forget(&invalid),
+            Err(MemoryError::InvalidReceiptWindow)
+        ));
+        assert_memory_unchanged(&db, &key, sequence, Some(revision));
+    }
+
+    #[test]
+    fn forget_rejects_overflowing_receipt_window_without_panicking() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("forget-overflow-window.vlite"));
+        let seed = request("m", "seed");
+        provision(&mut db, &seed.scope);
+        remember(&mut db, &seed);
+        let key = memory_key(&seed.scope.key(), "m");
+        let revision = node(&db, &key).revision;
+        let sequence = db.sequence;
+        let mut invalid = forget_request(seed.scope, "erase", 1, &[("m", 1)]);
+        invalid.receipt_window_ms = u64::MAX;
+        assert!(matches!(
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .forget(&invalid),
+            Err(MemoryError::InvalidReceiptWindow)
+        ));
+        assert_memory_unchanged(&db, &key, sequence, Some(revision));
+    }
+
+    #[test]
+    fn forget_rejects_invalid_idempotency_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("forget-invalid-key.vlite"));
+        let seed = request("m", "seed");
+        provision(&mut db, &seed.scope);
+        remember(&mut db, &seed);
+        let key = memory_key(&seed.scope.key(), "m");
+        let revision = node(&db, &key).revision;
+        let sequence = db.sequence;
+        for invalid_key in ["", &"k".repeat(MAX_OPAQUE_BYTES + 1)] {
+            assert!(matches!(
+                MemoryMut::bind(&mut db, "memory", None)
+                    .unwrap()
+                    .forget(&forget_request(
+                        seed.scope.clone(),
+                        invalid_key,
+                        10,
+                        &[("m", 1)]
+                    )),
+                Err(MemoryError::InvalidKey)
+            ));
+            assert_memory_unchanged(&db, &key, sequence, Some(revision));
+        }
+    }
+
+    #[test]
+    fn expired_owner_with_reference_is_missing_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("expired-reference-owner.vlite"));
+        let seed = distinct_request("x", "seed");
+        provision(&mut db, &seed.scope);
+        remember(&mut db, &seed);
+        let sequence = db.sequence;
+        let mut expired = timed_request("m", "expired", 20);
+        expired.scope = seed.scope.clone();
+        expired.items[0].content = "content-m".into();
+        expired.items[0].expiry_ms = Some(20);
+        expired.items[0].references.push("x".into());
+        assert!(matches!(
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .remember(&expired),
+            Err(MemoryError::MissingMemory)
+        ));
+        assert_eq!(db.sequence, sequence);
+        assert!(
+            db.graph("memory")
+                .unwrap()
+                .find_nodes(
+                    &FindNodes {
+                        label: Some(LABEL_MEMORY.into()),
+                        conditions: Vec::new(),
+                        limit: None,
+                        cursor: None,
+                    },
+                    &ReadOptions::default(),
+                )
+                .unwrap()
+                .output
+                .into_iter()
+                .filter(|node| string_property(node, "scope")
+                    .is_ok_and(|value| value == seed.scope.key()))
+                .count()
+                == 1
+        );
+    }
+
+    #[test]
+    fn evidence_record_id_is_pinned() {
+        assert_eq!(evidence_record_id("e"), 0x3f79bb7b435b0532);
+    }
+
+    #[test]
+    fn merge_adding_first_evidence_attaches_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("merge-first-evidence.vlite"));
+        let seed = timed_request("m", "seed", 10);
+        provision(&mut db, &seed.scope);
+        remember(&mut db, &seed);
+        seed_vector(&mut db, "e");
+        let mut merge = seed.clone();
+        merge.idempotency_key = "merge".into();
+        merge.now_ms = 11;
+        merge.items[0].observed_at_ms = Some(11);
+        merge.items[0].source = "second-source".into();
+        merge.items[0].merge_into = Some("m".into());
+        merge.items[0].expected_revision = Some(1);
+        merge.items[0]
+            .evidence
+            .push(memory_evidence("e", &seed.scope));
+        MemoryMut::bind(&mut db, "memory", Some("default"))
+            .unwrap()
+            .remember(&merge)
+            .unwrap();
+        assert_eq!(
+            db.graph("memory")
+                .unwrap()
+                .memory_node_attachments(&memory_key(&seed.scope.key(), "m"))
+                .unwrap(),
+            vec![(db.resolve("default").unwrap(), evidence_record_id("e"))]
+        );
+    }
+
+    #[test]
+    fn remember_rejects_non_opaque_evidence_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("invalid-evidence-id.vlite"));
+        let seed = request("m", "seed");
+        provision(&mut db, &seed.scope);
+        let sequence = db.sequence;
+        for evidence_id in ["", &"e".repeat(MAX_OPAQUE_BYTES + 1)] {
+            let mut invalid = seed.clone();
+            invalid.items[0]
+                .evidence
+                .push(memory_evidence(evidence_id, &seed.scope));
+            assert!(matches!(
+                MemoryMut::bind(&mut db, "memory", Some("default"))
+                    .unwrap()
+                    .remember(&invalid),
+                Err(MemoryError::InvalidEvidence)
+            ));
+            assert_eq!(db.sequence, sequence);
+            assert!(
+                scan_memories(&db.graph("memory").unwrap(), &seed.scope.key())
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn remember_rejects_invalid_evidence_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("invalid-evidence-scope.vlite"));
+        let seed = request("m", "seed");
+        provision(&mut db, &seed.scope);
+        let mut invalid_scope = seed.scope.clone();
+        invalid_scope.tenant.clear();
+        let mut invalid = seed.clone();
+        invalid.items[0]
+            .evidence
+            .push(memory_evidence("e", &invalid_scope));
+        let sequence = db.sequence;
+        assert!(matches!(
+            MemoryMut::bind(&mut db, "memory", Some("default"))
+                .unwrap()
+                .remember(&invalid),
+            Err(MemoryError::InvalidScope)
+        ));
+        assert_eq!(db.sequence, sequence);
+    }
+
+    #[test]
+    fn remember_foreign_non_memory_owner_is_record_already_attached() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("foreign-non-memory-owner.vlite"));
+        let seed = request("m", "seed");
+        provision(&mut db, &seed.scope);
+        let record = seed_vector(&mut db, "e");
+        db.graph_mut("memory")
+            .unwrap()
+            .write_batch(&[
+                GraphOp::CreateNode {
+                    key: "outside-owner".into(),
+                    labels: vec!["Outside".into()],
+                    properties: Metadata::new(),
+                },
+                GraphOp::Attach {
+                    node: "outside-owner".into(),
+                    collection: "default".into(),
+                    record,
+                },
+            ])
+            .unwrap();
+        let mut with_evidence = seed.clone();
+        with_evidence.items[0]
+            .evidence
+            .push(memory_evidence("e", &seed.scope));
+        let sequence = db.sequence;
+        assert!(matches!(
+            MemoryMut::bind(&mut db, "memory", Some("default"))
+                .unwrap()
+                .remember(&with_evidence),
+            Err(MemoryError::RecordAlreadyAttached)
+        ));
+        assert_eq!(db.sequence, sequence);
+        assert!(
+            db.graph("memory")
+                .unwrap()
+                .get_node(&memory_key(&seed.scope.key(), "m"))
+                .unwrap()
+                .output
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn legacy_memory_without_evidence_property_reads_as_no_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("legacy-memory-evidence.vlite"));
+        let seed = request("m", "seed");
+        provision(&mut db, &seed.scope);
+        remember(&mut db, &seed);
+        let key = memory_key(&seed.scope.key(), "m");
+        let memory = node(&db, &key);
+        let mut properties = memory.properties.clone();
+        properties.remove("evidence");
+        replace_properties(&mut db, memory, properties);
+        let scanned = scan_memories(&db.graph("memory").unwrap(), &seed.scope.key()).unwrap();
+        assert!(scanned[0].evidence.is_empty());
+        assert!(
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .remember(&seed)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn corrupted_memory_evidence_property_is_invalid_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("corrupt-memory-evidence.vlite"));
+        let seed = request("m", "seed");
+        provision(&mut db, &seed.scope);
+        remember(&mut db, &seed);
+        let key = memory_key(&seed.scope.key(), "m");
+        let memory = node(&db, &key);
+        let mut properties = memory.properties.clone();
+        properties.insert("evidence".into(), MetadataValue::Integer(1));
+        replace_properties(&mut db, memory, properties);
+        let revision = node(&db, &key).revision;
+        let sequence = db.sequence;
+        let mut fresh_request = seed.clone();
+        fresh_request.idempotency_key = "fresh-scan".into();
+        assert!(matches!(
+            MemoryMut::bind(&mut db, "memory", None)
+                .unwrap()
+                .remember(&fresh_request),
+            Err(MemoryError::InvalidBundle)
+        ));
+        assert_memory_unchanged(&db, &key, sequence, Some(revision));
+    }
+
+    #[test]
+    fn encode_outcome_chunks_at_exactly_max_string_value_bytes() {
+        for (length, expected_chunks) in
+            [(MAX_STRING_VALUE_BYTES, 1), (MAX_STRING_VALUE_BYTES + 1, 2)]
+        {
+            let mut properties = Metadata::new();
+            let ops = encode_outcome("receipt-key", &"x".repeat(length), &mut properties).unwrap();
+            assert_eq!(ops.len(), expected_chunks);
+            assert_eq!(
+                properties.get("outcome_chunks"),
+                Some(&MetadataValue::Integer(expected_chunks as i64))
+            );
+        }
+    }
+
+    #[test]
+    fn remember_evidence_without_seeded_vector_record_is_record_already_attached() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = database(&dir.path().join("missing-evidence-record.vlite"));
+        let seed = request("m", "seed");
+        provision(&mut db, &seed.scope);
+        let mut with_evidence = seed.clone();
+        with_evidence.items[0]
+            .evidence
+            .push(memory_evidence("missing", &seed.scope));
+        let sequence = db.sequence;
+        assert!(matches!(
+            MemoryMut::bind(&mut db, "memory", Some("default"))
+                .unwrap()
+                .remember(&with_evidence),
+            Err(MemoryError::RecordAlreadyAttached)
+        ));
+        assert_eq!(db.sequence, sequence);
+        assert!(
+            db.graph("memory")
+                .unwrap()
+                .get_node(&memory_key(&seed.scope.key(), "m"))
+                .unwrap()
+                .output
+                .is_none()
         );
     }
 
