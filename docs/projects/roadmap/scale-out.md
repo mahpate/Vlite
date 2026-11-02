@@ -2,8 +2,8 @@
 
 | Field | Value |
 |---|---|
-| Status | Design recommendation, not implementation or approval of new interfaces |
-| Decision proposed | Gap 11 first, Gap 10 second, Gap 9 third |
+| Status | Design recommendation; order adopted 2026-11-02 and backlogged (unscheduled) until the owner revisits it. No new interfaces approved |
+| Decision | Gap 11 first, Gap 10 second, Gap 9 third (adopted 2026-11-02) |
 | Sources | [Next major](next-major.md), [product gaps](../product-gaps/product-gaps.md), [P2 directory store](p2-directory-store.md) |
 | Boundary | Embedded-first, one writer per database; no sharding, distributed transactions or automatic multi-writer operation |
 | Validation | Repository evidence reviewed; acceptance below is prospective, not test results or performance claims |
@@ -345,17 +345,17 @@ extent accounting, not identical file contents or elapsed-time comparisons.
 
 | Open decision / risk | Recommendation |
 |---|---|
-| Is this order approved? | Adopt 11 -> 10 -> 9; only an explicit HA requirement should reorder it |
+| Is this order approved? | Adopted 2026-11-02: 11 -> 10 -> 9, backlogged until revisited; only an explicit HA requirement should reorder it |
 | What counts as Gap 11 completion? | Qualify real COW on named supported plaintext filesystems; label full-copy/encrypted paths honestly, not universal cheap branches |
 | Portable sharing, online forks, merge? | Defer hardlink catalogs, live generation pins and merging; start quiesced, independent-inode forks |
 | Encrypted COW versus isolation? | Fresh cipher domain/full rewrite first; per-segment keys need separate format/security review |
 | Revision and external claim safety? | Retain record revisions locally, scope external fences to database identity and leader epoch; audit graph restatement separately |
-| First object provider? | Azure Blob first to match current deployment context, with native local disks; S3 follows the same semantic matrix |
+| First object provider? | Decided 2026-11-02: Azure Blob first to match current deployment context, with native local disks; S3 follows the same semantic matrix |
 | Remote manifest and pin format? | Separate versioned catalog under storage-owner review; do not reinterpret current P2 MANIFEST or reuse age-only retention |
 | Offline object readers and erasure? | Bounded renewable pins, explicit retained-copy policy and key retirement; do not promise immediate deletion from historical copies |
 | Timestamp PITR on directories? | Keep unsupported; implement only retained sequence-generation chains until a separate timestamp format decision |
 | Leader authority and failover loss? | External durable fencing authority for HA; manual infrastructure fencing first; async loss bound is the actual missing durable suffix |
-| Sync replication default? | Async read followers first, explicitly not zero-loss HA; synchronous ACK and availability tradeoff require owner approval |
+| Sync replication default? | Decided 2026-11-02: async read followers first, explicitly not zero-loss HA; synchronous ACK and availability tradeoff still require owner approval |
 | Tenant/admin restore scope? | Whole-database operator privilege, separate policy backup/restore and revocation review; no tenant-scoped raw export |
 | Compact blocks and lazy remote reads? | Require source-codec/maintenance parity before enablement; lazy readers wait for P3-P5 accessors |
 | Public APIs and competitor verification? | Review Rust names/internal transport first; approve wire/OpenAPI/proto changes separately and verify linked first-party references before implementation |

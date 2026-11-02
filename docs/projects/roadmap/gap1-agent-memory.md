@@ -1,6 +1,7 @@
 # Gap 1: agent memory
 
-Status: implementation design; no shipped memory API or wire approval is claimed.
+Status: implementation design; no shipped memory API. Its open decisions and serving approval were
+granted 2026-11-02 (section 9); nothing below is implemented unless stated.
 Scope: embedded remember, recall, consolidate and forget over existing storage.
 Dependencies: Gap 2 key-value, Gap 3 graph TTL and Gap 4 temporal validity.
 Evidence below refers to checkout base `c92c8c0`; proposed names are not existing APIs.
@@ -11,7 +12,7 @@ The roadmap's Gap 1 row requires all four actions after Gaps 2-4.
 Source: `docs/projects/roadmap/next-major.md:21`.
 The product gap calls for sessions, users and fact updates as a thin layer.
 Source: `docs/projects/product-gaps/product-gaps.md:46-49`.
-Rust comes first; `src/openapi.json` is frozen until explicit API approval.
+Rust comes first; `src/openapi.json` changes only in slice D, from a schema written here and reviewed first.
 Preserve format compatibility, exact-search results and major-release benchmark gates.
 Source: `docs/projects/roadmap/next-major.md:117-125`.
 No REST, gRPC, MCP, CLI, bindings or OpenAPI changes belong to this slice.
@@ -375,7 +376,10 @@ Main risks: scope leakage through graph expansion, misleading as-of completeness
 receipt/history growth, exclusive-slot races, shared-evidence erasure and unbounded
 source/reranker work. The acceptance cases and barriers above are release requirements.
 
-| Open decision | Recommendation |
+The owner accepted every recommendation below on 2026-11-02, including the serving approval for
+slice D. Acceptance authorizes the work; each slice still meets its exit criteria above.
+
+| Decision | Accepted approach |
 |---|---|
 | Public Rust names and error taxonomy | Review typed handles/errors before A; preserve underlying storage ambiguity and conflicts |
 | Scope sharing and physical partitioning | Exact-scope allowlists, no fallback; caller-provisioned graph/collection bindings, not per-session graphs |

@@ -1,6 +1,6 @@
 # P5: filters and serving
 
-Status: implementation design; wire changes remain proposals. Delivery step 2 and the exact-planner half of
+Status: implementation design; its wire proposals were approved 2026-11-02 and are not yet implemented. Delivery step 2 and the exact-planner half of
 step 3 are implemented in embedded Rust, independently reviewed and integrated, but unreleased
 ([below](#implemented-step-2-unreleased-reviewed)). The remaining explicit approximate filter-aware ANN
 half of step 3 is a private, gated slice, independently accepted and integrated but unreleased
@@ -17,8 +17,8 @@ F7 targets REST parity; F8 keeps the filtered-search lead and adds filter-aware 
 S5 targets metadata and attachments at least three times smaller on typical JSON
 (`docs/projects/performance/storage-goals.md:35`). These are goals, not results.
 
-Keep JSON as the default. Keep `src/openapi.json` frozen. The roadmap requires approval before changes
-(`docs/projects/roadmap/next-major.md:82-83`).
+Keep JSON as the default. `src/openapi.json` changes only as these approved proposals specify
+(`docs/projects/roadmap/next-major.md`, Decided 2026-11-02).
 This document proposes contracts only. It does not change the proto. Run benchmarks only at the major release, per
 `docs/projects/performance/storage-goals.md:124-125`. No measurements are claimed.
 

@@ -1,6 +1,7 @@
 # Serving contract: embeddings, rerankers and gRPC graphs
 
-Status: design proposal. Nothing here approves a wire change.
+Status: approved 2026-11-02 as the wire contract to implement; nothing here is
+implemented or shipped yet.
 All requirements below are proposed unless labeled Current.
 Open means not verified or not decided. Evidence uses repository `path:line`.
 Audit citations refer to base `d530b4c`; existing embedding/reranking routes and

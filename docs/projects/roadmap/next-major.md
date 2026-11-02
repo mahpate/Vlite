@@ -37,13 +37,35 @@ flowchart LR
   MEM --> BENCH
 ```
 
-## Still open
+## Decided 2026-11-02
 
-- S1's default-settings size target conflicts with the chosen float32 default.
-  Whether to qualify an explicit float16 profile instead remains a release
-  decision; the original criterion is not waived.
-- Whether parity targets F1–F3 and F7 block the release.
-- Which scale-out item comes first after P2.
+These owner decisions authorize work; none waives correctness qualification,
+independent acceptance or the unchanged DO-005 quiet-host policy.
+
+- **S1:** qualifies on the explicit float16 profile instead of default
+  settings; float32 stays the default. Measured at the major release.
+- **Parity:** F1–F3 and F7 are tracked goals that the release reports but
+  does not wait for. Must-not-regress items still block.
+- **Public APIs and wire:** approved as drafted: the
+  [P3 precision API](p3-precision-api.md) (design A), the
+  [serving contract](serving-contract.md) and the
+  [P5 serving proposals](p5-filters-and-serving.md). Gap 4 slice E and Gap 1
+  slice D follow them; each exact schema is written into its design and
+  reviewed before code. `src/openapi.json` and the proto change only as
+  these documents specify.
+- **Gap 1:** the public Rust names and error taxonomy proceed through
+  review in slice A, and every recommendation in
+  [Gap 1 section 9](gap1-agent-memory.md#9-delivery-risks-and-open-decisions)
+  is accepted.
+- **Activation:** float16 per-collection precision, temporal copy-out and
+  compact writers each become an explicit opt-in once that capability passes
+  its own qualification. Defaults stay unchanged; nothing is qualified yet,
+  so nothing is active.
+- **Scale-out:** order decided as Gap 11 (local forks), then Gap 10 (object
+  storage, Azure Blob first), then Gap 9 (asynchronous read followers, not
+  zero-loss high availability). The track stays in the backlog, unscheduled,
+  until the owner revisits it. Synchronous acknowledgement needs its own
+  approval.
 
 ## Progress
 
@@ -190,20 +212,22 @@ Local numbers below show direction only (see rules).
   performance claim or change to DO-005 is made.
 - **Serving design:** [serving](serving-contract.md) has implementation
   boundaries and acceptance matrices, not shipped capabilities. Approximate
-  search does not acquire an exact top-k guarantee. Serving schemas remain
-  proposals, not approved wire changes.
+  search does not acquire an exact top-k guarantee. Its schemas were approved
+  2026-11-02 and are not yet implemented.
 - **Further design proposals:** [agent memory](gap1-agent-memory.md) defines
   the embedded operations and their prerequisites; [scale-out](scale-out.md)
   compares branching, object storage and replication. Both received source
   and first-party-reference review. Neither is an implemented capability;
-  the proposed scale-out order still needs a decision.
+  the scale-out order 11 → 10 → 9 was decided 2026-11-02; the track is
+  backlogged until the owner revisits it.
 
 ## Rules for every item
 
 - Existing `.vlite` files keep opening; format changes arrive only with P2 and
   its converter.
-- `src/openapi.json` stays frozen until an OpenAPI change is approved, so new
-  features land as embedded Rust APIs first.
+- `src/openapi.json` changes only as an approved contract specifies (see
+  [Decided 2026-11-02](#decided-2026-11-02)); new features still land as
+  embedded Rust APIs first.
 - Exact search results stay identical; recall and latency are compared at equal
   settings.
 - Local micro-benchmarks check direction only. Claimed gains come from the

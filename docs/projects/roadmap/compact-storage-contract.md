@@ -391,8 +391,9 @@ Rules for avoiding conflicts:
 
 ## 8. Decisions and remaining gates
 
-Decisions 1-6 and 8-10 are accepted below. Decision 7 fixes the private-first
-rollout; its public opt-in still needs API review. Decision 11 remains open.
+Decisions 1-6 and 8-11 are accepted below. Decision 7 fixes the private-first
+rollout; its public opt-in API was approved 2026-11-02, and each writer still
+activates only after qualification.
 These decisions authorize implementation, not performance or release claims.
 
 | # | Question | Decision |
@@ -407,7 +408,7 @@ These decisions authorize implementation, not performance or release claims.
 | 8 | Does compaction emit blocks? | No production writer in slice 0. Later codecs must support faithful maintenance or reject it explicitly; legacy export is not an implicit precision downgrade |
 | 9 | Are P5 statistics critical? | No, derived and rebuildable |
 | 10 | Change feed: replacing op 15 loses the graph keys `src/changes.rs:394-399` reads. P4 does not cover this | P4 provides `graph_keys` through the registry |
-| 11 | S1 acceptance profile | Stays open and is not waived; decided before release |
+| 11 | S1 acceptance profile | Decided 2026-11-02: the explicit float16 profile, measured at the major release; float32 stays the default |
 
 ## 9. Precision-policy publication amendment
 

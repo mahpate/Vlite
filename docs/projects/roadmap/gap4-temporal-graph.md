@@ -14,7 +14,7 @@ TTL integration below was reconciled with `cf146fe`.
 Gap 4 asks for edge validity and as-of reads, starting with validity only.
 Source: `docs/projects/product-gaps/product-gaps.md:49`.
 Keep mixed writes atomic and forbid dangling edges. Keep security and feature gates.
-Keep OpenAPI frozen. Benchmarks remain major-release-only.
+Change OpenAPI only in slice E, from its reviewed schema (serving approved 2026-11-02). Benchmarks remain major-release-only.
 Source: `docs/projects/product-gaps/product-gaps.md:90-97`.
 Rust goes first; format changes must follow P2 and its converter.
 Source: `docs/projects/roadmap/next-major.md:78-87`.
@@ -170,8 +170,9 @@ are reseeded from the copy. A temporal write needs a file that already has the c
 is then an ordinary atomic append; no write enables it in place.
 (Amended by user decision during the slice A/B review, replacing "enable the capability
 atomically with the first temporal write". The decision covers this design and a gated,
-private implementation only: the conversion API stays gated until reviewed and qualified,
-and production activation is not approved. See
+private implementation only: the conversion API stays gated until reviewed and qualified.
+Production activation was approved 2026-11-02 as an explicit opt-in once qualified; it is not
+yet qualified or enabled. See
 [Activation publication (decided: copy-out)](#activation-publication-decided-copy-out).)
 Readers without the capability must refuse before publishing partial state.
 Open: allocate a separate temporal capability and precise unsupported-format error with the format owner.
@@ -496,7 +497,7 @@ the revision range, and restores the series.
 
 Known gaps and follow-ups (not yet tested unless stated):
 
-1. **Activation surface.** Activation is a gated, crate-private copy-out. The public `maintenance::enable_temporal` is proposed, not added, and production activation is not approved. Replicas of the source must be reseeded from the copy, which starts its own backup chain.
+1. **Activation surface.** Activation is a gated, crate-private copy-out. The public `maintenance::enable_temporal` is proposed, not added. Activation was approved 2026-11-02 as an explicit opt-in once qualified; it is not qualified or enabled yet. Replicas of the source must be reseeded from the copy, which starts its own backup chain.
 2. **Edges created in the batch.** An edge created earlier in the same batch has no batch-start revision, so it cannot be corrected in that batch; create it with its full series.
 3. **Revisions after compaction.** Compaction and upgrade renumber temporal revisions under the existing new-lineage contract (see Persistence).
 4. **Ordinary reads.** Private/gated slices C1 and C2 now apply one fixed T/C to get, find nodes, neighbors, traverse, shortest path, retrieve expansion, and typed/text query and explain reads on temporal files. Temporal edges and endpoints hidden at T/C are neither returned nor traversed. Retrieval's pivot search, embeddings, ranking, payloads, attachments, and full historical recall remain current/nonhistorical. No production temporal reads are enabled.

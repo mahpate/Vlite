@@ -28,7 +28,7 @@ same build before any claim is made.
 
 | ID | Goal | Today | Target |
 |---|---|---|---|
-| S1 | Disk per 768-d vector, default settings | 3,072 B of float32 plus record overhead | ≤1,700 B: float16 stored vectors and a 96 B quantized code |
+| S1 | Disk per 768-d vector, explicit float16 profile (decision 5) | 3,072 B of float32 plus record overhead | ≤1,700 B: float16 stored vectors and a 96 B quantized code |
 | S2 | Resident memory per vector for ANN search | Full float32 vectors and the HNSW graph | ≤25% of today: codes and graph in memory, full vectors read from mapped files only for re-ranking |
 | S3 | Graph disk per edge | Log records, about 65 B per edge | ≤24 B per edge |
 | S4 | Graph memory per edge | About 1,016 B | ≤100 B |
@@ -37,10 +37,10 @@ same build before any claim is made.
 
 The [P3 precision decision](../roadmap/p3-compact-vectors.md) keeps float32
 as the default to preserve existing values and exact results; float16 is
-explicitly selected. This does **not** meet S1's original default-settings
-criterion: float32 components alone require 3,072 B. An opt-in float16 result
-cannot close that goal without a separate acceptance-profile decision
-(see [Decisions](#decisions)). The 1,700 B target is unchanged and unqualified.
+explicitly selected. Float32 components alone require 3,072 B, so the default
+cannot meet 1,700 B. Decision 5 (2026-11-02) therefore qualifies S1 on the
+explicit float16 profile instead of default settings. The 1,700 B target is
+unchanged and still unqualified until the major-release measurement.
 
 ### Faster
 
@@ -149,11 +149,13 @@ phases.
    compact-storage choice. This preserves the must-not-regress exact-default
    invariant and follows the separation of stored datatype from derived ANN
    quantization ([P3 design and sources](../roadmap/p3-compact-vectors.md)).
-   S1's original default-size criterion consequently remains unmet.
-3. **Open:** whether parity targets F1–F3 and F7 block the release or stay
-   tracked goals. Needed before the release benchmark.
+   S1's original default-size criterion consequently cannot be met; see
+   decision 5.
+3. **Decided 2026-11-02:** parity targets F1–F3 and F7 are tracked goals.
+   The release benchmark reports them, but they do not block the release.
+   Must-not-regress items still block.
 4. **Approved:** phase 1 first, then phase 2.
-5. **Open before release:** whether S1 may qualify the explicit float16
-   profile instead of default settings. Keep the original acceptance
-   criterion until that decision; neither a design estimate nor an opt-in
-   measurement silently changes it.
+5. **Decided 2026-11-02:** S1 qualifies on the explicit float16 profile
+   instead of default settings; float32 stays the default. The release
+   measures that profile in the DO-005 run; a design estimate is not
+   qualification.

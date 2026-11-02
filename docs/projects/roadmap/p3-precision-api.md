@@ -1,8 +1,9 @@
 # P3 precision API: proposal for review
 
-**Status: Design A accepted for implementation; public enablement is gated.**
+**Status: Design A accepted for implementation; its public surface was
+approved 2026-11-02. Enablement still waits for qualification.**
 This records Rust surface review on the accepted compact foundation;
-it authorizes no production writer or API baseline change before qualification.
+it authorizes no production writer before qualification.
 The concurrent private numeric/column codec work does not approve this surface.
 
 ## Accepted goals versus proposed decisions
@@ -16,7 +17,7 @@ Decision 8 requires faithful maintenance or refusal; source writers remain gated
 
 Proposed below: exact Rust names, separate immutable precision descriptors,
 constructor arguments, conversion scope and failure/compatibility contracts.
-S1's float32-default target remains open and unchanged. No benchmarks,
+S1 qualifies on the explicit float16 profile (decided 2026-11-02). No benchmarks,
 measurement claims, binary16 algorithm, new internal-slice knobs, or changes to
 `src/openapi.json`, proto, wire APIs, CLI or bindings are proposed.
 

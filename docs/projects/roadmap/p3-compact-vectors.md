@@ -28,14 +28,13 @@ and quantization creates an additional representation. Similarly,
 table to `halfvec` from quantizing its index and reranking candidates.
 These are architectural precedents, not VLite performance evidence.
 
-**S1 remains unresolved as written.** Its approved target is <=1,700 B per
-768-dimensional vector at default settings. Float32 components alone occupy
-3,072 B. A float16 profile has 1,536 B of components; adding a 96 B code gives
-1,632 B before IDs, norms, graph links, record metadata, framing or WAL.
-That subtotal is not an achieved disk budget. Measure the compact profile
-separately, but do not use it to mark the original default-settings S1 complete.
-Changing that qualifier remains a release decision. F1/F3/S2 and the
-exact-default invariant are unchanged.
+**S1 is qualified on the explicit float16 profile (decided 2026-11-02).** Its
+original target was <=1,700 B per 768-dimensional vector at default settings,
+but float32 components alone occupy 3,072 B. A float16 profile has 1,536 B of
+components; adding a 96 B code gives 1,632 B before IDs, norms, graph links,
+record metadata, framing or WAL. That subtotal is not an achieved disk budget:
+the major-release run measures the float16 profile against 1,700 B. Float32
+stays the default. F1/F3/S2 and the exact-default invariant are unchanged.
 
 ## Reuse the existing engine
 
