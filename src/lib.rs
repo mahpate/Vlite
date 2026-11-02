@@ -8,6 +8,8 @@ mod collection;
 mod compact;
 mod crypto;
 mod directory;
+#[allow(dead_code)]
+mod memory;
 pub use directory::DEFAULT_CHECKPOINT_BYTES;
 pub mod disk_ann;
 mod durability;

@@ -1,7 +1,10 @@
 # Gap 1: agent memory
 
-Status: implementation design; no shipped memory API. Its open decisions and serving approval were
-granted 2026-11-02 (section 9); nothing below is implemented unless stated.
+Status: the crate-private A1 core (remember, receipts and one graph batch) is integrated after
+independent acceptance; it is unreleased, not activated and has no public API. Recall,
+consolidation, forget/expiry and serving are not implemented. Open decisions and serving approval
+were granted 2026-11-02 (section 9). Provisional Rust names only; no public memory API or wire
+approval is claimed.
 Scope: embedded remember, recall, consolidate and forget over existing storage.
 Dependencies: Gap 2 key-value, Gap 3 graph TTL and Gap 4 temporal validity.
 Evidence below refers to checkout base `c92c8c0`; proposed names are not existing APIs.
@@ -140,6 +143,30 @@ No atomic multi-file operation, remote embedding call or KV lease acquisition is
 Oversized bundles fail before append; callers may explicitly split independent memories.
 Offer `Durability::Full` or `sync()` for stronger acknowledgement requirements,
 without altering the database's configured durability behind the caller's back.
+
+The current A1 candidate is deliberately narrower than this proposal. Its
+crate-private `MemoryRef` / `MemoryMut` bindings require an existing graph and can
+validate an optional existing evidence collection; it currently writes only entity
+and episodic memory nodes, source/provenance properties, references and receipts.
+It does not attach vector records or provide public names, public errors, settings,
+recall, forget, expiry, facts or serving surfaces. Names and error mapping remain
+provisional until independent acceptance and public Rust API review.
+
+Candidate limits are exact: a request has 1-4,096 items; opaque scope, identity,
+source and idempotency keys are at most 256 UTF-8 bytes; provenance has at most 64
+entries, with each source/kind/URI/transformation field at most 256 bytes. A
+canonical request and the serialized graph frame are each limited to 16 MiB. The
+single graph batch is limited to 4,096 operations, counting one receipt operation
+and one budget unit for each expected-revision guard; no batch splitting is done.
+Individual stored string properties are at most 4,096 bytes and large memory
+content/outcomes are chunked within the same frame. A1 does not expire receipts.
+
+Receipt creation is a keyed graph-node create in the same `GraphMut::write_batch`
+as all memory operations. Key absence is enforced by the graph create operation;
+changed existing memory nodes use expected graph revisions. Matching key/digest
+replay returns the stored outcome and committed receipt revision; digest mismatch
+conflicts. Validation and budget failures are preflighted before the batch. These
+are candidate implementation notes, not a released contract or durability claim.
 
 ## 3. Recall, time selectors and explanation
 
@@ -367,7 +394,8 @@ or approved contracts; no Rust implementation, durability or concurrency is clai
 
 | Slice | Exit criteria |
 |---|---|
-| A: core | Approved Rust types/schema; graph-enabled provisioning, kinds/scopes, remember receipts, exact dedup and small forget; atomic failure/reopen/expiry tests pass; fact support waits for Gap 4 |
+| A1: crate-private candidate | Provisional graph binding, scope provisioning, entity/episodic remember, same-frame receipts, exact dedup, idempotency and budget/validation coverage; unreleased and pending independent acceptance |
+| A2: follow-on | Small forget and expiry with atomic failure/reopen/expiry tests; fact support waits for Gap 4 |
 | B: recall planner | Filtered hybrid plus bounded temporal expansion, owner retention checks, rank/explain fixtures and existing vector-only exact/MMR integration; scan/work/cancellation coverage; no exhaustive-history claim |
 | C: consolidation | Caller summaries, slot-guarded corrections, contradictions, stale-source reporting and resumable erasure barriers/fencing; crash/retry and maintenance tests pass |
 | D: serving after approval | Explicit OpenAPI and wire approval before edits; REST/gRPC/MCP/CLI scope/authorization, limits, feed and unsupported-capability parity; no external provider enabled by default |
