@@ -1,4 +1,5 @@
 use super::*;
+mod survivors;
 use std::{
     collections::VecDeque,
     io::{BufRead, BufReader, Read, Write},
@@ -141,7 +142,7 @@ impl Loopback {
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
                 stream
-                    .set_write_timeout(Some(Duration::from_millis(200)))
+                    .set_write_timeout(Some(Duration::from_secs(3)))
                     .unwrap();
                 *thread_active.lock().unwrap() = Some(stream.try_clone().unwrap());
                 thread_calls.fetch_add(1, Ordering::SeqCst);
@@ -212,10 +213,18 @@ impl Loopback {
 impl Drop for Loopback {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        if let Some(stream) = self.active.lock().unwrap().as_ref() {
+        if let Some(stream) = self
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+        {
             let _ = stream.shutdown(std::net::Shutdown::Both);
         }
-        self.thread.take().unwrap().join().unwrap();
+        let result = self.thread.take().unwrap().join();
+        if !std::thread::panicking() {
+            assert!(result.is_ok(), "loopback fixture thread failed");
+        }
     }
 }
 
@@ -269,7 +278,7 @@ struct BlockingReleaseGuard(Arc<(Mutex<bool>, std::sync::Condvar)>);
 impl Drop for BlockingReleaseGuard {
     fn drop(&mut self) {
         let (released, changed) = &*self.0;
-        *released.lock().unwrap() = true;
+        *released.lock().unwrap_or_else(|error| error.into_inner()) = true;
         changed.notify_all();
     }
 }
@@ -817,6 +826,9 @@ fn environment_secret_values_are_bounded_printable_and_sanitized() {
         "".to_owned(),
         "x".repeat(MAX_SECRET_BYTES + 1),
         "has space".into(),
+        "SECRET\n".into(),
+        "SECRET ".into(),
+        "SECRET\r\n".into(),
     ] {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
@@ -863,11 +875,13 @@ async fn every_provoked_error_and_captured_log_is_sanitized() {
     let mut timeout = Fake::new(200, &body);
     timeout.error = Some(ProviderError::Timeout);
     let timeout = registry.embed(&key(), TEXT, &timeout).await.unwrap_err();
-    let permit = registry.providers["test"]
-        .slots
-        .acquire_many(2)
-        .await
-        .unwrap();
+    let permit = tokio::time::timeout(
+        Duration::from_secs(5),
+        registry.providers["test"].slots.acquire_many(2),
+    )
+    .await
+    .expect("provider permits were not returned within five seconds")
+    .unwrap();
     let busy = bounded(registry.embed(&key(), TEXT, &fake))
         .await
         .unwrap_err();
@@ -1503,7 +1517,7 @@ async fn replay_safe_retry_is_at_most_once_and_only_for_transients() {
         assert_eq!(bodies[0]["version"], "2026-01");
     }
     for safe in [false, true] {
-        for status in [302, 401, 403, 429, 500, 503] {
+        for status in [302, 401, 403, 408, 429, 500, 502, 503, 504] {
             let responses = vec![(Loopback::json(status, SECRET), Duration::ZERO); 2];
             let server = Loopback::new(responses);
             let mut value = config(&server.endpoint, "embedding");
@@ -1606,9 +1620,10 @@ async fn retry_after_delta_seconds_is_honored_and_invalid_values_do_not_retry() 
 
 #[tokio::test]
 async fn refused_connect_is_retried_only_for_replay_safe_aliases() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let socket = listener.local_addr().unwrap();
-    drop(listener);
+    // Binding without listening reserves the port while still refusing connections.
+    let reservation = tokio::net::TcpSocket::new_v4().unwrap();
+    reservation.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let socket = reservation.local_addr().unwrap();
     // Windows refuses the URL's port-zero endpoint immediately; Linux needs the closed port.
     let endpoint_port = if cfg!(windows) { 0 } else { socket.port() };
     for (replay_safe, expected_attempts) in [(true, 2), (false, 1)] {
