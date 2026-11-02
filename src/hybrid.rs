@@ -109,7 +109,7 @@ impl CollectionRef<'_> {
     /// Hybrid search per REQ-008. Stats count the vector leg's work.
     pub fn search_hybrid(&self, query: &HybridQuery) -> Result<(Vec<HybridHit>, SearchStats)> {
         let db = self.db;
-        db.ensure_healthy()?;
+        db.ensure_resident_in(self.id)?;
         let fusion = query.fusion;
         if query.k > MAX_HYBRID_K {
             return Err(Error::InvalidQuery("hybrid k must be at most 1000"));
@@ -140,6 +140,7 @@ impl CollectionRef<'_> {
         }
         metadata::validate_filter(&query.conditions)?;
         let state = db.state(self.id);
+        let records = state.records.resident()?;
         // A zero-weight text leg is disabled and never consults the index.
         if fusion.text_weight > 0.0 && !terms.is_empty() {
             let status = state.text_index.status();
@@ -189,7 +190,7 @@ impl CollectionRef<'_> {
         }
         let text_hits = if fusion.text_weight > 0.0 && !terms.is_empty() {
             state.text_index.search(&terms, candidates, |id| {
-                state.records.get(&id).is_some_and(|record| {
+                records.get(&id).is_some_and(|record| {
                     !state
                         .expiries
                         .get(&id)

@@ -669,7 +669,7 @@ impl Database {
     }
 
     fn graphs(&self) -> Result<&GraphState> {
-        self.ensure_healthy()?;
+        self.ensure_all_resident()?;
         self.graph.as_ref().ok_or(Error::GraphsNotEnabled)
     }
 
@@ -793,7 +793,7 @@ impl Database {
             return Err(Error::Poisoned);
         }
         for (collection, mutation) in vectors {
-            self.apply_batch(*collection, std::slice::from_ref(mutation), sequence);
+            self.apply_batch(*collection, std::slice::from_ref(mutation), sequence)?;
         }
         Ok(sequence)
     }

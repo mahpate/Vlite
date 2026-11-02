@@ -405,8 +405,9 @@ impl ParsedQuery {
         collection: CollectionRef<'_>,
         parameters: &BTreeMap<String, Vec<f32>>,
     ) -> Result<QueryOutput> {
-        collection.db.ensure_healthy()?;
+        collection.db.ensure_resident_in(collection.id)?;
         let state = collection.db.state(collection.id);
+        let records = state.records.resident()?;
         let depth = state.records.len();
         let mut hits = if let Some(n) = &self.name {
             let vector = parameters
@@ -488,8 +489,8 @@ impl ParsedQuery {
                 } else if field == "id" {
                     a.id.cmp(&b.id)
                 } else {
-                    let a = state.records[&a.id].metadata.get(field);
-                    let b = state.records[&b.id].metadata.get(field);
+                    let a = records[&a.id].metadata.get(field);
+                    let b = records[&b.id].metadata.get(field);
                     match (a, b) {
                         (Some(a), Some(b)) => compare(a, b).unwrap_or(std::cmp::Ordering::Equal),
                         (Some(_), None) => std::cmp::Ordering::Less,
@@ -504,7 +505,7 @@ impl ParsedQuery {
         let mut out = QueryOutput::default();
         if let Some(field) = &self.facet {
             for h in &hits {
-                if let Some(value) = state.records[&h.id].metadata.get(field) {
+                if let Some(value) = records[&h.id].metadata.get(field) {
                     if let Some(f) = out.facets.iter_mut().find(|f| f.value == *value) {
                         f.count += 1;
                     } else {
@@ -518,7 +519,7 @@ impl ParsedQuery {
         }
         if let Some(field) = &self.group {
             for h in &hits {
-                if let Some(value) = state.records[&h.id].metadata.get(field) {
+                if let Some(value) = records[&h.id].metadata.get(field) {
                     if let Some(g) = out.groups.iter_mut().find(|g| g.value == *value) {
                         g.hits.push(h.clone());
                     } else if out.groups.len() < self.limit {

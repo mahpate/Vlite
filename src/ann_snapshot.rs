@@ -249,10 +249,10 @@ impl<W: Write> Write for Sink<W> {
 
 /// SHA-256 over every live record in ascending ID order:
 /// `id u64 LE ‖ revision u64 LE ‖ dimensions × f32 bits LE`.
-fn content_digest(collection: &Collection) -> [u8; 32] {
+fn content_digest(collection: &Collection) -> Result<[u8; 32]> {
     let mut hasher = Sha256::new();
     let mut buffer = [0; 4096];
-    for (&id, record) in &collection.records {
+    for (&id, record) in collection.records.resident()? {
         hasher.update(id.to_le_bytes());
         let revision = collection.revisions.get(&id).copied().unwrap_or(0);
         hasher.update(revision.to_le_bytes());
@@ -265,7 +265,7 @@ fn content_digest(collection: &Collection) -> [u8; 32] {
             hasher.update(&buffer[..values.len() * 4]);
         }
     }
-    hasher.finalize().into()
+    Ok(hasher.finalize().into())
 }
 
 /// `(datafile version, lineage or 0, sequence, end, default dimensions)`.
@@ -308,7 +308,7 @@ fn write_body(db: &Database, w: &mut impl Write) -> io::Result<usize> {
         w.write_all(collection.name.as_bytes())?;
         w.write_all(&(collection.dimensions as u32).to_le_bytes())?;
         w.write_all(&(collection.records.len() as u64).to_le_bytes())?;
-        w.write_all(&content_digest(collection))?;
+        w.write_all(&content_digest(collection).map_err(io::Error::other)?)?;
         index.write_snapshot(w)?;
     }
     Ok(sections.len())
@@ -363,10 +363,16 @@ fn parse<R: Read>(db: &Database, reader: R, length: u64) -> Parse<Vec<(u16, Inde
             .get(&id)
             .filter(|c| c.name.as_bytes() == name && c.dimensions as u64 == u64::from(dimensions))
             .ok_or(AnnSnapshotRejection::Stale("collection"))?;
-        if live_records != collection.records.len() as u64 || digest != content_digest(collection) {
+        let records = collection
+            .records
+            .resident()
+            .map_err(|_| corrupt("compact records"))?;
+        if live_records != collection.records.len() as u64
+            || digest != content_digest(collection).map_err(|_| corrupt("compact records"))?
+        {
             return Err(AnnSnapshotRejection::Stale("content"));
         }
-        let index = Index::read_snapshot(&mut source, &collection.records, collection.dimensions)?;
+        let index = Index::read_snapshot(&mut source, records, collection.dimensions)?;
         indexes.push((id, index));
     }
     if source.remaining() != 0 {
@@ -643,7 +649,7 @@ mod tests {
             db.put(2, &vec![0.25; dimensions], b"new revision").unwrap();
             let collection = db.default_state();
             let mut reference = Sha256::new();
-            for (&id, record) in &collection.records {
+            for (&id, record) in collection.records.resident().unwrap() {
                 reference.update(id.to_le_bytes());
                 reference.update(
                     collection
@@ -658,7 +664,7 @@ mod tests {
                 }
             }
             assert_eq!(
-                content_digest(collection),
+                content_digest(collection).unwrap(),
                 <[u8; 32]>::from(reference.finalize())
             );
         }

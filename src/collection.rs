@@ -139,7 +139,7 @@ pub(crate) struct Collection {
     /// Stored precision fixed at creation (P3a), in a `FLAG_PRECISION`
     /// store only; installed and dropped with the collection.
     pub precision: Option<crate::compact::catalog::Precision>,
-    pub records: crate::records::RecordMap,
+    pub records: crate::records::CollectionRecords,
     /// Latest record-vector mutation covered by background catch-up.
     pub vector_sequence: u64,
     /// Commit sequence that last put each live record (its revision).
@@ -156,7 +156,11 @@ pub(crate) struct Collection {
 
 impl Collection {
     pub(crate) fn from_loaded(loaded: format::LoadedCollection) -> Self {
-        let mut collection = Self {
+        let mut metadata_indexes = MetadataIndexes::default();
+        metadata_indexes.rebuild(&loaded.settings.metadata_indexes, &loaded.records);
+        let mut text_index = TextIndex::default();
+        text_index.rebuild(&loaded.settings.text_fields, &loaded.records);
+        Self {
             sparse_index: crate::vectors::SparseIndex::build(&loaded.vectors),
             vectors: loaded.vectors,
             vector_indexes: BTreeMap::new(),
@@ -165,18 +169,16 @@ impl Collection {
             settings: loaded.settings,
             settings_persisted: loaded.settings_persisted,
             precision: loaded.precision,
-            records: loaded.records,
+            records: crate::records::CollectionRecords::Resident(loaded.records),
             vector_sequence: 0,
             revisions: loaded.revisions,
             expiries: std::sync::Arc::new(loaded.expiries),
             live_body_bytes: loaded.live_body_bytes,
             index: None,
             background_hnsw: None,
-            metadata_indexes: MetadataIndexes::default(),
-            text_index: TextIndex::default(),
-        };
-        collection.rebuild_derived();
-        collection
+            metadata_indexes,
+            text_index,
+        }
     }
 
     pub(crate) fn empty(
@@ -203,9 +205,9 @@ impl Collection {
         candidates: Option<&BTreeSet<u64>>,
         now_ms: u64,
         stats: &mut SearchStats,
-    ) -> Vec<SearchHit> {
-        crate::exact_search(
-            &self.records,
+    ) -> Result<Vec<SearchHit>> {
+        Ok(crate::exact_search(
+            self.records.resident()?,
             &self.expiries,
             query,
             query_norm,
@@ -215,20 +217,27 @@ impl Collection {
             candidates,
             now_ms,
             stats,
-        )
+        ))
     }
 
-    pub(crate) fn rebuild_derived(&mut self) {
+    pub(crate) fn rebuild_derived(&mut self) -> Result<()> {
+        let records = self.records.resident()?;
         self.metadata_indexes
-            .rebuild(&self.settings.metadata_indexes, &self.records);
-        self.text_index
-            .rebuild(&self.settings.text_fields, &self.records);
+            .rebuild(&self.settings.metadata_indexes, records);
+        self.text_index.rebuild(&self.settings.text_fields, records);
+        Ok(())
     }
 
-    pub(crate) fn apply_metadata_committed(&mut self, id: u64, metadata: Metadata, sequence: u64) {
+    pub(crate) fn apply_metadata_committed(
+        &mut self,
+        id: u64,
+        metadata: Metadata,
+        sequence: u64,
+    ) -> Result<()> {
+        let records = self.records.resident_mut()?;
         self.vectors.invalidate_staged(id);
         self.vector_indexes.clear();
-        if let Some(record) = self.records.get_mut(&id) {
+        if let Some(record) = records.get_mut(&id) {
             let previous = record.metadata.clone();
             self.metadata_indexes
                 .track(id, Some(&previous), Some(&metadata));
@@ -238,6 +247,7 @@ impl Collection {
             self.live_body_bytes += format::record_body_len(record);
             self.revisions.insert(id, sequence);
         }
+        Ok(())
     }
 
     /// Applies one durably committed mutation to all in-memory state.
@@ -250,24 +260,25 @@ impl Collection {
         sequence: u64,
         vector_bytes: usize,
         expires_at_ms: Option<u64>,
-    ) {
+    ) -> Result<()> {
+        let records = self.records.resident_mut()?;
         self.vector_sequence = sequence;
         self.vectors.records.remove(&id);
         self.sparse_index.remove(id);
         self.vector_indexes.clear();
         if let Some(index) = &mut self.index
-            && !index.track(id, self.records.get(&id), vector_bytes)
+            && !index.track(id, records.get(&id), vector_bytes)
         {
             self.index = None;
         }
-        let previous = self.records.get(&id).map(|record| &record.metadata);
+        let previous = records.get(&id).map(|record| &record.metadata);
         let current = record.as_ref().map(|record| &record.metadata);
         self.metadata_indexes.track(id, previous, current);
         self.text_index.track(id, previous, current);
         match record {
             Some(record) => {
                 self.live_body_bytes += format::record_body_len(&record);
-                if let Some(previous) = self.records.insert(id, record) {
+                if let Some(previous) = records.insert(id, record) {
                     self.live_body_bytes -= format::record_body_len(&previous);
                 }
                 self.revisions.insert(id, sequence);
@@ -278,13 +289,14 @@ impl Collection {
                 }
             }
             None => {
-                if let Some(previous) = self.records.remove(&id) {
+                if let Some(previous) = records.remove(&id) {
                     self.live_body_bytes -= format::record_body_len(&previous);
                 }
                 self.revisions.remove(&id);
                 std::sync::Arc::make_mut(&mut self.expiries).remove(&id);
             }
         }
+        Ok(())
     }
 }
 
@@ -325,7 +337,7 @@ impl<'a> CollectionRef<'a> {
     }
 
     pub(crate) fn first_id(&self) -> Option<u64> {
-        self.state().records.keys().next().copied()
+        self.state().records.first_id()
     }
 
     pub fn get(&self, id: u64) -> Result<Option<&'a Record>> {

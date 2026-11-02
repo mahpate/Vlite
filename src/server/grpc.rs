@@ -2213,6 +2213,7 @@ async fn export_page(
             let state = db.state(collection);
             let mut records = state
                 .records
+                .resident()?
                 .range((after.map_or(Unbounded, Excluded), Unbounded))
                 .peekable();
             let mut items = Vec::with_capacity(page);

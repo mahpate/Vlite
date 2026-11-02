@@ -1836,6 +1836,7 @@ async fn list_in(
             let mut records = db
                 .state(collection)
                 .records
+                .resident()?
                 .range((after.map_or(Unbounded, Excluded), Unbounded))
                 .peekable();
             let mut items = Vec::with_capacity(limit);

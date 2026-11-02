@@ -95,7 +95,7 @@ fn ready_index(
     metric: DistanceMetric,
     options: AnnOptions,
 ) -> Result<(&Collection, &hnsw::Index)> {
-    db.ensure_healthy()?;
+    db.ensure_resident_in(collection)?;
     config.validate()?;
     validate_ann_metric(metric)?;
     options.validate()?;
@@ -184,7 +184,7 @@ impl CollectionRef<'_> {
         let mut stats = SearchStats::default();
         let (mut found, mut expected, mut used) = (0usize, 0usize, 0usize);
         let mut sampled = positions.iter().peekable();
-        for (position, record) in state.records.values().enumerate() {
+        for (position, record) in state.records.resident()?.values().enumerate() {
             if sampled.peek() != Some(&&position) {
                 continue;
             }
@@ -203,7 +203,7 @@ impl CollectionRef<'_> {
                 None,
                 crate::current_time_ms(),
                 &mut stats,
-            );
+            )?;
             let approximate = self.db.search_ready_with_options_in(
                 self.id,
                 query,

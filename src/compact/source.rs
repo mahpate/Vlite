@@ -330,6 +330,7 @@ impl CompactGeneration {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct CompactView {
     generation: Arc<CompactGeneration>,
     collection: u16,
@@ -410,3 +411,6 @@ impl CompactView {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod dispatch_tests;

@@ -85,7 +85,7 @@ impl<'a> CollectionRef<'a> {
         ef_search: usize,
     ) -> Result<PlannedSearch> {
         let db: &'a Database = self.db;
-        db.ensure_healthy()?;
+        db.ensure_resident_in(self.id)?;
         let state = db.state(self.id);
         validate_vector(state.dimensions, query)?;
         metadata::validate_filter(conditions)?;
@@ -134,7 +134,7 @@ impl<'a> CollectionRef<'a> {
                 ann(&mut stats)?
             } else {
                 plan.reason = no_ann_reason(metric, live);
-                exact(&mut stats, None)
+                exact(&mut stats, None)?
             }
         } else {
             let limit = state.settings.planner.exact_limit(live);
@@ -152,7 +152,7 @@ impl<'a> CollectionRef<'a> {
                         "estimated candidates within the exact limit"
                     };
                     stats.index_candidates = ids.len() as u64;
-                    exact(&mut stats, Some(&ids))
+                    exact(&mut stats, Some(&ids))?
                 }
                 None if ready => {
                     plan.strategy = PlanStrategy::FilteredAnn;
@@ -169,10 +169,10 @@ impl<'a> CollectionRef<'a> {
                     // that cannot match; every candidate is re-verified.
                     let ids = state.metadata_indexes.summary_candidates(
                         conditions,
-                        &state.records,
+                        state.records.resident()?,
                         live / 2,
                     );
-                    exact(&mut stats, ids.as_ref())
+                    exact(&mut stats, ids.as_ref())?
                 }
             }
         };

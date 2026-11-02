@@ -386,7 +386,12 @@ mod tests {
         let config = HnswConfig::default();
         let metric = DistanceMetric::SquaredL2;
         let options = AnnOptions::default();
-        let index = Index::build(&db.state(0).records, config, metric, options);
+        let index = Index::build(
+            db.state(0).records.resident().unwrap(),
+            config,
+            metric,
+            options,
+        );
         let mut changes = Index::build(&crate::records::RecordMap::new(), config, metric, options);
         changes.set_background(true);
         let (release, wait) = std::sync::mpsc::channel();

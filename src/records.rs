@@ -16,6 +16,76 @@ use std::{
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct RecordMap(Arc<BTreeMap<u64, Arc<Record>>>);
 
+#[derive(Clone)]
+pub(crate) enum CollectionRecords {
+    Resident(RecordMap),
+    #[cfg(test)]
+    Compact {
+        view: crate::compact::source::CompactView,
+    },
+}
+
+impl CollectionRecords {
+    pub(crate) fn resident(&self) -> Result<&RecordMap> {
+        match self {
+            Self::Resident(records) => Ok(records),
+            #[cfg(test)]
+            Self::Compact { .. } => Err(Error::UnsupportedFeature(crate::format::FLAG_COMPACT)),
+        }
+    }
+
+    pub(crate) fn resident_mut(&mut self) -> Result<&mut RecordMap> {
+        match self {
+            Self::Resident(records) => Ok(records),
+            #[cfg(test)]
+            Self::Compact { .. } => Err(Error::UnsupportedFeature(crate::format::FLAG_COMPACT)),
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Self::Resident(records) => records.len(),
+            #[cfg(test)]
+            Self::Compact { view } => view.len(),
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub(crate) fn first_id(&self) -> Option<u64> {
+        match self {
+            Self::Resident(records) => records.keys().next().copied(),
+            #[cfg(test)]
+            Self::Compact { view } => view.first_id(),
+        }
+    }
+
+    pub(crate) fn contains_key(&self, id: &u64) -> bool {
+        match self {
+            Self::Resident(records) => records.contains_key(id),
+            #[cfg(test)]
+            Self::Compact { view } => view.contains_id(*id),
+        }
+    }
+
+    pub(crate) fn get_at<'a>(
+        &'a self,
+        id: u64,
+        now_ms: u64,
+        expiries: &BTreeMap<u64, u64>,
+    ) -> Result<Option<&'a Record>> {
+        match self {
+            Self::Resident(records) => Ok(records
+                .get(&id)
+                .filter(|_| !expiries.get(&id).is_some_and(|expiry| *expiry <= now_ms))),
+            #[cfg(test)]
+            Self::Compact { view } => view.get_at(id, now_ms),
+        }
+    }
+}
+
 pub(crate) struct RecordIter<'a>(std::collections::btree_map::Iter<'a, u64, Arc<Record>>);
 
 impl<'a> Iterator for RecordIter<'a> {
@@ -162,7 +232,7 @@ impl Drop for SnapshotLease {
 /// record bodies, may be retained per database. Clones share the same budget.
 #[derive(Clone)]
 pub struct ReadSnapshot {
-    records: RecordMap,
+    records: CollectionRecords,
     expiries: Arc<BTreeMap<u64, u64>>,
     dimensions: usize,
     sequence: u64,
@@ -254,12 +324,7 @@ impl ReadSnapshot {
         self.get_at(id, self.captured_at_ms)
     }
     pub fn get_at(&self, id: u64, now_ms: u64) -> Result<Option<&Record>> {
-        Ok(self.records.get(&id).filter(|_| {
-            !self
-                .expiries
-                .get(&id)
-                .is_some_and(|expiry| *expiry <= now_ms)
-        }))
+        self.records.get_at(id, now_ms, &self.expiries)
     }
 }
 
@@ -277,12 +342,12 @@ mod snapshot_tests {
         db.put(1, &[1.0], b"first").unwrap();
         db.put(2, &[2.0], b"second").unwrap();
         let snapshot = db.read_snapshot().unwrap();
-        let old = Arc::downgrade(&snapshot.records.0[&1]);
+        let old = Arc::downgrade(&snapshot.records.resident().unwrap().0[&1]);
         let unchanged = snapshot.get(2).unwrap().unwrap().vector.as_ptr();
         db.put(1, &[3.0], b"replacement").unwrap();
         assert!(Arc::ptr_eq(
-            &snapshot.records.0[&2],
-            &db.default_state().records.0[&2]
+            &snapshot.records.resident().unwrap().0[&2],
+            &db.default_state().records.resident().unwrap().0[&2]
         ));
         assert_eq!(unchanged, db.get(2).unwrap().unwrap().vector.as_ptr());
         assert_eq!(old.upgrade().unwrap().payload, b"first");
@@ -376,22 +441,24 @@ mod snapshot_tests {
     #[test]
     fn record_count_limit_accepts_boundary_and_rejects_larger_captures() {
         let mut db = database();
-        db.state_mut(0).records = (0..MAX_READ_SNAPSHOT_RECORDS as u64)
-            .map(|id| {
-                (
-                    id,
-                    Record {
-                        vector: Vec::new(),
-                        payload: Vec::new(),
-                        metadata: crate::Metadata::new(),
-                    },
-                )
-            })
-            .collect();
+        db.state_mut(0).records = CollectionRecords::Resident(
+            (0..MAX_READ_SNAPSHOT_RECORDS as u64)
+                .map(|id| {
+                    (
+                        id,
+                        Record {
+                            vector: Vec::new(),
+                            payload: Vec::new(),
+                            metadata: crate::Metadata::new(),
+                        },
+                    )
+                })
+                .collect(),
+        );
         let boundary = db.read_snapshot().unwrap();
         assert_eq!(boundary.len(), MAX_READ_SNAPSHOT_RECORDS);
         drop(boundary);
-        db.state_mut(0).records.insert(
+        db.state_mut(0).records.resident_mut().unwrap().insert(
             MAX_READ_SNAPSHOT_RECORDS as u64,
             Record {
                 vector: Vec::new(),
@@ -556,12 +623,14 @@ impl ReadSnapshot {
         self.browse_at(after, limit, self.captured_at_ms)
     }
     pub fn browse_at(&self, after: Option<u64>, limit: usize, now_ms: u64) -> Result<BrowsePage> {
+        self.records.resident()?;
         if !(1..=MAX_BROWSE_PAGE).contains(&limit) {
             return Err(Error::InvalidQuery("browse limit must be 1..=1000"));
         }
         use std::ops::Bound::{Excluded, Unbounded};
         let mut hits: Vec<_> = self
             .records
+            .resident()?
             .range((after.map_or(Unbounded, Excluded), Unbounded))
             .filter(|(id, _)| {
                 !self
@@ -618,11 +687,12 @@ impl ReadSnapshot {
         now_ms: u64,
         stats: &mut crate::SearchStats,
     ) -> Result<Vec<SearchHit>> {
+        let records = self.records.resident()?;
         validate_vector(self.dimensions, query)?;
         metadata::validate_filter(conditions)?;
         let norm = crate::validate_metric_query(query, metric)?;
         Ok(crate::exact_search(
-            &self.records,
+            records,
             &self.expiries,
             query,
             norm,
@@ -803,7 +873,7 @@ impl CollectionRef<'_> {
 
     /// Deterministic form of `browse` for tests and applications with an injected clock.
     pub fn browse_at(&self, after: Option<u64>, limit: usize, now_ms: u64) -> Result<BrowsePage> {
-        self.db.ensure_healthy()?;
+        self.db.ensure_resident_in(self.id)?;
         if !(1..=MAX_BROWSE_PAGE).contains(&limit) {
             return Err(Error::InvalidQuery("browse limit must be 1..=1000"));
         }
@@ -811,6 +881,7 @@ impl CollectionRef<'_> {
         let mut selected = Vec::with_capacity(limit.saturating_add(1));
         for (&id, record) in state
             .records
+            .resident()?
             .iter()
             .filter(|(id, _)| after.is_none_or(|after| **id > after))
         {
@@ -849,7 +920,7 @@ impl CollectionRef<'_> {
         conditions: &[Condition],
         metric: DistanceMetric,
     ) -> Result<Vec<SearchGroup>> {
-        self.db.ensure_healthy()?;
+        self.db.ensure_resident_in(self.id)?;
         if !valid_field(field) {
             return Err(Error::InvalidQuery("group field must be 1..=256 bytes"));
         }
@@ -868,7 +939,7 @@ impl CollectionRef<'_> {
         let mut output: Vec<SearchGroup> = Vec::new();
         let mut positions: HashMap<ValueKey, usize> = HashMap::new();
         for hit in hits {
-            let Some(value) = state.records[&hit.id].metadata.get(field) else {
+            let Some(value) = state.records.resident()?[&hit.id].metadata.get(field) else {
                 continue;
             };
             let key = value_key(value);
@@ -898,7 +969,7 @@ impl CollectionRef<'_> {
         let k = request.k;
         let conditions = &request.conditions;
         let metric = request.metric;
-        self.db.ensure_healthy()?;
+        self.db.ensure_resident_in(self.id)?;
         let state = self.db.state(self.id);
         metadata::validate_filter(conditions)?;
         let now_ms = current_time_ms();
@@ -913,6 +984,7 @@ impl CollectionRef<'_> {
             }
             let record = state
                 .records
+                .resident()?
                 .get(&id)
                 .filter(|_| {
                     !state
@@ -986,7 +1058,7 @@ impl CollectionRef<'_> {
 
     /// Counts typed values for one metadata field under an optional AND filter.
     pub fn facets(&self, field: &str, conditions: &[Condition]) -> Result<Vec<FacetCount>> {
-        self.db.ensure_healthy()?;
+        self.db.ensure_resident_in(self.id)?;
         if !valid_field(field) {
             return Err(Error::InvalidQuery("facet field must be 1..=256 bytes"));
         }
@@ -994,7 +1066,7 @@ impl CollectionRef<'_> {
         let now_ms = current_time_ms();
         let state = self.db.state(self.id);
         let mut counts: HashMap<ValueKey, (MetadataValue, u64)> = HashMap::new();
-        for (&id, record) in &state.records {
+        for (&id, record) in state.records.resident()? {
             if state
                 .expiries
                 .get(&id)
@@ -1020,7 +1092,7 @@ impl CollectionRef<'_> {
 
     /// Numeric min/max/sum/count/average over integer and float metadata values.
     pub fn numeric_stats(&self, field: &str, conditions: &[Condition]) -> Result<NumericStats> {
-        self.db.ensure_healthy()?;
+        self.db.ensure_resident_in(self.id)?;
         if !valid_field(field) {
             return Err(Error::InvalidQuery("stats field must be 1..=256 bytes"));
         }
@@ -1028,7 +1100,7 @@ impl CollectionRef<'_> {
         let now_ms = current_time_ms();
         let state = self.db.state(self.id);
         let mut result = NumericStats::default();
-        for (&id, record) in &state.records {
+        for (&id, record) in state.records.resident()? {
             if state
                 .expiries
                 .get(&id)
@@ -1057,6 +1129,7 @@ impl CollectionRef<'_> {
     /// Vector search constrained to a spherical radius around a geo-point field.
     /// Vector distance remains available; `sort` selects vector or geographic ordering.
     pub fn search_geo(&self, request: &GeoSearchQuery) -> Result<Vec<GeoSearchHit>> {
+        self.db.ensure_resident_in(self.id)?;
         let query = &request.vector;
         let k = request.k;
         let field = request.field.as_str();
@@ -1091,10 +1164,11 @@ impl CollectionRef<'_> {
             metric,
             &mut crate::SearchStats::default(),
         )?;
+        let records = state.records.resident()?;
         let mut output: Vec<_> = hits
             .into_iter()
             .map(|hit| {
-                let (lat, lon) = match state.records[&hit.id]
+                let (lat, lon) = match records[&hit.id]
                     .metadata
                     .get(field)
                     .expect("radius filter matched")

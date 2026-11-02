@@ -583,7 +583,7 @@ fn submitted_digest(operations: &[Mutation], valid: &[bool], policy: InvalidRowP
 
 impl Database {
     fn ensure_imports(&self) -> Result<()> {
-        self.ensure_healthy()?;
+        self.ensure_all_resident()?;
         if self.version < format::V4 {
             return Err(Error::ImportsRequireUpgrade);
         }

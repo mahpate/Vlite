@@ -372,11 +372,11 @@ fn rank(mut hits: Vec<SearchHit>, k: usize) -> Vec<SearchHit> {
 }
 impl<'a> CollectionRef<'a> {
     pub fn vector_specs(&self) -> Result<&'a BTreeMap<String, VectorSpec>> {
-        self.db.ensure_healthy()?;
+        self.db.ensure_resident_in(self.id)?;
         Ok(&self.db.state(self.id).vectors.specs)
     }
     pub fn record_vectors(&self, id: u64) -> Result<Option<&'a RecordVectors>> {
-        self.db.ensure_healthy()?;
+        self.db.ensure_resident_in(self.id)?;
         if self.get(id)?.is_none() {
             return Ok(None);
         }
@@ -387,7 +387,7 @@ impl<'a> CollectionRef<'a> {
         n: &str,
         version: Option<&str>,
     ) -> Result<(VectorSpec, crate::records::RecordMap)> {
-        self.db.ensure_healthy()?;
+        self.db.ensure_resident_in(self.id)?;
         let state = self.db.state(self.id);
         let spec = state.vectors.specs.get(n).ok_or_else(invalid)?.clone();
         let version = version.unwrap_or(&spec.active_version);
@@ -497,7 +497,7 @@ impl<'a> CollectionRef<'a> {
     }
     /// Dot-product scoring through derived inverted postings (rebuilt on open).
     pub fn search_sparse(&self, n: &str, query: &[(u32, f32)], k: usize) -> Result<Vec<SearchHit>> {
-        self.db.ensure_healthy()?;
+        self.db.ensure_resident_in(self.id)?;
         name(n)?;
         sparse(query)?;
         let state = self.db.state(self.id);
@@ -549,7 +549,7 @@ impl<'a> CollectionRef<'a> {
         )
     }
     pub fn reembed_status(&self, n: &str) -> Result<Option<&'a ReembedStatus>> {
-        self.db.ensure_healthy()?;
+        self.db.ensure_resident_in(self.id)?;
         Ok(self.db.state(self.id).vectors.jobs.get(n))
     }
     /// Preferred iterator for work performed outside the database owner's lock.
@@ -574,14 +574,14 @@ impl<'a> CollectionRef<'a> {
     }
     /// Returns missing target embeddings, including newly inserted IDs before the cursor.
     pub fn reembed_pending(&self, n: &str, limit: usize) -> Result<Vec<(u64, Record)>> {
-        self.db.ensure_healthy()?;
+        self.db.ensure_resident_in(self.id)?;
         if limit > crate::MAX_BATCH_OPERATIONS {
             return Err(Error::BatchTooLarge);
         }
         let state = self.db.state(self.id);
         let j = state.vectors.jobs.get(n).ok_or_else(invalid)?;
         let mut out = Vec::new();
-        for (&id, r) in &state.records {
+        for (&id, r) in state.records.resident()? {
             if out.len() == limit {
                 break;
             }

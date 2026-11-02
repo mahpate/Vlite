@@ -1616,6 +1616,20 @@ impl Database {
         Ok(())
     }
 
+    fn ensure_resident_in(&self, collection: u16) -> Result<()> {
+        self.ensure_healthy()?;
+        self.state(collection).records.resident()?;
+        Ok(())
+    }
+
+    fn ensure_all_resident(&self) -> Result<()> {
+        self.ensure_healthy()?;
+        for state in self.collections.values() {
+            state.records.resident()?;
+        }
+        Ok(())
+    }
+
     /// Whether this handle refuses all further operations (a failed commit
     /// or a failed periodic sync). Close and reopen.
     pub fn is_poisoned(&self) -> bool {
@@ -1647,6 +1661,9 @@ impl Database {
     /// and `Periodic`, both with `InvalidDurability`, so a handle never
     /// claims a durability it cannot provide.
     pub fn set_durability(&mut self, durability: Durability) -> Result<()> {
+        for state in self.collections.values() {
+            state.records.resident()?;
+        }
         durability.validate()?;
         match (self.file.is_memory(), durability) {
             (true, Durability::None) | (false, Durability::Full | Durability::Periodic { .. }) => {}
@@ -1692,7 +1709,7 @@ impl Database {
     /// handles, and under `Durability::None` (there is no storage). A sync failure returns `CommitIndeterminate`
     /// and poisons the handle.
     pub fn sync(&self) -> Result<()> {
-        self.ensure_healthy()?;
+        self.ensure_all_resident()?;
         match &self.flusher {
             Some(flusher) => flusher.sync_now().map_err(Error::CommitIndeterminate),
             None => Ok(()),
@@ -1735,7 +1752,7 @@ impl Database {
     /// directory store. Change-feed cursors older than the floor then get
     /// `CursorBeforeHistory`.
     pub fn checkpoint(&mut self) -> Result<Option<u64>> {
-        self.ensure_healthy()?;
+        self.ensure_all_resident()?;
         if !self.file.is_chain() {
             return Ok(None);
         }
@@ -1859,12 +1876,7 @@ impl Database {
     fn get_at_in(&self, collection: u16, id: u64, now_ms: u64) -> Result<Option<&Record>> {
         self.ensure_healthy()?;
         let state = self.state(collection);
-        Ok(state.records.get(&id).filter(|_| {
-            !state
-                .expiries
-                .get(&id)
-                .is_some_and(|expiry| *expiry <= now_ms)
-        }))
+        state.records.get_at(id, now_ms, &state.expiries)
     }
 
     pub fn get_at(&self, id: u64, now_ms: u64) -> Result<Option<&Record>> {
@@ -1979,7 +1991,7 @@ impl Database {
         expiry: Option<u64>,
         expected: Expected,
     ) -> Result<u64> {
-        self.ensure_healthy()?;
+        self.ensure_resident_in(collection)?;
         if self.version < format::V5 {
             return Err(Error::ExpiryRequiresUpgrade);
         }
@@ -2005,7 +2017,7 @@ impl Database {
         let sequence = self.next_sequence()?;
         let frame = format::record_frame_v5(sequence, collection, id, &record, expiry);
         self.commit_frame(sequence, &frame)?;
-        self.apply(collection, id, Some(record), sequence, expiry);
+        self.apply(collection, id, Some(record), sequence, expiry)?;
         Ok(sequence)
     }
 
@@ -2016,7 +2028,7 @@ impl Database {
         metadata: &Metadata,
         expected: Expected,
     ) -> Result<u64> {
-        self.ensure_healthy()?;
+        self.ensure_resident_in(collection)?;
         if self.version < format::V5 {
             return Err(Error::ExpiryRequiresUpgrade);
         }
@@ -2033,7 +2045,7 @@ impl Database {
         let frame = format::metadata_frame_v5(sequence, collection, id, metadata);
         self.commit_frame(sequence, &frame)?;
         self.state_mut(collection)
-            .apply_metadata_committed(id, metadata.clone(), sequence);
+            .apply_metadata_committed(id, metadata.clone(), sequence)?;
         self.touch_graph_record(collection, id, sequence);
         Ok(sequence)
     }
@@ -2047,7 +2059,7 @@ impl Database {
         metadata: &Metadata,
         expected: Expected,
     ) -> Result<u64> {
-        self.ensure_healthy()?;
+        self.ensure_resident_in(collection)?;
         let state = self.state(collection);
         validate_stored(state.dimensions, state.precision, vector)?;
         if payload.len() > MAX_PAYLOAD_BYTES {
@@ -2070,7 +2082,7 @@ impl Database {
         let sequence = self.next_sequence()?;
         let frame = format::record_frame(sequence, collection, id, Some(&record));
         self.commit_frame(sequence, &frame)?;
-        self.apply(collection, id, Some(record), sequence, None);
+        self.apply(collection, id, Some(record), sequence, None)?;
         Ok(sequence)
     }
 
@@ -2086,7 +2098,7 @@ impl Database {
     }
 
     fn delete_in(&mut self, collection: u16, id: u64, expected: Expected) -> Result<bool> {
-        self.ensure_healthy()?;
+        self.ensure_resident_in(collection)?;
         let current = self.state(collection).revisions.get(&id).copied();
         expected.check(current)?;
         if current.is_none() {
@@ -2098,7 +2110,7 @@ impl Database {
         let sequence = self.next_sequence()?;
         let frame = format::record_frame(sequence, collection, id, None);
         self.commit_frame(sequence, &frame)?;
-        self.apply(collection, id, None, sequence, None);
+        self.apply(collection, id, None, sequence, None)?;
         Ok(true)
     }
 
@@ -2113,7 +2125,7 @@ impl Database {
     }
 
     fn write_batch_in(&mut self, collection: u16, operations: &[Mutation]) -> Result<()> {
-        self.ensure_healthy()?;
+        self.ensure_resident_in(collection)?;
         if operations.is_empty() {
             return Ok(());
         }
@@ -2130,7 +2142,7 @@ impl Database {
             format::batch_frame_v4(sequence, collection, &operations, None)
         };
         self.commit_frame(sequence, &frame)?;
-        self.apply_batch(collection, &operations, sequence);
+        self.apply_batch(collection, &operations, sequence)?;
         Ok(())
     }
 
@@ -2206,7 +2218,12 @@ impl Database {
         Ok(std::borrow::Cow::Owned(stored))
     }
 
-    fn apply_batch(&mut self, collection: u16, operations: &[Mutation], sequence: u64) {
+    fn apply_batch(
+        &mut self,
+        collection: u16,
+        operations: &[Mutation],
+        sequence: u64,
+    ) -> Result<()> {
         for operation in operations {
             let (id, record) = match operation {
                 Mutation::Put {
@@ -2236,8 +2253,9 @@ impl Database {
                 ),
                 Mutation::Delete { id } => (*id, None),
             };
-            self.apply(collection, id, record, sequence, None);
+            self.apply(collection, id, record, sequence, None)?;
         }
+        Ok(())
     }
 
     /// Atomically commits a chunk of rows plus its import checkpoint marker in
@@ -2249,7 +2267,7 @@ impl Database {
         operations: &[Mutation],
         marker: &format::ImportMarker,
     ) -> Result<u64> {
-        self.ensure_healthy()?;
+        self.ensure_resident_in(collection)?;
         if self.version < format::V4 {
             return Err(Error::ImportsRequireUpgrade);
         }
@@ -2258,7 +2276,7 @@ impl Database {
         let operations = self.stored_batch(collection, operations)?;
         let frame = format::batch_frame_v4(sequence, collection, &operations, Some(marker));
         self.commit_frame(sequence, &frame)?;
-        self.apply_batch(collection, &operations, sequence);
+        self.apply_batch(collection, &operations, sequence)?;
         let name = &self.collections[&collection].name;
         self.imports.apply(collection, name, marker);
         Ok(sequence)
@@ -2299,7 +2317,7 @@ impl Database {
         f: impl FnOnce(&mut Self) -> T,
         sync: impl FnOnce(&LockedFile) -> io::Result<()>,
     ) -> Result<T> {
-        self.ensure_healthy()?;
+        self.ensure_all_resident()?;
         if self.read_only {
             return Err(Error::ReadOnly);
         }
@@ -2400,6 +2418,9 @@ impl Database {
     /// Cursor positioned at the current head: `changes_after` returns only
     /// commits made after this call. Needs format v4 or newer.
     pub fn feed_cursor(&self) -> Result<changes::FeedCursor> {
+        for state in self.collections.values() {
+            state.records.resident()?;
+        }
         Ok(changes::FeedCursor {
             lineage: self.lineage.ok_or(Error::ChangeFeedRequiresUpgrade)?,
             sequence: self.sequence,
@@ -2416,6 +2437,9 @@ impl Database {
         cursor: &changes::FeedCursor,
         max_events: usize,
     ) -> Result<changes::ChangeBatch> {
+        for state in self.collections.values() {
+            state.records.resident()?;
+        }
         self.lineage.ok_or(Error::ChangeFeedRequiresUpgrade)?;
         // Periodic durability: never publish commits a crash could lose.
         self.sync()?;
@@ -2460,6 +2484,9 @@ impl Database {
         expected_last: u64,
         key: Option<&EncryptionKey>,
     ) -> Result<()> {
+        for state in self.collections.values() {
+            state.records.resident()?;
+        }
         if self.read_only {
             return Err(Error::ReadOnly);
         }
@@ -2518,8 +2545,9 @@ impl Database {
         record: Option<Record>,
         sequence: u64,
         expires_at_ms: Option<u64>,
-    ) {
+    ) -> Result<()> {
         let vector_bytes = record.as_ref().map_or(0, |record| record.vector.len() * 4);
+        self.state(collection).records.resident()?;
         self.touch_graph_record(collection, id, sequence);
         let state = self
             .collections
@@ -2528,10 +2556,11 @@ impl Database {
         if let Some((owner, job)) = &mut self.rebuild
             && *owner == collection
         {
-            job.track(id, state.records.get(&id), vector_bytes);
+            job.track(id, state.records.resident()?.get(&id), vector_bytes);
             job.set_vector_sequence(sequence);
         }
-        state.apply_committed(id, record, sequence, vector_bytes, expires_at_ms);
+        state.apply_committed(id, record, sequence, vector_bytes, expires_at_ms)?;
+        Ok(())
     }
 
     // ---------------------------------------------------------------- collections
@@ -2569,6 +2598,7 @@ impl Database {
     /// Mutable handle to a collection. `default` is always available.
     pub fn collection_mut(&mut self, name: &str) -> Result<CollectionMut<'_>> {
         let id = self.resolve(name)?;
+        self.ensure_resident_in(id)?;
         Ok(CollectionMut { db: self, id })
     }
 
@@ -2601,7 +2631,7 @@ impl Database {
         spec: CollectionSpec,
         precision: compact::catalog::Precision,
     ) -> Result<CollectionInfo> {
-        self.ensure_healthy()?;
+        self.ensure_all_resident()?;
         if self.version < format::V4 {
             return Err(Error::CollectionsRequireUpgrade);
         }
@@ -2659,7 +2689,7 @@ impl Database {
     /// Durably drops an empty named collection (v4 only). A collection with
     /// live records or open import jobs returns `CollectionNotEmpty`.
     pub fn drop_collection(&mut self, name: &str) -> Result<()> {
-        self.ensure_healthy()?;
+        self.ensure_all_resident()?;
         if self.version < format::V4 {
             return Err(Error::CollectionsRequireUpgrade);
         }
@@ -2692,6 +2722,7 @@ impl Database {
         settings: CollectionSettings,
     ) -> Result<SettingsPersistence> {
         let id = self.resolve(name)?;
+        self.ensure_resident_in(id)?;
         validate_settings(&settings)?;
         let persistence = if self.version >= format::V4 {
             let sequence = self.next_sequence()?;
@@ -2703,13 +2734,13 @@ impl Database {
         let state = self.state_mut(id);
         state.settings = settings;
         state.settings_persisted = persistence == SettingsPersistence::Persisted;
-        state.rebuild_derived();
+        state.rebuild_derived()?;
         Ok(persistence)
     }
 
     /// Durable status of one import job (v4 only).
     pub fn import_status(&self, job: u64) -> Result<ImportStatus> {
-        self.ensure_healthy()?;
+        self.ensure_all_resident()?;
         if self.version < format::V4 {
             return Err(Error::ImportsRequireUpgrade);
         }
@@ -2757,7 +2788,7 @@ impl Database {
         collection: u16,
         limits: Option<HnswRebuildLimits>,
     ) -> Result<()> {
-        self.ensure_healthy()?;
+        self.ensure_resident_in(collection)?;
         if let Some(limits) = limits {
             limits.validate(0, self.state(collection).dimensions)?;
         }
@@ -2861,7 +2892,7 @@ impl Database {
         metric: DistanceMetric,
         options: AnnOptions,
     ) -> Result<()> {
-        self.ensure_healthy()?;
+        self.ensure_resident_in(collection)?;
         config.validate()?;
         validate_ann_metric(metric)?;
         options.validate()?;
@@ -2871,7 +2902,12 @@ impl Database {
             job.stop(HnswRebuildStatus::Superseded);
         }
         let state = self.state_mut(collection);
-        state.index = Some(hnsw::Index::build(&state.records, config, metric, options));
+        state.index = Some(hnsw::Index::build(
+            state.records.resident()?,
+            config,
+            metric,
+            options,
+        ));
         if state.background_hnsw.is_some() {
             state
                 .index
@@ -2928,7 +2964,7 @@ impl Database {
         options: AnnOptions,
         limits: HnswRebuildLimits,
     ) -> Result<()> {
-        self.ensure_healthy()?;
+        self.ensure_resident_in(collection)?;
         config.validate()?;
         validate_ann_metric(metric)?;
         options.validate()?;
@@ -2947,9 +2983,9 @@ impl Database {
             return Err(Error::HnswRebuildBusy);
         }
         let mut job = if state.background_hnsw.is_some() {
-            rebuild::Job::start_background(&state.records, config, metric, options)?
+            rebuild::Job::start_background(state.records.resident()?, config, metric, options)?
         } else {
-            rebuild::Job::start(&state.records, config, metric, options)?
+            rebuild::Job::start(state.records.resident()?, config, metric, options)?
         };
         job.set_vector_sequence(state.vector_sequence);
         self.rebuild = Some((collection, job));
@@ -2966,7 +3002,7 @@ impl Database {
     }
 
     fn poll_rebuild_in(&mut self, collection: u16) -> Result<HnswRebuildStatus> {
-        self.ensure_healthy()?;
+        self.ensure_resident_in(collection)?;
         match &self.rebuild {
             Some((owner, job)) if *owner == collection => {
                 if !job.finished() {
@@ -3046,7 +3082,7 @@ impl Database {
         options: AnnOptions,
         policy: HnswMaintenancePolicy,
     ) -> Result<HnswMaintenanceStatus> {
-        self.ensure_healthy()?;
+        self.ensure_resident_in(collection)?;
         config.validate()?;
         validate_ann_metric(metric)?;
         options.validate()?;
@@ -3271,7 +3307,7 @@ impl Database {
                 k,
                 ef_search,
                 AnnOptions::default(),
-                &state.records,
+                state.records.resident()?,
                 &state.expiries,
                 current_time_ms(),
                 conditions,
@@ -3406,7 +3442,7 @@ impl Database {
             } else {
                 let summaries = state.metadata_indexes.summary_candidates(
                     conditions,
-                    &state.records,
+                    state.records.resident()?,
                     state.records.len(),
                 );
                 let used_summaries = summaries.is_some();
@@ -3422,12 +3458,12 @@ impl Database {
                 )
             };
             let Some(index) = index else {
-                let hits = exact(stats);
+                let hits = exact(stats)?;
                 hnsw::p5_exact_fallback_report();
                 return Ok(hits);
             };
             let Some(candidates) = candidates else {
-                let hits = exact(stats);
+                let hits = exact(stats)?;
                 hnsw::p5_exact_fallback_report();
                 return Ok(hits);
             };
@@ -3437,7 +3473,7 @@ impl Database {
                 ef_search,
                 limits,
                 options,
-                &state.records,
+                state.records.resident()?,
                 &state.expiries,
                 now_ms,
                 conditions,
@@ -3449,7 +3485,7 @@ impl Database {
                 hnsw::set_p5_approximation_report(report);
                 return Ok(hits);
             }
-            let hits = exact(stats);
+            let hits = exact(stats)?;
             hnsw::p5_exact_fallback_report();
             return Ok(hits);
         }
@@ -3464,7 +3500,7 @@ impl Database {
             k,
             ef_search,
             options,
-            &state.records,
+            state.records.resident()?,
             &state.expiries,
             current_time_ms(),
             conditions,
@@ -3483,7 +3519,7 @@ impl Database {
         conditions: &[Condition],
         metric: DistanceMetric,
     ) -> Result<()> {
-        self.ensure_healthy()?;
+        self.ensure_resident_in(collection)?;
         let state = self.state(collection);
         validate_vector(state.dimensions, query)?;
         metadata::validate_filter(conditions)?;
@@ -3583,8 +3619,9 @@ impl Database {
         now_ms: u64,
         stats: &mut SearchStats,
     ) -> Result<Vec<SearchHit>> {
-        self.ensure_healthy()?;
+        self.ensure_resident_in(collection)?;
         let state = self.state(collection);
+        let records = state.records.resident()?;
         validate_vector(state.dimensions, query)?;
         metadata::validate_filter(conditions)?;
         let query_norm = validate_metric_query(query, metric)?;
@@ -3601,9 +3638,9 @@ impl Database {
         let candidates = candidates.or_else(|| {
             state
                 .metadata_indexes
-                .summary_candidates(conditions, &state.records, cap)
+                .summary_candidates(conditions, records, cap)
         });
-        Ok(state.exact_search_candidates(
+        state.exact_search_candidates(
             query,
             query_norm,
             k,
@@ -3612,7 +3649,7 @@ impl Database {
             candidates.as_ref(),
             now_ms,
             stats,
-        ))
+        )
     }
 
     /// Consumes the handle and releases its OS lock. Under
@@ -3624,7 +3661,7 @@ impl Database {
     /// state, and a periodic handle performs the same final sync on drop
     /// (but cannot report its failure).
     pub fn close(mut self) -> Result<()> {
-        self.ensure_healthy()?;
+        self.ensure_all_resident()?;
         if let Some((_, mut job)) = self.rebuild.take() {
             job.stop(HnswRebuildStatus::Cancelled);
             job.finish()?;
@@ -3664,7 +3701,7 @@ impl Database {
     /// holds the complete new snapshot but its durability is uncertain.
     /// The sidecar contains vector data; protect it like the datafile.
     pub fn save_ann_snapshot(&self, path: impl AsRef<Path>) -> Result<AnnSnapshotReport> {
-        self.ensure_healthy()?;
+        self.ensure_all_resident()?;
         if self.cipher.is_some() {
             return Err(Error::SidecarUnavailable(
                 "ANN snapshots hold plaintext vectors and are not written for encrypted databases; rebuild indexes after open",
@@ -3681,7 +3718,7 @@ impl Database {
     /// is only read. Returns `Err` only for `Poisoned` or `HnswRebuildBusy`
     /// (a background rebuild is pending).
     pub fn load_ann_snapshot(&mut self, path: impl AsRef<Path>) -> Result<AnnSnapshotLoad> {
-        self.ensure_healthy()?;
+        self.ensure_all_resident()?;
         if self.rebuild.is_some() {
             return Err(Error::HnswRebuildBusy);
         }
@@ -4374,7 +4411,13 @@ mod tests {
         ));
         assert_eq!(db.sequence, 1);
         assert_eq!(
-            db.default_state().records.get(&1).unwrap().payload,
+            db.default_state()
+                .records
+                .resident()
+                .unwrap()
+                .get(&1)
+                .unwrap()
+                .payload,
             b"original"
         );
         assert!(matches!(db.get(1), Err(Error::Poisoned)));
@@ -4459,7 +4502,16 @@ mod tests {
             Err(Error::CommitIndeterminate(_))
         ));
         assert_eq!(db.default_state().records.len(), 1);
-        assert_eq!(db.default_state().records.get(&1).unwrap().payload, b"old");
+        assert_eq!(
+            db.default_state()
+                .records
+                .resident()
+                .unwrap()
+                .get(&1)
+                .unwrap()
+                .payload,
+            b"old"
+        );
         assert!(matches!(db.write_batch(&[]), Err(Error::Poisoned)));
         drop(db);
         let db = Database::open(&path).unwrap();
@@ -4818,16 +4870,19 @@ mod v4_tests {
         }
         let subset: BTreeSet<u64> = [3, 7, 11, 99].into();
         let mut stats = SearchStats::default();
-        let hits = db.default_state().exact_search_candidates(
-            &[10.0],
-            0.0,
-            2,
-            &[],
-            DistanceMetric::SquaredL2,
-            Some(&subset),
-            current_time_ms(),
-            &mut stats,
-        );
+        let hits = db
+            .default_state()
+            .exact_search_candidates(
+                &[10.0],
+                0.0,
+                2,
+                &[],
+                DistanceMetric::SquaredL2,
+                Some(&subset),
+                current_time_ms(),
+                &mut stats,
+            )
+            .unwrap();
         assert_eq!(hits.iter().map(|hit| hit.id).collect::<Vec<_>>(), [11, 7]);
         assert_eq!((stats.records_scanned, stats.distance_evaluations), (3, 3));
     }
@@ -5022,6 +5077,8 @@ mod p5_filter_approximation_tests {
         let query_norm = validate_metric_query(query, metric).unwrap();
         let mut eligible: Vec<SearchHit> = state
             .records
+            .resident()
+            .unwrap()
             .iter()
             .filter(|(id, record)| {
                 !state
@@ -5048,7 +5105,7 @@ mod p5_filter_approximation_tests {
             .collect();
         for hit in hits {
             assert_eq!(expected.get(&hit.id), Some(&hit.distance.to_bits()));
-            let record = &state.records[&hit.id];
+            let record = &state.records.resident().unwrap()[&hit.id];
             assert!(metadata::matches(&record.metadata, filter));
             assert!(
                 !state
@@ -5077,6 +5134,8 @@ mod p5_filter_approximation_tests {
         let query_norm = validate_metric_query(query, metric).unwrap();
         let mut expected: Vec<SearchHit> = state
             .records
+            .resident()
+            .unwrap()
             .iter()
             .filter(|(id, record)| {
                 !state

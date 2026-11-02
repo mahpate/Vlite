@@ -94,8 +94,9 @@ impl GpuExactSearcher {
 
     /// Exact squared-L2 search of the default collection on the GPU.
     pub fn search(&self, database: &Database, query: &[f32], k: usize) -> Result<Vec<SearchHit>> {
-        database.ensure_healthy()?;
+        database.ensure_resident_in(0)?;
         let state = database.state(0);
+        let records = state.records.resident()?;
         crate::validate_vector(state.dimensions, query)?;
         if k == 0 {
             return Ok(Vec::new());
@@ -103,6 +104,7 @@ impl GpuExactSearcher {
         let now = current_time_ms();
         let live: Vec<(u64, &[f32])> = state
             .records
+            .resident()?
             .iter()
             .filter(|(id, _)| state.expiries.get(id).is_none_or(|expires| *expires > now))
             .map(|(&id, record)| (id, record.vector.as_slice()))
@@ -122,7 +124,7 @@ impl GpuExactSearcher {
         let keep = k.saturating_mul(4).saturating_add(32).min(scored.len());
         let rows: Vec<&[f32]> = scored[..keep]
             .iter()
-            .map(|&(_, id)| state.records[&id].vector.as_slice())
+            .map(|&(_, id)| records[&id].vector.as_slice())
             .collect();
         let distances = cpu_rescore(query, &rows);
         let mut hits: Vec<SearchHit> = scored[..keep]

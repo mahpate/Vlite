@@ -113,6 +113,7 @@ impl Database {
 }
 
 fn check_kv_collection(db: &Database, id: u16) -> Result<()> {
+    db.ensure_resident_in(id)?;
     if db.state(id).dimensions == 1 {
         Ok(())
     } else {
@@ -201,7 +202,7 @@ impl KvStore<'_> {
         if value.len() > MAX_KV_VALUE_BYTES {
             return Err(Error::PayloadTooLarge(value.len()));
         }
-        let probe = probe(self.db, self.id, namespace, key, now_ms);
+        let probe = probe(self.db, self.id, namespace, key, now_ms)?;
         options.expected.check(probe.live_version())?;
         let (slot, physical) = match probe.found {
             Some(found) => (found.slot, Expected::Revision(found.revision)),
@@ -246,7 +247,7 @@ impl KvStore<'_> {
         now_ms: u64,
     ) -> Result<bool> {
         validate(namespace, key)?;
-        let probe = probe(self.db, self.id, namespace, key, now_ms);
+        let probe = probe(self.db, self.id, namespace, key, now_ms)?;
         expected.check(probe.live_version())?;
         match probe.found {
             Some(found) if !found.expired => {
@@ -285,13 +286,14 @@ impl Probe {
     }
 }
 
-fn probe(db: &Database, collection: u16, namespace: &str, key: &str, now_ms: u64) -> Probe {
+fn probe(db: &Database, collection: u16, namespace: &str, key: &str, now_ms: u64) -> Result<Probe> {
     let state = db.state(collection);
+    let records = state.records.resident()?;
     let base = slot_base(namespace, key);
     let mut free = None;
     for offset in 0..KV_PROBE_SLOTS {
         let slot = base.wrapping_add(offset);
-        let Some(record) = state.records.get(&slot) else {
+        let Some(record) = records.get(&slot) else {
             free.get_or_insert((slot, None));
             continue;
         };
@@ -302,14 +304,14 @@ fn probe(db: &Database, collection: u16, namespace: &str, key: &str, now_ms: u64
             .is_some_and(|expiry| *expiry <= now_ms);
         match decode(&record.payload) {
             Some((ns, k, _)) if ns == namespace && k == key => {
-                return Probe {
+                return Ok(Probe {
                     found: Some(Found {
                         slot,
                         revision,
                         expired,
                     }),
                     free,
-                };
+                });
             }
             // Expired entries of other keys are reusable; foreign records are not.
             Some(_) if expired => {
@@ -318,7 +320,7 @@ fn probe(db: &Database, collection: u16, namespace: &str, key: &str, now_ms: u64
             _ => {}
         }
     }
-    Probe { found: None, free }
+    Ok(Probe { found: None, free })
 }
 
 fn get_at(
@@ -328,25 +330,30 @@ fn get_at(
     key: &str,
     now_ms: u64,
 ) -> Result<Option<KvEntry>> {
-    db.ensure_healthy()?;
+    db.ensure_resident_in(collection)?;
     validate(namespace, key)?;
-    let probe = probe(db, collection, namespace, key, now_ms);
+    let probe = probe(db, collection, namespace, key, now_ms)?;
     let Some(found) = probe.found.filter(|found| !found.expired) else {
         return Ok(None);
     };
-    Ok(entry(db, collection, found.slot))
+    entry(db, collection, found.slot)
 }
 
-fn entry(db: &Database, collection: u16, slot: u64) -> Option<KvEntry> {
+fn entry(db: &Database, collection: u16, slot: u64) -> Result<Option<KvEntry>> {
     let state = db.state(collection);
-    let record = state.records.get(&slot)?;
-    let (_, key, value) = decode(&record.payload)?;
-    Some(KvEntry {
+    let records = state.records.resident()?;
+    let Some(record) = records.get(&slot) else {
+        return Ok(None);
+    };
+    let Some((_, key, value)) = decode(&record.payload) else {
+        return Ok(None);
+    };
+    Ok(Some(KvEntry {
         key: key.to_owned(),
         value: value.to_vec(),
         version: state.revisions.get(&slot).copied().unwrap_or_default(),
         expires_at_ms: state.expiries.get(&slot).copied(),
-    })
+    }))
 }
 
 fn list_at(
@@ -358,7 +365,7 @@ fn list_at(
     limit: usize,
     now_ms: u64,
 ) -> Result<Vec<KvEntry>> {
-    db.ensure_healthy()?;
+    db.ensure_resident_in(collection)?;
     validate_namespace(namespace)?;
     if limit == 0 || limit > MAX_KV_LIST_LIMIT {
         return Err(Error::InvalidKvKey("limit must be between 1 and 10000"));
@@ -366,6 +373,7 @@ fn list_at(
     let state = db.state(collection);
     let mut matches: Vec<(&str, u64)> = state
         .records
+        .resident()?
         .iter()
         .filter(|(id, _)| {
             !state
@@ -383,7 +391,10 @@ fn list_at(
     Ok(matches
         .into_iter()
         .take(limit)
-        .filter_map(|(_, id)| entry(db, collection, id))
+        .map(|(_, id)| entry(db, collection, id))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
         .collect())
 }
 

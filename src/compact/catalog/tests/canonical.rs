@@ -212,7 +212,14 @@ struct Held {
 
 fn held(db: &Database, name: &str) -> Held {
     let collection = db.collection(name).unwrap();
-    let ids: Vec<u64> = db.state(collection.id).records.keys().copied().collect();
+    let ids: Vec<u64> = db
+        .state(collection.id)
+        .records
+        .resident()
+        .unwrap()
+        .keys()
+        .copied()
+        .collect();
     let mut held = Held {
         primary: BTreeMap::new(),
         named: BTreeMap::new(),
@@ -457,6 +464,8 @@ fn default_collection(key: Option<EncryptionKey>) {
         let ids = db
             .default_state()
             .records
+            .resident()
+            .unwrap()
             .keys()
             .copied()
             .collect::<Vec<_>>();

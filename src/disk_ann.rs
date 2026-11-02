@@ -149,7 +149,7 @@ impl Database {
         config: HnswConfig,
         metric: DistanceMetric,
     ) -> Result<DiskAnnSource> {
-        self.ensure_healthy()?;
+        self.ensure_all_resident()?;
         if self.cipher.is_some() {
             return Err(Error::SidecarUnavailable(
                 "disk ANN sidecars hold plaintext vectors and are not built for encrypted databases",
@@ -158,9 +158,15 @@ impl Database {
         config.validate()?;
         validate_ann_metric(metric)?;
         let id = self.resolve(collection)?;
+        self.ensure_resident_in(id)?;
         let state = self.state(id);
         let lineage = self.lineage.unwrap_or(0);
-        let index = hnsw::Index::build(&state.records, config, metric, AnnOptions::default());
+        let index = hnsw::Index::build(
+            state.records.resident()?,
+            config,
+            metric,
+            AnnOptions::default(),
+        );
         let graph = index.export_graph().ok_or(Error::UnsupportedAnnMetric)?;
         let source = DiskAnnSource {
             lineage,
@@ -171,7 +177,7 @@ impl Database {
         write_sidecar(
             path.as_ref(),
             &graph,
-            &state.records,
+            state.records.resident()?,
             state.dimensions,
             config,
             metric,
@@ -190,7 +196,7 @@ impl Database {
         k: usize,
         ef_search: usize,
     ) -> Result<Vec<SearchHit>> {
-        self.ensure_healthy()?;
+        self.ensure_all_resident()?;
         if !index.is_fresh_for(self) {
             return Err(Error::StaleIndex);
         }
