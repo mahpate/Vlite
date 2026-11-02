@@ -67,6 +67,7 @@ pub(crate) fn precision_supported() -> bool {
 #[cfg(test)]
 thread_local! {
     static PRECISION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static GRAPH_BLOCKS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Test-only switch of `precision_supported` on this thread, restored when
@@ -89,6 +90,34 @@ impl Activation {
 impl Drop for Activation {
     fn drop(&mut self) {
         PRECISION.with(|cell| cell.set(self.0));
+    }
+}
+
+/// Whether P4 graph blocks are enabled in this test build.
+#[cfg(test)]
+pub(crate) fn graph_blocks_enabled() -> bool {
+    GRAPH_BLOCKS.with(std::cell::Cell::get)
+}
+
+/// Test-only P4 block gate, restored when dropped.
+#[cfg(test)]
+pub(crate) struct GraphBlocks(bool);
+
+#[cfg(test)]
+impl GraphBlocks {
+    pub(crate) fn on() -> Self {
+        Self::set(true)
+    }
+
+    pub(crate) fn set(enabled: bool) -> Self {
+        Self(GRAPH_BLOCKS.with(|cell| cell.replace(enabled)))
+    }
+}
+
+#[cfg(test)]
+impl Drop for GraphBlocks {
+    fn drop(&mut self) {
+        GRAPH_BLOCKS.with(|cell| cell.set(self.0));
     }
 }
 
@@ -220,6 +249,39 @@ pub(crate) fn records_table_frame(
             &[]
         },
     )
+}
+
+/// Precision-image capability table for the enabled private source codecs.
+#[cfg(test)]
+pub(crate) fn precision_table_frame(
+    floor: u64,
+    graphs: bool,
+    loaded: &crate::format::Loaded,
+    now: Option<u64>,
+    graph_blocks: bool,
+) -> Vec<u8> {
+    let records = catalog::payload::enabled()
+        && loaded.collections.values().any(|collection| {
+            collection.records.keys().any(|id| {
+                !collection
+                    .expiries
+                    .get(id)
+                    .is_some_and(|expiry| now.is_some_and(|now| *expiry <= now))
+            })
+        });
+    let graph = graph_blocks
+        && loaded
+            .graph
+            .as_ref()
+            .is_some_and(|state| state.graphs().next().is_some());
+    let mut extra = Vec::with_capacity(2);
+    if records {
+        extra.push(catalog::payload::KIND);
+    }
+    if graph {
+        extra.push(graph::framing::KIND);
+    }
+    table_frame_extra(floor, graphs, &extra)
 }
 
 /// Storage-owned framing and partitioning of private complete primary records.
@@ -481,6 +543,8 @@ pub(crate) enum Supplement {
         nodes: catalog::Pairs,
         edges: catalog::Pairs,
     },
+    #[cfg(test)]
+    GraphSnapshot(Vec<GraphBody>),
 }
 
 /// A live collection of a precision log: its name, dimensions and stored
@@ -570,6 +634,10 @@ pub(crate) struct ImageCheck {
     /// that ended and may not resume.
     run: Option<(u16, u16, u64)>,
     ended: BTreeSet<(u16, u16)>,
+    /// Graphs must use one base representation each within an image.
+    graph_bases: BTreeMap<u16, bool>,
+    #[cfg(test)]
+    last_graph_block: Option<u16>,
     /// Image frames before the end block, from the advance on, and the
     /// SHA-256 of their prefixes.
     frames: u64,
@@ -614,6 +682,9 @@ impl ImageCheck {
             entries: None,
             run: None,
             ended: BTreeSet::new(),
+            graph_bases: BTreeMap::new(),
+            #[cfg(test)]
+            last_graph_block: None,
             frames: 0,
             digest: Sha256::new(),
             skips: Skips::default(),
@@ -813,11 +884,17 @@ impl ImageCheck {
     /// decodes those frames itself and makes the same checks.
     pub(crate) fn frame(&mut self, frame: &RawFrame, offset: u64) -> Result<Option<Supplement>> {
         let body = frame.body();
+        #[cfg(test)]
+        let graph_base =
+            frame.operation == OP_COMPACT_BLOCK && frame.id as u16 == graph::framing::KIND;
+        #[cfg(not(test))]
+        let graph_base = false;
         // In a precision image, each graph's revision blocks continue its
         // snapshot frames.
         if self.precise
             && frame.operation != OP_GRAPH_SNAPSHOT
             && (frame.operation != OP_COMPACT_BLOCK || frame.id as u16 != KIND_REVISIONS)
+            && !graph_base
         {
             self.load_snapshot()?;
         }
@@ -1034,6 +1111,12 @@ impl ImageCheck {
             return Ok(());
         }
         let graph = body.graph_id.0;
+        if self.graph_bases.get(&graph) == Some(&true) {
+            return Err(corrupt(
+                offset,
+                "op-15 snapshot duplicates a graph base block",
+            ));
+        }
         if self
             .coverage
             .as_ref()
@@ -1070,6 +1153,7 @@ impl ImageCheck {
                 _ => {}
             }
         }
+        self.graph_bases.entry(graph).or_insert(false);
         Ok(())
     }
 
@@ -1163,6 +1247,43 @@ impl ImageCheck {
                 collection,
                 entries,
             }));
+        }
+        #[cfg(test)]
+        if kind == graph::framing::KIND {
+            if !self.precise || !graph_blocks_enabled() {
+                return Err(Error::UnsupportedFeature(FLAG_COMPACT));
+            }
+            if self.graph_bases.contains_key(&collection)
+                || self
+                    .last_graph_block
+                    .is_some_and(|previous| previous >= collection)
+            {
+                return Err(corrupt(
+                    offset,
+                    "duplicate or out-of-order graph base block",
+                ));
+            }
+            let bodies = graph::framing::graph_keys(
+                collection,
+                count,
+                block.sections[0],
+                self.floor.expect("graph blocks follow advance"),
+                offset,
+            )?;
+            for body in &bodies {
+                self.snapshot(body, offset)?;
+                self.pending
+                    .get_or_insert_with(|| {
+                        crate::property_graph::frame::PendingSnapshot::new(
+                            self.floor.expect("graph blocks follow advance"),
+                            offset,
+                        )
+                    })
+                    .push(body.clone());
+            }
+            self.graph_bases.insert(collection, true);
+            self.last_graph_block = Some(collection);
+            return Ok(Some(Supplement::GraphSnapshot(bodies)));
         }
         if matches!(kind >> 8, 0x01 | 0x02) && !self.collections.contains(&collection) {
             return Err(corrupt(offset, "compact block for unknown collection"));
@@ -1339,6 +1460,13 @@ impl ImageCheck {
             {
                 Snapshot
             }
+            #[cfg(test)]
+            (OP_COMPACT_BLOCK, graph::framing::KIND)
+                if partition == 0
+                    && matches!(stage, Imports | Records | Vectors | Snapshot | Revisions) =>
+            {
+                Snapshot
+            }
             (OP_COMPACT_BLOCK, KIND_REVISIONS)
                 if (partition == 0 && stage == Snapshot)
                     || (partition != 0 && stage == Revisions) =>
@@ -1413,6 +1541,10 @@ impl ImageCheck {
                 || (self.precise
                     && catalog::payload::enabled()
                     && kind == catalog::payload::KIND
+                    && version == 1)
+                || (self.precise
+                    && graph_blocks_enabled()
+                    && kind == graph::framing::KIND
                     && version == 1);
             readable &= supported;
             entries.insert((kind, version), (flags, None));

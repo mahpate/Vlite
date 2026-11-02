@@ -1999,7 +1999,13 @@ fn load_inner<R: Read + Seek>(
         // A pending snapshot or run of record blocks ends at the first frame
         // that does not continue it. In a precision image, each graph's
         // revision blocks follow its snapshot frames.
+        #[cfg(test)]
+        let graph_base = operation == OP_COMPACT_BLOCK
+            && u64_at(&prefix, 16) as u16 == crate::compact::graph::framing::KIND;
+        #[cfg(not(test))]
+        let graph_base = false;
         let continues_snapshot = operation == OP_GRAPH_SNAPSHOT
+            || graph_base
             || (precise
                 && operation == OP_COMPACT_BLOCK
                 && u64_at(&prefix, 16) as u16 == crate::compact::catalog::KIND_REVISIONS);
@@ -2316,7 +2322,15 @@ fn load_inner<R: Read + Seek>(
                     .block(collection_id, id, count as u32, body, offset)?;
                 if let Some(supplement) = supplement {
                     // P3a: complete-record installation also checks prior source coverage.
-                    apply_supplement(&mut loaded, &mut jobs, &mut revisions, supplement, offset)?;
+                    apply_supplement(
+                        &mut loaded,
+                        &mut jobs,
+                        &mut revisions,
+                        &mut snapshot,
+                        sequence,
+                        supplement,
+                        offset,
+                    )?;
                 }
             }
             _ => {
@@ -2397,6 +2411,10 @@ fn apply_supplement(
     loaded: &mut Loaded,
     jobs: &mut ImportJobs,
     revisions: &mut Vec<Revisions>,
+    #[cfg_attr(not(test), allow(unused_variables))] snapshot: &mut Option<
+        crate::property_graph::frame::PendingSnapshot,
+    >,
+    #[cfg_attr(not(test), allow(unused_variables))] sequence: u64,
     supplement: crate::compact::Supplement,
     #[cfg_attr(not(test), allow(unused_variables))] offset: u64,
 ) -> Result<()> {
@@ -2449,6 +2467,16 @@ fn apply_supplement(
                     nodes,
                     edges,
                 });
+            }
+        }
+        #[cfg(test)]
+        Supplement::GraphSnapshot(bodies) => {
+            for body in bodies {
+                snapshot
+                    .get_or_insert_with(|| {
+                        crate::property_graph::frame::PendingSnapshot::new(sequence, offset)
+                    })
+                    .push(body);
             }
         }
     }

@@ -255,9 +255,12 @@ fn scan<R: Read + Seek>(
         offset += frame.disk.len() as u64;
         // A compact image's blocks, and in a precision image the frames
         // they restate context for, are checked as full replay checks them.
-        if let Some(check) = &mut check {
-            check.frame(&frame, at)?;
-        }
+        #[cfg_attr(not(test), allow(unused_variables))]
+        let supplement = if let Some(check) = &mut check {
+            check.frame(&frame, at)?
+        } else {
+            None
+        };
         if frame.operation == OP_TIME_ANCHOR {
             anchor_ms = frame
                 .plain
@@ -436,7 +439,36 @@ fn scan<R: Read + Seek>(
             format::OP_RECORD_BLOCK => {}
             // Compact blocks restate the checkpoint too; they were checked
             // above, and only exist behind FLAG_COMPACT.
-            format::OP_COMPACT_BLOCK if check.is_some() => {}
+            format::OP_COMPACT_BLOCK if check.is_some() => {
+                #[cfg(test)]
+                if let Some(crate::compact::Supplement::GraphSnapshot(bodies)) = supplement {
+                    for body in bodies {
+                        let encoded =
+                            crate::property_graph::engine::encode_body(&body).map_err(|_| {
+                                Error::Corrupt {
+                                    offset: at,
+                                    reason: "invalid compact graph snapshot",
+                                }
+                            })?;
+                        let count =
+                            u32::try_from(body.entries.len()).map_err(|_| Error::Corrupt {
+                                offset: at,
+                                reason: "invalid compact graph snapshot",
+                            })?;
+                        let plain = format::graph_snapshot_frame(frame.sequence, count, &encoded);
+                        let snapshot = format::RawFrame {
+                            operation: format::OP_GRAPH_SNAPSHOT,
+                            collection: body.graph_id.0,
+                            sequence: frame.sequence,
+                            id: 0,
+                            count,
+                            disk: plain.clone(),
+                            plain,
+                        };
+                        events.extend(graphs.frame(&snapshot, at, &collections)?);
+                    }
+                }
+            }
             _ => return Err(corrupt()),
         }
         if frame.sequence <= after {

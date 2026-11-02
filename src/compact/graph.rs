@@ -1,14 +1,14 @@
 //! Private P4 graph source model and immutable CSR codec.
 //!
-//! This test-only module deliberately does not participate in checkpoint
-//! framing. It owns only the graph-domain representation; the shared storage
-//! owner must wire any future block dispatch.
+//! This test-only module owns the graph-domain representation and its private
+//! checkpoint-block framing candidate.
 //!
 //! A graph's declared schema is stored losslessly as declarations only. The
 //! derived property indexes are not stored: a schema-bearing payload is
 //! loaded through the engine's own snapshot path, which validates the
 //! declarations, rebuilds the indexes and checks every declared rule.
 
+pub(crate) mod framing;
 #[cfg(not(target_arch = "wasm32"))]
 mod import;
 mod overlay;

@@ -348,6 +348,24 @@ sources and each graph-revision run follows its corresponding graph snapshot.
 | 2. Shared wiring | Storage | Writers enabled per opted-in object, generation pinning, crash matrix | Extends `tests/directory_recovery_matrix.rs`, `tests/encryption.rs`, `tests/replica.rs` and `tests/graph_compat.rs` with compact images |
 | 3. Later slices | Each owner | P3b-d, P4 mutations and import, filter-aware ANN | The acceptance lists in the P3 and P4 designs |
 
+**Slice 1b status.** A private, unreleased P4 framing candidate uses critical
+kind `0x0300`, codec version 1, and carries the accepted `VLGCSR06` body
+unchanged. Its writer is behind both precision activation and a separate
+test-only P4 gate; gate-off and release readers refuse graph-base images with
+`UnsupportedFeature(FLAG_COMPACT)`. Each graph occupies one block with a
+64 MiB total body cap; partitioning one graph is not implemented, and an
+oversize graph fails before the image header is written. Check and full replay
+route decoded graph bodies through the op-15 snapshot and revision validators.
+Tests compare op-15 state and reads, cover an independent golden, graph
+structure, properties, schema, attachments, deadlines, temporal series,
+encryption, directory checkpoints, precision conversion, byte-copy
+backup/restore, re-encryption, change-feed parity and explicit refusal of
+pre-checkpoint replica export. Precision-store `compact` and graph strip/enable
+rewrites remain explicitly refused by their existing policy; no policy or
+release gate changes, production activation, performance claim or size claim
+are part of this candidate. Independent acceptance and the wider shared
+framing/publication qualification remain pending.
+
 **Slice 0 status.** `src/compact/mod.rs` holds one concrete check, wired
 into the load loop (`src/format.rs`), the change feed (`src/changes.rs`)
 and segment export (`src/logops.rs`). Each reader checks every frame prefix

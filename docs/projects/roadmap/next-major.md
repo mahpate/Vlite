@@ -188,6 +188,9 @@ Local numbers below show direction only (see rules).
   full parallel import and S3/S4/F6
   qualification remain outstanding. Native schema enforcement, cross-graph
   owner validation and columnar property storage also remain outstanding.
+  P4 slice 1b has a private unreleased `0x0300` checkpoint-block candidate
+  using unchanged `VLGCSR06` bodies, one block per graph, a 64 MiB block-body
+  cap and no graph partitioning; it awaits independent acceptance.
   Independently reviewed logical references cover committed-overlay
   identity, non-reused IDs and expiry precedence, typed property snapshots
   with exact integer and float bits, label postings and scans, and

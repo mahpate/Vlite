@@ -925,11 +925,22 @@ pub(crate) fn write_v5_image(
         flags |= format::FLAG_HISTORY;
     }
     let precise = extra_flags & format::FLAG_PRECISION != 0;
+    #[cfg(test)]
+    let graph_blocks = precise && crate::compact::graph_blocks_enabled();
     if precise {
         if floor == 0 {
             return Err(Error::UnsupportedFeature(format::FLAG_PRECISION));
         }
         flags |= format::FLAG_COMPACT;
+    }
+    #[cfg(test)]
+    if graph_blocks
+        && let Some(state) = loaded
+            .graph
+            .as_ref()
+            .filter(|_| extra_flags & format::FLAG_GRAPH != 0)
+    {
+        crate::compact::graph::framing::preflight(state, graph_now_ms)?;
     }
     file.write_all(&format::header_v5_flags(
         loaded.dimensions,
@@ -982,7 +993,9 @@ pub(crate) fn write_v5_image(
         let table = crate::compact::table_frame(floor, graphs);
         // P3a: complete-record source blocks have a separate test-only gate.
         #[cfg(test)]
-        let table = if crate::compact::catalog::payload::enabled() {
+        let table = if graph_blocks {
+            crate::compact::precision_table_frame(floor, graphs, loaded, now_ms, true)
+        } else if crate::compact::catalog::payload::enabled() {
             crate::compact::records_table_frame(floor, graphs, loaded, now_ms)
         } else {
             table
@@ -1058,26 +1071,49 @@ pub(crate) fn write_v5_image(
                 output.write_all(frame)
             })
         };
-        let mut current = None;
-        crate::property_graph::frame::compacted_bodies(
-            state,
-            graph_now_ms,
-            floor,
-            |graph, count, body| {
-                if precise && let Some(previous) = current.replace(graph).filter(|&id| id != graph)
-                {
-                    revisions(&mut output, previous)?;
-                }
-                if floor != 0 {
-                    output.write_all(&format::graph_snapshot_frame(floor, count, body))
-                } else {
-                    output.write_all(&format::graph_frame(next(floor)?, 0, count, body))
-                }
-            },
-        )?;
-        if precise && let Some(last) = current {
-            revisions(&mut output, last)?;
+        let mut write_snapshots = |output: &mut Sink<'_>| -> Result<()> {
+            let mut current = None;
+            crate::property_graph::frame::compacted_bodies(
+                state,
+                graph_now_ms,
+                floor,
+                |graph, count, body| {
+                    if precise
+                        && let Some(previous) = current.replace(graph).filter(|&id| id != graph)
+                    {
+                        revisions(output, previous)?;
+                    }
+                    if floor != 0 {
+                        output.write_all(&format::graph_snapshot_frame(floor, count, body))
+                    } else {
+                        output.write_all(&format::graph_frame(next(floor)?, 0, count, body))
+                    }
+                },
+            )?;
+            if precise && let Some(last) = current {
+                revisions(output, last)?;
+            }
+            Ok(())
+        };
+        #[cfg(test)]
+        if precise && graph_blocks {
+            for graph in state.graphs() {
+                let (count, body) =
+                    crate::compact::graph::framing::encode_graph(graph, graph_now_ms)?;
+                output.write_all(&format::compact_block_frame(
+                    floor,
+                    graph.id().0,
+                    u64::from(crate::compact::graph::framing::KIND),
+                    count,
+                    &body,
+                ))?;
+                revisions(&mut output, graph.id())?;
+            }
+        } else {
+            write_snapshots(&mut output)?;
         }
+        #[cfg(not(test))]
+        write_snapshots(&mut output)?;
     }
     if let Some((frames, digest)) = output.image.take() {
         output.write_raw(&crate::compact::end_frame(
