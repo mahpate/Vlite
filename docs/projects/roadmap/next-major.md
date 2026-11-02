@@ -152,7 +152,9 @@ Local numbers below show direction only (see rules).
   and integrated, with no production caller. The
   [engine-integration design](p3-compact-vectors.md#p3b-engine-integration-design)
   (pinned generation plus overlay, five ordered code slices) is independently
-  reviewed with six owner decisions pending; no engine code is integrated yet.
+  reviewed with six owner decisions pending. Slice 0 (a test-gated pinned
+  source with standalone point reads) is independently accepted and
+  integrated; slices 1–5 and all `Database` wiring remain.
   The [P3c compact-ANN design](p3c-compact-ann.md) (source-bound flat
   topology, persisted scalar-u8 codes, background rebuild and a separately
   opted-in rotated one-bit candidate) is independently reviewed with nine
