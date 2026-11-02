@@ -356,6 +356,10 @@ test-only P4 gate; gate-off and release readers refuse graph-base images with
 64 MiB total body cap; partitioning one graph is not implemented, and an
 oversize graph fails before the image header is written. Check and full replay
 route decoded graph bodies through the op-15 snapshot and revision validators.
+The private fix round propagates the gate into directory checkpoint workers,
+shares writer/preflight/declaration admission, and requires history/graph flags
+and exactly one payload section, with specific corruption reasons and named
+mutation regressions; it remains pending independent acceptance.
 Tests compare op-15 state and reads, cover an independent golden, graph
 structure, properties, schema, attachments, deadlines, temporal series,
 encryption, directory checkpoints, precision conversion, byte-copy

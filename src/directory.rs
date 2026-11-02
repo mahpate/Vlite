@@ -682,6 +682,8 @@ impl Chain {
         // P3a: carry the private complete-record codec gate into this worker.
         #[cfg(test)]
         let payload = crate::compact::catalog::payload::enabled();
+        #[cfg(test)]
+        let graph_blocks = crate::compact::graph_blocks_enabled();
         // Gap 4: so is the test-only temporal gate.
         #[cfg(test)]
         let temporal = crate::property_graph::temporal::supported();
@@ -693,6 +695,8 @@ impl Chain {
                 // P3a: retain the codec gate until build and validation finish.
                 #[cfg(test)]
                 let _payload = crate::compact::catalog::payload::Activation::set(payload);
+                #[cfg(test)]
+                let _graph_blocks = crate::compact::GraphBlocks::set(graph_blocks);
                 #[cfg(test)]
                 let _temporal = crate::property_graph::temporal::Activation::set(temporal);
                 let (mut segments, _) = open_segments(&directory, &names, false)?;

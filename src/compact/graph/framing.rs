@@ -46,11 +46,8 @@ impl Drop for BodyLimit {
     }
 }
 
-fn corrupt(offset: u64) -> Error {
-    Error::Corrupt {
-        offset,
-        reason: "invalid compact graph block",
-    }
+fn corrupt(offset: u64, reason: &'static str) -> Error {
+    Error::Corrupt { offset, reason }
 }
 
 fn encode_source(source: &super::GraphSource) -> Result<(u32, Vec<u8>)> {
@@ -59,16 +56,18 @@ fn encode_source(source: &super::GraphSource) -> Result<(u32, Vec<u8>)> {
         .len()
         .checked_add(source.edges.len())
         .and_then(|count| u32::try_from(count).ok())
-        .ok_or_else(|| corrupt(0))?;
-    let section = super::encode(source).map_err(|_| corrupt(0))?;
+        .ok_or_else(|| corrupt(0, "graph base entity count overflow"))?;
+    let section = super::encode(source).map_err(|_| corrupt(0, "invalid graph base source"))?;
     let body_len = HEADER_LEN
         .checked_add(SECTION_ENTRY_LEN)
         .and_then(|len| len.checked_add(section.len()))
         .filter(|&len| len <= body_limit())
-        .ok_or_else(|| corrupt(0))?;
-    let section_len = u32::try_from(section.len()).map_err(|_| corrupt(0))?;
+        .ok_or_else(|| corrupt(0, "graph base block exceeds body cap"))?;
+    let section_len = u32::try_from(section.len())
+        .map_err(|_| corrupt(0, "graph base section length overflow"))?;
     let mut body = Vec::new();
-    body.try_reserve_exact(body_len).map_err(|_| corrupt(0))?;
+    body.try_reserve_exact(body_len)
+        .map_err(|_| corrupt(0, "graph base allocation failed"))?;
     for field in [KIND, VERSION, CRITICAL, 1] {
         body.extend_from_slice(&field.to_le_bytes());
     }
@@ -85,7 +84,8 @@ fn encode_source(source: &super::GraphSource) -> Result<(u32, Vec<u8>)> {
 
 /// Encodes one graph after applying the checkpoint's shared expiry clock.
 pub(crate) fn encode_graph(graph: &Graph, now_ms: Option<u64>) -> Result<(u32, Vec<u8>)> {
-    let mut source = super::GraphSource::from_graph(graph).map_err(|_| corrupt(0))?;
+    let mut source = super::GraphSource::from_graph(graph)
+        .map_err(|_| corrupt(0, "invalid graph base source"))?;
     source.nodes.retain(|node| {
         !now_ms.is_some_and(|now| node.deadline.is_some_and(|deadline| deadline <= now))
     });
@@ -120,21 +120,25 @@ pub(crate) fn graph_keys(
         .checked_add(HEADER_LEN + SECTION_ENTRY_LEN)
         .is_none_or(|len| len > MAX_BODY)
     {
-        return Err(corrupt(offset));
+        return Err(corrupt(offset, "graph base block exceeds body cap"));
     }
-    let compact = super::decode(payload).map_err(|_| corrupt(offset))?;
-    if compact.source.graph_id != owner
-        || compact
-            .source
-            .nodes
-            .len()
-            .checked_add(compact.source.edges.len())
-            .and_then(|items| u32::try_from(items).ok())
-            != Some(count)
+    let compact =
+        super::decode(payload).map_err(|_| corrupt(offset, "invalid graph base payload"))?;
+    if compact.source.graph_id != owner {
+        return Err(corrupt(offset, "graph base owner mismatch"));
+    }
+    if compact
+        .source
+        .nodes
+        .len()
+        .checked_add(compact.source.edges.len())
+        .and_then(|items| u32::try_from(items).ok())
+        != Some(count)
     {
-        return Err(corrupt(offset));
+        return Err(corrupt(offset, "graph base entity count mismatch"));
     }
-    let state = engine_state(&compact.source).map_err(|_| corrupt(offset))?;
+    let state =
+        engine_state(&compact.source).map_err(|_| corrupt(offset, "invalid graph base state"))?;
     snapshot_bodies(&state, floor, owner, offset)
 }
 
@@ -147,13 +151,13 @@ fn snapshot_bodies(
     let mut bodies = Vec::new();
     compacted_bodies(state, None, floor, |graph, count, body| {
         if graph.0 != owner {
-            return Err(corrupt(offset));
+            return Err(corrupt(offset, "graph base snapshot owner mismatch"));
         }
         bodies.push(frame::decode_frame(Some(floor), 0, count, body, offset)?);
         Ok(())
     })?;
     if bodies.is_empty() {
-        return Err(corrupt(offset));
+        return Err(corrupt(offset, "graph base snapshot is empty"));
     }
     Ok(bodies)
 }

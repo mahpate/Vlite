@@ -925,8 +925,6 @@ pub(crate) fn write_v5_image(
         flags |= format::FLAG_HISTORY;
     }
     let precise = extra_flags & format::FLAG_PRECISION != 0;
-    #[cfg(test)]
-    let graph_blocks = precise && crate::compact::graph_blocks_enabled();
     if precise {
         if floor == 0 {
             return Err(Error::UnsupportedFeature(format::FLAG_PRECISION));
@@ -934,12 +932,9 @@ pub(crate) fn write_v5_image(
         flags |= format::FLAG_COMPACT;
     }
     #[cfg(test)]
-    if graph_blocks
-        && let Some(state) = loaded
-            .graph
-            .as_ref()
-            .filter(|_| extra_flags & format::FLAG_GRAPH != 0)
-    {
+    let graph_blocks = crate::compact::graph_blocks_for(loaded, flags);
+    #[cfg(test)]
+    if graph_blocks && let Some(state) = loaded.graph.as_ref() {
         crate::compact::graph::framing::preflight(state, graph_now_ms)?;
     }
     file.write_all(&format::header_v5_flags(
@@ -994,7 +989,7 @@ pub(crate) fn write_v5_image(
         // P3a: complete-record source blocks have a separate test-only gate.
         #[cfg(test)]
         let table = if graph_blocks {
-            crate::compact::precision_table_frame(floor, graphs, loaded, now_ms, true)
+            crate::compact::precision_table_frame(floor, graphs, loaded, now_ms, flags)
         } else if crate::compact::catalog::payload::enabled() {
             crate::compact::records_table_frame(floor, graphs, loaded, now_ms)
         } else {

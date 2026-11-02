@@ -140,6 +140,14 @@ fn loaded() -> format::Loaded {
                         edge_id: EdgeId(12),
                         expires_at_ms: Some(0),
                     },
+                    GraphEntry::PutEdge {
+                        edge_id: EdgeId(14),
+                        source: NodeId(0),
+                        destination: NodeId(100),
+                        relationship: "R".into(),
+                        key: Some("expired-destination".into()),
+                        properties: Properties::new(),
+                    },
                     GraphEntry::Attach {
                         node_id: NodeId(42),
                         collection: 0,
@@ -147,7 +155,7 @@ fn loaded() -> format::Loaded {
                     },
                     GraphEntry::GraphHighWater {
                         next_node_id: 102,
-                        next_edge_id: 13,
+                        next_edge_id: 15,
                     },
                 ],
             },
@@ -203,7 +211,7 @@ fn loaded_temporal() -> format::Loaded {
                 graph_id: GraphId(0),
                 entries: vec![
                     GraphEntry::Temporal(TemporalEntry::PutEdge {
-                        edge_id: EdgeId(13),
+                        edge_id: EdgeId(15),
                         revision: 0,
                         source: NodeId(0),
                         destination: NodeId(42),
@@ -230,7 +238,7 @@ fn loaded_temporal() -> format::Loaded {
                     }),
                     GraphEntry::GraphHighWater {
                         next_node_id: 102,
-                        next_edge_id: 14,
+                        next_edge_id: 16,
                     },
                 ],
             },
@@ -340,6 +348,661 @@ fn fix_frame_checksums(frame: &mut [u8]) {
     let footer_crc = format::crc32(&frame[..frame.len() - 16]);
     let footer_at = frame.len() - 12;
     frame[footer_at..footer_at + 4].copy_from_slice(&footer_crc.to_le_bytes());
+}
+
+fn assert_corrupt<T>(result: Result<T>, expected: &str) {
+    match result {
+        Err(Error::Corrupt { reason, .. }) => assert_eq!(reason, expected),
+        Err(other) => panic!("expected Corrupt({expected:?}), got {other:?}"),
+        Ok(_) => panic!("expected Corrupt({expected:?}), got success"),
+    }
+}
+
+fn is_graph_block(frame: &[u8]) -> bool {
+    frame[4] == format::OP_COMPACT_BLOCK
+        && u64::from_le_bytes(frame[16..24].try_into().unwrap()) as u16 == KIND
+}
+
+fn golden() -> Vec<u8> {
+    include_str!("../../../../tests/fixtures/compact/graph-base-v1.hex")
+        .split_whitespace()
+        .map(|byte| u8::from_str_radix(byte, 16).unwrap())
+        .collect()
+}
+
+fn golden_state() -> GraphState {
+    let bytes = golden();
+    let envelope = crate::compact::Envelope::parse(0, u64::from(KIND), &bytes, 0).unwrap();
+    let mut pending = frame::PendingSnapshot::new(1, 0);
+    for body in graph_keys(0, 0, envelope.sections[0], 1, 0).unwrap() {
+        pending.push(body);
+    }
+    pending
+        .finish(&BTreeMap::<u16, format::LoadedCollection>::new())
+        .unwrap()
+}
+
+// Stop at the first graph base, before any later SnapshotBuilder can mask
+// the graph-base admission check under test.
+fn check_through_first_graph_base(bytes: &[u8]) -> Result<()> {
+    let mut input = Cursor::new(bytes);
+    let header = format::read_log_header(&mut input, None)?;
+    let mut check = crate::compact::ImageCheck::new(
+        header.version,
+        header.flags,
+        header.dimensions,
+        header.collection_floor,
+    )
+    .unwrap();
+    let mut offset = header.start;
+    while let Some(frame) =
+        format::next_checked_frame(&mut input, &header, offset, Some(&mut check))?
+    {
+        check.frame(&frame, offset)?;
+        if is_graph_block(&frame.disk) {
+            return Ok(());
+        }
+        offset += frame.disk.len() as u64;
+    }
+    panic!("image has no graph base");
+}
+
+#[test]
+fn directory_worker_checkpoints_block_and_op15_sources_with_read_parity() {
+    let _precision = Activation::on();
+    let _graph_blocks = GraphBlocks::on();
+    let mut source = format::load_with(&mut Cursor::new(image(&loaded(), true)), None).unwrap();
+    source
+        .graph
+        .as_mut()
+        .unwrap()
+        .apply_at(
+            FLOOR,
+            &GraphBody {
+                graph_id: GraphId(0),
+                entries: vec![GraphEntry::NodeExpiry {
+                    node_id: NodeId(42),
+                    expires_at_ms: None,
+                }],
+            },
+            true,
+        )
+        .unwrap();
+    for blocks_at_creation in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let store = directory.path().join("store");
+        {
+            let _gate = GraphBlocks::set(blocks_at_creation);
+            let chain = crate::directory::create_converted(&store, &source).unwrap();
+            chain.unlock().unwrap();
+        }
+        let initial = std::fs::read(store.join("image-1.vlite")).unwrap();
+        assert_eq!(
+            split_image(&initial).1.iter().any(|f| is_graph_block(f)),
+            blocks_at_creation
+        );
+        let mut db = open(&store);
+        db.set_checkpoint_threshold(None);
+        db.graph_mut("sparse")
+            .unwrap()
+            .create_node("tail", &["Person"], &Metadata::new())
+            .unwrap();
+        let before_state = db.graph.clone();
+        let initial_state = std::mem::replace(&mut source.graph, before_state);
+        let initial_sequence = source.sequence;
+        source.sequence = db.sequence;
+        let mut reference = Vec::new();
+        {
+            let _gate = GraphBlocks::set(false);
+            crate::maintenance::write_v5_image(
+                &mut reference,
+                &source,
+                LINEAGE,
+                None,
+                None,
+                None,
+                FLAG_GRAPH | FLAG_PRECISION,
+                db.sequence,
+            )
+            .unwrap();
+        }
+        source.graph = initial_state;
+        source.sequence = initial_sequence;
+        let reference_state = format::load_with(&mut Cursor::new(reference), None)
+            .unwrap()
+            .graph;
+        let before_node = db.graph("sparse").unwrap().get_node("n42").unwrap().output;
+        let mut neighbors = Neighbors::new(NodeSelector::Id(42));
+        neighbors.direction = Direction::Both;
+        let before_neighbors = db
+            .graph("sparse")
+            .unwrap()
+            .neighbors(&neighbors, &ReadOptions::default())
+            .unwrap()
+            .output;
+        let traverse = crate::property_graph::Traverse::new(vec![NodeSelector::Id(0)]);
+        let before_traverse = db
+            .graph("sparse")
+            .unwrap()
+            .traverse(&traverse, &ReadOptions::default())
+            .unwrap()
+            .output;
+        assert!(db.checkpoint().unwrap().is_some());
+        db.close().unwrap();
+        let manifest = std::fs::read_to_string(store.join("MANIFEST")).unwrap();
+        let image_name = manifest
+            .lines()
+            .find_map(|line| line.strip_prefix("file image-"))
+            .unwrap();
+        let image = std::fs::read(store.join(format!("image-{image_name}"))).unwrap();
+        assert!(split_image(&image).1.iter().any(|f| is_graph_block(f)));
+        assert_eq!(
+            format::load_with(&mut Cursor::new(image), None)
+                .unwrap()
+                .graph,
+            reference_state
+        );
+        let reopened = open(&store);
+        assert_eq!(reopened.graph, reference_state);
+        assert_eq!(
+            reopened
+                .graph("sparse")
+                .unwrap()
+                .get_node("n42")
+                .unwrap()
+                .output,
+            before_node
+        );
+        assert_eq!(
+            reopened
+                .graph("sparse")
+                .unwrap()
+                .neighbors(&neighbors, &ReadOptions::default())
+                .unwrap()
+                .output,
+            before_neighbors
+        );
+        assert_eq!(
+            reopened
+                .graph("sparse")
+                .unwrap()
+                .traverse(&traverse, &ReadOptions::default())
+                .unwrap()
+                .output,
+            before_traverse
+        );
+        assert!(
+            reopened
+                .graph("sparse")
+                .unwrap()
+                .get_node("tail")
+                .unwrap()
+                .output
+                .is_some()
+        );
+    }
+}
+
+#[test]
+fn graph_block_requires_graph_and_history_flags_plain_and_encrypted() {
+    let _precision = Activation::on();
+    let _graph_blocks = GraphBlocks::on();
+    let key = EncryptionKey::from_bytes([0x42; 32]);
+    for encrypted in [false, true] {
+        let bytes = if encrypted {
+            encrypted_image(&loaded(), true, &key)
+        } else {
+            image(&loaded(), true)
+        };
+        for (flag, reason) in [
+            (
+                FLAG_GRAPH,
+                "graph base block requires history and graph flags",
+            ),
+            (format::FLAG_HISTORY, "compact flag without a history image"),
+        ] {
+            let mut bad = bytes.clone();
+            let flags = u16::from_le_bytes(bad[26..28].try_into().unwrap()) & !flag;
+            bad[26..28].copy_from_slice(&flags.to_le_bytes());
+            let crc = format::crc32(&bad[..28]);
+            bad[28..32].copy_from_slice(&crc.to_le_bytes());
+            assert_corrupt(
+                format::load_with(&mut Cursor::new(&bad), encrypted.then_some(&key)),
+                reason,
+            );
+        }
+    }
+}
+
+#[test]
+fn graph_block_rejects_a_valid_extra_section() {
+    let _precision = Activation::on();
+    let _graph_blocks = GraphBlocks::on();
+    let (header, mut frames) = split_image(&image(&loaded(), true));
+    let index = frames.iter().position(|f| is_graph_block(f)).unwrap();
+    let original = &frames[index];
+    let owner = u16::from_le_bytes(original[5..7].try_into().unwrap());
+    let count = u32::from_le_bytes(original[24..28].try_into().unwrap());
+    let body = &original[format::PREFIX_SIZE..original.len() - 16];
+    let payload = crate::compact::Envelope::parse(owner, u64::from(KIND), body, 0)
+        .unwrap()
+        .sections[0];
+    let mut extra = body[..32].to_vec();
+    extra[6..8].copy_from_slice(&2u16.to_le_bytes());
+    extra[24..28].copy_from_slice(&48u32.to_le_bytes());
+    for value in [48, payload.len() as u32, 48 + payload.len() as u32, 1] {
+        extra.extend_from_slice(&value.to_le_bytes());
+    }
+    extra.extend_from_slice(payload);
+    extra.push(0x7f);
+    assert_eq!(
+        crate::compact::Envelope::parse(owner, u64::from(KIND), &extra, 0)
+            .unwrap()
+            .sections
+            .len(),
+        2
+    );
+    frames[index] = format::compact_block_frame(FLOOR, owner, u64::from(KIND), count, &extra);
+    assert_corrupt(
+        format::load_with(&mut Cursor::new(complete_image(&header, frames)), None),
+        "graph base block requires exactly one section",
+    );
+}
+
+#[test]
+fn graph_enabled_zero_graphs_has_no_graph_block_declaration() {
+    let mut source = loaded();
+    source.graph = Some(GraphState::new());
+    let bytes = image(&source, true);
+    let reference = image(&source, false);
+    let _precision = Activation::on();
+    let _graph_blocks = GraphBlocks::on();
+    assert_eq!(bytes, reference);
+    assert!(!split_image(&bytes).1.iter().any(|f| is_graph_block(f)));
+    assert_eq!(
+        format::load_with(&mut Cursor::new(bytes), None)
+            .unwrap()
+            .graph,
+        format::load_with(&mut Cursor::new(reference), None)
+            .unwrap()
+            .graph
+    );
+}
+
+#[test]
+fn graph_preflight_checks_first_graph_and_uses_checkpoint_expiry_clock() {
+    let source = loaded();
+    let state = source.graph.as_ref().unwrap();
+    let first = encode_graph(state.graph(GraphId(0)).unwrap(), Some(5))
+        .unwrap()
+        .1
+        .len();
+    let later = encode_graph(state.graph(GraphId(3)).unwrap(), Some(5))
+        .unwrap()
+        .1
+        .len();
+    let unpruned = encode_graph(state.graph(GraphId(0)).unwrap(), None)
+        .unwrap()
+        .1
+        .len();
+    assert!(139 < later && later < first && first < unpruned);
+    let _precision = Activation::on();
+    let _graph_blocks = GraphBlocks::on();
+    let write = |output: &mut Vec<u8>| {
+        crate::maintenance::write_v5_image(
+            output,
+            &source,
+            LINEAGE,
+            None,
+            Some(5),
+            None,
+            FLAG_GRAPH | FLAG_PRECISION,
+            FLOOR,
+        )
+    };
+    {
+        let _limit = BodyLimit::set(later);
+        let mut output = Vec::new();
+        assert_corrupt(write(&mut output), "graph base block exceeds body cap");
+        assert!(output.is_empty(), "first graph must fail before any output");
+    }
+    let _limit = BodyLimit::set(first);
+    let mut output = Vec::new();
+    write(&mut output).unwrap();
+    let actual = format::load_with(&mut Cursor::new(output), None).unwrap();
+    let reference = format::load_with(&mut Cursor::new(image(&source, false)), None).unwrap();
+    assert_eq!(actual.graph, reference.graph);
+}
+
+#[test]
+fn graph_body_limit_accepts_exact_golden_boundary_and_constants_match() {
+    assert_eq!(MAX_BODY, 64 << 20);
+    assert_eq!(MAX_BODY, crate::compact::MAX_BODY);
+    assert_eq!(MAX_BODY, super::super::MAX_BYTES);
+    let bytes = golden();
+    assert_eq!(bytes.len(), 139);
+    let state = golden_state();
+    let graph = state.graph(GraphId(0)).unwrap();
+    {
+        let _limit = BodyLimit::set(bytes.len());
+        assert_eq!(encode_graph(graph, None).unwrap().1, bytes);
+    }
+    let _limit = BodyLimit::set(bytes.len() - 1);
+    assert_corrupt(
+        encode_graph(graph, None),
+        "graph base block exceeds body cap",
+    );
+}
+
+#[test]
+fn graph_kind_codec_version_two_is_unsupported() {
+    let _precision = Activation::on();
+    let _graph_blocks = GraphBlocks::on();
+    let (header, mut frames) = split_image(&image(&loaded(), true));
+    let table = frames
+        .iter_mut()
+        .find(|f| {
+            f[4] == format::OP_COMPACT_BLOCK
+                && u64::from_le_bytes(f[16..24].try_into().unwrap()) as u16
+                    == crate::compact::KIND_TABLE
+        })
+        .unwrap();
+    let start = format::PREFIX_SIZE + 40;
+    let end = table.len() - 16;
+    let entry = table[start..end]
+        .as_chunks_mut::<8>()
+        .0
+        .iter_mut()
+        .find(|entry| u16::from_le_bytes(entry[..2].try_into().unwrap()) == KIND)
+        .unwrap();
+    entry[2..4].copy_from_slice(&2u16.to_le_bytes());
+    fix_frame_checksums(table);
+    assert!(matches!(
+        format::load_with(&mut Cursor::new(complete_image(&header, frames)), None),
+        Err(Error::UnsupportedFeature(format::FLAG_COMPACT))
+    ));
+}
+
+#[test]
+fn mixed_op15_and_graph_base_is_rejected_by_image_check_before_builder() {
+    let _precision = Activation::on();
+    let _graph_blocks = GraphBlocks::on();
+    let source = loaded();
+    let (header, mut frames) = split_image(&image(&source, true));
+    let (_, reference) = split_image(&image(&source, false));
+    let snapshot = reference
+        .into_iter()
+        .find(|f| f[4] == format::OP_GRAPH_SNAPSHOT)
+        .unwrap();
+    let index = frames.iter().position(|f| is_graph_block(f)).unwrap();
+    frames.insert(index, snapshot);
+    assert_corrupt(
+        check_through_first_graph_base(&complete_image(&header, frames)),
+        "duplicate or out-of-order graph base block",
+    );
+}
+
+#[test]
+fn graph_block_header_count_cannot_understate_entities() {
+    let state = loaded().graph.unwrap();
+    let (count, body) = encode_graph(state.graph(GraphId(0)).unwrap(), Some(5)).unwrap();
+    assert!(count > 0);
+    let payload = crate::compact::Envelope::parse(0, u64::from(KIND), &body, 0)
+        .unwrap()
+        .sections[0];
+    assert_corrupt(
+        graph_keys(0, count - 1, payload, FLOOR, 0),
+        "graph base entity count mismatch",
+    );
+    assert_corrupt(
+        graph_keys(3, count, payload, FLOOR, 0),
+        "graph base owner mismatch",
+    );
+}
+
+#[test]
+fn graph_gate_off_and_nonprecision_writers_keep_op15_without_graph_blocks() {
+    let source = loaded();
+    let _precision = Activation::on();
+    let _gate = GraphBlocks::set(false);
+    let legacy = image(&source, false);
+    assert!(!split_image(&legacy).1.iter().any(|f| is_graph_block(f)));
+    assert!(
+        split_image(&legacy)
+            .1
+            .iter()
+            .any(|f| f[4] == format::OP_GRAPH_SNAPSHOT)
+    );
+    format::load_with(&mut Cursor::new(&legacy), None).unwrap();
+    let _gate = GraphBlocks::on();
+    for flags in [FLAG_GRAPH, 0, FLAG_PRECISION] {
+        let mut output = Vec::new();
+        crate::maintenance::write_v5_image(
+            &mut output,
+            &source,
+            LINEAGE,
+            None,
+            Some(5),
+            None,
+            flags,
+            FLOOR,
+        )
+        .unwrap();
+        assert!(!split_image(&output).1.iter().any(|f| is_graph_block(f)));
+        let actual = format::load_with(&mut Cursor::new(output), None).unwrap();
+        if flags & FLAG_GRAPH == 0 {
+            assert!(actual.graph.is_none());
+        }
+    }
+}
+
+#[test]
+fn multi_body_graph_load_public_reads_and_feed_seed_all_graphs_keys_and_attachments() {
+    let mut source = loaded();
+    for id in [5, 6] {
+        source.collections.get_mut(&0).unwrap().put(
+            id,
+            crate::Record {
+                vector: vec![1.0, 0.0],
+                payload: vec![],
+                metadata: Metadata::new(),
+            },
+            1,
+            None,
+        );
+    }
+    let state = source.graph.as_mut().unwrap();
+    let mut entries = vec![GraphEntry::NodeExpiry {
+        node_id: NodeId(42),
+        expires_at_ms: None,
+    }];
+    entries.extend(
+        (102..=4300)
+            .map(|id| GraphEntry::PutNode {
+                node_id: NodeId(id),
+                key: format!("n{id}"),
+                labels: BTreeSet::from(["Person".into()]),
+                properties: Properties::new(),
+            })
+            .collect::<Vec<_>>(),
+    );
+    entries.extend([
+        GraphEntry::PutEdge {
+            edge_id: EdgeId(15),
+            source: NodeId(42),
+            destination: NodeId(4300),
+            relationship: "R".into(),
+            key: Some("last-edge".into()),
+            properties: Properties::new(),
+        },
+        GraphEntry::Attach {
+            node_id: NodeId(4300),
+            collection: 0,
+            record_id: 5,
+        },
+        GraphEntry::GraphHighWater {
+            next_node_id: 4301,
+            next_edge_id: 16,
+        },
+    ]);
+    for entries in entries.chunks(4096) {
+        state
+            .apply_at(
+                3,
+                &GraphBody {
+                    graph_id: GraphId(0),
+                    entries: entries.to_vec(),
+                },
+                true,
+            )
+            .unwrap();
+    }
+    let properties = || Properties::from([("rank".into(), PropertyValue::Integer(3))]);
+    state
+        .apply(
+            4,
+            &GraphBody {
+                graph_id: GraphId(3),
+                entries: vec![
+                    GraphEntry::PutNode {
+                        node_id: NodeId(0),
+                        key: "third-a".into(),
+                        labels: BTreeSet::from(["Person".into()]),
+                        properties: properties(),
+                    },
+                    GraphEntry::PutNode {
+                        node_id: NodeId(1),
+                        key: "third-b".into(),
+                        labels: BTreeSet::from(["Person".into()]),
+                        properties: properties(),
+                    },
+                    GraphEntry::PutEdge {
+                        edge_id: EdgeId(0),
+                        source: NodeId(0),
+                        destination: NodeId(1),
+                        relationship: "R".into(),
+                        key: Some("third-edge".into()),
+                        properties: Properties::new(),
+                    },
+                    GraphEntry::Attach {
+                        node_id: NodeId(1),
+                        collection: 0,
+                        record_id: 6,
+                    },
+                    GraphEntry::GraphHighWater {
+                        next_node_id: 2,
+                        next_edge_id: 1,
+                    },
+                ],
+            },
+        )
+        .unwrap();
+    let (count, body) = encode_graph(state.graph(GraphId(0)).unwrap(), Some(5)).unwrap();
+    let payload = crate::compact::Envelope::parse(0, u64::from(KIND), &body, 0)
+        .unwrap()
+        .sections[0];
+    assert!(graph_keys(0, count, payload, FLOOR, 0).unwrap().len() > 1);
+    let candidate = image(&source, true);
+    let reference = image(&source, false);
+    let _precision = Activation::on();
+    let _gate = GraphBlocks::on();
+    assert_eq!(
+        format::load_with(&mut Cursor::new(&candidate), None)
+            .unwrap()
+            .graph,
+        format::load_with(&mut Cursor::new(&reference), None)
+            .unwrap()
+            .graph
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let mut databases = Vec::new();
+    for (name, bytes) in [
+        ("candidate.vlite", candidate),
+        ("reference.vlite", reference),
+    ] {
+        let path = directory.path().join(name);
+        std::fs::write(&path, bytes).unwrap();
+        databases.push(open(&path));
+    }
+    for name in ["sparse", "empty"] {
+        let a = databases[0].graph(name).unwrap().with_clock(5);
+        let b = databases[1].graph(name).unwrap().with_clock(5);
+        assert_eq!(a.info(), b.info());
+        let (node, edge) = if name == "sparse" {
+            ("n4300", "last-edge")
+        } else {
+            ("third-b", "third-edge")
+        };
+        assert_eq!(
+            a.get_node(node).unwrap().output,
+            b.get_node(node).unwrap().output
+        );
+        assert_eq!(
+            a.get_edge_by_key(edge).unwrap().output,
+            b.get_edge_by_key(edge).unwrap().output
+        );
+        let request = Neighbors::new(NodeSelector::Key(node.into()));
+        assert_eq!(
+            a.neighbors(&request, &ReadOptions::default())
+                .unwrap()
+                .output,
+            b.neighbors(&request, &ReadOptions::default())
+                .unwrap()
+                .output
+        );
+    }
+    for db in &mut databases {
+        for (name, node, edge) in [
+            ("sparse", "n4300", "last-edge"),
+            ("empty", "third-b", "third-edge"),
+        ] {
+            let mut graph = db.graph_mut(name).unwrap();
+            graph.detach(node, "default").unwrap();
+            graph
+                .delete_edge(
+                    crate::property_graph::EdgeRef::Key(edge.into()),
+                    crate::Expected::Any,
+                )
+                .unwrap();
+        }
+    }
+    let cursor = crate::changes::FeedCursor {
+        lineage: LINEAGE,
+        sequence: FLOOR,
+    };
+    let actual = databases[0].changes_after(&cursor, 100).unwrap();
+    let expected = databases[1].changes_after(&cursor, 100).unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(actual.changes.len(), 4);
+    for (index, graph, node, key, record, edge, edge_key) in [
+        (0, "sparse", 4300, "n4300", 5, 15, "last-edge"),
+        (2, "empty", 1, "third-b", 6, 0, "third-edge"),
+    ] {
+        assert_eq!(
+            actual.changes[index].kind,
+            crate::changes::ChangeKind::GraphBatch {
+                graph: graph.into(),
+                revision: FLOOR + index as u64 + 1,
+                operations: vec![crate::changes::GraphChange::Detached {
+                    node,
+                    node_key: key.into(),
+                    collection: "default".into(),
+                    record,
+                }],
+            }
+        );
+        assert_eq!(
+            actual.changes[index + 1].kind,
+            crate::changes::ChangeKind::GraphBatch {
+                graph: graph.into(),
+                revision: FLOOR + index as u64 + 2,
+                operations: vec![crate::changes::GraphChange::EdgeDeleted {
+                    id: edge,
+                    key: Some(edge_key.into()),
+                }],
+            }
+        );
+    }
 }
 
 #[test]
@@ -486,11 +1149,11 @@ fn graph_block_preserves_temporal_series_against_op15_snapshot() {
     let reference_graph = reference.graph.as_ref().unwrap();
     assert!(actual_graph.is_temporal());
     assert_eq!(
-        actual_graph.graph(GraphId(0)).unwrap().segments(EdgeId(13)),
+        actual_graph.graph(GraphId(0)).unwrap().segments(EdgeId(15)),
         reference_graph
             .graph(GraphId(0))
             .unwrap()
-            .segments(EdgeId(13))
+            .segments(EdgeId(15))
     );
 }
 
@@ -652,38 +1315,47 @@ fn graph_block_rejects_malformed_headers_owner_and_torn_images() {
         .split_whitespace()
         .map(|byte| u8::from_str_radix(byte, 16).unwrap())
         .collect::<Vec<_>>();
-    for (at, value) in [
-        (0, 1),
-        (2, 0),
-        (4, 2),
-        (6, 0),
-        (8, 1),
-        (16, 1),
-        (24, 41),
-        (28, 1),
-        (32, 41),
-        (36, 0xff),
+    for (at, value, reason) in [
+        (0, 1, "compact block header does not match its frame"),
+        (2, 0, "invalid compact block header"),
+        (4, 2, "invalid compact block header"),
+        (6, 0, "invalid compact block header"),
+        (8, 1, "compact block header does not match its frame"),
+        (16, 1, "invalid compact block header"),
+        (24, 41, "invalid compact block sections"),
+        (28, 1, "invalid compact block header"),
+        (32, 41, "invalid compact block sections"),
+        (36, 0xff, "invalid compact block sections"),
     ] {
         let mut bad = bytes.clone();
         bad[at] = value;
-        assert!(
-            crate::compact::Envelope::parse(0, u64::from(KIND), &bad, 0).is_err(),
-            "header byte {at}"
+        assert_corrupt(
+            crate::compact::Envelope::parse(0, u64::from(KIND), &bad, 0),
+            reason,
         );
     }
-    assert!(crate::compact::Envelope::parse(1, u64::from(KIND), &bytes, 0).is_err());
+    assert_corrupt(
+        crate::compact::Envelope::parse(1, u64::from(KIND), &bytes, 0),
+        "compact block header does not match its frame",
+    );
     let envelope = crate::compact::Envelope::parse(0, u64::from(KIND), &bytes, 0).unwrap();
-    assert!(graph_keys(1, 0, envelope.sections[0], 1, 0).is_err());
-    assert!(graph_keys(0, 1, envelope.sections[0], 1, 0).is_err());
+    assert_corrupt(
+        graph_keys(1, 0, envelope.sections[0], 1, 0),
+        "graph base owner mismatch",
+    );
+    assert_corrupt(
+        graph_keys(0, 1, envelope.sections[0], 1, 0),
+        "graph base entity count mismatch",
+    );
 
     let source = loaded();
     let compact = image(&source, true);
     let _precision = Activation::on();
     let _graph_blocks = GraphBlocks::on();
-    assert!(matches!(
+    assert_corrupt(
         format::load_with(&mut Cursor::new(&compact[..compact.len() - 1]), None),
-        Err(crate::Error::Corrupt { .. })
-    ));
+        "incomplete compact checkpoint image",
+    );
 }
 
 #[test]
@@ -757,14 +1429,13 @@ fn duplicate_out_of_order_and_undeclared_graph_blocks_are_corrupt() {
 
     let _precision = Activation::on();
     let _graph_blocks = GraphBlocks::on();
-    for image in [duplicate, reordered, undeclared, orphaned_graph] {
-        assert!(
-            matches!(
-                format::load_with(&mut Cursor::new(image), None),
-                Err(crate::Error::Corrupt { .. })
-            ),
-            "malformed graph-block image was accepted"
-        );
+    for (image, reason) in [
+        (duplicate, "non-canonical compact block partition"),
+        (reordered, "duplicate or out-of-order graph base block"),
+        (undeclared, "undeclared compact block"),
+        (orphaned_graph, "precision image frame out of order"),
+    ] {
+        assert_corrupt(format::load_with(&mut Cursor::new(image), None), reason);
     }
 }
 
@@ -785,7 +1456,7 @@ fn graph_block_size_limit_fails_before_writer_output() {
         FLAG_GRAPH | FLAG_PRECISION,
         FLOOR,
     );
-    assert!(matches!(result, Err(crate::Error::Corrupt { .. })));
+    assert_corrupt(result, "graph base block exceeds body cap");
     assert!(output.is_empty());
 }
 

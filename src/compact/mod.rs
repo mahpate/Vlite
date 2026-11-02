@@ -251,6 +251,20 @@ pub(crate) fn records_table_frame(
     )
 }
 
+/// One admission predicate for graph-block preflight, declaration and writing.
+#[cfg(test)]
+pub(crate) fn graph_blocks_for(loaded: &crate::format::Loaded, flags: u16) -> bool {
+    let required =
+        crate::format::FLAG_PRECISION | crate::format::FLAG_HISTORY | crate::format::FLAG_GRAPH;
+    flags & required == required
+        && precision_supported()
+        && graph_blocks_enabled()
+        && loaded
+            .graph
+            .as_ref()
+            .is_some_and(|state| state.graphs().next().is_some())
+}
+
 /// Precision-image capability table for the enabled private source codecs.
 #[cfg(test)]
 pub(crate) fn precision_table_frame(
@@ -258,7 +272,7 @@ pub(crate) fn precision_table_frame(
     graphs: bool,
     loaded: &crate::format::Loaded,
     now: Option<u64>,
-    graph_blocks: bool,
+    flags: u16,
 ) -> Vec<u8> {
     let records = catalog::payload::enabled()
         && loaded.collections.values().any(|collection| {
@@ -269,11 +283,7 @@ pub(crate) fn precision_table_frame(
                     .is_some_and(|expiry| now.is_some_and(|now| *expiry <= now))
             })
         });
-    let graph = graph_blocks
-        && loaded
-            .graph
-            .as_ref()
-            .is_some_and(|state| state.graphs().next().is_some());
+    let graph = graph_blocks_for(loaded, flags);
     let mut extra = Vec::with_capacity(2);
     if records {
         extra.push(catalog::payload::KIND);
@@ -1253,6 +1263,20 @@ impl ImageCheck {
             if !self.precise || !graph_blocks_enabled() {
                 return Err(Error::UnsupportedFeature(FLAG_COMPACT));
             }
+            if self.flags & (crate::format::FLAG_HISTORY | crate::format::FLAG_GRAPH)
+                != crate::format::FLAG_HISTORY | crate::format::FLAG_GRAPH
+            {
+                return Err(corrupt(
+                    offset,
+                    "graph base block requires history and graph flags",
+                ));
+            }
+            let [payload] = block.sections.as_slice() else {
+                return Err(corrupt(
+                    offset,
+                    "graph base block requires exactly one section",
+                ));
+            };
             if self.graph_bases.contains_key(&collection)
                 || self
                     .last_graph_block
@@ -1266,7 +1290,7 @@ impl ImageCheck {
             let bodies = graph::framing::graph_keys(
                 collection,
                 count,
-                block.sections[0],
+                payload,
                 self.floor.expect("graph blocks follow advance"),
                 offset,
             )?;

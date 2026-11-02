@@ -13,6 +13,12 @@ total block-body cap. Multi-block graph partitioning is out of scope; both
 precision activation and the separate P4 test gate are required to write, and
 gate-off/release readers refuse the image. No performance or size claims are
 made. Full P4 implementation and measured results remain outstanding.
+The private fix-round candidate carries the gate into directory checkpoint
+workers, shares writer/preflight/declaration admission, and rejects graph
+blocks without history/graph flags or with extra sections. Named regressions
+cover multi-body snapshot/feed parity, expiry cascade, empty graph registries,
+exact body-cap boundaries, codec versions and mixed op-15/block rejection;
+independent acceptance remains pending.
 Depends on [P2](p2-directory-store.md); exits remain
 [S3/S4/F6](../performance/storage-goals.md): **<=24 B/edge disk,
 <=100 B/edge resident, >=1M edges/s bulk load, <=300 ms reopen at 1M edges**.
