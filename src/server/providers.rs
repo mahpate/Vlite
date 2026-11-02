@@ -377,6 +377,10 @@ impl ProviderRegistry {
             let host = endpoint
                 .host_str()
                 .ok_or(ConfigFailure(ConfigReason::EndpointUrl))?;
+            let loopback_ip = host
+                .trim_matches(['[', ']'])
+                .parse::<IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback());
             let allow = &alias.endpoint_allowlist;
             if !endpoint.username().is_empty()
                 || endpoint.password().is_some()
@@ -402,7 +406,8 @@ impl ProviderRegistry {
             }
             if (endpoint.scheme() == "https" && !alias.tls_required)
                 || (endpoint.scheme() == "http"
-                    && (!alias.allow_local_http
+                    && (!loopback_ip
+                        || !alias.allow_local_http
                         || alias.tls_required
                         || allow.addresses.iter().any(|ip| !ip.is_loopback())))
             {

@@ -5,7 +5,7 @@ use std::{
     path::Path,
     process::{Child, Command, Stdio},
     sync::mpsc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 struct Server {
@@ -92,6 +92,44 @@ fn providers_environment_file_is_honored_and_flag_takes_precedence() {
         Some(&broken),
     );
     assert_eq!(server.request("GET", "/ready", Value::Null).0, 200);
+}
+
+#[test]
+fn invalid_providers_environment_file_fails_before_database_creation() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("providers-invalid-env.vlite");
+    let config = directory.path().join("providers-invalid.json");
+    std::fs::write(&config, r#"{"aliases":[],"bindings":[],"unexpected":true}"#).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vlite-server"))
+        .arg(&path)
+        .args([
+            "--insecure-local",
+            "--create-if-missing",
+            "2",
+            "--bind",
+            "127.0.0.1:0",
+        ])
+        .env_remove("VLITE_PROVIDERS_FILE")
+        .env("VLITE_PROVIDERS_FILE", &config)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid provider configuration"));
+    assert!(!path.exists());
 }
 
 #[test]

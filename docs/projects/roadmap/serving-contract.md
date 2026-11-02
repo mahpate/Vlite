@@ -77,7 +77,7 @@ Current HTTP code uses env settings, a 30 s timeout, no redirects and a 4 MiB re
 The managed contract must not claim those defaults provide the new isolation policy.
 Open: migrate legacy env-configured `http` into admin bindings without silently changing existing grants.
 
-Delivery 1 is a private, unreleased candidate pending independent acceptance. Its startup hook is server-startup plumbing outside the embedded Rust API reference; `tests/api_reference.py:204` skips `src/server*`, so no `site/api.html` row is required. The `--providers-file` and `VLITE_PROVIDERS_FILE` names remain proposals awaiting ratification. Secrets are not zeroized in memory. The exact-IP allowlist is the sole egress control: operators may allow any IP, and there is no built-in metadata or link-local denylist. Blocking DNS lookups hold a bounded per-provider permit inside Tokio's shared blocking pool; tasks may queue before acquiring that permit. Windows private-file verification remains unsupported.
+Delivery 1 is a private, unreleased candidate pending independent acceptance. Its startup hook is server-startup plumbing outside the embedded Rust API reference; `tests/api_reference.py:204` skips `src/server*`, so no `site/api.html` row is required. The `--providers-file` and `VLITE_PROVIDERS_FILE` names remain proposals awaiting ratification. Secrets are not zeroized in memory. The exact-IP allowlist is the sole egress control: operators may allow any IP, and there is no built-in metadata or link-local denylist. DNS lookup admission is limited by Tokio's blocking-thread limit, but acquiring the DNS permit before `spawn_blocking` remains a wiring-slice obligation. That slice must also remove `#![allow(dead_code)]`. Windows private-file verification remains unsupported.
 
 | Proposed bound | Contract |
 |---|---|
@@ -337,16 +337,16 @@ exactly; addresses are 1..64 exact IPv4/IPv6 addresses, not CIDRs. Literal IP UR
 must match at startup. Every dispatch resolves DNS anew within the connect
 deadline, rejects the whole answer if any address is outside the allowlist and
 pins that answer into a fresh client. No proxies, redirects, shared connections
-or response caches are used. HTTPS requires `tls_required:true`. HTTP requires
-every allowlisted and resolved address to be loopback, `allow_local_http:true`
-and `tls_required:false`; a hostname is acceptable only when its complete DNS
-answer is pinned to loopback addresses. `localhost` is not a special exception.
-TLS certificate verification remains enabled.
+or response caches are used. HTTPS requires `tls_required:true`. Plain HTTP is
+accepted only for an IP-literal loopback endpoint with `allow_local_http:true`,
+`tls_required:false` and every allowlisted address loopback. `localhost` is not
+an exception. TLS certificate verification remains enabled.
 
 Only secret objects `{"env":"NAME"}` or `{"file":"/absolute/private/file"}` are
 accepted; literal secrets and other keys fail. Values must be 1..4,096 printable
-ASCII bytes without spaces. File sources are at most 4,096 encoded bytes, trim
-trailing CR/LF, require a regular
+ASCII bytes without spaces. File sources are at most 4,096 raw bytes before
+trimming trailing CR/LF (4,096 content bytes plus a newline is rejected), and
+require a regular
 non-symlink file and Unix mode with no group/other permissions, and compare the
 opened file's device/inode to its pre-open metadata. Open platform limitation:
 Windows ACL privacy verification is unavailable in the frozen dependencies;
@@ -370,7 +370,9 @@ there is no admission queue. Provider concurrency is 1..64, tenant concurrency
 tenant/alias. Permits are acquired with nonblocking try-acquire and held through
 the transport call/retry. Open: these conservative admin-selected limits have
 no implicit defaults; downstream callers must pass the smaller client deadline
-when wiring live requests.
+when wiring live requests. Before calling `spawn_blocking`, acquire the DNS
+permit in async context; remove the module's `#![allow(dead_code)]` in that
+wiring slice.
 
 One embedding input is at most 16,384 UTF-8 bytes. Rerank requires
 `1 <= k <= candidates <= 1,000`, unique u64 IDs, finite query/candidate vectors

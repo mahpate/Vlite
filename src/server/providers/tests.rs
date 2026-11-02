@@ -2,7 +2,7 @@ use super::*;
 use std::{
     collections::VecDeque,
     io::{BufRead, BufReader, Read, Write},
-    net::{IpAddr, SocketAddr, TcpListener},
+    net::{IpAddr, SocketAddr, TcpListener, TcpStream},
     sync::{
         Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -101,6 +101,7 @@ struct Loopback {
     bodies: Arc<Mutex<Vec<Value>>>,
     headers: Arc<Mutex<Vec<String>>>,
     stop: Arc<AtomicBool>,
+    active: Arc<Mutex<Option<TcpStream>>>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -113,8 +114,14 @@ impl Loopback {
         let bodies = Arc::new(Mutex::new(Vec::new()));
         let headers = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
-        let (thread_calls, thread_bodies, thread_headers, thread_stop) =
-            (calls.clone(), bodies.clone(), headers.clone(), stop.clone());
+        let active = Arc::new(Mutex::new(None));
+        let (thread_calls, thread_bodies, thread_headers, thread_stop, thread_active) = (
+            calls.clone(),
+            bodies.clone(),
+            headers.clone(),
+            stop.clone(),
+            active.clone(),
+        );
         let thread = std::thread::spawn(move || {
             for (response, delay) in responses {
                 let mut stream = loop {
@@ -133,6 +140,10 @@ impl Loopback {
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_millis(200)))
+                    .unwrap();
+                *thread_active.lock().unwrap() = Some(stream.try_clone().unwrap());
                 thread_calls.fetch_add(1, Ordering::SeqCst);
                 let mut reader = BufReader::new(&mut stream);
                 let mut size = 0;
@@ -171,6 +182,7 @@ impl Loopback {
                 let _ = stream.shutdown(std::net::Shutdown::Write);
                 let mut drain = [0; 1024];
                 while matches!(stream.read(&mut drain), Ok(n) if n != 0) {}
+                *thread_active.lock().unwrap() = None;
             }
         });
         Self {
@@ -179,6 +191,7 @@ impl Loopback {
             bodies,
             headers,
             stop,
+            active,
             thread: Some(thread),
         }
     }
@@ -199,6 +212,9 @@ impl Loopback {
 impl Drop for Loopback {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        if let Some(stream) = self.active.lock().unwrap().as_ref() {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
         self.thread.take().unwrap().join().unwrap();
     }
 }
@@ -235,9 +251,26 @@ impl Resolver for BlockingResolver {
         let (released, changed) = &*self.state;
         let mut released = released.lock().unwrap();
         while !*released {
-            released = changed.wait(released).unwrap();
+            let (next, timeout) = changed
+                .wait_timeout(released, Duration::from_secs(20))
+                .unwrap();
+            released = next;
+            assert!(
+                !timeout.timed_out() || *released,
+                "blocking resolver release timed out"
+            );
         }
         Ok(vec!["127.0.0.1:1234".parse().unwrap()])
+    }
+}
+
+struct BlockingReleaseGuard(Arc<(Mutex<bool>, std::sync::Condvar)>);
+
+impl Drop for BlockingReleaseGuard {
+    fn drop(&mut self) {
+        let (released, changed) = &*self.0;
+        *released.lock().unwrap() = true;
+        changed.notify_all();
     }
 }
 
@@ -509,6 +542,11 @@ fn schema_caps_names_allowlists_concurrency_and_payload_fields_have_distinct_bou
     outside_http["aliases"][0]["endpoint_allowlist"]["hosts"] = json!(["example.invalid"]);
     outside_http["aliases"][0]["endpoint_allowlist"]["addresses"] = json!(["192.0.2.1"]);
     assert_eq!(failure(&outside_http), ConfigReason::TlsPolicy);
+
+    let mut localhost_http = config("http://localhost:1234/inference", "embedding");
+    localhost_http["aliases"][0]["endpoint_allowlist"]["hosts"] = json!(["localhost"]);
+    localhost_http["aliases"][0]["endpoint_allowlist"]["addresses"] = json!(["127.0.0.1"]);
+    assert_eq!(failure(&localhost_http), ConfigReason::TlsPolicy);
 }
 
 #[test]
@@ -519,6 +557,22 @@ fn secret_policy_helpers_are_platform_neutral_and_precise() {
     }
     assert_eq!(trim_secret_file(b"SECRET\r\n").unwrap(), b"SECRET");
     assert_eq!(validate_secret_bytes(b"SECRET").unwrap(), "SECRET");
+    let raw_limit_with_newline = vec![b'a'; MAX_SECRET_BYTES - 1]
+        .into_iter()
+        .chain(*b"\n")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        trim_secret_file(&raw_limit_with_newline).unwrap().len(),
+        MAX_SECRET_BYTES - 1
+    );
+    let raw_over_limit_with_newline = vec![b'a'; MAX_SECRET_BYTES]
+        .into_iter()
+        .chain(*b"\n")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        trim_secret_file(&raw_over_limit_with_newline),
+        Err(SecretReason::TooLarge)
+    );
     assert_eq!(
         trim_secret_file(&vec![b'a'; 4097]),
         Err(SecretReason::TooLarge)
@@ -560,11 +614,21 @@ fn address_check_rejects_empty_mixed_and_over_limit_answers() {
     );
 }
 
-fn hostname_config(endpoint: &str, host: &str, address: IpAddr) -> Value {
-    let mut value = config(endpoint, "embedding");
-    value["aliases"][0]["endpoint_allowlist"]["hosts"] = json!([host]);
-    value["aliases"][0]["endpoint_allowlist"]["addresses"] = json!([address.to_string()]);
-    value
+fn hostname_config(endpoint: &str, host: &str, address: IpAddr) -> ProviderRegistry {
+    let url = reqwest::Url::parse(endpoint).unwrap();
+    let port = url.port().unwrap();
+    let local_endpoint = format!("http://{address}:{port}/inference");
+    let value = config(&local_endpoint, "embedding");
+    let mut registry = registry(&value);
+    registry.providers.get_mut("test").unwrap().endpoint = reqwest::Url::parse(endpoint).unwrap();
+    registry
+        .providers
+        .get_mut("test")
+        .unwrap()
+        .definition
+        .endpoint_allowlist
+        .hosts = vec![host.to_owned()];
+    registry
 }
 
 #[tokio::test]
@@ -578,12 +642,11 @@ async fn pinned_hostname_uses_only_the_injected_allowed_address() {
         .unwrap()
         .parse()
         .unwrap();
-    let value = hostname_config(
+    let mut registry = hostname_config(
         &format!("http://pinned.invalid:{}/inference", socket.port()),
         "pinned.invalid",
         socket.ip(),
     );
-    let mut registry = registry(&value);
     let resolver = Arc::new(QueueResolver::new([vec![socket]]));
     registry.providers.get_mut("test").unwrap().resolver = resolver.clone();
     assert_eq!(
@@ -603,7 +666,13 @@ async fn pinned_hostname_uses_only_the_injected_allowed_address() {
 
 #[tokio::test]
 async fn replay_retry_re_resolves_and_rejects_a_new_disallowed_answer() {
-    let server = Loopback::new(vec![(Loopback::json(503, ""), Duration::ZERO)]);
+    let server = Loopback::new(vec![
+        (Loopback::json(503, ""), Duration::ZERO),
+        (
+            Loopback::json(200, r#"{"data":[{"embedding":[1,2]}]}"#),
+            Duration::ZERO,
+        ),
+    ]);
     let socket: SocketAddr = server
         .endpoint
         .trim_start_matches("http://")
@@ -612,15 +681,19 @@ async fn replay_retry_re_resolves_and_rejects_a_new_disallowed_answer() {
         .unwrap()
         .parse()
         .unwrap();
-    let other: SocketAddr = "127.0.0.2:1".parse().unwrap();
-    let mut value = hostname_config(
+    let other = SocketAddr::new("127.0.0.2".parse().unwrap(), socket.port());
+    let mut registry = hostname_config(
         &format!("http://pinned.invalid:{}/inference", socket.port()),
         "pinned.invalid",
         socket.ip(),
     );
-    value["aliases"][0]["replay_safe"] = json!(true);
-    let mut registry = registry(&value);
-    let resolver = Arc::new(QueueResolver::new([vec![socket], vec![other]]));
+    registry
+        .providers
+        .get_mut("test")
+        .unwrap()
+        .definition
+        .replay_safe = true;
+    let resolver = Arc::new(QueueResolver::new([vec![socket], vec![socket, other]]));
     registry.providers.get_mut("test").unwrap().resolver = resolver.clone();
     assert_eq!(
         bounded(registry.embed(&key(), TEXT, &HttpTransport))
@@ -634,16 +707,43 @@ async fn replay_retry_re_resolves_and_rejects_a_new_disallowed_answer() {
 
 #[tokio::test]
 async fn timed_out_blocking_dns_keeps_its_admission_slot_until_returned() {
-    let mut value = config("http://stalled.invalid:1234/inference", "embedding");
-    value["aliases"][0]["concurrency"] = json!(1);
-    value["aliases"][0]["tenant_concurrency"] = json!(1);
-    value["aliases"][0]["connect_timeout_ms"] = json!(1000);
-    value["aliases"][0]["total_timeout_ms"] = json!(1000);
-    let mut registry = registry(&value);
+    let mut registry = hostname_config(
+        "http://stalled.invalid:1234/inference",
+        "stalled.invalid",
+        "127.0.0.1".parse().unwrap(),
+    );
+    registry
+        .providers
+        .get_mut("test")
+        .unwrap()
+        .definition
+        .concurrency = 1;
+    registry
+        .providers
+        .get_mut("test")
+        .unwrap()
+        .definition
+        .tenant_concurrency = 1;
+    registry
+        .providers
+        .get_mut("test")
+        .unwrap()
+        .definition
+        .connect_timeout_ms = 1000;
+    registry
+        .providers
+        .get_mut("test")
+        .unwrap()
+        .definition
+        .total_timeout_ms = 1000;
+    registry.providers.get_mut("test").unwrap().slots = Arc::new(Semaphore::new(1));
+    registry.providers.get_mut("test").unwrap().dns_slots = Arc::new(Semaphore::new(1));
+    registry.bindings.get_mut(&key()).unwrap().slots = Arc::new(Semaphore::new(1));
     let resolver = Arc::new(BlockingResolver {
         state: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
         entered: AtomicBool::new(false),
     });
+    let _release_guard = BlockingReleaseGuard(resolver.state.clone());
     registry.providers.get_mut("test").unwrap().resolver = resolver.clone();
     assert_eq!(
         bounded(registry.embed(&key(), TEXT, &HttpTransport))
@@ -651,15 +751,19 @@ async fn timed_out_blocking_dns_keeps_its_admission_slot_until_returned() {
             .unwrap_err(),
         ProviderError::Timeout
     );
-    assert!(resolver.entered.load(Ordering::SeqCst));
+    let entered_deadline = Instant::now() + Duration::from_secs(5);
+    while !resolver.entered.load(Ordering::SeqCst) && Instant::now() < entered_deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        resolver.entered.load(Ordering::SeqCst),
+        "resolver thread did not start within 5 seconds"
+    );
     let second = tokio::time::timeout(
         Duration::from_secs(2),
         registry.embed(&key(), TEXT, &HttpTransport),
     )
     .await;
-    let (release, changed) = &*resolver.state;
-    *release.lock().unwrap() = true;
-    changed.notify_all();
     assert_eq!(
         second
             .expect("provider admission must not wait")
@@ -729,6 +833,7 @@ fn environment_secret_values_are_bounded_printable_and_sanitized() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
         if !value.is_empty() {
             assert!(!String::from_utf8_lossy(&output.stdout).contains(&value));
             assert!(!String::from_utf8_lossy(&output.stderr).contains(&value));
@@ -870,7 +975,7 @@ fn tls_and_loopback_policy_are_validated_without_dns() {
     assert!(ProviderRegistry::parse(&serde_json::to_vec(&ipv6).unwrap()).is_ok());
     ipv6["aliases"][0]["endpoint"] = json!("http://localhost:1234/inference");
     ipv6["aliases"][0]["endpoint_allowlist"]["hosts"] = json!(["localhost"]);
-    assert!(ProviderRegistry::parse(&serde_json::to_vec(&ipv6).unwrap()).is_ok());
+    assert_eq!(failure(&ipv6), ConfigReason::TlsPolicy);
 }
 
 #[tokio::test]
@@ -1115,12 +1220,11 @@ async fn provider_http_client_ignores_proxy_environment() {
             .unwrap()
             .parse()
             .unwrap();
-        let value = hostname_config(
+        let mut configured = hostname_config(
             &format!("http://pinned.invalid:{}/inference", socket.port()),
             "pinned.invalid",
             socket.ip(),
         );
-        let mut configured = registry(&value);
         configured.providers.get_mut("test").unwrap().resolver =
             Arc::new(QueueResolver::new([vec![socket]]));
         assert_eq!(
@@ -1155,6 +1259,7 @@ async fn provider_http_client_ignores_proxy_environment() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
     assert_eq!(proxy.calls.load(Ordering::SeqCst), 0);
 }
 
@@ -1164,12 +1269,13 @@ async fn provider_log_contains_only_alias_fingerprint_outcome_and_batch_count() 
     let tenant = "unique-log-tenant-2648";
     let host = "unique-log-host.invalid";
     let path = "/unique-private-path-613";
-    let mut value = config(&format!("http://{host}{path}"), "embedding");
+    let mut value = config("http://127.0.0.1:1234/inference", "embedding");
     value["aliases"][0]["alias"] = json!(alias);
-    value["aliases"][0]["endpoint_allowlist"]["hosts"] = json!([host]);
     value["bindings"][0]["alias"] = json!(alias);
     value["bindings"][0]["tenant"] = json!(tenant);
-    let registry = registry(&value);
+    let mut registry = registry(&value);
+    registry.providers.get_mut(alias).unwrap().endpoint =
+        reqwest::Url::parse(&format!("http://{host}{path}")).unwrap();
     let log_key = (42, 0, tenant.to_owned(), alias.to_owned());
     let transport = Fake::new(200, r#"{"data":[{"embedding":[1,2]}]}"#);
     assert_eq!(
@@ -1500,21 +1606,30 @@ async fn retry_after_delta_seconds_is_honored_and_invalid_values_do_not_retry() 
 
 #[tokio::test]
 async fn refused_connect_is_retried_only_for_replay_safe_aliases() {
-    let socket: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let socket = listener.local_addr().unwrap();
+    drop(listener);
+    // Windows refuses the URL's port-zero endpoint immediately; Linux needs the closed port.
+    let endpoint_port = if cfg!(windows) { 0 } else { socket.port() };
     for (replay_safe, expected_attempts) in [(true, 2), (false, 1)] {
-        let mut value = hostname_config(
-            &format!("http://pinned.invalid:{}/inference", socket.port()),
+        let mut configured = hostname_config(
+            &format!("http://pinned.invalid:{endpoint_port}/inference"),
             "pinned.invalid",
             socket.ip(),
         );
-        value["aliases"][0]["replay_safe"] = json!(replay_safe);
-        let mut configured = registry(&value);
+        configured
+            .providers
+            .get_mut("test")
+            .unwrap()
+            .definition
+            .replay_safe = replay_safe;
         let resolver = Arc::new(QueueResolver::new([vec![socket], vec![socket]]));
         configured.providers.get_mut("test").unwrap().resolver = resolver.clone();
+        let error = bounded(configured.embed(&key(), TEXT, &HttpTransport))
+            .await
+            .unwrap_err();
         assert!(matches!(
-            bounded(configured.embed(&key(), TEXT, &HttpTransport))
-                .await
-                .unwrap_err(),
+            error,
             ProviderError::Unavailable | ProviderError::Timeout
         ));
         assert_eq!(
