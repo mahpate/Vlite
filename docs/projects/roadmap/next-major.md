@@ -237,7 +237,11 @@ Local numbers below show direction only (see rules).
   [graph gRPC](serving-graph-grpc-contract.md) contracts are likewise
   reviewed specifications awaiting owner decisions: the first aligns to the
   private memory core and its A2 retention work, the second records today's
-  gRPC behaviour apart from the proposed schema. Neither is implemented.
+  gRPC behaviour apart from the proposed schema. Neither is implemented. The
+  [KV and TTL serving](serving-kv-ttl-contract.md) contract specifies KV
+  routes, fenced leases, and TTL and change-feed events; its lease ledger is a
+  storage-format change that needs owner approval and P2. It is a reviewed
+  specification, not an implemented capability.
 - **Further design proposals:** [agent memory](gap1-agent-memory.md) defines
   the embedded operations and their prerequisites; [scale-out](scale-out.md)
   compares branching, object storage and replication. Both received source
