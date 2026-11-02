@@ -10,8 +10,28 @@ pub(crate) fn pinned_views(
     states: &[GraphState],
     cap: usize,
 ) -> Result<Vec<CompactGraphView>, String> {
+    pinned_views_with_record_order(graph, states, cap, false)
+}
+
+pub(crate) fn pinned_views_reversed_records(
+    graph: GraphId,
+    states: &[GraphState],
+    cap: usize,
+) -> Result<Vec<CompactGraphView>, String> {
+    pinned_views_with_record_order(graph, states, cap, true)
+}
+
+fn pinned_views_with_record_order(
+    graph: GraphId,
+    states: &[GraphState],
+    cap: usize,
+    reverse_records: bool,
+) -> Result<Vec<CompactGraphView>, String> {
     let first = states.first().ok_or("history requires a base state")?;
     let mut previous = source(first, graph)?;
+    if reverse_records {
+        reverse_source_records(&mut previous);
+    }
     let base = Arc::new(
         decode(&encode(&previous).map_err(|error| format!("{error:?}"))?)
             .map_err(|error| format!("{error:?}"))?,
@@ -19,7 +39,10 @@ pub(crate) fn pinned_views(
     let mut overlay = Overlay::new(&base, cap);
     let mut views = vec![CompactGraphView::new(Arc::clone(&base))];
     for state in &states[1..] {
-        let current = source(state, graph)?;
+        let mut current = source(state, graph)?;
+        if reverse_records {
+            reverse_source_records(&mut current);
+        }
         overlay
             .apply(projection(&previous, &current))
             .map_err(|error| format!("{error:?}"))?;
@@ -31,6 +54,11 @@ pub(crate) fn pinned_views(
         previous = current;
     }
     Ok(views)
+}
+
+fn reverse_source_records(source: &mut GraphSource) {
+    source.nodes.reverse();
+    source.edges.reverse();
 }
 
 fn source(state: &GraphState, graph: GraphId) -> Result<GraphSource, String> {
@@ -155,6 +183,14 @@ mod tests {
                     key: None,
                     properties: Properties::new(),
                 },
+                GraphEntry::PutEdge {
+                    edge_id: EdgeId(1),
+                    source: NodeId(0),
+                    destination: NodeId(1),
+                    relationship: "S".into(),
+                    key: None,
+                    properties: Properties::new(),
+                },
             ],
         );
         let mut states = vec![state.clone()];
@@ -169,7 +205,7 @@ mod tests {
                     properties: Properties::new(),
                 },
                 GraphEntry::PutEdge {
-                    edge_id: EdgeId(1),
+                    edge_id: EdgeId(2),
                     source: NodeId(1),
                     destination: NodeId(2),
                     relationship: "S".into(),
@@ -182,7 +218,10 @@ mod tests {
         apply(
             &mut state,
             3,
-            vec![GraphEntry::DeleteEdge { edge_id: EdgeId(0) }],
+            vec![
+                GraphEntry::DeleteEdge { edge_id: EdgeId(0) },
+                GraphEntry::DeleteEdge { edge_id: EdgeId(1) },
+            ],
         );
         states.push(state);
         states
@@ -221,13 +260,73 @@ mod tests {
             views[0]
                 .algorithm_adjacency(NodeId(0), Direction::Out, None)
                 .collect::<Vec<_>>(),
-            [("R", EdgeId(0))]
+            [("R", EdgeId(0)), ("S", EdgeId(1))]
         );
         assert_eq!(
             views[2]
                 .algorithm_adjacency(NodeId(0), Direction::Out, None)
                 .count(),
             0
+        );
+    }
+
+    #[test]
+    fn reversed_source_records_preserve_pinned_history_semantics() {
+        let states = history();
+        let canonical_source = source(&states[0], GRAPH).unwrap();
+        let mut reversed_source = canonical_source.clone();
+        reverse_source_records(&mut reversed_source);
+        assert!(
+            reversed_source
+                .nodes
+                .windows(2)
+                .all(|pair| pair[0].id > pair[1].id)
+        );
+        assert!(
+            reversed_source
+                .edges
+                .windows(2)
+                .all(|pair| pair[0].id > pair[1].id)
+        );
+        reverse_source_records(&mut reversed_source);
+        assert_eq!(reversed_source, canonical_source);
+
+        let canonical = pinned_views(GRAPH, &states, 16).unwrap();
+        let reversed = pinned_views_reversed_records(GRAPH, &states, 16).unwrap();
+        assert_eq!(reversed.len(), states.len());
+        for ((canonical_view, reversed_view), state) in canonical.iter().zip(&reversed).zip(&states)
+        {
+            assert_matches(canonical_view, state);
+            assert_matches(reversed_view, state);
+            for node in state.graph(GRAPH).unwrap().nodes() {
+                assert_eq!(
+                    canonical_view
+                        .algorithm_node_by_key(&node.key)
+                        .map(|row| row.id),
+                    reversed_view
+                        .algorithm_node_by_key(&node.key)
+                        .map(|row| row.id)
+                );
+            }
+        }
+        assert_eq!(
+            reversed[0]
+                .algorithm_adjacency(NodeId(0), Direction::Out, None)
+                .collect::<Vec<_>>(),
+            [("R", EdgeId(0)), ("S", EdgeId(1))]
+        );
+        assert_eq!(
+            reversed[2]
+                .algorithm_adjacency(NodeId(0), Direction::Out, None)
+                .count(),
+            0
+        );
+        assert_eq!(
+            reversed[0]
+                .algorithm_adjacency(NodeId(0), Direction::Out, None)
+                .collect::<Vec<_>>(),
+            [("R", EdgeId(0)), ("S", EdgeId(1))],
+            "later overlay commits must not mutate the earlier pinned view"
         );
     }
 }

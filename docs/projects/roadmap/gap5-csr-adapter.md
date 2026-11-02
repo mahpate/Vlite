@@ -264,28 +264,33 @@ real-time source counts are explicitly not a bitwise reproducibility claim.
 
 ## (f) Fixtures, counts and fail-first evidence
 
-The original design baseline was 53 engine algorithm tests and 29 public-adapter
-tests. At the current tree, `cargo test --locked --offline --lib --all-features
--- --list` reports 57 tests under `algorithm::tests` (including four accepted
-TTL guards), 2 resident-source tests, 29 public-adapter tests, 2 CSR
-source-contract tests, and 4 new parity tests. The 801-test library listing
-includes all modules. Commits 2–3 add no edits to pre-existing test, fixture, or
-oracle files; `git diff --stat` for commit 3 lists only the adapter module
-declaration and the new parity-test file.
+The original accepted resident seam covered 53 engine algorithm tests and 29
+public-adapter tests. The follow-up leaves those existing test/fixture/oracle
+files unchanged; its changed test files are new `algorithm_csr/tests.rs` and
+the authorized test-only `view/history.rs`. The observed library run covers 320
+property-graph tests with default features and 320 with all features. The
+standalone `vlite-graph` harness separately passes 201 unit tests and 2
+integration tests. `cargo test --list` is used with the source diff to verify
+that these are additive tests, not edits to the accepted fixtures or oracles.
 
 | Executed coverage | Evidence |
 |---|---|
 | Fixture families | 12: chain; weighted diamond; dangling/isolates; parallel edges/loops/edge zero; sparse IDs/types; labels/conditions; TTL boundaries; temporal ordinary record; overlay replacement/delete; high degree/absent type; invalid inputs/weights; budget/partial output. |
-| Main parity matrix | 5 algorithms x 3 directions x 13 family/clock cases = 195 logical cases. Each compares resident results to both pinned CSR views (390 comparisons, 600 source executions). Overlay replacement/delete compares each resident state to its corresponding CSR state; other families also assert equality across the two pinned views. |
+| Main parity matrix | Explicit manifest: 12 fixture families, 5 algorithms, 3 directions, and the declared family-specific clocks, plus four budget profiles. It runs both canonical and reverse-source-record construction orders: 540 logical cases total, 540 comparisons per order (1,080 total), and 1,650 source executions. Overlay replacement/delete compares each resident state to its corresponding CSR state; other families also compare the base and pinned-overlay sources. |
 | Result equality | Full `AlgorithmResult`/`AlgorithmError` equality, including values, scope, truncation, reasons, ordering and integer counters; floating outputs are additionally compared by `to_bits()`. Source-call and yielded-adjacency counts match after normalizing expiry-predicate calls, which are conservatively different for the two sources. |
 | Retained-record precondition | Fixture records compare physical IDs, keys, labels, properties and expiry values. The temporal case checks the ordinary physical record and confirms a stored segment while algorithm requests retain T=None. |
 | Independent expected values | A hand-built two-node directed cycle checks exact Degree, path, PageRank, label-propagation and betweenness outputs in Out/In/Both directions. |
 | Fixed stop schedules | Cancellation and deadline outcomes compare resident, base, and pinned-overlay executions for all five algorithms and three directions using a deterministic fake clock. |
-| Reverse update order | Nodes and ordinary edge updates are replayed in reverse while IDs are preserved; each algorithm/direction compares the canonical resident result with reverse-updated resident and CSR results. |
+| Construction order and retained records | Both canonical and reversed `GraphSource.nodes`/`.edges` pass through encode/decode and the same base/overlay path; IDs and fields remain fixed. The focused history test proves actual source-record reversal, semantic equality with `GraphState`, and earlier-view pinning. This does not claim descending `GraphState` ID allocation. |
+| Reverse update order | Separate test replays node/edge updates in reverse while preserving IDs; all five algorithm kinds and three directions compare resident and CSR outcomes (420 comparisons). It is not conflated with source-record ordering. |
+| Boundary matrix | `csr_all_budget_boundaries_and_check_traces_match` sweeps 410 limit configurations and 15 scheduled-clock comparisons per construction order (820 configurations and 30 scheduled comparisons total). Includes work budgets, output caps, iterations, hops, sampled-source caps, edge-per-node caps, and cancellation/deadline traces. |
+| Index-work instrumentation | The accepted test-only visit counter measures indexed binary-search/cursor comparisons: 15,504 per construction order in the main matrix; a miss among 1,024 keys takes 11 index visits; a 1,024-edge row yields 1,024 entries with 1,027 index visits. These are not backing-record visits and not allocation measurements. |
+| Allocation instrumentation | The high-degree query's measuring allocator observed 112 peak requested bytes, 112 retained bytes and 4 blocks for each source execution. View/index construction is outside the measured query interval. This is a focused observation, not an allocator-wide or total-memory bound. |
+| Independent expected values | A hand-built two-node directed cycle checks exact Degree, path, PageRank, label-propagation and betweenness outputs in Out/In/Both directions; the independent Python golden consumers check 24 algorithm, 12 iteration and 23 betweenness cases. Existing scripts and JSON fixtures remain unchanged. |
 | Harness concurrency | The parity matrix test passed with `--test-threads=1`, `2`, and `4`. These settings vary test-harness concurrency only; algorithm kernels remain serial, so this is not algorithm thread-count evidence. |
-| Existing oracle consumers | `graph_algorithm_oracle.py` checked 24 cases, `graph_iteration_oracle.py` checked 12 cases, and `graph_betweenness_oracle.py` checked 23 cases. Existing scripts and JSON fixtures remain unchanged. |
-| Validation matrix | `cargo fmt --check`, all-target/all-feature workspace clippy, default/all-feature property-graph tests (310 each), `vlite-graph` (201 unit + 2 integration), compact tests (244 each feature mode), no-default and wasm checks, all three Python oracles, API reference (840 items), release docs, content budget, and staged/unstaged diff checks exited 0. |
-| Planned but not covered exhaustively | The 540-comparison-per-construction-order skeleton, all budget-boundary sweeps, allocation/backing-record instrumentation, and the complete deliberate-mutation list below remain future evidence. The 390 comparisons do not constitute release qualification. |
+| Executed test counts | CSR parity module: 15 passed; TTL guards: 4 passed; reversed-record history self-test: 1 passed; property graph: 321 passed in both default and all-feature modes; compact tests: 246 passed in each feature mode; `vlite-graph`: 201 unit + 2 integration passed. Test listing reports 57 engine algorithm tests (53 original plus the 4 accepted TTL guards), 29 public-adapter tests, and 15 CSR tests. |
+| Validation matrix | Strict all-target/all-feature workspace Clippy, direct `rustfmt --edition 2024 --check` on both touched Rust files, no-default and wasm checks, the cargo test modes above, all three Python oracles, API reference (840 items), release docs, content budget, and staged/unstaged diff checks exited 0. `cargo fmt` does not accept `--locked --offline`; formatting was verified with the installed `rustfmt` executable instead. |
+| Not established | Serving/activation, performance or size claims, cross-platform float identity, allocator-wide memory bounds, runtime backing-record visit totals, or release qualification remain out of scope. |
 
 The executed fail-first mutation replaced the CSR adjacency direction with
 `Direction::Out`. The named parity-matrix test failed with exit 101 at
@@ -298,26 +303,33 @@ same command pass with exit 0:
 cargo test --locked --offline --lib property_graph::algorithms::csr::tests::parity_matrix_matches_resident_base_and_pinned_overlay_sources -- --exact --nocapture
 ```
 
-No mutation is committed. The other mutations below are planned probes only;
-they have not been claimed as killed. The current instrumentation counts source
-method calls and yielded adjacency entries, not physical backing-record visits,
-tombstone skips, or allocations, so it does not by itself establish bounded
-internal work.
+No mutation is committed. The recorded fail-first probes were applied locally,
+their named tests failed, and the original source was restored before validation.
+The accepted index counter counts comparisons in index binary searches and
+cursor partition searches; it does not count physical backing-record visits,
+tombstone skips, or allocations.
 
-| Deliberate mutation not yet run | Intended regression test |
+| Deliberate mutation | Named regression test | Outcome |
 |---|---|
-| Sort CSR row by neighbor ordinal, or reverse relationship dictionary | `csr_physical_order_and_typed_probes_match` |
-| Skip ID 0 in typed probe, or duplicate Both loop | `csr_edge_zero_parallel_and_loops_match` |
-| TTL `<` changed to `<=` visibility, or endpoint cascade omitted | `csr_ttl_equality_and_hidden_entry_charges_match` |
-| Use read-filtered adjacency instead of physical entries | `csr_ttl_equality_and_hidden_entry_charges_match` (exact counters/boundaries) |
-| Validate weights while extracting or choose relationship-order bad edge | `csr_weight_error_order_and_cancel_precedence_match` |
-| Select temporal segment at T=0 | `csr_temporal_records_keep_retention_only_semantics` |
-| Allocate degree-sized Vec before Meter | `csr_high_degree_scan_allocates_no_row_buffer` |
-| Scan every node on key miss | `csr_key_misses_use_indexed_lookup` |
-| Ignore overlay tombstone/replacement or rebind snapshot mid-run | `csr_overlay_generation_stays_pinned` |
-| Keep parallel Brandes arcs, halve Both, change SplitMix input | `csr_betweenness_oracle_and_completed_prefix_match` |
-| Expose partial step/source or move final check | `csr_all_budget_boundaries_and_check_traces_match` |
-| Add one scratch reservation / type-probe charge | `csr_all_budget_boundaries_and_check_traces_match` |
+| No-op reverse-source-record helper | `reversed_source_records_preserve_pinned_history_semantics` | Killed; restored. |
+| Materialize a degree-sized adjacency row | `csr_high_degree_scan_allocates_no_row_buffer` | Killed; restored. |
+| Replace indexed key lookup with a node scan | `csr_key_misses_use_indexed_lookup` | Killed; restored. |
+| Change all-required-label matching to any-label matching | `parity_matrix_matches_resident_base_and_pinned_overlay_sources` | Killed after fixture requires both A and B; restored. |
+| Drop edge-ID-zero typed-probe workaround | `csr_edge_zero_parallel_and_loops_match` | Killed; restored. |
+| Omit expiry checks or endpoint-node cascade | `csr_ttl_equality_and_hidden_entry_charges_match` | Killed; restored. |
+| Ignore the adjacency `after` cursor or reverse adjacency order | `csr_physical_order_and_typed_probes_match` | Killed; restored. |
+| Read the wrong physical edge for a late weight lookup | `csr_weight_error_order_and_cancel_precedence_match` | Killed; restored. |
+| Skip the path-source expiry check (G12) | `due_nonseed_path_source_fails_before_seed_membership` | Exit 101 under mutant (`InvalidQuery` instead of `UnknownNodeKey`); restored command passed, exit 0. The test's C=NOW-1 control preserves the seed-membership error. |
+| Skip the iterative teleport expiry clock (G10) | `due_nonseed_personalization_honours_the_expiry_clock` | Exit 101 under mutant (`InvalidQuery` instead of `UnknownNodeKey`); restored and included in passing regression suites. |
+| Skip path-destination expiry (G11) | `due_nonseed_path_destination_is_rejected` | Exit 101 under mutant (returns a path result instead of `UnknownNodeKey`); restored and included in passing regression suites. |
+| Skip due-seed expiry for iterative request (G16) | `due_seed_is_rejected_for_an_iterative_request` | Exit 101 under mutant (returns PageRank instead of `UnknownNodeKey`); restored and included in passing regression suites. |
+| Keep parallel Brandes arcs (sort without deduplication) | `parallel_arcs_collapse_and_self_loops_are_ignored` | Killed (101); CSR-specific parity alone survives because resident and CSR share the kernel; restored. |
+| Omit reverse arcs for `Direction::Both` | `csr_betweenness_oracle_and_completed_prefix_match` | Killed (101), exact expected score was 1/3 instead of 2/3; restored. |
+| Change SplitMix input from XOR to addition | `sources_are_ranked_by_hash_then_id` | Killed (101), source order differed; restored. |
+| Read temporal properties at `T=0` instead of ordinary physical properties | `csr_temporal_records_keep_retention_only_semantics` | Killed (101), produced a weighted path instead of `MissingWeight`; restored. |
+| Omit the final cancellation/deadline check | `cancellation_is_checked_before_work_periodically_and_at_the_end` | Killed (101), omitted `Cancelled`; restored. |
+| Add one scratch reservation to each typed probe | `shared_sorts_keep_degree_and_path_results_and_units` | Killed (101), exact scratch accounting differed; restored. |
+| Add a second vertex charge to each typed probe | `absent_type_probe_keeps_the_exact_vertex_charge` | Killed (101), observed 13 rather than the independent expected 11; restored, and baseline test passed (0). |
 
 Keep engine `every_budget_is_exact_and_stops_without_output` (:806),
 `absent_relationship_type_probes_are_charged_and_interruptible` (:1929),
@@ -332,7 +344,7 @@ betweenness `every_budget_stops_at_its_boundary_and_keeps_only_full_sources`
 | 1. Resident-only seam | `src/property_graph/engine/algorithm.rs`, `algorithm/source.rs`, `algorithm/iterative.rs` | Existing signatures, all 82 existing tests and oracle consumers unchanged; exact counters/float bits unchanged. No compact imports. |
 | Dependency, P4-owned plus authorized test seam | Accepted view and indexed physical key/adjacency accessors; algorithm commit 2a adds only the approved test construction seam | Independently reviewed contract for bounded effective membership and snapshot pinning. No production view behavior is changed by commit 2a. |
 | 2. CSR source (commit `6386b86e`) | New `src/property_graph/engine/algorithm_csr.rs`; test-only module declaration in `src/property_graph/algorithms.rs` | Two base/overlay source-contract tests; no public selection/serving switch. |
-| 3. Parity evidence (commit `594d492e`) | Test-only module declaration in `algorithm_csr.rs`; new `algorithm_csr/tests.rs` | Four parity tests, 390 comparisons/600 source executions, independent cycle expectations, and one killed/restored adjacency-direction mutant; existing test/fixture/oracle files unchanged. |
+| 3. Parity evidence (commit `594d492e`, additive follow-up pending) | Test-only module declaration in `algorithm_csr.rs`; new `algorithm_csr/tests.rs`; authorized test-only `view/history.rs` | 540 comparisons per construction order, exhaustive assigned boundary sweep, independent cycle and algorithm expectations, indexed-work and allocator observations, and named fail-first probes; existing test/fixture/oracle files unchanged. |
 | 4. Documentation (this commit) | This file and the two current status locations | Record actual evidence and residual limitations, no invented qualification. |
 
 Except the narrowly authorized test-only commit 2a, no ownership of compact
@@ -361,6 +373,12 @@ Coordinator ownership amendment: separate commit 2a is authorized to expose
 `view/history.rs::pinned_views` using the real encode/decode and overlay
 snapshot path for parity fixtures; it authorizes no other `src/compact/**`
 change and is present in the local history.
+
+Follow-up amendment: the same test-only history helper may reverse
+`GraphSource.nodes` and `.edges` before encoding while preserving IDs/fields;
+the accepted P4 VISITS wrapper (`4d1b28dfc0eaf9385254032ce8dbb30f0b6d9f78`,
+cherry-picked locally as `eb92afd8`) may be consumed only in tests. Neither
+authorization adds production behavior or accessors.
 
 | Approved decision | Approved default / consequence |
 |---|---|
