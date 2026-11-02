@@ -248,6 +248,7 @@ impl Database {
         self.lineage.ok_or(Error::ChangeFeedRequiresUpgrade)?;
         // As `changes_after`: never publish commits a crash could lose.
         self.sync()?;
+        let _scan = self.lock_log_scan()?;
         let mut file = &self.file;
         crate::changes::read_changes_with(
             &mut file,

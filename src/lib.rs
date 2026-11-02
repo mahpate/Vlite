@@ -895,6 +895,8 @@ pub struct Database {
     flusher: Option<durability::Flusher>,
     durability: Durability,
     file: LockedFile,
+    /// Shared-reference log scans must hold this across every seek and read.
+    log_scan: std::sync::Mutex<()>,
     version: u32,
     lineage: Option<u64>,
     sequence: u64,
@@ -1396,6 +1398,7 @@ impl Database {
             flusher: None,
             durability: initial_durability(&file),
             file,
+            log_scan: Default::default(),
             version,
             lineage,
             sequence: 0,
@@ -1497,6 +1500,7 @@ impl Database {
             flusher: None,
             durability: initial_durability(&file),
             file,
+            log_scan: Default::default(),
             version: loaded.version,
             lineage: loaded.lineage,
             sequence: loaded.sequence,
@@ -2401,8 +2405,9 @@ impl Database {
     }
 
     /// Reads up to about `max_events` committed changes after `cursor`, cut on
-    /// commit boundaries (a batch commit is never split). Reads the durable log
-    /// with a separate handle, so it observes exactly what a crash would keep.
+    /// commit boundaries (a batch commit is never split). Reads the durable log,
+    /// serializing scans so concurrent readers cannot move its shared cursor.
+    /// It observes exactly what a crash would keep.
     /// Cost is one sequential scan of the log per call.
     pub fn changes_after(
         &self,
@@ -2412,6 +2417,7 @@ impl Database {
         self.lineage.ok_or(Error::ChangeFeedRequiresUpgrade)?;
         // Periodic durability: never publish commits a crash could lose.
         self.sync()?;
+        let _scan = self.lock_log_scan()?;
         let mut file = &self.file;
         // This handle's open reported any skipped compact blocks.
         changes::read_changes(&mut file, None, self.cipher.as_ref(), cursor, max_events)
@@ -2420,10 +2426,11 @@ impl Database {
 
     /// Cuts a log segment of commits after `after_sequence` for replication
     /// (see `ReplicaFollower`). `max_bytes` bounds the segment softly: whole
-    /// commits are included until it is reached.
+    /// commits are included until it is reached. Serialized with feed scans.
     pub fn export_log(&self, after_sequence: u64, max_bytes: usize) -> Result<LogSegment> {
         // Periodic durability: a replica must never get ahead of the primary.
         self.sync()?;
+        let _scan = self.lock_log_scan()?;
         let mut file = &self.file;
         logops::read_segment(
             &mut file,
@@ -2433,6 +2440,12 @@ impl Database {
             max_bytes,
         )
         .map(|(segment, _)| segment)
+    }
+
+    fn lock_log_scan(&self) -> Result<std::sync::MutexGuard<'_, ()>> {
+        self.log_scan
+            .lock()
+            .map_err(|error| io::Error::other(error.to_string()).into())
     }
 
     /// Replica apply step: appends whole, already-authenticated commits to this

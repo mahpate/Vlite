@@ -42,6 +42,71 @@ fn graph_events(changes: &[Change]) -> Vec<&ChangeKind> {
 }
 
 #[test]
+fn concurrent_feed_and_replication_scans_preserve_the_log_cursor() {
+    for kind in [Kind::Plain, Kind::Encrypted] {
+        for backing in ["file", "memory", "directory"] {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("feed");
+            let mut db = match backing {
+                "file" => Database::create_with_options(&path, 2, kind.options()),
+                "memory" => Database::create_in_memory(2, kind.options()),
+                "directory" => Database::create_directory(&path, 2, kind.options()),
+                _ => unreachable!(),
+            }
+            .unwrap();
+            db.create_graph("g").unwrap();
+            for id in 0..32 {
+                db.put(id, &[id as f32, 1.0], b"vector").unwrap();
+                db.graph_mut("g")
+                    .unwrap()
+                    .create_node(&format!("n{id}"), &[], &Metadata::new())
+                    .unwrap();
+            }
+            let start = FeedCursor::beginning();
+            let head = db.feed_cursor().unwrap();
+            let expected = db.changes_after(&start, 10_000).unwrap();
+            let empty = db.changes_after(&head, 10_000).unwrap();
+            let segment = db.export_log(0, usize::MAX).unwrap();
+            let barrier = std::sync::Barrier::new(8);
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..8)
+                    .map(|worker| {
+                        let (db, barrier, expected, empty, segment) =
+                            (&db, &barrier, &expected, &empty, &segment);
+                        scope.spawn(move || {
+                            barrier.wait();
+                            for _ in 0..16 {
+                                match worker % 3 {
+                                    0 => assert_eq!(
+                                        db.changes_after(&start, 10_000).unwrap(),
+                                        *expected,
+                                        "{kind:?} {backing}"
+                                    ),
+                                    1 => assert_eq!(
+                                        db.changes_after(&head, 10_000).unwrap(),
+                                        *empty,
+                                        "{kind:?} {backing}"
+                                    ),
+                                    _ => assert_eq!(
+                                        db.export_log(0, usize::MAX).unwrap(),
+                                        *segment,
+                                        "{kind:?} {backing}"
+                                    ),
+                                }
+                            }
+                        })
+                    })
+                    .collect();
+                for handle in handles {
+                    handle.join().unwrap();
+                }
+            });
+            db.close().unwrap();
+        }
+    }
+}
+
+#[test]
 fn graph_commits_are_reported_with_keys_ids_and_revisions() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("feed.vlite");
