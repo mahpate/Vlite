@@ -1,6 +1,7 @@
 # Temporal graph serving contract
 
 Status: proposed exact schema for Gap 4 slice E; review required before code.
+This document is conformed to the [serving wire conventions proposal](serving-wire-conventions.md), whose owner decisions remain open.
 Nothing in this document activates a file, changes a default, or ships an API.
 The owner's 2026-11-02 authorization requires exact schemas to be reviewed first
 ([next-major](next-major.md), lines 49-55); qualification remains separate.
@@ -10,7 +11,7 @@ Prerequisites: qualified Rust slice C and the applicable
 [temporal design](gap4-temporal-graph.md) defines engine semantics.
 All wire names below are proposed. **NEW** items do not exist in this checkout;
 [section 9](#9-owner-decisions-and-open-items) lists each owner decision they need.
-Cross-document wire vocabulary is deferred to the conform pass.
+Cross-document wire vocabulary follows that proposal, pending owner ratification.
 
 Non-goals: temporal nodes, transaction-time snapshots, bitemporality, inferred
 contradictions, historical vectors/evidence, TTL replication, new query grammar,
@@ -76,9 +77,9 @@ Reject floats, exponents, whitespace, `+`, leading zeros (except `0`), `-0`,
 out-of-range values and integers beyond ±9,007,199,254,740,991 (2^53-1), which a
 JavaScript parser may already have rounded: send those as strings; they fail as
 REST 422 `invalid_json`. Never parse a timestamp through floating point. Prose
-`Time`/`TimeInput` abbreviate `TemporalMillis` (output) and `TemporalMillisInput`;
-`ID`/`U64String` a decimal u64 string (input `TemporalU64Input`);
-`Bounds`/`Segment` the `Temporal*` schemas. TTL clock output is unsigned u64 ms.
+`Time`/`TimeInput` abbreviate `GraphTemporalMillis` (output) and `GraphTemporalMillisInput`;
+`ID`/`U64String` a decimal u64 string (input `GraphTemporalU64Input`);
+`Bounds`/`Segment` the `GraphTemporal*` schemas. TTL clock output is unsigned u64 ms.
 
 `Segment = {valid_from_ms: Time|null, valid_to_ms: Time|null, properties: Metadata}`.
 Input bounds may be absent or null: both mean unbounded on that side. Output
@@ -243,60 +244,68 @@ revision/sequence, or restart if either changes.
 
 ### Errors and resource rules
 
-Codes not marked **NEW** exist today (`src/server.rs:1380-1662`); the gRPC
-column is what today's mapper yields for the row's HTTP status
-(`src/server/grpc.rs:181-197`).
+Codes not marked **NEW** exist today (`src/server.rs:1380-1662`); proposed
+mapping additions follow [wire conventions section 2](serving-wire-conventions.md#2-error-registry-c2-c9).
 
 | Condition | REST / wire code | gRPC status |
 |---|---|---|
 | Missing authentication | 401 `unauthorized` | UNAUTHENTICATED |
 | Wrong grant/tenant | 403 `forbidden_scope`; write through read-only principal: 403 `read_only` | PERMISSION_DENIED |
-| Temporal unavailable, file not opted in, or feed not opted in | **NEW** 409 `unsupported_feature`, `feature:64`; today REST returns 500 `internal_error` (no `UnsupportedFeature` arm, `src/server.rs:1624`) | FAILED_PRECONDITION |
+| Temporal unavailable, file not opted in, or feed not opted in | **NEW** scoped 409 `unsupported_feature`, `details:{feature:64,category:"capability"}`; legacy routes keep 500 `internal_error` | FAILED_PRECONDITION |
 | Missing graph/entity for a mutation | 409 `graph_not_found`, `graph_edge_not_found`, `graph_node_not_found` | FAILED_PRECONDITION |
 | Expected revision mismatch | 412 `precondition_failed` (`src/server.rs:1523-1527`) | ABORTED (`src/server/grpc.rs:181-189`) |
 | Keyed create conflicts with another live edge | 409 `graph_key_conflict` | FAILED_PRECONDITION |
-| Malformed JSON; wrong type, unknown field or non-canonical/unsafe time | 400 (syntax) / 422 (shape) `invalid_json` (`src/server/graph.rs:344-365`) | INVALID_ARGUMENT |
-| Invalid temporal operation or read; more than 4,096 operations | 422 `invalid_input`, `category` below for temporal reasons | INVALID_ARGUMENT |
+| Malformed or oversize JSON; wrong type, unknown field or non-canonical/unsafe time | 400 (syntax) / 413 (oversize) / 422 (shape) `invalid_json` (`src/server/graph.rs:344-365`) | INVALID_ARGUMENT for adapter validation; transport rejection per wire conventions section 2.2 |
+| Invalid temporal operation or read; more than 4,096 operations | 422 `invalid_input`, `details.category` below for temporal reasons | INVALID_ARGUMENT |
 | Above graph ceiling | 422 `graph_limit_exceeds_ceiling` | INVALID_ARGUMENT |
 | Admission saturation | 503 `busy` | UNAVAILABLE |
 | Poisoned database / indeterminate commit | 503 `poisoned` / 503 `commit_indeterminate` | INTERNAL / UNKNOWN |
 | Stale read / wrong-lineage feed / below history floor | 409 `graph_cursor_stale` / `cursor_compacted` / `cursor_before_history` | FAILED_PRECONDITION |
-| **NEW** wire request too large | 413 `request_too_large` (today 413 `invalid_json`, `src/server/graph.rs:350`) | INVALID_ARGUMENT |
-| **NEW** whole response/commit cannot fit wire cap | 413 `response_too_large`; no cursor advance | INVALID_ARGUMENT |
-| **NEW** transport deadline | 504 `graph_timeout` | INTERNAL |
-| **NEW** explicit caller cancellation | no response after disconnect; otherwise 408 `graph_cancelled` | INVALID_ARGUMENT |
+| **NEW** feed cursor bound to another feature set | 409 `cursor_mode_mismatch` | FAILED_PRECONDITION |
+| **NEW** whole response/commit cannot fit wire cap | 413 `response_too_large`; no cursor advance | RESOURCE_EXHAUSTED |
+| **NEW** engine or adapter deadline before commit, no partial allowed | 504 `deadline_exceeded` | DEADLINE_EXCEEDED |
 
-The four **NEW** wire codes are provisional (D9): their names, statuses and
-whether they are needed at all (versus 503 `busy`/`unavailable`) are deferred to
-the conform pass. **NEW** `ApiError` members (D8): the `feature` and `category`
-body fields and the `vlite-feature` trailer; today's `ApiError` has only status,
-code, message and details (`src/server.rs:1380-1423`); `vlite-error-code` and
-`vlite-error-details-base64` exist (`src/server/grpc.rs:29,199-215`). No new
-public `Error` variant: `Error::UnsupportedFeature` already carries the flag.
-Temporal `category` is the reason prefix before `:` of the engine InvalidQuery
+Proposed D8/D9 replacements follow [wire conventions decisions 4, 7 and 21](serving-wire-conventions.md#6-owner-decisions-23)
+and [section 2.2](serving-wire-conventions.md#22-one-reachable-family-oversize-deadline-cancel-busy).
+**Withdrawn:** separate request-size, transport-deadline and cancellation codes,
+and per-draft error-body members/trailer; the shared registry and context proposal replace them.
+For each new code, the temporal handler/adapter builds an `ApiError`:
+`unsupported_feature` from the existing `Error::UnsupportedFeature` or explicit
+temporal/feed negotiation refusal; `cursor_mode_mismatch` from the feed feature-set
+check; `response_too_large` from response preflight; `deadline_exceeded` from the
+engine stop reason before commit. No new public `Error` variant or global
+`UnsupportedFeature` conversion arm is proposed. Legacy routes retain their
+existing mapping (`src/server.rs:1624`).
+Error context uses only `details`, per [wire conventions section 3](serving-wire-conventions.md#3-encoding-rules-c12);
+the REST `error.details` object remains proposed under decision 21, while gRPC
+uses the existing details trailer. Temporal `details.category` is the reason prefix before `:` of the engine InvalidQuery
 message: `bounds,order,overlap,segment_limit,no_segment,close,not_temporal,
 temporal_edge,series_bytes,expected,already_temporal,capability`
-(`src/property_graph/engine/temporal.rs:37-56`; `capability` is engine-internal,
-a served file reports `unsupported_feature`). Two timeline errors carry no prefix
+(`src/property_graph/engine/temporal.rs:37-56`; `capability` is never an
+`invalid_input` category:
+a served file reports `unsupported_feature` with `details.category`
+`capability`). Two timeline errors carry no prefix
 (`src/property_graph/temporal/read.rs:273,291`) and map by exact message:
 `timeline requires a temporal edge` to `not_temporal`,
 `timeline bounds must satisfy start <= end <= 256` to `bounds`. Any other 422
-`invalid_input` has no `category`; schema/key failures keep existing codes.
+`invalid_input` has no `details.category`; schema/key failures keep existing codes.
 `invalid_request` exists only in CLI/MCP/proxy (`src/bin/vlite-graph-cli.rs:101`,
 `src/bin/tool_support/graph_mcp.rs:61`, `src/bin/tool_support/graph_proxy.rs:190`)
 for failures REST reports as `invalid_json`. No broad `internal_error` fallback
-for validation or unsupported features.
+for validation or the scoped temporal unsupported-feature failures.
 
 **NEW** refusal JSON (D8; engine text today is
 `database header declares unsupported feature flags 0x0040`, `src/lib.rs:634-637`):
-`{"error":{"code":"unsupported_feature","message":"temporal capability 64 is unavailable for this operation","feature":64}}`.
-gRPC Status message is that message, code FAILED_PRECONDITION; ASCII trailers
-`vlite-error-code: unsupported_feature` and **NEW** `vlite-feature: 64`.
+`{"error":{"code":"unsupported_feature","message":"temporal capability 64 is unavailable for this operation","details":{"feature":64,"category":"capability"}}}`.
+gRPC Status message is that message, code FAILED_PRECONDITION; existing trailers
+`vlite-error-code: unsupported_feature` and `vlite-error-details-base64` carry
+the code and the base64-encoded JSON details respectively, per wire conventions section 3.
 MCP tool failure has `isError:true`, text
 `unsupported_feature: temporal capability 64 is unavailable for this operation`,
-and **NEW** `structuredContent` equal to the JSON error object (today
-`{"error":"<text>"}`, `src/bin/vlite-mcp.rs:679`). CLI prints the same JSON to
-stderr and exits 1 with empty stdout (today's shape lacks `feature`,
+and `structuredContent:{"error":"unsupported_feature: temporal capability 64 is unavailable for this operation"}`
+per [wire conventions section 2.3](serving-wire-conventions.md#23-partial-versus-error).
+CLI prints the refusal JSON to
+stderr and exits 1 with empty stdout (today's shape lacks `details`,
 `src/bin/vlite-graph-cli.rs:337-353`). A failed local open prints this
 diagnostic before accepting commands/tools; it is not a successful MCP response.
 Bindings keep their language error result, code `unsupported_feature`, feature 64
@@ -313,16 +322,20 @@ deadline, configured lower ceiling), including queueing/serialization;
 propagate disconnect/cancellation to engine checks (**NEW** for REST, which
 passes `cancel: None`: `src/server/graph.rs:458,497,609`).
 A graph-budget deadline may return a certified incomplete envelope
-while transport time remains; a fired transport deadline returns only its error.
+while transport time remains; transport expiry and cancellation follow
+[wire conventions section 2.2](serving-wire-conventions.md#22-one-reachable-family-oversize-deadline-cancel-busy), not a new domain wire code.
 No successful partial serialization, dropped segments or truncated commits.
 
 Wire caps today: REST graph reads 1 MiB (`src/server/graph.rs:79-80,184`), other
 REST bodies 8 MiB (`src/server.rs:60,742`), gRPC decode 8 MiB and encode 16 MiB
 (`src/server/grpc.rs:23,25,98-99`); responses are uncapped elsewhere, and the
-legacy CLI accepts 64 MiB of input (`src/bin/vlite-graph-cli.rs:72`). **NEW**
-(D10): temporal requests and files get 1 MiB read, 8 MiB batch and 16 MiB
+legacy CLI accepts 64 MiB of input (`src/bin/vlite-graph-cli.rs:72`).
+**NEW** (D10): temporal requests and files get 1 MiB read, 8 MiB batch and 16 MiB
 response caps, including envelopes, across REST/gRPC/MCP/CLI/client methods;
-non-temporal behaviour is unchanged. Reject oversize before mutation;
+non-temporal behaviour is unchanged. Proposed [wire conventions decision 3](serving-wire-conventions.md#6-owner-decisions-23)
+would keep REST without a response cap and make `response_too_large` gRPC-only;
+see [sections 1.5 and 2.2](serving-wire-conventions.md#15-size-and-count-caps-c14).
+Reject oversize before mutation;
 preflight the bounded batch response before committing. Timeline cannot
 silently omit oversized properties: caller requests a smaller index range.
 
@@ -420,7 +433,7 @@ types, no engine fallback:
 | Traverse | `traverse(request, *, as_of_ms=None)` | `traverse(request, {signal}?)` | `TraverseAsync(request, cancellationToken)` |
 | Shortest path | `shortest_path(request, *, as_of_ms=None)` | `shortestPath(request, {signal}?)` | `ShortestPathAsync(request, cancellationToken)` |
 | Timeline | `edge_timeline(edge, *, start_index=0, end_index=256)` | `edgeTimeline({edge,startIndex?,endIndex?}, {signal}?)` | `EdgeTimelineAsync(request, cancellationToken)` |
-| Opt-in feed | `changes(cursor=None, limit=1000, temporal=True)` | `changes({cursor?,limit?,temporal:true,signal?})` | `ChangesAsync(cursor,limit,temporal:true,cancellationToken)` |
+| Opt-in feed | `changes(cursor=None, limit=1000, graph_events=["temporal"])` | `changes({cursor?,limit?,graphEvents:["temporal"],signal?})` | `ChangesWithGraphEventsAsync(cursor,limit,graphEvents:["temporal"],cancellationToken)` |
 
 Other read methods in section 3 also forward the optional selector.
 Python timestamps are range-checked `int` (bool rejected), bounds `None`;
@@ -431,32 +444,36 @@ for validity and nullable segment bounds, `ulong` for IDs/TTL clocks and
 `CancellationToken`. Clients decode to those lossless types; no Date/datetime
 conversion or retry after unknown write outcome. Typed operation constructors
 mirror all six discriminants, including required old bounds/revision.
-Expose structured `feature` and `category` in typed errors, plus transport code.
+Expose `details.feature` and `details.category` in typed errors, plus transport code.
 Older-server errors remain explicit. Embedded C/Python/Node/WASM temporal
 exposure is a separate qualification: until then refuse the file at open;
 do not make HTTP client work silently depend on binding support.
 
 ## 6. Versioned correction feed
 
-Use existing REST `GET /v1/changes?temporal=true&cursor=TOKEN&limit=1000`;
-`temporal` is an optional strict boolean default false. gRPC `Changes` and
-`WatchChanges` gain `optional bool temporal=100`, absent/false = legacy.
-Old servers: REST `ChangeQuery` is `deny_unknown_fields`, so `temporal` is 400
+Proposed D2 negotiation follows [wire conventions section 4 and decision 8](serving-wire-conventions.md#4-graph-events-in-the-change-feed-c11).
+Use existing REST `GET /v1/changes?graph_events=temporal&cursor=TOKEN&limit=1000`;
+the temporal slice consumes the shared `graph_events` set and response echo,
+not a separate temporal boolean or version discriminator.
+Old servers: REST `ChangeQuery` is `deny_unknown_fields`, so `graph_events` is 400
 `invalid_query` (`src/server/features.rs:90-103`); gRPC (proto3) skips unknown
-field 100. A client that asked for temporal must fail `unsupported_feature`
-when the response lacks `feed_version:"temporal_v1"` (D2).
+request fields. A client that asked for temporal must fail the scoped
+`unsupported_feature` negotiation check when the response echo does not contain
+`temporal` (D2; producer in section 3).
 **NEW** (D13): MCP read-only `vlite_temporal_changes`, schema
 `{cursor:string?,limit:integer[1,10000]=1000}` with no graph field; authorization
 filters every event's tenant graph and collection. **NEW** CLI `temporal-changes`
 with that same request, no `--writable`/`--explain`; output is the REST batch.
 Limit default 1000, maximum 10,000 are the current feed constants
 (`src/changes.rs:22-23`; REST answers 422 outside that range,
-`src/server/features.rs:108-110`). Whole commit may exceed event limit; never
-divide a commit to manufacture a resumable cursor.
+`src/server/features.rs:108-110`). A whole temporal commit may exceed the event
+limit; never divide a temporal commit to manufacture a resumable cursor.
+TTL reclaim pagination remains governed by wire conventions section 4.
 
 Opted-in REST/MCP batch:
 `{changes:[Event],next_cursor:string,has_more:bool,head:U64String,
-feed_version:"temporal_v1"}` (**NEW** `feed_version`, D2). Existing event shape remains
+graph_events:["temporal"]}` (**NEW** feature-set echo, D2; echoes the requested set).
+Existing event shape remains
 `{sequence:U64String,ordinal:uint,collection:string,committed_at_ms:uint|null,
 change:{type:"graph_batch",graph:string,revision:U64String,operations:[Change]}}`;
 graph operations stay in original frame order. Existing JSON envelope evidence:
@@ -482,10 +499,11 @@ Commit order is sequence then ordinal, not validity order; append/backfill may
 mention earlier validity time. No-op close emits nothing. No event at from/to.
 
 **NEW** (D11) webhook subscription create/status field
-`feed_version:"legacy"|"temporal_v1"` default `"legacy"`; the admin-only
+`graph_events` is an immutable per-subscription feature set, default `[]`,
+per [wire conventions section 4](serving-wire-conventions.md#4-graph-events-in-the-change-feed-c11); the admin-only
 `/v1/admin/webhooks` routes are retained (`src/server/webhooks.rs:150-163`).
 Delivery for opted-in subscriptions is
-`{subscription_id:string,feed_version:"temporal_v1",changes:[Event]}` using
+`{subscription_id:string,graph_events:["temporal"],changes:[Event]}` using
 the exact REST event/correction shapes, signed over the complete bytes as today
 (`src/server/webhooks.rs:473-490`). The dedup key stays
 `(sequence,ordinal,collection)` per subscription (`docs/WEBHOOKS.md:39-40`); the
@@ -493,11 +511,11 @@ payload carries no lineage, so a lineage-bearing key needs a new envelope field
 (D11).
 Legacy subscriptions on a temporal file enter explicit blocked status
 `last_error:"unsupported_feature:64"` (`src/server/webhooks.rs:26-31`), deliver
-nothing and do not advance their cursor. Versioned subscriptions progress
-independently, replacing today's single shared cursor
-(`src/server/webhooks.rs:42,405-436`; `docs/WEBHOOKS.md:45,52`) with persisted
-per-subscription progress, without resetting existing positions. Persisted
-state is `deny_unknown_fields` and a failed parse fails `Dispatcher::configure`
+nothing and do not advance their cursor. The dispatcher consumes the shared
+feed cursor and persists progress per feature set, per wire conventions section 4;
+the empty-set `webhooks.cursor` path and format remain unchanged
+(`src/server/webhooks.rs:42,405-436`; `docs/WEBHOOKS.md:45,52`).
+Persisted state is `deny_unknown_fields` and a failed parse fails `Dispatcher::configure`
 (`src/server/webhooks.rs:14,26,33,70-73`), so new fields need `#[serde(default)]`
 and a downgrade after migration fails (D11). Never silently upgrade a
 subscription; an operator must opt it in.
@@ -507,11 +525,16 @@ on flag-64 files refuse **before any event**, including when empty or filtered.
 This **strengthens** today's refusal, which fires only on meeting a temporal
 entry (`src/property_graph/feed.rs:278-286`; D2).
 Do not send unknown temporal enum values to legacy consumers or omit correction
-operations from their commits. Non-temporal files retain legacy response shapes.
+operations from their commits. Empty-set requests on non-temporal files retain
+legacy response shapes; opted-in responses echo the requested feature set.
 
-Keep the existing opaque checksummed `(lineage,sequence)` cursor and durable
-commit semantics (`src/changes.rs:1-9,25-75`). No validity timestamp, segment
-index or ordinal cursor. Advance across fully processed/unauthorized commits,
+Use the shared `FeedCursor` owned by `src/changes.rs` under
+[wire conventions section 4](serving-wire-conventions.md#4-graph-events-in-the-change-feed-c11):
+the TTL slice lands `vlc2` and temporal consumes it; `vlc1` remains the empty-set
+token. Non-empty-set cursors bind lineage, sequence, ordinal and the feature set;
+a different set yields `cursor_mode_mismatch`. Temporal commits stay whole under
+the proposed decision 9; there is no validity-time or segment-index cursor.
+Advance across fully processed/unauthorized commits,
 never past a failed or partially delivered one; a response cap that cannot fit
 the next whole commit errors without advancement. Checkpoint snapshots restate
 state, not correction history: below floor is `cursor_before_history`, never
@@ -520,9 +543,10 @@ preserve cursor lineage; new-lineage compaction/upgrade/restore and temporal
 activation invalidate old cursors with `cursor_compacted` (explicit reseed, not
 automatic reset) and revision expectations must be reacquired. Consumers
 bootstrap from a separately authorized consistent snapshot and its cursor; this
-slice adds no snapshot endpoint. Feeds still omit TTL deadlines and reclaims
-(`src/property_graph/feed.rs:270-277`), so they are not replication or
-historical-retention reconstruction.
+slice adds no snapshot endpoint. This slice adds no TTL deadline/reclaim
+semantics; that vocabulary belongs to the preceding TTL slice and the requested
+feature set under wire conventions section 4, not temporal opt-in alone.
+Temporal correction output is not replication or historical-retention reconstruction.
 
 ## 7. Exact OpenAPI and proto proposal
 
@@ -534,14 +558,14 @@ approves **this** document. Existing graph paths merge from
 
 This is an insertion manifest, not replacement of existing path objects:
 preserve their security, parameters, responses and operationIds. Apply
-`TemporalReadSelector`'s property directly inside each existing closed request
+`GraphTemporalReadSelector`'s property directly inside each existing closed request
 object (not `allOf` outside `additionalProperties:false`) and extend responses
 with resolved selectors and edge validity. The JSON types and conditional
 required fields of sections 3 and 6 are normative.
 
 Every non-200 response below carries
 `content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}`
-(elided); responses marked NEW follow the provisional D9 vocabulary.
+(elided); responses marked NEW follow the proposed shared registry cited in section 3.
 
 ```yaml
 paths:
@@ -555,99 +579,98 @@ paths:
         required: true
         content:
           application/json:
-            schema: {$ref: '#/components/schemas/TemporalTimelineRequest'}
+            schema: {$ref: '#/components/schemas/GraphTemporalTimelineRequest'}
       responses:
         '200':
           description: Retained TTL-visible timeline range, or null
           content:
             application/json:
-              schema: {$ref: '#/components/schemas/TemporalTimelineResponse'}
+              schema: {$ref: '#/components/schemas/GraphTemporalTimelineResponse'}
         '400': {description: invalid_json}
         '401': {description: unauthorized}
         '403': {description: forbidden_scope}
-        '408': {description: NEW graph_cancelled (D9)}
         '409': {description: NEW unsupported_feature (D8); graph_not_found}
-        '413': {description: NEW request_too_large, response_too_large (D9)}
+        '413': {description: invalid_json (oversize request); NEW response_too_large (D10)}
         '422': {description: invalid_json (shape), invalid_input}
         '503': {description: busy, poisoned}
-        '504': {description: NEW graph_timeout (D9)}
+        '504': {description: NEW deadline_exceeded (D9)}
 components:
   schemas:
-    TemporalMillis:
+    GraphTemporalMillis:
       type: string
       pattern: '^(0|-[1-9][0-9]*|[1-9][0-9]*)$'
       description: Signed i64 epoch milliseconds; enforce -9223372036854775808..9223372036854775807
-    TemporalMillisInput:
+    GraphTemporalMillisInput:
       oneOf:
-        - {$ref: '#/components/schemas/TemporalMillis'}
+        - {$ref: '#/components/schemas/GraphTemporalMillis'}
         - {type: integer, minimum: -9007199254740991, maximum: 9007199254740991, description: Larger magnitudes must be sent as strings}
-    TemporalBoundsInput:
+    GraphTemporalBoundsInput:
       type: object
       additionalProperties: false
       properties:
-        valid_from_ms: {anyOf: [{$ref: '#/components/schemas/TemporalMillisInput'}, {type: 'null'}]}
-        valid_to_ms: {anyOf: [{$ref: '#/components/schemas/TemporalMillisInput'}, {type: 'null'}]}
-    TemporalBounds:
+        valid_from_ms: {anyOf: [{$ref: '#/components/schemas/GraphTemporalMillisInput'}, {type: 'null'}]}
+        valid_to_ms: {anyOf: [{$ref: '#/components/schemas/GraphTemporalMillisInput'}, {type: 'null'}]}
+    GraphTemporalBounds:
       type: object
       additionalProperties: false
       required: [valid_from_ms, valid_to_ms]
       properties:
-        valid_from_ms: {anyOf: [{$ref: '#/components/schemas/TemporalMillis'}, {type: 'null'}]}
-        valid_to_ms: {anyOf: [{$ref: '#/components/schemas/TemporalMillis'}, {type: 'null'}]}
-    TemporalSegmentInput:
+        valid_from_ms: {anyOf: [{$ref: '#/components/schemas/GraphTemporalMillis'}, {type: 'null'}]}
+        valid_to_ms: {anyOf: [{$ref: '#/components/schemas/GraphTemporalMillis'}, {type: 'null'}]}
+    GraphTemporalSegmentInput:
       type: object
       additionalProperties: false
       properties:
-        valid_from_ms: {anyOf: [{$ref: '#/components/schemas/TemporalMillisInput'}, {type: 'null'}]}
-        valid_to_ms: {anyOf: [{$ref: '#/components/schemas/TemporalMillisInput'}, {type: 'null'}]}
+        valid_from_ms: {anyOf: [{$ref: '#/components/schemas/GraphTemporalMillisInput'}, {type: 'null'}]}
+        valid_to_ms: {anyOf: [{$ref: '#/components/schemas/GraphTemporalMillisInput'}, {type: 'null'}]}
         properties: {type: object, maxProperties: 64, additionalProperties: {$ref: '#/components/schemas/MetadataValue'}, default: {}}
-    TemporalSegment:
+    GraphTemporalSegment:
       type: object
       additionalProperties: false
       required: [valid_from_ms, valid_to_ms, properties]
       properties:
-        valid_from_ms: {anyOf: [{$ref: '#/components/schemas/TemporalMillis'}, {type: 'null'}]}
-        valid_to_ms: {anyOf: [{$ref: '#/components/schemas/TemporalMillis'}, {type: 'null'}]}
+        valid_from_ms: {anyOf: [{$ref: '#/components/schemas/GraphTemporalMillis'}, {type: 'null'}]}
+        valid_to_ms: {anyOf: [{$ref: '#/components/schemas/GraphTemporalMillis'}, {type: 'null'}]}
         properties: {type: object, maxProperties: 64, additionalProperties: {$ref: '#/components/schemas/MetadataValue'}}
-    TemporalReadSelector:
+    GraphTemporalReadSelector:
       type: object
       properties:
-        as_of_ms: {$ref: '#/components/schemas/TemporalMillisInput'}
-    TemporalTimelineRequest:
+        as_of_ms: {$ref: '#/components/schemas/GraphTemporalMillisInput'}
+    GraphTemporalTimelineRequest:
       type: object
       additionalProperties: false
       required: [edge]
       properties:
-        edge: {$ref: '#/components/schemas/TemporalEntitySelector'}
+        edge: {$ref: '#/components/schemas/GraphTemporalEntitySelector'}
         start_index: {type: integer, minimum: 0, maximum: 256, default: 0}
         end_index: {type: integer, minimum: 0, maximum: 256, default: 256}
-    TemporalEntitySelector:
+    GraphTemporalEntitySelector:
       oneOf:
-        - {type: object, additionalProperties: false, required: [id], properties: {id: {$ref: '#/components/schemas/TemporalU64Input'}}}
+        - {type: object, additionalProperties: false, required: [id], properties: {id: {$ref: '#/components/schemas/GraphTemporalU64Input'}}}
         - {type: object, additionalProperties: false, required: [key], properties: {key: {type: string, minLength: 1, maxLength: 256}}}
-    TemporalU64Input:
+    GraphTemporalU64Input:
       oneOf:
         - {type: string, pattern: '^(0|[1-9][0-9]*)$', description: Enforce u64 range}
         - {type: integer, minimum: 0, maximum: 18446744073709551615}
-    TemporalExpectedRevision:
+    GraphTemporalExpectedRevision:
       type: object
       additionalProperties: false
       required: [revision]
       properties:
-        revision: {$ref: '#/components/schemas/TemporalU64Input'}
+        revision: {$ref: '#/components/schemas/GraphTemporalU64Input'}
 ```
 
 Remaining insertions, as construction rules (existing graph schemas are not copied):
 
 | Target | Exact edit |
 |---|---|
-| Existing read POST operationIds `GraphGetNode,GraphGetEdge,GraphFindNodes,GraphNeighbors,GraphTraverse,GraphShortestPath,GraphExplain,GraphRetrieve,GraphQueryText` | Add request `as_of_ms` above (existing inline `limits` objects unchanged), temporal errors, and response `as_of_ms:TemporalMillis` and `ttl_clock_ms:decimal u64 string`, both required when the file is temporal. Add required `validity:TemporalBounds|null` to edge objects in temporal responses. Non-temporal responses unchanged. |
-| `GraphBatch` | Append six mutually exclusive `TemporalWriteOperation` alternatives to `ops.items`; each is a closed object whose `op` enum is exactly one row's discriminant and whose properties/required/defaults are exactly the write table. No existing variant changes. |
-| `TemporalWriteOperation` components | `oneOf` six named schemas `TemporalCreateEdge,TemporalPromoteEdge,TemporalAppendSegment,TemporalReplaceSegment,TemporalCloseSegment,TemporalRemoveSegment`, reusing the input schemas above. Source/destination: key strings (1-256 UTF-8 bytes); relationship 1-63 ASCII identifier bytes; key nullable, default null; segments maxItems 256. |
-| `TemporalTimelineResponse` | Closed object with every shared read field required (`cursor` null; sequence/TTL decimal u64 strings; canonical `as_of_ms`; `complete`, `truncation`, `stats` as existing reads) plus required nullable `timeline`: a closed object with the six section 3 fields required, segments maxItems 256, response segment bounds required. |
-| Error schema | Add optional `feature:integer uint16` and `category:string` inside `error` (NEW, D8; the root `Error` is not closed, `src/openapi.json:198`); no existing required field changes. Temporal unsupported response fixes feature to 64 and message/code as section 3. |
-| `/v1/changes` GET, existing operationId preserved | Add `temporal` query boolean default false; optional response `feed_version` enum `[temporal_v1]`; append five temporal operation alternatives only to the opted-in schema (D2). |
-| `/v1/admin/webhooks` POST/GET, `/v1/admin/webhooks/{id}` GET | Add subscription `feed_version` enum `[legacy,temporal_v1]` default legacy; document exact versioned delivery envelope from section 6; existing operationIds/auth unchanged (D11). |
+| Existing read POST operationIds `GraphGetNode,GraphGetEdge,GraphFindNodes,GraphNeighbors,GraphTraverse,GraphShortestPath,GraphExplain,GraphRetrieve,GraphQueryText` | Add request `as_of_ms` above (existing inline `limits` objects unchanged), temporal errors, and response `as_of_ms:GraphTemporalMillis` and `ttl_clock_ms:decimal u64 string`, both required when the file is temporal. Add required `validity:GraphTemporalBounds|null` to edge objects in temporal responses. Non-temporal responses unchanged. |
+| `GraphBatch` | **Withdrawn:** closed `oneOf` alternatives on `ops.items` would restructure the shared schema. Proposed [wire conventions section 5.2, decision 23](serving-wire-conventions.md#52-per-file-owner-and-sequence): retain the single open `ops.items` object and `maxItems:4096`; add the six write-table literals to its `op` enum and one temporal `allOf` `if`/`then` branch that `$ref`s `GraphTemporalWriteOperation`. No existing variant changes. |
+| `GraphTemporalWriteOperation` component | One object using the input schemas above; `op` enum contains all six write-table discriminants. Six internal `allOf` `if`/`then` branches on the `op` const `$ref` the named schemas `GraphTemporalCreateEdge,GraphTemporalPromoteEdge,GraphTemporalAppendSegment,GraphTemporalReplaceSegment,GraphTemporalCloseSegment,GraphTemporalRemoveSegment`; each is a closed object with the exact properties/required/defaults of its write row, not a `oneOf` union. Source/destination: key strings (1-256 UTF-8 bytes); relationship 1-63 ASCII identifier bytes; key nullable, default null; segments maxItems 256. |
+| `GraphTemporalTimelineResponse` | Closed object with every shared read field required (`cursor` null; sequence/TTL decimal u64 strings; canonical `as_of_ms`; `complete`, `truncation`, `stats` as existing reads) plus required nullable `timeline`: a closed object with the six section 3 fields required, segments maxItems 256, response segment bounds required. |
+| Error schema | Proposed D8 context follows [wire conventions section 3, decision 21](serving-wire-conventions.md#3-encoding-rules-c12): only optional `error.details`, with `feature` and `category` inside it; no per-draft body members. Scoped temporal unsupported response fixes `details.feature` to 64 and `details.category` to `capability`, with message/code as section 3. |
+| `/v1/changes` GET, existing operationId preserved | Consume the shared `graph_events` query set and response echo under wire conventions section 4; append five temporal operation alternatives only to the temporal-opted-in schema (D2). |
+| `/v1/admin/webhooks` POST/GET, `/v1/admin/webhooks/{id}` GET | Add immutable subscription `graph_events` feature set, default `[]`; use the opted-in delivery envelope and per-set progress from section 6; existing operationIds/auth unchanged (D11). |
 
 `BearerAuth`, `MetadataValue` and `Error` are existing root definitions
 (`src/openapi.json:123,195,198`); add no second metadata/error type. Use OpenAPI
@@ -658,35 +681,36 @@ checks; goldens must test them.
 
 Proto additions below are exact proposed declarations. Reuse existing
 `MetadataValue`/`Expected` (`proto/vlite/v1/vlite.proto:100-123`).
-Messages are additive. Reserve 20-99 in each new message; use 1-19 as declared
-and leave 100+ unallocated. Never reserve or reuse an occupied field.
+Messages are additive; domain-message reserves and shared-message extensions
+follow [wire conventions sections 1.3 and 1.4](serving-wire-conventions.md#13-field-number-allocation-c1).
+Never reserve or reuse an occupied field.
 Existing `GraphChangeOperation` fields 1-18 and enum values 0-9 stay untouched.
 
 ```proto
-message TemporalBounds {
+message GraphTemporalBounds {
   optional int64 valid_from_ms = 1;
   optional int64 valid_to_ms = 2;
-  reserved 20 to 99;
+  reserved 100 to 199;
 }
-message TemporalSegment {
-  TemporalBounds bounds = 1;
+message GraphTemporalSegment {
+  GraphTemporalBounds bounds = 1;
   map<string, MetadataValue> properties = 2;
-  reserved 20 to 99;
+  reserved 100 to 199;
 }
-message TemporalSelector {
+message GraphTemporalSelector {
   optional int64 as_of_ms = 1;
-  reserved 20 to 99;
+  reserved 100 to 199;
 }
-message TemporalContext {
+message GraphTemporalContext {
   int64 as_of_ms = 1;
   uint64 ttl_clock_ms = 2;
-  reserved 20 to 99;
+  reserved 100 to 199;
 }
-message TemporalEntitySelector {
+message GraphTemporalEntitySelector {
   oneof kind { uint64 id = 1; string key = 2; }
-  reserved 20 to 99;
+  reserved 100 to 199;
 }
-enum TemporalWriteKind {
+enum GraphTemporalWriteKind {
   TEMPORAL_WRITE_UNSPECIFIED = 0;
   TEMPORAL_WRITE_CREATE_EDGE = 1;
   TEMPORAL_WRITE_PROMOTE_EDGE = 2;
@@ -696,43 +720,43 @@ enum TemporalWriteKind {
   TEMPORAL_WRITE_REMOVE_SEGMENT = 6;
   reserved 7 to 19;
 }
-message TemporalWriteOperation {
-  TemporalWriteKind kind = 1;
-  TemporalEntitySelector edge = 2;
+message GraphTemporalWriteOperation {
+  GraphTemporalWriteKind kind = 1;
+  GraphTemporalEntitySelector edge = 2;
   Expected expected = 3;
   optional string key = 4;
   string source = 5;
   string destination = 6;
   string relationship = 7;
-  repeated TemporalSegment segments = 8;
-  TemporalBounds old_bounds = 9;
-  TemporalSegment segment = 10;
+  repeated GraphTemporalSegment segments = 8;
+  GraphTemporalBounds old_bounds = 9;
+  GraphTemporalSegment segment = 10;
   optional int64 at_ms = 11;
-  reserved 20 to 99;
+  reserved 100 to 199;
 }
-message TemporalTimelineRequest {
+message GraphTemporalTimelineRequest {
   string graph = 1;
-  TemporalEntitySelector edge = 2;
+  GraphTemporalEntitySelector edge = 2;
   optional uint32 start_index = 3;
   optional uint32 end_index = 4;
-  reserved 20 to 99;
+  reserved 100 to 199;
 }
-message TemporalTimeline {
+message GraphTemporalTimeline {
   uint64 edge_id = 1;
   uint64 revision = 2;
   uint32 start_index = 3;
   uint32 end_index = 4;
   uint32 total_segments = 5;
-  repeated TemporalSegment segments = 6;
-  reserved 20 to 99;
+  repeated GraphTemporalSegment segments = 6;
+  reserved 100 to 199;
 }
-message TemporalTimelineResponse {
+message GraphTemporalTimelineResponse {
   string graph = 1;
   GraphReadMeta meta = 2;
-  TemporalTimeline timeline = 3;
-  reserved 20 to 99;
+  GraphTemporalTimeline timeline = 3;
+  reserved 100 to 199;
 }
-enum TemporalChangeKind {
+enum GraphTemporalChangeKind {
   TEMPORAL_CHANGE_UNSPECIFIED = 0;
   TEMPORAL_CHANGE_EDGE_PUT = 1;
   TEMPORAL_CHANGE_SEGMENT_APPENDED = 2;
@@ -741,8 +765,8 @@ enum TemporalChangeKind {
   TEMPORAL_CHANGE_SEGMENT_REMOVED = 5;
   reserved 6 to 19;
 }
-message TemporalChangeOperation {
-  TemporalChangeKind kind = 1;
+message GraphTemporalChangeOperation {
+  GraphTemporalChangeKind kind = 1;
   uint64 id = 2;
   optional string key = 3;
   optional uint64 source = 4;
@@ -750,61 +774,66 @@ message TemporalChangeOperation {
   string relationship = 6;
   optional uint64 destination = 7;
   string destination_key = 8;
-  repeated TemporalSegment segments = 9;
+  repeated GraphTemporalSegment segments = 9;
   optional bool created = 10;
-  TemporalBounds old_bounds = 11;
-  TemporalSegment segment = 12;
+  GraphTemporalBounds old_bounds = 11;
+  GraphTemporalSegment segment = 12;
   optional int64 at_ms = 13;
-  reserved 20 to 99;
+  reserved 100 to 199;
 }
 ```
 
 Exact integration into the proposed Gap 12 service/messages and existing feeds:
 
 ```proto
-// Append inside service vlite.v1.Graph; retain all 17 Gap 12 methods.
-rpc EdgeTimeline(TemporalTimelineRequest) returns (TemporalTimelineResponse);
+// Append inside service vlite.v1.Graph; retain all methods already landed.
+rpc EdgeTimeline(GraphTemporalTimelineRequest) returns (GraphTemporalTimelineResponse);
 // Append to each Gap 12 request named in the read operation table:
 // GetNodeRequest, GetEdgeRequest, FindNodesRequest, NeighborsRequest,
 // TraverseRequest, ShortestPathRequest, ExplainRequest, RetrieveRequest,
 // QueryTextRequest:
-TemporalSelector temporal = 100;
+GraphTemporalSelector temporal = 200;
 // Append once to shared GraphReadMeta (covers those read responses):
-TemporalContext temporal = 100;
+GraphTemporalContext temporal = 200;
 // Append to shared Gap 12 GraphEdge; absent = legacy, present empty = all-time:
-TemporalBounds validity = 100;
+GraphTemporalBounds validity = 200;
 // Append as a new member of GraphWriteOperation's operation oneof:
-TemporalWriteOperation temporal = 100;
+GraphTemporalWriteOperation temporal = 200;
 // Append to existing GraphChangeOp:
-GRAPH_CHANGE_OP_TEMPORAL = 100;
+GRAPH_CHANGE_OP_TEMPORAL = 10;
 // Append to existing GraphChangeOperation, not a second event stream:
-TemporalChangeOperation temporal = 100;
-// Append to each existing ChangesRequest and WatchChangesRequest:
-optional bool temporal = 100;
-// Append to existing ChangesResponse:
-optional string feed_version = 100; // "temporal_v1" only when opted in
+GraphTemporalChangeOperation temporal = 23;
+// Shared GraphEventFeature enum and feed fields land in the preceding TTL slice.
+// Consume that enum's TTL and TEMPORAL values; do not redeclare it here.
+// ChangesRequest:
+repeated GraphEventFeature graph_events = 3;
+// WatchChangesRequest (tag 3 remains poll_interval_ms):
+repeated GraphEventFeature graph_events = 4;
+// ChangesResponse (echo):
+repeated GraphEventFeature graph_events = 5;
 ```
 
-Tag 100 is a proposed allocation in each named message, not a blanket reserved
-range. Gap 12 must leave it free, fix the shared GraphEdge/GraphReadMeta and
-operation-oneof names before implementation, and publish one combined descriptor.
-No other tags are assumed allocated by that still-proposed contract. The
-existing feed messages have no tag 100 (`proto/vlite/v1/vlite.proto:455-530`).
-Appending tag/enum 100 to `GraphChangeOperation`, `GraphChangeOp`,
-`ChangesRequest`, `WatchChangesRequest` and `ChangesResponse` amends
+Proposed D3 allocations follow [wire conventions section 1.3, decision 1](serving-wire-conventions.md#13-field-number-allocation-c1):
+carve tag 200 out of the temporal fence in each shared message above, leaving
+`reserved 201 to 299`; retain the other sibling fences.
+Gap 12 must fix the shared GraphEdge/GraphReadMeta and operation-oneof names
+before implementation and publish one combined descriptor. The descriptor test
+adds named entries for each tag-200 extension, `GraphChangeOperation.temporal`
+tag 23 and `GRAPH_CHANGE_OP_TEMPORAL` value 10; the TTL slice owns the shared feed
+fields and change tags 19-22. These additive changes amend
 `docs/projects/roadmap/serving-contract.md:206` ("keep GraphChangeOperation and
 existing stream messages unchanged"): owner decision D3.
 Proto generated JSON mapping uses int64 decimal strings; binary wire uses
 ordinary protobuf int64 presence, never the storage presence byte.
 JSON `Segment` is flat (`valid_from_ms`, `valid_to_ms`, `properties`), while
-proto `TemporalSegment` nests `bounds`; the proto binding converts. A timeline
+proto `GraphTemporalSegment` nests `bounds`; the proto binding converts. A timeline
 request has no read options; absent indices mean 0 and 256, and `graph` and
 `edge` are required. Section 3's zero-work envelope (complete, empty truncation,
 zero stats) travels in `meta` (field manifest: D3).
 Required selectors/messages and kind-dependent fields follow the JSON write/feed
 tables; missing edge/expected/old_bounds/segment/at, kind 0 and inapplicable
-nondefault fields are INVALID_ARGUMENT. Empty TemporalBounds means open/open,
-not unspecified old bounds; every TemporalSegment carries its bounds message
+nondefault fields are INVALID_ARGUMENT. Empty GraphTemporalBounds means open/open,
+not unspecified old bounds; every GraphTemporalSegment carries its bounds message
 (empty for all-time). Empty segments is legal on create/put. Zero ID, time,
 index and false-created values retain presence where optional. Timeline absent
 means JSON null.
@@ -834,11 +863,11 @@ Their source-of-truth role is logical semantics, not proof of persistence/auth.
 | Reads | REST/gRPC/MCP/CLI/client equality for get/neighbors/traverse/shortest-path/timeline; hidden endpoints; TTL C before/equal/after independent of T; post-purge nonresurrection; current node metadata/evidence limitations. |
 | Certification | Invalid-at-T edges charged; each work/output cap; deadline/cancel at admission/mid-execution/serialization; shortest-path never provisional; no transport truncation masquerading as complete. |
 | Paging/timeline | Captured default T/C, conflicting override, stale/cross-graph cursor, gap null get, empty timeline, legacy refusal, 0/0 and 256/256, start>end and 257, range past length, changed revision between ranges. |
-| Feed | Five correction payloads, promotion false, ordered mixed commit, backfill, no boundary event, no-op absent, old subscription blocked, signature exact bytes, independent subscriber progress, no advancement on oversized/failed commit. |
-| Persistence | Plain/encrypted reopen, directory checkpoint, compact image, activation copy; checkpoint floor versus lineage mismatch; revisions reacquired; no synthetic history; TTL omission explicitly visible in capability docs. |
+| Feed | Five correction payloads, promotion false, ordered mixed commit, backfill, no boundary event, no-op absent, feature-set echo/old-server refusal, `vlc1`/`vlc2` and wrong-set `cursor_mode_mismatch`, old subscription blocked, signature exact bytes, per-set dispatcher progress, whole temporal commits and no advancement on oversized/failed commit. |
+| Persistence | Plain/encrypted reopen, directory checkpoint, compact image, activation copy; checkpoint floor versus lineage mismatch; revisions reacquired; no synthetic history; temporal-only feed's TTL omission explicitly visible in capability docs. |
 | Authorization | No auth, revoked/expired/read-only, graph binding, collection wildcard without graph scopes, tenant physical-name bypass, forbidden existence, mixed collection writes/pivot/evidence grants; REST/gRPC/proxied MCP parity. |
 | Compatibility/refusal | Old generated client/new server and reverse; old file exact legacy goldens; no automatic capability on write/open; empty flag-64 file refused; ordinary/versioned feed negotiation; unsupported binding/CLI/dashboard path; unknown enums handled without success fallback. |
-| Schemas/errors | OpenAPI validation, generated-client descriptor/golden checks, every error code/trailer/feature/category, every default/ceiling/ceiling+1, 1/8/16 MiB boundaries, all relative links/API-reference keys. |
+| Schemas/errors | OpenAPI validation including the six `op` enum literals and single temporal `allOf` branch, generated-client descriptor/golden checks for shared tag 200, change tag 23/enum 10 and feed tags 3/4/5, every error code/details trailer and scoped feature/category, transport expiry/cancel per wire conventions, every default/ceiling/ceiling+1, 1/8/16 MiB boundaries, all relative links/API-reference keys. |
 
 Mutation list: flip inclusive start/exclusive end; map null to zero; round i64
 through f64; collapse open/open into legacy; select latest properties in a gap;
@@ -857,8 +886,8 @@ bypass gates. Activation tooling (D7) belongs to none of these slices.
 
 | Slice | Files owned | Required tests and independent acceptance checklist |
 |---|---|---|
-| `gap4e-rest` | `src/server/graph.rs`, `src/server/features.rs`, `src/server/webhooks.rs`, `src/bin/tool_support/graph_json.rs` (shared by REST, `vlite-mcp` and `vlite-graph-cli`: `src/server/graph.rs:75-77`, `src/bin/vlite-mcp.rs:1`, `src/bin/vlite-graph-cli.rs:17`), `ApiError`/auth/error-mapping glue in `src/server.rs`, approved `src/openapi_graph.json`/`src/openapi.json`, relevant server tests/docs | Oracle/wire goldens; all routes/auth/limits; versioned feed/webhook cursors; refusal at empty flag-64 file; descriptor-free REST schema review; source unchanged by activation; old-file goldens. Accept only with independently reproduced negative cases and no gate changes. |
-| `gap4e-grpc` | `proto/vlite/v1/vlite.proto`, `src/server/grpc.rs`, graph service implementation/tests, generated descriptor fixtures, `site/api.html` rows | After Gap 12: combined tag/oneof review, all unary parity, stream opt-in/error trailers, no unknown-op downgrade, old descriptor compatibility, cancellation/whole-commit cap. Accept only with independent binary goldens and REST-equivalent authorization. |
+| `gap4e-rest` | `src/server/graph.rs`, `src/server/features.rs`, `src/server/webhooks.rs`, `src/bin/tool_support/graph_json.rs` (shared by REST, `vlite-mcp` and `vlite-graph-cli`: `src/server/graph.rs:75-77`, `src/bin/vlite-mcp.rs:1`, `src/bin/vlite-graph-cli.rs:17`), `ApiError`/auth/error-mapping glue in `src/server.rs`, approved `src/openapi_graph.json`/`src/openapi.json`, relevant server tests/docs | At wire-conventions step 6 after TTL: oracle/wire goldens; all routes/auth/limits; shared `graph_events`/`vlc2` consumption and per-set webhook progress; scoped handler-built errors; single temporal `GraphBatch` branch with root components; refusal at empty flag-64 file; descriptor-free REST schema review; source unchanged by activation; old-file goldens. Accept only with independently reproduced negative cases and no gate changes. |
+| `gap4e-grpc` | `proto/vlite/v1/vlite.proto`, `src/server/grpc.rs`, graph service implementation/tests, generated descriptor fixtures, `site/api.html` rows | After Gap 12 and TTL: named descriptor additions for shared tag 200 and change tag 23/enum 10; consume feed tags 3/4/5; all unary parity, stream feature-set echo/error details, no unknown-op downgrade, old descriptor compatibility, transport cancellation/whole-commit cap per wire conventions. Accept only with independent binary goldens and REST-equivalent authorization. |
 | `gap4e-mcp-cli` | `src/bin/tool_support/graph_mcp.rs`, `graph_proxy.rs`, `src/bin/vlite-mcp.rs`, `src/bin/vlite-graph-cli.rs`, command/tool tests and reference docs; consumes `graph_json.rs` from `gap4e-rest` | Stdin exact int parsing, tool-schema validation, writable/read-only listing/calls, local/proxy parity, stderr/exit/open refusal, timeline and temporal feed, cancellation. Accept only after independent malformed-input and no-silent-fallback cases. |
 | `gap4e-clients` | `clients/python/vlite_client/__init__.py`, `clients/javascript/index.js`/`index.d.ts`, `clients/dotnet/VLite.Client/Client.cs` and model files/tests/docs; embedded binding files only in a separately qualified sub-slice | Lossless language types, all six operation builders, HTTP/gRPC fixture parity, safe timestamps, cancellation/error fields, old-server behavior; run binding gate tests unchanged until explicit support. Accept only with independent wire captures and API-reference completeness. |
 
@@ -872,20 +901,23 @@ visibility and show explicit unsupported errors rather than attempt conversion.
 
 These are schema/qualification decisions, not requests to change already chosen
 copy-out activation, explicit opt-in, caps or validity semantics.
+Original decision options and recommendations are retained below; text marked
+"Formerly" is historical, not the current proposal. Appended wire-conventions
+annotations propose replacements and remain open for owner ratification.
 
 | Decision | Options | Recommendation / blocking consequence |
 |---|---|---|
 | D1: signed JSON time and ids | Decimal strings with exact integer input; integers only; formatted dates | Approve: times take strings or integers within ±(2^53-1), larger integers refused; ids/revisions keep today's string-or-integer input (`src/server/graph.rs:4-8`), clients send strings. Blocks serializer/client goldens. |
-| D2: feed negotiation | Explicit existing-route opt-in plus per-subscription version; new feed endpoints; implicit new vocabulary | Approve `temporal=true`/`temporal_v1`. Legacy feeds refuse temporal files before any event, and a client that asked for temporal fails `unsupported_feature` without `feed_version` (cites in section 6). Blocks feed and activation acceptance. |
-| D3: Gap 12 tag manifest | Shared tag-100 extension points; allocate different reviewed tags; JSON-only RPC payloads; new stream messages | Approve these typed extensions after resolving Gap 12 shared names and the GraphReadMeta field manifest. One combined descriptor review is required; never guess occupied tags. Tag/enum 100 on the existing change messages amends `serving-contract.md:206`; approve that explicitly. |
+| D2: feed negotiation | Explicit existing-route opt-in plus per-subscription version; new feed endpoints; implicit new vocabulary | Formerly: Approve `temporal=true`/`temporal_v1`. Legacy feeds refuse temporal files before any event, and a client that asked for temporal fails `unsupported_feature` without `feed_version` (cites in section 6). Blocks feed and activation acceptance. **Withdrawn:** separate temporal negotiation; the shared feature set and echo replace it. Proposed replacement: section 6 `graph_events=temporal`. [Wire conventions, decision 8 (proposed)](serving-wire-conventions.md#6-owner-decisions-23). |
+| D3: Gap 12 tag manifest | Formerly: Shared tag-100 extension points; allocate different reviewed tags; JSON-only RPC payloads; new stream messages | Formerly: Approve these typed extensions after resolving Gap 12 shared names and the GraphReadMeta field manifest. One combined descriptor review is required; never guess occupied tags. Tag/enum 100 on the existing change messages amends `serving-contract.md:206`; approve that explicitly. **Withdrawn:** tag-100 temporal allocation conflicts with the ALG band; propose section 7's shared tag 200, change tag 23/enum 10 and shared feed fields. [Wire conventions, decision 1 (proposed)](serving-wire-conventions.md#6-owner-decisions-23). |
 | D4: remote TTL clock | Server-owned C only; explicit admin clock override | Keep server-owned C and return it, never allow a remote caller to resurrect retained-but-expired data. Blocks read request schema approval. |
 | D5: activation readiness | Qualify all serving/feed surfaces before acceptance; permit explicitly unsupported bindings to remain closed | Require complete server/feed support before server acceptance; keep individual bindings closed until separately qualified. No per-request weakening and no gate/default changes here. |
-| D6: wire failure/deadline | Explicit transport errors plus bounded incomplete read envelopes; always discard budget results | Approve section 3 precedence/caps/error codes; graph budget can report incomplete, transport cancellation/deadline cannot report success. gRPC deadlines come from `grpc-timeout`; REST has no client deadline and passes `cancel: None` (section 3), so REST propagation is NEW. Blocks parity/error goldens. |
+| D6: wire failure/deadline | Explicit transport errors plus bounded incomplete read envelopes; always discard budget results | Approve section 3 precedence/caps/error codes; graph budget can report incomplete, transport cancellation/deadline cannot report success. gRPC deadlines come from `grpc-timeout`; REST has no client deadline and passes `cancel: None` (section 3), so REST propagation is NEW. Blocks parity/error goldens. [Wire conventions, decision 4 (proposed)](serving-wire-conventions.md#6-owner-decisions-23); transport expiry/cancel follows its section 2.2. |
 | D7: public activation API and CLI | Keep `enable_temporal` crate-private; public `maintenance::enable_temporal` plus `vlite-maintain enable-temporal`; library only | After activation qualification, add both. Encrypted sources: `--key-env NAME` (never a key argument) or plaintext only. A public Rust API needs its own `site/api.html` row and is not authorized here (`gap4-temporal-graph.md:500`; section 4 cites the rest). |
-| D8: `UnsupportedFeature` REST mapping | Flag 64 only; every flag; keep 500 | Flag 64 only: 409 `unsupported_feature` with NEW `ApiError` members (`feature` body field, `vlite-feature` trailer); other flags keep today's 500 (`src/server.rs:1624`). No new public `Error` variant. Blocks refusal goldens. |
-| D9: new wire codes | `request_too_large`, `response_too_large`, `graph_timeout`, `graph_cancelled`; reuse 413 `invalid_json`, 503 `busy`; none | Provisional. Today 504 maps to INTERNAL and 408/413 to INVALID_ARGUMENT (`src/server/grpc.rs:181-197`); the vocabulary is settled in the cross-document wire review before any REST/gRPC golden. |
-| D10: wire caps | Temporal-only 1/8/16 MiB; uniform for all graph requests; none | Temporal-only. REST has no response cap today and an 8-16 MiB write the engine accepts is refused by transport (cites in section 3). |
-| D11: webhook migration | Shared cursor and legacy key; per-subscription progress with `feed_version`; separate temporal dispatcher | Per-subscription progress; dedup key unchanged, a lineage key needs a new payload field. Contradicts `docs/WEBHOOKS.md:45,52`; `deny_unknown_fields` blocks downgrade (cites in section 6). Needs its own qualification before activation serving. |
+| D8: `UnsupportedFeature` REST mapping | Flag 64 only; every flag; keep 500 | Formerly: Flag 64 only: 409 `unsupported_feature` with NEW `ApiError` members (`feature` body field, `vlite-feature` trailer); other flags keep today's 500 (`src/server.rs:1624`). No new public `Error` variant. Blocks refusal goldens. **Withdrawn:** per-draft members/trailer would fork error context; propose scoped handler-built `ApiError` with `details.feature` and `details.category` under section 3, preserving legacy routes. [Wire conventions, decision 7 (proposed)](serving-wire-conventions.md#6-owner-decisions-23); Wire conventions, decision 21 (proposed). |
+| D9: new wire codes | Formerly: `request_too_large`, `response_too_large`, `graph_timeout`, `graph_cancelled`; reuse 413 `invalid_json`, 503 `busy`; none | Formerly: Provisional. Today 504 maps to INTERNAL and 408/413 to INVALID_ARGUMENT (`src/server/grpc.rs:181-197`); the vocabulary is settled in the cross-document wire review before any REST/gRPC golden. **Withdrawn:** the domain-specific request/deadline/cancel vocabulary conflicts with the shared registry. Proposed replacement: section 3 and [wire conventions section 2](serving-wire-conventions.md#2-error-registry-c2-c9), including `response_too_large` to RESOURCE_EXHAUSTED and explicit `deadline_exceeded` to DEADLINE_EXCEEDED, with no wire cancellation code. Wire conventions, decision 4 (proposed). |
+| D10: wire caps | Temporal-only 1/8/16 MiB; uniform for all graph requests; none | Temporal-only. REST has no response cap today and an 8-16 MiB write the engine accepts is refused by transport (cites in section 3). [Wire conventions, decision 3 (proposed)](serving-wire-conventions.md#6-owner-decisions-23). |
+| D11: webhook migration | Formerly: Shared cursor and legacy key; per-subscription progress with `feed_version`; separate temporal dispatcher | Formerly: Per-subscription progress; dedup key unchanged, a lineage key needs a new payload field. Contradicts `docs/WEBHOOKS.md:45,52`; `deny_unknown_fields` blocks downgrade (cites in section 6). Needs its own qualification before activation serving. **Withdrawn:** separate versioned progress duplicates cursor ownership; propose section 6's immutable feature sets and per-set dispatcher progress, preserving the empty-set path/format. [Wire conventions, decision 8 (proposed)](serving-wire-conventions.md#6-owner-decisions-23). |
 | D12: audit and metrics | Section 4 fields and labels; existing fields only; none | Approve the NEW fields and bounded labels (cites in section 4); never record keys, bounds, properties or secrets. |
 | D13: NEW tools, CLI and client methods | All NEW; REST/gRPC only | Approve MCP `vlite_graph_edge_timeline`/`vlite_temporal_changes`, CLI `edge-timeline`/`temporal-changes` and the HTTP graph accessors (none exist today, section 1); each is documented in its slice. |
 

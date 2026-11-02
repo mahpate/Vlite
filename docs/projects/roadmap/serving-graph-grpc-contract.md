@@ -1,6 +1,7 @@
 # Graph gRPC exact schema contract (Gap 12)
 
 Status: exact-schema review draft, 2026-11-02; not implemented or shipped.
+This document is conformed to the [serving wire conventions proposal](serving-wire-conventions.md), whose owner decisions remain open.
 The public API direction is approved, conditional on exact-schema review before
 code (`docs/projects/roadmap/next-major.md:49-55`). This document supplies that
 review artifact; it does not itself approve implementation or change
@@ -65,19 +66,43 @@ Their wire declarations are `proto/vlite/v1/vlite.proto:98-123`,
 `proto/vlite/v1/vlite.proto:200-206`, `proto/vlite/v1/vlite.proto:222-238`,
 and `proto/vlite/v1/vlite.proto:378`.
 
-Tags are message-local, not service-global. Allocate core tags 1-99 additively
-(except the `GraphWriteOperation` hold 14-31, below);
+Tags are message-local, not service-global. Allocate core tags 1-99 additively;
 never renumber or reuse a removed field/enum value, and reserve its number
-**and name**. Never use protobuf's 19000-19999 range. The permanent fences in
-`GraphWriteOperation` are algorithms 100-199, temporal 200-299, memory 300-399,
-KV/TTL 400-499. These are **reserved, not placeholders to reclaim**: siblings
-append their own prefixed messages/RPCs (GraphAlgorithm*, GraphTemporal*,
-GraphMemory*, GraphKv*) with independent tag spaces. Thus they cannot collide
-with or silently reinterpret core operation arms. Any future shared-envelope
-extension outside these fences needs another exact-schema review. The
-`reserved 14 to 31;` hold has no owner or rationale in the parent, which lists
-13 arms (`docs/projects/roadmap/serving-contract.md:204`): it is an owner
-decision (section 10), not a sibling fence.
+**and name**. Never use protobuf's 19000-19999 range.
+**Withdrawn:** permanent empty sibling fences prevent atomic mixed writes;
+the proposed replacement is [wire conventions section 1.3](serving-wire-conventions.md#13-field-number-allocation-c1),
+decision 1 (option A). Its sibling-owned bands apply to `GraphSelector`,
+`GraphLimits`, `GraphProjection`, `GraphReadMeta`, `GraphSchema`,
+`GraphWriteOperation`, the nine read requests and `GraphEdge`; the block below
+declares their initial fences. A sibling carves its band's first tag for one
+domain-message field or arm and updates the named descriptor manifest.
+Graph-attached messages use `GraphAlgorithm*`, `GraphTemporal*`, `GraphExpiry*`;
+separate `Kv` and `Memory` services use `Kv*` and `Memory*`, per
+[section 1.4](serving-wire-conventions.md#14-service-versus-arm-prefix-and-package-rules-c16).
+The proposed TTL arm is `GraphExpiryOperation expiry = 400`;
+`WriteExpiryBatch` only wraps that same message. Tags 500 and up require
+another exact-schema review.
+**Withdrawn:** the unowned `GraphWriteOperation` hold `reserved 14 to 31;`;
+decision 20 (option A) proposes dropping it so core may use 14-99.
+
+The following summaries follow [wire conventions sections 1.1 and 1.2](serving-wire-conventions.md#11-services-all-package-vlitev1-appended-to-protovlitev1vliteproto);
+they are landing obligations, not claims of shipped services.
+
+| Service | RPCs at landing / later additions | Health name | Owner |
+|---|---|---|---|
+| `VLite` | Existing baseline; Gap 8 and precision append their named RPCs | `""`, `vlite.v1.VLite` | Existing and sibling slices |
+| `Graph` | 17 unary RPCs below; later slices append in landing order: TTL `GetNodeExpiry`, `GetEdgeExpiry`, `WriteExpiryBatch`; temporal `EdgeTimeline`; five ALG RPCs | `vlite.v1.Graph` | Gap 12; later slices append |
+| `Kv` | Seven RPCs in the note's manifest | `vlite.v1.Kv` | KV |
+| `Memory` | Nine RPCs in the note's manifest | `vlite.v1.Memory` | MEM |
+| `GraphTtl` | Proposed not created; TTL RPCs append to `Graph` | None | TTL |
+| `vlite.serving.v1` | Transport-only messages, no service | None | Binary results |
+
+| Per-service obligation | Gap 12 landing requirement |
+|---|---|
+| Registration | Own adapter module; one `add_service` on shared `Routes`; `grpc.rs` retains routing, health, caps and shared error mapping |
+| Message caps | Set 8 MiB decode and 16 MiB encode on each service, with a cap test |
+| Health | Add `vlite.v1.Graph` to `GrpcHealth::set`, the `set_not_serving` doc comment and the `grpc_smoke` health loop |
+| Descriptor test | List every service, unique RPC short name and shared-message tag manifest; later slices append named entries |
 
 ```proto3
 syntax = "proto3";
@@ -129,13 +154,20 @@ enum GraphPathOutcome { GRAPH_PATH_UNSPECIFIED = 0; GRAPH_PATH_FOUND = 1; GRAPH_
 message GraphUnit {}
 message GraphStrings { repeated string values = 1; }
 message GraphProperties { map<string, MetadataValue> values = 1; }
-message GraphSelector { oneof kind { uint64 id = 1; string key = 2; } }
-message GraphProjection { oneof kind { GraphUnit all = 1; GraphUnit none = 2; GraphStrings only = 3; } }
+message GraphSelector {
+  oneof kind { uint64 id = 1; string key = 2; }
+  reserved 100 to 199; reserved 200 to 299; reserved 300 to 399; reserved 400 to 499;
+}
+message GraphProjection {
+  oneof kind { GraphUnit all = 1; GraphUnit none = 2; GraphStrings only = 3; }
+  reserved 100 to 199; reserved 200 to 299; reserved 300 to 399; reserved 400 to 499;
+}
 message GraphLimits {
   optional uint64 max_hops = 1; optional uint64 max_visited_nodes = 2;
   optional uint64 max_edges_examined = 3; optional uint64 max_edges_per_node = 4;
   optional uint64 deadline_ms = 5; optional uint64 max_output_nodes = 6;
   optional uint64 max_output_edges = 7; optional uint64 max_output_paths = 8;
+  reserved 100 to 199; reserved 200 to 299; reserved 300 to 399; reserved 400 to 499;
 }
 message GraphNodeFilter { repeated string labels = 1; repeated Condition conditions = 2; }
 message GraphGetNode { GraphSelector node = 1; }
@@ -167,6 +199,7 @@ message GraphReadStats {
 message GraphReadMeta {
   string graph = 1; uint64 view_sequence = 2; bool complete = 3;
   repeated GraphTruncation truncation = 4; GraphReadStats stats = 5; optional string cursor = 6;
+  reserved 100 to 199; reserved 200 to 299; reserved 300 to 399; reserved 400 to 499;
 }
 message GraphInfo { string name = 1; uint64 node_count = 2; uint64 edge_count = 3; }
 message GraphNode { uint64 id = 1; string key = 2; repeated string labels = 3; map<string, MetadataValue> properties = 4; uint64 revision = 5; }
@@ -174,6 +207,7 @@ message GraphEdge {
   uint64 id = 1; optional string key = 2; string relationship = 3; uint64 source = 4;
   string source_key = 5; uint64 target = 6; string target_key = 7;
   map<string, MetadataValue> properties = 8; uint64 revision = 9;
+  reserved 100 to 199; reserved 200 to 299; reserved 300 to 399; reserved 400 to 499;
 }
 message GraphPath { repeated uint64 nodes = 1; repeated uint64 edges = 2; }
 message GraphTraversedNode { uint64 depth = 1; GraphNode node = 2; }
@@ -202,7 +236,10 @@ message GraphRelationshipDefinition {
   string description = 1; repeated GraphEndpoint endpoints = 2;
   GraphMultiplicity multiplicity = 3; map<string, GraphPropertyDefinition> properties = 4;
 }
-message GraphSchema { map<string, GraphLabelDefinition> labels = 1; map<string, GraphRelationshipDefinition> relationships = 2; }
+message GraphSchema {
+  map<string, GraphLabelDefinition> labels = 1; map<string, GraphRelationshipDefinition> relationships = 2;
+  reserved 100 to 199; reserved 200 to 299; reserved 300 to 399; reserved 400 to 499;
+}
 message GraphObservedProperty { string name = 1; GraphSchemaOrigin origin = 2; uint64 count = 3; repeated GraphPropertyType types = 4; }
 message GraphObservedLabel { string name = 1; GraphSchemaOrigin origin = 2; uint64 count = 3; repeated GraphObservedProperty properties = 4; }
 message GraphObservedEndpoint { string source = 1; string destination = 2; GraphSchemaOrigin origin = 3; uint64 count = 4; }
@@ -236,11 +273,10 @@ message GraphWriteOperation {
     GraphAttach attach = 8; GraphDetach detach = 9; GraphPutVector put_vector = 10;
     GraphDeleteVector delete_vector = 11; GraphEnsureEdge ensure_edge = 12; GraphPutSchema put_schema = 13;
   }
-  reserved 14 to 31;
-  reserved 100 to 199; // algorithms: separate messages, never core arms
+  reserved 100 to 199; // algorithms
   reserved 200 to 299; // temporal
-  reserved 300 to 399; // memory
-  reserved 400 to 499; // KV/TTL
+  reserved 300 to 399; // held for memory; no current arm
+  reserved 400 to 499; // TTL
 }
 message GraphWrite { uint64 id = 1; bool created = 2; uint64 revision = 3; }
 message GraphDeleted { uint64 id = 1; }
@@ -298,19 +334,40 @@ message GetGraphRequest { string graph = 1; }
 message GetGraphResponse { GraphInfo graph = 1; }
 message DropGraphRequest { string graph = 1; }
 message DropGraphResponse { string dropped = 1; }
-message GetNodeRequest { string graph = 1; GraphGetNode query = 2; GraphLimits limits = 3; GraphProjection projection = 4; }
+message GetNodeRequest {
+  string graph = 1; GraphGetNode query = 2; GraphLimits limits = 3; GraphProjection projection = 4;
+  reserved 100 to 199; reserved 200 to 299; reserved 300 to 399; reserved 400 to 499;
+}
 message GetNodeResponse { GraphReadMeta meta = 1; GraphNode node = 2; }
-message GetEdgeRequest { string graph = 1; GraphGetEdge query = 2; GraphLimits limits = 3; GraphProjection projection = 4; }
+message GetEdgeRequest {
+  string graph = 1; GraphGetEdge query = 2; GraphLimits limits = 3; GraphProjection projection = 4;
+  reserved 100 to 199; reserved 200 to 299; reserved 300 to 399; reserved 400 to 499;
+}
 message GetEdgeResponse { GraphReadMeta meta = 1; GraphEdge edge = 2; }
-message FindNodesRequest { string graph = 1; GraphFindNodes query = 2; GraphLimits limits = 3; GraphProjection projection = 4; }
+message FindNodesRequest {
+  string graph = 1; GraphFindNodes query = 2; GraphLimits limits = 3; GraphProjection projection = 4;
+  reserved 100 to 199; reserved 200 to 299; reserved 300 to 399; reserved 400 to 499;
+}
 message FindNodesResponse { GraphReadMeta meta = 1; repeated GraphNode nodes = 2; }
-message NeighborsRequest { string graph = 1; GraphNeighbors query = 2; GraphLimits limits = 3; GraphProjection projection = 4; }
+message NeighborsRequest {
+  string graph = 1; GraphNeighbors query = 2; GraphLimits limits = 3; GraphProjection projection = 4;
+  reserved 100 to 199; reserved 200 to 299; reserved 300 to 399; reserved 400 to 499;
+}
 message NeighborsResponse { GraphReadMeta meta = 1; repeated GraphNode nodes = 2; repeated GraphEdge edges = 3; }
-message TraverseRequest { string graph = 1; GraphTraverse query = 2; GraphLimits limits = 3; GraphProjection projection = 4; }
+message TraverseRequest {
+  string graph = 1; GraphTraverse query = 2; GraphLimits limits = 3; GraphProjection projection = 4;
+  reserved 100 to 199; reserved 200 to 299; reserved 300 to 399; reserved 400 to 499;
+}
 message TraverseResponse { GraphReadMeta meta = 1; repeated GraphTraversedNode nodes = 2; repeated GraphEdge edges = 3; repeated GraphPath paths = 4; }
-message ShortestPathRequest { string graph = 1; GraphShortestPath query = 2; GraphLimits limits = 3; GraphProjection projection = 4; }
+message ShortestPathRequest {
+  string graph = 1; GraphShortestPath query = 2; GraphLimits limits = 3; GraphProjection projection = 4;
+  reserved 100 to 199; reserved 200 to 299; reserved 300 to 399; reserved 400 to 499;
+}
 message ShortestPathResponse { GraphReadMeta meta = 1; GraphPathResult shortest_path = 2; }
-message ExplainRequest { string graph = 1; GraphReadQuery query = 2; GraphLimits limits = 3; GraphProjection projection = 4; }
+message ExplainRequest {
+  string graph = 1; GraphReadQuery query = 2; GraphLimits limits = 3; GraphProjection projection = 4;
+  reserved 100 to 199; reserved 200 to 299; reserved 300 to 399; reserved 400 to 499;
+}
 message ExplainResponse { string graph = 1; GraphExplanation explain = 2; }
 message GetSchemaRequest { string graph = 1; optional uint64 budget = 2; }
 message GetSchemaResponse { string graph = 1; GraphSchema declared = 2; GraphObservedSchema observed = 3; }
@@ -319,9 +376,13 @@ message PutSchemaResponse { string graph = 1; uint64 revision = 2; }
 message RetrieveRequest {
   string graph = 1; GraphPivot pivot = 2; GraphExpansion expansion = 3;
   GraphEvidenceSpec evidence = 4; GraphLimits limits = 5; GraphProjection projection = 6;
+  reserved 100 to 199; reserved 200 to 299; reserved 300 to 399; reserved 400 to 499;
 }
 message RetrieveResponse { GraphRetrievalResult result = 1; }
-message QueryTextRequest { string graph = 1; string query = 2; map<string, MetadataValue> params = 3; GraphLimits limits = 4; bool explain = 5; }
+message QueryTextRequest {
+  string graph = 1; string query = 2; map<string, MetadataValue> params = 3; GraphLimits limits = 4; bool explain = 5;
+  reserved 100 to 199; reserved 200 to 299; reserved 300 to 399; reserved 400 to 499;
+}
 message QueryTextResponse { string graph = 1; oneof result { GraphReadResult read = 2; GraphExplanation explain = 3; } }
 message WriteGraphBatchRequest { string graph = 1; repeated GraphWriteOperation ops = 2; }
 message WriteGraphBatchResponse { string graph = 1; optional uint64 revision = 2; repeated GraphWriteOutcome outcomes = 3; }
@@ -663,11 +724,11 @@ Standard clients also expire a call locally, so tests accept CANCELLED without
 | Condition | Observable today (unchanged tonic + adapter) | Needs new adapter code (proposed) |
 |---|---|---|
 | Graph budget expires, client waiting | No Graph RPC exists | OK, complete=false, deadline reason |
-| Client `grpc-timeout` expires | CANCELLED, no `vlite-error-code` | DEADLINE_EXCEEDED + `graph_deadline_exceeded` only if an adapter timer set from the same header (kept in `request.metadata()`, tonic `src/request.rs:160-162`) fires before tonic's; never OK with a partial result |
+| Client `grpc-timeout` expires | CANCELLED, no `vlite-error-code` | DEADLINE_EXCEEDED + `deadline_exceeded` (proposed; wire conventions decision 4) only if an adapter timer set from the same header (kept in `request.metadata()`, tonic `src/request.rs:160-162`) fires before tonic's; never OK with a partial result |
 | Client cancels or disconnects | Handler dropped, no status deliverable; the spawned pipeline keeps its permits (`src/server/grpc.rs:243`) | `graph_cancelled` is an audit/metrics label, never on the wire |
 | Server cancel signal, client connected, before deadline | Not wired: the REST read path passes `cancel: None` (`src/server/graph.rs:455-459`) | OK, complete=false, cancelled reason |
 | Request frame > 8 MiB | OUT_OF_RANGE, no `vlite-error-code` (tonic `src/codec/decode.rs:193-197`) | None: transport behavior |
-| Response frame > 16 MiB | OUT_OF_RANGE, no `vlite-error-code` (tonic `src/codec/encode.rs:188-192`) | `encoded_len()` preflight, then RESOURCE_EXHAUSTED + `graph_response_too_large` |
+| Response frame > 16 MiB | OUT_OF_RANGE, no `vlite-error-code` (tonic `src/codec/encode.rs:188-192`) | `encoded_len()` preflight, then RESOURCE_EXHAUSTED + `response_too_large` |
 
 Typed reads and retrieve expansion can pass an adapter-owned `AtomicBool`
 through the public `ReadOptions.cancel` while the adapter retains
@@ -699,7 +760,7 @@ excluding the five-byte gRPC message prefix; equality passes, cap+1 fails
 (`Cargo.toml:54`; no `accept_compressed`/`send_compressed` under `src/`). Today
 both caps fail natively as OUT_OF_RANGE with no `vlite-error-code`. To return
 RESOURCE_EXHAUSTED with the proposed
-`graph_response_too_large` trailer instead, the adapter must compute each graph
+`response_too_large` trailer instead, the adapter must compute each graph
 response's `encoded_len()` before returning it and fail above 16,777,216 bytes;
 that is new code and an owner decision (section 10). Either way the failure is
 **not** truncation and not a smaller success. This preserves the documented
@@ -718,7 +779,9 @@ this document does not supply. Proposed unit: the re-encoded protobuf length
 (`encoded_len()`) of the whole decoded read request, excluding the five-byte
 prefix; at most 1,048,576, equality passes, cap+1 fails as
 `INVALID_ARGUMENT / invalid_json` (the REST 413 code). This is separate from the
-8-MiB decoder cap; do not clamp any field.
+8-MiB decoder cap; do not clamp any field. This proposes option B of
+[wire conventions decision 18](serving-wire-conventions.md#6-owner-decisions-23);
+the unit is encoded protobuf bytes, not JSON bytes or a field count.
 
 ## 5. Per-RPC behavior, authorization and retries
 
@@ -836,9 +899,8 @@ Each comma-separated code below is a separate exact status/trailer pair.
 | commit_indeterminate | UNKNOWN | Write might already be durable; inspect, never blind retry |
 | poisoned | INTERNAL | Existing generic mapping of this 503; no silent mapper change |
 | internal_error | INTERNAL | Unexpected sanitized internal failure |
-| graph_deadline_exceeded (**proposed**) | DEADLINE_EXCEEDED | Adapter-detected client deadline; only if an adapter timer fires before tonic's (section 4) |
-| graph_cancelled (**proposed**) | CANCELLED | Audit/metrics label only; never on the wire (section 4) |
-| graph_response_too_large (**proposed**) | RESOURCE_EXHAUSTED | Adapter preflight: encoded response exceeds 16,777,216 bytes |
+| deadline_exceeded (**proposed**) | DEADLINE_EXCEEDED | Handler-built `ApiError` from the engine/adapter stop reason, before the commit point with no partial allowed; wire conventions decision 4 |
+| response_too_large (**proposed**) | RESOURCE_EXHAUSTED | Adapter-built `ApiError` from the response `encoded_len()` preflight above 16,777,216 bytes; wire conventions section 2 |
 | (none: tonic transport) | OUT_OF_RANGE | Request frame above 8 MiB; response frame above 16 MiB when no preflight runs |
 | (none: tonic transport) | CANCELLED | `grpc-timeout` expiry enforced by tonic |
 | (none: tonic transport) | INTERNAL | Undecodable protobuf (tonic-prost `src/codec.rs:143-146`) |
@@ -864,14 +926,22 @@ Transport failures carry no `vlite-error-code`: undecodable protobuf and the
 client get no adapter response; a 16-MiB encoder failure keeps the adapter's
 x-request-id header (`src/server/grpc.rs:297-302`, tonic
 `src/codec/encode.rs:321-326`). Clients must tolerate absent values and must
-not invent them. The three proposed trailer values are plain `vlite-error-code`
-strings produced by the adapter: no `vlite::Error` variant and no REST code is
-added, and a disconnected client cannot receive them. REST also reports JSON
+not invent them. The two new codes above are built as `ApiError` by the
+handler/adapter; the proposed read-cap `invalid_json` also comes from an
+adapter-built `ApiError`, not a new engine variant. Explicit shared mapper arms
+for `response_too_large` and `deadline_exceeded` would land in Gap 12, if wire
+conventions decisions 3 and 4 are approved, per
+[wire conventions sections 2 and 5.2](serving-wire-conventions.md#2-error-registry-c2-c9);
+no public `vlite::Error` variant is added. `graph_cancelled` remains an
+audit/metrics label only, with no wire code or status/trailer pair.
+A disconnected client cannot receive an adapter response. REST also reports JSON
 shape errors as 422 `invalid_json` (`src/server/graph.rs:346-365`); protobuf
 has no JSON shape, so equivalent adapter-detected cases are `invalid_input`.
 Do not add retry-after:1 to the new size error: it is not transient quota
 pressure. The current status helper adds it for HTTP 429
-(`src/server/grpc.rs:202-204`); implement the size status explicitly.
+(`src/server/grpc.rs:202-204`); add the explicit response-size mapper arm without
+changing existing mappings. The proposed response-size code is gRPC-only;
+REST retains no response cap per wire conventions decision 3.
 
 OK partial reads retain data and complete=false with distinct ordered reasons:
 visited_limit, edge_limit, degree_limit{node_ids}, output_limit, deadline,
@@ -911,8 +981,11 @@ Add a `data-api="grpc:<RPC>"` row per method under `site/api.html`'s gRPC sectio
 scope and request/response names when the proto ships. The current scan is
 name-based, not service-qualified (`tests/api_reference.py:445-446`); these
 names do not collide with existing VLite methods
-(`proto/vlite/v1/vlite.proto:16-60`). If a sibling later duplicates an RPC
-name, separately review scanner qualification instead of hiding one row.
+(`proto/vlite/v1/vlite.proto:16-60`). Proposed option A of
+[wire conventions decision 16](serving-wire-conventions.md#6-owner-decisions-23)
+keeps the scanner and `grpc:<ShortName>` keys unchanged and requires a
+descriptor-level RPC short-name uniqueness test across every `vlite.v1` service.
+Later slices add named services and RPCs to that test.
 Update graph/security references `docs/GRAPH.md` and `docs/SECURITY.md` with
 transport parity only; correct directly related OpenAPI descriptive omissions
 only in an approved later slice, never by adding REST routes here.
@@ -928,14 +1001,14 @@ pass today. Existing build/smoke entry points are `build.rs:10-18`,
 | Shared REST/gRPC/MCP golden graph | Every method vs REST; all mapped MCP tools; local MCP read-only/write rules tested separately. Nodes/edges/properties, deterministic order, self-loops, duplicate starts, paths, null lookups, declared/observed schema, retrieve pivots/evidence and every batch outcome. Ignore only timing counters when comparing deterministic data. |
 | Field-by-field round trips | Exercise every field/tag/enum/oneof arm in the manifest, empty vs absent wrappers/maps, Expected any/absent/revision, IDs 0/2^53+1/u64::MAX, i64 min/max, f64 vs f32, UTF-8, geopoints, arbitrary binary excerpt, nullable edge key, revision null, cursors and redaction. Nonfinite numeric negatives. |
 | Independent Python oracle | Generate Python descriptors/stubs from the proposed manifest and unchanged proto outside the source tree. Separate hand-written fixture/value and protobuf wire expectations from the Rust adapter; encode Python -> decode Rust and encode Rust -> decode Python. Assert literal tags, wire types, values, HasField/WhichOneof, not just self-round-trip. Include all 13 operation arms, six read arms, eight outcomes and optional zero values. |
-| Descriptor stability | Compare FileDescriptorSets normalized only for source locations/order noise. Existing field numbers/types/labels/oneofs/service signatures/enum values unchanged; GraphChangeOperation and streams byte-for-byte descriptor equivalent. Snapshot every new symbol/tag, reserved interval and enum number; reject deletion, reuse or reassignment. |
+| Descriptor stability | Compare FileDescriptorSets normalized only for source locations/order noise. Preserve existing fields, types, labels, oneofs, signatures, enum meanings and streams; accept only named additive entries per wire conventions sections 1.2-1.3 and 5.3, including TTL GraphChangeOperation tags 19-22 and temporal tag 23 / enum value 10 in their landing slices. Snapshot every new symbol/tag, reserved interval and enum number; permit only the band's first tag to be carved from a shared-message fence for a named addition; reject deletion, reuse or reassignment. List every service and enforce RPC short-name uniqueness. |
 | Auth negatives | Missing/expired/revoked key, wrong lineage, missing graph_read/write, collection wildcard without graph scopes, unbound existing and nonexistent graph (same denial), read-only mutation, non-admin stats, viewer/editor/admin. |
 | Tenant negatives | Logical vs physical names; cross-tenant graph/pivot/evidence/attached collection; filtered list; suspend/delete tenant; revocation while queued. No existence probe, raw-name label or denied evidence payload. |
 | Atomic writes | Each attach/detach/vector mutation and attached-node deletion denied without affected collection write; multi-collection quota rejection rolls back everything; Expected conflict returns ABORTED; schema conflict FAILED_PRECONDITION; no partial outcomes on failure. |
 | Every default and boundary | Every L field omitted/default/ceiling/ceiling+1/0/u64::MAX; node and edge page limits including implicit zero pages; G/Key/labels/type/Props/S/B boundaries, UTF-8 byte rather than character lengths. Schema budget, pivot k/exact-scan, fusion candidates/rrf/weights, evidence names/items/excerpts and query-language bounds at default/ceiling/+1/zero where meaningful. Record semantic rejection vs supported zero. |
 | Consistency/pages | Same view across pivot/attachments/expansion/evidence; graph or attached-record mutation invalidates cursor; wrong query/page/projection/graph cursor rejected, wrong credential lineage denied; corruption/uppercase/odd hex; no automatic restart. Exhausted != no-path; found path tie fixture. No unsupported cross-file cursor guarantee. |
 | Deadline/cancel | Before admission, while queued, before work, mid-read at a check, during pivot/schema scan, and after write starts. Graph budget partial vs transport deadline error; smaller graph/client deadline; sub-ms remainder; connected server-cancel partial (if a signal is wired); preserve permits/audit until work ends. Client expiry asserts CANCELLED without `vlite-error-code` or DEADLINE_EXCEEDED, never OK or a partial result; pivot/schema scans never return a prefix. |
-| Size caps | Request frame 8 MiB-1/equal/+1 (+1: OUT_OF_RANGE, no `vlite-error-code`); read request `encoded_len()` 1 MiB-1/equal/+1 (+1: section 10 outcome); response 16 MiB-1/equal/+1 across each response family, binary/UTF-8/map overhead (+1: section 10 outcome, never a truncated success). Assert no cursor invention, smaller explicit read request succeeds, failed write response never triggers automatic replay. |
+| Size caps | Every service sets both caps and has an oversize-request test. Request frame 8 MiB-1/equal/+1 (+1: OUT_OF_RANGE, no `vlite-error-code`); whole decoded read request `encoded_len()` 1 MiB-1/equal/+1 (+1: INVALID_ARGUMENT / invalid_json per proposed decision 18); response 16 MiB-1/equal/+1 across each response family, binary/UTF-8/map overhead (+1: RESOURCE_EXHAUSTED / response_too_large with preflight, never a truncated success). Assert no cursor advance or invention, smaller explicit read request succeeds, failed write response never triggers automatic replay. |
 | Version skew | Old generated VLite/feed clients against new server; new Graph stubs against old server -> UNIMPLEMENTED, no fallback. Unknown fields tolerated, unknown request enum/operation rejected, unknown response enum surfaced. Feature-off builds and health registration remain coherent. |
 | References/docs | release_docs.py, content_budget.py, agent_docs.py, api_reference.py, relative-link resolution and diff whitespace. Proto/Graph reference inventory agrees exactly; no claim of shipped support before delivery. |
 
@@ -1006,8 +1079,8 @@ New test/helper filenames below are proposed, not existing-code claims.
 
 | Slice | Exclusive files owned when active | Dependencies and required tests | Independent acceptance checklist |
 |---|---|---|---|
-| gap12-proto | proto/vlite/v1/vlite.proto; proposed tests/graph_grpc_schema.py and descriptor/golden fixtures | Gap 8 proto/gRPC wiring accepted + exact-schema review; compile via existing build.rs path; independent Python oracle and descriptor stability | every method defined in this document; all field tables match descriptors; old descriptors/feeds unchanged; sibling fences present; no adapter needed to verify schema |
-| gap12-server | src/server/grpc.rs; src/server/graph.rs; src/property_graph/read.rs, retrieve.rs and engine read/schema execution only if section 10 approves a public cancellation API; proposed tests/graph_grpc.py | gap12-proto; all parity/auth/tenant/atomicity/limits/deadline/cap checks; cargo test with graph+grpc and feature-off builds | Shared admission/auth/audit/metrics; no HTTP loopback; exact errors; complete metadata; pivot/schema deadline handled as section 10 decides, never a pivot prefix; no new policy/default; no source name guessed from this draft |
+| gap12-proto | proto/vlite/v1/vlite.proto; proposed tests/graph_grpc_schema.py and descriptor/golden fixtures | Gap 8 proto/gRPC wiring accepted + exact-schema review; compile via existing build.rs path; independent Python oracle and descriptor stability | 17 unary Graph methods at landing; all field tables match descriptors; old descriptors/feeds unchanged at this slice; all shared-message fences present under proposed decisions 1 and 20; named additions and unique RPC short names enforced; no adapter needed to verify schema |
+| gap12-server | src/server/grpc.rs; src/server/graph.rs; src/property_graph/read.rs, retrieve.rs and engine read/schema execution only if section 10 approves a public cancellation API; proposed tests/graph_grpc.py | gap12-proto; all parity/auth/tenant/atomicity/limits/deadline/cap checks; cargo test with graph+grpc and feature-off builds | Shared admission/auth/audit/metrics; Graph registration, health and both caps per section 3; explicit `response_too_large` and `deadline_exceeded` mapper arms only if wire conventions decisions 3 and 4 are approved; no HTTP loopback; exact errors; complete metadata; pivot/schema deadline handled as section 10 decides, never a pivot prefix; no new policy/default; no source name guessed from this draft |
 | gap12-clients | clients/README.md; clients/python/README.md; clients/javascript/README.md; optional stub examples/notes and tests under clients/python, clients/javascript, clients/dotnet | gap12-proto; runnable endpoints from gap12-server for live checks; Python oracle, JS full-width ID checks, .NET optional generation and skew tests | REST dependency defaults unchanged; explicit gRPC selection; an example/type per method; status/trailers/absence preserved; no silent fallback/retry |
 | gap12-parity-docs | docs/GRPC.md; site/api.html; docs/GRAPH.md; docs/SECURITY.md; final parity fixtures in tests/graph_grpc.py coordinated after server ownership ends | All prior slices; full acceptance matrix, four documentation checks plus api_reference.py and links | Every method documented once; shared REST/MCP fixtures pass; mutation assertions proven; generated-client instructions reproducible; no claim of release/qualification based only on docs |
 
@@ -1019,14 +1092,14 @@ changes to existing gates.
 | Decision | Options | Recommendation / acceptance consequence |
 |---|---|---|
 | Exact wire manifest | Approve these typed wrappers/tags; or revise names/presence before code | Approve only after descriptor/oracle review, especially GraphProperties absent/empty, schema observations, 13 write arms and eight outcomes. Proto remains frozen until then. |
-| Deadline partial vs transport error | Always return partial; always fail on any budget; or distinguish graph budget from transport deadline. For client expiry: accept tonic's CANCELLED (today) or add a header-derived adapter timer | Graph-budget partial while transport permits. For client expiry accept tonic's CANCELLED with no `vlite-error-code` (no new code); add the DEADLINE_EXCEEDED timer and `graph_deadline_exceeded` only if an owner needs that trailer. `graph_cancelled` stays an audit/metrics label. Do not change engine defaults. Evidence: tonic `src/transport/service/grpc_timeout.rs:41-93`; section 4 table. |
-| 16 MiB response | Truncate and mark; `encoded_len()` preflight error (RESOURCE_EXHAUSTED + `graph_response_too_large`); or accept tonic's OUT_OF_RANGE (today) | Explicit error, never truncation. Prefer the preflight (new adapter code, new trailer name); OUT_OF_RANGE is the zero-code fallback. No cap increase. Evidence: tonic `src/codec/encode.rs:188-192`, `docs/GRPC.md:157-160`. |
-| Read-body admission accounting | Transport 8 MiB only (today); 1,048,576 re-encoded protobuf bytes; or 1 MiB of a canonical REST JSON encoding | Protobuf unit (section 4): deterministic, one counter, no JSON encoder to specify. REST counts the JSON bytes received (`src/server/graph.rs:79-80`), so exact REST equivalence is not claimed. Add boundary fixtures. |
+| Deadline partial vs transport error | Always return partial; always fail on any budget; or distinguish graph budget from transport deadline. For client expiry: accept tonic's CANCELLED (today) or add a header-derived adapter timer | Graph-budget partial while transport permits. For client expiry accept tonic's CANCELLED with no `vlite-error-code` (no new code); add the DEADLINE_EXCEEDED timer and `deadline_exceeded` only if an owner needs that trailer. `graph_cancelled` stays an audit/metrics label. Do not change engine defaults. Evidence: tonic `src/transport/service/grpc_timeout.rs:41-93`; section 4 table. Wire conventions, decision 4 (proposed): explicit 504 deadline_exceeded for an engine/adapter stop before commit with no partial allowed; tonic expiry is unchanged. |
+| 16 MiB response | Truncate and mark; `encoded_len()` preflight error (RESOURCE_EXHAUSTED + `response_too_large`); or accept tonic's OUT_OF_RANGE (today) | Explicit error, never truncation. Prefer the preflight (new adapter code, new trailer name); OUT_OF_RANGE is the zero-code fallback. No cap increase. Evidence: tonic `src/codec/encode.rs:188-192`, `docs/GRPC.md:157-160`. Wire conventions, decision 3 (proposed): REST retains no response cap; the preflight code is gRPC-only. |
+| Read-body admission accounting | Transport 8 MiB only (today); 1,048,576 re-encoded protobuf bytes; or 1 MiB of a canonical REST JSON encoding | Protobuf unit (section 4): deterministic, one counter, no JSON encoder to specify. REST counts the JSON bytes received (`src/server/graph.rs:79-80`), so exact REST equivalence is not claimed. Add boundary fixtures. Wire conventions, decision 18 (proposed): option B, encoded_len() preflight with invalid_json. |
 | Pivot k=0 documentation mismatch | Tighten runtime to minimum 1; or document current zero behavior | Preserve zero runtime behavior here. Correct OpenAPI in its separately owned approved slice, or explicitly approve a future compatibility change; do not silently invent a minimum. |
-| Sibling tag allocation; `reserved 14 to 31;` | Reclaim reserved core arms later; or independent prefixed messages/RPCs. Keep or delete the 14-31 hold | Permanent reserved fences and sibling-specific messages; no removal of a reserved range to slip features into core writes. Keep 14-31 only if owners name its use (the parent lists 13 arms, `docs/projects/roadmap/serving-contract.md:204`); otherwise delete it before the proto freeze lifts so core arms stay additive. |
+| Sibling tag allocation; `reserved 14 to 31;` | Reclaim reserved core arms later; or independent prefixed messages/RPCs. Keep or delete the 14-31 hold | **Withdrawn:** permanent reserved fences and sibling-specific messages; no removal of a reserved range to slip features into core writes. Keep 14-31 only if owners name its use (the parent lists 13 arms, `docs/projects/roadmap/serving-contract.md:204`); otherwise delete it before the proto freeze lifts so core arms stay additive. Reason: permanent empty fences prevent atomic mixed writes; use [wire conventions section 1.3](serving-wire-conventions.md#13-field-number-allocation-c1). Wire conventions, decision 1 (proposed): option A, sibling-owned bands. Wire conventions, decision 20 (proposed): option A, drop the unowned hold. |
 | Packaged clients | Mandatory new runtimes; optional packages; or generated-stub recipes first | Generated-stub recipes/optional examples first, no dependency change to REST packages. Separately approve packaging and supported runtime versions. |
 | Pivot/schema cancellation (public Rust API) | (a) Adapter-only: stop waiting at the client deadline, retain permits, drop the result; (b) honor `ReadOptions.cancel` or a deadline inside pivot and schema code; (c) add a public method or parameter | (a) for gap12-server; (b)/(c) need explicit approval and no new `Error` variant. Evidence: `src/property_graph/read.rs:61-69`, `src/property_graph/retrieve.rs:12-18`, `src/property_graph/retrieve.rs:301`, `src/property_graph/mod.rs:189`, `src/property_graph/engine/schema.rs:1130`. |
-| Sibling RPCs, method count and sequencing | This document alone defines the `Graph` service; or later documents append methods | Gap 5 S5 appends five algorithm RPCs, making the service 22 methods (`docs/projects/roadmap/serving-graph-algorithms-contract.md` at `fd4bb5ce`, lines 477-479). Its gRPC slice waits for Gap 12 acceptance (lines 1165-1171); the coordinator amends the count and parity table then. Gap 8's reservations (section 2) stay untouched. The drafts differ on the read-cap unit and oversize/deadline statuses; one shared decision resolves them. |
+| Sibling RPCs, method count and sequencing | This document alone defines the `Graph` service; or later documents append methods | **Withdrawn:** an absolute post-ALG method total, because earlier slices append RPCs too; see [wire conventions sections 1.1 and 5.1](serving-wire-conventions.md#51-order). Graph lands with 17 unary RPCs at step 3; later slices append to what is present in landing order (TTL step 5, temporal step 6, five ALG RPCs step 8), adding named descriptor and parity entries. No slice promises an absolute total. Gap 8's reservations (section 2) stay untouched. |
 
 Open implementation details: fix a concrete descriptor baseline after Gap 8
 lands; select reproducible generated JavaScript/.NET runtime versions without

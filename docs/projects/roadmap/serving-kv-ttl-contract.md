@@ -5,10 +5,11 @@ this document. The goals are approved and exact schemas are reviewed before
 code (`docs/projects/roadmap/next-major.md:5,18-19,91-94,106-112` and
 `:49-55,239-241`); a storage-format change arrives only with its own converter
 (`:237-238`).
+This document is conformed to the [serving wire conventions proposal](serving-wire-conventions.md), whose owner decisions remain open.
 Scope: product Gaps 2 and 3. Normative words below describe proposed behavior;
 only the evidence table describes Current behavior. Cross-document wire choices
 (proto tags, error codes, the `GraphChangeOperation` amendment, TTL-operation
-placement) are proposals pending a cross-document consistency pass. No
+placement) follow that proposal pending owner ratification. No
 benchmark or capacity claim is made, and no default, gate, policy or release
 criterion changes. `src/openapi.json` and `proto/vlite/v1/vlite.proto` stay
 frozen until the owner approves this document.
@@ -233,13 +234,13 @@ parameters, not a body (decision (f)).
 
 | Method and path | Request | Success body | operationId / scope |
 |---|---|---|---|
-| GET `C/kv/entry` | required query `namespace,key`; no body | `KvEntry`; absent/due -> 404 `kv_not_found` | `kvGet` / read |
-| PUT `C/kv/entry` | `KvPut` body; no query | `KvPutResult` | `kvPut` / write |
-| DELETE `C/kv/entry` | required query `namespace,key`; optional `expected=any\|absent\|<D>` (default `any`); no body | `KvDeleteResult` | `kvDelete` / write |
-| GET `C/kv/entries` | required `namespace`; optional `prefix,after,limit`; no body | `KvPage` | `kvList` / read |
-| POST `C/kv/leases/acquire` | `LeaseAcquire` | `Lease` | `kvLeaseAcquire` / write |
-| POST `C/kv/leases/renew` | `LeaseRenew` | `Lease` | `kvLeaseRenew` / write |
-| POST `C/kv/leases/revoke` | `LeaseRevoke` | `LeaseRevoked` | `kvLeaseRevoke` / write |
+| GET `C/kv/entry` | required query `namespace,key`; no body | `KvEntry`; absent/due -> 404 `kv_not_found` | `KvGet` / read |
+| PUT `C/kv/entry` | `KvPut` body; no query | `KvPutResult` | `KvPut` / write |
+| DELETE `C/kv/entry` | required query `namespace,key`; optional `expected=any\|absent\|<D>` (default `any`); no body | `KvDeleteResult` | `KvDelete` / write |
+| GET `C/kv/entries` | required `namespace`; optional `prefix,after,limit`; no body | `KvPage` | `KvList` / read |
+| POST `C/kv/leases/acquire` | `LeaseAcquire` | `Lease` | `KvLeaseAcquire` / write |
+| POST `C/kv/leases/renew` | `LeaseRenew` | `Lease` | `KvLeaseRenew` / write |
+| POST `C/kv/leases/revoke` | `LeaseRevoke` | `LeaseRevoked` | `KvLeaseRevoke` / write |
 
 Unlisted methods receive 405; unknown routes receive 404. No lease-get,
 KV-batch, or separate CAS endpoint/RPC/tool is proposed: Rust has no KV batch
@@ -409,23 +410,28 @@ record ID, batch, import, admin or tenant wildcard is allowed.
 
 ### Additive TTL-aware change feed
 
-Add REST `/v1/changes?graph_ttl=true|false` (default false); gRPC
-`ChangesRequest.graph_ttl=3` and `WatchChangesRequest.graph_ttl=4` (default
-false; field numbers are proposals, §7); and optional `graph_ttl:boolean=false`
-on admin-only POST `/v1/admin/webhooks` (`src/server/webhooks.rs:150-164`).
-The webhook option is immutable per subscription, existing subscriptions
-default to false, and no update route is added. An old server answers 400
+Propose the `graph_events` feature set from
+[wire conventions §4](serving-wire-conventions.md#4-graph-events-in-the-change-feed-c11)
+(decision 8): REST `/v1/changes?graph_events=ttl` (or `ttl,temporal` once
+temporal lands); gRPC `ChangesRequest.graph_events=3`,
+`WatchChangesRequest.graph_events=4` and response echo
+`ChangesResponse.graph_events=5` (§7); and optional `graph_events` on admin-only
+POST `/v1/admin/webhooks` (`src/server/webhooks.rs:150-164`). The webhook set is
+immutable per subscription, existing subscriptions default to the empty set,
+and no update route is added. An old server answers 400
 `invalid_query` to the unknown query parameter (`ChangeQuery` denies unknown
 fields, `src/server/features.rs:90-103`), so clients read the capability flag
-first (ledger X4). The mode selects the same decoder, filter and cursor rules for
-polling, streaming and webhooks; the dispatcher keeps a separate durable cursor
-per mode, because its single `webhooks.cursor`
-(`src/server/webhooks.rs:42,81-87,405-450`) would skip one decoder's extra
-events. False preserves current grouping, shapes and cursor interpretation.
-True uses cursor token version `vlc2` (decision (g); today `vlc1`, `FeedCursor{lineage,sequence}`:
-`src/changes.rs:25-33,44-46`) binding lineage, mode, sequence and ordinal; a
-cursor of the other mode is 409 `cursor_mode_mismatch`, in the `cursor_*`
-family of `src/server.rs:1545-1565`. Cursor strings stay opaque, and there is
+first (ledger X4). An older gRPC server silently drops an unknown request
+field, so clients also verify the echoed set. Polling, streaming and webhooks
+share the decoder, filter and cursor rules in that proposal. The dispatcher
+persists progress per feature set; the legacy `webhooks.cursor` path and format
+(`src/server/webhooks.rs:42,81-87,405-450`) stay for the empty set.
+`FeedCursor` in `src/changes.rs` owns both `vlc1` for the empty set and `vlc2`,
+the single non-default feed token, for any non-empty set. The TTL slice lands
+`vlc2` once; temporal consumes it. It binds lineage, sequence, ordinal and the
+set; a cursor of another set is 409 `cursor_mode_mismatch` (decision (g)).
+The former boolean feed proposal is **Withdrawn**: one shared set replaces it
+under wire conventions decision 8. Cursor strings stay opaque, and there is
 no silent restart from the beginning. Feed authorization is unchanged [AUTH].
 The stream already mixes numeric vector-put `expires_at_ms` and
 `committed_at_ms` with these decimal-string graph deadlines
@@ -448,7 +454,7 @@ graph batches keep `type:"graph_batch",graph,revision,operations` [F1]; example
 ]
 ```
 
-Field applicability in TTL-aware mode: node/edge upsert and ordinary patch
+Field applicability when the set includes `ttl`: node/edge upsert and ordinary patch
 carry `expires_at_ms:Deadline` (the resulting own deadline) and
 `expiry_changed:false`. A deadline operation emits the corresponding
 otherwise-empty patch with `expiry_changed:true`; null clears. Upsert of a new
@@ -469,10 +475,11 @@ each committed reclaim, emit due edge deletions by ascending ID, detach events
 by `(node ID,collection,record ID)`, then due node deletions by ascending ID,
 each exactly once; detach events keep their schema. Flush at vector/lifecycle
 boundaries as today (`src/property_graph/feed.rs:1-10,90-100`) and preserve
-frame sequence and logged order, including set-then-immediate-reclaim. Default
-mode keeps whole commits on a page (`src/changes.rs:445-448`,
-`src/openapi.json:33`); a TTL-aware page may end inside a commit. Split a
-TTL-aware graph run greedily at 256 operations or 1 MiB of canonical JSON event
+frame sequence and logged order, including set-then-immediate-reclaim. The empty
+set keeps whole commits on a page (`src/changes.rs:445-448`,
+`src/openapi.json:33`). Per the proposed wire conventions decision 9, only TTL
+reclaim runs may split a commit; temporal commits stay whole. Split a TTL
+reclaim run greedily at 256 operations or 1 MiB of canonical JSON event
 bytes, whichever comes first, without reordering; one larger operation is
 allowed up to the 16 MiB response cap. Each chunk is an event numbered by its
 `ordinal` (`src/changes.rs:163-170`) and the `vlc2` cursor carries the last
@@ -485,18 +492,18 @@ dropping its history, or invalidate the lineage and cursors explicitly.
 Compaction or checkpoint removal without a logged reclaim creates no fictitious
 delete event; bootstrap/export include deadlines, and a restart must not infer
 removals from the reader's clock. Vector-put `expires_at_ms=None` at [F2] is
-unchanged: graph TTL is not record TTL. Old consumers stay on default mode;
+unchanged: graph TTL is not record TTL. Old consumers stay on the empty set;
 opted-in consumers must tolerate additive fields (tested, not assumed).
 
 ## 7. Proposed proto additions
 
-Proposal for package `vlite.v1`, pending the cross-document consistency pass
+Proposal for package `vlite.v1`, pending owner ratification
 (§12 ledger); it edits no `.proto` file. It is additive only
 (`serving-contract.md:209`): existing RPCs, messages and tags stay unchanged
-and no number is reused. No `reserved` statement is added anywhere, because
-nothing is removed: a later field takes the next unused number after review,
-and every unused tag of an existing message stays available to the Gap 8 and
-Gap 12 proposals (`serving-contract.md:8,203,208`). `Expected` is reused with
+and no number is reused. Field allocation and domain-message reserves follow
+[wire conventions §1.3](serving-wire-conventions.md#13-field-number-allocation-c1)
+and §1.4 (decision 1, proposed). **Withdrawn:** the former no-reserves
+proposal conflicts with those shared-message bands. `Expected` is reused with
 fields 1/2/3 [P1]; an unset `expected` or empty `kind` means any
 (`proto/vlite/v1/vlite.proto:112`, `src/server/grpc.rs:378-385`). Fields required
 by the contract are validated (empty `collection` is `invalid_input`, §4). An
@@ -505,100 +512,158 @@ write. Bytes are raw proto bytes, not base64.
 
 ```proto
 service Kv {
-  rpc Get(KvGetRequest) returns (KvEntry);
-  rpc Put(KvPutRequest) returns (KvPutResponse);
-  rpc Delete(KvDeleteRequest) returns (KvDeleteResponse);
-  rpc List(KvListRequest) returns (KvListResponse);
+  rpc GetKvEntry(KvGetRequest) returns (KvEntry);
+  rpc PutKvEntry(KvPutRequest) returns (KvPutResponse);
+  rpc DeleteKvEntry(KvDeleteRequest) returns (KvDeleteResponse);
+  rpc ListKvEntries(KvListRequest) returns (KvListResponse);
   rpc AcquireLease(KvAcquireLeaseRequest) returns (KvLease);
   rpc RenewLease(KvRenewLeaseRequest) returns (KvLease);
   rpc RevokeLease(KvRevokeLeaseRequest) returns (KvRevokeLeaseResponse);
 }
-message KvAddress { string collection = 1; string namespace = 2; string key = 3; }
-message KvGetRequest { KvAddress address = 1; }
+message KvAddress {
+  reserved 100 to 199;
+  string collection = 1; string namespace = 2; string key = 3;
+}
+message KvGetRequest { reserved 100 to 199; KvAddress address = 1; }
 message KvEntry {
+  reserved 100 to 199;
   string key = 1; bytes value = 2; uint64 version = 3;
   optional uint64 expires_at_ms = 4;
 }
 message KvPutRequest {
+  reserved 100 to 199;
   KvAddress address = 1; bytes value = 2; Expected expected = 3;
   optional uint64 expires_at_ms = 4;
 }
-message KvPutResponse { uint64 version = 1; optional uint64 expires_at_ms = 2; }
-message KvDeleteRequest { KvAddress address = 1; Expected expected = 2; }
-message KvDeleteResponse { bool deleted = 1; }
+message KvPutResponse {
+  reserved 100 to 199;
+  uint64 version = 1; optional uint64 expires_at_ms = 2;
+}
+message KvDeleteRequest {
+  reserved 100 to 199;
+  KvAddress address = 1; Expected expected = 2;
+}
+message KvDeleteResponse { reserved 100 to 199; bool deleted = 1; }
 message KvListRequest {
+  reserved 100 to 199;
   string collection = 1; string namespace = 2; string prefix = 3;
   optional string after = 4; optional uint32 limit = 5;
 }
-message KvListResponse { repeated KvEntry items = 1; optional string next_after = 2; }
-message KvAcquireLeaseRequest { KvAddress address = 1; uint32 ttl_ms = 2; }
+message KvListResponse {
+  reserved 100 to 199;
+  repeated KvEntry items = 1; optional string next_after = 2;
+}
+message KvAcquireLeaseRequest {
+  reserved 100 to 199;
+  KvAddress address = 1; uint32 ttl_ms = 2;
+}
 message KvRenewLeaseRequest {
+  reserved 100 to 199;
   KvAddress address = 1; uint64 fencing_token = 2; uint32 ttl_ms = 3;
   string fence_domain = 4;
 }
 message KvRevokeLeaseRequest {
+  reserved 100 to 199;
   KvAddress address = 1; uint64 fencing_token = 2; string fence_domain = 3;
 }
 message KvLease {
+  reserved 100 to 199;
   string namespace = 1; string key = 2; string fence_domain = 3;
   uint64 fencing_token = 4; uint64 expires_at_ms = 5;
 }
-message KvRevokeLeaseResponse { bool revoked = 1; }
+message KvRevokeLeaseResponse { reserved 100 to 199; bool revoked = 1; }
 
-// Proposed narrow TTL projection (decision (e)); the Gap 12 owner may fold it
-// into vlite.v1.Graph instead (ledger X1).
-service GraphTtl {
-  rpc GetNodeExpiry(GraphNodeExpiryRequest) returns (GraphExpiryResponse);
-  rpc GetEdgeExpiry(GraphEdgeExpiryRequest) returns (GraphExpiryResponse);
+// Append these RPCs to the Gap 12 Graph service (decision 2, proposed).
+service Graph {
+  rpc GetNodeExpiry(GraphExpiryNodeRequest) returns (GraphExpiryResponse);
+  rpc GetEdgeExpiry(GraphExpiryEdgeRequest) returns (GraphExpiryResponse);
   rpc WriteExpiryBatch(GraphExpiryBatchRequest) returns (GraphExpiryBatchResponse);
 }
-message GraphExpiryEdge { oneof selector { string key = 1; uint64 id = 2; } }
-message GraphNodeExpiryRequest { string graph = 1; string key = 2; }
-message GraphEdgeExpiryRequest { string graph = 1; GraphExpiryEdge edge = 2; }
+message GraphExpiryNodeRequest {
+  reserved 100 to 199;
+  string graph = 1; string key = 2;
+}
+message GraphExpiryEdgeRequest {
+  reserved 100 to 199;
+  string graph = 1; GraphSelector edge = 2;
+}
 message GraphExpiry {
+  reserved 100 to 199;
   uint64 id = 1; optional string key = 2; uint64 revision = 3;
   optional uint64 expires_at_ms = 4;
 }
 message GraphExpiryResponse {
+  reserved 100 to 199;
   string graph = 1; uint64 view_sequence = 2; optional GraphExpiry entity = 3;
 }
-message GraphSetNodeExpiry {
+message GraphExpirySetNode {
+  reserved 100 to 199;
   string key = 1; optional uint64 expires_at_ms = 2; Expected expected = 3;
 }
-message GraphSetEdgeExpiry {
-  GraphExpiryEdge edge = 1; optional uint64 expires_at_ms = 2;
+message GraphExpirySetEdge {
+  reserved 100 to 199;
+  GraphSelector edge = 1; optional uint64 expires_at_ms = 2;
   Expected expected = 3;
 }
 message GraphExpiryOperation {
-  oneof operation { GraphSetNodeExpiry node = 1; GraphSetEdgeExpiry edge = 2; }
+  reserved 100 to 199;
+  oneof operation { GraphExpirySetNode node = 1; GraphExpirySetEdge edge = 2; }
 }
 message GraphExpiryBatchRequest {
+  reserved 100 to 199;
   string graph = 1; repeated GraphExpiryOperation ops = 2;
 }
-message GraphExpiryWrite { uint64 id = 1; uint64 revision = 2; bool node = 3; }
+message GraphExpiryWrite {
+  reserved 100 to 199;
+  uint64 id = 1; uint64 revision = 2; bool node = 3;
+}
 message GraphExpiryBatchResponse {
+  reserved 100 to 199;
   string graph = 1; optional uint64 revision = 2;
   repeated GraphExpiryWrite outcomes = 3;
 }
 ```
 
 Gets project the REST get result (missing or due -> absent `entity`); node-get
-takes a key, edge-get a key or ID. `WriteExpiryBatch` is the same atomic
-TTL-only sub-batch as REST, with ordered outcomes (`created:false` implied,
-`node=false` meaning edge). Gets need `graph_read`, writes `graph_write`. A
-mixed create-and-TTL batch belongs to the Gap 12 `WriteGraphBatch` contract
-(`serving-contract.md:152`), not to an untyped JSON field here.
-`GraphExpiryEdge` may be replaced by Gap 12's shared `GraphSelector`
-(`serving-contract.md:203`).
+takes a key, edge-get a key or ID through the shared `GraphSelector`.
+**Withdrawn:** the separate service (formerly `GraphTtl`) duplicates graph
+registration; wire conventions decision 2 proposes folding its RPCs into `Graph`.
+**Withdrawn:** the duplicate edge selector (formerly `GraphExpiryEdge`) is
+replaced by `GraphSelector` under wire conventions §1.3.
+
+`WriteExpiryBatch` stays only as a TTL-only wrapper of `GraphExpiryOperation`,
+with ordered outcomes (`created:false` implied, `node=false` meaning edge).
+Gets need `graph_read`, writes `graph_write`. A mixed create-and-TTL batch
+uses one `WriteGraphBatch` call (`serving-contract.md:152`), with this proposed
+addition inside the Gap 12 `GraphWriteOperation.operation` oneof:
+
+```proto
+GraphExpiryOperation expiry = 400;
+```
+
+The TTL slice carves tag 400 from the shared message's band fence, leaving
+`reserved 401 to 499`, per wire conventions §1.3; it does not add direct TTL
+fields to that shared message.
+
+The KV slice registers `vlite.v1.Kv` on the shared routes and adds its name to
+`GrpcHealth::set`, the `set_not_serving` doc comment and the `grpc_smoke` health
+loop, applying both caps to `KvServer` per
+[wire conventions §1.2](serving-wire-conventions.md#12-per-service-obligations-c14).
+TTL uses the Gap 12 `Graph` registration, health and caps, not another service.
+The descriptor test checks service/RPC short-name uniqueness and named
+additions, including the tag-400 arm, per §§1.2-1.4 and decision 16 (proposed).
 
 Additive edits to existing feed messages (these lines are inserts, not
 replacement declarations; every existing tag stays untouched):
 
 ```proto
 // ChangesRequest has fields 1-2 today (vlite.proto:455):
-bool graph_ttl = 3;
+repeated GraphEventFeature graph_events = 3;
 // WatchChangesRequest has fields 1-3 today (vlite.proto:456):
-bool graph_ttl = 4;
+repeated GraphEventFeature graph_events = 4;
+// ChangesResponse has fields 1-4 today (vlite.proto:525):
+repeated GraphEventFeature graph_events = 5;
+// New enum GraphEventFeature has values TTL and TEMPORAL (wire conventions §1.3).
 // New enum:
 enum GraphRemovalReason {
   GRAPH_REMOVAL_REASON_UNSPECIFIED = 0;
@@ -614,13 +679,17 @@ optional uint64 removed_at_ms = 22;
 ```
 
 In TTL-aware upsert/patch an absent `expires_at_ms` means JSON null and
-`expiry_changed` separates a clear from an ordinary patch; in default mode the
+`expiry_changed` separates a clear from an ordinary patch; without `ttl` the
 four new fields stay unset. `ChangeEvent.expires_at_ms` (field 7) keeps its
 vector-record meaning. A server that predates a new service answers
-UNIMPLEMENTED; clients report it and never emulate leases. The tags 3/4 and
-19-22, the enum, the `GraphTtl` placement and the `Kv` service are proposals:
+UNIMPLEMENTED; clients report it and never emulate leases. The tags 3/4/5 and
+19-22, the enums, the `Graph` additions and the `Kv` service remain proposals:
 the amendment of `serving-contract.md:206` and the Gap 8/12 tag check are
-ledger X1 (§12).
+ledger X1 (§12). The TTL slice registers `GraphChangeOperation.expires_at_ms=19`,
+`expiry_changed=20`, `removal_reason=21`, `removed_at_ms=22`, all
+`GraphRemovalReason` names/values, and the feature enum and request/echo fields
+as named descriptor additions under wire conventions §§1.3 and 5.3, rather
+than silently weakening the baseline descriptor-equivalence assertion.
 
 ## 8. Proposed OpenAPI and reference delta
 
@@ -630,7 +699,7 @@ no edit of the frozen `src/openapi.json` or `src/openapi_graph.json`
 Paths, methods, operation IDs and scopes are the §4 table; request and response
 objects are the §3 types, with `additionalProperties:false` on inputs. Existing
 collection routes name the path parameter `c` (`src/openapi.json:54-57`);
-`{collection}` is notation only. `kvDelete` takes query parameters `namespace`,
+`{collection}` is notation only. `KvDelete` takes query parameters `namespace`,
 `key` and `expected` (string matching `^(any|absent|(0|[1-9][0-9]{0,19}))$`,
 default `any`) and no `requestBody`. Every operation inherits BearerAuth and the
 unchanged `Error` envelope, and documents 429 `rate_limited` / `quota_exceeded`
@@ -654,11 +723,12 @@ and every other schema is its §3 table row:
  "FenceDomain":{"type":"string","pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
  "KvExpected":{"oneOf":[{"enum":["any","absent"]},{"type":"object","additionalProperties":false,"required":["revision"],"properties":{"revision":{"$ref":"#/components/schemas/KvDecimal"}}}]},
  "GraphExpiryExpected":{"oneOf":[{"enum":["any","absent"]},{"type":"object","additionalProperties":false,"required":["revision"],"properties":{"revision":{"oneOf":[{"$ref":"#/components/schemas/KvDecimal"},{"type":"integer","minimum":0}]}}}]},
- "GraphSetNodeExpiry":{"type":"object","additionalProperties":false,"required":["op","key","expires_at_ms"],
+ "GraphExpiryOperation":{"oneOf":[{"$ref":"#/components/schemas/GraphExpirySetNode"},{"$ref":"#/components/schemas/GraphExpirySetEdge"}]},
+ "GraphExpirySetNode":{"type":"object","additionalProperties":false,"required":["op","key","expires_at_ms"],
   "properties":{"op":{"const":"set_node_expiry"},"key":{"type":"string","minLength":1,"x-maxUtf8Bytes":256},
    "expires_at_ms":{"anyOf":[{"$ref":"#/components/schemas/KvDecimal"},{"type":"null"}]},
    "expected":{"$ref":"#/components/schemas/GraphExpiryExpected","default":"any"}}},
- "GraphSetEdgeExpiry":{"type":"object","additionalProperties":false,"required":["op","edge","expires_at_ms"],
+ "GraphExpirySetEdge":{"type":"object","additionalProperties":false,"required":["op","edge","expires_at_ms"],
   "properties":{"op":{"const":"set_edge_expiry"},
    "edge":{"oneOf":[{"type":"object","additionalProperties":false,"required":["key"],"properties":{"key":{"type":"string","minLength":1,"x-maxUtf8Bytes":256}}},
     {"type":"object","additionalProperties":false,"required":["id"],"properties":{"id":{"oneOf":[{"$ref":"#/components/schemas/KvDecimal"},{"type":"integer","minimum":0}]}}}]},
@@ -679,18 +749,22 @@ The graph fragment is inline, not named components; the batch path is
 enum `:2149-2161`; `GraphGetNode` (`:394`) and `GraphGetEdge` (`:635`) keep their
 IDs. Batch `items` are `additionalProperties:true` today, hence the conditional
 refs. After the components are added, the batch item schema gains
-`set_node_expiry` and `set_edge_expiry` in its `op` enum, an `allOf` of two
-`if`/`then` branches (`op` const `set_node_expiry` -> `GraphSetNodeExpiry`,
-`set_edge_expiry` -> `GraphSetEdgeExpiry`), and the `:2146` description extended
-with the same two op names.
+`set_node_expiry` and `set_edge_expiry` in its `op` enum and one TTL-domain
+`allOf` `if`/`then` branch: `if` matches either `op` const via `anyOf`, and
+`then` `$ref`s `GraphExpiryOperation`. The `:2146` description gains the same
+two op names. This follows
+[wire conventions §5.2](serving-wire-conventions.md#52-per-file-owner-and-sequence),
+decision 23 (proposed); `items` stays one open object, not a `oneOf`, and
+`ops.maxItems` stays 4096. **Withdrawn:** the former two-branch TTL proposal
+does not match that one-branch-per-domain mechanism.
 
 Node and edge response projections gain a required `expires_at_ms`
 (`KvDecimal` or null) inside each entity object, including objects the inline
 responses admit only through `additionalProperties:true`; the graph-read
 envelope does not change (§6). `GET /v1/changes` gains optional query
-`graph_ttl` (boolean, default false) and webhook registration an optional
-boolean `graph_ttl`; TTL-aware feed schemas add the §6 fields and the
-default-mode schemas stay as an alternative. No other path, operation ID or
+`graph_events` feature set and webhook registration the immutable set from
+§6; the response echoes `graph_events`. TTL-aware feed schemas add the §6
+fields and the empty-set schemas stay as an alternative. No other path, operation ID or
 schema change is proposed.
 
 Reference rows: every new public API needs a `site/api.html` row and a
@@ -698,8 +772,8 @@ Reference rows: every new public API needs a `site/api.html` row and a
 fails on both missing and stale keys; this document adds no row (ledger X6). The
 extractor's families are listed at `tests/api_reference.py:9-23`. Proposed keys:
 `rest:METHOD /v1/...`, `mcp:vlite_kv_get` etc., unqualified `grpc:<Rpc>`
-(approve a namespaced extractor change first if `Kv.Get` collides with a later
-`Get` RPC) and `rust:` rows for new Rust methods (existing KV rows:
+(short names stay unique under wire conventions decision 16, proposed;
+no namespaced extractor change) and `rust:` rows for new Rust methods (existing KV rows:
 `site/api.html:1062-1074`). The HTTP clients and the CLI have no extractor
 family, so the client slice adds `http-py`, `http-js`, `dotnet` and `cli`
 families with the same rule.
@@ -767,8 +841,8 @@ Revision variants; .NET records use PascalCase with the §3 snake_case JSON name
 `graph_set_node_expiry` / `graphSetNodeExpiry` / `GraphSetNodeExpiryAsync` plus
 the edge methods, each submitting one batch op and returning the write outcome
 (`id,created:false,revision`). The existing feed methods return untyped JSON
-(`clients/javascript/index.d.ts:273`) and gain an optional `graph_ttl` /
-`graphTtl`; deadlines arrive as D strings, and one absent from an older server's
+(`clients/javascript/index.d.ts:273`) and gain an optional `graph_events` /
+`graphEvents` set and verify its echo; deadlines arrive as D strings, and one absent from an older server's
 response stays unknown, never null. A server without the feature gives an
 explicit unsupported error, never a client-side fallback, and no client retries
 a mutation after cancellation.
@@ -780,7 +854,7 @@ embedded wrap the C library
 (`bindings/wasm/src/lib.rs:149-165,251-262`); the graph batch parser exists
 twice, as `OpIn` in `src/bin/tool_support/graph_json.rs:208` (CLI, MCP, REST)
 and in the C ABI (`bindings/c/src/graph.rs:191`). Recommended scope: the C ABI
-carries only the graph TTL ops, deadline result fields and the `graph_ttl` feed
+carries only the graph TTL ops, deadline result fields and the `graph_events` feed
 option (`bindings/c/src/features.rs:820-828`), so `graph_write_batch` /
 `graphWriteBatch` accept them; embedded KV and lease methods wait for the §12
 Rust slices; WASM keeps the default feed and reports an explicit unsupported
@@ -862,6 +936,17 @@ the mapping rows are ledger X3 (§12), and nothing here is claimed served. Other
 graph errors keep their names and statuses [A2]. A stale token and a foreign
 holder deliberately share `stale_fencing_token`.
 
+New-code producers follow
+[wire conventions §2](serving-wire-conventions.md#2-error-registry-c2-c9):
+`kv_not_found` is an `ApiError` built by the KV get handler for an absent/due
+entry; `kv_slots_exhausted` and `not_kv_collection` are new `From<Error>` arms
+for existing `KvSlotsExhausted` and `NotKvCollection`. The existing
+`InvalidKvKey` gains an arm for `invalid_input`, not a new code. Lease handlers
+build `ApiError`s for `lease_held`, `stale_fencing_token`, `lease_unavailable`
+and `fencing_recovery_required`; the feed adapter builds the `ApiError` for
+`cursor_mode_mismatch` after checking the cursor's feature set. None adds a
+public `Error` variant.
+
 **Audit and metrics.** Mutations use the existing audit log
 (`src/server/audit.rs:1-5`: entries never hold secrets, vectors, payloads or
 metadata values). Fields: mutation name, request ID, tenant-safe principal ID,
@@ -898,7 +983,8 @@ grants and tokens; Rust collision fixtures cover the 16-slot probe separately.
 | Durability and crash | Ordinary KV is acknowledged after the handle's commit and synced only under `full`; under `periodic`/`none` assert only the documented loss window; lease writes always sync or the route refuses; faults before allocation sync, after high-water sync, after grant sync before reply, during revoke/renew and during the recovery barrier; never repeat an acknowledged or burned token |
 | Maintenance and recovery | Restart revokes live grants; compaction, upgrade, re-encryption, `convert_to_directory` and checkpoint carry the ledger forward; drop/recreate never resets it; an older reader refuses the file; backup, PITR and checkpoint restore, copy, rollback and promotion give `fencing_recovery_required` |
 | Graph invariant | Node cascade and independent edge expiry; shared edges counted once; >4096 affected edges under one reclaim; rollback removes nothing; attached record survives with no expiry |
-| Feed | Default byte goldens unchanged; per-mode webhook cursors; `vlc2` resume inside a commit and `cursor_mode_mismatch`; set/clear/removal/detach goldens; vector puts stay null; deterministic chunks and ordinals; no wall-clock synthetic delete |
+| Feed | Empty-set byte goldens and legacy webhook progress unchanged; per-set webhook progress; single `changes.rs`-owned `vlc2` resume inside TTL reclaim and `cursor_mode_mismatch` across sets; request/response set echo and old-server detection; set/clear/removal/detach goldens; vector puts stay null; deterministic reclaim chunks and ordinals, whole temporal commits; no wall-clock synthetic delete |
+| Proto descriptors | Unique RPC short names, `vlite.v1.Kv` health and both caps, TTL RPCs on `Graph`; `GraphSelector` reuse; mixed create/expiry through tag 400; named feature fields 3/4/5, `GraphChangeOperation` fields 19-22 and `GraphRemovalReason` values |
 | Parity/auth | REST/gRPC/MCP share oracle traces and tenant qualification; scope/binding denials precede existence; read-only denial; namespace is not an authorization boundary; `graph_*` scopes never authorize KV and `collections:["*"]` never grants graph scope; immediate-reclaim collection checks; rate and size limits |
 | Bindings/CLI | Python/JS/.NET lossless conversions; embedded parity; MCP code-first string errors; local MCP read-only; proxy KV tool unknown until ledger X2; stdin errors and exit status; old-server missing-field and UNIMPLEMENTED behavior; no retry on an ambiguous mutation |
 
@@ -908,8 +994,8 @@ key matching a revision; ignored `Expected`; reused token after restart;
 renewal allocating a token; absent holder check; forgotten high-water or
 recovery barrier; restore resetting the domain; deadline clear read as
 omission; skipped endpoint cascade; attached record receiving node TTL; missing
-detach; reordered reclaim chunks; reader clock in the feed; old-mode cursor
-accepted in TTL mode; wildcard implying `graph_write`; JS Number conversion;
+detach; reordered reclaim chunks; reader clock in the feed; another-set cursor
+accepted for `graph_events=ttl`; wildcard implying `graph_write`; JS Number conversion;
 success before sync; automatic retry. Each must change a recorded assertion.
 
 ## 12. Delivery slices, ledger and owner decisions
@@ -926,27 +1012,34 @@ them.
 | Slice (depends on) | Files owned in a future implementation | Required tests and acceptance (the independent reviewer signs) |
 |---|---|---|
 | `gap2-rust-lease-ledger` (decisions (a)-(c); the P2 converter, `next-major.md:237-238`) | `src/kv.rs`, a new ledger module, `src/lib.rs` hooks, a `src/format.rs` section and capability flag, `src/maintenance.rs`, `src/logops.rs`, `src/directory.rs`, `src/replica.rs` | §11 durability, crash and maintenance rows; an older reader refuses the file; LEASE-001/002 |
-| `gap2-kv-serving` (none: get, put, delete and list exist [K2]) | `src/server.rs`, a new server KV adapter, `src/server/grpc.rs`, credential, tenant, audit and quota hooks, `src/bin/vlite-mcp.rs`, `src/bin/tool_support/graph_proxy.rs`, `src/bin/vlite-shell.rs`, the Python, JavaScript and .NET clients | KV oracle, wire goldens, CAS races, bounds, pagination, auth and parity; KV-001/002, AUTH-001, SHIP-001 |
+| `gap2-kv-serving` (none: get, put, delete and list exist [K2]) | `src/server.rs`, a new server KV adapter, `src/server/grpc.rs`, credential, tenant, audit and quota hooks, `src/bin/vlite-mcp.rs`, `src/bin/tool_support/graph_proxy.rs`, `src/bin/vlite-shell.rs`, the Python, JavaScript and .NET clients | KV oracle, wire goldens, CAS races, bounds, pagination, auth and parity; `vlite.v1.Kv` health, both caps and named descriptor entries with unique RPC short names (§7); KV-001/002, AUTH-001, SHIP-001 |
 | `gap2-lease-serving` (`gap2-kv-serving`, `gap2-rust-lease-ledger`) | the lease routes, RPCs, tools, CLI commands and client methods of §4, §7 and §9 | lease oracle, downstream-token model, crash and restore, quota and rate cases; LEASE-001/002, AUTH-001, SHIP-001 |
 | `gap3-rust-feed` (none) | `src/changes.rs` (`vlc2`, ordinals), `src/property_graph/feed.rs` (tracker for deadlines, endpoint IDs, attachments, expiry and reclaim replay) | replay oracle, default-feed byte goldens, chunk and cursor boundaries, maintenance and restart; FEED-001 |
-| `gap3-feed-events` (`gap3-rust-feed`) | `src/server/features.rs`, `src/server/grpc.rs`, `src/server/webhooks.rs` (a cursor per mode), feed authorization, feed encoders such as `bindings/c/src/features.rs` | server feed goldens, per-mode webhook cursors, `cursor_mode_mismatch`, filter parity; FEED-001, AUTH-001, SHIP-001 |
-| `gap3-ttl-serving` (`gap3-feed-events`: the feed skips TTL entries today [F2], so TTL writes are not served before it can replay them) | `src/server/graph.rs`, `src/bin/tool_support/graph_json.rs`, `graph_mcp.rs`, `src/bin/vlite-graph-cli.rs`, the C ABI op parser, gRPC `GraphTtl`, the clients and bindings | clock-boundary oracle, all projections, mixed create and TTL atomicity, missing and due preconditions, attachment invariant, >4096 cascade, auth, parity and client goldens; TTL-001/002, ATTACH-001, AUTH-001, SHIP-001 |
+| `gap3-feed-events` (`gap3-rust-feed`) | `src/server/features.rs`, `src/server/grpc.rs`, `src/server/webhooks.rs` (progress per feature set), feed authorization, feed encoders such as `bindings/c/src/features.rs` | server feed goldens, per-set webhook progress, feature-set echo, named descriptor additions for fields 3/4/5, 19-22 and both enums, `cursor_mode_mismatch`, filter parity; FEED-001, AUTH-001, SHIP-001 |
+| `gap3-ttl-serving` (`gap3-feed-events` and the Gap 12 `Graph` schema: the feed skips TTL entries today [F2], so TTL writes are not served before it can replay them) | `src/server/graph.rs`, `src/bin/tool_support/graph_json.rs`, `graph_mcp.rs`, `src/bin/vlite-graph-cli.rs`, the C ABI op parser, gRPC `Graph` additions and tag-400 arm, the clients and bindings | clock-boundary oracle, all projections, mixed create and TTL atomicity through `WriteGraphBatch`, wrapper parity, named tag-400 descriptor entry, missing and due preconditions, attachment invariant, >4096 cascade, auth, parity and client goldens; TTL-001/002, ATTACH-001, AUTH-001, SHIP-001 |
 
 **Delivery ledger: obligations on other files.** Each serving slice carries its
 share of these rows and states in prose only what it ships.
 
 | ID | Files | Obligation |
 |---|---|---|
-| X1 | `docs/projects/roadmap/serving-contract.md` | Amend `serving-contract.md:206` ("keep GraphChangeOperation and existing stream messages unchanged") to permit the additive `GraphChangeOperation` fields 19-22, the `graph_ttl` fields 3 and 4 and `GraphRemovalReason` (§7); the Gap 12 owner confirms `GraphTtl` as a separate service or folds it into the Graph service (`serving-contract.md:202`); compare the tags and reserved ranges that the Gap 8 and Gap 12 sections propose with §7, under the rule at `serving-contract.md:208-209` (additive only, never reuse tags) |
-| X2 | `src/openapi.json`, `src/openapi_graph.json`, `proto/vlite/v1/vlite.proto`, MCP schemas, graph parsers | `src/openapi.json`: KV paths, the §8 components, the `graph_ttl` query and webhook property, error rows and a qualifier on the sentence at `src/openapi.json:6` "Successful writes are synced."; `src/openapi_graph.json`: the §8 batch-item changes, projections and the op description at `src/openapi_graph.json:2146`; the proto: the §7 services, messages and tags; MCP op schemas `src/bin/tool_support/graph_mcp.rs:584-669` and a KV forwarder beside `graph_proxy.rs:1-9`; parsers `OpIn` (`graph_json.rs:208`), `BatchIn` (`src/server/graph.rs:701-705`), the C ABI (`bindings/c/src/graph.rs:191`), `bindings/node/index.d.ts:274-285` and the `vlite-graph-cli` batch JSON |
+| X1 | `docs/projects/roadmap/serving-contract.md` | Amend `serving-contract.md:206` ("keep GraphChangeOperation and existing stream messages unchanged") to permit the named additive `GraphChangeOperation` fields 19-22, `graph_events` request tags 3/4 and echo 5, `GraphEventFeature` and `GraphRemovalReason` (§7); append TTL RPCs to `Graph` and carve the `GraphExpiryOperation expiry = 400` arm under wire conventions §§1.1-1.4 (decisions 1 and 2, proposed); compare tags and reserved ranges with the Gap 8/12 schemas and register named descriptor additions |
+| X2 | `src/openapi.json`, `src/openapi_graph.json`, `proto/vlite/v1/vlite.proto`, MCP schemas, graph parsers | `src/openapi.json`: KV paths, the §8 components, the `graph_events` query, echo and webhook property, error rows and a qualifier on the sentence at `src/openapi.json:6` "Successful writes are synced."; `src/openapi_graph.json`: the §8 batch-item changes, projections and the op description at `src/openapi_graph.json:2146`; the proto: the §7 services, messages and tags; MCP op schemas `src/bin/tool_support/graph_mcp.rs:584-669` and a KV forwarder beside `graph_proxy.rs:1-9`; parsers `OpIn` (`graph_json.rs:208`), `BatchIn` (`src/server/graph.rs:701-705`), the C ABI (`bindings/c/src/graph.rs:191`), `bindings/node/index.d.ts:274-285` and the `vlite-graph-cli` batch JSON |
 | X3 | `src/server.rs`, `src/bin/tool_support/graph_json.rs`, `src/server/grpc.rs` | Arms and stable codes for `InvalidKvKey` (422 `invalid_input`), `KvSlotsExhausted` (409 `kv_slots_exhausted`) and `NotKvCollection` (409 `not_kv_collection`), beside the fallback `error => internal(error)` (`src/server.rs:1624`) and `graph_code` (`src/server.rs:1631-1654`, fallback at `:1654`); the tool layer's `error_code` (`graph_json.rs:26-72`); the gRPC table (`src/server/grpc.rs:181-197`) |
 | X4 | `src/server/admin.rs`, `docs/CAPABILITIES.md` | The `features` object and `routes` array (`src/server/admin.rs:410-423`) gain the proposed flags `kv`, `kv_leases` and `graph_ttl` and the new routes, which clients read before using a surface (§6); `docs/CAPABILITIES.md` documents them (it already covers `features.tenant_lifecycle`, `docs/CAPABILITIES.md:195`) |
 | X5 | `docs/GRAPH.md`, `docs/GRPC.md`, `docs/API.md`, `docs/MCP.md`, `docs/WEBHOOKS.md`, `docs/TOOLS.md`, `docs/SECURITY.md`, `docs/STORAGE-FEATURES.md` | Replace "embedded Rust API only" (`GRAPH.md:60-62`), "does not report deadlines or removals yet" (`GRAPH.md:93-96`), the graph-feed paragraph (`GRPC.md:86-90`) and "REST, gRPC and bindings come after the OpenAPI review" (`STORAGE-FEATURES.md:283`) with what the shipped slice supports; the other files gain the routes, tools, webhook option, CLI commands and the scope and tenancy rules of §10 |
-| X6 | `site/api.html`, `tests/api_reference.py` | New rows and `data-api` keys beside the existing Rust KV rows (`site/api.html:1062-1074`); the extractor (`tests/api_reference.py:9-23`) gains the `http-py`, `http-js`, `dotnet` and `cli` families and, if `Get` collides, namespaced `grpc:` keys (§8) |
+| X6 | `site/api.html`, `tests/api_reference.py` | New rows and `data-api` keys beside the existing Rust KV rows (`site/api.html:1062-1074`); the extractor (`tests/api_reference.py:9-23`) gains the `http-py`, `http-js`, `dotnet` and `cli` families; `grpc:` keys stay unqualified with unique short names under wire conventions decision 16 (proposed), §8 |
 
 Each decision records the recommended option; the owner approves it before
 code. Decisions (e), (g) and (h) touch wire shared with other documents and stay
-proposals until the cross-document consistency pass.
+proposals pending owner ratification; every row below remains an open proposal,
+not a ratified choice. **Withdrawn:** the former separate-service
+placement and boolean/mode feed alternatives in (e), (g) and (m) are replaced
+by the proposals in wire conventions decisions 1, 2 and 8. Wire conventions
+decision 9 (proposed) limits
+(n)'s chunks to TTL reclaim runs. The appended references name the wire
+conventions proposals behind
+the text above without rewriting those original rows.
 
 | Decision (section) | Options | Recorded choice |
 |---|---|---|
@@ -954,22 +1047,23 @@ proposals until the cross-document consistency pass.
 | (b) Lease ledger placement (§5) | Record revisions / ordinary KV records / a new file section behind a capability flag with the P2 converter / an external allocator | A storage-format change delivered by `gap2-rust-lease-ledger` with the converter; revisions alone fail LEASE-001 |
 | (c) Fencing after restore, promotion, point-in-time output, checkpoint restore or copy (§5) | Fail closed / an external non-rollback floor / build recovery | Fail closed (`fencing_recovery_required`): a fresh domain and explicit re-enrollment (`scale-out.md:28,357`) |
 | (d) KV credential scopes (§10) | Reuse `read`/`write` / new `kv_read`/`kv_write` / reuse graph scopes | Reuse `read`/`write`, because a store naming an unknown scope fails to load in an older build (`src/server/credentials.rs:41-42`); dedicated scopes stay a future option |
-| (e) Graph TTL placement and the 19-22 amendment (§7) | A narrow `GraphTtl` service plus an amendment of `serving-contract.md:206` / wait for the full Graph service / another placement | Narrow `GraphTtl` plus the amendment (ledger X1); mixed create and TTL batches wait for the full Graph schema review |
+| (e) Graph TTL placement and the 19-22 amendment (§7) | A narrow `GraphTtl` service plus an amendment of `serving-contract.md:206` / wait for the full Graph service / another placement | Narrow `GraphTtl` plus the amendment (ledger X1); mixed create and TTL batches wait for the full Graph schema review; formerly proposed placement, **Withdrawn** as explained above. Wire conventions, decision 1 (proposed); Wire conventions, decision 2 (proposed) |
 | (f) DELETE shape (§4) | JSON body (DELETE has no defined body semantics) / query parameters / POST `.../delete` | Query parameters and the existing 200 `{"deleted"}` shape (`src/openapi.json:115`) |
-| (g) TTL-mode feed cursor (§6) | Keep `vlc1` with an out-of-band mode flag / `vlc2` binding lineage, mode, sequence and ordinal / a separate endpoint | `vlc2` with `cursor_mode_mismatch` |
+| (g) TTL-mode feed cursor (§6) | Keep `vlc1` with an out-of-band mode flag / `vlc2` binding lineage, mode, sequence and ordinal / a separate endpoint | `vlc2` with `cursor_mode_mismatch`; formerly proposed mode binding, **Withdrawn** in favor of set binding above. Wire conventions, decision 8 (proposed) |
 | (h) Size errors (§3, §10) | New size-specific error codes / reuse existing codes | Reuse 413 `invalid_json` and 422 `invalid_input`; gRPC size violations stay tonic's `OUT_OF_RANGE` |
 | (i) C ABI and WASM scope (§9) | Embedded KV and leases in every binding / C ABI graph TTL only / none | C ABI graph TTL only; WASM explicitly unsupported; embedded KV and leases wait for the Rust slices; HTTP clients and the CLI get full parity |
 | (j) Restart holders (§5) | Preserve live grants with a durable clock protocol / invalidate all at recovery | Invalidate all; document the availability tradeoff |
 | (k) Lease quotas (§10) | A fixed universal cap / an explicit configured per-tenant quota / unlimited | An explicit finite quota; activation is rejected until configured; allocator history is never evicted |
 | (l) Lease holder identity (§5) | Transferable token / principal-bound / an admin takeover API | Principal-bound; no takeover API |
-| (m) Feed compatibility (§6) | Change the default decoder / opt-in `graph_ttl` | Opt-in; the default feed is unchanged |
-| (n) Oversized reclaim feed (§6) | Truncate / fail permanently / deterministic resumable chunks | Chunks; independent cursor and replay acceptance is mandatory |
+| (m) Feed compatibility (§6) | Change the default decoder / opt-in `graph_ttl` | Opt-in; the default feed is unchanged; formerly proposed boolean, **Withdrawn** in favor of the set above. Wire conventions, decision 8 (proposed) |
+| (n) Oversized reclaim feed (§6) | Truncate / fail permanently / deterministic resumable chunks | Chunks; independent cursor and replay acceptance is mandatory. Wire conventions, decision 9 (proposed) |
 | (o) Wire numbers (§3) | JSON numbers / canonical decimal strings | Decimal strings for every new u64; existing numeric inputs only where already public |
 | (p) KV batch (§2, §12) | Simulate with sequential writes / a storage transaction API first / omit | Omit; a future batch needs independent atomicity and schema review |
 
 Not decided here: the ledger byte layout, framing and replay; restore
 provenance detection; the converter; the lease-quota configuration surface;
-and the extractor change for multi-service RPC names (ledger X6). None permits
+and any future extractor families (ledger X6); RPC short-name uniqueness follows
+wire conventions decision 16 (proposed). None permits
 weakening the normative contract or shipping a partial lease API. The owner
 resolves or explicitly defers each decision before the affected surface ships;
 this document claims no implementation or release.

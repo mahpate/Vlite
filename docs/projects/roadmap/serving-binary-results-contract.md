@@ -1,6 +1,7 @@
 # P5: binary search-result serving contract
 
 Status: one design candidate for independent acceptance; not implemented or released.
+This document is conformed to the [serving wire conventions proposal](serving-wire-conventions.md), whose owner decisions remain open.
 The [owner's wire approval](next-major.md#decided-2026-11-02) authorizes exact
 schemas to be reviewed before code, not automatic acceptance of this candidate.
 Evidence below was checked at `00babff460c58b0d80f179de79cfcc3e50c0ce57`.
@@ -140,7 +141,10 @@ All errors, even when Accept excludes JSON, use
 | 422 | `binary_result_limit` | `binary result exceeds 10000 hits, 1048576 bytes or a 1024-byte plan string` |
 | 500 | `binary_result_invalid` | `search result cannot be encoded as binary version 1` |
 
-These are representation errors, not engine Error variants. Do not expose
+Each new code in this table is produced by an `ApiError` built by the HTTP
+handler, per [wire conventions section 2](serving-wire-conventions.md#2-error-registry-c2-c9);
+none adds a public `Error` variant. These representation errors are REST-only.
+Do not expose
 offending values, field names, encoded lengths or internal exceptions in messages.
 Existing auth, request-body, search, busy and index errors retain their codes.
 JSON requests do not acquire a new output cap. Binary requests never truncate
@@ -149,11 +153,16 @@ or fall back to JSON when a result cannot be encoded.
 ## 4. Exact message and byte layout
 
 Proposed future file `proto/vlite/serving/v1/results.proto` contains this entire
-schema; it is **not** added by this documentation slice. No services/imports:
+schema; it is **not** added by this documentation slice. No services.
+Proposed reuse follows [wire conventions, decision 17](serving-wire-conventions.md#6-owner-decisions-23),
+option A. **Withdrawn:** the local `HybridHit` definition duplicated
+`vlite.v1.HybridHit`; import it instead per that proposal.
 
 ```proto
 syntax = "proto3";
 package vlite.serving.v1;
+
+import "vlite/v1/vlite.proto";
 
 enum ResultKind {
   RESULT_KIND_UNSPECIFIED = 0;
@@ -165,15 +174,6 @@ message VectorHit {
   uint64 id = 1;
   double distance = 2;
   reserved 3 to 15;
-}
-message HybridHit {
-  uint64 id = 1;
-  double score = 2;
-  optional double distance = 3;
-  optional double bm25 = 4;
-  optional uint32 vector_rank = 5;
-  optional uint32 text_rank = 6;
-  reserved 7 to 15;
 }
 message SearchStats {
   uint64 records_scanned = 1;
@@ -197,7 +197,7 @@ message SearchResults {
   uint32 version = 1;
   ResultKind kind = 2;
   repeated VectorHit hits = 3;
-  repeated HybridHit hybrid_hits = 4;
+  repeated vlite.v1.HybridHit hybrid_hits = 4;
   SearchStats stats = 5;
   QueryPlan plan = 6;
   reserved 7 to 15;
@@ -339,7 +339,7 @@ Fixtures originate from this layout, not a server/generator round-trip.
 this slice.** gRPC already encodes typed hit messages [E5]; HTTP Accept has
 no meaning on its RPC. SearchResults is a separate HTTP representation, not a
 replacement for `vlite.v1.SearchResponse`. The new schema has no service.
-Keep existing tags (`Hit` 1/2, `HybridHit` 1..6, `SearchResponse` 1/2) untouched.
+Keep existing tags (`Hit` 1/2, `vlite.v1.HybridHit` 1..6, `SearchResponse` 1/2) untouched.
 Its absence of HTTP explain/version fields is intentional. Auto/explain parity
 belongs to a separately reviewed serving schema, not this candidate.
 The HTTP typed refactor may adjust `src/server/grpc.rs` adapters only to preserve
@@ -408,7 +408,7 @@ JavaScript `search(request, {resultFormat = "json"} = {})` and
 Python `search(request, *, result_format="json")` and
 `search_detailed(request, *, result_format="json")`;
 .NET retain current methods and add the distinctly named
-`SearchDetailedWithFormatAsync(object request, SearchResultFormat resultFormat, CancellationToken cancellation = default)`,
+`SearchDetailedWithResultFormatAsync(object request, SearchResultFormat resultFormat, CancellationToken cancellation = default)`,
 with enum Json/BinaryV1. Leave .NET `SearchAsync` JSON-only: its existing
 `Hit.Distance` is nonnullable (`clients/dotnet/VLite.Client/Client.cs:27,159-162`),
 so it cannot preserve absent hybrid distances. A nullable typed-hit redesign
@@ -453,6 +453,7 @@ Run self-tests as part of the oracle invocation.
 | Family | Independent acceptance assertion |
 |---|---|
 | Goldens | Python accepts canonical manual fixtures; Rust produces identical bytes; supported SDKs normalize identically |
+| Proto descriptors | Compile `results.proto` together with `vlite.proto`; assert `SearchResults.hybrid_hits` tag 4 resolves to `.vlite.v1.HybridHit`, its existing tags/presence remain unchanged, no serving message name duplicates a `vlite.v1` message, and `results.proto` declares no service, per [wire conventions section 1.4](serving-wire-conventions.md#14-service-versus-arm-prefix-and-package-rules-c16) |
 | JSON parity | On a fixed clock/snapshot, same authorized execution supplies both encoders; compare ordered IDs, finite float bits, absent/null fields, counters and plan |
 | Modes | Exact, approximate, approximate_ready, auto, hybrid vector/text/both, exact/MMR rerank; preserve current validation and index errors |
 | Custom rerank | Binary selection returns 406 `binary_unsupported_mode` before search/provider work; JSON retains approved `rerank_score`/`ranking` behavior; no silent field loss |
@@ -485,19 +486,44 @@ names below are proposed labels under it, not claims of existing accepted work.
 They do not consume Gap 8/12 or P5 ANN/compression ledger entries.
 Order is dependency order; each candidate needs independent acceptance before
 integration. File ownership below is future work only.
+Under [wire conventions sections 5.1-5.2](serving-wire-conventions.md#5-files-order-and-guards),
+P5 lands at serving step 10: 5C's `src/server.rs` and `src/server/grpc.rs`
+edits and 5D's `src/server.rs` and `src/openapi.json` edits follow all
+shared-file slices of steps 2-9, rebased onto their landed contents.
 
 | Ledger name | Depends on | Files owned | Independent-acceptance checklist |
 |---|---|---|---|
 | P5-5A binary contract | None | This document only | Approve schema, negotiation, errors, bounds and owner decisions; confirm OpenAPI/proto unchanged |
 | P5-5B binary oracle | 5A | `tests/serving_binary_oracle.py`, `tests/fixtures/serving_binary/` | Manual bytes/answers, positive and negative self-tests, mutations and bounded decode independently checked |
-| P5-5C typed encoder | 5B | `proto/vlite/serving/v1/results.proto`, new `src/server/binary_results.rs`, `src/server.rs` typed Hits/refactor, `src/server/grpc.rs` adapter, required schema build wiring | Exact proposed schema; typed JSON parity; cap-before-allocation; oracle byte equality; unchanged gRPC wire/rerank behavior |
-| P5-5D HTTP opt-in | 5C | `src/server.rs` negotiation/adapter, `src/openapi.json`, new `tests/server_binary_results.rs` | Section 5 diff only; header/error table, auth/tenant/audit/admission parity, no search on rejection, full-frame-before-headers and client-disconnect behavior verified |
+| P5-5C typed encoder | 5B; shared-file slices of serving steps 2-9 (lands at step 10) | `proto/vlite/serving/v1/results.proto`, new `src/server/binary_results.rs`, `src/server.rs` typed Hits/refactor, `src/server/grpc.rs` adapter, root `build.rs`, a named entry in the shared descriptor test proposed in [wire conventions section 1.2](serving-wire-conventions.md#12-per-service-obligations-c14) | Exact proposed schema with imported `vlite.v1.HybridHit`; joint schema compilation and descriptor assertions; typed JSON parity; cap-before-allocation; oracle byte equality; unchanged gRPC wire/rerank behavior |
+| P5-5D HTTP opt-in | 5C; shared-file slices of serving steps 2-9 (lands at step 10) | `src/server.rs` negotiation/adapter, `src/openapi.json`, new `tests/server_binary_results.rs` | Section 5 diff only; header/error table, auth/tenant/audit/admission parity, no search on rejection, full-frame-before-headers and client-disconnect behavior verified |
 | P5-5E HTTP clients | 5D | `clients/javascript/`, `clients/python/`, `clients/dotnet/` implementation/types/tests and their search docs | All three decoders cross-check oracle; exact IDs/presence; defaults and existing signatures preserved; explicit failure on old server |
 | P5-5F serving qualification | 5E | Serving parity/fuzz tests, directly related public API/security/client docs and `site/api.html` | Full matrix, compatibility, sanitized observation, published contract agrees with schema/OpenAPI; no default/gate change |
 
 Do not overlap ownership of server.rs between 5C/5D or integrate a partial
-client set as completion of 5E. Coordinate schema build wiring with its owner;
-do not add an RPC or pull unrelated graph/provider APIs into the same candidate.
+client set as completion of 5E.
+
+Build wiring verified in this checkout: root [`build.rs`](../../../build.rs)
+currently runs `grpc()` only under feature `grpc`; its
+`protox::compile(["vlite/v1/vlite.proto"], ["proto"])` feeds
+`tonic_prost_build::configure().build_client(true).build_server(true).compile_fds(...)`.
+No `results.proto` wiring exists today.
+Proposed owner is root `build.rs` in 5C: add `vlite/serving/v1/results.proto`
+to that same compile input list, retaining the `proto` include root and
+`cargo:rerun-if-changed=proto`, then pass the joint descriptors to the existing
+generated-code step. Check it with `cargo check --features grpc --bin vlite-server`;
+also check `cargo check --features server --bin vlite-server` to preserve the
+HTTP-only build's isolation from optional gRPC generation.
+[`tests/grpc_smoke.py`](../../../tests/grpc_smoke.py)'s `generate()` currently
+compiles only `vlite.proto` plus its health schema, so it does not exercise
+`results.proto`. Proposed 5C adds the section 8 descriptor row as a named entry
+of the shared descriptor test proposed in
+[wire conventions section 1.2](serving-wire-conventions.md#12-per-service-obligations-c14),
+compiling both VLite schemas together and rebased onto the landed steps 2-9.
+This supplies the [wire conventions section 1.4](serving-wire-conventions.md#14-service-versus-arm-prefix-and-package-rules-c16)
+test without relying on the independent byte oracle or strict decoder to prove
+schema identity. All wiring and checks described here are future 5C work.
+Do not add an RPC or pull unrelated graph/provider APIs into the same candidate.
 Major-release measurement remains outside these slices and follows the existing
 roadmap; accepting a codec is not acceptance of F7 qualification.
 
@@ -511,7 +537,7 @@ roadmap; accepting a codec is not acceptance of F7 qualification.
 | BR-4 | Boundaries, Success headers, Transport | P5-5C, P5-5D |
 | BR-5 | Goldens, mutation corpus/fuzz, Transport | P5-5B, P5-5E, P5-5F |
 | BR-6 | Auth, Admission, Observation, Transport | P5-5D, P5-5F |
-| BR-7 | Compatibility, Negotiation | P5-5C, P5-5E |
+| BR-7 | Compatibility, Negotiation, Proto descriptors | P5-5C, P5-5E |
 | BR-8 | Independently accepted slice checklists and full matrix | P5-5A through P5-5F |
 
 ## 10. Owner decisions and open items
@@ -522,7 +548,7 @@ each decision rather than imply approval from this document.
 | Decision | Options | Recommendation |
 |---|---|---|
 | Encoding | HTTP protobuf or Arrow | HTTP protobuf v1 as specified; defer Arrow/projection to a separately versioned design |
-| Schema identity | Extend existing gRPC SearchResponse or independent HTTP envelope | Independent `vlite.serving.v1.SearchResults`; no gRPC tag/default changes |
+| Schema identity | Extend existing gRPC SearchResponse or independent HTTP envelope | Independent `vlite.serving.v1.SearchResults`; no gRPC tag/default changes. Wire conventions, decision 17 (proposed) |
 | Negotiation | Strict binary opt-in or automatic binary preference | Strict opt-in with JSON ties/default and explicit 406 codes |
 | Remaining Accept rejection | Ignore all explicit exclusions as today or enforce approved unsupported-type/version rejection | Recommend section 3's 406 for well-formed unsupported/excluded representations; JSON media parameters ignored, empty/malformed/oversized Accept skips negotiation; no new Accept 400/431 |
 | Custom rerank | Extend binary v1 or reject unsupported mode explicitly | Recommend 406 `binary_unsupported_mode` before execution; do not drop approved JSON `rerank_score` or `ranking` |

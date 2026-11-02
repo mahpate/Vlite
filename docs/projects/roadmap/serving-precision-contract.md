@@ -6,6 +6,7 @@ subject to exact-schema review before code
 (`docs/projects/roadmap/next-major.md:40-55`). This document applies nothing.
 Float32 remains the default. Float16 remains a separate, explicitly selected,
 lossy per-collection option, unavailable to production writers until qualified.
+This document is conformed to the [serving wire conventions proposal](serving-wire-conventions.md), whose owner decisions remain open.
 
 Scope: collection creation and inspection through REST, gRPC, MCP and clients;
 offline compact-store creation and copy-out conversion through CLI. Non-goals:
@@ -81,9 +82,12 @@ No aliases, whitespace normalization, numeric encodings, null or coercion.
 Request objects reject unknown properties; precision is a top-level field,
 never a setting. Read it from the raw JSON value so absent differs from `null`:
 `Option<_>` fields fold `null` into absent (silently Float32) and a typed
-`String` turns a wrong type into `invalid_json`. Absent = legacy create; `null`,
-a non-string or an unknown string = 422 `invalid_precision` (a field type that
-deserializes `Value`, defaulting to Absent, does this). Existing settings
+`String` turns a wrong type into `invalid_json`. Absent = legacy create;
+`null` or an unknown/case-mismatched string = proposed 422 `invalid_input`
+with `details.field="precision"`; a non-null, non-string value is a shape
+failure, 422 `invalid_json`. A field type that deserializes `Value`, defaulting
+to Absent, preserves these distinctions. See [wire conventions, decisions 6
+and 21](serving-wire-conventions.md#6-owner-decisions-23). Existing settings
 semantics/limits remain: REST updates partially merge, with the strict input and
 validation in `src/server/collections.rs:94-170` and `src/collection.rs:59-94`.
 
@@ -159,6 +163,15 @@ The following is the exact additive diff inventory; existing fields/messages
 remain byte-for-byte unchanged, except for the shown added fields/reservations.
 No tags in these messages are currently reserved
 (`proto/vlite/v1/vlite.proto:62-87`); these new reservations allocate no fields.
+At serving-order step 11, the descriptor test must confirm the proposed
+`Collection.precision=7`, `Collection.compact=8` and
+`ListCollectionsResponse.compact=3`, and reservations `3 to 15` on
+VectorPrecision, `5 to 15` and `100 to 199` on
+CreateCollectionWithPrecisionRequest, `9 to 15` on Collection and `4 to 15` on
+ListCollectionsResponse: all are absent from, and do not collide with, the
+frozen proto's current declarations; the low-tag additions and new-message
+reserve follow [wire conventions sections 1.3-1.4](serving-wire-conventions.md#13-field-number-allocation-c1),
+without sibling-band fences on baseline-owned messages.
 
 ```proto
 // Add inside service VLite:
@@ -178,6 +191,7 @@ message CreateCollectionWithPrecisionRequest {
   optional string settings_json = 3;
   VectorPrecision precision = 4;
   reserved 5 to 15;
+  reserved 100 to 199;
 }
 
 // Add inside existing Collection (existing tags 1..6 retained):
@@ -191,7 +205,9 @@ reserved 4 to 15;
 ```
 
 Explicit RPC requires enum 1 or 2; 0 and unknown values fail INVALID_ARGUMENT
-with `invalid_precision`. Omitted settings_json means defaults; supplied
+with proposed `invalid_input` and `details.field="precision"` per
+[wire conventions, decisions 6 and 21](serving-wire-conventions.md#6-owner-decisions-23).
+Omitted settings_json means defaults; supplied
 settings_json must encode the same strict settings object as REST, not null.
 Its errors differ from REST's: malformed JSON text is 400 `invalid_json`; a
 non-object or strict-schema, unknown-field or type error (including `precision`)
@@ -282,12 +298,13 @@ Do not add a convert/create-store tool, even in writable mode.
 
 For these new tools, success is the existing content text plus structuredContent
 with `isError:false`; failure is `isError:true` with text=message and
-`structuredContent:{"error":{"code":CODE,"message":MESSAGE}}`. Proxy preserves
-the REST code/message; local errors use section 8. Structured errors apply to
-these tools only; existing MCP errors stay strings
-(`src/bin/vlite-mcp.rs:673-681`). Malformed JSON-RPC keeps protocol errors;
+`structuredContent:{"error":"<code>: <message>"}`, as proposed in
+[wire conventions, decision 22](serving-wire-conventions.md#6-owner-decisions-23).
+Proxy preserves the REST code/message; local errors use section 8.
+**Withdrawn:** the new-tool-only object-shaped failure proposal added a second
+parser shape; see wire conventions, decision 22. Malformed JSON-RPC keeps protocol errors;
 valid tools/call with invalid operation arguments uses `invalid_json` or
-`invalid_precision`, not a success-shaped empty result.
+`invalid_input`, not a success-shaped empty result.
 
 ## 6. CLI: exact offline operations
 
@@ -459,7 +476,9 @@ are proposed. Generated gRPC clients receive the RPC/messages in section 4.
 ## 8. Errors, authorization and observability
 
 REST errors retain `{"error":{"code":string,"message":string}}`, verified at
-`src/server.rs:1407-1413`. New codes below are proposed adapter mappings,
+`src/server.rs:1407-1413`, with the optional `error.details` object proposed in
+[wire conventions, section 3 and decision 21](serving-wire-conventions.md#3-encoding-rules-c12).
+New codes below are proposed adapter mappings,
 not new Rust Error variants. gRPC carries the same code in `vlite-error-code`
 and message in status; current trailer machinery is
 `src/server/grpc.rs:199-215`. CLI new-operation errors print that same JSON
@@ -468,19 +487,19 @@ vectors in public errors.
 
 | Refusal / underlying cause | Stable code | HTTP | gRPC |
 |---|---|---|---|
-| Gate closed: any explicit precision (even `"float32"`), compact create or conversion. An adapter check, not an engine error: `precision_supported()` is `pub(crate)` (`src/compact/mod.rs:56-66`); `UnsupportedFeature(32)` is only an open-time refusal (`src/format.rs:1442-1453`) | `precision_not_enabled` | 409 | FAILED_PRECONDITION |
+| Gate closed: any explicit precision (even `"float32"`); compact create or conversion is offline only. An adapter check, not an engine error: `precision_supported()` is `pub(crate)` (`src/compact/mod.rs:56-66`); `UnsupportedFeature(32)` is only an open-time refusal (`src/format.rs:1442-1453`) | `precision_not_enabled` | 409 | FAILED_PRECONDITION |
 | Store below format V4: `CollectionsRequireUpgrade`, `ImportsRequireUpgrade`, `ChangeFeedRequiresUpgrade` (existing mapping, `src/server.rs:1510-1516`) | `requires_format_v4` | 409 | FAILED_PRECONDITION |
 | Explicit precision (even `"float32"`) on a store not opted in; designed UnsupportedFeature(16), Design A's only (16) mapping (`p3-precision-api.md:197`) | `compact_required` | 409 | FAILED_PRECONDITION |
 | Unimplemented supported-backing path/build, or compact with timestamps; UnsupportedFeature / UnsupportedFeature(2) | `unsupported_feature` | 409 | FAILED_PRECONDITION |
 | Unsupported format version; UnsupportedVersion | `unsupported_version` | 409 | FAILED_PRECONDITION |
-| Unknown/case-mismatched/null precision, wrong precision type, enum 0/unknown | `invalid_precision` | 422 | INVALID_ARGUMENT |
+| Unknown/case-mismatched/null precision, enum 0/unknown; proposed `details.field="precision"` | `invalid_input` | 422 | INVALID_ARGUMENT |
 | Malformed JSON text (REST body or gRPC `settings_json`) | `invalid_json` | 400 | INVALID_ARGUMENT |
-| REST strict-schema/type/unknown-field rejection, including `precision` in settings | `invalid_json` | 422 | n/a |
+| REST strict-schema/type/unknown-field rejection, including a non-null non-string top-level precision or `precision` in settings | `invalid_json` | 422 | n/a |
 | gRPC `settings_json` non-object or strict/unknown/type error, including `precision` (`src/server/collections.rs:250-256`) | `invalid_input` | n/a | INVALID_ARGUMENT |
 | Dimensions/name/settings invalid (designed InvalidCollectionSettings) | `invalid_input` | 422 | INVALID_ARGUMENT |
 | Wrong vector width, nonfinite value or finite half overflow; DimensionMismatch/NonFiniteVector | `invalid_input` | 422 | INVALID_ARGUMENT |
 | Collection missing / exists / limit / reserved default | `collection_not_found` / `collection_exists` / `collection_limit` / `default_collection_immutable` | 404 / 409 / 409 / 409 | NOT_FOUND / ALREADY_EXISTS / FAILED_PRECONDITION / FAILED_PRECONDITION |
-| Open import during conversion; designed ImportConflict | `import_conflict` | 409 | FAILED_PRECONDITION |
+| Open import during offline conversion; designed ImportConflict | `import_conflict` (existing wire code for other operations) | offline | offline |
 | Read-only credential / wrong scope | `read_only` / `forbidden_scope` | 403 | PERMISSION_DENIED |
 | Missing/invalid bearer | `unauthorized` | 401 | UNAUTHENTICATED |
 | Suspended/deleted tenant | `tenant_suspended` / `tenant_unavailable` | 403 | PERMISSION_DENIED |
@@ -495,9 +514,21 @@ vectors in public errors.
 | Other I/O failure | `internal_error` (CLI: `io_error`, `src/bin/tool_support/graph_json.rs:28`) | 500 | INTERNAL |
 | Old gRPC server lacks explicit RPC | `unimplemented` (client classification; no promised trailer) | n/a | UNIMPLEMENTED |
 
-The gate, opt-in, `unsupported_feature`, `unsupported_version` and
-compact-with-timestamps rows are NEW REST/gRPC mappings, applied only inside an
-explicit-precision operation; today those engine errors reach the 500 catch-all
+**Withdrawn:** the separate `invalid_precision` code duplicated semantic
+validation; see [wire conventions, decision 6](serving-wire-conventions.md#6-owner-decisions-23).
+Its replacement is the existing `invalid_input`, built as an `ApiError` by the
+explicit-precision handler with the proposed field context from decision 21.
+
+The proposed `precision_not_enabled`, `compact_required`,
+`unsupported_feature` and `unsupported_version` REST/gRPC mappings are
+`ApiError`s built only by explicit-precision handlers: respectively from the
+adapter gate check, existing `Error::UnsupportedFeature(16)`, other existing
+`Error::UnsupportedFeature` causes (including timestamps), and existing
+`Error::UnsupportedVersion`. They add no global `From<Error>` arm or public
+`Error` variant; see [wire conventions, decision 7](serving-wire-conventions.md#6-owner-decisions-23).
+`unsupported_feature` uses the proposed `details.feature` and
+`details.category` context from decisions 7 and 21.
+Today those engine errors reach the 500 catch-all
 `internal_error` (`src/server.rs:1624`) and legacy routes keep that. `offline`
 rows arise only in the CLI or at startup, which stays a process error
 (section 1), and create no HTTP/gRPC mapping. The CLI mapper
@@ -507,6 +538,12 @@ rows arise only in the CLI or at startup, which stays a process error
 `encryption_key_required`, `commit_indeterminate` and `poisoned` of these codes
 and falls back to `database_error`; the other CLI-reachable codes are new
 (section 11, "Error vocabulary").
+Their producers are CLI adapter checks for `precision_not_enabled` and
+`compact_required`, existing `Error::Io` with AlreadyExists for
+`destination_exists`, and existing `Error::EncryptionKeyMismatch`,
+`Error::NotEncrypted`, `Error::InvalidEncryptionOptions` and
+`Error::PublicationIndeterminate` for their corresponding codes; these
+CLI-only mappings add no public `Error` variant or wire mapping.
 Fixed gate message: `"precision storage is not enabled in this build"`;
 compact-required message: `"explicit precision requires a compact store"`.
 Other messages are sanitized and not machine-parsed.
@@ -514,8 +551,8 @@ Other messages are sanitized and not machine-parsed.
 Precedence, first failing step wins, never probing unauthorized store state:
 
 1. Authorization and tenant admission.
-2. Strict validation: `invalid_json`, `invalid_precision`, gRPC `settings_json`
-   `invalid_input`.
+2. Strict validation: `invalid_json` for shape failures; `invalid_input` for
+   semantic precision failures and gRPC `settings_json` validation.
 3. Gate: `precision_not_enabled`.
 4. Store version: `requires_format_v4`.
 5. Opt-in: `compact_required`.
@@ -664,11 +701,12 @@ outside tests, `src/compact/mod.rs:56-66`):**
 | Matrix | Required assertions |
 |---|---|
 | Refusal | Every explicit-precision create, even `"float32"` or in an empty compact Float32 store, and every compact create or conversion fails `precision_not_enabled` before any engine call; no downgrade, fallback or file/source mutation. |
-| Validation order | Each section 8 precedence step beats later ones; every bound and bound+1, enum unknown/zero, null/type/case errors, gRPC `settings_json` text versus object errors. |
+| Validation order | Each section 8 precedence step beats later ones; every bound and bound+1; enum unknown/zero and null/case failures use `invalid_input` with proposed `details.field="precision"`, wrong non-null precision types use `invalid_json`; gRPC `settings_json` text versus object errors. |
 | Auth | Admin/scoped wildcard/tenant wildcard/read-only; 28/29-byte tenant local names, 63/64-byte unqualified names; qualify exactly once, scope before lookup, revoked/suspended/deleted grants, filtered lists. Proxy and local authority distinguished. |
 | Legacy unchanged | Omitted-precision creates behave as today on every transport; record/search shapes and old Float32 files/constructors unchanged. |
 | Compatibility | Old client/new response ignores extras; new client/old response keeps absent fields unknown. Old gRPC explicit RPC UNIMPLEMENTED; old REST rejects precision; no fallback. |
-| Specification | Validate proposed schemas against hand-authored goldens; protoc descriptor tag/reservation check; OpenAPI operation IDs/paths and API-reference keys; clients preserve optional response fields and positional signatures. |
+| Specification | Validate proposed schemas against hand-authored goldens; step-11 protoc descriptor tag/reservation check per section 4; OpenAPI operation IDs/paths and API-reference keys; clients preserve optional response fields and positional signatures. |
+| Error shape/scope | MCP failures are strings per section 5; the four new 409 mappings apply only to explicit-precision handlers, legacy routes retain their mappings, and offline refusals create no wire mapping. |
 
 **Gate-open success goldens (deferred to the activation decision; none written now):**
 
@@ -698,11 +736,12 @@ documentation task.
 | Slice | Owned files | Required tests and independent-acceptance checklist |
 |---|---|---|
 | `p3-serving-rest` | `src/server/collections.rs`, `src/server.rs`, approved `src/openapi.json`; coordinated audit/metrics in server modules | Contract goldens; strict schema/defaults/atomic reads; auth/tenant/refusal matrix; review exact errors and schema against independent fixtures; API-reference rows complete. |
-| `p3-serving-grpc` | `proto/vlite/v1/vlite.proto`, `src/server/grpc.rs` | Descriptor/tag/reservation goldens, generated-old-client interoperability, explicit-RPC UNIMPLEMENTED/no-fallback, REST parity and trailers; independent sign-off on no tag reuse or default ambiguity. |
+| `p3-serving-grpc` | `proto/vlite/v1/vlite.proto`, `src/server/grpc.rs` | Step-11 descriptor/tag/reservation goldens per section 4, generated-old-client interoperability, explicit-RPC UNIMPLEMENTED/no-fallback, REST parity and trailers; independent sign-off on no tag reuse or default ambiguity. |
 | `p3-serving-cli-mcp` | `src/bin/vlite-maintain.rs`, `src/bin/vlite-shell.rs`, `src/bin/vlite-mcp.rs`, relevant `src/bin/tool_support/` proxy support, `Cargo.toml` | CLI process/lock/no-clobber/source-byte goldens; local/proxy MCP schemas and errors, read-only rejection, offline-only conversion; independently exercise Windows aliases/publication failures and production refusals. |
 | `p3-serving-clients` | `clients/python/vlite_client/__init__.py`, `clients/javascript/index.js`, `clients/javascript/index.d.ts`, `clients/dotnet/VLite.Client/Client.cs`, their existing tests | Request goldens, optional response fields, no coercion/retry, cancellation/positional compatibility, old/new server matrix; independent review against approved REST/proto, not client-generated expectations. |
 
-Order: rest, grpc, cli-mcp (its proxy needs rest), clients (need rest/proto
+At [serving-order step 11](serving-wire-conventions.md#51-order), internal
+order: rest, grpc, cli-mcp (its proxy needs rest), clients (need rest/proto
 goldens). Each slice owns its reference updates and tests; none may edit shared
 storage gates to make an adapter test pass. Activation of float16 remains a
 **separate qualified opt-in decision** after lifecycle/preservation
@@ -717,11 +756,11 @@ qualification for every promised backing. Float32 stays the default.
 | Response placement | Add precision+compact to each descriptor and compact to list / separate precision endpoint | Additive fields as specified; Rust CollectionInfo stays unchanged, reads are atomic. |
 | Remote conversion | None / admin-only path-based endpoint with separate lifecycle protocol | None. Offline CLI only; never convert in place or while serving. |
 | CLI coverage | Maintain persistent create + shell memory / add server/import activation flags / add a directory-output conversion route | Maintain/shell only; conversion writes a file (no CLI route to `convert_to_directory`); `--encryption-key-file PATH`; server/import defaults untouched. |
-| Error vocabulary | Contextual stable codes above / generic unsupported_feature for all causes | Contextual codes; extend the CLI mapper (`src/bin/tool_support/graph_json.rs:26-72`) with every section 8 code the CLI reaches; legacy mappings unchanged; uncertainty distinct. |
+| Error vocabulary | Contextual stable codes above / generic unsupported_feature for all causes | Contextual codes; extend the CLI mapper (`src/bin/tool_support/graph_json.rs:26-72`) with every section 8 code the CLI reaches; legacy mappings unchanged; uncertainty distinct. Wire conventions, decision 6 (proposed); Wire conventions, decision 7 (proposed); Wire conventions, decision 21 (proposed). |
 | MCP response names | Preserve existing collections/count / rename to REST items/live_records | Preserve existing keys and add fields; only new tools use REST descriptor shapes. |
 | Rust API visibility during the hold (`p3-precision-api.md:188,229,242`; `src/compact/mod.rs:56-66`; `src/bin/vlite-mcp.rs:18`) | Design A unshipped, `pub(crate)` gate, adapters refuse before the engine / `pub` API with gate-closed refusal / `pub` behind a cargo feature | Unshipped: bins see only the public API, so CLI/MCP land parsing and refusals; success goldens (section 10) wait for a `pub` API and the activation decision. No new Error variant or feature flag. |
 | New MCP tools and proxy extension (`src/bin/vlite-mcp.rs:24-26`, `:464-474`) | Both, local and proxy / local only | Both, with REST grants; the proxy never elevates (section 5). |
-| Structured MCP error (`src/bin/vlite-mcp.rs:673-681`: string errors today) | New tools only / all tools | New tools only. |
+| Structured MCP error (`src/bin/vlite-mcp.rs:673-681`: string errors today) | New tools only / all tools | All tools: one string failure `"<code>: <message>"`; the new-tool-only object-shaped proposal is withdrawn. Wire conventions, decision 22 (proposed). |
 | Audit and metric additions (section 8) | As specified / audit only / none | As specified; no tenant, path or collection labels. |
 | .NET public API (`clients/dotnet/VLite.Client/Client.cs:119-133`) | Enum plus named method / string argument | Enum plus named method; lowercase wire strings. |
 | Store-level `compact` in the list response | Include / omit | Include: one persisted store flag. |

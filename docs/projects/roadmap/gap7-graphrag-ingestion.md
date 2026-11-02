@@ -1,6 +1,7 @@
 # Gap 7: GraphRAG ingestion
 
 Status: design for owner approval; nothing in this document is implemented.
+This document is conformed to the [serving wire conventions proposal](serving-wire-conventions.md), whose owner decisions remain open.
 Scope: one source document becomes embedded chunks, resolved entities, directed
 relations and evidence in a graph-enabled database. All proposed defaults, Rust
 types, reserved schema and delivery boundaries require approval before code.
@@ -95,7 +96,7 @@ Pipeline = { version: sha256, chunker, extractor_alias, extractor_version,
              normalization: "ascii-key-v1", embedder_alias, model_version,
              dimensions, binding_generation, schema_version: 1 }
 IngestRequest = { source, pipeline, expected_source: Absent | Revision(u64),
-                  mode: AtomicDocument | Incremental, deadline_ms: u32 }
+                  mode: AtomicDocument | Incremental, deadline_ms: uint64 }
 Prepared = { receipt_key, request_digest, plan_digest, ordered_batches }
 IngestResult = { receipt_key, source_revision_key, state, last_batch, total_batches,
                  chunk_count, entity_count, relation_count, receipt_revision,
@@ -471,7 +472,7 @@ is reused.
 
 | Failure | Existing public `Error`; outcome |
 |---|---|
-| Invalid text, pipeline, span, reference, alias, deadline, busy admission or decoded provider output | `InvalidQuery(&'static str)` with fixed sanitized reasons; no writes for preparation failures |
+| Invalid text, pipeline, span, reference or deadline | `InvalidQuery(&'static str)` with fixed sanitized reasons; no writes for preparation failures |
 | Source bytes over 1,048,576 | `PayloadTooLarge(actual)` (Display at `src/lib.rs:498-500` states that fixed maximum, so an operator-lowered source ceiling uses the document-ceiling reason below) |
 | Whole-plan ceilings (chunks, entities, relations, mentions, frames, prepared memory) | `InvalidQuery("ingestion document ceiling")`; no writes |
 | A real frame limit (`AtomicDocument` over 4,096 operations or 16 MiB, or commit-time frame admission) | `BatchTooLarge` (Display at `src/lib.rs:501-504`); appends nothing, any partial job is kept |
@@ -482,7 +483,9 @@ is reused.
 | Raw-writer interference at a later frame (changed or removed object, anchor create race) | `RevisionMismatch`, `GraphKeyExists`, `GraphNodeNotFound`, `GraphEdgeNotFound`, `GraphNodeHasEdges`; the frame appends nothing, the partial job is kept and abort (ING-012) is the exit |
 | Missing graph/collection or graph enablement | `GraphNotFound`, `CollectionNotFound`, `GraphsNotEnabled` |
 | Graph schema/attachment/expiry conflict | Existing `GraphSchemaViolation`, `GraphAttachmentConflict`, `GraphRecordNotAttachable`, `GraphAttachedRecord`, `GraphAttachedRecordExpiry` |
-| Provider timeout/unavailable/cancelled | `InvalidQuery` with distinct static reasons `ingestion provider timeout`, `ingestion provider unavailable`, `ingestion cancelled` |
+| Provider timeout/unavailable/invalid response/not configured/busy or invalid provider input | Existing `InvalidQuery` with sanitized static reasons as internal labels only, including `ingestion provider timeout` and `ingestion provider unavailable`; proposed serving codes are listed below |
+| Job admission full | Serving handler builds 503 `busy` directly; no fabricated `InvalidQuery` admission error |
+| Cancellation | Existing `InvalidQuery("ingestion cancelled")` is an internal label; no cancellation wire code per [wire conventions section 2.2](serving-wire-conventions.md#22-one-reachable-family-oversize-deadline-cancel-busy) |
 | Append/sync ambiguity, poisoned handle, I/O | Propagate `CommitIndeterminate`, `Poisoned`, `Io`; reopen and reconcile, never return complete |
 
 These names exist in C13; reasons are proposed. `GraphKeyConflict` is the edge-key
@@ -490,9 +493,27 @@ conflict (C18) and is never used for receipts or anchors. Gap 1 names a public
 `IdempotencyConflict` only as a proposal (Gap 1 section 2) whose name and mapping stay
 provisional until public Rust API review; Gap 7 uses `InvalidQuery` reasons and adds no
 public timeout, busy, conflict or ingestion variant by analogy. Serving authorization
-uses its existing rejection layer, not a fabricated storage error. Any richer public
-error or transport mapping requires an explicit owner decision in section 10; do not
-copy Gap 8's proposed codes without wire review.
+uses its existing rejection layer, not a fabricated storage error.
+
+Proposed serving mapping reuses the Gap 8 codes in the
+[serving contract](serving-contract.md#gap-8-provider-policy)
+and [wire conventions section 2](serving-wire-conventions.md#2-error-registry-c2-c9).
+For each row below, the ingestion handler or provider adapter builds an `ApiError`
+from the classified failure; static `InvalidQuery` reasons remain internal labels,
+not wire codes. No new public `Error` variant or global `From<Error>` arm is added.
+
+| Failure | REST code | gRPC |
+|---|---|---|
+| Provider timeout | 504 `provider_timeout` | DEADLINE_EXCEEDED |
+| Provider unavailable | 503 `provider_unavailable` | UNAVAILABLE |
+| Invalid provider response, including embedding shape/dimensions | 502 `provider_invalid_response` | UNAVAILABLE |
+| Provider alias absent or disabled within the authorized binding | 409 `provider_not_configured` | FAILED_PRECONDITION |
+| Provider admission full | 429 `provider_busy` | RESOURCE_EXHAUSTED |
+| Invalid provider input | 422 `invalid_provider_input` | INVALID_ARGUMENT |
+| Job admission full | 503 `busy` | UNAVAILABLE |
+
+Shared mapper arms follow [wire conventions section 5.2](serving-wire-conventions.md#52-per-file-owner-and-sequence);
+exact ingestion wire approval remains a section 10 gate.
 
 ## 7. Security and privacy
 
@@ -514,12 +535,17 @@ Include tenant/binding in every canonical key and resume token; reject foreign
 references before lookup to avoid existence probing. Embedded callers control the
 file and trusted configuration; tenant tags are not a hostile-file-access sandbox.
 
-Raw graph/vector writers, and any Gap 1 memory operation on a shared graph, can forge
-or remove `G7*` receipts, shards and anchors. Replay, delete and abort must validate
-stored identity and back-references (receipt key/index, source/revision keys, each
-owned vector record's metadata) before trusting any `G7*` object. The ingestion graph
-and its collections must not be exposed to untrusted raw writers or shared with Gap 1
-memory scopes; `gap7-serving` must specify that gate.
+Propose rejecting raw writes to reserved `G7*` objects, including creation,
+modification and removal of receipts, shards and anchors, per option A of
+[wire conventions, decision 14](serving-wire-conventions.md#6-owner-decisions-23).
+Apply the rejection before mutation across raw graph/vector adapters and Gap 1
+memory operations on a shared graph; do not add a `raw_access` grant. Only the
+authorized ingestion path may write those reserved objects. Replay, delete and abort
+still validate stored identity and back-references (receipt key/index,
+source/revision keys, each owned vector record's metadata) before trusting any
+`G7*` object. The ingestion graph and its collections must not be exposed to
+untrusted raw writers or shared with Gap 1 memory scopes; `gap7-serving` owns
+the proposed rejection gate. Embedded file access remains a trusted boundary.
 
 Providers can see only the authorized chunk text and required pinned schema, not
 unrelated evidence, tenant secrets or the whole database. Follow Gap 8's endpoint,
@@ -555,6 +581,7 @@ calculation; compare the engine encoder as the implementation, not the oracle.
 | ING-001 | Same goldens across Windows/Linux/macOS; LF/CRLF, BOM, emoji, combining marks, Turkish I, invalid UTF-8, whitespace, exact overlap and EOF |
 | ING-002/007 | Exactly 4,096 operations / 16,777,216 bytes accepted when valid; +1 rejected; include receipt shards, vector dimensions and reclaim bytes; a commit-time `BatchTooLarge` appends nothing and keeps any partial job; all source/chunk/extraction/plan limits tested at and above boundary |
 | ING-003/006 | No-network default with trap provider; unauthorized wildcard/tenant/provider references fail before dispatch; DNS/redirect/TLS/secret and reauthorization fixtures |
+| ING-004/006 | Proposed reserved-object gate rejects raw creation, modification or removal of `G7*` receipts, shards and anchors through graph/vector adapters and shared-graph memory operations; ingestion receipt replay still validates identities and back-references |
 | ING-004 | Replay before providers; conflicting request/plan digest, wrong binding generation, shuffled outputs, duplicate calls and source CAS races |
 | ING-005/009 | Exact evidence spans and paths; shared anchor across two sources, distinct relation evidence, contradiction preservation; replace/delete removes only owned objects |
 | ING-008/012 | Crash before/after each frame and after append before acknowledgement; reopen, compare receipts and resume exact plan; missing bundle fails resume but not abort; status stays Partial until the final batch receipt; raw-writer interference (changed or removed object, unrelated vector at a planned record ID, anchor create race) appends nothing and keeps the partial job; abort crash between frames, abort without the bundle, abort never touching another source's objects or retained shared anchors, replay returns `Aborted` |
@@ -591,7 +618,7 @@ oracle early but runs its final gate after all enabled surfaces.
 |---|---|---|
 | `gap7-core` / owner approves this model | `src/ingestion.rs`, `src/ingestion/` except `providers.rs`; minimal module export in `src/lib.rs`; `tests/ingestion_core.rs`; `docs/GRAPH.md` ingestion section; `site/api.html` rows for the new public items | Local chunkers/extractors, typed embedded prepare/commit, receipts, replacement/delete, explicit incremental mode and abort/cleanup of a Partial job (ING-012). Checklist: independent golden comparison; exact bounds; no provider calls on replay or abort; crash/reopen; mixed-frame and attached-record invariants; `python tests/api_reference.py` passes (every new `pub` item has a `site/api.html` row; `src/server*` and `src/bin/*` are excluded). No storage opcode, serving or dependency changes without separate approval |
 | `gap7-providers` / **BLOCKED**: accepted core and a Gap 8 amendment adding an extraction-provider kind (section 10) | `src/ingestion/providers.rs`; ingestion-only fixtures in `tests/ingestion_providers.rs`; ingestion provider documentation; `site/api.html` rows for any new public items | Cannot start until Gap 8 accepts that amendment and names its slice; then consume its contracts and do not implement a competing registry. Checklist: explicit egress only; alias/tenant/binding checks; response/deadline/concurrency caps; prompt-injection fixtures; no fallback or sensitive logs; `python tests/api_reference.py` passes. Shared registry edits remain owned by Gap 8 |
-| `gap7-serving` / accepted core (and providers, only if enabled) and owner approval of exact public wire **before work starts** | New `src/server/ingestion.rs`; narrowly coordinated dispatch in `src/server.rs` and `src/server/grpc.rs`; `src/openapi.json`, `proto/vlite/v1/vlite.proto`, relevant client/binding/tool adapters and API documentation only as enumerated in the approved wire inventory | Write exact request/result/error/status/resume schemas first, including numeric encoding and transport body caps. Checklist: approved surface/file/tag inventory; auth/quota/cancellation parity; receipt replay across adapters; transport limits fail explicitly; no unapproved REST/gRPC/MCP/CLI/Python additions |
+| `gap7-serving` / step 9 of [wire conventions section 5.1](serving-wire-conventions.md#51-order), accepted core (and providers, only if enabled) and owner approval of exact public wire **before work starts** | New `src/server/ingestion.rs`; narrowly coordinated dispatch in `src/server.rs` and `src/server/grpc.rs`; `src/openapi_graph.json` for any `/v1/graphs` paths and `src/openapi.json` for components (and any non-graph paths), per [wire conventions section 5.2](serving-wire-conventions.md#52-per-file-owner-and-sequence); `proto/vlite/v1/vlite.proto`, relevant client/binding/tool adapters and API documentation only as enumerated in the approved wire inventory | Write exact request/result/error/status/resume schemas first, including numeric encoding and transport body caps. Checklist: approved surface/file/tag inventory; auth/quota/cancellation parity; section 6 provider/admission error mappings; proposed raw-write rejection for reserved `G7*` objects; receipt replay across adapters; transport limits fail explicitly; no unapproved REST/gRPC/MCP/CLI/Python additions |
 | `gap7-qualification` / accepted enabled slices | `tests/ingestion_reference.py`, `tests/fixtures/ingestion/`, `tests/ingestion_qualification.rs`; this design's acceptance/status updates | Own independent Python oracle and hand-reviewed goldens. Checklist: cross-platform digest parity; every mutation killed; frame/crash/replay and maintenance matrix; tenant/egress/redaction tests; publish pass/fail evidence before release |
 
 `gap7-providers` is blocked. Gap 8 as written defines embedding and reranker
@@ -617,6 +644,7 @@ receipt design is prior art for the receipt pattern, not a callable memory core:
 | Replacement/history | Delete old content; retain versions; temporal integration | Delete old source-owned text/evidence, retain shared anchors and compact receipts; history is separate scope |
 | Retention | Implicit TTL/eviction; explicit delete and receipt purge; Gap 1-style expiry window | Explicit guarded deletion; receipts, result shards and tombstones kept until explicit purge, no growth bound claimed; purge mechanics, size accounting and any retention window are decided before any purge code and reconciled with Gap 1 (receipt expiry only by explicit policy) and Gap 4; acknowledge log/backup erasure limits |
 | Error API | `InvalidQuery` static reasons; new typed ingestion/provider errors | `InvalidQuery` reasons first (section 6); a typed ingestion error or **any new public `Error` variant requires separate explicit approval** and a `site/api.html` row |
+| Reserved objects and raw writers | Reject raw writes to `G7*`; allow an explicit `raw_access` grant; accept forgeable receipts | Propose option A: reject raw writes to reserved `G7*` objects before mutation, as specified in section 7; retain stored-identity validation. Wire conventions, decision 14 (proposed). |
 | Serving | Reuse raw graph batch wire; new ingestion wire; embedded only | Embedded first; exact transport schemas, endpoints/RPC tags, resume payloads and errors need separate approval before `gap7-serving` |
 | Prepared-plan custody | Caller retains bundle; encrypted durable job spool | Caller-retained bounded bundle initially; losing it blocks resume, and recovery is abort from the ownership shards (ING-012) then re-ingest, never new inference |
 | Record-ID allocation | Planner-chosen candidate IDs absence-checked per frame; engine allocator; derived IDs | Planner-chosen IDs frozen in the plan and required absent under every frame's exclusive borrow (`ingestion record id conflict`); an engine allocator or derived IDs need separate approval (C16) |

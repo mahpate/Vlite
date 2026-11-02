@@ -1,6 +1,7 @@
 # Gap 6: bounded Cypher-style subset with writes
 
 Status: design for owner approval; nothing in this proposal is implemented.
+This document is conformed to the [serving wire conventions proposal](serving-wire-conventions.md), whose owner decisions remain open.
 Proposed names and limits below are contracts to approve, not shipped APIs.
 Scope: one graph, bounded pattern reads and atomic graph writes in embedded Rust,
 then separately approved serving. No storage format change.
@@ -430,7 +431,7 @@ caller-configurable, with the default and ceiling shown:
 | Evaluator work units | 100,000 default / 1,000,000 ceiling; one per predicate, row projection, sort comparison, frontier operation, key resolution or operation staged |
 | Scratch | 32 MiB default / 128 MiB ceiling, at least twice `MAX_BATCH_BYTES` (`src/property_graph/engine/limits.rs:35`) so scratch cannot undercut the batch cap; charge owned decoded values, bindings, frontier, sorting, staged operations and output buffers before allocation |
 | Writes | `MAX_BATCH_ENTRIES` = 4,096 user operations; `MAX_BATCH_BYTES` = 16,777,216 encoded body bytes, including TTL reclaims (`src/property_graph/engine/limits.rs:31-35`; `src/property_graph/mod.rs:601-628`) |
-| Write deadline | `write_deadline_ms` 100 default / 1,000 ceiling for statements with a write clause, in place of `deadline_ms` (owner decision, section 11). Such a statement holds the exclusive writer guard from before MATCH until append ends; the batch route holds it only for authorization, planning and append (`src/server/graph.rs:725-729`; `src/server.rs:340`), and a writer blocks readers (`src/server.rs:355-358`). The hold is bounded by this deadline plus append and sync time and is recorded in the existing `write_guard` stats (`src/server/graph.rs:241-245,259-267,293-310`) |
+| Write deadline | `write_deadline_ms` uint64, 100 default / 1,000 ceiling for statements with a write clause, in place of `deadline_ms` (proposed per [wire conventions, decision 15](serving-wire-conventions.md#6-owner-decisions-23); owner decision, section 11). Such a statement holds the exclusive writer guard from before MATCH until append ends; the batch route holds it only for authorization, planning and append (`src/server/graph.rs:725-729`; `src/server.rs:340`), and a writer blocks readers (`src/server.rs:355-358`). The hold is bounded by this deadline plus append and sync time and is recorded in the existing `write_guard` stats (`src/server/graph.rs:241-245,259-267,293-310`) |
 
 Configurable work, frontier, binding, scratch and write-deadline limits must be at
 least 1; the returned-row cap may be 0. Above-ceiling requests use
@@ -450,7 +451,7 @@ entities nested in paths; path cap counts path occurrences. LIMIT/SKIP do not
 raise these caps, bound scans, truncate mutation targets or excuse unfinished
 sorting. Scratch and work budgets span every phase and are not reset per clause.
 
-Check the monotonic deadline (`write_deadline_ms` for a statement with a write
+Check the monotonic deadline (uint64 `write_deadline_ms` for a statement with a write
 clause) and cancellation before work, every at most `CHECK_INTERVAL`
 (64) combined work units, during sorting/staging and immediately before commit.
 Do not use the epoch TTL clock as a deadline timer. Existing meter behavior is
@@ -541,15 +542,25 @@ position in the message (`src/property_graph/engine/language.rs:65-80`).
 **Proposed changes (not implemented; owner approval, section 11).** None is needed
 for the dialect to work; without approval the table above applies unchanged.
 
-1. Budget, deadline and cancellation failures: keep 422 `invalid_input` plus the
-   fixed reason (recommended), or approve a distinct code. A new `invalid_query`
-   code would sit beside `invalid_input` for the same `InvalidQuery` variant.
-2. A defined REST status for `UnsupportedFeature(64)` (today 500).
-3. 413 `batch_too_large` for `BatchTooLarge` (today 422 `invalid_input`).
-4. 404 for a missing graph or entity (today 409 `graph_*`).
-5. gRPC DEADLINE_EXCEEDED and CANCELLED, which `status_code` cannot emit, and a
-   budget code: each needs a new arm and applies only if the Gap 12 Graph service
-   is approved (`serving-contract.md:131,202-205`).
+1. Budget failures keep 422 `invalid_input` plus the fixed reason through the
+   existing `InvalidQuery` mapping. Propose 504 `deadline_exceeded` for the
+   precommit engine deadline stop reason, produced by a handler-built `ApiError`
+   and mapped to gRPC DEADLINE_EXCEEDED; cancellation has no wire code. Follow
+   [wire conventions sections 2.2 and 3](serving-wire-conventions.md#22-one-reachable-family-oversize-deadline-cancel-busy),
+   including decision 4; fixed reasons remain the budget discriminator.
+2. Propose scoped 409 `unsupported_feature` per
+   [wire conventions, decision 7](serving-wire-conventions.md#6-owner-decisions-23):
+   temporal and explicit-precision operation handlers build an `ApiError` from
+   the existing `UnsupportedFeature` variant; no global `From<Error>` arm or
+   legacy-route change. The proposed AS OF operation uses the temporal scope.
+3. **Withdrawn:** a distinct batch-size status/code duplicates `BatchTooLarge`'s
+   existing 422 `invalid_input`; see [wire conventions section 2.2](serving-wire-conventions.md#22-one-reachable-family-oversize-deadline-cancel-busy).
+4. **Withdrawn:** changing missing graph/entity statuses would alter existing
+   mappings; a missing graph stays 409 `graph_not_found`, per
+   [wire conventions section 2.1](serving-wire-conventions.md#21-registry).
+5. **Withdrawn:** separate budget and cancellation codes and a second deadline
+   mapping conflict with the shared family; proposal 1 follows
+   [wire conventions section 2.2](serving-wire-conventions.md#22-one-reachable-family-oversize-deadline-cancel-busy).
 
 Exact envelopes, numeric/geo encoding and any code or status change are settled
 before `gap6-serving`; the gRPC column describes a transport that does not exist
@@ -658,6 +669,9 @@ constraints and reopen state. These tests complement, not replace, the oracle.
 All paths below are proposed ownership for future slices, not files created by
 this design. Each slice stops at its boundary and gets independent acceptance
 before its dependent starts. Existing tests remain intact.
+For `gap6-serving`, `/v1/graphs` paths belong only in `src/openapi_graph.json`;
+`src/openapi.json` holds components only for those graph operations, per
+[wire conventions section 5.2](serving-wire-conventions.md#52-per-file-owner-and-sequence).
 
 | Slice / dependencies | Files owned | Required tests and independent-acceptance checklist |
 |---|---|---|
@@ -684,13 +698,13 @@ side effect.
 |---|---|---|
 | Compatibility/name | Claim openCypher subset with compatibility exceptions; or versioned named VLite dialect | Approve `vlite-cypher-1` as a separate, named, non-conformant dialect with a published supported-scenario matrix; it narrows the approved "openCypher with writes" item (`docs/projects/product-gaps/product-gaps.md:118-119`). KEY identity, parameter-only values and idempotent keyed CREATE make an unqualified openCypher claim misleading. |
 | First-release REST writes | Embedded writes only; or separately authorized REST write-query endpoint alongside existing reads | Embedded first; REST writes only after the exact wire and threat/rollback tests pass. Never make existing read-only `/query` write-capable. |
-| Error mapping | Existing mapping with fixed reasons only (section 7); or also the section 7 proposed changes 1-5 (new codes/statuses, new gRPC arms) | Approve the existing mapping now; take each proposed change only after wire review, with the owner choosing code and status. Any new public Error variant needs a separately enumerated approval item; none is proposed here. |
+| Error mapping | Existing mapping with fixed reasons only (section 7); or also the section 7 proposed changes 1-5 (new codes/statuses, new gRPC arms) | Approve the existing mapping now; take each proposed change only after wire review, with the owner choosing code and status. Any new public Error variant needs a separately enumerated approval item; none is proposed here. Wire conventions, decision 4 (proposed); Wire conventions, decision 7 (proposed). |
 | Reserved words | Versioned complete reserved set; or contextual keywords that may change parsing later | Freeze section 3's set in version 1 for bare variables and aliases only; labels, types, property names and `$` parameter names stay unrestricted as in legacy (`src/property_graph/engine/language.rs:244-257,585-594`); add keywords only with explicit compatibility review. |
 | Match breadth/path semantics | Single-pattern edge-simple trail rows; or legacy once-per-node BFS rows; or larger multi-pattern language | Approve single-pattern trail rows with explicit caps; retain BFS only in legacy/typed APIs. Defer joins and OPTIONAL MATCH. |
 | MERGE/CREATE identity | Explicit-key identity and typed keyed-create behavior; or property-based merge and strict always-new CREATE | Approve explicit keys and documented existing edge-create idempotency; no inference from schema uniqueness or endpoint triples. |
 | Time and fail-closed output | AS OF reads only and whole-statement errors on exhaustion; or temporal writes/partial results | Approve read-only AS OF, no segment syntax, and fail-closed rows/writes; existing typed truncation remains unchanged. |
 | Public API inventory | Approve exact Rust/wire names/shapes before implementation (dialect selector default, new route/tool/RPC, `SubsetLimits` name and home, `src/openapi.json`, `src/openapi_graph.json` and proto edits, rustdoc broadening of section 7); or keep all new entry points private until qualification | Private embedded slices first: no new public Rust item (`SubsetLimits` included) and `GraphLimits` unchanged until approved. An absent selector stays the legacy language. Approve the exact REST/gRPC/MCP/CLI/OpenAPI/proto contract before `gap6-serving`, including whether transports may ship at different times. |
-| Write-statement deadline and scratch | Same values as reads (`deadline_ms` 250/5,000; Gap 5 scratch 64/256 MiB); or `write_deadline_ms` 100/1,000 and scratch 32/128 MiB in `SubsetLimits` (section 6) | Approve the lower values: a write statement holds the exclusive writer guard from before MATCH until append ends, and the guard hold time is recorded in the existing `write_guard` stats. |
+| Write-statement deadline and scratch | Same values as reads (`deadline_ms` 250/5,000; Gap 5 scratch 64/256 MiB); or `write_deadline_ms` 100/1,000 and scratch 32/128 MiB in `SubsetLimits` (section 6) | Approve the lower values: a write statement holds the exclusive writer guard from before MATCH until append ends, and the guard hold time is recorded in the existing `write_guard` stats. Proposed representation: uint64 `write_deadline_ms`, with above-ceiling values rejected as in section 6. Wire conventions, decision 15 (proposed). |
 | Mutating-statement authorization | Require `graph_read` and `graph_write`; or `graph_write` alone | Require both: the statement reads through MATCH and RETURN, while the batch route needs only `graph_write` (`src/server/graph.rs:14-24`), so `graph_write` alone must not become a read path. |
 
 No implementation, API publication or compatibility claim follows from this

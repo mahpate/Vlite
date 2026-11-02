@@ -1,6 +1,7 @@
 # Serving contract: agent memory
 
 Status: exact schema proposal for Gap 1 slice D; **not implemented or shipped**.
+This document is conformed to the [serving wire conventions proposal](serving-wire-conventions.md), whose owner decisions remain open.
 The owner authorized serving work on 2026-11-02, conditional on reviewing each
 exact schema before code ([release decision](next-major.md#decided-2026-11-02)).
 This document requests that review; it activates nothing. All names, bounds,
@@ -59,7 +60,7 @@ limited to the cited dispatchers/types, not an assertion about future core work.
 | gRPC rerank is vector-only, default 4*k, cap 4,096 | `src/server/grpc.rs:1081-1109`, `src/server/grpc.rs:1135-1153` | Do not silently unify old Search; new Memory.Recall uses section 4 |
 | Exact distance/ID ties, cosine MMR and fetched-vector cap | `src/rerank.rs:21-51`, `src/rerank.rs:54-68`, `src/rerank.rs:90-104`, `src/rerank.rs:106-132` | Candidate-only repair/diversity, not historical recovery |
 | REST errors and ambiguity | `src/server.rs:1399-1418`, `src/server.rs:1450-1586`, `src/server.rs:1587-1650` | Add memory codes in this server-private mapper; no public `Error` variant (A1 `MemoryError` is crate-private); old mappings unchanged |
-| gRPC mapping and code/details trailers | `src/server/grpc.rs:181-215` | Today: 409 -> FAILED_PRECONDITION except `collection_exists` -> ALREADY_EXISTS and `rebuild_busy` -> ABORTED; 412 -> ABORTED; 503 `busy`/`unavailable` -> UNAVAILABLE, `commit_indeterminate` -> UNKNOWN, `poisoned` -> INTERNAL; other 4xx -> INVALID_ARGUMENT, other 5xx -> INTERNAL. Memory adds only the 413/499/504 rows of section 6 |
+| gRPC mapping and code/details trailers | `src/server/grpc.rs:181-215` | Today: 409 -> FAILED_PRECONDITION except `collection_exists` -> ALREADY_EXISTS and `rebuild_busy` -> ABORTED; 412 -> ABORTED; 503 `busy`/`unavailable` -> UNAVAILABLE, `commit_indeterminate` -> UNKNOWN, `poisoned` -> INTERNAL; other 4xx -> INVALID_ARGUMENT, other 5xx -> INTERNAL. Memory uses the shared error registry in [wire conventions section 2](serving-wire-conventions.md#2-error-registry-c2-c9) |
 | REST body 8 MiB; gRPC request 8 MiB/response 16 MiB | `src/server.rs:60`, `src/server.rs:742`; `src/server/grpc.rs:22-25` | Wire caps are smaller than the atomic frame cap. Over-cap REST bodies are `invalid_json` with the extractor's 413 (`src/server.rs:1658-1662`); gRPC over-cap messages are refused by tonic as OUT_OF_RANGE before the adapter, with no `vlite-error-code` trailer (tonic 0.14.6 `src/codec/decode.rs:193-197`, `src/codec/encode.rs:188-192`; `Cargo.lock:2946-2947`) |
 | Shared scoped-key token bucket and admission | `src/server.rs:3472-3506`; `src/server/grpc.rs:249-267` | No new default rate or unbounded memory queue |
 | Feed visibility, temporal refusal, omitted expiry events | `src/server/graph.rs:85-108`; `src/property_graph/feed.rs:270-285` | No complete memory replication/TTL subscription promise |
@@ -73,11 +74,15 @@ and unknown keys; required fields cannot be null. Optional fields are omitted,
 except explicitly nullable diagnostics/bounds. Integers are not booleans. UTF-8
 byte limits apply before allocation, including escaped JSON after decoding.
 No Unicode normalization/case folding; reject control characters in opaque keys.
-Identifiers (`Key`) are 1-256 UTF-8 bytes. `U64` is a canonical unsigned decimal
-string, 0..18446744073709551615, no leading zero except "0". `I64` is a canonical
-signed decimal string, -9223372036854775808..9223372036854775807, no "-0".
-Times/revisions/sequences on JSON/MCP/CLI/SDK surfaces are strings, never lossy
-JavaScript numbers. Protobuf uses the corresponding integer types.
+Identifiers (`MemoryKey`) are 1-256 UTF-8 bytes. `MemoryU64` output is a canonical unsigned
+decimal string, 0..18446744073709551615, no leading zero except "0"; `MemoryI64`
+output is a canonical signed decimal string,
+-9223372036854775808..9223372036854775807, no "-0".
+As proposed by [wire conventions section 3, decision 12](serving-wire-conventions.md#3-encoding-rules-c12),
+inputs also accept exact JSON integers in the corresponding range.
+Times/revisions/sequences in responses remain strings, never lossy JavaScript
+numbers. Protobuf uses the corresponding integer types. `deadline_ms` and
+`MemoryLimits` follow that section's uint64 budget rule; JSON budgets remain integers.
 Finite JSON numbers are binary64; vector inputs round once to finite binary32,
 rejecting overflow and invalid dimensions against the provisioned collection.
 
@@ -90,9 +95,9 @@ No provisioning/configuration endpoint is added here. Setup is retryable and
 separate from mutation atomicity (Gap 1 sections 1-2). Missing binding is
 `memory_not_configured`, after authorization, with no existence probing.
 
-Request `Scope` is `{agent:Key,user?:Key,session?:Key}`. Session requires user;
+Request `MemoryScope` is `{agent:MemoryKey,user?:MemoryKey,session?:MemoryKey}`. Session requires user;
 absence means shared in that exact tenant/agent, never wildcard/parent fallback.
-Response `EffectiveScope` adds `tenant:Key`, derived only by the server. A
+Response `MemoryEffectiveScope` adds `tenant:MemoryKey`, derived only by the server. A
 tenant-bound credential's `tenant` is its immutable `Tenant.id` (random 128-bit hex),
 never the renamable name (`src/server/tenants.rs:241-245`, `:424`). Untenanted
 admin/read-only/scoped principals select the proposed reserved `@root` sentinel,
@@ -116,7 +121,8 @@ to a requested scope or required evidence collection fails before execution.
 
 ### Atomicity, receipts and failures
 
-Mutations require body `idempotency_key:Key`; no HTTP header alias is defined.
+Mutations require body `idempotency_key:MemoryKey`; no HTTP header alias is defined,
+as proposed by [wire conventions decision 13](serving-wire-conventions.md#6-owner-decisions-23).
 The identity is `(lineage,stable binding identity,exact scope,operation,key)`, where
 operation is one of `remember,correct_facts,consolidate,forget,resume_erasure`.
 The core computes the digest; an adapter never does. A1 uses `v1:` + SHA-256 of a
@@ -152,11 +158,11 @@ hashed into the digest and otherwise ignored; section 8 has no such field, so
 whether it survives, and what the adapter passes, is an owner decision ("Receipt
 retention", section 11).
 
-`Receipt` is `{id:Key,operation:Operation,scope:EffectiveScope,sequence:U64,
-retry_until_ms?:U64,digest_version:"memory-request-v1"}`; `retry_until_ms` exists
+`MemoryReceipt` is `{id:MemoryKey,operation:MemoryOperation,scope:MemoryEffectiveScope,sequence:MemoryU64,
+retry_until_ms?:MemoryU64,digest_version:"memory-request-v1"}`; `retry_until_ms` exists
 only under the A2 design. `sequence` is A1's `commit_sequence` (Core alignment). A1
 returns no receipt ID, so `id` needs a core accessor (owner decision, section 11).
-Mutation success is `MutationResponse` from section 8. `outcomes` follow input
+Mutation success is `MemoryMutationResponse` from section 8. `outcomes` follow input
 order; an exact dedup outcome returns the retained ID/revision. No per-item errors
 or 207 status: any failed item aborts the whole small mutation including TTL cleanup.
 Logical `created|merged|noop|corrected|deleted|expired|retained_shared` outcomes
@@ -197,18 +203,20 @@ this table and the section 8 examples change with it.
 Every request/response field is defined by the schema inventory in section 8.
 Defaults/conditional rules here are part of those schemas, not optional advice.
 All methods are unary POSTs; there is no memory DELETE/GET/HEAD alias.
+OperationIds and component names below follow the proposal in
+[wire conventions section 5.4](serving-wire-conventions.md#54-naming-rules).
 
 | REST suffix / operationId | Request -> response | Success | gRPC RPC | MCP tool | CLI verb |
 |---|---|---|---|---|---|
-| `/remember` / memoryRemember | RememberRequest -> MutationResponse | 200 | Remember | vlite_memory_remember | remember |
-| `/recall` / memoryRecall | RecallRequest -> RecallResponse | 200 | Recall | vlite_memory_recall | recall |
-| `/facts/query` / memoryFindFacts | FactsRequest -> FactsResponse | 200 | FindFacts | vlite_memory_facts | facts |
-| `/facts/correct` / memoryCorrectFacts | CorrectionRequest -> MutationResponse | 200 | CorrectFacts | vlite_memory_correct_facts | correct-facts |
-| `/consolidate` / memoryConsolidate | ConsolidateRequest -> MutationResponse or PlanResponse | 200 | Consolidate | vlite_memory_consolidate | consolidate |
-| `/forget` / memoryForget | ForgetRequest -> MutationResponse | 200 logical / 202 pending | Forget | vlite_memory_forget | forget |
-| `/receipts/lookup` / memoryGetReceipt | ReceiptRequest -> ReceiptResponse | 200 | GetReceipt | vlite_memory_receipt | receipt |
-| `/erasures/get` / memoryGetErasure | ErasureRequest -> ErasureResponse | 200 | GetErasure | vlite_memory_erasure | erasure |
-| `/erasures/resume` / memoryResumeErasure | ResumeRequest -> MutationResponse | 200 logical / 202 pending | ResumeErasure | vlite_memory_resume_erasure | resume-erasure |
+| `/remember` / MemoryRemember | MemoryRememberRequest -> MemoryMutationResponse | 200 | Remember | vlite_memory_remember | remember |
+| `/recall` / MemoryRecall | MemoryRecallRequest -> MemoryRecallResponse | 200 | Recall | vlite_memory_recall | recall |
+| `/facts/query` / MemoryFindFacts | MemoryFactsRequest -> MemoryFactsResponse | 200 | FindFacts | vlite_memory_facts | facts |
+| `/facts/correct` / MemoryCorrectFacts | MemoryCorrectionRequest -> MemoryMutationResponse | 200 | CorrectFacts | vlite_memory_correct_facts | correct-facts |
+| `/consolidate` / MemoryConsolidate | MemoryConsolidateRequest -> MemoryMutationResponse or MemoryPlanResponse | 200 | Consolidate | vlite_memory_consolidate | consolidate |
+| `/forget` / MemoryForget | MemoryForgetRequest -> MemoryMutationResponse | 200 logical / 202 pending | Forget | vlite_memory_forget | forget |
+| `/receipts/lookup` / MemoryGetReceipt | MemoryReceiptRequest -> MemoryReceiptResponse | 200 | GetReceipt | vlite_memory_receipt | receipt |
+| `/erasures/get` / MemoryGetErasure | MemoryErasureRequest -> MemoryErasureResponse | 200 | GetErasure | vlite_memory_erasure | erasure |
+| `/erasures/resume` / MemoryResumeErasure | MemoryResumeRequest -> MemoryMutationResponse | 200 logical / 202 pending | ResumeErasure | vlite_memory_resume_erasure | resume-erasure |
 
 **Remember.** `items` has 1-4,096 ordered memories, optional `evidence` 0-256.
 Each item supplies its opaque `id`, kind, content, caller `observed_at_ms`,
@@ -220,13 +228,13 @@ bare UTF-8 bytes. Preserve original
 digests when copying input provenance into a derived summary; do not relabel an
 input's digest as the summary's digest. This is separate from the typed request
 digest and scope/kind/source-qualified exact-dedup identity.
-`expected` is `{absent:true}` for creation (default) or `{revision:U64}` for
+`expected` is `{absent:true}` for creation (default) or `{revision:MemoryU64}` for
 explicit merge. `merge` is `none` (default) or `merge_provenance`.
-`references` entries are `Ref`s: a retained memory's `{id,revision}` or, with
+`references` entries are `MemoryRef`s: a retained memory's `{id,revision}` or, with
 `revision` 0, an ID created in this bundle; resolve the whole bundle before append,
 supporting forward references. Provenance entries describe sources, not memories.
 Each item/evidence record belongs to the single request scope.
-Evidence IDs are caller-supplied U64, new versioned records only, expected absent;
+Evidence IDs are caller-supplied `MemoryU64`, new versioned records only, expected absent;
 vectors are optional, not fabricated zeros; text-only records are supported.
 Source URI is inert, never fetched/executed. Item content is exact-dedup material;
 digest plus kind/scope/source identity determines dedup, not vector similarity.
@@ -235,8 +243,10 @@ must be entity anchors. Slot identity is subject/predicate/slot_key in this scop
 exclusive/multivalued mode is predeclared in binding schema, not request-controlled.
 Require `slot_expected` and all changed existing revisions. `disagreement` defaults
 `reject`; explicit `disputed` stores labelled disagreement without declaring truth.
-The interval is half-open; null endpoints mean unbounded, from < to when both
-finite. There are at most 256 retained segments per series (Gap 1 sections 1-2).
+The interval is half-open; null endpoints mean unbounded,
+`valid_from_ms` < `valid_to_ms` when both are finite, using the proposed names in
+[wire conventions decision 11](serving-wire-conventions.md#6-owner-decisions-23).
+There are at most 256 retained segments per series (Gap 1 sections 1-2).
 
 **Recall.** At least one of vector, text or entity_seeds is required. Text is
 lexical by default; no implicit embedding. `embedding_provider` requires text,
@@ -287,7 +297,7 @@ for fixed eligible input/view; SDKs must not compare scores across versions.
 
 `projection` defaults snippets=true, provenance=true, paths=false, metadata=[];
 snippets <=4,096 UTF-8 bytes each, total evidence budget charged before fetch.
-`RecallResponse` includes matched segments, contradiction/staleness labels,
+`MemoryRecallResponse` includes matched segments, contradiction/staleness labels,
 raw dense/sparse/text ranks and scores, distance/BM25, R/D/I/S, mode/policy,
 effective scopes/T/C/sequence, examined/charged work and completeness reasons.
 `complete` means the declared bounded plan completed, not complete semantic or
@@ -297,7 +307,9 @@ explicit `as_of_ms` also lists
 records, old anchor metadata or an old index. These limitations alone are not budget
 truncation. There is **no recall pagination** or cursor in this version.
 Budget exhaustion returns a partial 200 only with `allow_partial:true`, with
-complete=false and explicit truncation; otherwise a typed budget/deadline error.
+complete=false and explicit truncation; otherwise 422 `invalid_input` or
+504 `deadline_exceeded` for a deadline. This proposes the memory-read exception in
+[wire conventions decision 19](serving-wire-conventions.md#6-owner-decisions-23).
 Authorization/storage/cancellation errors never return partial data.
 
 **Facts and corrections.** Query requires one exact subject/predicate/slot_key;
@@ -320,7 +332,7 @@ No arbitrary graph text write or automatic conflict resolution is exposed.
 1-256 exact input ID/revision/disposition entries and optional evidence.
 Disposition defaults retain; explicit logical_delete obeys forget ownership checks.
 Do not confuse consolidation with forgetting. Dry_run defaults false; true returns
-PlanResponse conflicts/counts/bytes, no receipt/write/reservation. Commit rechecks
+MemoryPlanResponse conflicts/counts/bytes, no receipt/write/reservation. Commit rechecks
 the whole retained input set and slot/ownership guards. Output provenance links
 every input; duplicates reject. Bounded stale-summary invalidation reports
 `remaining_work` (count or null), not a completed cascade claim.
@@ -329,10 +341,10 @@ every input; duplicates reject. Bounded stale-summary invalidation reports
 
 | Limit | Default / hard maximum and exact enforcement | Basis |
 |---|---|---|
-| Request, serialized success/error response | 8,388,608 bytes each, REST/MCP/CLI/SDK; gRPC request 8,388,608, response 16,777,216; projected memory JSON equivalent also <=8,388,608 | Request caps Current (`src/server.rs:60,742`; `src/server/grpc.rs:22-25`); response caps and projected equivalent New |
+| Request, serialized success/error response | Request 8,388,608 bytes, REST/MCP/CLI/SDK and gRPC; MCP/CLI response 8,388,608; gRPC response 16,777,216; REST/HTTP SDK responses have no serving cap | Transport behavior per [wire conventions sections 1.5 and 2.2, decision 3](serving-wire-conventions.md#15-size-and-count-caps-c14); MCP/CLI response bound remains proposed |
 | Mutation input entries / planned user operations / frame body | 4,096 input items or explicit targets / 4,096 operations (counted as in Core alignment) / 16,777,216 encoded frame bytes, including receipts, temporal writes and reclaim bytes; never auto-split | Frame caps Current (`src/property_graph/engine/limits.rs:33-35`); counting A1 |
 | Evidence | 256 input records/bundle, 64 links/item; payload <=1,048,576 decoded bytes/record; total <=4,194,304 bytes, summing UTF-8 text bytes + decoded payload bytes + 4*vector components + encoded metadata bytes | New; total from Gap 1 section 6 |
-| Content / query text / source URI | 4,096 / 16,384 / 256 UTF-8 bytes; source_id/source_kind/transformation_id are Key | URI A1; content cap is stricter than A1's chunked content; query text New |
+| Content / query text / source URI | 4,096 / 16,384 / 256 UTF-8 bytes; source_id/source_kind/transformation_id are `MemoryKey` | URI A1; content cap is stricter than A1's chunked content; query text New |
 | Metadata | 64 typed scalar fields, 65,536 encoded property bytes, strings <=4,096 bytes; whole reserved+caller object must fit, no overwrite of reserved fields; the core slice that first accepts caller metadata publishes the reserved names (A1 accepts none) and collisions reject `invalid_input` | Current (`limits.rs:24-30`) |
 | References/provenance/input cap | max_references 64/256 caps each item's reference count and a consolidation's input count; provenance also <=64 entries and 4,096 encoded bytes; reject overflow, never drop provenance | Gap 1 section 6; provenance A1 |
 | Recall scopes / output / candidates | 1/16, 20/100, 200/1,000; entity seeds <=64; distinct kinds <=4; filter conditions <=64 | Gap 1 section 6; seeds and kinds New; conditions Current (`limits.rs:37`) |
@@ -353,6 +365,8 @@ Other memory limits are proposed Gap 1 section 6 safety budgets and explicit
 wire constraints, not size/performance measurements. Read caps do not excuse
 unaccounted planner work. Reject an unrepresentable response before mutation
 append; reserve bounded receipt/outcome response space during planning.
+**Withdrawn:** the proposed REST response and projected-JSON-equivalent caps would
+add policy; use [wire conventions decision 3](serving-wire-conventions.md#6-owner-decisions-23).
 `max_references` (1..256, default 64) caps each item's reference count and a
 consolidation's input count separately; provenance is capped by the A1 core, not
 by `max_references`.
@@ -380,9 +394,9 @@ Scope/session jobs cover the exact requested scope/session, not child scopes.
 No automatic scope reactivation. Large ID/series lists must be explicitly split;
 do not create a surprise non-atomic job for them.
 
-`Erasure` is `{id,scope,target,revision,generation,state,logical_visibility,
+`MemoryErasure` is `{id,scope,target,revision,generation,state,logical_visibility,
 deleted_count,remaining_count,resume_token}`; state pending|logical, visibility
-hidden, remaining_count is U64 or null (unknown), token is opaque <=4,096 bytes
+hidden, remaining_count is `MemoryU64` or null (unknown), token is opaque <=4,096 bytes
 and absent when finished. Get returns status only. Resume supplies the exact job
 revision/generation/token and a new idempotency key; one bounded chunk and its
 progress/manifest/receipt commit together. Token binds lineage, binding, scope,
@@ -451,11 +465,15 @@ retroactive policy change for ordinary graphs/collections; refuse to adopt
 in-use ordinary resources without an independently approved migration. Embedded
 file access and operator backups remain outside server scope enforcement.
 
-REST errors retain `{error:{code,message}}`, with optional new `details` only on
-these routes: `{field?,limit?,requested?,competing?:[{id,interval,revision}],
-receipt_lookup_required?:boolean,code?:string}` (`code` only on `PlanResponse.conflicts`
-items, using a code below); no text/vectors/URIs/secrets. gRPC carries the
-same code in `vlite-error-code`, details JSON in `vlite-error-details-base64`,
+REST errors retain `{error:{code,message}}`; the proposed optional `error.details`
+uses the shared context schema in
+[wire conventions section 3, decision 21](serving-wire-conventions.md#3-encoding-rules-c12),
+not a memory-only extension. **Withdrawn:** memory-only error details
+(`competing`, `receipt_lookup_required`) would create a second error schema; see
+that decision. `MemoryPlanResponse.conflicts` retains its separate conflict-item
+schema and optional code from the table below. No text/vectors/URIs/secrets
+belong in error context. gRPC carries the
+same code in `vlite-error-code`, the same details JSON in `vlite-error-details-base64`,
 request ID in `x-request-id`. The following table is exhaustive for new memory
 domain errors; unchanged underlying auth/quota/provider/graph codes remain as
 specified in their existing mapper or the approved serving contract.
@@ -471,24 +489,34 @@ specified in their existing mapper or the approved serving contract.
 | 409 memory_deletion_pending/memory_job_reconciliation_required | FAILED_PRECONDITION | Barrier or maintenance reconciliation |
 | 409 index_not_ready | FAILED_PRECONDITION | No lazy read build |
 | 412 precondition_failed | ABORTED | Existing code (`src/server.rs:1523-1525`): object/slot/input/job revision or generation mismatch; `details.field` says which |
-| 413 memory_request_too_large/memory_response_too_large | RESOURCE_EXHAUSTED | Wire size refusal, before mutation append |
-| 422 invalid_input | INVALID_ARGUMENT | Existing semantic code: shape, arithmetic, batch/frame bounds; `details` names the limit |
+| 413 response_too_large (gRPC adapter preflight; MCP/CLI response bound) | RESOURCE_EXHAUSTED | Response refusal before mutation append or cursor advance; request oversize remains extractor `invalid_json` or tonic OUT_OF_RANGE per [wire conventions section 2.2](serving-wire-conventions.md#22-one-reachable-family-oversize-deadline-cancel-busy) |
+| 422 invalid_input | INVALID_ARGUMENT | Existing semantic code: shape, arithmetic, batch/frame bounds and exhausted per-request work budget without an allowed partial; `details` names the bound per proposed decision 5 |
 | 422 memory_unsupported_ranking/memory_bounded_plan_unsupported | INVALID_ARGUMENT | No semantic fallback |
-| 429 memory_budget_exceeded/rate_limited | RESOURCE_EXHAUSTED | Explicit budget failure/shared credential limiter |
+| 429 rate_limited/quota_exceeded | RESOURCE_EXHAUSTED | Existing credential rate/quota limiter, not a per-request work budget |
 | 503 busy/unavailable | UNAVAILABLE | Existing admission saturation / service unavailable |
 | 503 poisoned | INTERNAL | Existing code (`src/server.rs:1589-1591`); today's gRPC fallthrough (`src/server/grpc.rs:181-195`) |
 | 503 commit_indeterminate | UNKNOWN | Reopen and reconcile receipt, not blind retry |
-| 504 memory_deadline_exceeded | DEADLINE_EXCEEDED | No permitted partial answer |
-| 499 memory_cancelled | CANCELLED | Cancellation before result; mutation may need receipt lookup |
+| 504 deadline_exceeded | DEADLINE_EXCEEDED | Engine/adapter deadline before the commit point, no permitted partial answer; transport expiry is distinct |
 | 500 internal_error | INTERNAL | Sanitized unexpected failure or integrity fault (A1 `DigestCollision`), never an empty result |
 
-Add explicit gRPC mapping for the new 413/499/504 codes; `poisoned` keeps today's
-INTERNAL mapping, and the generic 4xx/5xx mapping must not supply the wrong status
-for the new codes. Today's REST over-cap `invalid_json` 413 and gRPC OUT_OF_RANGE
-(section 2) make the gRPC halves of the 413 rows unreachable; see "Oversize
-behaviour" in section 11. 429 responses
-retain Retry-After:1/retry-after:1; budget details explain which budget rather than
-suggest that time alone increases a hard cap. No unbounded retries/queues.
+Producers: the memory handlers/adapters build server-private `ApiError`s for
+`memory_not_found`, `receipt_not_found`, `erasure_not_found`,
+`memory_not_configured`, `memory_capability_unavailable`, `memory_feed_unsupported`,
+`idempotency_conflict`, `memory_slot_conflict`, `memory_attachment_conflict`,
+`memory_deletion_pending`, `memory_job_reconciliation_required`,
+`memory_unsupported_ranking` and `memory_bounded_plan_unsupported`; `index_not_ready`
+keeps its existing producer (`src/server.rs:1458-1462`).
+The adapter builds `response_too_large` on response preflight and
+`deadline_exceeded` from the engine/adapter stop reason before the commit point;
+their shared gRPC arms follow
+[wire conventions sections 2 and 5.2](serving-wire-conventions.md#2-error-registry-c2-c9).
+None adds a public `Error` variant; existing codes retain their existing producers.
+**Withdrawn:** domain-specific oversize, budget, deadline and cancellation codes
+duplicate shared behavior; see that registry and decision 5.
+Cancellation has no wire code; transport expiry/cancel follows
+[wire conventions section 2.2](serving-wire-conventions.md#22-one-reachable-family-oversize-deadline-cancel-busy).
+Mutation ambiguity still requires receipt reconciliation, never inferred rollback.
+429 responses retain Retry-After:1/retry-after:1. No unbounded retries/queues.
 Use the existing per-credential configured token bucket, one charge per call
 including replay/status, and shared admission. No new requests/second default
 or exemption; an admin without a configured rate is not assigned one here.
@@ -531,6 +559,10 @@ can tail a temporal file: they may encounter the existing explicit refusal.
 Do not modify existing feeds/webhooks to swallow that error. Any future additive
 temporal/TTL events require separate exact schema/consumer approval in Gap 4/12;
 this document reserves no event names or proto enum values for them.
+The frozen `feed` block and `require_complete_feed` above stay unchanged; the
+proposed shared `graph_events` opt-in and its cursor/webhook behavior belong to
+[wire conventions section 4](serving-wire-conventions.md#4-graph-events-in-the-change-feed-c11),
+not a separate memory feed design.
 
 ## 8. Exact schema and adapter inventory
 
@@ -554,7 +586,7 @@ notation only; request and response are the actual JSON bodies.
 {"operation":"remember","request":{"scope":{"agent":"a"},"idempotency_key":"k1","items":[{"id":"e1","kind":"entity","content":"Ada","observed_at_ms":"90","source":{"source_id":"s1","source_kind":"caller"}}]},"status":200,"response":{"receipt":{"id":"r1","operation":"remember","scope":{"tenant":"@root","agent":"a"},"sequence":"7","digest_version":"memory-request-v1"},"replayed":false,"outcomes":[{"id":"e1","action":"created","revision":"1"}],"feed":{"mode":"ordinary_changes","temporal_complete":false,"ttl_complete":false,"consumer_purge_acknowledged":false},"remaining_work":"0"}}
 {"operation":"recall","request":{"scope":{"agent":"a"},"entity_seeds":["e1"],"limit":1},"status":200,"response":{"memories":[{"id":"e1","revision":"1","scope":{"tenant":"@root","agent":"a"},"kind":"entity","content":"Ada","observed_at_ms":"90","created_at_ms":"100","updated_at_ms":"100","importance":0.5,"status":"accepted","stale":false,"segment":null,"evidence":[],"scores":{"R":0,"D":null,"I":0.5,"S":0},"provenance":[{"source_id":"s1","source_kind":"caller","content_digest":"v1:a39afeed7d3319213be7a235840b3c6d3f09f2810b9c91779f34572b6b36832a"}],"references":[],"metadata":{}}],"meta":{"scopes":[{"tenant":"@root","agent":"a"}],"as_of_ms":"100","ttl_clock_ms":"100","sequence":"7","complete":true,"truncation":[],"limitations":["retained_state_only"],"mode":"bounded_expansion","candidates_examined":"1","edges_charged":"0","vector_components":"0","mmr_components":"0","evidence_bytes":"0"},"ranking_version":"memory-ranking-v1","selection":"weighted"}}
 {"operation":"facts","request":{"scope":{"agent":"a"},"slot":{"subject_id":"e1","predicate":"role","slot_key":"primary"}},"status":200,"response":{"facts":[],"meta":{"scopes":[{"tenant":"@root","agent":"a"}],"as_of_ms":"100","ttl_clock_ms":"100","sequence":"7","complete":true,"truncation":[],"limitations":["retained_state_only"],"mode":"exact_enumeration","candidates_examined":"0","edges_charged":"0","vector_components":"0","mmr_components":"0","evidence_bytes":"0"}}}
-{"operation":"correct_facts","request":{"scope":{"agent":"a"},"idempotency_key":"k1","slot":{"subject_id":"e1","predicate":"role","slot_key":"primary"},"series":{"id":"f1","revision":"7"},"slot_revision":"7","interval":{"from_ms":"0","to_ms":null},"action":"close","at_ms":"100"},"status":200,"response":{"receipt":{"id":"r1","operation":"correct_facts","scope":{"tenant":"@root","agent":"a"},"sequence":"8","digest_version":"memory-request-v1"},"replayed":false,"outcomes":[{"id":"f1","action":"corrected","revision":"8"}],"feed":{"mode":"ordinary_changes","temporal_complete":false,"ttl_complete":false,"consumer_purge_acknowledged":false},"remaining_work":"0"}}
+{"operation":"correct_facts","request":{"scope":{"agent":"a"},"idempotency_key":"k1","slot":{"subject_id":"e1","predicate":"role","slot_key":"primary"},"series":{"id":"f1","revision":"7"},"slot_revision":"7","interval":{"valid_from_ms":"0","valid_to_ms":null},"action":"close","at_ms":"100"},"status":200,"response":{"receipt":{"id":"r1","operation":"correct_facts","scope":{"tenant":"@root","agent":"a"},"sequence":"8","digest_version":"memory-request-v1"},"replayed":false,"outcomes":[{"id":"f1","action":"corrected","revision":"8"}],"feed":{"mode":"ordinary_changes","temporal_complete":false,"ttl_complete":false,"consumer_purge_acknowledged":false},"remaining_work":"0"}}
 {"operation":"consolidate","request":{"scope":{"agent":"a"},"idempotency_key":"k1","inputs":[{"id":"m1","revision":"7"}],"output":{"id":"summary1","kind":"episodic","content":"Caller summary","observed_at_ms":"90","source":{"source_id":"summary-source","source_kind":"caller","transformation_id":"summary-v1"}},"dry_run":true},"status":200,"response":{"dry_run":true,"user_operations":"4","encoded_bytes":"512","conflicts":[],"remaining_work":"0"}}
 {"operation":"forget","request":{"scope":{"agent":"a"},"idempotency_key":"k1","target":{"ids":[{"id":"m1","revision":"7"}]},"mode":"logical_delete"},"status":200,"response":{"receipt":{"id":"r1","operation":"forget","scope":{"tenant":"@root","agent":"a"},"sequence":"8","digest_version":"memory-request-v1"},"replayed":false,"outcomes":[{"id":"m1","action":"deleted","revision":"8"}],"feed":{"mode":"ordinary_changes","temporal_complete":false,"ttl_complete":false,"consumer_purge_acknowledged":false},"remaining_work":"0","state":"logical","erasure_notice":{"live_state_only":true,"secure_erasure":false,"external_copies":"operator_managed","restore_requires_manifest":true,"backup_history_purge":"not_verified","manifest_id":"manifest1"}}}
 {"operation":"receipt","request":{"scope":{"agent":"a"},"operation":"forget","idempotency_key":"k1"},"status":200,"response":{"result":{"receipt":{"id":"r1","operation":"forget","scope":{"tenant":"@root","agent":"a"},"sequence":"8","digest_version":"memory-request-v1"},"replayed":true,"outcomes":[{"id":"m1","action":"deleted","revision":"8"}],"feed":{"mode":"ordinary_changes","temporal_complete":false,"ttl_complete":false,"consumer_purge_acknowledged":false},"remaining_work":"0","state":"logical","erasure_notice":{"live_state_only":true,"secure_erasure":false,"external_copies":"operator_managed","restore_requires_manifest":true,"backup_history_purge":"not_verified","manifest_id":"manifest1"}}}}
@@ -570,7 +602,7 @@ The implementation must supply independently verified count/byte fixtures.
 
 This compact YAML uses an explicitly defined expansion: `x-memory-post` entries
 expand to POST operations with operationId, tags:[Memory], security:[{BearerAuth:[]}],
-one required binding path parameter using Binding, one required JSON requestBody
+one required binding path parameter using `MemoryBinding`, one required JSON requestBody
 using the named request schema, 200 JSON response using the named result schema
 (oneOf for a result list), and all section 6 errors using MemoryError.
 `pending:true` adds 202 with the same result schema. These extension keys are
@@ -580,6 +612,11 @@ named security scheme.
 All object schemas below have additionalProperties:false, except declared maps.
 References use local component names (expand `ref: X` to `$ref:
 '#/components/schemas/X'`); `array: X` means type:array/items:$ref X.
+For request schemas only, recursively expand `MemoryU64`/`MemoryI64` references
+to a `oneOf` of the declared decimal-string schema and an integer schema with the
+corresponding range from section 3; response references retain the string schema.
+This input/output distinction implements proposed
+[wire conventions decision 12](serving-wire-conventions.md#6-owner-decisions-23).
 This finite expansion defines exact components without copying identical
 operation/error boilerplate nine times. String limits below count code points
 only as a preliminary schema check; normative UTF-8 byte checks still apply.
@@ -587,90 +624,93 @@ only as a preliminary schema check; normative UTF-8 byte checks still apply.
 ```yaml
 tags: [{name: Memory, description: Explicitly provisioned scoped agent memory}]
 paths:
-  /v1/memory/{binding}/remember: {x-memory-post: {id: memoryRemember, request: RememberRequest, result: MutationResponse}}
-  /v1/memory/{binding}/recall: {x-memory-post: {id: memoryRecall, request: RecallRequest, result: RecallResponse}}
-  /v1/memory/{binding}/facts/query: {x-memory-post: {id: memoryFindFacts, request: FactsRequest, result: FactsResponse}}
-  /v1/memory/{binding}/facts/correct: {x-memory-post: {id: memoryCorrectFacts, request: CorrectionRequest, result: MutationResponse}}
-  /v1/memory/{binding}/consolidate: {x-memory-post: {id: memoryConsolidate, request: ConsolidateRequest, result: [MutationResponse, PlanResponse]}}
-  /v1/memory/{binding}/forget: {x-memory-post: {id: memoryForget, request: ForgetRequest, result: MutationResponse, pending: true}}
-  /v1/memory/{binding}/receipts/lookup: {x-memory-post: {id: memoryGetReceipt, request: ReceiptRequest, result: ReceiptResponse}}
-  /v1/memory/{binding}/erasures/get: {x-memory-post: {id: memoryGetErasure, request: ErasureRequest, result: ErasureResponse}}
-  /v1/memory/{binding}/erasures/resume: {x-memory-post: {id: memoryResumeErasure, request: ResumeRequest, result: MutationResponse, pending: true}}
+  /v1/memory/{binding}/remember: {x-memory-post: {id: MemoryRemember, request: MemoryRememberRequest, result: MemoryMutationResponse}}
+  /v1/memory/{binding}/recall: {x-memory-post: {id: MemoryRecall, request: MemoryRecallRequest, result: MemoryRecallResponse}}
+  /v1/memory/{binding}/facts/query: {x-memory-post: {id: MemoryFindFacts, request: MemoryFactsRequest, result: MemoryFactsResponse}}
+  /v1/memory/{binding}/facts/correct: {x-memory-post: {id: MemoryCorrectFacts, request: MemoryCorrectionRequest, result: MemoryMutationResponse}}
+  /v1/memory/{binding}/consolidate: {x-memory-post: {id: MemoryConsolidate, request: MemoryConsolidateRequest, result: [MemoryMutationResponse, MemoryPlanResponse]}}
+  /v1/memory/{binding}/forget: {x-memory-post: {id: MemoryForget, request: MemoryForgetRequest, result: MemoryMutationResponse, pending: true}}
+  /v1/memory/{binding}/receipts/lookup: {x-memory-post: {id: MemoryGetReceipt, request: MemoryReceiptRequest, result: MemoryReceiptResponse}}
+  /v1/memory/{binding}/erasures/get: {x-memory-post: {id: MemoryGetErasure, request: MemoryErasureRequest, result: MemoryErasureResponse}}
+  /v1/memory/{binding}/erasures/resume: {x-memory-post: {id: MemoryResumeErasure, request: MemoryResumeRequest, result: MemoryMutationResponse, pending: true}}
 components:
   schemas:
-    Binding: {type: string, pattern: '^[a-z][a-z0-9_-]{0,62}$'}
-    Key: {type: string, minLength: 1, maxLength: 256}
-    U64: {type: string, pattern: '^(0|[1-9][0-9]*)$'}
-    I64: {type: string, pattern: '^(0|-?[1-9][0-9]*)$'}
-    Kind: {type: string, enum: [entity, episodic, fact, relation]}
-    Operation: {type: string, enum: [remember, correct_facts, consolidate, forget, resume_erasure]}
-    Scope: {type: object, required: [agent], properties: {agent: {ref: Key}, user: {ref: Key}, session: {ref: Key}}}
-    EffectiveScope: {type: object, required: [tenant, agent], properties: {tenant: {ref: Key}, agent: {ref: Key}, user: {ref: Key}, session: {ref: Key}}}
-    Expected: {oneOf: [{type: object, required: [absent], properties: {absent: {type: boolean, enum: [true]}}}, {type: object, required: [revision], properties: {revision: {ref: U64}}}]}
-    Interval: {type: object, required: [from_ms, to_ms], properties: {from_ms: {ref: I64, nullable: true}, to_ms: {ref: I64, nullable: true}}}
-    Ref: {type: object, required: [id, revision], properties: {id: {ref: Key}, revision: {ref: U64}}}
-    Source: {type: object, required: [source_id, source_kind], properties: {source_id: {ref: Key}, source_kind: {ref: Key}, uri: {type: string, maxLength: 256}, transformation_id: {ref: Key}}}
-    Provenance: {type: object, required: [source_id, source_kind, content_digest], properties: {source_id: {ref: Key}, source_kind: {ref: Key}, uri: {type: string, maxLength: 256}, transformation_id: {ref: Key}, content_digest: {type: string, pattern: '^v1:[0-9a-f]{64}$'}}}
-    Scalar: {oneOf: [{type: object, required: [type, value], properties: {type: {enum: [string]}, value: {type: string, maxLength: 4096}}}, {type: object, required: [type, value], properties: {type: {enum: [integer]}, value: {ref: I64}}}, {type: object, required: [type, value], properties: {type: {enum: [float]}, value: {type: number}}}, {type: object, required: [type, value], properties: {type: {enum: [boolean]}, value: {type: boolean}}}]}
-    Properties: {type: object, maxProperties: 64, additionalProperties: {ref: Scalar}}
-    MemoryCondition: {type: object, required: [field, op], properties: {field: {ref: Key}, op: {enum: [eq, lt, lte, gt, gte, exists]}, value: {ref: Scalar}}}
-    Filter: {type: object, properties: {all: {array: MemoryCondition, maxItems: 64}, any: {array: MemoryCondition, maxItems: 64}}}
-    EvidenceRef: {type: object, required: [collection, record], properties: {collection: {ref: Binding}, record: {ref: U64}}}
-    Evidence: {type: object, required: [collection, record], properties: {collection: {ref: Binding}, record: {ref: U64}, vector: {type: array, items: {type: number}, minItems: 1}, text: {type: string, maxLength: 4096}, payload_base64: {type: string, format: byte}, metadata: {ref: Properties}}}
-    Assertion: {type: object, required: [subject_id, predicate, slot_key, destination_id, interval, slot_expected], properties: {subject_id: {ref: Key}, predicate: {ref: Key}, slot_key: {ref: Key}, destination_id: {ref: Key}, interval: {ref: Interval}, slot_expected: {ref: Expected}, disagreement: {enum: [reject, disputed], default: reject}}}
-    MemoryItem: {type: object, required: [id, kind, content, observed_at_ms, source], properties: {id: {ref: Key}, kind: {ref: Kind}, content: {type: string, maxLength: 4096}, observed_at_ms: {ref: I64}, importance: {type: number, minimum: 0, maximum: 1, default: 0.5}, confidence: {type: number, minimum: 0, maximum: 1}, expires_at_ms: {ref: U64}, source: {ref: Source}, provenance: {array: Source, maxItems: 64}, references: {array: Ref, maxItems: 256}, evidence: {array: EvidenceRef, maxItems: 64}, metadata: {ref: Properties}, assertion: {ref: Assertion}, expected: {ref: Expected}, merge: {enum: [none, merge_provenance], default: none}}}
-    Mutation: {type: object, required: [scope, idempotency_key], properties: {scope: {ref: Scope}, idempotency_key: {ref: Key}, max_references: {type: integer, minimum: 1, maximum: 256, default: 64}, deadline_ms: {type: integer, minimum: 1, maximum: 5000, default: 250}, require_complete_feed: {type: boolean, default: false}}}
-    RememberRequest: {allOf: [{ref: Mutation}], x-add-properties: {items: {array: MemoryItem, minItems: 1, maxItems: 4096}, evidence: {array: Evidence, maxItems: 256}}, x-add-required: [items]}
-    Ranking: {type: object, properties: {selection: {enum: [weighted, exact, mmr], default: weighted}, weights: {type: array, items: {type: number, minimum: 0}, minItems: 3, maxItems: 3, default: [1, 0, 0]}, half_life_ms: {type: number, exclusiveMinimum: 0}, future_observations: {enum: [reject, clamp], default: reject}, lambda: {type: number, minimum: 0, maximum: 1, default: 0.5}}}
-    Limits: {type: object, properties: {candidates: {type: integer, minimum: 1, maximum: 1000, default: 200}, vector_components: {type: integer, minimum: 1, maximum: 4000000, default: 1000000}, evidence_bytes: {type: integer, minimum: 1, maximum: 4194304, default: 1048576}, mmr_components: {type: integer, minimum: 1, maximum: 100000000, default: 10000000}, deadline_ms: {type: integer, minimum: 1, maximum: 5000, default: 250}, max_hops: {type: integer, minimum: 0, maximum: 4, default: 2}, max_visited_nodes: {type: integer, minimum: 1, maximum: 10000, default: 1000}, max_edges_examined: {type: integer, minimum: 1, maximum: 100000, default: 10000}, max_edges_per_node: {type: integer, minimum: 1, maximum: 10000, default: 1000}, max_output_nodes: {type: integer, minimum: 0, maximum: 1000, default: 100}, max_output_edges: {type: integer, minimum: 0, maximum: 2000, default: 200}, max_output_paths: {type: integer, minimum: 0, maximum: 100, default: 20}}}
-    Projection: {type: object, properties: {snippets: {type: boolean, default: true}, provenance: {type: boolean, default: true}, paths: {type: boolean, default: false}, metadata: {type: array, items: {ref: Key}, maxItems: 64, default: []}}}
-    RecallRequest: {type: object, required: [scope], properties: {scope: {ref: Scope}, scopes: {array: Scope, minItems: 1, maxItems: 16}, vector: {type: array, items: {type: number}, minItems: 1}, text: {type: string, minLength: 1, maxLength: 16384}, embedding_provider: {ref: Key}, entity_seeds: {type: array, items: {ref: Key}, maxItems: 64}, kinds: {array: Kind, maxItems: 4}, filter: {ref: Filter}, as_of_ms: {ref: I64}, ranking: {ref: Ranking}, limits: {ref: Limits}, projection: {ref: Projection}, mode: {enum: [exact, approximate], default: exact}, limit: {type: integer, minimum: 1, maximum: 100, default: 20}, allow_partial: {type: boolean, default: false}}}
-    Slot: {type: object, required: [subject_id, predicate, slot_key], properties: {subject_id: {ref: Key}, predicate: {ref: Key}, slot_key: {ref: Key}}}
-    FactsRequest: {type: object, required: [scope, slot], properties: {scope: {ref: Scope}, slot: {ref: Slot}, as_of_ms: {ref: I64}, history: {type: boolean, default: false}, limit: {type: integer, minimum: 1, maximum: 100, default: 20}, limits: {ref: Limits}, projection: {ref: Projection}, allow_partial: {type: boolean, default: false}}}
-    CorrectionRequest: {allOf: [{ref: Mutation}], x-add-required: [slot, series, slot_revision, interval, action], x-add-properties: {slot: {ref: Slot}, series: {ref: Ref}, slot_revision: {ref: U64}, interval: {ref: Interval}, action: {enum: [close, replace, remove]}, at_ms: {ref: I64}, correction_interval: {ref: Interval}, replacement: {ref: MemoryItem}, evidence: {array: Evidence, maxItems: 256}}}
-    Input: {type: object, required: [id, revision], properties: {id: {ref: Key}, revision: {ref: U64}, disposition: {enum: [retain, logical_delete], default: retain}}}
-    ConsolidateRequest: {allOf: [{ref: Mutation}], x-add-required: [inputs, output], x-add-properties: {inputs: {array: Input, minItems: 1, maxItems: 256}, output: {ref: MemoryItem}, evidence: {array: Evidence, maxItems: 256}, dry_run: {type: boolean, default: false}}}
-    Target: {oneOf: [{type: object, required: [ids], properties: {ids: {array: Ref, minItems: 1, maxItems: 4096}}}, {type: object, required: [series], properties: {series: {ref: Ref}}}, {type: object, required: [entity], properties: {entity: {ref: Ref}}}, {type: object, required: [session], properties: {session: {type: boolean, enum: [true]}}}, {type: object, required: [scope], properties: {scope: {type: boolean, enum: [true]}}}]}
-    ForgetRequest: {allOf: [{ref: Mutation}], x-add-required: [target, mode], x-add-properties: {target: {ref: Target}, mode: {enum: [logical_delete, expire]}, expires_at_ms: {ref: U64}, allow_job: {type: boolean, default: false}}}
-    ReceiptRequest: {type: object, required: [scope, operation, idempotency_key], properties: {scope: {ref: Scope}, operation: {ref: Operation}, idempotency_key: {ref: Key}}}
-    ErasureRequest: {type: object, required: [scope, job_id], properties: {scope: {ref: Scope}, job_id: {ref: Key}}}
-    ResumeRequest: {allOf: [{ref: Mutation}], x-add-required: [job_id, revision, generation, resume_token], x-add-properties: {job_id: {ref: Key}, revision: {ref: U64}, generation: {ref: U64}, resume_token: {type: string, minLength: 1, maxLength: 4096}}}
-    Receipt: {type: object, required: [id, operation, scope, sequence, digest_version], properties: {id: {ref: Key}, operation: {ref: Operation}, scope: {ref: EffectiveScope}, sequence: {ref: U64}, retry_until_ms: {ref: U64}, digest_version: {enum: [memory-request-v1]}}}
-    Outcome: {type: object, required: [id, action, revision], properties: {id: {ref: Key}, action: {enum: [created, merged, noop, corrected, deleted, expired, retained_shared]}, revision: {ref: U64}, expires_at_ms: {ref: U64}}}
-    Feed: {type: object, required: [mode, temporal_complete, ttl_complete, consumer_purge_acknowledged], properties: {mode: {enum: [ordinary_changes]}, temporal_complete: {enum: [false]}, ttl_complete: {enum: [false]}, consumer_purge_acknowledged: {enum: [false]}}}
-    ErasureNotice: {type: object, required: [live_state_only, secure_erasure, external_copies, restore_requires_manifest, backup_history_purge], properties: {live_state_only: {enum: [true]}, secure_erasure: {enum: [false]}, external_copies: {enum: [operator_managed]}, restore_requires_manifest: {enum: [true]}, backup_history_purge: {enum: [not_verified]}, manifest_id: {ref: Key}}}
-    Erasure: {type: object, required: [id, scope, target, revision, generation, state, logical_visibility, deleted_count, remaining_count], properties: {id: {ref: Key}, scope: {ref: EffectiveScope}, target: {ref: Target}, revision: {ref: U64}, generation: {ref: U64}, state: {enum: [pending, logical]}, logical_visibility: {enum: [hidden]}, deleted_count: {ref: U64}, remaining_count: {ref: U64, nullable: true}, resume_token: {type: string, maxLength: 4096}}}
-    MutationResponse: {type: object, required: [receipt, replayed, outcomes, feed, remaining_work], properties: {receipt: {ref: Receipt}, replayed: {type: boolean}, outcomes: {array: Outcome, maxItems: 4096}, feed: {ref: Feed}, remaining_work: {ref: U64, nullable: true}, state: {enum: [logical, pending, retention_set]}, erasure: {ref: Erasure}, erasure_notice: {ref: ErasureNotice}}}
-    ReceiptResponse: {type: object, required: [result], properties: {result: {ref: MutationResponse}}}
-    ErasureResponse: {type: object, required: [erasure, erasure_notice, feed], properties: {erasure: {ref: Erasure}, erasure_notice: {ref: ErasureNotice}, feed: {ref: Feed}}}
-    PlanResponse: {type: object, required: [dry_run, user_operations, encoded_bytes, conflicts, remaining_work], properties: {dry_run: {enum: [true]}, user_operations: {ref: U64}, encoded_bytes: {ref: U64}, conflicts: {type: array, items: {ref: ErrorDetail}, maxItems: 256}, remaining_work: {ref: U64, nullable: true}}}
-    EvidenceView: {type: object, required: [collection, record], properties: {collection: {ref: Binding}, record: {ref: U64}, snippet: {type: string, maxLength: 4096}}}
-    Path: {type: object, required: [nodes, edges], properties: {nodes: {type: array, items: {ref: U64}, maxItems: 5}, edges: {type: array, items: {ref: U64}, maxItems: 4}}}
-    Scores: {type: object, required: [R, D, I, S], properties: {R: {type: number}, D: {type: number, nullable: true}, I: {type: number}, S: {type: number}, dense_rank: {type: integer, minimum: 1, maximum: 1000}, sparse_rank: {type: integer, minimum: 1, maximum: 1000}, text_rank: {type: integer, minimum: 1, maximum: 1000}, distance: {type: number}, bm25: {type: number}, sparse_score: {type: number}, fused_rank: {type: integer, minimum: 1, maximum: 1000}, fused_score: {type: number}}}
-    MemoryView: {type: object, required: [id, revision, scope, kind, content, observed_at_ms, created_at_ms, updated_at_ms, importance, status, stale, segment, evidence, scores], properties: {id: {ref: Key}, revision: {ref: U64}, scope: {ref: EffectiveScope}, kind: {ref: Kind}, content: {type: string, maxLength: 4096}, observed_at_ms: {ref: I64}, created_at_ms: {ref: U64}, updated_at_ms: {ref: U64}, importance: {type: number}, confidence: {type: number}, expires_at_ms: {ref: U64}, status: {enum: [accepted, disputed]}, stale: {type: boolean}, segment: {ref: Interval, nullable: true}, evidence: {array: EvidenceView, maxItems: 64}, scores: {ref: Scores}, provenance: {array: Provenance, maxItems: 64}, references: {array: Ref, maxItems: 256}, paths: {array: Path, maxItems: 100}, metadata: {ref: Properties}}}
-    ReadMeta: {type: object, required: [scopes, as_of_ms, ttl_clock_ms, sequence, complete, truncation, limitations, mode, candidates_examined, edges_charged, vector_components, mmr_components, evidence_bytes], properties: {scopes: {array: EffectiveScope, minItems: 1, maxItems: 16}, as_of_ms: {ref: I64}, ttl_clock_ms: {ref: U64}, sequence: {ref: U64}, complete: {type: boolean}, truncation: {type: array, items: {enum: [candidates, source_scan, vector_components, evidence_bytes, mmr_components, visited_nodes, edges, degree, deadline, output, deletion_barrier]}}, limitations: {type: array, items: {enum: [historical_candidate_discovery_not_exhaustive, retained_state_only]}}, mode: {enum: [exact_enumeration, approximate, bounded_expansion]}, candidates_examined: {ref: U64}, edges_charged: {ref: U64}, vector_components: {ref: U64}, mmr_components: {ref: U64}, evidence_bytes: {ref: U64}}}
-    RecallResponse: {type: object, required: [memories, meta, ranking_version, selection], properties: {memories: {array: MemoryView, maxItems: 100}, meta: {ref: ReadMeta}, ranking_version: {enum: [memory-ranking-v1]}, selection: {enum: [weighted, exact, mmr]}}}
-    FactView: {type: object, required: [series, slot, slot_revision, destination_id, interval, status, stale, evidence], properties: {series: {ref: Ref}, slot: {ref: Slot}, slot_revision: {ref: U64}, destination_id: {ref: Key}, interval: {ref: Interval}, status: {enum: [accepted, disputed]}, stale: {type: boolean}, evidence: {array: EvidenceView, maxItems: 64}, provenance: {array: Provenance, maxItems: 64}}}
-    FactsResponse: {type: object, required: [facts, meta], properties: {facts: {array: FactView, maxItems: 100}, meta: {ref: ReadMeta}}}
-    Competing: {type: object, required: [id, interval, revision], properties: {id: {ref: Key}, interval: {ref: Interval}, revision: {ref: U64}}}
-    ErrorDetail: {type: object, properties: {field: {ref: Key}, limit: {ref: U64}, requested: {ref: U64}, competing: {array: Competing, maxItems: 256}, receipt_lookup_required: {type: boolean}, code: {type: string}}}
-    MemoryError: {type: object, required: [error], properties: {error: {type: object, required: [code, message], properties: {code: {type: string}, message: {type: string}, details: {ref: ErrorDetail}}}}}
+    MemoryBinding: {type: string, pattern: '^[a-z][a-z0-9_-]{0,62}$'}
+    MemoryKey: {type: string, minLength: 1, maxLength: 256}
+    MemoryU64: {type: string, pattern: '^(0|[1-9][0-9]*)$'}
+    MemoryI64: {type: string, pattern: '^(0|-?[1-9][0-9]*)$'}
+    MemoryKind: {type: string, enum: [entity, episodic, fact, relation]}
+    MemoryOperation: {type: string, enum: [remember, correct_facts, consolidate, forget, resume_erasure]}
+    MemoryScope: {type: object, required: [agent], properties: {agent: {ref: MemoryKey}, user: {ref: MemoryKey}, session: {ref: MemoryKey}}}
+    MemoryEffectiveScope: {type: object, required: [tenant, agent], properties: {tenant: {ref: MemoryKey}, agent: {ref: MemoryKey}, user: {ref: MemoryKey}, session: {ref: MemoryKey}}}
+    MemoryExpected: {oneOf: [{type: object, required: [absent], properties: {absent: {type: boolean, enum: [true]}}}, {type: object, required: [revision], properties: {revision: {ref: MemoryU64}}}]}
+    MemoryInterval: {type: object, required: [valid_from_ms, valid_to_ms], properties: {valid_from_ms: {ref: MemoryI64, nullable: true}, valid_to_ms: {ref: MemoryI64, nullable: true}}}
+    MemoryRef: {type: object, required: [id, revision], properties: {id: {ref: MemoryKey}, revision: {ref: MemoryU64}}}
+    MemorySource: {type: object, required: [source_id, source_kind], properties: {source_id: {ref: MemoryKey}, source_kind: {ref: MemoryKey}, uri: {type: string, maxLength: 256}, transformation_id: {ref: MemoryKey}}}
+    MemoryProvenance: {type: object, required: [source_id, source_kind, content_digest], properties: {source_id: {ref: MemoryKey}, source_kind: {ref: MemoryKey}, uri: {type: string, maxLength: 256}, transformation_id: {ref: MemoryKey}, content_digest: {type: string, pattern: '^v1:[0-9a-f]{64}$'}}}
+    MemoryScalar: {oneOf: [{type: object, required: [type, value], properties: {type: {enum: [string]}, value: {type: string, maxLength: 4096}}}, {type: object, required: [type, value], properties: {type: {enum: [integer]}, value: {ref: MemoryI64}}}, {type: object, required: [type, value], properties: {type: {enum: [float]}, value: {type: number}}}, {type: object, required: [type, value], properties: {type: {enum: [boolean]}, value: {type: boolean}}}]}
+    MemoryProperties: {type: object, maxProperties: 64, additionalProperties: {ref: MemoryScalar}}
+    MemoryCondition: {type: object, required: [field, op], properties: {field: {ref: MemoryKey}, op: {enum: [eq, lt, lte, gt, gte, exists]}, value: {ref: MemoryScalar}}}
+    MemoryFilter: {type: object, properties: {all: {array: MemoryCondition, maxItems: 64}, any: {array: MemoryCondition, maxItems: 64}}}
+    MemoryEvidenceRef: {type: object, required: [collection, record], properties: {collection: {ref: MemoryBinding}, record: {ref: MemoryU64}}}
+    MemoryEvidence: {type: object, required: [collection, record], properties: {collection: {ref: MemoryBinding}, record: {ref: MemoryU64}, vector: {type: array, items: {type: number}, minItems: 1}, text: {type: string, maxLength: 4096}, payload_base64: {type: string, format: byte}, metadata: {ref: MemoryProperties}}}
+    MemoryAssertion: {type: object, required: [subject_id, predicate, slot_key, destination_id, interval, slot_expected], properties: {subject_id: {ref: MemoryKey}, predicate: {ref: MemoryKey}, slot_key: {ref: MemoryKey}, destination_id: {ref: MemoryKey}, interval: {ref: MemoryInterval}, slot_expected: {ref: MemoryExpected}, disagreement: {enum: [reject, disputed], default: reject}}}
+    MemoryItem: {type: object, required: [id, kind, content, observed_at_ms, source], properties: {id: {ref: MemoryKey}, kind: {ref: MemoryKind}, content: {type: string, maxLength: 4096}, observed_at_ms: {ref: MemoryI64}, importance: {type: number, minimum: 0, maximum: 1, default: 0.5}, confidence: {type: number, minimum: 0, maximum: 1}, expires_at_ms: {ref: MemoryU64}, source: {ref: MemorySource}, provenance: {array: MemorySource, maxItems: 64}, references: {array: MemoryRef, maxItems: 256}, evidence: {array: MemoryEvidenceRef, maxItems: 64}, metadata: {ref: MemoryProperties}, assertion: {ref: MemoryAssertion}, expected: {ref: MemoryExpected}, merge: {enum: [none, merge_provenance], default: none}}}
+    MemoryMutation: {type: object, required: [scope, idempotency_key], properties: {scope: {ref: MemoryScope}, idempotency_key: {ref: MemoryKey}, max_references: {type: integer, minimum: 1, maximum: 256, default: 64}, deadline_ms: {type: integer, minimum: 1, maximum: 5000, default: 250}, require_complete_feed: {type: boolean, default: false}}}
+    MemoryRememberRequest: {allOf: [{ref: MemoryMutation}], x-add-properties: {items: {array: MemoryItem, minItems: 1, maxItems: 4096}, evidence: {array: MemoryEvidence, maxItems: 256}}, x-add-required: [items]}
+    MemoryRanking: {type: object, properties: {selection: {enum: [weighted, exact, mmr], default: weighted}, weights: {type: array, items: {type: number, minimum: 0}, minItems: 3, maxItems: 3, default: [1, 0, 0]}, half_life_ms: {type: number, exclusiveMinimum: 0}, future_observations: {enum: [reject, clamp], default: reject}, lambda: {type: number, minimum: 0, maximum: 1, default: 0.5}}}
+    MemoryLimits: {type: object, properties: {candidates: {type: integer, minimum: 1, maximum: 1000, default: 200}, vector_components: {type: integer, minimum: 1, maximum: 4000000, default: 1000000}, evidence_bytes: {type: integer, minimum: 1, maximum: 4194304, default: 1048576}, mmr_components: {type: integer, minimum: 1, maximum: 100000000, default: 10000000}, deadline_ms: {type: integer, minimum: 1, maximum: 5000, default: 250}, max_hops: {type: integer, minimum: 0, maximum: 4, default: 2}, max_visited_nodes: {type: integer, minimum: 1, maximum: 10000, default: 1000}, max_edges_examined: {type: integer, minimum: 1, maximum: 100000, default: 10000}, max_edges_per_node: {type: integer, minimum: 1, maximum: 10000, default: 1000}, max_output_nodes: {type: integer, minimum: 0, maximum: 1000, default: 100}, max_output_edges: {type: integer, minimum: 0, maximum: 2000, default: 200}, max_output_paths: {type: integer, minimum: 0, maximum: 100, default: 20}}}
+    MemoryProjection: {type: object, properties: {snippets: {type: boolean, default: true}, provenance: {type: boolean, default: true}, paths: {type: boolean, default: false}, metadata: {type: array, items: {ref: MemoryKey}, maxItems: 64, default: []}}}
+    MemoryRecallRequest: {type: object, required: [scope], properties: {scope: {ref: MemoryScope}, scopes: {array: MemoryScope, minItems: 1, maxItems: 16}, vector: {type: array, items: {type: number}, minItems: 1}, text: {type: string, minLength: 1, maxLength: 16384}, embedding_provider: {ref: MemoryKey}, entity_seeds: {type: array, items: {ref: MemoryKey}, maxItems: 64}, kinds: {array: MemoryKind, maxItems: 4}, filter: {ref: MemoryFilter}, as_of_ms: {ref: MemoryI64}, ranking: {ref: MemoryRanking}, limits: {ref: MemoryLimits}, projection: {ref: MemoryProjection}, mode: {enum: [exact, approximate], default: exact}, limit: {type: integer, minimum: 1, maximum: 100, default: 20}, allow_partial: {type: boolean, default: false}}}
+    MemorySlot: {type: object, required: [subject_id, predicate, slot_key], properties: {subject_id: {ref: MemoryKey}, predicate: {ref: MemoryKey}, slot_key: {ref: MemoryKey}}}
+    MemoryFactsRequest: {type: object, required: [scope, slot], properties: {scope: {ref: MemoryScope}, slot: {ref: MemorySlot}, as_of_ms: {ref: MemoryI64}, history: {type: boolean, default: false}, limit: {type: integer, minimum: 1, maximum: 100, default: 20}, limits: {ref: MemoryLimits}, projection: {ref: MemoryProjection}, allow_partial: {type: boolean, default: false}}}
+    MemoryCorrectionRequest: {allOf: [{ref: MemoryMutation}], x-add-required: [slot, series, slot_revision, interval, action], x-add-properties: {slot: {ref: MemorySlot}, series: {ref: MemoryRef}, slot_revision: {ref: MemoryU64}, interval: {ref: MemoryInterval}, action: {enum: [close, replace, remove]}, at_ms: {ref: MemoryI64}, correction_interval: {ref: MemoryInterval}, replacement: {ref: MemoryItem}, evidence: {array: MemoryEvidence, maxItems: 256}}}
+    MemoryInput: {type: object, required: [id, revision], properties: {id: {ref: MemoryKey}, revision: {ref: MemoryU64}, disposition: {enum: [retain, logical_delete], default: retain}}}
+    MemoryConsolidateRequest: {allOf: [{ref: MemoryMutation}], x-add-required: [inputs, output], x-add-properties: {inputs: {array: MemoryInput, minItems: 1, maxItems: 256}, output: {ref: MemoryItem}, evidence: {array: MemoryEvidence, maxItems: 256}, dry_run: {type: boolean, default: false}}}
+    MemoryTarget: {oneOf: [{type: object, required: [ids], properties: {ids: {array: MemoryRef, minItems: 1, maxItems: 4096}}}, {type: object, required: [series], properties: {series: {ref: MemoryRef}}}, {type: object, required: [entity], properties: {entity: {ref: MemoryRef}}}, {type: object, required: [session], properties: {session: {type: boolean, enum: [true]}}}, {type: object, required: [scope], properties: {scope: {type: boolean, enum: [true]}}}]}
+    MemoryForgetRequest: {allOf: [{ref: MemoryMutation}], x-add-required: [target, mode], x-add-properties: {target: {ref: MemoryTarget}, mode: {enum: [logical_delete, expire]}, expires_at_ms: {ref: MemoryU64}, allow_job: {type: boolean, default: false}}}
+    MemoryReceiptRequest: {type: object, required: [scope, operation, idempotency_key], properties: {scope: {ref: MemoryScope}, operation: {ref: MemoryOperation}, idempotency_key: {ref: MemoryKey}}}
+    MemoryErasureRequest: {type: object, required: [scope, job_id], properties: {scope: {ref: MemoryScope}, job_id: {ref: MemoryKey}}}
+    MemoryResumeRequest: {allOf: [{ref: MemoryMutation}], x-add-required: [job_id, revision, generation, resume_token], x-add-properties: {job_id: {ref: MemoryKey}, revision: {ref: MemoryU64}, generation: {ref: MemoryU64}, resume_token: {type: string, minLength: 1, maxLength: 4096}}}
+    MemoryReceipt: {type: object, required: [id, operation, scope, sequence, digest_version], properties: {id: {ref: MemoryKey}, operation: {ref: MemoryOperation}, scope: {ref: MemoryEffectiveScope}, sequence: {ref: MemoryU64}, retry_until_ms: {ref: MemoryU64}, digest_version: {enum: [memory-request-v1]}}}
+    MemoryOutcome: {type: object, required: [id, action, revision], properties: {id: {ref: MemoryKey}, action: {enum: [created, merged, noop, corrected, deleted, expired, retained_shared]}, revision: {ref: MemoryU64}, expires_at_ms: {ref: MemoryU64}}}
+    MemoryFeed: {type: object, required: [mode, temporal_complete, ttl_complete, consumer_purge_acknowledged], properties: {mode: {enum: [ordinary_changes]}, temporal_complete: {enum: [false]}, ttl_complete: {enum: [false]}, consumer_purge_acknowledged: {enum: [false]}}}
+    MemoryErasureNotice: {type: object, required: [live_state_only, secure_erasure, external_copies, restore_requires_manifest, backup_history_purge], properties: {live_state_only: {enum: [true]}, secure_erasure: {enum: [false]}, external_copies: {enum: [operator_managed]}, restore_requires_manifest: {enum: [true]}, backup_history_purge: {enum: [not_verified]}, manifest_id: {ref: MemoryKey}}}
+    MemoryErasure: {type: object, required: [id, scope, target, revision, generation, state, logical_visibility, deleted_count, remaining_count], properties: {id: {ref: MemoryKey}, scope: {ref: MemoryEffectiveScope}, target: {ref: MemoryTarget}, revision: {ref: MemoryU64}, generation: {ref: MemoryU64}, state: {enum: [pending, logical]}, logical_visibility: {enum: [hidden]}, deleted_count: {ref: MemoryU64}, remaining_count: {ref: MemoryU64, nullable: true}, resume_token: {type: string, maxLength: 4096}}}
+    MemoryMutationResponse: {type: object, required: [receipt, replayed, outcomes, feed, remaining_work], properties: {receipt: {ref: MemoryReceipt}, replayed: {type: boolean}, outcomes: {array: MemoryOutcome, maxItems: 4096}, feed: {ref: MemoryFeed}, remaining_work: {ref: MemoryU64, nullable: true}, state: {enum: [logical, pending, retention_set]}, erasure: {ref: MemoryErasure}, erasure_notice: {ref: MemoryErasureNotice}}}
+    MemoryReceiptResponse: {type: object, required: [result], properties: {result: {ref: MemoryMutationResponse}}}
+    MemoryErasureResponse: {type: object, required: [erasure, erasure_notice, feed], properties: {erasure: {ref: MemoryErasure}, erasure_notice: {ref: MemoryErasureNotice}, feed: {ref: MemoryFeed}}}
+    MemoryPlanResponse: {type: object, required: [dry_run, user_operations, encoded_bytes, conflicts, remaining_work], properties: {dry_run: {enum: [true]}, user_operations: {ref: MemoryU64}, encoded_bytes: {ref: MemoryU64}, conflicts: {type: array, items: {ref: MemoryErrorDetail}, maxItems: 256}, remaining_work: {ref: MemoryU64, nullable: true}}}
+    MemoryEvidenceView: {type: object, required: [collection, record], properties: {collection: {ref: MemoryBinding}, record: {ref: MemoryU64}, snippet: {type: string, maxLength: 4096}}}
+    MemoryPath: {type: object, required: [nodes, edges], properties: {nodes: {type: array, items: {ref: MemoryU64}, maxItems: 5}, edges: {type: array, items: {ref: MemoryU64}, maxItems: 4}}}
+    MemoryScores: {type: object, required: [R, D, I, S], properties: {R: {type: number}, D: {type: number, nullable: true}, I: {type: number}, S: {type: number}, dense_rank: {type: integer, minimum: 1, maximum: 1000}, sparse_rank: {type: integer, minimum: 1, maximum: 1000}, text_rank: {type: integer, minimum: 1, maximum: 1000}, distance: {type: number}, bm25: {type: number}, sparse_score: {type: number}, fused_rank: {type: integer, minimum: 1, maximum: 1000}, fused_score: {type: number}}}
+    MemoryView: {type: object, required: [id, revision, scope, kind, content, observed_at_ms, created_at_ms, updated_at_ms, importance, status, stale, segment, evidence, scores], properties: {id: {ref: MemoryKey}, revision: {ref: MemoryU64}, scope: {ref: MemoryEffectiveScope}, kind: {ref: MemoryKind}, content: {type: string, maxLength: 4096}, observed_at_ms: {ref: MemoryI64}, created_at_ms: {ref: MemoryU64}, updated_at_ms: {ref: MemoryU64}, importance: {type: number}, confidence: {type: number}, expires_at_ms: {ref: MemoryU64}, status: {enum: [accepted, disputed]}, stale: {type: boolean}, segment: {ref: MemoryInterval, nullable: true}, evidence: {array: MemoryEvidenceView, maxItems: 64}, scores: {ref: MemoryScores}, provenance: {array: MemoryProvenance, maxItems: 64}, references: {array: MemoryRef, maxItems: 256}, paths: {array: MemoryPath, maxItems: 100}, metadata: {ref: MemoryProperties}}}
+    MemoryReadMeta: {type: object, required: [scopes, as_of_ms, ttl_clock_ms, sequence, complete, truncation, limitations, mode, candidates_examined, edges_charged, vector_components, mmr_components, evidence_bytes], properties: {scopes: {array: MemoryEffectiveScope, minItems: 1, maxItems: 16}, as_of_ms: {ref: MemoryI64}, ttl_clock_ms: {ref: MemoryU64}, sequence: {ref: MemoryU64}, complete: {type: boolean}, truncation: {type: array, items: {enum: [candidates, source_scan, vector_components, evidence_bytes, mmr_components, visited_nodes, edges, degree, deadline, output, deletion_barrier]}}, limitations: {type: array, items: {enum: [historical_candidate_discovery_not_exhaustive, retained_state_only]}}, mode: {enum: [exact_enumeration, approximate, bounded_expansion]}, candidates_examined: {ref: MemoryU64}, edges_charged: {ref: MemoryU64}, vector_components: {ref: MemoryU64}, mmr_components: {ref: MemoryU64}, evidence_bytes: {ref: MemoryU64}}}
+    MemoryRecallResponse: {type: object, required: [memories, meta, ranking_version, selection], properties: {memories: {array: MemoryView, maxItems: 100}, meta: {ref: MemoryReadMeta}, ranking_version: {enum: [memory-ranking-v1]}, selection: {enum: [weighted, exact, mmr]}}}
+    MemoryFactView: {type: object, required: [series, slot, slot_revision, destination_id, interval, status, stale, evidence], properties: {series: {ref: MemoryRef}, slot: {ref: MemorySlot}, slot_revision: {ref: MemoryU64}, destination_id: {ref: MemoryKey}, interval: {ref: MemoryInterval}, status: {enum: [accepted, disputed]}, stale: {type: boolean}, evidence: {array: MemoryEvidenceView, maxItems: 64}, provenance: {array: MemoryProvenance, maxItems: 64}}}
+    MemoryFactsResponse: {type: object, required: [facts, meta], properties: {facts: {array: MemoryFactView, maxItems: 100}, meta: {ref: MemoryReadMeta}}}
+    MemoryCompeting: {type: object, required: [id, interval, revision], properties: {id: {ref: MemoryKey}, interval: {ref: MemoryInterval}, revision: {ref: MemoryU64}}}
+    MemoryErrorDetail: {type: object, properties: {field: {ref: MemoryKey}, limit: {ref: MemoryU64}, requested: {ref: MemoryU64}, competing: {array: MemoryCompeting, maxItems: 256}, receipt_lookup_required: {type: boolean}, code: {type: string}}}
+    MemoryErrorContext: {type: object, properties: {field: {type: string}, limit: {ref: MemoryU64}, requested: {ref: MemoryU64}, feature: {type: string}, category: {type: string}}}
+    MemoryError: {type: object, required: [error], properties: {error: {type: object, required: [code, message], properties: {code: {type: string}, message: {type: string}, details: {ref: MemoryErrorContext}}}}}
 ```
 
-`x-add-properties`/`x-add-required` mean flatten the named common Mutation fields
+`MemoryErrorDetail` describes plan conflicts only; `MemoryErrorContext` is the
+proposed shared REST/gRPC context of decision 21, not a memory-only error shape.
+`x-add-properties`/`x-add-required` mean flatten the named common `MemoryMutation` fields
 and listed fields into one closed object, not allOf with an incompatible closed
 base. Expand nullable refs using the repository's OpenAPI dialect, retaining
 explicit null. All named scalar enums have type:string except literal booleans.
-U64/I64 maximum ranges, finite numbers and decoded-byte budgets require runtime
-validation. Filter is AND(all) AND OR(any); absent/empty groups are true; exists
+`MemoryU64`/`MemoryI64` maximum ranges, exact integer inputs, finite numbers and decoded-byte budgets require runtime
+validation. `MemoryFilter` is AND(all) AND OR(any); absent/empty groups are true; exists
 forbids value, other operators require it; ordered comparisons require matching
 integer/float/string type. Max 64 conditions total, no nesting or raw graph text.
 Absent kinds means all four; empty kinds rejects. If scopes is supplied it
 replaces the single scope as the exact read allowlist and must contain scope.
 Sources default provenance to [source], references/evidence/metadata to empty;
 no secret source redaction fallback may change identity. References to new
-bundle IDs use revision "0" as a request-only sentinel; retained revisions must
-be nonzero. ReceiptResponse.result has replayed=true. Mutation remaining_work
+bundle IDs use revision "0" or exact integer 0 as a request-only sentinel; retained revisions must
+be nonzero. `MemoryReceiptResponse.result` has replayed=true. Mutation remaining_work
 is "0" when known finished and null only when unknown. Erasure outcome arrays
 are empty for bulk targets; counts/job state carry progress instead.
 Read meta truncation/limitations are unique arrays sorted lexically.
@@ -702,7 +742,7 @@ service Memory {
 message MemoryScope { string agent = 1; optional string user = 2; optional string session = 3; }
 message MemoryEffectiveScope { string tenant = 1; string agent = 2; optional string user = 3; optional string session = 4; }
 message MemoryExpected { oneof check { bool absent = 1; uint64 revision = 2; } }
-message MemoryInterval { optional int64 from_ms = 1; optional int64 to_ms = 2; }
+message MemoryInterval { optional int64 valid_from_ms = 1; optional int64 valid_to_ms = 2; }
 message MemoryRef { string id = 1; uint64 revision = 2; }
 message MemorySource { string source_id = 1; string source_kind = 2; optional string uri = 3; optional string transformation_id = 4; }
 message MemoryProvenance { MemorySource source = 1; string content_digest = 2; }
@@ -714,11 +754,11 @@ message MemoryVector { repeated float values = 1; }
 message MemoryEvidence { string collection = 1; uint64 record = 2; MemoryVector vector = 3; optional string text = 4; optional bytes payload = 5; map<string, MemoryScalar> metadata = 6; }
 message MemoryAssertion { string subject_id = 1; string predicate = 2; string slot_key = 3; string destination_id = 4; MemoryInterval interval = 5; MemoryExpected slot_expected = 6; optional string disagreement = 7; }
 message MemoryItem { string id = 1; string kind = 2; string content = 3; optional int64 observed_at_ms = 4; MemorySource source = 5; optional double importance = 6; optional double confidence = 7; optional uint64 expires_at_ms = 8; repeated MemorySource provenance = 9; repeated MemoryRef references = 10; repeated MemoryEvidenceRef evidence = 11; map<string, MemoryScalar> metadata = 12; MemoryAssertion assertion = 13; MemoryExpected expected = 14; optional string merge = 15; }
-message MemoryMutation { MemoryScope scope = 1; string idempotency_key = 2; optional uint32 max_references = 3; optional uint32 deadline_ms = 4; optional bool require_complete_feed = 5; }
+message MemoryMutation { MemoryScope scope = 1; string idempotency_key = 2; optional uint32 max_references = 3; optional uint64 deadline_ms = 4; optional bool require_complete_feed = 5; }
 message MemoryRememberRequest { string binding = 1; MemoryMutation mutation = 2; repeated MemoryItem items = 3; repeated MemoryEvidence evidence = 4; }
 message MemoryWeights { double relevance = 1; double recency = 2; double importance = 3; }
 message MemoryRanking { optional string selection = 1; MemoryWeights weights = 2; optional double half_life_ms = 3; optional string future_observations = 4; optional double lambda = 5; }
-message MemoryLimits { optional uint32 candidates = 1; optional uint64 vector_components = 2; optional uint64 evidence_bytes = 3; optional uint64 mmr_components = 4; optional uint32 deadline_ms = 5; optional uint32 max_hops = 6; optional uint32 max_visited_nodes = 7; optional uint32 max_edges_examined = 8; optional uint32 max_edges_per_node = 9; optional uint32 max_output_nodes = 10; optional uint32 max_output_edges = 11; optional uint32 max_output_paths = 12; }
+message MemoryLimits { optional uint64 candidates = 1; optional uint64 vector_components = 2; optional uint64 evidence_bytes = 3; optional uint64 mmr_components = 4; optional uint64 deadline_ms = 5; optional uint64 max_hops = 6; optional uint64 max_visited_nodes = 7; optional uint64 max_edges_examined = 8; optional uint64 max_edges_per_node = 9; optional uint64 max_output_nodes = 10; optional uint64 max_output_edges = 11; optional uint64 max_output_paths = 12; }
 message MemoryProjection { optional bool snippets = 1; optional bool provenance = 2; optional bool paths = 3; repeated string metadata = 4; }
 message MemoryRecallRequest { string binding = 1; MemoryScope scope = 2; repeated MemoryScope scopes = 3; MemoryVector vector = 4; optional string text = 5; optional string embedding_provider = 6; repeated string entity_seeds = 7; repeated string kinds = 8; MemoryFilter filter = 9; optional int64 as_of_ms = 10; MemoryRanking ranking = 11; MemoryLimits limits = 12; MemoryProjection projection = 13; optional string mode = 14; optional uint32 limit = 15; optional bool allow_partial = 16; }
 message MemorySlot { string subject_id = 1; string predicate = 2; string slot_key = 3; }
@@ -764,7 +804,7 @@ scope booleans must be true. Repeated scopes empty defaults to [scope], but JSON
 explicit empty rejects; JSON kinds empty rejects, protobuf empty means all kinds.
 Publish these presence differences in generated client docs, never reinterpret
 nonempty requests. Missing required nonoptional strings reject empty; required
-revision/generation zero rejects, except `Ref.revision` 0 naming an ID created in
+revision/generation zero rejects, except `MemoryRef.revision` 0 naming an ID created in
 the same bundle (section 4); request timestamps that permit zero use optional.
 All message presence requirements mirror the required JSON fields. Today prost
 decoding discards unknown fields (`prost-derive` 0.14.4 `src/lib.rs:191`
@@ -776,16 +816,20 @@ unknown fields remain ignorable.
 
 ### MCP, CLI and clients
 
-Each MCP tool in section 4 has exact inputSchema
-`{type:"object",additionalProperties:false,required:["binding","request"],
-properties:{binding:Binding,request:<that operation's expanded request schema>}}`.
+Each MCP tool in section 4 has a flat inputSchema: expand that operation's request
+schema into one object, add top-level `binding` using `MemoryBinding`, and require
+`binding` plus the operation's required fields; set `additionalProperties:false`.
+No nested request wrapper or `outputSchema` is proposed, following
+[wire conventions section 5.4, decision 22](serving-wire-conventions.md#54-naming-rules).
 Register reusable definitions locally in tools/list, not remote schema refs.
 This is the complete input shape; no hidden tenant/provider configuration.
 Read tools have readOnlyHint=true; others false, including dry-run-capable
 consolidate. Mutation tools have idempotentHint=false because replay is bounded
 by receipt retention (none in A1; an A2 policy). Tools call the authenticated shared service,
 never open a file to evade policy. Return the exact JSON response in structuredContent
-and the same JSON text content; failures set isError=true with MemoryError,
+and the same JSON text content; failures set `isError:true` with
+`structuredContent.error` the string `"<code>: <message>"`, using the engine code
+per [wire conventions section 2.3](serving-wire-conventions.md#23-partial-versus-error),
 never put a failed operation inside a success result. Preserve pending state;
 do not poll/resume or interpret a tool response as further instructions.
 
@@ -800,31 +844,39 @@ edits the JSON `deadline_ms` (engine default 250) or its digest. A timeout is
 transport ambiguity (exit 6); reconcile a mutation by receipt.
 No token literal flag or automatic retry/paging/job loop. Success prints exactly
 one response JSON line; pending is a successful accepted request with state pending.
-Failures print MemoryError to stderr; exit 0 success, 2 usage/input, 3 auth,
-4 conflict/precondition, 5 budget/deadline/cancel, 6 transport/storage ambiguity,
+Failures print `"<code>: <message>"` to stderr per that same failure convention;
+exit 0 success, 2 usage/input, 3 auth,
+4 conflict/precondition, 5 deadline/cancel (an exhausted work budget is
+`invalid_input`, exit 2), 6 transport/storage ambiguity,
 1 other failure. Receipt reconciliation is explicit, never a hidden resubmission.
 
-Add `client.memory(binding)` in Python/JavaScript and `client.Memory(binding)` in
-.NET, returning a binding-local typed facade. Methods map one-to-one in table order:
+Add `client.memory(binding)` in Python/JavaScript and `client.Memory(binding)` in .NET,
+returning a binding-local typed facade whose method names are mechanically
+derived from RPC short names under
+[wire conventions section 5.4](serving-wire-conventions.md#54-naming-rules).
+No hand-shortened aliases. Wire conventions [decision 10](serving-wire-conventions.md#6-owner-decisions-23)
+(proposed) recommends flat methods instead; this facade stays until the owner decides.
+Methods map one-to-one in table order:
 
 | Python (sync) | JavaScript (Promise) | .NET (Task, CancellationToken) |
 |---|---|---|
-| remember(RememberRequest) | remember(request) | RememberAsync(RememberRequest, cancellation) |
-| recall(RecallRequest) | recall(request) | RecallAsync(RecallRequest, cancellation) |
-| facts(FactsRequest) | facts(request) | FindFactsAsync(FactsRequest, cancellation) |
-| correct_facts(CorrectionRequest) | correctFacts(request) | CorrectFactsAsync(CorrectionRequest, cancellation) |
-| consolidate(ConsolidateRequest) | consolidate(request) | ConsolidateAsync(ConsolidateRequest, cancellation) |
-| forget(ForgetRequest) | forget(request) | ForgetAsync(ForgetRequest, cancellation) |
-| receipt(ReceiptRequest) | receipt(request) | GetReceiptAsync(ReceiptRequest, cancellation) |
-| erasure(ErasureRequest) | erasure(request) | GetErasureAsync(ErasureRequest, cancellation) |
-| resume_erasure(ResumeRequest) | resumeErasure(request) | ResumeErasureAsync(ResumeRequest, cancellation) |
+| remember(MemoryRememberRequest) | remember(request) | RememberAsync(MemoryRememberRequest, cancellation) |
+| recall(MemoryRecallRequest) | recall(request) | RecallAsync(MemoryRecallRequest, cancellation) |
+| find_facts(MemoryFactsRequest) | findFacts(request) | FindFactsAsync(MemoryFactsRequest, cancellation) |
+| correct_facts(MemoryCorrectionRequest) | correctFacts(request) | CorrectFactsAsync(MemoryCorrectionRequest, cancellation) |
+| consolidate(MemoryConsolidateRequest) | consolidate(request) | ConsolidateAsync(MemoryConsolidateRequest, cancellation) |
+| forget(MemoryForgetRequest) | forget(request) | ForgetAsync(MemoryForgetRequest, cancellation) |
+| get_receipt(MemoryReceiptRequest) | getReceipt(request) | GetReceiptAsync(MemoryReceiptRequest, cancellation) |
+| get_erasure(MemoryErasureRequest) | getErasure(request) | GetErasureAsync(MemoryErasureRequest, cancellation) |
+| resume_erasure(MemoryResumeRequest) | resumeErasure(request) | ResumeErasureAsync(MemoryResumeRequest, cancellation) |
 
 Return the full typed response, never only hits or a deletion boolean. Types
 match section 8 names/required presence; TypeScript discriminated unions cover
-Target/Expected/Scalar and ConsolidateResponse. Python uses TypedDict/Literal
+`MemoryTarget`/`MemoryExpected`/`MemoryScalar` and `MemoryConsolidateResponse`. Python uses TypedDict/Literal
 unions; .NET uses explicit request/response records and checked string integer
-converters. Preserve U64/I64 as canonical strings in all HTTP facades; no JS Number
-coercion. HTTP 202 is not an exception. Existing SDK error classes carry code,
+converters. Preserve `MemoryU64`/`MemoryI64` outputs as canonical strings in all HTTP
+clients, and accept the exact inputs of section 3 without lossy JS Number coercion.
+HTTP 202 is not an exception. Existing SDK error classes carry code,
 status, request ID plus optional structured details; transport ambiguity remains
 a transport error, not success. No auto-embedding, splitting, retries or pagination.
 Cancellation cannot establish rollback. Embedded/C/WASM bindings are not changed
@@ -848,17 +900,17 @@ do not model, explicit f64 tolerance/order fixtures and Gap 4 interval goldens.
 
 | Acceptance area | Required assertions / intended-reason mutations |
 |---|---|
-| Wire goldens | Every route/RPC/tool/verb/facade request+response/error; max U64, negative/zero I64, absent/null/default, typed metadata, unknown/duplicate fields, every conditional union; mutate lost presence/rounded IDs |
+| Wire goldens | Every route/RPC/tool/verb/client method request+response/error; max `MemoryU64`, negative/zero `MemoryI64`, decimal-string and exact-integer input with string output, absent/null/default, typed metadata, unknown/duplicate fields, every conditional union; mutate lost presence/rounded IDs, old validity names, header key aliases, nested MCP input and non-string MCP/CLI failures |
 | Scope/auth | Wrong tenant/agent/user/session, root versus tenant key, no parent fallback, session requires user, physical names, lineage mismatch, revoked/suspended keys, graph wildcard without operation, collection wildcard without graph scope; mutate scope filter OR/late ownership check |
 | Atomicity/receipts | Final item/guard/slot/quota failure leaves no graph/vector/receipt/TTL cleanup; crash before/after append/sync; concurrent same key/different digest; replay after deletion (and, under A2, at expiry); mutate KV-only receipt, predicted sequence, deadline hashing, TTL refresh |
 | Facts | Touching intervals, null/unbounded/i64 extremes, exclusive concurrent destinations, multivalued slots, exact-end no-op, revision guards, versioned evidence, correction versus deletion; mutate missing slot guard/from-to inclusivity |
 | Recall/ranking | Formula/ties/graph-only R=0, future clamp/refusal/overflow, raw RRF versus cosine, exact candidate-only, MMR vector-only/refused blend, scope/TTL revalidation after provider work; mutate sign/order/rank/weights and removal of expiry owner check |
 | Bounded plans | Every limit at default/max/max+1 and zero; input count before dedup; actual encoded frame bytes including receipt/reclaims; UTF-8/base64/transport accounting; high-degree invalid edges/duplicates; mutate off-by-one, clamp and output-only accounting |
-| Partial/cancel | allow_partial false budget errors, true marked 200 with reasons; output cap versus requested limit; deadlines/cancellation never empty success; partial arrays remain ordered and authorized |
+| Partial/cancel | allow_partial false yields 422 `invalid_input` for work budgets or 504 `deadline_exceeded` before commit, true permits marked 200 with reasons; gRPC response preflight `response_too_large` never partial; REST request oversize `invalid_json`, tonic cap/expiry without trailer, cancellation without wire code; output cap versus requested limit; deadlines/cancellation never empty success; partial arrays remain ordered and authorized |
 | Forget/jobs | Foreign attachments block whole small mutation; shared evidence retained; TTL equality hides records; barrier checked by all reads/writes; deterministic chunk retry, stale generation/revision, unknown remainder; mutate unauthorized detach, skipped barrier, unfenced lease, fake secure_erasure |
 | Maintenance/feed | Healthy reopen reconciliation; encrypted/compacted/checkpoint/restore receipt+slot/job invariants; manifest caveat on all erasure/replay surfaces; ordinary event grouping/auth; temporal/TTL feed refusal before writes; mutate omitted notice or fabricated completion |
 | Provider refusal | Zero outbound calls without registry authorization; unauthorized alias and provider response changes fail explicitly; text-only lexical recall works; no embedding default; mutate ambient-credential activation |
-| Adapter parity | REST/gRPC/MCP/CLI/three SDKs agree on operation result, order, partial/pending, receipt replay, limits, authorization and exact error code; transport status differences only as specified |
+| Adapter parity | REST/gRPC/MCP/CLI/three SDKs agree on operation result, order, partial/pending, receipt replay, limits, authorization and exact error code; PascalCase operationIds, prefixed components, uint64 budgets and mechanically named facade methods; REST/gRPC share proposed error context, MCP/CLI use string failures; transport status differences only as specified |
 | Compatibility | Old generated HTTP/gRPC clients on new server unchanged; new Memory clients on old server receive explicit 404/UNIMPLEMENTED with no fallback; legacy REST 1,000/gRPC 4,096 rerank unchanged; no old enum/tag/schema drift |
 
 New goldens belong under `tests/fixtures/agent_memory/wire/` with input, expected
@@ -877,10 +929,10 @@ prerequisites, not permission to edit outside each slice's ownership.
 
 | Slice | Exclusive files owned after approval | Required tests and independent acceptance |
 |---|---|---|
-| gap1d-rest | new `src/server/memory.rs`; memory-only integration in `src/server.rs`, `src/openapi.json`; reserved-resource guards in `src/server/graph.rs`, `collections.rs`, `features.rs`, `webhooks.rs`; new `tests/server_memory.rs`, wire fixtures; relevant REST `site/api.html` rows | Core A-C accepted; exact schema reviewed; atomic receipts/reopen, guard/quota/scope isolation including raw-route bypass attempts, every error/byte bound, provider-off, feed refusals, caveats; independent reviewer signs all sections 1/9 applicable cases |
-| gap1d-grpc | new `src/server/memory_grpc.rs`; additive Memory proto/service wiring and raw-gRPC reserved-resource guards in `proto/vlite/v1/vlite.proto`, `src/server/grpc.rs`; new `tests/grpc_memory.rs`; gRPC reference rows | After shared REST core and Gap 12 policy; regenerate clients, descriptor/tag/reserved-range golden, presence/status/trailer parity, old-client compatibility, message-size bounds; independent parity acceptance |
-| gap1d-mcp-cli | new memory tool support under `src/bin/tool_support/`, memory-only `src/bin/vlite-mcp.rs` registration, new `src/bin/vlite-memory-cli.rs`, binary declaration in `Cargo.toml`, `docs/MCP.md`, CLI docs and tool reference rows; dedicated adapter tests | After REST contract; remote auth/strict schema/size caps, stderr/exit/pending/replay goldens, no direct-file bypass/automatic loop, old nine-tool compatibility expectations updated deliberately; independent tool/CLI acceptance |
-| gap1d-clients | `clients/python/vlite_client/__init__.py`, `clients/python/test_client.py`, Python README; `clients/javascript/index.js`, `index.d.ts`, `test.mjs`, README; `clients/dotnet/VLite.Client/Client.cs`, test Program.cs; `clients/README.md` | After REST; full typed unions/precision/errors/cancellation/pending, old methods unchanged, new-server/old-server fixtures, no automatic key/retry/provider policy; independent acceptance per language |
+| gap1d-rest | new `src/server/memory.rs`; memory-only integration in `src/server.rs`, `src/openapi.json`; reserved-resource guards in `src/server/graph.rs`, `collections.rs`, `features.rs`, `webhooks.rs`; new `tests/server_memory.rs`, wire fixtures; relevant REST `site/api.html` rows | Core A-C accepted; exact schema reviewed; PascalCase operationIds, prefixed schemas, exact integer inputs/string outputs, shared error context; atomic receipts/reopen, guard/quota/scope isolation including raw-route bypass attempts, every error/byte bound, provider-off, feed refusals, caveats; independent reviewer signs all sections 1/9 applicable cases |
+| gap1d-grpc | new `src/server/memory_grpc.rs`; additive Memory proto/service wiring and raw-gRPC reserved-resource guards in `proto/vlite/v1/vlite.proto`, `src/server/grpc.rs`; new `tests/grpc_memory.rs`; gRPC reference rows | After shared REST core and Gap 12 policy; regenerate clients, descriptor/tag/reserved-range golden including uint64 budgets and validity names, shared status/trailer parity, old-client compatibility, message-size bounds; independent parity acceptance |
+| gap1d-mcp-cli | new memory tool support under `src/bin/tool_support/`, memory-only `src/bin/vlite-mcp.rs` registration, new `src/bin/vlite-memory-cli.rs`, binary declaration in `Cargo.toml`, `docs/MCP.md`, CLI docs and tool reference rows; dedicated adapter tests | After REST contract; flat MCP arguments with top-level binding and string failure goldens; remote auth/strict schema/size caps, stderr/exit/pending/replay goldens, no direct-file bypass/automatic loop, old nine-tool compatibility expectations updated deliberately; independent tool/CLI acceptance |
+| gap1d-clients | `clients/python/vlite_client/__init__.py`, `clients/python/test_client.py`, Python README; `clients/javascript/index.js`, `index.d.ts`, `test.mjs`, README; `clients/dotnet/VLite.Client/Client.cs`, test Program.cs; `clients/README.md` | After REST; a binding-local facade with RPC-derived method names, full typed unions/exact integer input/string output/errors/cancellation/pending, old methods unchanged, new-server/old-server fixtures, no automatic key/retry/provider policy; independent acceptance per language |
 
 The current nine-tool guide assertion is `tests/agent_docs.py:10-17`; update it
 only when the new tool inventory is implemented, not as part of this proposal.
@@ -899,17 +951,17 @@ following choices concern only this exact serving schema and need explicit revie
 | Wire inventory | Approve nine methods here / narrower first schema / revise naming | Approve the complete inventory, including explicit consolidation and erasure reconciliation, before adapters | Sections 4 and 8 |
 | Scope grants/root | Scope tenant is `Tenant.id`, with a reserved `@root` sentinel for untenanted principals / tenant-bound principals only / a startup-configured root tenant ID / client-selected tenant | Exact startup principal grants, `Tenant.id` as scope tenant, `@root` sentinel; reject client tenant; later persisted grants need a separate schema | `src/server/tenants.rs:47-52,241-245,424`; `@root` appears nowhere in `src`; `src/server/graph.rs:22-24` |
 | Reserved-resource authorization | Guard raw access to new memory resources / separate graph per scope / allow raw bypass | Explicit new-binding raw_access=false policy across raw graph/record/feed adapters; operator-only broad opt-in, no ordinary-resource policy change | `src/server/graph.rs:22-24`; section 6 |
-| Request identity | Body key only / header+body alias | Body-only idempotency_key across adapters; the core owns the `v1:` digest, with byte goldens from core tests before adapter code | Section 3; Gap 1 section 2 |
+| Request identity | Body key only / header+body alias | Body-only idempotency_key across adapters; the core owns the `v1:` digest, with byte goldens from core tests before adapter code | Section 3; Gap 1 section 2; Wire conventions, decision 13 (proposed) |
 | Receipt retention | A2: binding-level mandatory window 1..2592000000 ms / implicit default / indefinite receipts; keep or drop A1's hashed per-request `receipt_window_ms` | Binding-level explicit window with advertised `retry_until_ms`, dropping the per-request digest input once A2 lands; manifest retention and restore procedure independently explicit | A1 receipts never expire; expiry arrives with A2 (Gap 1 section 2) |
 | New memory recall caps | 1,000 everywhere / preserve transport-dependent legacy depth in new methods | 200 default, 1,000 ceiling everywhere for memory only; old Search unchanged | `src/server.rs:3032-3054`; `src/server/grpc.rs:1135-1153` |
 | Presence/compatibility | Descriptor-driven pre-scan codec rejecting unknown request tags / additive-only versioned service (a field that changes scope, filter or policy meaning ships in a new version) / ignore plus presence-checked fields | Versioned service plus presence-checked fields now; add the pre-scan codec only if the owner requires rejection; publish empty-list protobuf differences | `prost-derive` 0.14.4 `src/lib.rs:191`; `build.rs:12-17` |
 | Feeds | Ordinary incomplete events with refusals / block all memory until complete feeds / add events now | Ordinary events with explicit temporal/TTL incompleteness; require_complete_feed rejects; new events need another exact review | `src/server/graph.rs:85-108`; `src/property_graph/feed.rs:270-285` |
-| New wire safety bounds | Adopt section 4 / revise after bounded-work review | Adopt provisionally, including the bounds section 4 marks New and the 4,096-byte content cap (stricter than A1's chunked content); consolidation inputs stay capped at A1's 64-entry provenance limit until the consolidation slice raises it; qualify actual accounting before release; no performance/size guarantee | Section 4 limits table, Basis column |
-| SDK integer shape and errors | Canonical strings / language-native divergent integer JSON | Canonical strings and full typed envelopes, no lossy JS IDs or deletion booleans | Section 8 `U64`/`I64`; JavaScript Number is exact only to 2^53 |
-| Oversize behaviour | Keep today's transport behavior / body-limit layer plus gRPC interceptor so every over-cap request returns a memory code / raise transport caps | Keep transport behavior; reserve `memory_request_too_large` and `memory_response_too_large` for caps the adapter checks; the gRPC halves of the 413 rows stay unreachable | `src/server.rs:60,742,1658-1662`; `src/server/grpc.rs:22-25,98-99`; tonic 0.14.6 `src/codec/decode.rs:193-197`, `src/codec/encode.rs:188-192` |
-| Mutation deadline | A1's absolute `deadline_ms` with no default / adapter computes it from a relative budget / require an explicit budget | Adapter computes the absolute deadline from the JSON budget (default 250 ms, ceiling 5,000 ms, the Graph read values), excluded from the digest; vocabulary follows the central wire note | `src/property_graph/engine/limits.rs:93,104`; Gap 1 section 2 |
+| New wire safety bounds | Adopt section 4 / revise after bounded-work review | Adopt provisionally, including the bounds section 4 marks New and the 4,096-byte content cap (stricter than A1's chunked content); consolidation inputs stay capped at A1's 64-entry provenance limit until the consolidation slice raises it; qualify actual accounting before release; no performance/size guarantee | Section 4 limits table, Basis column; Wire conventions, decision 3 (proposed) |
+| SDK integer shape and errors | Canonical strings / language-native divergent integer JSON | Canonical strings and full typed envelopes, no lossy JS IDs or deletion booleans | Section 8 `MemoryU64`/`MemoryI64`; JavaScript Number is exact only to 2^53; Wire conventions, decision 12 (proposed) |
+| Oversize behaviour | Keep today's transport behavior / body-limit layer plus gRPC interceptor so every over-cap request returns a memory code / raise transport caps | Keep transport behavior. **Withdrawn:** reserving memory-specific oversize codes (formerly `memory_request_too_large` and `memory_response_too_large`) for caps the adapter checks; the shared registry already covers oversize: request oversize stays `invalid_json` or tonic OUT_OF_RANGE and the gRPC-only `response_too_large` replaces the response code, per [wire conventions section 2.2](serving-wire-conventions.md#22-one-reachable-family-oversize-deadline-cancel-busy) | `src/server.rs:60,742,1658-1662`; `src/server/grpc.rs:22-25,98-99`; tonic 0.14.6 `src/codec/decode.rs:193-197`, `src/codec/encode.rs:188-192`; Wire conventions, decision 3 (proposed) |
+| Mutation deadline | A1's absolute `deadline_ms` with no default / adapter computes it from a relative budget / require an explicit budget | Adapter computes the absolute deadline from the JSON budget (default 250 ms, ceiling 5,000 ms, the Graph read values), excluded from the digest; vocabulary follows the central wire note | `src/property_graph/engine/limits.rs:93,104`; Gap 1 section 2; Wire conventions, decision 4 (proposed) |
 | Core accessors | Crate-private accessors in the core slice / adapter-side key derivation / public Rust API | Crate-private accessors for the receipt ID and, if kept, a revision pin on item references; the adapter never recomputes a receipt key; no public Rust API or `Error` variant without a separate owner decision | A1 returns `receipt_revision` and `commit_sequence` but no receipt ID, and item references are bare IDs (Gap 1 section 2) |
-| Error codes | Reuse existing codes only / add `memory_*` codes with no existing equivalent | Reuse `invalid_json`, `invalid_input`, `precondition_failed`, `busy`, `poisoned`, `internal_error`; keep only the memory-specific `memory_*` codes of section 6; no public `Error` variant | `src/server.rs:1523-1525,1589-1591,1658-1662`; `src/server/grpc.rs:181-196` |
+| Error codes | Reuse existing codes only / add `memory_*` codes with no existing equivalent | Reuse `invalid_json`, `invalid_input`, `precondition_failed`, `busy`, `poisoned`, `internal_error`; keep only the memory-specific `memory_*` codes of section 6; no public `Error` variant | `src/server.rs:1523-1525,1589-1591,1658-1662`; `src/server/grpc.rs:181-196`; Wire conventions, decision 5 (proposed); Wire conventions, decision 21 (proposed); Wire conventions, decision 22 (proposed) |
 
 Open implementation acceptance: final Rust type/error names from A-C; binding
 configuration encoding and safe generation rotation without losing retained
