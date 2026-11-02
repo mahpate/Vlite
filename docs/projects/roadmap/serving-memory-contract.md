@@ -815,10 +815,12 @@ the same bundle (section 4); request timestamps that permit zero use optional.
 All message presence requirements mirror the required JSON fields. Today prost
 decoding discards unknown fields (`prost-derive` 0.14.4 `src/lib.rs:191`
 `skip_field`; `build.rs:12-17` generates through `tonic_prost_build`), so an older
-server silently ignores a newer request field. Rejecting them needs a
-descriptor-driven pre-scan codec (owner decision, section 11); until then only
-presence-checked fields and a versioned service guard against skew. Response
-unknown fields remain ignorable.
+server silently ignores a newer request field. The owner selected versioned
+services and required-field presence checks (decision 72), not a custom
+descriptor-driven pre-scan decoder. Any new field that changes scope, filtering
+or policy meaning must use a new service version, not an additive field that an
+older server can ignore. The repeated-list differences above must be published;
+they never relax authorization. Unknown response fields remain ignorable.
 
 ### MCP, CLI and clients
 
@@ -959,8 +961,8 @@ following choices concern only this exact serving schema and need explicit revie
 | Reserved-resource authorization | **Owner-selected: new-binding raw-access protection** | Explicit new-binding `raw_access:false` across raw graph/record/search/export/feed and attachment surfaces, including list/feed filtering with cursor progress. Broad operator opt-in still needs underlying permissions and grants no memory scopes. No ordinary-resource policy change; adopting in-use resources needs migration review; direct file-owner access/backups remain outside server enforcement | `src/server/graph.rs:22-24`; section 6; decision 69, 2026-11-02 |
 | Request identity | Body key only / header+body alias | Body-only idempotency_key across adapters; the core owns the `v1:` digest, with byte goldens from core tests before adapter code | Section 3; Gap 1 section 2; Wire conventions, decision 13 (proposed) |
 | Receipt retention | **Owner-selected: explicit binding window, 1..2592000000 ms** | No implicit default; advertise `retry_until_ms`; preserve the accepted core's hashed window supplied by the adapter. Expiry ends receipt replay, not memory retention. Binding/window changes must preserve retained lookup and retry semantics; exact configuration/rotation acceptance remains separate | Accepted A2 (Gap 1 section 2); decision 70, 2026-11-02 |
-| New memory recall caps | 1,000 everywhere / preserve transport-dependent legacy depth in new methods | 200 default, 1,000 ceiling everywhere for memory only; old Search unchanged | `src/server.rs:3032-3054`; `src/server/grpc.rs:1135-1153` |
-| Presence/compatibility | Descriptor-driven pre-scan codec rejecting unknown request tags / additive-only versioned service (a field that changes scope, filter or policy meaning ships in a new version) / ignore plus presence-checked fields | Versioned service plus presence-checked fields now; add the pre-scan codec only if the owner requires rejection; publish empty-list protobuf differences | `prost-derive` 0.14.4 `src/lib.rs:191`; `build.rs:12-17` |
+| New memory recall caps | **Owner-selected: consistent candidate pool limits** | 200 default, 1,000 ceiling across new memory adapters, including exact/MMR candidates; old Search/rerank unchanged. This does not select every other result/work budget or qualify ANN; unsupported bounded plans still fail explicitly | `src/server.rs:3032-3054`; `src/server/grpc.rs:1135-1153`; decision 71, 2026-11-02 |
+| Presence/compatibility | **Owner-selected: versioning and presence checks** | Scope/filter/policy-changing fields require a new service version. No custom unknown-request-field pre-scan decoder; required fields are presence-checked. Publish the protobuf/JSON empty-list differences; unknown response fields remain ignorable; authorization is unchanged | `prost-derive` 0.14.4 `src/lib.rs:191`; `build.rs:12-17`; decision 72, 2026-11-02 |
 | Feeds | Ordinary incomplete events with refusals / block all memory until complete feeds / add events now | Ordinary events with explicit temporal/TTL incompleteness; require_complete_feed rejects; new events need another exact review | `src/server/graph.rs:85-108`; `src/property_graph/feed.rs:270-285` |
 | New wire safety bounds | Adopt section 4 / revise after bounded-work review | Adopt provisionally, including the bounds section 4 marks New and the 4,096-byte content cap (stricter than A1's chunked content); consolidation inputs stay capped at A1's 64-entry provenance limit until the consolidation slice raises it; qualify actual accounting before release; no performance/size guarantee | Section 4 limits table, Basis column; Wire conventions, decision 3 (proposed) |
 | SDK integer shape and errors | Canonical strings / language-native divergent integer JSON | Canonical strings and full typed envelopes, no lossy JS IDs or deletion booleans | Section 8 `MemoryU64`/`MemoryI64`; JavaScript Number is exact only to 2^53; Wire conventions, decision 12 (proposed) |
