@@ -356,7 +356,7 @@ async fn configure_vector(
     service
         .run(move |db| {
             let cid = open(db, &role, &target)?;
-            crate::CollectionMut { db, id: cid }.configure_vector(&name, spec)?;
+            db.collection_mut_in(cid)?.configure_vector(&name, spec)?;
             Ok(())
         })
         .await?;
@@ -409,7 +409,7 @@ async fn put_named_vectors(
     service
         .run(move |db| {
             let cid = open(db, &role, &target)?;
-            crate::CollectionMut { db, id: cid }.put_vectors(record_id, vectors)?;
+            db.collection_mut_in(cid)?.put_vectors(record_id, vectors)?;
             Ok(())
         })
         .await?;

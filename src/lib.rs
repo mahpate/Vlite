@@ -2599,6 +2599,11 @@ impl Database {
     pub fn collection_mut(&mut self, name: &str) -> Result<CollectionMut<'_>> {
         let id = self.resolve(name)?;
         self.ensure_resident_in(id)?;
+        self.collection_mut_in(id)
+    }
+
+    fn collection_mut_in(&mut self, id: u16) -> Result<CollectionMut<'_>> {
+        self.state(id).records.resident()?;
         Ok(CollectionMut { db: self, id })
     }
 

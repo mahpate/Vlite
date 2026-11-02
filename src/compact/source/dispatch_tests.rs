@@ -146,6 +146,7 @@ fn compact_dispatch_mutable_acquisition_and_writes_refuse_before_changes() {
         }
         for info in oracle.collections().unwrap() {
             refuse!("collection_mut", candidate.collection_mut(&info.name));
+            refuse!("collection_mut_in", candidate.collection_mut_in(info.id));
             refuse!("kv_store", candidate.kv_store(&info.name));
             refuse!("kv_view", candidate.kv_view(&info.name));
             refuse!(
@@ -365,6 +366,33 @@ fn compact_dispatch_resident_collection_remains_writable_in_mixed_fixture() {
             .hits
             .len(),
         2
+    );
+    candidate.poisoned = true;
+    let request = crate::GeoSearchQuery {
+        vector: vec![1.0, 2.0],
+        k: 1,
+        field: String::new(),
+        latitude: 0.0,
+        longitude: 0.0,
+        radius_meters: 1.0,
+        conditions: Vec::new(),
+        metric: DistanceMetric::SquaredL2,
+        sort: crate::GeoSort::GeoDistance,
+    };
+    assert!(matches!(
+        candidate.collection("default"),
+        Err(Error::Poisoned)
+    ));
+    let view = crate::CollectionRef {
+        db: &candidate,
+        id: 0,
+    };
+    assert!(
+        matches!(
+            view.search_geo(&request),
+            Err(Error::InvalidQuery("geo field must be 1..=256 bytes"))
+        ),
+        "resident geo validation must retain its original error precedence"
     );
 }
 

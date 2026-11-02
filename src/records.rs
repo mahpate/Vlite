@@ -1129,7 +1129,7 @@ impl CollectionRef<'_> {
     /// Vector search constrained to a spherical radius around a geo-point field.
     /// Vector distance remains available; `sort` selects vector or geographic ordering.
     pub fn search_geo(&self, request: &GeoSearchQuery) -> Result<Vec<GeoSearchHit>> {
-        self.db.ensure_resident_in(self.id)?;
+        self.db.state(self.id).records.resident()?;
         let query = &request.vector;
         let k = request.k;
         let field = request.field.as_str();

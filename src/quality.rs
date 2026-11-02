@@ -365,8 +365,8 @@ impl Database {
         CollectionRef { db: self, id: 0 }
     }
 
-    fn default_collection_mut(&mut self) -> CollectionMut<'_> {
-        CollectionMut { db: self, id: 0 }
+    fn default_collection_mut(&mut self) -> Result<CollectionMut<'_>> {
+        self.collection_mut_in(0)
     }
 
     /// See `CollectionMut::build_hnsw_with_options`.
@@ -376,7 +376,7 @@ impl Database {
         metric: DistanceMetric,
         options: AnnOptions,
     ) -> Result<()> {
-        self.default_collection_mut()
+        self.default_collection_mut()?
             .build_hnsw_with_options(config, metric, options)
     }
 
@@ -388,7 +388,7 @@ impl Database {
         options: AnnOptions,
         limits: HnswRebuildLimits,
     ) -> Result<()> {
-        self.default_collection_mut()
+        self.default_collection_mut()?
             .start_hnsw_rebuild_with_options(config, metric, options, limits)
     }
 
@@ -411,7 +411,7 @@ impl Database {
         options: AnnOptions,
         policy: HnswMaintenancePolicy,
     ) -> Result<HnswMaintenanceReport> {
-        self.default_collection_mut()
+        self.default_collection_mut()?
             .maintain_hnsw_with_options(config, metric, options, policy)
     }
 

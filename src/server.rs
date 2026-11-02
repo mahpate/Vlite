@@ -2315,7 +2315,7 @@ async fn put_core(
             let expected = guard.resolve(db, &ident, collection, id)?;
             let created = db.revision_in(collection, id)?.is_none();
             if let Some(expires_at_ms) = expires_at_ms {
-                crate::CollectionMut { db, id: collection }.put_with_expiry(
+                db.collection_mut_in(collection)?.put_with_expiry(
                     id,
                     &vector,
                     &payload,

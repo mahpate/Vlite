@@ -1,9 +1,8 @@
 //! Named collections and resumable imports over REST.
 use super::*;
 use crate::{
-    CollectionInfo, CollectionMut, CollectionSettings, CollectionSpec, ImportChunkOutcome,
-    ImportState, ImportStatus, InvalidRowPolicy, MetadataIndexKind, MetadataIndexSpec,
-    SettingsPersistence,
+    CollectionInfo, CollectionSettings, CollectionSpec, ImportChunkOutcome, ImportState,
+    ImportStatus, InvalidRowPolicy, MetadataIndexKind, MetadataIndexSpec, SettingsPersistence,
 };
 
 /// Bound on reserved plus open import jobs.
@@ -687,7 +686,7 @@ pub(super) async fn import_chunk_core(
             if !db.imports.get(job).is_some_and(|state| number <= state.last_chunk) {
                 enforce_quota(&quota_service, db, &role, collection, &quota_mutations(&operations))?;
             }
-            let report = CollectionMut { db: &mut *db, id: collection }
+            let report = db.collection_mut_in(collection)?
                 .import_chunk(job, number, &operations, policy)?;
             if db.imports.get(job).is_some() {
                 reserved.jobs.remove(&job);
@@ -763,10 +762,7 @@ pub(super) async fn close_core(
             let located = locate(db, &reserved, &role, job);
             match located {
                 Ok(Job::Durable(collection)) => {
-                    let mut handle = CollectionMut {
-                        db: &mut *db,
-                        id: collection,
-                    };
+                    let mut handle = db.collection_mut_in(collection)?;
                     let status = if abort {
                         handle.abort_import(job)?
                     } else {
