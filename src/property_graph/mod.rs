@@ -68,6 +68,9 @@ mod maintain;
 mod read;
 mod retrieve;
 pub(crate) mod temporal;
+// Gap 3: the TTL feed's reader arrives in a later commit.
+#[cfg_attr(not(test), allow(dead_code))]
+mod ttl_feed;
 
 pub use algorithms::{
     BetweennessOutput, CommunityAssignment, DegreeRow, GraphAlgorithm, GraphAlgorithmError,
