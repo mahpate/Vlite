@@ -2,7 +2,8 @@
 
 **Status:** approved design; private test-only CSR, ordinary typed-property,
 label-posting, attachment and schema-declaration codec slices are implemented.
-Private decoded-CSR identity, adjacency, TTL and temporal reads are implemented.
+Private decoded-CSR identity, adjacency, TTL and temporal reads are implemented
+and independently accepted.
 Full P4 implementation and measured results remain outstanding.
 Depends on [P2](p2-directory-store.md); exits remain
 [S3/S4/F6](../performance/storage-goals.md): **<=24 B/edge disk,
@@ -280,6 +281,10 @@ half-open series at signed T, hiding gaps and empty series and using only the
 selected segment's properties. Ordinary reads retain engine retention-only
 semantics. These test-only reads do not wire GraphRef or query execution to CSR,
 change VLGCSR06 bytes, or establish size/performance results.
+Independent acceptance compared retained fixtures and seeded reads with the
+engine, then changed the node TTL boundary from `<` to `<=`: the ID/key regression
+failed by returning a node at its expiry, and passed after restoring the boundary.
+The integrated branch still requires its full CI qualification.
 
 Remaining P4 slices are shared framing and block dispatch/publication,
 checkpoint/read integration, mutation overlay, parallel import, and performance

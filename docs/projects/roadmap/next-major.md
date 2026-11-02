@@ -139,7 +139,9 @@ Local numbers below show direction only (see rules).
   the edge's identity, revision and deadline, rebuilding the equivalent
   tag-65 snapshot entry. Temporal-section membership distinguishes an empty
   series from an ordinary edge. Ordinary edge records remain on the existing
-  path apart from the payload version. Temporal reads from CSR, shared framing,
+  path apart from the payload version. Private decoded-CSR ID/key and adjacency
+  reads are independently accepted, including TTL and selected temporal
+  properties; production query execution is not wired to CSR. Shared framing,
   checkpoint/read integration, mutation overlay, parallel import and S3/S4/F6
   qualification remain outstanding. Native schema enforcement, cross-graph
   owner validation and columnar property storage also remain outstanding.
