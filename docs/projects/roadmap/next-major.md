@@ -153,6 +153,12 @@ Local numbers below show direction only (see rules).
   [engine-integration design](p3-compact-vectors.md#p3b-engine-integration-design)
   (pinned generation plus overlay, five ordered code slices) is independently
   reviewed with six owner decisions pending; no engine code is integrated yet.
+  The [P3c compact-ANN design](p3c-compact-ann.md) (source-bound flat
+  topology, persisted scalar-u8 codes, background rebuild and a separately
+  opted-in rotated one-bit candidate) is independently reviewed with nine
+  owner decisions and one conditional storage amendment pending. It proposes
+  no public API or wire change and makes no recall, size or performance
+  claim; its code waits for the P3b engine integration.
   Release rejection and S1/S2/DO-005 remain unchanged. The
   [API review](p3-precision-api.md) still holds public enablement pending
   complete read/write/maintenance integration. The first exact-SIMD slice

@@ -195,6 +195,9 @@ without their corresponding contract approval; `src/openapi.json` is frozen.
 3. **P3c, persisted compact ANN:** flattened topology, source-bound codes,
    background rebuild integration and the opt-in rotated-code prototype.
    Reuse existing scalar-u8 and index-cache behavior rather than duplicate it.
+   The [detailed design](p3c-compact-ann.md) is independently reviewed with
+   its owner decisions pending; no ANN code is integrated, and code starts
+   only after P3b engine integration is accepted.
 4. **P3d, dispatch and qualification:** verified SIMD kernels, complete
    conversion/backup/restore/key-rotation coverage and major-release acceptance.
 
@@ -812,6 +815,11 @@ behavior. The precision API needs stored precision and explicit conversion
 entry points, not a new implicit read policy. None may bypass overlay,
 expiry, authentication or error semantics. Do not expose this seam publicly
 or let derived indexes become source-of-truth.
+
+The extra crate-private operations P3c needs (physical base rows, source
+identity, an affected-ID cursor and batched vector scoring) are proposed in
+[P3c section G](p3c-compact-ann.md#g-integration-seams-and-consumers). They
+are assumptions, not part of this contract, until the P3b seam is frozen.
 
 ### J. Ordered code sub-slices and shared-file touch map
 
