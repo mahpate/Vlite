@@ -420,7 +420,7 @@ mode or family-wide exemption.
 | Slice | Exit criteria |
 |---|---|
 | A1: crate-private core | Provisional graph binding, scope provisioning, entity/episodic remember, same-frame receipts, exact dedup, idempotency and budget/validation coverage; independently accepted and integrated, unreleased and not activated |
-| A2: private candidate | Crate-private small forget and graph-TTL expiry with atomic failure, evidence, budget-boundary, receipt-replay and reopen tests; re-base the three oversized A2 golden setups into multi-step physical-cap writes; pending independent acceptance, unreleased and not activated. No facts, recall, resumable erasure, serving, public API or format change |
+| A2: accepted private slice | Crate-private small forget and graph-TTL expiry with atomic failure, evidence, budget-boundary, receipt-replay, reopen and mutation coverage; the three oversized A2 golden setups now use multi-step physical-cap writes; independently accepted and integrated, unreleased and not activated. No facts, recall, resumable erasure, serving, public API or format change |
 | B: recall planner | Filtered hybrid plus bounded temporal expansion, owner retention checks, rank/explain fixtures and existing vector-only exact/MMR integration; scan/work/cancellation coverage; no exhaustive-history claim |
 | C: consolidation | Caller summaries, slot-guarded corrections, contradictions, stale-source reporting and resumable erasure barriers/fencing; crash/retry and maintenance tests pass |
 | D: serving after approval | Explicit OpenAPI and wire approval before edits; REST/gRPC/MCP/CLI scope/authorization, limits, feed and unsupported-capability parity; no external provider enabled by default |
