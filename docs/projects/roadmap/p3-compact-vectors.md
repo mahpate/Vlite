@@ -41,8 +41,43 @@ retention accounting, authenticated I/O propagation, and end-to-end search,
 graph-attachment, maintenance and reopen wiring. This accessor makes no
 performance, size, or release-qualification claim.
 
-The engine-integration design below has been independently reviewed; its owner
-decisions (K.1-K.6) are pending and it is not accepted or implemented.
+**P3b slice 0 status — private, unreleased candidate pending independent
+acceptance.** The test-only source module retains each checked record block's
+on-disk frame and the row/column extents produced by the same `ImageCheck`
+validation pass. `format::load_inner` constructs the `Arc<CompactGeneration>`
+only after the image end block validates. The normal loader's resident
+`RecordMap` remains the oracle; no `Database`, `Collection`, `ReadSnapshot`,
+`Chain`, mutation path or public API uses this generation. Release builds do
+not compile the source module or its gate.
+
+The standalone view supports only the following surface:
+
+| Surface | Available in the test-gated point view | Refused or absent |
+|---|---|---|
+| Record reads | `get` / `get_at` with explicit `now_ms`; expiry hides when `expiry <= now_ms`. | No implicit clock and no mutable access. |
+| Point columns | Physical `len` (including expired rows), `first_id`, `contains_id`, binary `row_of`, ID, revision and expiry by row. | No ordered iterator or bulk scan. |
+| Record materialization | Stable `&Record` from a generation-owned once-cell, decoded at most once after successful access. | No decoded-block cache or persistent plaintext sidecar; no public `Record` change. |
+| Search and collection APIs | None. | Browse, exact/ANN/hybrid/filter/group search, KV, named vectors, index access and graph attachment APIs are not wired to the view. |
+| Writes and lifecycle | None. | Put, delete, metadata updates, batches, checkpoint, compaction, conversion, backup/restore, graph rewrites, feed, replica and `Database`/snapshot installation are not exposed by this slice. |
+| Source backing | Loader capture uses an owned buffer; a test-only mapped copy exercises identical frame extents. Encrypted generations retain ciphertext frames and the existing cipher context, authenticating/decrypting each record read into a temporary frame. | No directory-store segment installation or mapped `Database` generation; Windows retirement remains deferred to slice 5. |
+| Gate off | Existing release and default behavior is unchanged. | A compact critical source kind without the existing test activation returns `UnsupportedFeature(FLAG_COMPACT)`. |
+
+The owned backing retains only verified on-disk frames and their immutable
+directory; the directory records frame kind, extent, checksum, sequence and
+original file offset, while the generation retains the cipher context when
+encrypted. Plain frames have already passed footer/checksum and codec
+validation before publication. Encrypted reads recheck checksum and AEAD
+before decoding. The temporary plaintext frame is operation-local; the
+stable decoded `Record` cell is memory-resident and is not evicted while the
+generation lives. Mapped bytes, decoded cells and temporary plaintext are
+separate accounting categories; no public snapshot counter is changed.
+Database installation, snapshot retention, overlays, writes and lifecycle
+parity remain for slices 1–5. This candidate makes no performance, size or
+release-qualification claim.
+
+The engine-integration design below has been independently reviewed; owner
+decisions K.1-K.6 are adopted for sequencing, but no code slice is accepted
+or activated until its independent acceptance.
 
 ## Precision decision
 
@@ -530,9 +565,9 @@ DO-005 measurements and major-release acceptance.
 
 ## P3b engine integration design
 
-**Design proposal — independently reviewed; owner decisions K.1-K.6 pending;
-not accepted, implemented,
-qualified or activated.** All source line references below are from setup
+**Design proposal — independently reviewed; owner decisions K.1-K.6 adopted
+for planning; the design is not implementation acceptance or activation.**
+All source line references below are from setup
 head `91d0e38c62dea7997b072d02118aedc45ca63e1b`. The accepted column code
 and record codec are test-only at this head; release readers still refuse
 compact source blocks. This design changes no code, test, fixture, format,
@@ -869,7 +904,7 @@ not performance/size claims.
 
 | Order / sub-slice | Goal, exact files/functions, tests and acceptance | Size / dependency / parallelism |
 |---|---|---|
-| 0. Pinned source and standalone point-read view | Retain a verified-block directory from the same `ImageCheck` pass, backed by an owned byte buffer or mapped file. Add generation-owned once-cells and a standalone view with point reads only. Files: new `src/compact/source.rs` and tests; `src/compact/mod.rs` (`ImageCheck::block`); `src/format.rs` (`load_inner`, `verified_frame`). Tests: `compact_generation_authenticates_before_publish`, `compact_generation_pins_source_until_last_handle_drop`, `compact_view_get_matches_resident_after_source_drop`, `compact_get_decodes_each_record_once`, encrypted failure and mapped/owned parity. Accept complete-image publication, exact fields/revisions/expiry, authentication-before-publish and byte-source parity. | ~500-800 LOC; no Database/Chain/collection wiring; foundation for 1. |
+| 0. Pinned source and standalone point-read view | **Implemented as a private candidate; pending independent acceptance.** Retain a verified-block directory from the same `ImageCheck` pass in an owned frame buffer; mapped backing is exercised by parity tests only. Add generation-owned once-cells and a standalone view with point reads only. Files: `src/compact/source.rs` and tests; `src/compact/mod.rs` (`ImageCheck::block`); `src/format.rs` (`load_inner`, `verified_frame`). Tests: `compact_generation_authenticates_before_publish`, `compact_generation_pins_source_until_last_handle_drop`, `compact_view_get_matches_resident_after_source_drop`, `compact_get_decodes_each_record_once`, encrypted wrong-key/tag rejection, mapped/owned parity and gate-off refusal. Accept complete-image publication, exact fields/revisions/expiry, authentication-before-publish and byte-source parity. | ~500-800 LOC; no Database/Chain/collection wiring; foundation for 1. |
 | 1. Database point-read wiring and fail-closed dispatch (**smallest safe engine slice**) | Add exhaustive `CollectionRecords` matches for every consumer; wire `get/get_at`, `len`, `first_id`, snapshot pin and stable cells. Unsupported APIs are absent/refused, never stubbed. Files: `src/compact/mod.rs`, `src/format.rs`, `src/directory.rs`, `src/records.rs`, `src/collection.rs`, `src/lib.rs`; broad API refusals are required. Tests: pin snapshot after Database drop; release-equivalent gate-off refusal; method-level refusal matrix. Accept no partially installed state, all unsupported compact operations fail closed, resident paths unchanged. | ~350-550 LOC plus tests; depends on 0; serialize shared loader hooks with P4. |
 | 2. WAL overlay and committed mutation semantics | Replace direct collection mutation with base+overlay; replay put/batch/delete/metadata/TTL and retain tombstones. Files: `src/collection.rs` (`apply_metadata_committed`, `apply_committed`), `src/format.rs` (`LoadedCollection::{put,delete,update_metadata}`, frame replay/checks), `src/lib.rs` (`put_in`, `delete_in`, `apply`, `apply_batch`), `src/property_graph/frame.rs` (`GraphRecords` liveness), `src/property_graph/maintain.rs` (attachment validation). Tests: `compact_overlay_ordered_batch_matches_replay`, `compact_delete_tombstone_shadows_base`, `compact_expired_overlay_never_reveals_base`, `compact_metadata_update_preserves_vector_payload`, `compact_graph_attachment_tracks_effective_row`. Accept durability-before-apply, CAS/revision and graph atomic parity. | ~450-700 LOC; depends 1; serialize with 1 and 5. |
 | 3. Ordered public reads and exact/filter paths | Merge base/overlay IDs, unify TTL/filter/clock semantics and bounded vector access. Files: `src/records.rs` (`browse_at`, `search_with_stats_at`), `src/collection.rs` (browse/group/exact), `src/lib.rs` (`search_in_at`, `exact_search*`), `src/hybrid.rs`, `src/query_language.rs`. Tests: `compact_ordered_merge_matches_resident_with_gaps`, `compact_exact_scan_is_bit_identical_at_same_clock`, `compact_search_filters_after_overlay_resolution`, `compact_browse_cursor_skips_tombstones_and_expiry`. Accept exact order/stat semantics and bounded scratch. | ~300-500 LOC; depends 1-2; can split API/search tests after interface freeze, but shared `records.rs`/`lib.rs` edits serialize. |
