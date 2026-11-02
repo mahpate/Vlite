@@ -44,6 +44,7 @@ pub mod grpc;
 mod logs;
 mod observability;
 mod ops;
+pub mod providers;
 #[cfg(feature = "otel")]
 pub mod telemetry;
 mod tenants;
@@ -184,6 +185,7 @@ pub struct Service {
     graph_enabled: bool,
     /// EPIC-011: graph read/write guard hold times.
     graph_stats: Arc<graph::GuardStats>,
+    providers: Arc<providers::ProviderRegistry>,
 }
 
 impl Service {
@@ -272,7 +274,19 @@ impl Service {
             snapshot_reads: true,
             graph_enabled,
             graph_stats: Arc::default(),
+            providers: Arc::default(),
         })
+    }
+
+    /// Install inert startup provider state; live handlers do not dispatch through it.
+    pub fn with_providers(mut self, registry: providers::ProviderRegistry) -> Self {
+        self.providers = Arc::new(registry);
+        self
+    }
+
+    #[allow(dead_code)] // Reserved for the independently accepted handler-wiring slice.
+    pub(crate) fn providers(&self) -> &providers::ProviderRegistry {
+        &self.providers
     }
 
     /// Choose snapshot-based simple exact reads, or the original lock-held path.

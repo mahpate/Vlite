@@ -30,6 +30,7 @@ impl Server {
             .args(options)
             .env_remove("VLITE_AUTH_TOKEN")
             .env_remove("VLITE_AUTH_TOKEN_FILE");
+        command.env_remove("VLITE_PROVIDERS_FILE");
         if file {
             let token = path.with_extension("token");
             std::fs::write(&token, format!("{TOKEN}\r\n")).unwrap();
@@ -88,6 +89,55 @@ fn lock_held_read_policy_is_explicit_and_rejects_duplicate_flags() {
     let invalid = directory.path().join("duplicate.vlite");
     assert!(fails(&invalid, &["--lock-held-reads", "--lock-held-reads"]).contains("usage:"));
     assert!(!invalid.exists());
+}
+
+#[test]
+fn providers_startup_is_explicit_strict_and_precedes_database_creation() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("providers.vlite");
+    let config = directory.path().join("providers.json");
+    let config_arg = config.to_str().unwrap();
+    assert!(
+        fails(
+            &path,
+            &["--create-if-missing", "2", "--providers-file", config_arg]
+        )
+        .contains("provider configuration file unavailable")
+    );
+    assert!(!path.exists());
+    std::fs::write(
+        &config,
+        r#"{"aliases":[],"bindings":[],"secret":"fake-secret-sentinel"}"#,
+    )
+    .unwrap();
+    let error = fails(
+        &path,
+        &["--create-if-missing", "2", "--providers-file", config_arg],
+    );
+    assert!(error.contains("invalid provider configuration"));
+    assert!(!error.contains("fake-secret-sentinel"));
+    assert!(!path.exists());
+    std::fs::write(&config, r#"{"aliases":[],"bindings":[]}"#).unwrap();
+    assert!(
+        fails(
+            &path,
+            &[
+                "--providers-file",
+                config_arg,
+                "--providers-file",
+                config_arg
+            ]
+        )
+        .contains("usage:")
+    );
+    assert!(!path.exists());
+    let server = Server::start_with_options(&path, false, &["--providers-file", config_arg]);
+    assert_eq!(
+        server
+            .request("POST", "/v1/search", json!({"vector":[1,0],"k":1}))
+            .0,
+        200
+    );
 }
 
 #[test]
@@ -340,6 +390,7 @@ fn fails(path: &Path, args: &[&str]) -> String {
         .arg("--insecure-local")
         .env_remove("VLITE_AUTH_TOKEN")
         .env_remove("VLITE_AUTH_TOKEN_FILE")
+        .env_remove("VLITE_PROVIDERS_FILE")
         .args(args)
         .output()
         .unwrap();

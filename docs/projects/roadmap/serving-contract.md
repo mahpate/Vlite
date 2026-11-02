@@ -1,7 +1,8 @@
 # Serving contract: embeddings, rerankers and gRPC graphs
 
-Status: approved 2026-11-02 as the wire contract to implement; nothing here is
-implemented or shipped yet.
+Status: approved 2026-11-02 as the wire contract to implement. Gap 8 delivery 1
+has a private, unreleased registry/adapter candidate pending independent
+acceptance; it is inert in live handlers. No proposed wire changes are shipped.
 All requirements below are proposed unless labeled Current.
 Open means not verified or not decided. Evidence uses repository `path:line`.
 Audit citations refer to base `d530b4c`; existing embedding/reranking routes and
@@ -260,7 +261,144 @@ unverified and do not establish requirements or performance.
 | Milvus | unverified; Open: embedding functions, batch limits and reranking contracts |
 | Neo4j drivers | unverified; Open: driver query/result streaming and cancellation semantics |
 
-Delivery: first approve schemas, defaults and auth rules; then shared admin provider registry and bounded adapters.
+### Gap 8 delivery 1: private startup registry candidate
+
+The registry is constructed before opening a database or serving requests. No
+REST/gRPC handler uses it yet. No config means an empty registry, no DNS lookup
+and no provider calls. Aliases alone do not authorize any dispatch. Local hashing,
+legacy explicitly selected HTTP embedding, exact/MMR and their defaults remain
+unchanged. This is not a production activation or a new wire contract.
+
+**Startup hook.** The authorized public exception consists of
+`pub mod providers;`, opaque `pub struct ProviderRegistry`, loader
+`pub fn from_file(path: &std::path::Path) -> Result<ProviderRegistry, String>`
+(an associated function), and the one `Service` builder
+`pub fn with_providers(mut self, registry: providers::ProviderRegistry) -> Self`.
+These are server-startup plumbing, outside the embedded Rust API reference:
+`tests/api_reference.py:204` skips `src/server*`; no `site/api.html` row is needed.
+The loader never contacts endpoints. Everything else is private or crate-private;
+the service has a crate-private `providers()` accessor for the next slice.
+
+**Exact config schema and limits.** Use `--providers-file <path>` or
+`VLITE_PROVIDERS_FILE`; a flag overrides the environment and duplicate flags fail.
+Both names are delivery-1 choices (Open: ratify these startup names).
+The UTF-8 JSON file is at most 1,048,576 bytes. Every object rejects unknown and
+duplicate fields; wrong types, duplicate aliases/bindings and invalid references
+fail startup without printing JSON, secret values or filenames. No hidden defaults
+enable providers. Root `aliases` and `bindings` arrays are required, at most
+64 and 4,096 entries respectively. Empty arrays are valid.
+
+```json
+{
+  "aliases": [{
+    "alias": "semantic",
+    "kind": "embedding",
+    "endpoint": "https://inference.example.invalid/embeddings",
+    "model": "pinned-model",
+    "version": "2026-01",
+    "dimensions": 3,
+    "connect_timeout_ms": 2000,
+    "total_timeout_ms": 10000,
+    "concurrency": 4,
+    "tenant_concurrency": 1,
+    "replay_safe": false,
+    "tls_required": true,
+    "allow_local_http": false,
+    "endpoint_allowlist": {
+      "schemes": ["https"],
+      "hosts": ["inference.example.invalid"],
+      "addresses": ["192.0.2.10"]
+    },
+    "secret": {"env": "EXAMPLE_PROVIDER_TOKEN"}
+  }],
+  "bindings": [{
+    "lineage": 42,
+    "collection_id": 0,
+    "tenant": "tenant-a",
+    "alias": "semantic",
+    "payload_fields": []
+  }]
+}
+```
+
+`kind` is exactly `embedding` or `rerank`. Every alias field shown is required
+except `secret` (absent/null means no authorization header) and `dimensions`
+(required 1..=65,536 for embedding, absent/null for rerank). `alias`, `model`,
+`version`, tenant and payload field names are 1..256 ASCII bytes drawn from
+letters, digits, dot, underscore and hyphen; versions `latest` and `default` are
+rejected. Open: provider-specific immutable model/version verification; the
+adapter sends the configured model/version, never discovers or follows upgrades.
+Endpoint credentials, query strings and fragments are rejected.
+
+Allowlist schemes and hosts are single-element arrays matching the parsed URL
+exactly; addresses are 1..64 exact IPv4/IPv6 addresses, not CIDRs. Literal IP URLs
+must match at startup. Every dispatch resolves DNS anew within the connect
+deadline, rejects the whole answer if any address is outside the allowlist and
+pins that answer into a fresh client. No proxies, redirects, shared connections
+or response caches are used. HTTPS requires `tls_required:true`. HTTP requires
+an IP-literal loopback endpoint, only loopback allowed addresses,
+`allow_local_http:true` and `tls_required:false`. `localhost` is not an HTTP
+exception. TLS certificate verification remains enabled.
+
+Only secret objects `{"env":"NAME"}` or `{"file":"/absolute/private/file"}` are
+accepted; literal secrets and other keys fail. Values must be 1..4,096 printable
+ASCII bytes without spaces. File sources are at most 4,096 encoded bytes, trim
+trailing CR/LF, require a regular
+non-symlink file and Unix mode with no group/other permissions, and compare the
+opened file's device/inode to its pre-open metadata. Open platform limitation:
+Windows ACL privacy verification is unavailable in the frozen dependencies;
+file sources fail explicitly on non-Unix, where named environment references
+remain supported. Missing/non-UTF-8 environment variables fail startup.
+
+Bindings are exact `(lineage: u64, collection_id: u16, tenant, alias)` keys;
+`CollectionRef::id()` and `CollectionInfo::id` supply the stable numeric identity
+(`src/collection.rs:108-110,303`). No name or wildcard fallback exists. A binding
+may allow at most 64 unique top-level payload fields; embedding requires none.
+Only explicitly selected fields are copied into rerank requests. No request path
+can yet select these aliases. Open: later wiring must reject files without
+lineage and recheck collection existence/dimensions, tenant authorization,
+candidate revisions, binding generation and expiry before returning results.
+
+Connect timeout is 1..2,000 ms (0.001..2 s), total timeout 1..10,000 ms
+(0.001..10 s), with connect <= total. The total starts before validation and
+serialization and covers admission, DNS, HTTP, bounded reading, retry and parsing;
+there is no admission queue. Provider concurrency is 1..64, tenant concurrency
+1..provider concurrency, shared across every collection bound to that
+tenant/alias. Permits are acquired with nonblocking try-acquire and held through
+the transport call/retry. Open: these conservative admin-selected limits have
+no implicit defaults; downstream callers must pass the smaller client deadline
+when wiring live requests.
+
+One embedding input is at most 16,384 UTF-8 bytes. Rerank requires
+`1 <= k <= candidates <= 1,000`, unique u64 IDs, finite query/candidate vectors
+with matching dimensions (1..65,536). The encoded request is at most 1,048,576
+bytes; it is refused before transport dispatch, never split. Response bodies are
+at most 4,194,304 bytes, enforced for both declared and chunked lengths. The
+embedding request is `{"model":string,"version":string,"input":string}` and its
+strict response is `{"data":[{"embedding":[finite f32,...]}]}`, exactly one vector
+of the configured dimension. Rerank sends
+`{"model":string,"version":string,"query":[f32,...],"candidates":[{"id":u64,"vector":[f32,...],"payload":object},...],"k":integer}`.
+Its strict response is `{"results":[{"id":u64,"cost":finite_f32},...]}`.
+Open conservative choice: exactly k unique, known IDs are required rather than
+accepting a short answer; costs sort ascending then numeric ID. Wire conversion
+to `rerank_score = -cost` and preservation of original distances await wiring.
+
+At most one retry is allowed for connection failure, HTTP 429 or 503, only with
+`replay_safe:true`; timeout, invalid data, redirects and auth never retry. Jitter
+is 10..50 ms using OS randomness. Integer-seconds Retry-After adds a minimum delay;
+if it plus jitter cannot fit the remaining total deadline, fail timeout without
+retry. Open conservative choice: an HTTP-date or malformed Retry-After fails
+timeout without a retry rather than risking an early retry. All non-2xx bodies
+are discarded without reading or logging.
+No inference inputs, responses, secrets or URLs enter provider errors/logs.
+The six sanitized REST/gRPC mappings above are data and unit-tested, not wired
+into the current generic mappers. Adapter outcomes record only the configured
+alias, SHA-256 tenant fingerprint, duration milliseconds, batch count and sanitized
+outcome in the bounded server log buffer. Open: authorization rechecks belong
+to the live-handler slice.
+
+Delivery: first approve schemas, defaults and auth rules; then independently
+accept this shared admin provider registry and bounded adapters candidate.
 Next wire REST/gRPC embedding/custom ranking and Python types; then graph unary parity and generated clients.
 Last add parity/auth/compatibility tests and update API/MCP/security/graph references. No benchmark campaign is needed.
 Risks: external data disclosure, unsafe endpoint resolution, tenant secret mixing, lock-held inference and score confusion.

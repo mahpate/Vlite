@@ -15,9 +15,10 @@ use vlite::{
     },
 };
 
-const USAGE: &str = "usage: vlite-server <database-path> [--create-if-missing <dimensions> [--create-format 3|4|5]] (default 5: graph-enabled; 3 and 4 create plain vector files) [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--lock-held-reads] [--group-commit [--group-commit-requests <1..16>] [--group-commit-bytes <1024..268435456>] [--group-commit-delay-ms <0..100>]] [--durability periodic|full|none] (default periodic) [--flush-interval-ms <1..60000>] (periodic only, default 60000; none keeps the database in memory only, needs --create-if-missing and loses all data when the server stops) [--encryption-key-file <path> | VLITE_ENCRYPTION_KEY | VLITE_ENCRYPTION_KEY_HEX] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS; dashboard sign-in (needs VLITE_ADMIN_DIR and an admin token): VLITE_TRUSTED_PROXY=1 behind a proxy that sets X-Forwarded-Proto/For, VLITE_SESSION_IDLE_MINUTES (default 30), VLITE_SESSION_MAX_HOURS (default 8), optional first super admin: VLITE_ADMIN_USERNAME with VLITE_ADMIN_PASSWORD_FILE; [--log-buffer <n>] (default 2000, maximum 100000)";
+const USAGE: &str = "usage: vlite-server <database-path> [--providers-file <path> | VLITE_PROVIDERS_FILE] [--create-if-missing <dimensions> [--create-format 3|4|5]] (default 5: graph-enabled; 3 and 4 create plain vector files) [--bind <ip:port>] [--tls-cert <pem> --tls-key <pem>] [--otlp-endpoint <url>] [--grpc-bind <ip:port> [--grpc-tls-cert <pem> --grpc-tls-key <pem> [--grpc-tls-client-ca <pem>]]] [--allow-remote] [--ann-snapshot] [--lock-held-reads] [--group-commit [--group-commit-requests <1..16>] [--group-commit-bytes <1024..268435456>] [--group-commit-delay-ms <0..100>]] [--durability periodic|full|none] (default periodic) [--flush-interval-ms <1..60000>] (periodic only, default 60000; none keeps the database in memory only, needs --create-if-missing and loses all data when the server stops) [--encryption-key-file <path> | VLITE_ENCRYPTION_KEY | VLITE_ENCRYPTION_KEY_HEX] [--token-file <path> | --insecure-local]; admin: VLITE_AUTH_TOKEN or VLITE_AUTH_TOKEN_FILE; optional read-only: VLITE_READ_ONLY_TOKEN or VLITE_READ_ONLY_TOKEN_FILE; backups/credentials/persistent audit: VLITE_ADMIN_DIR; off-by-default schedules: VLITE_AUTO_MAINTENANCE_INTERVAL_SECS, VLITE_BACKUP_INTERVAL_SECS, VLITE_BACKUP_RETENTION_ENABLED=1, VLITE_BACKUP_RETAIN_LAST, VLITE_BACKUP_RETAIN_DAYS, VLITE_BACKUP_DRILL_EVERY, VLITE_BACKUP_DRILL_MAX_BYTES; VLITE_SLOW_QUERY_MS; dashboard sign-in (needs VLITE_ADMIN_DIR and an admin token): VLITE_TRUSTED_PROXY=1 behind a proxy that sets X-Forwarded-Proto/For, VLITE_SESSION_IDLE_MINUTES (default 30), VLITE_SESSION_MAX_HOURS (default 8), optional first super admin: VLITE_ADMIN_USERNAME with VLITE_ADMIN_PASSWORD_FILE; [--log-buffer <n>] (default 2000, maximum 100000)";
 
 struct Config {
+    providers: vlite::server::providers::ProviderRegistry,
     lock_held_reads: bool,
     group_commit: Option<GroupCommitConfig>,
     /// Per-open commit durability: `Periodic` every 60 s unless `--durability`
@@ -170,6 +171,8 @@ fn decode_hex_key(value: &str) -> Result<[u8; 32], Box<dyn Error>> {
 fn config() -> Result<Config, Box<dyn Error>> {
     let mut args = std::env::args_os().skip(1);
     let path = args.next().ok_or(USAGE)?;
+    let mut providers_file = std::env::var_os("VLITE_PROVIDERS_FILE").map(PathBuf::from);
+    let mut seen_providers_file = false;
     let mut otlp_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
     let mut dimensions = None;
     let mut format = None;
@@ -194,6 +197,10 @@ fn config() -> Result<Config, Box<dyn Error>> {
     let mut flush_interval_ms: Option<u64> = None;
     while let Some(arg) = args.next() {
         match arg.to_str() {
+            Some("--providers-file") if !seen_providers_file => {
+                providers_file = Some(args.next().ok_or(USAGE)?.into());
+                seen_providers_file = true;
+            }
             Some("--lock-held-reads") if !lock_held_reads => lock_held_reads = true,
             Some("--group-commit") if group_commit.is_none() => {
                 group_commit = Some(GroupCommitConfig::default());
@@ -461,6 +468,11 @@ fn config() -> Result<Config, Box<dyn Error>> {
         }
     }
     let config = Config {
+        providers: providers_file
+            .as_deref()
+            .map(vlite::server::providers::ProviderRegistry::from_file)
+            .transpose()?
+            .unwrap_or_default(),
         lock_held_reads,
         group_commit,
         durability,
@@ -648,7 +660,7 @@ async fn stopped(mut stop: tokio::sync::watch::Receiver<bool>, health: Option<Gr
 }
 
 async fn run() -> Result<(), Box<dyn Error>> {
-    let config = config()?;
+    let mut config = config()?;
     #[cfg(feature = "otel")]
     let telemetry = vlite::server::telemetry::configure(config.otlp_endpoint.as_deref())?;
     #[cfg(not(feature = "otel"))]
@@ -683,6 +695,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Some(key) => Service::try_new_with_encryption_key(database, key)?,
         None => Service::try_new(database)?,
     };
+    let service = service.with_providers(std::mem::take(&mut config.providers));
     let service = match config.group_commit {
         Some(group) => service.with_group_commit(group)?,
         None => service,
