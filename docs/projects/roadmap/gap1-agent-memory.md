@@ -350,6 +350,18 @@ Exact rational scores, fixture limits and request/error names are labelled local
 assumptions, not Rust/f64 parity or approved public contracts. Retrieval, ownership,
 TTL, temporal discovery, rerankers and the Rust recall implementation remain open.
 
+### Private write reference
+
+The independently reviewed `tests/agent_memory_oracle.py` and
+`tests/fixtures/agent_memory/golden.json` are a bounded logical reference for slice
+A remember/forget: scope framing, receipts and idempotency, exact dedup, provenance,
+expiry and operation budgets. Every rejected golden step declares one repairable
+defect; the self-test repairs it and checks injected second defects, so no golden
+depends on validation precedence. CI runs normal and optimized self-tests.
+Unspecified behaviour is labelled, e.g. `fixture: duplicate-bundle-ids-reject` and
+`fixture: empty-bundle-rejects`. Field/error names are fixture APIs, not Rust parity
+or approved contracts; no Rust implementation, durability or concurrency is claimed.
+
 ## 9. Delivery, risks and open decisions
 
 | Slice | Exit criteria |
