@@ -370,6 +370,15 @@ release gate changes, production activation, performance claim or size claim
 are part of this slice. The wider shared framing/publication qualification
 remains pending.
 
+**Slice 2a P4 status.** A private, unreleased, test-only `CompactGraphView`
+candidate is pending independent acceptance: Arc-pinned decoded base plus an
+owned committed-overlay snapshot, physical and clock-bound entity/scan/CSR
+accessors, TTL cascade, temporal selection, schema declarations, attachments
+and engine-oracle parity. Declared property-index lookup is explicitly deferred
+with exact planner call sites in [P4](p4-compact-graph.md); serving cannot ship
+before it exists. No GraphRef/query/executor, Database, checkpoint or WAL wiring,
+production use, public API, format, policy, gate or default change is included.
+
 **Slice 0 status.** `src/compact/mod.rs` holds one concrete check, wired
 into the load loop (`src/format.rs`), the change feed (`src/changes.rs`)
 and segment export (`src/logops.rs`). Each reader checks every frame prefix

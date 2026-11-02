@@ -24,6 +24,10 @@ blocks without history/graph flags or with extra sections. Named regressions
 cover multi-body snapshot/feed parity, expiry cascade, empty graph registries,
 exact body-cap boundaries, codec versions and mixed op-15/block rejection.
 Checkpoint reads, production wiring and activation remain outstanding.
+Slice 2a adds a private, unreleased, test-only `CompactGraphView` candidate,
+pending independent acceptance. It has no GraphRef, query/executor, Database,
+checkpoint or WAL wiring and no production use. Property-index access is
+explicitly deferred as described below; serving cannot ship before it exists.
 Depends on [P2](p2-directory-store.md); exits remain
 [S3/S4/F6](../performance/storage-goals.md): **<=24 B/edge disk,
 <=100 B/edge resident, >=1M edges/s bulk load, <=300 ms reopen at 1M edges**.
@@ -75,6 +79,102 @@ and mutation planning with compact-base accessors, without retaining a duplicate
 heap copy of the base. Preserve cursor ordering, canonical
 paths, limits, metering and default query results. P4 does not change vector
 precision or exact-search defaults; P3 decides those separately.
+
+## Slice 2a private read-model candidate
+
+`src/compact/graph/view.rs` pins an already decoded `CompactGraph` by `Arc`.
+An optional immutable snapshot owns only the accepted overlay's committed
+delta rows, tombstones, sequence, allocation high-water marks and adjacency
+memberships. `Overlay::snapshot` verifies the supplied Arc names exactly its
+borrowed base allocation before capturing it; an equal graph in another
+allocation returns the typed private `OverlayError::Identity`. Because the
+accepted overlay borrows its base, this is `std::ptr::eq` against `Arc::as_ref`,
+not value equality. Views and their clones retain both generations independently
+of later commits, overlay destruction or construction of another decoded base.
+Snapshot creation does not change overlay admission or existing overlay tests.
+
+Entity lookup resolves the delta slot first, including tombstones, then the
+base's public-ID mapping. Ascending ID iteration merges the base and delta
+IDs without visiting a replaced row twice. Key lookup and label scans inspect
+the resolved rows, so removed keys/labels do not leak from the base. Adjacency
+collects base CSR candidates and delta memberships, deduplicates edge IDs,
+resolves visibility, filters direction/type/cursor and sorts by relationship
+string then edge ID. `Both` includes a self-loop once; parallel edges remain
+distinct. The adjacency and `edges_between` iterators materialize their result
+before returning; executor metering/cancellation integration is not implemented
+or qualified by this slice.
+
+`read(C, T)` fixes one unsigned retention clock C and an optional signed as-of
+time T. Every logical entity, key, scan, attachment and adjacency read applies
+retention before returning rows. Deadline equality expires a row, and node
+expiry hides every incident edge. As-of edges select the half-open segment at T;
+gaps and empty series are absent. `segments` is a retention-checked timeline,
+independent of T. `live_counts` counts retention, not segment validity, matching
+the engine. `node_expiry`/`edge_expiry` expose physical deadlines even for due
+rows, as the engine does. Metadata counts are physical.
+An explicit `physical()` read disables retention and validity selection for the
+future snapshot/planning seams; it is not a user-visible read. Physical and
+clock-bound accessors return borrowed node/edge fields, projected properties,
+schema declarations and ordered attachments. No view constructor or accessor
+constructs an engine `Graph`/`GraphState` or a merged `GraphSource`; engine state
+is used only by the independent test oracles. Generation decoding and overlay
+admission retain their existing codec validation outside view reads.
+
+**Property indexes: DEFERRED.** The view deliberately has no `property_index`
+accessor or scan fallback pretending to be one. Exact/range/unique derived
+postings are not persisted by VLGCSR06 and are not built by this candidate.
+The affected engine calls are `query.rs::find_nodes` at the `Eq` and `Range`
+arms calling `Graph::property_index` (currently lines 1131 and 1139), and
+`schema.rs::check_node`'s unique-property lookup (currently line 892).
+`query.rs::prepare` still uses `schema::usable_index` to select those plans.
+Serving cannot ship before derived lookup structures exist and their
+equality/range, uniqueness, TTL/cursor and planner-choice semantics are proved.
+The intended follow-up is once-per-pinned-generation lazy derived postings
+from physical resolved rows, with logical retention applied by their consumer;
+no such implementation or fallback is claimed here.
+
+The following inventory describes the accessor seam for the next slice, not
+executor wiring completed by this candidate. `ReadView` denotes the captured
+logical read; `physical()` is required where engine code must inspect due rows.
+Engine error precedence, planner mutation/rollback, budgets, cursors and public
+response construction remain with their current owners.
+
+| Existing consumer/module and functions | View accessor seam | Remaining integration |
+|---|---|---|
+| `property_graph/mod.rs`: `GraphRef`, `GraphInfo::of`, graph lookup; `read.rs`: `GraphRef::query`, execute adapter | `id`, `name`, `graph_sequence`, physical counts, `read(C, T)`, `live_counts` | Replace borrowed `&Graph`; Database graph registry remains outside one view |
+| `engine/query.rs`: `page`, `find`, `resolve`, `prepare`, `execute`, `execute_as_of`, `execute_with_selectors`, `run` | IDs/sequence for binding; `node`, `node_by_key`, `edge`, `edge_by_key`, `schema`, `has_due` | Generic executor and opaque cursor binding, unchanged public behavior |
+| `engine/query.rs`: `Exec::{node_view,edge_hidden,edge_properties,edge_view}`, `find_nodes`, `neighbors` | Borrowed labels/properties/revisions, projections, deadlines, endpoint reads, `node_scan`, `label_scan`, `adjacency` | Property-index plans **DEFERRED**; preserve examined-row metering via physical access where needed |
+| `engine/traverse.rs`: `traverse`, `shortest_path`, `search`, `other_end` | `node`, `edge`, endpoints, `adjacency`, captured clock/as-of selectors | Generic execution, path canonicalization and budget/cancellation accounting |
+| `engine/algorithm.rs`: `run`, `run_with`, `Ready::new`, `resolve`, `Local::{eligible_node,eligible_edge,scan,step,touches}`; `algorithm/iterative.rs::teleport` and iterative algorithms | Metadata, node/key, labels/properties, `has_due`, `node_expired`, `edge_expired`, `edge(0)`, tuple-cursor `adjacency` | Generic scope/projection construction and metering; edge zero remains addressable |
+| `engine/schema.rs`: `check_node`, `check_endpoints`, `check_edge`, `check_entry`, `check_graph`, `Graph::observed_schema` | `schema`, physical nodes/edges, labels/properties, endpoints, `segments`, `edges_of`, physical counts plus captured TTL predicates | Unique-property index **DEFERRED**; generic enforcement and observed-summary aggregation not wired |
+| `engine/filter.rs`: `NodeFilter::matches`, `conditions_match`; algorithm `carries` | Node labels and node/edge/selected-segment `Properties` | Replace concrete borrowed-node assumption; predicates themselves unchanged |
+| `engine/temporal_visibility.rs`: `visible_edge`, `edge_retained_at`; `property_graph/temporal/read.rs`: edge, query, timeline and traversal adapters | `read(C, Some(T))`, `edge`, `segments`, endpoint reads and expiry predicates | Generic temporal execution and fixed-selector cursor plumbing |
+| `engine/mutate.rs`: `Planner::{graph,push,reclaim_expired,reclaim_due,node_id,checked_node,checked_edge,mutate}`; `mutate/temporal.rs`: temporal planning and edge resolution | Physical node/edge/key, `next_node_id`, `next_edge_id`, `schema`, `segments`, `edges_between`, `has_due` | Ordered tentative writes, reclamation, rollback and schema enforcement remain engine-owned, not a view mutation API |
+| `engine/state/temporal.rs`: `Graph::edge_snapshot_entry`, `check_segments`; `engine/state/snapshot.rs`: snapshot construction and revision restore | Physical edges, full `segments`, identities, revisions, deadlines and high-water marks | Snapshot serialization/validation and installation remain unwired |
+| `property_graph/frame.rs`: `compacted_bodies`, `kept_nodes`, `kept_edges`, `kept_revisions`; `engine/state.rs`: graph registry and attachment-owner checks | Physical iteration, attachments, metadata, clock-bound predicates | Checkpoint/WAL integration and cross-graph/global owner validation are later slices |
+
+Bounds are inherited, not widened: the decoded base is the accepted single-graph
+VLGCSR06 source subject to its 64 MiB codec cap and checked u32 ordinals; the
+overlay admits its caller-selected touched-slot cap before a snapshot is taken.
+The view adds no persisted format, allocation policy, gate, default or public
+API. It accepts only the overlay's fixed graph identity/schema lifecycle.
+Schema changes, graph creation/drop, ordered write planning, checkpoint
+publication, WAL replay and generation replacement are not implemented here.
+The largest allocatable public ID is `u64::MAX - 1`; `u64::MAX` is tested as an
+absent ID/cursor, not accepted as a persisted row with an impossible high-water
+mark. No engine modules or accessors are changed by this slice.
+
+Tests compare every implemented accessor against independently applied heap
+engine histories. Hand-built states cover sparse/extreme IDs, self-loops,
+parallel/keyed edges, deadlines including zero and equality, attachments,
+schema labels and temporal gaps/empty series. Four existing xorshift seeds and
+the accepted overlay history shape are reused with every history split between
+base and committed tail, including key recreation, tombstones, deadline
+set/removal and temporal replacement. Physical and logical reads, last/beyond/
+deleted cursors, pinned old generations and framing-versus-payload decoding are
+checked separately. Named real rebuild mutations cover metadata, entities,
+scans, temporal selection, retention, adjacency, directed edge pairs and delta
+precedence; these are correctness checks, not executor qualification.
 
 ## Mutations, expiry and attachments
 
