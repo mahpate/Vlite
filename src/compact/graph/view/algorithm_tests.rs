@@ -25,7 +25,8 @@ fn algorithm_parity(view: &CompactGraphView, graph: &Graph) {
         ("unknown".into(), EdgeId(1)),
         ("zzz".into(), EdgeId(u64::MAX)),
     ]);
-    for node in graph.nodes().map(|node| node.id).chain([NodeId(u64::MAX)]) {
+    let max = graph.nodes().map(|node| node.id.0).max().unwrap_or(0);
+    for node in (0..=max + 1).map(NodeId).chain([NodeId(u64::MAX)]) {
         for direction in [Direction::Out, Direction::In, Direction::Both] {
             let expected: Vec<_> = graph.adjacency(node, direction, None, None).collect();
             assert_eq!(
@@ -195,6 +196,29 @@ fn tombstones_keys_reuse_and_pinned_snapshot_match_engine() {
         .apply(projection(&initial, &source(&state)))
         .unwrap();
     let first = CompactGraphView::with_overlay(overlay.snapshot(Arc::clone(&base)).unwrap());
+    let graph = state.graph(G).unwrap();
+    assert_eq!(
+        first.algorithm.bytes(),
+        Index::projected_bytes(
+            graph.nodes().count(),
+            graph.nodes().count(),
+            graph.edges().count()
+        )
+    );
+    for direction in [Direction::Out, Direction::In, Direction::Both] {
+        for after in [None, Some(("", EdgeId(0))), Some(("A", EdgeId(0)))] {
+            let actual: Vec<_> = first
+                .algorithm_adjacency(NodeId(2), direction, after)
+                .collect();
+            assert!(actual.is_empty(), "tombstoned node must have no row");
+            assert_eq!(
+                actual,
+                graph
+                    .adjacency(NodeId(2), direction, None, after)
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
     let earlier = state.clone();
     let before = source(&state);
     apply(
@@ -235,6 +259,13 @@ fn key_changes_and_removals_use_effective_index() {
     removed.key = None;
     snapshot.nodes.insert(removed.id, Some(removed));
     let view = CompactGraphView::with_overlay(snapshot);
+    for missing in ["a", ""] {
+        assert!(view.algorithm_node_by_key(missing).is_none());
+    }
+    assert_eq!(
+        view.algorithm.bytes(),
+        Index::projected_bytes(3, 2, state.graph(G).unwrap().edges().count())
+    );
     for old in ["k0", "k1"] {
         assert!(view.algorithm_node_by_key(old).is_none());
     }
@@ -320,7 +351,11 @@ fn tombstone_heavy_iteration_has_bounded_visits() {
     let mut actual = Vec::new();
     loop {
         let entry = iterator.next();
-        assert!(take_visits() <= 2, "next must not walk tombstones");
+        let visits = take_visits();
+        assert!(visits <= 2, "next must not walk tombstones");
+        if entry.is_some() {
+            assert!(visits >= 1, "yielded entries must be counted");
+        }
         match entry {
             Some(entry) => actual.push(entry),
             None => break,
@@ -402,6 +437,31 @@ fn indexed_key_lookup_visits_are_logarithmic() {
         assert!(
             take_visits() <= 14,
             "key lookup must binary-search, never scan"
+        );
+    }
+}
+
+#[test]
+fn key_order_differs_from_node_id_order() {
+    let mut state = GraphState::new();
+    let mut entries = vec![GraphEntry::CreateGraph {
+        name: "key_order".into(),
+    }];
+    for (id, key) in [(0, "zulu"), (1, "alpha"), (2, "middle")] {
+        entries.push(GraphEntry::PutNode {
+            node_id: NodeId(id),
+            key: key.into(),
+            labels: BTreeSet::new(),
+            properties: Properties::new(),
+        });
+    }
+    apply(&mut state, 1, entries);
+    let view = base_view(&state);
+    for (key, id) in [("alpha", 1), ("middle", 2), ("zulu", 0)] {
+        assert_eq!(view.algorithm_node_by_key(key).unwrap().id, NodeId(id));
+        assert_eq!(
+            view.algorithm_node_by_key(key).map(|node| node.id),
+            state.graph(G).unwrap().node_by_key(key).map(|node| node.id)
         );
     }
 }
