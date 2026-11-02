@@ -1,7 +1,7 @@
 # Gap 5: private CSR algorithm parity adapter
 
 Status: **design accepted 2026-11-02; private and unreleased**.
-Phase 1 changed documentation only. Phase 2 commit 1 (resident seam) and its TTL-resolution tests are independently accepted and integrated; the CSR source stays gated by section (g).
+Phase 1 changed documentation only. Phase 2 commit 1 (resident seam) and its TTL-resolution tests are independently accepted and integrated. The P4 view and bounded key/adjacency accessors required by section (h) are now independently accepted and integrated, so commit 2 (CSR source) may start under section (g).
 Baseline: `49c77d6f8f2ed87d85b5a570e74457af248bcd45`.
 Candidate P4 view: `50190ded2834abe8efdb8902e629c744c833efff`, inspected through
 git objects only; not accepted, integrated or activated by this document.

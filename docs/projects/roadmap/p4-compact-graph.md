@@ -24,12 +24,13 @@ blocks without history/graph flags or with extra sections. Named regressions
 cover multi-body snapshot/feed parity, expiry cascade, empty graph registries,
 exact body-cap boundaries, codec versions and mixed op-15/block rejection.
 Checkpoint reads, production wiring and activation remain outstanding.
-Slice 2a adds a private, unreleased, test-only `CompactGraphView` candidate,
-pending independent acceptance. It has no GraphRef, query/executor, Database,
+Slice 2a adds a private, unreleased, test-only `CompactGraphView`,
+independently accepted and integrated. It has no GraphRef, query/executor, Database,
 checkpoint or WAL wiring and no production use. Property-index access is
 explicitly deferred as described below; serving cannot ship before it exists.
-The bounded algorithm key/adjacency accessors described below are a private,
-unreleased candidate pending independent acceptance and hidden-work review.
+The bounded algorithm key/adjacency accessors described below are private and
+unreleased, independently accepted (including mutation and hidden-work review)
+and integrated, with no production caller.
 Depends on [P2](p2-directory-store.md); exits remain
 [S3/S4/F6](../performance/storage-goals.md): **<=24 B/edge disk,
 <=100 B/edge resident, >=1M edges/s bulk load, <=300 ms reopen at 1M edges**.

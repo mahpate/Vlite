@@ -187,7 +187,9 @@ Local numbers below show direction only (see rules).
   series from an ordinary edge. Ordinary edge records remain on the existing
   path apart from the payload version. Private decoded-CSR ID/key and adjacency
   reads are independently accepted, including TTL and selected temporal
-  properties; production query execution is not wired to CSR. This decoded
+  properties; production query execution is not wired to CSR. Private bounded
+algorithm key/adjacency accessors over the pinned view are also independently
+accepted and integrated, with no production caller. This decoded
   read model is a correctness oracle, not a resident-budget candidate: on x64
   its per-edge record alone exceeds the 100 B/edge target, so S4 depends on a
   later packed representation. Private parallel
@@ -231,7 +233,7 @@ Local numbers below show direction only (see rules).
   or sweep, never a partial one. S4 sampled betweenness is implemented, reviewed
   and integrated with independent reference fixtures; interrupted computation
   retains only completed sources. S4 is also unreleased. CSR parity and serving
-  exposure remain separate work; the private, unreleased [CSR adapter](gap5-csr-adapter.md) has an accepted design. Its first slice, the resident source seam, is independently accepted and integrated (private, unreleased); the CSR source stays gated on P4 accessors.
+  exposure remain separate work; the private, unreleased [CSR adapter](gap5-csr-adapter.md) has an accepted design. Its first slice, the resident source seam, is independently accepted and integrated (private, unreleased); with the P4 accessors now integrated, the CSR source slice is unblocked but not yet implemented.
 - **Speed P5, filters:** safe in-memory summaries and visibility tracking,
   including exact-planner fallback, are implemented, independently reviewed
   and integrated, but unreleased ([plan](p5-filters-and-serving.md)).
