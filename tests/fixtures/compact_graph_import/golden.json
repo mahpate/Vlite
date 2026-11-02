@@ -1,0 +1,352 @@
+{
+  "schema": "vlite.compact-graph-import-logical",
+  "version": 1,
+  "cases": [
+    {
+      "name": "empty",
+      "nodes": [],
+      "edges": [],
+      "expected": {"image": {
+        "nodes": [], "edges": [],
+        "adjacency": {"out": [], "in": []},
+        "degree_prefix_sums": {"out": [0], "in": [0]},
+        "dictionaries": {"labels": [], "relationships": []},
+        "next_node_id": 0, "next_edge_id": 0
+      }}
+    },
+    {
+      "name": "single-node",
+      "nodes": [{"key": "only", "labels": ["solo"]}],
+      "edges": [],
+      "expected": {"image": {
+        "nodes": [{"id": 0, "key": "only", "labels": ["solo"], "deadline": null, "attachments": []}],
+        "edges": [],
+        "adjacency": {"out": [[]], "in": [[]]},
+        "degree_prefix_sums": {"out": [0, 0], "in": [0, 0]},
+        "dictionaries": {"labels": ["solo"], "relationships": []},
+        "next_node_id": 1, "next_edge_id": 0
+      }}
+    },
+    {
+      "name": "self-loop",
+      "nodes": [{"labels": []}],
+      "edges": [{"source": {"ordinal": 0}, "target": {"ordinal": 0}, "relationship": "loop"}],
+      "expected": {"image": {
+        "nodes": [{"id": 0, "key": null, "labels": [], "deadline": null, "attachments": []}],
+        "edges": [{"id": 0, "source": 0, "target": 0, "relationship": "loop", "deadline": null}],
+        "adjacency": {"out": [[["loop", 0]]], "in": [[["loop", 0]]]},
+        "degree_prefix_sums": {"out": [0, 1], "in": [0, 1]},
+        "dictionaries": {"labels": [], "relationships": ["loop"]},
+        "next_node_id": 1, "next_edge_id": 1
+      }}
+    },
+    {
+      "name": "parallel-edges",
+      "nodes": [{"key": "s", "labels": []}, {"key": "t", "labels": []}],
+      "edges": [
+        {"source": {"key": "s"}, "target": {"ordinal": 1}, "relationship": "z"},
+        {"source": {"ordinal": 0}, "target": {"key": "t"}, "relationship": "a"},
+        {"source": {"key": "s"}, "target": {"key": "t"}, "relationship": "a"},
+        {"source": {"key": "t"}, "target": {"key": "s"}, "relationship": "a"}
+      ],
+      "expected": {"image": {
+        "nodes": [
+          {"id": 0, "key": "s", "labels": [], "deadline": null, "attachments": []},
+          {"id": 1, "key": "t", "labels": [], "deadline": null, "attachments": []}
+        ],
+        "edges": [
+          {"id": 0, "source": 0, "target": 1, "relationship": "z", "deadline": null},
+          {"id": 1, "source": 0, "target": 1, "relationship": "a", "deadline": null},
+          {"id": 2, "source": 0, "target": 1, "relationship": "a", "deadline": null},
+          {"id": 3, "source": 1, "target": 0, "relationship": "a", "deadline": null}
+        ],
+        "adjacency": {
+          "out": [[["a", 1], ["a", 2], ["z", 0]], [["a", 3]]],
+          "in": [[["a", 3]], [["a", 1], ["a", 2], ["z", 0]]]
+        },
+        "degree_prefix_sums": {"out": [0, 3, 4], "in": [0, 1, 4]},
+        "dictionaries": {"labels": [], "relationships": ["a", "z"]},
+        "next_node_id": 2, "next_edge_id": 4
+      }}
+    },
+    {
+      "name": "sparse-labels",
+      "nodes": [
+        {"labels": ["z", "a"]}, {"labels": []},
+        {"labels": ["middle"]}, {"labels": []}, {"labels": ["a"]}
+      ],
+      "edges": [],
+      "expected": {"image": {
+        "nodes": [
+          {"id": 0, "key": null, "labels": ["a", "z"], "deadline": null, "attachments": []},
+          {"id": 1, "key": null, "labels": [], "deadline": null, "attachments": []},
+          {"id": 2, "key": null, "labels": ["middle"], "deadline": null, "attachments": []},
+          {"id": 3, "key": null, "labels": [], "deadline": null, "attachments": []},
+          {"id": 4, "key": null, "labels": ["a"], "deadline": null, "attachments": []}
+        ],
+        "edges": [],
+        "adjacency": {"out": [[], [], [], [], []], "in": [[], [], [], [], []]},
+        "degree_prefix_sums": {"out": [0, 0, 0, 0, 0, 0], "in": [0, 0, 0, 0, 0, 0]},
+        "dictionaries": {"labels": ["a", "middle", "z"], "relationships": []},
+        "next_node_id": 5, "next_edge_id": 0
+      }}
+    },
+    {
+      "name": "many-relationships",
+      "nodes": [{"key": "hub", "labels": []}],
+      "edges": [
+        {"source": {"key": "hub"}, "target": {"key": "hub"}, "relationship": "zeta"},
+        {"source": {"ordinal": 0}, "target": {"ordinal": 0}, "relationship": "alpha"},
+        {"source": {"ordinal": 0}, "target": {"ordinal": 0}, "relationship": "omega"},
+        {"source": {"ordinal": 0}, "target": {"ordinal": 0}, "relationship": "beta"},
+        {"source": {"ordinal": 0}, "target": {"ordinal": 0}, "relationship": "delta"},
+        {"source": {"ordinal": 0}, "target": {"ordinal": 0}, "relationship": "gamma"}
+      ],
+      "expected": {"image": {
+        "nodes": [{"id": 0, "key": "hub", "labels": [], "deadline": null, "attachments": []}],
+        "edges": [
+          {"id": 0, "source": 0, "target": 0, "relationship": "zeta", "deadline": null},
+          {"id": 1, "source": 0, "target": 0, "relationship": "alpha", "deadline": null},
+          {"id": 2, "source": 0, "target": 0, "relationship": "omega", "deadline": null},
+          {"id": 3, "source": 0, "target": 0, "relationship": "beta", "deadline": null},
+          {"id": 4, "source": 0, "target": 0, "relationship": "delta", "deadline": null},
+          {"id": 5, "source": 0, "target": 0, "relationship": "gamma", "deadline": null}
+        ],
+        "adjacency": {
+          "out": [[["alpha", 1], ["beta", 3], ["delta", 4], ["gamma", 5], ["omega", 2], ["zeta", 0]]],
+          "in": [[["alpha", 1], ["beta", 3], ["delta", 4], ["gamma", 5], ["omega", 2], ["zeta", 0]]]
+        },
+        "degree_prefix_sums": {"out": [0, 6], "in": [0, 6]},
+        "dictionaries": {"labels": [], "relationships": ["alpha", "beta", "delta", "gamma", "omega", "zeta"]},
+        "next_node_id": 1, "next_edge_id": 6
+      }}
+    },
+    {
+      "name": "high-degree-skew",
+      "nodes": [
+        {"key": "hub", "labels": ["Hub"]}, {"labels": []}, {"labels": []},
+        {"labels": []}, {"key": "isolated", "labels": []}
+      ],
+      "edges": [
+        {"source": {"ordinal": 0}, "target": {"ordinal": 1}, "relationship": "z"},
+        {"source": {"ordinal": 0}, "target": {"ordinal": 2}, "relationship": "a"},
+        {"source": {"ordinal": 0}, "target": {"ordinal": 3}, "relationship": "z"},
+        {"source": {"ordinal": 0}, "target": {"ordinal": 0}, "relationship": "a"},
+        {"source": {"ordinal": 1}, "target": {"ordinal": 0}, "relationship": "a"},
+        {"source": {"ordinal": 0}, "target": {"ordinal": 1}, "relationship": "a"},
+        {"source": {"ordinal": 0}, "target": {"ordinal": 2}, "relationship": "a"},
+        {"source": {"ordinal": 2}, "target": {"ordinal": 0}, "relationship": "z"},
+        {"source": {"ordinal": 0}, "target": {"ordinal": 3}, "relationship": "b"}
+      ],
+      "expected": {"image": {
+        "nodes": [
+          {"id": 0, "key": "hub", "labels": ["Hub"], "deadline": null, "attachments": []},
+          {"id": 1, "key": null, "labels": [], "deadline": null, "attachments": []},
+          {"id": 2, "key": null, "labels": [], "deadline": null, "attachments": []},
+          {"id": 3, "key": null, "labels": [], "deadline": null, "attachments": []},
+          {"id": 4, "key": "isolated", "labels": [], "deadline": null, "attachments": []}
+        ],
+        "edges": [
+          {"id": 0, "source": 0, "target": 1, "relationship": "z", "deadline": null},
+          {"id": 1, "source": 0, "target": 2, "relationship": "a", "deadline": null},
+          {"id": 2, "source": 0, "target": 3, "relationship": "z", "deadline": null},
+          {"id": 3, "source": 0, "target": 0, "relationship": "a", "deadline": null},
+          {"id": 4, "source": 1, "target": 0, "relationship": "a", "deadline": null},
+          {"id": 5, "source": 0, "target": 1, "relationship": "a", "deadline": null},
+          {"id": 6, "source": 0, "target": 2, "relationship": "a", "deadline": null},
+          {"id": 7, "source": 2, "target": 0, "relationship": "z", "deadline": null},
+          {"id": 8, "source": 0, "target": 3, "relationship": "b", "deadline": null}
+        ],
+        "adjacency": {
+          "out": [
+            [["a", 1], ["a", 3], ["a", 5], ["a", 6], ["b", 8], ["z", 0], ["z", 2]],
+            [["a", 4]], [["z", 7]], [], []
+          ],
+          "in": [
+            [["a", 3], ["a", 4], ["z", 7]], [["a", 5], ["z", 0]],
+            [["a", 1], ["a", 6]], [["b", 8], ["z", 2]], []
+          ]
+        },
+        "degree_prefix_sums": {"out": [0, 7, 8, 9, 9, 9], "in": [0, 3, 5, 7, 9, 9]},
+        "dictionaries": {"labels": ["Hub"], "relationships": ["a", "b", "z"]},
+        "next_node_id": 5, "next_edge_id": 9
+      }}
+    },
+    {
+      "name": "unicode",
+      "nodes": [
+        {"key": "\u00e9", "labels": ["\u732b", "\u00e9", "e\u0301", "Z"]},
+        {"key": "e\u0301", "labels": ["\ud83d\ude00", "Z"]}
+      ],
+      "edges": [
+        {"source": {"key": "\u00e9"}, "target": {"key": "e\u0301"}, "relationship": "\ud83d\ude00"},
+        {"source": {"key": "e\u0301"}, "target": {"key": "\u00e9"}, "relationship": "\u732b"},
+        {"source": {"key": "\u00e9"}, "target": {"key": "e\u0301"}, "relationship": "e\u0301"},
+        {"source": {"key": "\u00e9"}, "target": {"key": "e\u0301"}, "relationship": "\u00e9"}
+      ],
+      "expected": {"image": {
+        "nodes": [
+          {"id": 0, "key": "\u00e9", "labels": ["Z", "e\u0301", "\u00e9", "\u732b"], "deadline": null, "attachments": []},
+          {"id": 1, "key": "e\u0301", "labels": ["Z", "\ud83d\ude00"], "deadline": null, "attachments": []}
+        ],
+        "edges": [
+          {"id": 0, "source": 0, "target": 1, "relationship": "\ud83d\ude00", "deadline": null},
+          {"id": 1, "source": 1, "target": 0, "relationship": "\u732b", "deadline": null},
+          {"id": 2, "source": 0, "target": 1, "relationship": "e\u0301", "deadline": null},
+          {"id": 3, "source": 0, "target": 1, "relationship": "\u00e9", "deadline": null}
+        ],
+        "adjacency": {
+          "out": [[["e\u0301", 2], ["\u00e9", 3], ["\ud83d\ude00", 0]], [["\u732b", 1]]],
+          "in": [[["\u732b", 1]], [["e\u0301", 2], ["\u00e9", 3], ["\ud83d\ude00", 0]]]
+        },
+        "degree_prefix_sums": {"out": [0, 3, 4], "in": [0, 1, 4]},
+        "dictionaries": {
+          "labels": ["Z", "e\u0301", "\u00e9", "\u732b", "\ud83d\ude00"],
+          "relationships": ["e\u0301", "\u00e9", "\u732b", "\ud83d\ude00"]
+        },
+        "next_node_id": 2, "next_edge_id": 4
+      }}
+    },
+    {
+      "name": "deadline-boundaries",
+      "nodes": [
+        {"key": "zero", "labels": [], "deadline": 0, "attachments": [{"collection": 1, "record": 8}]},
+        {"key": "one", "labels": [], "deadline": 1},
+        {"labels": [], "deadline": 18446744073709551615},
+        {"labels": [], "deadline": null}
+      ],
+      "edges": [
+        {"source": {"key": "zero"}, "target": {"key": "one"}, "relationship": "r", "deadline": 0},
+        {"source": {"key": "one"}, "target": {"ordinal": 2}, "relationship": "r", "deadline": 18446744073709551615},
+        {"source": {"ordinal": 2}, "target": {"ordinal": 3}, "relationship": "r", "deadline": null},
+        {"source": {"ordinal": 3}, "target": {"key": "zero"}, "relationship": "r"}
+      ],
+      "expected": {"image": {
+        "nodes": [
+          {"id": 0, "key": "zero", "labels": [], "deadline": 0, "attachments": [[1, 8]]},
+          {"id": 1, "key": "one", "labels": [], "deadline": 1, "attachments": []},
+          {"id": 2, "key": null, "labels": [], "deadline": 18446744073709551615, "attachments": []},
+          {"id": 3, "key": null, "labels": [], "deadline": null, "attachments": []}
+        ],
+        "edges": [
+          {"id": 0, "source": 0, "target": 1, "relationship": "r", "deadline": 0},
+          {"id": 1, "source": 1, "target": 2, "relationship": "r", "deadline": 18446744073709551615},
+          {"id": 2, "source": 2, "target": 3, "relationship": "r", "deadline": null},
+          {"id": 3, "source": 3, "target": 0, "relationship": "r", "deadline": null}
+        ],
+        "adjacency": {
+          "out": [[["r", 0]], [["r", 1]], [["r", 2]], [["r", 3]]],
+          "in": [[["r", 3]], [["r", 0]], [["r", 1]], [["r", 2]]]
+        },
+        "degree_prefix_sums": {"out": [0, 1, 2, 3, 4], "in": [0, 1, 2, 3, 4]},
+        "dictionaries": {"labels": [], "relationships": ["r"]},
+        "next_node_id": 4, "next_edge_id": 4
+      }}
+    },
+    {
+      "name": "attachments",
+      "nodes": [
+        {"key": "a", "labels": [], "attachments": [{"collection": 65535, "record": 18446744073709551615}, {"collection": 0, "record": 5}]},
+        {"key": "b", "labels": [], "attachments": [{"collection": 1, "record": 5}]},
+        {"labels": [], "attachments": []}
+      ],
+      "edges": [],
+      "expected": {"image": {
+        "nodes": [
+          {"id": 0, "key": "a", "labels": [], "deadline": null, "attachments": [[0, 5], [65535, 18446744073709551615]]},
+          {"id": 1, "key": "b", "labels": [], "deadline": null, "attachments": [[1, 5]]},
+          {"id": 2, "key": null, "labels": [], "deadline": null, "attachments": []}
+        ],
+        "edges": [],
+        "adjacency": {"out": [[], [], []], "in": [[], [], []]},
+        "degree_prefix_sums": {"out": [0, 0, 0, 0], "in": [0, 0, 0, 0]},
+        "dictionaries": {"labels": [], "relationships": []},
+        "next_node_id": 3, "next_edge_id": 0
+      }}
+    },
+    {
+      "name": "duplicate-key-boundary",
+      "nodes": [
+        {"key": "a", "labels": [], "deadline": 0}, {"key": "b", "labels": []},
+        {"key": "a", "labels": []}, {"key": "c", "labels": []}
+      ],
+      "edges": [],
+      "expected": {"error": {"class": "NodeKeyExists", "ordinal": 2}}
+    },
+    {
+      "name": "unknown-endpoint",
+      "nodes": [{"key": "a", "labels": []}],
+      "edges": [
+        {"source": {"ordinal": 0}, "target": {"ordinal": 0}, "relationship": "ok"},
+        {"source": {"key": "missing"}, "target": {"key": "a"}, "relationship": "bad"}
+      ],
+      "expected": {"error": {"class": "UnknownNodeKey", "ordinal": 2}}
+    },
+    {
+      "name": "duplicate-owner-boundary",
+      "nodes": [
+        {"key": "a", "labels": [], "deadline": 0, "attachments": [{"collection": 7, "record": 99}]},
+        {"key": "b", "labels": []},
+        {"key": "c", "labels": [], "attachments": [{"collection": 7, "record": 99}]},
+        {"key": "d", "labels": []}
+      ],
+      "edges": [],
+      "expected": {"error": {"class": "RecordAlreadyAttached", "ordinal": 2}}
+    },
+    {
+      "name": "duplicate-node-collection",
+      "nodes": [
+        {"labels": []},
+        {"labels": [], "attachments": [{"collection": 2, "record": 10}, {"collection": 2, "record": 11}]}
+      ],
+      "edges": [],
+      "expected": {"error": {"class": "NodeAlreadyAttached", "ordinal": 1}}
+    },
+    {
+      "name": "multiple-errors",
+      "nodes": [
+        {"key": "a", "labels": [], "attachments": [{"collection": 1, "record": 1}]},
+        {"key": "b", "labels": [], "attachments": [{"collection": 1, "record": 1}]},
+        {"key": "a", "labels": []},
+        {"key": "b", "labels": [], "attachments": [{"collection": 2, "record": 8}, {"collection": 2, "record": 9}]}
+      ],
+      "edges": [
+        {"source": {"key": "missing"}, "target": {"ordinal": 99}, "relationship": "bad"}
+      ],
+      "expected": {"error": {"class": "RecordAlreadyAttached", "ordinal": 1}}
+    },
+    {
+      "name": "unknown-ordinal",
+      "nodes": [{"labels": []}],
+      "edges": [
+        {"source": {"ordinal": 0}, "target": {"ordinal": 1}, "relationship": "bad"},
+        {"source": {"ordinal": 18446744073709551615}, "target": {"ordinal": 0}, "relationship": "also-bad"}
+      ],
+      "expected": {"error": {"class": "NodeNotFound", "ordinal": 1}}
+    },
+    {
+      "name": "attachment-check-precedence",
+      "nodes": [
+        {"labels": [], "attachments": [{"collection": 2, "record": 10}, {"collection": 2, "record": 10}]}
+      ],
+      "edges": [],
+      "expected": {"error": {"class": "NodeAlreadyAttached", "ordinal": 0}}
+    },
+    {
+      "name": "source-key-error-first",
+      "nodes": [{"labels": []}],
+      "edges": [
+        {"source": {"key": "missing"}, "target": {"ordinal": 99}, "relationship": "bad"}
+      ],
+      "expected": {"error": {"class": "UnknownNodeKey", "ordinal": 1}}
+    },
+    {
+      "name": "source-ordinal-error-first",
+      "nodes": [{"labels": []}],
+      "edges": [
+        {"source": {"ordinal": 99}, "target": {"key": "missing"}, "relationship": "bad"}
+      ],
+      "expected": {"error": {"class": "NodeNotFound", "ordinal": 1}}
+    }
+  ]
+}

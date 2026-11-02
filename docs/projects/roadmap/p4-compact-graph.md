@@ -94,6 +94,18 @@ buffers and sorted spill runs for skew/high-degree nodes. Globally check duplica
 keys, endpoints, schema multiplicity and attachment ownership before installation.
 Publish only the complete durable import; normal batches retain their contract.
 
+The independent standard-library
+[`compact_graph_import_oracle.py`](../../../tests/compact_graph_import_oracle.py)
+checks 19 hand-authored logical cases against sequential admission and partitioned
+staging with sorted-run merging. It covers deterministic IDs, dictionaries,
+adjacency, degree prefixes, attachment ownership and first-error ordering across
+worker-count, partition-layout and spill-size choices. Its bounded model admits
+nodes before edges into an empty ownership domain, assumes referenced records
+already exist without expiry, and retains physical deadlines without evaluating
+a write clock. It does not model interleaved writes, schema/property admission,
+worker-local spill buffers, actual concurrency or durable publication. This is
+reference coverage, not an implemented importer or performance qualification.
+
 For online checkpoints, build against a sealed P2 prefix at floor `S`; later
 commits remain in the rotated WAL. Validate/fsync the temporary image, rename,
 then atomically publish the existing checksummed manifest. No acknowledgement
