@@ -77,6 +77,8 @@ Current HTTP code uses env settings, a 30 s timeout, no redirects and a 4 MiB re
 The managed contract must not claim those defaults provide the new isolation policy.
 Open: migrate legacy env-configured `http` into admin bindings without silently changing existing grants.
 
+Delivery 1 is a private, unreleased candidate pending independent acceptance. Its startup hook is server-startup plumbing outside the embedded Rust API reference; `tests/api_reference.py:204` skips `src/server*`, so no `site/api.html` row is required. The `--providers-file` and `VLITE_PROVIDERS_FILE` names remain proposals awaiting ratification. Secrets are not zeroized in memory. The exact-IP allowlist is the sole egress control: operators may allow any IP, and there is no built-in metadata or link-local denylist. Blocking DNS lookups hold a bounded per-provider permit inside Tokio's shared blocking pool; tasks may queue before acquiring that permit. Windows private-file verification remains unsupported.
+
 | Proposed bound | Contract |
 |---|---|
 | Embedding input | One UTF-8 text per request; 16,384 bytes maximum; no new batch endpoint |
@@ -336,9 +338,10 @@ must match at startup. Every dispatch resolves DNS anew within the connect
 deadline, rejects the whole answer if any address is outside the allowlist and
 pins that answer into a fresh client. No proxies, redirects, shared connections
 or response caches are used. HTTPS requires `tls_required:true`. HTTP requires
-an IP-literal loopback endpoint, only loopback allowed addresses,
-`allow_local_http:true` and `tls_required:false`. `localhost` is not an HTTP
-exception. TLS certificate verification remains enabled.
+every allowlisted and resolved address to be loopback, `allow_local_http:true`
+and `tls_required:false`; a hostname is acceptable only when its complete DNS
+answer is pinned to loopback addresses. `localhost` is not a special exception.
+TLS certificate verification remains enabled.
 
 Only secret objects `{"env":"NAME"}` or `{"file":"/absolute/private/file"}` are
 accepted; literal secrets and other keys fail. Values must be 1..4,096 printable

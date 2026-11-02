@@ -5,7 +5,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
     io::{Read, Write},
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, SocketAddr, ToSocketAddrs},
     path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
@@ -20,6 +20,10 @@ const REQUEST_BYTES: usize = 1_048_576;
 const RESPONSE_BYTES: usize = 4_194_304;
 const CONFIG_BYTES: usize = 1_048_576;
 const CONFIG_ERROR: &str = "invalid provider configuration";
+const MAX_ALIASES: usize = 64;
+const MAX_BINDINGS: usize = 4096;
+const MAX_ALLOWLIST_ADDRESSES: usize = 64;
+const MAX_SECRET_BYTES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProviderError {
@@ -29,6 +33,36 @@ pub(crate) enum ProviderError {
     Unavailable,
     Timeout,
     Busy,
+}
+
+fn check_embedding(vector: &[f32], dimensions: usize) -> Result<(), ProviderError> {
+    if vector.len() != dimensions || vector.iter().any(|value| !value.is_finite()) {
+        return Err(ProviderError::InvalidResponse);
+    }
+    Ok(())
+}
+
+fn check_ranked(
+    results: &[Ranked],
+    k: usize,
+    candidates: &BTreeSet<u64>,
+) -> Result<(), ProviderError> {
+    let mut seen = BTreeSet::new();
+    if results.len() != k
+        || results.iter().any(|result| {
+            !result.cost.is_finite() || !candidates.contains(&result.id) || !seen.insert(result.id)
+        })
+    {
+        return Err(ProviderError::InvalidResponse);
+    }
+    Ok(())
+}
+
+fn sort_ranked(results: &mut [Ranked]) {
+    for result in results.iter_mut() {
+        result.cost += 0.0;
+    }
+    results.sort_by(|a, b| a.cost.total_cmp(&b.cost).then(a.id.cmp(&b.id)));
 }
 
 impl ProviderError {
@@ -114,6 +148,8 @@ struct Provider {
     endpoint: reqwest::Url,
     secret: Option<String>,
     slots: Arc<Semaphore>,
+    dns_slots: Arc<Semaphore>,
+    resolver: Arc<dyn Resolver>,
 }
 
 struct Bound {
@@ -122,6 +158,79 @@ struct Bound {
 }
 
 type BindingKey = (u64, u16, String, String);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConfigReason {
+    JsonShape,
+    AliasCount,
+    BindingCount,
+    AliasName,
+    ModelName,
+    Version,
+    EndpointUrl,
+    EndpointCredentials,
+    EndpointAllowlist,
+    TlsPolicy,
+    Timeout,
+    Concurrency,
+    Dimensions,
+    DuplicateAlias,
+    SecretReference,
+    SecretValue,
+    BindingAlias,
+    BindingFields,
+    DuplicateBinding,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SecretReason {
+    UnsupportedPlatform,
+    InvalidPath,
+    FileUnavailable,
+    FileNotPrivate,
+    TooLarge,
+    InvalidValue,
+    MissingEnvironment,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ConfigFailure(ConfigReason);
+
+impl ConfigFailure {
+    fn public_message(&self) -> &'static str {
+        CONFIG_ERROR
+    }
+}
+
+trait Resolver: Send + Sync {
+    fn resolve(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, ProviderError>;
+}
+
+struct SystemResolver;
+
+impl Resolver for SystemResolver {
+    fn resolve(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, ProviderError> {
+        (host, port)
+            .to_socket_addrs()
+            .map(|addresses| addresses.take(MAX_ALLOWLIST_ADDRESSES + 1).collect())
+            .map_err(|_| ProviderError::Unavailable)
+    }
+}
+
+fn check_addresses(
+    resolved: &[SocketAddr],
+    allowed: &[IpAddr],
+) -> Result<Vec<SocketAddr>, ProviderError> {
+    if resolved.is_empty()
+        || resolved.len() > MAX_ALLOWLIST_ADDRESSES
+        || resolved
+            .iter()
+            .any(|address| !allowed.contains(&address.ip()))
+    {
+        return Err(ProviderError::Unavailable);
+    }
+    Ok(resolved.to_vec())
+}
 
 /// Opaque startup configuration; empty by default and never used by live handlers.
 pub struct ProviderRegistry {
@@ -148,63 +257,76 @@ fn name(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 
-fn load_secret(source: &SecretSource) -> Result<String, String> {
-    let value = match source {
+fn mode_is_private(mode: u32) -> bool {
+    mode & 0o077 == 0
+}
+
+fn trim_secret_file(bytes: &[u8]) -> Result<&[u8], SecretReason> {
+    if bytes.len() > MAX_SECRET_BYTES {
+        return Err(SecretReason::TooLarge);
+    }
+    let mut end = bytes.len();
+    while end > 0 && matches!(bytes[end - 1], b'\r' | b'\n') {
+        end -= 1;
+    }
+    Ok(&bytes[..end])
+}
+
+fn validate_secret_bytes(bytes: &[u8]) -> Result<String, SecretReason> {
+    if bytes.is_empty()
+        || bytes.len() > MAX_SECRET_BYTES
+        || !bytes.iter().all(|b| (0x21..=0x7e).contains(b))
+    {
+        return Err(SecretReason::InvalidValue);
+    }
+    String::from_utf8(bytes.to_vec()).map_err(|_| SecretReason::InvalidValue)
+}
+
+fn load_secret(source: &SecretSource) -> Result<String, SecretReason> {
+    let bytes = match source {
         SecretSource::Env(variable) => {
             if !name(variable) {
-                return Err("invalid provider secret environment reference".into());
+                return Err(SecretReason::InvalidValue);
             }
             std::env::var(variable)
-                .map_err(|_| "provider secret environment variable unavailable")?
+                .map_err(|_| SecretReason::MissingEnvironment)?
+                .into_bytes()
         }
         SecretSource::File(path) => {
             if !path.is_absolute() {
-                return Err("provider secret file must be absolute and private".into());
+                return Err(SecretReason::InvalidPath);
             }
             #[cfg(unix)]
             {
                 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-                let before = std::fs::symlink_metadata(path)
-                    .map_err(|_| "provider secret file unavailable")?;
+                let before =
+                    std::fs::symlink_metadata(path).map_err(|_| SecretReason::FileUnavailable)?;
                 if !before.is_file() || before.file_type().is_symlink() {
-                    return Err("provider secret file must be absolute and private".into());
+                    return Err(SecretReason::FileNotPrivate);
                 }
-                let file =
-                    std::fs::File::open(path).map_err(|_| "provider secret file unavailable")?;
-                let metadata = file
-                    .metadata()
-                    .map_err(|_| "provider secret file unavailable")?;
+                let file = std::fs::File::open(path).map_err(|_| SecretReason::FileUnavailable)?;
+                let metadata = file.metadata().map_err(|_| SecretReason::FileUnavailable)?;
                 if !metadata.is_file()
                     || before.file_type().is_symlink()
                     || before.dev() != metadata.dev()
                     || before.ino() != metadata.ino()
-                    || metadata.permissions().mode() & 0o077 != 0
+                    || !mode_is_private(metadata.permissions().mode())
                 {
-                    return Err("provider secret file must be absolute and private".into());
+                    return Err(SecretReason::FileNotPrivate);
                 }
                 let mut bytes = Vec::new();
                 file.take(4097)
                     .read_to_end(&mut bytes)
-                    .map_err(|_| "provider secret file unavailable")?;
-                if bytes.len() > 4096 {
-                    return Err("provider secret file exceeds 4096 bytes".into());
-                }
-                String::from_utf8(bytes)
-                    .map_err(|_| "invalid provider secret encoding")?
-                    .trim_end_matches(['\r', '\n'])
-                    .to_owned()
+                    .map_err(|_| SecretReason::FileUnavailable)?;
+                trim_secret_file(&bytes)?.to_vec()
             }
             #[cfg(not(unix))]
             {
-                return Err("private provider secret files are unsupported on this platform; use an environment reference".into());
+                return Err(SecretReason::UnsupportedPlatform);
             }
         }
     };
-    if value.is_empty() || value.len() > 4096 || !value.bytes().all(|b| (0x21..=0x7e).contains(&b))
-    {
-        return Err("invalid provider secret encoding".into());
-    }
-    Ok(value)
+    validate_secret_bytes(&bytes)
 }
 
 impl ProviderRegistry {
@@ -219,65 +341,105 @@ impl ProviderRegistry {
         if bytes.len() > CONFIG_BYTES {
             return Err("provider configuration exceeds 1048576 bytes".into());
         }
-        Self::parse(&bytes)
+        Self::parse_detailed(&bytes).map_err(|error| error.public_message().to_owned())
     }
 
     fn parse(bytes: &[u8]) -> Result<Self, String> {
-        let config: Config = serde_json::from_slice(bytes).map_err(|_| CONFIG_ERROR)?;
-        if config.aliases.len() > 64 || config.bindings.len() > 4096 {
-            return Err(CONFIG_ERROR.into());
+        Self::parse_detailed(bytes).map_err(|error| error.public_message().to_owned())
+    }
+
+    fn parse_detailed(bytes: &[u8]) -> Result<Self, ConfigFailure> {
+        let config: Config =
+            serde_json::from_slice(bytes).map_err(|_| ConfigFailure(ConfigReason::JsonShape))?;
+        if config.aliases.len() > MAX_ALIASES {
+            return Err(ConfigFailure(ConfigReason::AliasCount));
+        }
+        if config.bindings.len() > MAX_BINDINGS {
+            return Err(ConfigFailure(ConfigReason::BindingCount));
         }
         let mut registry = Self::default();
         for alias in config.aliases {
-            let endpoint = reqwest::Url::parse(&alias.endpoint).map_err(|_| CONFIG_ERROR)?;
-            let host = endpoint.host_str().ok_or(CONFIG_ERROR)?;
-            let loopback = host
-                .trim_matches(['[', ']'])
-                .parse::<IpAddr>()
-                .is_ok_and(|ip| ip.is_loopback());
+            if !name(&alias.alias) {
+                return Err(ConfigFailure(ConfigReason::AliasName));
+            }
+            if !name(&alias.model) {
+                return Err(ConfigFailure(ConfigReason::ModelName));
+            }
+            if !name(&alias.version)
+                || ["latest", "default"]
+                    .iter()
+                    .any(|reserved| alias.version.eq_ignore_ascii_case(reserved))
+            {
+                return Err(ConfigFailure(ConfigReason::Version));
+            }
+            let endpoint = reqwest::Url::parse(&alias.endpoint)
+                .map_err(|_| ConfigFailure(ConfigReason::EndpointUrl))?;
+            let host = endpoint
+                .host_str()
+                .ok_or(ConfigFailure(ConfigReason::EndpointUrl))?;
             let allow = &alias.endpoint_allowlist;
-            if !name(&alias.alias)
-                || !name(&alias.model)
-                || !name(&alias.version)
-                || matches!(alias.version.as_str(), "latest" | "default")
-                || !endpoint.username().is_empty()
+            if !endpoint.username().is_empty()
                 || endpoint.password().is_some()
                 || endpoint.query().is_some()
                 || endpoint.fragment().is_some()
                 || endpoint.port_or_known_default().is_none()
-                || !matches!(endpoint.scheme(), "http" | "https")
-                || !allow.schemes.iter().any(|s| s == endpoint.scheme())
-                || !allow.hosts.iter().any(|h| h == host)
-                || allow.addresses.is_empty()
-                || allow.addresses.len() > 64
-                || allow.hosts.len() != 1
+            {
+                return Err(ConfigFailure(ConfigReason::EndpointCredentials));
+            }
+            if !matches!(endpoint.scheme(), "http" | "https")
                 || allow.schemes.len() != 1
+                || allow.schemes[0] != endpoint.scheme()
+                || allow.hosts.len() != 1
+                || allow.hosts[0] != host
+                || allow.addresses.is_empty()
+                || allow.addresses.len() > MAX_ALLOWLIST_ADDRESSES
                 || host
                     .trim_matches(['[', ']'])
                     .parse::<IpAddr>()
                     .is_ok_and(|ip| !allow.addresses.contains(&ip))
-                || (endpoint.scheme() == "https" && !alias.tls_required)
+            {
+                return Err(ConfigFailure(ConfigReason::EndpointAllowlist));
+            }
+            if (endpoint.scheme() == "https" && !alias.tls_required)
                 || (endpoint.scheme() == "http"
-                    && (!loopback
-                        || !alias.allow_local_http
+                    && (!alias.allow_local_http
                         || alias.tls_required
                         || allow.addresses.iter().any(|ip| !ip.is_loopback())))
-                || !(1..=2000).contains(&alias.connect_timeout_ms)
+            {
+                return Err(ConfigFailure(ConfigReason::TlsPolicy));
+            }
+            if !(1..=2000).contains(&alias.connect_timeout_ms)
                 || !(1..=10000).contains(&alias.total_timeout_ms)
                 || alias.connect_timeout_ms > alias.total_timeout_ms
-                || !(1..=64).contains(&alias.concurrency)
-                || !(1..=alias.concurrency).contains(&alias.tenant_concurrency)
-                || match alias.kind {
-                    Kind::Embedding => !alias
-                        .dimensions
-                        .is_some_and(|n| (1..=crate::MAX_DIMENSIONS).contains(&n)),
-                    Kind::Rerank => alias.dimensions.is_some(),
-                }
             {
-                return Err(CONFIG_ERROR.into());
+                return Err(ConfigFailure(ConfigReason::Timeout));
             }
-            let secret = alias.secret.as_ref().map(load_secret).transpose()?;
+            if !(1..=64).contains(&alias.concurrency)
+                || !(1..=alias.concurrency).contains(&alias.tenant_concurrency)
+            {
+                return Err(ConfigFailure(ConfigReason::Concurrency));
+            }
+            if match alias.kind {
+                Kind::Embedding => !alias
+                    .dimensions
+                    .is_some_and(|n| (1..=crate::MAX_DIMENSIONS).contains(&n)),
+                Kind::Rerank => alias.dimensions.is_some(),
+            } {
+                return Err(ConfigFailure(ConfigReason::Dimensions));
+            }
+            if alias.secret.as_ref().is_some_and(
+                |source| matches!(source, SecretSource::Env(variable) if !name(variable)),
+            ) {
+                return Err(ConfigFailure(ConfigReason::SecretReference));
+            }
+            let secret = alias
+                .secret
+                .as_ref()
+                .map(load_secret)
+                .transpose()
+                .map_err(|_| ConfigFailure(ConfigReason::SecretValue))?;
             let slots = Arc::new(Semaphore::new(alias.concurrency));
+            let dns_limit = alias.concurrency;
             let key = alias.alias.clone();
             if registry
                 .providers
@@ -288,16 +450,21 @@ impl ProviderRegistry {
                         endpoint,
                         secret,
                         slots,
+                        dns_slots: Arc::new(Semaphore::new(dns_limit)),
+                        resolver: Arc::new(SystemResolver),
                     },
                 )
                 .is_some()
             {
-                return Err("duplicate provider alias".into());
+                return Err(ConfigFailure(ConfigReason::DuplicateAlias));
             }
         }
         let mut tenant_slots = BTreeMap::new();
         for binding in config.bindings {
-            let provider = registry.providers.get(&binding.alias).ok_or(CONFIG_ERROR)?;
+            let provider = registry
+                .providers
+                .get(&binding.alias)
+                .ok_or(ConfigFailure(ConfigReason::BindingAlias))?;
             if !name(&binding.tenant)
                 || binding.payload_fields.len() > 64
                 || binding.payload_fields.iter().any(|f| !name(f))
@@ -306,7 +473,7 @@ impl ProviderRegistry {
                 || (provider.definition.kind == Kind::Embedding
                     && !binding.payload_fields.is_empty())
             {
-                return Err(CONFIG_ERROR.into());
+                return Err(ConfigFailure(ConfigReason::BindingFields));
             }
             let slots = tenant_slots
                 .entry((binding.tenant.clone(), binding.alias.clone()))
@@ -329,7 +496,7 @@ impl ProviderRegistry {
                 )
                 .is_some()
             {
-                return Err("duplicate provider binding".into());
+                return Err(ConfigFailure(ConfigReason::DuplicateBinding));
             }
         }
         Ok(registry)
@@ -407,11 +574,13 @@ impl ProviderRegistry {
             return Err(ProviderError::InvalidResponse);
         }
         let vector = parsed.data.remove(0).embedding;
-        if Some(vector.len()) != provider.definition.dimensions
-            || vector.iter().any(|n| !n.is_finite())
-        {
-            return Err(ProviderError::InvalidResponse);
-        }
+        check_embedding(
+            &vector,
+            provider
+                .definition
+                .dimensions
+                .ok_or(ProviderError::InvalidResponse)?,
+        )?;
         check_deadline(started, provider)?;
         Ok(vector)
     }
@@ -512,18 +681,8 @@ impl ProviderRegistry {
         let mut parsed: Response =
             serde_json::from_slice(&response).map_err(|_| ProviderError::InvalidResponse)?;
         let ids: BTreeSet<_> = candidates.iter().map(|c| c.id).collect();
-        let mut seen = BTreeSet::new();
-        if parsed.results.len() != k
-            || parsed
-                .results
-                .iter()
-                .any(|r| !r.cost.is_finite() || !ids.contains(&r.id) || !seen.insert(r.id))
-        {
-            return Err(ProviderError::InvalidResponse);
-        }
-        parsed
-            .results
-            .sort_by(|a, b| a.cost.total_cmp(&b.cost).then(a.id.cmp(&b.id)));
+        check_ranked(&parsed.results, k, &ids)?;
+        sort_ranked(&mut parsed.results);
         check_deadline(started, provider)?;
         Ok(parsed.results)
     }
@@ -617,29 +776,29 @@ impl Transport for HttpTransport {
                 .endpoint
                 .port_or_known_default()
                 .ok_or(ProviderError::Unavailable)?;
-            let addresses: Vec<SocketAddr> = match host.trim_matches(['[', ']']).parse::<IpAddr>() {
-                Ok(ip) => vec![SocketAddr::new(ip, port)],
-                Err(_) => {
-                    tokio::time::timeout(connect_budget, tokio::net::lookup_host((host, port)))
-                        .await
-                        .map_err(|_| ProviderError::Timeout)?
-                        .map_err(|_| ProviderError::Unavailable)?
-                        .take(65)
-                        .collect()
-                }
+            let addresses = if let Ok(ip) = host.trim_matches(['[', ']']).parse::<IpAddr>() {
+                vec![SocketAddr::new(ip, port)]
+            } else {
+                let resolver = provider.resolver.clone();
+                let dns_slots = provider.dns_slots.clone();
+                let host = host.to_owned();
+                tokio::time::timeout(
+                    connect_budget,
+                    tokio::task::spawn_blocking(move || {
+                        let _permit = dns_slots
+                            .try_acquire_owned()
+                            .map_err(|_| ProviderError::Busy)?;
+                        resolver.resolve(&host, port)
+                    }),
+                )
+                .await
+                .map_err(|_| ProviderError::Timeout)?
+                .map_err(|_| ProviderError::Unavailable)??
             };
-            if addresses.is_empty()
-                || addresses.len() > 64
-                || addresses.iter().any(|address| {
-                    !provider
-                        .definition
-                        .endpoint_allowlist
-                        .addresses
-                        .contains(&address.ip())
-                })
-            {
-                return Err(ProviderError::Unavailable.into());
-            }
+            let addresses = check_addresses(
+                &addresses,
+                &provider.definition.endpoint_allowlist.addresses,
+            )?;
             let client = reqwest::Client::builder()
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())

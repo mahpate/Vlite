@@ -23,6 +23,15 @@ impl Server {
     }
 
     fn start_with_options(path: &Path, file: bool, options: &[&str]) -> Self {
+        Self::start_with_options_env(path, file, options, None)
+    }
+
+    fn start_with_options_env(
+        path: &Path,
+        file: bool,
+        options: &[&str],
+        providers_env: Option<&Path>,
+    ) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_vlite-server"));
         command
             .arg(path)
@@ -31,6 +40,9 @@ impl Server {
             .env_remove("VLITE_AUTH_TOKEN")
             .env_remove("VLITE_AUTH_TOKEN_FILE");
         command.env_remove("VLITE_PROVIDERS_FILE");
+        if let Some(providers_file) = providers_env {
+            command.env("VLITE_PROVIDERS_FILE", providers_file);
+        }
         if file {
             let token = path.with_extension("token");
             std::fs::write(&token, format!("{TOKEN}\r\n")).unwrap();
@@ -60,6 +72,26 @@ impl Server {
             .to_owned();
         server
     }
+}
+
+#[test]
+fn providers_environment_file_is_honored_and_flag_takes_precedence() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("providers-env.vlite");
+    let config = directory.path().join("providers.json");
+    let broken = directory.path().join("missing.json");
+    std::fs::write(&config, r#"{"aliases":[],"bindings":[]}"#).unwrap();
+    let server = Server::start_with_options_env(&path, false, &[], Some(&config));
+    assert_eq!(server.request("GET", "/ready", Value::Null).0, 200);
+    drop(server);
+
+    let server = Server::start_with_options_env(
+        &path,
+        false,
+        &["--providers-file", config.to_str().unwrap()],
+        Some(&broken),
+    );
+    assert_eq!(server.request("GET", "/ready", Value::Null).0, 200);
 }
 
 #[test]

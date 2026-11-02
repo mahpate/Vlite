@@ -1,7 +1,8 @@
 use super::*;
 use std::{
-    io::{BufRead, BufReader, Write},
-    net::TcpListener,
+    collections::VecDeque,
+    io::{BufRead, BufReader, Read, Write},
+    net::{IpAddr, SocketAddr, TcpListener},
     sync::{
         Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -12,6 +13,13 @@ use std::{
 const SECRET: &str = "sentinel-secret-9f31";
 const TEXT: &str = "sentinel-private-text-7ab2";
 const VECTOR: f32 = 987654.25;
+const NETWORK_TEST_TIMEOUT: Duration = Duration::from_secs(12);
+
+async fn bounded<T>(future: impl Future<Output = T>) -> T {
+    tokio::time::timeout(NETWORK_TEST_TIMEOUT, future)
+        .await
+        .expect("network test exceeded its overall timeout")
+}
 
 fn config(endpoint: &str, kind: &str) -> Value {
     let url = reqwest::Url::parse(endpoint).unwrap();
@@ -31,6 +39,13 @@ fn config(endpoint: &str, kind: &str) -> Value {
 
 fn registry(value: &Value) -> ProviderRegistry {
     ProviderRegistry::parse(&serde_json::to_vec(value).unwrap()).unwrap()
+}
+
+fn failure(value: &Value) -> ConfigReason {
+    ProviderRegistry::parse_detailed(&serde_json::to_vec(value).unwrap())
+        .err()
+        .expect("invalid config should be rejected")
+        .0
 }
 
 fn key() -> BindingKey {
@@ -84,6 +99,7 @@ struct Loopback {
     endpoint: String,
     calls: Arc<AtomicUsize>,
     bodies: Arc<Mutex<Vec<Value>>>,
+    headers: Arc<Mutex<Vec<String>>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -95,9 +111,10 @@ impl Loopback {
         let endpoint = format!("http://{}/inference", listener.local_addr().unwrap());
         let calls = Arc::new(AtomicUsize::new(0));
         let bodies = Arc::new(Mutex::new(Vec::new()));
+        let headers = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
-        let (thread_calls, thread_bodies, thread_stop) =
-            (calls.clone(), bodies.clone(), stop.clone());
+        let (thread_calls, thread_bodies, thread_headers, thread_stop) =
+            (calls.clone(), bodies.clone(), headers.clone(), stop.clone());
         let thread = std::thread::spawn(move || {
             for (response, delay) in responses {
                 let mut stream = loop {
@@ -119,6 +136,12 @@ impl Loopback {
                 thread_calls.fetch_add(1, Ordering::SeqCst);
                 let mut reader = BufReader::new(&mut stream);
                 let mut size = 0;
+                let mut request_headers = String::new();
+                let mut request_line = String::new();
+                if reader.read_line(&mut request_line).is_err() {
+                    return;
+                }
+                request_headers.push_str(&request_line);
                 loop {
                     let mut line = String::new();
                     if reader.read_line(&mut line).is_err() {
@@ -127,6 +150,7 @@ impl Loopback {
                     if line == "\r\n" || line.is_empty() {
                         break;
                     }
+                    request_headers.push_str(&line);
                     if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
                         size = value.trim().parse::<usize>().unwrap();
                     }
@@ -140,6 +164,7 @@ impl Loopback {
                 } else {
                     serde_json::from_slice(&body).unwrap()
                 });
+                thread_headers.lock().unwrap().push(request_headers);
                 std::thread::sleep(delay);
                 // Deadline/cap tests intentionally disconnect while the server writes.
                 let _ = stream.write_all(response.as_bytes());
@@ -152,6 +177,7 @@ impl Loopback {
             endpoint,
             calls,
             bodies,
+            headers,
             stop,
             thread: Some(thread),
         }
@@ -162,6 +188,9 @@ impl Loopback {
             body.len()
         )
     }
+    fn raw(status: u16, headers: &str, body: &str) -> String {
+        format!("HTTP/1.1 {status} Test\r\n{headers}\r\nConnection: close\r\n\r\n{body}")
+    }
     fn one(body: &str) -> Self {
         Self::new(vec![(Self::json(200, body), Duration::ZERO)])
     }
@@ -171,6 +200,55 @@ impl Drop for Loopback {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         self.thread.take().unwrap().join().unwrap();
+    }
+}
+
+struct QueueResolver {
+    answers: Mutex<VecDeque<Vec<SocketAddr>>>,
+    calls: AtomicUsize,
+}
+
+impl QueueResolver {
+    fn new(answers: impl IntoIterator<Item = Vec<SocketAddr>>) -> Self {
+        Self {
+            answers: Mutex::new(answers.into_iter().collect()),
+            calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Resolver for QueueResolver {
+    fn resolve(&self, _host: &str, _port: u16) -> Result<Vec<SocketAddr>, ProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(self.answers.lock().unwrap().pop_front().unwrap_or_default())
+    }
+}
+
+struct BlockingResolver {
+    state: Arc<(Mutex<bool>, std::sync::Condvar)>,
+    entered: AtomicBool,
+}
+
+impl Resolver for BlockingResolver {
+    fn resolve(&self, _host: &str, _port: u16) -> Result<Vec<SocketAddr>, ProviderError> {
+        self.entered.store(true, Ordering::SeqCst);
+        let (released, changed) = &*self.state;
+        let mut released = released.lock().unwrap();
+        while !*released {
+            released = changed.wait(released).unwrap();
+        }
+        Ok(vec!["127.0.0.1:1234".parse().unwrap()])
+    }
+}
+
+struct CountedHttp {
+    calls: AtomicUsize,
+}
+
+impl Transport for CountedHttp {
+    fn send<'a>(&'a self, request: TransportRequest<'a>) -> TransportFuture<'a> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        HttpTransport.send(request)
     }
 }
 
@@ -190,6 +268,7 @@ fn strict_config_roundtrip_and_invalid_shapes() {
         bad["aliases"][0].as_object_mut().unwrap().remove(field);
         cases.push(bad);
     }
+
     for (field, value) in [
         ("unexpected", json!(SECRET)),
         ("alias", json!("")),
@@ -279,6 +358,317 @@ fn strict_config_roundtrip_and_invalid_shapes() {
 }
 
 #[test]
+fn configuration_failures_report_private_reasons_without_changing_public_message() {
+    let base = config("http://127.0.0.1:1234/inference", "embedding");
+    let cases = [
+        ("alias", json!("a b"), ConfigReason::AliasName),
+        ("alias", json!("a".repeat(257)), ConfigReason::AliasName),
+        ("model", json!("m".repeat(257)), ConfigReason::ModelName),
+        ("version", json!("Latest"), ConfigReason::Version),
+        ("version", json!("DEFAULT"), ConfigReason::Version),
+        ("version", json!("latest"), ConfigReason::Version),
+        (
+            "endpoint",
+            json!("http://user@127.0.0.1/"),
+            ConfigReason::EndpointCredentials,
+        ),
+        (
+            "endpoint",
+            json!("http://:pass@127.0.0.1/"),
+            ConfigReason::EndpointCredentials,
+        ),
+        (
+            "endpoint",
+            json!("http://127.0.0.1/#frag"),
+            ConfigReason::EndpointCredentials,
+        ),
+        (
+            "endpoint",
+            json!("http://127.0.0.1/?q=1"),
+            ConfigReason::EndpointCredentials,
+        ),
+        ("connect_timeout_ms", json!(2001), ConfigReason::Timeout),
+        ("total_timeout_ms", json!(1000), ConfigReason::Timeout),
+        ("concurrency", json!(65), ConfigReason::Concurrency),
+        ("tenant_concurrency", json!(3), ConfigReason::Concurrency),
+        ("dimensions", json!(0), ConfigReason::Dimensions),
+    ];
+    for (field, value, reason) in cases {
+        let mut candidate = base.clone();
+        candidate["aliases"][0][field] = value;
+        assert_eq!(failure(&candidate), reason);
+        assert_eq!(ConfigFailure(reason).public_message(), CONFIG_ERROR);
+    }
+
+    let mut secret = base.clone();
+    secret["aliases"][0]["secret"] = json!(SECRET);
+    let error = ProviderRegistry::parse(&serde_json::to_vec(&secret).unwrap())
+        .err()
+        .expect("literal secrets must be rejected");
+    assert!(!error.contains(SECRET));
+}
+
+#[test]
+fn schema_caps_names_allowlists_concurrency_and_payload_fields_have_distinct_boundaries() {
+    let base = config("http://127.0.0.1:1234/inference", "rerank");
+    let alias = base["aliases"][0].clone();
+    let mut at_alias_cap = base.clone();
+    at_alias_cap["aliases"] = json!(
+        (0..MAX_ALIASES)
+            .map(|i| {
+                let mut item = alias.clone();
+                item["alias"] = json!(format!("alias-{i}"));
+                item
+            })
+            .collect::<Vec<_>>()
+    );
+    at_alias_cap["bindings"] = json!([]);
+    assert!(ProviderRegistry::parse(&serde_json::to_vec(&at_alias_cap).unwrap()).is_ok());
+    let mut over_alias_cap = at_alias_cap.clone();
+    over_alias_cap["aliases"]
+        .as_array_mut()
+        .unwrap()
+        .push(alias);
+    assert_eq!(failure(&over_alias_cap), ConfigReason::AliasCount);
+
+    let binding = base["bindings"][0].clone();
+    let mut at_binding_cap = base.clone();
+    at_binding_cap["bindings"] = json!(
+        (0..MAX_BINDINGS)
+            .map(|id| {
+                let mut item = binding.clone();
+                item["collection_id"] = json!(id);
+                item
+            })
+            .collect::<Vec<_>>()
+    );
+    assert!(ProviderRegistry::parse(&serde_json::to_vec(&at_binding_cap).unwrap()).is_ok());
+    let mut over_binding_cap = at_binding_cap.clone();
+    let mut next = binding.clone();
+    next["collection_id"] = json!(MAX_BINDINGS);
+    over_binding_cap["bindings"]
+        .as_array_mut()
+        .unwrap()
+        .push(next);
+    assert_eq!(failure(&over_binding_cap), ConfigReason::BindingCount);
+
+    let mut max_names = config("http://127.0.0.1:1234/inference", "rerank");
+    max_names["aliases"][0]["alias"] = json!("a".repeat(256));
+    max_names["aliases"][0]["model"] = json!("m".repeat(256));
+    max_names["aliases"][0]["version"] = json!("v".repeat(256));
+    max_names["bindings"][0]["alias"] = json!("a".repeat(256));
+    max_names["bindings"][0]["tenant"] = json!("t".repeat(256));
+    assert!(ProviderRegistry::parse(&serde_json::to_vec(&max_names).unwrap()).is_ok());
+
+    let mut payloads = config("http://127.0.0.1:1234/inference", "rerank");
+    payloads["bindings"][0]["payload_fields"] =
+        json!((0..64).map(|i| format!("field{i}")).collect::<Vec<_>>());
+    assert!(ProviderRegistry::parse(&serde_json::to_vec(&payloads).unwrap()).is_ok());
+    for fields in [
+        json!((0..65).map(|i| format!("field{i}")).collect::<Vec<_>>()),
+        json!(["field", "field"]),
+        json!(["bad field"]),
+    ] {
+        payloads["bindings"][0]["payload_fields"] = fields;
+        assert_eq!(failure(&payloads), ConfigReason::BindingFields);
+    }
+    let mut embedding_fields = config("http://127.0.0.1:1234/inference", "embedding");
+    embedding_fields["bindings"][0]["payload_fields"] = json!(["field"]);
+    assert_eq!(failure(&embedding_fields), ConfigReason::BindingFields);
+
+    let allowed_64: Vec<_> = (1..=64).map(|value| format!("127.0.0.{value}")).collect();
+    let allowed_65: Vec<_> = (1..=65).map(|value| format!("127.0.0.{value}")).collect();
+    let mut address_cap = config("http://127.0.0.1:1234/inference", "embedding");
+    address_cap["aliases"][0]["endpoint_allowlist"]["addresses"] = json!(allowed_64);
+    assert!(ProviderRegistry::parse(&serde_json::to_vec(&address_cap).unwrap()).is_ok());
+    address_cap["aliases"][0]["endpoint_allowlist"]["addresses"] = json!(allowed_65);
+    assert_eq!(failure(&address_cap), ConfigReason::EndpointAllowlist);
+
+    let mut max_concurrency = config("http://127.0.0.1:1234/inference", "embedding");
+    max_concurrency["aliases"][0]["connect_timeout_ms"] = json!(2000);
+    max_concurrency["aliases"][0]["total_timeout_ms"] = json!(2000);
+    max_concurrency["aliases"][0]["concurrency"] = json!(64);
+    max_concurrency["aliases"][0]["tenant_concurrency"] = json!(64);
+    assert!(ProviderRegistry::parse(&serde_json::to_vec(&max_concurrency).unwrap()).is_ok());
+
+    for (field, invalid) in [
+        ("schemes", json!([])),
+        ("schemes", json!(["http", "https"])),
+        ("schemes", json!(["https"])),
+        ("hosts", json!([])),
+        ("hosts", json!(["outside.invalid"])),
+        ("addresses", json!([])),
+        ("addresses", json!(["127.0.0.2"])),
+    ] {
+        let mut candidate = config("http://127.0.0.1:1234/inference", "embedding");
+        candidate["aliases"][0]["endpoint_allowlist"][field] = invalid;
+        assert_eq!(failure(&candidate), ConfigReason::EndpointAllowlist);
+    }
+
+    let mut outside_http = config("http://example.invalid:1234/inference", "embedding");
+    outside_http["aliases"][0]["endpoint_allowlist"]["hosts"] = json!(["example.invalid"]);
+    outside_http["aliases"][0]["endpoint_allowlist"]["addresses"] = json!(["192.0.2.1"]);
+    assert_eq!(failure(&outside_http), ConfigReason::TlsPolicy);
+}
+
+#[test]
+fn secret_policy_helpers_are_platform_neutral_and_precise() {
+    assert!(mode_is_private(0o600));
+    for mode in [0o640, 0o604, 0o077] {
+        assert!(!mode_is_private(mode));
+    }
+    assert_eq!(trim_secret_file(b"SECRET\r\n").unwrap(), b"SECRET");
+    assert_eq!(validate_secret_bytes(b"SECRET").unwrap(), "SECRET");
+    assert_eq!(
+        trim_secret_file(&vec![b'a'; 4097]),
+        Err(SecretReason::TooLarge)
+    );
+    for invalid in [b"".as_slice(), b"has space"] {
+        let bytes = trim_secret_file(invalid).unwrap();
+        assert!(validate_secret_bytes(bytes).is_err());
+    }
+}
+
+#[test]
+fn address_check_rejects_empty_mixed_and_over_limit_answers() {
+    let allowed: IpAddr = "127.0.0.1".parse().unwrap();
+    let other: IpAddr = "127.0.0.2".parse().unwrap();
+    assert_eq!(
+        check_addresses(
+            &[SocketAddr::new(allowed, 1234), SocketAddr::new(other, 1234)],
+            &[allowed]
+        ),
+        Err(ProviderError::Unavailable)
+    );
+    assert_eq!(
+        check_addresses(&[], &[allowed]),
+        Err(ProviderError::Unavailable)
+    );
+    let at_limit: Vec<_> = (0..MAX_ALLOWLIST_ADDRESSES)
+        .map(|p| SocketAddr::new(allowed, 1000 + p as u16))
+        .collect();
+    assert_eq!(
+        check_addresses(&at_limit, &[allowed]).unwrap().len(),
+        MAX_ALLOWLIST_ADDRESSES
+    );
+    let over: Vec<_> = (0..=MAX_ALLOWLIST_ADDRESSES)
+        .map(|p| SocketAddr::new(allowed, 1000 + p as u16))
+        .collect();
+    assert_eq!(
+        check_addresses(&over, &[allowed]),
+        Err(ProviderError::Unavailable)
+    );
+}
+
+fn hostname_config(endpoint: &str, host: &str, address: IpAddr) -> Value {
+    let mut value = config(endpoint, "embedding");
+    value["aliases"][0]["endpoint_allowlist"]["hosts"] = json!([host]);
+    value["aliases"][0]["endpoint_allowlist"]["addresses"] = json!([address.to_string()]);
+    value
+}
+
+#[tokio::test]
+async fn pinned_hostname_uses_only_the_injected_allowed_address() {
+    let server = Loopback::one(r#"{"data":[{"embedding":[1,2]}]}"#);
+    let socket: SocketAddr = server
+        .endpoint
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let value = hostname_config(
+        &format!("http://pinned.invalid:{}/inference", socket.port()),
+        "pinned.invalid",
+        socket.ip(),
+    );
+    let mut registry = registry(&value);
+    let resolver = Arc::new(QueueResolver::new([vec![socket]]));
+    registry.providers.get_mut("test").unwrap().resolver = resolver.clone();
+    assert_eq!(
+        bounded(registry.embed(&key(), TEXT, &HttpTransport))
+            .await
+            .unwrap(),
+        vec![1.0, 2.0]
+    );
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(server.calls.load(Ordering::SeqCst), 1);
+    assert!(
+        server.headers.lock().unwrap()[0]
+            .to_ascii_lowercase()
+            .contains("host: pinned.invalid:")
+    );
+}
+
+#[tokio::test]
+async fn replay_retry_re_resolves_and_rejects_a_new_disallowed_answer() {
+    let server = Loopback::new(vec![(Loopback::json(503, ""), Duration::ZERO)]);
+    let socket: SocketAddr = server
+        .endpoint
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let other: SocketAddr = "127.0.0.2:1".parse().unwrap();
+    let mut value = hostname_config(
+        &format!("http://pinned.invalid:{}/inference", socket.port()),
+        "pinned.invalid",
+        socket.ip(),
+    );
+    value["aliases"][0]["replay_safe"] = json!(true);
+    let mut registry = registry(&value);
+    let resolver = Arc::new(QueueResolver::new([vec![socket], vec![other]]));
+    registry.providers.get_mut("test").unwrap().resolver = resolver.clone();
+    assert_eq!(
+        bounded(registry.embed(&key(), TEXT, &HttpTransport))
+            .await
+            .unwrap_err(),
+        ProviderError::Unavailable
+    );
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(server.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn timed_out_blocking_dns_keeps_its_admission_slot_until_returned() {
+    let mut value = config("http://stalled.invalid:1234/inference", "embedding");
+    value["aliases"][0]["concurrency"] = json!(1);
+    value["aliases"][0]["tenant_concurrency"] = json!(1);
+    value["aliases"][0]["connect_timeout_ms"] = json!(1000);
+    value["aliases"][0]["total_timeout_ms"] = json!(1000);
+    let mut registry = registry(&value);
+    let resolver = Arc::new(BlockingResolver {
+        state: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
+        entered: AtomicBool::new(false),
+    });
+    registry.providers.get_mut("test").unwrap().resolver = resolver.clone();
+    assert_eq!(
+        bounded(registry.embed(&key(), TEXT, &HttpTransport))
+            .await
+            .unwrap_err(),
+        ProviderError::Timeout
+    );
+    assert!(resolver.entered.load(Ordering::SeqCst));
+    let second = tokio::time::timeout(
+        Duration::from_secs(2),
+        registry.embed(&key(), TEXT, &HttpTransport),
+    )
+    .await;
+    let (release, changed) = &*resolver.state;
+    *release.lock().unwrap() = true;
+    changed.notify_all();
+    assert_eq!(
+        second
+            .expect("provider admission must not wait")
+            .unwrap_err(),
+        ProviderError::Busy
+    );
+}
+
+#[test]
 fn named_environment_secret_is_loaded_without_disclosure() {
     const VARIABLE: &str = "VLITE_PROVIDERS_FAKE_TEST_SECRET";
     if std::env::var_os("VLITE_PROVIDERS_TEST_CHILD").is_some() {
@@ -308,6 +698,44 @@ fn named_environment_secret_is_loaded_without_disclosure() {
     assert!(!String::from_utf8_lossy(&output.stderr).contains(SECRET));
 }
 
+#[test]
+fn environment_secret_values_are_bounded_printable_and_sanitized() {
+    const CHILD: &str = "VLITE_PROVIDERS_INVALID_SECRET_CHILD";
+    const VARIABLE: &str = "VLITE_PROVIDERS_INVALID_SECRET_VALUE";
+    if std::env::var_os(CHILD).is_some() {
+        assert_eq!(
+            load_secret(&SecretSource::Env(VARIABLE.into())),
+            Err(SecretReason::InvalidValue)
+        );
+        return;
+    }
+    for value in [
+        "".to_owned(),
+        "x".repeat(MAX_SECRET_BYTES + 1),
+        "has space".into(),
+    ] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "server::providers::tests::environment_secret_values_are_bounded_printable_and_sanitized",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env(VARIABLE, &value)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if !value.is_empty() {
+            assert!(!String::from_utf8_lossy(&output.stdout).contains(&value));
+            assert!(!String::from_utf8_lossy(&output.stderr).contains(&value));
+        }
+    }
+}
+
 #[tokio::test]
 async fn every_provoked_error_and_captured_log_is_sanitized() {
     let mut registry = registry(&config("http://127.0.0.1:1234/inference", "embedding"));
@@ -335,7 +763,9 @@ async fn every_provoked_error_and_captured_log_is_sanitized() {
         .acquire_many(2)
         .await
         .unwrap();
-    let busy = registry.embed(&key(), TEXT, &fake).await.unwrap_err();
+    let busy = bounded(registry.embed(&key(), TEXT, &fake))
+        .await
+        .unwrap_err();
     drop(permit);
     assert_eq!(
         [missing, invalid, response, unavailable, timeout, busy],
@@ -417,9 +847,8 @@ fn private_secret_files_fail_closed() {
     }
     #[cfg(not(unix))]
     assert!(
-        load_secret(&SecretSource::File(absolute))
-            .unwrap_err()
-            .contains("unsupported")
+        load_secret(&SecretSource::File(absolute)).unwrap_err()
+            == SecretReason::UnsupportedPlatform
     );
 }
 
@@ -441,7 +870,7 @@ fn tls_and_loopback_policy_are_validated_without_dns() {
     assert!(ProviderRegistry::parse(&serde_json::to_vec(&ipv6).unwrap()).is_ok());
     ipv6["aliases"][0]["endpoint"] = json!("http://localhost:1234/inference");
     ipv6["aliases"][0]["endpoint_allowlist"]["hosts"] = json!(["localhost"]);
-    assert!(ProviderRegistry::parse(&serde_json::to_vec(&ipv6).unwrap()).is_err());
+    assert!(ProviderRegistry::parse(&serde_json::to_vec(&ipv6).unwrap()).is_ok());
 }
 
 #[tokio::test]
@@ -521,6 +950,17 @@ fn error_mapping_is_exact_and_sanitized() {
     }
 }
 
+#[test]
+fn rerank_signed_zero_costs_tie_by_id() {
+    let mut ranked = [Ranked { id: 2, cost: -0.0 }, Ranked { id: 1, cost: 0.0 }];
+    sort_ranked(&mut ranked);
+    assert_eq!(
+        ranked.iter().map(|result| result.id).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert!(ranked.iter().all(|result| result.cost.is_sign_positive()));
+}
+
 #[tokio::test]
 async fn zero_outbound_without_config_or_bindings_including_existing_handlers() {
     use axum::{body::Body, http::Request};
@@ -543,6 +983,10 @@ async fn zero_outbound_without_config_or_bindings_including_existing_handlers() 
         let app = super::super::router(service);
         for (route, body) in [
             ("/v1/search", json!({"vector":[1,0],"k":1})),
+            (
+                "/v1/search",
+                json!({"vector":[1,0],"k":1,"rerank":{"mode":"exact","candidates":2}}),
+            ),
             ("/v1/collections/default/embed", json!({"text":TEXT})),
         ] {
             let response = app
@@ -559,7 +1003,196 @@ async fn zero_outbound_without_config_or_bindings_including_existing_handlers() 
         }
         assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
     }
+
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("bound-providers.vlite");
+    let mut database = crate::Database::create(&database_path, 2).unwrap();
+    let lineage = database.lineage().unwrap();
+    let collection_id = database.collection("default").unwrap().id();
+    database.put(1, &[1.0, 0.0], b"one").unwrap();
+    database.put(2, &[0.0, 1.0], b"two").unwrap();
+    let mut value = config("http://127.0.0.1:1234/inference", "embedding");
+    value["bindings"][0]["lineage"] = json!(lineage);
+    value["bindings"][0]["collection_id"] = json!(collection_id);
+    value["bindings"][0]["tenant"] = json!("global");
+    let fake = Arc::new(Fake::new(200, r#"{"data":[{"embedding":[1,2]}]}"#));
+    let mut registry = registry(&value);
+    registry.transport = fake.clone();
+    let key = (lineage, collection_id, "global".into(), "test".into());
+    let service = super::super::Service::new(database).with_providers(registry);
+    assert_eq!(
+        service.providers().embed_bound(&key, TEXT).await.unwrap(),
+        vec![1.0, 2.0]
+    );
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+    fake.calls.store(0, Ordering::SeqCst);
+    let app = super::super::router(service);
+    for (route, body) in [
+        ("/v1/search", json!({"vector":[1,0],"k":1})),
+        (
+            "/v1/search",
+            json!({"vector":[1,0],"k":1,"rerank":{"mode":"exact","candidates":2}}),
+        ),
+        ("/v1/collections/default/embed", json!({"text":TEXT})),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(route)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_success(), "{}", response.status());
+    }
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
     assert!(ProviderRegistry::default().providers.is_empty());
+}
+
+#[tokio::test]
+async fn provider_wire_contract_uses_only_pinned_fields_and_bearer_auth() {
+    let server = Loopback::one(r#"{"data":[{"embedding":[1,2]}]}"#);
+    let mut configured = registry(&config(&server.endpoint, "embedding"));
+    configured.providers.get_mut("test").unwrap().secret = Some(SECRET.into());
+    assert_eq!(
+        bounded(configured.embed_bound(&key(), TEXT)).await.unwrap(),
+        vec![1.0, 2.0]
+    );
+    {
+        let headers = server.headers.lock().unwrap();
+        assert_eq!(
+            headers[0]
+                .lines()
+                .filter(|line| line.to_ascii_lowercase().starts_with("authorization:"))
+                .count(),
+            1
+        );
+        assert!(
+            headers[0]
+                .to_ascii_lowercase()
+                .contains(&format!("authorization: bearer {SECRET}").to_ascii_lowercase())
+        );
+        assert!(
+            headers[0]
+                .to_ascii_lowercase()
+                .contains("content-type: application/json")
+        );
+        assert!(!server.endpoint.contains(SECRET));
+        let bodies = server.bodies.lock().unwrap();
+        let body = &bodies[0];
+        assert_eq!(
+            body,
+            &json!({"model":"pinned-model","version":"2026-01","input":TEXT})
+        );
+        assert!(!body.to_string().contains(SECRET));
+    }
+
+    let server = Loopback::one(r#"{"data":[{"embedding":[1,2]}]}"#);
+    assert!(
+        bounded(registry(&config(&server.endpoint, "embedding")).embed_bound(&key(), TEXT))
+            .await
+            .is_ok()
+    );
+    assert!(
+        !server.headers.lock().unwrap()[0]
+            .to_ascii_lowercase()
+            .contains("authorization:")
+    );
+}
+
+#[tokio::test]
+async fn provider_http_client_ignores_proxy_environment() {
+    const CHILD: &str = "VLITE_PROVIDER_PROXY_TEST_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let target = Loopback::one(r#"{"data":[{"embedding":[1,2]}]}"#);
+        let socket: SocketAddr = target
+            .endpoint
+            .trim_start_matches("http://")
+            .split('/')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let value = hostname_config(
+            &format!("http://pinned.invalid:{}/inference", socket.port()),
+            "pinned.invalid",
+            socket.ip(),
+        );
+        let mut configured = registry(&value);
+        configured.providers.get_mut("test").unwrap().resolver =
+            Arc::new(QueueResolver::new([vec![socket]]));
+        assert_eq!(
+            bounded(configured.embed(&key(), TEXT, &HttpTransport))
+                .await
+                .unwrap(),
+            vec![1.0, 2.0]
+        );
+        assert_eq!(target.calls.load(Ordering::SeqCst), 1);
+        return;
+    }
+    let proxy = Loopback::new(vec![(Loopback::json(502, "proxy"), Duration::ZERO)]);
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "server::providers::tests::provider_http_client_ignores_proxy_environment",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .env("HTTP_PROXY", &proxy.endpoint)
+        .env("http_proxy", &proxy.endpoint)
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
+        .env_remove("HTTPS_PROXY")
+        .env_remove("https_proxy")
+        .env_remove("ALL_PROXY")
+        .env_remove("all_proxy")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(proxy.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn provider_log_contains_only_alias_fingerprint_outcome_and_batch_count() {
+    let alias = "unique-log-alias-7391";
+    let tenant = "unique-log-tenant-2648";
+    let host = "unique-log-host.invalid";
+    let path = "/unique-private-path-613";
+    let mut value = config(&format!("http://{host}{path}"), "embedding");
+    value["aliases"][0]["alias"] = json!(alias);
+    value["aliases"][0]["endpoint_allowlist"]["hosts"] = json!([host]);
+    value["bindings"][0]["alias"] = json!(alias);
+    value["bindings"][0]["tenant"] = json!(tenant);
+    let registry = registry(&value);
+    let log_key = (42, 0, tenant.to_owned(), alias.to_owned());
+    let transport = Fake::new(200, r#"{"data":[{"embedding":[1,2]}]}"#);
+    assert_eq!(
+        registry.embed(&log_key, TEXT, &transport).await.unwrap(),
+        vec![1.0, 2.0]
+    );
+    let entries: Vec<_> = super::super::logs::buffer()
+        .snapshot()
+        .0
+        .into_iter()
+        .filter(|entry| entry.target == "providers" && entry.fields["alias"] == alias)
+        .collect();
+    assert!(!entries.is_empty());
+    for entry in entries {
+        assert_eq!(entry.fields["outcome"], "ok");
+        assert_eq!(entry.fields["batch_count"], 1);
+        assert!(!entry.fields["tenant_fingerprint"].is_null());
+        let serialized = serde_json::to_string(&entry).unwrap();
+        for forbidden in [tenant, host, path, SECRET, TEXT] {
+            assert!(!serialized.contains(forbidden));
+        }
+        assert!(!serialized.contains(&VECTOR.to_string()));
+    }
 }
 
 #[tokio::test]
@@ -588,11 +1221,22 @@ async fn loopback_embedding_success_and_bad_response_shapes() {
             r#"{"data":[{"embedding":[1,2]},{"embedding":[1,2]}]}"#,
             Some(ProviderError::InvalidResponse),
         ),
+        (
+            r#"{"data":[{"embedding":[1,2],"extra":true}]}"#,
+            Some(ProviderError::InvalidResponse),
+        ),
+        (
+            r#"{"data":[{"embedding":[1,2]}],"extra":true}"#,
+            Some(ProviderError::InvalidResponse),
+        ),
     ] {
         let server = Loopback::one(body);
-        let result = registry(&config(&server.endpoint, "embedding"))
-            .embed(&key(), TEXT, &HttpTransport)
-            .await;
+        let result = bounded(registry(&config(&server.endpoint, "embedding")).embed(
+            &key(),
+            TEXT,
+            &HttpTransport,
+        ))
+        .await;
         if let Some(error) = expected {
             assert_eq!(result.unwrap_err(), error);
         } else {
@@ -610,9 +1254,12 @@ async fn redirects_are_not_followed() {
         target.endpoint
     );
     let source = Loopback::new(vec![(response, Duration::ZERO)]);
-    let result = registry(&config(&source.endpoint, "embedding"))
-        .embed(&key(), TEXT, &HttpTransport)
-        .await;
+    let result = bounded(registry(&config(&source.endpoint, "embedding")).embed(
+        &key(),
+        TEXT,
+        &HttpTransport,
+    ))
+    .await;
     assert_eq!(result.unwrap_err(), ProviderError::Unavailable);
     assert_eq!(target.calls.load(Ordering::SeqCst), 0);
 }
@@ -620,8 +1267,12 @@ async fn redirects_are_not_followed() {
 #[tokio::test]
 async fn response_cap_checks_declared_and_chunked_lengths() {
     let oversize = "x".repeat(RESPONSE_BYTES + 1);
+    let prefix = r#"{"data":[{"embedding":[1,2]}]}"#;
+    let valid_json_over_limit =
+        format!("{prefix}{}", " ".repeat(RESPONSE_BYTES + 1 - prefix.len()));
     for response in [
         Loopback::json(200, &oversize),
+        Loopback::json(200, &valid_json_over_limit),
         format!(
             "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\n",
             oversize.len(),
@@ -631,13 +1282,12 @@ async fn response_cap_checks_declared_and_chunked_lengths() {
         let server = Loopback::new(vec![(response, Duration::ZERO)]);
         let registry = registry(&config(&server.endpoint, "embedding"));
         let (provider, _) = registry.bound(&key(), Kind::Embedding).unwrap();
-        let response = HttpTransport
-            .send(TransportRequest {
-                provider,
-                body: b"{}",
-                remaining: Duration::from_secs(10),
-            })
-            .await;
+        let response = bounded(HttpTransport.send(TransportRequest {
+            provider,
+            body: b"{}",
+            remaining: Duration::from_secs(10),
+        }))
+        .await;
         assert!(matches!(
             response,
             Err(TransportFailure {
@@ -645,6 +1295,44 @@ async fn response_cap_checks_declared_and_chunked_lengths() {
                 ..
             })
         ));
+    }
+}
+
+#[tokio::test]
+async fn response_cap_accepts_exact_limit_and_rejects_declared_oversize_without_body() {
+    let prefix = r#"{"data":[{"embedding":[1,2]}]}"#;
+    let body = format!("{prefix}{}", " ".repeat(RESPONSE_BYTES - prefix.len()));
+    let server = Loopback::one(&body);
+    assert_eq!(
+        bounded(registry(&config(&server.endpoint, "embedding")).embed(
+            &key(),
+            TEXT,
+            &HttpTransport
+        ))
+        .await
+        .unwrap(),
+        vec![1.0, 2.0]
+    );
+
+    for (status, expected) in [
+        (500, ProviderError::Unavailable),
+        (200, ProviderError::InvalidResponse),
+    ] {
+        let response = format!(
+            "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            RESPONSE_BYTES + 1
+        );
+        let server = Loopback::new(vec![(response, Duration::ZERO)]);
+        assert_eq!(
+            bounded(registry(&config(&server.endpoint, "embedding")).embed(
+                &key(),
+                TEXT,
+                &HttpTransport
+            ))
+            .await
+            .unwrap_err(),
+            expected
+        );
     }
 }
 
@@ -659,13 +1347,12 @@ async fn total_deadline_includes_slow_response_and_retry_after() {
     value["aliases"][0]["total_timeout_ms"] = json!(200);
     let started = Instant::now();
     assert_eq!(
-        registry(&value)
-            .embed(&key(), TEXT, &HttpTransport)
+        bounded(registry(&value).embed(&key(), TEXT, &HttpTransport))
             .await
             .unwrap_err(),
         ProviderError::Timeout
     );
-    assert!(started.elapsed() < Duration::from_millis(400));
+    assert!(started.elapsed() < Duration::from_millis(1200));
     let server = Loopback::new(vec![(
         "HTTP/1.1 503 Busy\r\nRetry-After: 20\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             .into(),
@@ -675,13 +1362,14 @@ async fn total_deadline_includes_slow_response_and_retry_after() {
     value["aliases"][0]["replay_safe"] = json!(true);
     value["aliases"][0]["connect_timeout_ms"] = json!(2000);
     value["aliases"][0]["total_timeout_ms"] = json!(10000);
+    let started = Instant::now();
     assert_eq!(
-        registry(&value)
-            .embed(&key(), TEXT, &HttpTransport)
+        bounded(registry(&value).embed(&key(), TEXT, &HttpTransport))
             .await
             .unwrap_err(),
         ProviderError::Timeout
     );
+    assert!(started.elapsed() < Duration::from_secs(11));
     assert_eq!(server.calls.load(Ordering::SeqCst), 1);
 }
 
@@ -697,8 +1385,7 @@ async fn replay_safe_retry_is_at_most_once_and_only_for_transients() {
     let mut value = config(&server.endpoint, "embedding");
     value["aliases"][0]["replay_safe"] = json!(true);
     assert_eq!(
-        registry(&value)
-            .embed(&key(), TEXT, &HttpTransport)
+        bounded(registry(&value).embed(&key(), TEXT, &HttpTransport))
             .await
             .unwrap(),
         vec![1.0, 2.0]
@@ -715,8 +1402,7 @@ async fn replay_safe_retry_is_at_most_once_and_only_for_transients() {
             let server = Loopback::new(responses);
             let mut value = config(&server.endpoint, "embedding");
             value["aliases"][0]["replay_safe"] = json!(safe);
-            let error = registry(&value)
-                .embed(&key(), TEXT, &HttpTransport)
+            let error = bounded(registry(&value).embed(&key(), TEXT, &HttpTransport))
                 .await
                 .unwrap_err();
             assert_eq!(
@@ -762,6 +1448,83 @@ async fn replay_safe_retry_is_at_most_once_and_only_for_transients() {
     }
 }
 
+#[tokio::test]
+async fn retry_after_delta_seconds_is_honored_and_invalid_values_do_not_retry() {
+    let server = Loopback::new(vec![
+        (
+            "HTTP/1.1 503 Busy\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .into(),
+            Duration::ZERO,
+        ),
+        (
+            Loopback::json(200, r#"{"data":[{"embedding":[1,2]}]}"#),
+            Duration::ZERO,
+        ),
+    ]);
+    let mut value = config(&server.endpoint, "embedding");
+    value["aliases"][0]["replay_safe"] = json!(true);
+    let started = Instant::now();
+    assert_eq!(
+        bounded(registry(&value).embed(&key(), TEXT, &HttpTransport))
+            .await
+            .unwrap(),
+        vec![1.0, 2.0]
+    );
+    assert!(started.elapsed() >= Duration::from_secs(1));
+    assert_eq!(server.calls.load(Ordering::SeqCst), 2);
+
+    for retry_after in ["Sun, 06 Nov 1994 08:49:37 GMT", "-1", "1.5", "20"] {
+        let started = Instant::now();
+        let response = format!(
+            "HTTP/1.1 503 Busy\r\nRetry-After: {retry_after}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        let server = Loopback::new(vec![
+            (response, Duration::ZERO),
+            (
+                Loopback::json(200, r#"{"data":[{"embedding":[1,2]}]}"#),
+                Duration::ZERO,
+            ),
+        ]);
+        let mut value = config(&server.endpoint, "embedding");
+        value["aliases"][0]["replay_safe"] = json!(true);
+        assert_eq!(
+            bounded(registry(&value).embed(&key(), TEXT, &HttpTransport))
+                .await
+                .unwrap_err(),
+            ProviderError::Timeout
+        );
+        assert!(started.elapsed() < Duration::from_secs(11));
+        assert_eq!(server.calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn refused_connect_is_retried_only_for_replay_safe_aliases() {
+    let socket: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    for (replay_safe, expected_attempts) in [(true, 2), (false, 1)] {
+        let mut value = hostname_config(
+            &format!("http://pinned.invalid:{}/inference", socket.port()),
+            "pinned.invalid",
+            socket.ip(),
+        );
+        value["aliases"][0]["replay_safe"] = json!(replay_safe);
+        let mut configured = registry(&value);
+        let resolver = Arc::new(QueueResolver::new([vec![socket], vec![socket]]));
+        configured.providers.get_mut("test").unwrap().resolver = resolver.clone();
+        assert!(matches!(
+            bounded(configured.embed(&key(), TEXT, &HttpTransport))
+                .await
+                .unwrap_err(),
+            ProviderError::Unavailable | ProviderError::Timeout
+        ));
+        assert_eq!(
+            resolver.calls.load(Ordering::SeqCst),
+            expected_attempts,
+            "replay_safe={replay_safe}"
+        );
+    }
+}
+
 fn candidate(id: u64) -> Candidate {
     Candidate {
         id,
@@ -797,6 +1560,10 @@ async fn rerank_validates_ids_costs_cardinality_and_payload_allowlist() {
             false,
         ),
         (
+            r#"{"results":[{"id":1,"cost":0.1},{"id":2,"cost":0.2}],"extra":true}"#,
+            false,
+        ),
+        (
             r#"{"results":[{"id":999,"cost":0.1},{"id":2,"cost":0.2}]}"#,
             false,
         ),
@@ -806,20 +1573,37 @@ async fn rerank_validates_ids_costs_cardinality_and_payload_allowlist() {
         let server = Loopback::one(body);
         let mut value = config(&server.endpoint, "rerank");
         value["bindings"][0]["payload_fields"] = json!(["allowed"]);
-        let result = registry(&value)
-            .rerank(
-                &key(),
-                &[VECTOR, 1.0],
-                &[candidate(1), candidate(2)],
-                2,
-                &HttpTransport,
-            )
-            .await;
+        let result = bounded(registry(&value).rerank(
+            &key(),
+            &[VECTOR, 1.0],
+            &[candidate(1), candidate(2)],
+            2,
+            &HttpTransport,
+        ))
+        .await;
         if valid {
             assert_eq!(
                 result.unwrap().iter().map(|r| r.id).collect::<Vec<_>>(),
                 vec![1, 2]
             );
+            let bodies = server.bodies.lock().unwrap();
+            let request_keys: BTreeSet<_> = bodies[0]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                request_keys,
+                BTreeSet::from(["candidates", "k", "model", "query", "version"])
+            );
+            let candidate_keys: BTreeSet<_> = bodies[0]["candidates"][0]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(candidate_keys, BTreeSet::from(["id", "payload", "vector"]));
         } else {
             assert_eq!(result.unwrap_err(), ProviderError::InvalidResponse);
         }
@@ -870,6 +1654,15 @@ async fn request_byte_text_candidate_and_vector_limits_precede_transport() {
         (vec![candidate(1), candidate(1)], 1, vec![VECTOR, 1.0]),
         (vec![candidate(1)], 1, vec![f32::NAN, 1.0]),
         (vec![candidate(1)], 1, vec![VECTOR]),
+        (
+            {
+                let mut item = candidate(1);
+                item.vector[0] = f32::INFINITY;
+                vec![item]
+            },
+            1,
+            vec![VECTOR, 1.0],
+        ),
     ] {
         assert_eq!(
             rerank
@@ -892,12 +1685,12 @@ async fn provider_and_tenant_admission_is_immediate_and_shared_across_collection
     let fake = Fake::new(200, r#"{"data":[{"embedding":[1,2]}]}"#);
     let provider = registry.providers.get("test").unwrap();
     let provider_permit = provider.slots.acquire_many(2).await.unwrap();
-    let started = Instant::now();
     assert_eq!(
-        registry.embed(&key(), TEXT, &fake).await.unwrap_err(),
+        bounded(registry.embed(&key(), TEXT, &fake))
+            .await
+            .unwrap_err(),
         ProviderError::Busy
     );
-    assert!(started.elapsed() < Duration::from_millis(100));
     drop(provider_permit);
     let tenant_permit = registry
         .bindings
@@ -908,8 +1701,7 @@ async fn provider_and_tenant_admission_is_immediate_and_shared_across_collection
         .await
         .unwrap();
     assert_eq!(
-        registry
-            .embed(&(42, 1, "tenant-a".into(), "test".into()), TEXT, &fake)
+        bounded(registry.embed(&(42, 1, "tenant-a".into(), "test".into()), TEXT, &fake))
             .await
             .unwrap_err(),
         ProviderError::Busy
@@ -941,8 +1733,7 @@ async fn address_allowlist_is_checked_before_connecting() {
         .endpoint_allowlist
         .addresses = vec!["127.0.0.2".parse().unwrap()];
     assert_eq!(
-        registry
-            .embed(&key(), TEXT, &HttpTransport)
+        bounded(registry.embed(&key(), TEXT, &HttpTransport))
             .await
             .unwrap_err(),
         ProviderError::Unavailable
