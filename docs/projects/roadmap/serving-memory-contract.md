@@ -188,7 +188,7 @@ this table and the section 8 examples change with it.
 | Request digest | Core-computed `v1:` + SHA-256 of fixed-order JSON; `deadline_ms` and the clock are excluded |
 | `content_digest` | `v1:` + 64 lowercase hex of SHA-256 over the JSON-quoted content string |
 | Receipt | Graph node plus outcome chunk nodes in the mutation frame; never expires; no receipt ID is returned |
-| Outcomes | `created`, `merged`, `noop` only; `deleted`, `expired`, `retained_shared` arrive with A2, `corrected` with A3 |
+| Outcomes | `created`, `merged`, `noop` from A1; the accepted private A2 forget returns the sorted `deleted` IDs and expiry hides memories through graph TTL, but per-item `deleted`, `expired`, `retained_shared` outcome values are not core outcomes yet; `corrected` arrives with A3 |
 | `revision` / `sequence` | `revision` is the per-memory logical revision (1 at creation, +1 per merge, stored value on `noop`); `sequence` is the frame's commit sequence, equal to the receipt revision and unchanged on replay |
 | Kinds | `entity`, `episodic`; `fact`, `relation` need A3 / Gap 4 |
 | Deadline | The core's `deadline_ms` is absolute; the adapter computes it as `now_ms` plus the JSON `deadline_ms` budget (1..5,000 ms, default 250), checked once after replay and before planning, excluded from the digest |

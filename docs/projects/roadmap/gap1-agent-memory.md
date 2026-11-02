@@ -1,8 +1,9 @@
 # Gap 1: agent memory
 
-Status: the crate-private A1 core (remember, receipts and one graph batch) is integrated after
-independent acceptance; it is unreleased, not activated and has no public API. Recall,
-consolidation, forget/expiry and serving are not implemented. Open decisions and serving approval
+Status: the crate-private A1 core (remember, receipts and one graph batch) and A2 (bounded
+exact-ID forget and graph-TTL expiry) are integrated after independent acceptance; they are
+unreleased, not activated and have no public API. Recall, consolidation, resumable erasure and
+serving are not implemented. Open decisions and serving approval
 were granted 2026-11-02 (section 9). Provisional Rust names only; no public memory API or wire
 approval is claimed.
 Scope: embedded remember, recall, consolidate and forget over existing storage.
@@ -286,10 +287,10 @@ fact series/history and removes unneeded anchors in one graph frame with a recei
 Respect all attachments, including ones outside the memory layer; a conflicting
 attachment prevents deletion, rather than being detached without authorization.
 Forget entity includes bounded incident-edge handling; never leave dangling edges.
-The private A2 candidate implements bounded exact-ID forget and graph-TTL expiry only;
+The accepted private A2 slice implements bounded exact-ID forget and graph-TTL expiry only;
 oversized erasure is rejected, not converted into a resumable job. Its acceptance
-requires shared/unshared evidence, outside-attachment, incident-edge, expiry-boundary,
-receipt-replay and reopen coverage.
+covered shared/unshared evidence, outside-attachment, incident-edge, expiry-boundary,
+receipt-replay and reopen cases, plus mutation testing.
 Oversized session/entity/scope erasure becomes a resumable, explicitly non-atomic job.
 First commit a scope/entity deletion barrier; every memory read/write checks it.
 Subsequent revision-guarded chunks detach/delete and advance a persisted graph job.
