@@ -81,6 +81,29 @@ fn request(value: Value) -> String {
     value.to_string()
 }
 
+/// Runs a read and zeroes its wall-clock fields, which differ between any two runs.
+fn timeless(db: &Path, args: &[&str]) -> Value {
+    let mut value = run(db, args).value();
+    mask_timings(&mut value);
+    value
+}
+
+fn mask_timings(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for (key, field) in map.iter_mut() {
+                if matches!(key.as_str(), "elapsed_ms" | "pivot_ms" | "expand_ms") {
+                    *field = json!(0);
+                } else {
+                    mask_timings(field);
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(mask_timings),
+        _ => {}
+    }
+}
+
 /// A graph-enabled file with graph `kb`: nodes a -> b -> c (edge keys ab and
 /// bc), d isolated, and record u64::MAX attached to `a`.
 fn seeded(fixture: &Fixture) -> std::path::PathBuf {
@@ -641,6 +664,22 @@ fn files_are_never_graph_enabled_implicitly() {
 }
 
 #[test]
+fn timing_fields_are_masked_at_any_depth() {
+    let mut value = json!({
+        "stats": {"elapsed_ms": 7, "nodes_visited": 3},
+        "hits": [{"pivot_ms": 2, "expand_ms": 5, "limits": {"deadline_ms": 9}}]
+    });
+    mask_timings(&mut value);
+    assert_eq!(
+        value,
+        json!({
+            "stats": {"elapsed_ms": 0, "nodes_visited": 3},
+            "hits": [{"pivot_ms": 0, "expand_ms": 0, "limits": {"deadline_ms": 9}}]
+        })
+    );
+}
+
+#[test]
 fn query_text_runs_exactly_the_equivalent_typed_read() {
     let fixture = Fixture::new();
     let db = seeded(&fixture);
@@ -683,11 +722,11 @@ fn query_text_runs_exactly_the_equivalent_typed_read() {
         ),
     ];
     for (text, command, typed) in pairs {
-        let expected = run(&db, &[command, &request(typed.clone())]).value();
-        let actual = run(&db, &["query", &request(text.clone())]).value();
+        let expected = timeless(&db, &[command, &request(typed.clone())]);
+        let actual = timeless(&db, &["query", &request(text.clone())]);
         assert_eq!(actual, expected, "{text}");
-        let expected = run(&db, &["--explain", command, &request(typed)]).value();
-        let actual = run(&db, &["--explain", "query", &request(text.clone())]).value();
+        let expected = timeless(&db, &["--explain", command, &request(typed)]);
+        let actual = timeless(&db, &["--explain", "query", &request(text.clone())]);
         assert_eq!(actual, expected, "{text}");
     }
     let path = run(
