@@ -256,7 +256,11 @@ Local numbers below show direction only (see rules).
   and copy-out activation across REST, gRPC, MCP, the graph CLI and HTTP
   clients; no temporal file is served until its own qualification passes. It
   is a reviewed specification awaiting owner decisions, not an implemented
-  capability.
+  capability. The
+  [serving wire conventions](serving-wire-conventions.md) note reconciles the
+  proto tag bands, error registry, encodings, change-feed opt-in and shared-file
+  order across these drafts; it is a docs-only proposal with 23 owner
+  decisions, and nothing in it is implemented or approved.
 - **Further design proposals:** [agent memory](gap1-agent-memory.md) defines
   the embedded operations and their prerequisites; [scale-out](scale-out.md)
   compares branching, object storage and replication. Both received source
