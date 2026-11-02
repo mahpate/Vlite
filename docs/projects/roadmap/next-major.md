@@ -231,7 +231,7 @@ Local numbers below show direction only (see rules).
   or sweep, never a partial one. S4 sampled betweenness is implemented, reviewed
   and integrated with independent reference fixtures; interrupted computation
   retains only completed sources. S4 is also unreleased. CSR parity and serving
-  exposure remain separate work; the private, unreleased [CSR adapter](gap5-csr-adapter.md) has an accepted design; the resident seam is its first slice and the CSR source stays gated on P4 accessors.
+  exposure remain separate work; the private, unreleased [CSR adapter](gap5-csr-adapter.md) has an accepted design. Its first slice, the resident source seam, is independently accepted and integrated (private, unreleased); the CSR source stays gated on P4 accessors.
 - **Speed P5, filters:** safe in-memory summaries and visibility tracking,
   including exact-planner fallback, are implemented, independently reviewed
   and integrated, but unreleased ([plan](p5-filters-and-serving.md)).
