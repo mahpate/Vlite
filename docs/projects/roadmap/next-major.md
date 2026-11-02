@@ -246,7 +246,13 @@ Local numbers below show direction only (see rules).
   per-collection float16 create and inspection surfaces on REST, gRPC, MCP and
   the offline CLI; every explicit-precision request is refused while the
   storage gate stays closed. It is a reviewed specification awaiting owner
-  decisions, not an implemented capability.
+  decisions, not an implemented capability. The
+  [temporal graph serving](serving-temporal-contract.md) contract specifies
+  fixed-time reads, six temporal write operations, an opt-in correction feed
+  and copy-out activation across REST, gRPC, MCP, the graph CLI and HTTP
+  clients; no temporal file is served until its own qualification passes. It
+  is a reviewed specification awaiting owner decisions, not an implemented
+  capability.
 - **Further design proposals:** [agent memory](gap1-agent-memory.md) defines
   the embedded operations and their prerequisites; [scale-out](scale-out.md)
   compares branching, object storage and replication. Both received source
