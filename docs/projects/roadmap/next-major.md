@@ -91,7 +91,11 @@ Local numbers below show direction only (see rules).
 - **Gap 2, key-value:** the embedded Rust API is done
   ([storage features](../../STORAGE-FEATURES.md#key-value-store)): namespaces,
   ordered prefix lists, expiry, compare-and-set and fencing tokens, with no
-  format change. REST and gRPC wait for the OpenAPI review.
+  format change. REST and gRPC wait for the OpenAPI review. The
+  [fenced-lease ledger design](gap2-lease-ledger.md) is a docs-only
+  storage-format proposal for `gap2-rust-lease-ledger`, accepted 2026-11-02;
+  it is not implemented or active, no existing file is opted in by default,
+  and Phase 2 is gated behind separate approval.
 - **Speed P2, directory store:** P2a done ([plan](p2-directory-store.md),
   [storage features](../../STORAGE-FEATURES.md#directory-store)). A database
   can be a directory of write-ahead logs and a checkpoint image listed by an
@@ -109,7 +113,11 @@ Local numbers below show direction only (see rules).
   edge can also expire on its own. Graph writes, compaction and checkpoints
   remove expired entities as one computed entry, so the 4,096-operation
   limit is unaffected. Files that do not use expiry keep their encoding.
-  REST, gRPC and MCP wait for the OpenAPI review.
+  REST, gRPC and MCP wait for the OpenAPI review. The
+  [TTL-aware feed design](gap3-ttl-feed.md), an additive opt-in feed that
+  reports deadlines and removals while the default feed bytes stay unchanged,
+  is accepted as a docs-only proposal (2026-11-02); its Rust implementation is
+  not yet accepted or integrated.
 - **Gap 4, temporal graph:** private model and persistence slices A and B
   are implemented, independently reviewed and integrated, but unreleased
   ([plan](gap4-temporal-graph.md)). They preserve atomic writes, TTL and
@@ -173,7 +181,10 @@ Local numbers below show direction only (see rules).
   series from an ordinary edge. Ordinary edge records remain on the existing
   path apart from the payload version. Private decoded-CSR ID/key and adjacency
   reads are independently accepted, including TTL and selected temporal
-  properties; production query execution is not wired to CSR. Private parallel
+  properties; production query execution is not wired to CSR. This decoded
+  read model is a correctness oracle, not a resident-budget candidate: on x64
+  its per-edge record alone exceeds the 100 B/edge target, so S4 depends on a
+  later packed representation. Private parallel
     import staging is independently accepted and integrated but unreleased: logical
   nodes-before-edges admission, in-memory bounded sorting runs and disjoint
   encoding match retained goldens and sequential bytes. Schema/property
