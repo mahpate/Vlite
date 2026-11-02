@@ -240,6 +240,50 @@ Budget exhaustion may return a marked partial result only when explicitly reques
 otherwise return a typed budget error. Cancellation is not an empty successful answer.
 No recall paging initially; later cursors must bind scope, policy, T/C and view sequence.
 
+### Private slice B candidate
+
+The crate-private, unreleased recall candidate is pending independent acceptance;
+it adds no public surface, activation, format, dependency or default change.
+It reads retained entity/episodic memories under one borrowed database sequence,
+fixed validity T and TTL clock C. Existing temporal traversal is used only when
+the file already carries the independently gated Gap 4 capability; tests use its
+existing thread-local activation seam, not a production gate change.
+Facts, relation segments, contradiction status and historical anchor reconstruction
+remain outside this candidate, rather than being fabricated from current metadata.
+
+The supported plan is exact eligible-evidence enumeration, existing indexed BM25
+and RRF, optional scoped REFERENCES expansion, and candidate-only exact or cosine
+MMR selection. Ready ANN is explicitly refused: its existing metadata predicate
+cannot enforce the authoritative attachment-owner ID allowlist before top-N.
+There is no approximate fallback, lazy text-index build, custom caller reranker,
+embedding provider or network call. Vector-only exact/MMR rejects text, seeds,
+expansion and non-relevance ranking weights instead of silently ignoring them.
+In vector-only selection, relevance uses the selected order while diagnostics
+retain the original vector-leg rank and query-metric distance (not an MMR score).
+
+The section 6 ceilings apply unchanged. Source preflight conservatively charges
+physical graph nodes once per authorized scope plus the evidence collection size,
+including unrelated/expired retained records; an over-cap plan rejects before scans.
+Each active leg reserves `min(leg depth, eligible owners)` candidate units before
+search, including duplicates and possible text nonmatches. Seeds charge separately;
+expansion caps output to remaining candidate capacity and shares graph node, edge,
+output and monotonic deadline limits across scopes. Vector components are reserved
+before copies and reused for MMR; MMR reserves `n^3 * dimensions` similarity work
+before selection. These conservative bounds may refuse a plan that would ultimately
+produce fewer hits. Cancellation/deadline checks bracket bounded source, index,
+reranker and scoring work; this is not a hard real-time preemption guarantee.
+
+Evidence/body projections charge copied bytes before allocation (default 1 MiB,
+ceiling 4 MiB), with each snippet at most 4,096 bytes. UTF-8 body snippets end at a
+character boundary; chunked bodies read only their first bounded chunk, not the
+whole body. Graph metadata is separately bounded by source/node/frame limits, not
+counted as projected evidence bytes. Graph truncation can return marked partial
+results only on explicit request; other exhausted budgets always fail explicitly.
+Diagnostics identify exact enumeration, bounded expansion, fixed T/C/sequence,
+conservative charges and retained-history limitations; `complete` is not a claim
+of exhaustive semantic or historical recall. Plain/encrypted file and directory
+reopen tests compare the entire deterministic result and idempotent write replay.
+
 ## 4. Consolidation, correction and contradictions
 
 Consolidate accepts caller-produced summary text/embedding, exact input IDs/revisions,
@@ -393,7 +437,14 @@ default future-observation refusal, dense ranks, explicit decay half-life, scope
 identity/segment ties, malformed inputs and intended-reason mutation checks.
 Exact rational scores, fixture limits and request/error names are labelled local
 assumptions, not Rust/f64 parity or approved public contracts. Retrieval, ownership,
-TTL, temporal discovery, rerankers and the Rust recall implementation remain open.
+TTL, temporal discovery and retrieval are not modeled by that ranking-only oracle.
+The private B candidate replays all 42 valid ranking cases (including input-order
+permutations), 40 representable invalid cases and four canonical-comparator cases.
+Its explicit 32-case skip classifier covers only values/object shapes excluded by
+the typed Rust requests, not unsupported ranking behavior. Separate engine tests
+cover discovery, retention, independent T/C, exact/MMR, budgets and reopen equality.
+The write oracle has no recall operations: its 93 replayed cases and three existing
+typed/hash-injection skips are unchanged by B.
 
 ### Private write reference
 
@@ -421,7 +472,7 @@ mode or family-wide exemption.
 |---|---|
 | A1: crate-private core | Provisional graph binding, scope provisioning, entity/episodic remember, same-frame receipts, exact dedup, idempotency and budget/validation coverage; independently accepted and integrated, unreleased and not activated |
 | A2: accepted private slice | Crate-private small forget and graph-TTL expiry with atomic failure, evidence, budget-boundary, receipt-replay, reopen and mutation coverage; the three oversized A2 golden setups now use multi-step physical-cap writes; independently accepted and integrated, unreleased and not activated. No facts, recall, resumable erasure, serving, public API or format change |
-| B: recall planner | Filtered hybrid plus bounded temporal expansion, owner retention checks, rank/explain fixtures and existing vector-only exact/MMR integration; scan/work/cancellation coverage; no exhaustive-history claim |
+| B: private recall candidate | Crate-private exact eligible-evidence/BM25/RRF plus bounded gated temporal expansion, owner retention checks, ranking fixtures and vector-only exact/MMR; preflight/work/cancellation and reopen coverage; pending independent acceptance, unreleased and inactive. Ready ANN/custom providers explicitly refused; no exhaustive-history claim |
 | C: consolidation | Caller summaries, slot-guarded corrections, contradictions, stale-source reporting and resumable erasure barriers/fencing; crash/retry and maintenance tests pass |
 | D: serving after approval | Explicit OpenAPI and wire approval before edits; REST/gRPC/MCP/CLI scope/authorization, limits, feed and unsupported-capability parity; no external provider enabled by default |
 

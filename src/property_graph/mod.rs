@@ -192,6 +192,21 @@ impl GraphRef<'_> {
         Ok(self.graph.attachments(node.id).collect())
     }
 
+    pub(crate) fn memory_scan_bound(&self) -> usize {
+        self.graph.node_count()
+    }
+
+    pub(crate) fn memory_string_property(&self, key: &str, field: &str) -> Option<&str> {
+        let node = self.graph.node_by_key(key)?;
+        if self.graph.node_expired(node.id, self.now()) {
+            return None;
+        }
+        match node.properties.get(field)? {
+            engine::PropertyValue::String(value) => Some(value),
+            _ => None,
+        }
+    }
+
     /// Declared and observed labels, relationship types, endpoints and
     /// properties (REQ-032). At most `budget` nodes and edges are scanned
     /// (PD-011: default 100,000, ceiling 1,000,000); `complete` is false
