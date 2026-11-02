@@ -1,0 +1,482 @@
+{
+  "schema": "fixture.c1-consolidation.v1",
+  "assumptions": [
+    "spec: Frozen 305c46a1 C1 contract sections 1-8, no Rust-derived expectations.",
+    "fixture: base_request is deep-merged with literal step overrides; descriptors expand only inputs. All error cases carry a single one-leaf repair.",
+    "fixture: setup, raw storage corruption, forget, JSON reopen and diagnostics are not APIs or real backend tests. Physical exact lengths are body lengths, not disk frame envelopes.",
+    "fixture: Missing binding/record is InvalidEvidence; an attached record must be explicitly detached. Logical replacement guards charge exactly two; physical guards charge zero."
+  ],
+  "base_request": {
+    "scope": {"tenant":"t","agent":"a"},
+    "idempotency_key":"k",
+    "C":10,
+    "receipt_window_ms":100,
+    "inputs":[{"id":"m","expected_memory_revision":1,"disposition":"retain"}],
+    "summary":{"id":"z","content":"x","source":"s","observed_at_ms":5},
+    "transformation":"t"
+  },
+  "property_sets": {
+    "summary":{"scope":"String","id":"String","kind":"String","content_digest":"String","sources":"String","provenance":"String","memory_revision":"String","reference_count":"String","evidence":"String","importance":"Float","observed_at_ms":"Integer","created_at_ms":"Integer","updated_at_ms":"Integer","c1_schema":"String","c1_transformation":"String","c1_source_digest":"String","c1_source_count":"Integer","content":"String"},
+    "derived":{"c1_schema":"String","c1_source_memory_revision":"String"},
+    "outcome":{"receipt_key":"String","index":"Integer","outcome":"String"},
+    "receipt":{"scope":"String","c1_scope_tuple":"String","c1_schema":"String","c1_collection":"String","digest":"String","expires_at_ms":"String","outcome_chunks":"Integer"},
+    "content":{"scope":"String","index":"Integer","content":"String"},
+    "content_edge":{}
+  },
+  "exact_nodes":[
+    {
+      "op":"PutNode","role":"summary",
+      "key":"mem:v1:scope:v1:25df3b6eb4f13c27b083539f86658272207df67b469883b90ef564843228bd78:594e519ae499312b29433b7dd8a97ff068defcba9755b6d5d00e84c524d67b06",
+      "labels":["VliteMemory"],
+      "properties":{
+        "scope":"scope:v1:25df3b6eb4f13c27b083539f86658272207df67b469883b90ef564843228bd78",
+        "id":"z","kind":"episodic","content_digest":"v1:ba2df4903a2c14e86dc3bcca58911b44ac1d2514b7227bf6eb08cfb978f55a1b",
+        "sources":"73","provenance":"1:s;-;-;-;","memory_revision":"1","reference_count":"0","evidence":"",
+        "importance":0.5,"observed_at_ms":5,"created_at_ms":10,"updated_at_ms":10,
+        "c1_schema":"consolidate:v1","c1_transformation":"t",
+        "c1_source_digest":"v1:18724b2d59b9d4014afe375230479320be8ad7b5d29af7feef788b326dd4438b",
+        "c1_source_count":1,"content":"x"
+      }
+    },
+    {
+      "op":"PutEdge","role":"derived",
+      "key":"derived:v1:42a66f3319e94bd940fd76abb6f1448d4fdcbc32bea1cf6781182f585035e736",
+      "from":"mem:v1:scope:v1:25df3b6eb4f13c27b083539f86658272207df67b469883b90ef564843228bd78:594e519ae499312b29433b7dd8a97ff068defcba9755b6d5d00e84c524d67b06",
+      "to":"mem:v1:scope:v1:25df3b6eb4f13c27b083539f86658272207df67b469883b90ef564843228bd78:62c66a7a5dd70c3146618063c344e531e6d4b59e379808443ce962b3abd63c5a",
+      "relationship":"DERIVED_FROM",
+      "properties":{"c1_schema":"consolidate:v1","c1_source_memory_revision":"1"}
+    },
+    {
+      "op":"PutNode","role":"outcome",
+      "key":"receipt-outcome:v1:e88a0e494f642a591c318b8f058e42030d57367359e98dbeb84a5b1cea045031:0000",
+      "labels":["VliteMemoryReceiptOutcome"],
+      "properties":{"receipt_key":"receipt:v1:scope:v1:25df3b6eb4f13c27b083539f86658272207df67b469883b90ef564843228bd78:ac54ca3654e80ae79ad2a894e75eb48dbdbf7f6caa0af57a2a9668b8099e5542","index":0,
+        "outcome":"consolidate:v1\n7a\n1\n1\nv1:18724b2d59b9d4014afe375230479320be8ad7b5d29af7feef788b326dd4438b\n"}
+    },
+    {
+      "op":"PutNode","role":"receipt",
+      "key":"receipt:v1:scope:v1:25df3b6eb4f13c27b083539f86658272207df67b469883b90ef564843228bd78:ac54ca3654e80ae79ad2a894e75eb48dbdbf7f6caa0af57a2a9668b8099e5542",
+      "labels":["VliteMemoryReceipt"],
+      "properties":{
+        "scope":"scope:v1:25df3b6eb4f13c27b083539f86658272207df67b469883b90ef564843228bd78",
+        "c1_scope_tuple":"73636f70653a76310100000001740100000001610000",
+        "c1_schema":"consolidate:v1","c1_collection":"c",
+        "digest":"v1:1b8b2d9aee8bb5a5fd6c3090f7f45984a022935cd82972e26b01c1fba0c2467c",
+        "expires_at_ms":"110","outcome_chunks":1
+      }
+    }
+  ],
+  "chunk_keys":{
+    "content":{"key":"content:v1:275e3557a8f823592061aa455df381f327c7a61052fb25ebd3c2270f8b26c8fb:0000","labels":["VliteMemoryContent"],"properties":{"scope":"scope:v1:25df3b6eb4f13c27b083539f86658272207df67b469883b90ef564843228bd78","index":0}},
+    "content_edge":{"key":"content-edge:v1:275e3557a8f823592061aa455df381f327c7a61052fb25ebd3c2270f8b26c8fb:0000","relationship":"HAS_CONTENT","properties":{},"from":"mem:v1:scope:v1:25df3b6eb4f13c27b083539f86658272207df67b469883b90ef564843228bd78:594e519ae499312b29433b7dd8a97ff068defcba9755b6d5d00e84c524d67b06","to":"content:v1:275e3557a8f823592061aa455df381f327c7a61052fb25ebd3c2270f8b26c8fb:0000"}
+  },
+  "cases":[
+    {
+      "name":"exact-inline-schema",
+      "assumptions":["spec: sections 3-7 exact bytes, property sets and batch order.","fixture: expected hashes independently calculated from struct-packed contract bytes."],
+      "steps":[
+        {"expect":{
+          "status":"created","physical_ops":4,"logical_ops":4,"frame_bytes":1919,
+          "entry_bytes":{"summary":[770],"derived":[193],"outcome":[428],"receipt":[524]},
+          "chunk_bytes":[],"request_bytes":139,
+          "request_digest":"v1:1b8b2d9aee8bb5a5fd6c3090f7f45984a022935cd82972e26b01c1fba0c2467c",
+          "source_digest":"v1:18724b2d59b9d4014afe375230479320be8ad7b5d29af7feef788b326dd4438b",
+          "source_bytes_hex":"766c6974652e6d656d6f72792e636f6e736f6c69646174652e736f75726365732e7631000000001673636f70653a7631010000000174010000000161000000000001000000016d000000000000000100",
+          "outcome_ascii":"consolidate:v1\n7a\n1\n1\nv1:18724b2d59b9d4014afe375230479320be8ad7b5d29af7feef788b326dd4438b\n",
+          "outcome_bytes":90,"receipt_revision":1,"sequence":1
+        }},
+        {"request":{"C":11},"expect":{"status":"replayed","receipt_revision":1,"sequence":1,"outcome":{"id":"z","revision":1,"N":1,"source_digest":"v1:18724b2d59b9d4014afe375230479320be8ad7b5d29af7feef788b326dd4438b"}}},
+        {"op":"digest","expect":{"request_hex":"766c6974652e6d656d6f72792e636f6e736f6c69646174652e726571756573742e7631000000001673636f70653a7631010000000174010000000161000000000001000000016d000000000000000100000000017a0000000178000000017300000000000000053fe000000000000000000000010000000173000000000000017400000000000000000064"}}
+      ]
+    },
+    {
+      "name":"default64",
+      "assumptions":["spec: default input budget inclusive 64."],
+      "setup":{"sources":{"$repeat":{"id":"m"},"count":64,"enumerate":["id"]}},
+      "steps":[{"request":{"inputs":{"$repeat":{"id":"m","expected_memory_revision":1,"disposition":"retain"},"count":64,"enumerate":["id"]}},"expect":{"status":"created","physical_ops":67,"outcome":{"N":64}}}]
+    },
+    {
+      "name":"default65",
+      "assumptions":["spec: 65 inputs exceed the default, before receipt/state access."],
+      "setup":{"sources":{"$repeat":{"id":"m"},"count":65,"enumerate":["id"]}},
+      "steps":[{"request":{"inputs":{"$repeat":{"id":"m","expected_memory_revision":1,"disposition":"retain"},"count":65,"enumerate":["id"]}},"expect":{"error":"OperationLimit"},"defect":{"tag":"raise-default-budget","path":["steps",0,"request","input_budget"],"set":65}}]
+    },
+    {
+      "name":"override256",
+      "assumptions":["spec: approved override ceiling inclusive 256."],
+      "setup":{"sources":{"$repeat":{"id":"m"},"count":256,"enumerate":["id"]}},
+      "steps":[{"request":{"input_budget":256,"inputs":{"$repeat":{"id":"m","expected_memory_revision":1,"disposition":"retain"},"count":256,"enumerate":["id"]}},"expect":{"status":"created","physical_ops":259,"outcome":{"N":256}}}]
+    },
+    {
+      "name":"override257",
+      "assumptions":["spec: approved override ceiling rejects 257."],
+      "setup":{"sources":{"$repeat":{"id":"m"},"count":256,"enumerate":["id"]}},
+      "steps":[{"request":{"input_budget":256,"inputs":{"$repeat":{"id":"m","expected_memory_revision":1,"disposition":"retain"},"count":257,"enumerate":["id"]}},"expect":{"error":"OperationLimit"},"defect":{"tag":"input-ceiling","path":["steps",0,"request","inputs","count"],"set":256}}]
+    },
+    {
+      "name":"canonical-permutation",
+      "assumptions":["spec: canonical source set sorted by UTF-8 bytes."],
+      "setup":{"sources":[{"id":"b"},{"id":"a"},{"id":"\u00e9"}]},
+      "steps":[
+        {"request":{"inputs":[{"id":"\u00e9","expected_memory_revision":1,"disposition":"retain"},{"id":"b","expected_memory_revision":1,"disposition":"retain"},{"id":"a","expected_memory_revision":1,"disposition":"retain"}]},"expect":{"status":"created","physical_ops":6,"outcome":{"N":3}}},
+        {"request":{"inputs":[{"id":"a","expected_memory_revision":1,"disposition":"retain"},{"id":"\u00e9","expected_memory_revision":1,"disposition":"retain"},{"id":"b","expected_memory_revision":1,"disposition":"retain"}]},"expect":{"status":"replayed","sequence":1}}
+      ]
+    },
+    {
+      "name":"provenance-empty-expands",
+      "assumptions":["spec: explicit single default entry equals empty expansion."],
+      "steps":[{"expect":{"status":"created"}},{"request":{"summary":{"provenance":[{"source":"s","kind":null,"uri":null,"transformation":null}]}},"expect":{"status":"replayed"}}]
+    },
+    {
+      "name":"provenance-order",
+      "assumptions":["spec: provenance ordering is hashed, not a set."],
+      "steps":[
+        {"request":{"summary":{"provenance":[{"source":"a"},{"source":"b"}]}},"expect":{"status":"created"}},
+        {"request":{"summary":{"provenance":{"$ordered":[{"source":"a"},{"source":"b"}],"reverse":true}}},"expect":{"error":"IdempotencyConflict"},"defect":{"tag":"provenance-order","path":["steps",1,"request","summary","provenance","reverse"],"set":false}}
+      ]
+    },
+    {
+      "name":"provenance-multiplicity",
+      "assumptions":["spec: duplicate provenance entries remain in request bytes.","fixture: repair changes stored receipt digest only via replay of a repaired earlier request."],
+      "steps":[
+        {"request":{"summary":{"provenance":{"$repeat":{"source":"s"},"count":1}}},"expect":{"status":"created"}},
+        {"request":{"summary":{"provenance":{"$repeat":{"source":"s"},"count":2}}},"expect":{"error":"IdempotencyConflict"},"defect":{"tag":"multiplicity","path":["steps",1,"request","summary","provenance","count"],"set":1}}
+      ]
+    },
+    {
+      "name":"window-is-hashed",
+      "assumptions":["spec: receipt window remains hashed."],
+      "steps":[{"expect":{"status":"created"}},{"request":{"receipt_window_ms":101},"expect":{"error":"IdempotencyConflict"},"defect":{"tag":"window","path":["steps",1,"request","receipt_window_ms"],"set":100}}]
+    },
+    {
+      "name":"replay-before-fresh-checks",
+      "assumptions":["spec: live replay before deadline, future observation, TTL and source validation; no resurrection.","fixture: explicit raw source removal/summary expiry is diagnostic setup."],
+      "steps":[
+        {"request":{"summary":{"expiry_ms":20}},"expect":{"status":"created","physical_ops":5}},
+        {"request":{"C":4,"deadline":0,"summary":{"expiry_ms":20}},"edits":[{"path":["sources"],"set":[]}],"expect":{"status":"replayed","sequence":1}},
+        {"request":{"C":20,"deadline":0,"summary":{"expiry_ms":20}},"expect":{"status":"replayed","sequence":1}},
+        {"op":"forget","id":"z","expect":{"forgotten":"z"}},
+        {"op":"reopen","expect":{"reopened":true}},
+        {"request":{"C":25,"summary":{"expiry_ms":20}},"expect":{"status":"replayed","sequence":1}},
+        {"op":"inspect","expect":{"sources":[],"summaries":[],"sequence":1}}
+      ]
+    },
+    {
+      "name":"receipt-expiry-equality",
+      "assumptions":["spec: C=expiry is fresh, not replay; expired intrinsic outcome need not equal new request.","fixture: separate logical charges for two replacement guards."],
+      "steps":[
+        {"expect":{"status":"created"}},
+        {"request":{"C":109},"expect":{"status":"replayed","sequence":1}},
+        {"request":{"C":110,"summary":{"id":"y","content":"new"}},"expect":{"status":"created","physical_ops":4,"logical_ops":6,"receipt_revision":2,"sequence":2}},
+        {"request":{"C":111,"summary":{"id":"y","content":"new"}},"expect":{"status":"replayed","receipt_revision":2,"sequence":2}}
+      ]
+    },
+    {
+      "name":"born-expired-without-evidence",
+      "assumptions":["spec: E=C rejects MissingMemory before source checks."],
+      "steps":[{"request":{"summary":{"expiry_ms":10}},"expect":{"error":"MissingMemory"},"defect":{"tag":"due-output","path":["steps",0,"request","summary","expiry_ms"],"set":11}}]
+    },
+    {
+      "name":"born-expired-with-evidence",
+      "assumptions":["spec: E<C rejects MissingMemory even with evidence."],
+      "setup":{"records":[{"id":"e"}]},
+      "steps":[{"request":{"summary":{"expiry_ms":9},"evidence":{"id":"e","scope":{"tenant":"t","agent":"a"}}},"expect":{"error":"MissingMemory"},"defect":{"tag":"due-output","path":["steps",0,"request","summary","expiry_ms"],"set":11}}]
+    },
+    {
+      "name":"output-id-collision",
+      "assumptions":["spec: a live source/output ID collision rejects."],
+      "steps":[{"request":{"summary":{"id":"m"}},"expect":{"error":"IdentityConflict"},"defect":{"tag":"fresh-output-id","path":["steps",0,"request","summary","id"],"set":"z"}}]
+    },
+    {
+      "name":"episodic-dedup-collision",
+      "assumptions":["spec: exact Episodic content/source identity cannot alias a fresh summary."],
+      "setup":{"sources":[{"id":"m","kind":"episodic","content":"x","source":"s"}]},
+      "steps":[{"expect":{"error":"IdentityConflict"},"defect":{"tag":"independent-source","path":["setup","sources",0,"source"],"set":"other"}}]
+    },
+    {
+      "name":"source-revision",
+      "assumptions":["spec: expected memory revision, not graph revision."],
+      "setup":{"sources":[{"id":"m","revision":2,"graph_revision":99}]},
+      "steps":[{"expect":{"error":"RevisionConflict"},"defect":{"tag":"memory-revision","path":["setup","sources",0,"revision"],"set":1}}]
+    },
+    {
+      "name":"source-expiry-equality",
+      "assumptions":["spec: source E=C is absent."],
+      "setup":{"sources":[{"id":"m","expiry_ms":10}]},
+      "steps":[{"expect":{"error":"MissingMemory"},"defect":{"tag":"source-ttl","path":["setup","sources",0,"expiry_ms"],"set":11}}]
+    },
+    {
+      "name":"source-scope-is-exact",
+      "assumptions":["spec: missing ID does not traverse different scopes."],
+      "setup":{"sources":[{"id":"m","scope":{"tenant":"other","agent":"a"}}]},
+      "steps":[{"expect":{"error":"MissingMemory"},"defect":{"tag":"foreign-source","path":["setup","sources",0,"scope","tenant"],"set":"t"}}]
+    },
+    {
+      "name":"source-malformed",
+      "assumptions":["spec: malformed retained source rejects."],
+      "setup":{"sources":[{"id":"m","malformed":true}]},
+      "steps":[{"expect":{"error":"InvalidBundle"},"defect":{"tag":"stored-source","path":["setup","sources",0,"malformed"],"set":false}}]
+    },
+    {
+      "name":"source-kind",
+      "assumptions":["spec: only retained Entity/Episodic sources."],
+      "setup":{"sources":[{"id":"m","kind":"fact"}]},
+      "steps":[{"expect":{"error":"UnsupportedKind"},"defect":{"tag":"unsupported-kind","path":["setup","sources",0,"kind"],"set":"entity"}}]
+    },
+    {
+      "name":"evidence-attached",
+      "assumptions":["spec: no sharing/stealing an already attached record."],
+      "setup":{"records":[{"id":"e","owners":["external"]}]},
+      "steps":[{"request":{"evidence":{"id":"e","scope":{"tenant":"t","agent":"a"}}},"expect":{"error":"RecordAlreadyAttached"},"defect":{"tag":"record-owner","path":["setup","records",0,"owners",0],"delete":true}}]
+    },
+    {
+      "name":"evidence-record-scope",
+      "assumptions":["spec: evidence attachability retains CrossScope."],
+      "setup":{"records":[{"id":"e","scope":{"tenant":"other","agent":"a"}}]},
+      "steps":[{"request":{"evidence":{"id":"e","scope":{"tenant":"t","agent":"a"}}},"expect":{"error":"CrossScope"},"defect":{"tag":"record-scope","path":["setup","records",0,"scope","tenant"],"set":"t"}}]
+    },
+    {
+      "name":"evidence-request-scope",
+      "assumptions":["spec: explicit foreign evidence scope rejects structurally."],
+      "setup":{"records":[{"id":"e"}]},
+      "steps":[{"request":{"evidence":{"id":"e","scope":{"tenant":"other","agent":"a"}}},"expect":{"error":"CrossScope"},"defect":{"tag":"evidence-scope","path":["steps",0,"request","evidence","scope","tenant"],"set":"t"}}]
+    },
+    {
+      "name":"evidence-collection",
+      "assumptions":["fixture: record must exist in the exact bound collection; missing record is InvalidEvidence."],
+      "setup":{"records":[{"id":"e","collection":"other"}]},
+      "steps":[{"request":{"evidence":{"id":"e","scope":{"tenant":"t","agent":"a"}}},"expect":{"error":"InvalidEvidence"},"defect":{"tag":"record-collection","path":["setup","records",0,"collection"],"set":"c"}}]
+    },
+    {
+      "name":"evidence-plus-ttl",
+      "assumptions":["spec: evidence attaches once and TTL uses separate graph operation."],
+      "setup":{"records":[{"id":"e"}]},
+      "steps":[{"request":{"summary":{"expiry_ms":20},"evidence":{"id":"e","scope":{"tenant":"t","agent":"a"}}},"expect":{"status":"created","physical_ops":6,"entry_bytes":{"attach":[28],"expiry":[24]},"frame_bytes":1973}}]
+    },
+    {
+      "name":"opening-reclaim-bytes",
+      "assumptions":["spec: opening reclaim is byte-charged but not a user op."],
+      "setup":{"opening_reclaims":1},
+      "steps":[{"expect":{"status":"created","physical_ops":4,"logical_ops":4,"frame_bytes":1935,"entry_bytes":{"opening_reclaim":[16]}}}]
+    },
+    {
+      "name":"utf8-packing",
+      "assumptions":["spec: actual scalar-safe chunk packing, not ceil(raw/4096)."],
+      "steps":[{"request":{"summary":{"content":{"$text":"\u20ac","bytes":12288}}},"expect":{"status":"created","physical_ops":12,"chunk_bytes":[4095,4095,4095,3],"frame_bytes":15712,"entry_bytes":{"summary":[755],"content":[4336,4336,4336,244],"content_edge":[139,139,139,139],"derived":[193],"outcome":[428],"receipt":[524]}}}]
+    },
+    {
+      "name":"fresh4096",
+      "assumptions":["spec: N=1,K=2046,fully packed ASCII, no expiry/evidence, fresh receipt =>4096."],
+      "steps":[{"request":{"summary":{"content":{"$text":"x","bytes":8380416}}},"expect":{"status":"created","physical_ops":4096,"logical_ops":4096,"frame_bytes":9159800,"request_bytes":8380554}}]
+    },
+    {
+      "name":"fresh4097",
+      "assumptions":["spec: N=2 with identical valid raw body =>4097; rejects atomically."],
+      "setup":{"sources":[{"id":"m"},{"id":"n"}]},
+      "steps":[{"request":{"inputs":[{"id":"m","expected_memory_revision":1,"disposition":"retain"},{"id":"n","expected_memory_revision":1,"disposition":"retain"}],"summary":{"content":{"$text":"x","bytes":8380416}}},"expect":{"error":"OperationLimit"},"defect":{"tag":"one-excess-chunk","path":["steps",0,"request","summary","content","bytes"],"set":8376320}}]
+    },
+    {
+      "name":"request-limit-exact",
+      "assumptions":["spec: canonical request bytes exactly 16MiB pass structural validation, independent of physical frame."],
+      "steps":[{"op":"digest","request":{"summary":{"content":{"$text":"x","bytes":16777078}}},"expect":{"request_bytes":16777216}}]
+    },
+    {
+      "name":"request-limit-plus-one",
+      "assumptions":["spec: one extra RequestByte rejects before receipt access."],
+      "steps":[{"op":"digest","request":{"summary":{"content":{"$text":"x","bytes":16777079}}},"expect":{"error":"BodyLimit"},"defect":{"tag":"binary-request-limit","path":["steps",0,"request","summary","content","bytes"],"set":16777078}}]
+    },
+    {
+      "name":"raw-limit-plus-one",
+      "assumptions":["spec: raw content cap precedes RequestBytes; repair remains a valid digest-only request."],
+      "steps":[{"op":"digest","request":{"summary":{"content":{"$text":"x","bytes":16777217}}},"expect":{"error":"BodyLimit"},"defect":{"tag":"raw-cap","path":["steps",0,"request","summary","content","bytes"],"set":1}}]
+    },
+    {
+      "name":"commit-clock-crossing",
+      "assumptions":["spec: captured commit=max(C,wall,high_water) can make a future TTL due; refuse before append.","fixture: EndpointRefused is an explicit hook, not a Rust error mapping."],
+      "setup":{"wall":20,"high_water":15},
+      "steps":[{"request":{"summary":{"expiry_ms":20}},"expect":{"error":"fixture:EndpointRefused"},"defect":{"tag":"captured-ttl","path":["steps",0,"request","summary","expiry_ms"],"set":21}}]
+    },
+    {
+      "name":"preserve-and-reopen",
+      "assumptions":["spec: derivation does not mutate retained source memory revision, properties, TTL or attachments.","fixture: JSON snapshot retention is not backend reopen or B traversal proof."],
+      "setup":{"sources":[{"id":"m","revision":7,"expiry_ms":1000,"attachments":["owned"],"properties":{"retained":"unchanged"}}],"records":[{"id":"owned","owners":["m"]}]},
+      "steps":[
+        {"request":{"inputs":[{"id":"m","expected_memory_revision":7,"disposition":"retain"}]},"expect":{"status":"created"}},
+        {"op":"inspect","expect":{"sources":[{"scope":{"tenant":"t","agent":"a"},"id":"m","revision":7,"kind":"entity","expiry_ms":1000,"content":"source","source":"origin","attachments":["owned"],"properties":{"retained":"unchanged"},"malformed":false}]}},
+        {"op":"reopen","expect":{"reopened":true}},
+        {"request":{"inputs":[{"id":"m","expected_memory_revision":7,"disposition":"retain"}]},"expect":{"status":"replayed","receipt_revision":1,"sequence":1}},
+        {"op":"forget","id":"m","expect":{"forgotten":"m"}},
+        {"request":{"inputs":[{"id":"m","expected_memory_revision":7,"disposition":"retain"}]},"expect":{"status":"replayed"}},
+        {"op":"inspect","expect":{"sources":[],"records":[{"scope":{"tenant":"t","agent":"a"},"collection":"c","owners":[],"id":"owned"}]}}
+      ]
+    },
+    {
+      "name":"ttl-visibility-replay-no-resurrection",
+      "assumptions":["spec: expiry equality hides summary/evidence; replay is not a new write or TTL extension.","fixture: bounded visible projection only, not retrieval."],
+      "setup":{"records":[{"id":"e"}]},
+      "steps":[
+        {"request":{"summary":{"expiry_ms":20},"evidence":{"id":"e","scope":{"tenant":"t","agent":"a"}}},"expect":{"status":"created"}},
+        {"op":"visible","clock":19,"expect":{"memories":["m","z"],"evidence":["e"]}},
+        {"op":"visible","clock":20,"expect":{"memories":["m"],"evidence":[]}},
+        {"request":{"C":20,"summary":{"expiry_ms":20},"evidence":{"id":"e","scope":{"tenant":"t","agent":"a"}}},"expect":{"status":"replayed","sequence":1}},
+        {"op":"visible","clock":21,"expect":{"memories":["m"],"evidence":[]}}
+      ]
+    },
+    {
+      "name":"full-content-entry",
+      "assumptions":["spec: normative schema/formula and coordinator erratum 24a24d46; a full node is 4337 bytes."],
+      "steps":[{"request":{"summary":{"content":{"$text":"x","bytes":4097}}},"expect":{"status":"created","physical_ops":8,"frame_bytes":6761,"entry_bytes":{"summary":[755],"content":[4337,242],"content_edge":[139,139],"derived":[193],"outcome":[428],"receipt":[524]}}}]
+    },
+    {
+      "name":"null-scope-normalization",
+      "assumptions":["spec: optional scope None is identical whether explicit null or omitted."],
+      "steps":[{"expect":{"status":"created"}},{"request":{"scope":{"user":null,"session":null}},"expect":{"status":"replayed"}}]
+    },
+    {
+      "name":"negative-zero",
+      "assumptions":["spec: binary64 negative zero normalizes to positive zero."],
+      "steps":[{"request":{"summary":{"importance":-0.0}},"expect":{"status":"created"}},{"request":{"summary":{"importance":0.0}},"expect":{"status":"replayed"}}]
+    },
+    {
+      "name":"no-binding-no-evidence",
+      "assumptions":["spec: no binding stores empty collection in receipt and allows vector-free summary."],
+      "setup":{"bindings":[{"scope":{"tenant":"t","agent":"a"},"collection":null}]},
+      "steps":[{"expect":{"status":"created","physical_ops":4,"frame_bytes":1918}},{"expect":{"status":"replayed"}}]
+    },
+    {
+      "name":"source-due-at-commit",
+      "assumptions":["spec: one captured commit clock reclaims a source before endpoint validation.","fixture: EndpointRefused is an explicit preappend hook, not a Rust error spelling."],
+      "setup":{"wall":20,"sources":[{"id":"m","expiry_ms":20}]},
+      "steps":[{"expect":{"error":"fixture:EndpointRefused"},"defect":{"tag":"source-commit-expiry","path":["setup","wall"],"set":19}}]
+    },
+    {
+      "name":"references-filter-isolation",
+      "assumptions":["spec: DERIVED_FROM does not become a B REFERENCES relation.","fixture: only filter a literal edge catalog here, no B discovery/expansion parity claim."],
+      "steps":[{"op":"references","edges":[{"relationship":"DERIVED_FROM","from":"z","to":"m"},{"relationship":"REFERENCES","from":"m","to":"n"},{"relationship":"HAS_CONTENT","from":"z","to":"chunk"}],"expect":{"references":[{"relationship":"REFERENCES","from":"m","to":"n"}]}}]
+    },
+    {
+      "name":"expired-outcome-intrinsic-only",
+      "assumptions":["spec: expired intrinsic outcome can differ from new request; no recomputation against retained sources.","fixture: a valid changed old outcome is not claimed to be authenticated."],
+      "steps":[
+        {"expect":{"status":"created"}},
+        {"request":{"C":110,"summary":{"id":"y","content":"new"}},"corruption":{"enabled":true,"change":{"path":["outcomes",0,"properties","outcome"],"set":"consolidate:v1\n61\n1\n2\nv1:0000000000000000000000000000000000000000000000000000000000000000\n"}},"expect":{"status":"created","sequence":2}}
+      ]
+    }
+  ],
+  "rejections":[
+    {"name":"scope-shape","request":{"scope":{"session":"s"}},"error":"InvalidScope","repair":{"path":["steps",0,"request","scope","session"],"delete":true}},
+    {"name":"request-limit-does-not-allow-physical-write","request":{"summary":{"content":{"$text":"x","bytes":16777078}}},"error":"OperationLimit","repair":{"path":["steps",0,"request","summary","content","bytes"],"set":1}},
+    {"name":"provisioned-tuple-collision","request":{},"setup":{"edits":[{"path":["scopes","$only","tuple"],"set":"00"}]},"error":"DigestCollision","repair":{"path":["setup","edits",0,"set"],"set":"73636f70653a76310100000001740100000001610000"}},
+    {"name":"key-empty","request":{"idempotency_key":""},"error":"InvalidKey","repair":{"path":["steps",0,"request","idempotency_key"],"set":"k"}},
+    {"name":"clock-negative","request":{"C":-1},"error":"InvalidClock","repair":{"path":["steps",0,"request","C"],"set":10}},
+    {"name":"clock-bool","request":{"C":true},"error":"InvalidClock","repair":{"path":["steps",0,"request","C"],"set":10}},
+    {"name":"clock-i64","request":{"C":9223372036854775808},"error":"InvalidClock","repair":{"path":["steps",0,"request","C"],"set":9223372036854775807}},
+    {"name":"window-zero","request":{"receipt_window_ms":0},"error":"InvalidReceiptWindow","repair":{"path":["steps",0,"request","receipt_window_ms"],"set":100}},
+    {"name":"window-overflow","request":{"receipt_window_ms":18446744073709551615},"error":"InvalidReceiptWindow","repair":{"path":["steps",0,"request","receipt_window_ms"],"set":18446744073709551605}},
+    {"name":"budget-zero","request":{"input_budget":0},"error":"InvalidBundle","repair":{"path":["steps",0,"request","input_budget"],"set":64}},
+    {"name":"budget-ceiling","request":{"input_budget":257},"error":"OperationLimit","repair":{"path":["steps",0,"request","input_budget"],"set":256}},
+    {"name":"inputs-empty","request":{"inputs":[]},"error":"InvalidBundle","repair":{"path":["steps",0,"request","inputs"],"set":[{"id":"m","expected_memory_revision":1,"disposition":"retain"}]}},
+    {"name":"input-id-empty","request":{"inputs":[{"id":"","expected_memory_revision":1,"disposition":"retain"}]},"error":"InvalidTarget","repair":{"path":["steps",0,"request","inputs",0,"id"],"set":"m"}},
+    {"name":"revision-zero","request":{"inputs":[{"id":"m","expected_memory_revision":0,"disposition":"retain"}]},"error":"InvalidTarget","repair":{"path":["steps",0,"request","inputs",0,"expected_memory_revision"],"set":1}},
+    {"name":"revision-overflow","request":{"inputs":[{"id":"m","expected_memory_revision":18446744073709551616,"disposition":"retain"}]},"error":"InvalidTarget","repair":{"path":["steps",0,"request","inputs",0,"expected_memory_revision"],"set":1}},
+    {"name":"duplicate-input","request":{"inputs":[{"id":"m","expected_memory_revision":1,"disposition":"retain"},{"id":"m","expected_memory_revision":1,"disposition":"retain"}]},"setup":{"sources":[{"id":"m"},{"id":"n"}]},"error":"DuplicateTarget","repair":{"path":["steps",0,"request","inputs",1,"id"],"set":"n"}},
+    {"name":"retain-required","request":{"inputs":[{"id":"m","expected_memory_revision":1,"disposition":"delete"}]},"error":"InvalidBundle","repair":{"path":["steps",0,"request","inputs",0,"disposition"],"set":"retain"}},
+    {"name":"output-id-empty","request":{"summary":{"id":""}},"error":"InvalidIdentity","repair":{"path":["steps",0,"request","summary","id"],"set":"z"}},
+    {"name":"summary-source-empty","request":{"summary":{"source":""}},"error":"InvalidIdentity","repair":{"path":["steps",0,"request","summary","source"],"set":"s"}},
+    {"name":"content-empty","request":{"summary":{"content":""}},"error":"InvalidContent","repair":{"path":["steps",0,"request","summary","content"],"set":"x"}},
+    {"name":"importance-nan","request":{"summary":{"importance":{"$number":"nan"}}},"error":"InvalidImportance","repair":{"path":["steps",0,"request","summary","importance","$number"],"set":"zero"}},
+    {"name":"importance-above-one","request":{"summary":{"importance":1.1}},"error":"InvalidImportance","repair":{"path":["steps",0,"request","summary","importance"],"set":1}},
+    {"name":"observation-bool","request":{"summary":{"observed_at_ms":true}},"error":"InvalidObservation","repair":{"path":["steps",0,"request","summary","observed_at_ms"],"set":-9223372036854775808}},
+    {"name":"expiry-negative","request":{"summary":{"expiry_ms":-1}},"error":"InvalidExpiry","repair":{"path":["steps",0,"request","summary","expiry_ms"],"set":18446744073709551615}},
+    {"name":"provenance65","request":{"summary":{"provenance":{"$repeat":{"source":"s"},"count":65}}},"error":"ProvenanceLimit","repair":{"path":["steps",0,"request","summary","provenance","count"],"set":64}},
+    {"name":"provenance-encoded-bytes","request":{"summary":{"provenance":{"$repeat":{"source":{"$text":"s","bytes":256},"kind":{"$text":"k","bytes":256},"uri":{"$text":"u","bytes":256},"transformation":{"$text":"t","bytes":256}},"count":4}}},"error":"ProvenanceLimit","repair":{"path":["steps",0,"request","summary","provenance","count"],"set":3}},
+    {"name":"provenance-source-empty","request":{"summary":{"provenance":[{"source":""}]}},"error":"InvalidProvenance","repair":{"path":["steps",0,"request","summary","provenance",0,"source"],"set":"s"}},
+    {"name":"transformation-required","request":{"transformation":""},"error":"InvalidProvenance","repair":{"path":["steps",0,"request","transformation"],"set":"t"}},
+    {"name":"evidence-id-empty","request":{"evidence":{"id":"","scope":{"tenant":"t","agent":"a"}}},"setup":{"records":[{"id":"e"}]},"error":"InvalidEvidence","repair":{"path":["steps",0,"request","evidence","id"],"set":"e"}},
+    {"name":"unprovisioned","request":{},"setup":{"bindings":[{"scope":{"tenant":"other","agent":"a"},"collection":"c"}]},"error":"InvalidScope","repair":{"path":["setup","bindings",0,"scope","tenant"],"set":"t"}},
+    {"name":"deadline-equality","request":{"deadline":10},"error":"DeadlineExceeded","repair":{"path":["steps",0,"request","deadline"],"set":11}},
+    {"name":"future-observation","request":{"summary":{"observed_at_ms":11}},"error":"FutureObservation","repair":{"path":["steps",0,"request","summary","observed_at_ms"],"set":10}},
+    {"name":"missing-source","request":{},"setup":{"sources":[{"id":"n"}]},"error":"MissingMemory","repair":{"path":["setup","sources",0,"id"],"set":"m"}}
+  ],
+  "hash_probes":[
+    {"name":"scope-tenant","edits":[{"path":["scope","tenant"],"set":"tt"}],"equal":false,"source_equal":false},
+    {"name":"scope-agent","edits":[{"path":["scope","agent"],"set":"aa"}],"equal":false,"source_equal":false},
+    {"name":"scope-user","edits":[{"path":["scope","user"],"set":"u"}],"equal":false,"source_equal":false},
+    {"name":"scope-session","edits":[{"path":["scope","user"],"set":"u"},{"path":["scope","session"],"set":"v"}],"equal":false,"source_equal":false},
+    {"name":"input-id","edits":[{"path":["inputs",0,"id"],"set":"n"}],"equal":false,"source_equal":false},
+    {"name":"input-revision","edits":[{"path":["inputs",0,"expected_memory_revision"],"set":2}],"equal":false,"source_equal":false},
+    {"name":"input-count","edits":[{"path":["inputs"],"set":[{"id":"m","expected_memory_revision":1,"disposition":"retain"},{"id":"n","expected_memory_revision":1,"disposition":"retain"}]}],"equal":false,"source_equal":false},
+    {"name":"summary-id","edits":[{"path":["summary","id"],"set":"y"}],"equal":false,"source_equal":true},
+    {"name":"summary-content","edits":[{"path":["summary","content"],"set":"y"}],"equal":false,"source_equal":true},
+    {"name":"summary-source","edits":[{"path":["summary","source"],"set":"y"}],"equal":false,"source_equal":true},
+    {"name":"observation","edits":[{"path":["summary","observed_at_ms"],"set":-1}],"equal":false,"source_equal":true},
+    {"name":"importance","edits":[{"path":["summary","importance"],"set":0.25}],"equal":false,"source_equal":true},
+    {"name":"expiry","edits":[{"path":["summary","expiry_ms"],"set":18446744073709551615}],"equal":false,"source_equal":true},
+    {"name":"provenance-source","edits":[{"path":["summary","provenance"],"set":[{"source":"p"}]}],"equal":false,"source_equal":true},
+    {"name":"provenance-kind","edits":[{"path":["summary","provenance"],"set":[{"source":"s","kind":""}]}],"equal":false,"source_equal":true},
+    {"name":"provenance-uri","edits":[{"path":["summary","provenance"],"set":[{"source":"s","uri":"u"}]}],"equal":false,"source_equal":true},
+    {"name":"provenance-transform","edits":[{"path":["summary","provenance"],"set":[{"source":"s","transformation":"x"}]}],"equal":false,"source_equal":true},
+    {"name":"provenance-multiplicity","edits":[{"path":["summary","provenance"],"set":[{"source":"s"},{"source":"s"}]}],"equal":false,"source_equal":true},
+    {"name":"transformation","edits":[{"path":["transformation"],"set":"u"}],"equal":false,"source_equal":true},
+    {"name":"evidence","edits":[{"path":["evidence"],"set":{"id":"e","scope":{"tenant":"t","agent":"a"}}}],"equal":false,"source_equal":true},
+    {"name":"evidence-id","edits":[{"path":["evidence"],"set":{"id":"f","scope":{"tenant":"t","agent":"a"}}}],"equal":false,"source_equal":true},
+    {"name":"future-policy","edits":[{"path":["allow_future_observations"],"set":true}],"equal":false,"source_equal":true},
+    {"name":"receipt-window","edits":[{"path":["receipt_window_ms"],"set":101}],"equal":false,"source_equal":true},
+    {"name":"execution-excluded","edits":[{"path":["C"],"set":12}],"equal":true,"source_equal":true},
+    {"name":"deadline-excluded","edits":[{"path":["deadline"],"set":0}],"equal":true,"source_equal":true},
+    {"name":"budget-excluded","edits":[{"path":["input_budget"],"set":256}],"equal":true,"source_equal":true},
+    {"name":"key-excluded","edits":[{"path":["idempotency_key"],"set":"other"}],"equal":true,"source_equal":true},
+    {"name":"default-importance","edits":[{"path":["summary","importance"],"set":0.5}],"equal":true,"source_equal":true},
+    {"name":"empty-prov","edits":[{"path":["summary","provenance"],"set":[]}],"equal":true,"source_equal":true},
+    {"name":"evidence-id-pair","base_edits":[{"path":["evidence"],"set":{"id":"e","scope":{"tenant":"t","agent":"a"}}}],"edits":[{"path":["evidence","id"],"set":"f"}],"equal":false,"source_equal":true},
+    {"name":"zero-sign","base_edits":[{"path":["summary","importance"],"set":0.0}],"edits":[{"path":["summary","importance"],"set":-0.0}],"equal":true,"source_equal":true},
+    {"name":"provenance-order-pair","base_edits":[{"path":["summary","provenance"],"set":[{"source":"a"},{"source":"b"}]}],"edits":[{"path":["summary","provenance"],"set":[{"source":"b"},{"source":"a"}]}],"equal":false,"source_equal":true},
+    {"name":"no-unicode-normalization","base_edits":[{"path":["summary","content"],"set":"\u00e9"}],"edits":[{"path":["summary","content"],"set":"e\u0301"}],"equal":false,"source_equal":true}
+  ],
+  "corruptions":[
+    {"name":"receipt-label","change":{"path":["node","labels",0],"set":"Other"}},
+    {"name":"receipt-schema","change":{"path":["node","properties","c1_schema"],"set":"consolidate:v2"}},
+    {"name":"receipt-scope","change":{"path":["node","properties","scope"],"set":"other"}},
+    {"name":"receipt-tuple","error":"DigestCollision","change":{"path":["node","properties","c1_scope_tuple"],"set":"00"}},
+    {"name":"receipt-collection","change":{"path":["node","properties","c1_collection"],"set":"other"}},
+    {"name":"receipt-digest","change":{"path":["node","properties","digest"],"set":"v1:ABC"}},
+    {"name":"receipt-digest-type","change":{"path":["node","properties","digest"],"set":3}},
+    {"name":"receipt-missing-field","change":{"path":["node","properties","digest"],"delete":true}},
+    {"name":"receipt-extra-field","change":{"path":["node","properties","extra"],"set":""}},
+    {"name":"receipt-expiry-zero","change":{"path":["node","properties","expires_at_ms"],"set":"0"}},
+    {"name":"receipt-expiry-leading-zero","change":{"path":["node","properties","expires_at_ms"],"set":"0110"}},
+    {"name":"receipt-expiry-sign","change":{"path":["node","properties","expires_at_ms"],"set":"+110"}},
+    {"name":"receipt-expiry-space","change":{"path":["node","properties","expires_at_ms"],"set":"110 "}},
+    {"name":"receipt-expiry-overflow","change":{"path":["node","properties","expires_at_ms"],"set":"18446744073709551616"}},
+    {"name":"receipt-expiry-type","change":{"path":["node","properties","expires_at_ms"],"set":110}},
+    {"name":"receipt-chunks-string","change":{"path":["node","properties","outcome_chunks"],"set":"1"}},
+    {"name":"receipt-chunks-float","change":{"path":["node","properties","outcome_chunks"],"set":1.0}},
+    {"name":"receipt-chunks-bool","change":{"path":["node","properties","outcome_chunks"],"set":true}},
+    {"name":"receipt-chunks-two","change":{"path":["node","properties","outcome_chunks"],"set":2}},
+    {"name":"outcome-missing-node","change":{"path":["outcomes"],"set":[]}},
+    {"name":"outcome-label","change":{"path":["outcomes",0,"labels",0],"set":"Other"}},
+    {"name":"outcome-key","change":{"path":["outcomes",0,"key"],"set":"other"}},
+    {"name":"outcome-extra-property","change":{"path":["outcomes",0,"properties","extra"],"set":1}},
+    {"name":"outcome-missing-property","change":{"path":["outcomes",0,"properties","outcome"],"delete":true}},
+    {"name":"outcome-receipt-key","change":{"path":["outcomes",0,"properties","receipt_key"],"set":"other"}},
+    {"name":"outcome-index-string","change":{"path":["outcomes",0,"properties","index"],"set":"0"}},
+    {"name":"outcome-index-float","change":{"path":["outcomes",0,"properties","index"],"set":0.0}},
+    {"name":"outcome-index-one","change":{"path":["outcomes",0,"properties","index"],"set":1}},
+    {"name":"outcome-trailing-data","change":{"path":["outcomes",0,"properties","outcome"],"set":"consolidate:v1\n7a\n1\n1\nv1:18724b2d59b9d4014afe375230479320be8ad7b5d29af7feef788b326dd4438b\nx"}},
+    {"name":"outcome-no-final-lf","change":{"path":["outcomes",0,"properties","outcome"],"set":"consolidate:v1\n7a\n1\n1\nv1:18724b2d59b9d4014afe375230479320be8ad7b5d29af7feef788b326dd4438b"}},
+    {"name":"outcome-revision","change":{"path":["outcomes",0,"properties","outcome"],"set":"consolidate:v1\n7a\n2\n1\nv1:18724b2d59b9d4014afe375230479320be8ad7b5d29af7feef788b326dd4438b\n"}},
+    {"name":"outcome-count-leading-zero","change":{"path":["outcomes",0,"properties","outcome"],"set":"consolidate:v1\n7a\n1\n01\nv1:18724b2d59b9d4014afe375230479320be8ad7b5d29af7feef788b326dd4438b\n"}},
+    {"name":"outcome-invalid-utf8","change":{"path":["outcomes",0,"properties","outcome"],"set":"consolidate:v1\nff\n1\n1\nv1:18724b2d59b9d4014afe375230479320be8ad7b5d29af7feef788b326dd4438b\n"}},
+    {"name":"outcome-uppercase-hex","change":{"path":["outcomes",0,"properties","outcome"],"set":"consolidate:v1\n7A\n1\n1\nv1:18724b2d59b9d4014afe375230479320be8ad7b5d29af7feef788b326dd4438b\n"}},
+    {"name":"outcome-crlf","change":{"path":["outcomes",0,"properties","outcome"],"set":"consolidate:v1\r\n7a\n1\n1\nv1:18724b2d59b9d4014afe375230479320be8ad7b5d29af7feef788b326dd4438b\n"}},
+    {"name":"outcome-over4096","change":{"path":["outcomes",0,"properties","outcome"],"set":{"$text":"x","bytes":4097}}},
+    {"name":"live-outcome-id-mismatch","expired":false,"change":{"path":["outcomes",0,"properties","outcome"],"set":"consolidate:v1\n79\n1\n1\nv1:18724b2d59b9d4014afe375230479320be8ad7b5d29af7feef788b326dd4438b\n"}},
+    {"name":"live-outcome-count-mismatch","expired":false,"change":{"path":["outcomes",0,"properties","outcome"],"set":"consolidate:v1\n7a\n1\n2\nv1:18724b2d59b9d4014afe375230479320be8ad7b5d29af7feef788b326dd4438b\n"}},
+    {"name":"live-outcome-source-mismatch","expired":false,"change":{"path":["outcomes",0,"properties","outcome"],"set":"consolidate:v1\n7a\n1\n1\nv1:0000000000000000000000000000000000000000000000000000000000000000\n"}}
+  ],
+  "mutations":[
+    {"name":"window_unhashed","case":"window-is-hashed","step":1,"reason":"IdempotencyConflict"},
+    {"name":"born_expired_late","case":"born-expired-without-evidence","step":0,"reason":"MissingMemory"},
+    {"name":"reclaim_free","case":"opening-reclaim-bytes","step":0,"reason":"frame_bytes"}
+  ]
+}
