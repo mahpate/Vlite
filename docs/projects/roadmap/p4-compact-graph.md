@@ -7,6 +7,9 @@ unreleased.
 Private decoded-CSR identity, adjacency, TTL and temporal reads are implemented
 and independently accepted. The private mutation overlay is independently
 accepted and integrated, unreleased and not wired into production.
+The standalone packed-fields core is independently accepted and integrated,
+test-only and unreleased. Packed topology and production property access remain
+separate work; its fields-only accounting is not full-graph qualification.
 P4 slice 1b, a separate private, test-only graph-base checkpoint framing, is
 independently accepted and integrated but unreleased: critical kind `0x0300`,
 codec version 1, unchanged `VLGCSR06` payload, one block per graph, and a
@@ -273,7 +276,7 @@ and a linear tombstone walk; each fails a named test and passes restored.
 The CSR adapter, executor/loader wiring, generation publication, property
 indexes and activation remain outside this candidate.
 
-## Columnar-fields design addendum (private candidate)
+## Columnar-fields design addendum (accepted private core)
 
 The `p4-columnar-properties` slice introduces a separate test-only packed
 fields model, not replace the accepted decoded graph/view or change VLGCSR06.
@@ -330,9 +333,9 @@ required before independent acceptance. Native compact-index serving, schema
 enforcement, packed topology, production publication and activation remain
 separate work.
 
-### Implemented fields candidate and hidden-cost boundary
+### Accepted fields core and hidden-cost boundary
 
-This is **a private, unreleased candidate pending independent acceptance** in
+This is **an independently accepted and integrated private, unreleased core** in
 `compact/graph/columns.rs` and `columns/fields.rs`, reached only through the
 existing `cfg(test)` graph module. Each property table has sorted u64 row IDs,
 one name/header per global property name and no retained per-row `Properties`.
@@ -408,6 +411,20 @@ keys/owners and owned views with blanked source fields to exclude fallback.
 Real rebuilt mutations target rank anchors, signed integer/float bits, raw
 selection, dictionary codes, projection selection, key order, attachment IDs,
 canonical admission and bypassing packed fields in an owned node view.
+
+Independent acceptance used the final candidate including the multi-edge
+temporal-offset regression: compact tests passed in both feature modes, graph
+engine, maintenance, storage/recovery/compatibility, strict workspace Clippy,
+native/WASM no-default builds and the existing logical oracles/API/docs checks.
+Five coordinator-applied mutations were separately rebuilt, failed the exact
+selector and passed it after restoration: temporal offset, dense rank anchor,
+integer sign, dictionary ordinal and canonical re-encoding rejection. The
+integer and dictionary mutants failed valid decode with `Corrupt`, not direct
+value-equality assertions; the canonicality mutant admitted an invalid encoding.
+The integrated packed sources and fixtures match that accepted candidate, and
+combined compact tests passed with the accepted memory recall and visit seam.
+This does not accept a normal loader, checkpoint/WAL integration, native index
+serving, total graph memory/size targets or production activation.
 
 ## Mutations, expiry and attachments
 

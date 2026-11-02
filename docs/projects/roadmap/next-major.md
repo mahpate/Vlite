@@ -216,7 +216,12 @@ accepted and integrated, with no production caller. This decoded
   Checkpoint/read integration, production mutation integration,
   full parallel import and S3/S4/F6
   qualification remain outstanding. Native schema enforcement, cross-graph
-  owner validation and columnar property storage also remain outstanding.
+  owner validation and integrated columnar property storage also remain
+  outstanding. The standalone private packed-fields core is independently
+  accepted and integrated, including exact typed values, indexed keys/owners,
+  temporal offsets and owned projections. It remains test-only, with explicit
+  construction/projection scratch and fields-only informational accounting;
+  no normal loader, query wiring or total-memory qualification is claimed.
   P4 slice 1b, a private, test-only, independently accepted and integrated
   `0x0300` checkpoint-block framing, uses unchanged `VLGCSR06` bodies, one
   block per graph, a 64 MiB block-body cap and no graph partitioning; it is
