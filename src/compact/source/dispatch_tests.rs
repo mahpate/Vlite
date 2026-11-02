@@ -1,9 +1,20 @@
 use crate::compact::catalog::tests::{source_key, source_view_fixture};
 use crate::records::CollectionRecords;
+use crate::rerank::{ExactReranker, RerankCandidate, Reranker};
 use crate::{CollectionSettings, DistanceMetric, Expected, HnswConfig, Metadata, Mutation};
-use crate::{Database, Error, Record, Result};
+use crate::{Database, Error, Record, Result, SearchHit};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+struct ProviderSentinel(AtomicBool);
+
+impl Reranker for ProviderSentinel {
+    fn rerank(&self, _: &[f32], _: &[RerankCandidate], _: usize) -> Result<Vec<SearchHit>> {
+        self.0.store(true, Ordering::SeqCst);
+        Ok(Vec::new())
+    }
+}
 
 fn gates() -> (
     crate::compact::Activation,
@@ -50,9 +61,37 @@ fn point_parity(candidate: &Database, oracle: &Database) {
         assert_eq!(actual.first_id(), reference.first_id());
         for (&record_id, record) in expected.records.resident().unwrap() {
             assert!(candidate.state(id).records.contains_key(&record_id));
-            for now in [0, u64::MAX] {
+            assert_eq!(
+                actual.revision(record_id).unwrap(),
+                reference.revision(record_id).unwrap(),
+                "revision parity"
+            );
+            let expiry = expected.expiries.get(&record_id).copied();
+            assert_eq!(
+                actual.expires_at(record_id).unwrap(),
+                expiry,
+                "expiry state"
+            );
+            assert_eq!(
+                actual.expires_at(record_id).unwrap(),
+                reference.expires_at(record_id).unwrap(),
+                "expires_at parity"
+            );
+            let mut clocks = vec![0, u64::MAX];
+            if let Some(deadline) = expiry {
+                clocks.push(deadline);
+                if let Some(predecessor) = deadline.checked_sub(1) {
+                    clocks.push(predecessor);
+                }
+            }
+            for now in clocks {
                 let observed = actual.get_at(record_id, now).unwrap();
                 let want = reference.get_at(record_id, now).unwrap();
+                assert_eq!(
+                    want.is_some(),
+                    expiry.is_none_or(|deadline| now < deadline),
+                    "resident expiry boundary must hide at the deadline"
+                );
                 assert_eq!(observed, want);
                 if let Some(observed) = observed {
                     assert_eq!(
@@ -73,6 +112,8 @@ fn point_parity(candidate: &Database, oracle: &Database) {
         let missing = (0..).find(|id| !expected.records.contains_key(id)).unwrap();
         assert!(!candidate.state(id).records.contains_key(&missing));
         assert!(actual.get_at(missing, 0).unwrap().is_none());
+        assert_eq!(actual.revision(missing).unwrap(), None);
+        assert_eq!(actual.expires_at(missing).unwrap(), None);
     }
 }
 
@@ -91,6 +132,13 @@ fn compact_dispatch_point_observations_and_raw_image_match_resident() {
     let _gates = gates();
     for encrypted in [false, true] {
         let (mut candidate, oracle, image) = compact_dispatch_fixture(encrypted);
+        assert!(
+            oracle.collections.values().any(|state| state
+                .expiries
+                .values()
+                .any(|&deadline| deadline > 0 && deadline < u64::MAX)),
+            "point parity must exercise a finite expiry and predecessor"
+        );
         point_parity(&candidate, &oracle);
         assert_eq!(
             candidate.to_bytes(),
@@ -219,6 +267,25 @@ fn compact_dispatch_scan_search_and_snapshot_scans_refuse() {
         for info in oracle.collections().unwrap() {
             let view = candidate.collection(&info.name).unwrap();
             let query = vec![0.5; view.dimensions()];
+            let exact = ExactReranker {
+                metric: DistanceMetric::SquaredL2,
+            };
+            let sentinel = ProviderSentinel(AtomicBool::new(false));
+            let hits = [SearchHit {
+                id: oracle.state(info.id).records.first_id().unwrap_or(0),
+                distance: 0.0,
+            }];
+            let empty = view.rerank(&query, &[], 0, &exact);
+            let populated = view.rerank(&query, &hits, 1, &exact);
+            let custom = view.rerank(&query, &hits, 1, &sentinel);
+            assert!(
+                !sentinel.0.load(Ordering::SeqCst),
+                "compact rerank must not invoke the provider"
+            );
+            unsupported(empty, "rerank empty");
+            unsupported(populated, "rerank populated");
+            unsupported(custom, "rerank custom provider");
+            unsupported(view.rerank(&[], &[], 0, &exact), "rerank invalid query");
             unsupported(view.browse(None, 1), "browse");
             unsupported(view.browse_at(None, 0, 0), "browse invalid limit");
             unsupported(view.search(&query, 0), "search zero k");
@@ -367,6 +434,38 @@ fn compact_dispatch_resident_collection_remains_writable_in_mixed_fixture() {
             .len(),
         2
     );
+    let view = candidate.collection("default").unwrap();
+    let hits = [SearchHit {
+        id: 99,
+        distance: 0.0,
+    }];
+    let exact = ExactReranker {
+        metric: DistanceMetric::SquaredL2,
+    };
+    assert_eq!(
+        view.rerank(&[1.0, 2.0], &hits, 1, &exact).unwrap(),
+        hits,
+        "resident rerank must remain available in a mixed handle"
+    );
+    let sentinel = ProviderSentinel(AtomicBool::new(false));
+    assert!(
+        view.rerank(&[1.0, 2.0], &hits, 1, &sentinel)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(sentinel.0.load(Ordering::SeqCst));
+    let sequence = candidate.sequence;
+    let bytes = candidate.to_bytes().unwrap();
+    unsupported(candidate.checkpoint(), "mixed checkpoint");
+    assert_eq!(candidate.sequence, sequence, "mixed checkpoint sequence");
+    assert_eq!(
+        candidate.to_bytes().unwrap(),
+        bytes,
+        "mixed checkpoint bytes"
+    );
+    unsupported(candidate.sync(), "mixed sync");
+    assert_eq!(candidate.sequence, sequence, "mixed sync sequence");
+    assert_eq!(candidate.to_bytes().unwrap(), bytes, "mixed sync bytes");
     candidate.poisoned = true;
     let request = crate::GeoSearchQuery {
         vector: vec![1.0, 2.0],
@@ -387,6 +486,10 @@ fn compact_dispatch_resident_collection_remains_writable_in_mixed_fixture() {
         db: &candidate,
         id: 0,
     };
+    assert!(
+        view.rerank(&[], &[], 0, &sentinel).unwrap().is_empty(),
+        "resident empty rerank must not acquire an earlier health error"
+    );
     assert!(
         matches!(
             view.search_geo(&request),

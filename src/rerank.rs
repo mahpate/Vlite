@@ -129,6 +129,7 @@ impl crate::CollectionRef<'_> {
         limit: usize,
         reranker: &dyn Reranker,
     ) -> Result<Vec<SearchHit>> {
+        self.db.state(self.id).records.resident()?;
         if hits.len() > crate::MAX_BATCH_OPERATIONS {
             return Err(Error::BatchTooLarge);
         }
