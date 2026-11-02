@@ -142,7 +142,7 @@ Local numbers below show direction only (see rules).
   path apart from the payload version. Private decoded-CSR ID/key and adjacency
   reads are independently accepted, including TTL and selected temporal
   properties; production query execution is not wired to CSR. Private parallel
-  import staging is a candidate pending independent acceptance: logical
+    import staging is independently accepted and integrated but unreleased: logical
   nodes-before-edges admission, in-memory bounded sorting runs and disjoint
   encoding match retained goldens and sequential bytes. Schema/property
   admission, disk spilling and durable publication are not implemented.

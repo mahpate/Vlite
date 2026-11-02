@@ -2,7 +2,8 @@
 
 **Status:** approved design; private test-only CSR, ordinary typed-property,
 label-posting, attachment and schema-declaration codec slices are implemented.
-Private parallel import staging is a candidate pending independent acceptance.
+Private parallel import staging is independently accepted and integrated, but
+unreleased.
 Private decoded-CSR identity, adjacency, TTL and temporal reads are implemented
 and independently accepted.
 Full P4 implementation and measured results remain outstanding.
@@ -109,8 +110,8 @@ a write clock. It does not model interleaved writes, schema/property admission,
 worker-local spill buffers, actual concurrency or durable publication. This is
 reference coverage, not performance qualification.
 
-`src/compact/graph/import.rs` is a private test-only staging candidate, pending
-independent acceptance. Rayon partitions decode and validate logical JSON rows,
+`src/compact/graph/import.rs` is private test-only staging, independently
+accepted and integrated but unreleased. Rayon partitions decode and validate logical JSON rows,
 then global ordered admission checks duplicate keys and attachment ownership
 before parallel endpoint resolution. IDs follow input order. Sorted dictionaries,
 worker-local bounded membership runs, tuple-ordered k-way merging and degree
@@ -121,8 +122,12 @@ and compares seeded skew, hubs, self-loops, parallel edges, sparse/duplicate key
 and attachments with sequential admission. Representable sources also compare
 with the engine/codec path; anonymous nodes require an explicit test-only key
 remap, not a claim of unchanged-source engine parity.
+Independent acceptance disabled the cross-node record-ownership check: the
+`duplicate-owner-boundary` golden and seeded first-error parity tests failed,
+then passed after restoring it. The integrated branch still requires full CI
+qualification.
 
-The candidate admits nodes before edges into one new empty ownership domain.
+The staging admits nodes before edges into one new empty ownership domain.
 Its fixture graph has ID 0, name `import`, sequence/revisions 1 and count-based
 allocation marks; it is not an API for choosing graph lifecycle metadata.
 It assumes attached records exist without record expiry and preserves deadlines
@@ -315,8 +320,9 @@ failed by returning a node at its expiry, and passed after restoring the boundar
 The integrated branch still requires its full CI qualification.
 
 Remaining P4 slices are shared framing and block dispatch/publication,
-checkpoint/read integration, mutation overlay, parallel import, and performance
-and cross-platform qualification.
+checkpoint/read integration, mutation overlay, full parallel import (property and
+schema admission, spilling and durable publication), and performance and
+cross-platform qualification.
 Columnar property storage, native compact-index serving and schema enforcement
 also remain outstanding.
 
