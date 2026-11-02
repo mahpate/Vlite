@@ -26,7 +26,8 @@ benchmark claims, changed defaults, policies or release criteria.
 2. **S5-R2:** All transports preserve section 4's budgets, validation precedence,
    nullable outputs, first stopping reason and last-full-step provenance.
 3. **S5-R3:** REST, gRPC and proxied MCP authorize `graph_read`, tenant and graph
-   binding before lookup. Local MCP/CLI use read-only file access, not invented bearer enforcement.
+   binding before lookup. The CLI opens read-only; MCP uses the session's existing
+   handle (read-only by default), and the new tools never mutate it.
 4. **S5-R4:** A response uses one graph borrow, sequence and TTL read clock;
    no adapter retry may combine results from different views.
 5. **S5-R5:** Schemas reject unknown JSON fields, ambiguous selectors, wrong
@@ -71,9 +72,9 @@ Absence means absent from the cited dispatcher/service, not from every possible 
   `proto/vlite/v1/vlite.proto:100-108,222-237` defines reusable MetadataValue and Condition.
 - **W4:** `src/bin/tool_support/graph_mcp.rs:1-12,34-76,119-136,152-282`
   defines existing tool dispatch and local execution; its ordinary reads currently pass `cancel: None`.
-- **W5:** `src/bin/vlite-graph-cli.rs:1-12,33-82,188-204` defines read-only file
+- **W5:** `src/bin/vlite-graph-cli.rs:1-12,33-82,188-207` defines read-only file
   execution, decimal IDs, commands and rejection of `--writable` for reads.
-- **W6:** `src/bin/tool_support/graph_proxy.rs:1-15,77-127,164-194` forwards
+- **W6:** `src/bin/tool_support/graph_proxy.rs:1-15,77-127,164-203` forwards
   graph tools to REST with bearer identity and no local file; its dispatcher
   needs an explicit algorithm branch, not the ordinary read-route fallback.
 - **E1:** `src/server.rs:1476-1480,1528-1535,1595-1655` maps existing engine errors.
@@ -92,16 +93,22 @@ Absence means absent from the cited dispatcher/service, not from every possible 
 
 ## 3. Exact operation and JSON contract
 
-All five routes are `POST /v1/graphs/{graph}/algorithms/<suffix>`, require
-`Content-Type: application/json`, use `graph_read`, and return HTTP 200 for a
-valid execution, including exhaustion. Other statuses are exactly section 5.
+All five routes are `POST /v1/graphs/{graph}/algorithms/<suffix>`, use `graph_read`,
+and return HTTP 200 for a valid execution, including exhaustion.
+Like existing graph reads, they do not enforce Content-Type: the body is a UTF-8
+JSON object; empty/all-whitespace bodies decode as `{}`, whose missing required
+scope yields 422 `invalid_json` (`src/server/graph.rs:344-366`). No 415 is added.
+Other statuses are exactly section 5.
 There is no GET alias, batch algorithm endpoint or mutation method.
 Each new read request is capped at 1,048,576 encoded bytes: UTF-8 JSON for
-REST/MCP/CLI, serialized protobuf for gRPC (including unknown fields);
-REST retains the existing graph-read cap (`src/server/graph.rs:79-80,183`).
-For MCP this bounds the tool arguments, excluding the JSON-RPC envelope.
+REST/CLI, `encoded_len()` of the decoded protobuf request for gRPC (prost drops
+unknown fields, so they are not counted). MCP size is the UTF-8 byte length of
+compact re-serialized `arguments`, excluding the JSON-RPC envelope, measured
+after parsing (`src/bin/tool_support/graph_mcp.rs:152-159`).
+REST retains the existing graph-read cap (`src/server/graph.rs:79-80,184`).
 New CLI commands use this cap, leaving existing commands' caps unchanged.
-gRPC also retains its outer 8 MiB request / 16 MiB response caps [W3].
+gRPC retains its service-wide 8 MiB request / 16 MiB response caps [W3];
+do not lower Graph's service cap, which also admits batches.
 Algorithm responses on all surfaces have a 16,777,216 encoded-byte ceiling:
 overflow fails explicitly as `invalid_input` rather than cutting serialized JSON.
 This is an output safety limit, not a measurement.
@@ -180,7 +187,9 @@ extra fields. Each response has the envelope in 3.3 and exactly its output kind.
 These are shapes, not a common fixture with fabricated counts.
 `weight_property` is 1..256 UTF-8 bytes. Damping and tolerance are finite and
 strictly between 0 and 1. Personalization, when present, has 1..10,000 entries,
-positive finite masses, distinct resolved nodes, all scope seeds; an empty list
+positive finite masses and distinct resolved nodes; each entry's resolved node
+must be a scope seed, but entries need not cover every seed
+(`src/property_graph/engine/algorithm/iterative.rs:69-78`). An empty list
 does not mean uniform. Omitted personalization means uniform. Do not accept
 weights for degree, label propagation or betweenness [A2, A4].
 
@@ -274,7 +283,10 @@ there are no algorithm pages/cursors, and retry recomputes on a new view.
 For each tool in section 3, `inputSchema` is exactly its section 7 request schema
 with required `graph:string` added (the same graph-name validation); references
 are expanded into a self-contained tool schema, including Condition/MetadataValue.
-`outputSchema` is the section 7 GraphAlgorithmResponse schema, likewise expanded.
+Do not declare `outputSchema`: errors retain `structuredContent:{"error":message}`
+[E3], and existing protocol negotiation includes older versions
+(`src/bin/vlite-mcp.rs:21-22`). Success still returns the envelope as
+structuredContent plus text; the oracle validates it against section 7.
 Annotations: `readOnlyHint:true, destructiveHint:false, idempotentHint:true`.
 Idempotence means no writes, not identical results after graph/TTL changes.
 Tool invocation is `tools/call {name:<tool>,arguments:{graph:"g",...request}}`.
@@ -288,6 +300,9 @@ reject `--writable` and `--explain` for these commands. Successful execution
 prints exactly one compact envelope on stdout, exit 0 even when incomplete;
 errors print `{"error":{"code":CODE,"message":MESSAGE}}` on stderr, exit 1.
 Argument/usage failures use `usage`; request decoding failures use `invalid_request`.
+Rejecting `--explain`/tool `explain` is new for algorithms: existing typed reads
+support explain (`src/bin/tool_support/graph_proxy.rs:164-183`). The proxy's
+algorithm branch must reject it rather than forward it to `/explain`.
 There is no new HTTP CLI mode. Local file authority and server tenancy differ
 explicitly in section 6; result parity does not imply a local security boundary.
 
@@ -346,9 +361,16 @@ deliver a partial result. If the engine's own deadline expires while the transpo
 is live, deliver HTTP 200 / gRPC OK / MCP isError=false with `deadline`.
 If gRPC itself expires/cancels first, return DEADLINE_EXCEEDED/CANCELLED without
 an envelope; set the flag, stop work cooperatively and release the guard.
-MCP request cancellation notification and CLI Ctrl+C set the flag; when the output
-channel remains live return the incomplete envelope normally. Forced process
-termination has no result guarantee. Add no cancellation route or job registry.
+Today no served graph read supplies a cancellation flag (`src/server/graph.rs:458,497,609`;
+`src/bin/tool_support/graph_mcp.rs:218,271`; `src/bin/vlite-graph-cli.rs:322`).
+REST/gRPC slices must add a drop-guard flag around spawn_blocking work, surviving
+handler/future drop until the worker observes it. MCP currently ignores
+notifications/cancelled and reads stdio sequentially (`src/bin/vlite-mcp.rs:733,798-818`);
+its slice must add a reader thread and request-id-to-flag map to receive cancellation
+during a call, for local and proxied execution. A live channel returns the incomplete
+envelope normally. The CLI installs no signal handler: Ctrl+C ends the process,
+without a result guarantee; uninterrupted runs use deadline_ms (ceiling 5,000 ms [A5]).
+Add no dependency, unsafe/FFI, cancellation route or job registry.
 
 ## 5. Error contract
 
@@ -361,7 +383,7 @@ Graph-enabled checks and graph binding must precede node/edge information exposu
 | Failure / exact REST code | HTTP | gRPC | MCP/CLI code |
 |---|---:|---|---|
 | Syntax / shape: `invalid_json` | 400 / 422 | INVALID_ARGUMENT (`invalid_input` for typed-message shape failures) | `invalid_request` for JSON decode/shape |
-| Read body exceeds 1 MiB: `invalid_json` | 413 | RESOURCE_EXHAUSTED (adapter cap; `invalid_input` trailer) | `invalid_request` |
+| Read body exceeds 1 MiB: `invalid_json` | 413 | INVALID_ARGUMENT (decoded request encoded_len cap; `invalid_input` trailer) | `invalid_request` |
 | Missing/invalid bearer: `unauthorized` | 401 | UNAUTHENTICATED | Proxy preserves `unauthorized` |
 | Missing operation/graph/lineage: `forbidden_scope` | 403 | PERMISSION_DENIED | Proxy preserves `forbidden_scope` |
 | Inactive tenant: `tenant_suspended` / `tenant_unavailable` | 403 | PERMISSION_DENIED | Proxy preserves code |
@@ -386,8 +408,14 @@ not a blanket catch that hides them [E1, E2].
 
 REST errors use `{"error":{"code":CODE,"message":MESSAGE}}` [D1].
 gRPC message is the same sanitized MESSAGE and `vlite-error-code` trailer is CODE,
-as today [E2]. Native gRPC deadline/cancellation and pre-decoding transport size
-failures may lack application trailers; they are not algorithm truncations.
+as today [E2]. The decoded per-method size check uses the existing invalid_input
+mapping, with no new status-mapping arm. Frames above service decode/encode caps
+fail natively with OUT_OF_RANGE and no VLite trailer (locked tonic 0.14.6;
+`Cargo.lock:2946-2950`; dependency source `src/codec/decode.rs:189-196` and
+`src/codec/encode.rs:186-191`, verified in the cached crate). These are distinct
+from the decoded per-method check.
+Native deadline/cancellation may also lack application trailers; none are
+algorithm truncations.
 Retain request IDs and Retry-After on existing admission errors, with no automatic retry.
 
 MCP tool failure preserves the existing wrapper [E3], not a new error object:
@@ -425,8 +453,10 @@ at equality. Do not expose a caller-selected TTL clock.
 REST and gRPC use the same permission/scope helpers; proxied MCP forwards identity,
 request cancellation and errors, never retries via local file access. Local MCP
 and CLI have no server credential context [W4, W5]: file access is full authority,
-not tenant isolation. They must open read-only and never claim graph scopes are
-enforced. Do not add a `tenant` input claiming to secure local execution. Test
+not tenant isolation. The CLI opens read-only; MCP uses the session's existing
+handle (read-only by default), including writable sessions, and the new tools
+never mutate it (`src/bin/vlite-mcp.rs:95-108,722`). Neither claims graph scopes
+are enforced. Do not add a `tenant` input claiming to secure local execution. Test
 server authorization parity through proxied MCP and test local non-mutation
 separately. Adding remote CLI auth or local access policy is outside S5.
 
@@ -445,7 +475,8 @@ These fenced snippets are proposed insertions, not applied changes. Names beginn
 GraphAlgorithm are owned by this contract, avoiding unresolved Gap 12 shared-message
 tag choices. Keep all existing v1 RPCs, fields, numbers and enums untouched.
 Append five RPC declarations to the Gap 12 `Graph` service (17 existing proposed
-methods stay intact). No second Graph service or algorithm service.
+methods stay intact, making 22). At the gRPC slice the coordinator amends Gap 12's
+method count and parity table from 17 to 22. No second Graph service or algorithm service.
 
 ### 7.1 OpenAPI overlay
 
@@ -1095,20 +1126,22 @@ iteration counts from stationary PageRank. No new oracle is delivered here.
 | Path: exhaustive <=H walks, rational sums of binary64 inputs | Weighted diamond, hop-state counterexample, zero cycle, source=destination, missing/due endpoint, exact-sum ties and unequal exact sums rounding alike; exact path/outcome and once-rounded cost | Round each addition; single state per node; cost-only tie; return NoPath on interruption |
 | PageRank: independent ordered synchronous recurrence plus stationary rational goldens | Reciprocal pair, dangling chain, zero weights, personalized isolates; every full step, residual/iterations/converged; scores within 1e-14 per-step, stationary within 1e-8 at tolerance 1e-10/100 steps; mass within 1e-12 | Lose dangling mass; update in place; normalize echo masses; publish partial step |
 | Label propagation: independent ascending in-place sweeps | Two pairs + isolate; tied labels, reverse ID insertion; exact per-sweep assignment, smallest member community ID | Synchronous sweep; random ties; loop votes; label rather than minimum member as community ID |
-| Betweenness: BFS path counts/dependencies and Python wrapping SplitMix64-v1 | A->B->C full sample B=0.5, diamond multipaths, Both, parallels, isolates, n<=2; exact selected/completed IDs and counts; scores within 1e-14 | Halve Both; seed+ID instead of XOR; count parallel arcs; emit interrupted source; wrong k scaling |
+| Betweenness: BFS path counts/dependencies and Python wrapping SplitMix64-v1 | A->B->C full sample B=0.5, diamond multipaths, Both, parallels, isolates, n<=2; exact selected/completed IDs and counts; scores within 1e-12 relative to max(1, \|expected\|), zero scores exactly | Halve Both; seed+ID instead of XOR; count parallel arcs; emit interrupted source; wrong k scaling |
 
 | Cross-surface area | Required cases / exact assertions |
 |---|---|
 | Wire schema | Every required/optional/null field, both selector forms, ID 0/u64 max, number vs decimal string, duplicate/unknown fields, unknown enum, malformed JSON, NaN/Inf, noncanonical strings, invalid oneofs; validate both OpenAPI and tool schemas |
+| MCP SDK compatibility | SDK-style callTool validation on success structuredContent and isError structuredContent; no outputSchema advertised; success envelope matches section 7, error wrapper remains accepted |
+| Body/size parity | Missing or non-JSON Content-Type still parses JSON; empty/whitespace body gives 422 invalid_json, never 415; compact re-serialized MCP arguments cap; decoded gRPC encoded_len cap gives INVALID_ARGUMENT/invalid_input; unknown fields count only toward service frame cap, whose overflow gives native OUT_OF_RANGE without VLite trailer |
 | Defaults/ceilings | Each field omitted/default/ceiling/ceiling+1; zero H/output valid, zero work/caps invalid; inactive-algorithm caps still validated; raw list counts before dedup; UTF-8 boundary bytes |
 | Execution limits | Exact needed edge/vertex/scratch budget and one below; extraction vs compute vs serialization stops; per-node degree including rejected/repeated edges; zero output; path withheld vs certified NoPath; first reason alone |
 | Iteration/sample limits | Cap just before convergence and exactly on convergence; stop within first and later full steps/sources; output-prefix cuts never change computation or source lists; estimated complete sample vs partial estimate |
-| Cancellation | Pre-set flag; before/after 64-operation boundary; edge-free preparation/sort/fill loops; final check; each transport disconnect; MCP notification; CLI Ctrl+C; fake monotonic clock, not sleeps |
+| Cancellation | Pre-set flag; before/after 64-operation boundary; edge-free preparation/sort/fill loops; final check; REST/gRPC disconnect/drop guard; MCP notification received during local/proxy call through reader thread and request-id flag map; fake monotonic clock, not sleeps |
 | Transport deadline | Engine deadline while live channel gives incomplete OK; earlier client gRPC deadline gives DEADLINE_EXCEEDED, cancellation gives CANCELLED; no response after expired channel, flag observed and read guard released |
 | Errors | Each section 5 row, existing display text, smallest bad edge ID; no new public Error variants, no leaking weight/key/property contents; old read errors unchanged |
 | Authorization | Missing/expired/revoked key, wrong lineage, read-only allowed, graph_write without graph_read denied, collection wildcard denied; out-of-binding nonexistent/existing graph indistinguishable; admin vs two tenant keys |
 | Tenant/lifecycle | Equal local graph/key/ID names in two tenants; physical names; suspended/deleted tenant; no cross-tenant seeds or existence leak; no vector/attachment reads; proxy must not fall back locally |
-| Consistency/non-mutation | TTL equality and node-hidden edges, one clock/view under attempted writes, no caller clock; database bytes/state unchanged; local read-only shared lock, --writable/--explain rejected |
+| Consistency/non-mutation | TTL equality and node-hidden edges, one clock/view under attempted writes, no caller clock; database bytes/state unchanged; CLI read-only shared lock and --writable/--explain rejected; MCP existing handle (read-only default or writable) never mutated; proxy algorithm explain rejected |
 | Parity/compatibility | Compare REST, gRPC normalized output, local/proxied MCP and CLI except elapsed_ms; status/trailer/wrapper/exit mapping; old clients unaffected; new RPCs on older servers UNIMPLEMENTED, no silent fallback |
 | Observation/docs | One request record per execution/proxy call, denial audit and reason counters, no sensitive log values; every new data-api key and relative link valid; no stale current-facing docs |
 
@@ -1128,9 +1161,9 @@ permission to edit them during the document slice.
 |---|---|---|
 | `gap5-s5-serving` after accepted S1-S4 | This document only | Evidence checked at required base; all five exact schemas/bounds/errors; decisions enumerated; four requested doc checks pass; links resolve |
 | `gap5-s5-serving-json` after contract decisions | `src/bin/tool_support/graph_json.rs`, new focused serializer/adapter tests | Strict request decoding; ID/float fidelity; canonical envelope and nulls; existing errors adapted without new Error variants; all five oracle schemas and mutations |
-| `gap5-s5-serving-rest` after JSON | `src/server/graph.rs`, `src/openapi_graph.json`, `src/openapi.json`, new REST algorithm tests, REST rows in `site/api.html` | Five POST read classifications; graph/tenant authorization before lookup; one guard/clock; cooperative cancellation; exact overlay/error/limit parity |
-| `gap5-s5-serving-grpc` after REST and independently accepted Gap 12 Graph service/auth/typed-read slices | `proto/vlite/v1/vlite.proto`, `src/server/grpc.rs`, new graph-algorithm RPC adapter/tests, gRPC rows in `site/api.html` | Append five methods to the 17-method Graph service; compile descriptors/generated clients; freeze tags/reservations; deadline/trailer parity; old/new compatibility |
-| `gap5-s5-serving-agents` after REST and JSON | `src/bin/tool_support/graph_mcp.rs`, `src/bin/tool_support/graph_proxy.rs`, cancellation dispatch in `src/bin/vlite-mcp.rs`, `src/bin/vlite-graph-cli.rs`, new MCP/CLI tests, MCP rows in `site/api.html` | Five tools and commands; explicit proxy routing (no ordinary-read fallback); local read-only behavior; proxy identity/cancellation/no fallback; byte caps, wrappers, exits, all five oracle results |
+| `gap5-s5-serving-rest` after JSON | `src/server/graph.rs`, `src/openapi_graph.json`, `src/openapi.json`, new REST algorithm tests, REST rows in `site/api.html` | Five POST read classifications; graph/tenant authorization before lookup; one guard/clock; spawn_blocking drop-guard cancellation flag; exact overlay/error/limit parity |
+| `gap5-s5-serving-grpc` after REST and independently accepted Gap 12 Graph service/auth/typed-read slices | `proto/vlite/v1/vlite.proto`, `src/server/grpc.rs`, new graph-algorithm RPC adapter/tests, gRPC rows in `site/api.html` | Append five methods, yielding 22; coordinator amends Gap 12 method count/parity table from 17 to 22; compile descriptors/generated clients; freeze tags/reservations; decoded encoded_len cap/existing INVALID_ARGUMENT mapping vs native OUT_OF_RANGE; spawn_blocking drop-guard flag; deadline/trailer parity; old/new compatibility |
+| `gap5-s5-serving-agents` after REST and JSON | `src/bin/tool_support/graph_mcp.rs`, `src/bin/tool_support/graph_proxy.rs`, reader thread/request-id flag map and cancellation dispatch in `src/bin/vlite-mcp.rs`, `src/bin/vlite-graph-cli.rs`, new MCP/CLI tests, MCP rows in `site/api.html` | Five tools and commands; explicit proxy routing, rejecting explain (no ordinary-read fallback); MCP reader-thread cancellation during calls; CLI no signal handler, deadline-bounded; MCP existing read-only/writable handle never mutated; proxy identity/no fallback; compact arguments byte cap; no outputSchema, SDK success/error validation; wrappers, exits, all five oracle results |
 | `gap5-s5-serving-parity` after all transports | New `tests/graph_algorithm_serving_oracle.py`, transport fixtures/tests, `docs/GRAPH.md`, matching existing README/site sections only when implementation is published | Python oracle + goldens + mutations; full cross-surface matrix; API-reference/doc checks; independent review; coordinator alone integrates |
 
 Serialize overlapping ownership of `site/api.html` and `src/bin/vlite-mcp.rs`.
