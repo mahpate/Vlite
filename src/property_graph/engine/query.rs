@@ -530,12 +530,14 @@ fn page(
     fingerprint: &Fingerprint,
     size: u64,
     bytes: Option<&[u8]>,
+    temporal: Option<(i64, u64)>,
 ) -> Result<Page, GraphError> {
     let scope = CursorScope {
         kind,
         graph: graph.id(),
         graph_sequence: graph.graph_sequence(),
         fingerprint: fingerprint.finish(),
+        temporal,
     };
     let after = match bytes {
         Some(bytes) => cursor::decode(bytes, &scope)?,
@@ -637,11 +639,20 @@ fn traversal_indexes<'a>(
     indexes
 }
 
+fn fingerprint_temporal(fingerprint: &mut Fingerprint, temporal: Option<(i64, u64)>) {
+    if let Some((as_of_ms, ttl_clock_ms)) = temporal {
+        fingerprint.u64(1);
+        fingerprint.u64(as_of_ms as u64);
+        fingerprint.u64(ttl_clock_ms);
+    }
+}
+
 fn prepare<'q>(
     graph: &Graph,
     query: &'q GraphQuery,
     limits: &GraphLimits,
     expired_at: Option<u64>,
+    temporal_clock: Option<(i64, u64)>,
 ) -> Result<(Plan<'q>, Vec<IndexChoice>), GraphError> {
     limits.validate()?;
     validate_projection(&query.projection)?;
@@ -686,12 +697,14 @@ fn prepare<'q>(
             fingerprint.conditions(conditions);
             fingerprint.u64(size);
             fingerprint_projection(&mut fingerprint, &query.projection);
+            fingerprint_temporal(&mut fingerprint, temporal_clock);
             let page = page(
                 graph,
                 CursorKind::FindNodes,
                 &fingerprint,
                 size,
                 cursor.as_deref(),
+                temporal_clock,
             )?;
             let probe = label
                 .as_deref()
@@ -733,12 +746,14 @@ fn prepare<'q>(
             fingerprint.conditions(edge_conditions);
             fingerprint.u64(size);
             fingerprint_projection(&mut fingerprint, &query.projection);
+            fingerprint_temporal(&mut fingerprint, temporal_clock);
             let page = page(
                 graph,
                 CursorKind::Neighbors,
                 &fingerprint,
                 size,
                 cursor.as_deref(),
+                temporal_clock,
             )?;
             let plan = Plan::Neighbors {
                 node: resolve(graph, node, expired_at)?,
@@ -859,8 +874,8 @@ pub fn execute(
     execute_with_selectors(graph, query, limits, context, None)
 }
 
-/// Private slice C1 executor; paged temporal continuation and the remaining
-/// operations are deliberately unavailable until slice C2.
+/// Private, gated temporal executor. Its selectors are resolved once by the
+/// adapter and are part of every page cursor's identity.
 #[allow(dead_code)] // The standalone engine harness has no temporal read adapter.
 pub(crate) fn execute_as_of(
     graph: &Graph,
@@ -874,28 +889,18 @@ pub(crate) fn execute_as_of(
             super::temporal::reason::CAPABILITY,
         ));
     }
-    match &query.op {
-        QueryOp::GetNode { .. } | QueryOp::GetEdge { .. } => {}
-        QueryOp::FindNodes { cursor: None, .. } | QueryOp::Neighbors { cursor: None, .. } => {}
-        _ => {
-            return Err(GraphError::InvalidQuery(
-                "temporal operation awaits slice C2",
-            ));
-        }
-    }
-    if query.explain {
-        return Err(GraphError::InvalidQuery("temporal explain awaits slice C2"));
-    }
-    let mut result = execute_with_selectors(
+    execute_with_selectors(
         graph,
         query,
         limits,
         context,
         Some((as_of_ms, context.now_ms)),
-    )?;
-    // Do not issue ordinary cursors that omit the fixed T/C identity.
-    result.cursor = None;
-    Ok(result)
+    )
+}
+
+#[allow(dead_code)] // The standalone graph harness has no temporal adapter.
+pub(crate) fn temporal_cursor_selectors(bytes: &[u8]) -> Result<(i64, u64), GraphError> {
+    cursor::temporal_selectors(bytes)
 }
 
 fn execute_with_selectors(
@@ -906,7 +911,7 @@ fn execute_with_selectors(
     temporal_clock: Option<(i64, u64)>,
 ) -> Result<QueryResult, GraphError> {
     let expired_at = graph.has_due(context.now_ms).then_some(context.now_ms);
-    let (plan, indexes) = prepare(graph, query, limits, expired_at)?;
+    let (plan, indexes) = prepare(graph, query, limits, expired_at, temporal_clock)?;
     if query.explain {
         let explanation = Explanation {
             query: normalized(query, &plan),

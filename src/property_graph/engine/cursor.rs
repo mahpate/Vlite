@@ -1,10 +1,12 @@
 //! REQ-027: opaque, versioned page cursors for `find_nodes` and `neighbors`.
 //!
-//! Layout (integers little-endian): `version u8 = 1`, `kind u8`
-//! (1 `find_nodes`, 2 `neighbors`), `graph_id u16`, `graph_sequence u64` at
-//! issue time, `fingerprint u64` of the normalized query, `position u8`
-//! (0 start, 1 node: `node_id u64`, 2 edge: `edge_id u64`, `type_len u8`,
-//! `type`), then an FNV-1a 64 checksum of all preceding bytes.
+//! Layout (integers little-endian): the shared header contains `version u8`
+//! (1 ordinary, 2 temporal), `kind u8` (1 `find_nodes`, 2 `neighbors`),
+//! `graph_id u16`, `graph_sequence u64` at issue time, `fingerprint u64` of
+//! the normalized query, and `position u8` (0 start, 1 node, 2 edge). V2
+//! stores resolved `as_of_ms i64` and `ttl_clock_ms u64` after that header.
+//! Position payload follows: node ID, or edge ID, type length and type. Both
+//! versions end with an FNV-1a 64 checksum of all preceding bytes.
 //!
 //! Decoding never panics and allocates at most one relationship type. It
 //! checks, in order: version and structure, checksum, operation, graph and
@@ -20,6 +22,7 @@ use super::model::{
 };
 
 const VERSION: u8 = 1;
+const TEMPORAL_VERSION: u8 = 2;
 const HEADER_BYTES: usize = 21;
 const CHECKSUM_BYTES: usize = 8;
 
@@ -161,29 +164,44 @@ pub(super) struct CursorScope {
     pub(super) graph: GraphId,
     pub(super) graph_sequence: u64,
     pub(super) fingerprint: u64,
+    pub(super) temporal: Option<(i64, u64)>,
 }
 
 pub(super) fn encode(scope: &CursorScope, position: &Position) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(HEADER_BYTES + 9 + 64 + CHECKSUM_BYTES);
-    bytes.push(VERSION);
+    let temporal_bytes = if scope.temporal.is_some() { 16 } else { 0 };
+    let mut bytes = Vec::with_capacity(HEADER_BYTES + temporal_bytes + 9 + 64 + CHECKSUM_BYTES);
+    bytes.push(if scope.temporal.is_some() {
+        TEMPORAL_VERSION
+    } else {
+        VERSION
+    });
     bytes.push(scope.kind as u8);
     bytes.extend_from_slice(&scope.graph.0.to_le_bytes());
     bytes.extend_from_slice(&scope.graph_sequence.to_le_bytes());
     bytes.extend_from_slice(&scope.fingerprint.to_le_bytes());
-    match position {
-        Position::Start => bytes.push(0),
+    let position_bytes = match position {
+        Position::Start => {
+            bytes.push(0);
+            Vec::new()
+        }
         Position::Node(node) => {
             bytes.push(1);
-            bytes.extend_from_slice(&node.0.to_le_bytes());
+            node.0.to_le_bytes().to_vec()
         }
         Position::Edge(kind, edge) => {
             bytes.push(2);
-            bytes.extend_from_slice(&edge.0.to_le_bytes());
             // Relationship types are at most 63 bytes.
-            bytes.push(kind.len() as u8);
-            bytes.extend_from_slice(kind.as_bytes());
+            let mut position = edge.0.to_le_bytes().to_vec();
+            position.push(kind.len() as u8);
+            position.extend_from_slice(kind.as_bytes());
+            position
         }
+    };
+    if let Some((as_of_ms, ttl_clock_ms)) = scope.temporal {
+        bytes.extend_from_slice(&as_of_ms.to_le_bytes());
+        bytes.extend_from_slice(&ttl_clock_ms.to_le_bytes());
     }
+    bytes.extend_from_slice(&position_bytes);
     let sum = checksum(&bytes);
     bytes.extend_from_slice(&sum.to_le_bytes());
     bytes
@@ -200,14 +218,30 @@ fn u64_at(bytes: &[u8], at: usize) -> Option<u64> {
     Some(u64::from_le_bytes(value))
 }
 
-/// Decodes `bytes` issued for `expected` and returns the resume position.
-pub(super) fn decode(bytes: &[u8], expected: &CursorScope) -> Result<Position, GraphError> {
+fn i64_at(bytes: &[u8], at: usize) -> Option<i64> {
+    let slice = bytes.get(at..at.checked_add(8)?)?;
+    let mut value = [0; 8];
+    value.copy_from_slice(slice);
+    Some(i64::from_le_bytes(value))
+}
+
+struct Components {
+    kind: u8,
+    graph: GraphId,
+    graph_sequence: u64,
+    fingerprint: u64,
+    temporal: Option<(i64, u64)>,
+    position: Position,
+}
+
+fn components(bytes: &[u8]) -> Result<Components, GraphError> {
     const MALFORMED: &str = "malformed cursor";
-    match bytes.first() {
+    let version = match bytes.first() {
         None => return Err(invalid("empty cursor")),
-        Some(&VERSION) => {}
+        Some(&VERSION) => VERSION,
+        Some(&TEMPORAL_VERSION) => TEMPORAL_VERSION,
         Some(_) => return Err(invalid("unsupported cursor version")),
-    }
+    };
     let (Some(&kind), Some(graph), Some(sequence), Some(fingerprint), Some(&tag)) = (
         bytes.get(1),
         bytes.get(2..4),
@@ -217,18 +251,27 @@ pub(super) fn decode(bytes: &[u8], expected: &CursorScope) -> Result<Position, G
     ) else {
         return Err(invalid(MALFORMED));
     };
+    let temporal = if version == TEMPORAL_VERSION {
+        Some((
+            i64_at(bytes, HEADER_BYTES).ok_or(invalid(MALFORMED))?,
+            u64_at(bytes, HEADER_BYTES + 8).ok_or(invalid(MALFORMED))?,
+        ))
+    } else {
+        None
+    };
+    let position_start = HEADER_BYTES + if temporal.is_some() { 16 } else { 0 };
     let (position, end) = match tag {
-        0 => (Position::Start, HEADER_BYTES),
+        0 => (Position::Start, position_start),
         1 => (
             Position::Node(NodeId(
-                u64_at(bytes, HEADER_BYTES).ok_or(invalid(MALFORMED))?,
+                u64_at(bytes, position_start).ok_or(invalid(MALFORMED))?,
             )),
-            HEADER_BYTES + 8,
+            position_start + 8,
         ),
         2 => {
-            let edge = u64_at(bytes, HEADER_BYTES).ok_or(invalid(MALFORMED))?;
-            let length = usize::from(*bytes.get(HEADER_BYTES + 8).ok_or(invalid(MALFORMED))?);
-            let start = HEADER_BYTES + 9;
+            let edge = u64_at(bytes, position_start).ok_or(invalid(MALFORMED))?;
+            let length = usize::from(*bytes.get(position_start + 8).ok_or(invalid(MALFORMED))?);
+            let start = position_start + 9;
             let name = bytes
                 .get(start..start + length)
                 .and_then(|name| std::str::from_utf8(name).ok())
@@ -247,24 +290,51 @@ pub(super) fn decode(bytes: &[u8], expected: &CursorScope) -> Result<Position, G
     if u64_at(bytes, end) != Some(checksum(&bytes[..end])) {
         return Err(invalid("corrupt cursor"));
     }
-    let position_kind = match position {
+    let graph = u16::from_le_bytes([graph[0], graph[1]]);
+    Ok(Components {
+        kind,
+        graph: GraphId(graph),
+        graph_sequence: sequence,
+        fingerprint,
+        temporal,
+        position,
+    })
+}
+
+/// Decodes `bytes` issued for `expected` and returns the resume position.
+pub(super) fn decode(bytes: &[u8], expected: &CursorScope) -> Result<Position, GraphError> {
+    let decoded = components(bytes)?;
+    let position_kind = match &decoded.position {
         Position::Start => None,
         Position::Node(_) => Some(CursorKind::FindNodes),
         Position::Edge(..) => Some(CursorKind::Neighbors),
     };
-    if kind != expected.kind as u8 || position_kind.is_some_and(|kind| kind != expected.kind) {
+    if decoded.kind != expected.kind as u8
+        || position_kind.is_some_and(|kind| kind != expected.kind)
+    {
         return Err(invalid("cursor belongs to another operation"));
     }
-    if graph != expected.graph.0.to_le_bytes() {
+    if decoded.graph != expected.graph {
         return Err(invalid("cursor belongs to another graph"));
     }
-    if fingerprint != expected.fingerprint {
+    if decoded.temporal != expected.temporal {
+        return Err(invalid("cursor belongs to another temporal view"));
+    }
+    if decoded.fingerprint != expected.fingerprint {
         return Err(invalid("cursor belongs to another query"));
     }
-    if sequence != expected.graph_sequence {
+    if decoded.graph_sequence != expected.graph_sequence {
         return Err(GraphError::CursorStale);
     }
-    Ok(position)
+    Ok(decoded.position)
+}
+
+/// Validates and returns the fixed selectors embedded in a temporal cursor.
+#[allow(dead_code)] // The standalone graph harness has no temporal adapter.
+pub(super) fn temporal_selectors(bytes: &[u8]) -> Result<(i64, u64), GraphError> {
+    components(bytes)?
+        .temporal
+        .ok_or(invalid("cursor is not temporal"))
 }
 
 #[cfg(test)]
@@ -277,6 +347,7 @@ mod tests {
             graph: GraphId(3),
             graph_sequence: 41,
             fingerprint: 0x0123_4567_89ab_cdef,
+            temporal: None,
         }
     }
 
@@ -401,7 +472,7 @@ mod tests {
             ));
         }
         assert_eq!(
-            decode(&[2], &expected),
+            decode(&[3], &expected),
             Err(invalid("unsupported cursor version"))
         );
         assert_eq!(decode(&[], &expected), Err(invalid("empty cursor")));
@@ -440,5 +511,43 @@ mod tests {
             Fingerprint::new(CursorKind::FindNodes).finish(),
             Fingerprint::new(CursorKind::Neighbors).finish()
         );
+    }
+
+    #[test]
+    fn temporal_cursors_bind_and_recover_both_selectors() {
+        let mut temporal_scope = scope(CursorKind::Neighbors);
+        temporal_scope.temporal = Some((-17, u64::MAX));
+        let cursor = encode(&temporal_scope, &Position::Edge("R".into(), EdgeId(9)));
+        assert_eq!(temporal_selectors(&cursor), Ok((-17, u64::MAX)));
+        assert_eq!(
+            decode(&cursor, &temporal_scope),
+            Ok(Position::Edge("R".into(), EdgeId(9)))
+        );
+        for length in 0..cursor.len() {
+            assert!(matches!(
+                decode(&cursor[..length], &temporal_scope),
+                Err(GraphError::InvalidCursor(_))
+            ));
+        }
+        for index in 0..cursor.len() {
+            let mut corrupted = cursor.clone();
+            corrupted[index] ^= 1;
+            assert!(matches!(
+                decode(&corrupted, &temporal_scope),
+                Err(GraphError::InvalidCursor(_))
+            ));
+        }
+
+        let mut different_as_of = temporal_scope;
+        different_as_of.temporal = Some((-16, u64::MAX));
+        assert_eq!(
+            decode(&cursor, &different_as_of),
+            Err(invalid("cursor belongs to another temporal view"))
+        );
+        let ordinary = scope(CursorKind::Neighbors);
+        assert!(matches!(
+            decode(&cursor, &ordinary),
+            Err(GraphError::InvalidCursor(_))
+        ));
     }
 }

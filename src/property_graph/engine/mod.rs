@@ -62,7 +62,7 @@ mod state;
 pub mod temporal;
 pub(super) mod temporal_visibility;
 #[allow(unused_imports)] // No adapter in the standalone harness.
-pub(crate) use query::execute_as_of;
+pub(crate) use query::{execute_as_of, temporal_cursor_selectors};
 #[cfg(test)]
 mod testkit;
 mod traverse;

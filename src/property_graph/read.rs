@@ -778,20 +778,57 @@ impl GraphRef<'_> {
             projection: projection(&options.projection),
             explain,
         };
-        let context = ExecutionContext {
-            view_sequence: self.view_sequence,
-            clock,
-            cancel: options.cancel,
-            now_ms: self.now(),
-        };
-        if self.db.flags & crate::format::FLAG_TEMPORAL != 0 {
+        let temporal = if self.db.flags & crate::format::FLAG_TEMPORAL != 0 {
             if !super::temporal::supported() {
                 return Err(crate::Error::UnsupportedFeature(
                     crate::format::FLAG_TEMPORAL,
                 ));
             }
-            let as_of = super::temporal::read::resolve_as_of(self.as_of_ms, context.now_ms)?;
-            engine::execute_as_of(self.graph, &query, &options.limits, &context, as_of)
+            let cursor = match &query.op {
+                QueryOp::FindNodes { cursor, .. } | QueryOp::Neighbors { cursor, .. } => {
+                    cursor.as_deref()
+                }
+                _ => None,
+            };
+            let (as_of_ms, ttl_clock_ms) = match cursor {
+                Some(cursor) => {
+                    let (as_of_ms, ttl_clock_ms) =
+                        engine::temporal_cursor_selectors(cursor).map_err(graph_error)?;
+                    if self.as_of_ms.is_some_and(|requested| requested != as_of_ms) {
+                        return Err(crate::Error::InvalidQuery(
+                            "temporal cursor conflicts with the as_of selector",
+                        ));
+                    }
+                    if self
+                        .now_ms
+                        .is_some_and(|requested| requested != ttl_clock_ms)
+                    {
+                        return Err(crate::Error::InvalidQuery(
+                            "temporal cursor conflicts with the TTL clock",
+                        ));
+                    }
+                    (as_of_ms, ttl_clock_ms)
+                }
+                None => {
+                    let ttl_clock_ms = self.now();
+                    (
+                        super::temporal::read::resolve_as_of(self.as_of_ms, ttl_clock_ms)?,
+                        ttl_clock_ms,
+                    )
+                }
+            };
+            Some((as_of_ms, ttl_clock_ms))
+        } else {
+            None
+        };
+        let context = ExecutionContext {
+            view_sequence: self.view_sequence,
+            clock,
+            cancel: options.cancel,
+            now_ms: temporal.map_or_else(|| self.now(), |(_, clock)| clock),
+        };
+        if let Some((as_of_ms, _)) = temporal {
+            engine::execute_as_of(self.graph, &query, &options.limits, &context, as_of_ms)
                 .map_err(graph_error)
         } else {
             engine::execute(self.graph, &query, &options.limits, &context).map_err(graph_error)

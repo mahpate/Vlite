@@ -1,8 +1,9 @@
 # Gap 4: time-aware graph
 
-Status: private/gated slices A and B are implemented, independently reviewed and
-integrated, but unreleased. Slice C reads, public activation, serving approval and
-production qualification remain outstanding.
+Status: private/gated slices A, B and C1/C2 reads are implemented; A/B and C1
+are independently reviewed and integrated, but all remain unreleased. Slice C
+public activation, serving approval and production qualification remain
+outstanding; release builds continue to reject flag 64.
 Scope: validity time for facts, not transaction-time history or bitemporal storage.
 Semantic rules below are the chosen direction; explicit Open items are prerequisites
 for their implementation slices. Audit citations refer to base `d530b4c`;
@@ -498,15 +499,13 @@ Known gaps and follow-ups (not yet tested unless stated):
 1. **Activation surface.** Activation is a gated, crate-private copy-out. The public `maintenance::enable_temporal` is proposed, not added, and production activation is not approved. Replicas of the source must be reseeded from the copy, which starts its own backup chain.
 2. **Edges created in the batch.** An edge created earlier in the same batch has no batch-start revision, so it cannot be corrected in that batch; create it with its full series.
 3. **Revisions after compaction.** Compaction and upgrade renumber temporal revisions under the existing new-lineage contract (see Persistence).
-4. **Ordinary reads.** Private/gated slice C1 now applies default T=C to get, find nodes and neighbors on temporal files. Traverse, shortest path and explain reject temporal reads pending C2. No production temporal reads are enabled.
+4. **Ordinary reads.** Private/gated slices C1 and C2 now apply one fixed T/C to get, find nodes, neighbors, traverse, shortest path, retrieve expansion, and typed/text query and explain reads on temporal files. Temporal edges and endpoints hidden at T/C are neither returned nor traversed. Retrieval's pivot search, embeddings, ranking, payloads, attachments, and full historical recall remain current/nonhistorical. No production temporal reads are enabled.
 5. **Feed gaps.** The feed does not report TTL deadlines or reclaims, as in Gap 3. No surface outside Rust reports temporal changes.
 6. **Measurement.** Memory per segment and production caps are not measured, and benchmarks are unchanged.
 
-Slice C still needs:
-
-- C2 traversal, shortest path, retrieve and query text, all inheriting fixed T/C
-- fixed-T/C cursors and budgets
-- the remaining C2 acceptance rows: complete Reads and Paging/budgets coverage
+Slice C2 implementation and acceptance coverage are complete for the private,
+unreleased gate. Release activation, serving approval, and production
+qualification remain outstanding; flag 64 stays closed in release builds.
 
 Slice C1 (unreleased, private/gated) implements:
 
@@ -521,17 +520,21 @@ Slice C1 (unreleased, private/gated) implements:
 - timeline inspection with explicit segment-index bounds up to 256; validity
   is ignored, but edge and endpoint TTLs are always enforced
 
-C1 deliberately rejects cursor inputs and does not issue continuation cursors.
-Partial first pages still report truncation and examined-entry counts. C2 must
-bind resolved T/C into cursors before continuation is admitted.
+C1 initially rejected cursor inputs. C2 now binds resolved T/C (including
+defaults) into temporal page cursors, resumes with those captured selectors,
+rejects conflicting overrides, and preserves graph-sequence stale detection.
+Invalid-at-T adjacency entries still consume the read budget.
 
-C1 acceptance tests exercise oracle boundary cases through actual edge reads,
-gaps and touching intervals, 256-segment reads, rejected changes without
-mutation, TTL before/equal/after expiry independently of T (including both
-endpoints and post-purge non-resurrection), bounded timelines, and equal
-immediate/reopened plain and encrypted reads. A deliberate inclusive-upper-bound
-mutation fails the oracle-backed read test; restoring half-open selection passes.
-These tests qualify C1 only, not the remaining C2 operations or release activation.
+C1 tests exercise oracle boundary cases through actual edge reads, gaps and
+touching intervals, 256-segment reads, rejected changes without mutation, TTL
+before/equal/after expiry independently of T (including both endpoints and
+post-purge non-resurrection), bounded timelines, and equal immediate/reopened
+plain and encrypted reads. C2 replays the retained read-cases oracle through
+real Rust neighbors, traverse, and shortest-path reads, and covers fixed-T/C
+continuation, stale graph detection, certified budget exhaustion, query-text
+explain selectors, retrieve expansion, and plain/encrypted reopen equality.
+These tests qualify the private C1/C2 read implementations only, not release
+activation, serving approval, or production behavior.
 
 Turning the gate on for release builds also waits for slice C.
 
