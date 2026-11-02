@@ -622,6 +622,39 @@ sidecars. Use the concrete enum `CollectionRecords::Resident(RecordMap)` or
 `Compact { base: Arc<CompactGeneration>, overlay: Arc<RecordOverlay> }`, not
 an open-ended storage trait.
 
+**Loader handoff and source seam (slice 0 prerequisite).** At the reviewed
+design head, `format::load_inner` reads frame bytes and calls
+`verified_frame` before dispatch (`src/format.rs:1835-2085,2654-2674`).
+`ImageCheck::block` validates the complete-record codec and returns decoded
+entries (`src/compact/mod.rs:1198-1257`); `BlockRun::apply` installs owned
+records in `LoadedCollection.records` (`src/format.rs:2519-2603`). The
+validated source extent is not retained by `Loaded`, and encrypted plaintext
+is transient. Therefore the loader must explicitly hand a validated source
+directory to generation construction.
+
+During that same `ImageCheck` pass, retain immutable descriptors for each
+supported record block: kind, owner/partition, on-disk extent, checksum and
+AEAD context. Do not revalidate the block with a second validator to build
+the directory. A generation may be published only after the complete image
+end block and every source block pass. Backing is either a read-only mapped
+file (non-WASM) or owned buffer using identical extents. Plain source bytes
+are verified once before publication and then immutable. Encrypted generations
+retain ciphertext extents and the file `Cipher` context only; each read
+authenticates/decrypts into an operation-local, evictable plaintext frame
+buffer, never a persistent plaintext sidecar.
+
+Account mapped bytes separately from decoded-vector scratch and the
+plaintext frame buffer; all three are bounded and included in internal
+accounting, without changing public snapshot counters. The generation pins
+its selected backing until its final handle drops. A mapped generation cannot
+be replaced/unlinked on Windows while a view still owns the map; `Chain::install`
+currently drains replaced segments and removes them immediately after durable
+publication (`src/directory.rs:730-775`). Until slice 5 implements deferred
+retirement, any future Database-installed generation must use owned-buffer
+backing. Directory-store/segment images remain refused with
+`UnsupportedFeature(FLAG_COMPACT)` for that integration. Standalone slice 0
+can exercise mapped parity without installing a Database generation.
+
 `Database`, readers and workers hold an `Arc` for their operation. A
 `ReadSnapshot` pins the generation and sequence-specific immutable overlay
 root, outlives `Database`, and preserves `get`, `get_at`, browse/search,
@@ -799,14 +832,18 @@ approaches silently; overlay is the engine integration target.
 
 ### I. Minimal read seam for P3c, P3d and precision API
 
-Freeze one crate-private concrete contract, not empty traits:
-`CollectionRecords::{len, contains_id, row_of, id_at, revision_at,
-expiry_at, vector_at, payload_at, metadata_at, ordered_visible}` plus a
-`ReadAccess` that carries one clock, pinned generation/overlay root and
-caller-owned bounded scratch. `vector_at` returns a borrowed source slice
-only while its `ReadAccess` is alive; otherwise it returns a bounded decoded
-view. `metadata_at` applies the normal typed decoder; public borrowed
-`Record` still uses the stable generation cell.
+Freeze one crate-private concrete contract, not empty traits. Slice 0 first
+provides a standalone point-read view over a pinned generation:
+`get/get_at` at an explicit clock, physical `len`, `first_id`, `contains_id`,
+and row ID/revision/expiry accessors. It has no scans, mutations, or Database
+integration. Slice 1 then introduces `CollectionRecords` with exhaustive
+`Resident` and `Compact` matches, `CollectionRecords::{len, contains_id,
+row_of, id_at, revision_at, expiry_at, vector_at, payload_at, metadata_at,
+ordered_visible}`, plus a `ReadAccess` that pins one clock, generation and
+overlay root with caller-owned bounded scratch. `vector_at` borrows source
+data only while `ReadAccess` lives or returns a bounded decoded view;
+`metadata_at` uses the normal typed decoder. Public borrowed `Record` remains
+generation-cell-backed.
 
 P3c needs ID/revision lookup, vectors, visibility, metadata predicates and
 generation identity to build/bind ANN codes and rerank without `RecordMap`.
@@ -832,7 +869,8 @@ not performance/size claims.
 
 | Order / sub-slice | Goal, exact files/functions, tests and acceptance | Size / dependency / parallelism |
 |---|---|---|
-| 1. Generation-backed point reads (**smallest safe first code slice**) | Add concrete generation and source-view types; install only after full image validation; implement `get/get_at`, `len`, `first_id`, snapshot pin and lazy record cells. Files: `src/compact/mod.rs` (`ImageCheck::block`), `src/format.rs` (`load_inner`, `BlockRun::apply`, `apply_supplement`), `src/directory.rs` (`open_segments`, `Chain::install`), `src/records.rs` (capture/get), `src/collection.rs` (`from_loaded`, accessors), `src/lib.rs` (`open_backed`, `get_at_in`). Tests: `compact_generation_authenticates_before_install`, `compact_generation_pins_image_until_snapshot_drop`, `compact_snapshot_get_matches_resident_after_database_drop`, `compact_get_decodes_each_record_once`. Accept exact legacy fields/revisions/expiry, both backing paths, encrypted/plain, unsupported-version pass-through, no change to default/release gate. | ~350-550 LOC plus tests. Foundation; no dependent slice parallel. |
+| 0. Pinned source and standalone point-read view | Retain a verified-block directory from the same `ImageCheck` pass, backed by an owned byte buffer or mapped file. Add generation-owned once-cells and a standalone view with point reads only. Files: new `src/compact/source.rs` and tests; `src/compact/mod.rs` (`ImageCheck::block`); `src/format.rs` (`load_inner`, `verified_frame`). Tests: `compact_generation_authenticates_before_publish`, `compact_generation_pins_source_until_last_handle_drop`, `compact_view_get_matches_resident_after_source_drop`, `compact_get_decodes_each_record_once`, encrypted failure and mapped/owned parity. Accept complete-image publication, exact fields/revisions/expiry, authentication-before-publish and byte-source parity. | ~500-800 LOC; no Database/Chain/collection wiring; foundation for 1. |
+| 1. Database point-read wiring and fail-closed dispatch (**smallest safe engine slice**) | Add exhaustive `CollectionRecords` matches for every consumer; wire `get/get_at`, `len`, `first_id`, snapshot pin and stable cells. Unsupported APIs are absent/refused, never stubbed. Files: `src/compact/mod.rs`, `src/format.rs`, `src/directory.rs`, `src/records.rs`, `src/collection.rs`, `src/lib.rs`; broad API refusals are required. Tests: pin snapshot after Database drop; release-equivalent gate-off refusal; method-level refusal matrix. Accept no partially installed state, all unsupported compact operations fail closed, resident paths unchanged. | ~350-550 LOC plus tests; depends on 0; serialize shared loader hooks with P4. |
 | 2. WAL overlay and committed mutation semantics | Replace direct collection mutation with base+overlay; replay put/batch/delete/metadata/TTL and retain tombstones. Files: `src/collection.rs` (`apply_metadata_committed`, `apply_committed`), `src/format.rs` (`LoadedCollection::{put,delete,update_metadata}`, frame replay/checks), `src/lib.rs` (`put_in`, `delete_in`, `apply`, `apply_batch`), `src/property_graph/frame.rs` (`GraphRecords` liveness), `src/property_graph/maintain.rs` (attachment validation). Tests: `compact_overlay_ordered_batch_matches_replay`, `compact_delete_tombstone_shadows_base`, `compact_expired_overlay_never_reveals_base`, `compact_metadata_update_preserves_vector_payload`, `compact_graph_attachment_tracks_effective_row`. Accept durability-before-apply, CAS/revision and graph atomic parity. | ~450-700 LOC; depends 1; serialize with 1 and 5. |
 | 3. Ordered public reads and exact/filter paths | Merge base/overlay IDs, unify TTL/filter/clock semantics and bounded vector access. Files: `src/records.rs` (`browse_at`, `search_with_stats_at`), `src/collection.rs` (browse/group/exact), `src/lib.rs` (`search_in_at`, `exact_search*`), `src/hybrid.rs`, `src/query_language.rs`. Tests: `compact_ordered_merge_matches_resident_with_gaps`, `compact_exact_scan_is_bit_identical_at_same_clock`, `compact_search_filters_after_overlay_resolution`, `compact_browse_cursor_skips_tombstones_and_expiry`. Accept exact order/stat semantics and bounded scratch. | ~300-500 LOC; depends 1-2; can split API/search tests after interface freeze, but shared `records.rs`/`lib.rs` edits serialize. |
 | 4. Record consumers and derived indexes | Port payload APIs, named vectors, summary indexes, HNSW/rebuild/sidecars, metrics and record serializers. Files: `src/vectors.rs`, `src/kv.rs`, `src/server.rs`, `src/server/grpc.rs`, `src/server/features.rs`, `src/server/webhooks.rs`, `src/bin/vlite-mcp.rs`, `src/rerank.rs`, `src/property_graph/retrieve.rs`, `src/server/observability.rs`, `src/server/tenants.rs`, `src/hnsw.rs`, `src/rebuild.rs`, `src/metadata_index.rs`, `src/text_index.rs`, `src/ann_snapshot.rs`, `src/disk_ann.rs`, `src/gpu.rs`, `src/quality.rs`, `src/planner.rs`, `src/compact/stats.rs`. Tests: `compact_kv_point_and_prefix_match_resident`, `compact_named_vector_visibility_matches_resident`, `compact_hnsw_rerank_uses_pinned_generation`, `compact_rebuild_snapshot_survives_checkpoint`, `compact_metadata_text_indexes_verify_overlay`, `compact_ann_snapshot_rejects_other_generation`, `compact_server_materializes_only_results`. Accept no stale index result and accurate cache/source accounting. | ~600-1,000 LOC; depends 1-3; file-disjoint vector/KV/server and index groups can run in parallel after seam freeze; `hnsw.rs`/`lib.rs` hooks serialize. |
