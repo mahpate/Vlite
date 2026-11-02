@@ -21,9 +21,10 @@ Coordinator verification at `0cfcaa4f`:
   SetNodeExpiry(Some) 24, reclaim 16. Reclaims are uncounted but byte-charged and
   only open the body or follow an expiry entry due at the batch clock.
 - Recomputed: outcome maximum 602 bytes; frame envelope 11,853,316 bytes. With
-  this schema a full content node is 4,336 bytes, HAS_CONTENT 139 and DERIVED_FROM
+  this schema a full content node is 4,337 bytes, HAS_CONTENT 139 and DERIVED_FROM
   212; summary metadata stays far below 65,536 (content and provenance are each
-  at most 4,096 bytes).
+  at most 4,096 bytes). Erratum: 4,337 corrects a misprinted 4,336; the section
+  7 formulas govern, and no bound changes.
 - The engine has no separate past-expiry refusal. A SetNodeExpiry already due at
   the captured commit clock makes the planner reclaim the summary inside the
   batch, so its later edges fail endpoint validation before append. Report that
