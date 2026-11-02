@@ -442,7 +442,7 @@ All 12 cases of `iterative-cases.json` (checked by `tests/graph_iteration_oracle
 Their synthetic interruptions map to the vertex budget that stops the same update; they are not engine budgets.
 The adapter also covers the echo, partial-result provenance, typed errors, the shared budget and non-mutation.
 Both suites were written first and failed to compile (61 errors, all missing S3 API) before the implementation passed.
-The surface review and API-reference entry are complete. CSR parity and serving remain separate gates.
+The surface review and API-reference entry are complete. CSR parity and serving remain separate gates; the private, unreleased [CSR adapter](gap5-csr-adapter.md) has an accepted design; the resident seam is its first slice and the CSR source stays gated on P4 accessors.
 
 ## Implemented S4 (reviewed, unreleased)
 
