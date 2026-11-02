@@ -237,3 +237,6 @@ mod tests;
 
 #[cfg(test)]
 pub(crate) mod payload;
+
+#[cfg(test)]
+mod column;

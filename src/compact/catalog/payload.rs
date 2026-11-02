@@ -44,6 +44,48 @@ pub(crate) struct Entry {
     pub record: Record,
 }
 
+pub(crate) struct Columns<'a> {
+    rows: vectors::Rows<'a>,
+    payloads: &'a [u8],
+    payload_offsets: &'a [u8],
+    metadata: &'a [u8],
+    metadata_offsets: &'a [u8],
+}
+
+impl Columns<'_> {
+    pub(crate) fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub(crate) fn id(&self, row: usize) -> u64 {
+        self.rows.id(row)
+    }
+
+    pub(crate) fn revision(&self, row: usize) -> u64 {
+        self.rows.revision(row)
+    }
+
+    pub(crate) fn expiry(&self, row: usize) -> Option<u64> {
+        self.rows.expiry(row)
+    }
+
+    pub(crate) fn payload(&self, row: usize) -> &[u8] {
+        &self.payloads[self.part(self.payload_offsets, row)]
+    }
+
+    pub(crate) fn metadata(&self, row: usize) -> &[u8] {
+        &self.metadata[self.part(self.metadata_offsets, row)]
+    }
+
+    pub(crate) fn vector(&self, row: usize) -> impl Iterator<Item = f32> + '_ {
+        self.rows.vector(row)
+    }
+
+    fn part(&self, offsets: &[u8], row: usize) -> std::ops::Range<usize> {
+        u32_at(offsets, 4 * row) as usize..u32_at(offsets, 4 * (row + 1)) as usize
+    }
+}
+
 /// Sections: descriptor (row count, reserved zero), dense v1 body,
 /// payload offsets, payload bytes, metadata offsets, metadata bytes.
 pub(crate) fn encode(
@@ -86,15 +128,15 @@ pub(crate) fn encode(
     Ok(bytes)
 }
 
-pub(crate) fn check(
+fn check_columns_inner<'a>(
     owner: u16,
     id: u64,
     count: u32,
-    body: &[u8],
+    body: &'a [u8],
     layout: vectors::Layout,
     floor: u64,
     offset: u64,
-) -> Result<Vec<Entry>> {
+) -> Result<Columns<'a>> {
     let invalid = || corrupt(offset, "invalid complete records block");
     if !(MIN_BODY..=MAX_BODY).contains(&body.len()) || id as u16 != KIND {
         return Err(invalid());
@@ -151,20 +193,53 @@ pub(crate) fn check(
     {
         return Err(invalid());
     }
-    let part = |offsets: &[u8], row: usize| {
-        u32_at(offsets, 4 * row) as usize..u32_at(offsets, 4 * (row + 1)) as usize
-    };
-    (0..rows.len())
+    Ok(Columns {
+        rows,
+        payloads,
+        payload_offsets: po,
+        metadata,
+        metadata_offsets: mo,
+    })
+}
+
+pub(crate) fn check_columns<'a>(
+    owner: u16,
+    id: u64,
+    count: u32,
+    body: &'a [u8],
+    layout: vectors::Layout,
+    floor: u64,
+    offset: u64,
+) -> Result<Columns<'a>> {
+    let columns = check_columns_inner(owner, id, count, body, layout, floor, offset)?;
+    let invalid = || corrupt(offset, "invalid complete records block");
+    for row in 0..columns.len() {
+        crate::metadata::decode(columns.metadata(row)).map_err(|_| invalid())?;
+    }
+    Ok(columns)
+}
+
+pub(crate) fn check(
+    owner: u16,
+    id: u64,
+    count: u32,
+    body: &[u8],
+    layout: vectors::Layout,
+    floor: u64,
+    offset: u64,
+) -> Result<Vec<Entry>> {
+    let columns = check_columns_inner(owner, id, count, body, layout, floor, offset)?;
+    (0..columns.len())
         .map(|row| {
-            let metadata =
-                crate::metadata::decode(&metadata[part(mo, row)]).map_err(|_| invalid())?;
+            let metadata = crate::metadata::decode(columns.metadata(row))
+                .map_err(|_| corrupt(offset, "invalid complete records block"))?;
             Ok(Entry {
-                id: rows.id(row),
-                revision: rows.revision(row),
-                expiry: rows.expiry(row),
+                id: columns.id(row),
+                revision: columns.revision(row),
+                expiry: columns.expiry(row),
                 record: Record {
-                    vector: rows.vector(row).collect(),
-                    payload: payloads[part(po, row)].to_vec(),
+                    vector: columns.vector(row).collect(),
+                    payload: columns.payload(row).to_vec(),
                     metadata,
                 },
             })
