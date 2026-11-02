@@ -273,6 +273,63 @@ and a linear tombstone walk; each fails a named test and passes restored.
 The CSR adapter, executor/loader wiring, generation publication, property
 indexes and activation remain outside this candidate.
 
+## Columnar-fields design addendum (private candidate)
+
+The `p4-columnar-properties` slice will introduce a separate test-only packed
+fields model, not replace the accepted decoded graph/view or change VLGCSR06.
+It is unreleased, gated off with `compact::graph`, and has no format registry,
+checkpoint/WAL/query or algorithm-source wiring. The accepted algorithm
+accessors, signatures, semantics and tests stay unchanged.
+
+Property tables use ascending row IDs and UTF-8 property-name dictionaries.
+Each name has a presence map (dense bits with rank anchors, or sparse ascending
+row ordinals, choosing the smaller counted payload). Values are stored only
+for present rows. Homogeneous columns may use ZigZag bit-packed i64 integers,
+bit-packed booleans, exact little-endian f64/GeoPoint bits, or string dictionaries
+with packed codes. An indexed raw typed-value byte block is the deterministic
+fallback for mixed types and whenever a typed encoding is not strictly smaller,
+including its offsets/dictionary metadata. Ties choose raw. No float arithmetic,
+normalization or numeric coercion is permitted. Empty/missing/string-empty are
+distinct; property output retains existing UTF-8 name order and value variants.
+
+Keys and attachments use indexed contiguous byte blocks, not one owned String
+or map per entity. Node/edge key namespaces stay separate; key identity/equality
+and graph-local record ownership retain existing admission. Segment properties
+use a separate flattened property table, with indexed per-edge ranges; timeline
+metadata stays with the unchanged source. Projection returns the existing owned
+`Properties` values (All/None/Fields), with allocations explicit at the projection
+boundary. It cannot replace `NodeRef`'s borrowed Properties without another owner
+decision; this slice deliberately does not attempt that replacement.
+
+Construction and decode eagerly validate the existing source/property/schema
+limits and canonical IDs, presence, widths, lengths, offsets, UTF-8, numeric bits
+and dictionary codes. All byte counts are bounded by the existing 64 MiB
+private-source cap with checked arithmetic; external counts must be bounded by
+remaining bytes before allocation. Canonical round trips and independent
+hand-authored bytes will test selection and corruption refusals. Construction
+may materialize decoded rows and encoding candidates; these are explicit
+O(input plus candidates) scratch, not hidden first-read work or peak-memory
+qualification. Reads use binary name/ID/ordinal searches and bounded rank work;
+they never rebuild a table or derived schema index. All-fields projection scans
+the name dictionary; selected-fields projection probes only requested names.
+
+Accounting reports retained element-size-times-length plus fixed headers and
+payload bytes, separately from projection/construction scratch. It is an
+informational fields subtotal, not the total graph disk/resident accounting,
+and does not qualify or relax 24 B/edge disk or 100 B/edge resident targets.
+The synthetic shape and every exclusion must accompany the count.
+
+Validation will compare typed values and f64/GeoPoint bits against independent
+goldens and the resident engine, including sparse/mixed properties, integer
+extrema/width boundaries, string dictionary/raw choices, keys/attachments,
+schema/index and temporal round trips. Real rebuilt mutations will target
+presence/rank, ZigZag/bit packing, float bits, encoding selection, string codes,
+projection selection, row/key/attachment indexing and corrupt-input checks.
+The previous matrix plus graph_storage, graph_recovery and graph_compat is
+required before independent acceptance. Native compact-index serving, schema
+enforcement, packed topology, production publication and activation remain
+separate work.
+
 ## Mutations, expiry and attachments
 
 Layer bounded mutable records, adjacency changes and tombstones over the base.
