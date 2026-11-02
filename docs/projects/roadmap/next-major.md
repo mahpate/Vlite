@@ -169,8 +169,15 @@ Local numbers below show direction only (see rules).
   Exact results retain full predicate and expiry checks. The per-collection
   64 MiB limit covers retained allocator-requested summary heap, not RSS,
   peak or whole-query memory; exhaustion falls back to an exact scan.
-  Persisted writer integration, ANN optimization, compression, serving and
-  F7/F8/S5 qualification remain outstanding.
+  The remaining explicit approximate filter-aware ANN slice has a private,
+  unreleased status draft, not implementation acceptance: candidate-assisted
+  eligibility, nonmatching traversal bridges and bounded ef widening retain
+  predicate/visibility checks and exact fallback, without exact top-k recall
+  guarantees. Released exact results and `auto` selection remain unchanged.
+  Thresholds and work/memory budgets are provisional and open for release
+  qualification. Persisted writer integration, ANN implementation acceptance,
+  compression, serving and F7/F8/S5 qualification remain outstanding; no
+  performance claim or change to DO-005 is made.
 - **Serving design:** [serving](serving-contract.md) has implementation
   boundaries and acceptance matrices, not shipped capabilities. Approximate
   search does not acquire an exact top-k guarantee. Serving schemas remain

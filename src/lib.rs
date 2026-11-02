@@ -3369,6 +3369,76 @@ impl Database {
         if k == 0 || state.records.is_empty() {
             return Ok(Vec::new());
         }
+
+        #[cfg(test)]
+        if let Some(limits) = hnsw::p5_approximation_limits()
+            && !conditions.is_empty()
+        {
+            let now_ms = current_time_ms();
+            let query_norm = if metric == DistanceMetric::Cosine {
+                vector_norm(query)
+            } else {
+                0.0
+            };
+            let posting_candidates = state
+                .metadata_indexes
+                .lookup(conditions, state.records.len())
+                .and_then(|lookup| lookup.ids);
+            let (candidates, used_postings, used_summaries) = if let Some(ids) = posting_candidates
+            {
+                stats.index_candidates = stats.index_candidates.saturating_add(ids.len() as u64);
+                (Some(ids), true, false)
+            } else {
+                let summaries = state.metadata_indexes.summary_candidates(
+                    conditions,
+                    &state.records,
+                    state.records.len(),
+                );
+                let used_summaries = summaries.is_some();
+                (summaries, false, used_summaries)
+            };
+            let index = state
+                .index
+                .as_ref()
+                .filter(|index| index.ready_for(config, metric, options.quantization));
+            let exact = |stats: &mut SearchStats| {
+                state.exact_search_candidates(
+                    query, query_norm, k, conditions, metric, None, now_ms, stats,
+                )
+            };
+            let Some(index) = index else {
+                let hits = exact(stats);
+                hnsw::p5_exact_fallback_report();
+                return Ok(hits);
+            };
+            let Some(candidates) = candidates else {
+                let hits = exact(stats);
+                hnsw::p5_exact_fallback_report();
+                return Ok(hits);
+            };
+            if let Some((hits, mut report)) = index.search_filtered_p5_with_expiry(
+                query,
+                k,
+                ef_search,
+                limits,
+                options,
+                &state.records,
+                &state.expiries,
+                now_ms,
+                conditions,
+                &candidates,
+                stats,
+            ) {
+                report.used_postings = used_postings;
+                report.used_summaries = used_summaries;
+                hnsw::set_p5_approximation_report(report);
+                return Ok(hits);
+            }
+            let hits = exact(stats);
+            hnsw::p5_exact_fallback_report();
+            return Ok(hits);
+        }
+
         let index = state
             .index
             .as_ref()
@@ -4886,5 +4956,689 @@ mod v4_tests {
         }
         #[cfg(target_arch = "wasm32")]
         check();
+    }
+}
+
+#[cfg(test)]
+mod p5_filter_approximation_tests {
+    use super::*;
+
+    fn eq_tag(value: &str) -> Vec<Condition> {
+        vec![Condition::Eq {
+            field: "tag".into(),
+            value: MetadataValue::String(value.into()),
+        }]
+    }
+
+    fn tag(value: &str) -> Metadata {
+        Metadata::from([("tag".into(), MetadataValue::String(value.into()))])
+    }
+
+    fn settings(kind: MetadataIndexKind) -> CollectionSettings {
+        CollectionSettings {
+            metadata_indexes: vec![MetadataIndexSpec {
+                field: "tag".into(),
+                kind,
+            }],
+            ..CollectionSettings::default()
+        }
+    }
+
+    fn rows(count: u64, rare_from: u64) -> Vec<Mutation> {
+        (0..count)
+            .map(|id| Mutation::PutWithMetadata {
+                id,
+                vector: vec![id as f32 + 1.0, (id % 17) as f32 + 1.0],
+                payload: Vec::new(),
+                metadata: tag(if id >= rare_from { "rare" } else { "common" }),
+            })
+            .collect()
+    }
+
+    fn assert_exact_subset(
+        db: &Database,
+        hits: &[SearchHit],
+        query: &[f32],
+        filter: &[Condition],
+        metric: DistanceMetric,
+        now_ms: u64,
+    ) {
+        let state = db.state(0);
+        let query_norm = validate_metric_query(query, metric).unwrap();
+        let mut eligible: Vec<SearchHit> = state
+            .records
+            .iter()
+            .filter(|(id, record)| {
+                !state
+                    .expiries
+                    .get(*id)
+                    .is_some_and(|expiry| *expiry <= now_ms)
+                    && metadata::matches(&record.metadata, filter)
+            })
+            .filter_map(|(&id, record)| {
+                metric_distance(
+                    &record.vector,
+                    query,
+                    metric,
+                    vector_norm(&record.vector),
+                    query_norm,
+                )
+                .map(|distance| SearchHit { id, distance })
+            })
+            .collect();
+        eligible.sort_by(|a, b| a.distance.total_cmp(&b.distance).then(a.id.cmp(&b.id)));
+        let expected: BTreeMap<u64, u64> = eligible
+            .into_iter()
+            .map(|hit| (hit.id, hit.distance.to_bits()))
+            .collect();
+        for hit in hits {
+            assert_eq!(expected.get(&hit.id), Some(&hit.distance.to_bits()));
+            let record = &state.records[&hit.id];
+            assert!(metadata::matches(&record.metadata, filter));
+            assert!(
+                !state
+                    .expiries
+                    .get(&hit.id)
+                    .is_some_and(|expiry| *expiry <= now_ms)
+            );
+        }
+        assert!(hits.windows(2).all(|pair| {
+            pair[0].distance.total_cmp(&pair[1].distance).is_lt()
+                || (pair[0].distance.to_bits() == pair[1].distance.to_bits()
+                    && pair[0].id < pair[1].id)
+        }));
+    }
+
+    fn assert_matches_oracle(
+        db: &Database,
+        hits: &[SearchHit],
+        query: &[f32],
+        filter: &[Condition],
+        metric: DistanceMetric,
+        now_ms: u64,
+        k: usize,
+    ) {
+        let state = db.state(0);
+        let query_norm = validate_metric_query(query, metric).unwrap();
+        let mut expected: Vec<SearchHit> = state
+            .records
+            .iter()
+            .filter(|(id, record)| {
+                !state
+                    .expiries
+                    .get(*id)
+                    .is_some_and(|expiry| *expiry <= now_ms)
+                    && metadata::matches(&record.metadata, filter)
+            })
+            .filter_map(|(&id, record)| {
+                metric_distance(
+                    &record.vector,
+                    query,
+                    metric,
+                    vector_norm(&record.vector),
+                    query_norm,
+                )
+                .map(|distance| SearchHit { id, distance })
+            })
+            .collect();
+        expected.sort_by(|a, b| a.distance.total_cmp(&b.distance).then(a.id.cmp(&b.id)));
+        expected.truncate(k);
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (hit.id, hit.distance.to_bits()))
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|hit| (hit.id, hit.distance.to_bits()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn gated_postings_path_is_deterministic_and_currently_visible() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut db = Database::create(directory.path().join("p5.vlite"), 2).unwrap();
+        db.set_collection_settings("default", settings(MetadataIndexKind::Eq))
+            .unwrap();
+        db.write_batch(&rows(1200, 1160)).unwrap();
+        let config = HnswConfig::default();
+        let now = current_time_ms();
+        db.build_hnsw_with_metric(config, DistanceMetric::SquaredL2)
+            .unwrap();
+        db.delete(5).unwrap();
+        db.put_with_metadata(5, &[2.0, 3.0], b"", &tag("rare"))
+            .unwrap();
+        db.update_metadata(6, &tag("rare")).unwrap();
+        db.put_with_expiry(7, &[8.0, 3.0], b"", &tag("rare"), Some(now + 60_000))
+            .unwrap();
+        db.put_with_expiry(8, &[9.0, 3.0], b"", &tag("rare"), Some(now - 1))
+            .unwrap();
+        db.put_with_expiry(9, &[4.0, 2.0], b"", &tag("rare"), Some(now + 60_000))
+            .unwrap();
+        db.put_with_metadata(1200, &[1.5, 2.0], b"", &tag("rare"))
+            .unwrap();
+        let filter = eq_tag("rare");
+        let query = [1.0, 2.0];
+        let _gate = hnsw::activate_p5_approximation();
+        let first = db
+            .search_approximate_ready_filtered_with_metric(
+                &query,
+                20,
+                20,
+                config,
+                &filter,
+                DistanceMetric::SquaredL2,
+            )
+            .unwrap();
+        let first_report = hnsw::take_p5_approximation_report().unwrap();
+        let second = db
+            .search_approximate_ready_filtered_with_metric(
+                &query,
+                20,
+                20,
+                config,
+                &filter,
+                DistanceMetric::SquaredL2,
+            )
+            .unwrap();
+        let second_report = hnsw::take_p5_approximation_report().unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first_report, second_report);
+        assert_eq!(first_report.eligible_count, 45);
+        assert!(first_report.used_postings);
+        assert!(!first_report.used_summaries);
+        assert!(first_report.ef <= first_report.ef_cap);
+        assert!(first_report.graph_nodes_visited <= first_report.work_budget as u64);
+        assert!(first_report.exact_completion_available);
+        assert!(first_report.ef > 20);
+        assert!(!first.iter().any(|hit| hit.id == 8));
+        assert!(first.iter().any(|hit| {
+            hit.id == 5 || hit.id == 6 || hit.id == 7 || hit.id == 9 || hit.id == 1200
+        }));
+        assert_exact_subset(
+            &db,
+            &first,
+            &query,
+            &filter,
+            DistanceMetric::SquaredL2,
+            current_time_ms(),
+        );
+        let broad = db
+            .search_approximate_ready_filtered_with_metric(
+                &query,
+                20,
+                20,
+                config,
+                &eq_tag("common"),
+                DistanceMetric::SquaredL2,
+            )
+            .unwrap();
+        let broad_report = hnsw::take_p5_approximation_report().unwrap();
+        assert_eq!(broad_report.eligible_count, 1155);
+        assert!(broad_report.ef < first_report.ef);
+        assert!(broad_report.work_budget < first_report.work_budget);
+        assert_exact_subset(
+            &db,
+            &broad,
+            &query,
+            &eq_tag("common"),
+            DistanceMetric::SquaredL2,
+            current_time_ms(),
+        );
+        let strict = db
+            .search_filtered_with_metric_at(
+                &query,
+                20,
+                &filter,
+                DistanceMetric::SquaredL2,
+                current_time_ms(),
+            )
+            .unwrap();
+        assert_matches_oracle(
+            &db,
+            &strict,
+            &query,
+            &filter,
+            DistanceMetric::SquaredL2,
+            current_time_ms(),
+            20,
+        );
+        assert_exact_subset(
+            &db,
+            &strict,
+            &query,
+            &filter,
+            DistanceMetric::SquaredL2,
+            current_time_ms(),
+        );
+        assert!(
+            db.search_approximate_ready_filtered_with_metric(
+                &query,
+                0,
+                20,
+                config,
+                &filter,
+                DistanceMetric::SquaredL2,
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert!(hnsw::take_p5_approximation_report().is_none());
+        let empty = db
+            .search_approximate_ready_filtered_with_metric(
+                &query,
+                10,
+                10,
+                config,
+                &eq_tag("absent"),
+                DistanceMetric::SquaredL2,
+            )
+            .unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(
+            hnsw::take_p5_approximation_report().unwrap().status,
+            hnsw::P5ApproxStatus::Empty
+        );
+        let over_k = db
+            .search_approximate_ready_filtered_with_metric(
+                &query,
+                100,
+                100,
+                config,
+                &filter,
+                DistanceMetric::SquaredL2,
+            )
+            .unwrap();
+        let over_k_report = hnsw::take_p5_approximation_report().unwrap();
+        assert_eq!(over_k_report.eligible_count, 45);
+        if over_k.len() < 45 {
+            assert!(over_k_report.exact_completion_available);
+        }
+        let strict_over_k = db
+            .search_filtered_with_metric_at(
+                &query,
+                100,
+                &filter,
+                DistanceMetric::SquaredL2,
+                current_time_ms(),
+            )
+            .unwrap();
+        assert_eq!(strict_over_k.len(), 45);
+        assert_matches_oracle(
+            &db,
+            &strict_over_k,
+            &query,
+            &filter,
+            DistanceMetric::SquaredL2,
+            current_time_ms(),
+            100,
+        );
+    }
+
+    #[test]
+    fn summary_candidates_and_exact_fallback_preserve_strict_results() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut db = Database::create(directory.path().join("summary.vlite"), 2).unwrap();
+        db.set_collection_settings("default", settings(MetadataIndexKind::Range))
+            .unwrap();
+        db.write_batch(&rows(1200, 1100)).unwrap();
+        let config = HnswConfig::default();
+        db.build_hnsw_with_metric(config, DistanceMetric::Cosine)
+            .unwrap();
+        let filter = eq_tag("rare");
+        let query = [1.0, 2.0];
+        let _gate = hnsw::activate_p5_approximation();
+        let summary_hits = db
+            .search_approximate_ready_filtered_with_metric(
+                &query,
+                20,
+                20,
+                config,
+                &filter,
+                DistanceMetric::Cosine,
+            )
+            .unwrap();
+        let summary_report = hnsw::take_p5_approximation_report().unwrap();
+        let summary_again = db
+            .search_approximate_ready_filtered_with_metric(
+                &query,
+                20,
+                20,
+                config,
+                &filter,
+                DistanceMetric::Cosine,
+            )
+            .unwrap();
+        let summary_again_report = hnsw::take_p5_approximation_report().unwrap();
+        assert_eq!(summary_hits, summary_again);
+        assert_eq!(summary_report, summary_again_report);
+        assert_eq!(summary_report.eligible_count, 100);
+        assert!(!summary_report.used_postings);
+        assert!(summary_report.used_summaries);
+        assert_exact_subset(
+            &db,
+            &summary_hits,
+            &query,
+            &filter,
+            DistanceMetric::Cosine,
+            current_time_ms(),
+        );
+
+        let mut missing = Database::create(directory.path().join("missing.vlite"), 2).unwrap();
+        missing.write_batch(&rows(20, 10)).unwrap();
+        let strict = missing
+            .search_filtered_with_metric_at(
+                &query,
+                20,
+                &filter,
+                DistanceMetric::SquaredL2,
+                current_time_ms(),
+            )
+            .unwrap();
+        let fallback = missing
+            .search_approximate_ready_filtered_with_metric(
+                &query,
+                20,
+                20,
+                config,
+                &filter,
+                DistanceMetric::SquaredL2,
+            )
+            .unwrap();
+        assert_eq!(fallback, strict);
+        assert_eq!(
+            hnsw::take_p5_approximation_report().unwrap().status,
+            hnsw::P5ApproxStatus::ExactFallback
+        );
+        assert_matches_oracle(
+            &missing,
+            &strict,
+            &query,
+            &filter,
+            DistanceMetric::SquaredL2,
+            current_time_ms(),
+            20,
+        );
+        missing
+            .build_hnsw_with_metric(config, DistanceMetric::SquaredL2)
+            .unwrap();
+        let stale_config = HnswConfig {
+            seed: config.seed + 1,
+            ..config
+        };
+        let stale_fallback = missing
+            .search_approximate_ready_filtered_with_metric(
+                &query,
+                20,
+                20,
+                stale_config,
+                &filter,
+                DistanceMetric::SquaredL2,
+            )
+            .unwrap();
+        assert_eq!(stale_fallback, strict);
+        assert_eq!(
+            hnsw::take_p5_approximation_report().unwrap().status,
+            hnsw::P5ApproxStatus::ExactFallback
+        );
+    }
+
+    #[test]
+    fn ef_cap_budget_exhaustion_and_disconnected_graph_are_reported() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut db = Database::create(directory.path().join("bounded.vlite"), 2).unwrap();
+        db.set_collection_settings("default", settings(MetadataIndexKind::Eq))
+            .unwrap();
+        db.write_batch(&rows(256, 0)).unwrap();
+        let config = HnswConfig::default();
+        db.build_hnsw_with_metric(config, DistanceMetric::SquaredL2)
+            .unwrap();
+        let filter = eq_tag("rare");
+        let _gate = hnsw::activate_p5_approximation_with_limits(4, 1);
+        let hits = db
+            .search_approximate_ready_filtered_with_metric(
+                &[1.0, 2.0],
+                10,
+                32,
+                config,
+                &filter,
+                DistanceMetric::SquaredL2,
+            )
+            .unwrap();
+        let report = hnsw::take_p5_approximation_report().unwrap();
+        assert!(report.ef <= 4);
+        assert!(report.graph_nodes_visited <= 1);
+        assert_eq!(report.status, hnsw::P5ApproxStatus::BudgetExhausted);
+        assert!(report.exact_completion_available);
+        let strict = db
+            .search_filtered_with_metric_at(
+                &[1.0, 2.0],
+                10,
+                &filter,
+                DistanceMetric::SquaredL2,
+                current_time_ms(),
+            )
+            .unwrap();
+        assert_eq!(strict.len(), 10);
+        assert_matches_oracle(
+            &db,
+            &strict,
+            &[1.0, 2.0],
+            &filter,
+            DistanceMetric::SquaredL2,
+            current_time_ms(),
+            10,
+        );
+        assert_exact_subset(
+            &db,
+            &hits,
+            &[1.0, 2.0],
+            &filter,
+            DistanceMetric::SquaredL2,
+            current_time_ms(),
+        );
+    }
+
+    #[test]
+    fn encrypted_reopen_replays_visibility_and_rebuilds_derived_candidates() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sealed.vlite");
+        let key = EncryptionKey::from_bytes([0x61; 32]);
+        let mut db = Database::create_with_options(
+            &path,
+            2,
+            CreateOptions {
+                encryption: Some(key.clone()),
+                ..CreateOptions::default()
+            },
+        )
+        .unwrap();
+        db.set_collection_settings("default", settings(MetadataIndexKind::Eq))
+            .unwrap();
+        db.write_batch(&rows(128, 120)).unwrap();
+        db.update_metadata(0, &tag("rare")).unwrap();
+        db.delete(1).unwrap();
+        db.put_with_expiry(2, &[3.0, 4.0], b"", &tag("rare"), Some(u64::MAX))
+            .unwrap();
+        db.close().unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let mut db = Database::open_encrypted(&path, &key).unwrap();
+        let config = HnswConfig::default();
+        db.build_hnsw_with_metric(config, DistanceMetric::SquaredL2)
+            .unwrap();
+        let filter = eq_tag("rare");
+        let query = [2.0, 3.0];
+        let _gate = hnsw::activate_p5_approximation();
+        let hits = db
+            .search_approximate_ready_filtered_with_metric(
+                &query,
+                20,
+                20,
+                config,
+                &filter,
+                DistanceMetric::SquaredL2,
+            )
+            .unwrap();
+        assert!(hnsw::take_p5_approximation_report().unwrap().used_postings);
+        assert_matches_oracle(
+            &db,
+            &db.search_filtered_with_metric_at(
+                &query,
+                20,
+                &filter,
+                DistanceMetric::SquaredL2,
+                current_time_ms(),
+            )
+            .unwrap(),
+            &query,
+            &filter,
+            DistanceMetric::SquaredL2,
+            current_time_ms(),
+            20,
+        );
+        assert_exact_subset(
+            &db,
+            &hits,
+            &query,
+            &filter,
+            DistanceMetric::SquaredL2,
+            current_time_ms(),
+        );
+        db.close().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn disconnected_graph_reports_shortfall_without_claiming_completion() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut db = Database::create(directory.path().join("disconnected.vlite"), 2).unwrap();
+        db.set_collection_settings("default", settings(MetadataIndexKind::Eq))
+            .unwrap();
+        db.write_batch(&rows(64, 0)).unwrap();
+        let config = HnswConfig::default();
+        db.build_hnsw_with_metric(config, DistanceMetric::SquaredL2)
+            .unwrap();
+        db.state_mut(0)
+            .index
+            .as_mut()
+            .unwrap()
+            .disconnect_base_for_test();
+        let filter = eq_tag("rare");
+        let _gate = hnsw::activate_p5_approximation();
+        let hits = db
+            .search_approximate_ready_filtered_with_metric(
+                &[1.0, 2.0],
+                10,
+                10,
+                config,
+                &filter,
+                DistanceMetric::SquaredL2,
+            )
+            .unwrap();
+        let report = hnsw::take_p5_approximation_report().unwrap();
+        assert!(hits.len() < 10);
+        assert_eq!(report.status, hnsw::P5ApproxStatus::Shortfall);
+        assert!(report.exact_completion_available);
+        let strict = db
+            .search_filtered_with_metric_at(
+                &[1.0, 2.0],
+                10,
+                &filter,
+                DistanceMetric::SquaredL2,
+                current_time_ms(),
+            )
+            .unwrap();
+        assert_eq!(strict.len(), 10);
+        assert_matches_oracle(
+            &db,
+            &strict,
+            &[1.0, 2.0],
+            &filter,
+            DistanceMetric::SquaredL2,
+            current_time_ms(),
+            10,
+        );
+    }
+
+    #[test]
+    fn quantized_explicit_clock_and_ties_keep_the_strict_order() {
+        let records: records::RecordMap = (0..32u64)
+            .map(|id| {
+                (
+                    id,
+                    Record {
+                        vector: if id < 8 {
+                            vec![1.0, 1.0]
+                        } else {
+                            vec![id as f32 + 1.0, 2.0]
+                        },
+                        payload: Vec::new(),
+                        metadata: tag(if id < 16 { "rare" } else { "common" }),
+                    },
+                )
+            })
+            .collect();
+        let index = hnsw::Index::build(
+            &records,
+            HnswConfig::default(),
+            DistanceMetric::SquaredL2,
+            AnnOptions {
+                quantization: Quantization::ScalarU8,
+                ..AnnOptions::default()
+            },
+        );
+        let filter = eq_tag("rare");
+        let candidate_ids: BTreeSet<u64> = (0..16).collect();
+        let expiries = BTreeMap::from([(1, 100), (2, 101)]);
+        let mut stats = SearchStats::default();
+        let (hits, report) = index
+            .search_filtered_p5_with_expiry(
+                &[1.0, 1.0],
+                16,
+                16,
+                (4096, 16_384),
+                AnnOptions {
+                    quantization: Quantization::ScalarU8,
+                    ..AnnOptions::default()
+                },
+                &records,
+                &expiries,
+                100,
+                &filter,
+                &candidate_ids,
+                &mut stats,
+            )
+            .unwrap();
+        assert_eq!(report.eligible_count, 15);
+        assert!(!hits.iter().any(|hit| hit.id == 1));
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (hit.distance.to_bits(), hit.id))
+                .collect::<Vec<_>>(),
+            {
+                let mut expected = Vec::new();
+                for (&id, record) in &records {
+                    if id != 1 && metadata::matches(&record.metadata, &filter) {
+                        expected.push((
+                            metric_distance(
+                                &record.vector,
+                                &[1.0, 1.0],
+                                DistanceMetric::SquaredL2,
+                                0.0,
+                                0.0,
+                            )
+                            .unwrap()
+                            .to_bits(),
+                            id,
+                        ));
+                    }
+                }
+                expected.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+                expected.truncate(16);
+                expected
+            }
+        );
+        assert_eq!(report.status, hnsw::P5ApproxStatus::Approximate);
     }
 }

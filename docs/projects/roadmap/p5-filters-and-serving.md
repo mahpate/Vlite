@@ -1,7 +1,9 @@
 # P5: filters and serving
 
 Status: implementation design; wire changes remain proposals. Delivery step 2 and the exact-planner half of
-step 3 are implemented in embedded Rust, unreleased and under review ([below](#implemented-step-2-unreleased-under-review)).
+step 3 are implemented in embedded Rust, independently reviewed and integrated, but unreleased
+([below](#implemented-step-2-unreleased-reviewed)). The remaining explicit approximate filter-aware ANN
+half of step 3 is a private, unreleased slice; its status draft below does not assert implementation acceptance.
 Audit citations refer to base `d530b4c`; integration decisions follow the shared contract.
 Open means not verified here or not yet decided.
 
@@ -281,6 +283,31 @@ The block size, half-records cap, churn threshold and retained-heap budget are a
 Release notes must call out lower `records_scanned`. A well-formed block with a matching digest but wrong
 summary is not detectable without recomputation; persisted blocks, partition-to-block binding and
 multi-generation layouts wait for writer wiring.
+
+### Step 3 ANN status (private draft, unreleased)
+
+The remaining slice targets only explicit approximate filtered search: use safe candidate supersets
+to assist eligibility, retain nonmatching graph nodes as traversal bridges, and widen ef deterministically
+within bounded work. Recheck full predicates, latest-version visibility and expiry at one query clock;
+include buffered replacements and new matches, and suppress shadowed versions. Exact reranking of
+selected candidates does not establish exact top-k recall.
+
+Released behavior remains unchanged: no public activation, API, wire, format or persistence change;
+exact search retains exhaustive correctness and distance-then-ID ordering, and existing `auto` selection
+is not retuned by this slice. Missing or stale ANN, unsafe or unavailable acceleration, and exhausted
+budgets must retain a correctness-preserving exact fallback with diagnostics, not silently truncate
+candidates or label approximate work exact. Review and integration must verify these boundaries before
+this draft can be marked implemented.
+
+Eligible-count/selectivity thresholds, ef widening and caps, traversal-work limits, and candidate,
+bitmap and scratch-memory budgets are provisional implementation choices, open for release qualification;
+the test-only defaults are a 4,096 eligible-candidate ef cap and at most 16,384 graph traversal
+distance evaluations per query. Base ef is widened by the inverse eligible-bitmap density, capped by
+the current eligible count and ef cap; the traversal budget is four times the density-adjusted width,
+with a base-ef floor and bounded by the work cap. This budget excludes candidate-set construction,
+exact reranking and buffered row scoring. Predicate validity is not a universal recall floor.
+F7/F8/S5 remain unqualified, with no benchmark or performance claim and no change to DO-005 timing
+or its quiet gate.
 
 ## Verification and release plan
 

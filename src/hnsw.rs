@@ -138,6 +138,115 @@ pub const MAX_EF_SEARCH: usize = 100_000;
 pub const MAX_HNSW_BUFFER_IDS: usize = 256;
 pub const MAX_HNSW_BUFFER_VECTOR_BYTES: usize = 8 * 1024 * 1024;
 
+#[cfg(test)]
+const P5_FILTER_EF_CAP: usize = 4096;
+#[cfg(test)]
+const P5_FILTER_WORK_CAP: usize = 16_384;
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum P5ApproxStatus {
+    Approximate,
+    Shortfall,
+    BudgetExhausted,
+    Empty,
+    ExactFallback,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct P5ApproxReport {
+    pub status: P5ApproxStatus,
+    pub eligible_count: usize,
+    pub graph_eligible_count: usize,
+    pub used_postings: bool,
+    pub used_summaries: bool,
+    pub ef: usize,
+    pub ef_cap: usize,
+    pub work_budget: usize,
+    pub graph_nodes_visited: u64,
+    pub exact_completion_available: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct P5ApproxLimits {
+    ef_cap: usize,
+    work_budget: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static P5_APPROX_LIMITS: Cell<Option<P5ApproxLimits>> = const { Cell::new(None) };
+    static P5_APPROX_REPORT: Cell<Option<P5ApproxReport>> = const { Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct P5ApproxGuard(Option<P5ApproxLimits>);
+
+#[cfg(test)]
+impl Drop for P5ApproxGuard {
+    fn drop(&mut self) {
+        P5_APPROX_LIMITS.set(self.0);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn activate_p5_approximation() -> P5ApproxGuard {
+    let limits = P5ApproxLimits {
+        ef_cap: P5_FILTER_EF_CAP,
+        work_budget: P5_FILTER_WORK_CAP,
+    };
+    P5ApproxGuard(P5_APPROX_LIMITS.replace(Some(limits)))
+}
+
+#[cfg(test)]
+pub(crate) fn activate_p5_approximation_with_limits(
+    ef_cap: usize,
+    work_budget: usize,
+) -> P5ApproxGuard {
+    let limits = P5ApproxLimits {
+        ef_cap: ef_cap.max(1),
+        work_budget,
+    };
+    P5ApproxGuard(P5_APPROX_LIMITS.replace(Some(limits)))
+}
+
+#[cfg(test)]
+pub(crate) fn p5_approximation_limits() -> Option<(usize, usize)> {
+    P5_APPROX_LIMITS.with(|limits| {
+        limits
+            .get()
+            .map(|limits| (limits.ef_cap, limits.work_budget))
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn set_p5_approximation_report(report: P5ApproxReport) {
+    P5_APPROX_REPORT.set(Some(report));
+}
+
+#[cfg(test)]
+pub(crate) fn take_p5_approximation_report() -> Option<P5ApproxReport> {
+    P5_APPROX_REPORT.take()
+}
+
+#[cfg(test)]
+pub(crate) fn p5_exact_fallback_report() {
+    set_p5_approximation_report(P5ApproxReport {
+        status: P5ApproxStatus::ExactFallback,
+        eligible_count: 0,
+        graph_eligible_count: 0,
+        used_postings: false,
+        used_summaries: false,
+        ef: 0,
+        ef_cap: P5_FILTER_EF_CAP,
+        work_budget: 0,
+        graph_nodes_visited: 0,
+        exact_completion_available: false,
+    });
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Candidate {
     distance: f64,
@@ -294,6 +403,13 @@ impl Index {
 
     pub fn graph_nodes(&self) -> usize {
         self.nodes.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn disconnect_base_for_test(&mut self) {
+        for node in &mut self.nodes {
+            node.links[0].clear();
+        }
     }
 
     fn quantized(&self) -> bool {
@@ -904,6 +1020,232 @@ impl Index {
         self.merge_buffered(
             hits, query, query_norm, k, records, expiries, now_ms, conditions, stats,
         )
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn search_filtered_p5_with_expiry(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef: usize,
+        limits: (usize, usize),
+        rerank: AnnOptions,
+        records: &crate::records::RecordMap,
+        expiries: &BTreeMap<u64, u64>,
+        now_ms: u64,
+        conditions: &[Condition],
+        candidate_ids: &std::collections::BTreeSet<u64>,
+        stats: &mut SearchStats,
+    ) -> Option<(Vec<SearchHit>, P5ApproxReport)> {
+        let query_norm = self.query_norm(query);
+        let mut bitmap = vec![0u64; self.nodes.len().div_ceil(64)];
+        let mut eligible_count = 0usize;
+        let mut graph_eligible_count = 0usize;
+        for &id in candidate_ids {
+            let Some(record) = records.get(&id) else {
+                continue;
+            };
+            if expiries.get(&id).is_some_and(|expiry| *expiry <= now_ms)
+                || !metadata::matches(&record.metadata, conditions)
+                || (self.metric == DistanceMetric::Cosine && vector_norm(&record.vector) == 0.0)
+            {
+                continue;
+            }
+            eligible_count += 1;
+            if self.buffered.contains_key(&id) {
+                continue;
+            }
+            let Ok(node) = self.nodes.binary_search_by_key(&id, |node| node.id) else {
+                return None;
+            };
+            bitmap[node / 64] |= 1u64 << (node % 64);
+            graph_eligible_count += 1;
+        }
+
+        let (ef_cap, work_cap) = limits;
+        let report_base = |status, ef, work_budget, graph_nodes_visited| P5ApproxReport {
+            status,
+            eligible_count,
+            graph_eligible_count,
+            used_postings: false,
+            used_summaries: false,
+            ef,
+            ef_cap,
+            work_budget,
+            graph_nodes_visited,
+            exact_completion_available: matches!(
+                status,
+                P5ApproxStatus::Approximate
+                    | P5ApproxStatus::Shortfall
+                    | P5ApproxStatus::BudgetExhausted
+            ),
+        };
+        if eligible_count == 0 {
+            return Some((Vec::new(), report_base(P5ApproxStatus::Empty, 0, 0, 0)));
+        }
+        let base_ef = ef.max(k).min(ef_cap).max(1);
+        let widened_ef = if graph_eligible_count == 0 || self.nodes.is_empty() {
+            0
+        } else {
+            base_ef
+                .saturating_mul(self.nodes.len())
+                .div_ceil(graph_eligible_count)
+                .min(eligible_count)
+                .min(ef_cap)
+                .max(1)
+        };
+        let computed_budget = if widened_ef == 0 {
+            0
+        } else {
+            widened_ef
+                .saturating_mul(self.nodes.len())
+                .div_ceil(graph_eligible_count)
+                .saturating_mul(4)
+                .max(base_ef)
+                .min(P5_FILTER_WORK_CAP)
+        };
+        let work_budget = computed_budget.min(work_cap);
+        let visits = Cell::new(0);
+        let mut exhausted = false;
+        let mut eligible = Vec::new();
+        if let Some(entry) = self.entry
+            && widened_ef > 0
+        {
+            let (best, used, descent_exhausted) =
+                self.descend_p5_bounded(query, query_norm, entry, records, &visits, work_budget);
+            exhausted = descent_exhausted;
+            if !exhausted {
+                let (found, _, layer_exhausted) = self.filtered_layer_p5_bounded(
+                    query,
+                    query_norm,
+                    best,
+                    widened_ef,
+                    &bitmap,
+                    records,
+                    &visits,
+                    work_budget.saturating_sub(used),
+                );
+                eligible = found;
+                exhausted = layer_exhausted;
+            } else if bitmap[entry / 64] & (1u64 << (entry % 64)) != 0 {
+                eligible.push(best);
+            }
+        }
+        let width = rerank.rerank_width(k, widened_ef.max(k));
+        let mut hits =
+            self.finish_graph_hits(eligible, query, query_norm, k, width, records, stats);
+        hits = self.merge_buffered(
+            hits, query, query_norm, k, records, expiries, now_ms, conditions, stats,
+        );
+        self.count_visits(stats, &visits);
+        let needed = k.min(eligible_count);
+        let status = if exhausted {
+            P5ApproxStatus::BudgetExhausted
+        } else if hits.len() < needed {
+            P5ApproxStatus::Shortfall
+        } else {
+            P5ApproxStatus::Approximate
+        };
+        Some((
+            hits,
+            report_base(status, widened_ef, work_budget, visits.get()),
+        ))
+    }
+
+    #[cfg(test)]
+    fn descend_p5_bounded(
+        &self,
+        query: &[f32],
+        query_norm: f64,
+        entry: usize,
+        records: &crate::records::RecordMap,
+        visits: &Cell<u64>,
+        budget: usize,
+    ) -> (Candidate, usize, bool) {
+        if budget == 0 {
+            return (
+                Candidate {
+                    distance: f64::INFINITY,
+                    node: entry,
+                },
+                0,
+                true,
+            );
+        }
+        let mut used = 1usize;
+        let mut best = self.candidate(entry, query, query_norm, records, visits);
+        for layer in (1..self.nodes[entry].links.len()).rev() {
+            loop {
+                let previous = best;
+                for &neighbor in &self.nodes[previous.node].links[layer] {
+                    if used >= budget {
+                        return (best, used, true);
+                    }
+                    let candidate = self.candidate(neighbor, query, query_norm, records, visits);
+                    used += 1;
+                    if candidate < best {
+                        best = candidate;
+                    }
+                }
+                if best == previous {
+                    break;
+                }
+            }
+        }
+        (best, used, false)
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    fn filtered_layer_p5_bounded(
+        &self,
+        query: &[f32],
+        query_norm: f64,
+        entry: Candidate,
+        ef: usize,
+        eligible_bitmap: &[u64],
+        records: &crate::records::RecordMap,
+        visits: &Cell<u64>,
+        budget: usize,
+    ) -> (Vec<Candidate>, usize, bool) {
+        let is_eligible = |node: usize| eligible_bitmap[node / 64] & (1u64 << (node % 64)) != 0;
+        let mut visited = Visited::new(self.nodes.len(), entry.node);
+        let mut candidates = BinaryHeap::from([Reverse(entry)]);
+        let mut results = BinaryHeap::with_capacity(ef.min(self.nodes.len()).saturating_add(1));
+        let mut used = 0usize;
+        if is_eligible(entry.node) {
+            results.push(entry);
+        }
+        while let Some(Reverse(current)) = candidates.pop() {
+            if results.len() >= ef && current > *results.peek().expect("nonempty results") {
+                break;
+            }
+            for &node in &self.nodes[current.node].links[0] {
+                if !visited.insert(node) {
+                    continue;
+                }
+                if used >= budget {
+                    let mut results = results.into_vec();
+                    results.sort_unstable();
+                    return (results, used, true);
+                }
+                let candidate = self.candidate(node, query, query_norm, records, visits);
+                used += 1;
+                if results.len() < ef || candidate < *results.peek().expect("nonempty results") {
+                    candidates.push(Reverse(candidate));
+                    if is_eligible(node) {
+                        results.push(candidate);
+                        if results.len() > ef {
+                            results.pop();
+                        }
+                    }
+                }
+            }
+        }
+        let mut results = results.into_vec();
+        results.sort_unstable();
+        (results, used, false)
     }
 
     /// Converts traversal-ordered eligible candidates into graph hits.
