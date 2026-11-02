@@ -154,8 +154,10 @@ Local numbers below show direction only (see rules).
   (pinned generation plus overlay, five ordered code slices) is independently
   reviewed; its six owner decisions were approved individually on 2026-11-02,
   without activation or release authorization. Slice 0 (a test-gated pinned
-  source with standalone point reads) is independently accepted and
-  integrated; slices 1–5 and all `Database` wiring remain.
+  source with standalone point reads) and slice 1a (exhaustive private
+  resident/compact record dispatch with fail-closed refusals) are
+  independently accepted and integrated. Slice 1b loader installation,
+  slices 2–5 and all normal `Database` wiring remain.
   The [P3c compact-ANN design](p3c-compact-ann.md) (source-bound flat
   topology, persisted scalar-u8 codes, background rebuild and a separately
   opted-in rotated one-bit candidate) is independently reviewed; its nine

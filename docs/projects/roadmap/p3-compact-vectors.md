@@ -899,8 +899,8 @@ must refuse Database installation at open rather than invent a result.
 Crate-private resident iteration is fallibly dispatched; it is not a
 public API classification.
 
-**Slice 1a status: private, unreleased candidate pending independent
-acceptance.** The concrete enum replaces collection and snapshot record
+**Slice 1a status: independently accepted and integrated (private,
+unreleased).** The concrete enum replaces collection and snapshot record
 storage; resident-only scan/mutation access returns the existing typed
 refusal. Loader installation is deliberately unchanged: even with private
 test activations, normal Database open still installs resident collections.
@@ -919,6 +919,20 @@ owned-source installation only after full image validation, late-image
 failure atomicity and snapshot/accounting acceptance through real open.
 Mapped installation and directory/segment images remain out of scope;
 no activation, wire/format change, new public error or API is introduced.
+
+Independent acceptance reran the full matrix on the assembled candidate:
+strict workspace Clippy, 789 default and 835 all-feature library tests,
+14 storage/graph/rerank integration targets, native and WASM no-default
+checks, and API/documentation checks. Five coordinator mutations each
+compiled, failed their named regression (exit 101) and passed again after
+restoration: removing the rerank target guard, checking only the default
+collection for whole-handle graph recall, reading compact points at clock 0,
+ignoring the compact evidence refusal and replacing the evidence-target
+guard with a whole-handle guard. After integration, formatting, strict
+Clippy and the compact and memory suites passed in both feature modes.
+Full graph recall still refuses a mixed resident/compact `Database`; only
+evidence acquisition checks its single selected target. Slice 1b remains
+open.
 
 P3c needs ID/revision lookup, vectors, visibility, metadata predicates and
 generation identity to build/bind ANN codes and rerank without `RecordMap`.
@@ -945,7 +959,7 @@ not performance/size claims.
 | Order / sub-slice | Goal, exact files/functions, tests and acceptance | Size / dependency / parallelism |
 |---|---|---|
 | 0. Pinned source and standalone point-read view | **Implemented, independently accepted and integrated (private, test-gated).** Retain a verified-block directory from the same `ImageCheck` pass in an owned frame buffer; mapped backing is exercised by parity tests only. Add generation-owned once-cells and a standalone view with point reads only. Files: `src/compact/source.rs` and tests; `src/compact/mod.rs` (`ImageCheck::block`); `src/format.rs` (`load_inner`, `verified_frame`). Tests: `compact_generation_authenticates_before_publish`, `compact_generation_pins_source_until_last_handle_drop`, `compact_view_get_matches_resident_after_source_drop`, `compact_get_decodes_each_record_once`, encrypted wrong-key/tag rejection, mapped/owned parity and gate-off refusal. Accept complete-image publication, exact fields/revisions/expiry, authentication-before-publish and byte-source parity. | ~500-800 LOC; no Database/Chain/collection wiring; foundation for 1. |
-| 1a. Enum and fail-closed dispatch | **Private candidate pending independent acceptance.** Migrate record consumers through exhaustive resident/compact dispatch and typed resident-only access; guard mutation acquisition and unsupported operations before early returns or side effects. Dispatch fixtures exercise point parity, refusals and source/snapshot retention; normal loader installation remains resident. No loader, directory or P4 codec hunk. | Bounded split from 1; depends on accepted 0; stop for independent acceptance before 1b. |
+| 1a. Enum and fail-closed dispatch | **Implemented, independently accepted and integrated (private, unreleased).** Migrate record consumers through exhaustive resident/compact dispatch and typed resident-only access; guard mutation acquisition and unsupported operations before early returns or side effects. Dispatch fixtures exercise point parity, refusals and source/snapshot retention; normal loader installation remains resident. No loader, directory or P4 codec hunk. | Bounded split from 1; depends on accepted 0; stop for independent acceptance before 1b. |
 | 1b. Database installation and point-read acceptance | Install only an owned verified generation after full-image validation; refuse directory/segment images. Complete the exhaustive A-D public-method oracle/refusal matrix, late-image failure atomicity, explicit expiry, encrypted reads and snapshot/accounting lifetime through real Database open. | Depends on independently accepted 1a; serialize minimal loader hooks with P4. No partial installation, mapped installation or unsupported success. |
 | 2. WAL overlay and committed mutation semantics | Replace direct collection mutation with base+overlay; replay put/batch/delete/metadata/TTL and retain tombstones. Files: `src/collection.rs` (`apply_metadata_committed`, `apply_committed`), `src/format.rs` (`LoadedCollection::{put,delete,update_metadata}`, frame replay/checks), `src/lib.rs` (`put_in`, `delete_in`, `apply`, `apply_batch`), `src/property_graph/frame.rs` (`GraphRecords` liveness), `src/property_graph/maintain.rs` (attachment validation). Tests: `compact_overlay_ordered_batch_matches_replay`, `compact_delete_tombstone_shadows_base`, `compact_expired_overlay_never_reveals_base`, `compact_metadata_update_preserves_vector_payload`, `compact_graph_attachment_tracks_effective_row`. Accept durability-before-apply, CAS/revision and graph atomic parity. | ~450-700 LOC; depends 1; serialize with 1 and 5. |
 | 3. Ordered public reads and exact/filter paths | Merge base/overlay IDs, unify TTL/filter/clock semantics and bounded vector access. Files: `src/records.rs` (`browse_at`, `search_with_stats_at`), `src/collection.rs` (browse/group/exact), `src/lib.rs` (`search_in_at`, `exact_search*`), `src/hybrid.rs`, `src/query_language.rs`. Tests: `compact_ordered_merge_matches_resident_with_gaps`, `compact_exact_scan_is_bit_identical_at_same_clock`, `compact_search_filters_after_overlay_resolution`, `compact_browse_cursor_skips_tombstones_and_expiry`. Accept exact order/stat semantics and bounded scratch. | ~300-500 LOC; depends 1-2; can split API/search tests after interface freeze, but shared `records.rs`/`lib.rs` edits serialize. |
