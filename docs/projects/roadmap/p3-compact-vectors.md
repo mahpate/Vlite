@@ -41,6 +41,9 @@ retention accounting, authenticated I/O propagation, and end-to-end search,
 graph-attachment, maintenance and reopen wiring. This accessor makes no
 performance, size, or release-qualification claim.
 
+The engine-integration design below has been independently reviewed; its owner
+decisions (K.1-K.6) are pending and it is not accepted or implemented.
+
 ## Precision decision
 
 Keep **float32 as the default stored precision**. Add an explicit per-collection
@@ -521,3 +524,366 @@ kernel, not the remaining lifecycle or performance goals.
 
 Remaining P3d work: conversion, backup, restore and key-rotation coverage,
 DO-005 measurements and major-release acceptance.
+
+## P3b engine integration design
+
+**Design proposal — independently reviewed; owner decisions K.1-K.6 pending;
+not accepted, implemented,
+qualified or activated.** All source line references below are from setup
+head `91d0e38c62dea7997b072d02118aedc45ca63e1b`. The accepted column code
+and record codec are test-only at this head; release readers still refuse
+compact source blocks. This design changes no code, test, fixture, format,
+writer, API, policy, gate, default or release criterion.
+
+### A. Scope and non-goals
+
+Integrate verified primary columns with existing collection reads, writes,
+snapshots, indexes and lifecycle while preserving public `Record`, exact
+search and durability semantics. Float32 remains the default; float16,
+temporal copy-out and compact writers remain explicit opt-ins, each behind
+its own qualification. The [compact-storage contract](compact-storage-contract.md)
+owns framing, registry, verification and accessor invariants; this proposal
+narrows the engine seam.
+
+No production writer, public activation, new persisted format, WAL operation,
+sidecar, dependency, public error/API, policy change, or performance/size
+claim is part of this design. If implementation requires one, raise a
+separately reviewed sub-slice rather than widening this scope.
+
+### B. Call-site inventory at setup head
+
+The counts are **consumer families per file**, not raw token matches: a
+cohesive set of accesses in one subsystem is one family. Test modules and
+test-only compact writer/checker paths are excluded from production counts.
+The inventory includes `RecordMap` storage/reads/writes and record-field
+consumers; `ReadSnapshot` callers are listed with `records.rs`. Each row gives
+the replacement seam and owning code sub-slice.
+
+| Production families | File and verified locations | Current pattern | Replacement / sub-slice |
+|---:|---|---|---|
+| 4 | `src/records.rs:17-120,164-261,554-635` | `RecordMap` storage/iteration; snapshot clones map and expiries; borrowed point `get`; ordered browse clones records; exact snapshot scan. | `CollectionRecords` read view, snapshot-pinned generation and lazy stable `Record` cell; S1, S3. |
+| 6 | `src/collection.rs:142-282,320-328,335-425` | `Collection.records` construction, derived metadata/text index rebuild, committed put/delete/metadata mutation, count/first-ID, browse/group, exact search. | Concrete base-plus-overlay source and effective ordered cursor; S1-S3. |
+| 6 | `src/format.rs:348-421,466-472,690-855,2017-2082,2577-2602,2716-2826` | `LoadedCollection.records` is built by legacy ops and op-14 `BlockRun`; the complete-record supplement is test-only; count/default-map access; frame encoders and `check_frame_writes` read record fields. | Verified compact base installation and replay into overlay; stream checkpoint from effective rows; S1, S2, S5. |
+| 10 | `src/lib.rs:894-918,1585-1589,1851-1870,1972-2218,2414-2450,2514-2557,2670,2874-2952,3226-3604,3698-3884` | Database counts/get/CAS and write apply; checkpoint hooks; ANN build/rebuild; ready and lazy approximate paths; exact search and parallel row scan; summary/filter candidates. | `CollectionRecords` and operation-scoped `ReadAccess`; writes update overlay only after commit; S1-S4, S5. |
+| 6 | `src/hnsw.rs:27-32,314-329,472-520,595-620,949-1051,1162-1391,1495-1712` | `RecordMap` adapters, build/encode vectors and norms, mutation buffer, metadata filter, rerank and snapshot validation. | Vector/metadata accessors pinned to one generation; keep derived indexes source-bound; S4. |
+| 3 | `src/rebuild.rs:205-232,325-408` | Background rebuild captures a `RecordMap`, tracks previous records, snapshots counts and builds from that state. | Rebuild job pins a `ReadView`/generation plus sequence-bounded overlay snapshot; S4. |
+| 2 | `src/metadata_index.rs:319-343,417-430` | Index rebuild and summary candidate verification read `Record.metadata`. | Rebuild and reverify from effective metadata rows; never let summaries decide visibility; S4. |
+| 2 | `src/text_index.rs:96-110` | Text index rebuild and tracking read `Record.metadata`. | Feed effective metadata on replay/commit and verify current visibility; S4. |
+| 2 | `src/ann_snapshot.rs:255-369` | Persisted ANN digest/save and load validation iterate primary vectors and counts. | Bind snapshots to source generation identity; compact-backed save/load must stream through the accessor; S4. |
+| 2 | `src/disk_ann.rs:163-274` | Sidecar build and source validation use live `RecordMap` vectors. | Use the accessor only for supported plaintext sidecars; encrypted sidecars remain unavailable; S4. |
+| 4 | `src/vectors.rs:383-439,584-591,650-768` | Named-vector search checks primary-record existence; re-embedding iterates records and clones them; vector mutations require a live base record. | Separate primary existence/metadata lookup from named-vector storage; preserve owned output only where API requires it; S3. |
+| 2 | `src/kv.rs:294-377` | Point probes and ordered namespace/prefix listing decode key/value data from `Record.payload`. | Point/ordered payload slice from effective row; overlay-first and TTL semantics; S3. |
+| 1 | `src/hybrid.rs:159-197` | Text leg checks expiry and `Record.metadata` after postings. | Effective metadata/expiry predicate on the same captured generation and clock; S3. |
+| 1 | `src/query_language.rs:410-521` | Candidate depth, metadata rechecks, ordering, facets and groups read `Record.metadata`. | Query-local metadata accessor; order/facet/group over visible rows; S3. |
+| 1 | `src/gpu.rs:105-125` | GPU query preparation gathers IDs and primary vector slices. | Bounded accessor-fed staging buffer; preserve its existing size checks and CPU fallback; S4. |
+| 1 | `src/compact/stats.rs:570-580` | Summary/statistics build iterates records and metadata. | Effective metadata scan; keep conservative candidate-superset semantics; S4. |
+| 1 | `src/planner.rs:95,172` | Planner uses live count and metadata-index summaries over records. | Effective count plus source-aware summary view; S4. |
+| 2 | `src/quality.rs:127-192` | Reports record count/resident-vector bytes and scans primary vectors. | Report source/cached/overlay accounting distinctly; use bounded access for vector scan; S4. |
+| 3 | `src/server.rs:1838-1928,2029-2031,2815-2891,3238,3549-3564` | REST point/list responses copy `Record` fields; quota and index metrics count records and estimate resident vectors. | Existing public response materializes only returned records; count from view, distinguish resident cache from source rows; S3-S4. |
+| 2 | `src/server/grpc.rs:614-616,919-921,2215-2228` | gRPC output copies vector, payload and metadata; batch/list route reads records. | Same `Record` compatibility materializer and effective scan as REST; S3. |
+| 1 | `src/bin/vlite-mcp.rs:424-433` | MCP responses serialize payload, metadata and optionally the vector. | Materialize only response records through the shared read view; S3. |
+| 1 | `src/server/features.rs:71` | Feature endpoint serializes committed put records. | Preserve response shape through the same materializer; S3. |
+| 1 | `src/server/webhooks.rs:373` | Webhook event serializes committed put records. | Preserve event shape through the same materializer; S3. |
+| 1 | `src/rerank.rs:140-141` | Search rerank output clones record vectors and payloads. | Keep owned output where required; resolve through one pinned read view; S3. |
+| 1 | `src/server/observability.rs:59-67,292` | Live counts and resident-vector estimate. | Source-aware counts and honest cache accounting, without changing telemetry policy; S4. |
+| 1 | `src/server/tenants.rs:64` | Tenant quota reads collection record count. | Effective physical-row count with overlay deltas; S2-S3. |
+| 4 | `src/maintenance.rs:313-343,600-701,856-925,1014-1041,1394-1411` | Precision validation/rounding, conversion/backup/compaction walks records and fields, record-copy/rewrite paths. | Stream merge of base and overlay into staged destination; keep old source/generation until publication; S5. |
+| 1 | `src/changes.rs:103-375` | Feed replays committed frames into owned `ChangeKind::Put { record }`; it does not read `RecordMap`. | Validate compact checkpoint blocks through shared image check; emit only post-floor WAL changes, never restatement rows; S5. |
+| 1 | `src/property_graph/frame.rs:95-192` | `GraphRecords` validates dimensions/vector mutations and whether attached records remain live without expiry. | Reuse the collection view's `exists`/`lasting` checks at replay time; keep graph mutations atomic; S2, S5. |
+| 1 | `src/property_graph/maintain.rs:75-105` | Graph copy-out validates attachments against `LoadedCollection.records` and expiries. | Effective row membership during graph rewrite; S5. |
+| 1 | `src/property_graph/retrieve.rs:394,470-480` | Graph retrieval filters on metadata and projects metadata/payload excerpts. | Use the captured effective row and materialize only requested evidence; S3. |
+| 0 | `src/directory.rs:165-210,399-450,730-775,855-925` | No `RecordMap` consumer; owns mapped sealed files, directory-chain installation and deletion. | Generation must pin the sealed image mapping and defer unlink after publication; S1, S5. |
+| 0 | `src/compact/mod.rs:612-1264` | Production `ImageCheck` verifies frame/block runs and graph liveness; P3 complete-record writer/apply helpers are test-only. | Add concrete P3 block check/apply branch only after contract review; do not make test gates production; S1, S5. |
+| 0 | `src/compact/catalog/{column.rs,payload.rs}` | Candidate accessor/checker and full-record decoder are test-only; no release engine caller. | Preserve verified-slice API and error provenance; no code change in this design. |
+| 1 | `src/metadata.rs:136-200` | Existing typed metadata encoder/decoder used by public `Record` and compact payload columns. | Decode only the selected row when materializing a `Record`; malformed bytes remain `Corrupt`; S1. |
+
+`src/property_graph/frame.rs` already has a focused `GraphRecords` contract;
+reuse its semantics, not a new codec/plugin trait. The concrete engine seam
+proposed below is an enum-backed `CollectionRecords`. `src/directory.rs` and
+`src/compact/mod.rs` are listed despite zero direct map families because they
+own image lifetime and checked block dispatch. The source scan found no record
+`next_id` allocator: record IDs are supplied by callers; `collection_high`
+allocates collection IDs (field `src/format.rs:436`, `src/lib.rs:920`;
+allocation `src/lib.rs:2630-2647`),
+and KV slots are derived by `slot_base` (`src/kv.rs:407`). Row ordinals must
+never substitute for those public IDs.
+
+### C. Generation ownership, lifetime and accounting
+
+Use one immutable `Arc<CompactGeneration>` per checked image: it owns image
+identity, pinned read-only map or file/offset backing, checked block directory,
+collection layouts, row counts and stable lazy-record cells. The owned-buffer
+fallback reads the same offsets. Encrypted reads authenticate before exposing
+an operation-local, evictable plaintext block; never persist plaintext
+sidecars. Use the concrete enum `CollectionRecords::Resident(RecordMap)` or
+`Compact { base: Arc<CompactGeneration>, overlay: Arc<RecordOverlay> }`, not
+an open-ended storage trait.
+
+`Database`, readers and workers hold an `Arc` for their operation. A
+`ReadSnapshot` pins the generation and sequence-specific immutable overlay
+root, outlives `Database`, and preserves `get`, `get_at`, browse/search,
+sequence, lineage and captured-clock behavior. Rebuild/checkpoint pins its
+source and overlay/high-water snapshot. Publish a new generation only after
+staged validation and durable manifest/file publication; maintenance retains
+the old source through copy-out. Final `Arc` drop releases mappings and allows
+unlink. Because `directory::Chain::install` currently drains old segments
+immediately (`src/directory.rs:743-775`), deferred generation retirement must
+be implemented explicitly.
+
+Preserve `MAX_READ_SNAPSHOTS=8`, `MAX_READ_SNAPSHOT_RECORDS=100_000` and
+`MAX_READ_SNAPSHOT_BYTES=128 MiB` with current rejection semantics
+(`src/records.rs:123-126,201-225`); clones share the existing per-capture
+logical-body lease. Account materialized `Record` cells, overlays and
+float16-to-f32 expansion; report mapped and logical decoded bytes separately.
+Existing `get` can materialize all rows, so full-record residency is possible
+and is not S2 qualification. Capture/materialization failure, overflow,
+fallback failure, stale generation or budget exhaustion must fail explicitly,
+never appear as a missing row.
+
+### D. Cache identity and invalidation
+
+The exact logical cache key is `(generation identity, collection_id,
+block_kind, partition)`. A generation-scoped cache may omit no part of this
+identity; any cross-generation cache needs a live opaque generation token.
+The shape guard checks element count, dimensions and precision, not byte
+identity. Same-shaped collisions are prevented by the key, not the guard;
+I/O/authentication errors can never become misses.
+
+A stored block holds at most `BLOCK_COMPONENTS` = 1 MiB of components (a byte
+budget; `Layout::max_rows`, `src/compact/vectors.rs`), so a decoded `f32` block
+is at most 2 MiB (float16 expands twofold). Budget 4 MiB per operation for
+vector scratch (room for two of the largest decoded blocks),
+with deterministic logical-counter LRU. The separate plaintext frame buffer
+is bounded by the contract's per-block body cap (section 4). Initially exact
+compact scans are serial in one operation context, avoiding shared mutable
+caches and per-worker budget multiplication. Stable borrowed-record cells
+cannot be evicted while borrowed. Count scratch, cells and plaintext in
+memory accounting; these are bounds, not performance claims.
+
+Reopen always creates a fresh generation/cache. Checkpoint swaps generations
+only after publication; old readers retain the prior one. Compact, precision
+conversion and graph rewrite get new source identities and never reuse old
+entries. Byte-identical backup may preserve lineage, but an opened restore
+gets a new in-process identity. Persist no cache state; test generation
+isolation and deterministic eviction across reopen, checkpoint, conversion,
+backup/restore, re-encryption and concurrent snapshots.
+
+### E. Overlay precedence, deletes, expiry and IDs
+
+Store committed mutations in a persistent/COW ordered overlay keyed by public
+record ID: `Put { revision, expiry, Record }` or `Delete { revision }`.
+The WAL remains the durability authority; update the overlay only after the
+existing commit succeeds. `RecordMap` resident mode remains unchanged.
+
+| Base row | Newer overlay | Effective row |
+|---|---|---|
+| absent | absent | absent |
+| present | absent | base, including its revision and expiry |
+| present or absent | put | overlay record, revision and expiry |
+| present | delete tombstone | absent; never fall through to base |
+| present | expired put | absent at that query clock; never reveal older base |
+| expired base | absent | absent at that query clock |
+
+Choose the greatest committed revision, hide it when `expiry <= now_ms`, then
+evaluate filters. `Collection.len` and `ReadSnapshot.len` remain physical
+counts including TTL-hidden rows. Ordered scans merge ascending IDs, consume
+equal base/overlay IDs, emit only the overlay winner and skip tombstones or
+expired winners. Results, tie order, cursors and clocks must match resident
+behavior at the same sequence/time.
+
+Preserve batch order, duplicate-ID, conditional-revision and metadata-only
+write semantics. Metadata-only updates materialize the winning base row and
+install a complete overlay record. Expiry never reallocates IDs; record IDs
+remain caller-supplied, graph attachments keep those IDs, collection
+high-water is separate/non-reused, and KV slot reuse rules stay unchanged.
+
+### F. Lazy `Record` compatibility
+
+Keep public `Record { vector: Vec<f32>, payload: Vec<u8>, metadata: Metadata }`
+and signatures unchanged (`src/lib.rs:773-777`). An immutable per-row
+generation-owned `OnceLock<Record>` supplies stable borrows for existing
+`get/get_at` APIs. On first access resolve the winning row, use bounded
+vector access, copy canonical f32 values and payload, decode only that row's
+typed metadata, then publish the complete record. Float16 yields the f32
+represented by stored half bits; revision/expiry remain columns.
+
+Borrowed references stay tied to a generation/snapshot, never evictable
+scratch. Overlay records are immutable in the captured COW root; `BrowseHit`
+and REST/gRPC outputs remain owned. Exact/ANN scoring uses borrowed vectors
+without constructing every `Record`; predicates decode only required
+metadata, and scoring-only paths do not decode payload/metadata.
+
+Cells live until their generation drops because `&Record` cannot carry a
+cache guard. Account actual vector, payload and metadata allocations,
+including half expansion. Apply existing count/body limits before snapshot
+capture; snapshots share cells but keep independent leases. Full materialized
+residency is possible; `get` is not promised constant-cost or compact. No new
+public cap or eviction behavior (owner decision 2).
+
+### G. Authenticated I/O and errors
+
+For every block: **read bounded bytes → verify footer/checksum →
+authenticate/decrypt → validate envelope and codec → pin generation →
+expose columns or touch caches**. `format::verified_frame` checks footer and
+checksum, then maps failed AEAD auth to `Corrupt`
+(`src/format.rs:2654-2674`). Header key checks precede replay
+(`src/lib.rs:1441-1448`; `src/crypto.rs:300-375`). Owned reads use the same
+path. Never hide I/O, authentication or codec errors as cache misses.
+
+| Condition | Result |
+|---|---|
+| Unknown critical source kind/version, including nested dense version | Pass through `UnsupportedFeature(FLAG_COMPACT)` unchanged. |
+| Invalid envelope, offsets, row count/range, checksum, or authenticated-frame tag | Existing `Corrupt { offset, reason }`; never repair an immutable image. |
+| Missing key / wrong key / key supplied to plaintext file | Existing `EncryptionKeyRequired` / `EncryptionKeyMismatch` / `NotEncrypted`. |
+| File read, seek, map fallback, or publication I/O failure | Existing `Io`/publication error; do not convert to absence or miss. |
+
+`BlockDirectory` ranges are ordered/nonoverlapping with `rows > 0`,
+`first_id <= last_id`, and overflow-safe `rows <= last_id-first_id+1`.
+Before serving, reconcile block totals, collection ownership, revisions,
+expiry rows and directory count. Effective physical count includes overlay
+puts minus replaced/tombstoned base IDs; expired rows remain counted.
+Snapshots capture counts/revisions/expiry atomically. Mismatches are
+`Corrupt`, never short scans or silent truncation.
+
+### H. Writes, checkpoint and lifecycle
+
+**First write choices.** (1) Convert the whole compact collection to resident
+`RecordMap` before mutation. This reuses current paths and is a straightforward
+correctness bridge, but decodes every vector/payload and defeats bounded
+source residency; it also needs a snapshot-safe source retirement rule.
+(2) Keep the immutable generation and write committed full-record puts and
+tombstones to an ordered WAL overlay. **Recommend (2)**: it matches the
+accepted P3 source/overlay model, lets existing durability ordering remain
+authoritative, and preserves old generations for readers. Do not mix the
+approaches silently; overlay is the engine integration target.
+
+- **Commit/WAL/recovery:** validate and encode through existing put/batch
+  paths; append/sync as today; only then update overlay, revisions, expiry,
+  vectors, metadata/text indexes and graph attachments. Replay starts from
+  authenticated compact base, then applies later WAL operations in order.
+  Recovery must reproduce the same overlay and high-water state.
+- **Checkpoint:** pin `(base generation, overlay root, sequence, clock)`;
+  build a complete staged image by ordered merge; validate it fully, sync and
+  atomically publish; install a new generation and clear only the included
+  overlay. Concurrent writes after the captured sequence remain in the new
+  WAL. Snapshots/rebuilds can retain the old image.
+- **Compact/precision conversion:** stream from the effective view; apply
+  TTL at the caller's explicit/current clock; preserve current lineage,
+  revision, import, named/sparse-vector and graph rules exactly. Float16
+  conversion is explicitly selected and must validate all retained source
+  rows before creating output. A failed stage leaves source and destination
+  state unchanged.
+- **Backup/restore/re-encryption:** byte-copy backup keeps encrypted frames
+  and capabilities; validate source first. Restore and `restore_to` preserve
+  their current lineage/cursor policy; re-encryption authenticates before
+  rewriting and uses the selected destination key. No plaintext sidecar or
+  spill. Each path gets source-generation lifetime tests.
+- **Graph enable/strip:** copy-outs must enumerate effective base+overlay
+  IDs and apply attachment/no-expiry checks at the same replay/maintenance
+  points. Keep `GraphRecords` semantics, graph atomicity and explicit graph
+  data-loss confirmation. These operations remain governed by their current
+  opt-in and refusal rules.
+- **WAL/feed/replica:** compact block frames are checkpoint restatements,
+  not user change events. `changes_after` starts after the image history
+  floor; feed and export validate the complete image and surface only
+  committed later WAL changes. Replica application retains append-then-replay
+  atomicity; source-generation replacement is installed only after replay
+  succeeds.
+- **Reopen:** discard process-local caches, validate/authenticate the image
+  and replay WAL before exposing `Database`; old snapshots remain pinned only
+  in the old process/generation. Reopen cannot revive expired winners or
+  bypass unknown critical kinds.
+
+### I. Minimal read seam for P3c, P3d and precision API
+
+Freeze one crate-private concrete contract, not empty traits:
+`CollectionRecords::{len, contains_id, row_of, id_at, revision_at,
+expiry_at, vector_at, payload_at, metadata_at, ordered_visible}` plus a
+`ReadAccess` that carries one clock, pinned generation/overlay root and
+caller-owned bounded scratch. `vector_at` returns a borrowed source slice
+only while its `ReadAccess` is alive; otherwise it returns a bounded decoded
+view. `metadata_at` applies the normal typed decoder; public borrowed
+`Record` still uses the stable generation cell.
+
+P3c needs ID/revision lookup, vectors, visibility, metadata predicates and
+generation identity to build/bind ANN codes and rerank without `RecordMap`.
+P3d needs canonical stored precision plus stable vector access and fallback
+behavior. The precision API needs stored precision and explicit conversion
+entry points, not a new implicit read policy. None may bypass overlay,
+expiry, authentication or error semantics. Do not expose this seam publicly
+or let derived indexes become source-of-truth.
+
+### J. Ordered code sub-slices and shared-file touch map
+
+Every sub-slice requires a deliberately failing regression mutation (for
+example, drop the generation pin, let an overlay tombstone fall through,
+swap expiry comparison, omit block authentication, or omit one rewrite
+source), then restore the mutation and show the named test green. Each adds
+golden/malformed coverage where it owns decoding. Sizes are planning ranges,
+not performance/size claims.
+
+| Order / sub-slice | Goal, exact files/functions, tests and acceptance | Size / dependency / parallelism |
+|---|---|---|
+| 1. Generation-backed point reads (**smallest safe first code slice**) | Add concrete generation and source-view types; install only after full image validation; implement `get/get_at`, `len`, `first_id`, snapshot pin and lazy record cells. Files: `src/compact/mod.rs` (`ImageCheck::block`), `src/format.rs` (`load_inner`, `BlockRun::apply`, `apply_supplement`), `src/directory.rs` (`open_segments`, `Chain::install`), `src/records.rs` (capture/get), `src/collection.rs` (`from_loaded`, accessors), `src/lib.rs` (`open_backed`, `get_at_in`). Tests: `compact_generation_authenticates_before_install`, `compact_generation_pins_image_until_snapshot_drop`, `compact_snapshot_get_matches_resident_after_database_drop`, `compact_get_decodes_each_record_once`. Accept exact legacy fields/revisions/expiry, both backing paths, encrypted/plain, unsupported-version pass-through, no change to default/release gate. | ~350-550 LOC plus tests. Foundation; no dependent slice parallel. |
+| 2. WAL overlay and committed mutation semantics | Replace direct collection mutation with base+overlay; replay put/batch/delete/metadata/TTL and retain tombstones. Files: `src/collection.rs` (`apply_metadata_committed`, `apply_committed`), `src/format.rs` (`LoadedCollection::{put,delete,update_metadata}`, frame replay/checks), `src/lib.rs` (`put_in`, `delete_in`, `apply`, `apply_batch`), `src/property_graph/frame.rs` (`GraphRecords` liveness), `src/property_graph/maintain.rs` (attachment validation). Tests: `compact_overlay_ordered_batch_matches_replay`, `compact_delete_tombstone_shadows_base`, `compact_expired_overlay_never_reveals_base`, `compact_metadata_update_preserves_vector_payload`, `compact_graph_attachment_tracks_effective_row`. Accept durability-before-apply, CAS/revision and graph atomic parity. | ~450-700 LOC; depends 1; serialize with 1 and 5. |
+| 3. Ordered public reads and exact/filter paths | Merge base/overlay IDs, unify TTL/filter/clock semantics and bounded vector access. Files: `src/records.rs` (`browse_at`, `search_with_stats_at`), `src/collection.rs` (browse/group/exact), `src/lib.rs` (`search_in_at`, `exact_search*`), `src/hybrid.rs`, `src/query_language.rs`. Tests: `compact_ordered_merge_matches_resident_with_gaps`, `compact_exact_scan_is_bit_identical_at_same_clock`, `compact_search_filters_after_overlay_resolution`, `compact_browse_cursor_skips_tombstones_and_expiry`. Accept exact order/stat semantics and bounded scratch. | ~300-500 LOC; depends 1-2; can split API/search tests after interface freeze, but shared `records.rs`/`lib.rs` edits serialize. |
+| 4. Record consumers and derived indexes | Port payload APIs, named vectors, summary indexes, HNSW/rebuild/sidecars, metrics and record serializers. Files: `src/vectors.rs`, `src/kv.rs`, `src/server.rs`, `src/server/grpc.rs`, `src/server/features.rs`, `src/server/webhooks.rs`, `src/bin/vlite-mcp.rs`, `src/rerank.rs`, `src/property_graph/retrieve.rs`, `src/server/observability.rs`, `src/server/tenants.rs`, `src/hnsw.rs`, `src/rebuild.rs`, `src/metadata_index.rs`, `src/text_index.rs`, `src/ann_snapshot.rs`, `src/disk_ann.rs`, `src/gpu.rs`, `src/quality.rs`, `src/planner.rs`, `src/compact/stats.rs`. Tests: `compact_kv_point_and_prefix_match_resident`, `compact_named_vector_visibility_matches_resident`, `compact_hnsw_rerank_uses_pinned_generation`, `compact_rebuild_snapshot_survives_checkpoint`, `compact_metadata_text_indexes_verify_overlay`, `compact_ann_snapshot_rejects_other_generation`, `compact_server_materializes_only_results`. Accept no stale index result and accurate cache/source accounting. | ~600-1,000 LOC; depends 1-3; file-disjoint vector/KV/server and index groups can run in parallel after seam freeze; `hnsw.rs`/`lib.rs` hooks serialize. |
+| 5. Checkpoint, maintenance, feed and replica lifecycle | Stream complete output, pin/retire images and preserve byte-copy/copy-out/error behavior. Files: `src/format.rs` (`write_v5_image`, `BlockRun`, `apply_supplement`, `verified_frame`), `src/compact/mod.rs` (`ImageCheck::{frame,block}`), `src/directory.rs` (`build_image`, `Chain::{install,open}`), `src/lib.rs` (`start_checkpoint`, `finish_checkpoint`, `replica_extend`, feed/export hooks), `src/maintenance.rs` (`backup_inner`, `restore_inner`, `compact_inner`, `write_v5`, `write_v5_image`, `convert_precision`), `src/changes.rs` (`scan`), `src/logops.rs` (`restore_to`, `reencrypt`), `src/property_graph/{frame.rs,maintain.rs}`. Tests: `compact_overlay_checkpoint_reopen_is_identical`, `compact_checkpoint_keeps_old_snapshot_mapped`, `compact_backup_restore_reencrypt_authenticate_all_blocks`, `compact_change_feed_starts_after_image_floor`, `compact_replica_failure_keeps_old_generation`, `compact_graph_copyout_keeps_attachment_rules`. Accept full lifecycle matrix before any writer is production-enabled. | ~700-1,100 LOC; depends 1-4; serialize with P4 checkpoint/read work. |
+
+**Shared-file touch map for P4 checkpoint/read integration.** P4 independently
+touches `src/compact/mod.rs`, `src/format.rs`, `src/maintenance.rs` and
+`src/lib.rs` hooks. Before coding, reserve ownership at function granularity:
+
+| Shared file | P3b functions/regions | P4 functions/regions | Coordination |
+|---|---|---|---|
+| `src/compact/mod.rs` | `ImageCheck::block` P3 kind check/apply and source block ordering (1,5). | `ImageCheck::block` graph-kind dispatch; `ImageCheck::frame` graph snapshot ordering. | Shared match arms: one owner edits at a time; separate owner-specific validators, then one serialized dispatch integration. |
+| `src/format.rs` | `load_inner`, `BlockRun::{new,apply}`, `apply_supplement`, `LoadedCollection` put/delete/update, record output from `write_v5_image` (1,2,5). | `load_graph_image`, `apply_supplement`, graph snapshot/revision replay, graph section in `write_v5_image`. | Share loader and supplement state; agree on struct fields/order first and serialize integration. |
+| `src/maintenance.rs` | `backup_inner`, `restore_inner`, `compact_inner`, `convert_precision`, `write_v5`, `write_v5_image` record source loops (5). | Graph-copy `enable_graph`/`strip_graph` and graph snapshot encode/revisions through `property_graph::maintain` and `write_v5_image`. | Build one common effective-record iterator; do not let either owner independently copy out `RecordMap`. |
+| `src/lib.rs` | `open_backed`, `apply`, `start_checkpoint`, `finish_checkpoint`, read/search hooks and `replica_extend` (1-5). | Graph replay/checkpoint clock, graph mutation and `GraphRef` hooks. | Add distinct generation/graph fields under one coordinator; serialize `Database` field/constructor changes and checkpoint swap. |
+
+`src/changes.rs::scan` is also shared with temporal graph feed work, although
+not named in the P4 four-file touch set; reserve its `ImageCheck` and event
+dispatch branches. P3b should not change graph framing or add graph codecs.
+
+### K. Owner decisions
+
+1. **First write:** resident conversion or immutable base plus WAL overlay.
+   Recommend overlay; blocks mutation/recovery and checkpoint design.
+2. **Borrowed records:** stable generation cells or API/guarded-view change.
+   Recommend non-evicting cells with explicit accounting and unchanged caps;
+   blocks `get`/snapshot work and accepts full-read materialization.
+3. **Rayon scratch:** per-worker caches or serial bounded scans.
+   Recommend 4 MiB per-operation serial scans initially; blocks parallel
+   exact scans, not semantics.
+4. **Snapshot metric:** include decoded cache/overlay in logical retention,
+   report mapped bytes separately. Recommend no public counter redefinition;
+   blocks S2 claims and snapshot acceptance.
+5. **Maintenance:** exact revision, lineage, import, TTL and graph parity.
+   Recommend an operation parity table; blocks compact/convert/restore.
+6. **Admission:** retain current gates/refusal; float16 and temporal copy-out
+   remain separate opt-ins. Recommend no activation; blocks release enablement,
+   not test-only integration.
+
+Planning default: until the owner decides otherwise, the code sub-slices in J
+proceed on these recommendations. Recommendation 2 is the only option that
+keeps the public `Record` API unchanged; the alternative needs a separately
+approved API change. None of them activates a compact reader or writer.
+
+### L. Risks and unverified items
+
+- **Unverified:** no production compact `RecordMap` replacement, generation
+  owner, compact `ReadSnapshot`, overlay merge, or compact writer is present
+  at setup head. The exact production image directory and whether it can
+  retain a single block without retaining a larger map are implementation
+  questions, not established behavior.
+- **Unverified:** the 4 MiB scratch budget is a conservative choice (room for
+  two of the largest decoded blocks, each at most 2 MiB), not a derived maximum;
+  aggregate memory accounting with concurrent
+  non-search reads, GPU staging and rebuild workers needs implementation
+  measurements; no result is claimed here.
+- **Unverified:** current public maintenance APIs' exact numeric revision
+  behavior across every compact/precision/restore combination needs an
+  operation-by-operation oracle before a production writer is allowed.
+- The [storage goals](../performance/storage-goals.md) make exactness and
+  S2 explicit constraints; this proposal supplies no qualification or
+  performance/size evidence (Goals and Must not regress).
