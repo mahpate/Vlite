@@ -81,7 +81,7 @@ Identifiers (`MemoryKey`) are 1-256 UTF-8 bytes. `MemoryU64` output is a canonic
 decimal string, 0..18446744073709551615, no leading zero except "0"; `MemoryI64`
 output is a canonical signed decimal string,
 -9223372036854775808..9223372036854775807, no "-0".
-As proposed by [wire conventions section 3, decision 12](serving-wire-conventions.md#3-encoding-rules-c12),
+As the owner selected in [wire conventions section 3, decision 12](serving-wire-conventions.md#3-encoding-rules-c12),
 inputs also accept exact JSON integers in the corresponding range.
 Times/revisions/sequences in responses remain strings, never lossy JavaScript
 numbers. Protobuf uses the corresponding integer types. `deadline_ms` and
@@ -125,7 +125,7 @@ to a requested scope or required evidence collection fails before execution.
 ### Atomicity, receipts and failures
 
 Mutations require body `idempotency_key:MemoryKey`; no HTTP header alias is defined,
-as proposed by [wire conventions decision 13](serving-wire-conventions.md#6-owner-decisions-23).
+as the owner selected in [wire conventions decision 13](serving-wire-conventions.md#6-owner-decisions-23).
 The identity is `(lineage,stable binding identity,exact scope,operation,key)`, where
 operation is one of `remember,correct_facts,consolidate,forget,resume_erasure`.
 The core computes the digest; an adapter never does. A1 uses `v1:` + SHA-256 of a
@@ -250,7 +250,7 @@ exclusive/multivalued mode is predeclared in binding schema, not request-control
 Require `slot_expected` and all changed existing revisions. `disagreement` defaults
 `reject`; explicit `disputed` stores labelled disagreement without declaring truth.
 The interval is half-open; null endpoints mean unbounded,
-`valid_from_ms` < `valid_to_ms` when both are finite, using the proposed names in
+`valid_from_ms` < `valid_to_ms` when both are finite, using the names the owner selected in
 [wire conventions decision 11](serving-wire-conventions.md#6-owner-decisions-23).
 There are at most 256 retained segments per series (Gap 1 sections 1-2).
 
@@ -471,7 +471,7 @@ retroactive policy change for ordinary graphs/collections; refuse to adopt
 in-use ordinary resources without an independently approved migration. Embedded
 file access and operator backups remain outside server scope enforcement.
 
-REST errors retain `{error:{code,message}}`; the proposed optional `error.details`
+REST errors retain `{error:{code,message}}`; the owner-selected optional `error.details`
 uses the shared context schema in
 [wire conventions section 3, decision 21](serving-wire-conventions.md#3-encoding-rules-c12),
 not a memory-only extension. **Withdrawn:** memory-only error details
@@ -496,7 +496,7 @@ specified in their existing mapper or the approved serving contract.
 | 409 index_not_ready | FAILED_PRECONDITION | No lazy read build |
 | 412 precondition_failed | ABORTED | Existing code (`src/server.rs:1523-1525`): object/slot/input/job revision or generation mismatch; `details.field` says which |
 | 413 response_too_large (gRPC adapter preflight; MCP/CLI response bound) | RESOURCE_EXHAUSTED | Response refusal before mutation append or cursor advance; request oversize remains extractor `invalid_json` or tonic OUT_OF_RANGE per [wire conventions section 2.2](serving-wire-conventions.md#22-one-reachable-family-oversize-deadline-cancel-busy) |
-| 422 invalid_input | INVALID_ARGUMENT | Existing semantic code: shape, arithmetic, batch/frame bounds and exhausted per-request work budget without an allowed partial; `details` names the bound per proposed decision 5 |
+| 422 invalid_input | INVALID_ARGUMENT | Existing semantic code: shape, arithmetic, batch/frame bounds and exhausted per-request work budget without an allowed partial; `details` names the bound per owner-selected wire decision 5 |
 | 422 memory_unsupported_ranking/memory_bounded_plan_unsupported | INVALID_ARGUMENT | No semantic fallback |
 | 429 rate_limited/quota_exceeded | RESOURCE_EXHAUSTED | Existing credential rate/quota limiter, not a per-request work budget |
 | 503 busy/unavailable | UNAVAILABLE | Existing admission saturation / service unavailable |
@@ -622,7 +622,7 @@ References use local component names (expand `ref: X` to `$ref:
 For request schemas only, recursively expand `MemoryU64`/`MemoryI64` references
 to a `oneOf` of the declared decimal-string schema and an integer schema with the
 corresponding range from section 3; response references retain the string schema.
-This input/output distinction implements proposed
+This input/output distinction implements owner-selected
 [wire conventions decision 12](serving-wire-conventions.md#6-owner-decisions-23).
 This finite expansion defines exact components without copying identical
 operation/error boilerplate nine times. String limits below count code points
@@ -703,7 +703,7 @@ components:
 ```
 
 `MemoryErrorDetail` describes plan conflicts only; `MemoryErrorContext` is the
-proposed shared REST/gRPC context of decision 21, not a memory-only error shape.
+owner-selected shared REST/gRPC context of wire decision 21, not a memory-only error shape.
 `x-add-properties`/`x-add-required` mean flatten the named common `MemoryMutation` fields
 and listed fields into one closed object, not allOf with an incompatible closed
 base. Expand nullable refs using the repository's OpenAPI dialect, retaining
@@ -864,7 +864,8 @@ returning a binding-local typed facade whose method names are mechanically
 derived from RPC short names under
 [wire conventions section 5.4](serving-wire-conventions.md#54-naming-rules).
 No hand-shortened aliases. Wire conventions [decision 10](serving-wire-conventions.md#6-owner-decisions-23)
-(proposed) recommends flat methods instead; this facade stays until the owner decides.
+selected flat methods (option A); conforming this facade and the table below to flat
+methods is open conformance work (wire conventions section 7, MEM).
 Methods map one-to-one in table order:
 
 | Python (sync) | JavaScript (Promise) | .NET (Task, CancellationToken) |
@@ -960,17 +961,17 @@ following choices concern only this exact serving schema and need explicit revie
 | Wire inventory | **Owner-selected: approve the complete nine-operation inventory** | Remember, Recall, FindFacts, CorrectFacts, Consolidate, Forget, GetReceipt, GetErasure and ResumeErasure across REST, gRPC, MCP and CLI. Inventory only; core prerequisites, authorization/retention/limit policies and exact-schema acceptance remain required before adapters ship | Sections 4 and 8; decision 67, 2026-11-02 |
 | Scope grants/root | **Owner-selected: exact grants and `@root`** | Exact startup principal grants plus existing graph/collection permissions; `Tenant.id` as scope tenant, reserved `@root` for untenanted principals; reject client tenant and implicit admin scopes. Later persisted grants need a separate schema | `src/server/tenants.rs:47-52,241-245,424`; `src/server/graph.rs:22-24`; decision 68, 2026-11-02 |
 | Reserved-resource authorization | **Owner-selected: new-binding raw-access protection** | Explicit new-binding `raw_access:false` across raw graph/record/search/export/feed and attachment surfaces, including list/feed filtering with cursor progress. Broad operator opt-in still needs underlying permissions and grants no memory scopes. No ordinary-resource policy change; adopting in-use resources needs migration review; direct file-owner access/backups remain outside server enforcement | `src/server/graph.rs:22-24`; section 6; decision 69, 2026-11-02 |
-| Request identity | Body key only / header+body alias | Body-only idempotency_key across adapters; the core owns the `v1:` digest, with byte goldens from core tests before adapter code | Section 3; Gap 1 section 2; Wire conventions, decision 13 (proposed) |
+| Request identity | **Owner-selected: body key only (wire conventions decision 13, option A)** | Body-only idempotency_key across adapters, no header alias. Carried forward from the shared 2026-11-02 choice, not asked again. The core-owned `v1:` digest, with byte goldens from core tests before adapter code, stays an exact-schema acceptance requirement | Section 3; Gap 1 section 2; Wire conventions, decision 13 (owner-selected) |
 | Receipt retention | **Owner-selected: explicit binding window, 1..2592000000 ms** | No implicit default; advertise `retry_until_ms`; preserve the accepted core's hashed window supplied by the adapter. Expiry ends receipt replay, not memory retention. Binding/window changes must preserve retained lookup and retry semantics; exact configuration/rotation acceptance remains separate | Accepted A2 (Gap 1 section 2); decision 70, 2026-11-02 |
 | New memory recall caps | **Owner-selected: consistent candidate pool limits** | 200 default, 1,000 ceiling across new memory adapters, including exact/MMR candidates; old Search/rerank unchanged. This does not select every other result/work budget or qualify ANN; unsupported bounded plans still fail explicitly | `src/server.rs:3032-3054`; `src/server/grpc.rs:1135-1153`; decision 71, 2026-11-02 |
 | Presence/compatibility | **Owner-selected: versioning and presence checks** | Scope/filter/policy-changing fields require a new service version. No custom unknown-request-field pre-scan decoder; required fields are presence-checked. Publish the protobuf/JSON empty-list differences; unknown response fields remain ignorable; authorization is unchanged | `prost-derive` 0.14.4 `src/lib.rs:191`; `build.rs:12-17`; decision 72, 2026-11-02 |
 | Feeds | **Owner-selected: ordinary incomplete events with explicit refusal** | Ordinary authorized events with explicit temporal/TTL incompleteness in every `feed` block; `require_complete_feed:true` returns `memory_feed_unsupported` before writes/providers; no placeholder events; new temporal/TTL events need another exact review | `src/server/graph.rs:85-108`; `src/property_graph/feed.rs:270-285`; `src/changes.rs:196`; decision 73, 2026-11-02 |
-| New wire safety bounds | Adopt section 4 / revise after bounded-work review | Adopt provisionally, including the bounds section 4 marks New and the 4,096-byte content cap (stricter than A1's chunked content); consolidation inputs stay capped at A1's 64-entry provenance limit until the consolidation slice raises it; qualify actual accounting before release; no performance/size guarantee | Section 4 limits table, Basis column; Wire conventions, decision 3 (proposed) |
-| SDK integer shape and errors | Canonical strings / language-native divergent integer JSON | Canonical strings and full typed envelopes, no lossy JS IDs or deletion booleans | Section 8 `MemoryU64`/`MemoryI64`; JavaScript Number is exact only to 2^53; Wire conventions, decision 12 (proposed) |
-| Oversize behaviour | Keep today's transport behavior / body-limit layer plus gRPC interceptor so every over-cap request returns a memory code / raise transport caps | Keep transport behavior. **Withdrawn:** reserving memory-specific oversize codes (formerly `memory_request_too_large` and `memory_response_too_large`) for caps the adapter checks; the shared registry already covers oversize: request oversize stays `invalid_json` or tonic OUT_OF_RANGE and the gRPC-only `response_too_large` replaces the response code, per [wire conventions section 2.2](serving-wire-conventions.md#22-one-reachable-family-oversize-deadline-cancel-busy) | `src/server.rs:60,742,1658-1662`; `src/server/grpc.rs:22-25,98-99`; tonic 0.14.6 `src/codec/decode.rs:193-197`, `src/codec/encode.rs:188-192`; Wire conventions, decision 3 (proposed) |
-| Mutation deadline | A1's absolute `deadline_ms` with no default / adapter computes it from a relative budget / require an explicit budget | Adapter computes the absolute deadline from the JSON budget (default 250 ms, ceiling 5,000 ms, the Graph read values), excluded from the digest; vocabulary follows the central wire note | `src/property_graph/engine/limits.rs:93,104`; Gap 1 section 2; Wire conventions, decision 4 (proposed) |
+| New wire safety bounds | Adopt section 4 / revise after bounded-work review | Adopt provisionally, including the bounds section 4 marks New and the 4,096-byte content cap (stricter than A1's chunked content); consolidation inputs stay capped at A1's 64-entry provenance limit until the consolidation slice raises it; qualify actual accounting before release; no performance/size guarantee | Section 4 limits table, Basis column; Wire conventions, decision 3 (owner-selected) |
+| SDK integer shape and errors | Canonical strings / language-native divergent integer JSON | Canonical strings and full typed envelopes, no lossy JS IDs or deletion booleans | Section 8 `MemoryU64`/`MemoryI64`; JavaScript Number is exact only to 2^53; Wire conventions, decision 12 (owner-selected) |
+| Oversize behaviour | Keep today's transport behavior / body-limit layer plus gRPC interceptor so every over-cap request returns a memory code / raise transport caps | Keep transport behavior. **Withdrawn:** reserving memory-specific oversize codes (formerly `memory_request_too_large` and `memory_response_too_large`) for caps the adapter checks; the shared registry already covers oversize: request oversize stays `invalid_json` or tonic OUT_OF_RANGE and the gRPC-only `response_too_large` replaces the response code, per [wire conventions section 2.2](serving-wire-conventions.md#22-one-reachable-family-oversize-deadline-cancel-busy) | `src/server.rs:60,742,1658-1662`; `src/server/grpc.rs:22-25,98-99`; tonic 0.14.6 `src/codec/decode.rs:193-197`, `src/codec/encode.rs:188-192`; Wire conventions, decision 3 (owner-selected) |
+| Mutation deadline | A1's absolute `deadline_ms` with no default / adapter computes it from a relative budget / require an explicit budget | Adapter computes the absolute deadline from the JSON budget (default 250 ms, ceiling 5,000 ms, the Graph read values), excluded from the digest; vocabulary follows the central wire note | `src/property_graph/engine/limits.rs:93,104`; Gap 1 section 2; Wire conventions, decision 4 (owner-selected) |
 | Core accessors | Crate-private accessors in the core slice / adapter-side key derivation / public Rust API | Crate-private accessors for the receipt ID and, if kept, a revision pin on item references; the adapter never recomputes a receipt key; no public Rust API or `Error` variant without a separate owner decision | A1 returns `receipt_revision` and `commit_sequence` but no receipt ID, and item references are bare IDs (Gap 1 section 2) |
-| Error codes | Reuse existing codes only / add `memory_*` codes with no existing equivalent | Reuse `invalid_json`, `invalid_input`, `precondition_failed`, `busy`, `poisoned`, `internal_error`; keep only the memory-specific `memory_*` codes of section 6; no public `Error` variant | `src/server.rs:1523-1525,1589-1591,1658-1662`; `src/server/grpc.rs:181-196`; Wire conventions, decision 5 (proposed); Wire conventions, decision 21 (proposed); Wire conventions, decision 22 (proposed) |
+| Error codes | Reuse existing codes only / add `memory_*` codes with no existing equivalent | Reuse `invalid_json`, `invalid_input`, `precondition_failed`, `busy`, `poisoned`, `internal_error`; keep only the memory-specific `memory_*` codes of section 6; no public `Error` variant | `src/server.rs:1523-1525,1589-1591,1658-1662`; `src/server/grpc.rs:181-196`; Wire conventions, decision 5 (owner-selected); Wire conventions, decision 21 (owner-selected); Wire conventions, decision 22 (owner-selected) |
 
 Open implementation acceptance: final Rust type/error names from A-C; binding
 configuration encoding and safe generation rotation without losing retained

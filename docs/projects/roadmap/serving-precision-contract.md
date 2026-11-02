@@ -6,7 +6,7 @@ subject to exact-schema review before code
 (`docs/projects/roadmap/next-major.md:40-55`). This document applies nothing.
 Float32 remains the default. Float16 remains a separate, explicitly selected,
 lossy per-collection option, unavailable to production writers until qualified.
-This document is conformed to the [serving wire conventions proposal](serving-wire-conventions.md), whose owner decisions remain open.
+This document follows the [serving wire conventions](serving-wire-conventions.md), whose shared owner decisions were selected on 2026-11-02; items still unchecked for it in that note's section 7 remain conformance work.
 
 Scope: collection creation and inspection through REST, gRPC, MCP and clients;
 offline compact-store creation and copy-out conversion through CLI. Non-goals:
@@ -756,11 +756,11 @@ qualification for every promised backing. Float32 stays the default.
 | Response placement | Add precision+compact to each descriptor and compact to list / separate precision endpoint | Additive fields as specified; Rust CollectionInfo stays unchanged, reads are atomic. |
 | Remote conversion | None / admin-only path-based endpoint with separate lifecycle protocol | None. Offline CLI only; never convert in place or while serving. |
 | CLI coverage | Maintain persistent create + shell memory / add server/import activation flags / add a directory-output conversion route | Maintain/shell only; conversion writes a file (no CLI route to `convert_to_directory`); `--encryption-key-file PATH`; server/import defaults untouched. |
-| Error vocabulary | Contextual stable codes above / generic unsupported_feature for all causes | Contextual codes; extend the CLI mapper (`src/bin/tool_support/graph_json.rs:26-72`) with every section 8 code the CLI reaches; legacy mappings unchanged; uncertainty distinct. Wire conventions, decision 6 (proposed); Wire conventions, decision 7 (proposed); Wire conventions, decision 21 (proposed). |
+| Error vocabulary | Contextual stable codes above / generic unsupported_feature for all causes | Contextual codes; extend the CLI mapper (`src/bin/tool_support/graph_json.rs:26-72`) with every section 8 code the CLI reaches; legacy mappings unchanged; uncertainty distinct. Wire conventions, decision 6 (owner-selected); Wire conventions, decision 7 (owner-selected); Wire conventions, decision 21 (owner-selected). |
 | MCP response names | Preserve existing collections/count / rename to REST items/live_records | Preserve existing keys and add fields; only new tools use REST descriptor shapes. |
 | Rust API visibility during the hold (`p3-precision-api.md:188,229,242`; `src/compact/mod.rs:56-66`; `src/bin/vlite-mcp.rs:18`) | Design A unshipped, `pub(crate)` gate, adapters refuse before the engine / `pub` API with gate-closed refusal / `pub` behind a cargo feature | Unshipped: bins see only the public API, so CLI/MCP land parsing and refusals; success goldens (section 10) wait for a `pub` API and the activation decision. No new Error variant or feature flag. |
 | New MCP tools and proxy extension (`src/bin/vlite-mcp.rs:24-26`, `:464-474`) | Both, local and proxy / local only | Both, with REST grants; the proxy never elevates (section 5). |
-| Structured MCP error (`src/bin/vlite-mcp.rs:673-681`: string errors today) | New tools only / all tools | All tools: one string failure `"<code>: <message>"`; the new-tool-only object-shaped proposal is withdrawn. Wire conventions, decision 22 (proposed). |
+| Structured MCP error (`src/bin/vlite-mcp.rs:673-681`: string errors today) | New tools only / all tools | All tools: one string failure `"<code>: <message>"`; the new-tool-only object-shaped proposal is withdrawn. Wire conventions, decision 22 (owner-selected). |
 | Audit and metric additions (section 8) | As specified / audit only / none | As specified; no tenant, path or collection labels. |
 | .NET public API (`clients/dotnet/VLite.Client/Client.cs:119-133`) | Enum plus named method / string argument | Enum plus named method; lowercase wire strings. |
 | Store-level `compact` in the list response | Include / omit | Include: one persisted store flag. |

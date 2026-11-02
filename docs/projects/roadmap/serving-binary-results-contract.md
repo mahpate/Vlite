@@ -1,7 +1,7 @@
 # P5: binary search-result serving contract
 
 Status: one design candidate for independent acceptance; not implemented or released.
-This document is conformed to the [serving wire conventions proposal](serving-wire-conventions.md), whose owner decisions remain open.
+This document follows the [serving wire conventions](serving-wire-conventions.md), whose shared owner decisions were selected on 2026-11-02; items still unchecked for it in that note's section 7 remain conformance work.
 The [owner's wire approval](next-major.md#decided-2026-11-02) authorizes exact
 schemas to be reviewed before code, not automatic acceptance of this candidate.
 Evidence below was checked at `00babff460c58b0d80f179de79cfcc3e50c0ce57`.
@@ -548,7 +548,7 @@ each decision rather than imply approval from this document.
 | Decision | Options | Recommendation |
 |---|---|---|
 | Encoding | HTTP protobuf or Arrow | HTTP protobuf v1 as specified; defer Arrow/projection to a separately versioned design |
-| Schema identity | Extend existing gRPC SearchResponse or independent HTTP envelope | Independent `vlite.serving.v1.SearchResults`; no gRPC tag/default changes. Wire conventions, decision 17 (proposed) |
+| Schema identity | Extend existing gRPC SearchResponse or independent HTTP envelope | Independent `vlite.serving.v1.SearchResults`; no gRPC tag/default changes. Wire conventions, decision 17 (owner-selected) |
 | Negotiation | Strict binary opt-in or automatic binary preference | Strict opt-in with JSON ties/default and explicit 406 codes |
 | Remaining Accept rejection | Ignore all explicit exclusions as today or enforce approved unsupported-type/version rejection | Recommend section 3's 406 for well-formed unsupported/excluded representations; JSON media parameters ignored, empty/malformed/oversized Accept skips negotiation; no new Accept 400/431 |
 | Custom rerank | Extend binary v1 or reject unsupported mode explicitly | Recommend 406 `binary_unsupported_mode` before execution; do not drop approved JSON `rerank_score` or `ranking` |

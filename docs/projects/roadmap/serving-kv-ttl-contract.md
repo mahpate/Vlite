@@ -5,7 +5,7 @@ this document. The goals are approved and exact schemas are reviewed before
 code (`docs/projects/roadmap/next-major.md:5,18-19,91-94,106-112` and
 `:49-55,239-241`); a storage-format change arrives only with its own converter
 (`:237-238`).
-This document is conformed to the [serving wire conventions proposal](serving-wire-conventions.md), whose owner decisions remain open.
+This document follows the [serving wire conventions](serving-wire-conventions.md), whose shared owner decisions were selected on 2026-11-02; items still unchecked for it in that note's section 7 remain conformance work.
 Scope: product Gaps 2 and 3. Normative words below describe proposed behavior;
 only the evidence table describes Current behavior. Cross-document wire choices
 (proto tags, error codes, the `GraphChangeOperation` amendment, TTL-operation
@@ -476,7 +476,7 @@ each exactly once; detach events keep their schema. Flush at vector/lifecycle
 boundaries as today (`src/property_graph/feed.rs:1-10,90-100`) and preserve
 frame sequence and logged order, including set-then-immediate-reclaim. The empty
 set keeps whole commits on a page (`src/changes.rs:445-448`,
-`src/openapi.json:33`). Per the proposed wire conventions decision 9, only TTL
+`src/openapi.json:33`). Per owner-selected wire conventions decision 9, only TTL
 reclaim runs may split a commit; temporal commits stay whole. Split a TTL
 reclaim run greedily at 256 operations or 1 MiB of canonical JSON event
 bytes, whichever comes first, without reordering; one larger operation is
@@ -650,7 +650,7 @@ loop, applying both caps to `KvServer` per
 [wire conventions §1.2](serving-wire-conventions.md#12-per-service-obligations-c14).
 TTL uses the Gap 12 `Graph` registration, health and caps, not another service.
 The descriptor test checks service/RPC short-name uniqueness and named
-additions, including the tag-400 arm, per §§1.2-1.4 and decision 16 (proposed).
+additions, including the tag-400 arm, per §§1.2-1.4 and decision 16 (owner-selected).
 
 Additive edits to existing feed messages (these lines are inserts, not
 replacement declarations; every existing tag stays untouched):
@@ -753,7 +753,7 @@ refs. After the components are added, the batch item schema gains
 `then` `$ref`s `GraphExpiryOperation`. The `:2146` description gains the same
 two op names. This follows
 [wire conventions §5.2](serving-wire-conventions.md#52-per-file-owner-and-sequence),
-decision 23 (proposed); `items` stays one open object, not a `oneOf`, and
+decision 23 (owner-selected); `items` stays one open object, not a `oneOf`, and
 `ops.maxItems` stays 4096. **Withdrawn:** the former two-branch TTL proposal
 does not match that one-branch-per-domain mechanism.
 
@@ -1027,7 +1027,7 @@ share of these rows and states in prose only what it ships.
 | X3 | `src/server.rs`, `src/bin/tool_support/graph_json.rs`, `src/server/grpc.rs` | Arms and stable codes for `InvalidKvKey` (422 `invalid_input`), `KvSlotsExhausted` (409 `kv_slots_exhausted`) and `NotKvCollection` (409 `not_kv_collection`), beside the fallback `error => internal(error)` (`src/server.rs:1624`) and `graph_code` (`src/server.rs:1631-1654`, fallback at `:1654`); the tool layer's `error_code` (`graph_json.rs:26-72`); the gRPC table (`src/server/grpc.rs:181-197`) |
 | X4 | `src/server/admin.rs`, `docs/CAPABILITIES.md` | The `features` object and `routes` array (`src/server/admin.rs:410-423`) gain the proposed flags `kv`, `kv_leases` and `graph_ttl` and the new routes, which clients read before using a surface (§6); `docs/CAPABILITIES.md` documents them (it already covers `features.tenant_lifecycle`, `docs/CAPABILITIES.md:195`) |
 | X5 | `docs/GRAPH.md`, `docs/GRPC.md`, `docs/API.md`, `docs/MCP.md`, `docs/WEBHOOKS.md`, `docs/TOOLS.md`, `docs/SECURITY.md`, `docs/STORAGE-FEATURES.md` | Replace "embedded Rust API only" (`GRAPH.md:60-62`), "does not report deadlines or removals yet" (`GRAPH.md:93-96`), the graph-feed paragraph (`GRPC.md:86-90`) and "REST, gRPC and bindings come after the OpenAPI review" (`STORAGE-FEATURES.md:283`) with what the shipped slice supports; the other files gain the routes, tools, webhook option, CLI commands and the scope and tenancy rules of §10 |
-| X6 | `site/api.html`, `tests/api_reference.py` | New rows and `data-api` keys beside the existing Rust KV rows (`site/api.html:1062-1074`); the extractor (`tests/api_reference.py:9-23`) gains the `http-py`, `http-js`, `dotnet` and `cli` families; `grpc:` keys stay unqualified with unique short names under wire conventions decision 16 (proposed), §8 |
+| X6 | `site/api.html`, `tests/api_reference.py` | New rows and `data-api` keys beside the existing Rust KV rows (`site/api.html:1062-1074`); the extractor (`tests/api_reference.py:9-23`) gains the `http-py`, `http-js`, `dotnet` and `cli` families; `grpc:` keys stay unqualified with unique short names under wire conventions decision 16 (owner-selected), §8 |
 
 Each decision records the recommended option; the owner approves it before
 code. Decisions (e), (g) and (h) touch wire shared with other documents and stay
@@ -1035,7 +1035,7 @@ proposals pending owner ratification; every row below remains an open proposal,
 not a ratified choice. **Withdrawn:** the former separate-service
 placement and boolean/mode feed alternatives in (e), (g) and (m) are replaced
 by the proposals in wire conventions decisions 1, 2 and 8. Wire conventions
-decision 9 (proposed) limits
+decision 9 (owner-selected) limits
 (n)'s chunks to TTL reclaim runs. The appended references name the wire
 conventions proposals behind
 the text above without rewriting those original rows.
@@ -1046,23 +1046,23 @@ the text above without rewriting those original rows.
 | (b) Lease ledger placement (§5) | Record revisions / ordinary KV records / a new file section behind a capability flag with the P2 converter / an external allocator | A storage-format change delivered by `gap2-rust-lease-ledger` with the converter; revisions alone fail LEASE-001 |
 | (c) Fencing after restore, promotion, point-in-time output, checkpoint restore or copy (§5) | Fail closed / an external non-rollback floor / build recovery | Fail closed (`fencing_recovery_required`): a fresh domain and explicit re-enrollment (`scale-out.md:28,357`) |
 | (d) KV credential scopes (§10) | Reuse `read`/`write` / new `kv_read`/`kv_write` / reuse graph scopes | Reuse `read`/`write`, because a store naming an unknown scope fails to load in an older build (`src/server/credentials.rs:41-42`); dedicated scopes stay a future option |
-| (e) Graph TTL placement and the 19-22 amendment (§7) | A narrow `GraphTtl` service plus an amendment of `serving-contract.md:206` / wait for the full Graph service / another placement | Narrow `GraphTtl` plus the amendment (ledger X1); mixed create and TTL batches wait for the full Graph schema review; formerly proposed placement, **Withdrawn** as explained above. Wire conventions, decision 1 (proposed); Wire conventions, decision 2 (proposed) |
+| (e) Graph TTL placement and the 19-22 amendment (§7) | A narrow `GraphTtl` service plus an amendment of `serving-contract.md:206` / wait for the full Graph service / another placement | Narrow `GraphTtl` plus the amendment (ledger X1); mixed create and TTL batches wait for the full Graph schema review; formerly proposed placement, **Withdrawn** as explained above. Wire conventions, decision 1 (owner-selected); Wire conventions, decision 2 (owner-selected) |
 | (f) DELETE shape (§4) | JSON body (DELETE has no defined body semantics) / query parameters / POST `.../delete` | Query parameters and the existing 200 `{"deleted"}` shape (`src/openapi.json:115`) |
-| (g) TTL-mode feed cursor (§6) | Keep `vlc1` with an out-of-band mode flag / `vlc2` binding lineage, mode, sequence and ordinal / a separate endpoint | `vlc2` with `cursor_mode_mismatch`; formerly proposed mode binding, **Withdrawn** in favor of set binding above. Wire conventions, decision 8 (proposed) |
+| (g) TTL-mode feed cursor (§6) | Keep `vlc1` with an out-of-band mode flag / `vlc2` binding lineage, mode, sequence and ordinal / a separate endpoint | `vlc2` with `cursor_mode_mismatch`; formerly proposed mode binding, **Withdrawn** in favor of set binding above. Wire conventions, decision 8 (owner-selected) |
 | (h) Size errors (§3, §10) | New size-specific error codes / reuse existing codes | Reuse 413 `invalid_json` and 422 `invalid_input`; gRPC size violations stay tonic's `OUT_OF_RANGE` |
 | (i) C ABI and WASM scope (§9) | Embedded KV and leases in every binding / C ABI graph TTL only / none | C ABI graph TTL only; WASM explicitly unsupported; embedded KV and leases wait for the Rust slices; HTTP clients and the CLI get full parity |
 | (j) Restart holders (§5) | Preserve live grants with a durable clock protocol / invalidate all at recovery | Invalidate all; document the availability tradeoff |
 | (k) Lease quotas (§10) | A fixed universal cap / an explicit configured per-tenant quota / unlimited | An explicit finite quota; activation is rejected until configured; allocator history is never evicted |
 | (l) Lease holder identity (§5) | Transferable token / principal-bound / an admin takeover API | Principal-bound; no takeover API |
-| (m) Feed compatibility (§6) | Change the default decoder / opt-in `graph_ttl` | Opt-in; the default feed is unchanged; formerly proposed boolean, **Withdrawn** in favor of the set above. Wire conventions, decision 8 (proposed) |
-| (n) Oversized reclaim feed (§6) | Truncate / fail permanently / deterministic resumable chunks | Chunks; independent cursor and replay acceptance is mandatory. Wire conventions, decision 9 (proposed) |
+| (m) Feed compatibility (§6) | Change the default decoder / opt-in `graph_ttl` | Opt-in; the default feed is unchanged; formerly proposed boolean, **Withdrawn** in favor of the set above. Wire conventions, decision 8 (owner-selected) |
+| (n) Oversized reclaim feed (§6) | Truncate / fail permanently / deterministic resumable chunks | Chunks; independent cursor and replay acceptance is mandatory. Wire conventions, decision 9 (owner-selected) |
 | (o) Wire numbers (§3) | JSON numbers / canonical decimal strings | Decimal strings for every new u64; existing numeric inputs only where already public |
 | (p) KV batch (§2, §12) | Simulate with sequential writes / a storage transaction API first / omit | Omit; a future batch needs independent atomicity and schema review |
 
 Not decided here: the ledger byte layout, framing and replay; restore
 provenance detection; the converter; the lease-quota configuration surface;
 and any future extractor families (ledger X6); RPC short-name uniqueness follows
-wire conventions decision 16 (proposed). None permits
+wire conventions decision 16 (owner-selected). None permits
 weakening the normative contract or shipping a partial lease API. The owner
 resolves or explicitly defers each decision before the affected surface ships;
 this document claims no implementation or release.

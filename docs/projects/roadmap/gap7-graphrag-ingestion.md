@@ -2,7 +2,7 @@
 
 Status: embedded design choices approved individually on 2026-11-02;
 nothing in this document is implemented or qualified.
-This document is conformed to the [serving wire conventions proposal](serving-wire-conventions.md), whose owner decisions remain open.
+This document follows the [serving wire conventions](serving-wire-conventions.md), whose shared owner decisions were selected on 2026-11-02; items still unchecked for it in that note's section 7 remain conformance work.
 Scope: one source document becomes embedded chunks, resolved entities, directed
 relations and evidence in a graph-enabled database. Section 10 records the
 approved model, limits and delivery boundaries. External extraction, purge
