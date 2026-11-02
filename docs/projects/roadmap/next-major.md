@@ -232,7 +232,12 @@ Local numbers below show direction only (see rules).
   [graph algorithm serving](serving-graph-algorithms-contract.md) contract
   proposes five named read operations over the local Gap 5 algorithms with
   their limits and error mapping; it is a reviewed specification awaiting
-  owner decisions, not an implemented capability.
+  owner decisions, not an implemented capability. The
+  [agent memory serving](serving-memory-contract.md) and
+  [graph gRPC](serving-graph-grpc-contract.md) contracts are likewise
+  reviewed specifications awaiting owner decisions: the first aligns to the
+  private memory core and its A2 retention work, the second records today's
+  gRPC behaviour apart from the proposed schema. Neither is implemented.
 - **Further design proposals:** [agent memory](gap1-agent-memory.md) defines
   the embedded operations and their prerequisites; [scale-out](scale-out.md)
   compares branching, object storage and replication. Both received source
