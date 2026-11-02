@@ -6,6 +6,38 @@ use crate::compact::catalog::tests::{source_empty_fixture, source_key, source_vi
 use crate::format::{self, FOOTER_SIZE, OP_COMPACT_BLOCK};
 use std::io::Cursor;
 
+#[test]
+fn compact_source_activation_defaults_off_and_restores_nested_guards() {
+    std::thread::spawn(|| {
+        assert!(
+            !enabled(),
+            "a fresh thread must start with the source gate off"
+        );
+        let outer = Activation::on();
+        assert!(enabled(), "the outer guard must enable the source gate");
+        {
+            let _inner = Activation::set(false);
+            assert!(!enabled(), "the inner guard must disable the source gate");
+        }
+        assert!(
+            enabled(),
+            "dropping the disabled inner guard must restore true"
+        );
+        {
+            let _inner = Activation::on();
+            assert!(enabled(), "the enabled inner guard must leave the gate on");
+        }
+        assert!(
+            enabled(),
+            "dropping the enabled inner guard must restore true"
+        );
+        drop(outer);
+        assert!(!enabled(), "dropping the outer guard must restore false");
+    })
+    .join()
+    .unwrap();
+}
+
 struct TestGates {
     _precision: PrecisionActivation,
     _records: RecordsActivation,
