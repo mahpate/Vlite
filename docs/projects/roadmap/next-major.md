@@ -288,10 +288,13 @@ accepted and integrated, with no production caller. This decoded
   capability. The
   [serving wire conventions](serving-wire-conventions.md) note reconciles the
   proto tag bands, error registry, encodings, change-feed opt-in and shared-file
-  order across these drafts; it is a docs-only proposal with 23 owner
-  decisions, and nothing in it is implemented or approved. The drafts above
-  and the Cypher-style subset and GraphRAG designs follow it as proposed; an
-  owner decision that differs means editing those drafts.
+  order across these drafts. Its 23 shared choices are owner-approved
+  (2026-11-02), including the explicitly retained GraphWriteOperation tags
+  14-31: Gap 12 owns them for future core atomic graph-batch arms, with a
+  separate exact-schema review before releasing a tag. Sibling-draft
+  conformance work remains tracked in that note. These shared approvals do
+  not approve every feature-specific endpoint, signature or field, accept
+  implementations, activate gates or authorize the release.
 - **Further design proposals:** [agent memory](gap1-agent-memory.md) defines
   the embedded operations and their prerequisites; [scale-out](scale-out.md)
   compares branching, object storage and replication. Both received source

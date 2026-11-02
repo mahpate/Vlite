@@ -88,6 +88,9 @@ Open: migrate legacy env-configured `http` into admin bindings without silently 
 | Admission | Bounded per-provider and per-tenant concurrency; reject overload rather than unbounded queues |
 
 These are proposed defaults, not measurements; current text/dimension checks are `src/server/features.rs:585-588`, `src/server/features.rs:625-629`.
+The registry currently holds its DNS permit inside the blocking task.
+Acquiring that permit in async context before `spawn_blocking` is a
+wiring-slice obligation, not implemented DNS admission or serving activation.
 Authorize `search` plus the collection binding before resolving aliases or making network calls.
 Current REST embedding already needs `search` (`src/server.rs:885-899`).
 Add no credential scope in this slice. Provider access is an additional admin-controlled allowlist.

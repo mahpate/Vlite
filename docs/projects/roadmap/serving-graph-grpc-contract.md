@@ -70,8 +70,8 @@ Tags are message-local, not service-global. Allocate core tags 1-99 additively;
 never renumber or reuse a removed field/enum value, and reserve its number
 **and name**. Never use protobuf's 19000-19999 range.
 **Withdrawn:** permanent empty sibling fences prevent atomic mixed writes;
-the proposed replacement is [wire conventions section 1.3](serving-wire-conventions.md#13-field-number-allocation-c1),
-decision 1 (option A). Its sibling-owned bands apply to `GraphSelector`,
+the owner-approved replacement is [wire conventions section 1.3](serving-wire-conventions.md#13-field-number-allocation-c1),
+decision 1 (option A, 2026-11-02). Its sibling-owned bands apply to `GraphSelector`,
 `GraphLimits`, `GraphProjection`, `GraphReadMeta`, `GraphSchema`,
 `GraphWriteOperation`, the nine read requests and `GraphEdge`; the block below
 declares their initial fences. A sibling carves its band's first tag for one
@@ -82,8 +82,12 @@ separate `Kv` and `Memory` services use `Kv*` and `Memory*`, per
 The proposed TTL arm is `GraphExpiryOperation expiry = 400`;
 `WriteExpiryBatch` only wraps that same message. Tags 500 and up require
 another exact-schema review.
-**Withdrawn:** the unowned `GraphWriteOperation` hold `reserved 14 to 31;`;
-decision 20 (option A) proposes dropping it so core may use 14-99.
+**Owner-approved (2026-11-02):** KEEP `GraphWriteOperation`'s
+`reserved 14 to 31;` under wire decision 20 option B, contrary to the earlier
+recommendation to drop it. GR12 / the Gap 12 core graph protocol owner owns
+these tags for future core atomic graph-batch operation arms. They remain
+reserved until a separate exact-schema review names an operation and explicitly
+releases its tag. This does not approve any new operation or lift the proto freeze.
 
 The following summaries follow [wire conventions sections 1.1 and 1.2](serving-wire-conventions.md#11-services-all-package-vlitev1-appended-to-protovlitev1vliteproto);
 they are landing obligations, not claims of shipped services.
@@ -273,6 +277,7 @@ message GraphWriteOperation {
     GraphAttach attach = 8; GraphDetach detach = 9; GraphPutVector put_vector = 10;
     GraphDeleteVector delete_vector = 11; GraphEnsureEdge ensure_edge = 12; GraphPutSchema put_schema = 13;
   }
+  reserved 14 to 31; // GR12 future core atomic batch arms; separate exact-schema review to release
   reserved 100 to 199; // algorithms
   reserved 200 to 299; // temporal
   reserved 300 to 399; // held for memory; no current arm
@@ -1079,15 +1084,17 @@ New test/helper filenames below are proposed, not existing-code claims.
 
 | Slice | Exclusive files owned when active | Dependencies and required tests | Independent acceptance checklist |
 |---|---|---|---|
-| gap12-proto | proto/vlite/v1/vlite.proto; proposed tests/graph_grpc_schema.py and descriptor/golden fixtures | Gap 8 proto/gRPC wiring accepted + exact-schema review; compile via existing build.rs path; independent Python oracle and descriptor stability | 17 unary Graph methods at landing; all field tables match descriptors; old descriptors/feeds unchanged at this slice; all shared-message fences present under proposed decisions 1 and 20; named additions and unique RPC short names enforced; no adapter needed to verify schema |
+| gap12-proto | proto/vlite/v1/vlite.proto; proposed tests/graph_grpc_schema.py and descriptor/golden fixtures | Gap 8 proto/gRPC wiring accepted + exact-schema review; compile via existing build.rs path; independent Python oracle and descriptor stability | 17 unary Graph methods at landing; all field tables match descriptors; old descriptors/feeds unchanged at this slice; sibling-owned fences under approved wire decision 1 and the named core hold under decision 20B; named additions and unique RPC short names enforced; no adapter needed to verify schema |
 | gap12-server | src/server/grpc.rs; src/server/graph.rs; src/property_graph/read.rs, retrieve.rs and engine read/schema execution only if section 10 approves a public cancellation API; proposed tests/graph_grpc.py | gap12-proto; all parity/auth/tenant/atomicity/limits/deadline/cap checks; cargo test with graph+grpc and feature-off builds | Shared admission/auth/audit/metrics; Graph registration, health and both caps per section 3; explicit `response_too_large` and `deadline_exceeded` mapper arms only if wire conventions decisions 3 and 4 are approved; no HTTP loopback; exact errors; complete metadata; pivot/schema deadline handled as section 10 decides, never a pivot prefix; no new policy/default; no source name guessed from this draft |
 | gap12-clients | clients/README.md; clients/python/README.md; clients/javascript/README.md; optional stub examples/notes and tests under clients/python, clients/javascript, clients/dotnet | gap12-proto; runnable endpoints from gap12-server for live checks; Python oracle, JS full-width ID checks, .NET optional generation and skew tests | REST dependency defaults unchanged; explicit gRPC selection; an example/type per method; status/trailers/absence preserved; no silent fallback/retry |
 | gap12-parity-docs | docs/GRPC.md; site/api.html; docs/GRAPH.md; docs/SECURITY.md; final parity fixtures in tests/graph_grpc.py coordinated after server ownership ends | All prior slices; full acceptance matrix, four documentation checks plus api_reference.py and links | Every method documented once; shared REST/MCP fixtures pass; mutation assertions proven; generated-client instructions reproducible; no claim of release/qualification based only on docs |
 
 ## 10. Owner decisions and remaining open items
 
-Recommendations below are exact proposed resolutions, not new approvals or
-changes to existing gates.
+Recommendations below are exact proposed resolutions, not blanket approvals or
+changes to existing gates. The shared sibling-band and core-reservation choices
+are already settled by wire decisions 1 and 20; they do not approve this exact
+manifest or lift its descriptor/oracle review prerequisite.
 
 | Decision | Options | Recommendation / acceptance consequence |
 |---|---|---|
@@ -1096,7 +1103,7 @@ changes to existing gates.
 | 16 MiB response | Truncate and mark; `encoded_len()` preflight error (RESOURCE_EXHAUSTED + `response_too_large`); or accept tonic's OUT_OF_RANGE (today) | Explicit error, never truncation. Prefer the preflight (new adapter code, new trailer name); OUT_OF_RANGE is the zero-code fallback. No cap increase. Evidence: tonic `src/codec/encode.rs:188-192`, `docs/GRPC.md:157-160`. Wire conventions, decision 3 (proposed): REST retains no response cap; the preflight code is gRPC-only. |
 | Read-body admission accounting | Transport 8 MiB only (today); 1,048,576 re-encoded protobuf bytes; or 1 MiB of a canonical REST JSON encoding | Protobuf unit (section 4): deterministic, one counter, no JSON encoder to specify. REST counts the JSON bytes received (`src/server/graph.rs:79-80`), so exact REST equivalence is not claimed. Add boundary fixtures. Wire conventions, decision 18 (proposed): option B, encoded_len() preflight with invalid_json. |
 | Pivot k=0 documentation mismatch | Tighten runtime to minimum 1; or document current zero behavior | Preserve zero runtime behavior here. Correct OpenAPI in its separately owned approved slice, or explicitly approve a future compatibility change; do not silently invent a minimum. |
-| Sibling tag allocation; `reserved 14 to 31;` | Reclaim reserved core arms later; or independent prefixed messages/RPCs. Keep or delete the 14-31 hold | **Withdrawn:** permanent reserved fences and sibling-specific messages; no removal of a reserved range to slip features into core writes. Keep 14-31 only if owners name its use (the parent lists 13 arms, `docs/projects/roadmap/serving-contract.md:204`); otherwise delete it before the proto freeze lifts so core arms stay additive. Reason: permanent empty fences prevent atomic mixed writes; use [wire conventions section 1.3](serving-wire-conventions.md#13-field-number-allocation-c1). Wire conventions, decision 1 (proposed): option A, sibling-owned bands. Wire conventions, decision 20 (proposed): option A, drop the unowned hold. |
+| Sibling tag allocation; `reserved 14 to 31;` | Shared choices already resolved; exact operation schemas remain separately reviewed | **Owner-approved 2026-11-02:** wire decision 1 option A, sibling-owned bands for atomic mixed writes; decision 20 option B, KEEP tags 14-31 for GR12 future core atomic graph-batch arms. Only a separate exact-schema review naming an operation may release its tag. The original recommendation to drop this hold is superseded; use [wire conventions section 1.3](serving-wire-conventions.md#13-field-number-allocation-c1). |
 | Packaged clients | Mandatory new runtimes; optional packages; or generated-stub recipes first | Generated-stub recipes/optional examples first, no dependency change to REST packages. Separately approve packaging and supported runtime versions. |
 | Pivot/schema cancellation (public Rust API) | (a) Adapter-only: stop waiting at the client deadline, retain permits, drop the result; (b) honor `ReadOptions.cancel` or a deadline inside pivot and schema code; (c) add a public method or parameter | (a) for gap12-server; (b)/(c) need explicit approval and no new `Error` variant. Evidence: `src/property_graph/read.rs:61-69`, `src/property_graph/retrieve.rs:12-18`, `src/property_graph/retrieve.rs:301`, `src/property_graph/mod.rs:189`, `src/property_graph/engine/schema.rs:1130`. |
 | Sibling RPCs, method count and sequencing | This document alone defines the `Graph` service; or later documents append methods | **Withdrawn:** an absolute post-ALG method total, because earlier slices append RPCs too; see [wire conventions sections 1.1 and 5.1](serving-wire-conventions.md#51-order). Graph lands with 17 unary RPCs at step 3; later slices append to what is present in landing order (TTL step 5, temporal step 6, five ALG RPCs step 8), adding named descriptor and parity entries. No slice promises an absolute total. Gap 8's reservations (section 2) stay untouched. |

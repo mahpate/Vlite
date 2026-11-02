@@ -1,6 +1,6 @@
 # Serving wire conventions
 
-Status: proposal for owner ratification. Docs only: no code, gate or policy change, no new public `Error` variant, additive v1 only (BASE:209). It settles the cross-document conflicts found when the ten serving drafts were read side by side: proto tags and `HybridHit` (C1, C16), error codes (C2-C9), the `GraphBatch` op union (C10), the change feed (C11), encodings (C12), client and MCP shapes (C13), shared files, health and caps (C14) and operationIds (C15). Each ruling follows what the source already does and cites it; where the source does not decide, the ruling is an owner decision (section 6). Once ratified, the drafts cite this note instead of restating its rules.
+Status: shared design conventions owner-approved on 2026-11-02; section 6 records all 23 choices. Docs only: no implementation acceptance, gate activation, release approval or new public `Error` variant; additive v1 only (BASE:209). This note settles the cross-document conflicts found when the ten serving drafts were read side by side: proto tags and `HybridHit` (C1, C16), error codes (C2-C9), the `GraphBatch` op union (C10), the change feed (C11), encodings (C12), client and MCP shapes (C13), shared files, health and caps (C14) and operationIds (C15). Remaining feature-specific endpoint, signature, field and error-code approvals are not granted by these shared choices. Conflicting proposal text in sibling drafts must follow this record; section 7 tracks the remaining conformance work, not completed implementation.
 
 | ID | Document in `docs/projects/roadmap/` | Scope |
 |---|---|---|
@@ -15,7 +15,7 @@ Status: proposal for owner ratification. Docs only: no code, gate or policy chan
 | P5 | `serving-binary-results-contract.md` | binary results |
 | PRC | `serving-precision-contract.md` | P3 precision API |
 
-Citations: `file:line` is source at e88ca853; `BASE:n` is a line of `serving-contract.md` at e88ca853; `tonic` is tonic 0.14.6 source (Cargo.lock); `ID §n ~line` is a section and approximate line of a working draft. Draft cites (KV, G6, G7, TMP, MEM, PRC, GR12, ALG) were pinned against the text read while writing; those drafts are still being edited and move by lines per edit, so re-pin before ratifying (section names and decision ids are the stable anchors).
+Citations: `file:line` is source at e88ca853; `BASE:n` is a line of `serving-contract.md` at e88ca853; `tonic` is tonic 0.14.6 source (Cargo.lock); `ID §n ~line` is a section and approximate line of a working draft. These historical citations explain the proposal; the owner walkthrough used the shared note at 1d531a26 and the preceding P3b/P3c, G6 and G7 approval records. Drafts continue to move by lines per edit, so section names and decision IDs are the stable anchors; re-pin source and exact schemas at each implementation review.
 
 ## 1. Proto manifest
 
@@ -45,7 +45,7 @@ Gap 12 shared messages are `GraphSelector`, `GraphLimits`, `GraphProjection`, `G
 
 | Tags | Owner | Use |
 |---|---|---|
-| 1-99 | GR12 | core fields; `GraphWriteOperation` arms 1-13 (BASE:204); the `reserved 14 to 31` hold (decision 20) |
+| 1-99 | GR12 | core fields; `GraphWriteOperation` arms 1-13 (BASE:204); retain its `reserved 14 to 31` for future core atomic graph-batch operation arms (decision 20) |
 | 100-199 | ALG | unused unless a shared field is needed; ALG keeps its own `GraphAlgorithm*` messages |
 | 200-299 | TMP | at most one field or arm per shared message, first tag 200 |
 | 300-399 | none | held for MEM if it ever needs a `WriteGraphBatch` arm; it has none today (own `Memory` service) |
@@ -55,6 +55,7 @@ Gap 12 shared messages are `GraphSelector`, `GraphLimits`, `GraphProjection`, `G
 | Mechanic | Rule |
 |---|---|
 | Fences | GR12 declares the four `reserved` fences in every shared message, as it does in `GraphWriteOperation` (GR12 §3 ~239-243). The band owner's slice carves exactly one tag out of its band (`reserved 200 to 299` becomes `reserved 201 to 299`) and adds the field |
+| Core operation hold | GR12 / the Gap 12 core graph protocol owner owns `GraphWriteOperation` tags 14-31 for future core atomic graph-batch operation arms. Keep them reserved until a separate exact-schema review names an operation and explicitly releases its tag. This is not permission to allocate one now, nor a reservation of 14-31 in every other message |
 | Arms wrap domain messages | the field or arm holds a domain-owned message with its own oneof and `reserved 100 to 199`; no domain field is added directly to a shared message |
 | Proof | the descriptor test asserts that every tag of 100 or more in a shared message is its band's first tag; each landing adds a named entry (GR12 ~931) |
 | TMP | `TemporalWriteOperation temporal = 100` cannot compile against `reserved 100 to 199` (GR12 §3 ~239-243). It and the other tag-100 additions on shared messages (`TemporalSelector` on the nine read requests, `TemporalContext` on `GraphReadMeta`, `TemporalBounds validity` on `GraphEdge`; TMP §7 ~771-777) become tag 200 |
@@ -102,7 +103,7 @@ Baseline-owned messages carry no fence; they take the next free low tag in landi
 | REST graph reads | 1 MiB | no cap | `graph.rs:80,184` |
 | Graph batch | 4,096 ops; engine cap 16,777,216 encoded bytes (the 8 MiB wire cap bites first) | none | `graph.rs:110,717`; BASE:175 |
 | G8 provider calls | embedding input 16,384 UTF-8 bytes; encoded request 1 MiB | 4 MiB | G8 limits table |
-| ALG graph-read RPCs | 1 MiB input (S5-D5) | 16 MiB | ALG ~1186; decision 18 |
+| gRPC graph reads, including ALG | 1 MiB of the decoded request's re-encoded protobuf `encoded_len()`; adapter preflight after tonic's 8 MiB decode cap | 16 MiB | ALG ~1186; decision 18; not a pre-decode or process-memory bound |
 
 ## 2. Error registry (C2-C9)
 
@@ -130,9 +131,8 @@ The gRPC column is what the shared mapper returns (`grpc.rs:181-196`). It keeps 
 | 409 | `memory_feed_unsupported` and the other MEM domain 409s | FAILED_PRECONDITION | MEM ~468-472 | new |
 | 409 | `provider_not_configured` | FAILED_PRECONDITION (generic arm) | BASE:118 | new |
 | 412 | `precondition_failed` (MEM revision or job mismatch as `details.field`) | ABORTED (`grpc.rs:189`) | src `server.rs:1523`; MEM ~473 | existing |
-| 413 | `response_too_large` (no cursor advance) | RESOURCE_EXHAUSTED (new arm before `grpc.rs:194`) | GR12 ~841; TMP ~265; MEM ~474 | new; one code replaces `graph_response_too_large`, `memory_response_too_large` and TMP's INVALID_ARGUMENT mapping |
-| 422 | `invalid_input` (limit or field named through `details`, section 3); KV `InvalidKvKey` through a new arm | INVALID_ARGUMENT | src `server.rs:1446`; KV §10 ~849 | existing; new arm |
-| 422 | `invalid_precision` (unknown, null or wrong-case precision; enum 0 or unknown) | INVALID_ARGUMENT | PRC ~476 | new; decision 6 |
+| 413 (gRPC adapter only) | `response_too_large` (no cursor advance) | RESOURCE_EXHAUSTED (new arm before `grpc.rs:194`) | GR12 ~841; TMP ~265; MEM ~474 | internal `ApiError` status, not a new REST cap; replaces `graph_response_too_large`, `memory_response_too_large` and TMP's INVALID_ARGUMENT mapping |
+| 422 | `invalid_input` (limit or field named through `details`, section 3); KV `InvalidKvKey` through a new arm; invalid precision values | INVALID_ARGUMENT | src `server.rs:1446`; KV §10 ~849; PRC ~476 | existing; new arm; decision 6 rejects a separate `invalid_precision` code, while wrong JSON type/shape remains `invalid_json` |
 | 422 | `invalid_cursor`; `invalid_graph_name`, `graph_limit_exceeds_ceiling`, `graph_invalid_options`, `graph_pivot_too_expensive` | INVALID_ARGUMENT | src `server.rs:1545,1616-1623` | existing |
 | 422 | `invalid_provider_input` | INVALID_ARGUMENT | BASE:119 | new |
 | 429 | `rate_limited`, `quota_exceeded`, `provider_busy` | RESOURCE_EXHAUSTED with `retry-after: 1` (`grpc.rs:184,201-203`) | src `server.rs:1216-1219`; BASE:123 | existing; `provider_busy` new |
@@ -170,13 +170,14 @@ The gRPC column is what the shared mapper returns (`grpc.rs:181-196`). It keeps 
 | Never partial | graph batch and KV writes, memory mutations, G6 writes, G7 ingestion, provider calls, response-size failures, authorization and storage errors, transport expiry and cancel | BASE:181; G6 §6 |
 | Expired channel | cannot carry a partial; the call ends CANCELLED without trailer | ALG ~356-362 |
 | JSON | malformed or oversize body is `invalid_json`; a semantic failure is 422 `invalid_input`; structured context follows the `details` rule of section 3 | `server.rs:1658-1662`; `grpc.rs:199-216` |
-| MCP and CLI | one failure shape: `isError:true` with `structuredContent.error` a STRING, `"<code>: <message>"` with the engine's code; `invalid_request` is tool-local and never a REST or gRPC code; object-shaped failures change (decision 22) | `vlite-mcp.rs:673-682`; `graph_mcp.rs:56-62`; `graph_proxy.rs:190`; KV §9 ~717-719 |
+| MCP | one failure shape: `isError:true` with `structuredContent.error` a STRING, `"<code>: <message>"` with the engine's code; `invalid_request` is tool-local and never a REST or gRPC code; object-shaped MCP failures change (decision 22) | `vlite-mcp.rs:673-682`; `graph_mcp.rs:56-62`; `graph_proxy.rs:190`; KV §9 ~717-719 |
+| CLI | preserve coded JSON `{"error":{"code":...,"message":...}}` on stderr and a nonzero exit; do not apply MCP's `isError` / `structuredContent` envelope | `vlite-graph-cli.rs:8-13,346-351` at 1d531a26; decision 22 leaves CLI behavior unchanged |
 
 ## 3. Encoding rules (C12)
 
 | Concept | Rule | Evidence | Docs that change |
 |---|---|---|---|
-| u64 and i64 in JSON: ids, revisions, sequences, timestamps on graph-domain routes | output decimal string; input decimal string or exact JSON integer; unknown fields rejected; proto uses native uint64 and int64 | `graph.rs:4-8`; BASE:205 | KV (decimal strings for every new u64, ~153-155, 967; integer revision input kept only inside the graph fragment, ~673-675, as `graph_json.rs:98,161-168`), MEM (strings only, ~76-80), TMP (integer input capped at +-(2^53-1), larger values strings, out-of-range 422 `invalid_json`, ~72-78): decision 12 |
+| u64 and i64 in JSON: ids, revisions, sequences, timestamps on graph-domain routes | output decimal string; input canonical decimal string or exact JSON integer in the field's full u64/i64 range, through one shared parser; no extra JavaScript-safe-range restriction; unknown fields rejected; proto uses native uint64 and int64 | `graph.rs:4-8,806-825`; BASE:205 | KV (decimal strings for every new u64, ~153-155, 967; integer revision input kept only inside the graph fragment, ~673-675, as `graph_json.rs:98,161-168`), MEM (strings only, ~76-80), TMP (integer input capped at +-(2^53-1), larger values strings, out-of-range 422 `invalid_json`, ~72-78): decision 12 |
 | Existing numeric fields | stay JSON numbers (`committed_at_ms`, vector `expires_at_ms`); clients do not unify them with graph strings | `features.rs:64-87`; `changes.rs:172` | none |
 | `deadline_ms` | uint64 everywhere, a JSON integer; default 250, ceiling 5,000; above the ceiling is rejected, never clamped | `limits.rs:68-81,93,104`; `graph.rs:1176`; GR12 ~137; ALG ~886 | MEM (uint32, ~717-721), G7 (`u32`, ~98), G6 `write_deadline_ms` (~433, 453, 693) |
 | Other limits | `GraphLimits` is eight `u64` fields; page `limit` and `k` are uint32; bounded durations (`poll_interval_ms`, KV `ttl_ms`) stay uint32 | `limits.rs:68-81`; `vlite.proto:455-456`; `features.rs:109-110` | MEM `MemoryLimits` |
@@ -185,7 +186,13 @@ The gRPC column is what the shared mapper returns (`grpc.rs:181-196`). It keeps 
 | Idempotency key | body field `idempotency_key` only, no header alias; the digest excludes deadline fields; G7 uses content-digest receipts (decision 13) | MEM ~119, 122-126, 182; no source precedent | KV, MEM, G7 state it once |
 | Cursors | the feed token belongs to `changes.rs` (section 4); graph read cursors are opaque `cursor` and `next_cursor` owned by the engine; keyed lists use `after` and `next_after` | `changes.rs:26-35`; `openapi_graph.json:526`; `openapi.json:56,114`; `vlite-mcp.rs:468,575` | KV and MEM list routes |
 | Pagination | feed `limit` 1..=10000, default 1000, whole commits per page unless section 4 says otherwise | `features.rs:109-110`; `changes.rs:22-23,445-448` | KV, TMP |
-| Error `details` | gRPC: the optional JSON string an `ApiError` carries, sent as `vlite-error-details-base64` (one producer today, `import_rows_invalid`). REST: the body stays `{error:{code,message}}`; ONE optional `error.details` object (same JSON; keys `field`, `limit`, `requested`, `feature`, `category`) only if decision 21 passes. No other new error-body member and no `vlite-feature` trailer | `server.rs:1380-1388,1409-1412`; `grpc.rs:206-209,2262-2268`; PRC ~461-465; MEM ~454-458 | MEM (keys), TMP D8 (`feature` and `category` move into `details`), G6 (reason text only) |
+| Error `details` | gRPC: the optional JSON string an `ApiError` carries, sent as `vlite-error-details-base64` (one producer today, `import_rows_invalid`). REST currently has `{error:{code,message}}`; decision 21 approves ONE additive optional `error.details` object (same JSON; keys `field`, `limit`, `requested`, `feature`, `category`), preserving `code` and `message`. No other new error-body member and no `vlite-feature` trailer | `server.rs:1380-1388,1409-1412`; `grpc.rs:206-209,2262-2268`; PRC ~461-465; MEM ~454-458 | MEM (keys), TMP D8 (`feature` and `category` move into `details`), G6 (reason text only) |
+
+Decision 12 does not make an already-rounded JavaScript number exact: clients
+must send large values as strings before rounding can occur. Canonical string
+parsing rejects padding, leading zeros other than `"0"` and nondecimal syntax,
+with the corresponding signed form for i64. Ordinary JSON layout whitespace is
+unaffected. Existing numeric fields retain their current representation.
 
 ## 4. Graph events in the change feed (C11)
 
@@ -255,11 +262,20 @@ BASE:253-255 fix steps 1-3; the later steps are the ratified serving order and a
 | MCP tool | `vlite_<domain>_<verb>` in snake_case: `vlite_graph_*` (13 exist), `vlite_kv_*`, `vlite_memory_*`; ALG's `vlite_graph_degree` and siblings fit | `graph_mcp.rs`; KV ~709-712; ALG ~116-121 |
 | MCP input and failure (C13) | flat arguments with `additionalProperties:false` and one top-level selector property (`collection`, `graph` or `binding`); no `{binding, request}` nesting; no `outputSchema`; a failure is the string of 2.3 (decision 22) | `vlite-mcp.rs:457-458,464-474,673-682`; `graph_mcp.rs:56-62,286,306`; KV ~709-720; MEM ~779-781, 788; PRC ~283-288 |
 | CLI subcommand | kebab-case mirror of the tool verb (`find-nodes`, `shortest-path`) | `vlite-graph-cli.rs:78-81` |
-| Client method | derived mechanically from the RPC or operation short name: Python `snake_case`, JavaScript `camelCase`, .NET `PascalCase` plus `Async`; no hand-shortened aliases (`create_collection_with_precision` is the pattern). An option on an existing operation (P5 `resultFormat`) is a keyword or options argument in Python and JavaScript and a distinct `<Operation>With<Option>Async` method in .NET, so existing calls keep binding | PRC ~429-437; P5 ~406-413; MEM ~807-816 |
+| Client method | flat methods derived mechanically from the RPC or operation short name: Python `snake_case`, JavaScript `camelCase`, .NET `PascalCase` plus `Async`; no new scoped facade or hand-shortened aliases (`create_collection_with_precision` is the pattern). An option on an existing operation (P5 `resultFormat`) is a keyword or options argument in Python and JavaScript and a distinct `<Operation>With<Option>Async` method in .NET, so existing calls keep binding | PRC ~429-437; P5 ~406-413; MEM ~807-816; decision 10 |
 
 ## 6. Owner decisions (23)
 
-| # | Decision | Options | Recommendation | Evidence |
+All choices below are resolved by the 2026-11-02 one-by-one owner walkthrough:
+option A for 1-17, 19 and 21-23; option B for 18 and 20. Decisions 14 and 15
+carry forward the already-approved G7 reserved-object policy and G6 separate
+write budget rather than asking them again. For decision 20 the owner rejected
+the original recommendation to drop the hold, then explicitly approved the
+GR12 owner, future-core-operation purpose and separate tag-release review.
+These are shared design approvals only; exact feature contracts, independent
+implementation acceptance, qualification and final release go/no-go remain separate.
+
+| # | Decision | Options | Owner selection | Evidence |
 |---|---|---|---|---|
 | 1 | Tags 100-499 in Gap 12 shared messages | A sibling-owned bands, one arm per band carved from `reserved`; B permanent empty fences, sibling messages and RPCs only | A: keeps temporal and TTL writes atomic with core writes and `GraphBatch` single | BASE:152; KV ~589-590; TMP ~777, D3 ~880; GR12 ~71-77, 1026 |
 | 2 | `GraphTtl` | A fold into `Graph`; B separate service | A: one health name, one cap setting, one parity table | BASE:131; KV ~548-553 (ledger X1) |
@@ -267,7 +283,7 @@ BASE:253-255 fix steps 1-3; the later steps are the ratified serving order and a
 | 4 | Deadline status | A explicit 504 `deadline_exceeded` to DEADLINE_EXCEEDED; B 503 `unavailable` to UNAVAILABLE | A: precedent BASE:122; B invites blind retry | BASE:122,126-127; TMP D9 ~886 (B is TMP's provisional fallback); MEM ~481 |
 | 5 | MEM `memory_budget_exceeded` (429) | A per-request work budget is 422 `invalid_input`, a rate or quota is the existing 429; B keep the new code | A: no new code; 429 stays the credential limiter | MEM ~477; `server.rs:1216-1219`; G6 §7 proposal 1 (~544-546) |
 | 6 | PRC `invalid_precision` (422) | A fold into `invalid_input`, the field named through `details` (decision 21) or the message; B keep a new domain code on a generic 422 arm | A: semantic is 422 `invalid_input` and PRC already uses it for its other value failures; PRC also files "wrong precision type" here, yet a wrong type is a shape failure (`invalid_json`, ~478). B follows `invalid_cursor`, `invalid_id`, `invalid_graph_name` | PRC ~476, 478, 480-481; `server.rs:1446` |
-| 7 | `unsupported_feature` mapping | A scoped per-operation `ApiError` (409; feature and category in `details`; legacy routes keep 500); B a global `From<Error>` arm (changes legacy 500 to 409); C TMP D8: `vlite-feature` trailer plus new body members; D leave 500 | A: no public error-shape change and no legacy behaviour change | `server.rs:1624`; TMP ~254, 271-275, 290-294, D8 ~885; PRC ~498-501; G6 §7 proposal 2 (~547) |
+| 7 | `unsupported_feature` mapping | A scoped per-operation `ApiError` (409; feature and category in `details`; legacy routes keep 500); B a global `From<Error>` arm (changes legacy 500 to 409); C TMP D8: `vlite-feature` trailer plus new body members; D leave 500 | A: no legacy mapping change; context uses the shared optional `details` extension approved in decision 21 | `server.rs:1624`; TMP ~254, 271-275, 290-294, D8 ~885; PRC ~498-501; G6 §7 proposal 2 (~547) |
 | 8 | Feed opt-in | A `graph_events` set; B separate booleans (`graph_ttl`, `temporal`); C `feed_version` | A: one parameter, one cursor token, extends the engine boolean | `changes.rs:207,236,246`; KV ~412-415; TMP ~441-447 |
 | 9 | Feed page splitting | A split only TTL reclaim runs; B split every opted-in commit; C never split | A: temporal commits are bounded at 4,096 ops, reclaim is not | `openapi.json:33`; `changes.rs:445-448`; KV ~473-476 |
 | 10 | Client facade shape | A flat methods derived from RPC names; B scoped objects (`client.graph(name)`, `client.memory(binding)`) | A: the 5.4 derivation is mechanical; B needs the same wrapper in four languages | MEM ~807-816; PRC ~429-437 |
@@ -278,16 +294,16 @@ BASE:253-255 fix steps 1-3; the later steps are the ratified serving order and a
 | 15 | G6 `write_deadline_ms` | A keep a separate write budget (uint64, rejected above its ceiling); B one `deadline_ms` | A: G6 sets different defaults (100 and 1,000 against 250 and 5,000) | G6 ~433, 453, 693; `limits.rs:93,104` |
 | 16 | RPC short-name uniqueness | A descriptor-level uniqueness test, scanner unchanged; B qualify keys as `grpc:<Service>.<Rpc>` | A: B rewrites every `site/api.html` gRPC row | `api_reference.py:445-446`; KV ~700-701 (ledger X6); GR12 ~910-915 |
 | 17 | `vlite.serving.v1` and `HybridHit` | A import `vlite.v1.HybridHit`; B rename and convert; C fold `results.proto` into `vlite.v1` | A: one concept, one message | P5 ~156,169-176 |
-| 18 | gRPC graph-read input cap | A tonic 8 MiB only (OUT_OF_RANGE, no trailer); B an adapter `encoded_len()` check at 1 MiB returning `invalid_json` as INVALID_ARGUMENT | B for graph reads only: equal cap to REST and a trailer; GR12 already proposes it, so ALG's trailer becomes `invalid_json` and S5-D5 becomes this rule; writes keep 8 MiB | `graph.rs:80`; BASE:177; GR12 ~718-721, 828, 842, 931; ALG ~386, 1186 |
+| 18 | gRPC graph-read input cap | A tonic 8 MiB only (OUT_OF_RANGE, no trailer); B an adapter `encoded_len()` check at 1 MiB returning `invalid_json` as INVALID_ARGUMENT | B for graph reads only: decoded request's re-encoded protobuf bytes, not original wire bytes or a pre-decode memory bound; ALG's trailer becomes `invalid_json` and S5-D5 uses this rule; tonic decoding and writes keep 8 MiB | `graph.rs:80`; BASE:177; GR12 ~718-721, 828, 842, 931; ALG ~386, 1186 |
 | 19 | MEM `allow_partial` | A MEM reads fail unless `allow_partial: true`; B partial by default like graph reads | A, documented as MEM's one exception | MEM ~299-306; BASE:178 |
-| 20 | `GraphWriteOperation` `reserved 14 to 31` hold | A drop it, so Gap 12 core may use 14-99; B name an owner and purpose | A: BASE:204 lists 13 arms, so the hold has no owner | GR12 ~78-80, 1026; BASE:204 |
+| 20 | `GraphWriteOperation` `reserved 14 to 31` hold | A drop it, so Gap 12 core may use 14-99; B name an owner and purpose | B: KEEP the hold. GR12 / the Gap 12 core graph protocol owner owns tags 14-31 for future core atomic graph-batch operation arms; a separate exact-schema review must name an operation and explicitly release its tag | Owner choice and clarification, 2026-11-02; GR12 section 3; BASE:204 |
 | 21 | Structured error context on REST | A one optional `error.details` object, additive, the same JSON as the gRPC trailer; B none on REST (message text only, gRPC trailer only); C per-draft members (MEM `details` on memory routes, TMP `feature` and `category`) | A: one schema extension serves decisions 5-7 and needs no new trailer; today only gRPC can carry the context | `server.rs:1380-1388,1409-1412`; `grpc.rs:206-209,2262-2268`; MEM ~454-458; TMP ~271-275, 885; PRC ~461-465 |
 | 22 | MCP tool input and failure shape (C13) | A flat arguments with one top-level selector and a string failure `"<code>: <message>"` (what the source, KV, G6 and ALG do); B MEM's nested `{binding, request}` input with `MemoryError` failures, and PRC's `{error:{code,message}}` objects | A: every existing tool takes flat arguments and returns a string error, so one client parser serves all tool families; B adds a second parsing path | `vlite-mcp.rs:457-458,464-474,673-682`; `graph_mcp.rs:56-62`; KV ~709-720; G6 ~536; ALG ~286, 424; MEM ~779-781, 788; PRC ~283-288 |
 | 23 | `GraphBatch` schema mechanism (C10) | A additive: new op literals in the `op` enum plus one `allOf` `if`/`then` `$ref` per domain (KV); B closed `oneOf` alternatives per domain appended to `items` (TMP) | A: `items` is one open object today, so A restructures nothing and each later domain adds one branch; B turns `items` into a `oneOf` that every domain must join | `openapi_graph.json:2141-2165`; KV §8 ~677-685; TMP ~645-646 |
 
 ## 7. Per-document conformance checklist
 
-Every document: for each new code, state its producer (an existing `Error` variant through a new `From` arm, or an `ApiError` built by the handler); none adds a public `Error` variant. Cite this note instead of restating a rule.
+Every document: for each new code, state its producer (an existing `Error` variant through a new `From` arm, or an `ApiError` built by the handler); none adds a public `Error` variant. Cite this note instead of restating a rule. Unchecked items remain conformance work: owner ratification does not assert that every sibling draft or implementation has been reconciled.
 
 **KV**
 - [ ] operationIds `kvGet`, `kvPut` and the rest (~236-240) become PascalCase.
@@ -335,7 +351,7 @@ Every document: for each new code, state its producer (an existing `Error` varia
 - Conforming: operationIds (`ListCollections`, `CreateCollection`, `GetCollection`, ~580-591); client names `create_collection_with_precision` (~429-437); `requires_format_v4`, `collection_limit`, `default_collection_immutable` and `import_conflict` are existing codes (`server.rs:1484-1521`).
 
 **GR12**
-- [ ] §3 (~71-80): replace "reserved, not placeholders to reclaim" with the band rule of 1.3 for every shared message; rename band 400 "TTL" (~243); use `GraphExpiry*` and the separate `Kv*`, `Memory*` services in place of the `GraphKv*`, `GraphMemory*` examples (~74-75); settle `reserved 14 to 31` (~239; decision 20).
+- [ ] §3 (~71-80): replace "reserved, not placeholders to reclaim" with the band rule of 1.3 for every shared message; rename band 400 "TTL" (~243); use `GraphExpiry*` and the separate `Kv*`, `Memory*` services in place of the `GraphKv*`, `GraphMemory*` examples (~74-75); retain and label `reserved 14 to 31` for GR12 future core atomic graph-batch arms, with separate review before any release (decision 20).
 - [ ] §6 (~839-841): `graph_response_too_large` becomes `response_too_large`, `graph_deadline_exceeded` becomes `deadline_exceeded`, `graph_cancelled` stays an audit label with no wire code.
 - [ ] §4 (~712-721): keep the `encoded_len()` preflight and state the unit of the graph-read input cap (decision 18).
 - [ ] Add the 1.1 and 1.2 tables: health, caps and 17 methods at landing, with later slices appending in landing order; the sentence that fixes the service at 22 methods after ALG (~1029) goes, because no slice promises an absolute total.
