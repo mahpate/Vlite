@@ -1,0 +1,575 @@
+{
+  "schema": "vlite.compact-graph-schema-logical",
+  "version": 1,
+  "cases": [
+    {
+      "name": "empty-schema-empty-snapshot",
+      "purpose": "An empty declaration removes all rules; empty arrays are valid.",
+      "input": {"declarations": [], "nodes": [], "edges": [], "queries": []},
+      "expected": {"declarations": [], "conforms": true, "violations": [], "results": []}
+    },
+    {
+      "name": "empty-schema-open-world",
+      "purpose": "Undeclared types and parallel edges are allowed; Eq preserves Boolean/Integer/Float identity.",
+      "input": {
+        "declarations": [],
+        "nodes": [
+          {"id": 2, "labels": ["Free", "Free"], "properties": [{"name": "p", "type": "Boolean", "value": true}]},
+          {"id": 0, "labels": [], "properties": [{"name": "p", "type": "Integer", "value": 1}]},
+          {"id": 1, "labels": ["Free"], "properties": [{"name": "p", "type": "Float", "bits": "3ff0000000000000"}]}
+        ],
+        "edges": [
+          {"id": 1, "source": 0, "relationship": "UNKNOWN", "destination": 1, "properties": []},
+          {"id": 0, "source": 0, "relationship": "UNKNOWN", "destination": 1, "properties": []}
+        ],
+        "queries": [
+          {"label": null, "op": "Eq", "property": "p", "value": {"type": "Integer", "value": 1}},
+          {"label": "Free", "op": "Eq", "property": "p", "value": {"type": "Boolean", "value": true}},
+          {"label": null, "op": "Eq", "property": "p", "value": {"type": "Float", "bits": "3ff0000000000000"}}
+        ]
+      },
+      "expected": {
+        "declarations": [], "conforms": true, "violations": [],
+        "results": [{"ids": [0], "index": "Scan"}, {"ids": [2], "index": "Scan"}, {"ids": [1], "index": "Scan"}]
+      }
+    },
+    {
+      "name": "canonical-declaration-order-and-separate-namespaces",
+      "purpose": "Both declaration kinds may share a name. Descriptions, all flags and undeclared endpoint labels survive canonical ordering.",
+      "input": {
+        "declarations": [
+          {"kind": "Relationship", "name": "Same", "description": "Directed \u00e9", "properties": [
+            {"name": "\u00e9", "type": "String", "required": false, "unique": false, "index": null},
+            {"name": " a.-", "type": "Boolean", "required": true, "unique": false, "index": null}
+          ], "endpoints": [{"source": "Z", "destination": "A"}, {"source": "A", "destination": "Z"}, {"source": "A", "destination": "A"}], "multiplicity": "Multi"},
+          {"kind": "Label", "name": "Same", "description": "", "properties": [
+            {"name": "z", "type": "Float", "required": false, "unique": true, "index": "Range"},
+            {"name": "a", "type": "GeoPoint", "required": true, "unique": false, "index": "Exact"}
+          ]},
+          {"kind": "Label", "name": "9_R", "description": "Leading digit is valid.", "properties": []}
+        ],
+        "nodes": [], "edges": [], "queries": []
+      },
+      "expected": {
+        "declarations": [
+          {"kind": "Label", "name": "9_R", "description": "Leading digit is valid.", "properties": []},
+          {"kind": "Label", "name": "Same", "description": "", "properties": [
+            {"name": "a", "type": "GeoPoint", "required": true, "unique": false, "index": "Exact"},
+            {"name": "z", "type": "Float", "required": false, "unique": true, "index": "Range"}
+          ]},
+          {"kind": "Relationship", "name": "Same", "description": "Directed \u00e9", "properties": [
+            {"name": " a.-", "type": "Boolean", "required": true, "unique": false, "index": null},
+            {"name": "\u00e9", "type": "String", "required": false, "unique": false, "index": null}
+          ], "endpoints": [{"source": "A", "destination": "A"}, {"source": "A", "destination": "Z"}, {"source": "Z", "destination": "A"}], "multiplicity": "Multi"}
+        ],
+        "conforms": true, "violations": [], "results": []
+      }
+    },
+    {
+      "name": "person-schema-conformance-and-index-choices",
+      "purpose": "Required unique String, optional range Integer and directed UniqueTriple relationship follow the engine test schema.",
+      "input": {
+        "declarations": [
+          {"kind": "Relationship", "name": "KNOWS", "description": "Acquaintance.", "properties": [
+            {"name": "since", "type": "Integer", "required": false, "unique": false, "index": null}
+          ], "endpoints": [{"source": "Person", "destination": "Person"}], "multiplicity": "UniqueTriple"},
+          {"kind": "Label", "name": "Person", "description": "A human being.", "properties": [
+            {"name": "name", "type": "String", "required": true, "unique": true, "index": null},
+            {"name": "age", "type": "Integer", "required": false, "unique": false, "index": "Range"}
+          ]}
+        ],
+        "nodes": [
+          {"id": 7, "labels": ["Person"], "properties": [{"name": "name", "type": "String", "value": "Bob"}]},
+          {"id": 2, "labels": ["Person"], "properties": [{"name": "age", "type": "Integer", "value": 36}, {"name": "name", "type": "String", "value": "Ada"}]},
+          {"id": 9, "labels": ["Other"], "properties": [{"name": "age", "type": "String", "value": "unconstrained"}]}
+        ],
+        "edges": [{"id": 4, "source": 2, "relationship": "KNOWS", "destination": 7, "properties": [{"name": "since", "type": "Integer", "value": 2020}]}],
+        "queries": [
+          {"label": "Person", "op": "Eq", "property": "name", "value": {"type": "String", "value": "Bob"}},
+          {"label": "Person", "op": "Range", "property": "age", "min": {"type": "Integer", "value": 36}, "max": {"type": "Integer", "value": 36}},
+          {"label": "Person", "op": "Eq", "property": "age", "value": {"type": "Integer", "value": 36}},
+          {"label": "Person", "op": "Range", "property": "age", "min": {"type": "Float", "bits": "0000000000000000"}, "max": null},
+          {"label": "Absent", "op": "Eq", "property": "name", "value": {"type": "String", "value": "Bob"}}
+        ]
+      },
+      "expected": {
+        "declarations": [
+          {"kind": "Label", "name": "Person", "description": "A human being.", "properties": [
+            {"name": "age", "type": "Integer", "required": false, "unique": false, "index": "Range"},
+            {"name": "name", "type": "String", "required": true, "unique": true, "index": null}
+          ]},
+          {"kind": "Relationship", "name": "KNOWS", "description": "Acquaintance.", "properties": [
+            {"name": "since", "type": "Integer", "required": false, "unique": false, "index": null}
+          ], "endpoints": [{"source": "Person", "destination": "Person"}], "multiplicity": "UniqueTriple"}
+        ],
+        "conforms": true, "violations": [],
+        "results": [{"ids": [7], "index": "Exact"}, {"ids": [2], "index": "Range"}, {"ids": [2], "index": "Scan"}, {"ids": [], "index": "Range"}, {"ids": [], "index": "Scan"}]
+      }
+    },
+    {
+      "name": "all-five-types-and-u64-i64-boundaries",
+      "purpose": "Typed equality normalizes signed zeros without numeric coercion; range is inclusive and keeps full i64 precision.",
+      "input": {
+        "declarations": [
+          {"kind": "Label", "name": "Item", "description": "Typed.", "properties": [
+            {"name": "s", "type": "String", "required": false, "unique": false, "index": "Exact"},
+            {"name": "i", "type": "Integer", "required": false, "unique": true, "index": "Range"},
+            {"name": "g", "type": "GeoPoint", "required": false, "unique": false, "index": "Exact"},
+            {"name": "f", "type": "Float", "required": false, "unique": false, "index": "Exact"},
+            {"name": "b", "type": "Boolean", "required": false, "unique": false, "index": "Exact"}
+          ]}
+        ],
+        "nodes": [
+          {"id": 18446744073709551615, "labels": ["Item"], "properties": [
+            {"name": "b", "type": "Boolean", "value": false},
+            {"name": "f", "type": "Float", "bits": "0000000000000000"},
+            {"name": "g", "type": "GeoPoint", "latitude_bits": "8000000000000000", "longitude_bits": "0000000000000000"},
+            {"name": "i", "type": "Integer", "value": 9223372036854775807},
+            {"name": "s", "type": "String", "value": "text"}
+          ]},
+          {"id": 0, "labels": ["Item"], "properties": [
+            {"name": "b", "type": "Boolean", "value": true},
+            {"name": "f", "type": "Float", "bits": "8000000000000000"},
+            {"name": "g", "type": "GeoPoint", "latitude_bits": "4056800000000000", "longitude_bits": "c066800000000000"},
+            {"name": "i", "type": "Integer", "value": -9223372036854775808},
+            {"name": "s", "type": "String", "value": ""}
+          ]}
+        ],
+        "edges": [],
+        "queries": [
+          {"label": "Item", "op": "Eq", "property": "f", "value": {"type": "Float", "bits": "8000000000000000"}},
+          {"label": "Item", "op": "Eq", "property": "b", "value": {"type": "Integer", "value": 1}},
+          {"label": "Item", "op": "Eq", "property": "b", "value": {"type": "Boolean", "value": true}},
+          {"label": "Item", "op": "Eq", "property": "g", "value": {"type": "GeoPoint", "latitude_bits": "0000000000000000", "longitude_bits": "8000000000000000"}},
+          {"label": "Item", "op": "Range", "property": "i", "min": {"type": "Integer", "value": 9223372036854775807}, "max": null},
+          {"label": "Item", "op": "Range", "property": "i", "min": null, "max": {"type": "Integer", "value": -9223372036854775808}},
+          {"label": "Item", "op": "Eq", "property": "i", "value": {"type": "Integer", "value": 9223372036854775807}},
+          {"label": "Item", "op": "Eq", "property": "s", "value": {"type": "String", "value": ""}}
+        ]
+      },
+      "expected": {
+        "declarations": [
+          {"kind": "Label", "name": "Item", "description": "Typed.", "properties": [
+            {"name": "b", "type": "Boolean", "required": false, "unique": false, "index": "Exact"},
+            {"name": "f", "type": "Float", "required": false, "unique": false, "index": "Exact"},
+            {"name": "g", "type": "GeoPoint", "required": false, "unique": false, "index": "Exact"},
+            {"name": "i", "type": "Integer", "required": false, "unique": true, "index": "Range"},
+            {"name": "s", "type": "String", "required": false, "unique": false, "index": "Exact"}
+          ]}
+        ],
+        "conforms": true, "violations": [],
+        "results": [{"ids": [0, 18446744073709551615], "index": "Exact"}, {"ids": [], "index": "Exact"}, {"ids": [0], "index": "Exact"}, {"ids": [18446744073709551615], "index": "Exact"}, {"ids": [18446744073709551615], "index": "Range"}, {"ids": [0], "index": "Range"}, {"ids": [18446744073709551615], "index": "Exact"}, {"ids": [0], "index": "Exact"}]
+      }
+    },
+    {
+      "name": "float-adjacent-values-subnormal-and-range-zero",
+      "purpose": "No epsilon equality; the smallest positive subnormal is greater than zero. Signed zeros share inclusive numeric range postings.",
+      "input": {
+        "declarations": [{"kind": "Label", "name": "F", "description": "", "properties": [
+          {"name": "p", "type": "Float", "required": false, "unique": true, "index": "Range"}
+        ]}],
+        "nodes": [
+          {"id": 5, "labels": ["F"], "properties": [{"name": "p", "type": "Float", "bits": "3ff0000000000001"}]},
+          {"id": 3, "labels": ["F"], "properties": [{"name": "p", "type": "Float", "bits": "3ff0000000000000"}]},
+          {"id": 2, "labels": ["F"], "properties": [{"name": "p", "type": "Float", "bits": "0000000000000001"}]},
+          {"id": 0, "labels": ["F"], "properties": [{"name": "p", "type": "Float", "bits": "8000000000000000"}]}
+        ],
+        "edges": [],
+        "queries": [
+          {"label": "F", "op": "Eq", "property": "p", "value": {"type": "Float", "bits": "3ff0000000000000"}},
+          {"label": "F", "op": "Range", "property": "p", "min": {"type": "Float", "bits": "0000000000000000"}, "max": {"type": "Float", "bits": "8000000000000000"}},
+          {"label": "F", "op": "Range", "property": "p", "min": {"type": "Float", "bits": "0000000000000001"}, "max": {"type": "Float", "bits": "3ff0000000000000"}}
+        ]
+      },
+      "expected": {
+        "declarations": [{"kind": "Label", "name": "F", "description": "", "properties": [
+          {"name": "p", "type": "Float", "required": false, "unique": true, "index": "Range"}
+        ]}], "conforms": true, "violations": [],
+        "results": [{"ids": [3], "index": "Exact"}, {"ids": [0], "index": "Range"}, {"ids": [2, 3], "index": "Range"}]
+      }
+    },
+    {
+      "name": "missing-and-wrong-typed-required-properties",
+      "purpose": "A well-formed snapshot can violate required/type rules without being malformed.",
+      "input": {
+        "declarations": [{"kind": "Label", "name": "L", "description": "", "properties": [
+          {"name": "p", "type": "Integer", "required": true, "unique": false, "index": null}
+        ]}],
+        "nodes": [
+          {"id": 1, "labels": ["L"], "properties": [{"name": "p", "type": "Boolean", "value": true}]},
+          {"id": 0, "labels": ["L"], "properties": []}
+        ], "edges": [], "queries": []
+      },
+      "expected": {
+        "declarations": [{"kind": "Label", "name": "L", "description": "", "properties": [
+          {"name": "p", "type": "Integer", "required": true, "unique": false, "index": null}
+        ]}], "conforms": false,
+        "violations": [
+          {"entity": "node", "id": 0, "element": "L", "rule": "required", "property": "p"},
+          {"entity": "node", "id": 1, "element": "L", "rule": "type", "property": "p"}
+        ], "results": []
+      }
+    },
+    {
+      "name": "optional-still-type-checked-multilabel-conflict",
+      "purpose": "Optional means missing is allowed, not wrong type; all present label definitions apply to one property.",
+      "input": {
+        "declarations": [
+          {"kind": "Label", "name": "B", "description": "", "properties": [{"name": "p", "type": "Integer", "required": false, "unique": false, "index": null}]},
+          {"kind": "Label", "name": "A", "description": "", "properties": [{"name": "p", "type": "String", "required": false, "unique": false, "index": null}]}
+        ],
+        "nodes": [{"id": 0, "labels": ["B", "A"], "properties": [{"name": "p", "type": "String", "value": "ok-for-A"}]}],
+        "edges": [], "queries": []
+      },
+      "expected": {
+        "declarations": [
+          {"kind": "Label", "name": "A", "description": "", "properties": [{"name": "p", "type": "String", "required": false, "unique": false, "index": null}]},
+          {"kind": "Label", "name": "B", "description": "", "properties": [{"name": "p", "type": "Integer", "required": false, "unique": false, "index": null}]}
+        ], "conforms": false,
+        "violations": [{"entity": "node", "id": 0, "element": "B", "rule": "type", "property": "p"}], "results": []
+      }
+    },
+    {
+      "name": "unique-signed-zero-geopoints-collide",
+      "purpose": "Both coordinate signs normalize in EqKey uniqueness, although the logical property bits differ.",
+      "input": {
+        "declarations": [{"kind": "Label", "name": "L", "description": "", "properties": [
+          {"name": "p", "type": "GeoPoint", "required": false, "unique": true, "index": null}
+        ]}],
+        "nodes": [
+          {"id": 1, "labels": ["L"], "properties": [{"name": "p", "type": "GeoPoint", "latitude_bits": "8000000000000000", "longitude_bits": "0000000000000000"}]},
+          {"id": 0, "labels": ["L"], "properties": [{"name": "p", "type": "GeoPoint", "latitude_bits": "0000000000000000", "longitude_bits": "8000000000000000"}]}
+        ], "edges": [], "queries": []
+      },
+      "expected": {
+        "declarations": [{"kind": "Label", "name": "L", "description": "", "properties": [
+          {"name": "p", "type": "GeoPoint", "required": false, "unique": true, "index": null}
+        ]}], "conforms": false,
+        "violations": [
+          {"entity": "node", "id": 0, "element": "L", "rule": "unique", "property": "p"},
+          {"entity": "node", "id": 1, "element": "L", "rule": "unique", "property": "p"}
+        ], "results": []
+      }
+    },
+    {
+      "name": "optional-unique-is-label-scoped",
+      "purpose": "Missing values do not collide; the same value on another label or an undeclared label does not violate uniqueness.",
+      "input": {
+        "declarations": [
+          {"kind": "Label", "name": "A", "description": "", "properties": [{"name": "p", "type": "String", "required": false, "unique": true, "index": null}]},
+          {"kind": "Label", "name": "B", "description": "", "properties": [{"name": "p", "type": "String", "required": false, "unique": true, "index": null}]}
+        ],
+        "nodes": [
+          {"id": 4, "labels": ["Other"], "properties": [{"name": "p", "type": "String", "value": "same"}]},
+          {"id": 3, "labels": ["B"], "properties": [{"name": "p", "type": "String", "value": "same"}]},
+          {"id": 2, "labels": ["A"], "properties": [{"name": "p", "type": "String", "value": "same"}]},
+          {"id": 1, "labels": ["A"], "properties": []},
+          {"id": 0, "labels": ["A"], "properties": []}
+        ], "edges": [],
+        "queries": [{"label": "A", "op": "Eq", "property": "p", "value": {"type": "String", "value": "same"}}]
+      },
+      "expected": {
+        "declarations": [
+          {"kind": "Label", "name": "A", "description": "", "properties": [{"name": "p", "type": "String", "required": false, "unique": true, "index": null}]},
+          {"kind": "Label", "name": "B", "description": "", "properties": [{"name": "p", "type": "String", "required": false, "unique": true, "index": null}]}
+        ], "conforms": true, "violations": [], "results": [{"ids": [2], "index": "Exact"}]
+      }
+    },
+    {
+      "name": "directed-endpoints-and-duplicate-triples",
+      "purpose": "UniqueTriple is directed and relationship-scoped. Reversed and self-loop endpoints must satisfy an allowed pair.",
+      "input": {
+        "declarations": [{"kind": "Relationship", "name": "R", "description": "", "properties": [], "endpoints": [{"source": "A", "destination": "B"}], "multiplicity": "UniqueTriple"}],
+        "nodes": [{"id": 0, "labels": ["A"], "properties": []}, {"id": 1, "labels": ["B"], "properties": []}],
+        "edges": [
+          {"id": 3, "source": 0, "relationship": "R", "destination": 0, "properties": []},
+          {"id": 2, "source": 1, "relationship": "R", "destination": 0, "properties": []},
+          {"id": 1, "source": 0, "relationship": "R", "destination": 1, "properties": []},
+          {"id": 0, "source": 0, "relationship": "R", "destination": 1, "properties": []},
+          {"id": 4, "source": 0, "relationship": "Other", "destination": 1, "properties": []}
+        ], "queries": []
+      },
+      "expected": {
+        "declarations": [{"kind": "Relationship", "name": "R", "description": "", "properties": [], "endpoints": [{"source": "A", "destination": "B"}], "multiplicity": "UniqueTriple"}],
+        "conforms": false,
+        "violations": [
+          {"entity": "edge", "id": 0, "element": "R", "rule": "unique_triple", "property": null},
+          {"entity": "edge", "id": 1, "element": "R", "rule": "unique_triple", "property": null},
+          {"entity": "edge", "id": 2, "element": "R", "rule": "endpoints", "property": null},
+          {"entity": "edge", "id": 3, "element": "R", "rule": "endpoints", "property": null}
+        ], "results": []
+      }
+    },
+    {
+      "name": "endpoint-alternatives-and-undeclared-labels",
+      "purpose": "Any allowed pair suffices, with no requirement to declare its labels. Extra labels/properties are open-world.",
+      "input": {
+        "declarations": [{"kind": "Relationship", "name": "R", "description": "", "properties": [
+          {"name": "p", "type": "Boolean", "required": true, "unique": false, "index": null}
+        ], "endpoints": [{"source": "Z", "destination": "Z"}, {"source": "A", "destination": "B"}], "multiplicity": "UniqueTriple"}],
+        "nodes": [{"id": 0, "labels": ["Z", "A"], "properties": []}, {"id": 1, "labels": ["B"], "properties": []}],
+        "edges": [
+          {"id": 0, "source": 0, "relationship": "R", "destination": 1, "properties": [{"name": "p", "type": "Boolean", "value": false}, {"name": "undeclared", "type": "Integer", "value": 2}]},
+          {"id": 1, "source": 0, "relationship": "R", "destination": 0, "properties": [{"name": "p", "type": "Boolean", "value": true}]}
+        ], "queries": []
+      },
+      "expected": {
+        "declarations": [{"kind": "Relationship", "name": "R", "description": "", "properties": [
+          {"name": "p", "type": "Boolean", "required": true, "unique": false, "index": null}
+        ], "endpoints": [{"source": "A", "destination": "B"}, {"source": "Z", "destination": "Z"}], "multiplicity": "UniqueTriple"}],
+        "conforms": true, "violations": [], "results": []
+      }
+    },
+    {
+      "name": "relationship-required-and-type",
+      "purpose": "Relationship property rules are enforced independently of endpoint restrictions and multiplicity.",
+      "input": {
+        "declarations": [{"kind": "Relationship", "name": "R", "description": "", "properties": [
+          {"name": "p", "type": "String", "required": true, "unique": false, "index": null}
+        ], "endpoints": [], "multiplicity": "Multi"}],
+        "nodes": [{"id": 0, "labels": [], "properties": []}],
+        "edges": [
+          {"id": 0, "source": 0, "relationship": "R", "destination": 0, "properties": []},
+          {"id": 1, "source": 0, "relationship": "R", "destination": 0, "properties": [{"name": "p", "type": "Integer", "value": 1}]}
+        ], "queries": []
+      },
+      "expected": {
+        "declarations": [{"kind": "Relationship", "name": "R", "description": "", "properties": [
+          {"name": "p", "type": "String", "required": true, "unique": false, "index": null}
+        ], "endpoints": [], "multiplicity": "Multi"}],
+        "conforms": false,
+        "violations": [
+          {"entity": "edge", "id": 0, "element": "R", "rule": "required", "property": "p"},
+          {"entity": "edge", "id": 1, "element": "R", "rule": "type", "property": "p"}
+        ], "results": []
+      }
+    },
+    {
+      "name": "multi-parallel-self-loops-and-empty-endpoints",
+      "purpose": "Multi and an empty endpoint set impose no structural restriction on valid topology.",
+      "input": {
+        "declarations": [{"kind": "Relationship", "name": "_9", "description": "", "properties": [], "endpoints": [], "multiplicity": "Multi"}],
+        "nodes": [{"id": 0, "labels": [], "properties": []}],
+        "edges": [
+          {"id": 1, "source": 0, "relationship": "_9", "destination": 0, "properties": []},
+          {"id": 0, "source": 0, "relationship": "_9", "destination": 0, "properties": []}
+        ], "queries": []
+      },
+      "expected": {
+        "declarations": [{"kind": "Relationship", "name": "_9", "description": "", "properties": [], "endpoints": [], "multiplicity": "Multi"}],
+        "conforms": true, "violations": [], "results": []
+      }
+    }
+  ],
+  "invalid_cases": [
+    {
+      "name": "unsupported-kind",
+      "input": {"declarations": [{"kind": "Constraint", "name": "L", "description": "", "properties": []}], "nodes": [], "edges": [], "queries": []},
+      "error": "unsupported declaration kind"
+    },
+    {
+      "name": "duplicate-label-identity",
+      "input": {"declarations": [{"kind": "Label", "name": "L", "description": "", "properties": []}, {"kind": "Label", "name": "L", "description": "Different description does not distinguish identity.", "properties": []}], "nodes": [], "edges": [], "queries": []},
+      "error": "duplicate declaration identity"
+    },
+    {
+      "name": "duplicate-relationship-identity",
+      "input": {"declarations": [{"kind": "Relationship", "name": "R", "description": "", "properties": [], "endpoints": [], "multiplicity": "Multi"}, {"kind": "Relationship", "name": "R", "description": "", "properties": [], "endpoints": [], "multiplicity": "UniqueTriple"}], "nodes": [], "edges": [], "queries": []},
+      "error": "duplicate declaration identity"
+    },
+    {
+      "name": "duplicate-property-identity",
+      "input": {"declarations": [{"kind": "Label", "name": "L", "description": "", "properties": [{"name": "p", "type": "String", "required": false, "unique": false, "index": null}, {"name": "p", "type": "Integer", "required": false, "unique": false, "index": null}]}], "nodes": [], "edges": [], "queries": []},
+      "error": "duplicate property name"
+    },
+    {
+      "name": "duplicate-endpoint-pair",
+      "input": {"declarations": [{"kind": "Relationship", "name": "R", "description": "", "properties": [], "endpoints": [{"source": "A", "destination": "B"}, {"source": "A", "destination": "B"}], "multiplicity": "Multi"}], "nodes": [], "edges": [], "queries": []},
+      "error": "duplicate endpoint pair"
+    },
+    {
+      "name": "invalid-label-name",
+      "input": {"declarations": [{"kind": "Label", "name": "bad-name", "description": "", "properties": []}], "nodes": [], "edges": [], "queries": []},
+      "error": "invalid ASCII identifier"
+    },
+    {
+      "name": "invalid-relationship-name",
+      "input": {"declarations": [{"kind": "Relationship", "name": "\u00e9", "description": "", "properties": [], "endpoints": [], "multiplicity": "Multi"}], "nodes": [], "edges": [], "queries": []},
+      "error": "invalid ASCII identifier"
+    },
+    {
+      "name": "empty-endpoint-name",
+      "input": {"declarations": [{"kind": "Relationship", "name": "R", "description": "", "properties": [], "endpoints": [{"source": "", "destination": "B"}], "multiplicity": "Multi"}], "nodes": [], "edges": [], "queries": []},
+      "error": "invalid ASCII identifier"
+    },
+    {
+      "name": "empty-property-name",
+      "input": {"declarations": [{"kind": "Label", "name": "L", "description": "", "properties": [{"name": "", "type": "String", "required": false, "unique": false, "index": null}]}], "nodes": [], "edges": [], "queries": []},
+      "error": "property name: UTF-8 byte length"
+    },
+    {
+      "name": "unsupported-type",
+      "input": {"declarations": [{"kind": "Label", "name": "L", "description": "", "properties": [{"name": "p", "type": "Bytes", "required": false, "unique": false, "index": null}]}], "nodes": [], "edges": [], "queries": []},
+      "error": "unsupported property type"
+    },
+    {
+      "name": "wrong-type-tag-case",
+      "input": {"declarations": [{"kind": "Label", "name": "L", "description": "", "properties": [{"name": "p", "type": "integer", "required": false, "unique": false, "index": null}]}], "nodes": [], "edges": [], "queries": []},
+      "error": "unsupported property type"
+    },
+    {
+      "name": "unsupported-index",
+      "input": {"declarations": [{"kind": "Label", "name": "L", "description": "", "properties": [{"name": "p", "type": "String", "required": false, "unique": false, "index": "Prefix"}]}], "nodes": [], "edges": [], "queries": []},
+      "error": "unsupported property index"
+    },
+    {
+      "name": "multiple-index-kinds",
+      "input": {"declarations": [{"kind": "Label", "name": "L", "description": "", "properties": [{"name": "p", "type": "Integer", "required": false, "unique": false, "index": ["Exact", "Range"]}]}], "nodes": [], "edges": [], "queries": []},
+      "error": "unsupported property index"
+    },
+    {
+      "name": "string-range-index",
+      "input": {"declarations": [{"kind": "Label", "name": "L", "description": "", "properties": [{"name": "p", "type": "String", "required": false, "unique": false, "index": "Range"}]}], "nodes": [], "edges": [], "queries": []},
+      "error": "range indexes require Integer or Float"
+    },
+    {
+      "name": "boolean-range-index",
+      "input": {"declarations": [{"kind": "Label", "name": "L", "description": "", "properties": [{"name": "p", "type": "Boolean", "required": false, "unique": false, "index": "Range"}]}], "nodes": [], "edges": [], "queries": []},
+      "error": "range indexes require Integer or Float"
+    },
+    {
+      "name": "relationship-unique-property",
+      "input": {"declarations": [{"kind": "Relationship", "name": "R", "description": "", "properties": [{"name": "p", "type": "String", "required": false, "unique": true, "index": null}], "endpoints": [], "multiplicity": "Multi"}], "nodes": [], "edges": [], "queries": []},
+      "error": "relationship properties cannot be unique or indexed"
+    },
+    {
+      "name": "relationship-exact-index",
+      "input": {"declarations": [{"kind": "Relationship", "name": "R", "description": "", "properties": [{"name": "p", "type": "Boolean", "required": false, "unique": false, "index": "Exact"}], "endpoints": [], "multiplicity": "Multi"}], "nodes": [], "edges": [], "queries": []},
+      "error": "relationship properties cannot be unique or indexed"
+    },
+    {
+      "name": "relationship-range-index",
+      "input": {"declarations": [{"kind": "Relationship", "name": "R", "description": "", "properties": [{"name": "p", "type": "Integer", "required": false, "unique": false, "index": "Range"}], "endpoints": [], "multiplicity": "Multi"}], "nodes": [], "edges": [], "queries": []},
+      "error": "relationship properties cannot be unique or indexed"
+    },
+    {
+      "name": "unsupported-multiplicity",
+      "input": {"declarations": [{"kind": "Relationship", "name": "R", "description": "", "properties": [], "endpoints": [], "multiplicity": "SingleSource"}], "nodes": [], "edges": [], "queries": []},
+      "error": "unsupported multiplicity"
+    },
+    {
+      "name": "integer-not-boolean-flag",
+      "input": {"declarations": [{"kind": "Label", "name": "L", "description": "", "properties": [{"name": "p", "type": "Integer", "required": 1, "unique": false, "index": null}]}], "nodes": [], "edges": [], "queries": []},
+      "error": "property flags must be boolean"
+    },
+    {
+      "name": "missing-description",
+      "input": {"declarations": [{"kind": "Label", "name": "L", "properties": []}], "nodes": [], "edges": [], "queries": []},
+      "error": "expected keys"
+    },
+    {
+      "name": "unknown-declaration-field",
+      "input": {"declarations": [{"kind": "Label", "name": "L", "description": "", "properties": [], "ttl": 1}], "nodes": [], "edges": [], "queries": []},
+      "error": "expected keys"
+    },
+    {
+      "name": "surrogate-description",
+      "input": {"declarations": [{"kind": "Label", "name": "L", "description": "\ud800", "properties": []}], "nodes": [], "edges": [], "queries": []},
+      "error": "description: invalid UTF-8"
+    },
+    {
+      "name": "null-description",
+      "input": {"declarations": [{"kind": "Label", "name": "L", "description": null, "properties": []}], "nodes": [], "edges": [], "queries": []},
+      "error": "description: expected UTF-8 string"
+    },
+    {
+      "name": "duplicate-node-id",
+      "input": {"declarations": [], "nodes": [{"id": 0, "labels": [], "properties": []}, {"id": 0, "labels": ["L"], "properties": []}], "edges": [], "queries": []},
+      "error": "duplicate entity ID"
+    },
+    {
+      "name": "duplicate-edge-id",
+      "input": {"declarations": [], "nodes": [{"id": 0, "labels": [], "properties": []}], "edges": [{"id": 0, "source": 0, "relationship": "R", "destination": 0, "properties": []}, {"id": 0, "source": 0, "relationship": "S", "destination": 0, "properties": []}], "queries": []},
+      "error": "duplicate entity ID"
+    },
+    {
+      "name": "boolean-node-id",
+      "input": {"declarations": [], "nodes": [{"id": true, "labels": [], "properties": []}], "edges": [], "queries": []},
+      "error": "entity ID: expected integer"
+    },
+    {
+      "name": "dangling-edge",
+      "input": {"declarations": [], "nodes": [], "edges": [{"id": 0, "source": 0, "relationship": "R", "destination": 1, "properties": []}], "queries": []},
+      "error": "dangling edge"
+    },
+    {
+      "name": "unsorted-snapshot-properties",
+      "input": {"declarations": [], "nodes": [{"id": 0, "labels": [], "properties": [{"name": "z", "type": "Integer", "value": 1}, {"name": "a", "type": "Integer", "value": 2}]}], "edges": [], "queries": []},
+      "error": "snapshot properties must be strictly sorted and unique"
+    },
+    {
+      "name": "duplicate-snapshot-property",
+      "input": {"declarations": [], "nodes": [{"id": 0, "labels": [], "properties": [{"name": "p", "type": "Integer", "value": 1}, {"name": "p", "type": "Integer", "value": 2}]}], "edges": [], "queries": []},
+      "error": "snapshot properties must be strictly sorted and unique"
+    },
+    {
+      "name": "bool-is-not-integer-value",
+      "input": {"declarations": [], "nodes": [{"id": 0, "labels": [], "properties": [{"name": "p", "type": "Integer", "value": true}]}], "edges": [], "queries": []},
+      "error": "Integer value: expected integer"
+    },
+    {
+      "name": "integer-overflow",
+      "input": {"declarations": [], "nodes": [{"id": 0, "labels": [], "properties": [{"name": "p", "type": "Integer", "value": 9223372036854775808}]}], "edges": [], "queries": []},
+      "error": "Integer value: expected integer"
+    },
+    {
+      "name": "nonfinite-float-bits",
+      "input": {"declarations": [], "nodes": [{"id": 0, "labels": [], "properties": [{"name": "p", "type": "Float", "bits": "7ff0000000000000"}]}], "edges": [], "queries": []},
+      "error": "float must be finite"
+    },
+    {
+      "name": "geopoint-outside-latitude",
+      "input": {"declarations": [], "nodes": [{"id": 0, "labels": [], "properties": [{"name": "p", "type": "GeoPoint", "latitude_bits": "4056c00000000000", "longitude_bits": "0000000000000000"}]}], "edges": [], "queries": []},
+      "error": "GeoPoint coordinates out of range"
+    },
+    {
+      "name": "range-without-bound",
+      "input": {"declarations": [], "nodes": [], "edges": [], "queries": [{"label": null, "op": "Range", "property": "p", "min": null, "max": null}]},
+      "error": "range requires min or max"
+    },
+    {
+      "name": "range-mixed-numeric-types",
+      "input": {"declarations": [], "nodes": [], "edges": [], "queries": [{"label": null, "op": "Range", "property": "p", "min": {"type": "Integer", "value": 0}, "max": {"type": "Float", "bits": "3ff0000000000000"}}]},
+      "error": "range bounds must have same numeric type"
+    },
+    {
+      "name": "range-reversed-bounds",
+      "input": {"declarations": [], "nodes": [], "edges": [], "queries": [{"label": null, "op": "Range", "property": "p", "min": {"type": "Integer", "value": 2}, "max": {"type": "Integer", "value": 1}}]},
+      "error": "range bounds must have same numeric type and min <= max"
+    },
+    {
+      "name": "range-nonnumeric-bound",
+      "input": {"declarations": [], "nodes": [], "edges": [], "queries": [{"label": null, "op": "Range", "property": "p", "min": {"type": "Boolean", "value": true}, "max": null}]},
+      "error": "range requires numeric bounds"
+    },
+    {
+      "name": "queries-on-nonconforming-snapshot",
+      "input": {"declarations": [{"kind": "Label", "name": "L", "description": "", "properties": [{"name": "p", "type": "Integer", "required": true, "unique": false, "index": null}]}], "nodes": [{"id": 0, "labels": ["L"], "properties": []}], "edges": [], "queries": [{"label": "L", "op": "Eq", "property": "p", "value": {"type": "Integer", "value": 1}}]},
+      "error": "queries require a conforming snapshot"
+    }
+  ],
+  "boundaries": [
+    {"name": "labels", "limit": 256, "error": "at most 256 labels"},
+    {"name": "relationships", "limit": 256, "error": "at most 256 relationships"},
+    {"name": "declaration_properties", "limit": 64, "error": "at most 64 declared properties"},
+    {"name": "endpoints", "limit": 64, "error": "at most 64 endpoints"},
+    {"name": "description_bytes", "limit": 1024, "error": "description: UTF-8 byte length"},
+    {"name": "indexed_properties", "limit": 32, "error": "at most 32 unique or indexed properties"},
+    {"name": "identifier_bytes", "limit": 63, "error": "invalid ASCII identifier"},
+    {"name": "property_name_bytes", "limit": 256, "error": "property name: UTF-8 byte length"},
+    {"name": "node_labels", "limit": 8, "error": "at most 8 distinct labels"},
+    {"name": "snapshot_properties", "limit": 64, "error": "at most 64 snapshot properties"},
+    {"name": "string_bytes", "limit": 4096, "error": "string: UTF-8 byte length"},
+    {"name": "property_bytes", "limit": 65536, "error": "properties exceed 65536 bytes"}
+  ]
+}

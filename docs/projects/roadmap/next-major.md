@@ -126,14 +126,18 @@ Local numbers below show direction only (see rules).
   source codec preserves IDs, keys, revisions, deadlines, ordinary typed
   node/edge properties, label postings with private scan and intersection
   checks, and per-node attachments with graph-local owner uniqueness; its CSR
-  is checked against the accepted logical oracle. It refuses
-  schema and temporal segments; cross-graph owner validation, shared framing,
+  is checked against the accepted logical oracle. Reviewed schema declarations
+  now round-trip losslessly, with engine snapshot loading checking conformance
+  and rebuilding exact/range indexes. This does not persist or serve native
+  compact indexes. The codec still refuses temporal segments; native schema
+  enforcement, cross-graph owner validation, shared framing,
   checkpoint/read integration, columnar property storage, mutation overlay,
   parallel import and S3/S4/F6 qualification remain outstanding.
   Independently reviewed logical references cover committed-overlay
   identity, non-reused IDs and expiry precedence, typed property snapshots
   with exact integer and float bits, label postings and scans, and
-  node-to-record attachments; they are
+  node-to-record attachments. A reviewed schema reference covers declarations,
+  snapshot conformance and single-condition exact/range lookups; these are
   test evidence, not an implemented Rust overlay or byte format. The byte
   budgets are estimates, not measured results.
 - **Gap 5, bounded algorithms:** S1 and S2 are implemented and reviewed in

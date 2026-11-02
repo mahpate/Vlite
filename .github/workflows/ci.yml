@@ -38,6 +38,7 @@ jobs:
           python tests/compact_graph_property_oracle.py --self-test
           python tests/compact_graph_label_oracle.py --self-test
           python tests/compact_graph_attachment_oracle.py --self-test
+          python tests/compact_graph_schema_oracle.py --self-test
           python tests/temporal_interval_oracle.py --self-test
           python tests/temporal_read_oracle.py --self-test
           python tests/filter_visibility_oracle.py --self-test

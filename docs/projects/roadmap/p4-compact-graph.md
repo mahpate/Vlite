@@ -232,6 +232,17 @@ all-or-nothing batch rollback. CI runs the reference, its malformed fixtures,
 shuffles and mutation rejections. It is logical test evidence for attachment
 semantics, not a byte format or a proof of checkpoint-level owner uniqueness.
 
+The reviewed `tests/compact_graph_schema_oracle.py` and
+`graph-schema-cases.json` model existing declarations and snapshot conformance:
+required/type rules, label-scoped uniqueness, directed endpoints, multiplicity
+and single-condition exact/range index choices and results. Typed values retain
+integer precision and normalize signed zeros for equality without coercion.
+CI runs the hand-authored goldens, malformed inputs, seeded shuffles, limit
+boundaries and effective mutations. This logical reference reports all
+violations in a deterministic order, not the engine's first-error precedence.
+It models no persisted bytes, TTL, temporal history, ordered writes, rollback
+or full query planning, and is not a Rust or checkpoint parity proof.
+
 This codec is not wired to the checkpoint block registry, shared framing,
 checkpoint reads or production builds. Cross-graph attachment-owner uniqueness
 is a checkpoint-level invariant; one graph codec cannot validate it. It refuses
