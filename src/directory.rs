@@ -679,6 +679,9 @@ impl Chain {
         // The test-only precision gate is per thread.
         #[cfg(test)]
         let precision = crate::compact::precision_supported();
+        // P3a: carry the private complete-record codec gate into this worker.
+        #[cfg(test)]
+        let payload = crate::compact::catalog::payload::enabled();
         // Gap 4: so is the test-only temporal gate.
         #[cfg(test)]
         let temporal = crate::property_graph::temporal::supported();
@@ -687,6 +690,9 @@ impl Chain {
             .spawn(move || {
                 #[cfg(test)]
                 let _gate = crate::compact::Activation::set(precision);
+                // P3a: retain the codec gate until build and validation finish.
+                #[cfg(test)]
+                let _payload = crate::compact::catalog::payload::Activation::set(payload);
                 #[cfg(test)]
                 let _temporal = crate::property_graph::temporal::Activation::set(temporal);
                 let (mut segments, _) = open_segments(&directory, &names, false)?;

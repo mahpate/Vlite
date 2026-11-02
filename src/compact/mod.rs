@@ -349,6 +349,11 @@ struct Coverage {
 
 /// What a block of a precision image restates, for the loader (P3a).
 pub(crate) enum Supplement {
+    #[cfg(test)]
+    Records {
+        collection: u16,
+        entries: Vec<catalog::payload::Entry>,
+    },
     Catalog(Vec<catalog::Entry>),
     Imports(Box<crate::import::Registry>),
     Revisions {
@@ -595,6 +600,12 @@ impl ImageCheck {
         }
         let kind = id as u16;
         let partition = id >> 16;
+        #[cfg(test)]
+        if kind == catalog::payload::KIND
+            && (body_len > catalog::payload::MAX_BODY || !(1..=4096).contains(&u32_at(prefix, 24)))
+        {
+            return Err(corrupt(offset, "invalid complete records prefix"));
+        }
         if id >> 48 != 0 || kind == 0 {
             return Err(corrupt(offset, "invalid compact block prefix"));
         }
@@ -995,6 +1006,45 @@ impl ImageCheck {
                 .supplement(kind, collection, id >> 16, count, &block, offset)
                 .map(Some);
         }
+        #[cfg(test)]
+        if self.precise && catalog::payload::enabled() && kind == catalog::payload::KIND {
+            let live = self
+                .described
+                .get_mut(&collection)
+                .ok_or_else(|| corrupt(offset, "complete records for unknown collection"))?;
+            let layout = vectors::Layout {
+                dimensions: live.dimensions,
+                precision: live
+                    .precision
+                    .ok_or_else(|| corrupt(offset, "missing precision"))?,
+            };
+            let entries = catalog::payload::check(
+                collection,
+                id,
+                count,
+                body,
+                layout,
+                self.floor.expect("blocks follow advance"),
+                offset,
+            )?;
+            if entries.first().is_some_and(|entry| {
+                live.records
+                    .last_key_value()
+                    .is_some_and(|(&last, _)| entry.id <= last)
+            }) {
+                return Err(corrupt(
+                    offset,
+                    "complete records do not ascend across blocks",
+                ));
+            }
+            for entry in &entries {
+                live.records.insert(entry.id, entry.expiry.is_some());
+            }
+            return Ok(Some(Supplement::Records {
+                collection,
+                entries,
+            }));
+        }
         if matches!(kind >> 8, 0x01 | 0x02) && !self.collections.contains(&collection) {
             return Err(corrupt(offset, "compact block for unknown collection"));
         }
@@ -1158,6 +1208,12 @@ impl ImageCheck {
             (OP_COMPACT_BLOCK, KIND_CATALOG) if stage == Table => Catalog,
             (OP_COMPACT_BLOCK, KIND_IMPORTS) if stage == Catalog => Imports,
             (OP_RECORD_BLOCK, _) if matches!(stage, Imports | Records) => Records,
+            #[cfg(test)]
+            (OP_COMPACT_BLOCK, catalog::payload::KIND)
+                if catalog::payload::enabled() && matches!(stage, Imports | Records) =>
+            {
+                Records
+            }
             (10, _) if matches!(stage, Imports | Records | Vectors) => Vectors,
             (OP_GRAPH_SNAPSHOT, _)
                 if matches!(stage, Imports | Records | Vectors | Snapshot | Revisions) =>
@@ -1232,7 +1288,14 @@ impl ImageCheck {
             previous = Some((kind, version));
             // Besides a precision image's own kinds, no codec exists yet:
             // only declared derived kinds can be skipped.
-            readable &= class == Some(false) || (own && version == 1);
+            let supported = class == Some(false) || (own && version == 1);
+            #[cfg(test)]
+            let supported = supported
+                || (self.precise
+                    && catalog::payload::enabled()
+                    && kind == catalog::payload::KIND
+                    && version == 1);
+            readable &= supported;
             entries.insert((kind, version), (flags, None));
         }
         if self.precise && storage != [true; 2] {

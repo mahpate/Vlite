@@ -2315,7 +2315,8 @@ fn load_inner<R: Read + Seek>(
                     .expect("op 16 is only allowed with FLAG_COMPACT")
                     .block(collection_id, id, count as u32, body, offset)?;
                 if let Some(supplement) = supplement {
-                    apply_supplement(&mut loaded, &mut jobs, &mut revisions, supplement);
+                    // P3a: complete-record installation also checks prior source coverage.
+                    apply_supplement(&mut loaded, &mut jobs, &mut revisions, supplement, offset)?;
                 }
             }
             _ => {
@@ -2397,9 +2398,30 @@ fn apply_supplement(
     jobs: &mut ImportJobs,
     revisions: &mut Vec<Revisions>,
     supplement: crate::compact::Supplement,
-) {
+    #[cfg_attr(not(test), allow(unused_variables))] offset: u64,
+) -> Result<()> {
     use crate::compact::Supplement;
     match supplement {
+        // P3a: only a test build can decode complete-record blocks.
+        #[cfg(test)]
+        Supplement::Records {
+            collection,
+            entries,
+        } => {
+            let target = collection_mut(loaded, collection);
+            if entries.first().is_some_and(|entry| {
+                target
+                    .records
+                    .keys()
+                    .next_back()
+                    .is_some_and(|&last| entry.id <= last)
+            }) {
+                return Err(corrupt(offset, "complete records overlap existing records"));
+            }
+            for entry in entries {
+                target.put(entry.id, entry.record, entry.revision, entry.expiry);
+            }
+        }
         Supplement::Catalog(entries) => {
             for entry in entries {
                 collection_mut(loaded, entry.collection).precision = Some(entry.precision);
@@ -2430,6 +2452,7 @@ fn apply_supplement(
             }
         }
     }
+    Ok(())
 }
 
 /// One decoded record-block entry.

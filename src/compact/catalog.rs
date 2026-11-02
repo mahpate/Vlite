@@ -171,10 +171,14 @@ pub(crate) fn decode_revisions(
 /// The capability table of a precision image: the catalog, the import
 /// registry and, when the image has graphs, their revisions.
 pub(crate) fn table_frame(floor: u64, graphs: bool) -> Vec<u8> {
+    table_frame_extra(floor, graphs, &[])
+}
+
+fn table_frame_extra(floor: u64, graphs: bool, extra: &[u16]) -> Vec<u8> {
     let kinds = [KIND_CATALOG, KIND_IMPORTS, KIND_REVISIONS];
     let listed = if graphs { &kinds[..] } else { &kinds[..2] };
-    let mut table = Vec::with_capacity(8 * listed.len());
-    for &kind in listed {
+    let mut table = Vec::with_capacity(8 * (listed.len() + extra.len()));
+    for &kind in listed.iter().chain(extra) {
         for field in [kind, 1, super::CRITICAL, 0] {
             table.extend_from_slice(&field.to_le_bytes());
         }
@@ -184,7 +188,7 @@ pub(crate) fn table_frame(floor: u64, graphs: bool) -> Vec<u8> {
         super::KIND_TABLE,
         0,
         0,
-        listed.len() as u32,
+        (listed.len() + extra.len()) as u32,
         &[&table],
     )
 }
@@ -255,3 +259,6 @@ pub(crate) fn revision_frames(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) mod payload;

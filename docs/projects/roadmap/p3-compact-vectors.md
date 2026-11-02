@@ -281,13 +281,78 @@ Remaining P3a work:
    ([above](#p3a-progress-commit-time-canonicalization-private-unreleased));
    it stays unreleased with item 1.
 3. Carrying payload and metadata for compact checkpoints, so they hold every
-   record.
+   record. Implemented privately, pending independent acceptance
+   ([complete-record blocks](#p3a-progress-complete-record-checkpoints-private-unreleased));
+   no production admission or writer is enabled.
 4. A storage-owned writer, capability table acceptance, and replay,
    maintenance and backup handling. The envelope writer moves into
    `src/compact/mod.rs`.
 5. Explicit conversion, plus old/new format rejection.
 
 Named dense reuse and bounded access remain P3b.
+
+## P3a progress: complete-record checkpoints (private, unreleased)
+
+Item 3's candidate is implemented in `src/compact/catalog/payload.rs`, compiled
+only for crate tests and enabled by a separate thread-local RAII gate, in
+addition to the private precision gate. Kind `0x0101`, version 1, critical,
+holds complete primary records rather than redefining `0x0100`. Its six
+little-endian envelope sections are:
+
+| # | Section | Contents |
+|---|---|---|
+| 0 | Descriptor | row count `u32`, reserved zero `u32` |
+| 1 | Dense body | unchanged `0x0100` v1 envelope/body, same owner, partition and count |
+| 2 | Payload offsets | `count + 1` offsets `u32`, from zero through payload length |
+| 3 | Payload bytes | unchanged opaque record payloads, concatenated |
+| 4 | Metadata offsets | `count + 1` offsets `u32`, from zero through metadata length |
+| 5 | Metadata bytes | existing typed metadata encoding per row, concatenated |
+
+The embedded dense codec owns sorted IDs, original revisions, absolute expiry
+(including zero), dimensions, precision and canonical component bits. Descriptor,
+frame count, offset-table lengths and dense row count must agree. Offsets must
+be nondecreasing and exhaust their sections; each payload and encoded metadata
+value obeys the existing record limits. The writer flushes at the dense row cap
+or 1 MiB of payload/metadata, allowing one final maximum-sized record. The
+prefix body cap is `2 * 1 MiB + MAX_PAYLOAD_BYTES + MAX_METADATA_BYTES + 128 * 4096`,
+including nested framing, dense columns and offset tables. It is an allocation
+bound, not a measured storage result. Alignment remains advisory.
+
+The image capability table declares `0x0101` only when a retained record exists;
+empty collections remain represented by the mandatory precision catalog. The
+blocks replace op 14 at the existing record stage, preserve partition runs and
+ascending IDs across blocks, and are followed by the unchanged op-10 named and
+sparse vector data, including model history and staged re-embedding state.
+Graph declarations, attachments, properties and entity allocation state remain
+in op-15 snapshots with kind-5 original revisions. Import state remains kind 4.
+Thus the **complete image**, not the primary-record block alone, reconstructs
+every retained record and its associated state, following Decision P in
+[precision publication](p3-precision-publication.md). With no retention clock it
+keeps expired records too; ordinary checkpoints retain their existing expiry
+filter. No source bytes, settings, op-10 or graph encodings are reinterpreted.
+
+Every frame is authenticated before its codec runs. Envelope, dense lengths,
+checked offset-table arithmetic, per-value limits and final offsets are checked
+before allocating decoded record values. Truncation, trailing bytes, malformed
+typed metadata, invalid dense data, count mismatches, unsupported versions,
+duplicate/out-of-order IDs and invalid partition runs are refused. Full replay,
+change-feed scans and log export share the same block validation. Release builds
+still refuse the precision flag; even a crate test with only the older precision
+gate refuses the new critical source kind.
+
+The private tests compare immediate borrowed records, complete images and
+reopened memory/file/directory stores for both precisions, plain and encrypted,
+including payloads, typed metadata, vector bits, revisions, expiry, named/sparse
+vectors, model history and graph attachments. Directory tests inspect the actual
+published image for `0x0101` and reject an op-14 fallback. A deliberate removal of
+the test-only worker-gate propagation fails that assertion; restoring it passes.
+Malformed-image tests exercise all three readers, a pre-publication failure
+retains the previous image plus committed WAL, and the precision peak harness
+bounds decoded-record heap and verifies malformed offsets allocate no records.
+
+This is not P3a item 4, production writer/capability registration, bounded source
+access, copy-out precision conversion, release activation or lifecycle
+qualification. Float32 defaults, S1's open decision and S1/S2/F1/F3 remain unchanged.
 
 Major-release measurements retain the unchanged DO-005 host/quiet policy.
 F1 requires p50 <=1.0 ms at 100k x 768 and recall@10 >=0.95; F3 requires

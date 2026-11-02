@@ -32,6 +32,7 @@ mod canonical;
 mod goldens;
 mod limits;
 mod parity;
+mod payload;
 mod peak;
 mod populated;
 mod replayed;

@@ -108,7 +108,10 @@ Local numbers below show direction only (see rules).
   transport validation are also implemented and reviewed. Private commit-time
   canonicalization is now independently reviewed and integrated: complete
   batch validation precedes copying, and immediate and reopened values agree.
-  Float32 remains unchanged. The
+  Float32 remains unchanged. A private complete-record checkpoint candidate
+  now carries payload/metadata beside unchanged dense columns and preserves
+  named/sparse histories and graph attachments in the complete image; it is
+  test-gated and pending independent acceptance. The
   [API review](p3-precision-api.md) still holds public enablement pending
   complete read/write/maintenance integration. The first exact-SIMD slice
   is implemented, reviewed and integrated, but unreleased: portable and AVX2
