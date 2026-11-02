@@ -1,14 +1,17 @@
 # Serving contract: agent memory
 
 Status: exact schema proposal for Gap 1 slice D; **not implemented or shipped**.
-This document is conformed to the [serving wire conventions proposal](serving-wire-conventions.md), whose owner decisions remain open.
+This document uses the [serving wire conventions](serving-wire-conventions.md),
+whose owner decisions are selected. Memory-specific decisions remain below.
 The owner authorized serving work on 2026-11-02, conditional on reviewing each
 exact schema before code ([release decision](next-major.md#decided-2026-11-02)).
-This document requests that review; it activates nothing. All names, bounds,
-errors, fields and adapter methods below are proposed unless marked Current.
+This document requests that review; it activates nothing. The owner selected the
+nine-operation inventory in decision 67. Other names, bounds, errors, fields and
+adapter policies below are proposed unless marked Current or owner-selected.
 Public Rust memory names remain proposed pending slice A API review. Core-facing
-shapes target the provisional, crate-private A1 core (Gap 1 section 2);
-"Core alignment" in section 3 lists what may still change.
+shapes were drafted against the crate-private A1 core (Gap 1 section 2);
+alignment with accepted A2 and B still needs review. "Core alignment" in section 3
+lists what may still change; this proposal does not override accepted core behavior.
 
 Authority: [Gap 1](gap1-agent-memory.md), read in full, especially sections 1-6
 and 9. [Serving contract](serving-contract.md) supplies the Gap 8 provider and
@@ -100,7 +103,7 @@ absence means shared in that exact tenant/agent, never wildcard/parent fallback.
 Response `MemoryEffectiveScope` adds `tenant:MemoryKey`, derived only by the server. A
 tenant-bound credential's `tenant` is its immutable `Tenant.id` (random 128-bit hex),
 never the renamable name (`src/server/tenants.rs:241-245`, `:424`). Untenanted
-admin/read-only/scoped principals select the proposed reserved `@root` sentinel,
+admin/read-only/scoped principals select the owner-selected reserved `@root` sentinel,
 which cannot collide with a hex id and appears nowhere in `src` today; a tenant
 *named* `@root` is still allowed (`src/server/tenants.rs:47-52`). Neither is ever
 a tenant named by a request: to operate as a tenant, use its tenant-bound credential.
@@ -143,20 +146,23 @@ response envelope. Different digest returns 409 `idempotency_conflict`, with no
 mutation. A no-op still commits a receipt. Neither retry extends memory/receipt
 TTL nor appends provenance. Receipt results contain IDs/outcomes, never forgotten
 text, vectors, URIs or full provenance.
-Receipts created by slice A1 never expire; expiry arrives with A2; serving slices start after A2 acceptance.
-In A1 a replay (matching digest) is answered before the deadline check.
+Historical A1 receipts did not expire. Accepted A2 implements receipt expiry and
+preserves the hashed request window. A live matching replay precedes the deadline
+check; receipt expiry ends the replay guarantee, not the memory's own lifetime.
 
-**A2-dependent retention design (not A1 behavior; changes with A2).** A binding
-may set `receipt_window_ms` in 1..2592000000 with no implicit default; a receipt
-then advertises `retry_until_ms` (checked captured-clock addition), at which
+**Owner-selected serving retention policy (decision 70).** Every binding must
+explicitly configure `receipt_window_ms` in 1..2592000000 with no implicit
+default. The adapter supplies that value to the accepted core and keeps it
+hashed; it does not remove or reinterpret A1/A2 digest fields. A receipt
+advertises `retry_until_ms` (checked captured-clock addition), at which
 boundary lookup returns not found and the key may execute again, exact dedup still
 applying. Cleanup is bounded, separate work, never an unbounded prefix scan.
 Binding identity, schema, canonical defaults and receipt access stay stable for the
 advertised window; incompatible binding replacement is rejected while retained
-receipts/jobs need it. A1 instead requires a nonzero per-request `receipt_window_ms`,
-hashed into the digest and otherwise ignored; section 8 has no such field, so
-whether it survives, and what the adapter passes, is an owner decision ("Receipt
-retention", section 11).
+receipts/jobs need it. Configuration and window rotation must preserve retained
+lookup and retry semantics throughout that window. Their exact encoding,
+generation handling and response fixtures still require implementation
+acceptance. The window is operator policy, not a new client request field.
 
 `MemoryReceipt` is `{id:MemoryKey,operation:MemoryOperation,scope:MemoryEffectiveScope,sequence:MemoryU64,
 retry_until_ms?:MemoryU64,digest_version:"memory-request-v1"}`; `retry_until_ms` exists
@@ -948,11 +954,11 @@ following choices concern only this exact serving schema and need explicit revie
 
 | Decision | Options | Recommendation in this document | Evidence |
 |---|---|---|---|
-| Wire inventory | Approve nine methods here / narrower first schema / revise naming | Approve the complete inventory, including explicit consolidation and erasure reconciliation, before adapters | Sections 4 and 8 |
-| Scope grants/root | Scope tenant is `Tenant.id`, with a reserved `@root` sentinel for untenanted principals / tenant-bound principals only / a startup-configured root tenant ID / client-selected tenant | Exact startup principal grants, `Tenant.id` as scope tenant, `@root` sentinel; reject client tenant; later persisted grants need a separate schema | `src/server/tenants.rs:47-52,241-245,424`; `@root` appears nowhere in `src`; `src/server/graph.rs:22-24` |
-| Reserved-resource authorization | Guard raw access to new memory resources / separate graph per scope / allow raw bypass | Explicit new-binding raw_access=false policy across raw graph/record/feed adapters; operator-only broad opt-in, no ordinary-resource policy change | `src/server/graph.rs:22-24`; section 6 |
+| Wire inventory | **Owner-selected: approve the complete nine-operation inventory** | Remember, Recall, FindFacts, CorrectFacts, Consolidate, Forget, GetReceipt, GetErasure and ResumeErasure across REST, gRPC, MCP and CLI. Inventory only; core prerequisites, authorization/retention/limit policies and exact-schema acceptance remain required before adapters ship | Sections 4 and 8; decision 67, 2026-11-02 |
+| Scope grants/root | **Owner-selected: exact grants and `@root`** | Exact startup principal grants plus existing graph/collection permissions; `Tenant.id` as scope tenant, reserved `@root` for untenanted principals; reject client tenant and implicit admin scopes. Later persisted grants need a separate schema | `src/server/tenants.rs:47-52,241-245,424`; `src/server/graph.rs:22-24`; decision 68, 2026-11-02 |
+| Reserved-resource authorization | **Owner-selected: new-binding raw-access protection** | Explicit new-binding `raw_access:false` across raw graph/record/search/export/feed and attachment surfaces, including list/feed filtering with cursor progress. Broad operator opt-in still needs underlying permissions and grants no memory scopes. No ordinary-resource policy change; adopting in-use resources needs migration review; direct file-owner access/backups remain outside server enforcement | `src/server/graph.rs:22-24`; section 6; decision 69, 2026-11-02 |
 | Request identity | Body key only / header+body alias | Body-only idempotency_key across adapters; the core owns the `v1:` digest, with byte goldens from core tests before adapter code | Section 3; Gap 1 section 2; Wire conventions, decision 13 (proposed) |
-| Receipt retention | A2: binding-level mandatory window 1..2592000000 ms / implicit default / indefinite receipts; keep or drop A1's hashed per-request `receipt_window_ms` | Binding-level explicit window with advertised `retry_until_ms`, dropping the per-request digest input once A2 lands; manifest retention and restore procedure independently explicit | A1 receipts never expire; expiry arrives with A2 (Gap 1 section 2) |
+| Receipt retention | **Owner-selected: explicit binding window, 1..2592000000 ms** | No implicit default; advertise `retry_until_ms`; preserve the accepted core's hashed window supplied by the adapter. Expiry ends receipt replay, not memory retention. Binding/window changes must preserve retained lookup and retry semantics; exact configuration/rotation acceptance remains separate | Accepted A2 (Gap 1 section 2); decision 70, 2026-11-02 |
 | New memory recall caps | 1,000 everywhere / preserve transport-dependent legacy depth in new methods | 200 default, 1,000 ceiling everywhere for memory only; old Search unchanged | `src/server.rs:3032-3054`; `src/server/grpc.rs:1135-1153` |
 | Presence/compatibility | Descriptor-driven pre-scan codec rejecting unknown request tags / additive-only versioned service (a field that changes scope, filter or policy meaning ships in a new version) / ignore plus presence-checked fields | Versioned service plus presence-checked fields now; add the pre-scan codec only if the owner requires rejection; publish empty-list protobuf differences | `prost-derive` 0.14.4 `src/lib.rs:191`; `build.rs:12-17` |
 | Feeds | Ordinary incomplete events with refusals / block all memory until complete feeds / add events now | Ordinary events with explicit temporal/TTL incompleteness; require_complete_feed rejects; new events need another exact review | `src/server/graph.rs:85-108`; `src/property_graph/feed.rs:270-285` |
