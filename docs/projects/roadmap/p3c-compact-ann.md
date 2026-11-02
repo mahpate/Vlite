@@ -1,13 +1,14 @@
 # P3c: persisted compact ANN design
 
-**Candidate for independent acceptance; not implemented, qualified or active.**
+**Design reviewed; owner decisions approved 2026-11-02; not implemented,
+qualified or active.**
 Inventory head: `2b045b63ac598b0cce8e27f061b6a87f3b9b455f`.
 All code anchors below were checked at that head, not copied from the older
 P3b inventory. This document changes no API, code, default, gate or release
-criterion. Planning default for the owner decisions in J: **approved as
-drafted**, subject to independent acceptance. The P3b engine-integration
-slice-0 candidate is **not accepted** and is an assumption, not a dependency
-already delivered.
+criterion. The owner explicitly approved J.1-J.9 individually on 2026-11-02,
+subject to the independent acceptance and dependencies below. P3b slice 0
+is now independently accepted and integrated; that does not satisfy the
+remaining engine-integration, source-interface or lifecycle prerequisites.
 
 The governing documents are [P3](p3-compact-vectors.md),
 the [storage contract](compact-storage-contract.md), the
@@ -623,7 +624,8 @@ crate-private `ReadAccess::{base_rows, base_vector_at, source_identity,
 affected_since, score_batch}` with explicit lifetimes/error propagation,
 not a second public trait. `base_rows` iterates physical source rows;
 `affected_since(S)` must cover every commit S..T or fail explicitly.
-These names/shapes are assumptions until P3b slice 0 is accepted. Metadata
+These names/shapes remain proposals until reviewed and frozen with P3b;
+slice-0 acceptance alone does not freeze these additions. Metadata
 decode/auth failure remains an error, never predicate false.
 
 P3d supplies exact kernels over canonical expanded stored values with f64
@@ -688,20 +690,22 @@ recall is evaluated only in F.2, not asserted by deterministic codec tests.
 ## I. Ordered implementation sub-slices and conflict domains
 
 P3c **implementation starts only after `p3b-engine-integration` is
-independently accepted**. No code is authorized by this document. The
+independently accepted**, except for the isolated prototype work explicitly
+permitted below against accepted P3b slice 0. Owner design approval does not
+waive any code-slice acceptance or integration prerequisite. The
 P3b design's five numbered slices are the dependency vocabulary here.
-P3b's newer slice-0 source-generation candidate may refine that order;
+P3b's accepted slice-0 source generation may refine that order;
 do not equate it with the already accepted storage-contract slice 0.
 LOC ranges include implementation plus focused tests, not performance or
 on-disk size estimates.
 
 | Slice | Exact proposed touch points and acceptance | Size / dependencies / regression mutation |
 |---|---|---|
-| C1. Private codec and independent oracle | New `src/compact/ann.rs::{check,encode,bind}` and `tests/compact_ann_oracle.py`/fixtures; reuse `quantize::ScalarU8`; add flat checked topology access. No shared dispatch until storage owner integrates. Golden/malformed/full binding tests in H pass without Record materialization. | 700-1,100 LOC; after engine-integration acceptance, P3b slice 1 generation seam freeze; bounded pure-codec work could run earlier **against an accepted P3b slice-0 source generation**, not the current unaccepted candidate. Mutation: accept neighbor ordinal N; malformed test must fail. |
+| C1. Private codec and independent oracle | New `src/compact/ann.rs::{check,encode,bind}` and `tests/compact_ann_oracle.py`/fixtures; reuse `quantize::ScalarU8`; add flat checked topology access. No shared dispatch until storage owner integrates. Golden/malformed/full binding tests in H pass without Record materialization. | 700-1,100 LOC; integration after engine-integration acceptance and P3b slice 1 generation seam freeze; bounded pure-codec work may run earlier **against the accepted P3b slice-0 source generation**, with no integration or activation. Mutation: accept neighbor ordinal N; malformed test must fail. |
 | C2. Flat build/search and overlay | `src/hnsw.rs::Index::{construct,plan,link,prune,node_distance,filtered_layer,finish_graph_hits,merge_buffered,ready_for,memory}`, `QuantizedSnapshot::encode`; `src/quantize.rs::ScalarU8::{train,encode_into,norm,distance}` adapters; `src/records.rs` read seam, `src/collection.rs::{apply_committed,apply_metadata_committed}`. New private flat arena/handle, preserve resident path. Immediate/reopen-independent search and overlay/expiry/filtered bridge tests pass. | 650-1,100 LOC; P3b slices 1-3 and slice 4 ANN adapters. Engine-domain edits serialize with P5/HNSW and P3b consumer work. Mutation: omit metadata-only affected ID; overlay test fails. |
 | C3. Storage read/write and reporting | Storage owner only: `src/compact/mod.rs::ImageCheck::{prefix,block,end}`, `skip_report`, table admission; `src/format.rs::{load_inner,apply_supplement}`; `src/maintenance.rs::write_v5_image`; `src/directory.rs::Chain::install`; `src/changes.rs::scan`, `src/logops.rs` image/export validation. P3 owner supplies C1 functions, no direct shared-owner edits. Eager validation, complete set installation, state-0/omit checkpoint, bounded once-only outcomes, all-reader parity. | 450-800 LOC; C1-C2 and P3b slice 5 pin/publication/maintenance. No early implementation against slice 0 alone. Mutation: ignore authentication error on derived block; encryption/lifecycle test fails. |
 | C4. Worker and lifecycle | `src/rebuild.rs::Job::{start_inner,track,finish,stop}`, limits; `src/lib.rs::{start_rebuild_with_options_in,poll_rebuild_in,maintain_background_hnsw_in,start_checkpoint,finish_checkpoint,search_ready_with_options_in}`; `src/quality.rs::{ready_index,ann_memory,ann_quality}` and private cache/accounting in `src/compact/ann.rs`. Storage owner handles lifecycle hooks in `maintenance`, `directory`, `logops` and replica replacement. Ready/pending/retirement/budget/failure matrices pass with no synchronous compact build. | 500-900 LOC; C2-C3, all P3b lifecycle slices. Could prototype worker pin/cancel tests earlier against **accepted** slice 0, not integrate/search before dependencies. Mutation: publish after source token change; race test fails. |
-| C5. Rotated private prototype | `src/quantize.rs` new `RotatedOneBitV1::{encode,score}` and settings; `src/compact/ann.rs` parameters/terms checker; `src/hnsw.rs` private profile dispatch; bounded source batches through existing `exact_kernels::Scorer`, no kernel edits. Numeric/golden/no-padding/gate and exact-rerank tests pass, independent review before integration; no recall/default claim. | 400-700 LOC; C1-C4 for integration. Scalar transform/oracle definition could start after design acceptance and an accepted P3b slice-0 shape; no current code authorization. Mutation: round code stride up to next power of two; 768 golden test fails. |
+| C5. Rotated private prototype | `src/quantize.rs` new `RotatedOneBitV1::{encode,score}` and settings; `src/compact/ann.rs` parameters/terms checker; `src/hnsw.rs` private profile dispatch; bounded source batches through existing `exact_kernels::Scorer`, no kernel edits. Numeric/golden/no-padding/gate and exact-rerank tests pass, independent review before integration; no recall/default claim. | 400-700 LOC; C1-C4 for integration. Scalar transform/oracle definition may start after design acceptance and an accepted P3b slice-0 shape; shared engine integration still waits for its dependencies. Mutation: round code stride up to next power of two; 768 golden test fails. |
 
 Every sub-slice first demonstrates its named failing mutation, restores it
 and records the green regression; each returns a bounded candidate for
@@ -722,15 +726,16 @@ serialized dispatch/publication last; no merge-by-overlapping-patches plan.
 
 ## J. Owner decisions and conflict register
 
-Planning default for each recommendation is **approved as drafted**, but
-implementation still requires this candidate's independent acceptance and
-its stated dependencies. These decisions do not activate any feature.
+The owner explicitly approved each choice separately on **2026-11-02**.
+Implementation still requires independent code-slice acceptance and the
+stated dependencies. These decisions do not activate any feature or
+authorize a release, benchmark campaign or performance claim.
 
-1. **Kinds/bounds:** recommend `0x0200-0x0203`, v1, optional; primary only,
+1. **Kinds/bounds:** approved `0x0200-0x0203`, v1, optional; primary only,
    4 MiB hard body limit, canonical complete-row partitions and <=1,000,000
    nodes. Oversize accelerator refuses explicitly and retains source;
    no source limit/default change.
-2. **Private selection/persistence:** recommend advisory settings in
+2. **Private selection/persistence:** approved advisory settings in
    `0x0200`, state-0 descriptor across compact checkpoints, private one-bit
    constructor/search only. Public `AnnOptions`/`Quantization` unchanged.
    The derived preference may be dropped by readers/rewrites that skip
@@ -739,40 +744,42 @@ its stated dependencies. These decisions do not activate any feature.
    conflict with contract sections 3/6 and current settings-v1 decoding.
    Recommended resolution is a separate storage/API amendment before such
    a promise, not an op-7 extension or public enum addition here.
-3. **Binding:** recommend full B/G/C and config/precision/versions/seeds,
+3. **Binding:** approved full B/G/C and config/precision/versions/seeds,
    eight-byte B prefix only as guard; no whole-image digest cycle.
    Source-only cursor and source physical revisions/expiry must be frozen
    with P3b before code.
-4. **Overlay pressure:** recommend 256 IDs/8 MiB compact readiness bound,
+4. **Overlay pressure:** approved 256 IDs/8 MiB compact readiness bound,
    all mutations shadow base, exact fallback and background/checkpoint
    scheduling. No durable write rejection and no restriction of resident
    background behavior; storage overlay bounds remain separate.
-5. **Build/checkpoint:** recommend build immutable base S, delta to T,
+5. **Build/checkpoint:** approved build immutable base S, delta to T,
    no query construction/wait; checkpoint carries revalidated compatible
    complete set or pending descriptor. Rebinding only after full checks,
    not a digest patch. One worker and existing failure/status taxonomy.
-6. **Rotation:** recommend seeded eight-round signed rational pair rotations,
+6. **Rotation:** approved seeded eight-round signed rational pair rotations,
    no dimension expansion, fixed binary64 scalar reference and all four
    row terms; no RaBitQ/unbiasedness label. Rerank default four with current
    bounded ef; exact stored-value scores only.
-7. **Memory/encryption:** recommend shared 16 MiB decrypted ANN cache,
+7. **Memory/encryption:** approved shared 16 MiB decrypted ANN cache,
    <=4 MiB bodies, <=two transient buffers/operation, explicit reservations
    and 256 MiB worker arena ceiling subject to existing stricter limits.
    No plaintext sidecar/spill; no GPU or P3d dispatch changes.
-8. **Diagnostics/lifecycle:** recommend bounded mixed per-group skip
+8. **Diagnostics/lifecycle:** approved bounded mixed per-group skip
    outcomes and actual queued/deferred/none rebuild status, same log target/
    server path, eager checks on all readers. Feed/export never start jobs.
    Storage owner implements this prescribed codec-era reporting transition.
-9. **Dependencies/public surface:** recommend the proposed private read
+9. **Dependencies/public surface:** approved the proposed private read
    seam gaps and source-only identity cursor review with P3b, then C1-C5
    ordering. No new public items or `Error` variants in this candidate.
    Existing precision API approval is not new P3c API approval.
 
 **Current conflict register:** no unconditional conflict with P3 or the
 storage contract is asserted for the bounded private candidate above.
-B1 is a conditional, explicit blocker if optional preference loss is not
-acceptable; it must not be silently resolved by calling the setting source
-policy. Eager validation deliberately accepts open-time work rather than
+B1 remains a conditional blocker for any future durable user-facing policy:
+the owner accepted optional preference loss for this private candidate, so
+no such amendment is approved or required by that choice. It must not be
+silently resolved by calling the setting source policy.
+Eager validation deliberately accepts open-time work rather than
 relaxing contract decision 4. In-image persistence/no encrypted sidecars
 implements decision 6; private-first selection implements decision 7.
 P3b acceptance and source seam gaps are prerequisite blockers, not proof of

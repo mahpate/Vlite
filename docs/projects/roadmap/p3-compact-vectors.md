@@ -80,8 +80,8 @@ parity remain for slices 1–5. This slice makes no performance, size or
 release-qualification claim.
 
 The engine-integration design below has been independently reviewed; owner
-decisions K.1-K.6 are adopted for sequencing, but no code slice is accepted
-or activated until its independent acceptance.
+decisions K.1-K.6 were explicitly approved on 2026-11-02. Each code slice
+still requires independent acceptance; these decisions grant no activation.
 
 ## Precision decision
 
@@ -570,8 +570,8 @@ DO-005 measurements and major-release acceptance.
 
 ## P3b engine integration design
 
-**Design proposal — independently reviewed; owner decisions K.1-K.6 adopted
-for planning; the design is not implementation acceptance or activation.**
+**Design independently reviewed; owner decisions K.1-K.6 approved
+2026-11-02; the design is not implementation acceptance or activation.**
 All source line references below are from setup
 head `91d0e38c62dea7997b072d02118aedc45ca63e1b`. The accepted column code
 and record codec are test-only at this head; release readers still refuse
@@ -933,27 +933,33 @@ dispatch branches. P3b should not change graph framing or add graph codecs.
 
 ### K. Owner decisions
 
-1. **First write:** resident conversion or immutable base plus WAL overlay.
-   Recommend overlay; blocks mutation/recovery and checkpoint design.
-2. **Borrowed records:** stable generation cells or API/guarded-view change.
-   Recommend non-evicting cells with explicit accounting and unchanged caps;
-   blocks `get`/snapshot work and accepts full-read materialization.
-3. **Rayon scratch:** per-worker caches or serial bounded scans.
-   Recommend 4 MiB per-operation serial scans initially; blocks parallel
-   exact scans, not semantics.
-4. **Snapshot metric:** include decoded cache/overlay in logical retention,
-   report mapped bytes separately. Recommend no public counter redefinition;
-   blocks S2 claims and snapshot acceptance.
-5. **Maintenance:** exact revision, lineage, import, TTL and graph parity.
-   Recommend an operation parity table; blocks compact/convert/restore.
-6. **Admission:** retain current gates/refusal; float16 and temporal copy-out
-   remain separate opt-ins. Recommend no activation; blocks release enablement,
-   not test-only integration.
+The owner explicitly approved each choice separately on 2026-11-02:
 
-Planning default: until the owner decides otherwise, the code sub-slices in J
-proceed on these recommendations. Recommendation 2 is the only option that
-keeps the public `Record` API unchanged; the alternative needs a separately
-approved API change. None of them activates a compact reader or writer.
+1. **First write:** immutable compact base plus a committed WAL overlay,
+   not full resident conversion on first write. Checkpoints fold committed
+   edits into a new base; the WAL remains the durability authority.
+2. **Borrowed records:** non-evicting generation cells with explicit
+   accounting and unchanged public APIs and snapshot caps. Reading every
+   record may materialize the full collection; compact RAM is not promised
+   for that access pattern.
+3. **Scan scratch:** serial exact compact scans initially, with 4 MiB of
+   vector-decoding workspace per operation. This is not a total-memory cap:
+   cells, overlays, plaintext buffers and concurrent operations are accounted
+   separately. Parallel scans require aggregate-memory qualification.
+4. **Snapshot metric:** include decoded cache/overlay and precision expansion
+   in logical retention, report mapped bytes separately, and preserve
+   existing public counter meanings and rejection limits.
+5. **Maintenance:** require an operation-by-operation parity table covering
+   existing revision, lineage, import, TTL, graph and feed semantics.
+   Unsupported paths stay refused until qualified; failed publication
+   preserves the source and existing data-loss confirmations remain.
+6. **Admission:** retain current gates/refusal. Compact storage, float16 and
+   temporal copy-out require separate qualification and explicit opt-in;
+   defaults and the final release go/no-go remain unchanged.
+
+These are design approvals, not implementation acceptance, activation,
+performance qualification or permission to tag a release. A guarded-view
+alternative to choice 2 would require a separately approved public API change.
 
 ### L. Risks and unverified items
 
